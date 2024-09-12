@@ -1,0 +1,85 @@
+{
+  "name": "@p2party/core",
+  "description": "A cryptographic commitment scheme with implied order of ownership wasm module for nodejs and the browser.",
+  "version": "0.2.7",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/p2party/core-js.git"
+  },
+  "author": {
+    "name": "Ondemos Foundation",
+    "email": "security@ondemos.org",
+    "url": "https://ondemos.org"
+  },
+  "contributors": [
+    {
+      "name": "Dimitris Karoukis",
+      "email": "dim@ondemos.org",
+      "url": "https://ondemos.org"
+    }
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ondemos/core/issues"
+  },
+  "keywords": [
+    "cryptographic commitment scheme",
+    "commitment",
+    "ledger",
+    "libsodium",
+    "curve25519",
+    "public key cryptography",
+    "cryptography",
+    "emscripten",
+    "typescript"
+  ],
+  "homepage": "https://github.com/ondemos/core#readme",
+  "main": "lib/index.js",
+  "module": "lib/index.mjs",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./lib/index.js",
+      "import": "./lib/index.mjs",
+      "module": "./lib/index.mjs",
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.min.js"
+    },
+    "./package.json": "./lib/package.json"
+  },
+  "files": [
+    "lib/**/*"
+  ],
+  "scripts": {
+    "build": "rollup --config rollup.config.ts --configPlugin typescript",
+    "format": "prettier --write .",
+    "lint": "npx eslint .",
+    "prepublishOnly": "npm-run-all -s lint test build",
+    "preversion": "npm-run-all -s lint format",
+    "docs": "typedoc --out docs --excludeInternal src/index.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.1",
+    "@reduxjs/toolkit": "^2.2.7",
+    "@rollup/plugin-commonjs": "^26.0.1",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@types/eslint__js": "^8.42.3",
+    "eslint": "^9.9.1",
+    "prettier": "^3.3.3",
+    "rollup": "^4.21.2",
+    "rollup-plugin-analyzer": "^4.0.0",
+    "terser": "^5.31.6",
+    "tslib": "^2.7.0",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.4.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "class-validator": "^0.14.1"
+  }
+}

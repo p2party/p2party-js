@@ -1,0 +1,1 @@
+{"version":3,"file":"getRoomClients.d.ts","sourceRoot":"","sources":["../../src/api/getRoomClients.ts"],"names":[],"mappings":"AAEA,MAAM,WAAW,MAAM;IACrB,EAAE,EAAE,MAAM,CAAC;IACX,SAAS,EAAE,IAAI,CAAC;IAChB,SAAS,EAAE,IAAI,CAAC;CACjB;AAED,eAAO,MAAM,cAAc,iDA2B1B,CAAC"}

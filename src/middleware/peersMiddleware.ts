@@ -10,13 +10,18 @@ import { signalingServerActions } from "../reducers/signalingServerSlice";
 import { setChannel } from "../reducers/channelsSlice";
 import { setIsSettingRemoteAnswerPending } from "../reducers/isSettingRemoteAnswerPendingSlice";
 
+import { getConnectedRoomPeers } from "../api/getConnectedRoomPeers";
+
 import type { Middleware } from "redux";
 import type { RoomState } from "../store/room";
 import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
 } from "../reducers/peersSlice";
-import { getConnectedRoomPeers } from "../api/getConnectedRoomPeers";
+import type {
+  WebSocketMessageCandidateSend,
+  WebSocketMessageDescriptionSend,
+} from "../utils/interfaces";
 
 const peersMiddleware: Middleware = (store) => {
   const peerConnections: IRTCPeerConnection[] = [];
@@ -24,6 +29,7 @@ const peersMiddleware: Middleware = (store) => {
 
   const rtcConnectWithPeer = async (
     peerId: string,
+    peerPublicKey: string,
     roomId: string,
     initiator = true,
     rtcConfig: RTCConfiguration = {
@@ -52,6 +58,7 @@ const peersMiddleware: Middleware = (store) => {
     const epc = pc as IRTCPeerConnection;
     epc.peerIsInitiator = initiator;
     epc.withPeerId = peerId;
+    epc.withPeerPublicKey = peerPublicKey;
     epc.makingOffer = false;
 
     epc.onnegotiationneeded = async () => {
@@ -60,15 +67,17 @@ const peersMiddleware: Middleware = (store) => {
         await epc.setLocalDescription();
         const description = epc.localDescription;
         if (description) {
+          const { keyPair } = store.getState();
           store.dispatch(
             signalingServerActions.sendMessage({
               content: {
                 type: "description",
                 description,
                 fromPeerId: keyPair.peerId,
+                fromPeerPublicKey: keyPair.publicKey,
                 toPeerId: peerId,
                 roomId,
-              },
+              } as WebSocketMessageDescriptionSend,
             }),
           );
 
@@ -85,13 +94,16 @@ const peersMiddleware: Middleware = (store) => {
 
     epc.onicecandidate = ({ candidate }) => {
       if (candidate && candidate.candidate !== "") {
+        const { keyPair } = store.getState();
         store.dispatch(
           signalingServerActions.sendMessage({
             content: {
               type: "candidate",
               candidate,
+              fromPeerId: keyPair.peerId,
               toPeerId: peerId,
-            },
+              roomId,
+            } as WebSocketMessageCandidateSend,
           }),
         );
 
@@ -159,6 +171,9 @@ const peersMiddleware: Middleware = (store) => {
         );
 
         if (epc.connectionState === "connected" && !epc.peerIsInitiator) {
+          store.dispatch(
+            setPeer({ roomId, peerId, peerPublicKey, initiate: false }),
+          );
           await rtcConnectWithRoom(roomId, true, rtcConfig);
         }
       }
@@ -219,6 +234,8 @@ const peersMiddleware: Middleware = (store) => {
           const withPeerId = clientsInRoom[i].id;
           if (withPeerId === keyPair.peerId) continue;
 
+          const withPeerPublicKey = clientsInRoom[i].publicKey;
+
           const peerIndex = peerConnections.findIndex(
             (peer) => peer.withPeerId === withPeerId,
           );
@@ -227,6 +244,7 @@ const peersMiddleware: Middleware = (store) => {
           if (!starConfig) {
             const epc = await rtcConnectWithPeer(
               withPeerId,
+              withPeerPublicKey,
               roomId,
               true,
               rtcConfig,
@@ -243,7 +261,13 @@ const peersMiddleware: Middleware = (store) => {
               clientsInRoom[clientIndex].createdAt > clientsInRoom[i].createdAt
             ) {
               // One of them needs to be an initiator and createdAt does not change
-              await rtcConnectWithPeer(withPeerId, roomId, true, rtcConfig);
+              await rtcConnectWithPeer(
+                withPeerId,
+                withPeerPublicKey,
+                roomId,
+                true,
+                rtcConfig,
+              );
             } else if (
               clientsInRoom[clientIndex].createdAt ===
               clientsInRoom[i].createdAt
@@ -254,6 +278,7 @@ const peersMiddleware: Middleware = (store) => {
               ) {
                 const epc = await rtcConnectWithPeer(
                   withPeerId,
+                  withPeerPublicKey,
                   roomId,
                   true,
                   rtcConfig,
@@ -327,7 +352,8 @@ const peersMiddleware: Middleware = (store) => {
     }
 
     if (setDescription.match(action)) {
-      const { peerId, roomId, description, rtcConfig } = action.payload;
+      const { peerId, peerPublicKey, roomId, description, rtcConfig } =
+        action.payload;
       const connectionIndex = peerConnections.findIndex(
         (peer) => peer.withPeerId === peerId,
       );
@@ -335,7 +361,13 @@ const peersMiddleware: Middleware = (store) => {
       const epc =
         connectionIndex !== -1
           ? peerConnections[connectionIndex]
-          : await rtcConnectWithPeer(peerId, roomId, false, rtcConfig);
+          : await rtcConnectWithPeer(
+              peerId,
+              peerPublicKey,
+              roomId,
+              false,
+              rtcConfig,
+            );
 
       const readyForOffer =
         !epc.makingOffer &&
@@ -372,13 +404,18 @@ const peersMiddleware: Middleware = (store) => {
           return next(action);
         }
 
+        const { keyPair } = store.getState();
+
         store.dispatch(
           signalingServerActions.sendMessage({
             content: {
               type: "description",
               description: localDescription,
+              fromPeerId: keyPair.peerId,
+              fromPeerPublicKey: keyPair.publicKey,
               toPeerId: peerId,
-            },
+              roomId,
+            } as WebSocketMessageDescriptionSend,
           }),
         );
       }
@@ -418,7 +455,8 @@ const peersMiddleware: Middleware = (store) => {
     }
 
     if (setPeer.match(action)) {
-      const { peerId, roomId, initiate, rtcConfig } = action.payload;
+      const { peerId, peerPublicKey, roomId, initiate, rtcConfig } =
+        action.payload;
 
       const connectionIndex = peerConnections.findIndex((peer) => {
         peer.withPeerId === peerId;
@@ -426,7 +464,13 @@ const peersMiddleware: Middleware = (store) => {
 
       if (connectionIndex !== -1) return next(action);
 
-      const epc = await rtcConnectWithPeer(peerId, roomId, initiate, rtcConfig);
+      const epc = await rtcConnectWithPeer(
+        peerId,
+        peerPublicKey,
+        roomId,
+        initiate,
+        rtcConfig,
+      );
       peerConnections.push(epc);
     }
 

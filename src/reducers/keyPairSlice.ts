@@ -1,5 +1,5 @@
 import { createSlice } from "@reduxjs/toolkit";
-import { isUUID } from "class-validator";
+import { isHexadecimal, isUUID } from "class-validator";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { RoomState } from "../store/room";
@@ -8,6 +8,8 @@ export interface KeyPair {
   peerId: string;
   publicKey: string;
   secretKey: string;
+  challenge: string;
+  signature: string;
 }
 
 export interface SetKeyPair {
@@ -15,14 +17,18 @@ export interface SetKeyPair {
   secretKey: string;
 }
 
-export interface SetPeerId {
+export interface SetPeerData {
   peerId: string;
+  challenge: string;
+  signature: string;
 }
 
 const initialState: KeyPair = {
-  peerId: "",
-  publicKey: "",
-  secretKey: "",
+  peerId: localStorage.getItem("peerId") ?? "",
+  publicKey: localStorage.getItem("publicKey") ?? "",
+  secretKey: localStorage.getItem("secretKey") ?? "",
+  challenge: localStorage.getItem("challenge") ?? "",
+  signature: localStorage.getItem("signature") ?? "",
 };
 
 const keyPairSlice = createSlice({
@@ -30,23 +36,43 @@ const keyPairSlice = createSlice({
   initialState,
   reducers: {
     setKeyPair: (state, action: PayloadAction<SetKeyPair>) => {
+      localStorage.setItem("secretKey", action.payload.secretKey);
+      localStorage.setItem("publicKey", action.payload.publicKey);
+
       return {
         ...state,
         publicKey: action.payload.publicKey,
         secretKey: action.payload.secretKey,
       };
     },
-    setPeerId: (state, action: PayloadAction<SetPeerId>) => {
-      if (!isUUID(action.payload.peerId, 4)) return state;
+
+    setPeerData: (state, action: PayloadAction<SetPeerData>) => {
+      const { peerId, challenge, signature } = action.payload;
+
+      if (
+        !isUUID(peerId, 4) ||
+        !isHexadecimal(challenge) ||
+        !isHexadecimal(signature) ||
+        challenge.length !== 64 ||
+        signature.length !== 1024
+      ) {
+        return state;
+      }
+
+      localStorage.setItem("peerId", peerId);
+      localStorage.setItem("challenge", challenge);
+      localStorage.setItem("signature", signature);
 
       return {
         ...state,
-        peerId: action.payload.peerId,
+        peerId,
+        challenge,
+        signature,
       };
     },
   },
 });
 
-export const { setKeyPair, setPeerId } = keyPairSlice.actions;
+export const { setKeyPair, setPeerData } = keyPairSlice.actions;
 export const keyPairSelector = (state: RoomState) => state.keyPair;
 export default keyPairSlice.reducer;

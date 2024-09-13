@@ -2,6 +2,12 @@ import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { RoomState } from "../store/room";
+import type {
+  WebSocketMessageCandidateSend,
+  WebSocketMessageDescriptionSend,
+  WebSocketMessageChallengeResponse,
+  WebSocketMessageRoomIdRequest,
+} from "../utils/interfaces";
 
 export interface SignalingState {
   isEstablishingConnection: boolean;
@@ -37,7 +43,11 @@ const signalingServerSlice = createSlice({
     sendMessage: (
       state,
       _action: PayloadAction<{
-        content: unknown;
+        content:
+          | WebSocketMessageCandidateSend
+          | WebSocketMessageDescriptionSend
+          | WebSocketMessageChallengeResponse
+          | WebSocketMessageRoomIdRequest;
       }>,
     ) => {
       return state;

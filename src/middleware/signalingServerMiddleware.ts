@@ -1,8 +1,8 @@
-import { Mutex } from "async-mutex";
+// import { Mutex } from "async-mutex";
 
 import { setCandidate, setDescription } from "../reducers/peersSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
-import { setKeyPair, setPeerId } from "../reducers/keyPairSlice";
+import { setKeyPair, setPeerData } from "../reducers/keyPairSlice";
 import { setRoom } from "../reducers/roomsSlice";
 
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
@@ -11,14 +11,16 @@ import { importPrivateKey, importPublicKey } from "../utils/importPEMKeys";
 import type { Middleware } from "redux";
 import type { RoomState } from "../store/room";
 import type {
-  PeerId,
-  RoomId,
-  Description,
-  Candidate,
+  WebSocketMessageChallengeRequest,
+  WebSocketMessageRoomIdResponse,
+  WebSocketMessageDescriptionReceive,
+  WebSocketMessageCandidateReceive,
+  WebSocketMessageChallengeResponse,
 } from "../utils/interfaces";
+import { isHexadecimal, isUUID } from "class-validator";
 
 // Mutex to control WebSocket connection (optional)
-const socketMutex = new Mutex();
+// const socketMutex = new Mutex();
 
 const signalingServerMiddleware: Middleware = (store) => {
   let ws: WebSocket;
@@ -27,6 +29,7 @@ const signalingServerMiddleware: Middleware = (store) => {
     const { signalingServer } = store.getState() as RoomState;
     const isConnectionEstablished =
       ws != undefined &&
+      ws.readyState !== WebSocket.CONNECTING &&
       ws.readyState !== WebSocket.CLOSED &&
       ws.readyState !== WebSocket.CLOSING &&
       signalingServer.isConnected;
@@ -36,73 +39,72 @@ const signalingServerMiddleware: Middleware = (store) => {
       !isConnectionEstablished
     ) {
       const { keyPair } = store.getState();
-      await socketMutex.runExclusive(async () => {
-        let publicKey = "";
-        if (!isConnectionEstablished && keyPair.secretKey.length === 0) {
-          const newKeyPair = await crypto.subtle.generateKey(
-            {
-              name: "RSA-PSS",
-              hash: "SHA-256",
-              modulusLength: 4096,
-              publicExponent: new Uint8Array([1, 0, 1]),
-            },
-            true,
-            ["sign", "verify"],
-          );
-
-          const pair = await exportPemKeys(newKeyPair);
-
-          store.dispatch(setKeyPair(pair));
-
-          publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
-        } else if (!isConnectionEstablished) {
-          const publicKeyPem = await importPublicKey(keyPair.publicKey);
-          publicKey = await exportPublicKeyToHex(publicKeyPem);
-        }
-
-        ws = new WebSocket(
-          signalingServer.serverUrl + "?publickey=" + publicKey,
+      // await socketMutex.runExclusive(async () => {
+      let publicKey = "";
+      if (keyPair.secretKey.length === 0) {
+        const newKeyPair = await crypto.subtle.generateKey(
+          {
+            name: "RSA-PSS",
+            hash: "SHA-256",
+            modulusLength: 4096,
+            publicExponent: new Uint8Array([1, 0, 1]),
+          },
+          true,
+          ["sign", "verify"],
         );
 
-        ws.onopen = () => {
-          console.log("WebSocket connected");
-          store.dispatch(signalingServerActions.connectionEstablished());
-        };
+        const pair = await exportPemKeys(newKeyPair);
 
-        ws.onerror = (error) => {
-          console.error("WebSocket error:", error);
-          ws.removeEventListener("message", () => {});
-          ws.removeEventListener("open", () => {});
-          ws.removeEventListener("close", () => {});
-          ws.close();
-        };
+        store.dispatch(setKeyPair(pair));
 
-        ws.onclose = () => {
-          console.log("WebSocket closed");
-        };
+        publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
+      } else {
+        const publicKeyPem = await importPublicKey(keyPair.publicKey);
+        publicKey = await exportPublicKeyToHex(publicKeyPem);
+      }
 
-        ws.onmessage = async (event) => {
-          console.log("Message from server:", JSON.parse(event.data));
+      ws = new WebSocket(signalingServer.serverUrl + "?publickey=" + publicKey);
 
-          if (event.data === "PING") return ws.send("PONG");
+      ws.onopen = () => {
+        console.log("WebSocket connected");
+        store.dispatch(signalingServerActions.connectionEstablished());
+      };
 
-          const message: PeerId | RoomId | Description | Candidate = JSON.parse(
-            event.data,
-          );
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        ws.removeEventListener("message", () => {});
+        ws.removeEventListener("open", () => {});
+        ws.removeEventListener("close", () => {});
+        ws.close();
+      };
 
-          switch (message.type) {
-            case "peerId": {
-              const { keyPair } = store.getState();
-              const peerId = message.peerId ?? "";
-              const challenge = message.challenge ?? "";
+      ws.onclose = () => {
+        console.log("WebSocket closed");
+      };
 
-              store.dispatch(
-                setPeerId({
-                  peerId,
-                }),
-              );
+      ws.onmessage = async (event) => {
+        console.log("Message from server:", JSON.parse(event.data));
 
+        if (event.data === "PING") return ws.send("PONG");
+
+        const message:
+          | WebSocketMessageChallengeRequest
+          | WebSocketMessageRoomIdResponse
+          | WebSocketMessageDescriptionReceive
+          | WebSocketMessageCandidateReceive = JSON.parse(event.data);
+
+        switch (message.type) {
+          case "peerId": {
+            const peerId = message.peerId ?? "";
+            const challenge = message.challenge ?? "";
+
+            if (
+              isUUID(peerId) &&
+              isHexadecimal(challenge) &&
+              challenge.length === 64
+            ) {
               try {
+                const { keyPair } = store.getState();
                 const secretKey = await importPrivateKey(keyPair.secretKey);
 
                 const nonce = Uint8Array.from(
@@ -111,7 +113,7 @@ const signalingServerMiddleware: Middleware = (store) => {
                     .map((byte: string) => parseInt(byte, 16)),
                 );
 
-                const signature = await window.crypto.subtle.sign(
+                const sig = await window.crypto.subtle.sign(
                   {
                     name: "RSA-PSS",
                     saltLength: 32,
@@ -120,18 +122,26 @@ const signalingServerMiddleware: Middleware = (store) => {
                   nonce,
                 );
 
+                const signature = [...new Uint8Array(sig)]
+                  .map((x) => x.toString(16).padStart(2, "0"))
+                  .join("");
+
+                store.dispatch(
+                  setPeerData({
+                    peerId,
+                    challenge,
+                    signature,
+                  }),
+                );
+
                 store.dispatch(
                   signalingServerActions.sendMessage({
                     content: {
                       type: "challenge",
                       fromPeerId: peerId,
                       challenge,
-                      signature:
-                        "0x" +
-                        [...new Uint8Array(signature)]
-                          .map((x) => x.toString(16).padStart(2, "0"))
-                          .join(""),
-                    },
+                      signature,
+                    } as WebSocketMessageChallengeResponse,
                   }),
                 );
                 // ws.send(
@@ -149,53 +159,55 @@ const signalingServerMiddleware: Middleware = (store) => {
               } catch (error) {
                 throw error;
               }
-
-              break;
             }
 
-            case "roomId": {
-              store.dispatch(
-                setRoom({
-                  id: message.roomId,
-                  url: message.roomUrl,
-                }),
-              );
-
-              break;
-            }
-
-            case "description": {
-              store.dispatch(
-                setDescription({
-                  peerId: message.fromPeerId,
-                  roomId: message.roomId,
-                  description: message.description,
-                }),
-              );
-
-              break;
-            }
-
-            case "candidate": {
-              store.dispatch(
-                setCandidate({
-                  peerId: message.fromPeerId,
-                  roomId: message.roomId,
-                  candidate: message.candidate,
-                }),
-              );
-
-              break;
-            }
-
-            default: {
-              console.error("Unknown message type");
-
-              break;
-            }
+            break;
           }
-        };
-      });
+
+          case "roomId": {
+            store.dispatch(
+              setRoom({
+                id: message.roomId,
+                url: message.roomUrl,
+              }),
+            );
+
+            break;
+          }
+
+          case "description": {
+            store.dispatch(
+              setDescription({
+                peerId: message.fromPeerId,
+                peerPublicKey: message.fromPeerPublicKey,
+                roomId: message.roomId,
+                description: message.description,
+              }),
+            );
+
+            break;
+          }
+
+          case "candidate": {
+            store.dispatch(
+              setCandidate({
+                peerId: message.fromPeerId,
+                roomId: message.roomId,
+                candidate: message.candidate,
+              }),
+            );
+
+            break;
+          }
+
+          default: {
+            console.error("Unknown message type");
+
+            break;
+          }
+        }
+      };
+      // });
 
       return next(action);
     }
@@ -216,9 +228,16 @@ const signalingServerMiddleware: Middleware = (store) => {
       signalingServerActions.sendMessage.match(action) &&
       isConnectionEstablished
     ) {
-      ws.send(JSON.stringify(action.payload.content));
-
-      console.log(JSON.stringify(action.payload.content));
+      const { keyPair } = store.getState();
+      if (
+        isUUID(keyPair.peerId, 4) &&
+        isHexadecimal(keyPair.challenge) &&
+        isHexadecimal(keyPair.signature) &&
+        keyPair.signature.length === 1024 &&
+        keyPair.challenge.length === 64
+      ) {
+        ws.send(JSON.stringify(action.payload.content));
+      }
 
       return next(action);
     }

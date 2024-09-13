@@ -1,46 +1,57 @@
-export interface DescriptionSendArgs {
-  type: "description";
-  description: RTCSessionDescription;
-  toPeerId: string;
-}
-
-export interface CandidateSendArgs {
-  type: "candidate";
-  candidate: RTCIceCandidate;
-  toPeerId: string;
-}
-
-export interface PeerId {
+export interface WebSocketMessageChallengeRequest {
   type: "peerId";
   peerId: string;
   challenge: string;
   message: string;
 }
 
-export interface RoomId {
-  type: "roomId";
-  roomId: string;
-  roomUrl: string;
-}
-
-export interface ChallengeSendArgs {
+export interface WebSocketMessageChallengeResponse {
   type: "challenge";
   challenge: string;
   signature: string;
   fromPeerId: string;
 }
 
-export interface Description extends DescriptionSendArgs {
+export interface WebSocketMessageRoomIdRequest {
+  type: "room";
   fromPeerId: string;
+  roomUrl: string;
+}
+
+export interface WebSocketMessageRoomIdResponse {
+  type: "roomId";
+  roomId: string;
+  roomUrl: string;
+}
+
+export interface WebSocketMessageDescriptionSend {
+  type: "description";
+  description: RTCSessionDescription;
+  fromPeerId: string;
+  fromPeerPublicKey: string;
+  toPeerId: string;
   roomId: string;
 }
 
-export interface Candidate extends CandidateSendArgs {
+export interface WebSocketMessageDescriptionReceive {
+  type: "description";
+  description: RTCSessionDescription;
   fromPeerId: string;
+  fromPeerPublicKey: string;
   roomId: string;
 }
 
-export interface BaseQueryFnArgs {
-  signalingServerUrl: string;
-  rtcConfig: RTCConfiguration;
+export interface WebSocketMessageCandidateSend {
+  type: "candidate";
+  candidate: RTCIceCandidate;
+  fromPeerId: string;
+  toPeerId: string;
+  roomId: string;
+}
+
+export interface WebSocketMessageCandidateReceive {
+  type: "candidate";
+  candidate: RTCIceCandidate;
+  fromPeerId: string;
+  roomId: string;
 }

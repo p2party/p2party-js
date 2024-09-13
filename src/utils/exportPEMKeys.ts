@@ -27,7 +27,7 @@ export const exportPublicKeyToHex = async (publicKey: CryptoKey) => {
     .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
 
-  return "0x" + result.toLowerCase();
+  return result.toLowerCase();
 };
 
 export const exportPemKeys = async (keys: CryptoKeyPair) => {

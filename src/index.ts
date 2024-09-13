@@ -18,14 +18,21 @@ import {
 } from "./reducers/signalingServerSlice";
 
 import type { RoomState } from "./store/room";
-import type {
-  DescriptionSendArgs,
-  CandidateSendArgs,
-} from "./utils/interfaces";
 import type { Room } from "./reducers/roomsSlice";
 import type { Peer } from "./reducers/peersSlice";
 import type { Channel } from "./reducers/channelsSlice";
 import type { Message } from "./reducers/channelsSlice";
+
+import type {
+  WebSocketMessageRoomIdRequest,
+  WebSocketMessageRoomIdResponse,
+  WebSocketMessageChallengeRequest,
+  WebSocketMessageChallengeResponse,
+  WebSocketMessageDescriptionSend,
+  WebSocketMessageDescriptionReceive,
+  WebSocketMessageCandidateSend,
+  WebSocketMessageCandidateReceive,
+} from "./utils/interfaces";
 
 const connectToSignalingServer = async (
   signalingServerUrl = "ws://localhost:3001/ws",
@@ -63,6 +70,7 @@ const connectToRoomPeers = async (
     );
 
     console.log(connectedRoomPeers);
+
     const LEN = connectedRoomPeers.length;
     for (let i = 0; i < LEN; i++) {
       if (connectedRoomPeers[i].publicKey === keyPair.publicKey) continue;
@@ -166,11 +174,17 @@ export default {
 };
 
 export type {
-  DescriptionSendArgs,
-  CandidateSendArgs,
   RoomState,
   Room,
   Channel,
   Peer,
   Message,
+  WebSocketMessageRoomIdRequest,
+  WebSocketMessageRoomIdResponse,
+  WebSocketMessageChallengeRequest,
+  WebSocketMessageChallengeResponse,
+  WebSocketMessageDescriptionSend,
+  WebSocketMessageDescriptionReceive,
+  WebSocketMessageCandidateSend,
+  WebSocketMessageCandidateReceive,
 };

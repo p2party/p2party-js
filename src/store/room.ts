@@ -3,9 +3,14 @@ import { configureStore } from "@reduxjs/toolkit";
 import keyPairReducer from "../reducers/keyPairSlice";
 import roomsReducer from "../reducers/roomsSlice";
 import isSettingRemoteAnswerPendingReducer from "../reducers/isSettingRemoteAnswerPendingSlice";
-import peers2Reducer from "../reducers/peersSlice";
-import channels2Reducer from "../reducers/channelsSlice";
-import signalingServerReducer from "../reducers/signalingServerSlice";
+import peers2Reducer, {
+  setCandidate,
+  setDescription,
+} from "../reducers/peersSlice";
+import channels2Reducer, { setChannel } from "../reducers/channelsSlice";
+import signalingServerReducer, {
+  signalingServerActions,
+} from "../reducers/signalingServerSlice";
 
 import signalingServerMiddleware from "../middleware/signalingServerMiddleware";
 import channelsMiddleware from "../middleware/channelsMiddleware";
@@ -22,7 +27,16 @@ export const room = configureStore({
     signalingServer: signalingServerReducer,
   },
   middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware().prepend([
+    getDefaultMiddleware({
+      serializableCheck: {
+        ignoredActions: [
+          signalingServerActions.sendMessage.toString(),
+          setCandidate.toString(),
+          setDescription.toString(),
+          setChannel.toString(),
+        ],
+      },
+    }).prepend([
       signalingServerMiddleware,
       channelsMiddleware,
       peersMiddleware,

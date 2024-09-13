@@ -1,1 +1,0 @@
-{"version":3,"file":"signalingServerApi.d.ts","sourceRoot":"","sources":["../../src/api/signalingServerApi.ts"],"names":[],"mappings":"AAiBA,OAAO,KAAK,EAAE,MAAM,EAAE,WAAW,EAAE,SAAS,EAAE,MAAM,qBAAqB,CAAC;AAiB1E,eAAO,MAAM,0BAA0B,SAAU,GAAG,SAOnD,CAAC;AAGF,eAAO,MAAM,kBAAkB;;iBAOd,MAAM,GAAG,WAAW,GAAG,SAAS;6BAAuB,MAAM;;;4BAiBlD,MAAM;oBAAc,gBAAgB;;uFAiQ9D,CAAC"}

@@ -1,1 +1,0 @@
-{"version":3,"file":"roomsSlice.d.ts","sourceRoot":"","sources":["../../src/reducers/roomsSlice.ts"],"names":[],"mappings":"AAIA,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,eAAe,CAAC;AAE/C,MAAM,WAAW,IAAI;IACnB,GAAG,EAAE,MAAM,CAAC;IACZ,EAAE,CAAC,EAAE,MAAM,CAAC;CACb;AA+CD,eAAO,MAAQ,OAAO,8EAAE,UAAU,iFAAuB,CAAC;AAC1D,eAAO,MAAM,aAAa,UAAW,SAAS,WAAgB,CAAC;;AAC/D,wBAAkC"}

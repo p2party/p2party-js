@@ -1,4 +1,5 @@
 import path from "path";
+import terser from "@rollup/plugin-terser";
 import commonjs from "@rollup/plugin-commonjs";
 import json from "@rollup/plugin-json";
 import resolve from "@rollup/plugin-node-resolve";
@@ -44,7 +45,13 @@ export default [
   // UMD
   {
     input,
-    plugins,
+    plugins: [
+      ...plugins,
+      terser({
+        ecma: 2020,
+        toplevel: true,
+      }),
+    ],
     output: {
       name: "p2party",
       // dir: "lib",

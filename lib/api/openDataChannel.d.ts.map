@@ -1,1 +1,0 @@
-{"version":3,"file":"openDataChannel.d.ts","sourceRoot":"","sources":["../../src/api/openDataChannel.ts"],"names":[],"mappings":"AAOA,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,wBAAwB,CAAC;AACjE,OAAO,KAAK,EAAE,eAAe,EAAE,MAAM,2BAA2B,CAAC;AAEjE,eAAO,MAAM,eAAe,MACvB,MAAM,GAAG,cAAc,OACrB,kBAAkB,KACtB,OAAO,CAAC,eAAe,CA+DzB,CAAC"}

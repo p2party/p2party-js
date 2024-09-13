@@ -6,6 +6,7 @@ import type { RoomState } from "../store/room";
 export interface IRTCPeerConnection extends RTCPeerConnection {
   peerIsInitiator: boolean; // If initiator then impolite
   withPeerId: string;
+  withPeerPublicKey: string;
   makingOffer: boolean;
 }
 
@@ -27,6 +28,7 @@ export interface SetPeerArgs {
 
 export interface SetPeerDescriptionArgs {
   peerId: string;
+  peerPublicKey: string;
   roomId: string;
   description: RTCSessionDescription;
   rtcConfig?: RTCConfiguration;

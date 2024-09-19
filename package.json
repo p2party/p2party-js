@@ -1,10 +1,10 @@
 {
-  "name": "@p2party/core",
+  "name": "p2party",
   "description": "A cryptographic commitment scheme with implied order of ownership wasm module for nodejs and the browser.",
   "version": "0.2.7",
   "repository": {
     "type": "git",
-    "url": "https://github.com/p2party/core-js.git"
+    "url": "https://github.com/p2party/p2party-ts.git"
   },
   "author": {
     "name": "Ondemos Foundation",

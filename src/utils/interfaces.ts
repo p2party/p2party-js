@@ -55,3 +55,22 @@ export interface WebSocketMessageCandidateReceive {
   fromPeerId: string;
   roomId: string;
 }
+
+export interface WebSocketMessageError {
+  type: "error";
+  fromAction:
+    | "ping"
+    | "sendCandidate"
+    | "receiveCandidate"
+    | "sendDescription"
+    | "receiveDescription"
+    | "requestRoomId"
+    | "requestPeerId"
+    | "sendChallengeResponse";
+  error:
+    | Error
+    | {
+        message: string;
+        [key: string]: unknown;
+      };
+}

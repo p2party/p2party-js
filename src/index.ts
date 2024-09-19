@@ -4,8 +4,9 @@ import { room } from "./store/room";
 
 import { getConnectedRoomPeers } from "./api/getConnectedRoomPeers";
 
+import signalingServerApi from "./api/signalingServerApi";
 import { peersSelector, setPeer, setPeerChannel } from "./reducers/peersSlice";
-import { roomsSelector, setRoomUrl } from "./reducers/roomsSlice";
+import { roomsSelector } from "./reducers/roomsSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
 import {
   channelsSelector,
@@ -17,7 +18,7 @@ import {
   signalingServerActions,
 } from "./reducers/signalingServerSlice";
 
-import type { RoomState } from "./store/room";
+import type { AppDispatch, RoomState } from "./store/room";
 import type { Room } from "./reducers/roomsSlice";
 import type { Peer } from "./reducers/peersSlice";
 import type { Channel } from "./reducers/channelsSlice";
@@ -32,19 +33,55 @@ import type {
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateSend,
   WebSocketMessageCandidateReceive,
+  WebSocketMessageError,
 } from "./utils/interfaces";
+
+const dispatch: AppDispatch = room.dispatch;
 
 const connectToSignalingServer = async (
   signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
-  room.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
+  dispatch(
+    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl)
+  )
+  // const { keyPair } = room.getState();
+  // if (keyPair.secretKey.length === 0) {
+  //   const pair = room.dispatch(setKeyPair());
+  //   const res = unwrapResult(pair);
+  // }
+  //
+  // room.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
 };
 
 const connectToRoom = (roomUrl: string) => {
-  const { keyPair, signalingServer } = room.getState();
+  const { keyPair, signalingServer, rooms } = room.getState();
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
-    room.dispatch(setRoomUrl(roomUrl));
+    if (rooms.length > 0) {
+      const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+
+      if (roomIndex === -1 || !isUUID(rooms[roomIndex].id)) {
+        room.dispatch(
+          signalingServerActions.sendMessage({
+            content: {
+              type: "room",
+              fromPeerId: keyPair.peerId,
+              roomUrl,
+            } as WebSocketMessageRoomIdRequest,
+          }),
+        );
+      }
+    } else {
+      room.dispatch(
+        signalingServerActions.sendMessage({
+          content: {
+            type: "room",
+            fromPeerId: keyPair.peerId,
+            roomUrl,
+          } as WebSocketMessageRoomIdRequest,
+        }),
+      );
+    }
   }
 };
 
@@ -187,4 +224,5 @@ export type {
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateSend,
   WebSocketMessageCandidateReceive,
+  WebSocketMessageError,
 };

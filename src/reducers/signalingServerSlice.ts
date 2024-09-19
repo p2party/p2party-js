@@ -32,7 +32,7 @@ const signalingServerSlice = createSlice({
 
     connectionEstablished: (state) => {
       state.isConnected = true;
-      state.isEstablishingConnection = true;
+      state.isEstablishingConnection = false;
     },
 
     disconnect: (state) => {

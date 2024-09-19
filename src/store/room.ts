@@ -12,10 +12,10 @@ import signalingServerReducer, {
   signalingServerActions,
 } from "../reducers/signalingServerSlice";
 
-import signalingServerMiddleware from "../middleware/signalingServerMiddleware";
+import signalingServerApi from "../api/signalingServerApi";
+// import signalingServerMiddleware from "../middleware/signalingServerMiddleware";
 import channelsMiddleware from "../middleware/channelsMiddleware";
 import peersMiddleware from "../middleware/peersMiddleware";
-import roomsMiddleware from "../middleware/roomsMiddleware";
 
 export const room = configureStore({
   reducer: {
@@ -25,6 +25,7 @@ export const room = configureStore({
     isSettingRemoteAnswerPending: isSettingRemoteAnswerPendingReducer,
     channels: channels2Reducer,
     signalingServer: signalingServerReducer,
+    [signalingServerApi.reducerPath]: signalingServerApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
@@ -36,12 +37,15 @@ export const room = configureStore({
           setChannel.toString(),
         ],
       },
-    }).prepend([
-      signalingServerMiddleware,
-      channelsMiddleware,
-      peersMiddleware,
-      roomsMiddleware,
-    ]),
+    })
+      .concat([
+        signalingServerApi.middleware,
+        // signalingServerMiddleware,
+        channelsMiddleware,
+        peersMiddleware,
+      ]).concat([
+
+    ])
 });
 
 export type AppDispatch = typeof room.dispatch;

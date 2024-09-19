@@ -1,12 +1,15 @@
 // import { Mutex } from "async-mutex";
+import { isHexadecimal, isUUID } from "class-validator";
+
+import handleChallenge from "../handlers/handleChallenge";
 
 import { setCandidate, setDescription } from "../reducers/peersSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
-import { setKeyPair, setPeerData } from "../reducers/keyPairSlice";
+import { setKeyPair } from "../reducers/keyPairSlice";
 import { setRoom } from "../reducers/roomsSlice";
 
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
-import { importPrivateKey, importPublicKey } from "../utils/importPEMKeys";
+import { importPublicKey } from "../utils/importPEMKeys";
 
 import type { Middleware } from "redux";
 import type { RoomState } from "../store/room";
@@ -15,9 +18,22 @@ import type {
   WebSocketMessageRoomIdResponse,
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateReceive,
-  WebSocketMessageChallengeResponse,
+  WebSocketMessageError,
 } from "../utils/interfaces";
-import { isHexadecimal, isUUID } from "class-validator";
+
+const waitForSocketConnection = (ws: WebSocket, callback: () => any) => {
+  setTimeout(function () {
+    if (ws.readyState === 1) {
+      console.log("Connection is made");
+      if (callback != null) {
+        callback();
+      }
+    } else {
+      console.log("wait for connection...");
+      waitForSocketConnection(ws, callback);
+    }
+  }, 10); // wait 10 milisecond for the connection...
+};
 
 // Mutex to control WebSocket connection (optional)
 // const socketMutex = new Mutex();
@@ -29,16 +45,17 @@ const signalingServerMiddleware: Middleware = (store) => {
     const { signalingServer } = store.getState() as RoomState;
     const isConnectionEstablished =
       ws != undefined &&
-      ws.readyState !== WebSocket.CONNECTING &&
-      ws.readyState !== WebSocket.CLOSED &&
-      ws.readyState !== WebSocket.CLOSING &&
+      ws.readyState === 1 &&
+      // ws.readyState !== WebSocket.CONNECTING &&
+      // ws.readyState !== WebSocket.CLOSED &&
+      // ws.readyState !== WebSocket.CLOSING &&
       signalingServer.isConnected;
 
     if (
       signalingServerActions.startConnecting.match(action) &&
       !isConnectionEstablished
     ) {
-      const { keyPair } = store.getState();
+      const { keyPair } = store.getState() as RoomState;
       // await socketMutex.runExclusive(async () => {
       let publicKey = "";
       if (keyPair.secretKey.length === 0) {
@@ -91,74 +108,34 @@ const signalingServerMiddleware: Middleware = (store) => {
           | WebSocketMessageChallengeRequest
           | WebSocketMessageRoomIdResponse
           | WebSocketMessageDescriptionReceive
-          | WebSocketMessageCandidateReceive = JSON.parse(event.data);
+          | WebSocketMessageCandidateReceive
+          | WebSocketMessageError = JSON.parse(event.data);
+
+        const { keyPair } = store.getState() as RoomState;
 
         switch (message.type) {
           case "peerId": {
             const peerId = message.peerId ?? "";
             const challenge = message.challenge ?? "";
 
-            if (
+            console.log(peerId);
+
+            const isNewPeerId =
               isUUID(peerId) &&
               isHexadecimal(challenge) &&
-              challenge.length === 64
-            ) {
-              try {
-                const { keyPair } = store.getState();
-                const secretKey = await importPrivateKey(keyPair.secretKey);
+              challenge.length === 64 &&
+              keyPair.challenge.length === 0 &&
+              keyPair.signature.length === 0;
 
-                const nonce = Uint8Array.from(
-                  challenge
-                    .match(/.{1,2}/g)!
-                    .map((byte: string) => parseInt(byte, 16)),
-                );
+            const isNewDbEntry =
+              isUUID(peerId) &&
+              isUUID(keyPair.peerId) &&
+              keyPair.peerId !== peerId &&
+              isHexadecimal(challenge) &&
+              challenge.length === 64;
 
-                const sig = await window.crypto.subtle.sign(
-                  {
-                    name: "RSA-PSS",
-                    saltLength: 32,
-                  },
-                  secretKey,
-                  nonce,
-                );
-
-                const signature = [...new Uint8Array(sig)]
-                  .map((x) => x.toString(16).padStart(2, "0"))
-                  .join("");
-
-                store.dispatch(
-                  setPeerData({
-                    peerId,
-                    challenge,
-                    signature,
-                  }),
-                );
-
-                store.dispatch(
-                  signalingServerActions.sendMessage({
-                    content: {
-                      type: "challenge",
-                      fromPeerId: peerId,
-                      challenge,
-                      signature,
-                    } as WebSocketMessageChallengeResponse,
-                  }),
-                );
-                // ws.send(
-                //   JSON.stringify({
-                //     type: "challenge",
-                //     fromPeerId: peerId,
-                //     challenge,
-                //     signature:
-                //       "0x" +
-                //       [...new Uint8Array(signature)]
-                //         .map((x) => x.toString(16).padStart(2, "0"))
-                //         .join(""),
-                //   }),
-                // );
-              } catch (error) {
-                throw error;
-              }
+            if (isNewPeerId || isNewDbEntry) {
+              await handleChallenge(keyPair, peerId, challenge, store);
             }
 
             break;
@@ -200,8 +177,14 @@ const signalingServerMiddleware: Middleware = (store) => {
             break;
           }
 
+          case "error": {
+            console.error(message);
+
+            break;
+          }
+
           default: {
-            console.error("Unknown message type");
+            console.error("Unknown message type " + message);
 
             break;
           }
@@ -229,6 +212,8 @@ const signalingServerMiddleware: Middleware = (store) => {
       isConnectionEstablished
     ) {
       const { keyPair } = store.getState();
+
+      console.log(action.payload.content);
       if (
         isUUID(keyPair.peerId, 4) &&
         isHexadecimal(keyPair.challenge) &&
@@ -236,7 +221,11 @@ const signalingServerMiddleware: Middleware = (store) => {
         keyPair.signature.length === 1024 &&
         keyPair.challenge.length === 64
       ) {
-        ws.send(JSON.stringify(action.payload.content));
+        waitForSocketConnection(ws, function () {
+          console.log("message sent!!!");
+          ws.send(JSON.stringify(action.payload.content));
+        });
+        // ws.send(JSON.stringify(action.payload.content));
       }
 
       return next(action);

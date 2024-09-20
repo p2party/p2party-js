@@ -18,9 +18,9 @@
       "url": "https://ondemos.org"
     }
   ],
-  "license": "MIT",
+  "license": "APACHE-2",
   "bugs": {
-    "url": "https://github.com/ondemos/core/issues"
+    "url": "https://github.com/p2party/p2party-ts/issues"
   },
   "keywords": [
     "cryptographic commitment scheme",

@@ -1,7 +1,7 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 import type { IRTCPeerConnection } from "./peersSlice";
 
 export interface IRTCDataChannel extends RTCDataChannel {
@@ -102,8 +102,6 @@ const channelsSlice = createSlice({
           }),
         );
       }
-
-      return state;
     },
 
     setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
@@ -113,7 +111,7 @@ const channelsSlice = createSlice({
           c.label === channel &&
           (c.withPeerId === fromPeerId || c.withPeerId === toPeerId),
       );
-      if (channelIndex === -1) return state;
+      if (channelIndex === -1) return;
 
       const messageIndex = state[channelIndex].messages.findIndex(
         (msg) =>
@@ -143,8 +141,6 @@ const channelsSlice = createSlice({
           newMessage,
         );
       }
-
-      return state;
     },
 
     sendMessageToChannel: (
@@ -153,7 +149,7 @@ const channelsSlice = createSlice({
     ) => {
       const { message, fromPeerId, channel } = action.payload;
       let channelIndex = state.findIndex((c) => c.label === channel);
-      if (channelIndex === -1) return state;
+      if (channelIndex === -1) return;
 
       while (channelIndex > -1) {
         state[channelIndex].messages.push({
@@ -168,8 +164,6 @@ const channelsSlice = createSlice({
           c.label === channel;
         });
       }
-
-      return state;
     },
 
     deletePeerChannels: (
@@ -189,8 +183,6 @@ const channelsSlice = createSlice({
       for (let i = 0; i < INDEXES_LEN; i++) {
         state.splice(channelsClosedIndexes[i], 1);
       }
-
-      return state;
     },
 
     deleteLabelChannels: (
@@ -210,8 +202,6 @@ const channelsSlice = createSlice({
       for (let i = 0; i < INDEXES_LEN; i++) {
         state.splice(channelsClosedIndexes[i], 1);
       }
-
-      return state;
     },
 
     deleteChannel: (state, action: PayloadAction<DeleteChannelArgs>) => {
@@ -223,12 +213,12 @@ const channelsSlice = createSlice({
       if (channelIndex > -1) {
         state.splice(channelIndex, 1);
       }
-
-      return state;
     },
 
-    deleteAllChannels: (_state) => {
-      return [];
+    deleteAllChannels: (state) => {
+      if (state.length > 0) {
+        state = [];
+      }
     },
 
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
@@ -243,8 +233,6 @@ const channelsSlice = createSlice({
       if (messageIndex > -1) {
         state[channelIndex].messages.splice(messageIndex, 1);
       }
-
-      return state;
     },
 
     deleteChannelMessages: (
@@ -257,8 +245,6 @@ const channelsSlice = createSlice({
       if (channelIndex > -1) {
         state[channelIndex].messages = [];
       }
-
-      return state;
     },
 
     deletePeerMessages: (
@@ -277,12 +263,12 @@ const channelsSlice = createSlice({
           c.withPeerId === peerId;
         });
       }
-
-      return state;
     },
 
-    deleteAllMessages: () => {
-      return [];
+    deleteAllMessages: (state) => {
+      if (state.length > 0) {
+        state = [];
+      }
     },
   },
 });
@@ -296,5 +282,5 @@ export const {
   deleteLabelChannels,
   deleteAllChannels,
 } = channelsSlice.actions;
-export const channelsSelector = (state: RoomState) => state.channels;
+export const channelsSelector = (state: RootState) => state.channels;
 export default channelsSlice.reducer;

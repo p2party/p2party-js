@@ -1,7 +1,7 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 
 const initialState = false;
 
@@ -20,6 +20,6 @@ const isSettingRemoteAnswerPendingSlice = createSlice({
 
 export const { setIsSettingRemoteAnswerPending } =
   isSettingRemoteAnswerPendingSlice.actions;
-export const isSettingRemoteAnswerPendingSelector = (state: RoomState) =>
+export const isSettingRemoteAnswerPendingSelector = (state: RootState) =>
   state.isSettingRemoteAnswerPending;
 export default isSettingRemoteAnswerPendingSlice.reducer;

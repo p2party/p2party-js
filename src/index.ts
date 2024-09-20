@@ -1,12 +1,16 @@
 import { isUUID } from "class-validator";
 
-import { room } from "./store/room";
+import { store, dispatch } from "./store";
 
 import { getConnectedRoomPeers } from "./api/getConnectedRoomPeers";
 
 import signalingServerApi from "./api/signalingServerApi";
 import { peersSelector, setPeer, setPeerChannel } from "./reducers/peersSlice";
-import { roomsSelector } from "./reducers/roomsSlice";
+import {
+  roomSelector,
+  setConnectingToPeers,
+  setRoom,
+} from "./reducers/roomSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
 import {
   channelsSelector,
@@ -18,8 +22,8 @@ import {
   signalingServerActions,
 } from "./reducers/signalingServerSlice";
 
-import type { AppDispatch, RoomState } from "./store/room";
-import type { Room } from "./reducers/roomsSlice";
+import type { RootState } from "./store";
+import type { Room } from "./reducers/roomSlice";
 import type { Peer } from "./reducers/peersSlice";
 import type { Channel } from "./reducers/channelsSlice";
 import type { Message } from "./reducers/channelsSlice";
@@ -36,44 +40,25 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 
-const dispatch: AppDispatch = room.dispatch;
-
-const connectToSignalingServer = async (
+const connect = (
+  roomUrl: string,
   signalingServerUrl = "ws://localhost:3001/ws",
+  rtcConfig: RTCConfiguration = {
+    iceServers: [
+      {
+        urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+      },
+    ],
+  },
 ) => {
-  dispatch(
-    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl)
-  )
-  // const { keyPair } = room.getState();
-  // if (keyPair.secretKey.length === 0) {
-  //   const pair = room.dispatch(setKeyPair());
-  //   const res = unwrapResult(pair);
-  // }
-  //
-  // room.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
-};
+  const { keyPair, signalingServer, room } = store.getState();
 
-const connectToRoom = (roomUrl: string) => {
-  const { keyPair, signalingServer, rooms } = room.getState();
+  dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
-    if (rooms.length > 0) {
-      const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-
-      if (roomIndex === -1 || !isUUID(rooms[roomIndex].id)) {
-        room.dispatch(
-          signalingServerActions.sendMessage({
-            content: {
-              type: "room",
-              fromPeerId: keyPair.peerId,
-              roomUrl,
-            } as WebSocketMessageRoomIdRequest,
-          }),
-        );
-      }
-    } else {
-      room.dispatch(
-        signalingServerActions.sendMessage({
+    if (!isUUID(room.id)) {
+      dispatch(
+        signalingServerApi.endpoints.sendMessage.initiate({
           content: {
             type: "room",
             fromPeerId: keyPair.peerId,
@@ -81,8 +66,24 @@ const connectToRoom = (roomUrl: string) => {
           } as WebSocketMessageRoomIdRequest,
         }),
       );
+    } else {
+      dispatch(setConnectingToPeers(true));
     }
+  } else {
+    dispatch(
+      signalingServerApi.endpoints.connectWebSocket.initiate(
+        signalingServerUrl,
+      ),
+    );
   }
+};
+
+const connectToSignalingServer = async (
+  signalingServerUrl = "ws://localhost:3001/ws",
+) => {
+  dispatch(
+    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl),
+  );
 };
 
 const connectToRoomPeers = async (
@@ -96,9 +97,9 @@ const connectToRoomPeers = async (
     ],
   },
 ) => {
-  const { keyPair, signalingServer, rooms } = room.getState();
+  const { keyPair, signalingServer, room } = store.getState();
 
-  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  const roomIndex = room.url === roomUrl ? 1 : -1;
 
   if (signalingServer.isConnected && roomIndex > -1) {
     const connectedRoomPeers = await getConnectedRoomPeers(
@@ -112,7 +113,7 @@ const connectToRoomPeers = async (
     for (let i = 0; i < LEN; i++) {
       if (connectedRoomPeers[i].publicKey === keyPair.publicKey) continue;
 
-      room.dispatch(
+      dispatch(
         setPeer({
           roomId: connectedRoomPeers[i].roomId,
           peerId: connectedRoomPeers[i].id,
@@ -126,17 +127,17 @@ const connectToRoomPeers = async (
 };
 
 const disconnectFromSignalingServer = async () => {
-  room.dispatch(signalingServerActions.disconnect());
+  dispatch(signalingServerActions.disconnect());
 };
 
 const disconnectFromRoom = async (roomId: string, _deleteMessages = false) => {
-  const { channels } = room.getState();
+  const { channels } = store.getState();
 
   let channelIndex = channels.findIndex((c) => {
     c.roomId === roomId;
   });
   while (channelIndex > -1) {
-    room.dispatch(
+    dispatch(
       deleteLabelChannels({
         channel: channels[channelIndex].label,
       }),
@@ -154,7 +155,7 @@ const openChannel = async (
   roomId: string,
   withPeerIds?: string[],
 ) => {
-  const { peers, channels } = room.getState();
+  const { peers, channels } = store.getState();
   const PEERS_LEN =
     withPeerIds && withPeerIds.length > 0 ? withPeerIds.length : peers.length;
   if (PEERS_LEN === 0) throw new Error("Cannot open channel with no peers");
@@ -173,7 +174,7 @@ const openChannel = async (
     );
     if (channelIndex > -1) continue; // || peers[i].connectionState !== "connected") continue;
 
-    room.dispatch(
+    dispatch(
       setPeerChannel({
         label,
         roomId,
@@ -184,8 +185,8 @@ const openChannel = async (
 };
 
 const sendMessage = async (message: string, toChannel: string) => {
-  const { keyPair } = room.getState();
-  room.dispatch(
+  const { keyPair } = store.getState();
+  dispatch(
     sendMessageToChannel({
       message,
       fromPeerId: keyPair.peerId,
@@ -195,14 +196,14 @@ const sendMessage = async (message: string, toChannel: string) => {
 };
 
 export default {
-  room,
+  partyState: store,
   signalingServerSelector,
   peersSelector,
-  roomsSelector,
+  roomSelector,
   keyPairSelector,
   channelsSelector,
+  connect,
   connectToSignalingServer,
-  connectToRoom,
   connectToRoomPeers,
   disconnectFromSignalingServer,
   disconnectFromRoom,
@@ -211,7 +212,7 @@ export default {
 };
 
 export type {
-  RoomState,
+  RootState,
   Room,
   Channel,
   Peer,

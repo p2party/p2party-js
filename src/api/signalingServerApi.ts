@@ -10,12 +10,13 @@ import { importPublicKey } from "../utils/importPEMKeys";
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 import type {
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
   WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdRequest,
+  WebSocketMessagePeersRequest,
 } from "../utils/interfaces";
 
 export interface WebSocketParams {
@@ -27,13 +28,13 @@ export interface WebSocketMessage {
     | WebSocketMessageCandidateSend
     | WebSocketMessageDescriptionSend
     | WebSocketMessageChallengeResponse
-    | WebSocketMessageRoomIdRequest;
+    | WebSocketMessageRoomIdRequest
+    | WebSocketMessagePeersRequest;
 }
 
 const waitForSocketConnection = (ws: WebSocket, callback: () => any) => {
-  setTimeout(function () {
+  setTimeout(() => {
     if (ws.readyState === 1) {
-      console.log("Connection is made");
       if (callback != null) {
         callback();
       }
@@ -57,7 +58,7 @@ const websocketBaseQuery: BaseQueryFn<
   }
 
   try {
-    const { keyPair } = api.getState() as RoomState;
+    const { keyPair } = api.getState() as RootState;
 
     let publicKey = "";
     if (keyPair.secretKey.length === 0) {
@@ -164,12 +165,10 @@ const websocketSendMessageQuery: BaseQueryFn<
   unknown
 > = async (message, api) => {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    console.log(message.content);
-
-    const { keyPair } = api.getState() as RoomState;
+    const { keyPair } = api.getState() as RootState;
 
     if (
-      isUUID(keyPair.peerId, 4) &&
+      isUUID(keyPair.peerId) &&
       isHexadecimal(keyPair.challenge) &&
       isHexadecimal(keyPair.signature) &&
       keyPair.signature.length === 1024 &&
@@ -177,7 +176,8 @@ const websocketSendMessageQuery: BaseQueryFn<
     ) {
       waitForSocketConnection(ws, () => {
         console.log("message sent!!!");
-        ws?.send(JSON.stringify(message.content));
+        ws!.send(JSON.stringify(message.content));
+        console.log(message.content);
       });
     }
 

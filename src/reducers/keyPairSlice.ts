@@ -7,10 +7,11 @@ import { isHexadecimal, isUUID } from "class-validator";
 // import { exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 
 export interface KeyPair {
   peerId: string;
+  challengeId: string;
   publicKey: string;
   secretKey: string;
   challenge: string;
@@ -30,6 +31,7 @@ export interface SetPeerData {
 
 const initialState: KeyPair = {
   peerId: "",
+  challengeId: "",
   publicKey: "",
   secretKey: "",
   challenge: "",
@@ -104,7 +106,16 @@ const keyPairSlice = createSlice({
         state.signature = signature;
       }
     },
+
+    setChallengeId: (state, action: PayloadAction<string>) => {
+      const challengeId = action.payload;
+
+      if (isUUID(challengeId)) {
+        state.challengeId = challengeId;
+      }
+    },
   },
+
   // extraReducers: (builder) => {
   //   builder.addCase(
   //     setKeyPair.fulfilled,
@@ -121,6 +132,6 @@ const keyPairSlice = createSlice({
   // },
 });
 
-export const { setKeyPair, setPeerData } = keyPairSlice.actions;
-export const keyPairSelector = (state: RoomState) => state.keyPair;
+export const { setKeyPair, setPeerData, setChallengeId } = keyPairSlice.actions;
+export const keyPairSelector = (state: RootState) => state.keyPair;
 export default keyPairSlice.reducer;

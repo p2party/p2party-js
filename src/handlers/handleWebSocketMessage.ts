@@ -2,18 +2,23 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
 
-import { setRoom } from "../reducers/roomsSlice";
-import { setDescription, setCandidate } from "../reducers/peersSlice";
+import { setRoom } from "../reducers/roomSlice";
+import { setDescription, setCandidate, setPeer } from "../reducers/peersSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 import type {
   WebSocketMessageChallengeRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateReceive,
+  WebSocketMessagePeersResponse,
+  WebSocketMessageSuccessfulChallenge,
   WebSocketMessageError,
 } from "../utils/interfaces";
+import { exportPublicKeyToHex } from "../utils/exportPEMKeys";
+import { importPublicKey } from "../utils/importPEMKeys";
+import { setChallengeId } from "../reducers/keyPairSlice";
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -29,16 +34,16 @@ const handleWebSocketMessage = async (
     | WebSocketMessageRoomIdResponse
     | WebSocketMessageDescriptionReceive
     | WebSocketMessageCandidateReceive
+    | WebSocketMessagePeersResponse
+    | WebSocketMessageSuccessfulChallenge
     | WebSocketMessageError = JSON.parse(event.data);
 
-  const { keyPair } = api.getState() as RoomState;
+  const { keyPair, room } = api.getState() as RootState;
 
   switch (message.type) {
     case "peerId": {
       const peerId = message.peerId ?? "";
       const challenge = message.challenge ?? "";
-
-      console.log(peerId);
 
       const isNewPeerId =
         isUUID(peerId) &&
@@ -54,9 +59,8 @@ const handleWebSocketMessage = async (
         isHexadecimal(challenge) &&
         challenge.length === 64;
 
-      if (isNewPeerId || isNewDbEntry) {
+      if (isNewPeerId || isNewDbEntry)
         await handleChallenge(keyPair, peerId, challenge, api);
-      }
 
       break;
     }
@@ -68,6 +72,41 @@ const handleWebSocketMessage = async (
           url: message.roomUrl,
         }),
       );
+
+      break;
+    }
+
+    case "challenge": {
+      api.dispatch(setChallengeId(message.challengeId));
+
+      break;
+    }
+
+    case "peers": {
+      if (
+        message.roomId !== room.id ||
+        !isUUID(message.roomId) ||
+        keyPair.publicKey.length === 0
+      )
+        break;
+
+      const len = message.peers.length;
+      const pk = await importPublicKey(keyPair.publicKey);
+      const pkHex = await exportPublicKeyToHex(pk);
+      for (let i = 0; i < len; i++) {
+        if (message.peers[i].publicKey === pkHex) continue;
+        if (!isUUID(message.peers[i].id)) continue;
+
+        api.dispatch(
+          setPeer({
+            roomId: message.roomId,
+            peerId: message.peers[i].id,
+            peerPublicKey: message.peers[i].publicKey,
+            initiate: true,
+            rtcConfig: room.rtcConfig,
+          }),
+        );
+      }
 
       break;
     }

@@ -6,14 +6,14 @@ import {
   setPeer,
   setPeerChannel,
 } from "../reducers/peersSlice";
-import { signalingServerActions } from "../reducers/signalingServerSlice";
 import { setChannel } from "../reducers/channelsSlice";
 import { setIsSettingRemoteAnswerPending } from "../reducers/isSettingRemoteAnswerPendingSlice";
 
+import signalingServerApi from "../api/signalingServerApi";
 import { getConnectedRoomPeers } from "../api/getConnectedRoomPeers";
 
 import type { Middleware } from "redux";
-import type { RoomState } from "../store/room";
+import type { AppDispatch, RootState } from "../store";
 import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
@@ -26,6 +26,8 @@ import type {
 const peersMiddleware: Middleware = (store) => {
   const peerConnections: IRTCPeerConnection[] = [];
   const iceCandidates: IRTCIceCandidate[] = [];
+
+  const dispatch: AppDispatch = store.dispatch;
 
   const rtcConnectWithPeer = async (
     peerId: string,
@@ -68,8 +70,8 @@ const peersMiddleware: Middleware = (store) => {
         const description = epc.localDescription;
         if (description) {
           const { keyPair } = store.getState();
-          store.dispatch(
-            signalingServerActions.sendMessage({
+          dispatch(
+            signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "description",
                 description,
@@ -95,8 +97,8 @@ const peersMiddleware: Middleware = (store) => {
     epc.onicecandidate = ({ candidate }) => {
       if (candidate && candidate.candidate !== "") {
         const { keyPair } = store.getState();
-        store.dispatch(
-          signalingServerActions.sendMessage({
+        dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "candidate",
               candidate,
@@ -299,7 +301,7 @@ const peersMiddleware: Middleware = (store) => {
   };
 
   return (next) => async (action) => {
-    const { isSettingRemoteAnswerPending } = store.getState() as RoomState;
+    const { isSettingRemoteAnswerPending } = store.getState() as RootState;
 
     if (deletePeer.match(action)) {
       const { peerId } = action.payload;
@@ -406,8 +408,8 @@ const peersMiddleware: Middleware = (store) => {
 
         const { keyPair } = store.getState();
 
-        store.dispatch(
-          signalingServerActions.sendMessage({
+        dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "description",
               description: localDescription,

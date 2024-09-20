@@ -12,6 +12,11 @@ export interface WebSocketMessageChallengeResponse {
   fromPeerId: string;
 }
 
+export interface WebSocketMessageSuccessfulChallenge {
+  type: "challenge";
+  challengeId: string;
+}
+
 export interface WebSocketMessageRoomIdRequest {
   type: "room";
   fromPeerId: string;
@@ -54,6 +59,23 @@ export interface WebSocketMessageCandidateReceive {
   candidate: RTCIceCandidate;
   fromPeerId: string;
   roomId: string;
+}
+
+export interface WebSocketMessagePeersRequest {
+  type: "peers";
+  fromPeerId: string;
+  roomId: string;
+}
+
+export interface RoomPeer {
+  id: string;
+  publicKey: string;
+}
+
+export interface WebSocketMessagePeersResponse {
+  type: "peers";
+  roomId: string;
+  peers: RoomPeer[];
 }
 
 export interface WebSocketMessageError {

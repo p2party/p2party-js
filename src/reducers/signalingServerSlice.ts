@@ -1,13 +1,7 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RoomState } from "../store/room";
-import type {
-  WebSocketMessageCandidateSend,
-  WebSocketMessageDescriptionSend,
-  WebSocketMessageChallengeResponse,
-  WebSocketMessageRoomIdRequest,
-} from "../utils/interfaces";
+import type { RootState } from "../store";
 
 export interface SignalingState {
   isEstablishingConnection: boolean;
@@ -40,19 +34,6 @@ const signalingServerSlice = createSlice({
       state.isEstablishingConnection = false;
     },
 
-    sendMessage: (
-      state,
-      _action: PayloadAction<{
-        content:
-          | WebSocketMessageCandidateSend
-          | WebSocketMessageDescriptionSend
-          | WebSocketMessageChallengeResponse
-          | WebSocketMessageRoomIdRequest;
-      }>,
-    ) => {
-      return state;
-    },
-
     // receiveMessage: (
     //   state,
     //   action: PayloadAction<{
@@ -65,6 +46,6 @@ const signalingServerSlice = createSlice({
 });
 
 export const signalingServerActions = signalingServerSlice.actions;
-export const signalingServerSelector = (state: RoomState) =>
+export const signalingServerSelector = (state: RootState) =>
   state.signalingServer;
 export default signalingServerSlice.reducer;

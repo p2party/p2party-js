@@ -6,13 +6,13 @@ import handleChallenge from "../handlers/handleChallenge";
 import { setCandidate, setDescription } from "../reducers/peersSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 import { setKeyPair } from "../reducers/keyPairSlice";
-import { setRoom } from "../reducers/roomsSlice";
+import { setRoom } from "../reducers/roomSlice";
 
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 import { importPublicKey } from "../utils/importPEMKeys";
 
 import type { Middleware } from "redux";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 import type {
   WebSocketMessageChallengeRequest,
   WebSocketMessageRoomIdResponse,
@@ -42,7 +42,7 @@ const signalingServerMiddleware: Middleware = (store) => {
   let ws: WebSocket;
 
   return (next) => async (action) => {
-    const { signalingServer } = store.getState() as RoomState;
+    const { signalingServer } = store.getState() as RootState;
     const isConnectionEstablished =
       ws != undefined &&
       ws.readyState === 1 &&
@@ -55,7 +55,7 @@ const signalingServerMiddleware: Middleware = (store) => {
       signalingServerActions.startConnecting.match(action) &&
       !isConnectionEstablished
     ) {
-      const { keyPair } = store.getState() as RoomState;
+      const { keyPair } = store.getState() as RootState;
       // await socketMutex.runExclusive(async () => {
       let publicKey = "";
       if (keyPair.secretKey.length === 0) {
@@ -111,7 +111,7 @@ const signalingServerMiddleware: Middleware = (store) => {
           | WebSocketMessageCandidateReceive
           | WebSocketMessageError = JSON.parse(event.data);
 
-        const { keyPair } = store.getState() as RoomState;
+        const { keyPair } = store.getState() as RootState;
 
         switch (message.type) {
           case "peerId": {
@@ -207,29 +207,29 @@ const signalingServerMiddleware: Middleware = (store) => {
       return next(action);
     }
 
-    if (
-      signalingServerActions.sendMessage.match(action) &&
-      isConnectionEstablished
-    ) {
-      const { keyPair } = store.getState();
-
-      console.log(action.payload.content);
-      if (
-        isUUID(keyPair.peerId, 4) &&
-        isHexadecimal(keyPair.challenge) &&
-        isHexadecimal(keyPair.signature) &&
-        keyPair.signature.length === 1024 &&
-        keyPair.challenge.length === 64
-      ) {
-        waitForSocketConnection(ws, function () {
-          console.log("message sent!!!");
-          ws.send(JSON.stringify(action.payload.content));
-        });
-        // ws.send(JSON.stringify(action.payload.content));
-      }
-
-      return next(action);
-    }
+    // if (
+    //   signalingServerActions.sendMessage.match(action) &&
+    //   isConnectionEstablished
+    // ) {
+    //   const { keyPair } = store.getState();
+    //
+    //   console.log(action.payload.content);
+    //   if (
+    //     isUUID(keyPair.peerId, 4) &&
+    //     isHexadecimal(keyPair.challenge) &&
+    //     isHexadecimal(keyPair.signature) &&
+    //     keyPair.signature.length === 1024 &&
+    //     keyPair.challenge.length === 64
+    //   ) {
+    //     waitForSocketConnection(ws, function () {
+    //       console.log("message sent!!!");
+    //       ws.send(JSON.stringify(action.payload.content));
+    //     });
+    //     // ws.send(JSON.stringify(action.payload.content));
+    //   }
+    //
+    //   return next(action);
+    // }
 
     return next(action);
   };

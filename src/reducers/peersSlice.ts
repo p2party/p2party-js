@@ -1,7 +1,7 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RoomState } from "../store/room";
+import type { RootState } from "../store";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
   peerIsInitiator: boolean; // If initiator then impolite
@@ -124,5 +124,5 @@ export const {
   deletePeer,
   deleteAllPeers,
 } = peersSlice.actions;
-export const peersSelector = (state: RoomState) => state.peers;
+export const peersSelector = (state: RootState) => state.peers;
 export default peersSlice.reducer;

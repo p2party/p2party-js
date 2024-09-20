@@ -1,11 +1,9 @@
 import { importPrivateKey } from "../utils/importPEMKeys";
 
 import { setPeerData } from "../reducers/keyPairSlice";
-import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import type { MiddlewareAPI, Dispatch, UnknownAction } from "@reduxjs/toolkit";
 import type { KeyPair } from "../reducers/keyPairSlice";
-import type { WebSocketMessageChallengeResponse } from "../utils/interfaces";
 
 const handleChallenge = async (
   keyPair: KeyPair,
@@ -38,17 +36,6 @@ const handleChallenge = async (
         peerId,
         challenge,
         signature,
-      }),
-    );
-
-    store.dispatch(
-      signalingServerActions.sendMessage({
-        content: {
-          type: "challenge",
-          fromPeerId: peerId,
-          challenge,
-          signature,
-        } as WebSocketMessageChallengeResponse,
       }),
     );
   } catch (error) {

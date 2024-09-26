@@ -27,7 +27,6 @@ import type { Room } from "./reducers/roomSlice";
 import type { Peer } from "./reducers/peersSlice";
 import type { Channel } from "./reducers/channelsSlice";
 import type { Message } from "./reducers/channelsSlice";
-
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,

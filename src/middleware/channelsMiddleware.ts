@@ -10,6 +10,7 @@ import {
 import { deletePeer, type IRTCPeerConnection } from "../reducers/peersSlice";
 
 import type { Middleware } from "redux";
+import type { RootState } from "../store";
 import type { IRTCDataChannel } from "../reducers/channelsSlice";
 
 const channelsMiddleware: Middleware = (store) => {
@@ -20,8 +21,10 @@ const channelsMiddleware: Middleware = (store) => {
     epc: IRTCPeerConnection,
   ) => {
     const label = typeof channel === "string" ? channel : channel.label;
+    console.log(typeof channel);
     const dataChannel =
       typeof channel === "string" ? epc.createDataChannel(channel) : channel;
+    console.log("EEEEEEEERE")
     const extChannel = dataChannel as IRTCDataChannel;
     extChannel.withPeerId = epc.withPeerId;
 
@@ -33,7 +36,7 @@ const channelsMiddleware: Middleware = (store) => {
       const message = `Connected with ${epc.withPeerId} on channel ${extChannel.label}`;
       extChannel.send(message);
 
-      const { keyPair } = store.getState();
+      const { keyPair } = store.getState() as RootState;
 
       store.dispatch(
         setMessage({

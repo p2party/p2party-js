@@ -10,7 +10,7 @@ import { setChannel } from "../reducers/channelsSlice";
 import { setIsSettingRemoteAnswerPending } from "../reducers/isSettingRemoteAnswerPendingSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
-import { getConnectedRoomPeers } from "../api/getConnectedRoomPeers";
+// import { getConnectedRoomPeers } from "../api/getConnectedRoomPeers";
 
 import type { Middleware } from "redux";
 import type { AppDispatch, RootState } from "../store";
@@ -19,6 +19,7 @@ import type {
   IRTCIceCandidate,
 } from "../reducers/peersSlice";
 import type {
+  WebSocketMessagePeersRequest,
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
 } from "../utils/interfaces";
@@ -45,7 +46,7 @@ const peersMiddleware: Middleware = (store) => {
       ],
     },
   ) => {
-    const { keyPair } = store.getState();
+    const { keyPair } = store.getState() as RootState;
     if (peerId === keyPair.peerId)
       throw new Error("Cannot create a connection with oneself.");
 
@@ -56,6 +57,7 @@ const peersMiddleware: Middleware = (store) => {
 
     if (initiator)
       console.log(`You have initiated a peer connection with ${peerId}.`);
+
     const pc = new RTCPeerConnection(rtcConfig);
     const epc = pc as IRTCPeerConnection;
     epc.peerIsInitiator = initiator;
@@ -69,7 +71,8 @@ const peersMiddleware: Middleware = (store) => {
         await epc.setLocalDescription();
         const description = epc.localDescription;
         if (description) {
-          const { keyPair } = store.getState();
+          const { keyPair } = store.getState() as RootState;
+
           dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
@@ -96,7 +99,7 @@ const peersMiddleware: Middleware = (store) => {
 
     epc.onicecandidate = ({ candidate }) => {
       if (candidate && candidate.candidate !== "") {
-        const { keyPair } = store.getState();
+        const { keyPair } = store.getState() as RootState;
         dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
@@ -173,10 +176,27 @@ const peersMiddleware: Middleware = (store) => {
         );
 
         if (epc.connectionState === "connected" && !epc.peerIsInitiator) {
-          store.dispatch(
-            setPeer({ roomId, peerId, peerPublicKey, initiate: false }),
-          );
-          await rtcConnectWithRoom(roomId, true, rtcConfig);
+          // store.dispatch(
+          //   setPeer({ roomId, peerId, peerPublicKey, initiate: false }),
+          // );
+          const { signalingServer } =
+            store.getState() as RootState;
+          if (
+            signalingServer.isConnected // &&
+            // isUUID(keyPair.peerId) &&
+            // isUUID(room.id)
+          ) {
+            dispatch(
+              signalingServerApi.endpoints.sendMessage.initiate({
+                content: {
+                  type: "peers",
+                  fromPeerId: keyPair.peerId,
+                  roomId,
+                } as WebSocketMessagePeersRequest,
+              }),
+            );
+          }
+          // await rtcConnectWithRoom(roomId, true, rtcConfig);
         }
       }
     };
@@ -207,98 +227,98 @@ const peersMiddleware: Middleware = (store) => {
     return epc;
   };
 
-  const rtcConnectWithRoom = async (
-    roomId: string,
-    starConfig = false,
-    rtcConfig: RTCConfiguration = {
-      iceServers: [
-        {
-          urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-          ],
-        },
-      ],
-    },
-  ) => {
-    try {
-      const clientsInRoom = await getConnectedRoomPeers(roomId);
-      const ROOM_CLIENTS_LEN = clientsInRoom.length;
-
-      const { keyPair } = store.getState();
-
-      if (
-        roomId.length > 0 &&
-        keyPair.peerId.length > 0 &&
-        ROOM_CLIENTS_LEN > peerConnections.length + 1
-      ) {
-        for (let i = 0; i < ROOM_CLIENTS_LEN; i++) {
-          const withPeerId = clientsInRoom[i].id;
-          if (withPeerId === keyPair.peerId) continue;
-
-          const withPeerPublicKey = clientsInRoom[i].publicKey;
-
-          const peerIndex = peerConnections.findIndex(
-            (peer) => peer.withPeerId === withPeerId,
-          );
-          if (peerIndex !== -1) continue;
-
-          if (!starConfig) {
-            const epc = await rtcConnectWithPeer(
-              withPeerId,
-              withPeerPublicKey,
-              roomId,
-              true,
-              rtcConfig,
-            );
-            peerConnections.push(epc);
-          } else {
-            const clientIndex = clientsInRoom.findIndex(
-              (client) => client.id === keyPair.peerId,
-            );
-            if (clientIndex === -1)
-              throw new Error("Impossible! Current client is not in the room");
-
-            if (
-              clientsInRoom[clientIndex].createdAt > clientsInRoom[i].createdAt
-            ) {
-              // One of them needs to be an initiator and createdAt does not change
-              await rtcConnectWithPeer(
-                withPeerId,
-                withPeerPublicKey,
-                roomId,
-                true,
-                rtcConfig,
-              );
-            } else if (
-              clientsInRoom[clientIndex].createdAt ===
-              clientsInRoom[i].createdAt
-            ) {
-              if (
-                clientsInRoom[clientIndex].updatedAt >
-                clientsInRoom[i].updatedAt
-              ) {
-                const epc = await rtcConnectWithPeer(
-                  withPeerId,
-                  withPeerPublicKey,
-                  roomId,
-                  true,
-                  rtcConfig,
-                );
-                peerConnections.push(epc);
-              } else {
-                continue;
-              }
-            } else {
-              continue;
-            }
-          }
-        }
-      }
-    } catch (error) {
-      throw error;
-    }
-  };
+  // const rtcConnectWithRoom = async (
+  //   roomId: string,
+  //   starConfig = false,
+  //   rtcConfig: RTCConfiguration = {
+  //     iceServers: [
+  //       {
+  //         urls: [
+  //           "stun:stun.l.google.com:19302",
+  //           "stun:stun1.l.google.com:19302",
+  //         ],
+  //       },
+  //     ],
+  //   },
+  // ) => {
+  //   try {
+  //     const clientsInRoom = await getConnectedRoomPeers(roomId);
+  //     const ROOM_CLIENTS_LEN = clientsInRoom.length;
+  //
+  //     const { keyPair } = store.getState();
+  //
+  //     if (
+  //       roomId.length > 0 &&
+  //       keyPair.peerId.length > 0 &&
+  //       ROOM_CLIENTS_LEN > peerConnections.length + 1
+  //     ) {
+  //       for (let i = 0; i < ROOM_CLIENTS_LEN; i++) {
+  //         const withPeerId = clientsInRoom[i].id;
+  //         if (withPeerId === keyPair.peerId) continue;
+  //
+  //         const withPeerPublicKey = clientsInRoom[i].publicKey;
+  //
+  //         const peerIndex = peerConnections.findIndex(
+  //           (peer) => peer.withPeerId === withPeerId,
+  //         );
+  //         if (peerIndex !== -1) continue;
+  //
+  //         if (!starConfig) {
+  //           const epc = await rtcConnectWithPeer(
+  //             withPeerId,
+  //             withPeerPublicKey,
+  //             roomId,
+  //             true,
+  //             rtcConfig,
+  //           );
+  //           peerConnections.push(epc);
+  //         } else {
+  //           const clientIndex = clientsInRoom.findIndex(
+  //             (client) => client.id === keyPair.peerId,
+  //           );
+  //           if (clientIndex === -1)
+  //             throw new Error("Impossible! Current client is not in the room");
+  //
+  //           if (
+  //             clientsInRoom[clientIndex].createdAt > clientsInRoom[i].createdAt
+  //           ) {
+  //             // One of them needs to be an initiator and createdAt does not change
+  //             await rtcConnectWithPeer(
+  //               withPeerId,
+  //               withPeerPublicKey,
+  //               roomId,
+  //               true,
+  //               rtcConfig,
+  //             );
+  //           } else if (
+  //             clientsInRoom[clientIndex].createdAt ===
+  //             clientsInRoom[i].createdAt
+  //           ) {
+  //             if (
+  //               clientsInRoom[clientIndex].updatedAt >
+  //               clientsInRoom[i].updatedAt
+  //             ) {
+  //               const epc = await rtcConnectWithPeer(
+  //                 withPeerId,
+  //                 withPeerPublicKey,
+  //                 roomId,
+  //                 true,
+  //                 rtcConfig,
+  //               );
+  //               peerConnections.push(epc);
+  //             } else {
+  //               continue;
+  //             }
+  //           } else {
+  //             continue;
+  //           }
+  //         }
+  //       }
+  //     }
+  //   } catch (error) {
+  //     throw error;
+  //   }
+  // };
 
   return (next) => async (action) => {
     const { isSettingRemoteAnswerPending } = store.getState() as RootState;
@@ -390,7 +410,9 @@ const peersMiddleware: Middleware = (store) => {
           epc.setRemoteDescription(description),
         ]);
       } else {
-        await epc.setRemoteDescription(description);
+        if (epc.signalingState !== "stable") {
+          await epc.setRemoteDescription(description);
+        }
       }
 
       if (setPending) store.dispatch(setIsSettingRemoteAnswerPending(false));
@@ -406,7 +428,7 @@ const peersMiddleware: Middleware = (store) => {
           return next(action);
         }
 
-        const { keyPair } = store.getState();
+        const { keyPair } = store.getState() as RootState;
 
         dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
@@ -473,6 +495,7 @@ const peersMiddleware: Middleware = (store) => {
         initiate,
         rtcConfig,
       );
+
       peerConnections.push(epc);
     }
 

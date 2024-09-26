@@ -94,7 +94,11 @@ const handleWebSocketMessage = async (
       const pk = await importPublicKey(keyPair.publicKey);
       const pkHex = await exportPublicKeyToHex(pk);
       for (let i = 0; i < len; i++) {
-        if (message.peers[i].publicKey === pkHex) continue;
+        if (
+          message.peers[i].publicKey === pkHex ||
+          message.peers[i].id === keyPair.peerId
+        )
+          continue;
         if (!isUUID(message.peers[i].id)) continue;
 
         api.dispatch(

@@ -89,6 +89,7 @@ const websocketBaseQuery: BaseQueryFn<
     return new Promise((resolve, reject) => {
       ws!.onopen = () => {
         console.log("WebSocket connected to:", fullUrl);
+        api.dispatch(signalingServerActions.connectionEstablished());
         resolve({ data: "connected" });
       };
 
@@ -175,7 +176,6 @@ const websocketSendMessageQuery: BaseQueryFn<
       keyPair.challenge.length === 64
     ) {
       waitForSocketConnection(ws, () => {
-        console.log("message sent!!!");
         ws!.send(JSON.stringify(message.content));
         console.log(message.content);
       });

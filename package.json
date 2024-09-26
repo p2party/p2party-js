@@ -18,7 +18,7 @@
       "url": "https://ondemos.org"
     }
   ],
-  "license": "APACHE-2",
+  "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/p2party/p2party-ts/issues"
   },

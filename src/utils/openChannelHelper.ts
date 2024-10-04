@@ -5,18 +5,17 @@ import type { State } from "../store";
 import type {
   IRTCPeerConnection,
   IRTCDataChannel,
-  IRTCMessage,
 } from "../api/webrtc/interfaces";
+import { setChannel, setMessage } from "../reducers/roomSlice";
 
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
   epc: IRTCPeerConnection;
   dataChannels: IRTCDataChannel[];
-  messages: IRTCMessage[];
 }
 
 const openChannelHelper = async (
-  { channel, epc, dataChannels, messages }: OpenChannelHelperParams,
+  { channel, epc, dataChannels }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   return new Promise((resolve, reject) => {
@@ -57,7 +56,6 @@ const openChannelHelper = async (
 
       extChannel.onmessage = (e) => {
         if (typeof e.data === "string" && e.data.length > 0) {
-          console.log(e.data);
           api.dispatch(
             webrtcApi.endpoints.message.initiate({
               message: e.data,
@@ -76,18 +74,22 @@ const openChannelHelper = async (
 
         dataChannels.push(extChannel);
 
+        api.dispatch(setChannel({ label, peerId: extChannel.withPeerId }));
+
         const message = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
 
         extChannel.send(message);
 
-        messages.push({
-          id: window.crypto.randomUUID(),
-          message,
-          fromPeerId: keyPair.peerId,
-          toPeerId: extChannel.withPeerId,
-          channelLabel: label,
-          timestamp: new Date(),
-        });
+        api.dispatch(
+          setMessage({
+            id: window.crypto.randomUUID(),
+            message,
+            fromPeerId: keyPair.peerId,
+            toPeerId: extChannel.withPeerId,
+            channelLabel: label,
+            timestamp: Date.now(),
+          }),
+        );
       };
 
       resolve(extChannel);

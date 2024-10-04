@@ -1,3 +1,5 @@
+import { deleteChannel } from "../../reducers/roomSlice";
+
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
@@ -13,11 +15,12 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
   void,
   unknown
-> = async ({ label, dataChannels }) => {
+> = async ({ label, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
       const CHANNELS_LEN = dataChannels.length;
       const channelsClosedIndexes: number[] = [];
+
       for (let i = 0; i < CHANNELS_LEN; i++) {
         if (
           dataChannels[i].label !== label ||
@@ -34,6 +37,10 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
         dataChannels[i].close();
 
         channelsClosedIndexes.push(i);
+
+        api.dispatch(
+          deleteChannel({ label, peerId: dataChannels[i].withPeerId }),
+        );
       }
 
       const INDEXES_LEN = channelsClosedIndexes.length;

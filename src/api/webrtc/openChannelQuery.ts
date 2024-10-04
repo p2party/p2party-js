@@ -1,5 +1,3 @@
-import signalingServerApi from "../signalingServerApi";
-
 import openChannelHelper from "../../utils/openChannelHelper";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -8,53 +6,41 @@ import type {
   RTCOpenChannelParams,
   IRTCDataChannel,
   IRTCPeerConnection,
-  IRTCMessage,
 } from "./interfaces";
-import type { WebSocketMessagePeersRequest } from "../../utils/interfaces";
 
 export interface RTCOpenChannelParamsExtention extends RTCOpenChannelParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  messages: IRTCMessage[];
 }
 
 const webrtcOpenChannelQuery: BaseQueryFn<
   RTCOpenChannelParamsExtention,
   void,
   unknown
-> = async (
-  { channel, roomId, withPeers, peerConnections, dataChannels, messages },
-  api,
-) => {
+> = async ({ channel, withPeers, peerConnections, dataChannels }, api) => {
   try {
     const { keyPair } = api.getState() as State;
 
     if (withPeers && withPeers.length > 0) {
       const PEERS_LEN = withPeers.length;
       for (let i = 0; i < PEERS_LEN; i++) {
-        const peerIndex = peerConnections.findIndex((p) => {
-          p.withPeerId === withPeers[i].peerId;
-        });
+        if (keyPair.peerId === withPeers[i].peerId) continue;
+
+        const peerIndex = peerConnections.findIndex(
+          (p) => p.withPeerId === withPeers[i].peerId,
+        );
 
         if (peerIndex > -1) {
           const epc = peerConnections[peerIndex];
-          await openChannelHelper(
-            { channel, epc, dataChannels, messages },
-            api,
-          );
+          await openChannelHelper({ channel, epc, dataChannels }, api);
         }
       }
     } else {
-      // TODO
-      api.dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "peers",
-            fromPeerId: keyPair.peerId,
-            roomId,
-          } as WebSocketMessagePeersRequest,
-        }),
-      );
+      const PEERS_LEN = peerConnections.length;
+      for (let i = 0; i < PEERS_LEN; i++) {
+        const epc = peerConnections[i];
+        await openChannelHelper({ channel, epc, dataChannels }, api);
+      }
     }
 
     return { data: undefined };

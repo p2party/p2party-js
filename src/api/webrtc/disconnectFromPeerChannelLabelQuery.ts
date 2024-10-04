@@ -3,6 +3,7 @@ import type {
   IRTCDataChannel,
   RTCDisconnectFromPeerChannelLabelParams,
 } from "./interfaces";
+import { deleteChannel } from "../../reducers/roomSlice";
 
 export interface RTCDisconnectFromPeerChannelLabelParamsExtension
   extends RTCDisconnectFromPeerChannelLabelParams {
@@ -13,7 +14,7 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromPeerChannelLabelParamsExtension,
   void,
   unknown
-> = async ({ peerId, label, dataChannels }) => {
+> = async ({ peerId, label, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
       const channelIndex = dataChannels.findIndex(
@@ -30,6 +31,13 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
           dataChannels[channelIndex].onbufferedamountlow = null;
           dataChannels[channelIndex].close();
         }
+
+        api.dispatch(
+          deleteChannel({
+            peerId: dataChannels[channelIndex].withPeerId,
+            label,
+          }),
+        );
 
         dataChannels.splice(channelIndex, 1);
       }

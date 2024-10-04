@@ -46,7 +46,6 @@ export interface RTCSetCandidateParams {
 
 export interface RTCOpenChannelParams {
   channel: string | RTCDataChannel;
-  roomId: string;
   withPeers?: { peerId: string; peerPublicKey: string }[];
 }
 

@@ -3,6 +3,7 @@ import webrtcApi from "../api/webrtc";
 
 import { setMakingOffer } from "../reducers/makingOfferSlice";
 import { setPeerRoom } from "../reducers/peerRoomsSlice";
+import { setPeer } from "../reducers/roomSlice";
 
 import { handleQueuedIceCandidates } from "../handlers/handleQueuedIceCandidates";
 
@@ -52,7 +53,6 @@ const connectToPeerHelper = async (
       const epc = pc as IRTCPeerConnection;
       epc.withPeerId = peerId;
       epc.withPeerPublicKey = peerPublicKey;
-      // epc.polite = !initiator; // TODO send this to signaling for random number challenge
       epc.iceCandidates = [] as RTCIceCandidate[];
 
       api.dispatch(setMakingOffer({ withPeerId: peerId, makingOffer: false }));
@@ -132,22 +132,12 @@ const connectToPeerHelper = async (
       epc.onicecandidateerror = (e) => {
         console.error(`ICE candidate error with ${peerId}`);
         console.error(e);
-
-        // api.dispatch(
-        //   webrtcApi.endpoints.disconnectFromPeer.initiate({
-        //     peerId: epc.withPeerId,
-        //   }),
-        // );
-        // epc.restartIce();
       };
 
       epc.oniceconnectionstatechange = () => {
         console.log(
           `ICE candidate connection state with ${peerId} is ${epc.iceConnectionState}.`,
         );
-        // if (epc.iceConnectionState === "failed") {
-        //   epc.restartIce();
-        // }
       };
 
       epc.onicegatheringstatechange = () => {
@@ -180,35 +170,26 @@ const connectToPeerHelper = async (
             `Connection status with peer ${peerId} is ${epc.connectionState}.`,
           );
 
-          if (epc.connectionState === "connected" && !initiator) {
-            const { signalingServer } = api.getState() as State;
-            if (signalingServer.isConnected) {
-              api.dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "peers",
-                    fromPeerId: keyPair.peerId,
-                    roomId,
-                  } as WebSocketMessagePeersRequest,
-                }),
-              );
+          if (epc.connectionState === "connected") {
+            api.dispatch(setPeer({ peerId, peerPublicKey }));
+
+            if (!initiator) {
+              const { signalingServer } = api.getState() as State;
+              if (signalingServer.isConnected) {
+                api.dispatch(
+                  signalingServerApi.endpoints.sendMessage.initiate({
+                    content: {
+                      type: "peers",
+                      fromPeerId: keyPair.peerId,
+                      roomId,
+                    } as WebSocketMessagePeersRequest,
+                  }),
+                );
+              }
             }
           }
         }
       };
-
-      // epc.ondatachannel = (e: RTCDataChannelEvent) => {
-      //   console.log(e);
-      //   api.dispatch(
-      //     webrtcApi.endpoints.openChannel.initiate({
-      //       channel: e.channel,
-      //       roomId,
-      //       withPeers: [
-      //         { peerId: epc.withPeerId, peerPublicKey: epc.withPeerPublicKey },
-      //       ],
-      //     }),
-      //   );
-      // };
 
       resolve(epc);
     } catch (error) {

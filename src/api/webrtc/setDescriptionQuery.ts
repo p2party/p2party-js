@@ -12,7 +12,6 @@ import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
   IRTCDataChannel,
-  IRTCMessage,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
 
@@ -21,7 +20,6 @@ export interface RTCSetDescriptionParamsExtension
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
-  messages: IRTCMessage[];
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -38,7 +36,6 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
-    messages,
   },
   api,
 ) => {
@@ -63,10 +60,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           );
 
     epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-      await openChannelHelper(
-        { channel: e.channel, epc, dataChannels, messages },
-        api,
-      );
+      await openChannelHelper({ channel: e.channel, epc, dataChannels }, api);
     };
 
     const ICE_CANDIDATES_LEN = iceCandidates.length;

@@ -1,30 +1,24 @@
 import { isUUID } from "class-validator";
 
+import { setMessage } from "../../reducers/roomSlice";
+
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
-import type {
-  IRTCDataChannel,
-  IRTCMessage,
-  RTCChannelMessageParams,
-} from "./interfaces";
+import type { IRTCDataChannel, RTCChannelMessageParams } from "./interfaces";
 
 export interface RTCChannelMessageParamsExtension
   extends RTCChannelMessageParams {
   dataChannels: IRTCDataChannel[];
-  messages: IRTCMessage[];
 }
 
 const webrtcMessageQuery: BaseQueryFn<
   RTCChannelMessageParamsExtension,
   void,
   unknown
-> = async (
-  { message, fromPeerId, toPeerId, label, dataChannels, messages },
-  api,
-) => {
+> = async ({ message, fromPeerId, toPeerId, label, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
-      if (!isUUID(fromPeerId) || !isUUID(toPeerId))
+      if (!isUUID(fromPeerId) && !isUUID(toPeerId))
         reject({ message: "FromPeerId or ToPeerId not a uuidv4" });
 
       const { keyPair } = api.getState() as State;
@@ -39,14 +33,16 @@ const webrtcMessageQuery: BaseQueryFn<
 
           dataChannels[channelIndex].send(message);
 
-          messages.push({
-            id: window.crypto.randomUUID(),
-            message,
-            fromPeerId,
-            toPeerId,
-            channelLabel: label,
-            timestamp: new Date(),
-          });
+          api.dispatch(
+            setMessage({
+              id: window.crypto.randomUUID(),
+              message,
+              fromPeerId,
+              toPeerId,
+              channelLabel: label,
+              timestamp: Date.now(),
+            }),
+          );
         } else if (label || toPeerId) {
           const channelIndex = dataChannels.findIndex(
             (c) => c.label === label || c.withPeerId === toPeerId,
@@ -64,27 +60,33 @@ const webrtcMessageQuery: BaseQueryFn<
               continue;
 
             dataChannels[i].send(message);
-            messages.push({
-              id: window.crypto.randomUUID(),
-              message,
-              fromPeerId,
-              toPeerId: dataChannels[i].withPeerId,
-              channelLabel: dataChannels[i].label,
-              timestamp: new Date(),
-            });
+
+            api.dispatch(
+              setMessage({
+                id: window.crypto.randomUUID(),
+                message,
+                fromPeerId,
+                toPeerId: dataChannels[i].withPeerId,
+                channelLabel: dataChannels[i].label,
+                timestamp: Date.now(),
+              }),
+            );
           }
         } else {
           const CHANNELS_LEN = dataChannels.length;
           for (let i = 0; i < CHANNELS_LEN; i++) {
             dataChannels[i].send(message);
-            messages.push({
-              id: window.crypto.randomUUID(),
-              message,
-              fromPeerId,
-              toPeerId: dataChannels[i].withPeerId,
-              channelLabel: dataChannels[i].label,
-              timestamp: new Date(),
-            });
+
+            api.dispatch(
+              setMessage({
+                id: window.crypto.randomUUID(),
+                message,
+                fromPeerId,
+                toPeerId: dataChannels[i].withPeerId,
+                channelLabel: dataChannels[i].label,
+                timestamp: Date.now(),
+              }),
+            );
           }
         }
       } else if (toPeerId && toPeerId !== keyPair.peerId) {
@@ -92,14 +94,16 @@ const webrtcMessageQuery: BaseQueryFn<
       } else {
         if (!label) reject(new Error("Received a message without a label"));
 
-        messages.push({
-          id: window.crypto.randomUUID(),
-          message,
-          fromPeerId,
-          toPeerId: keyPair.peerId,
-          channelLabel: label ?? "",
-          timestamp: new Date(),
-        });
+        api.dispatch(
+          setMessage({
+            id: window.crypto.randomUUID(),
+            message,
+            fromPeerId,
+            toPeerId: keyPair.peerId,
+            channelLabel: label ?? "",
+            timestamp: Date.now(),
+          }),
+        );
       }
 
       resolve({ data: undefined });

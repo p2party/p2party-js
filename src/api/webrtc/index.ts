@@ -5,7 +5,6 @@ import webrtcSetDescriptionQuery from "./setDescriptionQuery";
 import webrtcSetIceCandidateQuery from "./setCandidateQuery";
 import webrtcOpenChannelQuery from "./openChannelQuery";
 import webrtcMessageQuery from "./messageQuery";
-import webrtcGetInfoQuery from "./getInfoQuery";
 import webrtcDisconnectQuery from "./disconnectQuery";
 import webrtcDisconnectRoomQuery from "./disconnectFromRoomQuery";
 import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
@@ -16,14 +15,11 @@ import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
   IRTCDataChannel,
-  IRTCMessage,
   RTCPeerConnectionParams,
   RTCChannelMessageParams,
   RTCSetDescriptionParams,
   RTCSetCandidateParams,
   RTCOpenChannelParams,
-  RoomData,
-  RTCRoomInfoParams,
   RTCDisconnectFromRoomParams,
   RTCDisconnectFromPeerParams,
   RTCDisconnectFromChannelLabelParams,
@@ -33,7 +29,6 @@ import type {
 const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
-const messages: IRTCMessage[] = [];
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -63,14 +58,13 @@ const webrtcApi = createApi({
         rtcConfig,
         peerConnections,
         dataChannels,
-        messages,
       }),
     }),
 
     setDescription: builder.query<void, RTCSetDescriptionParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetDescriptionQuery(
-          { ...args, peerConnections, iceCandidates, dataChannels, messages },
+          { ...args, peerConnections, iceCandidates, dataChannels },
           api,
           extraOptions,
         ),
@@ -88,7 +82,7 @@ const webrtcApi = createApi({
     openChannel: builder.query<void, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
-          { ...args, peerConnections, dataChannels, messages },
+          { ...args, peerConnections, dataChannels },
           api,
           extraOptions,
         ),
@@ -96,20 +90,7 @@ const webrtcApi = createApi({
 
     message: builder.mutation<void, RTCChannelMessageParams>({
       queryFn: (args, api, extraOptions) =>
-        webrtcMessageQuery(
-          { ...args, dataChannels, messages },
-          api,
-          extraOptions,
-        ),
-    }),
-
-    getRoomInfo: builder.mutation<RoomData, RTCRoomInfoParams>({
-      queryFn: (args, api, extraOptions) =>
-        webrtcGetInfoQuery(
-          { ...args, peerConnections, dataChannels, messages },
-          api,
-          extraOptions,
-        ),
+        webrtcMessageQuery({ ...args, dataChannels }, api, extraOptions),
     }),
 
     disconnect: builder.query<void, void>({

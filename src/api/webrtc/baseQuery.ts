@@ -6,14 +6,12 @@ import type {
   RTCPeerConnectionParams,
   IRTCPeerConnection,
   IRTCDataChannel,
-  IRTCMessage,
 } from "./interfaces";
 import type { State } from "../../store";
 
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  messages: IRTCMessage[];
 }
 
 const webrtcBaseQuery: BaseQueryFn<
@@ -29,7 +27,6 @@ const webrtcBaseQuery: BaseQueryFn<
     rtcConfig,
     peerConnections,
     dataChannels,
-    messages,
   },
   api,
 ) => {
@@ -48,17 +45,14 @@ const webrtcBaseQuery: BaseQueryFn<
       );
 
       epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await openChannelHelper(
-          { channel: e.channel, epc, dataChannels, messages },
-          api,
-        );
+        await openChannelHelper({ channel: e.channel, epc, dataChannels }, api);
       };
 
       peerConnections.push(epc);
 
       if (initiator) {
         await openChannelHelper(
-          { channel: "signaling", epc, dataChannels, messages },
+          { channel: "signaling", epc, dataChannels },
           api,
         );
       }

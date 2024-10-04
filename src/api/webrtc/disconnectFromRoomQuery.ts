@@ -1,3 +1,5 @@
+import { deleteChannel, deletePeer } from "../../reducers/roomSlice";
+
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
@@ -15,12 +17,14 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
   RTCDisconnectFromRoomParamsExtension,
   void,
   unknown
-> = async ({ roomId, peerConnections, dataChannels }) => {
+> = async ({ roomId, peerConnections, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
       const peersIncluded: number[] = [];
 
       const CHANNELS_LEN = dataChannels.length;
+      const channelsClosedIndexes: number[] = [];
+
       for (let i = 0; i < CHANNELS_LEN; i++) {
         if (
           dataChannels[i].roomId !== roomId ||
@@ -40,10 +44,25 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
         dataChannels[i].onmessage = null;
         dataChannels[i].onbufferedamountlow = null;
         dataChannels[i].close();
-        dataChannels.splice(i, 1);
+
+        channelsClosedIndexes.push(i);
+
+        api.dispatch(
+          deleteChannel({
+            peerId: dataChannels[i].withPeerId,
+            label: dataChannels[i].label,
+          }),
+        );
+      }
+
+      const INDEXES_LEN = channelsClosedIndexes.length;
+      for (let i = 0; i < INDEXES_LEN; i++) {
+        dataChannels.splice(channelsClosedIndexes[i], 1);
       }
 
       const PEERS_LEN = peersIncluded.length;
+      const peersClosedIndexes: number[] = [];
+
       for (let i = 0; i < PEERS_LEN; i++) {
         const peerConnection = peerConnections[peersIncluded[i]];
         if (peerConnection.connectionState !== "connected") continue;
@@ -65,7 +84,14 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
         peerConnection.oniceconnectionstatechange = null;
         peerConnection.close();
 
-        peerConnections.splice(peersIncluded[i], 1);
+        peersClosedIndexes.push(i);
+
+        api.dispatch(deletePeer({ peerId: peerConnection.withPeerId }));
+      }
+
+      const PEER_INDEXES_LEN = peersClosedIndexes.length;
+      for (let i = 0; i < PEER_INDEXES_LEN; i++) {
+        peerConnections.splice(peersClosedIndexes[i], 1);
       }
 
       resolve({ data: undefined });

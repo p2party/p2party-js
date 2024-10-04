@@ -2,10 +2,9 @@ import { isUUID } from "class-validator";
 
 import { store, dispatch } from "./store";
 
-import { getConnectedRoomPeers } from "./api/getConnectedRoomPeers";
-
 import signalingServerApi from "./api/signalingServerApi";
-import { peersSelector, setPeer, setPeerChannel } from "./reducers/peersSlice";
+import webrtcApi from "./api/webrtc";
+
 import {
   roomSelector,
   setConnectingToPeers,
@@ -13,20 +12,12 @@ import {
 } from "./reducers/roomSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
 import {
-  channelsSelector,
-  deleteLabelChannels,
-  sendMessageToChannel,
-} from "./reducers/channelsSlice";
-import {
   signalingServerSelector,
   signalingServerActions,
 } from "./reducers/signalingServerSlice";
 
-import type { RootState } from "./store";
+import type { State } from "./store";
 import type { Room } from "./reducers/roomSlice";
-import type { Peer } from "./reducers/peersSlice";
-import type { Channel } from "./reducers/channelsSlice";
-import type { Message } from "./reducers/channelsSlice";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -38,6 +29,7 @@ import type {
   WebSocketMessageCandidateReceive,
   WebSocketMessageError,
 } from "./utils/interfaces";
+import type { RoomData } from "./api/webrtc/interfaces";
 
 const connect = (
   roomUrl: string,
@@ -85,125 +77,137 @@ const connectToSignalingServer = async (
   );
 };
 
-const connectToRoomPeers = async (
-  roomUrl: string,
-  httpServerUrl = "http://localhost:3001",
-  rtcConfig: RTCConfiguration = {
-    iceServers: [
-      {
-        urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      },
-    ],
-  },
-) => {
-  const { keyPair, signalingServer, room } = store.getState();
-
-  const roomIndex = room.url === roomUrl ? 1 : -1;
-
-  if (signalingServer.isConnected && roomIndex > -1) {
-    const connectedRoomPeers = await getConnectedRoomPeers(
-      roomUrl,
-      httpServerUrl,
-    );
-
-    console.log(connectedRoomPeers);
-
-    const LEN = connectedRoomPeers.length;
-    for (let i = 0; i < LEN; i++) {
-      if (connectedRoomPeers[i].publicKey === keyPair.publicKey) continue;
-
-      dispatch(
-        setPeer({
-          roomId: connectedRoomPeers[i].roomId,
-          peerId: connectedRoomPeers[i].id,
-          peerPublicKey: connectedRoomPeers[i].publicKey,
-          initiate: true,
-          rtcConfig,
-        }),
-      );
-    }
-  }
-};
+// const connectToRoomPeers = async (
+//   roomUrl: string,
+//   httpServerUrl = "http://localhost:3001",
+//   rtcConfig: RTCConfiguration = {
+//     iceServers: [
+//       {
+//         urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+//       },
+//     ],
+//   },
+// ) => {
+//   const { keyPair, signalingServer, room } = store.getState();
+//
+//   const roomIndex = room.url === roomUrl ? 1 : -1;
+//
+//   if (signalingServer.isConnected && roomIndex > -1) {
+//     const connectedRoomPeers = await getConnectedRoomPeers(
+//       roomUrl,
+//       httpServerUrl,
+//     );
+//
+//     console.log(connectedRoomPeers);
+//
+//     const LEN = connectedRoomPeers.length;
+//     for (let i = 0; i < LEN; i++) {
+//       if (connectedRoomPeers[i].publicKey === keyPair.publicKey) continue;
+//
+//       dispatch(
+//         setPeer({
+//           roomId: connectedRoomPeers[i].roomId,
+//           peerId: connectedRoomPeers[i].id,
+//           peerPublicKey: connectedRoomPeers[i].publicKey,
+//           initiate: true,
+//           rtcConfig,
+//         }),
+//       );
+//     }
+//   }
+// };
 
 const disconnectFromSignalingServer = async () => {
   dispatch(signalingServerActions.disconnect());
 };
 
 const disconnectFromRoom = async (roomId: string, _deleteMessages = false) => {
-  const { channels } = store.getState();
+  dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
+};
 
-  let channelIndex = channels.findIndex((c) => {
-    c.roomId === roomId;
-  });
-  while (channelIndex > -1) {
-    dispatch(
-      deleteLabelChannels({
-        channel: channels[channelIndex].label,
-      }),
-    );
+const getRoomInfo = async (roomId: string) => {
+  const room = dispatch(webrtcApi.endpoints.getRoomInfo.initiate({ roomId }));
 
-    channelIndex = channels.findIndex((c) => {
-      c.roomId === roomId;
-    });
-  }
-  // await rtcDisconnectFromRoom(deleteMessages);
+  return await room.unwrap();
 };
 
 const openChannel = async (
   label: string,
   roomId: string,
-  withPeerIds?: string[],
+  withPeers?: { peerId: string; peerPublicKey: string }[],
 ) => {
-  const { peers, channels } = store.getState();
-  const PEERS_LEN =
-    withPeerIds && withPeerIds.length > 0 ? withPeerIds.length : peers.length;
-  if (PEERS_LEN === 0) throw new Error("Cannot open channel with no peers");
-
-  for (let i = 0; i < PEERS_LEN; i++) {
-    const peerIndex =
-      withPeerIds && withPeerIds.length > 0
-        ? peers.findIndex((p) => {
-            p.id === withPeerIds[i];
-          })
-        : i;
-
-    const channelIndex = channels.findIndex(
-      (channel) =>
-        channel.withPeerId === peers[peerIndex].id && channel.label === label,
-    );
-    if (channelIndex > -1) continue; // || peers[i].connectionState !== "connected") continue;
-
-    dispatch(
-      setPeerChannel({
-        label,
-        roomId,
-        withPeerId: peers[peerIndex].id,
-      }),
-    );
-  }
+  dispatch(
+    webrtcApi.endpoints.openChannel.initiate({
+      channel: label,
+      roomId,
+      withPeers,
+    }),
+  );
+  // const { peers, channels } = store.getState();
+  // const PEERS_LEN =
+  //   withPeerIds && withPeerIds.length > 0 ? withPeerIds.length : peers.length;
+  // if (PEERS_LEN === 0) throw new Error("Cannot open channel with no peers");
+  //
+  // for (let i = 0; i < PEERS_LEN; i++) {
+  //   const peerIndex =
+  //     withPeerIds && withPeerIds.length > 0
+  //       ? peers.findIndex((p) => {
+  //           p.id === withPeerIds[i];
+  //         })
+  //       : i;
+  //
+  //   const channelIndex = channels.findIndex(
+  //     (channel) =>
+  //       channel.withPeerId === peers[peerIndex].id && channel.label === label,
+  //   );
+  //   if (channelIndex > -1) continue; // || peers[i].connectionState !== "connected") continue;
+  //
+  //   dispatch(
+  //     setPeerChannel({
+  //       label,
+  //       roomId,
+  //       withPeerId: peers[peerIndex].id,
+  //     }),
+  //   );
+  // }
 };
 
-const sendMessage = async (message: string, toChannel: string) => {
+/**
+ * If Neither toPeer nor toChannel then broadcast the message everywhere to everyone.
+ * If only toPeer then broadcast to all channels with that peer.
+ * If only toChannel then broadcast to all peers with that channel.
+ * If both there then send one message to one peer on one channel.
+ */
+const sendMessage = async (
+  message: string,
+  toPeer?: string,
+  toChannel?: string,
+) => {
   const { keyPair } = store.getState();
   dispatch(
-    sendMessageToChannel({
+    webrtcApi.endpoints.message.initiate({
       message,
       fromPeerId: keyPair.peerId,
-      channel: toChannel,
+      toPeerId: toPeer,
+      label: toChannel,
     }),
+    // sendMessageToChannel({
+    //   message,
+    //   fromPeerId: keyPair.peerId,
+    //   channel: toChannel,
+    // }),
   );
 };
 
 export default {
-  partyState: store,
+  store,
   signalingServerSelector,
-  peersSelector,
   roomSelector,
   keyPairSelector,
-  channelsSelector,
+  getRoomInfo,
   connect,
   connectToSignalingServer,
-  connectToRoomPeers,
+  // connectToRoomPeers,
   disconnectFromSignalingServer,
   disconnectFromRoom,
   openChannel,
@@ -211,11 +215,9 @@ export default {
 };
 
 export type {
-  RootState,
+  State,
   Room,
-  Channel,
-  Peer,
-  Message,
+  RoomData,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,

@@ -5,7 +5,7 @@ import { setConnectingToPeers, setRoom } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 
-import type { RootState } from "../store";
+import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
 
 const roomListenerMiddleware = createListenerMiddleware();
@@ -17,7 +17,7 @@ roomListenerMiddleware.startListening({
       const connectingToPeers = action.payload;
       if (connectingToPeers) {
         const { signalingServer, keyPair, room } =
-          listenerApi.getState() as RootState;
+          listenerApi.getState() as State;
 
         if (
           signalingServer.isConnected &&
@@ -37,7 +37,7 @@ roomListenerMiddleware.startListening({
       }
     } else if (setRoom.match(action)) {
       const { signalingServer, keyPair, room } =
-        listenerApi.getState() as RootState;
+        listenerApi.getState() as State;
 
       if (
         signalingServer.isConnected &&

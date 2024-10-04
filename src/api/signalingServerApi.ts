@@ -10,7 +10,7 @@ import { importPublicKey } from "../utils/importPEMKeys";
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
-import type { RootState } from "../store";
+import type { State } from "../store";
 import type {
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
@@ -58,7 +58,7 @@ const websocketBaseQuery: BaseQueryFn<
   }
 
   try {
-    const { keyPair } = api.getState() as RootState;
+    const { keyPair } = api.getState() as State;
 
     let publicKey = "";
     if (keyPair.secretKey.length === 0) {
@@ -74,10 +74,9 @@ const websocketBaseQuery: BaseQueryFn<
       );
 
       const pair = await exportPemKeys(newKeyPair);
-
-      api.dispatch(setKeyPair(pair));
-
       publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
+
+      api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
     } else {
       const publicKeyPem = await importPublicKey(keyPair.publicKey);
       publicKey = await exportPublicKeyToHex(publicKeyPem);
@@ -166,7 +165,7 @@ const websocketSendMessageQuery: BaseQueryFn<
   unknown
 > = async (message, api) => {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const { keyPair } = api.getState() as RootState;
+    const { keyPair } = api.getState() as State;
 
     if (
       isUUID(keyPair.peerId) &&
@@ -190,6 +189,7 @@ const websocketSendMessageQuery: BaseQueryFn<
 };
 
 const signalingServerApi = createApi({
+  reducerPath: "signalingServerApi",
   baseQuery: websocketBaseQuery,
   endpoints: (builder) => ({
     connectWebSocket: builder.query<void, string>({

@@ -6,7 +6,7 @@ import { setConnectingToPeers } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 
-import type { RootState } from "../store";
+import type { State } from "../store";
 import type {
   WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdRequest,
@@ -38,7 +38,7 @@ keyPairListenerMiddleware.startListening({
         );
       }
     } else if (setChallengeId.match(action)) {
-      const { keyPair, room } = listenerApi.getState() as RootState;
+      const { keyPair, room } = listenerApi.getState() as State;
 
       if (isUUID(room.id)) {
         listenerApi.dispatch(setConnectingToPeers(true));

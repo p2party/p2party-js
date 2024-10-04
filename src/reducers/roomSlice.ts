@@ -2,7 +2,7 @@ import { createSlice } from "@reduxjs/toolkit";
 import { isUUID } from "class-validator";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { RootState } from "../store";
+import type { State } from "../store";
 
 export interface SetRoomArgs {
   url: string;
@@ -43,21 +43,17 @@ const roomSlice = createSlice({
     },
 
     setConnectingToPeers: (state, action: PayloadAction<boolean>) => {
-      const connectingToPeers = action.payload;
-
-      state.connectingToPeers = connectingToPeers;
+      state.connectingToPeers = action.payload;
     },
 
     setConnectedToPeers: (state, action: PayloadAction<boolean>) => {
-      const connectedToPeers = action.payload;
-
       state.connectingToPeers = false;
-      state.connectedToPeers = connectedToPeers;
+      state.connectedToPeers = action.payload;
     },
   },
 });
 
 export const { setRoom, setConnectingToPeers, setConnectedToPeers } =
   roomSlice.actions;
-export const roomSelector = (state: RootState) => state.room;
+export const roomSelector = (state: State) => state.room;
 export default roomSlice.reducer;

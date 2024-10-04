@@ -58,7 +58,8 @@ export interface WebSocketMessageCandidateReceive {
   type: "candidate";
   candidate: RTCIceCandidate;
   fromPeerId: string;
-  roomId: string;
+  // fromPeerPublicKey: string;
+  // roomId: string;
 }
 
 export interface WebSocketMessagePeersRequest {

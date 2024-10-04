@@ -2,55 +2,42 @@ import { configureStore } from "@reduxjs/toolkit";
 
 import keyPairReducer from "./reducers/keyPairSlice";
 import roomReducer from "./reducers/roomSlice";
+import makingOfferReducer from "./reducers/makingOfferSlice";
+import peerRoomsReducer from "./reducers/peerRoomsSlice";
 import isSettingRemoteAnswerPendingReducer from "./reducers/isSettingRemoteAnswerPendingSlice";
-import peers2Reducer, {
-  setCandidate,
-  setDescription,
-} from "./reducers/peersSlice";
-import channels2Reducer, { setChannel } from "./reducers/channelsSlice";
+// import peers2Reducer from "./reducers/peersSlice"; // setDescription, // setCandidate,
+// import channels2Reducer from "./reducers/channelsSlice"; // setChannel
 import signalingServerReducer from "./reducers/signalingServerSlice"; // } // signalingServerActions, //, {
 
 import signalingServerApi from "./api/signalingServerApi";
+import webrtcApi from "./api/webrtc";
 
-// import signalingServerMiddleware from "../middleware/signalingServerMiddleware";
 import roomListenerMiddleware from "./middleware/roomListenerMiddleware";
-import channelsMiddleware from "./middleware/channelsMiddleware";
-import peersMiddleware from "./middleware/peersMiddleware";
 import keyPairListenerMiddleware from "./middleware/keyPairListenerMiddleware";
 
 export const store = configureStore({
   reducer: {
     keyPair: keyPairReducer,
     room: roomReducer,
-    peers: peers2Reducer,
+    makingOffer: makingOfferReducer,
+    peerRooms: peerRoomsReducer,
+    // peers: peers2Reducer,
     isSettingRemoteAnswerPending: isSettingRemoteAnswerPendingReducer,
-    channels: channels2Reducer,
+    // channels: channels2Reducer,
     signalingServer: signalingServerReducer,
     [signalingServerApi.reducerPath]: signalingServerApi.reducer,
+    [webrtcApi.reducerPath]: webrtcApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware({
-      serializableCheck: {
-        ignoredActions: [
-          // signalingServerActions.sendMessage.toString(),
-          setCandidate.toString(),
-          setDescription.toString(),
-          setChannel.toString(),
-        ],
-      },
-    })
-      .concat([
-        signalingServerApi.middleware,
-        // signalingServerMiddleware,
-        roomListenerMiddleware.middleware,
-        keyPairListenerMiddleware.middleware,
-        channelsMiddleware,
-        peersMiddleware,
-      ])
-      .concat([]),
+    getDefaultMiddleware().concat([
+      signalingServerApi.middleware,
+      webrtcApi.middleware,
+      roomListenerMiddleware.middleware,
+      keyPairListenerMiddleware.middleware,
+    ]),
 });
 
 export type AppDispatch = typeof store.dispatch;
-export type RootState = ReturnType<typeof store.getState>;
+export type State = ReturnType<typeof store.getState>;
 
 export const dispatch: AppDispatch = store.dispatch;

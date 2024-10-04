@@ -2,11 +2,21 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
 
+import webrtcApi from "../api/webrtc";
+
+// import { exportPublicKeyToHex } from "../utils/exportPEMKeys";
+// import { importPublicKey } from "../utils/importPEMKeys";
+
 import { setRoom } from "../reducers/roomSlice";
-import { setDescription, setCandidate, setPeer } from "../reducers/peersSlice";
+import { setChallengeId } from "../reducers/keyPairSlice";
+// import {
+//   setDescription,
+//   setCandidate,
+//   // setPeer
+// } from "../reducers/peersSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { RootState } from "../store";
+import type { State } from "../store";
 import type {
   WebSocketMessageChallengeRequest,
   WebSocketMessageRoomIdResponse,
@@ -16,9 +26,6 @@ import type {
   WebSocketMessageSuccessfulChallenge,
   WebSocketMessageError,
 } from "../utils/interfaces";
-import { exportPublicKeyToHex } from "../utils/exportPEMKeys";
-import { importPublicKey } from "../utils/importPEMKeys";
-import { setChallengeId } from "../reducers/keyPairSlice";
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -38,7 +45,7 @@ const handleWebSocketMessage = async (
     | WebSocketMessageSuccessfulChallenge
     | WebSocketMessageError = JSON.parse(event.data);
 
-  const { keyPair, room } = api.getState() as RootState;
+  const { keyPair, room } = api.getState() as State;
 
   switch (message.type) {
     case "peerId": {
@@ -91,22 +98,25 @@ const handleWebSocketMessage = async (
         break;
 
       const len = message.peers.length;
-      const pk = await importPublicKey(keyPair.publicKey);
-      const pkHex = await exportPublicKeyToHex(pk);
+      if (len === 1) break;
+
+      // const pk = await importPublicKey(keyPair.publicKey);
+      // const pkHex = await exportPublicKeyToHex(pk);
       for (let i = 0; i < len; i++) {
         if (
-          message.peers[i].publicKey === pkHex ||
-          message.peers[i].id === keyPair.peerId
+          message.peers[i].publicKey === keyPair.publicKey ||
+          message.peers[i].id === keyPair.peerId ||
+          !isUUID(message.peers[i].id) ||
+          message.peers[i].publicKey.length !== 1100
         )
           continue;
-        if (!isUUID(message.peers[i].id)) continue;
 
         api.dispatch(
-          setPeer({
+          webrtcApi.endpoints.connectWithPeer.initiate({
             roomId: message.roomId,
             peerId: message.peers[i].id,
             peerPublicKey: message.peers[i].publicKey,
-            initiate: true,
+            initiator: true,
             rtcConfig: room.rtcConfig,
           }),
         );
@@ -117,7 +127,7 @@ const handleWebSocketMessage = async (
 
     case "description": {
       api.dispatch(
-        setDescription({
+        webrtcApi.endpoints.setDescription.initiate({
           peerId: message.fromPeerId,
           peerPublicKey: message.fromPeerPublicKey,
           roomId: message.roomId,
@@ -125,17 +135,34 @@ const handleWebSocketMessage = async (
         }),
       );
 
+      // api.dispatch(
+      //   setDescription({
+      //     peerId: message.fromPeerId,
+      //     peerPublicKey: message.fromPeerPublicKey,
+      //     roomId: message.roomId,
+      //     description: message.description,
+      //   }),
+      // );
+
       break;
     }
 
     case "candidate": {
       api.dispatch(
-        setCandidate({
+        webrtcApi.endpoints.setCandidate.initiate({
           peerId: message.fromPeerId,
-          roomId: message.roomId,
+          // peerPublicKey: message.fromPeerPublicKey,
+          // roomId: message.roomId,
           candidate: message.candidate,
         }),
       );
+      // api.dispatch(
+      //   setCandidate({
+      //     peerId: message.fromPeerId,
+      //     roomId: message.roomId,
+      //     candidate: message.candidate,
+      //   }),
+      // );
 
       break;
     }

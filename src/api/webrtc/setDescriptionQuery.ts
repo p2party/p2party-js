@@ -1,0 +1,149 @@
+import signalingServerApi from "../signalingServerApi";
+
+import { setMakingOffer } from "../../reducers/makingOfferSlice";
+
+import connectToPeerHelper from "../../utils/connectToPeerHelper";
+import openChannelHelper from "../../utils/openChannelHelper";
+
+import type { BaseQueryFn } from "@reduxjs/toolkit/query";
+import type { State } from "../../store";
+import type {
+  RTCSetDescriptionParams,
+  IRTCPeerConnection,
+  IRTCIceCandidate,
+  IRTCDataChannel,
+  IRTCMessage,
+} from "./interfaces";
+import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
+
+export interface RTCSetDescriptionParamsExtension
+  extends RTCSetDescriptionParams {
+  peerConnections: IRTCPeerConnection[];
+  iceCandidates: IRTCIceCandidate[];
+  dataChannels: IRTCDataChannel[];
+  messages: IRTCMessage[];
+}
+
+const webrtcSetDescriptionQuery: BaseQueryFn<
+  RTCSetDescriptionParamsExtension,
+  void,
+  unknown
+> = async (
+  {
+    peerId,
+    peerPublicKey,
+    roomId,
+    description,
+    rtcConfig,
+    peerConnections,
+    iceCandidates,
+    dataChannels,
+    messages,
+  },
+  api,
+) => {
+  try {
+    const { keyPair } = api.getState() as State;
+    const connectionIndex = peerConnections.findIndex(
+      (peer) => peer.withPeerId === peerId,
+    );
+
+    const epc =
+      connectionIndex > -1
+        ? peerConnections[connectionIndex]
+        : await connectToPeerHelper(
+            {
+              peerId,
+              peerPublicKey,
+              roomId,
+              initiator: false,
+              rtcConfig,
+            },
+            api,
+          );
+
+    epc.ondatachannel = async (e: RTCDataChannelEvent) => {
+      await openChannelHelper(
+        { channel: e.channel, epc, dataChannels, messages },
+        api,
+      );
+    };
+
+    const ICE_CANDIDATES_LEN = iceCandidates.length;
+    const purgeCandidates: number[] = [];
+    for (let i = 0; i < ICE_CANDIDATES_LEN; i++) {
+      if (iceCandidates[i].withPeerId !== peerId) continue;
+
+      purgeCandidates.push(i);
+      epc.iceCandidates.push(iceCandidates[i]);
+    }
+    const PURGE_CANDIDATES_LEN = purgeCandidates.length;
+    for (let i = 0; i < PURGE_CANDIDATES_LEN; i++) {
+      iceCandidates.splice(purgeCandidates[i], 1);
+    }
+
+    if (connectionIndex === -1) peerConnections.push(epc);
+
+    let offering = false;
+    const { makingOffer } = api.getState() as State;
+    const offerIndex = makingOffer.findIndex(
+      (o) => o.withPeerId === epc.withPeerId,
+    );
+    if (offerIndex > -1) offering = makingOffer[offerIndex].makingOffer;
+
+    const offerCollision = description.type === "offer" && offering;
+    if (offerCollision && connectionIndex > -1) return { data: undefined };
+
+    if (offerCollision) {
+      api.dispatch(
+        setMakingOffer({ withPeerId: epc.withPeerId, makingOffer: false }),
+      );
+      await epc.setLocalDescription({ type: "rollback" });
+      await epc.setRemoteDescription(description);
+      await epc.setLocalDescription();
+      const answer = epc.localDescription;
+
+      if (answer) {
+        api.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "description",
+              description: answer,
+              fromPeerId: keyPair.peerId,
+              fromPeerPublicKey: keyPair.publicKey,
+              toPeerId: peerId,
+              roomId,
+            } as WebSocketMessageDescriptionSend,
+          }),
+        );
+      }
+    } else if (description.type === "offer") {
+      await epc.setRemoteDescription(description);
+      await epc.setLocalDescription();
+      const answer = epc.localDescription;
+
+      if (answer) {
+        api.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "description",
+              description: answer,
+              fromPeerId: keyPair.peerId,
+              fromPeerPublicKey: keyPair.publicKey,
+              toPeerId: peerId,
+              roomId,
+            } as WebSocketMessageDescriptionSend,
+          }),
+        );
+      }
+    } else if (description.type === "answer") {
+      await epc.setRemoteDescription(description);
+    }
+
+    return { data: undefined };
+  } catch (error) {
+    throw error;
+  }
+};
+
+export default webrtcSetDescriptionQuery;

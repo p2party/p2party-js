@@ -3,10 +3,10 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import { setKeyPair } from "../reducers/keyPairSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
+import { setConnectingToPeers } from "../reducers/roomSlice";
 
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
-import { importPublicKey } from "../utils/importPEMKeys";
 import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -17,6 +17,7 @@ import type {
   WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdRequest,
   WebSocketMessagePeersRequest,
+  WebSocketMessagePongResponse,
 } from "../utils/interfaces";
 
 export interface WebSocketParams {
@@ -25,6 +26,7 @@ export interface WebSocketParams {
 
 export interface WebSocketMessage {
   content:
+    | WebSocketMessagePongResponse
     | WebSocketMessageCandidateSend
     | WebSocketMessageDescriptionSend
     | WebSocketMessageChallengeResponse
@@ -53,8 +55,11 @@ const websocketBaseQuery: BaseQueryFn<
   unknown
 > = async ({ signalingServerUrl }, api) => {
   if (ws) {
+    const { keyPair } = api.getState() as State;
+
     console.warn("WebSocket already connected");
-    return { data: "already connected" };
+
+    return { data: keyPair.publicKey };
   }
 
   try {
@@ -78,50 +83,75 @@ const websocketBaseQuery: BaseQueryFn<
 
       api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
     } else {
-      const publicKeyPem = await importPublicKey(keyPair.publicKey);
-      publicKey = await exportPublicKeyToHex(publicKeyPem);
+      publicKey = keyPair.publicKey;
     }
 
     const fullUrl = signalingServerUrl + "?publickey=" + publicKey;
+    api.dispatch(signalingServerActions.startConnecting(fullUrl));
+
     ws = new WebSocket(fullUrl);
 
     return new Promise((resolve, reject) => {
-      ws!.onopen = () => {
-        console.log("WebSocket connected to:", fullUrl);
-        api.dispatch(signalingServerActions.connectionEstablished());
-        resolve({ data: "connected" });
-      };
+      try {
+        ws!.onopen = () => {
+          console.log("WebSocket connected to:", fullUrl);
+          api.dispatch(signalingServerActions.connectionEstablished());
 
-      ws!.onerror = (error) => {
-        console.error("WebSocket error:", error);
+          const { keyPair, room } = api.getState() as State;
+
+          if (isUUID(keyPair.peerId) && isUUID(room.id)) {
+            api.dispatch(setConnectingToPeers(true));
+          }
+
+          resolve({ data: publicKey });
+        };
+
+        ws!.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          if (ws) {
+            ws.removeEventListener("message", () => {});
+            ws.removeEventListener("open", () => {});
+            ws.removeEventListener("close", () => {});
+            ws.close();
+            ws = null;
+          }
+
+          api.dispatch(signalingServerActions.disconnect());
+
+          reject({ error: "WebSocket connection failed" });
+        };
+
+        ws!.onmessage = async (message) => {
+          await handleWebSocketMessage(message, ws!, api);
+        };
+
+        ws!.onclose = () => {
+          if (ws) {
+            ws.removeEventListener("message", () => {});
+            ws.removeEventListener("open", () => {});
+            ws.removeEventListener("close", () => {});
+            ws.close();
+            ws = null;
+          }
+
+          api.dispatch(signalingServerActions.disconnect());
+          console.log("WebSocket disconnected");
+          resolve({ data: publicKey });
+        };
+      } catch (error) {
+        reject(error);
+      }
+
+      // Cleanup function to close the WebSocket when the query is unsubscribed
+      return () => {
         if (ws) {
+          console.log("Cleaning up WebSocket connection...");
           ws.removeEventListener("message", () => {});
           ws.removeEventListener("open", () => {});
           ws.removeEventListener("close", () => {});
           ws.close();
           ws = null;
         }
-
-        api.dispatch(signalingServerActions.disconnect());
-
-        reject({ error: "WebSocket connection failed" });
-      };
-
-      ws!.onmessage = async (message) => {
-        await handleWebSocketMessage(message, ws!, api);
-      };
-
-      ws!.onclose = () => {
-        if (ws) {
-          ws.removeEventListener("message", () => {});
-          ws.removeEventListener("open", () => {});
-          ws.removeEventListener("close", () => {});
-          ws.close();
-          ws = null;
-        }
-
-        api.dispatch(signalingServerActions.disconnect());
-        console.log("WebSocket disconnected");
       };
     });
   } catch (error) {
@@ -135,11 +165,12 @@ const websocketBaseQuery: BaseQueryFn<
 
     api.dispatch(signalingServerActions.disconnect());
     console.error("Error during WebSocket setup:", error);
+
     return { error: "WebSocket connection failed" };
   }
 };
 
-const websocketDisconnectQuery: BaseQueryFn<void, void, unknown> = async (
+const websocketDisconnectQuery: BaseQueryFn<void, string, unknown> = async (
   _: void,
   api,
 ) => {
@@ -148,14 +179,17 @@ const websocketDisconnectQuery: BaseQueryFn<void, void, unknown> = async (
     ws.removeEventListener("open", () => {});
     ws.removeEventListener("close", () => {});
     ws.close();
+
     ws = null;
 
     console.log("WebSocket manually disconnected");
   }
 
+  const { keyPair } = api.getState() as State;
+
   api.dispatch(signalingServerActions.disconnect());
 
-  return { data: undefined };
+  return { data: keyPair.publicKey };
 };
 
 // BaseQuery for sending messages over WebSocket
@@ -192,12 +226,12 @@ const signalingServerApi = createApi({
   reducerPath: "signalingServerApi",
   baseQuery: websocketBaseQuery,
   endpoints: (builder) => ({
-    connectWebSocket: builder.query<void, string>({
+    connectWebSocket: builder.mutation<void, string>({
       query: (signalingServerUrl = "ws://localhost:3001/ws") => ({
         signalingServerUrl,
       }),
     }),
-    disconnectWebSocket: builder.query<void, void>({
+    disconnectWebSocket: builder.mutation<string, void>({
       queryFn: websocketDisconnectQuery,
     }),
     sendMessage: builder.mutation<void, WebSocketMessage>({

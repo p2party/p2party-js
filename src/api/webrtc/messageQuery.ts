@@ -90,7 +90,7 @@ const webrtcMessageQuery: BaseQueryFn<
           }
         }
       } else if (toPeerId && toPeerId !== keyPair.peerId) {
-        reject(new Error("Neither receiver not sender is us"));
+        reject(new Error("Neither receiver nor sender is us"));
       } else {
         if (!label) reject(new Error("Received a message without a label"));
 

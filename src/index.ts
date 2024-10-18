@@ -2,6 +2,8 @@ import { isUUID } from "class-validator";
 
 import { store, dispatch } from "./store";
 
+import generateRandomRoomUrl from "./crypto/randomString";
+
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
 
@@ -11,13 +13,10 @@ import {
   setRoom,
 } from "./reducers/roomSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
-import {
-  signalingServerSelector,
-  signalingServerActions,
-} from "./reducers/signalingServerSlice";
+import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
 import type { State } from "./store";
-import type { Room } from "./reducers/roomSlice";
+import type { Room, Peer, Channel } from "./reducers/roomSlice";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -44,9 +43,12 @@ const connect = (
 ) => {
   const { keyPair, signalingServer, room } = store.getState();
 
-  dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
+  if (room.url !== roomUrl) {
+    dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
+  }
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
+    const { room } = store.getState();
     if (!isUUID(room.id)) {
       dispatch(
         signalingServerApi.endpoints.sendMessage.initiate({
@@ -69,7 +71,7 @@ const connect = (
   }
 };
 
-const connectToSignalingServer = async (
+const connectToSignalingServer = (
   signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
   dispatch(
@@ -77,11 +79,11 @@ const connectToSignalingServer = async (
   );
 };
 
-const disconnectFromSignalingServer = async () => {
-  dispatch(signalingServerActions.disconnect());
+const disconnectFromSignalingServer = () => {
+  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const disconnectFromRoom = async (roomId: string, _deleteMessages = false) => {
+const disconnectFromRoom = (roomId: string, _deleteMessages = false) => {
   dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
 };
 
@@ -103,11 +105,7 @@ const openChannel = async (
  * If only toChannel then broadcast to all peers with that channel.
  * If both there then send one message to one peer on one channel.
  */
-const sendMessage = async (
-  message: string,
-  toPeer?: string,
-  toChannel?: string,
-) => {
+const sendMessage = (message: string, toPeer?: string, toChannel?: string) => {
   const { keyPair } = store.getState();
   dispatch(
     webrtcApi.endpoints.message.initiate({
@@ -131,11 +129,14 @@ export default {
   disconnectFromRoom,
   openChannel,
   sendMessage,
+  generateRandomRoomUrl,
 };
 
 export type {
   State,
   Room,
+  Peer,
+  Channel,
   RoomData,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,

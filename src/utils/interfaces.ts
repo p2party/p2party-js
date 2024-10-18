@@ -1,3 +1,12 @@
+export interface WebSocketMessagePingRequest {
+  type: "ping";
+}
+
+export interface WebSocketMessagePongResponse {
+  type: "pong";
+  fromPeerId: string;
+}
+
 export interface WebSocketMessageChallengeRequest {
   type: "peerId";
   peerId: string;

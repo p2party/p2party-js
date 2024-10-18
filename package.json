@@ -1,21 +1,21 @@
 {
   "name": "p2party",
-  "description": "A cryptographic commitment scheme with implied order of ownership wasm module for nodejs and the browser.",
-  "version": "0.2.7",
+  "description": "Create WebRTC mesh networks in two LOC",
+  "version": "0.2.8",
   "repository": {
     "type": "git",
     "url": "https://github.com/p2party/p2party-ts.git"
   },
   "author": {
-    "name": "Ondemos Foundation",
-    "email": "security@ondemos.org",
-    "url": "https://ondemos.org"
+    "name": "Deliberative Technologies P.C.",
+    "email": "security@deliberative.io",
+    "url": "https://deliberative.io"
   },
   "contributors": [
     {
       "name": "Dimitris Karoukis",
-      "email": "dim@ondemos.org",
-      "url": "https://ondemos.org"
+      "email": "dim@deliberative.io",
+      "url": "https://deliberative.io"
     }
   ],
   "license": "Apache-2.0",
@@ -23,17 +23,11 @@
     "url": "https://github.com/p2party/p2party-ts/issues"
   },
   "keywords": [
-    "cryptographic commitment scheme",
-    "commitment",
-    "ledger",
-    "libsodium",
-    "curve25519",
+    "webrtc",
     "public key cryptography",
-    "cryptography",
-    "emscripten",
     "typescript"
   ],
-  "homepage": "https://github.com/ondemos/core#readme",
+  "homepage": "https://github.com/p2party/p2party-js#readme",
   "main": "lib/index.js",
   "module": "lib/index.mjs",
   "types": "lib/index.d.ts",
@@ -76,11 +70,7 @@
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.4.0"
   },
-  "peerDependencies": {
-    "typescript": "^5.0.0"
-  },
   "dependencies": {
-    "async-mutex": "^0.5.0",
     "class-validator": "^0.14.1"
   }
 }

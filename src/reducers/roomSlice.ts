@@ -6,7 +6,7 @@ import type { State } from "../store";
 
 export interface Channel {
   label: string;
-  peerId: string;
+  peerIds: string[];
 }
 
 export interface Peer {
@@ -18,7 +18,6 @@ export interface Message {
   id: string;
   message: string;
   fromPeerId: string;
-  toPeerId: string;
   channelLabel: string;
   timestamp: number;
 }
@@ -27,6 +26,11 @@ export interface SetRoomArgs {
   url: string;
   id: string;
   rtcConfig?: RTCConfiguration;
+}
+
+export interface SetChannelArgs {
+  label: string;
+  peerId: string;
 }
 
 export interface Room extends SetRoomArgs {
@@ -92,34 +96,53 @@ const roomSlice = createSlice({
       if (peerIndex > -1) state.peers.splice(peerIndex, 1);
     },
 
-    setChannel: (state, action: PayloadAction<Channel>) => {
+    setChannel: (state, action: PayloadAction<SetChannelArgs>) => {
       const channelIndex = state.channels.findIndex(
-        (c) =>
-          c.peerId === action.payload.peerId &&
-          c.label === action.payload.label,
+        (c) => c.label === action.payload.label,
       );
 
-      if (channelIndex === -1) state.channels.push(action.payload);
+      if (channelIndex > -1) {
+        const peerIndex = state.channels[channelIndex].peerIds.findIndex(
+          (p) => p === action.payload.peerId,
+        );
+
+        if (peerIndex === -1) {
+          state.channels[channelIndex].peerIds.push(action.payload.peerId);
+        }
+      } else {
+        state.channels.push({
+          label: action.payload.label,
+          peerIds: [action.payload.peerId],
+        });
+      }
     },
 
-    deleteChannel: (
-      state,
-      action: PayloadAction<{ peerId: string; label: string }>,
-    ) => {
+    deleteChannel: (state, action: PayloadAction<SetChannelArgs>) => {
       const channelIndex = state.channels.findIndex(
-        (c) =>
-          c.peerId === action.payload.peerId &&
-          c.label === action.payload.label,
+        (c) => c.label === action.payload.label,
       );
 
-      if (channelIndex > -1) state.channels.splice(channelIndex, 1);
+      if (channelIndex > -1) {
+        const peerIndex = state.channels[channelIndex].peerIds.findIndex(
+          (p) => p === action.payload.peerId,
+        );
+
+        if (peerIndex > -1) {
+          state.channels[channelIndex].peerIds.splice(peerIndex, 1);
+        } else {
+          state.channels.splice(channelIndex, 1);
+        }
+
+        if (state.channels[channelIndex].peerIds.length === 0) {
+          state.channels.splice(channelIndex, 1);
+        }
+      }
     },
 
     setMessage: (state, action: PayloadAction<Message>) => {
       const messageIndex = state.messages.findIndex(
         (m) =>
           m.fromPeerId === action.payload.fromPeerId &&
-          m.toPeerId === action.payload.toPeerId &&
           m.message === action.payload.message &&
           m.channelLabel === action.payload.channelLabel &&
           m.timestamp === action.payload.timestamp,
@@ -130,13 +153,12 @@ const roomSlice = createSlice({
 
     deleteMessage: (
       state,
-      action: PayloadAction<{ peerId: string; label: string }>,
+      action: PayloadAction<{ fromPeerId: string; label: string }>,
     ) => {
       const messageIndex = state.messages.findIndex(
         (m) =>
-          (m.channelLabel === action.payload.label &&
-            m.fromPeerId === action.payload.peerId) ||
-          m.toPeerId === action.payload.peerId,
+          m.channelLabel === action.payload.label &&
+          m.fromPeerId === action.payload.fromPeerId,
       );
 
       if (messageIndex > -1) state.messages.splice(messageIndex, 1);

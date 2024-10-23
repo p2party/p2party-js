@@ -52,7 +52,6 @@ export interface RTCOpenChannelParams {
 export interface RTCChannelMessageParams {
   message: string;
   fromPeerId: string;
-  toPeerId?: string;
   label?: string;
 }
 

@@ -60,7 +60,7 @@ const openChannelHelper = async (
             webrtcApi.endpoints.message.initiate({
               message: e.data,
               fromPeerId: epc.withPeerId,
-              toPeerId: keyPair.peerId,
+              // toPeerId: keyPair.peerId,
               label: extChannel.label,
             }),
           );
@@ -85,7 +85,7 @@ const openChannelHelper = async (
             id: window.crypto.randomUUID(),
             message,
             fromPeerId: keyPair.peerId,
-            toPeerId: extChannel.withPeerId,
+            // toPeerId: extChannel.withPeerId,
             channelLabel: label,
             timestamp: Date.now(),
           }),

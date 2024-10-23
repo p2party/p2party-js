@@ -38,6 +38,7 @@ const webrtcBaseQuery: BaseQueryFn<
     const connectionIndex = peerConnections.findIndex(
       (pc) => pc.withPeerId === peerId,
     );
+
     if (connectionIndex === -1) {
       const epc = await connectToPeerHelper(
         { peerId, peerPublicKey, roomId, initiator, rtcConfig },
@@ -55,6 +56,8 @@ const webrtcBaseQuery: BaseQueryFn<
           { channel: "signaling", epc, dataChannels },
           api,
         );
+
+        await openChannelHelper({ channel: "main", epc, dataChannels }, api);
       }
     }
 

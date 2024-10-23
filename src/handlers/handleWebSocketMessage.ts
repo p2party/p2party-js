@@ -37,6 +37,8 @@ const handleWebSocketMessage = async (
   try {
     if (event.data === "PING") return ws.send("PONG");
 
+    console.log(event.data);
+
     const message:
       | WebSocketMessagePingRequest
       | WebSocketMessageChallengeRequest

@@ -16,7 +16,7 @@ import { keyPairSelector } from "./reducers/keyPairSlice";
 import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
 import type { State } from "./store";
-import type { Room, Peer, Channel } from "./reducers/roomSlice";
+import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -101,17 +101,15 @@ const openChannel = async (
 
 /**
  * If Neither toPeer nor toChannel then broadcast the message everywhere to everyone.
- * If only toPeer then broadcast to all channels with that peer.
- * If only toChannel then broadcast to all peers with that channel.
- * If both there then send one message to one peer on one channel.
+ * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = (message: string, toPeer?: string, toChannel?: string) => {
+const sendMessage = (message: string, toChannel?: string) => {
   const { keyPair } = store.getState();
+
   dispatch(
     webrtcApi.endpoints.message.initiate({
       message,
       fromPeerId: keyPair.peerId,
-      toPeerId: toPeer,
       label: toChannel,
     }),
   );
@@ -137,6 +135,7 @@ export type {
   Room,
   Peer,
   Channel,
+  Message,
   RoomData,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,

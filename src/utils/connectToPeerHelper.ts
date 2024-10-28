@@ -2,7 +2,6 @@ import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
 import { setMakingOffer } from "../reducers/makingOfferSlice";
-import { setPeerRoom } from "../reducers/peerRoomsSlice";
 import { setPeer } from "../reducers/roomSlice";
 
 import { handleQueuedIceCandidates } from "../handlers/handleQueuedIceCandidates";
@@ -18,6 +17,7 @@ import type {
   WebSocketMessageCandidateSend,
   WebSocketMessagePeersRequest,
 } from "../utils/interfaces";
+import { isUUID } from "class-validator";
 
 const connectToPeerHelper = async (
   {
@@ -49,6 +49,11 @@ const connectToPeerHelper = async (
       if (initiator)
         console.log(`You have initiated a peer connection with ${peerId}.`);
 
+      if (!isUUID(peerId)) reject(new Error("PeerId is not a valid uuidv4"));
+      // if (peerPublicKey.length !== 1100)
+      if (peerPublicKey.length !== 64)
+        reject(new Error("Peer public key is not a valid length"));
+
       const pc = new RTCPeerConnection(rtcConfig);
       const epc = pc as IRTCPeerConnection;
       epc.withPeerId = peerId;
@@ -56,7 +61,6 @@ const connectToPeerHelper = async (
       epc.iceCandidates = [] as RTCIceCandidate[];
 
       api.dispatch(setMakingOffer({ withPeerId: peerId, makingOffer: false }));
-      api.dispatch(setPeerRoom({ withPeerId: peerId, roomId }));
 
       epc.onnegotiationneeded = async () => {
         try {
@@ -74,8 +78,7 @@ const connectToPeerHelper = async (
                 setMakingOffer({ withPeerId: peerId, makingOffer: true }),
               );
 
-              // const offer = await epc.createOffer();
-              await epc.setLocalDescription(); // offer);
+              await epc.setLocalDescription();
               const offer = epc.localDescription;
               if (offer) {
                 api.dispatch(

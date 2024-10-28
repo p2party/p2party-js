@@ -2,7 +2,7 @@ import { isUUID } from "class-validator";
 
 import { store, dispatch } from "./store";
 
-import generateRandomRoomUrl from "./crypto/randomString";
+import { generateRandomRoomUrl } from "./webcrypto/random";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -10,6 +10,7 @@ import webrtcApi from "./api/webrtc";
 import {
   roomSelector,
   setConnectingToPeers,
+  setConnectionRelay,
   setRoom,
 } from "./reducers/roomSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
@@ -83,6 +84,10 @@ const disconnectFromSignalingServer = () => {
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
+const allowConnectionRelay = (allowed = true) => {
+  dispatch(setConnectionRelay(allowed));
+};
+
 const disconnectFromRoom = (roomId: string, _deleteMessages = false) => {
   dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
 };
@@ -100,7 +105,7 @@ const openChannel = async (
 };
 
 /**
- * If Neither toPeer nor toChannel then broadcast the message everywhere to everyone.
+ * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
 const sendMessage = (message: string, toChannel?: string) => {
@@ -124,6 +129,7 @@ export default {
   connectToSignalingServer,
   // connectToRoomPeers,
   disconnectFromSignalingServer,
+  allowConnectionRelay,
   disconnectFromRoom,
   openChannel,
   sendMessage,

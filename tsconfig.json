@@ -35,7 +35,11 @@
     // Some stricter flags (disabled by default)
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noPropertyAccessFromIndexSignature": true
+    "noPropertyAccessFromIndexSignature": true,
+
+    "paths": {
+      "@libcrypto": ["./src/cryptography"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules"]

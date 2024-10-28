@@ -25,6 +25,7 @@ export interface Message {
 export interface SetRoomArgs {
   url: string;
   id: string;
+  canBeConnectionRelay?: boolean;
   rtcConfig?: RTCConfiguration;
 }
 
@@ -36,6 +37,7 @@ export interface SetChannelArgs {
 export interface Room extends SetRoomArgs {
   connectingToPeers: boolean;
   connectedToPeers: boolean;
+  canBeConnectionRelay: boolean;
   rtcConfig: RTCConfiguration;
   peers: Peer[];
   channels: Channel[];
@@ -47,6 +49,7 @@ const initialState: Room = {
   id: "",
   connectingToPeers: false,
   connectedToPeers: false,
+  canBeConnectionRelay: true,
   rtcConfig: {
     iceServers: [
       {
@@ -64,10 +67,12 @@ const roomSlice = createSlice({
   initialState,
   reducers: {
     setRoom: (state, action: PayloadAction<SetRoomArgs>) => {
-      const { url, id, rtcConfig } = action.payload;
+      const { url, id, canBeConnectionRelay, rtcConfig } = action.payload;
 
       if (url.length > 0) state.url = url;
       if (isUUID(id)) state.id = id;
+      if (canBeConnectionRelay)
+        state.canBeConnectionRelay = canBeConnectionRelay;
       if (rtcConfig) state.rtcConfig = rtcConfig;
     },
 
@@ -78,6 +83,10 @@ const roomSlice = createSlice({
     setConnectedToPeers: (state, action: PayloadAction<boolean>) => {
       state.connectingToPeers = false;
       state.connectedToPeers = action.payload;
+    },
+
+    setConnectionRelay: (state, action: PayloadAction<boolean>) => {
+      state.canBeConnectionRelay = action.payload;
     },
 
     setPeer: (state, action: PayloadAction<Peer>) => {
@@ -170,6 +179,7 @@ export const {
   setRoom,
   setConnectingToPeers,
   setConnectedToPeers,
+  setConnectionRelay,
   setPeer,
   setChannel,
   setMessage,

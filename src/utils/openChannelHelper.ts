@@ -1,4 +1,10 @@
+import { hexToUint8, uint8ToHex } from "./hexString";
+
 import webrtcApi from "../api/webrtc";
+
+import { setChannel, setMessage } from "../reducers/roomSlice";
+
+import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -6,7 +12,6 @@ import type {
   IRTCPeerConnection,
   IRTCDataChannel,
 } from "../api/webrtc/interfaces";
-import { setChannel, setMessage } from "../reducers/roomSlice";
 
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
@@ -60,14 +65,13 @@ const openChannelHelper = async (
             webrtcApi.endpoints.message.initiate({
               message: e.data,
               fromPeerId: epc.withPeerId,
-              // toPeerId: keyPair.peerId,
               label: extChannel.label,
             }),
           );
         }
       };
 
-      extChannel.onopen = () => {
+      extChannel.onopen = async () => {
         console.log(
           `Channel with label \"${extChannel.label}\" and client ${epc.withPeerId} is open.`,
         );
@@ -78,14 +82,30 @@ const openChannelHelper = async (
 
         const message = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
 
-        extChannel.send(message);
+        const peerPublicKeyHex = epc.withPeerPublicKey;
+
+        const receiverPublicKey = hexToUint8(peerPublicKeyHex);
+        const senderSecretKey = hexToUint8(keyPair.secretKey);
+
+        const randomData = window.crypto.getRandomValues(new Uint8Array(16));
+        const messageEncoded = new TextEncoder().encode(message);
+        const encryptedMessage = await encryptAsymmetric(
+          messageEncoded,
+          receiverPublicKey,
+          senderSecretKey,
+          randomData,
+        );
+
+        const encryptedMessageHex =
+          uint8ToHex(encryptedMessage) + "-" + uint8ToHex(randomData);
+
+        extChannel.send(encryptedMessageHex);
 
         api.dispatch(
           setMessage({
             id: window.crypto.randomUUID(),
             message,
             fromPeerId: keyPair.peerId,
-            // toPeerId: extChannel.withPeerId,
             channelLabel: label,
             timestamp: Date.now(),
           }),

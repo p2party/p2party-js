@@ -3,11 +3,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import keyPairReducer from "./reducers/keyPairSlice";
 import roomReducer from "./reducers/roomSlice";
 import makingOfferReducer from "./reducers/makingOfferSlice";
-import peerRoomsReducer from "./reducers/peerRoomsSlice";
-import isSettingRemoteAnswerPendingReducer from "./reducers/isSettingRemoteAnswerPendingSlice";
-// import peers2Reducer from "./reducers/peersSlice"; // setDescription, // setCandidate,
-// import channels2Reducer from "./reducers/channelsSlice"; // setChannel
-import signalingServerReducer from "./reducers/signalingServerSlice"; // } // signalingServerActions, //, {
+import signalingServerReducer from "./reducers/signalingServerSlice";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -20,10 +16,6 @@ export const store = configureStore({
     keyPair: keyPairReducer,
     room: roomReducer,
     makingOffer: makingOfferReducer,
-    peerRooms: peerRoomsReducer,
-    // peers: peers2Reducer,
-    isSettingRemoteAnswerPending: isSettingRemoteAnswerPendingReducer,
-    // channels: channels2Reducer,
     signalingServer: signalingServerReducer,
     [signalingServerApi.reducerPath]: signalingServerApi.reducer,
     [webrtcApi.reducerPath]: webrtcApi.reducer,

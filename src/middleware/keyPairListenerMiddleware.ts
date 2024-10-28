@@ -24,7 +24,8 @@ keyPairListenerMiddleware.startListening({
         isHexadecimal(challenge) &&
         isHexadecimal(signature) &&
         challenge.length === 64 &&
-        signature.length === 1024
+        // signature.length === 1024
+        signature.length === 128
       ) {
         listenerApi.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({

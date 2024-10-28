@@ -99,7 +99,8 @@ const keyPairSlice = createSlice({
         isHexadecimal(challenge) &&
         isHexadecimal(signature) &&
         challenge.length === 64 &&
-        signature.length === 1024
+        // signature.length === 1024
+        signature.length === 128
       ) {
         state.peerId = peerId;
         state.challenge = challenge;

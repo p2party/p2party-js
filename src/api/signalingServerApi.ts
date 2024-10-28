@@ -7,7 +7,11 @@ import { setConnectingToPeers } from "../reducers/roomSlice";
 
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
-import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
+import { uint8ToHex } from "../utils/hexString";
+
+import { newKeyPair } from "../cryptography/ed25519";
+
+// import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -67,21 +71,27 @@ const websocketBaseQuery: BaseQueryFn<
 
     let publicKey = "";
     if (keyPair.secretKey.length === 0) {
-      const newKeyPair = await crypto.subtle.generateKey(
-        {
-          name: "RSA-PSS",
-          hash: "SHA-256",
-          modulusLength: 4096,
-          publicExponent: new Uint8Array([1, 0, 1]),
-        },
-        true,
-        ["sign", "verify"],
-      );
+      // const newKeyPair = await crypto.subtle.generateKey(
+      //   {
+      //     name: "RSA-PSS",
+      //     hash: "SHA-256",
+      //     modulusLength: 4096,
+      //     publicExponent: new Uint8Array([1, 0, 1]),
+      //   },
+      //   true,
+      //   ["sign", "verify"],
+      // );
+      //
+      // const pair = await exportPemKeys(newKeyPair);
+      // publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
+      //
+      // api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
 
-      const pair = await exportPemKeys(newKeyPair);
-      publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
+      const k = await newKeyPair();
+      publicKey = uint8ToHex(k.publicKey);
+      const secretKey = uint8ToHex(k.secretKey);
 
-      api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
+      api.dispatch(setKeyPair({ publicKey, secretKey }));
     } else {
       publicKey = keyPair.publicKey;
     }
@@ -205,7 +215,8 @@ const websocketSendMessageQuery: BaseQueryFn<
       isUUID(keyPair.peerId) &&
       isHexadecimal(keyPair.challenge) &&
       isHexadecimal(keyPair.signature) &&
-      keyPair.signature.length === 1024 &&
+      // keyPair.signature.length === 1024 &&
+      keyPair.signature.length === 128 &&
       keyPair.challenge.length === 64
     ) {
       waitForSocketConnection(ws, () => {

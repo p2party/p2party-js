@@ -124,7 +124,8 @@ const handleWebSocketMessage = async (
             message.peers[i].publicKey === keyPair.publicKey ||
             message.peers[i].id === keyPair.peerId ||
             !isUUID(message.peers[i].id) ||
-            message.peers[i].publicKey.length !== 1100
+            // message.peers[i].publicKey.length !== 1100
+            message.peers[i].publicKey.length !== 64
           )
             continue;
 

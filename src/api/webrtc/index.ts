@@ -90,7 +90,11 @@ const webrtcApi = createApi({
 
     message: builder.mutation<void, RTCChannelMessageParams>({
       queryFn: (args, api, extraOptions) =>
-        webrtcMessageQuery({ ...args, dataChannels }, api, extraOptions),
+        webrtcMessageQuery(
+          { ...args, peerConnections, dataChannels },
+          api,
+          extraOptions,
+        ),
     }),
 
     disconnect: builder.query<void, void>({

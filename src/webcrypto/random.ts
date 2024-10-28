@@ -2,7 +2,10 @@ const alphabetSmall = "abcdefghijklmnopqrstuvwxyz";
 const alphabetCapital = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const numbers = "0123456789";
 
-const randomNumberInRange = (min: number, max: number): Promise<number> => {
+export const randomNumberInRange = (
+  min: number,
+  max: number,
+): Promise<number> => {
   return new Promise((resolve, reject) => {
     try {
       const RANGE = max - min;
@@ -36,7 +39,7 @@ const randomNumberInRange = (min: number, max: number): Promise<number> => {
   });
 };
 
-const randomBytesToString = (
+export const randomBytesToString = (
   len: number,
   withAlphabetSmall = true,
   withAlphabetCapital = true,
@@ -65,7 +68,7 @@ const randomBytesToString = (
   });
 };
 
-const generateRandomRoomUrl = async (
+export const generateRandomRoomUrl = async (
   lenMin: number,
   lenMax?: number,
   withAlphabetSmall = true,
@@ -90,5 +93,3 @@ const generateRandomRoomUrl = async (
     throw error;
   }
 };
-
-export default generateRandomRoomUrl;

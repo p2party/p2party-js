@@ -10,6 +10,7 @@ import {
   crypto_box_poly1305_AUTHTAGBYTES,
   getEncryptedLen,
   getDecryptedLen,
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
 } from "./interfaces";
 
 /**
@@ -92,11 +93,15 @@ const encryptAsymmetricMemory = (
   additionalDataLen: number,
 ): WebAssembly.Memory => {
   const sealedBoxLen = getEncryptedLen(messageLen);
+  console.log("Message len: " + messageLen);
+  console.log("Sealed box len: " + sealedBoxLen);
+  console.log("Max len = ", 65536 - sealedBoxLen + messageLen);
   const memoryLen =
     (messageLen +
       crypto_sign_ed25519_PUBLICKEYBYTES +
       additionalDataLen +
       sealedBoxLen +
+      crypto_aead_chacha20poly1305_ietf_NPUBBYTES +
       1 * (messageLen + crypto_box_poly1305_AUTHTAGBYTES) + // malloc'd
       2 * crypto_box_x25519_PUBLICKEYBYTES + // malloc'd
       2 * crypto_box_x25519_SECRETKEYBYTES + // malloc'd

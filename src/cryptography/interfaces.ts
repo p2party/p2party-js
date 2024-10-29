@@ -29,7 +29,8 @@ export interface SignKeyPair {
 
 export const getEncryptedLen = (dataLen: number) => {
   return (
-    crypto_box_x25519_NONCEBYTES + // xchacha uses 24 byte nonce while ietf 12
+    crypto_aead_chacha20poly1305_ietf_NPUBBYTES +
+    // crypto_box_x25519_NONCEBYTES + // xchacha uses 24 byte nonce while ietf 12
     dataLen +
     crypto_box_poly1305_AUTHTAGBYTES // 16 bytes poly1305 auth tag
   );
@@ -38,7 +39,8 @@ export const getEncryptedLen = (dataLen: number) => {
 export const getDecryptedLen = (encryptedLen: number) => {
   return (
     encryptedLen -
-    crypto_box_x25519_NONCEBYTES - // nonce
+    crypto_aead_chacha20poly1305_ietf_NPUBBYTES -
+    // crypto_box_x25519_NONCEBYTES - // nonce
     crypto_box_poly1305_AUTHTAGBYTES // authTag
   );
 };

@@ -1,5 +1,6 @@
 import connectToPeerHelper from "../../utils/connectToPeerHelper";
 import openChannelHelper from "../../utils/openChannelHelper";
+import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -12,6 +13,7 @@ import type { State } from "../../store";
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
+  encryptionWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcBaseQuery: BaseQueryFn<
@@ -27,6 +29,7 @@ const webrtcBaseQuery: BaseQueryFn<
     rtcConfig,
     peerConnections,
     dataChannels,
+    encryptionWasmMemory,
   },
   api,
 ) => {
@@ -34,6 +37,10 @@ const webrtcBaseQuery: BaseQueryFn<
     const { keyPair } = api.getState() as State;
     if (peerId === keyPair.peerId)
       throw new Error("Cannot create a connection with oneself.");
+
+    const encryptionModule = await libcrypto({
+      wasmMemory: encryptionWasmMemory,
+    });
 
     const connectionIndex = peerConnections.findIndex(
       (pc) => pc.withPeerId === peerId,
@@ -46,18 +53,24 @@ const webrtcBaseQuery: BaseQueryFn<
       );
 
       epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await openChannelHelper({ channel: e.channel, epc, dataChannels }, api);
+        await openChannelHelper(
+          { channel: e.channel, epc, dataChannels, encryptionModule },
+          api,
+        );
       };
 
       peerConnections.push(epc);
 
       if (initiator) {
         await openChannelHelper(
-          { channel: "signaling", epc, dataChannels },
+          { channel: "signaling", epc, dataChannels, encryptionModule },
           api,
         );
 
-        await openChannelHelper({ channel: "main", epc, dataChannels }, api);
+        await openChannelHelper(
+          { channel: "main", epc, dataChannels, encryptionModule },
+          api,
+        );
       }
     }
 

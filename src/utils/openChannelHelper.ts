@@ -12,15 +12,17 @@ import type {
   IRTCPeerConnection,
   IRTCDataChannel,
 } from "../api/webrtc/interfaces";
+import type { LibCrypto } from "../cryptography/libcrypto";
 
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
   epc: IRTCPeerConnection;
   dataChannels: IRTCDataChannel[];
+  encryptionModule: LibCrypto;
 }
 
 const openChannelHelper = async (
-  { channel, epc, dataChannels }: OpenChannelHelperParams,
+  { channel, epc, dataChannels, encryptionModule }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   return new Promise((resolve, reject) => {
@@ -94,6 +96,7 @@ const openChannelHelper = async (
           receiverPublicKey,
           senderSecretKey,
           randomData,
+          encryptionModule,
         );
 
         const encryptedMessageHex =

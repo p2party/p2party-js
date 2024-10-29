@@ -199,9 +199,9 @@ export const sign = async (
     ? module.wasmMemory
     : demosMemory.signMemory(messageLen);
 
-  const demosModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
-  const ptr1 = demosModule._malloc(messageLen * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr1 = cryptoModule._malloc(messageLen * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(
     wasmMemory.buffer,
     ptr1,
@@ -209,14 +209,14 @@ export const sign = async (
   );
   dataArray.set(message);
 
-  const ptr2 = demosModule._malloc(crypto_sign_ed25519_BYTES);
+  const ptr2 = cryptoModule._malloc(crypto_sign_ed25519_BYTES);
   const signature = new Uint8Array(
     wasmMemory.buffer,
     ptr2,
     crypto_sign_ed25519_BYTES,
   );
 
-  const ptr3 = demosModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
+  const ptr3 = cryptoModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
   const sk = new Uint8Array(
     wasmMemory.buffer,
     ptr3,
@@ -224,7 +224,7 @@ export const sign = async (
   );
   sk.set(secretKey);
 
-  demosModule._sign(
+  cryptoModule._sign(
     messageLen,
     dataArray.byteOffset,
     sk.byteOffset,
@@ -233,9 +233,9 @@ export const sign = async (
 
   const sig = Uint8Array.from(signature);
 
-  demosModule._free(ptr1);
-  demosModule._free(ptr2);
-  demosModule._free(ptr3);
+  cryptoModule._free(ptr1);
+  cryptoModule._free(ptr2);
+  cryptoModule._free(ptr3);
 
   return sig;
 };
@@ -250,9 +250,9 @@ export const verify = async (
 
   const wasmMemory = module ? module.wasmMemory : demosMemory.verifyMemory(len);
 
-  const demosModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
-  const ptr1 = demosModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr1 = cryptoModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(
     wasmMemory.buffer,
     ptr1,
@@ -260,7 +260,7 @@ export const verify = async (
   );
   dataArray.set(message);
 
-  const ptr2 = demosModule._malloc(crypto_sign_ed25519_BYTES);
+  const ptr2 = cryptoModule._malloc(crypto_sign_ed25519_BYTES);
   const sig = new Uint8Array(
     wasmMemory.buffer,
     ptr2,
@@ -268,7 +268,7 @@ export const verify = async (
   );
   sig.set(signature);
 
-  const ptr3 = demosModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
+  const ptr3 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const key = new Uint8Array(
     wasmMemory.buffer,
     ptr3,
@@ -276,16 +276,16 @@ export const verify = async (
   );
   key.set(publicKey);
 
-  const result = demosModule._verify(
+  const result = cryptoModule._verify(
     len,
     dataArray.byteOffset,
     key.byteOffset,
     sig.byteOffset,
   );
 
-  demosModule._free(ptr1);
-  demosModule._free(ptr2);
-  demosModule._free(ptr3);
+  cryptoModule._free(ptr1);
+  cryptoModule._free(ptr2);
+  cryptoModule._free(ptr3);
 
   return result === 0;
 };

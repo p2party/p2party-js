@@ -109,6 +109,12 @@ const openChannel = async (
  * If toChannel then broadcast to all peers with that channel.
  */
 const sendMessage = (message: string, toChannel?: string) => {
+  const messageEncoded = new TextEncoder().encode(message);
+  if (messageEncoded.length > 65508)
+    throw new Error(
+      "RTCDataChannels can only transfer 64kb of data per message.",
+    );
+
   const { keyPair } = store.getState();
 
   dispatch(

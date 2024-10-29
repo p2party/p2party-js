@@ -14,12 +14,14 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
+import libcrypto from "../../cryptography/libcrypto";
 
 export interface RTCSetDescriptionParamsExtension
   extends RTCSetDescriptionParams {
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
+  encryptionWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -36,11 +38,16 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
+    encryptionWasmMemory,
   },
   api,
 ) => {
   try {
     const { keyPair } = api.getState() as State;
+    const encryptionModule = await libcrypto({
+      wasmMemory: encryptionWasmMemory,
+    });
+
     const connectionIndex = peerConnections.findIndex(
       (peer) => peer.withPeerId === peerId,
     );
@@ -60,7 +67,10 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           );
 
     epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-      await openChannelHelper({ channel: e.channel, epc, dataChannels }, api);
+      await openChannelHelper(
+        { channel: e.channel, epc, dataChannels, encryptionModule },
+        api,
+      );
     };
 
     const ICE_CANDIDATES_LEN = iceCandidates.length;

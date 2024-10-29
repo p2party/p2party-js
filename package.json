@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Create WebRTC mesh networks in two LOC",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/p2party/p2party-ts.git"
@@ -69,6 +69,7 @@
     "prettier": "^3.3.3",
     "rollup": "^4.21.2",
     "rollup-plugin-analyzer": "^4.0.0",
+    "rollup-plugin-copy": "^3.5.0",
     "terser": "^5.31.6",
     "tslib": "^2.7.0",
     "typescript": "^5.5.4",

@@ -1,4 +1,5 @@
 import path from "path";
+// import copy from "rollup-plugin-copy";
 import terser from "@rollup/plugin-terser";
 import commonjs from "@rollup/plugin-commonjs";
 import json from "@rollup/plugin-json";
@@ -37,6 +38,15 @@ const plugins = [
     // },
     outDir: `${dir}`,
   }),
+
+  // copy({
+  //   targets: [
+  //     {
+  //       src: 'src/cryptography/libcrypto.wasm',
+  //       dest: 'lib',
+  //     },
+  //   ],
+  // }),
 
   analyzer(),
 ];

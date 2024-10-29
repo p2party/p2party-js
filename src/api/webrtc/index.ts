@@ -11,6 +11,8 @@ import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
 
+import cryptoMemory from "../../cryptography/memory";
+
 import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
@@ -29,6 +31,16 @@ import type {
 const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
+
+const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
+  65508, // limit from RTCDataChannel is 64kb
+  1024 * 1024, // self-imposed limit of 1mb for additional data
+);
+
+const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
+  65536, // limit from RTCDataChannel is 64kb
+  1024 * 1024, // self-imposed limit of 1mb for additional data
+);
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -58,13 +70,20 @@ const webrtcApi = createApi({
         rtcConfig,
         peerConnections,
         dataChannels,
+        encryptionWasmMemory,
       }),
     }),
 
     setDescription: builder.query<void, RTCSetDescriptionParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetDescriptionQuery(
-          { ...args, peerConnections, iceCandidates, dataChannels },
+          {
+            ...args,
+            peerConnections,
+            iceCandidates,
+            dataChannels,
+            encryptionWasmMemory,
+          },
           api,
           extraOptions,
         ),
@@ -82,7 +101,7 @@ const webrtcApi = createApi({
     openChannel: builder.query<void, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
-          { ...args, peerConnections, dataChannels },
+          { ...args, peerConnections, dataChannels, encryptionWasmMemory },
           api,
           extraOptions,
         ),
@@ -91,7 +110,13 @@ const webrtcApi = createApi({
     message: builder.mutation<void, RTCChannelMessageParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcMessageQuery(
-          { ...args, peerConnections, dataChannels },
+          {
+            ...args,
+            peerConnections,
+            dataChannels,
+            encryptionWasmMemory,
+            decryptionWasmMemory,
+          },
           api,
           extraOptions,
         ),

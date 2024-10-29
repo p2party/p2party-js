@@ -1,4 +1,4 @@
-import demosMemory from "./memory";
+import cryptoMemory from "./memory";
 
 import libcrypto from "./libcrypto";
 
@@ -78,11 +78,11 @@ export const encryptAsymmetric = async (
 
   const wasmMemory =
     module?.wasmMemory ??
-    demosMemory.encryptAsymmetricMemory(len, additionalLen);
+    cryptoMemory.encryptAsymmetricMemory(len, additionalLen);
 
-  const demosModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
-  const ptr1 = demosModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr1 = cryptoModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(
     wasmMemory.buffer,
     ptr1,
@@ -90,7 +90,7 @@ export const encryptAsymmetric = async (
   );
   dataArray.set(message);
 
-  const ptr2 = demosModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
+  const ptr2 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const pk = new Uint8Array(
     wasmMemory.buffer,
     ptr2,
@@ -98,7 +98,7 @@ export const encryptAsymmetric = async (
   );
   pk.set(receiverPublicKey);
 
-  const ptr3 = demosModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
+  const ptr3 = cryptoModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
   const sk = new Uint8Array(
     wasmMemory.buffer,
     ptr3,
@@ -106,16 +106,20 @@ export const encryptAsymmetric = async (
   );
   sk.set(senderSecretKey);
 
-  const ptr4 = demosModule._malloc(crypto_aead_chacha20poly1305_ietf_NPUBBYTES);
+  const ptr4 = cryptoModule._malloc(
+    crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  );
   const nonceArray = new Uint8Array(
     wasmMemory.buffer,
     ptr4,
-    crypto_aead_chacha20poly1305_ietf_NPUBBYTES
-  )
-  const nonce = window.crypto.getRandomValues(new Uint8Array(crypto_aead_chacha20poly1305_ietf_NPUBBYTES));
+    crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  );
+  const nonce = window.crypto.getRandomValues(
+    new Uint8Array(crypto_aead_chacha20poly1305_ietf_NPUBBYTES),
+  );
   nonceArray.set(nonce);
 
-  const ptr5 = demosModule._malloc(
+  const ptr5 = cryptoModule._malloc(
     additionalLen * Uint8Array.BYTES_PER_ELEMENT,
   );
   const additional = new Uint8Array(
@@ -127,14 +131,16 @@ export const encryptAsymmetric = async (
 
   const sealedBoxLen = getEncryptedLen(len);
 
-  const ptr6 = demosModule._malloc(sealedBoxLen * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr6 = cryptoModule._malloc(
+    sealedBoxLen * Uint8Array.BYTES_PER_ELEMENT,
+  );
   const encrypted = new Uint8Array(
     wasmMemory.buffer,
     ptr6,
     sealedBoxLen * Uint8Array.BYTES_PER_ELEMENT,
   );
 
-  const result = demosModule._encrypt_chachapoly_asymmetric(
+  const result = cryptoModule._encrypt_chachapoly_asymmetric(
     len,
     dataArray.byteOffset,
     pk.byteOffset,
@@ -145,28 +151,28 @@ export const encryptAsymmetric = async (
     encrypted.byteOffset,
   );
 
-  demosModule._free(ptr1);
-  demosModule._free(ptr2);
-  demosModule._free(ptr3);
-  demosModule._free(ptr4);
-  demosModule._free(ptr5);
+  cryptoModule._free(ptr1);
+  cryptoModule._free(ptr2);
+  cryptoModule._free(ptr3);
+  cryptoModule._free(ptr4);
+  cryptoModule._free(ptr5);
 
   switch (result) {
     case 0: {
       const enc = Uint8Array.from(encrypted);
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       return enc;
     }
 
     case -1: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("Could not allocate memory for the ciphertext array.");
     }
 
     case -2: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error(
         "Could not allocate memory for the ephemeral x25519 public key array.",
@@ -174,7 +180,7 @@ export const encryptAsymmetric = async (
     }
 
     case -3: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error(
         "Could not allocate memory for the ephemeral x25519 secret key array.",
@@ -182,7 +188,7 @@ export const encryptAsymmetric = async (
     }
 
     case -4: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error(
         "Could not allocate memory for the receiver's ed25519 converted to x25519 public key array.",
@@ -190,31 +196,31 @@ export const encryptAsymmetric = async (
     }
 
     case -5: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("Could not convert Ed25519 public key to X25519.");
     }
 
     case -6: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("Could not allocate memory for the shared secret array.");
     }
 
     case -7: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("Could not create a shared secret.");
     }
 
     case -8: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("Could not allocate memory for the nonce helper array.");
     }
 
     default: {
-      demosModule._free(ptr6);
+      cryptoModule._free(ptr6);
 
       throw new Error("An unexpected error occured.");
     }
@@ -291,13 +297,13 @@ export const decryptAsymmetric = async (
 
   const wasmMemory =
     module?.wasmMemory ??
-    demosMemory.decryptAsymmetricMemory(len, additionalLen);
+    cryptoMemory.decryptAsymmetricMemory(len, additionalLen);
 
-  const demosModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
   const decryptedLen = getDecryptedLen(len);
 
-  const ptr1 = demosModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr1 = cryptoModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
   const encryptedArray = new Uint8Array(
     wasmMemory.buffer,
     ptr1,
@@ -305,7 +311,7 @@ export const decryptAsymmetric = async (
   );
   encryptedArray.set(encrypted);
 
-  const ptr2 = demosModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
+  const ptr2 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const pub = new Uint8Array(
     wasmMemory.buffer,
     ptr2,
@@ -313,7 +319,7 @@ export const decryptAsymmetric = async (
   );
   pub.set(publicKey);
 
-  const ptr3 = demosModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
+  const ptr3 = cryptoModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
   const sec = new Uint8Array(
     wasmMemory.buffer,
     ptr3,
@@ -321,7 +327,7 @@ export const decryptAsymmetric = async (
   );
   sec.set(secretKey);
 
-  const ptr4 = demosModule._malloc(
+  const ptr4 = cryptoModule._malloc(
     additionalLen * Uint8Array.BYTES_PER_ELEMENT,
   );
   const additional = new Uint8Array(
@@ -331,14 +337,16 @@ export const decryptAsymmetric = async (
   );
   additional.set(additionalData);
 
-  const ptr5 = demosModule._malloc(decryptedLen * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr5 = cryptoModule._malloc(
+    decryptedLen * Uint8Array.BYTES_PER_ELEMENT,
+  );
   const decrypted = new Uint8Array(
     wasmMemory.buffer,
     ptr5,
     decryptedLen * Uint8Array.BYTES_PER_ELEMENT,
   );
 
-  const result = demosModule._decrypt_chachapoly_asymmetric(
+  const result = cryptoModule._decrypt_chachapoly_asymmetric(
     len,
     encryptedArray.byteOffset,
     pub.byteOffset,
@@ -348,20 +356,20 @@ export const decryptAsymmetric = async (
     decrypted.byteOffset,
   );
 
-  demosModule._free(ptr1);
-  demosModule._free(ptr2);
-  demosModule._free(ptr3);
+  cryptoModule._free(ptr1);
+  cryptoModule._free(ptr2);
+  cryptoModule._free(ptr3);
 
   switch (result) {
     case 0: {
       const decr = Uint8Array.from(decrypted);
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       return decr;
     }
 
     case -1: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error(
         "Could not allocate memory for the ephemeral public key array.",
@@ -369,13 +377,13 @@ export const decryptAsymmetric = async (
     }
 
     case -2: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Could not allocate memory for the nonce helper array.");
     }
 
     case -3: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error(
         "Could not allocate memory for the ed25519 converted to x25519 public key array.",
@@ -383,7 +391,7 @@ export const decryptAsymmetric = async (
     }
 
     case -4: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error(
         "Could not allocate memory for the ed25519 converted to x25519 secret key array.",
@@ -391,31 +399,31 @@ export const decryptAsymmetric = async (
     }
 
     case -5: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Could not allocate memory for the shared secret array.");
     }
 
     case -6: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Could not successfully generate a shared secret.");
     }
 
     case -7: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Could not allocate memory for the ciphertext array.");
     }
 
     case -8: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Unsuccessful decryption attempt");
     }
 
     default: {
-      demosModule._free(ptr4);
+      cryptoModule._free(ptr4);
 
       throw new Error("Unexpected error occured");
     }

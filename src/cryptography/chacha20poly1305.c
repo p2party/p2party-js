@@ -197,10 +197,6 @@ decrypt_chachapoly_asymmetric(
     return -7;
   }
 
-  uint8_t *ephemeral_x25519_pk
-      = (uint8_t *)malloc(sizeof(uint8_t[crypto_scalarmult_curve25519_BYTES]));
-  if (ephemeral_x25519_pk == NULL) return -1;
-
   int CIPHERTEXT_LEN
       = ENCRYPTED_LEN - crypto_aead_chacha20poly1305_ietf_NPUBBYTES;
   uint8_t *ciphertext = (uint8_t *)malloc(sizeof(uint8_t[CIPHERTEXT_LEN]));
@@ -208,7 +204,7 @@ decrypt_chachapoly_asymmetric(
   {
     sodium_free(client_tx);
 
-    return -7;
+    return -8;
   }
 
   memcpy(ciphertext,
@@ -224,5 +220,5 @@ decrypt_chachapoly_asymmetric(
 
   if (decrypted == 0) return 0;
 
-  return -8;
+  return -9;
 }

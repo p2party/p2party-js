@@ -1,4 +1,4 @@
-import { uint8ToHex, hexToUint8 } from "../utils/hexString";
+import { uint8ArrayToHex, hexToUint8Array } from "../utils/uint8array";
 
 export const str2ab = (str: string) => {
   const buf = new ArrayBuffer(str.length);
@@ -11,66 +11,58 @@ export const str2ab = (str: string) => {
 };
 
 export const importPrivateKey = async (pemKey: string): Promise<CryptoKey> => {
-  try {
-    const pemHeader = "-----BEGIN PRIVATE KEY-----";
-    const pemFooter = "-----END PRIVATE KEY-----";
-    const pemContents = pemKey.substring(
-      pemHeader.length,
-      pemKey.length - pemFooter.length,
-    );
+  const pemHeader = "-----BEGIN PRIVATE KEY-----";
+  const pemFooter = "-----END PRIVATE KEY-----";
+  const pemContents = pemKey.substring(
+    pemHeader.length,
+    pemKey.length - pemFooter.length,
+  );
 
-    // base64 decode the string to get the binary data
-    const binaryDerString = window.atob(pemContents);
+  // base64 decode the string to get the binary data
+  const binaryDerString = window.atob(pemContents);
 
-    // convert from a binary string to an ArrayBuffer
-    const binaryDer = str2ab(binaryDerString);
+  // convert from a binary string to an ArrayBuffer
+  const binaryDer = str2ab(binaryDerString);
 
-    return await window.crypto.subtle.importKey(
-      "pkcs8",
-      binaryDer,
-      {
-        name: "RSA-PSS",
-        hash: "SHA-256",
-      },
-      true,
-      ["sign"],
-    );
-  } catch (error) {
-    throw error;
-  }
+  return await window.crypto.subtle.importKey(
+    "pkcs8",
+    binaryDer,
+    {
+      name: "RSA-PSS",
+      hash: "SHA-256",
+    },
+    true,
+    ["sign"],
+  );
 };
 
 export const importPublicKey = async (hexKey: string): Promise<CryptoKey> => {
-  try {
-    // const pemHeader = "-----BEGIN PUBLIC KEY-----";
-    // const pemFooter = "-----END PUBLIC KEY-----";
-    // const pemContents = pemKey.substring(
-    //   pemHeader.length,
-    //   pemKey.length - pemFooter.length,
-    // );
-    //
-    // // base64 decode the string to get the binary data
-    // const binaryDerString = window.atob(pemContents);
-    //
-    // // convert from a binary string to an ArrayBuffer
-    // const binaryDer = str2ab(binaryDerString);
+  // const pemHeader = "-----BEGIN PUBLIC KEY-----";
+  // const pemFooter = "-----END PUBLIC KEY-----";
+  // const pemContents = pemKey.substring(
+  //   pemHeader.length,
+  //   pemKey.length - pemFooter.length,
+  // );
+  //
+  // // base64 decode the string to get the binary data
+  // const binaryDerString = window.atob(pemContents);
+  //
+  // // convert from a binary string to an ArrayBuffer
+  // const binaryDer = str2ab(binaryDerString);
 
-    const publicKeyUint8 = hexToUint8(hexKey);
-    const binaryDer = publicKeyUint8.buffer;
+  const publicKeyUint8 = hexToUint8Array(hexKey);
+  const binaryDer = publicKeyUint8.buffer;
 
-    return await window.crypto.subtle.importKey(
-      "spki",
-      binaryDer,
-      {
-        name: "RSA-PSS",
-        hash: "SHA-256",
-      },
-      true,
-      ["verify"],
-    );
-  } catch (error) {
-    throw error;
-  }
+  return await window.crypto.subtle.importKey(
+    "spki",
+    binaryDer,
+    {
+      name: "RSA-PSS",
+      hash: "SHA-256",
+    },
+    true,
+    ["verify"],
+  );
 };
 
 const exportPublicKey = async (keys: CryptoKeyPair): Promise<string> => {
@@ -99,7 +91,7 @@ const exportPrivateKey = async (keys: CryptoKeyPair): Promise<string> => {
 export const exportPublicKeyToHex = async (publicKey: CryptoKey) => {
   const spki = await window.crypto.subtle.exportKey("spki", publicKey);
 
-  return uint8ToHex(new Uint8Array(spki));
+  return uint8ArrayToHex(new Uint8Array(spki));
   // const result = [...new Uint8Array(spki)]
   //   .map((x) => x.toString(16).padStart(2, "0"))
   //   .join("");
@@ -108,14 +100,10 @@ export const exportPublicKeyToHex = async (publicKey: CryptoKey) => {
 };
 
 export const exportPemKeys = async (keys: CryptoKeyPair) => {
-  try {
-    const publicKey = await exportPublicKey(keys);
-    const secretKey = await exportPrivateKey(keys);
+  const publicKey = await exportPublicKey(keys);
+  const secretKey = await exportPrivateKey(keys);
 
-    return { publicKey, secretKey };
-  } catch (error) {
-    throw error;
-  }
+  return { publicKey, secretKey };
 };
 
 export const encryptMessage = async (
@@ -156,8 +144,8 @@ export const encryptMessage = async (
     encodedMessage,
   );
 
-  const ciphertextHex = uint8ToHex(new Uint8Array(ciphertext));
-  const ivHex = uint8ToHex(iv);
+  const ciphertextHex = uint8ArrayToHex(new Uint8Array(ciphertext));
+  const ivHex = uint8ArrayToHex(iv);
 
   return ciphertextHex + "-" + ivHex;
 };
@@ -174,8 +162,8 @@ export const decryptMessageString = async (
   const ciphertextHex = messageHex.slice(0, splitIndex - 1); // remove "-"
   const ivHex = messageHex.slice(splitIndex);
 
-  const ciphertext = hexToUint8(ciphertextHex);
-  const iv = hexToUint8(ivHex);
+  const ciphertext = hexToUint8Array(ciphertextHex);
+  const iv = hexToUint8Array(ivHex);
 
   const key = await window.crypto.subtle.deriveKey(
     {
@@ -215,8 +203,8 @@ export const decryptMessageUint8Array = async (
   const ciphertextHex = messageHex.slice(0, splitIndex - 1); // remove "-"
   const ivHex = messageHex.slice(splitIndex);
 
-  const ciphertext = hexToUint8(ciphertextHex);
-  const iv = hexToUint8(ivHex);
+  const ciphertext = hexToUint8Array(ciphertextHex);
+  const iv = hexToUint8Array(ivHex);
 
   const key = await window.crypto.subtle.deriveKey(
     {

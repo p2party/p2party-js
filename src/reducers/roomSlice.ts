@@ -3,6 +3,7 @@ import { isUUID } from "class-validator";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
+import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
   label: string;
@@ -15,9 +16,12 @@ export interface Peer {
 }
 
 export interface Message {
-  id: string;
-  message: string;
+  merkleRootHex: string;
   fromPeerId: string;
+  chunkIndexes: number[];
+  messageType: MessageType;
+  savedSize: number;
+  totalSize: number;
   channelLabel: string;
   timestamp: number;
 }
@@ -32,6 +36,16 @@ export interface SetRoomArgs {
 export interface SetChannelArgs {
   label: string;
   peerId: string;
+}
+
+export interface SetMessageArgs {
+  merkleRootHex: string;
+  chunkIndex: number;
+  chunkSize: number;
+  fromPeerId?: string;
+  messageType?: MessageType;
+  totalSize?: number;
+  channelLabel?: string;
 }
 
 export interface Room extends SetRoomArgs {
@@ -52,9 +66,9 @@ const initialState: Room = {
   canBeConnectionRelay: true,
   rtcConfig: {
     iceServers: [
-      {
-        urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      },
+      // {
+      //   urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+      // },
     ],
   },
   peers: [],
@@ -148,26 +162,49 @@ const roomSlice = createSlice({
       }
     },
 
-    setMessage: (state, action: PayloadAction<Message>) => {
+    setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
       const messageIndex = state.messages.findIndex(
-        (m) =>
-          m.fromPeerId === action.payload.fromPeerId &&
-          m.message === action.payload.message &&
-          m.channelLabel === action.payload.channelLabel &&
-          m.timestamp === action.payload.timestamp,
+        (m) => m.merkleRootHex === action.payload.merkleRootHex,
       );
 
-      if (messageIndex === -1) state.messages.push(action.payload);
+      if (
+        messageIndex === -1 &&
+        action.payload.channelLabel &&
+        action.payload.fromPeerId &&
+        isUUID(action.payload.fromPeerId) &&
+        action.payload.messageType &&
+        action.payload.totalSize
+      ) {
+        state.messages.push({
+          merkleRootHex: action.payload.merkleRootHex,
+          channelLabel: action.payload.channelLabel,
+          messageType: action.payload.messageType,
+          fromPeerId: action.payload.fromPeerId,
+          timestamp: Date.now(),
+          chunkIndexes: [action.payload.chunkIndex],
+          savedSize: action.payload.chunkSize,
+          totalSize: action.payload.totalSize,
+        });
+      } else if (
+        !state.messages[messageIndex].chunkIndexes.includes(
+          action.payload.chunkIndex,
+        ) &&
+        state.messages[messageIndex].totalSize >=
+          state.messages[messageIndex].savedSize + action.payload.chunkSize
+      ) {
+        state.messages[messageIndex].chunkIndexes.push(
+          action.payload.chunkIndex,
+        );
+        state.messages[messageIndex].savedSize += action.payload.chunkSize;
+      }
     },
 
     deleteMessage: (
       state,
-      action: PayloadAction<{ fromPeerId: string; label: string }>,
+      action: PayloadAction<{ merkleRootHex: string }>,
     ) => {
       const messageIndex = state.messages.findIndex(
-        (m) =>
-          m.channelLabel === action.payload.label &&
-          m.fromPeerId === action.payload.fromPeerId,
+        (m) => m.merkleRootHex === action.payload.merkleRootHex,
       );
 
       if (messageIndex > -1) state.messages.splice(messageIndex, 1);

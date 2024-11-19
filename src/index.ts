@@ -2,7 +2,9 @@ import { isUUID } from "class-validator";
 
 import { store, dispatch } from "./store";
 
-import { generateRandomRoomUrl } from "./webcrypto/random";
+import { generateRandomRoomUrl } from "./cryptography/utils";
+
+import { getDBAllChunks } from "./utils/db";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -18,6 +20,7 @@ import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
+import type { MessageType } from "./utils/messageTypes";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -30,15 +33,16 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
+import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
 
 const connect = (
   roomUrl: string,
   signalingServerUrl = "ws://localhost:3001/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
-      {
-        urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      },
+      // {
+      //   urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+      // },
     ],
   },
 ) => {
@@ -108,22 +112,39 @@ const openChannel = async (
  * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = (message: string, toChannel?: string) => {
-  const messageEncoded = new TextEncoder().encode(message);
-  if (messageEncoded.length > 65508)
-    throw new Error(
-      "RTCDataChannels can only transfer 64kb of data per message.",
-    );
-
-  const { keyPair } = store.getState();
+const sendMessage = (data: string | File, toChannel?: string) => {
+  // const { keyPair } = store.getState();
 
   dispatch(
-    webrtcApi.endpoints.message.initiate({
-      message,
-      fromPeerId: keyPair.peerId,
-      label: toChannel,
+    signalingServerApi.endpoints.sendMessageToPeer.initiate({
+      data,
+      // fromPeerId: keyPair.peerId,
+      toChannel,
     }),
   );
+  //   dispatch(
+  //     webrtcApi.endpoints.message.initiate({
+  //       data,
+  //       fromPeerId: keyPair.peerId,
+  //       label: toChannel,
+  //     }),
+  //   );
+};
+
+const readMessage = async (merkleRootHex: string) => {
+  try {
+    const chunks = await getDBAllChunks(merkleRootHex);
+
+    const data = chunks
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((c) => hexToUint8Array(c.data));
+
+    return concatUint8Arrays(data);
+  } catch (error) {
+    console.error(error);
+
+    return;
+  }
 };
 
 export default {
@@ -139,6 +160,7 @@ export default {
   disconnectFromRoom,
   openChannel,
   sendMessage,
+  readMessage,
   generateRandomRoomUrl,
 };
 
@@ -149,6 +171,7 @@ export type {
   Channel,
   Message,
   RoomData,
+  MessageType,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,

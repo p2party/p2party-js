@@ -14,6 +14,7 @@ export default [
       "eslint.config.mjs",
       "rollup.config.ts",
       "emsdk",
+      "src/cryptography/libcrypto.js",
     ],
   },
   pluginJs.configs.recommended,

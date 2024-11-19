@@ -1,4 +1,5 @@
-import openChannelHelper from "../../utils/openChannelHelper";
+import { handleOpenChannel } from "../../handlers/handleOpenChannel";
+
 import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -41,7 +42,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
 
         if (peerIndex > -1) {
           const epc = peerConnections[peerIndex];
-          await openChannelHelper(
+          await handleOpenChannel(
             { channel, epc, dataChannels, encryptionModule },
             api,
           );
@@ -51,7 +52,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
       const PEERS_LEN = peerConnections.length;
       for (let i = 0; i < PEERS_LEN; i++) {
         const epc = peerConnections[i];
-        await openChannelHelper(
+        await handleOpenChannel(
           { channel, epc, dataChannels, encryptionModule },
           api,
         );

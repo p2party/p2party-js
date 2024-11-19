@@ -93,9 +93,6 @@ const encryptAsymmetricMemory = (
   additionalDataLen: number,
 ): WebAssembly.Memory => {
   const sealedBoxLen = getEncryptedLen(messageLen);
-  console.log("Message len: " + messageLen);
-  console.log("Sealed box len: " + sealedBoxLen);
-  console.log("Max len = ", 65536 - sealedBoxLen + messageLen);
   const memoryLen =
     (messageLen +
       crypto_sign_ed25519_PUBLICKEYBYTES +
@@ -131,6 +128,39 @@ const decryptAsymmetricMemory = (
   return new WebAssembly.Memory({ initial: pages, maximum: pages });
 };
 
+const getMerkleRootMemory = (leavesLen: number): WebAssembly.Memory => {
+  const memoryLen = (2 * leavesLen + 3) * crypto_hash_sha512_BYTES;
+  const memoryPages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({
+    initial: memoryPages,
+    maximum: memoryPages,
+  });
+};
+
+const getMerkleProofMemory = (leavesLen: number): WebAssembly.Memory => {
+  const memoryLen =
+    leavesLen * crypto_hash_sha512_BYTES +
+    leavesLen * (crypto_hash_sha512_BYTES + 1) +
+    3 * crypto_hash_sha512_BYTES;
+  const memoryPages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({
+    initial: memoryPages,
+    maximum: memoryPages,
+  });
+};
+
+const verifyMerkleProofMemory = (proofLen: number): WebAssembly.Memory => {
+  const memoryLen = proofLen + 5 * crypto_hash_sha512_BYTES;
+  const memoryPages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({
+    initial: memoryPages,
+    maximum: memoryPages,
+  });
+};
+
 export default {
   newKeyPairMemory,
   keyPairFromSeedMemory,
@@ -139,4 +169,7 @@ export default {
   verifyMemory,
   encryptAsymmetricMemory,
   decryptAsymmetricMemory,
+  getMerkleRootMemory,
+  getMerkleProofMemory,
+  verifyMerkleProofMemory,
 };

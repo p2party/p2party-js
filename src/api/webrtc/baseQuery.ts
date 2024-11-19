@@ -1,5 +1,6 @@
-import connectToPeerHelper from "../../utils/connectToPeerHelper";
-import openChannelHelper from "../../utils/openChannelHelper";
+import { handleOpenChannel } from "../../handlers/handleOpenChannel";
+import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
+
 import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -47,13 +48,13 @@ const webrtcBaseQuery: BaseQueryFn<
     );
 
     if (connectionIndex === -1) {
-      const epc = await connectToPeerHelper(
+      const epc = await handleConnectToPeer(
         { peerId, peerPublicKey, roomId, initiator, rtcConfig },
         api,
       );
 
       epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await openChannelHelper(
+        await handleOpenChannel(
           { channel: e.channel, epc, dataChannels, encryptionModule },
           api,
         );
@@ -62,12 +63,12 @@ const webrtcBaseQuery: BaseQueryFn<
       peerConnections.push(epc);
 
       if (initiator) {
-        await openChannelHelper(
+        await handleOpenChannel(
           { channel: "signaling", epc, dataChannels, encryptionModule },
           api,
         );
 
-        await openChannelHelper(
+        await handleOpenChannel(
           { channel: "main", epc, dataChannels, encryptionModule },
           api,
         );

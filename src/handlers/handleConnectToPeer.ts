@@ -1,10 +1,10 @@
+import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
+
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
 import { setMakingOffer } from "../reducers/makingOfferSlice";
 import { setPeer } from "../reducers/roomSlice";
-
-import { handleQueuedIceCandidates } from "../handlers/handleQueuedIceCandidates";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -19,7 +19,7 @@ import type {
 } from "../utils/interfaces";
 import { isUUID } from "class-validator";
 
-const connectToPeerHelper = async (
+export const handleConnectToPeer = async (
   {
     peerId,
     peerPublicKey,
@@ -36,18 +36,24 @@ const connectToPeerHelper = async (
       if (!initiator) initiator = true;
       if (!rtcConfig)
         rtcConfig = {
+          iceTransportPolicy: "all",
           iceServers: [
-            {
-              urls: [
-                "stun:stun.l.google.com:19302",
-                "stun:stun1.l.google.com:19302",
-              ],
-            },
+            // {
+            //   urls: [
+            //     "turn:localhost:3478"
+            //   ]
+            // }
+            // {
+            //   urls: [
+            //     "stun:stun.l.google.com:19302",
+            //     "stun:stun1.l.google.com:19302",
+            //   ],
+            // },
           ],
         };
 
       if (initiator)
-        console.log(`You have initiated a peer connection with ${peerId}.`);
+        console.log(`You are initiating a peer connection with ${peerId}.`);
 
       if (!isUUID(peerId)) reject(new Error("PeerId is not a valid uuidv4"));
       // if (peerPublicKey.length !== 1100)
@@ -60,57 +66,53 @@ const connectToPeerHelper = async (
       epc.withPeerPublicKey = peerPublicKey;
       epc.iceCandidates = [] as RTCIceCandidate[];
 
-      api.dispatch(setMakingOffer({ withPeerId: peerId, makingOffer: false }));
+      // api.dispatch(setMakingOffer({ withPeerId: peerId, makingOffer: false }));
 
       epc.onnegotiationneeded = async () => {
-        try {
-          const { makingOffer } = api.getState() as State;
-          const offerIndex = makingOffer.findIndex(
-            (o) => o.withPeerId === epc.withPeerId,
-          );
-          const offering =
-            offerIndex > -1 ? makingOffer[offerIndex].makingOffer : false;
-          if (epc.signalingState !== "stable" || offering) return; // Don't initiate renegotiation if already negotiating or not stable
+        const { makingOffer } = api.getState() as State;
+        const offerIndex = makingOffer.findIndex(
+          (o) => o.withPeerId === epc.withPeerId,
+        );
+        const offering =
+          offerIndex > -1 ? makingOffer[offerIndex].makingOffer : false;
+        if (epc.signalingState !== "stable" || offering) return; // Don't initiate renegotiation if already negotiating or not stable
 
-          if (initiator) {
-            try {
+        if (initiator) {
+          try {
+            api.dispatch(
+              setMakingOffer({ withPeerId: peerId, makingOffer: true }),
+            );
+
+            const offer = await epc.createOffer(); // { iceRestart: true });
+            if (offer) {
+              await epc.setLocalDescription(offer);
               api.dispatch(
-                setMakingOffer({ withPeerId: peerId, makingOffer: true }),
+                signalingServerApi.endpoints.sendMessage.initiate({
+                  content: {
+                    type: "description",
+                    description: offer,
+                    fromPeerId: keyPair.peerId,
+                    fromPeerPublicKey: keyPair.publicKey,
+                    toPeerId: peerId,
+                    roomId,
+                  } as WebSocketMessageDescriptionSend,
+                }),
               );
 
-              await epc.setLocalDescription();
-              const offer = epc.localDescription;
-              if (offer) {
-                api.dispatch(
-                  signalingServerApi.endpoints.sendMessage.initiate({
-                    content: {
-                      type: "description",
-                      description: offer,
-                      fromPeerId: keyPair.peerId,
-                      fromPeerPublicKey: keyPair.publicKey,
-                      toPeerId: peerId,
-                      roomId,
-                    } as WebSocketMessageDescriptionSend,
-                  }),
-                );
-
-                console.log(
-                  `Negotiation was needed with ${peerId} and you sent a description ${offer.type}.`,
-                );
-              }
-            } catch (error) {
-              console.error(error);
-              api.dispatch(
-                setMakingOffer({ withPeerId: peerId, makingOffer: false }),
-              );
-            } finally {
-              api.dispatch(
-                setMakingOffer({ withPeerId: peerId, makingOffer: false }),
+              console.log(
+                `Negotiation was needed with ${peerId} and you sent a description ${offer.type}.`,
               );
             }
+          } catch (error) {
+            console.error(error);
+            api.dispatch(
+              setMakingOffer({ withPeerId: peerId, makingOffer: false }),
+            );
+          } finally {
+            api.dispatch(
+              setMakingOffer({ withPeerId: peerId, makingOffer: false }),
+            );
           }
-        } catch (err) {
-          console.error(err);
         }
       };
 
@@ -133,6 +135,7 @@ const connectToPeerHelper = async (
       };
 
       epc.onicecandidateerror = (e) => {
+        epc.restartIce();
         console.error(`ICE candidate error with ${peerId}`);
         console.error(e);
       };
@@ -200,5 +203,3 @@ const connectToPeerHelper = async (
     }
   });
 };
-
-export default connectToPeerHelper;

@@ -1,10 +1,8 @@
-import { hexToUint8, uint8ToHex } from "./hexString";
+import { handleSendMessage } from "./handleSendMessage";
 
 import webrtcApi from "../api/webrtc";
 
-import { setChannel, setMessage } from "../reducers/roomSlice";
-
-import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
+import { setChannel } from "../reducers/roomSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -21,7 +19,7 @@ export interface OpenChannelHelperParams {
   encryptionModule: LibCrypto;
 }
 
-const openChannelHelper = async (
+export const handleOpenChannel = async (
   { channel, epc, dataChannels, encryptionModule }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
@@ -30,7 +28,13 @@ const openChannelHelper = async (
       const { keyPair } = api.getState() as State;
 
       const dataChannel =
-        typeof channel === "string" ? epc.createDataChannel(channel) : channel;
+        typeof channel === "string"
+          ? epc.createDataChannel(channel) // , {
+          : //   ordered: true,
+            //   maxRetransmits: 0,
+            // })
+            channel;
+      dataChannel.bufferedAmountLowThreshold = 64 * 1024; // 64kb
       const label = typeof channel === "string" ? channel : channel.label;
       const extChannel = dataChannel as IRTCDataChannel;
       extChannel.withPeerId = epc.withPeerId;
@@ -62,15 +66,13 @@ const openChannelHelper = async (
       };
 
       extChannel.onmessage = (e) => {
-        if (typeof e.data === "string" && e.data.length > 0) {
-          api.dispatch(
-            webrtcApi.endpoints.message.initiate({
-              message: e.data,
-              fromPeerId: epc.withPeerId,
-              label: extChannel.label,
-            }),
-          );
-        }
+        api.dispatch(
+          webrtcApi.endpoints.message.initiate({
+            data: e.data,
+            fromPeerId: epc.withPeerId,
+            label: extChannel.label,
+          }),
+        );
       };
 
       extChannel.onopen = async () => {
@@ -82,36 +84,15 @@ const openChannelHelper = async (
 
         api.dispatch(setChannel({ label, peerId: extChannel.withPeerId }));
 
-        const message = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
+        const msg = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
 
-        const peerPublicKeyHex = epc.withPeerPublicKey;
-
-        const receiverPublicKey = hexToUint8(peerPublicKeyHex);
-        const senderSecretKey = hexToUint8(keyPair.secretKey);
-
-        const randomData = window.crypto.getRandomValues(new Uint8Array(16));
-        const messageEncoded = new TextEncoder().encode(message);
-        const encryptedMessage = await encryptAsymmetric(
-          messageEncoded,
-          receiverPublicKey,
-          senderSecretKey,
-          randomData,
+        await handleSendMessage(
+          msg,
+          [epc],
+          [extChannel],
           encryptionModule,
-        );
-
-        const encryptedMessageHex =
-          uint8ToHex(encryptedMessage) + "-" + uint8ToHex(randomData);
-
-        extChannel.send(encryptedMessageHex);
-
-        api.dispatch(
-          setMessage({
-            id: window.crypto.randomUUID(),
-            message,
-            fromPeerId: keyPair.peerId,
-            channelLabel: label,
-            timestamp: Date.now(),
-          }),
+          api,
+          label,
         );
       };
 
@@ -121,5 +102,3 @@ const openChannelHelper = async (
     }
   });
 };
-
-export default openChannelHelper;

@@ -1,19 +1,33 @@
 import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
+import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
 
 import webrtcApi from "../api/webrtc";
 
 // import { exportPublicKeyToHex } from "../utils/exportPEMKeys";
 // import { importPublicKey } from "../utils/importPEMKeys";
 
-import { setRoom } from "../reducers/roomSlice";
+import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId } from "../reducers/keyPairSlice";
 // import {
 //   setDescription,
 //   setCandidate,
 //   // setPeer
 // } from "../reducers/peersSlice";
+
+import { hexToUint8Array } from "../utils/uint8array";
+import {
+  crypto_hash_sha512_BYTES,
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  crypto_box_poly1305_AUTHTAGBYTES,
+} from "../cryptography/interfaces";
+
+import libcrypto from "../cryptography/libcrypto";
+import cryptoMemory from "../cryptography/memory";
+
+import signalingServerApi from "../api/signalingServerApi";
+import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -26,8 +40,27 @@ import type {
   WebSocketMessageSuccessfulChallenge,
   WebSocketMessageError,
   WebSocketMessagePingRequest,
+  WebSocketMessagePeerConnectionResponse,
+  WebSocketMessageMessageSendResponse,
 } from "../utils/interfaces";
-import signalingServerApi from "../api/signalingServerApi";
+
+export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
+export const messageLen =
+  rtcDataChannelMessageLimit -
+  crypto_hash_sha512_BYTES - // merkle root
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
+  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
+export const encryptedLen =
+  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
+const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
+  messageLen,
+  crypto_hash_sha512_BYTES, // additional data is the merkle root
+);
+
+const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
+  64 * 1024,
+  crypto_hash_sha512_BYTES, // additional data is the merkle root
+);
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -37,7 +70,7 @@ const handleWebSocketMessage = async (
   try {
     if (event.data === "PING") return ws.send("PONG");
 
-    console.log(event.data);
+    // console.log(event.data);
 
     const message:
       | WebSocketMessagePingRequest
@@ -47,7 +80,9 @@ const handleWebSocketMessage = async (
       | WebSocketMessageCandidateReceive
       | WebSocketMessagePeersResponse
       | WebSocketMessageSuccessfulChallenge
-      | WebSocketMessageError = JSON.parse(event.data);
+      | WebSocketMessageError
+      | WebSocketMessagePeerConnectionResponse
+      | WebSocketMessageMessageSendResponse = JSON.parse(event.data);
 
     const { keyPair, room } = api.getState() as State;
 
@@ -130,14 +165,22 @@ const handleWebSocketMessage = async (
             continue;
 
           api.dispatch(
-            webrtcApi.endpoints.connectWithPeer.initiate({
+            signalingServerApi.endpoints.connectWithPeer.initiate({
               roomId: message.roomId,
               peerId: message.peers[i].id,
               peerPublicKey: message.peers[i].publicKey,
-              initiator: true,
-              rtcConfig: room.rtcConfig,
             }),
           );
+
+          // api.dispatch(
+          //   webrtcApi.endpoints.connectWithPeer.initiate({
+          //     roomId: message.roomId,
+          //     peerId: message.peers[i].id,
+          //     peerPublicKey: message.peers[i].publicKey,
+          //     initiator: true,
+          //     rtcConfig: room.rtcConfig,
+          //   }),
+          // );
         }
 
         break;
@@ -181,6 +224,78 @@ const handleWebSocketMessage = async (
         //     candidate: message.candidate,
         //   }),
         // );
+
+        break;
+      }
+
+      case "message": {
+        const decryptionModule = await libcrypto({
+          wasmMemory: decryptionWasmMemory,
+        });
+
+        const peerIndex = room.peers.findIndex(
+          (p) => p.peerId === message.fromPeerId,
+        );
+        if (peerIndex === -1)
+          throw new Error("Received a message from unknown peer");
+
+        const peerPublicKeyHex = room.peers[peerIndex].peerPublicKey;
+        const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
+        const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+        await handleReceiveMessage(
+          hexToUint8Array(message.message),
+          senderPublicKey,
+          receiverSecretKey,
+          decryptionModule,
+          message.label,
+          message.fromPeerId,
+          api,
+        );
+
+        break;
+      }
+
+      case "connection": {
+        if (
+          isUUID(keyPair.peerId) &&
+          isHexadecimal(keyPair.challenge) &&
+          isHexadecimal(keyPair.signature) &&
+          // keyPair.signature.length === 1024 &&
+          keyPair.signature.length === 128 &&
+          keyPair.challenge.length === 64 &&
+          isUUID(message.fromPeerId) &&
+          message.fromPeerPublicKey.length === 64 &&
+          isUUID(message.roomId)
+        ) {
+          api.dispatch(
+            setPeer({
+              peerId: message.fromPeerId,
+              peerPublicKey: message.fromPeerPublicKey,
+            }),
+          );
+
+          const encryptionModule = await libcrypto({
+            wasmMemory: encryptionWasmMemory,
+          });
+
+          const CHANNELS_LEN = message.labels.length;
+          for (let i = 0; i < CHANNELS_LEN; i++) {
+            api.dispatch(
+              setChannel({
+                label: message.labels[i],
+                peerId: message.fromPeerId,
+              }),
+            );
+
+            const data = `Connected with ${keyPair.peerId} on channel ${message.labels[i]}`;
+            await handleSendMessageWebsocket(
+              data as string | File,
+              encryptionModule,
+              api,
+              message.labels[i],
+            );
+          }
+        }
 
         break;
       }

@@ -1,7 +1,6 @@
 export interface IRTCPeerConnection extends RTCPeerConnection {
   withPeerId: string;
   withPeerPublicKey: string;
-  // polite: boolean;
   iceCandidates: RTCIceCandidate[];
 }
 
@@ -50,7 +49,7 @@ export interface RTCOpenChannelParams {
 }
 
 export interface RTCChannelMessageParams {
-  message: string;
+  data: string | File | Blob | ArrayBuffer;
   fromPeerId: string;
   label?: string;
 }

@@ -2,14 +2,27 @@ import { createApi } from "@reduxjs/toolkit/query";
 import { isUUID, isHexadecimal } from "class-validator";
 
 import { setKeyPair } from "../reducers/keyPairSlice";
+import {
+  setPeer,
+  setChannel,
+  setConnectingToPeers,
+} from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
-import { setConnectingToPeers } from "../reducers/roomSlice";
+import { handleSendMessageWebsocket } from "../handlers/handleSendMessageWebsocket";
 
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
-import { uint8ToHex } from "../utils/hexString";
+import { uint8ArrayToHex } from "../utils/uint8array";
 
 import { newKeyPair } from "../cryptography/ed25519";
+import libcrypto from "../cryptography/libcrypto";
+
+import cryptoMemory from "../cryptography/memory";
+import {
+  crypto_hash_sha512_BYTES,
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  crypto_box_poly1305_AUTHTAGBYTES,
+} from "../cryptography/interfaces";
 
 // import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
@@ -22,6 +35,10 @@ import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessagePeersRequest,
   WebSocketMessagePongResponse,
+  WebSocketMessageMessageSendRequest,
+  WebSocketPeerConnectionParams,
+  WebSocketSendMessageToPeerParams,
+  WebSocketMessagePeerConnectionRequest,
 } from "../utils/interfaces";
 
 export interface WebSocketParams {
@@ -35,8 +52,23 @@ export interface WebSocketMessage {
     | WebSocketMessageDescriptionSend
     | WebSocketMessageChallengeResponse
     | WebSocketMessageRoomIdRequest
-    | WebSocketMessagePeersRequest;
+    | WebSocketMessagePeersRequest
+    | WebSocketMessageMessageSendRequest;
 }
+
+export const rtcDataChannelMessageLimit = 64 * 1024;
+export const messageLen =
+  rtcDataChannelMessageLimit -
+  crypto_hash_sha512_BYTES - // merkle root
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
+  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
+export const encryptedLen =
+  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
+
+const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
+  messageLen,
+  crypto_hash_sha512_BYTES, // additional data is the merkle root
+);
 
 const waitForSocketConnection = (ws: WebSocket, callback: () => any) => {
   setTimeout(() => {
@@ -88,8 +120,8 @@ const websocketBaseQuery: BaseQueryFn<
       // api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
 
       const k = await newKeyPair();
-      publicKey = uint8ToHex(k.publicKey);
-      const secretKey = uint8ToHex(k.secretKey);
+      publicKey = uint8ArrayToHex(k.publicKey);
+      const secretKey = uint8ArrayToHex(k.secretKey);
 
       api.dispatch(setKeyPair({ publicKey, secretKey }));
     } else {
@@ -221,8 +253,104 @@ const websocketSendMessageQuery: BaseQueryFn<
     ) {
       waitForSocketConnection(ws, () => {
         ws!.send(JSON.stringify(message.content));
-        console.log(message.content);
       });
+    }
+
+    return { data: undefined };
+  } else {
+    console.warn("WebSocket is not open");
+
+    return { data: undefined };
+  }
+};
+
+const websocketConnectWithPeerQuery: BaseQueryFn<
+  WebSocketPeerConnectionParams,
+  void,
+  unknown
+> = async ({ peerId, peerPublicKey, roomId }, api) => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const { keyPair } = api.getState() as State;
+
+    if (
+      isUUID(keyPair.peerId) &&
+      isHexadecimal(keyPair.challenge) &&
+      isHexadecimal(keyPair.signature) &&
+      // keyPair.signature.length === 1024 &&
+      keyPair.signature.length === 128 &&
+      keyPair.challenge.length === 64 &&
+      isUUID(peerId) &&
+      peerPublicKey.length === 64 &&
+      isUUID(roomId)
+    ) {
+      api.dispatch(setPeer({ peerId, peerPublicKey }));
+      const labels: string[] = [];
+      api.dispatch(setChannel({ label: "main", peerId }));
+      labels.push("main");
+      api.dispatch(setChannel({ label: "signaling", peerId }));
+      labels.push("signaling");
+
+      waitForSocketConnection(ws, () => {
+        ws!.send(
+          JSON.stringify({
+            type: "connection",
+            roomId,
+            fromPeerId: keyPair.peerId,
+            toPeerId: peerId,
+            labels,
+          } as WebSocketMessagePeerConnectionRequest),
+        );
+      });
+
+      const CHANNELS_LEN = labels.length;
+      const encryptionModule = await libcrypto({
+        wasmMemory: encryptionWasmMemory,
+      });
+      for (let i = 0; i < CHANNELS_LEN; i++) {
+        const data = `Connected with ${keyPair.peerId} on channel ${labels[i]}`;
+        await handleSendMessageWebsocket(
+          data as string | File,
+          encryptionModule,
+          api,
+          labels[i],
+        );
+      }
+    }
+
+    return { data: undefined };
+  } else {
+    console.warn("WebSocket is not open");
+
+    return { data: undefined };
+  }
+};
+
+const websocketSendMessageToPeerQuery: BaseQueryFn<
+  WebSocketSendMessageToPeerParams,
+  void,
+  unknown
+> = async ({ data, toChannel }, api) => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const { keyPair } = api.getState() as State;
+
+    if (
+      isUUID(keyPair.peerId) &&
+      isHexadecimal(keyPair.challenge) &&
+      isHexadecimal(keyPair.signature) &&
+      // keyPair.signature.length === 1024 &&
+      keyPair.signature.length === 128 &&
+      keyPair.challenge.length === 64
+    ) {
+      const encryptionModule = await libcrypto({
+        wasmMemory: encryptionWasmMemory,
+      });
+
+      await handleSendMessageWebsocket(
+        data as string | File,
+        encryptionModule,
+        api,
+        toChannel,
+      );
     }
 
     return { data: undefined };
@@ -248,6 +376,14 @@ const signalingServerApi = createApi({
     sendMessage: builder.mutation<void, WebSocketMessage>({
       queryFn: websocketSendMessageQuery,
     }),
+    connectWithPeer: builder.mutation<void, WebSocketPeerConnectionParams>({
+      queryFn: websocketConnectWithPeerQuery,
+    }),
+    sendMessageToPeer: builder.mutation<void, WebSocketSendMessageToPeerParams>(
+      {
+        queryFn: websocketSendMessageToPeerQuery,
+      },
+    ),
   }),
 });
 

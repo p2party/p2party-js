@@ -8,16 +8,18 @@ export const randomNumberInRange = (
 ): Promise<number> => {
   return new Promise((resolve, reject) => {
     try {
+      if (min === max) resolve(min);
+
       const RANGE = max - min;
       const BYTES_NEEDED = Math.ceil(Math.log2(RANGE) / 8);
       const MAX_RANGE = Math.pow(Math.pow(2, 8), BYTES_NEEDED);
       const EXTENDED_RANGE = Math.floor(MAX_RANGE / RANGE) * RANGE;
 
-      const randomBytes = new Uint8Array(BYTES_NEEDED);
+      let randomBytes = new Uint8Array(BYTES_NEEDED);
 
       let randomInteger = EXTENDED_RANGE;
       while (randomInteger >= EXTENDED_RANGE) {
-        window.crypto.getRandomValues(randomBytes);
+        randomBytes = window.crypto.getRandomValues(randomBytes);
 
         randomInteger = 0;
         for (let i = 0; i < BYTES_NEEDED; i++) {
@@ -54,8 +56,7 @@ export const randomBytesToString = (
 
       let outputString = "";
 
-      const randomBytes = new Uint8Array(len);
-      window.crypto.getRandomValues(randomBytes);
+      const randomBytes = window.crypto.getRandomValues(new Uint8Array(len));
 
       for (let i = 0; i < len; i++) {
         outputString += chars[randomBytes[i] % chars.length];
@@ -92,4 +93,30 @@ export const generateRandomRoomUrl = async (
   } catch (error) {
     throw error;
   }
+};
+
+/**
+ * @function
+ * Fisher-Yates shuffle of array.
+ *
+ * @param array: The array to randomly shuffle.
+ *
+ * @returns Promise<T[]>
+ */
+export const fisherYatesShuffle = async <T>(array: T[]): Promise<T[]> => {
+  const n = array.length;
+
+  // If array has <2 items, there is nothing to do
+  if (n < 2) return array;
+
+  const shuffled = [...array];
+
+  for (let i = n - 1; i > 0; i--) {
+    const j = await randomNumberInRange(0, i + 1);
+    const temp = shuffled[i];
+    shuffled[i] = shuffled[j];
+    shuffled[j] = temp;
+  }
+
+  return shuffled;
 };

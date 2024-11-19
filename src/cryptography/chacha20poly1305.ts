@@ -372,25 +372,11 @@ export const decryptAsymmetric = async (
       cryptoModule._free(ptr4);
 
       throw new Error(
-        "Could not allocate memory for the ephemeral public key array.",
-      );
-    }
-
-    case -2: {
-      cryptoModule._free(ptr4);
-
-      throw new Error("Could not allocate memory for the nonce helper array.");
-    }
-
-    case -3: {
-      cryptoModule._free(ptr4);
-
-      throw new Error(
         "Could not allocate memory for the ed25519 converted to x25519 public key array.",
       );
     }
 
-    case -4: {
+    case -2: {
       cryptoModule._free(ptr4);
 
       throw new Error(
@@ -398,34 +384,50 @@ export const decryptAsymmetric = async (
       );
     }
 
+    case -3: {
+      cryptoModule._free(ptr4);
+
+      throw new Error(
+        "Could not convert receiver ed25519 secret key to x25519.",
+      );
+    }
+
+    case -4: {
+      cryptoModule._free(ptr4);
+
+      throw new Error(
+        "Could not allocate memory for the ed25519 converted to x25519 sender public key array.",
+      );
+    }
+
     case -5: {
       cryptoModule._free(ptr4);
 
-      throw new Error("Could not allocate memory for the shared secret array.");
+      throw new Error("Could not convert sender ed25519 public key to x25519.");
     }
 
     case -6: {
       cryptoModule._free(ptr4);
 
-      throw new Error("Could not successfully generate a shared secret.");
+      throw new Error("Could not allocate memory for the shared secret array.");
     }
 
     case -7: {
       cryptoModule._free(ptr4);
 
-      throw new Error("Could not allocate memory for the ciphertext array.");
+      throw new Error("Could not successfully generate a shared secret.");
     }
 
     case -8: {
       cryptoModule._free(ptr4);
 
-      throw new Error("Unsuccessful decryption attempt");
+      throw new Error("Could not allocate memory for the ciphertext array.");
     }
 
     default: {
       cryptoModule._free(ptr4);
 
-      throw new Error("Unexpected error occured");
+      throw new Error("Unsuccessful decryption attempt");
     }
   }
 };

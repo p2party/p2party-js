@@ -1,6 +1,6 @@
 import { setPeerData } from "../reducers/keyPairSlice";
 
-import { hexToUint8 } from "../utils/hexString";
+import { hexToUint8Array } from "../utils/uint8array";
 
 import { sign } from "../cryptography/ed25519";
 
@@ -14,7 +14,7 @@ const handleChallenge = async (
   store: MiddlewareAPI<Dispatch<UnknownAction>, any>,
 ) => {
   try {
-    const secretKey = hexToUint8(keyPair.secretKey);
+    const secretKey = hexToUint8Array(keyPair.secretKey);
 
     const nonce = Uint8Array.from(
       challenge.match(/.{1,2}/g)!.map((byte: string) => parseInt(byte, 16)),

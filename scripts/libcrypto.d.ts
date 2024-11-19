@@ -41,7 +41,6 @@ export interface LibCrypto extends EmscriptenModule {
     additional_data: number, // Uint8Array,
     encrypted: number, // Uint8Array,
   ): number;
-
   _decrypt_chachapoly_asymmetric(
     ENCRYPTED_LEN: number,
     encrypted_data: number, // Uint8Array,
@@ -50,6 +49,30 @@ export interface LibCrypto extends EmscriptenModule {
     ADDITIONAL_DATA_LEN: number,
     additional_data: number, // Uint8Array,
     data: number, // Uint8Array,
+  ): number;
+
+  _get_merkle_root(
+    LEAVES_LEN: number,
+    leaves_hashed: number, // Uint8Array.byteOffset
+    root: number, // Uint8Array.byteOffset
+  ): number;
+  _get_merkle_proof(
+    LEAVES_LEN: number,
+    leaves_hashed: number, // Uint8Array.byteOffset
+    element_hash: number, // Uint8Array.byteOffset
+    proof: number, // Uint8Array.byteOffset
+  ): number;
+  _get_merkle_root_from_proof(
+    PROOF_LEN: number,
+    element_hash: number, // Uint8Array.byteOffset
+    proof: number, // Uint8Array.byteOffset
+    root: number, // Uint8Array.byteOffset
+  ): number;
+  _verify_merkle_proof(
+    PROOF_LEN: number,
+    element_hash: number, // Uint8Array.byteOffset
+    root: number, // Uint8Array.byteOffset
+    proof: number, // Uint8Array.byteOffset
   ): number;
 }
 

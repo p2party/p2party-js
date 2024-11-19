@@ -88,6 +88,50 @@ export interface WebSocketMessagePeersResponse {
   peers: RoomPeer[];
 }
 
+export interface WebSocketMessagePeerConnectionRequest {
+  type: "connection";
+  roomId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  labels: string[];
+}
+
+export interface WebSocketMessagePeerConnectionResponse {
+  type: "connection";
+  roomId: string;
+  fromPeerId: string;
+  fromPeerPublicKey: string;
+  labels: string[];
+}
+
+export interface WebSocketMessageMessageSendRequest {
+  type: "message";
+  message: string;
+  roomId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  label: string;
+}
+
+export interface WebSocketMessageMessageSendResponse {
+  type: "message";
+  message: string;
+  roomId: string;
+  fromPeerId: string;
+  label: string;
+}
+
+export interface WebSocketPeerConnectionParams {
+  peerId: string;
+  peerPublicKey: string;
+  roomId: string;
+}
+
+export interface WebSocketSendMessageToPeerParams {
+  data: string | File;
+  toChannel?: string;
+}
+
 export interface WebSocketMessageError {
   type: "error";
   fromAction:

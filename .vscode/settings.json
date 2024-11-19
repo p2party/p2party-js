@@ -1,0 +1,5 @@
+{
+  "workbench.cloudChanges.autoResume": "off",
+  "workbench.cloudChanges.continueOn": "off",
+  "typescript.disableAutomaticTypeAcquisition": true
+}

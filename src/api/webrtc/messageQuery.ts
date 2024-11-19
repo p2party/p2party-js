@@ -1,14 +1,11 @@
 import { isUUID } from "class-validator";
 
-import { setMessage } from "../../reducers/roomSlice";
+import { handleSendMessage } from "../../handlers/handleSendMessage";
+import { handleReceiveMessage } from "../../handlers/handleReceiveMessage";
 
 import libcrypto from "../../cryptography/libcrypto";
-import {
-  encryptAsymmetric,
-  decryptAsymmetric,
-} from "../../cryptography/chacha20poly1305";
 
-import { hexToUint8, uint8ToHex } from "../../utils/hexString";
+import { hexToUint8Array } from "../../utils/uint8array";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -32,7 +29,7 @@ const webrtcMessageQuery: BaseQueryFn<
   unknown
 > = async (
   {
-    message,
+    data,
     fromPeerId,
     label,
     peerConnections,
@@ -51,92 +48,28 @@ const webrtcMessageQuery: BaseQueryFn<
         wasmMemory: encryptionWasmMemory,
       });
 
-      if (label) {
-        const channelIndex = dataChannels.findIndex((c) => c.label === label);
+      await handleSendMessage(
+        data as string | File,
+        peerConnections,
+        dataChannels,
+        encryptionModule,
+        api,
+        label,
+      );
 
-        if (channelIndex === -1) throw new Error("No channel with this label");
-
-        const CHANNELS_LEN = dataChannels.length;
-        for (let i = channelIndex; i < CHANNELS_LEN; i++) {
-          if (label && dataChannels[i].label !== label) continue;
-
-          const peerId = dataChannels[i].withPeerId;
-          const peerIndex = peerConnections.findIndex(
-            (p) => p.withPeerId === peerId,
-          );
-          if (peerIndex === -1) continue;
-
-          const peerPublicKeyHex = peerConnections[peerIndex].withPeerPublicKey;
-
-          const receiverPublicKey = hexToUint8(peerPublicKeyHex);
-          const senderSecretKey = hexToUint8(keyPair.secretKey);
-
-          const randomData = window.crypto.getRandomValues(new Uint8Array(16));
-          const messageEncoded = new TextEncoder().encode(message);
-          const encryptedMessage = await encryptAsymmetric(
-            messageEncoded,
-            receiverPublicKey,
-            senderSecretKey,
-            randomData,
-            encryptionModule,
-          );
-
-          const encryptedMessageHex =
-            uint8ToHex(encryptedMessage) + "-" + uint8ToHex(randomData);
-
-          dataChannels[i].send(encryptedMessageHex);
-
-          api.dispatch(
-            setMessage({
-              id: window.crypto.randomUUID(),
-              message,
-              fromPeerId,
-              // toPeerId: dataChannels[i].withPeerId,
-              channelLabel: dataChannels[i].label,
-              timestamp: Date.now(),
-            }),
-          );
-        }
-      } else {
-        const CHANNELS_LEN = dataChannels.length;
-        for (let i = 0; i < CHANNELS_LEN; i++) {
-          const peerId = dataChannels[i].withPeerId;
-          const peerIndex = peerConnections.findIndex(
-            (p) => p.withPeerId === peerId,
-          );
-          if (peerIndex === -1) continue;
-
-          const peerPublicKeyHex = peerConnections[peerIndex].withPeerPublicKey;
-
-          const receiverPublicKey = hexToUint8(peerPublicKeyHex);
-          const senderSecretKey = hexToUint8(keyPair.secretKey);
-
-          const randomData = window.crypto.getRandomValues(new Uint8Array(16));
-          const messageEncoded = new TextEncoder().encode(message);
-          const encryptedMessage = await encryptAsymmetric(
-            messageEncoded,
-            receiverPublicKey,
-            senderSecretKey,
-            randomData,
-            encryptionModule,
-          );
-
-          const encryptedMessageHex =
-            uint8ToHex(encryptedMessage) + "-" + uint8ToHex(randomData);
-
-          dataChannels[i].send(encryptedMessageHex);
-
-          api.dispatch(
-            setMessage({
-              id: window.crypto.randomUUID(),
-              message,
-              fromPeerId,
-              channelLabel: dataChannels[i].label,
-              timestamp: Date.now(),
-            }),
-          );
-        }
-      }
+      // const channelsLen = channels.length;
+      // for (let i = 0; i < channelsLen; i++) {
+      //   api.dispatch(
+      //     setMessage({
+      //       id: window.crypto.randomUUID(),
+      //       message,
+      //       fromPeerId,
+      //       // toPeerId: dataChannels[i].withPeerId,
+      //       channelLabel: channels[i],
+      //       timestamp: Date.now(),
+      //     }),
+      //   );
+      // }
     } else {
       const decryptionModule = await libcrypto({
         wasmMemory: decryptionWasmMemory,
@@ -152,31 +85,29 @@ const webrtcMessageQuery: BaseQueryFn<
 
       const peerPublicKeyHex = peerConnections[peerIndex].withPeerPublicKey;
 
-      const senderPublicKey = hexToUint8(peerPublicKeyHex);
-      const receiverSecretKey = hexToUint8(keyPair.secretKey);
+      const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
+      const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
 
-      const splitIndex = message.length - 32;
-      const encryptedMessage = hexToUint8(message.slice(0, splitIndex - 1));
-      const randomData = hexToUint8(message.slice(splitIndex));
-
-      const decryptedMessage = await decryptAsymmetric(
-        encryptedMessage,
+      await handleReceiveMessage(
+        await (data as Blob).arrayBuffer(),
         senderPublicKey,
         receiverSecretKey,
-        randomData,
         decryptionModule,
+        label ?? "",
+        fromPeerId,
+        api,
       );
 
-      api.dispatch(
-        setMessage({
-          id: window.crypto.randomUUID(),
-          message: new TextDecoder().decode(decryptedMessage),
-          fromPeerId,
-          // toPeerId: keyPair.peerId,
-          channelLabel: label ?? "",
-          timestamp: Date.now(),
-        }),
-      );
+      // api.dispatch(
+      //   setMessage({
+      //     id: window.crypto.randomUUID(),
+      //     message: decryptedMessage,
+      //     fromPeerId,
+      //     // toPeerId: keyPair.peerId,
+      //     channelLabel: label ?? "",
+      //     timestamp: Date.now(),
+      //   }),
+      // );
     }
 
     return { data: undefined };

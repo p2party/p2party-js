@@ -138,6 +138,10 @@ _sign,\
 _verify,\
 _encrypt_chachapoly_asymmetric,\
 _decrypt_chachapoly_asymmetric,\
+_get_merkle_proof,\
+_get_merkle_root,\
+_get_merkle_root_from_proof,\
+_verify_merkle_proof,\
 _keypair_from_seed,\
 _keypair_from_secret_key \
 -s EXPORT_NAME=libcrypto \

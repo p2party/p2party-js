@@ -13,6 +13,12 @@ import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChann
 
 import cryptoMemory from "../../cryptography/memory";
 
+import {
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  crypto_box_poly1305_AUTHTAGBYTES,
+  crypto_hash_sha512_BYTES,
+} from "../../cryptography/interfaces";
+
 import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
@@ -32,14 +38,23 @@ const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
 
+export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
+export const messageLen =
+  rtcDataChannelMessageLimit -
+  crypto_hash_sha512_BYTES - // merkle root
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
+  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
+export const encryptedLen =
+  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
+
 const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-  65508, // limit from RTCDataChannel is 64kb
-  1024 * 1024, // self-imposed limit of 1mb for additional data
+  messageLen,
+  crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
 const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  65536, // limit from RTCDataChannel is 64kb
-  1024 * 1024, // self-imposed limit of 1mb for additional data
+  encryptedLen,
+  crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
 const webrtcApi = createApi({

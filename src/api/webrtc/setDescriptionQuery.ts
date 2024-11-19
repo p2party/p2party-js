@@ -1,9 +1,10 @@
 import signalingServerApi from "../signalingServerApi";
 
-import { setMakingOffer } from "../../reducers/makingOfferSlice";
+import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
+import { handleOpenChannel } from "../../handlers/handleOpenChannel";
+import { handleQueuedIceCandidates } from "../../handlers/handleQueuedIceCandidates";
 
-import connectToPeerHelper from "../../utils/connectToPeerHelper";
-import openChannelHelper from "../../utils/openChannelHelper";
+import { setMakingOffer } from "../../reducers/makingOfferSlice";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -55,7 +56,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     const epc =
       connectionIndex > -1
         ? peerConnections[connectionIndex]
-        : await connectToPeerHelper(
+        : await handleConnectToPeer(
             {
               peerId,
               peerPublicKey,
@@ -67,7 +68,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           );
 
     epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-      await openChannelHelper(
+      await handleOpenChannel(
         { channel: e.channel, epc, dataChannels, encryptionModule },
         api,
       );
@@ -141,7 +142,14 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         );
       }
     } else if (description.type === "answer") {
-      await epc.setRemoteDescription(description);
+      if (
+        epc.signalingState === "have-local-offer" ||
+        epc.signalingState === "have-remote-offer"
+      ) {
+        await epc.setRemoteDescription(description);
+      } else {
+        await handleQueuedIceCandidates(epc);
+      }
     }
 
     return { data: undefined };

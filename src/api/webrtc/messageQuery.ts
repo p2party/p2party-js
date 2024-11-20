@@ -56,25 +56,7 @@ const webrtcMessageQuery: BaseQueryFn<
         api,
         label,
       );
-
-      // const channelsLen = channels.length;
-      // for (let i = 0; i < channelsLen; i++) {
-      //   api.dispatch(
-      //     setMessage({
-      //       id: window.crypto.randomUUID(),
-      //       message,
-      //       fromPeerId,
-      //       // toPeerId: dataChannels[i].withPeerId,
-      //       channelLabel: channels[i],
-      //       timestamp: Date.now(),
-      //     }),
-      //   );
-      // }
     } else {
-      const decryptionModule = await libcrypto({
-        wasmMemory: decryptionWasmMemory,
-      });
-
       if (!label) throw new Error("Received a message without a label");
 
       const peerIndex = peerConnections.findIndex(
@@ -83,13 +65,21 @@ const webrtcMessageQuery: BaseQueryFn<
       if (peerIndex === -1)
         throw new Error("Received a message from unknown peer");
 
+      const decryptionModule = await libcrypto({
+        wasmMemory: decryptionWasmMemory,
+      });
+
       const peerPublicKeyHex = peerConnections[peerIndex].withPeerPublicKey;
 
       const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
       const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+      
+      const msg = await (data as Blob).arrayBuffer();
+      const msgUint8 = new Uint8Array(msg);
+      // const msg = hexToUint8Array(data as string);
 
       await handleReceiveMessage(
-        await (data as Blob).arrayBuffer(),
+        msgUint8,
         senderPublicKey,
         receiverSecretKey,
         decryptionModule,
@@ -97,17 +87,6 @@ const webrtcMessageQuery: BaseQueryFn<
         fromPeerId,
         api,
       );
-
-      // api.dispatch(
-      //   setMessage({
-      //     id: window.crypto.randomUUID(),
-      //     message: decryptedMessage,
-      //     fromPeerId,
-      //     // toPeerId: keyPair.peerId,
-      //     channelLabel: label ?? "",
-      //     timestamp: Date.now(),
-      //   }),
-      // );
     }
 
     return { data: undefined };

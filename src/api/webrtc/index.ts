@@ -53,7 +53,7 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
 );
 
 const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  encryptedLen,
+  100 * 64 * 1024,
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 

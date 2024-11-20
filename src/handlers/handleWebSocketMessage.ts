@@ -10,11 +10,6 @@ import webrtcApi from "../api/webrtc";
 
 import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId } from "../reducers/keyPairSlice";
-// import {
-//   setDescription,
-//   setCandidate,
-//   // setPeer
-// } from "../reducers/peersSlice";
 
 import { hexToUint8Array } from "../utils/uint8array";
 import {
@@ -164,23 +159,23 @@ const handleWebSocketMessage = async (
           )
             continue;
 
-          api.dispatch(
-            signalingServerApi.endpoints.connectWithPeer.initiate({
-              roomId: message.roomId,
-              peerId: message.peers[i].id,
-              peerPublicKey: message.peers[i].publicKey,
-            }),
-          );
-
           // api.dispatch(
-          //   webrtcApi.endpoints.connectWithPeer.initiate({
+          //   signalingServerApi.endpoints.connectWithPeer.initiate({
           //     roomId: message.roomId,
           //     peerId: message.peers[i].id,
           //     peerPublicKey: message.peers[i].publicKey,
-          //     initiator: true,
-          //     rtcConfig: room.rtcConfig,
           //   }),
           // );
+
+          api.dispatch(
+            webrtcApi.endpoints.connectWithPeer.initiate({
+              roomId: message.roomId,
+              peerId: message.peers[i].id,
+              peerPublicKey: message.peers[i].publicKey,
+              initiator: true,
+              rtcConfig: room.rtcConfig,
+            }),
+          );
         }
 
         break;
@@ -196,15 +191,6 @@ const handleWebSocketMessage = async (
           }),
         );
 
-        // api.dispatch(
-        //   setDescription({
-        //     peerId: message.fromPeerId,
-        //     peerPublicKey: message.fromPeerPublicKey,
-        //     roomId: message.roomId,
-        //     description: message.description,
-        //   }),
-        // );
-
         break;
       }
 
@@ -217,13 +203,6 @@ const handleWebSocketMessage = async (
             candidate: message.candidate,
           }),
         );
-        // api.dispatch(
-        //   setCandidate({
-        //     peerId: message.fromPeerId,
-        //     roomId: message.roomId,
-        //     candidate: message.candidate,
-        //   }),
-        // );
 
         break;
       }

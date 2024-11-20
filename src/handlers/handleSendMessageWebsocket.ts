@@ -38,6 +38,8 @@ export const handleSendMessageWebsocket = async (
   const { merkleRoot, chunks, metadata, merkleProofs } =
     await splitToChunks(data);
 
+  const merkleRootHex = uint8ArrayToHex(merkleRoot);
+
   const chunksLen = chunks.length;
   // const channels: string[] = [];
   const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
@@ -53,15 +55,9 @@ export const handleSendMessageWebsocket = async (
     const indexesRandomized = await fisherYatesShuffle(indexes);
     for (let j = 0; j < chunksLen; j++) {
       const jRandom = indexesRandomized[j];
-      // const messageEncoded = new TextEncoder().encode(message);
-
-      // if (label && channels.length === 0) channels.push(label);
-      // if (!label && !channels.includes(dataChannels[i].label))
-      //   channels.push(dataChannels[i].label);
 
       const m = deserializeMetadata(metadata[jRandom]);
       if (m.chunkStartIndex < m.chunkEndIndex) {
-        const merkleRootHex = uint8ArrayToHex(merkleRoot);
         api.dispatch(
           setMessage({
             merkleRootHex,
@@ -75,11 +71,7 @@ export const handleSendMessageWebsocket = async (
         );
 
         const db = await getDB();
-        const storedChunk = await getDBChunk(
-          merkleRootHex,
-          m.chunkIndex,
-          db,
-        );
+        const storedChunk = await getDBChunk(merkleRootHex, m.chunkIndex, db);
         if (!storedChunk) {
           const realChunk = chunks[jRandom].slice(
             m.chunkStartIndex,

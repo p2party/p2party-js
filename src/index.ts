@@ -113,22 +113,23 @@ const openChannel = async (
  * If toChannel then broadcast to all peers with that channel.
  */
 const sendMessage = (data: string | File, toChannel?: string) => {
-  // const { keyPair } = store.getState();
+  const { keyPair } = store.getState();
+
+  // dispatch(
+  //   signalingServerApi.endpoints.sendMessageToPeer.initiate({
+  //     data,
+  //     // fromPeerId: keyPair.peerId,
+  //     toChannel,
+  //   }),
+  // );
 
   dispatch(
-    signalingServerApi.endpoints.sendMessageToPeer.initiate({
+    webrtcApi.endpoints.message.initiate({
       data,
-      // fromPeerId: keyPair.peerId,
-      toChannel,
+      fromPeerId: keyPair.peerId,
+      label: toChannel,
     }),
   );
-  //   dispatch(
-  //     webrtcApi.endpoints.message.initiate({
-  //       data,
-  //       fromPeerId: keyPair.peerId,
-  //       label: toChannel,
-  //     }),
-  //   );
 };
 
 const readMessage = async (merkleRootHex: string) => {

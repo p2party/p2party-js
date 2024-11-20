@@ -10,6 +10,7 @@ import {
 } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata } from "../utils/metadata";
+import { getDB, getDBChunk, setDBChunk } from "../utils/db";
 
 import type {
   IRTCDataChannel,
@@ -39,6 +40,8 @@ export const handleSendMessage = async (
   const { merkleRoot, chunks, metadata, merkleProofs } =
     await splitToChunks(data);
 
+  const merkleRootHex = uint8ArrayToHex(merkleRoot);
+
   const chunksLen = chunks.length;
   // const channels: string[] = [];
   const CHANNELS_LEN = dataChannels.length;
@@ -55,13 +58,13 @@ export const handleSendMessage = async (
     const indexes = Array.from({ length: chunksLen }, (_, i) => i);
     const indexesRandomized = await fisherYatesShuffle(indexes);
     for (let j = 0; j < chunksLen; j++) {
-      // const messageEncoded = new TextEncoder().encode(message);
+      const jRandom = indexesRandomized[j];
 
-      const m = deserializeMetadata(metadata[j]);
+      const m = deserializeMetadata(metadata[jRandom]);
       if (m.chunkStartIndex < m.chunkEndIndex) {
         api.dispatch(
           setMessage({
-            merkleRootHex: uint8ArrayToHex(merkleRoot),
+            merkleRootHex,
             fromPeerId: keyPair.peerId,
             chunkIndex: m.chunkIndex,
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
@@ -70,14 +73,34 @@ export const handleSendMessage = async (
             channelLabel: label ?? dataChannels[channelIndex].label,
           }),
         );
+
+        const db = await getDB();
+        const storedChunk = await getDBChunk(merkleRootHex, m.chunkIndex, db);
+        if (!storedChunk) {
+          const realChunk = chunks[jRandom].slice(
+            m.chunkStartIndex,
+            m.chunkEndIndex,
+          );
+          await setDBChunk(
+            {
+              merkleRoot: merkleRootHex,
+              chunkIndex: m.chunkIndex,
+              totalSize: m.size,
+              data: uint8ArrayToHex(realChunk),
+            },
+            db,
+          );
+        }
+
+        db.close();
       }
 
-      const jRandom = indexesRandomized[j];
       const concatedUnencrypted = await concatUint8Arrays([
         metadata[jRandom],
         merkleProofs[jRandom],
         chunks[jRandom],
       ]);
+
       const encryptedMessage = await encryptAsymmetric(
         concatedUnencrypted,
         receiverPublicKey,
@@ -91,7 +114,7 @@ export const handleSendMessage = async (
         encryptedMessage,
       ]);
 
-      dataChannels[i].send(concatedEncrypted.buffer);
+      dataChannels[i].send(concatedEncrypted);
     }
 
     // // const messageEncoded = new TextEncoder().encode(message);

@@ -14,7 +14,7 @@ import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
 export const handleReceiveMessage = async (
-  message: ArrayBuffer,
+  data: Uint8Array,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
   decryptionModule: LibCrypto,
@@ -26,7 +26,6 @@ export const handleReceiveMessage = async (
     const { room } = api.getState() as State;
     const incomingMessages = room.messages;
 
-    const data = new Uint8Array(message);
     const merkleRoot = data.slice(0, crypto_hash_sha512_BYTES);
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
 

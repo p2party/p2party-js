@@ -40,7 +40,7 @@ export const uint8ArraysAreEqual = (
 export const uint8ArrayToHex = (array: Uint8Array) => {
   return [...array]
     .map((x) => x.toString(16).toLocaleLowerCase().padStart(2, "0"))
-    .join("")
+    .join("");
 };
 
 /**

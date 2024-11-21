@@ -73,11 +73,8 @@ const webrtcMessageQuery: BaseQueryFn<
 
       const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
       const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
-      
-      const msg = await (data as Blob).arrayBuffer();
-      const msgUint8 = new Uint8Array(msg);
-      // const msg = hexToUint8Array(data as string);
 
+      const msgUint8 = new Uint8Array(data as ArrayBuffer);
       await handleReceiveMessage(
         msgUint8,
         senderPublicKey,

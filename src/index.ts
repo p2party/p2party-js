@@ -5,6 +5,12 @@ import { store, dispatch } from "./store";
 import { generateRandomRoomUrl } from "./cryptography/utils";
 
 import { getDBAllChunks } from "./utils/db";
+import {
+  getFileExtension,
+  getMessageCategory,
+  getMimeType,
+} from "./utils/messageTypes";
+import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -20,7 +26,12 @@ import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
-import type { MessageType } from "./utils/messageTypes";
+import {
+  MessageCategory,
+  MessageType,
+  type MimeType,
+  type FileExtension,
+} from "./utils/messageTypes";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -33,7 +44,6 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
 
 const connect = (
   roomUrl: string,
@@ -148,6 +158,18 @@ const readMessage = async (merkleRootHex: string) => {
   }
 };
 
+const getMessageTypeInfo = (messageType: MessageType) => {
+  const extension = getFileExtension(messageType);
+  const mimeType = getMimeType(messageType);
+  const category = getMessageCategory(messageType);
+
+  return {
+    extension,
+    mimeType,
+    category,
+  };
+};
+
 export default {
   store,
   signalingServerSelector,
@@ -162,8 +184,11 @@ export default {
   openChannel,
   sendMessage,
   readMessage,
+  getMessageTypeInfo,
   generateRandomRoomUrl,
 };
+
+export { MessageType, MessageCategory };
 
 export type {
   State,
@@ -172,7 +197,8 @@ export type {
   Channel,
   Message,
   RoomData,
-  MessageType,
+  MimeType,
+  FileExtension,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,

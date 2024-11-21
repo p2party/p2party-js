@@ -35,6 +35,7 @@ export const handleOpenChannel = async (
             // })
             channel;
       dataChannel.bufferedAmountLowThreshold = 64 * 1024; // 64kb
+      dataChannel.binaryType = "arraybuffer";
       const label = typeof channel === "string" ? channel : channel.label;
       const extChannel = dataChannel as IRTCDataChannel;
       extChannel.withPeerId = epc.withPeerId;

@@ -19,6 +19,7 @@ export interface Message {
   merkleRootHex: string;
   fromPeerId: string;
   chunkIndexes: number[];
+  filename: string;
   messageType: MessageType;
   savedSize: number;
   totalSize: number;
@@ -43,6 +44,7 @@ export interface SetMessageArgs {
   chunkIndex: number;
   chunkSize: number;
   fromPeerId?: string;
+  filename?: string;
   messageType?: MessageType;
   totalSize?: number;
   channelLabel?: string;
@@ -178,6 +180,7 @@ const roomSlice = createSlice({
         state.messages.push({
           merkleRootHex: action.payload.merkleRootHex,
           channelLabel: action.payload.channelLabel,
+          filename: action.payload.filename ?? "txt",
           messageType: action.payload.messageType,
           fromPeerId: action.payload.fromPeerId,
           timestamp: Date.now(),

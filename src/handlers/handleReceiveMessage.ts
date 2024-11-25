@@ -8,13 +8,14 @@ import { getDB, getDBChunk, setDBChunk } from "../utils/db";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
+import { getMimeType } from "../utils/messageTypes";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
 export const handleReceiveMessage = async (
-  data: Uint8Array,
+  data: Blob, // Uint8Array,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
   decryptionModule: LibCrypto,
@@ -26,10 +27,13 @@ export const handleReceiveMessage = async (
     const { room } = api.getState() as State;
     const incomingMessages = room.messages;
 
-    const merkleRoot = data.slice(0, crypto_hash_sha512_BYTES);
+    const messageBuffer = await data.arrayBuffer();
+    const message = new Uint8Array(messageBuffer);
+
+    const merkleRoot = message.slice(0, crypto_hash_sha512_BYTES); // data.slice(0, crypto_hash_sha512_BYTES);
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-    const encryptedMessage = data.slice(crypto_hash_sha512_BYTES);
+    const encryptedMessage = message.slice(crypto_hash_sha512_BYTES); // data.slice(crypto_hash_sha512_BYTES);
     const decryptedMessage = await decryptAsymmetric(
       encryptedMessage,
       senderPublicKey,
@@ -73,6 +77,7 @@ export const handleReceiveMessage = async (
         merkleRoot,
         merkleProof,
       );
+
       if (verifyProof) {
         api.dispatch(
           setMessage({
@@ -82,6 +87,7 @@ export const handleReceiveMessage = async (
             chunkSize: metadata.chunkEndIndex - metadata.chunkStartIndex,
             totalSize: metadata.size,
             messageType: metadata.messageType,
+            filename: metadata.name,
             channelLabel,
           }),
         );
@@ -101,12 +107,15 @@ export const handleReceiveMessage = async (
           db,
         );
         if (!storedChunk) {
+          const mimeType = getMimeType(metadata.messageType);
+
           await setDBChunk(
             {
               merkleRoot: merkleRootHex,
               chunkIndex: metadata.chunkIndex,
               totalSize: metadata.size,
-              data: uint8ArrayToHex(realChunk),
+              data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
+              mimeType,
             },
             db,
           );

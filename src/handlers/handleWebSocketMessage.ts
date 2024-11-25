@@ -5,9 +5,6 @@ import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
 
 import webrtcApi from "../api/webrtc";
 
-// import { exportPublicKeyToHex } from "../utils/exportPEMKeys";
-// import { importPublicKey } from "../utils/importPEMKeys";
-
 import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId } from "../reducers/keyPairSlice";
 
@@ -147,14 +144,11 @@ const handleWebSocketMessage = async (
         const len = message.peers.length;
         if (len === 0) break;
 
-        // const pk = await importPublicKey(keyPair.publicKey);
-        // const pkHex = await exportPublicKeyToHex(pk);
         for (let i = 0; i < len; i++) {
           if (
             message.peers[i].publicKey === keyPair.publicKey ||
             message.peers[i].id === keyPair.peerId ||
             !isUUID(message.peers[i].id) ||
-            // message.peers[i].publicKey.length !== 1100
             message.peers[i].publicKey.length !== 64
           )
             continue;
@@ -221,8 +215,10 @@ const handleWebSocketMessage = async (
         const peerPublicKeyHex = room.peers[peerIndex].peerPublicKey;
         const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
         const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+        const messageData = hexToUint8Array(message.message);
+
         await handleReceiveMessage(
-          hexToUint8Array(message.message),
+          new Blob([messageData]), // hexToUint8Array(message.message),
           senderPublicKey,
           receiverSecretKey,
           decryptionModule,

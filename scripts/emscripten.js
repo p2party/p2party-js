@@ -74,8 +74,8 @@ const withJS = ` \
 const memory = `\
 -s IMPORTED_MEMORY=1 \
 -s ALLOW_MEMORY_GROWTH=1 \
--s INITIAL_MEMORY=${process.env.NODE_ENV === "production" ? "512kb" : "10mb"} \
--s STACK_SIZE=${process.env.NODE_ENV === "production" ? "256kb" : "5mb"} \
+-s INITIAL_MEMORY=${process.env.NODE_ENV === "production" ? "1mb" : "10mb"} \
+-s STACK_SIZE=${process.env.NODE_ENV === "production" ? "512kb" : "5mb"} \
 -s MALLOC=emmalloc-memvalidate \
 -s MEMORY_GROWTH_LINEAR_STEP=128kb \
 -s GLOBAL_BASE=4096 \

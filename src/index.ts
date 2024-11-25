@@ -10,7 +10,7 @@ import {
   getMessageCategory,
   getMimeType,
 } from "./utils/messageTypes";
-import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
+// import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -50,10 +50,23 @@ const connect = (
   signalingServerUrl = "ws://localhost:3001/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
+      {
+      urls: ['stun:127.0.0.1:3478'],
+      },
+      {
+        urls: ['turn:127.0.0.1:3478'],
+        username: 'username',       // Dummy username
+        credential: 'password' // Dummy password
+      },
+    ],
+    // Optional: Specify ICE transport policy
+    iceTransportPolicy: 'all', // Use 'relay' if you want to force TURN server usage
+
+    // iceServers: [
       // {
       //   urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
       // },
-    ],
+    // ],
   },
 ) => {
   const { keyPair, signalingServer, room } = store.getState();
@@ -142,32 +155,89 @@ const sendMessage = (data: string | File, toChannel?: string) => {
   );
 };
 
-const readMessage = async (merkleRootHex: string) => {
+const readMessage = async (
+  merkleRootHex: string,
+): Promise<{
+  message: string | Blob;
+  percentage: number;
+  category: MessageCategory;
+  filename: string;
+  extension: FileExtension;
+  mimeType: MimeType;
+}> => {
   try {
-    const chunks = await getDBAllChunks(merkleRootHex);
+    const { room } = store.getState();
 
-    const data = chunks
+    const messageIndex = room.messages.findIndex(
+      (m) => m.merkleRootHex === merkleRootHex,
+    );
+    if (messageIndex === -1) {
+      return {
+        message: "Unknown message",
+        percentage: 100,
+        category: MessageCategory.Text,
+        filename: "txt",
+        extension: "",
+        mimeType: "text/plain"
+      };
+    }
+
+    const root = room.messages[messageIndex].merkleRootHex;
+    const messageType = room.messages[messageIndex].messageType;
+    const percentage =
+      Math.ceil(
+        room.messages[messageIndex].savedSize /
+          room.messages[messageIndex].totalSize,
+      ) * 100;
+
+    const chunks = await getDBAllChunks(root);
+
+    const dataChunks = chunks
       .sort((a, b) => a.chunkIndex - b.chunkIndex)
-      .map((c) => hexToUint8Array(c.data));
+      .map((c) => c.data); // hexToUint8Array(c.data));
 
-    return concatUint8Arrays(data);
+    const filename = messageType === MessageType.Text ? "txt" : room.messages[messageIndex].filename
+    const mimeType = getMimeType(messageType);
+    const extension = getFileExtension(messageType);
+    const category = getMessageCategory(messageType);
+
+    const data = new Blob(dataChunks, {
+      type: mimeType,
+    }); // await concatUint8Arrays(dataChunks);
+
+    if (messageType === 1) {
+      return {
+        message: await data.text(), // new TextDecoder().decode(data),
+        percentage,
+        category: MessageCategory.Text,
+        filename: "txt",
+        extension: "",
+        mimeType,
+      };
+    } else if (data) {
+      return { message: data, percentage, category, filename, extension, mimeType };
+    } else {
+      return {
+        message: "Invalid message",
+        percentage: 100,
+        category: MessageCategory.Text,
+        filename: "txt",
+        extension: "",
+        mimeType,
+      };
+    }
   } catch (error) {
     console.error(error);
 
-    return;
+    return {
+      message: "Inretrievable message",
+      percentage: 100,
+      category: MessageCategory.Text,
+      filename: "txt",
+      extension: "",
+      mimeType: "text/plain"
+    };
   }
-};
-
-const getMessageTypeInfo = (messageType: MessageType) => {
-  const extension = getFileExtension(messageType);
-  const mimeType = getMimeType(messageType);
-  const category = getMessageCategory(messageType);
-
-  return {
-    extension,
-    mimeType,
-    category,
-  };
 };
 
 export default {
@@ -184,7 +254,6 @@ export default {
   openChannel,
   sendMessage,
   readMessage,
-  getMessageTypeInfo,
   generateRandomRoomUrl,
 };
 

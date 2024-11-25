@@ -22,8 +22,8 @@ const memoryLenToPages = (
   minPages?: number,
   maxPages?: number,
 ): number => {
-  minPages = minPages ?? 8; // 512kb // 48 = 3mb // 256 = 16mb // 6 = 384kb
-  maxPages = maxPages ?? 32768; // 2gb // 16384 = 1gb
+  minPages = minPages ?? 16; // 8 = 512kb // 48 = 3mb // 256 = 16mb // 6 = 384kb
+  maxPages = maxPages ?? 81920; // 32768 = 2gb // 16384 = 1gb
   const pageSize = 64 * 1024;
   const ceil = Math.ceil(memoryLen / pageSize);
   if (ceil > maxPages)

@@ -132,6 +132,7 @@ const websocketBaseQuery: BaseQueryFn<
     api.dispatch(signalingServerActions.startConnecting(fullUrl));
 
     ws = new WebSocket(fullUrl);
+    ws.binaryType = "arraybuffer";
 
     return new Promise((resolve, reject) => {
       try {

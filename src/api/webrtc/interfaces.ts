@@ -49,7 +49,7 @@ export interface RTCOpenChannelParams {
 }
 
 export interface RTCChannelMessageParams {
-  data: string | File | Blob | ArrayBuffer;
+  data: string | File | Blob; // | ArrayBuffer;
   fromPeerId: string;
   label?: string;
 }

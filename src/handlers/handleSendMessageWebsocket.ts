@@ -10,6 +10,8 @@ import {
   hexToUint8Array,
   concatUint8Arrays,
 } from "../utils/uint8array";
+import { getMimeType } from "../utils/messageTypes";
+
 import { fisherYatesShuffle } from "../cryptography/utils";
 import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
 
@@ -66,6 +68,7 @@ export const handleSendMessageWebsocket = async (
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
             totalSize: m.size,
             messageType: m.messageType,
+            filename: m.name,
             channelLabel: label ?? dataChannels[channelIndex].label,
           }),
         );
@@ -77,12 +80,15 @@ export const handleSendMessageWebsocket = async (
             m.chunkStartIndex,
             m.chunkEndIndex,
           );
+          const mimeType = getMimeType(m.messageType);
+
           await setDBChunk(
             {
               merkleRoot: merkleRootHex,
               chunkIndex: m.chunkIndex,
               totalSize: m.size,
-              data: uint8ArrayToHex(realChunk),
+              data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
+              mimeType,
             },
             db,
           );

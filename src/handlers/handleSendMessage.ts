@@ -11,6 +11,7 @@ import {
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata } from "../utils/metadata";
 import { getDB, getDBChunk, setDBChunk } from "../utils/db";
+import { getMimeType } from "../utils/messageTypes";
 
 import type {
   IRTCDataChannel,
@@ -70,6 +71,7 @@ export const handleSendMessage = async (
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
             totalSize: m.size,
             messageType: m.messageType,
+            filename: m.name,
             channelLabel: label ?? dataChannels[channelIndex].label,
           }),
         );
@@ -81,12 +83,15 @@ export const handleSendMessage = async (
             m.chunkStartIndex,
             m.chunkEndIndex,
           );
+          const mimeType = getMimeType(m.messageType);
+
           await setDBChunk(
             {
               merkleRoot: merkleRootHex,
               chunkIndex: m.chunkIndex,
               totalSize: m.size,
-              data: uint8ArrayToHex(realChunk),
+              data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
+              mimeType,
             },
             db,
           );

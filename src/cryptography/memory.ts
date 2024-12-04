@@ -22,7 +22,7 @@ const memoryLenToPages = (
   minPages?: number,
   maxPages?: number,
 ): number => {
-  minPages = minPages ?? 16; // 8 = 512kb // 48 = 3mb // 256 = 16mb // 6 = 384kb
+  minPages = minPages ?? 80; // 8 = 512kb // 48 = 3mb // 256 = 16mb // 6 = 384kb
   maxPages = maxPages ?? 81920; // 32768 = 2gb // 16384 = 1gb
   const pageSize = 64 * 1024;
   const ceil = Math.ceil(memoryLen / pageSize);
@@ -152,7 +152,9 @@ const getMerkleProofMemory = (leavesLen: number): WebAssembly.Memory => {
 };
 
 const verifyMerkleProofMemory = (proofLen: number): WebAssembly.Memory => {
-  const memoryLen = proofLen + 5 * crypto_hash_sha512_BYTES;
+  const memoryLen =
+    proofLen * Uint8Array.BYTES_PER_ELEMENT + 4 * crypto_hash_sha512_BYTES;
+
   const memoryPages = memoryLenToPages(memoryLen);
 
   return new WebAssembly.Memory({

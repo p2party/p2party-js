@@ -4,7 +4,10 @@ import { store, dispatch } from "./store";
 
 import { generateRandomRoomUrl } from "./cryptography/utils";
 
-import { getDBAllChunks } from "./utils/db";
+import {
+  // createIDBReadableStream,
+  getDBAllChunks,
+} from "./utils/db";
 import {
   getFileExtension,
   getMessageCategory,
@@ -44,6 +47,7 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
+import { uint8ArrayToHex } from "./utils/uint8array";
 
 const connect = (
   roomUrl: string,
@@ -51,22 +55,19 @@ const connect = (
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
-      urls: ['stun:127.0.0.1:3478'],
+        urls: [
+          "stun:127.0.0.1:3478",
+          "stun:stun.l.google.com:19302",
+          "stun:stun1.l.google.com:19302",
+        ],
       },
       {
-        urls: ['turn:127.0.0.1:3478'],
-        username: 'username',       // Dummy username
-        credential: 'password' // Dummy password
+        urls: ["turn:127.0.0.1:3478"],
+        username: "username", // Dummy username
+        credential: "password", // Dummy password
       },
     ],
-    // Optional: Specify ICE transport policy
-    iceTransportPolicy: 'all', // Use 'relay' if you want to force TURN server usage
-
-    // iceServers: [
-      // {
-      //   urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      // },
-    // ],
+    iceTransportPolicy: "all", // Use 'relay' if you want to force TURN server usage
   },
 ) => {
   const { keyPair, signalingServer, room } = store.getState();
@@ -135,9 +136,7 @@ const openChannel = async (
  * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = (data: string | File, toChannel?: string) => {
-  const { keyPair } = store.getState();
-
+const sendMessage = (data: string | File, toChannel: string) => {
   // dispatch(
   //   signalingServerApi.endpoints.sendMessageToPeer.initiate({
   //     data,
@@ -147,9 +146,8 @@ const sendMessage = (data: string | File, toChannel?: string) => {
   // );
 
   dispatch(
-    webrtcApi.endpoints.message.initiate({
+    webrtcApi.endpoints.sendMessage.initiate({
       data,
-      fromPeerId: keyPair.peerId,
       label: toChannel,
     }),
   );
@@ -160,10 +158,10 @@ const readMessage = async (
 ): Promise<{
   message: string | Blob;
   percentage: number;
-  category: MessageCategory;
-  filename: string;
-  extension: FileExtension;
   mimeType: MimeType;
+  extension: FileExtension;
+  category: MessageCategory;
+  hashMatches: boolean;
 }> => {
   try {
     const { room } = store.getState();
@@ -174,21 +172,16 @@ const readMessage = async (
     if (messageIndex === -1) {
       return {
         message: "Unknown message",
-        percentage: 100,
-        category: MessageCategory.Text,
-        filename: "txt",
+        percentage: 0,
+        mimeType: "text/plain",
         extension: "",
-        mimeType: "text/plain"
+        category: MessageCategory.Text,
+        hashMatches: false,
       };
     }
 
     const root = room.messages[messageIndex].merkleRootHex;
     const messageType = room.messages[messageIndex].messageType;
-    const percentage =
-      Math.ceil(
-        room.messages[messageIndex].savedSize /
-          room.messages[messageIndex].totalSize,
-      ) * 100;
 
     const chunks = await getDBAllChunks(root);
 
@@ -196,34 +189,54 @@ const readMessage = async (
       .sort((a, b) => a.chunkIndex - b.chunkIndex)
       .map((c) => c.data); // hexToUint8Array(c.data));
 
-    const filename = messageType === MessageType.Text ? "txt" : room.messages[messageIndex].filename
     const mimeType = getMimeType(messageType);
     const extension = getFileExtension(messageType);
     const category = getMessageCategory(messageType);
 
     const data = new Blob(dataChunks, {
       type: mimeType,
-    }); // await concatUint8Arrays(dataChunks);
+    });
+
+    const dataArrayBuffer = await data.arrayBuffer();
+    const hashArrayBuffer = await window.crypto.subtle.digest(
+      "SHA-512",
+      dataArrayBuffer,
+    );
+    const hash = new Uint8Array(hashArrayBuffer);
+    const hashHex = uint8ArrayToHex(hash);
+
+    const percentage = Math.floor(
+      (room.messages[messageIndex].savedSize /
+        room.messages[messageIndex].totalSize) *
+        100,
+    );
 
     if (messageType === 1) {
       return {
-        message: await data.text(), // new TextDecoder().decode(data),
+        message: await data.text(),
         percentage,
-        category: MessageCategory.Text,
-        filename: "txt",
-        extension: "",
         mimeType,
+        extension,
+        category,
+        hashMatches: room.messages[messageIndex].sha512Hex === hashHex,
       };
     } else if (data) {
-      return { message: data, percentage, category, filename, extension, mimeType };
+      return {
+        message: data,
+        percentage,
+        mimeType,
+        extension,
+        category,
+        hashMatches: room.messages[messageIndex].sha512Hex === hashHex,
+      };
     } else {
       return {
         message: "Invalid message",
-        percentage: 100,
-        category: MessageCategory.Text,
-        filename: "txt",
-        extension: "",
+        percentage: 0,
         mimeType,
+        extension: "",
+        category: MessageCategory.Text,
+        hashMatches: false,
       };
     }
   } catch (error) {
@@ -231,11 +244,11 @@ const readMessage = async (
 
     return {
       message: "Inretrievable message",
-      percentage: 100,
-      category: MessageCategory.Text,
-      filename: "txt",
+      percentage: 0,
+      mimeType: "text/plain",
       extension: "",
-      mimeType: "text/plain"
+      category: MessageCategory.Text,
+      hashMatches: false,
     };
   }
 };

@@ -74,10 +74,9 @@ const withJS = ` \
 const memory = `\
 -s IMPORTED_MEMORY=1 \
 -s ALLOW_MEMORY_GROWTH=1 \
--s INITIAL_MEMORY=${process.env.NODE_ENV === "production" ? "1mb" : "10mb"} \
--s STACK_SIZE=${process.env.NODE_ENV === "production" ? "512kb" : "5mb"} \
--s MALLOC=emmalloc-memvalidate \
--s MEMORY_GROWTH_LINEAR_STEP=128kb \
+-s INITIAL_MEMORY=5mb \
+-s STACK_SIZE=3mb \
+-s MEMORY_GROWTH_LINEAR_STEP=64kb \
 -s GLOBAL_BASE=4096 \
 `;
 
@@ -109,7 +108,7 @@ const testing =
   process.env.NODE_ENV === "production"
     ? `\
 -flto \
--Os \
+-O3 \
 -s FILESYSTEM=0 \
 -s ASSERTIONS=0 \
 -s INVOKE_RUN=0 \

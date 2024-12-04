@@ -15,6 +15,8 @@ export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
   encryptionWasmMemory: WebAssembly.Memory;
+  decryptionWasmMemory: WebAssembly.Memory;
+  merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcBaseQuery: BaseQueryFn<
@@ -31,6 +33,8 @@ const webrtcBaseQuery: BaseQueryFn<
     peerConnections,
     dataChannels,
     encryptionWasmMemory,
+    decryptionWasmMemory,
+    merkleWasmMemory,
   },
   api,
 ) => {
@@ -41,6 +45,14 @@ const webrtcBaseQuery: BaseQueryFn<
 
     const encryptionModule = await libcrypto({
       wasmMemory: encryptionWasmMemory,
+    });
+
+    const decryptionModule = await libcrypto({
+      wasmMemory: decryptionWasmMemory,
+    });
+
+    const merkleModule = await libcrypto({
+      wasmMemory: merkleWasmMemory,
     });
 
     const connectionIndex = peerConnections.findIndex(
@@ -55,7 +67,14 @@ const webrtcBaseQuery: BaseQueryFn<
 
       epc.ondatachannel = async (e: RTCDataChannelEvent) => {
         await handleOpenChannel(
-          { channel: e.channel, epc, dataChannels, encryptionModule },
+          {
+            channel: e.channel,
+            epc,
+            dataChannels,
+            encryptionModule,
+            decryptionModule,
+            merkleModule,
+          },
           api,
         );
       };
@@ -64,12 +83,26 @@ const webrtcBaseQuery: BaseQueryFn<
 
       if (initiator) {
         await handleOpenChannel(
-          { channel: "signaling", epc, dataChannels, encryptionModule },
+          {
+            channel: "signaling",
+            epc,
+            dataChannels,
+            encryptionModule,
+            decryptionModule,
+            merkleModule,
+          },
           api,
         );
 
         await handleOpenChannel(
-          { channel: "main", epc, dataChannels, encryptionModule },
+          {
+            channel: "main",
+            epc,
+            dataChannels,
+            encryptionModule,
+            decryptionModule,
+            merkleModule,
+          },
           api,
         );
       }

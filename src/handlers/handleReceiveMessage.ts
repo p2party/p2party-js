@@ -2,36 +2,38 @@ import { decryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { verifyMerkleProof } from "../cryptography/merkle";
 
-import { setMessage } from "../reducers/roomSlice";
-
-import { getDB, getDBChunk, setDBChunk } from "../utils/db";
+import {
+  // existsDBChunk, getDB,
+  setDBChunk,
+} from "../utils/db";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
-import { getMimeType } from "../utils/messageTypes";
+import { getMimeType, MessageType } from "../utils/messageTypes";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { State } from "../store";
+import type { Room } from "../reducers/roomSlice";
 
 export const handleReceiveMessage = async (
   data: Blob, // Uint8Array,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
+  room: Room,
   decryptionModule: LibCrypto,
-  channelLabel: string,
-  fromPeerId: string,
-  api: BaseQueryApi,
-) => {
+  merkleModule: LibCrypto,
+): Promise<{
+  merkleRootHex: string;
+  sha512Hex: string;
+  chunkSize: number;
+  totalSize: number;
+  messageType: MessageType;
+  filename: string;
+}> => {
   try {
-    const { room } = api.getState() as State;
-    const incomingMessages = room.messages;
-
     const messageBuffer = await data.arrayBuffer();
     const message = new Uint8Array(messageBuffer);
 
     const merkleRoot = message.slice(0, crypto_hash_sha512_BYTES); // data.slice(0, crypto_hash_sha512_BYTES);
-    const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
     const encryptedMessage = message.slice(crypto_hash_sha512_BYTES); // data.slice(crypto_hash_sha512_BYTES);
     const decryptedMessage = await decryptAsymmetric(
@@ -42,88 +44,95 @@ export const handleReceiveMessage = async (
       decryptionModule,
     );
 
-    const metadataSerialized = decryptedMessage.slice(0, METADATA_LEN);
-    const metadata = deserializeMetadata(metadataSerialized);
+    const metadata = deserializeMetadata(
+      decryptedMessage.slice(0, METADATA_LEN),
+    );
 
-    const chunkLen = metadata.chunkEndIndex - metadata.chunkStartIndex;
+    const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
 
-    const incomingMessageIndex = incomingMessages.findIndex(
+    const merkleRootHex = uint8ArrayToHex(merkleRoot);
+    const incomingMessageIndex = room.messages.findIndex(
       (m) => m.merkleRootHex === merkleRootHex,
     );
     const messageRelevant =
-      chunkLen > 0 &&
+      chunkSize > 0 &&
       (incomingMessageIndex === -1 ||
-        (!incomingMessages[incomingMessageIndex].chunkIndexes.includes(
-          metadata.chunkIndex,
-        ) &&
-          incomingMessages[incomingMessageIndex].totalSize >=
-            incomingMessages[incomingMessageIndex].savedSize + chunkLen));
+        room.messages[incomingMessageIndex].totalSize >=
+          room.messages[incomingMessageIndex].savedSize + chunkSize);
 
-    if (messageRelevant) {
-      const merkleProofArray = decryptedMessage.slice(
-        METADATA_LEN,
-        METADATA_LEN + PROOF_LEN,
-      );
-      const proofLenView = new DataView(
-        merkleProofArray.buffer,
-        merkleProofArray.byteOffset,
-        4,
-      );
-      const proofLen = proofLenView.getUint32(0, false); // Big-endian
-      const merkleProof = merkleProofArray.subarray(4, 4 + proofLen);
-      const chunk = decryptedMessage.slice(METADATA_LEN + PROOF_LEN);
-      const verifyProof = await verifyMerkleProof(
-        chunk,
-        merkleRoot,
-        merkleProof,
-      );
+    if (!messageRelevant)
+      return {
+        merkleRootHex,
+        sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
+        totalSize: metadata.size,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+      };
 
-      if (verifyProof) {
-        api.dispatch(
-          setMessage({
-            merkleRootHex: uint8ArrayToHex(merkleRoot),
-            fromPeerId,
-            chunkIndex: metadata.chunkIndex,
-            chunkSize: metadata.chunkEndIndex - metadata.chunkStartIndex,
-            totalSize: metadata.size,
-            messageType: metadata.messageType,
-            filename: metadata.name,
-            channelLabel,
-          }),
-        );
+    const merkleProofArray = decryptedMessage.slice(
+      METADATA_LEN,
+      METADATA_LEN + PROOF_LEN,
+    );
+    const proofLenView = new DataView(
+      merkleProofArray.buffer,
+      merkleProofArray.byteOffset,
+      4,
+    );
+    const proofLen = proofLenView.getUint32(0, false); // Big-endian
+    if (proofLen > PROOF_LEN)
+      return {
+        merkleRootHex,
+        sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkSize: -3,
+        totalSize: metadata.size,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+      };
 
-        const realChunk = decryptedMessage.slice(
-          METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
-          METADATA_LEN +
-            PROOF_LEN +
-            // metadata.chunkStartIndex +
-            metadata.chunkEndIndex,
-        );
+    const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
+    const chunk = decryptedMessage.slice(METADATA_LEN + PROOF_LEN);
 
-        const db = await getDB();
-        const storedChunk = await getDBChunk(
-          merkleRootHex,
-          metadata.chunkIndex,
-          db,
-        );
-        if (!storedChunk) {
-          const mimeType = getMimeType(metadata.messageType);
+    const verifyProof = await verifyMerkleProof(
+      chunk,
+      merkleRoot,
+      merkleProof,
+      merkleModule,
+    );
 
-          await setDBChunk(
-            {
-              merkleRoot: merkleRootHex,
-              chunkIndex: metadata.chunkIndex,
-              totalSize: metadata.size,
-              data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
-              mimeType,
-            },
-            db,
-          );
-        }
+    if (!verifyProof)
+      return {
+        merkleRootHex,
+        sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkSize: -4,
+        totalSize: metadata.size,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+      };
 
-        db.close();
-      }
-    }
+    const realChunk = decryptedMessage.slice(
+      METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
+      METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
+    );
+
+    const mimeType = getMimeType(metadata.messageType);
+
+    await setDBChunk({
+      merkleRoot: merkleRootHex,
+      chunkIndex: metadata.chunkIndex,
+      totalSize: metadata.size,
+      data: new Blob([realChunk]),
+      mimeType,
+    });
+
+    return {
+      merkleRootHex,
+      sha512Hex: uint8ArrayToHex(metadata.hash),
+      chunkSize,
+      totalSize: metadata.size,
+      messageType: metadata.messageType,
+      filename: metadata.name,
+    };
   } catch (error) {
     throw error;
   }

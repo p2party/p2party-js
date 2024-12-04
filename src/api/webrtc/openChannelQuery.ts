@@ -14,6 +14,8 @@ export interface RTCOpenChannelParamsExtention extends RTCOpenChannelParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
   encryptionWasmMemory: WebAssembly.Memory;
+  decryptionWasmMemory: WebAssembly.Memory;
+  merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcOpenChannelQuery: BaseQueryFn<
@@ -21,7 +23,15 @@ const webrtcOpenChannelQuery: BaseQueryFn<
   void,
   unknown
 > = async (
-  { channel, withPeers, peerConnections, dataChannels, encryptionWasmMemory },
+  {
+    channel,
+    withPeers,
+    peerConnections,
+    dataChannels,
+    encryptionWasmMemory,
+    decryptionWasmMemory,
+    merkleWasmMemory,
+  },
   api,
 ) => {
   try {
@@ -29,6 +39,14 @@ const webrtcOpenChannelQuery: BaseQueryFn<
 
     const encryptionModule = await libcrypto({
       wasmMemory: encryptionWasmMemory,
+    });
+
+    const decryptionModule = await libcrypto({
+      wasmMemory: decryptionWasmMemory,
+    });
+
+    const merkleModule = await libcrypto({
+      wasmMemory: merkleWasmMemory,
     });
 
     if (withPeers && withPeers.length > 0) {
@@ -43,7 +61,14 @@ const webrtcOpenChannelQuery: BaseQueryFn<
         if (peerIndex > -1) {
           const epc = peerConnections[peerIndex];
           await handleOpenChannel(
-            { channel, epc, dataChannels, encryptionModule },
+            {
+              channel,
+              epc,
+              dataChannels,
+              encryptionModule,
+              decryptionModule,
+              merkleModule,
+            },
             api,
           );
         }
@@ -53,7 +78,14 @@ const webrtcOpenChannelQuery: BaseQueryFn<
       for (let i = 0; i < PEERS_LEN; i++) {
         const epc = peerConnections[i];
         await handleOpenChannel(
-          { channel, epc, dataChannels, encryptionModule },
+          {
+            channel,
+            epc,
+            dataChannels,
+            encryptionModule,
+            decryptionModule,
+            merkleModule,
+          },
           api,
         );
       }

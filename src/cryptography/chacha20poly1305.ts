@@ -159,7 +159,7 @@ export const encryptAsymmetric = async (
 
   switch (result) {
     case 0: {
-      const enc = Uint8Array.from(encrypted);
+      const enc = Uint8Array.from([...encrypted]);
       cryptoModule._free(ptr6);
 
       return enc;
@@ -168,18 +168,12 @@ export const encryptAsymmetric = async (
     case -1: {
       cryptoModule._free(ptr6);
 
-      throw new Error("Could not allocate memory for the ciphertext array.");
-    }
-
-    case -2: {
-      cryptoModule._free(ptr6);
-
       throw new Error(
         "Could not allocate memory for the ephemeral x25519 public key array.",
       );
     }
 
-    case -3: {
+    case -2: {
       cryptoModule._free(ptr6);
 
       throw new Error(
@@ -187,7 +181,21 @@ export const encryptAsymmetric = async (
       );
     }
 
+    case -3: {
+      cryptoModule._free(ptr6);
+
+      throw new Error("Could not convert Ed25519 secret key to X25519.");
+    }
+
     case -4: {
+      cryptoModule._free(ptr6);
+
+      throw new Error(
+        "Could not calculate x25519 public key from x25519 secret key.",
+      );
+    }
+
+    case -5: {
       cryptoModule._free(ptr6);
 
       throw new Error(
@@ -195,28 +203,28 @@ export const encryptAsymmetric = async (
       );
     }
 
-    case -5: {
+    case -6: {
       cryptoModule._free(ptr6);
 
       throw new Error("Could not convert Ed25519 public key to X25519.");
     }
 
-    case -6: {
-      cryptoModule._free(ptr6);
-
-      throw new Error("Could not allocate memory for the shared secret array.");
-    }
-
     case -7: {
       cryptoModule._free(ptr6);
 
-      throw new Error("Could not create a shared secret.");
+      throw new Error("Could not allocate memory for the shared secret.");
     }
 
     case -8: {
       cryptoModule._free(ptr6);
 
-      throw new Error("Could not allocate memory for the nonce helper array.");
+      throw new Error("Could not calculate the shared secret.");
+    }
+
+    case -9: {
+      cryptoModule._free(ptr6);
+
+      throw new Error("Could not encrypt.");
     }
 
     default: {
@@ -359,17 +367,18 @@ export const decryptAsymmetric = async (
   cryptoModule._free(ptr1);
   cryptoModule._free(ptr2);
   cryptoModule._free(ptr3);
+  cryptoModule._free(ptr4);
 
   switch (result) {
     case 0: {
-      const decr = Uint8Array.from(decrypted);
-      cryptoModule._free(ptr4);
+      const decr = Uint8Array.from([...decrypted]);
+      cryptoModule._free(ptr5);
 
       return decr;
     }
 
     case -1: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
       throw new Error(
         "Could not allocate memory for the ed25519 converted to x25519 public key array.",
@@ -377,7 +386,7 @@ export const decryptAsymmetric = async (
     }
 
     case -2: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
       throw new Error(
         "Could not allocate memory for the ed25519 converted to x25519 secret key array.",
@@ -385,7 +394,7 @@ export const decryptAsymmetric = async (
     }
 
     case -3: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
       throw new Error(
         "Could not convert receiver ed25519 secret key to x25519.",
@@ -393,39 +402,49 @@ export const decryptAsymmetric = async (
     }
 
     case -4: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
       throw new Error(
-        "Could not allocate memory for the ed25519 converted to x25519 sender public key array.",
+        "Could not generate x25519 public key from x25519 secret key.",
       );
     }
 
     case -5: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
-      throw new Error("Could not convert sender ed25519 public key to x25519.");
+      throw new Error(
+        "Could not allocate memory for the ed25519 converted to x25519 receiver public key.",
+      );
     }
 
     case -6: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
-      throw new Error("Could not allocate memory for the shared secret array.");
+      throw new Error(
+        "Could not convert receiver ed25519 public key to x25519.",
+      );
     }
 
     case -7: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
-      throw new Error("Could not successfully generate a shared secret.");
+      throw new Error("Could not allocate memory for the shared secret.");
     }
 
     case -8: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
-      throw new Error("Could not allocate memory for the ciphertext array.");
+      throw new Error("Could not calculate the shared secret.");
+    }
+
+    case -9: {
+      cryptoModule._free(ptr5);
+
+      throw new Error("Could not decrypt");
     }
 
     default: {
-      cryptoModule._free(ptr4);
+      cryptoModule._free(ptr5);
 
       throw new Error("Unsuccessful decryption attempt");
     }

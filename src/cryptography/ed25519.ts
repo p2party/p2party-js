@@ -31,17 +31,13 @@ export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
     crypto_sign_ed25519_SECRETKEYBYTES,
   );
 
-  const seed = window.crypto.getRandomValues(
-    new Uint8Array(crypto_sign_ed25519_SEEDBYTES),
-  );
-
   const ptr3 = cryptoModule._malloc(crypto_sign_ed25519_SEEDBYTES);
   const seedBytes = new Uint8Array(
     wasmMemory.buffer,
     ptr3,
     crypto_sign_ed25519_SEEDBYTES,
   );
-  seedBytes.set(seed);
+  window.crypto.getRandomValues(seedBytes);
 
   const result = cryptoModule._keypair_from_seed(
     publicKey.byteOffset,
@@ -231,7 +227,7 @@ export const sign = async (
     signature.byteOffset,
   );
 
-  const sig = Uint8Array.from(signature);
+  const sig = Uint8Array.from([...signature]);
 
   cryptoModule._free(ptr1);
   cryptoModule._free(ptr2);

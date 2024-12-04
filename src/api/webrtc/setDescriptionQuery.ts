@@ -1,5 +1,7 @@
 import signalingServerApi from "../signalingServerApi";
 
+import libcrypto from "../../cryptography/libcrypto";
+
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleQueuedIceCandidates } from "../../handlers/handleQueuedIceCandidates";
@@ -15,7 +17,6 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
-import libcrypto from "../../cryptography/libcrypto";
 
 export interface RTCSetDescriptionParamsExtension
   extends RTCSetDescriptionParams {
@@ -23,6 +24,8 @@ export interface RTCSetDescriptionParamsExtension
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
   encryptionWasmMemory: WebAssembly.Memory;
+  decryptionWasmMemory: WebAssembly.Memory;
+  merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -40,13 +43,24 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     iceCandidates,
     dataChannels,
     encryptionWasmMemory,
+    decryptionWasmMemory,
+    merkleWasmMemory,
   },
   api,
 ) => {
   try {
     const { keyPair } = api.getState() as State;
+
     const encryptionModule = await libcrypto({
       wasmMemory: encryptionWasmMemory,
+    });
+
+    const decryptionModule = await libcrypto({
+      wasmMemory: decryptionWasmMemory,
+    });
+
+    const merkleModule = await libcrypto({
+      wasmMemory: merkleWasmMemory,
     });
 
     const connectionIndex = peerConnections.findIndex(
@@ -69,7 +83,14 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
 
     epc.ondatachannel = async (e: RTCDataChannelEvent) => {
       await handleOpenChannel(
-        { channel: e.channel, epc, dataChannels, encryptionModule },
+        {
+          channel: e.channel,
+          epc,
+          dataChannels,
+          encryptionModule,
+          decryptionModule,
+          merkleModule,
+        },
         api,
       );
     };

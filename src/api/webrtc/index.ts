@@ -4,7 +4,7 @@ import webrtcBaseQuery from "./baseQuery";
 import webrtcSetDescriptionQuery from "./setDescriptionQuery";
 import webrtcSetIceCandidateQuery from "./setCandidateQuery";
 import webrtcOpenChannelQuery from "./openChannelQuery";
-import webrtcMessageQuery from "./messageQuery";
+import webrtcMessageQuery from "./sendMessageQuery";
 import webrtcDisconnectQuery from "./disconnectQuery";
 import webrtcDisconnectRoomQuery from "./disconnectFromRoomQuery";
 import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
@@ -12,7 +12,6 @@ import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQ
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
 
 import cryptoMemory from "../../cryptography/memory";
-
 import {
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
   crypto_box_poly1305_AUTHTAGBYTES,
@@ -24,7 +23,7 @@ import type {
   IRTCIceCandidate,
   IRTCDataChannel,
   RTCPeerConnectionParams,
-  RTCChannelMessageParams,
+  RTCSendMessageParams,
   RTCSetDescriptionParams,
   RTCSetCandidateParams,
   RTCOpenChannelParams,
@@ -38,7 +37,7 @@ const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
 
-export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
+export const rtcDataChannelMessageLimit = 64 * 1024;
 export const messageLen =
   rtcDataChannelMessageLimit -
   crypto_hash_sha512_BYTES - // merkle root
@@ -53,9 +52,12 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
 );
 
 const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  100 * 64 * 1024,
-  crypto_hash_sha512_BYTES, // additional data is the merkle root
+  64 * 1024,
+  crypto_hash_sha512_BYTES,
 );
+
+const PROOF_LEN = 4 * 48 * (crypto_hash_sha512_BYTES + 1);
+const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -86,6 +88,8 @@ const webrtcApi = createApi({
         peerConnections,
         dataChannels,
         encryptionWasmMemory,
+        decryptionWasmMemory,
+        merkleWasmMemory,
       }),
     }),
 
@@ -98,6 +102,8 @@ const webrtcApi = createApi({
             iceCandidates,
             dataChannels,
             encryptionWasmMemory,
+            decryptionWasmMemory,
+            merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -116,13 +122,20 @@ const webrtcApi = createApi({
     openChannel: builder.query<void, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
-          { ...args, peerConnections, dataChannels, encryptionWasmMemory },
+          {
+            ...args,
+            peerConnections,
+            dataChannels,
+            encryptionWasmMemory,
+            decryptionWasmMemory,
+            merkleWasmMemory,
+          },
           api,
           extraOptions,
         ),
     }),
 
-    message: builder.mutation<void, RTCChannelMessageParams>({
+    sendMessage: builder.mutation<void, RTCSendMessageParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcMessageQuery(
           {
@@ -130,7 +143,6 @@ const webrtcApi = createApi({
             peerConnections,
             dataChannels,
             encryptionWasmMemory,
-            decryptionWasmMemory,
           },
           api,
           extraOptions,

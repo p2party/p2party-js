@@ -9,25 +9,23 @@ import type { LibCrypto } from "./libcrypto";
 /**
  * @function
  * Returns the Merkle root of a tree.
- * If Uint8Array items' length is 64, even after serializer,
- * then we assume that it is a hash.
  *
- * @param tree: The tree.
- * @param serializer: Converts leaves into Uint8Array.
- *
+ * @param treeHashes: The tree, hashed.
  * @returns Promise<Uint8Array>
  */
 export const getMerkleRoot = async (
-  tree: Uint8Array[],
+  treeHashes: Uint8Array,
   module?: LibCrypto,
 ): Promise<Uint8Array> => {
-  const treeLen = tree.length;
+  if (treeHashes.length % crypto_hash_sha512_BYTES !== 0) {
+    throw new Error("Hashes were not passed");
+  }
+
+  const treeLen = treeHashes.length / crypto_hash_sha512_BYTES; // tree.length;
   if (treeLen === 0) {
     throw new Error("Cannot calculate Merkle root of tree with no leaves.");
   } else if (treeLen === 1) {
-    const digest = await window.crypto.subtle.digest("SHA-512", tree[0]);
-    return new Uint8Array(digest);
-    // return await sha512(tree[0]);
+    return treeHashes;
   }
 
   const wasmMemory =
@@ -44,16 +42,7 @@ export const getMerkleRoot = async (
     ptr1,
     treeLen * crypto_hash_sha512_BYTES,
   );
-
-  let i = 0;
-  let hash: Uint8Array;
-  for (let j = 0; j < treeLen; j++) {
-    const digest = await window.crypto.subtle.digest("SHA-512", tree[i]);
-    hash = new Uint8Array(digest);
-    // hash = await sha512(tree[i], cryptoModule);
-    leavesHashed.set(hash, i * crypto_hash_sha512_BYTES);
-    i++;
-  }
+  leavesHashed.set(treeHashes);
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const rootWasm = new Uint8Array(
@@ -72,13 +61,21 @@ export const getMerkleRoot = async (
 
   switch (result) {
     case 0: {
-      const root = Uint8Array.from(rootWasm);
+      const root = Uint8Array.from([...rootWasm]);
       cryptoModule._free(ptr2);
 
       return root;
     }
 
     case -1: {
+      cryptoModule._free(ptr2);
+
+      throw new Error(
+        "Could not allocate memory for hash concatenation helper array.",
+      );
+    }
+
+    case -2: {
       cryptoModule._free(ptr2);
 
       throw new Error("Could not calculate hash.");
@@ -106,12 +103,16 @@ export const getMerkleRoot = async (
  * @returns {Promise<Uint8Array>}: The Merkle proof.
  */
 export const getMerkleProof = async (
-  tree: Uint8Array[],
+  treeHashes: Uint8Array,
   element: Uint8Array,
   module?: LibCrypto,
   proofFixedLen?: number,
 ): Promise<Uint8Array> => {
-  const treeLen = tree.length;
+  if (treeHashes.length % crypto_hash_sha512_BYTES !== 0) {
+    throw new Error("Hashes were not passed");
+  }
+
+  const treeLen = treeHashes.length / crypto_hash_sha512_BYTES; // tree.length;
   if (treeLen === 0) {
     throw new Error("Cannot calculate Merkle proof of element of empty tree.");
   } else if (treeLen === 1) {
@@ -133,13 +134,7 @@ export const getMerkleProof = async (
     ptr1,
     treeLen * crypto_hash_sha512_BYTES,
   );
-
-  let i = 0;
-  for (let j = 0; j < treeLen; j++) {
-    const digest = await window.crypto.subtle.digest("SHA-512", tree[i]);
-    leavesHashed.set(new Uint8Array(digest), i * crypto_hash_sha512_BYTES);
-    i++;
-  }
+  leavesHashed.set(treeHashes);
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const elementHash = new Uint8Array(
@@ -147,7 +142,6 @@ export const getMerkleProof = async (
     ptr2,
     crypto_hash_sha512_BYTES,
   );
-
   const digest = await window.crypto.subtle.digest("SHA-512", element);
   // hash = await sha512(element);
   elementHash.set(new Uint8Array(digest));
@@ -178,48 +172,48 @@ export const getMerkleProof = async (
     case -2: {
       cryptoModule._free(ptr3);
 
-      throw new Error("Could not allocate memory for hashes helper array.");
-    }
-
-    case -3: {
-      cryptoModule._free(ptr3);
-
       throw new Error(
         "Could not allocate memory for hash concatenation helper array.",
       );
     }
 
-    case -4: {
+    case -3: {
       cryptoModule._free(ptr3);
 
       throw new Error("Could not calculate hash.");
     }
 
     default: {
-      if (proofFixedLen && proofFixedLen >= result) {
-        const proofArray = window.crypto.getRandomValues(
-          new Uint8Array(proofFixedLen),
-        );
+      if (result > 0) {
+        if (proofFixedLen && proofFixedLen >= result) {
+          const proofArray = window.crypto.getRandomValues(
+            new Uint8Array(proofFixedLen),
+          );
 
-        let offset = 0;
-        const proofLenBytes = 4;
-        const proofLenView = new DataView(
-          proofArray.buffer,
-          offset,
-          proofLenBytes,
-        );
-        proofLenView.setUint32(0, result, false); // Big-endian
-        offset += proofLenBytes;
+          let offset = 0;
+          const proofLenBytes = 4;
+          const proofLenView = new DataView(
+            proofArray.buffer,
+            offset,
+            proofLenBytes,
+          );
+          proofLenView.setUint32(0, result, false); // Big-endian
+          offset += proofLenBytes;
 
-        proofArray.set(proof.subarray(0, result), offset);
-        cryptoModule._free(ptr3);
+          proofArray.set(proof.slice(0, result), offset);
+          cryptoModule._free(ptr3);
 
-        return proofArray;
+          return proofArray;
+        } else {
+          const proofArray = Uint8Array.from([...proof.slice(0, result)]);
+          cryptoModule._free(ptr3);
+
+          return proofArray;
+        }
       } else {
-        const proofArray = Uint8Array.from(proof.slice(0, result));
         cryptoModule._free(ptr3);
 
-        return proofArray;
+        throw new Error("An unexpected error occured");
       }
     }
   }
@@ -281,7 +275,7 @@ export const getMerkleRootFromProof = async (
 
   switch (result) {
     case 0: {
-      const proof = Uint8Array.from(rootArray);
+      const proof = Uint8Array.from([...rootArray]);
       cryptoModule._free(ptr3);
 
       return proof;
@@ -326,6 +320,7 @@ export const verifyMerkleProof = async (
   item: Uint8Array,
   root: Uint8Array,
   proof: Uint8Array,
+  module?: LibCrypto,
 ): Promise<boolean> => {
   const proofLen = proof.length;
   if (proofLen % (crypto_hash_sha512_BYTES + 1) !== 0)
@@ -333,10 +328,14 @@ export const verifyMerkleProof = async (
 
   const proofArtifactsLen = proofLen / (crypto_hash_sha512_BYTES + 1);
 
-  const wasmMemory = cryptoMemory.verifyMerkleProofMemory(proofLen);
-  const cryptoModule = await libcrypto({
-    wasmMemory,
-  });
+  const wasmMemory =
+    module?.wasmMemory ?? cryptoMemory.verifyMerkleProofMemory(proofLen);
+  // const wasmMemory = cryptoMemory.verifyMerkleProofMemory(proofLen);
+  const cryptoModule =
+    module ??
+    (await libcrypto({
+      wasmMemory,
+    }));
 
   const ptr1 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const elementHash = new Uint8Array(
@@ -381,17 +380,12 @@ export const verifyMerkleProof = async (
       throw new Error("If 1 artifact then proof is its hash");
 
     case -2:
-      throw new Error(
-        "Could not allocate memory for hash concatenation helper array.",
-      );
-
-    case -3:
       throw new Error("Could not allocate memory for hashes helper array.");
 
-    case -4:
+    case -3:
       throw new Error("Proof artifact position is neither left nor right.");
 
-    case -5:
+    case -4:
       throw new Error("Could not calculate hash.");
 
     default:

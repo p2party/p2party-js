@@ -1,7 +1,10 @@
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
 export interface BasicMetadata {
   messageType: number; // 1 byte
   size: number; // 8 bytes, number of bytes, max file size 10GB
   name: string; // 256 bytes, serialized string
+  hash: Uint8Array;
   lastModified: Date; // 8 bytes, Date object
   chunkStartIndex: number; // 4 bytes, uint32
   chunkEndIndex: number; // 4 bytes, uint32
@@ -16,6 +19,7 @@ export const METADATA_LEN =
   1 + // messageType (1 byte)
   8 + // size (8 bytes)
   256 + // name (256 bytes)
+  crypto_hash_sha512_BYTES + // hash (SHA-512)
   8 + // lastModified (8 bytes)
   4 + // chunkStartIndex (4 bytes)
   4 + // chunkEndIndex (4 bytes)
@@ -53,6 +57,10 @@ export const serializeMetadata = (metadata: Metadata): Uint8Array => {
   namePadded.set(nameBytes.subarray(0, Math.min(256, nameBytes.length)));
   buffer.set(namePadded, offset);
   offset += 256;
+
+  // hash (64 bytes)
+  buffer.set(metadata.hash, offset);
+  offset += crypto_hash_sha512_BYTES;
 
   // lastModified (8 bytes)
   const lastModifiedTime = BigInt(metadata.lastModified.getTime());
@@ -103,6 +111,10 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
   const name = new TextDecoder().decode(nameBytes).replace(/\0+$/, "");
   offset += 256;
 
+  // hash (64 bytes)
+  const hash = buffer.slice(offset, offset + crypto_hash_sha512_BYTES);
+  offset += crypto_hash_sha512_BYTES;
+
   // lastModified (8 bytes)
   const lastModifiedView = new DataView(
     buffer.buffer,
@@ -152,6 +164,7 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
     messageType,
     size,
     name,
+    hash,
     lastModified,
     chunkStartIndex,
     chunkEndIndex,

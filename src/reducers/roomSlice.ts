@@ -17,8 +17,8 @@ export interface Peer {
 
 export interface Message {
   merkleRootHex: string;
+  sha512Hex: string;
   fromPeerId: string;
-  chunkIndexes: number[];
   filename: string;
   messageType: MessageType;
   savedSize: number;
@@ -41,13 +41,23 @@ export interface SetChannelArgs {
 
 export interface SetMessageArgs {
   merkleRootHex: string;
-  chunkIndex: number;
+  sha512Hex: string;
   chunkSize: number;
   fromPeerId?: string;
   filename?: string;
   messageType?: MessageType;
   totalSize?: number;
   channelLabel?: string;
+}
+
+export interface SetMessageAllChunksArgs {
+  merkleRootHex: string;
+  sha512Hex: string;
+  fromPeerId: string;
+  filename: string;
+  messageType: MessageType;
+  totalSize: number;
+  channelLabel: string;
 }
 
 export interface Room extends SetRoomArgs {
@@ -179,26 +189,50 @@ const roomSlice = createSlice({
       ) {
         state.messages.push({
           merkleRootHex: action.payload.merkleRootHex,
+          sha512Hex: action.payload.sha512Hex,
           channelLabel: action.payload.channelLabel,
           filename: action.payload.filename ?? "txt",
           messageType: action.payload.messageType,
           fromPeerId: action.payload.fromPeerId,
           timestamp: Date.now(),
-          chunkIndexes: [action.payload.chunkIndex],
           savedSize: action.payload.chunkSize,
           totalSize: action.payload.totalSize,
         });
       } else if (
-        !state.messages[messageIndex].chunkIndexes.includes(
-          action.payload.chunkIndex,
-        ) &&
         state.messages[messageIndex].totalSize >=
-          state.messages[messageIndex].savedSize + action.payload.chunkSize
+        state.messages[messageIndex].savedSize + action.payload.chunkSize
       ) {
-        state.messages[messageIndex].chunkIndexes.push(
-          action.payload.chunkIndex,
-        );
         state.messages[messageIndex].savedSize += action.payload.chunkSize;
+      } else {
+        console.log(
+          "Remaining data " +
+            (state.messages[messageIndex].totalSize -
+              state.messages[messageIndex].savedSize),
+        );
+        console.log("Current chunk will add " + action.payload.chunkSize);
+      }
+    },
+
+    setMessageAllChunks: (
+      state,
+      action: PayloadAction<SetMessageAllChunksArgs>,
+    ) => {
+      const messageIndex = state.messages.findIndex(
+        (m) => m.merkleRootHex === action.payload.merkleRootHex,
+      );
+
+      if (messageIndex === -1) {
+        state.messages.push({
+          merkleRootHex: action.payload.merkleRootHex,
+          sha512Hex: action.payload.sha512Hex,
+          channelLabel: action.payload.channelLabel,
+          filename: action.payload.filename ?? "txt",
+          messageType: action.payload.messageType,
+          fromPeerId: action.payload.fromPeerId,
+          timestamp: Date.now(),
+          savedSize: action.payload.totalSize,
+          totalSize: action.payload.totalSize,
+        });
       }
     },
 
@@ -223,6 +257,7 @@ export const {
   setPeer,
   setChannel,
   setMessage,
+  setMessageAllChunks,
   deletePeer,
   deleteChannel,
   deleteMessage,

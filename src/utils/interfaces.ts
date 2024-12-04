@@ -129,7 +129,7 @@ export interface WebSocketPeerConnectionParams {
 
 export interface WebSocketSendMessageToPeerParams {
   data: string | File;
-  toChannel?: string;
+  toChannel: string;
 }
 
 export interface WebSocketMessageError {

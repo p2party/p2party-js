@@ -48,10 +48,9 @@ export interface RTCOpenChannelParams {
   withPeers?: { peerId: string; peerPublicKey: string }[];
 }
 
-export interface RTCChannelMessageParams {
-  data: string | File | Blob; // | ArrayBuffer;
-  fromPeerId: string;
-  label?: string;
+export interface RTCSendMessageParams {
+  data: string | File;
+  label: string;
 }
 
 export interface RTCRoomInfoParams {

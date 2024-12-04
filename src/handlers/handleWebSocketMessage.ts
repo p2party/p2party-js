@@ -35,6 +35,7 @@ import type {
   WebSocketMessagePeerConnectionResponse,
   WebSocketMessageMessageSendResponse,
 } from "../utils/interfaces";
+import { PROOF_LEN } from "../utils/splitToChunks";
 
 export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
 export const messageLen =
@@ -50,9 +51,11 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
 );
 
 const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  64 * 1024,
+  100 * 64 * 1024,
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
+
+const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -206,6 +209,10 @@ const handleWebSocketMessage = async (
           wasmMemory: decryptionWasmMemory,
         });
 
+        const merkleModule = await libcrypto({
+          wasmMemory: merkleWasmMemory,
+        });
+
         const peerIndex = room.peers.findIndex(
           (p) => p.peerId === message.fromPeerId,
         );
@@ -221,10 +228,12 @@ const handleWebSocketMessage = async (
           new Blob([messageData]), // hexToUint8Array(message.message),
           senderPublicKey,
           receiverSecretKey,
+          room,
           decryptionModule,
-          message.label,
-          message.fromPeerId,
-          api,
+          merkleModule,
+          // message.label,
+          // message.fromPeerId,
+          // api,
         );
 
         break;

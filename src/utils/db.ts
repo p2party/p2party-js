@@ -15,6 +15,13 @@ export interface Chunk {
   mimeType: string;
 }
 
+export interface SendQueue {
+  position: number;
+  label: string;
+  toPeerId: string;
+  encryptedData: Blob;
+}
+
 export interface RepoSchema extends DBSchema {
   chunks: {
     value: Chunk;
@@ -22,6 +29,14 @@ export interface RepoSchema extends DBSchema {
     indexes: {
       /** Index to query all chunks by merkleRoot */
       merkleRoot: string;
+    };
+  };
+
+  sendQueue: {
+    value: SendQueue;
+    key: [number, string, string]; // Composite key: [position, label, toPeerId]
+    indexes: {
+      labelPeer: string;
     };
   };
 }
@@ -36,6 +51,16 @@ export const getDB = async (): Promise<IDBPDatabase<RepoSchema>> => {
         });
 
         chunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("sendQueue")) {
+        const sendQueue = db.createObjectStore("sendQueue", {
+          keyPath: ["position", "label", "toPeerId"],
+        });
+
+        sendQueue.createIndex("labelPeer", ["label", "toPeerId"], {
+          unique: false,
+        });
       }
     },
 
@@ -74,6 +99,71 @@ export const getDBChunk = async (
     // return;
   } catch (error) {
     console.error(error);
+    throw error;
+  }
+};
+
+export const existsDBChunk = async (
+  merkleRootHex: string,
+  chunkIndex: number,
+  db?: IDBPDatabase<RepoSchema>,
+) => {
+  try {
+    const shouldClose = db == undefined;
+
+    db = db ?? (await getDB());
+
+    const count = await db.count("chunks", [merkleRootHex, chunkIndex]);
+
+    if (shouldClose) db.close();
+
+    return count > 0;
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
+export const getDBSendQueue = async (
+  label: string,
+  toPeerId: string,
+  db?: IDBPDatabase<RepoSchema>,
+) => {
+  try {
+    const shouldClose = db == undefined;
+
+    db = db ?? (await getDB());
+
+    const sendQueueCount = await db.countFromIndex(
+      "sendQueue",
+      "labelPeer",
+      label + toPeerId,
+    );
+
+    if (sendQueueCount > 0) {
+      const sendQueue = await db.getAllFromIndex(
+        "sendQueue",
+        "labelPeer",
+        label + toPeerId,
+      );
+
+      if (shouldClose) db.close();
+
+      return sendQueue;
+    } else {
+      const tx = db.transaction("sendQueue", "readonly");
+      const store = tx.objectStore("sendQueue");
+      const index = store.index("labelPeer");
+      const keyRange = IDBKeyRange.only([label, toPeerId]);
+      const sendQueue = await index.getAll(keyRange);
+
+      if (shouldClose) db.close();
+
+      return sendQueue;
+    }
+  } catch (error) {
+    console.error(error);
+
     throw error;
   }
 };
@@ -120,6 +210,30 @@ export const getDBAllChunks = async (
   }
 };
 
+export const getDBAllChunksCount = async (
+  merkleRootHex: string,
+  db?: IDBPDatabase<RepoSchema>,
+) => {
+  try {
+    const shouldClose = db == undefined;
+
+    db = db ?? (await getDB());
+
+    const chunksCount = await db.countFromIndex(
+      "chunks",
+      "merkleRoot",
+      merkleRootHex,
+    );
+
+    if (shouldClose) db.close();
+
+    return chunksCount;
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+};
+
 export const setDBChunk = async (
   chunk: Chunk,
   db?: IDBPDatabase<RepoSchema>,
@@ -130,6 +244,23 @@ export const setDBChunk = async (
     db = db ?? (await getDB());
 
     await db.put("chunks", chunk);
+
+    if (shouldClose) db.close();
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const setDBSendQueue = async (
+  chunk: SendQueue,
+  db?: IDBPDatabase<RepoSchema>,
+) => {
+  try {
+    const shouldClose = db == undefined;
+
+    db = db ?? (await getDB());
+
+    await db.put("sendQueue", chunk);
 
     if (shouldClose) db.close();
   } catch (error) {
@@ -155,6 +286,25 @@ export const deleteDBChunk = async (
         await db.delete("chunks", [merkleRootHex, chunks[i].chunkIndex]);
       }
     }
+
+    if (shouldClose) db.close();
+  } catch (err) {
+    console.error(err);
+    throw err;
+  }
+};
+
+export const deleteDBSendQueueItem = async (
+  position: number,
+  label: string,
+  toPeerId: string,
+  db?: IDBPDatabase<RepoSchema>,
+) => {
+  try {
+    const shouldClose = db == undefined;
+
+    db = db ?? (await getDB());
+    await db.delete("sendQueue", [position, label, toPeerId]);
 
     if (shouldClose) db.close();
   } catch (err) {
@@ -198,48 +348,65 @@ export const createIDBWritableStream = async (
 
 // Create a ReadableStream to read data from IndexedDB in chunks
 export const createIDBReadableStream = async (
-  merkleRoot: string,
+  merkleRootHex: string,
   db?: IDBPDatabase<RepoSchema>,
-): Promise<ReadableStream<Blob>> => {
+): Promise<ReadableStream<Chunk>> => {
   const shouldClose = db == undefined;
   db = db ?? (await getDB());
 
-  const chunks = await getDBAllChunks(merkleRoot, db);
-  chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+  return new ReadableStream<Chunk>(
+    {
+      async pull(controller) {
+        const tx = db.transaction("chunks", "readonly");
+        const store = tx.objectStore("chunks");
+        // const index = store.index("merkleRoot");
+        const keyRange = IDBKeyRange.only(merkleRootHex);
+        let cursor = await store.openCursor(keyRange);
+        // const chunksUnsorted = await index.getAll(keyRange);
+        // const chunks = chunksUnsorted.sort((a, b) => a.chunkIndex - b.chunkIndex);
 
-  let chunkIndex = 0;
+        while (cursor) {
+          controller.enqueue(cursor.value);
+          if (controller.desiredSize ?? 0 > 0) {
+            cursor = await cursor.continue();
+          } else {
+            break;
+          }
+        }
 
-  return new ReadableStream<Blob>({
-    pull(controller) {
-      if (chunkIndex < chunks.length) {
-        const chunk = chunks[chunkIndex];
-        controller.enqueue(chunk.data);
-        chunkIndex += 1;
-      } else {
-        controller.close();
-        if (shouldClose) db?.close();
-      }
+        if (!cursor) {
+          // Actually done with this store, not just paused
+          console.log("Completely done");
+          controller.close();
+        }
+
+        if (shouldClose) db.close();
+      },
+
+      cancel(reason) {
+        console.error("ReadableStream cancelled:", reason);
+        if (shouldClose) db.close();
+      },
     },
-    cancel(reason) {
-      console.error("ReadableStream cancelled:", reason);
-      if (shouldClose) db?.close();
+    {
+      highWaterMark: 100,
     },
-  });
+  );
 };
 
-export const readDataFromIndexedDB = async (
-  merkleRoot: string,
-): Promise<Blob> => {
-  const readableStream = await createIDBReadableStream(merkleRoot);
-  const reader = readableStream.getReader();
-  const chunks: Blob[] = [];
+// export const readDataFromIndexedDB = async (
+//   merkleRoot: string,
+// ): Promise<Blob> => {
+//   const readableStream = await createIDBReadableStream(merkleRoot);
+//   const reader = readableStream.getReader();
+//   const chunks: Blob[] = [];
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
+//   while (true) {
+//     const { value, done } = await reader.read();
+//     if (done) break;
+//     chunks.push(value);
+//   }
 
-  const combinedBlob = new Blob(chunks);
-  return combinedBlob;
-};
+//   const combinedBlob = new Blob(chunks);
+//   return combinedBlob;
+// };

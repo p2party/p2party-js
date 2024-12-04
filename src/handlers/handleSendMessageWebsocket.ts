@@ -1,16 +1,15 @@
 import signalingServerApi from "../api/signalingServerApi";
 
 import { setMessage } from "../reducers/roomSlice";
-import { getDB, getDBChunk, setDBChunk } from "../utils/db";
+import { deleteDBChunk, getDB } from "../utils/db";
 
 import { splitToChunks } from "../utils/splitToChunks";
-import { deserializeMetadata } from "../utils/metadata";
+import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import {
   uint8ArrayToHex,
   hexToUint8Array,
   concatUint8Arrays,
 } from "../utils/uint8array";
-import { getMimeType } from "../utils/messageTypes";
 
 import { fisherYatesShuffle } from "../cryptography/utils";
 import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
@@ -24,7 +23,7 @@ export const handleSendMessageWebsocket = async (
   data: string | File,
   encryptionModule: LibCrypto,
   api: BaseQueryApi,
-  label?: string,
+  label: string,
 ) => {
   const { keyPair, room } = api.getState() as State;
   const senderSecretKey = hexToUint8Array(keyPair.secretKey);
@@ -37,13 +36,20 @@ export const handleSendMessageWebsocket = async (
     : 0;
   if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-  const { merkleRoot, chunks, metadata, merkleProofs } =
-    await splitToChunks(data);
+  const db = await getDB();
+
+  const { merkleRoot, unencryptedChunks } = await splitToChunks(
+    data,
+    api,
+    label,
+    db,
+  );
+
+  db.close();
 
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  const chunksLen = chunks.length;
-  // const channels: string[] = [];
+  const chunksLen = unencryptedChunks.length;
   const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
   for (let i = 0; i < PEERS_LEN; i++) {
     const peerId = dataChannels[channelIndex].peerIds[i];
@@ -58,13 +64,16 @@ export const handleSendMessageWebsocket = async (
     for (let j = 0; j < chunksLen; j++) {
       const jRandom = indexesRandomized[j];
 
-      const m = deserializeMetadata(metadata[jRandom]);
+      const m = deserializeMetadata(
+        unencryptedChunks[jRandom].slice(0, METADATA_LEN),
+      );
       if (m.chunkStartIndex < m.chunkEndIndex) {
         api.dispatch(
           setMessage({
             merkleRootHex,
+            sha512Hex: uint8ArrayToHex(m.hash),
             fromPeerId: keyPair.peerId,
-            chunkIndex: m.chunkIndex,
+            // chunkIndex: m.chunkIndex,
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
             totalSize: m.size,
             messageType: m.messageType,
@@ -72,39 +81,12 @@ export const handleSendMessageWebsocket = async (
             channelLabel: label ?? dataChannels[channelIndex].label,
           }),
         );
-
-        const db = await getDB();
-        const storedChunk = await getDBChunk(merkleRootHex, m.chunkIndex, db);
-        if (!storedChunk) {
-          const realChunk = chunks[jRandom].slice(
-            m.chunkStartIndex,
-            m.chunkEndIndex,
-          );
-          const mimeType = getMimeType(m.messageType);
-
-          await setDBChunk(
-            {
-              merkleRoot: merkleRootHex,
-              chunkIndex: m.chunkIndex,
-              totalSize: m.size,
-              data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
-              mimeType,
-            },
-            db,
-          );
-        }
-
-        db.close();
+      } else {
+        await deleteDBChunk(merkleRootHex, m.chunkIndex);
       }
 
-      const concatedUnencrypted = await concatUint8Arrays([
-        metadata[jRandom],
-        merkleProofs[jRandom],
-        chunks[jRandom],
-      ]);
-
       const encryptedMessage = await encryptAsymmetric(
-        concatedUnencrypted,
+        unencryptedChunks[jRandom],
         receiverPublicKey,
         senderSecretKey,
         merkleRoot,

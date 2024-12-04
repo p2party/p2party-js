@@ -2,10 +2,7 @@ import { decryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { verifyMerkleProof } from "../cryptography/merkle";
 
-import {
-  // existsDBChunk, getDB,
-  setDBChunk,
-} from "../utils/db";
+import { existsDBChunk, getDB, setDBChunk } from "../utils/db";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -24,6 +21,7 @@ export const handleReceiveMessage = async (
 ): Promise<{
   merkleRootHex: string;
   sha512Hex: string;
+  chunkIndex: number;
   chunkSize: number;
   totalSize: number;
   messageType: MessageType;
@@ -54,21 +52,31 @@ export const handleReceiveMessage = async (
     const incomingMessageIndex = room.messages.findIndex(
       (m) => m.merkleRootHex === merkleRootHex,
     );
+
+    const db = await getDB();
+
+    const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex, db);
+
     const messageRelevant =
       chunkSize > 0 &&
       (incomingMessageIndex === -1 ||
-        room.messages[incomingMessageIndex].totalSize >=
-          room.messages[incomingMessageIndex].savedSize + chunkSize);
+        (room.messages[incomingMessageIndex].totalSize >=
+          room.messages[incomingMessageIndex].savedSize + chunkSize &&
+          !exists));
 
-    if (!messageRelevant)
+    if (!messageRelevant) {
+      db.close();
+
       return {
         merkleRootHex,
         sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
         totalSize: metadata.size,
         messageType: metadata.messageType,
         filename: metadata.name,
       };
+    }
 
     const merkleProofArray = decryptedMessage.slice(
       METADATA_LEN,
@@ -84,6 +92,7 @@ export const handleReceiveMessage = async (
       return {
         merkleRootHex,
         sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkIndex: -1,
         chunkSize: -3,
         totalSize: metadata.size,
         messageType: metadata.messageType,
@@ -104,6 +113,7 @@ export const handleReceiveMessage = async (
       return {
         merkleRootHex,
         sha512Hex: uint8ArrayToHex(metadata.hash),
+        chunkIndex: -1,
         chunkSize: -4,
         totalSize: metadata.size,
         messageType: metadata.messageType,
@@ -117,17 +127,23 @@ export const handleReceiveMessage = async (
 
     const mimeType = getMimeType(metadata.messageType);
 
-    await setDBChunk({
-      merkleRoot: merkleRootHex,
-      chunkIndex: metadata.chunkIndex,
-      totalSize: metadata.size,
-      data: new Blob([realChunk]),
-      mimeType,
-    });
+    await setDBChunk(
+      {
+        merkleRoot: merkleRootHex,
+        chunkIndex: metadata.chunkIndex,
+        totalSize: metadata.size,
+        data: new Blob([realChunk]),
+        mimeType,
+      },
+      db,
+    );
+
+    db.close();
 
     return {
       merkleRootHex,
       sha512Hex: uint8ArrayToHex(metadata.hash),
+      chunkIndex: metadata.chunkIndex,
       chunkSize,
       totalSize: metadata.size,
       messageType: metadata.messageType,

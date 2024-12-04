@@ -73,7 +73,6 @@ export const handleSendMessageWebsocket = async (
             merkleRootHex,
             sha512Hex: uint8ArrayToHex(m.hash),
             fromPeerId: keyPair.peerId,
-            // chunkIndex: m.chunkIndex,
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
             totalSize: m.size,
             messageType: m.messageType,

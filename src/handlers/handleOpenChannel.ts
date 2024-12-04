@@ -10,6 +10,8 @@ import { randomNumberInRange } from "../cryptography/utils";
 import { deleteDBSendQueueItem, getDB, getDBSendQueue } from "../utils/db";
 import { hexToUint8Array } from "../utils/uint8array";
 
+import { wait } from "./handleSendMessage";
+
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 import type {
@@ -56,25 +58,28 @@ export const handleOpenChannel = async (
     dataChannel.bufferedAmountLowThreshold = 64 * 1024;
     dataChannel.onbufferedamountlow = async () => {
       const db = await getDB();
+
       const sendQueue = await getDBSendQueue(label, epc.withPeerId, db);
       const sendQueueLen = sendQueue.length;
+      let i = 0;
 
-      while (dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT && sendQueueLen > 0) {
-        for (let i = 0; i < sendQueueLen; i++) {
-          const timeoutSeconds = await randomNumberInRange(1, 50);
-          setTimeout(() => {
-            dataChannel.send(sendQueue[i].encryptedData);
-          }, timeoutSeconds);
+      while (
+        dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+        i < sendQueueLen
+      ) {
+        const timeoutMilliseconds = await randomNumberInRange(2, 20);
+        await wait(timeoutMilliseconds);
+        dataChannel.send(sendQueue[i].encryptedData);
 
-          await deleteDBSendQueueItem(
-            sendQueue[i].position,
-            label,
-            epc.withPeerId,
-            db,
-          );
+        await deleteDBSendQueueItem(
+          sendQueue[i].position,
+          label,
+          epc.withPeerId,
+          db,
+        );
 
-          delete(sendQueue[i]);
-        }
+        delete sendQueue[i];
+        i++;
       }
 
       db.close();
@@ -110,7 +115,6 @@ export const handleOpenChannel = async (
     };
 
     extChannel.onmessage = async (e) => {
-      console.log("Received message");
       try {
         const { room } = api.getState() as State;
 

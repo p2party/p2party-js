@@ -74,8 +74,8 @@ const withJS = ` \
 const memory = `\
 -s IMPORTED_MEMORY=1 \
 -s ALLOW_MEMORY_GROWTH=1 \
--s INITIAL_MEMORY=5mb \
--s STACK_SIZE=3mb \
+-s INITIAL_MEMORY=2mb \
+-s STACK_SIZE=512kb \
 -s MEMORY_GROWTH_LINEAR_STEP=64kb \
 -s GLOBAL_BASE=4096 \
 `;

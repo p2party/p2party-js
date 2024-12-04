@@ -67,6 +67,7 @@ export const splitToChunks = async (
 
   const hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", data);
   const dataHash = new Uint8Array(hashArrayBuffer);
+  const sha512Hex = uint8ArrayToHex(dataHash);
 
   const messageType = getMessageType(message);
   const size = data.length;
@@ -175,7 +176,7 @@ export const splitToChunks = async (
   api.dispatch(
     setMessageAllChunks({
       merkleRootHex,
-      sha512Hex: uint8ArrayToHex(dataHash),
+      sha512Hex,
       fromPeerId: keyPair.peerId,
       totalSize: size,
       messageType,

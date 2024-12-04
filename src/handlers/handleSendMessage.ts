@@ -15,6 +15,8 @@ import { deleteDBChunk, getDB, setDBSendQueue } from "../utils/db";
 //   MessageCategory,
 // } from "../utils/messageTypes";
 
+import { MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
+
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -22,7 +24,12 @@ import type {
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
-import { MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
+
+export const wait = (milliseconds: number) => {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+};
 
 export const handleSendMessage = async (
   data: string | File,
@@ -86,14 +93,10 @@ export const handleSendMessage = async (
         encryptedMessage,
       ]);
 
-      const timeoutSeconds = await randomNumberInRange(1, 50);
-
-      if (
-        dataChannels[i].bufferedAmount < MAX_BUFFERED_AMOUNT
-      ) {
-        setTimeout(() => {
-          dataChannels[i].send(concatedEncrypted);
-        }, timeoutSeconds);
+      const timeoutMilliseconds = await randomNumberInRange(2, 20);
+      if (dataChannels[i].bufferedAmount < MAX_BUFFERED_AMOUNT) {
+        await wait(timeoutMilliseconds);
+        dataChannels[i].send(concatedEncrypted);
       } else {
         await setDBSendQueue(
           {

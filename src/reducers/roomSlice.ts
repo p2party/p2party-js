@@ -179,37 +179,35 @@ const roomSlice = createSlice({
         (m) => m.merkleRootHex === action.payload.merkleRootHex,
       );
 
-      if (
-        messageIndex === -1 &&
-        action.payload.channelLabel &&
-        action.payload.fromPeerId &&
-        isUUID(action.payload.fromPeerId) &&
-        action.payload.messageType &&
-        action.payload.totalSize
-      ) {
-        state.messages.push({
-          merkleRootHex: action.payload.merkleRootHex,
-          sha512Hex: action.payload.sha512Hex,
-          channelLabel: action.payload.channelLabel,
-          filename: action.payload.filename ?? "txt",
-          messageType: action.payload.messageType,
-          fromPeerId: action.payload.fromPeerId,
-          timestamp: Date.now(),
-          savedSize: action.payload.chunkSize,
-          totalSize: action.payload.totalSize,
-        });
+      if (messageIndex === -1) {
+        if (
+          action.payload.channelLabel &&
+          action.payload.fromPeerId &&
+          isUUID(action.payload.fromPeerId) &&
+          action.payload.messageType &&
+          action.payload.chunkSize > 0 &&
+          action.payload.totalSize
+        ) {
+          state.messages.push({
+            merkleRootHex: action.payload.merkleRootHex,
+            sha512Hex: action.payload.sha512Hex,
+            channelLabel: action.payload.channelLabel,
+            filename: action.payload.filename ?? "txt",
+            messageType: action.payload.messageType,
+            fromPeerId: action.payload.fromPeerId,
+            timestamp: Date.now(),
+            savedSize:
+              action.payload.chunkSize > 0 ? action.payload.chunkSize : 0,
+            totalSize: action.payload.totalSize,
+          });
+        }
       } else if (
+        action.payload.chunkSize > 0 &&
         state.messages[messageIndex].totalSize >=
-        state.messages[messageIndex].savedSize + action.payload.chunkSize
+          state.messages[messageIndex].savedSize + action.payload.chunkSize
       ) {
-        state.messages[messageIndex].savedSize += action.payload.chunkSize;
-      } else {
-        console.log(
-          "Remaining data " +
-            (state.messages[messageIndex].totalSize -
-              state.messages[messageIndex].savedSize),
-        );
-        console.log("Current chunk will add " + action.payload.chunkSize);
+        state.messages[messageIndex].savedSize =
+          state.messages[messageIndex].savedSize + action.payload.chunkSize;
       }
     },
 
@@ -221,7 +219,14 @@ const roomSlice = createSlice({
         (m) => m.merkleRootHex === action.payload.merkleRootHex,
       );
 
-      if (messageIndex === -1) {
+      if (
+        messageIndex === -1 &&
+        action.payload.channelLabel &&
+        action.payload.fromPeerId &&
+        isUUID(action.payload.fromPeerId) &&
+        action.payload.messageType &&
+        action.payload.totalSize
+      ) {
         state.messages.push({
           merkleRootHex: action.payload.merkleRootHex,
           sha512Hex: action.payload.sha512Hex,

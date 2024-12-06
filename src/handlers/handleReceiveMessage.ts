@@ -46,7 +46,10 @@ export const handleReceiveMessage = async (
       decryptedMessage.slice(0, METADATA_LEN),
     );
 
-    const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
+    const chunkSize =
+      metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.size
+        ? 0
+        : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
     const incomingMessageIndex = room.messages.findIndex(

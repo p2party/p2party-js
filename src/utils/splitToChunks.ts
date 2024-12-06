@@ -55,7 +55,7 @@ export const splitToChunks = async (
   db: IDBPDatabase<RepoSchema>,
   minChunks = 5, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
-  percentageFilledChunk = 0.9,
+  percentageFilledChunk = 0.8,
 ): Promise<{
   merkleRoot: Uint8Array;
   unencryptedChunks: Uint8Array[];
@@ -64,7 +64,6 @@ export const splitToChunks = async (
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
 
   const data = await serializer(message);
-
   const hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", data);
   const dataHash = new Uint8Array(hashArrayBuffer);
   const sha512Hex = uint8ArrayToHex(dataHash);
@@ -106,11 +105,17 @@ export const splitToChunks = async (
       0,
       Math.floor(chunkSize * (1 - percentageFilledChunk)),
     );
-    const chunkEndIndex = chunkStartIndex + bytesToCopy;
+    let chunkEndIndex = chunkStartIndex + bytesToCopy;
 
     if (remainingBytes > 0) {
       chunk.set(data.slice(offset, offset + bytesToCopy), chunkStartIndex);
       offset += bytesToCopy;
+    } else {
+      const r = await randomNumberInRange(
+        chunkEndIndex + size + 1,
+        chunkEndIndex + 1000000 * size,
+      );
+      chunkEndIndex += r;
     }
 
     chunks.push(chunk);
@@ -143,10 +148,13 @@ export const splitToChunks = async (
       PROOF_LEN,
     );
 
-    const realChunk = chunks[i].slice(
-      metadata[i].chunkStartIndex,
-      metadata[i].chunkEndIndex,
-    );
+    const realChunk =
+      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex > metadata[i].size
+        ? new Uint8Array()
+        : chunks[i].slice(
+            metadata[i].chunkStartIndex,
+            metadata[i].chunkEndIndex,
+          );
     const mimeType = getMimeType(metadata[i].messageType);
 
     await setDBChunk(

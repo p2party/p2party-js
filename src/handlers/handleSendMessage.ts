@@ -113,7 +113,7 @@ export const handleSendMessage = async (
         unencryptedChunks[jRandom].slice(0, METADATA_LEN),
       );
 
-      if (m.chunkStartIndex === m.chunkEndIndex)
+      if (m.chunkEndIndex - m.chunkStartIndex > m.size)
         await deleteDBChunk(merkleRootHex, m.chunkIndex, db);
 
       delete unencryptedChunks[jRandom];

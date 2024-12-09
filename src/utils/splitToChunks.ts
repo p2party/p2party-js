@@ -111,9 +111,10 @@ export const splitToChunks = async (
       chunk.set(data.slice(offset, offset + bytesToCopy), chunkStartIndex);
       offset += bytesToCopy;
     } else {
+      const start = chunkEndIndex + size + 1;
       const r = await randomNumberInRange(
-        chunkEndIndex + size + 1,
-        chunkEndIndex + 1000000 * size,
+        start,
+        chunkEndIndex + Number.MAX_SAFE_INTEGER - start,
       );
       chunkEndIndex += r;
     }

@@ -1,4 +1,4 @@
-import { handleSendMessage } from "./handleSendMessage";
+// import { handleSendMessage } from "./handleSendMessage";
 import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
@@ -24,7 +24,6 @@ export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
   epc: IRTCPeerConnection;
   dataChannels: IRTCDataChannel[];
-  encryptionModule: LibCrypto;
   decryptionModule: LibCrypto;
   merkleModule: LibCrypto;
 }
@@ -36,7 +35,6 @@ export const handleOpenChannel = async (
     channel,
     epc,
     dataChannels,
-    encryptionModule,
     decryptionModule,
     merkleModule,
   }: OpenChannelHelperParams,
@@ -166,16 +164,16 @@ export const handleOpenChannel = async (
 
       api.dispatch(setChannel({ label, peerId: extChannel.withPeerId }));
 
-      const msg = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
+      // const msg = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
 
-      await handleSendMessage(
-        msg,
-        [epc],
-        [extChannel],
-        encryptionModule,
-        api,
-        label,
-      );
+      // await handleSendMessage(
+      //   msg,
+      //   [epc],
+      //   [extChannel],
+      //   encryptionModule,
+      //   api,
+      //   label,
+      // );
     };
 
     return extChannel;

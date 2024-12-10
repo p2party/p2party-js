@@ -141,6 +141,8 @@ const webrtcApi = createApi({
             peerConnections,
             dataChannels,
             encryptionWasmMemory,
+            decryptionWasmMemory,
+            merkleWasmMemory,
           },
           api,
           extraOptions,

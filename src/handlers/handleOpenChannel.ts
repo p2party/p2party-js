@@ -9,6 +9,7 @@ import { randomNumberInRange } from "../cryptography/utils";
 
 import { deleteDBSendQueueItem, getDB, getDBSendQueue } from "../utils/db";
 import { hexToUint8Array } from "../utils/uint8array";
+import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
 import { wait } from "./handleSendMessage";
 
@@ -44,7 +45,6 @@ export const handleOpenChannel = async (
     const { keyPair } = api.getState() as State;
 
     const label = typeof channel === "string" ? channel : channel.label;
-
     const dataChannel =
       typeof channel === "string"
         ? epc.createDataChannel(channel, {
@@ -114,39 +114,36 @@ export const handleOpenChannel = async (
 
     extChannel.onmessage = async (e) => {
       try {
+        const { channelLabel, merkleRoot, merkleRootHex, hashHex } =
+          await decompileChannelMessageLabel(label);
         const { room } = api.getState() as State;
 
         const peerPublicKeyHex = epc.withPeerPublicKey;
         const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
         const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
 
-        const {
-          merkleRootHex,
-          sha512Hex,
-          chunkSize,
-          totalSize,
-          messageType,
-          filename,
-        } = await handleReceiveMessage(
-          e.data as Blob,
-          senderPublicKey,
-          receiverSecretKey,
-          room,
-          decryptionModule,
-          merkleModule,
-        );
+        const { chunkSize, totalSize, messageType, filename } =
+          await handleReceiveMessage(
+            e.data as Blob,
+            merkleRoot,
+            senderPublicKey,
+            receiverSecretKey,
+            room,
+            decryptionModule,
+            merkleModule,
+          );
 
         if (chunkSize > 0) {
           api.dispatch(
             setMessage({
               merkleRootHex,
-              sha512Hex,
+              sha512Hex: hashHex,
               fromPeerId: epc.withPeerId,
               chunkSize,
               totalSize,
               messageType,
               filename,
-              channelLabel: label,
+              channelLabel,
             }),
           );
         }

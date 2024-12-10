@@ -31,7 +31,7 @@ export const PROOF_LEN =
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
 export const CHUNK_LEN =
   rtcDataChannelMessageLimit - // 64kb max message size on RTCDataChannel
-  crypto_hash_sha512_BYTES - // merkle root of message
+  // crypto_hash_sha512_BYTES - // merkle root of message
   METADATA_LEN - // fixed
   PROOF_LEN - // Merkle proof max len of 3kb
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // Encrypted message nonce
@@ -56,31 +56,36 @@ export const splitToChunks = async (
   minChunks = 5, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.8,
+  metadataSchemaVersion = 1,
 ): Promise<{
   merkleRoot: Uint8Array;
+  merkleRootHex: string;
+  hash: Uint8Array;
+  hashHex: string;
+  totalSize: number;
   unencryptedChunks: Uint8Array[];
 }> => {
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
 
   const data = await serializer(message);
+  const totalSize = data.length;
   const hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", data);
-  const dataHash = new Uint8Array(hashArrayBuffer);
-  const sha512Hex = uint8ArrayToHex(dataHash);
+  const hash = new Uint8Array(hashArrayBuffer);
+  const sha512Hex = uint8ArrayToHex(hash);
 
   const messageType = getMessageType(message);
-  const size = data.length;
   const name =
     typeof message === "string"
       ? await generateRandomRoomUrl(256)
       : message.name.slice(0, 255);
-  const lastModified = new Date(
-    typeof message === "string" ? Date.now() : message.lastModified,
-  );
+  // const lastModified = new Date(
+  //   typeof message === "string" ? Date.now() : message.lastModified,
+  // );
 
   const totalChunks = Math.max(
     minChunks,
-    Math.ceil(size / (chunkSize * percentageFilledChunk)),
+    Math.ceil(totalSize / (chunkSize * percentageFilledChunk)),
   );
 
   const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
@@ -95,7 +100,7 @@ export const splitToChunks = async (
   for (let i = 0; i < totalChunks; i++) {
     const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
 
-    const remainingBytes = data.length - offset;
+    const remainingBytes = totalSize - offset;
     const bytesToCopy =
       remainingBytes > 0
         ? Math.min(remainingBytes, Math.ceil(chunkSize * percentageFilledChunk))
@@ -111,7 +116,7 @@ export const splitToChunks = async (
       chunk.set(data.slice(offset, offset + bytesToCopy), chunkStartIndex);
       offset += bytesToCopy;
     } else {
-      const start = chunkEndIndex + size + 1;
+      const start = chunkEndIndex + totalSize + 1;
       const r = await randomNumberInRange(
         start,
         chunkEndIndex + Number.MAX_SAFE_INTEGER - start,
@@ -121,15 +126,13 @@ export const splitToChunks = async (
 
     chunks.push(chunk);
     metadata.push({
+      schemaVersion: metadataSchemaVersion,
       messageType,
-      size,
       name,
-      hash: dataHash,
-      lastModified,
       chunkStartIndex,
       chunkEndIndex,
       chunkIndex: i,
-      totalChunks,
+      totalSize,
     });
 
     const hash = await window.crypto.subtle.digest("SHA-512", chunk);
@@ -150,7 +153,7 @@ export const splitToChunks = async (
     );
 
     const realChunk =
-      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex > metadata[i].size
+      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex > totalSize
         ? new Uint8Array()
         : chunks[i].slice(
             metadata[i].chunkStartIndex,
@@ -162,7 +165,7 @@ export const splitToChunks = async (
       {
         merkleRoot: merkleRootHex,
         chunkIndex: metadata[i].chunkIndex,
-        totalSize: metadata[i].size,
+        // totalSize: metadata[i].size,
         data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
         mimeType,
       },
@@ -187,12 +190,19 @@ export const splitToChunks = async (
       merkleRootHex,
       sha512Hex,
       fromPeerId: keyPair.peerId,
-      totalSize: size,
+      totalSize,
       messageType,
       filename: name,
       channelLabel: label,
     }),
   );
 
-  return { merkleRoot, unencryptedChunks };
+  return {
+    merkleRoot,
+    merkleRootHex,
+    hash,
+    hashHex: sha512Hex,
+    totalSize,
+    unencryptedChunks,
+  };
 };

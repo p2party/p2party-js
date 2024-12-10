@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Create WebRTC mesh networks in two LOC",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/p2party/p2party-ts.git"
@@ -48,6 +48,7 @@
     "wasm": "cross-env NODE_ENV=production node scripts/emscripten.js",
     "prebuild": "npm run wasm",
     "build": "cross-env NODE_ENV=production rollup --config rollup.config.ts --configPlugin typescript",
+    "build:worker": "cross-env NODE_ENV=production rollup --config rollup.worker.config.ts --configPlugin typescript",
     "format": "prettier --write .",
     "lint": "npx eslint .",
     "test": "jest",
@@ -66,6 +67,7 @@
     "@rollup/plugin-typescript": "^11.1.6",
     "@types/emscripten": "^1.39.13",
     "@types/eslint__js": "^8.42.3",
+    "@web/rollup-plugin-import-meta-assets": "^2.2.1",
     "cross-env": "^7.0.3",
     "eslint": "^9.9.1",
     "eslint-plugin-jest": "^28.8.3",

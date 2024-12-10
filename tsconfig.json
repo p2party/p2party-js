@@ -6,7 +6,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",
-    "moduleResolution": "bundler",
+    "moduleResolution": "node",
 
     // // Output map
     // "declaration": true,
@@ -36,6 +36,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": true,
+
+    // For workers
+    "isolatedModules": true,
+    "noEmit": true,
 
     "paths": {
       "@libcrypto": ["./src/cryptography"]

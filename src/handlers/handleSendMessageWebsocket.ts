@@ -38,16 +38,10 @@ export const handleSendMessageWebsocket = async (
 
   const db = await getDB();
 
-  const { merkleRoot, unencryptedChunks } = await splitToChunks(
-    data,
-    api,
-    label,
-    db,
-  );
+  const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
+    await splitToChunks(data, api, label, db);
 
   db.close();
-
-  const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
   const chunksLen = unencryptedChunks.length;
   const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
@@ -71,10 +65,10 @@ export const handleSendMessageWebsocket = async (
         api.dispatch(
           setMessage({
             merkleRootHex,
-            sha512Hex: uint8ArrayToHex(m.hash),
+            sha512Hex: hashHex,
             fromPeerId: keyPair.peerId,
             chunkSize: m.chunkEndIndex - m.chunkStartIndex,
-            totalSize: m.size,
+            totalSize,
             messageType: m.messageType,
             filename: m.name,
             channelLabel: label ?? dataChannels[channelIndex].label,

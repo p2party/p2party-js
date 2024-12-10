@@ -10,7 +10,7 @@ export const dbVersion = 1;
 export interface Chunk {
   merkleRoot: string;
   chunkIndex: number;
-  totalSize: number;
+  // totalSize: number;
   data: Blob;
   mimeType: string;
 }
@@ -316,7 +316,7 @@ export const deleteDBSendQueueItem = async (
 // Create a WritableStream to write data to IndexedDB in chunks
 export const createIDBWritableStream = async (
   merkleRoot: string,
-  totalSize: number,
+  // totalSize: number,
   mimeType: string,
   db?: IDBPDatabase<RepoSchema>,
 ): Promise<WritableStream<Blob>> => {
@@ -329,7 +329,7 @@ export const createIDBWritableStream = async (
       const chunkData: Chunk = {
         merkleRoot,
         chunkIndex,
-        totalSize,
+        // totalSize,
         data: chunk,
         mimeType,
       };

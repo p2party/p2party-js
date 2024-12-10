@@ -13,6 +13,8 @@ export interface RTCChannelMessageParamsExtension extends RTCSendMessageParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
   encryptionWasmMemory: WebAssembly.Memory;
+  decryptionWasmMemory: WebAssembly.Memory;
+  merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcMessageQuery: BaseQueryFn<
@@ -20,7 +22,15 @@ const webrtcMessageQuery: BaseQueryFn<
   void,
   unknown
 > = async (
-  { data, label, peerConnections, dataChannels, encryptionWasmMemory },
+  {
+    data,
+    label,
+    peerConnections,
+    dataChannels,
+    encryptionWasmMemory,
+    decryptionWasmMemory,
+    merkleWasmMemory,
+  },
   api,
 ) => {
   try {
@@ -28,11 +38,21 @@ const webrtcMessageQuery: BaseQueryFn<
       wasmMemory: encryptionWasmMemory,
     });
 
+    const decryptionModule = await libcrypto({
+      wasmMemory: decryptionWasmMemory,
+    });
+
+    const merkleModule = await libcrypto({
+      wasmMemory: merkleWasmMemory,
+    });
+
     await handleSendMessage(
       data,
       peerConnections,
       dataChannels,
       encryptionModule,
+      decryptionModule,
+      merkleModule,
       api,
       label,
     );

@@ -1,9 +1,10 @@
+import { deleteChannel } from "../../reducers/roomSlice";
+
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
   RTCDisconnectFromPeerChannelLabelParams,
 } from "./interfaces";
-import { deleteChannel } from "../../reducers/roomSlice";
 
 export interface RTCDisconnectFromPeerChannelLabelParamsExtension
   extends RTCDisconnectFromPeerChannelLabelParams {

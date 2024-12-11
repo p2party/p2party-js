@@ -1,9 +1,11 @@
-// import workerUrl from "./db.worker.js";
+import type { WorkerMessages } from "./types";
 
-const workerUrl = new URL("./db.worker.js", import.meta.url);
-const worker = new Worker(workerUrl, {
-  type: "module",
+const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
+const workerBlob = new Blob([workerSrc], {
+  type: "application/javascript",
 });
+const worker = new Worker(URL.createObjectURL(workerBlob), { type: "module" });
+
 let msgId = 0;
 const pending = new Map<
   number,
@@ -19,61 +21,43 @@ worker.onmessage = (e: MessageEvent) => {
   else p.resolve(result);
 };
 
-const callWorker = (method: string, ...args: any[]) => {
+function callWorker<M extends WorkerMessages["method"]>(
+  method: M,
+  ...args: Extract<WorkerMessages, { method: M }>["args"]
+): Promise<import("./types").WorkerMethodReturnTypes[M]> {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
     pending.set(id, { resolve, reject });
     worker.postMessage({ id, method, args });
   });
-};
+}
 
-export const getDBChunk = (merkleRootHex: string, chunkIndex: number) => {
-  return callWorker("getDBChunk", merkleRootHex, chunkIndex);
-};
+export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
+  callWorker("getDBChunk", merkleRootHex, chunkIndex);
 
-export const existsDBChunk = (merkleRootHex: string, chunkIndex: number) => {
-  return callWorker("existsDBChunk", merkleRootHex, chunkIndex);
-};
+export const existsDBChunk = (merkleRootHex: string, chunkIndex: number) =>
+  callWorker("existsDBChunk", merkleRootHex, chunkIndex);
 
-export const getDBSendQueue = (label: string, toPeerId: string) => {
-  return callWorker("getDBSendQueue", label, toPeerId);
-};
+export const getDBSendQueue = (label: string, toPeerId: string) =>
+  callWorker("getDBSendQueue", label, toPeerId);
 
-export const getDBAllChunks = (merkleRootHex: string) => {
-  return callWorker("getDBAllChunks", merkleRootHex);
-};
+export const getDBAllChunks = (merkleRootHex: string) =>
+  callWorker("getDBAllChunks", merkleRootHex);
 
-export const getDBAllChunksCount = (merkleRootHex: string) => {
-  return callWorker("getDBAllChunksCount", merkleRootHex);
-};
+export const getDBAllChunksCount = (merkleRootHex: string) =>
+  callWorker("getDBAllChunksCount", merkleRootHex);
 
-export const setDBChunk = (chunk: {
-  merkleRoot: string;
-  chunkIndex: number;
-  totalSize: number;
-  data: Blob;
-  mimeType: string;
-}) => {
-  return callWorker("setDBChunk", chunk);
-};
+export const setDBChunk = (chunk: import("./types").Chunk) =>
+  callWorker("setDBChunk", chunk);
 
-export const setDBSendQueue = (item: {
-  position: number;
-  label: string;
-  toPeerId: string;
-  encryptedData: Blob;
-}) => {
-  return callWorker("setDBSendQueue", item);
-};
+export const setDBSendQueue = (item: import("./types").SendQueue) =>
+  callWorker("setDBSendQueue", item);
 
-export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) => {
-  return callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
-};
+export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
+  callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
 
 export const deleteDBSendQueueItem = (
   position: number,
   label: string,
   toPeerId: string,
-) => {
-  return callWorker("deleteDBSendQueueItem", position, label, toPeerId);
-};
+) => callWorker("deleteDBSendQueueItem", position, label, toPeerId);

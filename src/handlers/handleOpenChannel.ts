@@ -1,4 +1,3 @@
-// import { handleSendMessage } from "./handleSendMessage";
 import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
@@ -7,7 +6,7 @@ import { setChannel, setMessage } from "../reducers/roomSlice";
 
 import { randomNumberInRange } from "../cryptography/utils";
 
-import { deleteDBSendQueueItem, getDB, getDBSendQueue } from "../utils/db";
+import { deleteDBSendQueueItem, getDBSendQueue } from "../db/api";
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
@@ -55,9 +54,7 @@ export const handleOpenChannel = async (
     dataChannel.binaryType = "blob";
     dataChannel.bufferedAmountLowThreshold = 64 * 1024;
     dataChannel.onbufferedamountlow = async () => {
-      const db = await getDB();
-
-      const sendQueue = await getDBSendQueue(label, epc.withPeerId, db);
+      const sendQueue = await getDBSendQueue(label, epc.withPeerId);
       const sendQueueLen = sendQueue.length;
       let i = 0;
 
@@ -73,14 +70,11 @@ export const handleOpenChannel = async (
           sendQueue[i].position,
           label,
           epc.withPeerId,
-          db,
         );
 
         delete sendQueue[i];
         i++;
       }
-
-      db.close();
     };
 
     const extChannel = dataChannel as IRTCDataChannel;
@@ -160,17 +154,6 @@ export const handleOpenChannel = async (
       dataChannels.push(extChannel);
 
       api.dispatch(setChannel({ label, peerId: extChannel.withPeerId }));
-
-      // const msg = `Connected with ${keyPair.peerId} on channel ${extChannel.label}`;
-
-      // await handleSendMessage(
-      //   msg,
-      //   [epc],
-      //   [extChannel],
-      //   encryptionModule,
-      //   api,
-      //   label,
-      // );
     };
 
     return extChannel;

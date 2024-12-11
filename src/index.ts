@@ -4,16 +4,12 @@ import { store, dispatch } from "./store";
 
 import { generateRandomRoomUrl } from "./cryptography/utils";
 
-import {
-  // createIDBReadableStream,
-  getDBAllChunks,
-} from "./utils/db";
+import { getDBAllChunks } from "./db/api";
 import {
   getFileExtension,
   getMessageCategory,
   getMimeType,
 } from "./utils/messageTypes";
-// import { concatUint8Arrays, hexToUint8Array } from "./utils/uint8array";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -47,7 +43,6 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import { uint8ArrayToHex } from "./utils/uint8array";
 
 const connect = (
   roomUrl: string,
@@ -161,7 +156,6 @@ const readMessage = async (
   mimeType: MimeType;
   extension: FileExtension;
   category: MessageCategory;
-  hashMatches: boolean;
 }> => {
   try {
     const { room } = store.getState();
@@ -176,40 +170,38 @@ const readMessage = async (
         mimeType: "text/plain",
         extension: "",
         category: MessageCategory.Text,
-        hashMatches: false,
       };
     }
 
-    const root = room.messages[messageIndex].merkleRootHex;
     const messageType = room.messages[messageIndex].messageType;
-
-    const chunks = await getDBAllChunks(root);
-
-    const dataChunks = chunks
-      .sort((a, b) => a.chunkIndex - b.chunkIndex)
-      .map((c) => c.data); // hexToUint8Array(c.data));
-
     const mimeType = getMimeType(messageType);
     const extension = getFileExtension(messageType);
     const category = getMessageCategory(messageType);
-
-    const data = new Blob(dataChunks, {
-      type: mimeType,
-    });
-
-    const dataArrayBuffer = await data.arrayBuffer();
-    const hashArrayBuffer = await window.crypto.subtle.digest(
-      "SHA-512",
-      dataArrayBuffer,
-    );
-    const hash = new Uint8Array(hashArrayBuffer);
-    const hashHex = uint8ArrayToHex(hash);
 
     const percentage = Math.floor(
       (room.messages[messageIndex].savedSize /
         room.messages[messageIndex].totalSize) *
         100,
     );
+
+    const root = room.messages[messageIndex].merkleRootHex;
+    const chunks =
+      percentage === 100
+        ? await getDBAllChunks(root)
+        : [
+            {
+              merkleRoot: merkleRootHex,
+              chunkIndex: 0,
+              data: new Blob([new Uint8Array()]),
+              mimeType,
+            },
+          ];
+    const dataChunks = chunks
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((c) => c.data);
+    const data = new Blob(dataChunks, {
+      type: mimeType,
+    });
 
     if (messageType === 1) {
       return {
@@ -218,7 +210,6 @@ const readMessage = async (
         mimeType,
         extension,
         category,
-        hashMatches: room.messages[messageIndex].sha512Hex === hashHex,
       };
     } else if (data) {
       return {
@@ -227,7 +218,6 @@ const readMessage = async (
         mimeType,
         extension,
         category,
-        hashMatches: room.messages[messageIndex].sha512Hex === hashHex,
       };
     } else {
       return {
@@ -236,7 +226,6 @@ const readMessage = async (
         mimeType,
         extension: "",
         category: MessageCategory.Text,
-        hashMatches: false,
       };
     }
   } catch (error) {
@@ -248,7 +237,6 @@ const readMessage = async (
       mimeType: "text/plain",
       extension: "",
       category: MessageCategory.Text,
-      hashMatches: false,
     };
   }
 };
@@ -260,7 +248,6 @@ export default {
   keyPairSelector,
   connect,
   connectToSignalingServer,
-  // connectToRoomPeers,
   disconnectFromSignalingServer,
   allowConnectionRelay,
   disconnectFromRoom,

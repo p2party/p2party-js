@@ -4,12 +4,7 @@ import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
 import { hexToUint8Array } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
-import { deleteDBChunk, getDB, setDBSendQueue } from "../utils/db";
-// import {
-//   getMessageCategory,
-//   getMessageType,
-//   MessageCategory,
-// } from "../utils/messageTypes";
+import { deleteDBChunk, setDBSendQueue } from "../db/api";
 
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
@@ -44,10 +39,8 @@ export const handleSendMessage = async (
   const channelIndex = room.channels.findIndex((c) => c.label === label);
   if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-  const db = await getDB();
-
   const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
-    await splitToChunks(data, api, label, db);
+    await splitToChunks(data, api, label);
 
   const channelMessageLabel = await compileChannelMessageLabel(
     label,
@@ -98,15 +91,12 @@ export const handleSendMessage = async (
         await wait(timeoutMilliseconds);
         channel.send(encryptedMessage);
       } else {
-        await setDBSendQueue(
-          {
-            position: jRandom,
-            label: channel.label,
-            toPeerId: channel.withPeerId,
-            encryptedData: new Blob([encryptedMessage]),
-          },
-          db,
-        );
+        await setDBSendQueue({
+          position: jRandom,
+          label: channel.label,
+          toPeerId: channel.withPeerId,
+          encryptedData: new Blob([encryptedMessage]),
+        });
       }
 
       const m = deserializeMetadata(
@@ -114,73 +104,11 @@ export const handleSendMessage = async (
       );
 
       if (m.chunkEndIndex - m.chunkStartIndex > totalSize)
-        await deleteDBChunk(merkleRootHex, m.chunkIndex, db);
+        await deleteDBChunk(merkleRootHex, m.chunkIndex);
 
       delete unencryptedChunks[jRandom];
     }
 
     channel.close();
   }
-
-  // const CHANNELS_LEN = dataChannels.length;
-  // for (let i = channelIndex; i < CHANNELS_LEN; i++) {
-  //   if (dataChannels[i].label !== label) continue;
-
-  //   const peerId = dataChannels[i].withPeerId;
-  //   const peerIndex = peerConnections.findIndex((p) => p.withPeerId === peerId);
-  //   if (peerIndex === -1) continue;
-
-  //   const peerPublicKeyHex = peerConnections[peerIndex].withPeerPublicKey;
-  //   const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
-
-  //   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
-  //   const indexesRandomized = await fisherYatesShuffle(indexes);
-  //   for (let j = 0; j < chunksLen; j++) {
-  //     // If audio or video then sequential data, else random order
-  //     const jRandom = indexesRandomized[j];
-  //     // messageCategory === MessageCategory.Audio || MessageCategory.Video
-  //     //   ? j
-  //     //   : indexesRandomized[j];
-
-  //     const encryptedMessage = await encryptAsymmetric(
-  //       unencryptedChunks[jRandom],
-  //       receiverPublicKey,
-  //       senderSecretKey,
-  //       merkleRoot,
-  //       encryptionModule,
-  //     );
-
-  //     const concatedEncrypted = await concatUint8Arrays([
-  //       merkleRoot,
-  //       encryptedMessage,
-  //     ]);
-
-  //     const timeoutMilliseconds = await randomNumberInRange(2, 20);
-  //     if (dataChannels[i].bufferedAmount < MAX_BUFFERED_AMOUNT) {
-  //       await wait(timeoutMilliseconds);
-  //       dataChannels[i].send(concatedEncrypted);
-  //     } else {
-  //       await setDBSendQueue(
-  //         {
-  //           position: jRandom,
-  //           label: dataChannels[i].label,
-  //           toPeerId: dataChannels[i].withPeerId,
-  //           encryptedData: new Blob([concatedEncrypted]),
-  //         },
-  //         db,
-  //       );
-  //     }
-
-  //     const m = deserializeMetadata(
-  //       unencryptedChunks[jRandom].slice(0, METADATA_LEN),
-  //     );
-
-  //     if (m.chunkEndIndex - m.chunkStartIndex > totalSize)
-  //       await deleteDBChunk(merkleRootHex, m.chunkIndex, db);
-
-  //     delete unencryptedChunks[jRandom];
-  //   }
-  // }
-
-  db.close();
 };

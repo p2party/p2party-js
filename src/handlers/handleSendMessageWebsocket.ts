@@ -1,7 +1,7 @@
 import signalingServerApi from "../api/signalingServerApi";
 
 import { setMessage } from "../reducers/roomSlice";
-import { deleteDBChunk, getDB } from "../utils/db";
+import { deleteDBChunk } from "../db/api";
 
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
@@ -36,12 +36,8 @@ export const handleSendMessageWebsocket = async (
     : 0;
   if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-  const db = await getDB();
-
   const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
-    await splitToChunks(data, api, label, db);
-
-  db.close();
+    await splitToChunks(data, api, label); // db);
 
   const chunksLen = unencryptedChunks.length;
   const PEERS_LEN = dataChannels[channelIndex].peerIds.length;

@@ -25,17 +25,27 @@ export const compileChannelMessageLabel = (
       if (channelLabel.length <= 0 || channelLabel.length > 32)
         reject(new Error("Label larger than 128 characters"));
 
-      if (typeof merkleRoot === "string" &&
-          merkleRoot.length !== crypto_hash_sha512_BYTES * 2) {
+      if (
+        typeof merkleRoot === "string" &&
+        merkleRoot.length !== crypto_hash_sha512_BYTES * 2
+      ) {
         reject(new Error("Merkle root hex should be 128 bytes"));
-      } else if (typeof merkleRoot !== "string" && merkleRoot.length !== crypto_hash_sha512_BYTES) {
+      } else if (
+        typeof merkleRoot !== "string" &&
+        merkleRoot.length !== crypto_hash_sha512_BYTES
+      ) {
         reject(new Error("Merkle root should be 64 bytes"));
       }
 
-      if (typeof hash === "string" &&
-          hash.length !== crypto_hash_sha512_BYTES * 2) {
+      if (
+        typeof hash === "string" &&
+        hash.length !== crypto_hash_sha512_BYTES * 2
+      ) {
         reject(new Error("Hash hex should be 128 bytes"));
-      } else if (typeof hash !== "string" && hash.length !== crypto_hash_sha512_BYTES) {
+      } else if (
+        typeof hash !== "string" &&
+        hash.length !== crypto_hash_sha512_BYTES
+      ) {
         reject(new Error("Hash should be 64 bytes"));
       }
 

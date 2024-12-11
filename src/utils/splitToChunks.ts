@@ -1,7 +1,7 @@
 import { getMessageType, getMimeType } from "./messageTypes";
 import { serializer, uint8ArrayToHex, concatUint8Arrays } from "./uint8array";
 import { serializeMetadata, METADATA_LEN } from "./metadata";
-import { setDBChunk } from "./db";
+import { setDBChunk } from "../db/api";
 
 import { setMessageAllChunks } from "../reducers/roomSlice";
 
@@ -23,8 +23,6 @@ import {
 import type { Metadata } from "./metadata";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
-import type { IDBPDatabase } from "idb";
-import type { RepoSchema } from "./db";
 
 export const PROOF_LEN =
   4 + // length of the proof
@@ -52,7 +50,7 @@ export const splitToChunks = async (
   message: string | File,
   api: BaseQueryApi,
   label: string,
-  db: IDBPDatabase<RepoSchema>,
+  // db: IDBPDatabase<RepoSchema>,
   minChunks = 5, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.8,
@@ -79,9 +77,6 @@ export const splitToChunks = async (
     typeof message === "string"
       ? await generateRandomRoomUrl(256)
       : message.name.slice(0, 255);
-  // const lastModified = new Date(
-  //   typeof message === "string" ? Date.now() : message.lastModified,
-  // );
 
   const totalChunks = Math.max(
     minChunks,
@@ -142,7 +137,6 @@ export const splitToChunks = async (
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  // const merkleProofs: Uint8Array[] = [];
   const unencryptedChunks: Uint8Array[] = [];
   for (let i = 0; i < totalChunks; i++) {
     const proof = await getMerkleProof(
@@ -161,16 +155,12 @@ export const splitToChunks = async (
           );
     const mimeType = getMimeType(metadata[i].messageType);
 
-    await setDBChunk(
-      {
-        merkleRoot: merkleRootHex,
-        chunkIndex: metadata[i].chunkIndex,
-        // totalSize: metadata[i].size,
-        data: new Blob([realChunk]), // uint8ArrayToHex(realChunk),
-        mimeType,
-      },
-      db,
-    );
+    await setDBChunk({
+      merkleRoot: merkleRootHex,
+      chunkIndex: metadata[i].chunkIndex,
+      data: new Blob([realChunk]),
+      mimeType,
+    });
 
     const m = serializeMetadata(metadata[i]);
 

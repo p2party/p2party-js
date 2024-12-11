@@ -1,17 +1,27 @@
 import path from "path";
+import fs from "fs";
 // import copy from "rollup-plugin-copy";
 import terser from "@rollup/plugin-terser";
 import commonjs from "@rollup/plugin-commonjs";
 import json from "@rollup/plugin-json";
 import resolve from "@rollup/plugin-node-resolve";
 import typescript from "@rollup/plugin-typescript";
-import { importMetaAssets } from "@web/rollup-plugin-import-meta-assets";
+// import { importMetaAssets } from "@web/rollup-plugin-import-meta-assets";
+import replace from "@rollup/plugin-replace";
 import analyzer from "rollup-plugin-analyzer";
 
 const dir = "lib";
 const input = "src/index.ts";
 
+const idbWorkerPath = path.resolve("lib", "db.worker.js");
+const idbWorkerJs = fs.readFileSync(idbWorkerPath, { encoding: "utf-8" });
+
 const plugins = [
+  replace({
+    "process.env.INDEXEDDB_WORKER_JS": JSON.stringify(idbWorkerJs),
+    preventAssignment: true,
+  }),
+
   resolve({
     // jsnext: true,
     // main: true,
@@ -48,7 +58,7 @@ const plugins = [
   //   ],
   // }),
 
-  importMetaAssets(),
+  // importMetaAssets(),
 
   analyzer(),
 ];

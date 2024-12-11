@@ -1,7 +1,7 @@
 import { decryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { verifyMerkleProof } from "../cryptography/merkle";
 
-import { existsDBChunk, getDB, setDBChunk } from "../utils/db";
+import { existsDBChunk, setDBChunk } from "../db/api";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -11,7 +11,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 import type { Room } from "../reducers/roomSlice";
 
 export const handleReceiveMessage = async (
-  data: Blob, // Uint8Array,
+  data: Blob,
   merkleRoot: Uint8Array,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
@@ -50,9 +50,7 @@ export const handleReceiveMessage = async (
       (m) => m.merkleRootHex === merkleRootHex,
     );
 
-    const db = await getDB();
-
-    const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex, db);
+    const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
 
     const messageRelevant =
       chunkSize > 0 &&
@@ -61,9 +59,7 @@ export const handleReceiveMessage = async (
           room.messages[incomingMessageIndex].savedSize + chunkSize &&
           !exists));
 
-    if (!messageRelevant) {
-      db.close();
-
+    if (!messageRelevant)
       return {
         chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
@@ -71,7 +67,6 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
       };
-    }
 
     const merkleProofArray = decryptedMessage.slice(
       METADATA_LEN,
@@ -118,17 +113,12 @@ export const handleReceiveMessage = async (
 
     const mimeType = getMimeType(metadata.messageType);
 
-    await setDBChunk(
-      {
-        merkleRoot: merkleRootHex,
-        chunkIndex: metadata.chunkIndex,
-        data: new Blob([realChunk]),
-        mimeType,
-      },
-      db,
-    );
-
-    db.close();
+    await setDBChunk({
+      merkleRoot: merkleRootHex,
+      chunkIndex: metadata.chunkIndex,
+      data: new Blob([realChunk]),
+      mimeType,
+    });
 
     return {
       chunkIndex: metadata.chunkIndex,

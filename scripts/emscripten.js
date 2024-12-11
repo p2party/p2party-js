@@ -47,6 +47,7 @@ const withJS = ` \
 -s WASM=1 \
 -s MODULARIZE=1 \
 -s MAIN_MODULE=2 \
+-s BUILD_AS_WORKER=1 \
 -s INCOMING_MODULE_JS_API=\[\"wasmMemory\"\] \
 -s POLYFILL=0 \
 -s NO_DYNAMIC_EXECUTION=1 \
@@ -97,7 +98,7 @@ emcc \
 -fvectorize \
 -s STRICT \
 -s SINGLE_FILE=1 \
--s ENVIRONMENT=web \
+-s ENVIRONMENT=worker \
 ${memory} \
 ${withJS} \
 -s NODEJS_CATCH_EXIT=0 \

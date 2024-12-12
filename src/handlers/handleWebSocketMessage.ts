@@ -2,13 +2,17 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
 import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
+import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
+import signalingServerApi from "../api/signalingServerApi";
 
 import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId } from "../reducers/keyPairSlice";
 
 import { hexToUint8Array } from "../utils/uint8array";
+import { PROOF_LEN } from "../utils/splitToChunks";
+
 import {
   crypto_hash_sha512_BYTES,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
@@ -17,9 +21,6 @@ import {
 
 import libcrypto from "../cryptography/libcrypto";
 import cryptoMemory from "../cryptography/memory";
-
-import signalingServerApi from "../api/signalingServerApi";
-import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -35,7 +36,6 @@ import type {
   WebSocketMessagePeerConnectionResponse,
   WebSocketMessageMessageSendResponse,
 } from "../utils/interfaces";
-import { PROOF_LEN } from "../utils/splitToChunks";
 
 export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
 export const messageLen =

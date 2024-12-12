@@ -56,8 +56,10 @@ export const setDBSendQueue = (item: import("./types").SendQueue) =>
 export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
 
-export const deleteDBSendQueueItem = (
-  position: number,
+export const deleteDB = () => callWorker("deleteDB");
+
+export const deleteDBSendQueue = (
   label: string,
   toPeerId: string,
-) => callWorker("deleteDBSendQueueItem", position, label, toPeerId);
+  position?: number,
+) => callWorker("deleteDBSendQueue", label, toPeerId, position);

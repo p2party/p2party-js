@@ -1,6 +1,8 @@
 import { createSlice } from "@reduxjs/toolkit";
 import { isUUID } from "class-validator";
 
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
 import type { MessageType } from "../utils/messageTypes";
@@ -58,6 +60,10 @@ export interface SetMessageAllChunksArgs {
   messageType: MessageType;
   totalSize: number;
   channelLabel: string;
+}
+
+export interface DeleteMessageArgs {
+  merkleRootHex: string;
 }
 
 export interface Room extends SetRoomArgs {
@@ -241,15 +247,19 @@ const roomSlice = createSlice({
       }
     },
 
-    deleteMessage: (
-      state,
-      action: PayloadAction<{ merkleRootHex: string }>,
-    ) => {
+    deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
+      const { merkleRootHex } = action.payload;
+      if (merkleRootHex.length !== crypto_hash_sha512_BYTES * 2) return;
+
       const messageIndex = state.messages.findIndex(
-        (m) => m.merkleRootHex === action.payload.merkleRootHex,
+        (m) => m.merkleRootHex === merkleRootHex,
       );
 
       if (messageIndex > -1) state.messages.splice(messageIndex, 1);
+    },
+
+    deleteAll: (_state, _action: PayloadAction<void>) => {
+      return initialState;
     },
   },
 });
@@ -266,6 +276,7 @@ export const {
   deletePeer,
   deleteChannel,
   deleteMessage,
+  deleteAll,
 } = roomSlice.actions;
 export const roomSelector = (state: State) => state.room;
 export default roomSlice.reducer;

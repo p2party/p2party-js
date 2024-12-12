@@ -4,6 +4,7 @@ export interface BasicMetadata {
   schemaVersion: number; // 8 bytes
   messageType: MessageType; // 1 byte
   totalSize: number; // 8 bytes, number of bytes, max file totalSize 10GB
+  date: Date; // 8 bytes
   name: string; // 256 bytes, serialized string
   chunkStartIndex: number; // 8 bytes, uint64
   chunkEndIndex: number; // 8 bytes, uint64
@@ -17,6 +18,7 @@ export const METADATA_LEN =
   8 + // schemaVersion (8 bytes)
   1 + // messageType (1 byte)
   8 + // totalSize (8 bytes)
+  8 + // date (8 bytes)
   256 + // name (256 bytes)
   8 + // chunkStartIndex (8 bytes)
   8 + // chunkEndIndex (8 bytes)
@@ -50,6 +52,10 @@ export const serializeMetadata = (metadata: Metadata): Uint8Array => {
   // totalSize (8 bytes)
   const totalSizeView = new DataView(buffer.buffer, offset, 8);
   totalSizeView.setBigUint64(0, BigInt(metadata.totalSize), false); // Big-endian
+  offset += 8;
+
+  const dateView = new DataView(buffer.buffer, offset, 8);
+  dateView.setBigInt64(0, BigInt(metadata.date.getTime()), false);
   offset += 8;
 
   // name (256 bytes)
@@ -106,20 +112,16 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
   const totalSize = Number(totalSizeView.getBigUint64(0, false)); // Big-endian
   offset += 8;
 
+  // lastModified (8 bytes)
+  const dateView = new DataView(buffer.buffer, buffer.byteOffset + offset, 8);
+  const dateTime = Number(dateView.getBigUint64(0, false)); // Big-endian
+  const date = new Date(dateTime);
+  offset += 8;
+
   // name (256 bytes)
   const nameBytes = buffer.slice(offset, offset + 256);
   const name = new TextDecoder().decode(nameBytes).replace(/\0+$/, "");
   offset += 256;
-
-  // // lastModified (8 bytes)
-  // const lastModifiedView = new DataView(
-  //   buffer.buffer,
-  //   buffer.byteOffset + offset,
-  //   8,
-  // );
-  // const lastModifiedTime = Number(lastModifiedView.getBigUint64(0, false)); // Big-endian
-  // const lastModified = new Date(lastModifiedTime);
-  // offset += 8;
 
   // chunkStartIndex (8 bytes)
   const chunkStartIndexView = new DataView(
@@ -151,6 +153,7 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
     schemaVersion,
     messageType,
     totalSize,
+    date,
     name,
     chunkStartIndex,
     chunkEndIndex,

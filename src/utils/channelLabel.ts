@@ -1,16 +1,15 @@
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { hexToUint8Array, uint8ArrayToHex } from "./uint8array";
 
-export const LABEL_ELEMENTS = 4;
+export const LABEL_ELEMENTS = 3;
 
 const LABEL_SERIALIZED_LEN =
   32 + // label name
   64 + // merkle root
-  64 + // hash
-  8; // date
+  64; // hash
 
 // +3 for separators and the rest is hex
-export const LABEL_STRING_LEN = LABEL_SERIALIZED_LEN * 2 + 3;
+export const LABEL_STRING_LEN = LABEL_SERIALIZED_LEN * 2 + 2;
 
 export const LABEL_ELEMENTS_SEPARATOR = "~";
 
@@ -18,7 +17,6 @@ export const compileChannelMessageLabel = (
   channelLabel: string,
   merkleRoot: string | Uint8Array,
   hash: string | Uint8Array,
-  date = new Date(Date.now()),
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     try {
@@ -69,18 +67,9 @@ export const compileChannelMessageLabel = (
 
       if (typeof hash === "string") {
         label += hash;
-        label += LABEL_ELEMENTS_SEPARATOR;
       } else {
         label += uint8ArrayToHex(hash);
-        label += LABEL_ELEMENTS_SEPARATOR;
       }
-
-      const bigintUint8 = new Uint8Array(8);
-
-      const dateView = new DataView(bigintUint8.buffer, 0, 8);
-      dateView.setBigInt64(0, BigInt(date.getTime()), false);
-
-      label += uint8ArrayToHex(bigintUint8);
 
       resolve(label);
     } catch (error) {
@@ -97,7 +86,6 @@ export const decompileChannelMessageLabel = (
   merkleRoot: Uint8Array;
   hashHex: string;
   hash: Uint8Array;
-  date: Date;
 }> => {
   return new Promise((resolve, reject) => {
     try {
@@ -119,7 +107,6 @@ export const decompileChannelMessageLabel = (
           merkleRoot: new Uint8Array(),
           hashHex: "",
           hash: new Uint8Array(),
-          date: new Date(),
         });
       }
 
@@ -138,17 +125,12 @@ export const decompileChannelMessageLabel = (
       if (hash.length !== crypto_hash_sha512_BYTES)
         reject(new Error("Message hash has invalid length"));
 
-      const dateUint8 = hexToUint8Array(split[3]);
-      const dateView = new DataView(dateUint8.buffer, dateUint8.byteOffset, 8);
-      const date = new Date(Number(dateView.getBigUint64(0, false))); // Big-endian
-
       resolve({
         channelLabel,
         merkleRoot,
         merkleRootHex: split[1],
         hash,
         hashHex: split[2],
-        date,
       });
     } catch (error) {
       reject(error);

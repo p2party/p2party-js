@@ -41,8 +41,13 @@ export type WorkerMessages =
     }
   | {
       id: number;
-      method: "deleteDBSendQueueItem";
-      args: [position: number, label: string, toPeerId: string];
+      method: "deleteDBSendQueue";
+      args: [label: string, toPeerId: string, position?: number];
+    }
+  | {
+      id: number;
+      method: "deleteDB";
+      args: [];
     };
 
 // Return types for each method
@@ -55,5 +60,6 @@ export interface WorkerMethodReturnTypes {
   setDBChunk: void;
   setDBSendQueue: void;
   deleteDBChunk: void;
-  deleteDBSendQueueItem: void;
+  deleteDBSendQueue: void;
+  deleteDB: void;
 }

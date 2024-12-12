@@ -1,4 +1,8 @@
-import { deleteChannel } from "../../reducers/roomSlice";
+import { deleteChannel, deleteMessage } from "../../reducers/roomSlice";
+
+import { deleteDBSendQueue } from "../../db/api";
+import { decompileChannelMessageLabel } from "../../utils/channelLabel";
+import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -15,44 +19,44 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
   void,
   unknown
-> = async ({ label, dataChannels }, api) => {
-  return new Promise((resolve, reject) => {
-    try {
-      const CHANNELS_LEN = dataChannels.length;
-      const channelsClosedIndexes: number[] = [];
+> = async ({ label, alsoDeleteData, dataChannels }, api) => {
+  try {
+    const CHANNELS_LEN = dataChannels.length;
+    for (let i = 0; i < CHANNELS_LEN; i++) {
+      if (
+        dataChannels[i].label !== label ||
+        dataChannels[i].readyState !== "open"
+      )
+        continue;
 
-      for (let i = 0; i < CHANNELS_LEN; i++) {
-        if (
-          dataChannels[i].label !== label ||
-          dataChannels[i].readyState !== "open"
-        )
-          continue;
+      await deleteDBSendQueue(label, dataChannels[i].withPeerId);
 
-        dataChannels[i].onopen = null;
-        dataChannels[i].onclose = null;
-        dataChannels[i].onerror = null;
-        dataChannels[i].onclosing = null;
-        dataChannels[i].onmessage = null;
-        dataChannels[i].onbufferedamountlow = null;
-        dataChannels[i].close();
+      api.dispatch(
+        deleteChannel({ label, peerId: dataChannels[i].withPeerId }),
+      );
 
-        channelsClosedIndexes.push(i);
+      dataChannels[i].onopen = null;
+      dataChannels[i].onclose = null;
+      dataChannels[i].onerror = null;
+      dataChannels[i].onclosing = null;
+      dataChannels[i].onmessage = null;
+      dataChannels[i].onbufferedamountlow = null;
+      dataChannels[i].close();
 
-        api.dispatch(
-          deleteChannel({ label, peerId: dataChannels[i].withPeerId }),
-        );
+      if (alsoDeleteData) {
+        const { merkleRootHex } = await decompileChannelMessageLabel(label);
+        if (merkleRootHex.length === crypto_hash_sha512_BYTES * 2) {
+          api.dispatch(deleteMessage({ merkleRootHex }));
+        }
       }
 
-      const INDEXES_LEN = channelsClosedIndexes.length;
-      for (let i = 0; i < INDEXES_LEN; i++) {
-        dataChannels.splice(channelsClosedIndexes[i], 1);
-      }
-
-      resolve({ data: undefined });
-    } catch (error) {
-      reject(error);
+      delete dataChannels[i];
     }
-  });
+
+    return { data: undefined };
+  } catch (error) {
+    throw error;
+  }
 };
 
 export default webrtcDisconnectFromChannelLabelQuery;

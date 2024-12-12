@@ -31,6 +31,7 @@ import type {
   RTCDisconnectFromPeerParams,
   RTCDisconnectFromChannelLabelParams,
   RTCDisconnectFromPeerChannelLabelParams,
+  RTCDisconnectParams,
 } from "./interfaces";
 
 const peerConnections: IRTCPeerConnection[] = [];
@@ -149,10 +150,10 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnect: builder.query<void, void>({
-      queryFn: (_, api, extraOptions) =>
+    disconnect: builder.query<void, RTCDisconnectParams>({
+      queryFn: (args, api, extraOptions) =>
         webrtcDisconnectQuery(
-          { peerConnections, dataChannels },
+          { ...args, peerConnections, dataChannels },
           api,
           extraOptions,
         ),

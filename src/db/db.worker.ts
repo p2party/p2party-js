@@ -1,4 +1,4 @@
-import { openDB } from "idb";
+import { openDB, deleteDB } from "idb";
 
 import type { DBSchema, IDBPDatabase } from "idb";
 import type {
@@ -151,25 +151,35 @@ async function fnDeleteDBChunk(
   chunkIndex?: number,
 ): Promise<void> {
   const db = await getDB();
-  if (chunkIndex != null) {
+  if (chunkIndex) {
     await db.delete("chunks", [merkleRootHex, chunkIndex]);
   } else {
-    const chunks = await fnGetDBAllChunks(merkleRootHex);
-    for (let i = 0; i < chunks.length; i++) {
-      await db.delete("chunks", [merkleRootHex, chunks[i].chunkIndex]);
-    }
+    const keyRange = IDBKeyRange.only(merkleRootHex);
+    await db.delete("chunks", keyRange);
+  }
+
+  db.close();
+}
+
+async function fnDeleteDBSendQueue(
+  label: string,
+  toPeerId: string,
+  position?: number,
+): Promise<void> {
+  const db = await getDB();
+  if (position) {
+    await db.delete("sendQueue", [position, label, toPeerId]);
+  } else {
+    const keyRange = IDBKeyRange.only([label, toPeerId]);
+    await db.delete("sendQueue", keyRange);
   }
   db.close();
 }
 
-async function fnDeleteDBSendQueueItem(
-  position: number,
-  label: string,
-  toPeerId: string,
-): Promise<void> {
+async function fnDeleteDB(): Promise<void> {
   const db = await getDB();
-  await db.delete("sendQueue", [position, label, toPeerId]);
   db.close();
+  await deleteDB(dbName);
 }
 
 onmessage = async (e: MessageEvent) => {
@@ -218,10 +228,13 @@ onmessage = async (e: MessageEvent) => {
           ...message.args,
         )) as WorkerMethodReturnTypes["deleteDBChunk"];
         break;
-      case "deleteDBSendQueueItem":
-        result = (await fnDeleteDBSendQueueItem(
+      case "deleteDBSendQueue":
+        result = (await fnDeleteDBSendQueue(
           ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBSendQueueItem"];
+        )) as WorkerMethodReturnTypes["deleteDBSendQueue"];
+        break;
+      case "deleteDB":
+        result = (await fnDeleteDB()) as WorkerMethodReturnTypes["deleteDB"];
         break;
       default:
         postMessage({ id, error: "Method not found" });

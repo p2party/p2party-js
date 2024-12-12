@@ -1,4 +1,4 @@
-import { getMessageType, getMimeType } from "./messageTypes";
+import { getMessageType, getMimeType, MessageType } from "./messageTypes";
 import { serializer, uint8ArrayToHex, concatUint8Arrays } from "./uint8array";
 import { serializeMetadata, METADATA_LEN } from "./metadata";
 import { setDBChunk } from "../db/api";
@@ -61,6 +61,7 @@ export const splitToChunks = async (
   hash: Uint8Array;
   hashHex: string;
   totalSize: number;
+  messageType: MessageType;
   unencryptedChunks: Uint8Array[];
 }> => {
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
@@ -77,6 +78,8 @@ export const splitToChunks = async (
     typeof message === "string"
       ? await generateRandomRoomUrl(256)
       : message.name.slice(0, 255);
+
+  const date = new Date();
 
   const totalChunks = Math.max(
     minChunks,
@@ -128,6 +131,7 @@ export const splitToChunks = async (
       chunkEndIndex,
       chunkIndex: i,
       totalSize,
+      date,
     });
 
     const hash = await window.crypto.subtle.digest("SHA-512", chunk);
@@ -193,6 +197,7 @@ export const splitToChunks = async (
     hash,
     hashHex: sha512Hex,
     totalSize,
+    messageType,
     unencryptedChunks,
   };
 };

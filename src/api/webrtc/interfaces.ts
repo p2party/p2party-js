@@ -78,6 +78,10 @@ export interface RoomData {
   messages: MessageData[];
 }
 
+export interface RTCDisconnectParams {
+  alsoDeleteDB: boolean;
+}
+
 export interface RTCDisconnectFromRoomParams {
   roomId: string;
 }
@@ -88,6 +92,7 @@ export interface RTCDisconnectFromPeerParams {
 
 export interface RTCDisconnectFromChannelLabelParams {
   label: string;
+  alsoDeleteData?: boolean;
 }
 
 export interface RTCDisconnectFromPeerChannelLabelParams {

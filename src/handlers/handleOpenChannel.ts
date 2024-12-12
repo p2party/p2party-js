@@ -6,7 +6,7 @@ import { setChannel, setMessage } from "../reducers/roomSlice";
 
 import { randomNumberInRange } from "../cryptography/utils";
 
-import { deleteDBSendQueueItem, getDBSendQueue } from "../db/api";
+import { deleteDBSendQueue, getDBSendQueue } from "../db/api";
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
@@ -66,11 +66,7 @@ export const handleOpenChannel = async (
         await wait(timeoutMilliseconds);
         dataChannel.send(sendQueue[i].encryptedData);
 
-        await deleteDBSendQueueItem(
-          sendQueue[i].position,
-          label,
-          epc.withPeerId,
-        );
+        await deleteDBSendQueue(label, epc.withPeerId, sendQueue[i].position);
 
         delete sendQueue[i];
         i++;
@@ -84,7 +80,7 @@ export const handleOpenChannel = async (
       console.log(`Channel with label ${extChannel.label} is closing.`);
     };
 
-    extChannel.onclose = () => {
+    extChannel.onclose = async () => {
       console.log(`Channel with label ${extChannel.label} has closed.`);
 
       api.dispatch(

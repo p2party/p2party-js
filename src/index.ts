@@ -19,6 +19,8 @@ import {
   setConnectingToPeers,
   setConnectionRelay,
   setRoom,
+  deleteMessage,
+  deleteAll,
 } from "./reducers/roomSlice";
 import { keyPairSelector } from "./reducers/keyPairSlice";
 import { signalingServerSelector } from "./reducers/signalingServerSlice";
@@ -43,6 +45,9 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
+import { compileChannelMessageLabel } from "./utils/channelLabel";
+import { uint8ArrayToHex } from "./utils/uint8array";
+import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 const connect = (
   roomUrl: string,
@@ -241,6 +246,138 @@ const readMessage = async (
   }
 };
 
+const cancelMessage = async (
+  channelLabel: string,
+  merkleRoot?: string | Uint8Array,
+  hash?: string | Uint8Array,
+) => {
+  if (!merkleRoot && !hash)
+    throw new Error("Need to provide either merkle root or hash");
+  if (
+    merkleRoot &&
+    typeof merkleRoot === "string" &&
+    merkleRoot.length !== crypto_hash_sha512_BYTES * 2
+  )
+    throw new Error("Invalid Merkle root length");
+  if (
+    merkleRoot &&
+    typeof merkleRoot !== "string" &&
+    merkleRoot.length !== crypto_hash_sha512_BYTES
+  )
+    throw new Error("Invalid Merkle root length");
+  if (
+    hash &&
+    typeof hash === "string" &&
+    hash.length !== crypto_hash_sha512_BYTES * 2
+  )
+    throw new Error("Invalid hash length");
+  if (
+    hash &&
+    typeof hash !== "string" &&
+    hash.length !== crypto_hash_sha512_BYTES
+  )
+    throw new Error("Invalid hash length");
+
+  const merkleRootHex =
+    merkleRoot && typeof merkleRoot === "string"
+      ? merkleRoot
+      : merkleRoot && typeof merkleRoot !== "string"
+        ? uint8ArrayToHex(merkleRoot)
+        : "";
+  const hashHex =
+    hash && typeof hash === "string"
+      ? hash
+      : hash && typeof hash !== "string"
+        ? uint8ArrayToHex(hash)
+        : "";
+
+  const { room } = store.getState();
+
+  const messageIndex = merkleRoot
+    ? room.messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
+    : hash
+      ? room.messages.findIndex((m) => m.sha512Hex === hashHex)
+      : -1;
+
+  if (messageIndex === -1) return;
+
+  const label = await compileChannelMessageLabel(
+    channelLabel,
+    room.messages[messageIndex].merkleRootHex,
+    room.messages[messageIndex].sha512Hex,
+  );
+
+  dispatch(
+    webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+      label,
+      alsoDeleteData: true,
+    }),
+  );
+};
+
+const deleteMsg = async (
+  merkleRoot?: string | Uint8Array,
+  hash?: string | Uint8Array,
+) => {
+  if (!merkleRoot && !hash)
+    throw new Error("Need to provide either merkle root or hash");
+  if (
+    merkleRoot &&
+    typeof merkleRoot === "string" &&
+    merkleRoot.length !== crypto_hash_sha512_BYTES * 2
+  )
+    throw new Error("Invalid Merkle root length");
+  if (
+    merkleRoot &&
+    typeof merkleRoot !== "string" &&
+    merkleRoot.length !== crypto_hash_sha512_BYTES
+  )
+    throw new Error("Invalid Merkle root length");
+  if (
+    hash &&
+    typeof hash === "string" &&
+    hash.length !== crypto_hash_sha512_BYTES * 2
+  )
+    throw new Error("Invalid hash length");
+  if (
+    hash &&
+    typeof hash !== "string" &&
+    hash.length !== crypto_hash_sha512_BYTES
+  )
+    throw new Error("Invalid hash length");
+
+  const merkleRootHex =
+    merkleRoot && typeof merkleRoot === "string"
+      ? merkleRoot
+      : merkleRoot && typeof merkleRoot !== "string"
+        ? uint8ArrayToHex(merkleRoot)
+        : "";
+  const hashHex =
+    hash && typeof hash === "string"
+      ? hash
+      : hash && typeof hash !== "string"
+        ? uint8ArrayToHex(hash)
+        : "";
+
+  const { room } = store.getState();
+
+  const messageIndex = merkleRoot
+    ? room.messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
+    : hash
+      ? room.messages.findIndex((m) => m.sha512Hex === hashHex)
+      : -1;
+
+  if (messageIndex === -1) return;
+
+  dispatch(
+    deleteMessage({ merkleRootHex: room.messages[messageIndex].merkleRootHex }),
+  );
+};
+
+const purge = () => {
+  dispatch(deleteAll());
+};
+
 export default {
   store,
   signalingServerSelector,
@@ -254,6 +391,9 @@ export default {
   openChannel,
   sendMessage,
   readMessage,
+  cancelMessage,
+  deleteMessage: deleteMsg,
+  purge,
   generateRandomRoomUrl,
 };
 

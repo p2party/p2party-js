@@ -9,6 +9,8 @@ import { deleteDBChunk, setDBSendQueue } from "../db/api";
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 
+import { deleteMessage } from "../reducers/roomSlice";
+
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -87,9 +89,19 @@ export const handleSendMessage = async (
       );
 
       const timeoutMilliseconds = await randomNumberInRange(2, 20);
-      if (channel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-        await wait(timeoutMilliseconds);
+      await wait(timeoutMilliseconds);
+      if (
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+        channel.readyState === "open"
+      ) {
         channel.send(encryptedMessage);
+      } else if (
+        channel.readyState === "closing" ||
+        channel.readyState === "closed"
+      ) {
+        api.dispatch(deleteMessage({ merkleRootHex }));
+
+        channel.close();
       } else {
         await setDBSendQueue({
           position: jRandom,

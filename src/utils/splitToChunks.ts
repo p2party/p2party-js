@@ -27,13 +27,17 @@ import type { State } from "../store";
 export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-export const CHUNK_LEN =
-  rtcDataChannelMessageLimit - // 64kb max message size on RTCDataChannel
-  // crypto_hash_sha512_BYTES - // merkle root of message
+export const IMPORTANT_DATA_LEN =
   METADATA_LEN - // fixed
   PROOF_LEN - // Merkle proof max len of 3kb
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // Encrypted message nonce
   crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
+export const CHUNK_LEN =
+  rtcDataChannelMessageLimit - // 64kb max message size on RTCDataChannel
+  // crypto_hash_sha512_BYTES - // merkle root of message
+  IMPORTANT_DATA_LEN;
+
+export const metadataSchemaVersions = [1];
 
 /**
  * Splits a Uint8Array into chunks of a specified size, padding with zeros if necessary.
@@ -64,11 +68,21 @@ export const splitToChunks = async (
   messageType: MessageType;
   unencryptedChunks: Uint8Array[];
 }> => {
+  if (minChunks < 3) throw new Error("We need at least 3 chunks");
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
+  if (!metadataSchemaVersions.includes(metadataSchemaVersion))
+    throw new Error("Unknown metadata version schema.");
+  if (chunkSize > CHUNK_LEN || chunkSize <= IMPORTANT_DATA_LEN)
+    throw new Error(
+      `Chunk length needs to be between ${IMPORTANT_DATA_LEN} and ${CHUNK_LEN}`,
+    );
 
   const data = await serializer(message);
   const totalSize = data.length;
+
+  if (data.length < 1) throw new Error("No data to split");
+
   const hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", data);
   const hash = new Uint8Array(hashArrayBuffer);
   const sha512Hex = uint8ArrayToHex(hash);

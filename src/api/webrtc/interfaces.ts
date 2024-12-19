@@ -51,6 +51,10 @@ export interface RTCOpenChannelParams {
 export interface RTCSendMessageParams {
   data: string | File;
   label: string;
+  minChunks?: number;
+  chunkSize?: number;
+  percentageFilledChunk?: number;
+  metadataSchemaVersion?: number;
 }
 
 export interface RTCRoomInfoParams {

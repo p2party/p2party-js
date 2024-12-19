@@ -30,6 +30,10 @@ const webrtcMessageQuery: BaseQueryFn<
     encryptionWasmMemory,
     decryptionWasmMemory,
     merkleWasmMemory,
+    minChunks,
+    chunkSize,
+    percentageFilledChunk,
+    metadataSchemaVersion,
   },
   api,
 ) => {
@@ -48,13 +52,17 @@ const webrtcMessageQuery: BaseQueryFn<
 
     await handleSendMessage(
       data,
+      api,
+      label,
       peerConnections,
       dataChannels,
       encryptionModule,
       decryptionModule,
       merkleModule,
-      api,
-      label,
+      minChunks,
+      chunkSize,
+      percentageFilledChunk,
+      metadataSchemaVersion,
     );
 
     return { data: undefined };

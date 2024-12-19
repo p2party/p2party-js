@@ -11,6 +11,8 @@ import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 import { deleteMessage } from "../reducers/roomSlice";
 
+import { CHUNK_LEN } from "../utils/splitToChunks";
+
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -27,13 +29,17 @@ export const wait = (milliseconds: number) => {
 
 export const handleSendMessage = async (
   data: string | File,
+  api: BaseQueryApi,
+  label: string,
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
   encryptionModule: LibCrypto,
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
-  api: BaseQueryApi,
-  label: string,
+  minChunks = 5, // TODO errors when =2 due to merkle
+  chunkSize = CHUNK_LEN,
+  percentageFilledChunk = 0.8,
+  metadataSchemaVersion = 1,
 ) => {
   const { room, keyPair } = api.getState() as State;
   const senderSecretKey = hexToUint8Array(keyPair.secretKey);
@@ -42,7 +48,15 @@ export const handleSendMessage = async (
   if (channelIndex === -1) throw new Error("No channel with label " + label);
 
   const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
-    await splitToChunks(data, api, label);
+    await splitToChunks(
+      data,
+      api,
+      label,
+      minChunks,
+      chunkSize,
+      percentageFilledChunk,
+      metadataSchemaVersion,
+    );
 
   const channelMessageLabel = await compileChannelMessageLabel(
     label,

@@ -10,6 +10,7 @@ import {
   getMessageCategory,
   getMimeType,
 } from "./utils/messageTypes";
+import { CHUNK_LEN } from "./utils/splitToChunks";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -136,7 +137,14 @@ const openChannel = async (
  * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = (data: string | File, toChannel: string) => {
+const sendMessage = (
+  data: string | File,
+  toChannel: string,
+  minChunks = 5,
+  chunkSize = CHUNK_LEN,
+  percentageFilledChunk = 0.8,
+  metadataSchemaVersion = 1,
+) => {
   // dispatch(
   //   signalingServerApi.endpoints.sendMessageToPeer.initiate({
   //     data,
@@ -149,6 +157,10 @@ const sendMessage = (data: string | File, toChannel: string) => {
     webrtcApi.endpoints.sendMessage.initiate({
       data,
       label: toChannel,
+      minChunks,
+      chunkSize,
+      percentageFilledChunk,
+      metadataSchemaVersion,
     }),
   );
 };
@@ -237,7 +249,7 @@ const readMessage = async (
     console.error(error);
 
     return {
-      message: "Inretrievable message",
+      message: "Irretrievable message",
       percentage: 0,
       mimeType: "text/plain",
       extension: "",

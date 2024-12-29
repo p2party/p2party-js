@@ -60,15 +60,20 @@ export const handleOpenChannel = async (
 
       while (
         dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+        dataChannel.readyState === "open" &&
         i < sendQueueLen
       ) {
         const timeoutMilliseconds = await randomNumberInRange(2, 20);
         await wait(timeoutMilliseconds);
-        dataChannel.send(sendQueue[i].encryptedData);
 
-        await deleteDBSendQueue(label, epc.withPeerId, sendQueue[i].position);
+        if (dataChannel.readyState === "open") {
+          dataChannel.send(sendQueue[i].encryptedData);
 
-        delete sendQueue[i];
+          await deleteDBSendQueue(label, epc.withPeerId, sendQueue[i].position);
+
+          delete sendQueue[i];
+        }
+
         i++;
       }
     };

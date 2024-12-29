@@ -20,6 +20,7 @@ import {
   crypto_box_poly1305_AUTHTAGBYTES,
   crypto_hash_sha512_BYTES,
 } from "../cryptography/interfaces";
+
 import type { Metadata } from "./metadata";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -28,9 +29,9 @@ export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
 export const IMPORTANT_DATA_LEN =
-  METADATA_LEN - // fixed
-  PROOF_LEN - // Merkle proof max len of 3kb
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // Encrypted message nonce
+  METADATA_LEN + // fixed
+  PROOF_LEN + // Merkle proof max len of 3kb
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
   crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
 export const CHUNK_LEN =
   rtcDataChannelMessageLimit - // 64kb max message size on RTCDataChannel

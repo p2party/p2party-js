@@ -24,6 +24,8 @@ export interface WebSocketMessageChallengeResponse {
 export interface WebSocketMessageSuccessfulChallenge {
   type: "challenge";
   challengeId: string;
+  username?: string;
+  credential?: string;
 }
 
 export interface WebSocketMessageRoomIdRequest {

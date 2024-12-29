@@ -41,6 +41,10 @@ export interface SetChannelArgs {
   peerId: string;
 }
 
+export interface SetIceServersArgs {
+  iceServers: RTCIceServer[];
+}
+
 export interface SetMessageArgs {
   merkleRootHex: string;
   sha512Hex: string;
@@ -180,6 +184,13 @@ const roomSlice = createSlice({
       }
     },
 
+    setIceServers: (state, action: PayloadAction<SetIceServersArgs>) => {
+      const iceServersLen = action.payload.iceServers.length;
+      for (let i = 0; i < iceServersLen; i++) {
+        state.rtcConfig.iceServers?.push(action.payload.iceServers[i]);
+      }
+    },
+
     setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
       const messageIndex = state.messages.findIndex(
         (m) => m.merkleRootHex === action.payload.merkleRootHex,
@@ -271,6 +282,7 @@ export const {
   setConnectionRelay,
   setPeer,
   setChannel,
+  setIceServers,
   setMessage,
   setMessageAllChunks,
   deletePeer,

@@ -26,6 +26,10 @@ import {
 import { keyPairSelector } from "./reducers/keyPairSlice";
 import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
+import { compileChannelMessageLabel } from "./utils/channelLabel";
+import { uint8ArrayToHex } from "./utils/uint8array";
+import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
+
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
 import {
@@ -46,9 +50,6 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import { compileChannelMessageLabel } from "./utils/channelLabel";
-import { uint8ArrayToHex } from "./utils/uint8array";
-import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 const connect = (
   roomUrl: string,
@@ -57,18 +58,14 @@ const connect = (
     iceServers: [
       {
         urls: [
-          "stun:127.0.0.1:3478",
-          "stun:stun.l.google.com:19302",
-          "stun:stun1.l.google.com:19302",
+          "stun:stun.p2party.com:3478",
+          // "stun:localhost:3478",
+          // "stun:stun.l.google.com:19302",
+          // "stun:stun1.l.google.com:19302",
         ],
       },
-      {
-        urls: ["turn:127.0.0.1:3478"],
-        username: "username", // Dummy username
-        credential: "password", // Dummy password
-      },
     ],
-    iceTransportPolicy: "all", // Use 'relay' if you want to force TURN server usage
+    iceTransportPolicy: "all",
   },
 ) => {
   const { keyPair, signalingServer, room } = store.getState();
@@ -170,6 +167,7 @@ const readMessage = async (
 ): Promise<{
   message: string | Blob;
   percentage: number;
+  filename: string;
   mimeType: MimeType;
   extension: FileExtension;
   category: MessageCategory;
@@ -184,6 +182,7 @@ const readMessage = async (
       return {
         message: "Unknown message",
         percentage: 0,
+        filename: "",
         mimeType: "text/plain",
         extension: "",
         category: MessageCategory.Text,
@@ -224,6 +223,7 @@ const readMessage = async (
       return {
         message: await data.text(),
         percentage,
+        filename: "",
         mimeType,
         extension,
         category,
@@ -232,6 +232,7 @@ const readMessage = async (
       return {
         message: data,
         percentage,
+        filename: room.messages[messageIndex].filename,
         mimeType,
         extension,
         category,
@@ -240,6 +241,7 @@ const readMessage = async (
       return {
         message: "Invalid message",
         percentage: 0,
+        filename: "",
         mimeType,
         extension: "",
         category: MessageCategory.Text,
@@ -251,6 +253,7 @@ const readMessage = async (
     return {
       message: "Irretrievable message",
       percentage: 0,
+      filename: "",
       mimeType: "text/plain",
       extension: "",
       category: MessageCategory.Text,

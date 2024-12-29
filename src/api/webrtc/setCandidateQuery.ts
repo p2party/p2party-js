@@ -23,10 +23,10 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
     if (connectionIndex > -1) {
       const epc = peerConnections[connectionIndex];
       if (!epc.remoteDescription || epc.signalingState !== "stable") {
-        epc.iceCandidates.push(candidate);
+        epc.iceCandidates.push(new RTCIceCandidate(candidate));
       } else {
         try {
-          await epc.addIceCandidate(candidate);
+          await epc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (error) {
           throw error;
         }

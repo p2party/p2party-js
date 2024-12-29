@@ -31,27 +31,10 @@ export const handleConnectToPeer = async (
 ): Promise<IRTCPeerConnection> => {
   return new Promise((resolve, reject) => {
     try {
-      const { keyPair } = api.getState() as State;
+      const { keyPair, room } = api.getState() as State;
 
       if (!initiator) initiator = true;
-      if (!rtcConfig)
-        rtcConfig = {
-          iceTransportPolicy: "all",
-          iceServers: [
-            // {
-            //   urls: [
-            //     "turn:localhost:3478"
-            //   ]
-            // }
-            // {
-            //   urls: [
-            //     "stun:stun.l.google.com:19302",
-            //     "stun:stun1.l.google.com:19302",
-            //   ],
-            // },
-          ],
-        };
-
+      if (!rtcConfig) rtcConfig = room.rtcConfig;
       if (initiator)
         console.log(`You are initiating a peer connection with ${peerId}.`);
 

@@ -29,6 +29,12 @@ export interface SetPeerData {
   signature: string;
 }
 
+export interface SetChallengeId {
+  challengeId: string;
+  username?: string;
+  credential?: string;
+}
+
 const initialState: KeyPair = {
   peerId: "",
   challengeId: "",
@@ -108,8 +114,8 @@ const keyPairSlice = createSlice({
       }
     },
 
-    setChallengeId: (state, action: PayloadAction<string>) => {
-      const challengeId = action.payload;
+    setChallengeId: (state, action: PayloadAction<SetChallengeId>) => {
+      const { challengeId } = action.payload;
 
       if (isUUID(challengeId)) state.challengeId = challengeId;
     },

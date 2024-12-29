@@ -131,7 +131,7 @@ const handleWebSocketMessage = async (
       }
 
       case "challenge": {
-        api.dispatch(setChallengeId(message.challengeId));
+        api.dispatch(setChallengeId(message));
 
         break;
       }
@@ -195,8 +195,6 @@ const handleWebSocketMessage = async (
         api.dispatch(
           webrtcApi.endpoints.setCandidate.initiate({
             peerId: message.fromPeerId,
-            // peerPublicKey: message.fromPeerPublicKey,
-            // roomId: message.roomId,
             candidate: message.candidate,
           }),
         );

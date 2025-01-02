@@ -45,6 +45,15 @@ export const handleReceiveMessage = async (
         ? 0
         : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
+    if (chunkSize === 0)
+      return {
+        chunkIndex: -1,
+        chunkSize: 0,
+        totalSize: metadata.totalSize,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+      };
+
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
     const incomingMessageIndex = room.messages.findIndex(
       (m) => m.merkleRootHex === merkleRootHex,
@@ -53,11 +62,10 @@ export const handleReceiveMessage = async (
     const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
 
     const messageRelevant =
-      chunkSize > 0 &&
-      (incomingMessageIndex === -1 ||
-        (room.messages[incomingMessageIndex].totalSize >=
-          room.messages[incomingMessageIndex].savedSize + chunkSize &&
-          !exists));
+      incomingMessageIndex === -1 ||
+      (room.messages[incomingMessageIndex].totalSize >=
+        room.messages[incomingMessageIndex].savedSize + chunkSize &&
+        !exists);
 
     if (!messageRelevant)
       return {

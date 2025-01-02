@@ -10,7 +10,7 @@ import {
   getMessageCategory,
   getMimeType,
 } from "./utils/messageTypes";
-import { CHUNK_LEN } from "./utils/splitToChunks";
+import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/splitToChunks";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -53,13 +53,13 @@ import type { RoomData } from "./api/webrtc/interfaces";
 
 const connect = (
   roomUrl: string,
-  signalingServerUrl = "ws://localhost:3001/ws",
+  signalingServerUrl = "wss://signaling.p2party.com/ws",
+  // signalingServerUrl = "ws://localhost:3001/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
         urls: [
           "stun:stun.p2party.com:3478",
-          // "stun:localhost:3478",
           // "stun:stun.l.google.com:19302",
           // "stun:stun1.l.google.com:19302",
         ],
@@ -99,7 +99,8 @@ const connect = (
 };
 
 const connectToSignalingServer = (
-  signalingServerUrl = "ws://localhost:3001/ws",
+  signalingServerUrl = "wss://signaling.p2party.com/ws",
+  // signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
   dispatch(
     signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl),
@@ -410,6 +411,11 @@ export default {
   deleteMessage: deleteMsg,
   purge,
   generateRandomRoomUrl,
+  MIN_CHUNKS: 3,
+  MIN_CHUNK_SIZE: IMPORTANT_DATA_LEN + 1,
+  MAX_CHUNK_SIZE: CHUNK_LEN,
+  MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
+  MAX_PERCENTAGE_FILLED_CHUNK: 1,
 };
 
 export { MessageType, MessageCategory };

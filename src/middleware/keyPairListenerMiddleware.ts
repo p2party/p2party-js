@@ -48,8 +48,9 @@ keyPairListenerMiddleware.startListening({
               {
                 urls: [
                   "turn:turn.p2party.com:3478?transport=udp",
-                  // "turn:turn.p2party.com:5349?transport=tcp",
+                  "turn:turn.p2party.com:3478?transport=tcp",
                   "turns:turn.p2party.com:443?transport=tcp",
+                  // "turn:128.140.33.52:3478?transport=tcp",
                 ],
                 username: action.payload.username,
                 credential: action.payload.credential,

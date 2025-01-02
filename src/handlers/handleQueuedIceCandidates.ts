@@ -8,7 +8,11 @@ export const handleQueuedIceCandidates = async (epc: IRTCPeerConnection) => {
       epc.remoteDescription
     ) {
       const candidate = epc.iceCandidates.shift();
-      if (candidate) await epc.addIceCandidate(candidate);
+      if (candidate) {
+        const cand = new RTCIceCandidate(candidate);
+        if (cand.usernameFragment !== candidate.usernameFragment)
+          await epc.addIceCandidate(cand);
+      }
     }
   } catch (error) {
     throw error;

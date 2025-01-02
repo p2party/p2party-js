@@ -4,6 +4,7 @@ import { isUUID } from "class-validator";
 import {
   setConnectingToPeers,
   setRoom,
+  setMessage,
   deleteMessage,
   deleteAll,
 } from "../reducers/roomSlice";
@@ -62,6 +63,25 @@ roomListenerMiddleware.startListening({
       listenerApi.dispatch(
         webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
       );
+    } else if (setMessage.match(action)) {
+      const { room } = listenerApi.getState() as State;
+      const messageIndex = room.messages.findIndex(
+        (m) => m.merkleRootHex === action.payload.merkleRootHex,
+      );
+
+      if (
+        messageIndex > -1 &&
+        room.messages[messageIndex].savedSize ===
+          room.messages[messageIndex].totalSize
+      ) {
+        console.log("Closing the channel " + action.payload.channelLabel);
+        listenerApi.dispatch(
+          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+            label: action.payload.channelLabel ?? "",
+            alsoDeleteData: false,
+          }),
+        );
+      }
     }
   },
 });

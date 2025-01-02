@@ -22,11 +22,15 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
 
     if (connectionIndex > -1) {
       const epc = peerConnections[connectionIndex];
+      const cand = new RTCIceCandidate(candidate);
+
       if (!epc.remoteDescription || epc.signalingState !== "stable") {
-        epc.iceCandidates.push(new RTCIceCandidate(candidate));
+        // if (cand.usernameFragment !== candidate.usernameFragment)
+        epc.iceCandidates.push(cand);
       } else {
         try {
-          await epc.addIceCandidate(new RTCIceCandidate(candidate));
+          // if (cand.usernameFragment !== candidate.usernameFragment)
+          await epc.addIceCandidate(cand);
         } catch (error) {
           throw error;
         }

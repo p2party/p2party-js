@@ -1,7 +1,7 @@
 import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 
 import signalingServerApi from "../api/signalingServerApi";
-// import webrtcApi from "../api/webrtc";
+import webrtcApi from "../api/webrtc";
 
 import { setMakingOffer } from "../reducers/makingOfferSlice";
 import { setPeer } from "../reducers/roomSlice";
@@ -148,9 +148,9 @@ export const handleConnectToPeer = async (
           epc.connectionState === "failed" ||
           epc.connectionState === "disconnected"
         ) {
-          // api.dispatch(
-          //   webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
-          // );
+          api.dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
+          );
           console.error(
             `Connection with peer ${peerId} has ${epc.connectionState}.`,
           );

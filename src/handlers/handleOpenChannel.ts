@@ -28,7 +28,7 @@ export interface OpenChannelHelperParams {
   merkleModule: LibCrypto;
 }
 
-export const MAX_BUFFERED_AMOUNT = 128 * 1024;
+export const MAX_BUFFERED_AMOUNT = 256 * 1024;
 
 export const handleOpenChannel = async (
   {
@@ -52,7 +52,7 @@ export const handleOpenChannel = async (
           })
         : channel;
     dataChannel.binaryType = "blob";
-    dataChannel.bufferedAmountLowThreshold = 64 * 1024;
+    dataChannel.bufferedAmountLowThreshold = 128 * 1024;
     dataChannel.onbufferedamountlow = async () => {
       const sendQueue = await getDBSendQueue(label, epc.withPeerId);
       const sendQueueLen = sendQueue.length;
@@ -74,6 +74,12 @@ export const handleOpenChannel = async (
           delete sendQueue[i];
         }
 
+        if (i === sendQueueLen - 1) {
+          dataChannel.close();
+
+          return;
+        }
+
         i++;
       }
     };
@@ -81,11 +87,11 @@ export const handleOpenChannel = async (
     const extChannel = dataChannel as IRTCDataChannel;
     extChannel.withPeerId = epc.withPeerId;
 
-    extChannel.onclosing = () => {
-      console.log(`Channel with label ${extChannel.label} is closing.`);
-    };
+    // extChannel.onclosing = () => {
+    //   console.log(`Channel with label ${extChannel.label} is closing.`);
+    // };
 
-    extChannel.onclose = async () => {
+    extChannel.onclose = () => {
       console.log(`Channel with label ${extChannel.label} has closed.`);
 
       api.dispatch(
@@ -147,7 +153,7 @@ export const handleOpenChannel = async (
       }
     };
 
-    extChannel.onopen = async () => {
+    extChannel.onopen = () => {
       console.log(
         `Channel with label \"${extChannel.label}\" and client ${epc.withPeerId} is open.`,
       );

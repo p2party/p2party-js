@@ -1,7 +1,8 @@
 import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
+import { newKeyPair, sign } from "../cryptography/ed25519";
 
-import { hexToUint8Array } from "../utils/uint8array";
+import { concatUint8Arrays, hexToUint8Array } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { deleteDBChunk, setDBSendQueue } from "../db/api";
@@ -96,17 +97,26 @@ export const handleSendMessage = async (
         //   ? j
         //   : indexesRandomized[j];
 
-        const m = deserializeMetadata(
-          unencryptedChunks[jRandom].slice(0, METADATA_LEN),
+        const senderEphemeralKey = await newKeyPair(encryptionModule);
+        const ephemeralSignature = await sign(
+          senderEphemeralKey.publicKey,
+          senderSecretKey,
+          encryptionModule,
         );
 
         const encryptedMessage = await encryptAsymmetric(
           unencryptedChunks[jRandom],
           receiverPublicKey,
-          senderSecretKey,
+          senderEphemeralKey.secretKey, // senderSecretKey,
           merkleRoot,
           encryptionModule,
         );
+
+        const message = await concatUint8Arrays([
+          senderEphemeralKey.publicKey,
+          ephemeralSignature,
+          encryptedMessage,
+        ]);
 
         const timeoutMilliseconds = await randomNumberInRange(2, 20);
         await wait(timeoutMilliseconds);
@@ -114,7 +124,8 @@ export const handleSendMessage = async (
           channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
           channel.readyState === "open"
         ) {
-          channel.send(encryptedMessage);
+          // channel.send(encryptedMessage);
+          channel.send(message);
         } else if (
           channel.readyState === "closing" ||
           channel.readyState === "closed"
@@ -128,9 +139,13 @@ export const handleSendMessage = async (
             position: jRandom,
             label: channel.label,
             toPeerId: channel.withPeerId,
-            encryptedData: new Blob([encryptedMessage]),
+            encryptedData: new Blob([message]), // new Blob([encryptedMessage]),
           });
         }
+
+        const m = deserializeMetadata(
+          unencryptedChunks[jRandom].slice(0, METADATA_LEN),
+        );
 
         if (m.chunkEndIndex - m.chunkStartIndex > totalSize)
           await deleteDBChunk(merkleRootHex, m.chunkIndex);

@@ -19,6 +19,8 @@ import {
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
   crypto_box_poly1305_AUTHTAGBYTES,
   crypto_hash_sha512_BYTES,
+  crypto_sign_ed25519_BYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
 } from "../cryptography/interfaces";
 
 import type { Metadata } from "./metadata";
@@ -29,6 +31,8 @@ export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
 export const IMPORTANT_DATA_LEN =
+  crypto_sign_ed25519_PUBLICKEYBYTES + // ephemeral pk
+  crypto_sign_ed25519_BYTES + // pk signed with identity sk
   METADATA_LEN + // fixed
   PROOF_LEN + // Merkle proof max len of 3kb
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce

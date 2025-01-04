@@ -9,6 +9,11 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { Room } from "../reducers/roomSlice";
+import {
+  crypto_sign_ed25519_BYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
+} from "../cryptography/interfaces";
+import { verify } from "../cryptography/ed25519";
 
 export const handleReceiveMessage = async (
   data: Blob,
@@ -27,10 +32,38 @@ export const handleReceiveMessage = async (
 }> => {
   try {
     const messageBuffer = await data.arrayBuffer();
-    const encryptedMessage = new Uint8Array(messageBuffer);
+    const message = new Uint8Array(messageBuffer);
+    const senderEphemeralPublicKey = message.slice(
+      0,
+      crypto_sign_ed25519_PUBLICKEYBYTES,
+    );
+    const sig = message.slice(
+      crypto_sign_ed25519_PUBLICKEYBYTES,
+      crypto_sign_ed25519_PUBLICKEYBYTES + crypto_sign_ed25519_BYTES,
+    );
+
+    const verifySig = await verify(
+      senderEphemeralPublicKey,
+      sig,
+      senderPublicKey,
+      decryptionModule,
+    );
+
+    if (!verifySig)
+      return {
+        chunkIndex: -1,
+        chunkSize: 0,
+        totalSize: 0,
+        messageType: MessageType.Text,
+        filename: "",
+      };
+
+    const encryptedMessage = message.slice(
+      crypto_sign_ed25519_PUBLICKEYBYTES + crypto_sign_ed25519_BYTES,
+    );
     const decryptedMessage = await decryptAsymmetric(
       encryptedMessage,
-      senderPublicKey,
+      senderEphemeralPublicKey, // senderPublicKey,
       receiverSecretKey,
       merkleRoot,
       decryptionModule,

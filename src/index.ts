@@ -168,6 +168,7 @@ const readMessage = async (
 ): Promise<{
   message: string | Blob;
   percentage: number;
+  size: number;
   filename: string;
   mimeType: MimeType;
   extension: FileExtension;
@@ -183,6 +184,7 @@ const readMessage = async (
       return {
         message: "Unknown message",
         percentage: 0,
+        size: 0,
         filename: "",
         mimeType: "text/plain",
         extension: "",
@@ -224,6 +226,7 @@ const readMessage = async (
       return {
         message: await data.text(),
         percentage,
+        size: room.messages[messageIndex].totalSize,
         filename: "",
         mimeType,
         extension,
@@ -233,6 +236,7 @@ const readMessage = async (
       return {
         message: data,
         percentage,
+        size: room.messages[messageIndex].totalSize,
         filename: room.messages[messageIndex].filename,
         mimeType,
         extension,
@@ -242,6 +246,7 @@ const readMessage = async (
       return {
         message: "Invalid message",
         percentage: 0,
+        size: 0,
         filename: "",
         mimeType,
         extension: "",
@@ -254,6 +259,7 @@ const readMessage = async (
     return {
       message: "Irretrievable message",
       percentage: 0,
+      size: 0,
       filename: "",
       mimeType: "text/plain",
       extension: "",

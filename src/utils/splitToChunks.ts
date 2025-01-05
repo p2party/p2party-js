@@ -181,7 +181,7 @@ export const splitToChunks = async (
     await setDBChunk({
       merkleRoot: merkleRootHex,
       chunkIndex: metadata[i].chunkIndex,
-      data: new Blob([realChunk]),
+      data: realChunk.buffer, // new Blob([realChunk]),
       mimeType,
     });
 

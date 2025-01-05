@@ -223,7 +223,7 @@ const handleWebSocketMessage = async (
         const messageData = hexToUint8Array(message.message);
 
         await handleReceiveMessage(
-          new Blob([messageData]), // hexToUint8Array(message.message),
+          messageData.buffer, // new Blob([messageData]), //
           new Uint8Array(),
           senderPublicKey,
           receiverSecretKey,

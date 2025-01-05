@@ -97,6 +97,8 @@ export const handleSendMessage = async (
         //   ? j
         //   : indexesRandomized[j];
 
+        // if (!unencryptedChunks[jRandom]) continue;
+
         const senderEphemeralKey = await newKeyPair(encryptionModule);
         const ephemeralSignature = await sign(
           senderEphemeralKey.publicKey,
@@ -112,11 +114,11 @@ export const handleSendMessage = async (
           encryptionModule,
         );
 
-        const message = await concatUint8Arrays([
+        const message = (await concatUint8Arrays([
           senderEphemeralKey.publicKey,
           ephemeralSignature,
           encryptedMessage,
-        ]);
+        ])) as Uint8Array<ArrayBuffer>;
 
         const timeoutMilliseconds = await randomNumberInRange(2, 20);
         await wait(timeoutMilliseconds);
@@ -125,21 +127,19 @@ export const handleSendMessage = async (
           channel.readyState === "open"
         ) {
           // channel.send(encryptedMessage);
-          channel.send(message);
+          channel.send(message.buffer);
         } else if (
           channel.readyState === "closing" ||
           channel.readyState === "closed"
         ) {
           api.dispatch(deleteMessage({ merkleRootHex }));
-
-          channel.close();
         } else {
           putItemInDBSendQueue = true;
           await setDBSendQueue({
             position: jRandom,
             label: channel.label,
             toPeerId: channel.withPeerId,
-            encryptedData: new Blob([message]), // new Blob([encryptedMessage]),
+            encryptedData: message.buffer, // new Blob([message]), // new Blob([encryptedMessage]),
           });
         }
 

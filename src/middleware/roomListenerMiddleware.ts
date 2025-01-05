@@ -16,10 +16,17 @@ import { deleteDBChunk } from "../db/api";
 
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
+import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 const roomListenerMiddleware = createListenerMiddleware();
 roomListenerMiddleware.startListening({
-  matcher: isAnyOf(setConnectingToPeers, setRoom, deleteMessage, deleteAll),
+  matcher: isAnyOf(
+    setConnectingToPeers,
+    setRoom,
+    setMessage,
+    deleteMessage,
+    deleteAll,
+  ),
   // actionCreator: setConnectingToPeers,
   effect: async (action, listenerApi) => {
     if (setConnectingToPeers.match(action)) {
@@ -55,14 +62,6 @@ roomListenerMiddleware.startListening({
       ) {
         listenerApi.dispatch(setConnectingToPeers(true));
       }
-    } else if (deleteMessage.match(action)) {
-      const { merkleRootHex } = action.payload;
-
-      await deleteDBChunk(merkleRootHex);
-    } else if (deleteAll.match(action)) {
-      listenerApi.dispatch(
-        webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
-      );
     } else if (setMessage.match(action)) {
       const { room } = listenerApi.getState() as State;
       const messageIndex = room.messages.findIndex(
@@ -74,14 +73,27 @@ roomListenerMiddleware.startListening({
         room.messages[messageIndex].savedSize ===
           room.messages[messageIndex].totalSize
       ) {
-        console.log("Closing the channel " + action.payload.channelLabel);
+        const label = await compileChannelMessageLabel(
+          room.messages[messageIndex].channelLabel,
+          room.messages[messageIndex].merkleRootHex,
+          room.messages[messageIndex].sha512Hex,
+        );
+
         listenerApi.dispatch(
           webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-            label: action.payload.channelLabel ?? "",
+            label,
             alsoDeleteData: false,
           }),
         );
       }
+    } else if (deleteMessage.match(action)) {
+      const { merkleRootHex } = action.payload;
+
+      await deleteDBChunk(merkleRootHex);
+    } else if (deleteAll.match(action)) {
+      listenerApi.dispatch(
+        webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
+      );
     }
   },
 });

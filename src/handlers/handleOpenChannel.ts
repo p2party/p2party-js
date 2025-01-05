@@ -6,7 +6,7 @@ import { setChannel, setMessage } from "../reducers/roomSlice";
 
 import { randomNumberInRange } from "../cryptography/utils";
 
-import { deleteDBSendQueue, getDBSendQueue } from "../db/api";
+import { countDBSendQueue, deleteDBSendQueue, getDBSendQueue } from "../db/api";
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
@@ -28,7 +28,7 @@ export interface OpenChannelHelperParams {
   merkleModule: LibCrypto;
 }
 
-export const MAX_BUFFERED_AMOUNT = 256 * 1024;
+export const MAX_BUFFERED_AMOUNT = 1024 * 1024;
 
 export const handleOpenChannel = async (
   {
@@ -51,16 +51,20 @@ export const handleOpenChannel = async (
             maxRetransmits: 10,
           })
         : channel;
-    dataChannel.binaryType = "blob";
-    dataChannel.bufferedAmountLowThreshold = 128 * 1024;
+    dataChannel.binaryType = "arraybuffer";
+    dataChannel.bufferedAmountLowThreshold = 256 * 1024;
     dataChannel.onbufferedamountlow = async () => {
       const sendQueue = await getDBSendQueue(label, epc.withPeerId);
       const sendQueueLen = sendQueue.length;
+
       let i = 0;
+
+      let queueCount = await countDBSendQueue(label, epc.withPeerId);
 
       while (
         dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
         dataChannel.readyState === "open" &&
+        queueCount > 0 &&
         i < sendQueueLen
       ) {
         const timeoutMilliseconds = await randomNumberInRange(2, 20);
@@ -71,13 +75,7 @@ export const handleOpenChannel = async (
 
           await deleteDBSendQueue(label, epc.withPeerId, sendQueue[i].position);
 
-          delete sendQueue[i];
-        }
-
-        if (i === sendQueueLen - 1) {
-          dataChannel.close();
-
-          return;
+          queueCount = await countDBSendQueue(label, epc.withPeerId);
         }
 
         i++;
@@ -125,7 +123,7 @@ export const handleOpenChannel = async (
 
         const { chunkSize, totalSize, messageType, filename } =
           await handleReceiveMessage(
-            e.data as Blob,
+            e.data as ArrayBuffer,
             merkleRoot,
             senderPublicKey,
             receiverSecretKey,

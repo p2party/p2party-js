@@ -1,7 +1,12 @@
 import { decryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { verifyMerkleProof } from "../cryptography/merkle";
+import { verify } from "../cryptography/ed25519";
 
-import { existsDBChunk, setDBChunk } from "../db/api";
+import {
+  // existsDBChunk,
+  getDBChunk,
+  setDBChunk,
+} from "../db/api";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -13,10 +18,9 @@ import {
   crypto_sign_ed25519_BYTES,
   crypto_sign_ed25519_PUBLICKEYBYTES,
 } from "../cryptography/interfaces";
-import { verify } from "../cryptography/ed25519";
 
 export const handleReceiveMessage = async (
-  data: Blob,
+  data: ArrayBuffer,
   merkleRoot: Uint8Array,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
@@ -31,8 +35,8 @@ export const handleReceiveMessage = async (
   filename: string;
 }> => {
   try {
-    const messageBuffer = await data.arrayBuffer();
-    const message = new Uint8Array(messageBuffer);
+    // const messageBuffer = await data.arrayBuffer();
+    const message = new Uint8Array(data);
     const senderEphemeralPublicKey = message.slice(
       0,
       crypto_sign_ed25519_PUBLICKEYBYTES,
@@ -92,7 +96,8 @@ export const handleReceiveMessage = async (
       (m) => m.merkleRootHex === merkleRootHex,
     );
 
-    const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
+    // const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
+    const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
 
     const messageRelevant =
       incomingMessageIndex === -1 ||
@@ -157,7 +162,7 @@ export const handleReceiveMessage = async (
     await setDBChunk({
       merkleRoot: merkleRootHex,
       chunkIndex: metadata.chunkIndex,
-      data: new Blob([realChunk]),
+      data: realChunk.buffer, // new Blob([realChunk]),
       mimeType,
     });
 

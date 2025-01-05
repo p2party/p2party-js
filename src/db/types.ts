@@ -2,7 +2,7 @@
 export interface Chunk {
   merkleRoot: string;
   chunkIndex: number;
-  data: Blob;
+  data: ArrayBuffer;
   mimeType: string;
 }
 
@@ -10,7 +10,7 @@ export interface SendQueue {
   position: number;
   label: string;
   toPeerId: string;
-  encryptedData: Blob;
+  encryptedData: ArrayBuffer;
 }
 
 // Each method and its arguments/return type
@@ -28,12 +28,17 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBSendQueue";
-      args: [label: string, toPeerId: string];
+      args: [label: string, toPeerId: string, position?: number];
     }
   | { id: number; method: "getDBAllChunks"; args: [merkleRootHex: string] }
   | { id: number; method: "getDBAllChunksCount"; args: [merkleRootHex: string] }
   | { id: number; method: "setDBChunk"; args: [chunk: Chunk] }
   | { id: number; method: "setDBSendQueue"; args: [item: SendQueue] }
+  | {
+      id: number;
+      method: "countDBSendQueue";
+      args: [label: string, toPeerId: string];
+    }
   | {
       id: number;
       method: "deleteDBChunk";
@@ -59,6 +64,7 @@ export interface WorkerMethodReturnTypes {
   getDBAllChunksCount: number;
   setDBChunk: void;
   setDBSendQueue: void;
+  countDBSendQueue: number;
   deleteDBChunk: void;
   deleteDBSendQueue: void;
   deleteDB: void;

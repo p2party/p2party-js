@@ -49,11 +49,11 @@ export interface SetMessageArgs {
   merkleRootHex: string;
   sha512Hex: string;
   chunkSize: number;
-  fromPeerId?: string;
-  filename?: string;
-  messageType?: MessageType;
-  totalSize?: number;
-  channelLabel?: string;
+  fromPeerId: string;
+  filename: string;
+  messageType: MessageType;
+  totalSize: number;
+  channelLabel: string;
 }
 
 export interface SetMessageAllChunksArgs {
@@ -223,8 +223,7 @@ const roomSlice = createSlice({
         state.messages[messageIndex].totalSize >=
           state.messages[messageIndex].savedSize + action.payload.chunkSize
       ) {
-        state.messages[messageIndex].savedSize =
-          state.messages[messageIndex].savedSize + action.payload.chunkSize;
+        state.messages[messageIndex].savedSize += action.payload.chunkSize;
       }
     },
 

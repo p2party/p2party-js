@@ -53,6 +53,9 @@ export const setDBChunk = (chunk: import("./types").Chunk) =>
 export const setDBSendQueue = (item: import("./types").SendQueue) =>
   callWorker("setDBSendQueue", item);
 
+export const countDBSendQueue = (label: string, toPeerId: string) =>
+  callWorker("countDBSendQueue", label, toPeerId);
+
 export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
 

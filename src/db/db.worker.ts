@@ -51,7 +51,7 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 async function fnGetDBChunk(
   merkleRootHex: string,
   chunkIndex: number,
-): Promise<Blob | undefined> {
+): Promise<ArrayBuffer | undefined> {
   const db = await getDB();
   const chunk = await db.get("chunks", [merkleRootHex, chunkIndex]);
   db.close();
@@ -71,30 +71,47 @@ async function fnExistsDBChunk(
 async function fnGetDBSendQueue(
   label: string,
   toPeerId: string,
+  position?: number,
 ): Promise<SendQueue[]> {
   const db = await getDB();
-  const sendQueueCount = await db.countFromIndex(
-    "sendQueue",
-    "labelPeer",
-    label + toPeerId,
-  );
-  if (sendQueueCount > 0) {
-    const sendQueue = await db.getAllFromIndex(
-      "sendQueue",
-      "labelPeer",
-      label + toPeerId,
-    );
+
+  if (position) {
+    const item = await db.get("sendQueue", [position, label, toPeerId]);
     db.close();
-    return sendQueue;
-  } else {
-    const tx = db.transaction("sendQueue", "readonly");
-    const store = tx.objectStore("sendQueue");
-    const index = store.index("labelPeer");
-    const keyRange = IDBKeyRange.only([label, toPeerId]);
-    const sendQueue = await index.getAll(keyRange);
-    db.close();
-    return sendQueue;
+
+    if (!item) return [];
+    return [item];
   }
+
+  const tx = db.transaction("sendQueue", "readonly");
+  const store = tx.objectStore("sendQueue");
+  const index = store.index("labelPeer");
+  const keyRange = IDBKeyRange.only([label, toPeerId]);
+  const sendQueue = await index.getAll(keyRange);
+  db.close();
+
+  return sendQueue;
+}
+
+async function fnCountDBSendQueue(
+  label: string,
+  toPeerId: string,
+): Promise<number> {
+  const db = await getDB();
+  // const sendQueueCount = await db.countFromIndex(
+  //   "sendQueue",
+  //   "labelPeer",
+  //   label + toPeerId,
+  // );
+
+  const tx = db.transaction("sendQueue", "readonly");
+  const store = tx.objectStore("sendQueue");
+  const index = store.index("labelPeer");
+  const keyRange = IDBKeyRange.only([label, toPeerId]);
+  const sendQueueCount = await index.count(keyRange);
+  db.close();
+
+  return sendQueueCount;
 }
 
 async function fnGetDBAllChunks(merkleRootHex: string): Promise<Chunk[]> {
@@ -222,6 +239,11 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnSetDBSendQueue(
           ...message.args,
         )) as WorkerMethodReturnTypes["setDBSendQueue"];
+        break;
+      case "countDBSendQueue":
+        result = (await fnCountDBSendQueue(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["countDBSendQueue"];
         break;
       case "deleteDBChunk":
         result = (await fnDeleteDBChunk(

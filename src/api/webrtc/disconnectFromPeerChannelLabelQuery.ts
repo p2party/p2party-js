@@ -24,26 +24,34 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     );
 
     if (channelIndex > -1) {
-      if (dataChannels[channelIndex].readyState === "open") {
-        dataChannels[channelIndex].onopen = null;
-        dataChannels[channelIndex].onclose = null;
-        dataChannels[channelIndex].onerror = null;
-        dataChannels[channelIndex].onclosing = null;
-        dataChannels[channelIndex].onmessage = null;
-        dataChannels[channelIndex].onbufferedamountlow = null;
-        dataChannels[channelIndex].close();
+      if (dataChannels[channelIndex]) {
+        api.dispatch(
+          deleteChannel({
+            peerId: dataChannels[channelIndex].withPeerId,
+            label,
+          }),
+        );
+
+        await deleteDBSendQueue(label, dataChannels[channelIndex].withPeerId);
+
+        if (
+          dataChannels[channelIndex] // &&
+        ) {
+          dataChannels[channelIndex].onopen = null;
+          dataChannels[channelIndex].onclose = null;
+          dataChannels[channelIndex].onerror = null;
+          dataChannels[channelIndex].onclosing = null;
+          dataChannels[channelIndex].onmessage = null;
+          dataChannels[channelIndex].onbufferedamountlow = null;
+
+          if (dataChannels[channelIndex].readyState === "open")
+            dataChannels[channelIndex].close();
+
+          delete dataChannels[channelIndex];
+        }
+
+        dataChannels.splice(channelIndex, 1);
       }
-
-      await deleteDBSendQueue(label, peerId);
-
-      api.dispatch(
-        deleteChannel({
-          peerId: dataChannels[channelIndex].withPeerId,
-          label,
-        }),
-      );
-
-      dataChannels.splice(channelIndex, 1);
     }
 
     return { data: undefined };

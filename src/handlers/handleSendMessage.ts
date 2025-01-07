@@ -37,9 +37,9 @@ export const handleSendMessage = async (
   encryptionModule: LibCrypto,
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
-  minChunks = 5, // TODO errors when =2 due to merkle
+  minChunks = 3, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
-  percentageFilledChunk = 0.8,
+  percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
 ) => {
   try {
@@ -120,13 +120,12 @@ export const handleSendMessage = async (
           encryptedMessage,
         ])) as Uint8Array<ArrayBuffer>;
 
-        const timeoutMilliseconds = await randomNumberInRange(2, 20);
+        const timeoutMilliseconds = await randomNumberInRange(1, 10);
         await wait(timeoutMilliseconds);
         if (
           channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
           channel.readyState === "open"
         ) {
-          // channel.send(encryptedMessage);
           channel.send(message.buffer);
         } else if (
           channel.readyState === "closing" ||
@@ -139,7 +138,7 @@ export const handleSendMessage = async (
             position: jRandom,
             label: channel.label,
             toPeerId: channel.withPeerId,
-            encryptedData: message.buffer, // new Blob([message]), // new Blob([encryptedMessage]),
+            encryptedData: message.buffer, // new Blob([message]),
           });
         }
 

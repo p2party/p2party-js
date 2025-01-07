@@ -137,15 +137,17 @@ const handleWebSocketMessage = async (
       }
 
       case "peers": {
-        if (
-          !isUUID(message.roomId) ||
-          message.roomId !== room.id ||
-          keyPair.publicKey.length === 0
-        )
-          break;
+        // if (
+        //   !isUUID(message.roomId) ||
+        //   message.roomId !== room.id ||
+        //   keyPair.publicKey.length === 0
+        // )
+        //   break;
 
         const len = message.peers.length;
         if (len === 0) break;
+
+      console.log("RECEIVED PEERS " + JSON.stringify(message.peers))
 
         for (let i = 0; i < len; i++) {
           if (

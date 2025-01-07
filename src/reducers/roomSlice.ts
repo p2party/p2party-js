@@ -36,11 +36,6 @@ export interface SetRoomArgs {
   rtcConfig?: RTCConfiguration;
 }
 
-export interface SetChannelArgs {
-  label: string;
-  peerId: string;
-}
-
 export interface SetIceServersArgs {
   iceServers: RTCIceServer[];
 }
@@ -66,8 +61,18 @@ export interface SetMessageAllChunksArgs {
   channelLabel: string;
 }
 
+export interface SetChannelArgs {
+  peerId: string;
+  label: string;
+}
+
 export interface DeleteMessageArgs {
   merkleRootHex: string;
+}
+
+export interface DeleteChannelArgs {
+  peerId?: string;
+  label?: string;
 }
 
 export interface Room extends SetRoomArgs {
@@ -162,24 +167,32 @@ const roomSlice = createSlice({
       }
     },
 
-    deleteChannel: (state, action: PayloadAction<SetChannelArgs>) => {
-      const channelIndex = state.channels.findIndex(
-        (c) => c.label === action.payload.label,
-      );
+    deleteChannel: (state, action: PayloadAction<DeleteChannelArgs>) => {
+      const { peerId, label } = action.payload;
+      if (label && !peerId) {
+        const channelIndex = state.channels.findIndex((c) => c.label === label);
 
-      if (channelIndex > -1) {
-        const peerIndex = state.channels[channelIndex].peerIds.findIndex(
-          (p) => p === action.payload.peerId,
+        if (channelIndex > -1) state.channels.splice(channelIndex, 1);
+      } else if (!label && peerId) {
+        const channelsLen = state.channels.length;
+        for (let i = 0; i < channelsLen; i++) {
+          const peerIndex = state.channels[i].peerIds.findIndex(
+            (p) => p === peerId,
+          );
+
+          if (peerIndex > -1) state.channels[i].peerIds.splice(peerIndex, 1);
+        }
+      } else if (peerId && label) {
+        const channelIndex = state.channels.findIndex(
+          (c) => c.label === label && c.peerIds.includes(peerId),
         );
 
-        if (peerIndex > -1) {
-          state.channels[channelIndex].peerIds.splice(peerIndex, 1);
-        } else {
-          state.channels.splice(channelIndex, 1);
-        }
+        if (channelIndex > -1) {
+          const peerIndex = state.channels[channelIndex].peerIds.findIndex(
+            (p) => p === peerId,
+          );
 
-        if (state.channels[channelIndex].peerIds.length === 0) {
-          state.channels.splice(channelIndex, 1);
+          state.channels[channelIndex].peerIds.splice(peerIndex, 1);
         }
       }
     },

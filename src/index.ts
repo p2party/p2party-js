@@ -17,7 +17,7 @@ import webrtcApi from "./api/webrtc";
 
 import {
   roomSelector,
-  setConnectingToPeers,
+  // setConnectingToPeers,
   setConnectionRelay,
   setRoom,
   deleteMessage,
@@ -41,6 +41,7 @@ import {
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
+  WebSocketMessagePeersRequest,
   WebSocketMessageChallengeRequest,
   WebSocketMessageChallengeResponse,
   WebSocketMessageDescriptionSend,
@@ -87,7 +88,15 @@ const connect = (
         }),
       );
     } else {
-      dispatch(setConnectingToPeers(true));
+      dispatch(
+        signalingServerApi.endpoints.sendMessage.initiate({
+          content: {
+            type: "peers",
+            fromPeerId: keyPair.peerId,
+            roomId: room.id,
+          } as WebSocketMessagePeersRequest,
+        }),
+      );
     }
   } else {
     dispatch(
@@ -111,12 +120,16 @@ const disconnectFromSignalingServer = () => {
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const allowConnectionRelay = (allowed = true) => {
-  dispatch(setConnectionRelay(allowed));
+const disconnectFromPeer = (peerId: string) => {
+  dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
 };
 
 const disconnectFromRoom = (roomId: string, _deleteMessages = false) => {
   dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
+};
+
+const allowConnectionRelay = (allowed = true) => {
+  dispatch(setConnectionRelay(allowed));
 };
 
 const openChannel = async (
@@ -138,9 +151,9 @@ const openChannel = async (
 const sendMessage = (
   data: string | File,
   toChannel: string,
-  minChunks = 5,
+  minChunks = 4,
   chunkSize = CHUNK_LEN,
-  percentageFilledChunk = 0.8,
+  percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
 ) => {
   // dispatch(
@@ -202,6 +215,21 @@ const readMessage = async (
         room.messages[messageIndex].totalSize) *
         100,
     );
+
+    if (percentage === 100) {
+      const label = await compileChannelMessageLabel(
+        room.messages[messageIndex].channelLabel,
+        room.messages[messageIndex].merkleRootHex,
+        room.messages[messageIndex].sha512Hex,
+      );
+
+      store.dispatch(
+        webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+          label,
+          alsoDeleteData: false,
+        }),
+      );
+    }
 
     const root = room.messages[messageIndex].merkleRootHex;
     const chunks =
@@ -408,8 +436,9 @@ export default {
   connect,
   connectToSignalingServer,
   disconnectFromSignalingServer,
-  allowConnectionRelay,
   disconnectFromRoom,
+  disconnectFromPeer,
+  allowConnectionRelay,
   openChannel,
   sendMessage,
   readMessage,

@@ -64,7 +64,7 @@ const webrtcApi = createApi({
   reducerPath: "webrtcApi",
   baseQuery: webrtcBaseQuery,
   endpoints: (builder) => ({
-    connectWithPeer: builder.query<void, RTCPeerConnectionParams>({
+    connectWithPeer: builder.mutation<void, RTCPeerConnectionParams>({
       query: ({
         peerId,
         peerPublicKey,
@@ -95,7 +95,7 @@ const webrtcApi = createApi({
       }),
     }),
 
-    setDescription: builder.query<void, RTCSetDescriptionParams>({
+    setDescription: builder.mutation<void, RTCSetDescriptionParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetDescriptionQuery(
           {
@@ -111,7 +111,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    setCandidate: builder.query<void, RTCSetCandidateParams>({
+    setCandidate: builder.mutation<void, RTCSetCandidateParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetIceCandidateQuery(
           { ...args, peerConnections, iceCandidates },
@@ -120,7 +120,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    openChannel: builder.query<void, RTCOpenChannelParams>({
+    openChannel: builder.mutation<void, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
           {
@@ -151,7 +151,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnect: builder.query<void, RTCDisconnectParams>({
+    disconnect: builder.mutation<void, RTCDisconnectParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectQuery(
           { ...args, peerConnections, dataChannels },
@@ -160,7 +160,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromRoom: builder.query<void, RTCDisconnectFromRoomParams>({
+    disconnectFromRoom: builder.mutation<void, RTCDisconnectFromRoomParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectRoomQuery(
           { ...args, peerConnections, dataChannels },
@@ -169,7 +169,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromPeer: builder.query<void, RTCDisconnectFromPeerParams>({
+    disconnectFromPeer: builder.mutation<void, RTCDisconnectFromPeerParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectPeerQuery(
           { ...args, peerConnections, dataChannels },
@@ -178,7 +178,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromChannelLabel: builder.query<
+    disconnectFromChannelLabel: builder.mutation<
       void,
       RTCDisconnectFromChannelLabelParams
     >({
@@ -190,7 +190,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromPeerChannelLabel: builder.query<
+    disconnectFromPeerChannelLabel: builder.mutation<
       void,
       RTCDisconnectFromPeerChannelLabelParams
     >({

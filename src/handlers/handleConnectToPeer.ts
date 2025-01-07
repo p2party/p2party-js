@@ -119,7 +119,6 @@ export const handleConnectToPeer = async (
 
       epc.onicecandidateerror = (e) => {
         epc.restartIce();
-        console.error(`ICE candidate error with ${peerId}`);
         console.error(e);
       };
 
@@ -148,11 +147,12 @@ export const handleConnectToPeer = async (
           epc.connectionState === "failed" ||
           epc.connectionState === "disconnected"
         ) {
-          api.dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
-          );
           console.error(
             `Connection with peer ${peerId} has ${epc.connectionState}.`,
+          );
+
+          api.dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
           );
         } else {
           console.log(

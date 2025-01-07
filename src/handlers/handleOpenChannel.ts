@@ -28,7 +28,7 @@ export interface OpenChannelHelperParams {
   merkleModule: LibCrypto;
 }
 
-export const MAX_BUFFERED_AMOUNT = 1024 * 1024;
+export const MAX_BUFFERED_AMOUNT = 256 * 1024;
 
 export const handleOpenChannel = async (
   {
@@ -48,11 +48,11 @@ export const handleOpenChannel = async (
       typeof channel === "string"
         ? epc.createDataChannel(channel, {
             ordered: false,
-            maxRetransmits: 10,
+            maxRetransmits: 3,
           })
         : channel;
     dataChannel.binaryType = "arraybuffer";
-    dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+    dataChannel.bufferedAmountLowThreshold = 128 * 1024;
     dataChannel.onbufferedamountlow = async () => {
       const sendQueue = await getDBSendQueue(label, epc.withPeerId);
       const sendQueueLen = sendQueue.length;
@@ -67,7 +67,7 @@ export const handleOpenChannel = async (
         queueCount > 0 &&
         i < sendQueueLen
       ) {
-        const timeoutMilliseconds = await randomNumberInRange(2, 20);
+        const timeoutMilliseconds = await randomNumberInRange(1, 10);
         await wait(timeoutMilliseconds);
 
         if (dataChannel.readyState === "open") {

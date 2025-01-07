@@ -8,15 +8,14 @@ import {
   setConnectingToPeers,
 } from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
-import { handleSendMessageWebsocket } from "../handlers/handleSendMessageWebsocket";
 
+import { handleSendMessageWebsocket } from "../handlers/handleSendMessageWebsocket";
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
 
 import { newKeyPair } from "../cryptography/ed25519";
 import libcrypto from "../cryptography/libcrypto";
-
 import cryptoMemory from "../cryptography/memory";
 import {
   crypto_hash_sha512_BYTES,
@@ -144,6 +143,18 @@ const websocketBaseQuery: BaseQueryFn<
 
           if (isUUID(keyPair.peerId) && isUUID(room.id)) {
             api.dispatch(setConnectingToPeers(true));
+          } else if (isUUID(keyPair.peerId)) {
+            waitForSocketConnection(ws!, () => {
+              ws!.send(
+                JSON.stringify({
+                  content: {
+                    type: "room",
+                    fromPeerId: keyPair.peerId,
+                    roomUrl: room.url,
+                  } as WebSocketMessageRoomIdRequest,
+                }),
+              );
+            });
           }
 
           resolve({ data: publicKey });
@@ -367,7 +378,7 @@ const signalingServerApi = createApi({
   baseQuery: websocketBaseQuery,
   endpoints: (builder) => ({
     connectWebSocket: builder.mutation<void, string>({
-      query: (signalingServerUrl = "ws://localhost:3001/ws") => ({
+      query: (signalingServerUrl = "wss://signaling.p2party.com/ws") => ({
         signalingServerUrl,
       }),
     }),

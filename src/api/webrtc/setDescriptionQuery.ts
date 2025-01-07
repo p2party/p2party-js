@@ -110,16 +110,24 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     );
     if (offerIndex > -1) offering = makingOffer[offerIndex].makingOffer;
 
-    const offerCollision = description.type === "offer" && offering;
+    const offerCollision =
+      epc.signalingState !== "stable" &&
+      description.type === "offer" &&
+      offering;
     if (offerCollision && connectionIndex > -1) return { data: undefined };
 
     if (offerCollision) {
       api.dispatch(
         setMakingOffer({ withPeerId: epc.withPeerId, makingOffer: false }),
       );
-      await epc.setLocalDescription({ type: "rollback" });
-      await epc.setRemoteDescription(description);
-      await epc.setLocalDescription();
+
+      await Promise.all([
+        epc.setLocalDescription({ type: "rollback" }).catch(() => {}), // ignore failure
+        epc.setRemoteDescription(description),
+      ]);
+      // await epc.setLocalDescription({ type: "rollback" });
+      // await epc.setRemoteDescription(description);
+      // await epc.setLocalDescription();
       const answer = epc.localDescription;
 
       if (answer) {
@@ -164,6 +172,19 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       } else {
         await handleQueuedIceCandidates(epc);
       }
+    }
+
+    if (epc.connectionState === "connected" && connectionIndex > -1) {
+      await handleOpenChannel(
+        {
+          channel: "main",
+          epc,
+          dataChannels,
+          decryptionModule,
+          merkleModule,
+        },
+        api,
+      );
     }
 
     return { data: undefined };

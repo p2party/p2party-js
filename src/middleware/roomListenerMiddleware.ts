@@ -60,7 +60,15 @@ roomListenerMiddleware.startListening({
         isUUID(keyPair.peerId) &&
         isUUID(room.id)
       ) {
-        listenerApi.dispatch(setConnectingToPeers(true));
+        listenerApi.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "peers",
+              fromPeerId: keyPair.peerId,
+              roomId: room.id,
+            } as WebSocketMessagePeersRequest,
+          }),
+        );
       }
     } else if (setMessage.match(action)) {
       const { room } = listenerApi.getState() as State;

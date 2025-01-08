@@ -89,8 +89,8 @@ export const decompileChannelMessageLabel = (
 }> => {
   return new Promise((resolve, reject) => {
     try {
-      if (channelMessageLabel.length !== LABEL_STRING_LEN)
-        reject(new Error("Wrong channel message label size"));
+      // if (channelMessageLabel.length !== LABEL_STRING_LEN)
+      //   reject(new Error("Wrong channel message label size"));
 
       const split = channelMessageLabel.split(LABEL_ELEMENTS_SEPARATOR);
       const splitLen = split.length;

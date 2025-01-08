@@ -4,8 +4,7 @@ import { newKeyPair, sign } from "../cryptography/ed25519";
 
 import { concatUint8Arrays, hexToUint8Array } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
-import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
-import { deleteDBChunk, setDBSendQueue } from "../db/api";
+import { setDBSendQueue } from "../db/api";
 
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
@@ -49,7 +48,7 @@ export const handleSendMessage = async (
     const channelIndex = room.channels.findIndex((c) => c.label === label);
     if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-    const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
+    const { merkleRoot, merkleRootHex, hashHex, unencryptedChunks } =
       await splitToChunks(
         data,
         api,
@@ -91,13 +90,7 @@ export const handleSendMessage = async (
       const indexes = Array.from({ length: chunksLen }, (_, i) => i);
       const indexesRandomized = await fisherYatesShuffle(indexes);
       for (let j = 0; j < chunksLen; j++) {
-        // If audio or video then sequential data, else random order
         const jRandom = indexesRandomized[j];
-        // messageCategory === MessageCategory.Audio || MessageCategory.Video
-        //   ? j
-        //   : indexesRandomized[j];
-
-        // if (!unencryptedChunks[jRandom]) continue;
 
         const senderEphemeralKey = await newKeyPair(encryptionModule);
         const ephemeralSignature = await sign(
@@ -141,15 +134,6 @@ export const handleSendMessage = async (
             encryptedData: message.buffer, // new Blob([message]),
           });
         }
-
-        const m = deserializeMetadata(
-          unencryptedChunks[jRandom].slice(0, METADATA_LEN),
-        );
-
-        if (m.chunkEndIndex - m.chunkStartIndex > totalSize)
-          await deleteDBChunk(merkleRootHex, m.chunkIndex);
-
-        // delete unencryptedChunks[jRandom];
       }
 
       if (!putItemInDBSendQueue) channel.close();

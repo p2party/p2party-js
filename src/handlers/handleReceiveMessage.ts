@@ -28,8 +28,9 @@ export const handleReceiveMessage = async (
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ): Promise<{
-  chunkIndex: number;
   chunkSize: number;
+  chunkIndex: number;
+  relevant: boolean;
   totalSize: number;
   messageType: MessageType;
   filename: string;
@@ -57,6 +58,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: 0,
+        relevant: false,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -86,6 +88,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: 0,
+        relevant: false,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -109,6 +112,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
+        relevant: messageRelevant,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -128,6 +132,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: -3,
+        relevant: true,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -147,6 +152,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: -4,
+        relevant: true,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -169,6 +175,7 @@ export const handleReceiveMessage = async (
     return {
       chunkIndex: metadata.chunkIndex,
       chunkSize,
+      relevant: true,
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,

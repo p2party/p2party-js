@@ -178,12 +178,19 @@ export const splitToChunks = async (
           );
     const mimeType = getMimeType(metadata[i].messageType);
 
-    await setDBChunk({
-      merkleRoot: merkleRootHex,
-      chunkIndex: metadata[i].chunkIndex,
-      data: realChunk.buffer, // new Blob([realChunk]),
-      mimeType,
-    });
+    const chunkSize =
+      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex >
+      metadata[i].totalSize
+        ? 0
+        : metadata[i].chunkEndIndex - metadata[i].chunkStartIndex;
+    if (chunkSize > 0) {
+      await setDBChunk({
+        merkleRoot: merkleRootHex,
+        chunkIndex: metadata[i].chunkIndex,
+        data: realChunk.buffer, // new Blob([realChunk]),
+        mimeType,
+      });
+    }
 
     const m = serializeMetadata(metadata[i]);
 

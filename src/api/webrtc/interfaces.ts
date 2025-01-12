@@ -1,6 +1,7 @@
 export interface IRTCPeerConnection extends RTCPeerConnection {
   withPeerId: string;
   withPeerPublicKey: string;
+  roomId: string;
   iceCandidates: RTCIceCandidate[];
 }
 

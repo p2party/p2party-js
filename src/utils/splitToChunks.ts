@@ -1,7 +1,7 @@
 import { getMessageType, getMimeType, MessageType } from "./messageTypes";
 import { serializer, uint8ArrayToHex, concatUint8Arrays } from "./uint8array";
 import { serializeMetadata, METADATA_LEN } from "./metadata";
-import { setDBChunk } from "../db/api";
+import { setDBChunk, setDBRoomMessageData } from "../db/api";
 
 import { setMessageAllChunks } from "../reducers/roomSlice";
 
@@ -94,9 +94,9 @@ export const splitToChunks = async (
 
   const messageType = getMessageType(message);
   const name =
-    typeof message === "string"
+    messageType === MessageType.Text
       ? await generateRandomRoomUrl(256)
-      : message.name.slice(0, 255);
+      : (message as File).name.slice(0, 255);
 
   const date = new Date();
 
@@ -203,19 +203,21 @@ export const splitToChunks = async (
     unencryptedChunks.push(unencrypted);
   }
 
-  const { keyPair } = api.getState() as State;
+  const { keyPair, room } = api.getState() as State;
 
-  api.dispatch(
-    setMessageAllChunks({
-      merkleRootHex,
-      sha512Hex,
-      fromPeerId: keyPair.peerId,
-      totalSize,
-      messageType,
-      filename: name,
-      channelLabel: label,
-    }),
-  );
+  const messageData = {
+    merkleRootHex,
+    sha512Hex,
+    fromPeerId: keyPair.peerId,
+    totalSize,
+    messageType,
+    filename: name,
+    channelLabel: label,
+  };
+
+  api.dispatch(setMessageAllChunks(messageData));
+
+  await setDBRoomMessageData(room.id, messageData);
 
   return {
     merkleRoot,

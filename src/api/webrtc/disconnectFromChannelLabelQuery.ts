@@ -34,22 +34,7 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
       )
         continue;
 
-      // await deleteDBSendQueue(label, dataChannels[i].withPeerId);
-      //
-      // api.dispatch(
-      //   deleteChannel({ label, peerId: dataChannels[i].withPeerId }),
-      // );
-      //
-      // dataChannels[i].onopen = null;
-      // dataChannels[i].onclose = null;
-      // dataChannels[i].onerror = null;
-      // dataChannels[i].onclosing = null;
-      // dataChannels[i].onmessage = null;
-      // dataChannels[i].onbufferedamountlow = null;
       dataChannels[i].close();
-      // delete dataChannels[i];
-
-      // dataChannels.splice(i, 1);
 
       if (alsoDeleteData) {
         const { merkleRootHex } = await decompileChannelMessageLabel(label);

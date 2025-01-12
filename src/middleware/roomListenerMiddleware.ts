@@ -6,13 +6,14 @@ import {
   setRoom,
   setMessage,
   deleteMessage,
-  deleteAll,
+  deleteRoom,
+  setMessageAllChunks,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
-import { deleteDBChunk } from "../db/api";
+import { deleteDBChunk, getDBRoomMessageData } from "../db/api";
 
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
@@ -25,7 +26,7 @@ roomListenerMiddleware.startListening({
     setRoom,
     setMessage,
     deleteMessage,
-    deleteAll,
+    deleteRoom,
   ),
   // actionCreator: setConnectingToPeers,
   effect: async (action, listenerApi) => {
@@ -50,8 +51,16 @@ roomListenerMiddleware.startListening({
             }),
           );
         }
+
+        listenerApi.dispatch(setConnectingToPeers(false));
       }
     } else if (setRoom.match(action)) {
+      const oldMessages = await getDBRoomMessageData(action.payload.id);
+      const oldMessagesLen = oldMessages.length;
+      for (let i = 0; i < oldMessagesLen; i++) {
+        listenerApi.dispatch(setMessageAllChunks(oldMessages[i]));
+      }
+
       const { signalingServer, keyPair, room } =
         listenerApi.getState() as State;
 
@@ -98,7 +107,7 @@ roomListenerMiddleware.startListening({
       const { merkleRootHex } = action.payload;
 
       await deleteDBChunk(merkleRootHex);
-    } else if (deleteAll.match(action)) {
+    } else if (deleteRoom.match(action)) {
       listenerApi.dispatch(
         webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
       );

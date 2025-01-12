@@ -1,4 +1,18 @@
-// types.ts
+import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
+import type { MessageType } from "../utils/messageTypes";
+
+export interface MessageData {
+  roomId: string;
+  timestamp: number;
+  fromPeedId: string;
+  channelLabel: string;
+  hash: string;
+  merkleRoot: string;
+  filename: string;
+  messageType: MessageType;
+  totalSize: number;
+}
+
 export interface Chunk {
   merkleRoot: string;
   chunkIndex: number;
@@ -15,6 +29,16 @@ export interface SendQueue {
 
 // Each method and its arguments/return type
 export type WorkerMessages =
+  | {
+      id: number;
+      method: "getDBRoomMessageData";
+      args: [roomId: string];
+    }
+  | {
+      id: number;
+      method: "setDBRoomMessageData";
+      args: [roomId: string, message: SetMessageAllChunksArgs];
+    }
   | {
       id: number;
       method: "getDBChunk";
@@ -57,11 +81,13 @@ export type WorkerMessages =
 
 // Return types for each method
 export interface WorkerMethodReturnTypes {
+  getDBRoomMessageData: SetMessageAllChunksArgs[];
   getDBChunk: Blob | undefined;
   existsDBChunk: boolean;
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
   getDBAllChunksCount: number;
+  setDBRoomMessageData: void;
   setDBChunk: void;
   setDBSendQueue: void;
   countDBSendQueue: number;

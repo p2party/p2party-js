@@ -70,14 +70,28 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
 );
 
 const waitForSocketConnection = (ws: WebSocket, callback: () => any) => {
+  let attempts = 0;
   setTimeout(() => {
     if (ws.readyState === 1) {
       if (callback != null) {
         callback();
       }
     } else {
+      attempts += 1;
       console.log("wait for connection...");
-      waitForSocketConnection(ws, callback);
+
+      if (attempts < 10) {
+        waitForSocketConnection(ws, callback);
+      } else {
+        ws.removeEventListener("message", () => {});
+        ws.removeEventListener("open", () => {});
+        ws.removeEventListener("close", () => {});
+        ws.close();
+
+        console.log(
+          "WebSocket disconnected because of too many connection attempts",
+        );
+      }
     }
   }, 10); // wait 10 milisecond for the connection...
 };
@@ -147,12 +161,10 @@ const websocketBaseQuery: BaseQueryFn<
             waitForSocketConnection(ws!, () => {
               ws!.send(
                 JSON.stringify({
-                  content: {
-                    type: "room",
-                    fromPeerId: keyPair.peerId,
-                    roomUrl: room.url,
-                  } as WebSocketMessageRoomIdRequest,
-                }),
+                  type: "room",
+                  fromPeerId: keyPair.peerId,
+                  roomUrl: room.url,
+                } as WebSocketMessageRoomIdRequest),
               );
             });
           }

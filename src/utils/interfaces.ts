@@ -11,6 +11,10 @@ export interface WebSocketMessageChallengeRequest {
   type: "peerId";
   peerId: string;
   challenge: string;
+  signature?: string;
+  challengeId?: string;
+  username?: string;
+  credential?: string;
   message: string;
 }
 

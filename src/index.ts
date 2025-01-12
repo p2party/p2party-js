@@ -17,13 +17,13 @@ import webrtcApi from "./api/webrtc";
 
 import {
   roomSelector,
-  // setConnectingToPeers,
   setConnectionRelay,
   setRoom,
   deleteMessage,
-  deleteAll,
+  deleteRoom,
+  setConnectingToPeers,
 } from "./reducers/roomSlice";
-import { keyPairSelector } from "./reducers/keyPairSlice";
+import { keyPairSelector, resetIdentity } from "./reducers/keyPairSlice";
 import { signalingServerSelector } from "./reducers/signalingServerSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
@@ -41,7 +41,6 @@ import {
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
-  WebSocketMessagePeersRequest,
   WebSocketMessageChallengeRequest,
   WebSocketMessageChallengeResponse,
   WebSocketMessageDescriptionSend,
@@ -76,8 +75,7 @@ const connect = (
   }
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
-    const { room } = store.getState();
-    if (!isUUID(room.id)) {
+    if (roomUrl !== room.url) {
       dispatch(
         signalingServerApi.endpoints.sendMessage.initiate({
           content: {
@@ -88,15 +86,7 @@ const connect = (
         }),
       );
     } else {
-      dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "peers",
-            fromPeerId: keyPair.peerId,
-            roomId: room.id,
-          } as WebSocketMessagePeersRequest,
-        }),
-      );
+      dispatch(setConnectingToPeers(true));
     }
   } else {
     dispatch(
@@ -223,7 +213,7 @@ const readMessage = async (
         room.messages[messageIndex].sha512Hex,
       );
 
-      store.dispatch(
+      await store.dispatch(
         webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
           label,
           alsoDeleteData: false,
@@ -236,21 +226,22 @@ const readMessage = async (
       percentage === 100
         ? await getDBAllChunks(root)
         : [
-            {
-              merkleRoot: merkleRootHex,
-              chunkIndex: 0,
-              data: new Blob([new Uint8Array()]),
-              mimeType,
-            },
+            // {
+            //   merkleRoot: merkleRootHex,
+            //   chunkIndex: -1,
+            //   data: new Uint8Array().buffer,
+            //   mimeType,
+            // },
           ];
-    const dataChunks = chunks
-      .sort((a, b) => a.chunkIndex - b.chunkIndex)
-      .map((c) => c.data);
+    const dataChunks =
+      chunks.length > 0
+        ? chunks.sort((a, b) => a.chunkIndex - b.chunkIndex).map((c) => c.data)
+        : [new Uint8Array().buffer];
     const data = new Blob(dataChunks, {
       type: mimeType,
     });
 
-    if (messageType === 1) {
+    if (messageType === MessageType.Text) {
       return {
         message: await data.text(),
         percentage,
@@ -274,11 +265,11 @@ const readMessage = async (
       return {
         message: "Invalid message",
         percentage: 0,
-        size: 0,
-        filename: "",
+        size: room.messages[messageIndex].totalSize,
+        filename: room.messages[messageIndex].filename,
         mimeType,
-        extension: "",
-        category: MessageCategory.Text,
+        extension,
+        category,
       };
     }
   } catch (error) {
@@ -419,13 +410,42 @@ const deleteMsg = async (
 
   if (messageIndex === -1) return;
 
+  const label = await compileChannelMessageLabel(
+    room.messages[messageIndex].channelLabel,
+    room.messages[messageIndex].merkleRootHex,
+    room.messages[messageIndex].sha512Hex,
+  );
+
+  store.dispatch(
+    webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+      label,
+      alsoDeleteData: true,
+    }),
+  );
+
   dispatch(
     deleteMessage({ merkleRootHex: room.messages[messageIndex].merkleRootHex }),
   );
 };
 
+const purgeIdentity = () => {
+  const { room } = store.getState() as State;
+  dispatch(resetIdentity());
+  dispatch(
+    webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: room.id }),
+  );
+  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+};
+
+const purgeRoom = () => {
+  dispatch(deleteRoom());
+  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+};
+
 const purge = () => {
-  dispatch(deleteAll());
+  dispatch(deleteRoom());
+  dispatch(resetIdentity());
+  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
 export default {
@@ -444,6 +464,8 @@ export default {
   readMessage,
   cancelMessage,
   deleteMessage: deleteMsg,
+  purgeIdentity,
+  purgeRoom,
   purge,
   generateRandomRoomUrl,
   MIN_CHUNKS: 3,

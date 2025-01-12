@@ -93,10 +93,15 @@ const initialState: Room = {
   canBeConnectionRelay: true,
   rtcConfig: {
     iceServers: [
-      // {
-      //   urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      // },
+      {
+        urls: [
+          "stun:stun.p2party.com:3478",
+          // "stun:stun.l.google.com:19302",
+          // "stun:stun1.l.google.com:19302",
+        ],
+      },
     ],
+    iceTransportPolicy: "all",
   },
   peers: [],
   channels: [],
@@ -281,8 +286,13 @@ const roomSlice = createSlice({
       if (messageIndex > -1) state.messages.splice(messageIndex, 1);
     },
 
-    deleteAll: (_state, _action: PayloadAction<void>) => {
-      return initialState;
+    deleteRoom: (state, _action: PayloadAction<void>) => {
+      const url = state.url;
+
+      return {
+        ...initialState,
+        url,
+      };
     },
   },
 });
@@ -300,7 +310,7 @@ export const {
   deletePeer,
   deleteChannel,
   deleteMessage,
-  deleteAll,
+  deleteRoom,
 } = roomSlice.actions;
 export const roomSelector = (state: State) => state.room;
 export default roomSlice.reducer;

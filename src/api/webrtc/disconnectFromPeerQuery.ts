@@ -20,6 +20,8 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   unknown
 > = async ({ peerId, peerConnections, dataChannels }, api) => {
   try {
+    api.dispatch(deletePeer({ peerId }));
+
     const peerIndex = peerConnections.findIndex(
       (peer) => peer.withPeerId === peerId,
     );
@@ -40,34 +42,15 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
 
       delete peerConnections[peerIndex];
       peerConnections.splice(peerIndex, 1);
-
-      api.dispatch(deletePeer({ peerId }));
     }
 
     const CHANNELS_LEN = dataChannels.length;
-    // const channelsClosedIndexes: number[] = [];
-
     for (let i = 0; i < CHANNELS_LEN; i++) {
       if (dataChannels[i].withPeerId !== peerId) continue;
       if (dataChannels[i].readyState === "open") {
-        // dataChannels[i].onopen = null;
-        // dataChannels[i].onclose = null;
-        // dataChannels[i].onerror = null;
-        // dataChannels[i].onclosing = null;
-        // dataChannels[i].onmessage = null;
-        // dataChannels[i].onbufferedamountlow = null;
         dataChannels[i].close();
       }
-
-      // await deleteDBSendQueue(dataChannels[i].label, peerId);
-      //
-      // channelsClosedIndexes.push(i);
     }
-
-    // const INDEXES_LEN = channelsClosedIndexes.length;
-    // for (let i = 0; i < INDEXES_LEN; i++) {
-    //   dataChannels.splice(channelsClosedIndexes[i], 1);
-    // }
 
     return { data: undefined };
   } catch (error) {

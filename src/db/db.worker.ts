@@ -2,16 +2,23 @@ import { openDB, deleteDB } from "idb";
 
 import type { DBSchema, IDBPDatabase } from "idb";
 import type {
+  MessageData,
   Chunk,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
 } from "./types";
+import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
 export const dbName = "p2party";
-export const dbVersion = 1;
+export const dbVersion = 2;
 
 export interface RepoSchema extends DBSchema {
+  messageData: {
+    value: MessageData;
+    key: [string, string];
+    indexes: { roomId: string };
+  };
   chunks: {
     value: Chunk;
     key: [string, number];
@@ -27,6 +34,13 @@ export interface RepoSchema extends DBSchema {
 async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   return openDB<RepoSchema>(dbName, dbVersion, {
     upgrade(db) {
+      if (!db.objectStoreNames.contains("messageData")) {
+        const messageData = db.createObjectStore("messageData", {
+          keyPath: ["roomId", "hash"],
+        });
+        messageData.createIndex("roomId", "roomId", { unique: false });
+      }
+
       if (!db.objectStoreNames.contains("chunks")) {
         const chunks = db.createObjectStore("chunks", {
           keyPath: ["merkleRoot", "chunkIndex"],
@@ -47,6 +61,51 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 }
 
 // Define each function with the expected arguments and return type:
+
+async function fnGetDBRoomMessageData(
+  roomId: string,
+): Promise<SetMessageAllChunksArgs[]> {
+  const db = await getDB();
+  const messageData = await db.getAllFromIndex("messageData", "roomId", roomId);
+  db.close();
+
+  const messages: SetMessageAllChunksArgs[] = [];
+  const messageDataLen = messageData.length;
+  for (let i = 0; i < messageDataLen; i++) {
+    messages.push({
+      merkleRootHex: messageData[i].merkleRoot,
+      sha512Hex: messageData[i].hash,
+      fromPeerId: messageData[i].fromPeedId,
+      filename: messageData[i].filename,
+      messageType: messageData[i].messageType,
+      totalSize: messageData[i].totalSize,
+      channelLabel: messageData[i].channelLabel,
+    });
+  }
+
+  return messages;
+}
+
+async function fnSetDBRoomMessageData(
+  roomId: string,
+  message: SetMessageAllChunksArgs,
+): Promise<void> {
+  const db = await getDB();
+
+  await db.put("messageData", {
+    roomId,
+    timestamp: Date.now(),
+    merkleRoot: message.merkleRootHex,
+    hash: message.sha512Hex,
+    fromPeedId: message.fromPeerId,
+    filename: message.filename,
+    messageType: message.messageType,
+    totalSize: message.totalSize,
+    channelLabel: message.channelLabel,
+  });
+
+  db.close();
+}
 
 async function fnGetDBChunk(
   merkleRootHex: string,
@@ -205,6 +264,16 @@ onmessage = async (e: MessageEvent) => {
   try {
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
+      case "getDBRoomMessageData":
+        result = (await fnGetDBRoomMessageData(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBRoomMessageData"];
+        break;
+      case "setDBRoomMessageData":
+        result = (await fnSetDBRoomMessageData(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["setDBRoomMessageData"];
+        break;
       case "getDBChunk":
         result = (await fnGetDBChunk(
           ...message.args,

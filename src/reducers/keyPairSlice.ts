@@ -1,10 +1,5 @@
-import {
-  createSlice,
-  // createAsyncThunk
-} from "@reduxjs/toolkit";
+import { createSlice } from "@reduxjs/toolkit";
 import { isHexadecimal, isUUID } from "class-validator";
-
-// import { exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
@@ -35,13 +30,19 @@ export interface SetChallengeId {
   credential?: string;
 }
 
+export interface SetReconnectData extends SetPeerData {
+  challengeId: string;
+  username?: string;
+  credential?: string;
+}
+
 const initialState: KeyPair = {
-  peerId: "",
-  challengeId: "",
-  publicKey: "",
-  secretKey: "",
-  challenge: "",
-  signature: "",
+  peerId: localStorage.getItem("peerId") ?? "",
+  challengeId: localStorage.getItem("challengeId") ?? "",
+  publicKey: localStorage.getItem("publicKey") ?? "",
+  secretKey: localStorage.getItem("secretKey") ?? "",
+  challenge: localStorage.getItem("challenge") ?? "",
+  signature: localStorage.getItem("signature") ?? "",
 };
 
 // export const setKeyPair = createAsyncThunk(
@@ -93,8 +94,31 @@ const keyPairSlice = createSlice({
   initialState,
   reducers: {
     setKeyPair: (state, action: PayloadAction<SetKeyPair>) => {
-      state.publicKey = action.payload.publicKey;
-      state.secretKey = action.payload.secretKey;
+      const { publicKey, secretKey } = action.payload;
+
+      if (publicKey.length === 64 && secretKey.length === 128) {
+        state.publicKey = action.payload.publicKey;
+        state.secretKey = action.payload.secretKey;
+      }
+    },
+
+    setReconnectData: (state, action: PayloadAction<SetReconnectData>) => {
+      const { peerId, challenge, signature, challengeId } = action.payload;
+
+      if (
+        isUUID(peerId, 4) &&
+        isUUID(challengeId) &&
+        isHexadecimal(challenge) &&
+        isHexadecimal(signature) &&
+        challenge.length === 64 &&
+        // signature.length === 1024
+        signature.length === 128
+      ) {
+        state.peerId = peerId;
+        state.challenge = challenge;
+        state.signature = signature;
+        state.challengeId = challengeId;
+      }
     },
 
     setPeerData: (state, action: PayloadAction<SetPeerData>) => {
@@ -119,9 +143,26 @@ const keyPairSlice = createSlice({
 
       if (isUUID(challengeId)) state.challengeId = challengeId;
     },
+
+    resetIdentity: (_state, _action: PayloadAction<void>) => {
+      return {
+        peerId: "",
+        challengeId: "",
+        publicKey: "",
+        secretKey: "",
+        challenge: "",
+        signature: "",
+      };
+    },
   },
 });
 
-export const { setKeyPair, setPeerData, setChallengeId } = keyPairSlice.actions;
+export const {
+  setKeyPair,
+  setReconnectData,
+  setPeerData,
+  setChallengeId,
+  resetIdentity,
+} = keyPairSlice.actions;
 export const keyPairSelector = (state: State) => state.keyPair;
 export default keyPairSlice.reducer;

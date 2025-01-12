@@ -63,6 +63,7 @@ export enum MessageType {
   ExecutableEXE = 61,
   ExecutableDMG = 62,
   ExecutableAPK = 63,
+  Unknown = 64,
 }
 
 export enum MessageCategory {
@@ -276,7 +277,7 @@ export const getMessageType = (data: string | File): MessageType => {
     apk: MessageType.ExecutableAPK,
   };
 
-  return extensionToMessageType[extension] || MessageType.Text;
+  return extensionToMessageType[extension] || MessageType.Unknown;
 };
 
 export const getFileExtension = (messageType: MessageType): FileExtension => {

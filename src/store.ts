@@ -2,7 +2,6 @@ import { configureStore } from "@reduxjs/toolkit";
 
 import keyPairReducer from "./reducers/keyPairSlice";
 import roomReducer from "./reducers/roomSlice";
-import makingOfferReducer from "./reducers/makingOfferSlice";
 import signalingServerReducer from "./reducers/signalingServerSlice";
 
 import signalingServerApi from "./api/signalingServerApi";
@@ -15,7 +14,6 @@ export const store = configureStore({
   reducer: {
     keyPair: keyPairReducer,
     room: roomReducer,
-    makingOffer: makingOfferReducer,
     signalingServer: signalingServerReducer,
     [signalingServerApi.reducerPath]: signalingServerApi.reducer,
     [webrtcApi.reducerPath]: webrtcApi.reducer,

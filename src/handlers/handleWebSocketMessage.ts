@@ -8,7 +8,7 @@ import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
 
 import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
-import { setChallengeId } from "../reducers/keyPairSlice";
+import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
 
 import { hexToUint8Array } from "../utils/uint8array";
 import { PROOF_LEN } from "../utils/splitToChunks";
@@ -104,17 +104,35 @@ const handleWebSocketMessage = async (
           isHexadecimal(challenge) &&
           challenge.length === 64 &&
           keyPair.challenge.length === 0 &&
-          keyPair.signature.length === 0;
+          keyPair.signature.length === 0 &&
+          !message.challengeId &&
+          !message.username &&
+          !message.credential;
 
         const isNewDbEntry =
           isUUID(peerId) &&
           isUUID(keyPair.peerId) &&
           keyPair.peerId !== peerId &&
           isHexadecimal(challenge) &&
-          challenge.length === 64;
+          challenge.length === 64 &&
+          !message.challengeId &&
+          !message.username &&
+          !message.credential;
 
-        if (isNewPeerId || isNewDbEntry)
+        if (isNewPeerId || isNewDbEntry) {
           await handleChallenge(keyPair, peerId, challenge, api);
+        } else {
+          api.dispatch(
+            setReconnectData({
+              peerId,
+              challenge,
+              signature: message.signature ?? "",
+              challengeId: message.challengeId ?? "",
+              username: message.username ?? "",
+              credential: message.credential ?? "",
+            }),
+          );
+        }
 
         break;
       }
@@ -179,6 +197,7 @@ const handleWebSocketMessage = async (
       }
 
       case "description": {
+        console.log("RECEIVED DESCRIPTION FROM " + message.fromPeerId);
         api.dispatch(
           webrtcApi.endpoints.setDescription.initiate({
             peerId: message.fromPeerId,
@@ -192,6 +211,7 @@ const handleWebSocketMessage = async (
       }
 
       case "candidate": {
+        console.log("RECEIVED CANDIDATE FROM " + message.fromPeerId);
         api.dispatch(
           webrtcApi.endpoints.setCandidate.initiate({
             peerId: message.fromPeerId,

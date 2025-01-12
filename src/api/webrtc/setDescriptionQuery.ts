@@ -6,8 +6,6 @@ import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleQueuedIceCandidates } from "../../handlers/handleQueuedIceCandidates";
 
-import { setMakingOffer } from "../../reducers/makingOfferSlice";
-
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
 import type {
@@ -103,31 +101,15 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
 
     if (connectionIndex === -1) peerConnections.push(epc);
 
-    let offering = false;
-    const { makingOffer } = api.getState() as State;
-    const offerIndex = makingOffer.findIndex(
-      (o) => o.withPeerId === epc.withPeerId,
-    );
-    if (offerIndex > -1) offering = makingOffer[offerIndex].makingOffer;
-
     const offerCollision =
-      epc.signalingState !== "stable" &&
-      description.type === "offer" &&
-      offering;
+      epc.signalingState !== "stable" && description.type === "offer";
     if (offerCollision && connectionIndex > -1) return { data: undefined };
 
     if (offerCollision) {
-      api.dispatch(
-        setMakingOffer({ withPeerId: epc.withPeerId, makingOffer: false }),
-      );
-
       await Promise.all([
         epc.setLocalDescription({ type: "rollback" }).catch(() => {}), // ignore failure
         epc.setRemoteDescription(description),
       ]);
-      // await epc.setLocalDescription({ type: "rollback" });
-      // await epc.setRemoteDescription(description);
-      // await epc.setLocalDescription();
       const answer = epc.localDescription;
 
       if (answer) {

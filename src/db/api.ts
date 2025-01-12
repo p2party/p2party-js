@@ -1,3 +1,4 @@
+import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 import type { WorkerMessages } from "./types";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
@@ -31,6 +32,14 @@ function callWorker<M extends WorkerMessages["method"]>(
     worker.postMessage({ id, method, args });
   });
 }
+
+export const getDBRoomMessageData = (roomId: string) =>
+  callWorker("getDBRoomMessageData", roomId);
+
+export const setDBRoomMessageData = (
+  roomId: string,
+  message: SetMessageAllChunksArgs,
+) => callWorker("setDBRoomMessageData", roomId, message);
 
 export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
   callWorker("getDBChunk", merkleRootHex, chunkIndex);

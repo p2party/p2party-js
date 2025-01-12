@@ -1,11 +1,10 @@
-import { deleteChannel, deletePeer } from "../../reducers/roomSlice";
-
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
   RTCDisconnectFromRoomParams,
 } from "./interfaces";
+import { deletePeer } from "../../reducers/roomSlice";
 
 export interface RTCDisconnectFromRoomParamsExtension
   extends RTCDisconnectFromRoomParams {
@@ -20,11 +19,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
 > = async ({ roomId, peerConnections, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
-      const peersIncluded: number[] = [];
-
       const CHANNELS_LEN = dataChannels.length;
-      const channelsClosedIndexes: number[] = [];
-
       for (let i = 0; i < CHANNELS_LEN; i++) {
         if (
           dataChannels[i].roomId !== roomId ||
@@ -32,66 +27,32 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
         )
           continue;
 
-        const peerIndex = peerConnections.findIndex((p) => {
-          p.withPeerId === dataChannels[i].withPeerId;
-        });
-        if (!peersIncluded.includes(peerIndex)) peersIncluded.push(peerIndex);
-
-        dataChannels[i].onopen = null;
-        dataChannels[i].onclose = null;
-        dataChannels[i].onerror = null;
-        dataChannels[i].onclosing = null;
-        dataChannels[i].onmessage = null;
-        dataChannels[i].onbufferedamountlow = null;
         dataChannels[i].close();
-
-        channelsClosedIndexes.push(i);
-
-        api.dispatch(
-          deleteChannel({
-            peerId: dataChannels[i].withPeerId,
-            label: dataChannels[i].label,
-          }),
-        );
       }
 
-      const INDEXES_LEN = channelsClosedIndexes.length;
-      for (let i = 0; i < INDEXES_LEN; i++) {
-        dataChannels.splice(channelsClosedIndexes[i], 1);
-      }
-
-      const PEERS_LEN = peersIncluded.length;
-      const peersClosedIndexes: number[] = [];
-
+      const PEERS_LEN = peerConnections.length;
       for (let i = 0; i < PEERS_LEN; i++) {
-        const peerConnection = peerConnections[peersIncluded[i]];
-        if (peerConnection.connectionState !== "connected") continue;
+        if (
+          peerConnections[i].roomId !== roomId ||
+          peerConnections[i].connectionState !== "connected"
+        )
+          continue;
 
-        const channelIndex = dataChannels.findIndex((c) => {
-          c.withPeerId === peerConnection.withPeerId;
-        });
+        peerConnections[i].ontrack = null;
+        peerConnections[i].ondatachannel = null;
+        peerConnections[i].onicecandidate = null;
+        peerConnections[i].onicecandidateerror = null;
+        peerConnections[i].onnegotiationneeded = null;
+        peerConnections[i].onsignalingstatechange = null;
+        peerConnections[i].onconnectionstatechange = null;
+        peerConnections[i].onicegatheringstatechange = null;
+        peerConnections[i].oniceconnectionstatechange = null;
+        peerConnections[i].close();
 
-        if (channelIndex !== -1) continue;
+        api.dispatch(deletePeer({ peerId: peerConnections[i].withPeerId }));
 
-        peerConnection.ontrack = null;
-        peerConnection.ondatachannel = null;
-        peerConnection.onicecandidate = null;
-        peerConnection.onicecandidateerror = null;
-        peerConnection.onnegotiationneeded = null;
-        peerConnection.onsignalingstatechange = null;
-        peerConnection.onconnectionstatechange = null;
-        peerConnection.onicegatheringstatechange = null;
-        peerConnection.oniceconnectionstatechange = null;
-        peerConnection.close();
-
-        peersClosedIndexes.push(i);
-
-        api.dispatch(deletePeer({ peerId: peerConnection.withPeerId }));
-      }
-
-      const PEER_INDEXES_LEN = peersClosedIndexes.length;
-      for (let i = 0; i < PEER_INDEXES_LEN; i++) {
-        peerConnections.splice(peersClosedIndexes[i], 1);
+        delete peerConnections[i];
+        peerConnections.splice(i, 1);
       }
 
       resolve({ data: undefined });

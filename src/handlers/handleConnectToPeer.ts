@@ -5,7 +5,7 @@ import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
-import { setPeer } from "../reducers/roomSlice";
+import { defaultRTCConfig, setPeer } from "../reducers/roomSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -31,10 +31,10 @@ export const handleConnectToPeer = async (
 ): Promise<IRTCPeerConnection> => {
   return new Promise((resolve, reject) => {
     try {
-      const { keyPair, room } = api.getState() as State;
+      const { keyPair } = api.getState() as State;
 
       if (!initiator) initiator = true;
-      if (!rtcConfig) rtcConfig = room.rtcConfig;
+      if (!rtcConfig) rtcConfig = defaultRTCConfig;
       if (initiator)
         console.log(`You are initiating a peer connection with ${peerId}.`);
 
@@ -46,7 +46,7 @@ export const handleConnectToPeer = async (
       const epc = pc as IRTCPeerConnection;
       epc.withPeerId = peerId;
       epc.withPeerPublicKey = peerPublicKey;
-      epc.roomId = room.id;
+      epc.roomId = roomId;
       epc.iceCandidates = [] as RTCIceCandidate[];
 
       epc.onnegotiationneeded = async () => {

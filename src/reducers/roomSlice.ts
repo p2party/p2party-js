@@ -85,24 +85,26 @@ export interface Room extends SetRoomArgs {
   messages: Message[];
 }
 
+export const defaultRTCConfig = {
+  iceServers: [
+    {
+      urls: [
+        "stun:stun.p2party.com:3478",
+        // "stun:stun.l.google.com:19302",
+        // "stun:stun1.l.google.com:19302",
+      ],
+    },
+  ],
+  iceTransportPolicy: "all",
+} as RTCConfiguration;
+
 const initialState: Room = {
   url: "",
   id: "",
   connectingToPeers: false,
   connectedToPeers: false,
   canBeConnectionRelay: true,
-  rtcConfig: {
-    iceServers: [
-      {
-        urls: [
-          "stun:stun.p2party.com:3478",
-          // "stun:stun.l.google.com:19302",
-          // "stun:stun1.l.google.com:19302",
-        ],
-      },
-    ],
-    iceTransportPolicy: "all",
-  },
+  rtcConfig: defaultRTCConfig,
   peers: [],
   channels: [],
   messages: [],

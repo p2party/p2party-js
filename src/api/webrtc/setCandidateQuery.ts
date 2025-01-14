@@ -24,9 +24,6 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
       const epc = peerConnections[connectionIndex];
       const cand = new RTCIceCandidate(candidate);
 
-      console.log(epc.signalingState);
-      console.log(epc.connectionState);
-
       if (!epc.remoteDescription || epc.signalingState !== "stable") {
         epc.iceCandidates.push(cand);
       } else {

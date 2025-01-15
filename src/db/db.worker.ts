@@ -11,13 +11,13 @@ import type {
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
 export const dbName = "p2party";
-export const dbVersion = 3;
+export const dbVersion = 4;
 
 export interface RepoSchema extends DBSchema {
   messageData: {
     value: MessageData;
     key: [number, string, string];
-    indexes: { roomId: string };
+    indexes: { roomId: string; hash: string; merkleRoot: string };
   };
   chunks: {
     value: Chunk;
@@ -39,6 +39,8 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
           keyPath: ["timestamp", "roomId", "hash"],
         });
         messageData.createIndex("roomId", "roomId", { unique: false });
+        messageData.createIndex("hash", "hash", { unique: false });
+        messageData.createIndex("merkleRoot", "merkleRoot", { unique: true });
       }
 
       if (!db.objectStoreNames.contains("chunks")) {
@@ -93,17 +95,39 @@ async function fnSetDBRoomMessageData(
 ): Promise<void> {
   const db = await getDB();
 
-  await db.put("messageData", {
-    roomId,
-    timestamp: Date.now(),
-    merkleRoot: message.merkleRootHex,
-    hash: message.sha512Hex,
-    fromPeedId: message.fromPeerId,
-    filename: message.filename,
-    messageType: message.messageType,
-    totalSize: message.totalSize,
-    channelLabel: message.channelLabel,
-  });
+  try {
+    const tx = db.transaction("messageData", "readonly");
+    const index = tx.objectStore("messageData").index("merkleRoot");
+
+    const item = await index.get(message.merkleRootHex);
+    await tx.done;
+
+    if (!item) {
+      await db.put("messageData", {
+        roomId,
+        timestamp: Date.now(),
+        merkleRoot: message.merkleRootHex,
+        hash: message.sha512Hex,
+        fromPeedId: message.fromPeerId,
+        filename: message.filename,
+        messageType: message.messageType,
+        totalSize: message.totalSize,
+        channelLabel: message.channelLabel,
+      });
+    }
+  } catch (error) {
+    await db.put("messageData", {
+      roomId,
+      timestamp: Date.now(),
+      merkleRoot: message.merkleRootHex,
+      hash: message.sha512Hex,
+      fromPeedId: message.fromPeerId,
+      filename: message.filename,
+      messageType: message.messageType,
+      totalSize: message.totalSize,
+      channelLabel: message.channelLabel,
+    });
+  }
 
   db.close();
 }

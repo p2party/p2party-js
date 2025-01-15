@@ -160,9 +160,6 @@ const websocketBaseQuery: BaseQueryFn<
               ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
               : -1;
 
-          console.log(commonState.currentRoomUrl.length === 64);
-          console.log(isUUID(keyPair.peerId));
-
           if (
             roomIndex > -1 &&
             isUUID(keyPair.peerId) &&
@@ -175,9 +172,8 @@ const websocketBaseQuery: BaseQueryFn<
               }),
             );
           } else if (
-            // roomIndex === -1 &&
-            commonState.currentRoomUrl.length === 64 &&
-            isUUID(keyPair.peerId)
+            isUUID(keyPair.peerId) &&
+            commonState.currentRoomUrl.length === 64
           ) {
             waitForSocketConnection(ws!, () => {
               ws!.send(

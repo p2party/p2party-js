@@ -8,7 +8,7 @@ import {
   // uint8ArrayToHex,
 } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
-import { setDBSendQueue } from "../db/api";
+import { deleteDBSendQueue, getDBSendQueue, setDBSendQueue } from "../db/api";
 
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
@@ -109,7 +109,35 @@ const createChannelAndSendChunks = async (
     }
   }
 
-  if (!putItemInDBSendQueue) channel.close();
+  if (!putItemInDBSendQueue) {
+    channel.close();
+  } else {
+    while (
+      channel.readyState === "open" &&
+      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+    ) {
+      const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
+      if (sendQueue.length === 0) channel.close();
+
+      while (
+        sendQueue.length > 0 &&
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+        channel.readyState === "open"
+      ) {
+        const timeoutMilliseconds = await randomNumberInRange(1, 10);
+        await wait(timeoutMilliseconds);
+
+        let pos = await randomNumberInRange(0, sendQueue.length);
+        if (pos === sendQueue.length) pos = 0;
+
+        const [item] = sendQueue.splice(pos, 1);
+        if (channel.readyState === "open") {
+          channel.send(item.encryptedData);
+          await deleteDBSendQueue(channel.label, epc.withPeerId, item.position);
+        }
+      }
+    }
+  }
 };
 
 export const handleSendMessage = async (

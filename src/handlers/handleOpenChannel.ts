@@ -135,8 +135,9 @@ export const handleOpenChannel = async (
         if (roomIndex > -1) {
           const {
             chunkSize,
-            // chunkIndex,
+            chunkIndex,
             // relevant,
+            receivedFullSize,
             totalSize,
             messageType,
             filename,
@@ -150,18 +151,18 @@ export const handleOpenChannel = async (
             merkleModule,
           );
 
-          if (chunkSize > 0) {
-            await setDBRoomMessageData(roomId, {
-              roomId,
-              merkleRootHex,
-              sha512Hex: hashHex,
-              fromPeerId: epc.withPeerId,
-              totalSize,
-              messageType,
-              filename,
-              channelLabel,
-            });
+          await setDBRoomMessageData(roomId, {
+            roomId,
+            merkleRootHex,
+            sha512Hex: hashHex,
+            fromPeerId: epc.withPeerId,
+            totalSize,
+            messageType,
+            filename,
+            channelLabel,
+          });
 
+          if (chunkSize > 0) {
             api.dispatch(
               setMessage({
                 roomId,
@@ -176,6 +177,9 @@ export const handleOpenChannel = async (
               }),
             );
           }
+
+          if (chunkIndex > -1 && chunkSize > 0 && receivedFullSize)
+            extChannel.close();
         }
       } catch (error) {
         console.error(error);

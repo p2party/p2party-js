@@ -196,7 +196,7 @@ const webrtcApi = createApi({
     >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectFromPeerChannelLabelQuery(
-          { ...args, dataChannels },
+          { ...args, peerConnections, dataChannels },
           api,
           extraOptions,
         ),

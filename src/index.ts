@@ -15,6 +15,7 @@ import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/splitToChunks";
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
 
+import { commonStateSelector } from "./reducers/commonSlice";
 import {
   roomSelector,
   setConnectionRelay,
@@ -50,6 +51,7 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
+import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 const connect = (
   roomUrl: string,
@@ -68,14 +70,18 @@ const connect = (
     iceTransportPolicy: "all",
   },
 ) => {
-  const { keyPair, signalingServer, room } = store.getState();
+  if (roomUrl.length !== 64) throw new Error("Invalid room url length");
 
-  if (room.url !== roomUrl) {
-    dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
-  }
+  const { keyPair, signalingServer, rooms, commonState } = store.getState();
+
+  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  if (roomIndex === -1) dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
+
+  if (commonState.currentRoomUrl !== roomUrl)
+    dispatch(setCurrentRoomUrl(roomUrl));
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
-    if (roomUrl !== room.url) {
+    if (roomIndex === -1) {
       dispatch(
         signalingServerApi.endpoints.sendMessage.initiate({
           content: {
@@ -86,7 +92,12 @@ const connect = (
         }),
       );
     } else {
-      dispatch(setConnectingToPeers(true));
+      dispatch(
+        setConnectingToPeers({
+          roomId: rooms[roomIndex].id,
+          connectingToPeers: true,
+        }),
+      );
     }
   } else {
     dispatch(
@@ -118,16 +129,27 @@ const disconnectFromRoom = (roomId: string, _deleteMessages = false) => {
   dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
 };
 
-const allowConnectionRelay = (allowed = true) => {
-  dispatch(setConnectionRelay(allowed));
+const allowConnectionRelay = (roomId: string, allowed = true) => {
+  const { rooms } = store.getState();
+  const roomIndex = rooms.findIndex((r) => r.id === roomId);
+  if (roomIndex > -1) {
+    dispatch(
+      setConnectionRelay({
+        roomId: rooms[roomIndex].id,
+        canBeConnectionRelay: allowed,
+      }),
+    );
+  }
 };
 
 const openChannel = async (
+  roomId: string,
   label: string,
   withPeers?: { peerId: string; peerPublicKey: string }[],
 ) => {
   dispatch(
     webrtcApi.endpoints.openChannel.initiate({
+      roomId,
       channel: label,
       withPeers,
     }),
@@ -141,7 +163,8 @@ const openChannel = async (
 const sendMessage = (
   data: string | File,
   toChannel: string,
-  minChunks = 4,
+  roomId: string,
+  minChunks = 3,
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
@@ -158,6 +181,7 @@ const sendMessage = (
     webrtcApi.endpoints.sendMessage.initiate({
       data,
       label: toChannel,
+      roomId,
       minChunks,
       chunkSize,
       percentageFilledChunk,
@@ -178,12 +202,115 @@ const readMessage = async (
   category: MessageCategory;
 }> => {
   try {
-    const { room } = store.getState();
+    const { rooms } = store.getState();
+    const roomsLen = rooms.length;
+    let index = -1;
+    for (let i = 0; i < roomsLen; i++) {
+      const messageIndex = rooms[i].messages.findIndex(
+        (m) => m.merkleRootHex === merkleRootHex,
+      );
+      if (messageIndex > -1) {
+        index = i;
+        break;
+      }
+    }
 
-    const messageIndex = room.messages.findIndex(
-      (m) => m.merkleRootHex === merkleRootHex,
-    );
-    if (messageIndex === -1) {
+    if (index > -1) {
+      const messageIndex = rooms[index].messages.findIndex(
+        (m) => m.merkleRootHex === merkleRootHex,
+      );
+      if (messageIndex === -1) {
+        return {
+          message: "Unknown message",
+          percentage: 0,
+          size: 0,
+          filename: "",
+          mimeType: "text/plain",
+          extension: "",
+          category: MessageCategory.Text,
+        };
+      }
+
+      const messageType = rooms[index].messages[messageIndex].messageType;
+      const mimeType = getMimeType(messageType);
+      const extension = getFileExtension(messageType);
+      const category = getMessageCategory(messageType);
+
+      const percentage = Math.floor(
+        (rooms[index].messages[messageIndex].savedSize /
+          rooms[index].messages[messageIndex].totalSize) *
+          100,
+      );
+
+      if (percentage === 100) {
+        const label = await compileChannelMessageLabel(
+          rooms[index].messages[messageIndex].channelLabel,
+          rooms[index].messages[messageIndex].merkleRootHex,
+          rooms[index].messages[messageIndex].sha512Hex,
+        );
+
+        await store.dispatch(
+          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+            label,
+            alsoDeleteData: false,
+          }),
+        );
+      }
+
+      const root = rooms[index].messages[messageIndex].merkleRootHex;
+      const chunks =
+        percentage === 100
+          ? await getDBAllChunks(root)
+          : [
+              // {
+              //   merkleRoot: merkleRootHex,
+              //   chunkIndex: -1,
+              //   data: new Uint8Array().buffer,
+              //   mimeType,
+              // },
+            ];
+      const dataChunks =
+        chunks.length > 0
+          ? chunks
+              .sort((a, b) => a.chunkIndex - b.chunkIndex)
+              .map((c) => c.data)
+          : [new Uint8Array().buffer];
+      const data = new Blob(dataChunks, {
+        type: mimeType,
+      });
+
+      if (messageType === MessageType.Text) {
+        return {
+          message: await data.text(),
+          percentage,
+          size: rooms[index].messages[messageIndex].totalSize,
+          filename: "",
+          mimeType,
+          extension,
+          category,
+        };
+      } else if (data) {
+        return {
+          message: data,
+          percentage,
+          size: rooms[index].messages[messageIndex].totalSize,
+          filename: rooms[index].messages[messageIndex].filename,
+          mimeType,
+          extension,
+          category,
+        };
+      } else {
+        return {
+          message: "Invalid message",
+          percentage: 0,
+          size: rooms[index].messages[messageIndex].totalSize,
+          filename: rooms[index].messages[messageIndex].filename,
+          mimeType,
+          extension,
+          category,
+        };
+      }
+    } else {
       return {
         message: "Unknown message",
         percentage: 0,
@@ -192,84 +319,6 @@ const readMessage = async (
         mimeType: "text/plain",
         extension: "",
         category: MessageCategory.Text,
-      };
-    }
-
-    const messageType = room.messages[messageIndex].messageType;
-    const mimeType = getMimeType(messageType);
-    const extension = getFileExtension(messageType);
-    const category = getMessageCategory(messageType);
-
-    const percentage = Math.floor(
-      (room.messages[messageIndex].savedSize /
-        room.messages[messageIndex].totalSize) *
-        100,
-    );
-
-    if (percentage === 100) {
-      const label = await compileChannelMessageLabel(
-        room.messages[messageIndex].channelLabel,
-        room.messages[messageIndex].merkleRootHex,
-        room.messages[messageIndex].sha512Hex,
-      );
-
-      await store.dispatch(
-        webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-          label,
-          alsoDeleteData: false,
-        }),
-      );
-    }
-
-    const root = room.messages[messageIndex].merkleRootHex;
-    const chunks =
-      percentage === 100
-        ? await getDBAllChunks(root)
-        : [
-            // {
-            //   merkleRoot: merkleRootHex,
-            //   chunkIndex: -1,
-            //   data: new Uint8Array().buffer,
-            //   mimeType,
-            // },
-          ];
-    const dataChunks =
-      chunks.length > 0
-        ? chunks.sort((a, b) => a.chunkIndex - b.chunkIndex).map((c) => c.data)
-        : [new Uint8Array().buffer];
-    const data = new Blob(dataChunks, {
-      type: mimeType,
-    });
-
-    if (messageType === MessageType.Text) {
-      return {
-        message: await data.text(),
-        percentage,
-        size: room.messages[messageIndex].totalSize,
-        filename: "",
-        mimeType,
-        extension,
-        category,
-      };
-    } else if (data) {
-      return {
-        message: data,
-        percentage,
-        size: room.messages[messageIndex].totalSize,
-        filename: room.messages[messageIndex].filename,
-        mimeType,
-        extension,
-        category,
-      };
-    } else {
-      return {
-        message: "Invalid message",
-        percentage: 0,
-        size: room.messages[messageIndex].totalSize,
-        filename: room.messages[messageIndex].filename,
-        mimeType,
-        extension,
-        category,
       };
     }
   } catch (error) {
@@ -332,20 +381,30 @@ const cancelMessage = async (
         ? uint8ArrayToHex(hash)
         : "";
 
-  const { room } = store.getState();
+  let roomIndex = -1;
+  let messageIndex = -1;
 
-  const messageIndex = merkleRoot
-    ? room.messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
-    : hash
-      ? room.messages.findIndex((m) => m.sha512Hex === hashHex)
-      : -1;
+  const { rooms } = store.getState();
+  const roomsLen = rooms.length;
+  for (let i = 0; i < roomsLen; i++) {
+    messageIndex = merkleRoot
+      ? rooms[i].messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
+      : hash
+        ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
+        : -1;
 
-  if (messageIndex === -1) return;
+    if (messageIndex > -1) {
+      roomIndex = i;
+      break;
+    }
+  }
+
+  if (roomIndex === -1 || messageIndex === -1) return;
 
   const label = await compileChannelMessageLabel(
     channelLabel,
-    room.messages[messageIndex].merkleRootHex,
-    room.messages[messageIndex].sha512Hex,
+    rooms[roomIndex].messages[messageIndex].merkleRootHex,
+    rooms[roomIndex].messages[messageIndex].sha512Hex,
   );
 
   dispatch(
@@ -400,20 +459,30 @@ const deleteMsg = async (
         ? uint8ArrayToHex(hash)
         : "";
 
-  const { room } = store.getState();
+  let roomIndex = -1;
+  let messageIndex = -1;
 
-  const messageIndex = merkleRoot
-    ? room.messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
-    : hash
-      ? room.messages.findIndex((m) => m.sha512Hex === hashHex)
-      : -1;
+  const { rooms } = store.getState();
+  const roomsLen = rooms.length;
+  for (let i = 0; i < roomsLen; i++) {
+    messageIndex = merkleRoot
+      ? rooms[i].messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
+      : hash
+        ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
+        : -1;
 
-  if (messageIndex === -1) return;
+    if (messageIndex > -1) {
+      roomIndex = i;
+      break;
+    }
+  }
+
+  if (roomIndex === -1 || messageIndex === -1) return;
 
   const label = await compileChannelMessageLabel(
-    room.messages[messageIndex].channelLabel,
-    room.messages[messageIndex].merkleRootHex,
-    room.messages[messageIndex].sha512Hex,
+    rooms[roomIndex].messages[messageIndex].channelLabel,
+    rooms[roomIndex].messages[messageIndex].merkleRootHex,
+    rooms[roomIndex].messages[messageIndex].sha512Hex,
   );
 
   store.dispatch(
@@ -424,32 +493,48 @@ const deleteMsg = async (
   );
 
   dispatch(
-    deleteMessage({ merkleRootHex: room.messages[messageIndex].merkleRootHex }),
+    deleteMessage({
+      merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
+    }),
   );
 };
 
 const purgeIdentity = () => {
-  const { room } = store.getState() as State;
   dispatch(resetIdentity());
-  dispatch(
-    webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: room.id }),
-  );
+
+  const { rooms } = store.getState() as State;
+  const roomsLen = rooms.length;
+  for (let i = 0; i < roomsLen; i++) {
+    dispatch(
+      webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: rooms[i].id }),
+    );
+  }
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const purgeRoom = () => {
-  dispatch(deleteRoom());
+const purgeRoom = (roomUrl: string) => {
+  const { rooms } = store.getState() as State;
+  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  if (roomIndex > -1) dispatch(deleteRoom(rooms[roomIndex].id));
+
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
 const purge = () => {
-  dispatch(deleteRoom());
   dispatch(resetIdentity());
+
+  const { rooms } = store.getState() as State;
+  const roomsLen = rooms.length;
+  for (let i = 0; i < roomsLen; i++) {
+    dispatch(deleteRoom(rooms[i].id));
+  }
+
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
 export default {
   store,
+  commonStateSelector,
   signalingServerSelector,
   roomSelector,
   keyPairSelector,

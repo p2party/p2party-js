@@ -78,6 +78,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         {
           channel: e.channel,
           epc,
+          roomId,
           dataChannels,
           decryptionModule,
           merkleModule,
@@ -161,6 +162,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         {
           channel: "main",
           epc,
+          roomId,
           dataChannels,
           decryptionModule,
           merkleModule,

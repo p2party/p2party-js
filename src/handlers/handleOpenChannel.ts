@@ -28,6 +28,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
   epc: IRTCPeerConnection;
+  roomId: string;
   dataChannels: IRTCDataChannel[];
   decryptionModule: LibCrypto;
   merkleModule: LibCrypto;
@@ -39,6 +40,7 @@ export const handleOpenChannel = async (
   {
     channel,
     epc,
+    roomId,
     dataChannels,
     decryptionModule,
     merkleModule,
@@ -46,7 +48,7 @@ export const handleOpenChannel = async (
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   try {
-    const { keyPair, room } = api.getState() as State;
+    const { keyPair } = api.getState() as State;
 
     // const dataChannelsWithPeer = dataChannels.filter((d) => d.withPeerId === epc.withPeerId);
 
@@ -90,7 +92,7 @@ export const handleOpenChannel = async (
 
     const extChannel = dataChannel as IRTCDataChannel;
     extChannel.withPeerId = epc.withPeerId;
-    extChannel.roomId = room.id;
+    extChannel.roomId = roomId;
 
     // extChannel.onclosing = () => {
     //   console.log(`Channel with label ${extChannel.label} is closing.`);
@@ -120,7 +122,6 @@ export const handleOpenChannel = async (
 
     extChannel.onmessage = async (e) => {
       try {
-        const { room } = api.getState() as State;
         const { channelLabel, merkleRoot, merkleRootHex, hashHex } =
           await decompileChannelMessageLabel(label);
 
@@ -128,46 +129,53 @@ export const handleOpenChannel = async (
         const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
         const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
 
-        const {
-          chunkSize,
-          // chunkIndex,
-          // relevant,
-          totalSize,
-          messageType,
-          filename,
-        } = await handleReceiveMessage(
-          e.data as ArrayBuffer,
-          merkleRoot,
-          senderPublicKey,
-          receiverSecretKey,
-          room,
-          decryptionModule,
-          merkleModule,
-        );
+        const { rooms } = api.getState() as State;
+        const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
-        if (chunkSize > 0) {
-          await setDBRoomMessageData(room.id, {
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: epc.withPeerId,
+        if (roomIndex > -1) {
+          const {
+            chunkSize,
+            // chunkIndex,
+            // relevant,
             totalSize,
             messageType,
             filename,
-            channelLabel,
-          });
+          } = await handleReceiveMessage(
+            e.data as ArrayBuffer,
+            merkleRoot,
+            senderPublicKey,
+            receiverSecretKey,
+            rooms[roomIndex],
+            decryptionModule,
+            merkleModule,
+          );
 
-          api.dispatch(
-            setMessage({
+          if (chunkSize > 0) {
+            await setDBRoomMessageData(roomId, {
+              roomId,
               merkleRootHex,
               sha512Hex: hashHex,
               fromPeerId: epc.withPeerId,
-              chunkSize,
               totalSize,
               messageType,
               filename,
               channelLabel,
-            }),
-          );
+            });
+
+            api.dispatch(
+              setMessage({
+                roomId,
+                merkleRootHex,
+                sha512Hex: hashHex,
+                fromPeerId: epc.withPeerId,
+                chunkSize,
+                totalSize,
+                messageType,
+                filename,
+                channelLabel,
+              }),
+            );
+          }
         }
       } catch (error) {
         console.error(error);
@@ -188,7 +196,9 @@ export const handleOpenChannel = async (
           decompiledLabel.merkleRootHex === "" &&
           decompiledLabel.channelLabel.length > 0
         ) {
-          api.dispatch(setChannel({ label, peerId: extChannel.withPeerId }));
+          api.dispatch(
+            setChannel({ roomId, label, peerId: extChannel.withPeerId }),
+          );
         }
       } catch (error) {
         console.error(error);

@@ -79,10 +79,10 @@ const handleWebSocketMessage = async (
       | WebSocketMessagePeerConnectionResponse
       | WebSocketMessageMessageSendResponse = JSON.parse(event.data);
 
-    const { keyPair, room } = api.getState() as State;
-
     switch (message.type) {
       case "ping": {
+        const { keyPair } = api.getState() as State;
+
         api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
@@ -96,6 +96,8 @@ const handleWebSocketMessage = async (
       }
 
       case "peerId": {
+        const { keyPair } = api.getState() as State;
+
         const peerId = message.peerId ?? "";
         const challenge = message.challenge ?? "";
 
@@ -162,42 +164,50 @@ const handleWebSocketMessage = async (
         // )
         //   break;
 
-        const len = message.peers.length;
-        if (len === 0) break;
+        const { keyPair, rooms, commonState } = api.getState() as State;
 
-        for (let i = 0; i < len; i++) {
-          if (
-            message.peers[i].publicKey === keyPair.publicKey ||
-            message.peers[i].id === keyPair.peerId ||
-            !isUUID(message.peers[i].id) ||
-            message.peers[i].publicKey.length !== 64
-          )
-            continue;
+        const roomIndex =
+          commonState.currentRoomUrl.length === 64
+            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+            : -1;
 
-          // api.dispatch(
-          //   signalingServerApi.endpoints.connectWithPeer.initiate({
-          //     roomId: message.roomId,
-          //     peerId: message.peers[i].id,
-          //     peerPublicKey: message.peers[i].publicKey,
-          //   }),
-          // );
+        if (roomIndex > -1) {
+          const len = message.peers.length;
+          if (len === 0) break;
 
-          api.dispatch(
-            webrtcApi.endpoints.connectWithPeer.initiate({
-              roomId: message.roomId,
-              peerId: message.peers[i].id,
-              peerPublicKey: message.peers[i].publicKey,
-              initiator: true,
-              rtcConfig: room.rtcConfig,
-            }),
-          );
+          for (let i = 0; i < len; i++) {
+            if (
+              message.peers[i].publicKey === keyPair.publicKey ||
+              message.peers[i].id === keyPair.peerId ||
+              !isUUID(message.peers[i].id) ||
+              message.peers[i].publicKey.length !== 64
+            )
+              continue;
+
+            // api.dispatch(
+            //   signalingServerApi.endpoints.connectWithPeer.initiate({
+            //     roomId: message.roomId,
+            //     peerId: message.peers[i].id,
+            //     peerPublicKey: message.peers[i].publicKey,
+            //   }),
+            // );
+
+            api.dispatch(
+              webrtcApi.endpoints.connectWithPeer.initiate({
+                roomId: message.roomId,
+                peerId: message.peers[i].id,
+                peerPublicKey: message.peers[i].publicKey,
+                initiator: true,
+                rtcConfig: rooms[roomIndex].rtcConfig,
+              }),
+            );
+          }
         }
 
         break;
       }
 
       case "description": {
-        console.log("RECEIVED DESCRIPTION FROM " + message.fromPeerId);
         api.dispatch(
           webrtcApi.endpoints.setDescription.initiate({
             peerId: message.fromPeerId,
@@ -211,7 +221,6 @@ const handleWebSocketMessage = async (
       }
 
       case "candidate": {
-        console.log("RECEIVED CANDIDATE FROM " + message.fromPeerId);
         api.dispatch(
           webrtcApi.endpoints.setCandidate.initiate({
             peerId: message.fromPeerId,
@@ -231,34 +240,45 @@ const handleWebSocketMessage = async (
           wasmMemory: merkleWasmMemory,
         });
 
-        const peerIndex = room.peers.findIndex(
-          (p) => p.peerId === message.fromPeerId,
-        );
-        if (peerIndex === -1)
-          throw new Error("Received a message from unknown peer");
+        const { keyPair, rooms, commonState } = api.getState() as State;
 
-        const peerPublicKeyHex = room.peers[peerIndex].peerPublicKey;
-        const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
-        const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
-        const messageData = hexToUint8Array(message.message);
+        const roomIndex =
+          commonState.currentRoomUrl.length === 64
+            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+            : -1;
 
-        await handleReceiveMessage(
-          messageData.buffer, // new Blob([messageData]), //
-          new Uint8Array(),
-          senderPublicKey,
-          receiverSecretKey,
-          room,
-          decryptionModule,
-          merkleModule,
-          // message.label,
-          // message.fromPeerId,
-          // api,
-        );
+        if (roomIndex > -1) {
+          const peerIndex = rooms[roomIndex].peers.findIndex(
+            (p) => p.peerId === message.fromPeerId,
+          );
+          if (peerIndex === -1)
+            throw new Error("Received a message from unknown peer");
+
+          const peerPublicKeyHex =
+            rooms[roomIndex].peers[peerIndex].peerPublicKey;
+          const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
+          const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+          const messageData = hexToUint8Array(message.message);
+
+          await handleReceiveMessage(
+            messageData.buffer, // new Blob([messageData]), //
+            new Uint8Array(),
+            senderPublicKey,
+            receiverSecretKey,
+            rooms[roomIndex],
+            decryptionModule,
+            merkleModule,
+            // message.label,
+            // message.fromPeerId,
+            // api,
+          );
+        }
 
         break;
       }
 
       case "connection": {
+        const { keyPair } = api.getState() as State;
         if (
           isUUID(keyPair.peerId) &&
           isHexadecimal(keyPair.challenge) &&
@@ -272,6 +292,7 @@ const handleWebSocketMessage = async (
         ) {
           api.dispatch(
             setPeer({
+              roomId: message.roomId,
               peerId: message.fromPeerId,
               peerPublicKey: message.fromPeerPublicKey,
             }),
@@ -285,6 +306,7 @@ const handleWebSocketMessage = async (
           for (let i = 0; i < CHANNELS_LEN; i++) {
             api.dispatch(
               setChannel({
+                roomId: message.roomId,
                 label: message.labels[i],
                 peerId: message.fromPeerId,
               }),
@@ -293,6 +315,7 @@ const handleWebSocketMessage = async (
             const data = `Connected with ${keyPair.peerId} on channel ${message.labels[i]}`;
             await handleSendMessageWebsocket(
               data as string | File,
+              message.roomId,
               encryptionModule,
               api,
               message.labels[i],

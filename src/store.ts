@@ -1,5 +1,6 @@
 import { configureStore } from "@reduxjs/toolkit";
 
+import commonStateReducer from "./reducers/commonSlice";
 import keyPairReducer from "./reducers/keyPairSlice";
 import roomReducer from "./reducers/roomSlice";
 import signalingServerReducer from "./reducers/signalingServerSlice";
@@ -12,8 +13,9 @@ import keyPairListenerMiddleware from "./middleware/keyPairListenerMiddleware";
 
 export const store = configureStore({
   reducer: {
+    commonState: commonStateReducer,
     keyPair: keyPairReducer,
-    room: roomReducer,
+    rooms: roomReducer,
     signalingServer: signalingServerReducer,
     [signalingServerApi.reducerPath]: signalingServerApi.reducer,
     [webrtcApi.reducerPath]: webrtcApi.reducer,

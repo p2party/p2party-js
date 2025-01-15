@@ -45,6 +45,7 @@ export interface RTCSetCandidateParams {
 }
 
 export interface RTCOpenChannelParams {
+  roomId: string;
   channel: string | RTCDataChannel;
   withPeers?: { peerId: string; peerPublicKey: string }[];
 }
@@ -52,6 +53,7 @@ export interface RTCOpenChannelParams {
 export interface RTCSendMessageParams {
   data: string | File;
   label: string;
+  roomId: string;
   minChunks?: number;
   chunkSize?: number;
   percentageFilledChunk?: number;

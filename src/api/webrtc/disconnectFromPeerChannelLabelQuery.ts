@@ -30,12 +30,12 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
       if (dataChannels[channelIndex]) {
         api.dispatch(
           deleteChannel({
-            peerId: dataChannels[channelIndex].withPeerId,
+            peerId,
             label,
           }),
         );
 
-        await deleteDBSendQueue(label, dataChannels[channelIndex].withPeerId);
+        await deleteDBSendQueue(label, peerId);
 
         if (
           dataChannels[channelIndex] // &&
@@ -57,15 +57,17 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
       }
     }
 
-    const { room } = api.getState() as State;
-
+    const { rooms } = api.getState() as State;
+    const roomsLen = rooms.length;
     let peerHasChannel = false;
-    const channelsLen = room.channels.length;
-    for (let i = 0; i < channelsLen; i++) {
-      if (room.channels[i].peerIds.includes(peerId)) {
-        peerHasChannel = true;
+    for (let i = 0; i < roomsLen; i++) {
+      const channelsLen = rooms[i].channels.length;
+      for (let j = 0; j < channelsLen; j++) {
+        if (rooms[i].channels[j].peerIds.includes(peerId)) {
+          peerHasChannel = true;
 
-        break;
+          break;
+        }
       }
     }
 

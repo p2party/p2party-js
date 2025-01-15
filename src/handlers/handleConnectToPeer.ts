@@ -142,7 +142,7 @@ export const handleConnectToPeer = async (
           );
 
           if (epc.connectionState === "connected") {
-            api.dispatch(setPeer({ peerId, peerPublicKey }));
+            api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
             if (!initiator) {
               const { signalingServer } = api.getState() as State;

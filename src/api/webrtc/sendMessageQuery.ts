@@ -25,6 +25,7 @@ const webrtcMessageQuery: BaseQueryFn<
   {
     data,
     label,
+    roomId,
     peerConnections,
     dataChannels,
     encryptionWasmMemory,
@@ -54,6 +55,7 @@ const webrtcMessageQuery: BaseQueryFn<
       data,
       api,
       label,
+      roomId,
       peerConnections,
       dataChannels,
       encryptionModule,

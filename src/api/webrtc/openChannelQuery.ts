@@ -23,6 +23,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
   unknown
 > = async (
   {
+    roomId,
     channel,
     withPeers,
     peerConnections,
@@ -58,6 +59,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
             {
               channel,
               epc,
+              roomId,
               dataChannels,
               decryptionModule,
               merkleModule,
@@ -74,6 +76,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
           {
             channel,
             epc,
+            roomId,
             dataChannels,
             decryptionModule,
             merkleModule,

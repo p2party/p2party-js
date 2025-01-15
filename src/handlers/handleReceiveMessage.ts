@@ -30,7 +30,7 @@ export const handleReceiveMessage = async (
 ): Promise<{
   chunkSize: number;
   chunkIndex: number;
-  relevant: boolean;
+  receivedFullSize: boolean;
   totalSize: number;
   messageType: MessageType;
   filename: string;
@@ -58,7 +58,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: 0,
-        relevant: false,
+        receivedFullSize: false,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -88,7 +88,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: 0,
-        relevant: false,
+        receivedFullSize: false,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -108,11 +108,17 @@ export const handleReceiveMessage = async (
         room.messages[incomingMessageIndex].savedSize + chunkSize &&
         !exists);
 
+    const receivedFullSize =
+      incomingMessageIndex > -1
+        ? room.messages[incomingMessageIndex].totalSize ===
+          room.messages[incomingMessageIndex].savedSize + chunkSize
+        : false;
+
     if (!messageRelevant)
       return {
         chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
-        relevant: messageRelevant,
+        receivedFullSize,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -132,7 +138,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: -3,
-        relevant: true,
+        receivedFullSize,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -152,7 +158,7 @@ export const handleReceiveMessage = async (
       return {
         chunkIndex: -1,
         chunkSize: -4,
-        relevant: true,
+        receivedFullSize,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -175,7 +181,7 @@ export const handleReceiveMessage = async (
     return {
       chunkIndex: metadata.chunkIndex,
       chunkSize,
-      relevant: true,
+      receivedFullSize,
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,

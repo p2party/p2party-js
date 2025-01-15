@@ -59,6 +59,7 @@ export const splitToChunks = async (
   message: string | File,
   api: BaseQueryApi,
   label: string,
+  roomId: string,
   // db: IDBPDatabase<RepoSchema>,
   minChunks = 5, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
@@ -203,9 +204,10 @@ export const splitToChunks = async (
     unencryptedChunks.push(unencrypted);
   }
 
-  const { keyPair, room } = api.getState() as State;
+  const { keyPair } = api.getState() as State;
 
   const messageData = {
+    roomId,
     merkleRootHex,
     sha512Hex,
     fromPeerId: keyPair.peerId,
@@ -217,7 +219,7 @@ export const splitToChunks = async (
 
   api.dispatch(setMessageAllChunks(messageData));
 
-  await setDBRoomMessageData(room.id, messageData);
+  await setDBRoomMessageData(roomId, messageData);
 
   return {
     merkleRoot,

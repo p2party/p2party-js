@@ -33,6 +33,7 @@ export const wait = (milliseconds: number) => {
 
 const createChannelAndSendChunks = async (
   channelMessageLabel: string,
+  roomId: string,
   senderSecretKey: Uint8Array,
   unencryptedChunks: Uint8Array[],
   merkleRoot: Uint8Array,
@@ -50,6 +51,7 @@ const createChannelAndSendChunks = async (
     {
       channel: channelMessageLabel,
       epc,
+      roomId,
       dataChannels,
       decryptionModule,
       merkleModule,
@@ -114,6 +116,7 @@ export const handleSendMessage = async (
   data: string | File,
   api: BaseQueryApi,
   label: string,
+  roomId: string,
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
   encryptionModule: LibCrypto,
@@ -125,54 +128,64 @@ export const handleSendMessage = async (
   metadataSchemaVersion = 1,
 ) => {
   try {
-    const { room, keyPair } = api.getState() as State;
+    const { rooms, keyPair } = api.getState() as State;
     const senderSecretKey = hexToUint8Array(keyPair.secretKey);
 
-    const channelIndex = room.channels.findIndex((c) => c.label === label);
-    if (channelIndex === -1) throw new Error("No channel with label " + label);
+    const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
-    const { merkleRoot, merkleRootHex, hashHex, unencryptedChunks } =
-      await splitToChunks(
-        data,
-        api,
-        label,
-        minChunks,
-        chunkSize,
-        percentageFilledChunk,
-        metadataSchemaVersion,
+    if (roomIndex > -1) {
+      const channelIndex = rooms[roomIndex].channels.findIndex(
+        (c) => c.label === label,
       );
+      if (channelIndex === -1)
+        throw new Error("No channel with label " + label);
 
-    const channelMessageLabel = await compileChannelMessageLabel(
-      label,
-      merkleRootHex,
-      hashHex,
-    );
-
-    const PEERS_LEN = room.channels[channelIndex].peerIds.length;
-    const promises: Promise<void>[] = [];
-    for (let i = 0; i < PEERS_LEN; i++) {
-      const peerIndex = peerConnections.findIndex(
-        (p) => p.withPeerId === room.channels[channelIndex].peerIds[i],
-      );
-      if (peerIndex === -1) continue;
-
-      promises.push(
-        createChannelAndSendChunks(
-          channelMessageLabel,
-          senderSecretKey,
-          unencryptedChunks,
-          merkleRoot,
-          peerConnections[peerIndex],
+      const { merkleRoot, merkleRootHex, hashHex, unencryptedChunks } =
+        await splitToChunks(
+          data,
           api,
-          dataChannels,
-          encryptionModule,
-          decryptionModule,
-          merkleModule,
-        ),
-      );
-    }
+          label,
+          roomId,
+          minChunks,
+          chunkSize,
+          percentageFilledChunk,
+          metadataSchemaVersion,
+        );
 
-    await Promise.allSettled(promises);
+      const channelMessageLabel = await compileChannelMessageLabel(
+        label,
+        merkleRootHex,
+        hashHex,
+      );
+
+      const PEERS_LEN = rooms[roomIndex].channels[channelIndex].peerIds.length;
+      const promises: Promise<void>[] = [];
+      for (let i = 0; i < PEERS_LEN; i++) {
+        const peerIndex = peerConnections.findIndex(
+          (p) =>
+            p.withPeerId === rooms[roomIndex].channels[channelIndex].peerIds[i],
+        );
+        if (peerIndex === -1) continue;
+
+        promises.push(
+          createChannelAndSendChunks(
+            channelMessageLabel,
+            roomId,
+            senderSecretKey,
+            unencryptedChunks,
+            merkleRoot,
+            peerConnections[peerIndex],
+            api,
+            dataChannels,
+            encryptionModule,
+            decryptionModule,
+            merkleModule,
+          ),
+        );
+      }
+
+      await Promise.allSettled(promises);
+    }
   } catch (error) {
     console.error(error);
   }

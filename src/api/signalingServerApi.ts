@@ -36,7 +36,7 @@ import type {
   WebSocketMessagePongResponse,
   WebSocketMessageMessageSendRequest,
   WebSocketPeerConnectionParams,
-  WebSocketSendMessageToPeerParams,
+  // WebSocketSendMessageToPeerParams,
   WebSocketMessagePeerConnectionRequest,
 } from "../utils/interfaces";
 
@@ -153,17 +153,38 @@ const websocketBaseQuery: BaseQueryFn<
           console.log("WebSocket connected to:", fullUrl);
           api.dispatch(signalingServerActions.connectionEstablished());
 
-          const { keyPair, room } = api.getState() as State;
+          const { keyPair, rooms, commonState } = api.getState() as State;
 
-          if (isUUID(keyPair.peerId) && isUUID(room.id)) {
-            api.dispatch(setConnectingToPeers(true));
-          } else if (isUUID(keyPair.peerId)) {
+          const roomIndex =
+            commonState.currentRoomUrl.length === 64
+              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+              : -1;
+
+          console.log(commonState.currentRoomUrl.length === 64);
+          console.log(isUUID(keyPair.peerId));
+
+          if (
+            roomIndex > -1 &&
+            isUUID(keyPair.peerId) &&
+            isUUID(rooms[roomIndex].id)
+          ) {
+            api.dispatch(
+              setConnectingToPeers({
+                roomId: rooms[roomIndex].id,
+                connectingToPeers: true,
+              }),
+            );
+          } else if (
+            // roomIndex === -1 &&
+            commonState.currentRoomUrl.length === 64 &&
+            isUUID(keyPair.peerId)
+          ) {
             waitForSocketConnection(ws!, () => {
               ws!.send(
                 JSON.stringify({
                   type: "room",
                   fromPeerId: keyPair.peerId,
-                  roomUrl: room.url,
+                  roomUrl: commonState.currentRoomUrl,
                 } as WebSocketMessageRoomIdRequest),
               );
             });
@@ -307,11 +328,11 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
       peerPublicKey.length === 64 &&
       isUUID(roomId)
     ) {
-      api.dispatch(setPeer({ peerId, peerPublicKey }));
+      api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
       const labels: string[] = [];
-      api.dispatch(setChannel({ label: "main", peerId }));
+      api.dispatch(setChannel({ roomId, label: "main", peerId }));
       labels.push("main");
-      api.dispatch(setChannel({ label: "signaling", peerId }));
+      api.dispatch(setChannel({ roomId, label: "signaling", peerId }));
       labels.push("signaling");
 
       waitForSocketConnection(ws, () => {
@@ -334,6 +355,7 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
         const data = `Connected with ${keyPair.peerId} on channel ${labels[i]}`;
         await handleSendMessageWebsocket(
           data as string | File,
+          roomId,
           encryptionModule,
           api,
           labels[i],
@@ -349,41 +371,41 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
   }
 };
 
-const websocketSendMessageToPeerQuery: BaseQueryFn<
-  WebSocketSendMessageToPeerParams,
-  void,
-  unknown
-> = async ({ data, toChannel }, api) => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    const { keyPair } = api.getState() as State;
-
-    if (
-      isUUID(keyPair.peerId) &&
-      isHexadecimal(keyPair.challenge) &&
-      isHexadecimal(keyPair.signature) &&
-      // keyPair.signature.length === 1024 &&
-      keyPair.signature.length === 128 &&
-      keyPair.challenge.length === 64
-    ) {
-      const encryptionModule = await libcrypto({
-        wasmMemory: encryptionWasmMemory,
-      });
-
-      await handleSendMessageWebsocket(
-        data as string | File,
-        encryptionModule,
-        api,
-        toChannel,
-      );
-    }
-
-    return { data: undefined };
-  } else {
-    console.warn("WebSocket is not open");
-
-    return { data: undefined };
-  }
-};
+// const websocketSendMessageToPeerQuery: BaseQueryFn<
+//   WebSocketSendMessageToPeerParams,
+//   void,
+//   unknown
+// > = async ({ data, toChannel }, api) => {
+//   if (ws && ws.readyState === WebSocket.OPEN) {
+//     const { keyPair } = api.getState() as State;
+//
+//     if (
+//       isUUID(keyPair.peerId) &&
+//       isHexadecimal(keyPair.challenge) &&
+//       isHexadecimal(keyPair.signature) &&
+//       // keyPair.signature.length === 1024 &&
+//       keyPair.signature.length === 128 &&
+//       keyPair.challenge.length === 64
+//     ) {
+//       const encryptionModule = await libcrypto({
+//         wasmMemory: encryptionWasmMemory,
+//       });
+//
+//       await handleSendMessageWebsocket(
+//         data as string | File,
+//         encryptionModule,
+//         api,
+//         toChannel,
+//       );
+//     }
+//
+//     return { data: undefined };
+//   } else {
+//     console.warn("WebSocket is not open");
+//
+//     return { data: undefined };
+//   }
+// };
 
 const signalingServerApi = createApi({
   reducerPath: "signalingServerApi",
@@ -403,11 +425,11 @@ const signalingServerApi = createApi({
     connectWithPeer: builder.mutation<void, WebSocketPeerConnectionParams>({
       queryFn: websocketConnectWithPeerQuery,
     }),
-    sendMessageToPeer: builder.mutation<void, WebSocketSendMessageToPeerParams>(
-      {
-        queryFn: websocketSendMessageToPeerQuery,
-      },
-    ),
+    // sendMessageToPeer: builder.mutation<void, WebSocketSendMessageToPeerParams>(
+    //   {
+    //     queryFn: websocketSendMessageToPeerQuery,
+    //   },
+    // ),
   }),
 });
 

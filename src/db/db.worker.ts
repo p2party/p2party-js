@@ -73,6 +73,7 @@ async function fnGetDBRoomMessageData(
   const messageDataLen = messageData.length;
   for (let i = 0; i < messageDataLen; i++) {
     messages.push({
+      roomId,
       merkleRootHex: messageData[i].merkleRoot,
       sha512Hex: messageData[i].hash,
       fromPeerId: messageData[i].fromPeedId,

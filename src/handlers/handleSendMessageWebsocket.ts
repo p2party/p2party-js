@@ -21,84 +21,90 @@ import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 
 export const handleSendMessageWebsocket = async (
   data: string | File,
+  roomId: string,
   encryptionModule: LibCrypto,
   api: BaseQueryApi,
   label: string,
 ) => {
-  const { keyPair, room } = api.getState() as State;
+  const { keyPair, rooms } = api.getState() as State;
   const senderSecretKey = hexToUint8Array(keyPair.secretKey);
 
-  const peerConnections = room.peers;
-  const dataChannels = room.channels;
+  const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
-  const channelIndex = label
-    ? dataChannels.findIndex((c) => c.label === label)
-    : 0;
-  if (channelIndex === -1) throw new Error("No channel with label " + label);
+  if (roomIndex > -1) {
+    const peerConnections = rooms[roomIndex].peers;
+    const dataChannels = rooms[roomIndex].channels;
 
-  const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
-    await splitToChunks(data, api, label); // db);
+    const channelIndex = label
+      ? dataChannels.findIndex((c) => c.label === label)
+      : 0;
+    if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-  const chunksLen = unencryptedChunks.length;
-  const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
-  for (let i = 0; i < PEERS_LEN; i++) {
-    const peerId = dataChannels[channelIndex].peerIds[i];
-    const peerIndex = peerConnections.findIndex((p) => p.peerId === peerId);
-    if (peerIndex === -1) continue;
+    const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
+      await splitToChunks(data, api, label, roomId); // db);
 
-    const peerPublicKeyHex = peerConnections[peerIndex].peerPublicKey;
-    const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
+    const chunksLen = unencryptedChunks.length;
+    const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
+    for (let i = 0; i < PEERS_LEN; i++) {
+      const peerId = dataChannels[channelIndex].peerIds[i];
+      const peerIndex = peerConnections.findIndex((p) => p.peerId === peerId);
+      if (peerIndex === -1) continue;
 
-    const indexes = Array.from({ length: chunksLen }, (_, i) => i);
-    const indexesRandomized = await fisherYatesShuffle(indexes);
-    for (let j = 0; j < chunksLen; j++) {
-      const jRandom = indexesRandomized[j];
+      const peerPublicKeyHex = peerConnections[peerIndex].peerPublicKey;
+      const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-      const m = deserializeMetadata(
-        unencryptedChunks[jRandom].slice(0, METADATA_LEN),
-      );
-      if (m.chunkStartIndex < m.chunkEndIndex) {
+      const indexes = Array.from({ length: chunksLen }, (_, i) => i);
+      const indexesRandomized = await fisherYatesShuffle(indexes);
+      for (let j = 0; j < chunksLen; j++) {
+        const jRandom = indexesRandomized[j];
+
+        const m = deserializeMetadata(
+          unencryptedChunks[jRandom].slice(0, METADATA_LEN),
+        );
+        if (m.chunkStartIndex < m.chunkEndIndex) {
+          api.dispatch(
+            setMessage({
+              roomId,
+              merkleRootHex,
+              sha512Hex: hashHex,
+              fromPeerId: keyPair.peerId,
+              chunkSize: m.chunkEndIndex - m.chunkStartIndex,
+              totalSize,
+              messageType: m.messageType,
+              filename: m.name,
+              channelLabel: label ?? dataChannels[channelIndex].label,
+            }),
+          );
+        } else {
+          await deleteDBChunk(merkleRootHex, m.chunkIndex);
+        }
+
+        const encryptedMessage = await encryptAsymmetric(
+          unencryptedChunks[jRandom],
+          receiverPublicKey,
+          senderSecretKey,
+          merkleRoot,
+          encryptionModule,
+        );
+
+        const concatedEncrypted = await concatUint8Arrays([
+          merkleRoot,
+          encryptedMessage,
+        ]);
+
         api.dispatch(
-          setMessage({
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: keyPair.peerId,
-            chunkSize: m.chunkEndIndex - m.chunkStartIndex,
-            totalSize,
-            messageType: m.messageType,
-            filename: m.name,
-            channelLabel: label ?? dataChannels[channelIndex].label,
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "message",
+              message: uint8ArrayToHex(concatedEncrypted),
+              roomId,
+              fromPeerId: keyPair.peerId,
+              toPeerId: peerId,
+              label,
+            } as WebSocketMessageMessageSendRequest,
           }),
         );
-      } else {
-        await deleteDBChunk(merkleRootHex, m.chunkIndex);
       }
-
-      const encryptedMessage = await encryptAsymmetric(
-        unencryptedChunks[jRandom],
-        receiverPublicKey,
-        senderSecretKey,
-        merkleRoot,
-        encryptionModule,
-      );
-
-      const concatedEncrypted = await concatUint8Arrays([
-        merkleRoot,
-        encryptedMessage,
-      ]);
-
-      api.dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "message",
-            message: uint8ArrayToHex(concatedEncrypted),
-            roomId: room.id,
-            fromPeerId: keyPair.peerId,
-            toPeerId: peerId,
-            label,
-          } as WebSocketMessageMessageSendRequest,
-        }),
-      );
     }
   }
 };

@@ -59,35 +59,51 @@ keyPairListenerMiddleware.startListening({
         localStorage.setItem("signature", signature);
         localStorage.setItem("challengeId", challengeId);
 
-        const { keyPair, room } = listenerApi.getState() as State;
+        const { keyPair, rooms, commonState } = listenerApi.getState() as State;
 
-        if (action.payload.username && action.payload.credential) {
-          listenerApi.dispatch(
-            setIceServers({
-              iceServers: [
-                {
-                  urls: [
-                    "turn:turn.p2party.com:3478?transport=udp",
-                    "turn:turn.p2party.com:3478?transport=tcp",
-                    "turns:turn.p2party.com:443?transport=tcp",
-                  ],
-                  username,
-                  credential,
-                } as RTCIceServer,
-              ],
-            }),
-          );
-        }
+        const roomIndex =
+          commonState.currentRoomUrl.length === 64
+            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+            : -1;
 
-        if (isUUID(room.id)) {
-          listenerApi.dispatch(setConnectingToPeers(true));
-        } else {
+        if (roomIndex > -1) {
+          if (action.payload.username && action.payload.credential) {
+            listenerApi.dispatch(
+              setIceServers({
+                roomId: rooms[roomIndex].id,
+                iceServers: [
+                  {
+                    urls: [
+                      "turn:turn.p2party.com:3478?transport=udp",
+                      "turn:turn.p2party.com:3478?transport=tcp",
+                      "turns:turn.p2party.com:443?transport=tcp",
+                    ],
+                    username,
+                    credential,
+                  } as RTCIceServer,
+                ],
+              }),
+            );
+          }
+
+          if (isUUID(rooms[roomIndex].id)) {
+            listenerApi.dispatch(
+              setConnectingToPeers({
+                roomId: rooms[roomIndex].id,
+                connectingToPeers: true,
+              }),
+            );
+          }
+        } else if (
+          isUUID(keyPair.peerId) &&
+          commonState.currentRoomUrl.length === 64
+        ) {
           listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "room",
                 fromPeerId: keyPair.peerId,
-                roomUrl: room.url,
+                roomUrl: commonState.currentRoomUrl,
               } as WebSocketMessageRoomIdRequest,
             }),
           );
@@ -123,34 +139,64 @@ keyPairListenerMiddleware.startListening({
       if (isUUID(challengeId)) {
         localStorage.setItem("challengeId", challengeId);
 
-        if (action.payload.username && action.payload.credential) {
-          listenerApi.dispatch(
-            setIceServers({
-              iceServers: [
-                {
-                  urls: [
-                    "turn:turn.p2party.com:3478?transport=udp",
-                    "turn:turn.p2party.com:3478?transport=tcp",
-                    "turns:turn.p2party.com:443?transport=tcp",
-                  ],
-                  username: action.payload.username,
-                  credential: action.payload.credential,
-                } as RTCIceServer,
-              ],
-            }),
-          );
-        }
+        const { keyPair, rooms, commonState } = listenerApi.getState() as State;
 
-        const { keyPair, room } = listenerApi.getState() as State;
-        if (isUUID(room.id)) {
-          listenerApi.dispatch(setConnectingToPeers(true));
-        } else {
+        const roomIndex =
+          commonState.currentRoomUrl.length === 64
+            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+            : -1;
+
+        if (roomIndex > -1) {
+          if (action.payload.username && action.payload.credential) {
+            listenerApi.dispatch(
+              setIceServers({
+                roomId: rooms[roomIndex].id,
+                iceServers: [
+                  {
+                    urls: [
+                      "turn:turn.p2party.com:3478?transport=udp",
+                      "turn:turn.p2party.com:3478?transport=tcp",
+                      "turns:turn.p2party.com:443?transport=tcp",
+                    ],
+                    username: action.payload.username,
+                    credential: action.payload.credential,
+                  } as RTCIceServer,
+                ],
+              }),
+            );
+
+            if (isUUID(rooms[roomIndex].id)) {
+              listenerApi.dispatch(
+                setConnectingToPeers({
+                  roomId: rooms[roomIndex].id,
+                  connectingToPeers: true,
+                }),
+              );
+            } else if (
+              isUUID(keyPair.peerId) &&
+              commonState.currentRoomUrl.length === 64
+            ) {
+              listenerApi.dispatch(
+                signalingServerApi.endpoints.sendMessage.initiate({
+                  content: {
+                    type: "room",
+                    fromPeerId: keyPair.peerId,
+                    roomUrl: commonState.currentRoomUrl,
+                  } as WebSocketMessageRoomIdRequest,
+                }),
+              );
+            }
+          }
+        } else if (
+          isUUID(keyPair.peerId) &&
+          commonState.currentRoomUrl.length === 64
+        ) {
           listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "room",
                 fromPeerId: keyPair.peerId,
-                roomUrl: room.url,
+                roomUrl: commonState.currentRoomUrl,
               } as WebSocketMessageRoomIdRequest,
             }),
           );

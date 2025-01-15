@@ -31,28 +31,33 @@ roomListenerMiddleware.startListening({
   // actionCreator: setConnectingToPeers,
   effect: async (action, listenerApi) => {
     if (setConnectingToPeers.match(action)) {
-      const connectingToPeers = action.payload;
+      const { roomId, connectingToPeers } = action.payload;
       if (connectingToPeers) {
-        const { signalingServer, keyPair, room } =
+        const { signalingServer, keyPair, rooms } =
           listenerApi.getState() as State;
+
+        const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
         if (
           signalingServer.isConnected &&
           isUUID(keyPair.peerId) &&
-          isUUID(room.id)
+          roomIndex > -1 &&
+          isUUID(rooms[roomIndex].id)
         ) {
           listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "peers",
                 fromPeerId: keyPair.peerId,
-                roomId: room.id,
+                roomId,
               } as WebSocketMessagePeersRequest,
             }),
           );
         }
 
-        listenerApi.dispatch(setConnectingToPeers(false));
+        listenerApi.dispatch(
+          setConnectingToPeers({ roomId, connectingToPeers: false }),
+        );
       }
     } else if (setRoom.match(action)) {
       const oldMessages = await getDBRoomMessageData(action.payload.id);
@@ -61,47 +66,55 @@ roomListenerMiddleware.startListening({
         listenerApi.dispatch(setMessageAllChunks(oldMessages[i]));
       }
 
-      const { signalingServer, keyPair, room } =
+      const { signalingServer, keyPair, rooms } =
         listenerApi.getState() as State;
+
+      const roomIndex = rooms.findIndex((r) => r.id === action.payload.id);
 
       if (
         signalingServer.isConnected &&
         isUUID(keyPair.peerId) &&
-        isUUID(room.id)
+        roomIndex > -1 &&
+        isUUID(rooms[roomIndex].id)
       ) {
         listenerApi.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "peers",
               fromPeerId: keyPair.peerId,
-              roomId: room.id,
+              roomId: rooms[roomIndex].id,
             } as WebSocketMessagePeersRequest,
           }),
         );
       }
     } else if (setMessage.match(action)) {
-      const { room } = listenerApi.getState() as State;
-      const messageIndex = room.messages.findIndex(
-        (m) => m.merkleRootHex === action.payload.merkleRootHex,
-      );
+      const { roomId } = action.payload;
+      const { rooms } = listenerApi.getState() as State;
+      const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
-      if (
-        messageIndex > -1 &&
-        room.messages[messageIndex].savedSize ===
-          room.messages[messageIndex].totalSize
-      ) {
-        const label = await compileChannelMessageLabel(
-          room.messages[messageIndex].channelLabel,
-          room.messages[messageIndex].merkleRootHex,
-          room.messages[messageIndex].sha512Hex,
+      if (roomIndex > -1) {
+        const messageIndex = rooms[roomIndex].messages.findIndex(
+          (m) => m.merkleRootHex === action.payload.merkleRootHex,
         );
 
-        listenerApi.dispatch(
-          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-            label,
-            alsoDeleteData: false,
-          }),
-        );
+        if (
+          messageIndex > -1 &&
+          rooms[roomIndex].messages[messageIndex].savedSize ===
+            rooms[roomIndex].messages[messageIndex].totalSize
+        ) {
+          const label = await compileChannelMessageLabel(
+            rooms[roomIndex].messages[messageIndex].channelLabel,
+            rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            rooms[roomIndex].messages[messageIndex].sha512Hex,
+          );
+
+          listenerApi.dispatch(
+            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+              label,
+              alsoDeleteData: false,
+            }),
+          );
+        }
       }
     } else if (deleteMessage.match(action)) {
       const { merkleRootHex } = action.payload;

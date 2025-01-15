@@ -11,12 +11,12 @@ import type {
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
 export const dbName = "p2party";
-export const dbVersion = 2;
+export const dbVersion = 3;
 
 export interface RepoSchema extends DBSchema {
   messageData: {
     value: MessageData;
-    key: [string, string];
+    key: [number, string, string];
     indexes: { roomId: string };
   };
   chunks: {
@@ -36,7 +36,7 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
     upgrade(db) {
       if (!db.objectStoreNames.contains("messageData")) {
         const messageData = db.createObjectStore("messageData", {
-          keyPath: ["roomId", "hash"],
+          keyPath: ["timestamp", "roomId", "hash"],
         });
         messageData.createIndex("roomId", "roomId", { unique: false });
       }

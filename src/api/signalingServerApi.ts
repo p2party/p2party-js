@@ -69,31 +69,35 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
-const waitForSocketConnection = (ws: WebSocket, callback: () => any) => {
+const waitForSocketConnection = (
+  ws: WebSocket,
+  callback: () => void,
+  maxAttempts = 10,
+  interval = 20,
+) => {
   let attempts = 0;
-  setTimeout(() => {
-    if (ws.readyState === 1) {
-      if (callback != null) {
-        callback();
-      }
+
+  const checkConnection = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      clearInterval(checkConnection);
+      callback();
     } else {
       attempts += 1;
-      console.log("wait for connection...");
+      console.log(`Waiting for connection... Attempt ${attempts}`);
 
-      if (attempts < 10) {
-        waitForSocketConnection(ws, callback);
-      } else {
+      if (attempts >= maxAttempts) {
+        clearInterval(checkConnection);
+        console.log(
+          "WebSocket failed to connect after multiple attempts, closing...",
+        );
+
         ws.removeEventListener("message", () => {});
         ws.removeEventListener("open", () => {});
         ws.removeEventListener("close", () => {});
         ws.close();
-
-        console.log(
-          "WebSocket disconnected because of too many connection attempts",
-        );
       }
     }
-  }, 10); // wait 10 milisecond for the connection...
+  }, interval);
 };
 
 let ws: WebSocket | null = null;

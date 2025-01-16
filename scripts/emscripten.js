@@ -178,9 +178,6 @@ ${libsodiumKx5} \
 );
 
 let content = fs.readFileSync(wasmPath, "utf8");
-fs.writeFileSync(
-  wasmPath,
-  "'use strict'" + content.replace('"use strict"', ""),
-);
+fs.writeFileSync(wasmPath, content);
 
 console.log("Successfully compiled c methods to Wasm.");

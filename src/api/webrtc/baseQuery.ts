@@ -10,6 +10,7 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { State } from "../../store";
+import { setChannel, setPeer } from "../../reducers/roomSlice";
 
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
@@ -87,6 +88,36 @@ const webrtcBaseQuery: BaseQueryFn<
           },
           api,
         );
+      }
+    } else {
+      const epc = peerConnections[connectionIndex];
+      if (epc.connectionState === "connected") {
+        epc.roomIds.push(roomId);
+        api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
+
+        const dataChannelsLen = dataChannels.length;
+        for (let i = 0; i < dataChannelsLen; i++) {
+          if (dataChannels[i].withPeerId === peerId) {
+            dataChannels[i].roomIds.push(roomId);
+          }
+        }
+
+        const { rooms } = api.getState() as State;
+        const roomsLen = rooms.length;
+        for (let i = 0; i < roomsLen; i++) {
+          const channelIndex = rooms[i].channels.findIndex((c) =>
+            c.peerIds.includes(peerId),
+          );
+          if (channelIndex > -1) {
+            api.dispatch(
+              setChannel({
+                roomId,
+                label: rooms[i].channels[channelIndex].label,
+                peerId,
+              }),
+            );
+          }
+        }
       }
     }
 

@@ -1,13 +1,13 @@
 export interface IRTCPeerConnection extends RTCPeerConnection {
   withPeerId: string;
   withPeerPublicKey: string;
-  roomId: string;
+  roomIds: string[];
   iceCandidates: RTCIceCandidate[];
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {
   withPeerId: string;
-  roomId: string;
+  roomIds: string[];
 }
 
 export interface IRTCMessage {

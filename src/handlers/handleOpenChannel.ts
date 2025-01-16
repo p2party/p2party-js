@@ -92,7 +92,7 @@ export const handleOpenChannel = async (
 
     const extChannel = dataChannel as IRTCDataChannel;
     extChannel.withPeerId = epc.withPeerId;
-    extChannel.roomId = roomId;
+    extChannel.roomIds = [roomId];
 
     // extChannel.onclosing = () => {
     //   console.log(`Channel with label ${extChannel.label} is closing.`);

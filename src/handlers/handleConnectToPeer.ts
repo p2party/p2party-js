@@ -46,7 +46,7 @@ export const handleConnectToPeer = async (
       const epc = pc as IRTCPeerConnection;
       epc.withPeerId = peerId;
       epc.withPeerPublicKey = peerPublicKey;
-      epc.roomId = roomId;
+      epc.roomIds = [roomId];
       epc.iceCandidates = [] as RTCIceCandidate[];
 
       epc.onnegotiationneeded = async () => {

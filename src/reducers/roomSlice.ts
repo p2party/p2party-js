@@ -66,6 +66,7 @@ export interface SetMessageAllChunksArgs {
   messageType: MessageType;
   totalSize: number;
   channelLabel: string;
+  timestamp: number;
 }
 
 export interface SetChannelArgs {
@@ -139,6 +140,28 @@ const roomSlice = createSlice({
           state.push({
             url,
             id,
+            connectingToPeers: false,
+            connectedToPeers: false,
+            canBeConnectionRelay: true,
+            rtcConfig: defaultRTCConfig,
+            peers: [],
+            channels: [],
+            messages: [],
+          });
+        }
+      } else if (url.length === 64) {
+        const roomIndex = state.findIndex((r) => r.url === url);
+
+        if (roomIndex > -1) {
+          state[roomIndex].url = url;
+          state[roomIndex].id = "";
+          if (canBeConnectionRelay)
+            state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
+          if (rtcConfig) state[roomIndex].rtcConfig = rtcConfig;
+        } else {
+          state.push({
+            url,
+            id: "",
             connectingToPeers: false,
             connectedToPeers: false,
             canBeConnectionRelay: true,
@@ -255,13 +278,18 @@ const roomSlice = createSlice({
           if (channelIndex > -1) state[i].channels.splice(channelIndex, 1);
         } else if (!label && peerId) {
           const channelsLen = state[i].channels.length;
-          for (let i = 0; i < channelsLen; i++) {
+          for (let j = 0; j < channelsLen; j++) {
             const peerIndex = state[i].channels[i].peerIds.findIndex(
               (p) => p === peerId,
             );
 
-            if (peerIndex > -1)
-              state[i].channels[i].peerIds.splice(peerIndex, 1);
+            if (peerIndex > -1) {
+              state[i].channels[j].peerIds.splice(peerIndex, 1);
+
+              if (state[i].channels[j].peerIds.length === 0) {
+                state[i].channels.splice(j, 1);
+              }
+            }
           }
         } else if (peerId && label) {
           const channelIndex = state[i].channels.findIndex(
@@ -274,6 +302,10 @@ const roomSlice = createSlice({
             );
 
             state[i].channels[channelIndex].peerIds.splice(peerIndex, 1);
+
+            if (state[i].channels[channelIndex].peerIds.length === 0) {
+              state[i].channels.splice(channelIndex, 1);
+            }
           }
         }
       }
@@ -286,8 +318,24 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const iceServersLen = iceServers.length;
+        const existingIceServers =
+          state[roomIndex].rtcConfig.iceServers?.flatMap((server) =>
+            Array.isArray(server.urls) ? server.urls : [server.urls],
+          ) ?? [];
         for (let i = 0; i < iceServersLen; i++) {
-          state[roomIndex].rtcConfig.iceServers?.push(iceServers[i]);
+          const urlsLen = iceServers[i].urls.length;
+          let shouldPush = false;
+          for (let j = 0; j < urlsLen; j++) {
+            if (!existingIceServers.includes(iceServers[i].urls[j])) {
+              shouldPush = true;
+
+              break;
+            }
+          }
+
+          if (shouldPush) {
+            state[roomIndex].rtcConfig.iceServers?.push(iceServers[i]);
+          }
         }
       }
     },
@@ -364,7 +412,7 @@ const roomSlice = createSlice({
             filename: action.payload.filename ?? "txt",
             messageType: action.payload.messageType,
             fromPeerId: action.payload.fromPeerId,
-            timestamp: Date.now(),
+            timestamp: action.payload.timestamp,
             savedSize: action.payload.totalSize,
             totalSize: action.payload.totalSize,
           });

@@ -16,7 +16,7 @@ import type {
 import type {
   WebSocketMessageDescriptionSend,
   WebSocketMessageCandidateSend,
-  WebSocketMessagePeersRequest,
+  // WebSocketMessagePeersRequest,
 } from "../utils/interfaces";
 
 export const handleConnectToPeer = async (
@@ -49,19 +49,21 @@ export const handleConnectToPeer = async (
       epc.roomIds = [roomId];
       epc.iceCandidates = [] as RTCIceCandidate[];
 
-      epc.onnegotiationneeded = async () => {
-        if (epc.signalingState !== "stable") return;
+      // let makingOffer = false;
 
-        if (initiator) {
+      epc.onnegotiationneeded = async () => {
+        if (epc.signalingState === "stable") {
+          // if (initiator) {
           try {
-            const offer = await epc.createOffer({ iceRestart: true });
-            if (offer) {
-              await epc.setLocalDescription(offer);
+            // makingOffer = true;
+            await epc.setLocalDescription();
+
+            if (epc.localDescription) {
               api.dispatch(
                 signalingServerApi.endpoints.sendMessage.initiate({
                   content: {
                     type: "description",
-                    description: offer,
+                    description: epc.localDescription,
                     fromPeerId: keyPair.peerId,
                     fromPeerPublicKey: keyPair.publicKey,
                     toPeerId: peerId,
@@ -71,21 +73,21 @@ export const handleConnectToPeer = async (
               );
 
               console.log(
-                `Negotiation was needed with ${peerId} and you sent a description ${offer.type}.`,
+                `Negotiation was needed with ${peerId} and you sent a description ${epc.localDescription.type}.`,
               );
             }
           } catch (error) {
             console.error(error);
           } finally {
+            // makingOffer = false;
           }
+          // }
         }
       };
 
-      epc.onicecandidate = async ({ candidate }) => {
+      epc.onicecandidate = ({ candidate }) => {
         if (candidate && candidate.candidate !== "") {
-          console.log(`ICE candidate was sent to ${peerId}.`);
-
-          await api.dispatch(
+          api.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "candidate",
@@ -100,11 +102,28 @@ export const handleConnectToPeer = async (
       };
 
       epc.onicecandidateerror = (e) => {
-        epc.restartIce();
+        // epc.restartIce();
         console.error(e);
       };
 
       epc.oniceconnectionstatechange = () => {
+        if (epc.iceConnectionState === "failed") {
+          const { signalingServer } = api.getState() as State;
+          if (
+            !signalingServer.isConnected &&
+            !signalingServer.isEstablishingConnection &&
+            signalingServer.serverUrl.length > 0
+          ) {
+            api.dispatch(
+              signalingServerApi.endpoints.connectWebSocket.initiate(
+                signalingServer.serverUrl,
+              ),
+            );
+          }
+
+          epc.restartIce();
+        }
+
         console.log(
           `ICE candidate connection state with ${peerId} is ${epc.iceConnectionState}.`,
         );
@@ -144,20 +163,20 @@ export const handleConnectToPeer = async (
           if (epc.connectionState === "connected") {
             api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
-            if (!initiator) {
-              const { signalingServer } = api.getState() as State;
-              if (signalingServer.isConnected) {
-                api.dispatch(
-                  signalingServerApi.endpoints.sendMessage.initiate({
-                    content: {
-                      type: "peers",
-                      fromPeerId: keyPair.peerId,
-                      roomId,
-                    } as WebSocketMessagePeersRequest,
-                  }),
-                );
-              }
-            }
+            // if (!initiator) {
+            //   const { signalingServer } = api.getState() as State;
+            //   if (signalingServer.isConnected) {
+            //     api.dispatch(
+            //       signalingServerApi.endpoints.sendMessage.initiate({
+            //         content: {
+            //           type: "peers",
+            //           fromPeerId: keyPair.peerId,
+            //           roomId,
+            //         } as WebSocketMessagePeersRequest,
+            //       }),
+            //     );
+            //   }
+            // }
           }
         }
       };

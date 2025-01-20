@@ -7,13 +7,25 @@ import type {
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
+  AddressBook,
+  Blacklist,
 } from "./types";
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
 export const dbName = "p2party";
-export const dbVersion = 4;
+export const dbVersion = 5;
 
 export interface RepoSchema extends DBSchema {
+  addressBook: {
+    value: AddressBook;
+    key: [string];
+    indexes: { peerId: string; peerPublicKey: string };
+  };
+  blacklist: {
+    value: Blacklist;
+    key: [string];
+    indexes: { peerId: string; peerPublicKey: string };
+  };
   messageData: {
     value: MessageData;
     key: [number, string, string];
@@ -34,6 +46,26 @@ export interface RepoSchema extends DBSchema {
 async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   return openDB<RepoSchema>(dbName, dbVersion, {
     upgrade(db) {
+      if (!db.objectStoreNames.contains("addressBook")) {
+        const messageData = db.createObjectStore("addressBook", {
+          keyPath: ["peerId"],
+        });
+        messageData.createIndex("peerId", "peerId", { unique: true });
+        messageData.createIndex("peerPublicKey", "peerPublicKey", {
+          unique: true,
+        });
+      }
+
+      if (!db.objectStoreNames.contains("blacklist")) {
+        const messageData = db.createObjectStore("blacklist", {
+          keyPath: ["peerId"],
+        });
+        messageData.createIndex("peerId", "peerId", { unique: true });
+        messageData.createIndex("peerPublicKey", "peerPublicKey", {
+          unique: true,
+        });
+      }
+
       if (!db.objectStoreNames.contains("messageData")) {
         const messageData = db.createObjectStore("messageData", {
           keyPath: ["timestamp", "roomId", "hash"],
@@ -83,6 +115,7 @@ async function fnGetDBRoomMessageData(
       messageType: messageData[i].messageType,
       totalSize: messageData[i].totalSize,
       channelLabel: messageData[i].channelLabel,
+      timestamp: messageData[i].timestamp,
     });
   }
 
@@ -98,7 +131,6 @@ async function fnSetDBRoomMessageData(
   try {
     const tx = db.transaction("messageData", "readonly");
     const index = tx.objectStore("messageData").index("merkleRoot");
-
     const item = await index.get(message.merkleRootHex);
     await tx.done;
 

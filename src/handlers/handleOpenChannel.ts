@@ -160,6 +160,7 @@ export const handleOpenChannel = async (
             messageType,
             filename,
             channelLabel,
+            timestamp: Date.now(),
           });
 
           if (chunkSize > 0) {

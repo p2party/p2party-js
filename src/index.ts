@@ -26,6 +26,7 @@ import {
 } from "./reducers/roomSlice";
 import { keyPairSelector, resetIdentity } from "./reducers/keyPairSlice";
 import { signalingServerSelector } from "./reducers/signalingServerSlice";
+import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
 import { uint8ArrayToHex } from "./utils/uint8array";
@@ -51,7 +52,6 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 const connect = (
   roomUrl: string,

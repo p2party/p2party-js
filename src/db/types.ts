@@ -1,6 +1,22 @@
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 import type { MessageType } from "../utils/messageTypes";
 
+export interface AddressBook {
+  username: string;
+  peerId: string;
+  peerPublicKey: string;
+  challenge?: string;
+  signature?: string;
+  dateAdded: number;
+}
+
+export interface Blacklist {
+  username?: string;
+  peerId: string;
+  peerPublicKey: string;
+  dateAdded: number;
+}
+
 export interface MessageData {
   roomId: string;
   timestamp: number;

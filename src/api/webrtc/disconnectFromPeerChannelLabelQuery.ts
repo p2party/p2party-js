@@ -69,6 +69,8 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
           break;
         }
       }
+
+      if (peerHasChannel) break;
     }
 
     if (!peerHasChannel) {

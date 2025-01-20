@@ -1,6 +1,8 @@
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 
+import { setChannel, setPeer } from "../../reducers/roomSlice";
+
 import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -10,7 +12,6 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { State } from "../../store";
-import { setChannel, setPeer } from "../../reducers/roomSlice";
 
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];

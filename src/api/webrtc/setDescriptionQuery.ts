@@ -102,36 +102,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
 
     if (connectionIndex === -1) peerConnections.push(epc);
 
-    const offerCollision =
-      epc.signalingState !== "stable" && description.type === "offer";
-    if (offerCollision && connectionIndex > -1) return { data: undefined };
+    // const offerCollision =
+    //   epc.signalingState !== "stable" && description.type === "offer";
+    // const offerCollision =
+    //     description.type === "offer" &&
+    //     (makingOffer || epc.signalingState !== "stable");
+    // if (offerCollision && connectionIndex > -1) return { data: undefined };
 
-    if (offerCollision) {
-      await Promise.all([
-        epc.setLocalDescription({ type: "rollback" }).catch(() => {}), // ignore failure
-        epc.setRemoteDescription(description),
-      ]);
-      const answer = epc.localDescription;
-
-      if (answer) {
-        api.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "description",
-              description: answer,
-              fromPeerId: keyPair.peerId,
-              fromPeerPublicKey: keyPair.publicKey,
-              toPeerId: peerId,
-              roomId,
-            } as WebSocketMessageDescriptionSend,
-          }),
-        );
-      }
-    } else if (description.type === "offer") {
-      await epc.setRemoteDescription(description);
+    await epc.setRemoteDescription(description);
+    if (description.type === "offer") {
       await epc.setLocalDescription();
       const answer = epc.localDescription;
-
       if (answer) {
         api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
@@ -146,7 +127,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           }),
         );
       }
-    } else if (description.type === "answer") {
+    } else {
       if (
         epc.signalingState === "have-local-offer" ||
         epc.signalingState === "have-remote-offer"
@@ -156,6 +137,57 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         await handleQueuedIceCandidates(epc);
       }
     }
+
+    // if (offerCollision) {
+    //   await Promise.all([
+    //     epc.setLocalDescription({ type: "rollback" }).catch(() => {}), // ignore failure
+    //     epc.setRemoteDescription(description),
+    //   ]);
+    //   const answer = epc.localDescription;
+    //
+    //   if (answer) {
+    //     api.dispatch(
+    //       signalingServerApi.endpoints.sendMessage.initiate({
+    //         content: {
+    //           type: "description",
+    //           description: answer,
+    //           fromPeerId: keyPair.peerId,
+    //           fromPeerPublicKey: keyPair.publicKey,
+    //           toPeerId: peerId,
+    //           roomId,
+    //         } as WebSocketMessageDescriptionSend,
+    //       }),
+    //     );
+    //   }
+    // } else if (description.type === "offer") {
+    //   await epc.setRemoteDescription(description);
+    //   await epc.setLocalDescription();
+    //   const answer = epc.localDescription;
+    //
+    //   if (answer) {
+    //     api.dispatch(
+    //       signalingServerApi.endpoints.sendMessage.initiate({
+    //         content: {
+    //           type: "description",
+    //           description: answer,
+    //           fromPeerId: keyPair.peerId,
+    //           fromPeerPublicKey: keyPair.publicKey,
+    //           toPeerId: peerId,
+    //           roomId,
+    //         } as WebSocketMessageDescriptionSend,
+    //       }),
+    //     );
+    //   }
+    // } else if (description.type === "answer") {
+    //   if (
+    //     epc.signalingState === "have-local-offer" ||
+    //     epc.signalingState === "have-remote-offer"
+    //   ) {
+    //     await epc.setRemoteDescription(description);
+    //   } else {
+    //     await handleQueuedIceCandidates(epc);
+    //   }
+    // }
 
     if (epc.connectionState === "connected" && connectionIndex > -1) {
       await handleOpenChannel(

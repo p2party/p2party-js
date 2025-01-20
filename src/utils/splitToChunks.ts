@@ -215,6 +215,7 @@ export const splitToChunks = async (
     messageType,
     filename: name,
     channelLabel: label,
+    timestamp: Date.now(),
   };
 
   api.dispatch(setMessageAllChunks(messageData));

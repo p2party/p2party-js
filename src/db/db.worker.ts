@@ -8,7 +8,8 @@ import type {
   WorkerMessages,
   WorkerMethodReturnTypes,
   AddressBook,
-  Blacklist,
+  BlacklistedPeer,
+  UsernamedPeer,
 } from "./types";
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
@@ -19,17 +20,22 @@ export interface RepoSchema extends DBSchema {
   addressBook: {
     value: AddressBook;
     key: [string];
-    indexes: { peerId: string; peerPublicKey: string };
+    indexes: { peerId: string; peerPublicKey: string; username: string };
   };
   blacklist: {
-    value: Blacklist;
+    value: BlacklistedPeer;
     key: [string];
-    indexes: { peerId: string; peerPublicKey: string };
+    indexes: { peerId: string; peerPublicKey: string; username: string };
   };
   messageData: {
     value: MessageData;
     key: [number, string, string];
-    indexes: { roomId: string; hash: string; merkleRoot: string };
+    indexes: {
+      roomId: string;
+      hash: string;
+      merkleRoot: string;
+      fromPeerId: string;
+    };
   };
   chunks: {
     value: Chunk;
@@ -47,21 +53,23 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   return openDB<RepoSchema>(dbName, dbVersion, {
     upgrade(db) {
       if (!db.objectStoreNames.contains("addressBook")) {
-        const messageData = db.createObjectStore("addressBook", {
+        const addressBook = db.createObjectStore("addressBook", {
           keyPath: ["peerId"],
         });
-        messageData.createIndex("peerId", "peerId", { unique: true });
-        messageData.createIndex("peerPublicKey", "peerPublicKey", {
+        addressBook.createIndex("username", "username", { unique: false });
+        addressBook.createIndex("peerId", "peerId", { unique: true });
+        addressBook.createIndex("peerPublicKey", "peerPublicKey", {
           unique: true,
         });
       }
 
       if (!db.objectStoreNames.contains("blacklist")) {
-        const messageData = db.createObjectStore("blacklist", {
+        const blacklist = db.createObjectStore("blacklist", {
           keyPath: ["peerId"],
         });
-        messageData.createIndex("peerId", "peerId", { unique: true });
-        messageData.createIndex("peerPublicKey", "peerPublicKey", {
+        blacklist.createIndex("username", "username", { unique: false });
+        blacklist.createIndex("peerId", "peerId", { unique: true });
+        blacklist.createIndex("peerPublicKey", "peerPublicKey", {
           unique: true,
         });
       }
@@ -73,6 +81,7 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         messageData.createIndex("roomId", "roomId", { unique: false });
         messageData.createIndex("hash", "hash", { unique: false });
         messageData.createIndex("merkleRoot", "merkleRoot", { unique: true });
+        messageData.createIndex("fromPeerId", "fromPeerId", { unique: false });
       }
 
       if (!db.objectStoreNames.contains("chunks")) {
@@ -95,6 +104,264 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 }
 
 // Define each function with the expected arguments and return type:
+
+async function fnGetDBAddressBookEntry(
+  peerId?: string,
+  peerPublicKey?: string,
+): Promise<UsernamedPeer | undefined> {
+  if (!peerId && !peerPublicKey) return undefined;
+  if (peerId && peerId.length < 10 && !peerPublicKey) return undefined;
+  if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return undefined;
+
+  const db = await getDB();
+
+  try {
+    const tx = db.transaction("addressBook", "readonly");
+    const index = peerId
+      ? tx.objectStore("addressBook").index("peerId")
+      : tx.objectStore("addressBook").index("peerPublicKey");
+    const peer = peerId
+      ? await index.get(peerId)
+      : await index.get(peerPublicKey!);
+    await tx.done;
+    db.close();
+    return peer
+      ? {
+          username: peer.username,
+          peerId: peer.peerId,
+          peerPublicKey: peer.peerPublicKey,
+        }
+      : undefined;
+  } catch (error) {
+    db.close();
+
+    return undefined;
+  }
+}
+
+async function fnGetAllDBAddressBookEntries(): Promise<UsernamedPeer[]> {
+  const db = await getDB();
+
+  try {
+    const peers = await db.getAll("addressBook");
+    db.close();
+
+    return peers;
+  } catch (error) {
+    db.close();
+
+    return [];
+  }
+}
+
+async function fnSetDBAddressBookEntry(
+  username: string,
+  peerId: string,
+  peerPublicKey: string,
+): Promise<void> {
+  const db = await getDB();
+
+  try {
+    const tx = db.transaction("addressBook", "readonly");
+    const index1 = tx.objectStore("addressBook").index("peerId");
+    const index2 = tx.objectStore("addressBook").index("peerPublicKey");
+
+    const item1 = await index1.get(peerId);
+    const item2 = await index2.get(peerPublicKey);
+
+    await tx.done;
+
+    if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
+      await db.put("addressBook", {
+        username,
+        peerId,
+        peerPublicKey,
+        dateAdded: Date.now(),
+      });
+    }
+  } catch (error) {
+    await db.put("addressBook", {
+      username,
+      peerId,
+      peerPublicKey,
+      dateAdded: Date.now(),
+    });
+  }
+
+  db.close();
+}
+
+async function fnDeleteDBAddressBookEntry(
+  username?: string,
+  peerId?: string,
+  peerPublicKey?: string,
+): Promise<string> {
+  const noUsername = !username || username.length === 0;
+  const noPeerId = !peerId || peerId.length < 10;
+  const noPeerPublicKey = !peerPublicKey || peerPublicKey.length !== 64;
+
+  if (noUsername && noPeerId && noPeerPublicKey)
+    throw new Error("Cannot delete address book with no data");
+
+  const db = await getDB();
+
+  const tx = db.transaction("addressBook", "readwrite");
+  const store = tx.objectStore("addressBook");
+
+  let pId = peerId ?? "";
+
+  try {
+    if (!noPeerId) {
+      const index = store.index("peerId");
+      const item = await index.getKey(peerId);
+
+      if (item) await store.delete(item);
+    } else if (!noPeerPublicKey) {
+      const index = store.index("peerPublicKey");
+      const item = await index.getKey(peerPublicKey);
+
+      if (item) {
+        const entry = await index.get(peerPublicKey);
+        pId = entry?.peerId ?? "";
+
+        await store.delete(item);
+      }
+    } else {
+      const index = store.index("username");
+      const item = await index.getKey(username!);
+
+      if (item) {
+        const entry = await index.get(username!);
+        pId = entry?.peerId ?? "";
+
+        await store.delete(item);
+      }
+    }
+
+    await tx.done;
+  } catch {}
+
+  db.close();
+
+  return pId;
+}
+
+async function fnGetDBPeerIsBlackisted(
+  peerId?: string,
+  peerPublicKey?: string,
+): Promise<boolean> {
+  if (!peerId && !peerPublicKey) return false;
+  if (peerId && peerId.length < 10 && !peerPublicKey) return false;
+  if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return false;
+
+  const db = await getDB();
+
+  try {
+    const tx = db.transaction("blacklist", "readonly");
+    const index = peerId
+      ? tx.objectStore("blacklist").index("peerId")
+      : tx.objectStore("blacklist").index("peerPublicKey");
+    const peer = peerId
+      ? await index.get(peerId)
+      : await index.get(peerPublicKey!);
+    await tx.done;
+
+    db.close();
+
+    return peer ? true : false;
+  } catch (error) {
+    db.close();
+
+    return false;
+  }
+}
+
+async function fnGetAllDBBlacklisted(): Promise<BlacklistedPeer[]> {
+  const db = await getDB();
+
+  try {
+    const peers = await db.getAll("blacklist");
+    db.close();
+
+    return peers;
+  } catch (error) {
+    db.close();
+
+    return [];
+  }
+}
+
+async function fnSetDBPeerInBlacklist(
+  // username: string,
+  peerId: string,
+  peerPublicKey: string,
+): Promise<void> {
+  const db = await getDB();
+
+  try {
+    const tx = db.transaction("blacklist", "readonly");
+    const index1 = tx.objectStore("blacklist").index("peerId");
+    const index2 = tx.objectStore("blacklist").index("peerPublicKey");
+
+    const item1 = await index1.get(peerId);
+    const item2 = await index2.get(peerPublicKey);
+
+    await tx.done;
+
+    if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
+      await db.put("blacklist", {
+        // username,
+        peerId,
+        peerPublicKey,
+        dateAdded: Date.now(),
+      });
+    }
+  } catch (error) {
+    await db.put("blacklist", {
+      // username,
+      peerId,
+      peerPublicKey,
+      dateAdded: Date.now(),
+    });
+  }
+
+  db.close();
+}
+
+async function fnDeleteDBPeerFromBlacklist(
+  // username: string,
+  peerId?: string,
+  peerPublicKey?: string,
+): Promise<void> {
+  const noPeerId = !peerId || peerId.length < 10;
+  const noPeerPublicKey = !peerPublicKey || peerPublicKey.length !== 64;
+
+  if (noPeerId && noPeerPublicKey)
+    throw new Error("Cannot delete blacklisted with no data");
+
+  const db = await getDB();
+
+  const tx = db.transaction("blacklist", "readwrite");
+  const store = tx.objectStore("blacklist");
+
+  try {
+    if (!noPeerId) {
+      const index = store.index("peerId");
+      const item = await index.getKey(peerId);
+
+      if (item) await store.delete(item);
+    } else {
+      const index = store.index("peerPublicKey");
+      const item = await index.getKey(peerPublicKey!);
+
+      if (item) await store.delete(item);
+    }
+
+    await tx.done;
+  } catch {}
+
+  db.close();
+}
 
 async function fnGetDBRoomMessageData(
   roomId: string,
@@ -283,15 +550,26 @@ async function fnDeleteDBChunk(
   merkleRootHex: string,
   chunkIndex?: number,
 ): Promise<void> {
-  const db = await getDB();
-  if (chunkIndex) {
-    await db.delete("chunks", [merkleRootHex, chunkIndex]);
-  } else {
-    const keyRange = IDBKeyRange.only(merkleRootHex);
-    await db.delete("chunks", keyRange);
-  }
+  try {
+    const db = await getDB();
+    const tx = db.transaction("chunks", "readwrite");
+    const store = tx.objectStore("chunks");
 
-  db.close();
+    if (chunkIndex) {
+      const keys = IDBKeyRange.only([merkleRootHex, chunkIndex]);
+      await store.delete(keys);
+    } else {
+      const index = store.index("merkleRoot");
+      const keys = await index.getAllKeys(merkleRootHex);
+      const len = keys.length;
+      for (let i = 0; i < len; i++) {
+        await store.delete(keys[i]);
+      }
+    }
+
+    await tx.done;
+    db.close();
+  } catch (error) {}
 }
 
 async function fnDeleteDBSendQueue(
@@ -299,14 +577,32 @@ async function fnDeleteDBSendQueue(
   toPeerId: string,
   position?: number,
 ): Promise<void> {
-  const db = await getDB();
-  if (position) {
-    await db.delete("sendQueue", [position, label, toPeerId]);
-  } else {
-    const keyRange = IDBKeyRange.only([label, toPeerId]);
-    await db.delete("sendQueue", keyRange);
-  }
-  db.close();
+  try {
+    const db = await getDB();
+    if (position) {
+      await db.delete("sendQueue", [position, label, toPeerId]);
+    } else {
+      const keyRange = IDBKeyRange.only([label, toPeerId]);
+      await db.delete("sendQueue", keyRange);
+    }
+    db.close();
+  } catch (error) {}
+}
+
+async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction("messageData", "readwrite");
+    const store = tx.objectStore("messageData");
+    const index = store.index("merkleRoot");
+    const keys = await index.getAllKeys(merkleRootHex);
+    const len = keys.length;
+    for (let i = 0; i < len; i++) {
+      await store.delete(keys[i]);
+    }
+    await tx.done;
+    db.close();
+  } catch (error) {}
 }
 
 async function fnDeleteDB(): Promise<void> {
@@ -321,6 +617,46 @@ onmessage = async (e: MessageEvent) => {
   try {
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
+      case "getDBAddressBookEntry":
+        result = (await fnGetDBAddressBookEntry(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBAddressBookEntry"];
+        break;
+      case "getAllDBAddressBookEntries":
+        result = (await fnGetAllDBAddressBookEntries(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getAllDBAddressBookEntries"];
+        break;
+      case "setDBAddressBookEntry":
+        result = (await fnSetDBAddressBookEntry(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["setDBAddressBookEntry"];
+        break;
+      case "deleteDBAddressBookEntry":
+        result = (await fnDeleteDBAddressBookEntry(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["deleteDBAddressBookEntry"];
+        break;
+      case "getDBPeerIsBlacklisted":
+        result = (await fnGetDBPeerIsBlackisted(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBPeerIsBlacklisted"];
+        break;
+      case "getAllDBBlacklisted":
+        result = (await fnGetAllDBBlacklisted(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getAllDBBlacklisted"];
+        break;
+      case "setDBPeerInBlacklist":
+        result = (await fnSetDBPeerInBlacklist(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["setDBPeerInBlacklist"];
+        break;
+      case "deleteDBPeerFromBlacklist":
+        result = (await fnDeleteDBPeerFromBlacklist(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["deleteDBPeerFromBlacklist"];
+        break;
       case "getDBRoomMessageData":
         result = (await fnGetDBRoomMessageData(
           ...message.args,
@@ -375,6 +711,11 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnDeleteDBChunk(
           ...message.args,
         )) as WorkerMethodReturnTypes["deleteDBChunk"];
+        break;
+      case "deleteDBMessageData":
+        result = (await fnDeleteDBMessageData(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["deleteDBMessageData"];
         break;
       case "deleteDBSendQueue":
         result = (await fnDeleteDBSendQueue(

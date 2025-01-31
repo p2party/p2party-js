@@ -4,7 +4,17 @@ import { store, dispatch } from "./store";
 
 import { generateRandomRoomUrl } from "./cryptography/utils";
 
-import { getDBAllChunks } from "./db/api";
+import {
+  deleteDBAddressBookEntry,
+  deleteDBPeerFromBlacklist,
+  getAllDBAddressBookEntries,
+  getAllDBBlacklisted,
+  getDBAddressBookEntry,
+  getDBAllChunks,
+  getDBPeerIsBlacklisted,
+  setDBAddressBookEntry,
+  setDBPeerInBlacklist,
+} from "./db/api";
 import {
   getFileExtension,
   getMessageCategory,
@@ -52,11 +62,12 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
+import type { BlacklistedPeer, UsernamedPeer } from "./db/types";
 
 const connect = (
   roomUrl: string,
-  signalingServerUrl = "wss://signaling.p2party.com/ws",
-  // signalingServerUrl = "ws://localhost:3001/ws",
+  // signalingServerUrl = "wss://signaling.p2party.com/ws",
+  signalingServerUrl = "ws://localhost:3001/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
@@ -109,12 +120,21 @@ const connect = (
 };
 
 const connectToSignalingServer = (
-  signalingServerUrl = "wss://signaling.p2party.com/ws",
-  // signalingServerUrl = "ws://localhost:3001/ws",
+  // signalingServerUrl = "wss://signaling.p2party.com/ws",
+  signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
-  dispatch(
-    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl),
-  );
+  const { signalingServer } = store.getState();
+
+  if (
+    signalingServer.serverUrl !== signalingServerUrl ||
+    (!signalingServer.isConnected && !signalingServer.isEstablishingConnection)
+  ) {
+    dispatch(
+      signalingServerApi.endpoints.connectWebSocket.initiate(
+        signalingServerUrl,
+      ),
+    );
+  }
 };
 
 const disconnectFromSignalingServer = () => {
@@ -140,6 +160,74 @@ const allowConnectionRelay = (roomId: string, allowed = true) => {
       }),
     );
   }
+};
+
+const onlyAllowConnectionsFromAddressBook = async (
+  roomUrl: string,
+  onlyAllow: boolean,
+) => {
+  if (roomUrl.length === 64) {
+    const { rooms } = store.getState();
+    const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+
+    if (
+      roomIndex > -1 &&
+      !rooms[roomIndex].onlyConnectWithKnownAddresses &&
+      onlyAllow &&
+      rooms[roomIndex].peers.length > 0
+    ) {
+      const peersLen = rooms[roomIndex].peers.length;
+      for (let i = 0; i < peersLen; i++) {
+        const address = await getDBAddressBookEntry(
+          rooms[roomIndex].peers[i].peerId,
+          rooms[roomIndex].peers[i].peerPublicKey,
+        );
+
+        if (!address) {
+          dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({
+              peerId: rooms[roomIndex].peers[i].peerId,
+              alsoDeleteData: false,
+            }),
+          );
+        }
+      }
+    }
+
+    dispatch(
+      setRoom({
+        url: roomIndex > -1 ? rooms[roomIndex].url : roomUrl,
+        id: roomIndex > -1 ? rooms[roomIndex].id : "",
+        onlyConnectWithKnownPeers: onlyAllow,
+      }),
+    );
+  }
+};
+
+const deletePeerFromAddressBook = async (
+  username?: string,
+  peerId?: string,
+  peerPublicKey?: string,
+) => {
+  const pId = await deleteDBAddressBookEntry(username, peerId, peerPublicKey);
+  if (isUUID(pId)) {
+    dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate({
+        peerId: pId,
+        alsoDeleteData: false,
+      }),
+    );
+  }
+};
+
+const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
+  await setDBPeerInBlacklist(peerId, peerPublicKey);
+  dispatch(
+    webrtcApi.endpoints.disconnectFromPeer.initiate({
+      peerId,
+      alsoDeleteData: true,
+    }),
+  );
 };
 
 const openChannel = async (
@@ -532,6 +620,19 @@ const purge = () => {
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
+const newRoomUrl = async () => {
+  const randomString = await generateRandomRoomUrl(256);
+  const random = new TextEncoder().encode(randomString);
+  const firstHashArray = await window.crypto.subtle.digest("SHA-512", random);
+  const secondHashArray = await window.crypto.subtle.digest(
+    "SHA-256",
+    firstHashArray,
+  );
+  const hash = new Uint8Array(secondHashArray);
+
+  return uint8ArrayToHex(hash);
+};
+
 export default {
   store,
   commonStateSelector,
@@ -544,6 +645,15 @@ export default {
   disconnectFromRoom,
   disconnectFromPeer,
   allowConnectionRelay,
+  onlyAllowConnectionsFromAddressBook,
+  addPeerToAddressBook: setDBAddressBookEntry,
+  getPeerAddressBookEntry: getDBAddressBookEntry,
+  getAllPeersInAddressBook: getAllDBAddressBookEntries,
+  getAllPeersInBlacklist: getAllDBBlacklisted,
+  deletePeerFromAddressBook,
+  blacklistPeer,
+  getPeerIsBlacklisted: getDBPeerIsBlacklisted,
+  removePeerFromBlacklist: deleteDBPeerFromBlacklist,
   openChannel,
   sendMessage,
   readMessage,
@@ -552,7 +662,7 @@ export default {
   purgeIdentity,
   purgeRoom,
   purge,
-  generateRandomRoomUrl,
+  generateRandomRoomUrl: newRoomUrl,
   MIN_CHUNKS: 3,
   MIN_CHUNK_SIZE: IMPORTANT_DATA_LEN + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
@@ -571,6 +681,8 @@ export type {
   RoomData,
   MimeType,
   FileExtension,
+  UsernamedPeer,
+  BlacklistedPeer,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,

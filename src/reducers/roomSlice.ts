@@ -33,6 +33,7 @@ export interface SetRoomArgs {
   url: string;
   id: string;
   canBeConnectionRelay?: boolean;
+  onlyConnectWithKnownPeers?: boolean;
   rtcConfig?: RTCConfiguration;
 }
 
@@ -84,10 +85,16 @@ export interface DeleteChannelArgs {
   label?: string;
 }
 
+export interface SetCanOnlyConnectWithKnownPeers {
+  roomId: string;
+  onlyConnectWithKnownPeers: boolean;
+}
+
 export interface Room extends SetRoomArgs {
   connectingToPeers: boolean;
   connectedToPeers: boolean;
   canBeConnectionRelay: boolean;
+  onlyConnectWithKnownAddresses: boolean;
   rtcConfig: RTCConfiguration;
   peers: Peer[];
   channels: Channel[];
@@ -125,7 +132,13 @@ const roomSlice = createSlice({
   initialState,
   reducers: {
     setRoom: (state, action: PayloadAction<SetRoomArgs>) => {
-      const { url, id, canBeConnectionRelay, rtcConfig } = action.payload;
+      const {
+        url,
+        id,
+        canBeConnectionRelay,
+        rtcConfig,
+        onlyConnectWithKnownPeers,
+      } = action.payload;
 
       if (url.length === 64 && isUUID(id)) {
         const roomIndex = state.findIndex((r) => r.url === url || r.id === id);
@@ -133,17 +146,31 @@ const roomSlice = createSlice({
         if (roomIndex > -1) {
           state[roomIndex].url = url;
           state[roomIndex].id = id;
-          if (canBeConnectionRelay)
+          if (canBeConnectionRelay != undefined)
             state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
           if (rtcConfig) state[roomIndex].rtcConfig = rtcConfig;
+          if (onlyConnectWithKnownPeers != undefined) {
+            state[roomIndex].onlyConnectWithKnownAddresses =
+              onlyConnectWithKnownPeers;
+          } else {
+            state[roomIndex].onlyConnectWithKnownAddresses =
+              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+              "true";
+          }
         } else {
           state.push({
             url,
             id,
             connectingToPeers: false,
             connectedToPeers: false,
-            canBeConnectionRelay: true,
-            rtcConfig: defaultRTCConfig,
+            canBeConnectionRelay:
+              canBeConnectionRelay != undefined ? canBeConnectionRelay : true,
+            onlyConnectWithKnownAddresses:
+              onlyConnectWithKnownPeers != undefined
+                ? onlyConnectWithKnownPeers
+                : localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+                  "true",
+            rtcConfig: rtcConfig ?? defaultRTCConfig,
             peers: [],
             channels: [],
             messages: [],
@@ -155,17 +182,31 @@ const roomSlice = createSlice({
         if (roomIndex > -1) {
           state[roomIndex].url = url;
           state[roomIndex].id = "";
-          if (canBeConnectionRelay)
+          if (canBeConnectionRelay != undefined)
             state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
           if (rtcConfig) state[roomIndex].rtcConfig = rtcConfig;
+          if (onlyConnectWithKnownPeers != undefined) {
+            state[roomIndex].onlyConnectWithKnownAddresses =
+              onlyConnectWithKnownPeers;
+          } else {
+            state[roomIndex].onlyConnectWithKnownAddresses =
+              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+              "true";
+          }
         } else {
           state.push({
             url,
             id: "",
             connectingToPeers: false,
             connectedToPeers: false,
-            canBeConnectionRelay: true,
-            rtcConfig: defaultRTCConfig,
+            canBeConnectionRelay:
+              canBeConnectionRelay != undefined ? canBeConnectionRelay : true,
+            onlyConnectWithKnownAddresses:
+              onlyConnectWithKnownPeers != undefined
+                ? onlyConnectWithKnownPeers
+                : localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+                  "true",
+            rtcConfig: rtcConfig ?? defaultRTCConfig,
             peers: [],
             channels: [],
             messages: [],
@@ -434,6 +475,20 @@ const roomSlice = createSlice({
       }
     },
 
+    setOnlyConnectWithKnownPeers: (
+      state,
+      action: PayloadAction<SetCanOnlyConnectWithKnownPeers>,
+    ) => {
+      const { roomId, onlyConnectWithKnownPeers } = action.payload;
+
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+
+      if (roomIndex > -1) {
+        state[roomIndex].onlyConnectWithKnownAddresses =
+          onlyConnectWithKnownPeers;
+      }
+    },
+
     deleteRoom: (state, action: PayloadAction<string>) => {
       const roomIndex = state.findIndex(
         (r) => r.url === action.payload || r.id === action.payload,
@@ -447,6 +502,7 @@ const roomSlice = createSlice({
           connectingToPeers: false,
           connectedToPeers: false,
           canBeConnectionRelay: true,
+          onlyConnectWithKnownAddresses: false,
           rtcConfig: defaultRTCConfig,
           peers: [],
           channels: [],
@@ -462,6 +518,7 @@ export const {
   setConnectingToPeers,
   setConnectedToPeers,
   setConnectionRelay,
+  setOnlyConnectWithKnownPeers,
   setPeer,
   setChannel,
   setIceServers,

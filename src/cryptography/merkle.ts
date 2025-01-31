@@ -97,7 +97,7 @@ export const getMerkleRoot = async (
  * Returns the Merkle proof of an element of a tree.
  * Can be used as a receipt of a transaction etc.
  *
- * @param {Uint8Array[]} tree: The tree.
+ * @param {Uint8Array[]} treeHashes: The tree.
  * @param {Uint8Array} element: The element.
  *
  * @returns {Promise<Uint8Array>}: The Merkle proof.

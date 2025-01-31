@@ -3,6 +3,8 @@ import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 
 import { setChannel, setPeer } from "../../reducers/roomSlice";
 
+import { getDBPeerIsBlacklisted } from "../../db/api";
+
 import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -50,6 +52,9 @@ const webrtcBaseQuery: BaseQueryFn<
     const merkleModule = await libcrypto({
       wasmMemory: merkleWasmMemory,
     });
+
+    const blacklisted = await getDBPeerIsBlacklisted(peerId);
+    if (blacklisted) return { data: undefined };
 
     const connectionIndex = peerConnections.findIndex(
       (pc) => pc.withPeerId === peerId,

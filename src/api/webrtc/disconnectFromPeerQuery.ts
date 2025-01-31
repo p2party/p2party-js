@@ -1,4 +1,4 @@
-import { deletePeer } from "../../reducers/roomSlice";
+import { deleteMessage, deletePeer } from "../../reducers/roomSlice";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -6,7 +6,7 @@ import type {
   IRTCPeerConnection,
   RTCDisconnectFromPeerParams,
 } from "./interfaces";
-// import { deleteDBSendQueue } from "../../db/api";
+import type { State } from "../../store";
 
 export interface RTCDisconnectFromPeerParamsExtension
   extends RTCDisconnectFromPeerParams {
@@ -18,7 +18,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   RTCDisconnectFromPeerParamsExtension,
   void,
   unknown
-> = async ({ peerId, peerConnections, dataChannels }, api) => {
+> = async ({ peerId, alsoDeleteData, peerConnections, dataChannels }, api) => {
   try {
     api.dispatch(deletePeer({ peerId }));
 
@@ -49,6 +49,23 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       if (dataChannels[i].withPeerId !== peerId) continue;
       if (dataChannels[i].readyState === "open") {
         dataChannels[i].close();
+      }
+    }
+
+    if (alsoDeleteData) {
+      const { rooms } = api.getState() as State;
+      const roomsLen = rooms.length;
+      for (let i = 0; i < roomsLen; i++) {
+        const messagesLen = rooms[i].messages.length;
+        for (let j = 0; j < messagesLen; j++) {
+          if (rooms[i].messages[j].fromPeerId === peerId) {
+            api.dispatch(
+              deleteMessage({
+                merkleRootHex: rooms[i].messages[j].merkleRootHex,
+              }),
+            );
+          }
+        }
       }
     }
 

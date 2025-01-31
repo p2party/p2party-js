@@ -21,7 +21,7 @@ const signalingServerSlice = createSlice({
   reducers: {
     startConnecting: (state, action: PayloadAction<string | undefined>) => {
       state.isEstablishingConnection = true;
-      state.serverUrl = action.payload ?? "ws://localhost:3001/ws";
+      state.serverUrl = action.payload ?? "wss://signaling.p2party.com/ws";
     },
 
     connectionEstablished: (state) => {

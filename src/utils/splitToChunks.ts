@@ -74,7 +74,7 @@ export const splitToChunks = async (
   messageType: MessageType;
   unencryptedChunks: Uint8Array[];
 }> => {
-  if (minChunks < 3) throw new Error("We need at least 3 chunks");
+  // if (minChunks < 3) throw new Error("We need at least 3 chunks");
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
   if (!metadataSchemaVersions.includes(metadataSchemaVersion))

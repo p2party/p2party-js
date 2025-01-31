@@ -95,6 +95,7 @@ export interface RTCDisconnectFromRoomParams {
 
 export interface RTCDisconnectFromPeerParams {
   peerId: string;
+  alsoDeleteData?: boolean;
 }
 
 export interface RTCDisconnectFromChannelLabelParams {

@@ -94,6 +94,19 @@ export interface WebSocketMessagePeersResponse {
   peers: RoomPeer[];
 }
 
+export interface WebSocketMessageConnectionRequest {
+  type: "peerConnection";
+  roomId: string;
+  peer: RoomPeer;
+}
+
+export interface WebSocketMessageConnectionResponse {
+  type: "peerConnection";
+  roomId: string;
+  fromPeerId: string;
+  toPeerId: string;
+}
+
 export interface WebSocketMessagePeerConnectionRequest {
   type: "connection";
   roomId: string;

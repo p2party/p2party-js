@@ -33,6 +33,41 @@ function callWorker<M extends WorkerMessages["method"]>(
   });
 }
 
+export const getDBAddressBookEntry = (
+  peerId?: string,
+  peerPublicKey?: string,
+) => callWorker("getDBAddressBookEntry", peerId, peerPublicKey);
+
+export const getAllDBAddressBookEntries = () =>
+  callWorker("getAllDBAddressBookEntries");
+
+export const setDBAddressBookEntry = (
+  username: string,
+  peerId: string,
+  peerPublicKey: string,
+) => callWorker("setDBAddressBookEntry", username, peerId, peerPublicKey);
+
+export const deleteDBAddressBookEntry = (
+  username?: string,
+  peerId?: string,
+  peerPublicKey?: string,
+) => callWorker("deleteDBAddressBookEntry", username, peerId, peerPublicKey);
+
+export const getDBPeerIsBlacklisted = (
+  peerId?: string,
+  peerPublicKey?: string,
+) => callWorker("getDBPeerIsBlacklisted", peerId, peerPublicKey);
+
+export const getAllDBBlacklisted = () => callWorker("getAllDBBlacklisted");
+
+export const setDBPeerInBlacklist = (peerId: string, peerPublicKey: string) =>
+  callWorker("setDBPeerInBlacklist", peerId, peerPublicKey);
+
+export const deleteDBPeerFromBlacklist = (
+  peerId?: string,
+  peerPublicKey?: string,
+) => callWorker("deleteDBPeerFromBlacklist", peerId, peerPublicKey);
+
 export const getDBRoomMessageData = (roomId: string) =>
   callWorker("getDBRoomMessageData", roomId);
 
@@ -67,6 +102,9 @@ export const countDBSendQueue = (label: string, toPeerId: string) =>
 
 export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
+
+export const deleteDBMessageData = (merkleRootHex: string) =>
+  callWorker("deleteDBMessageData", merkleRootHex);
 
 export const deleteDB = () => callWorker("deleteDB");
 

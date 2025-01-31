@@ -33,6 +33,7 @@ import type {
   WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdRequest,
   WebSocketMessagePeersRequest,
+  WebSocketMessageConnectionResponse,
   WebSocketMessagePongResponse,
   WebSocketMessageMessageSendRequest,
   WebSocketPeerConnectionParams,
@@ -52,6 +53,7 @@ export interface WebSocketMessage {
     | WebSocketMessageChallengeResponse
     | WebSocketMessageRoomIdRequest
     | WebSocketMessagePeersRequest
+    | WebSocketMessageConnectionResponse
     | WebSocketMessageMessageSendRequest;
 }
 
@@ -118,8 +120,9 @@ const websocketBaseQuery: BaseQueryFn<
   try {
     const { keyPair } = api.getState() as State;
 
-    let publicKey = "";
-    if (keyPair.secretKey.length === 0) {
+    let publicKey = localStorage.getItem("publicKey") ?? "";
+    let secretKey = localStorage.getItem("secretKey") ?? "";
+    if (keyPair.secretKey.length === 0 && secretKey.length === 0) {
       // const newKeyPair = await crypto.subtle.generateKey(
       //   {
       //     name: "RSA-PSS",
@@ -138,15 +141,25 @@ const websocketBaseQuery: BaseQueryFn<
 
       const k = await newKeyPair();
       publicKey = uint8ArrayToHex(k.publicKey);
-      const secretKey = uint8ArrayToHex(k.secretKey);
+      secretKey = uint8ArrayToHex(k.secretKey);
 
       api.dispatch(setKeyPair({ publicKey, secretKey }));
+    } else if (keyPair.secretKey.length === 0) {
+      if (secretKey.length === 128 && publicKey.length === 64) {
+        api.dispatch(setKeyPair({ publicKey, secretKey }));
+      } else {
+        const k = await newKeyPair();
+        publicKey = uint8ArrayToHex(k.publicKey);
+        secretKey = uint8ArrayToHex(k.secretKey);
+
+        api.dispatch(setKeyPair({ publicKey, secretKey }));
+      }
     } else {
       publicKey = keyPair.publicKey;
     }
 
     const fullUrl = signalingServerUrl + "?publickey=" + publicKey;
-    api.dispatch(signalingServerActions.startConnecting(fullUrl));
+    api.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
 
     ws = new WebSocket(fullUrl);
     ws.binaryType = "arraybuffer";

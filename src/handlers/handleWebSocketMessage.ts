@@ -30,12 +30,14 @@ import type {
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateReceive,
   WebSocketMessagePeersResponse,
+  WebSocketMessageConnectionRequest,
   WebSocketMessageSuccessfulChallenge,
   WebSocketMessageError,
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
   WebSocketMessageMessageSendResponse,
 } from "../utils/interfaces";
+import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
 
 export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
 export const messageLen =
@@ -74,6 +76,7 @@ const handleWebSocketMessage = async (
       | WebSocketMessageDescriptionReceive
       | WebSocketMessageCandidateReceive
       | WebSocketMessagePeersResponse
+      | WebSocketMessageConnectionRequest
       | WebSocketMessageSuccessfulChallenge
       | WebSocketMessageError
       | WebSocketMessagePeerConnectionResponse
@@ -156,14 +159,42 @@ const handleWebSocketMessage = async (
         break;
       }
 
-      case "peers": {
-        // if (
-        //   !isUUID(message.roomId) ||
-        //   message.roomId !== room.id ||
-        //   keyPair.publicKey.length === 0
-        // )
-        //   break;
+      case "peerConnection": {
+        const blacklisted = await getDBPeerIsBlacklisted(
+          message.peer.id,
+          message.peer.publicKey,
+        );
 
+        if (blacklisted) break;
+
+        const { keyPair, rooms } = api.getState() as State;
+
+        const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
+
+        if (roomIndex > -1 && rooms[roomIndex].onlyConnectWithKnownAddresses) {
+          const inAddressBook = await getDBAddressBookEntry(
+            message.peer.id,
+            message.peer.publicKey,
+          );
+
+          if (!inAddressBook) break;
+        }
+
+        api.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "peerConnection",
+              roomId: message.roomId,
+              fromPeerId: keyPair.peerId,
+              toPeerId: message.peer.id,
+            },
+          }),
+        );
+
+        break;
+      }
+
+      case "peers": {
         const { keyPair, rooms, commonState } = api.getState() as State;
 
         const roomIndex =
@@ -175,6 +206,9 @@ const handleWebSocketMessage = async (
           const len = message.peers.length;
           if (len === 0) break;
 
+          const canOnlyConnectToKnownPeers =
+            rooms[roomIndex].onlyConnectWithKnownAddresses;
+
           for (let i = 0; i < len; i++) {
             if (
               message.peers[i].publicKey === keyPair.publicKey ||
@@ -183,6 +217,21 @@ const handleWebSocketMessage = async (
               message.peers[i].publicKey.length !== 64
             )
               continue;
+
+            const blacklisted = await getDBPeerIsBlacklisted(
+              message.peers[i].id,
+              message.peers[i].publicKey,
+            );
+            if (blacklisted) continue;
+
+            if (canOnlyConnectToKnownPeers) {
+              const p = await getDBAddressBookEntry(
+                message.peers[i].id,
+                message.peers[i].publicKey,
+              );
+
+              if (!p) continue;
+            }
 
             // api.dispatch(
             //   signalingServerApi.endpoints.connectWithPeer.initiate({
@@ -208,25 +257,34 @@ const handleWebSocketMessage = async (
       }
 
       case "description": {
-        api.dispatch(
-          webrtcApi.endpoints.setDescription.initiate({
-            peerId: message.fromPeerId,
-            peerPublicKey: message.fromPeerPublicKey,
-            roomId: message.roomId,
-            description: message.description,
-          }),
+        const blacklisted = await getDBPeerIsBlacklisted(
+          message.fromPeerId,
+          message.fromPeerPublicKey,
         );
+
+        if (!blacklisted)
+          api.dispatch(
+            webrtcApi.endpoints.setDescription.initiate({
+              peerId: message.fromPeerId,
+              peerPublicKey: message.fromPeerPublicKey,
+              roomId: message.roomId,
+              description: message.description,
+            }),
+          );
 
         break;
       }
 
       case "candidate": {
-        api.dispatch(
-          webrtcApi.endpoints.setCandidate.initiate({
-            peerId: message.fromPeerId,
-            candidate: message.candidate,
-          }),
-        );
+        const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
+
+        if (!blacklisted)
+          api.dispatch(
+            webrtcApi.endpoints.setCandidate.initiate({
+              peerId: message.fromPeerId,
+              candidate: message.candidate,
+            }),
+          );
 
         break;
       }

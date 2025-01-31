@@ -3,6 +3,7 @@ import { isUUID } from "class-validator";
 
 import {
   setConnectingToPeers,
+  // setOnlyConnectWithKnownPeers,
   setRoom,
   setMessage,
   deleteMessage,
@@ -13,7 +14,11 @@ import {
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
-import { deleteDBChunk, getDBRoomMessageData } from "../db/api";
+import {
+  deleteDBChunk,
+  deleteDBMessageData,
+  getDBRoomMessageData,
+} from "../db/api";
 
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
@@ -23,6 +28,7 @@ const roomListenerMiddleware = createListenerMiddleware();
 roomListenerMiddleware.startListening({
   matcher: isAnyOf(
     setConnectingToPeers,
+    // setOnlyConnectWithKnownPeers,
     setRoom,
     setMessage,
     deleteMessage,
@@ -64,6 +70,13 @@ roomListenerMiddleware.startListening({
       const oldMessagesLen = oldMessages.length;
       for (let i = 0; i < oldMessagesLen; i++) {
         listenerApi.dispatch(setMessageAllChunks(oldMessages[i]));
+      }
+
+      if (action.payload.onlyConnectWithKnownPeers != undefined) {
+        localStorage.setItem(
+          action.payload.url + "-onlyConnectWithKnownPeers",
+          String(action.payload.onlyConnectWithKnownPeers),
+        );
       }
 
       const { signalingServer, keyPair, rooms } =
@@ -120,6 +133,7 @@ roomListenerMiddleware.startListening({
       const { merkleRootHex } = action.payload;
 
       await deleteDBChunk(merkleRootHex);
+      await deleteDBMessageData(merkleRootHex);
     } else if (deleteRoom.match(action)) {
       listenerApi.dispatch(
         webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),

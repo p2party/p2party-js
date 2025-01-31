@@ -1,19 +1,17 @@
-import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
+import type { Peer, SetMessageAllChunksArgs } from "../reducers/roomSlice";
 import type { MessageType } from "../utils/messageTypes";
 
-export interface AddressBook {
+export interface UsernamedPeer extends Peer {
   username: string;
-  peerId: string;
-  peerPublicKey: string;
-  challenge?: string;
-  signature?: string;
-  dateAdded: number;
 }
 
-export interface Blacklist {
-  username?: string;
-  peerId: string;
-  peerPublicKey: string;
+export interface AddressBook extends UsernamedPeer {
+  dateAdded: number;
+  challenge?: string;
+  signature?: string;
+}
+
+export interface BlacklistedPeer extends Peer {
   dateAdded: number;
 }
 
@@ -45,6 +43,46 @@ export interface SendQueue {
 
 // Each method and its arguments/return type
 export type WorkerMessages =
+  | {
+      id: number;
+      method: "getDBAddressBookEntry";
+      args: [peerId?: string, peerPublicKey?: string];
+    }
+  | {
+      id: number;
+      method: "getAllDBAddressBookEntries";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setDBAddressBookEntry";
+      args: [username: string, peerId: string, peerPublicKey: string];
+    }
+  | {
+      id: number;
+      method: "deleteDBAddressBookEntry";
+      args: [username?: string, peerId?: string, peerPublicKey?: string];
+    }
+  | {
+      id: number;
+      method: "getDBPeerIsBlacklisted";
+      args: [peerId?: string, peerPublicKey?: string];
+    }
+  | {
+      id: number;
+      method: "getAllDBBlacklisted";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setDBPeerInBlacklist";
+      args: [peerId: string, peerPublicKey: string];
+    }
+  | {
+      id: number;
+      method: "deleteDBPeerFromBlacklist";
+      args: [peerId?: string, peerPublicKey?: string];
+    }
   | {
       id: number;
       method: "getDBRoomMessageData";
@@ -86,6 +124,11 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "deleteDBMessageData";
+      args: [merkleRootHex: string];
+    }
+  | {
+      id: number;
       method: "deleteDBSendQueue";
       args: [label: string, toPeerId: string, position?: number];
     }
@@ -97,6 +140,14 @@ export type WorkerMessages =
 
 // Return types for each method
 export interface WorkerMethodReturnTypes {
+  getDBAddressBookEntry: UsernamedPeer | undefined;
+  getAllDBAddressBookEntries: UsernamedPeer[];
+  setDBAddressBookEntry: void;
+  deleteDBAddressBookEntry: string;
+  getDBPeerIsBlacklisted: boolean;
+  getAllDBBlacklisted: BlacklistedPeer[];
+  setDBPeerInBlacklist: void;
+  deleteDBPeerFromBlacklist: void;
   getDBRoomMessageData: SetMessageAllChunksArgs[];
   getDBChunk: Blob | undefined;
   existsDBChunk: boolean;
@@ -108,6 +159,7 @@ export interface WorkerMethodReturnTypes {
   setDBSendQueue: void;
   countDBSendQueue: number;
   deleteDBChunk: void;
+  deleteDBMessageData: void;
   deleteDBSendQueue: void;
   deleteDB: void;
 }

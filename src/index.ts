@@ -66,8 +66,8 @@ import type { BlacklistedPeer, UsernamedPeer } from "./db/types";
 
 const connect = (
   roomUrl: string,
-  // signalingServerUrl = "wss://signaling.p2party.com/ws",
-  signalingServerUrl = "ws://localhost:3001/ws",
+  signalingServerUrl = "wss://signaling.p2party.com/ws",
+  // signalingServerUrl = "ws://localhost:3001/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
@@ -120,8 +120,8 @@ const connect = (
 };
 
 const connectToSignalingServer = (
-  // signalingServerUrl = "wss://signaling.p2party.com/ws",
-  signalingServerUrl = "ws://localhost:3001/ws",
+  signalingServerUrl = "wss://signaling.p2party.com/ws",
+  // signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
   const { signalingServer } = store.getState();
 

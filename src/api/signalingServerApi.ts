@@ -112,7 +112,7 @@ const websocketBaseQuery: BaseQueryFn<
   if (ws) {
     const { keyPair } = api.getState() as State;
 
-    console.warn("WebSocket already connected");
+    console.log("WebSocket already connected");
 
     return { data: keyPair.publicKey };
   }

@@ -120,10 +120,19 @@ const connect = (
 };
 
 const connectToSignalingServer = (
+  roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
-  const { signalingServer } = store.getState();
+  if (roomUrl.length !== 64) throw new Error("Invalid room url length");
+
+  const { signalingServer, rooms, commonState } = store.getState();
+
+  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  if (roomIndex === -1) dispatch(setRoom({ url: roomUrl, id: "" }));
+
+  if (commonState.currentRoomUrl !== roomUrl)
+    dispatch(setCurrentRoomUrl(roomUrl));
 
   if (
     signalingServer.serverUrl !== signalingServerUrl ||

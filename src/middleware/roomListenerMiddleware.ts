@@ -14,6 +14,8 @@ import {
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
+import { compileChannelMessageLabel } from "../utils/channelLabel";
+
 import {
   deleteDBChunk,
   deleteDBMessageData,
@@ -22,7 +24,6 @@ import {
 
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
-import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 const roomListenerMiddleware = createListenerMiddleware();
 roomListenerMiddleware.startListening({

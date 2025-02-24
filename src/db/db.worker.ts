@@ -10,11 +10,12 @@ import type {
   AddressBook,
   BlacklistedPeer,
   UsernamedPeer,
+  UniqueRoom,
 } from "./types";
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
 export const dbName = "p2party";
-export const dbVersion = 5;
+export const dbVersion = 7;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -26,6 +27,11 @@ export interface RepoSchema extends DBSchema {
     value: BlacklistedPeer;
     key: [string];
     indexes: { peerId: string; peerPublicKey: string; username: string };
+  };
+  uniqueRoom: {
+    value: UniqueRoom;
+    key: [string];
+    indexes: { roomId: string; roomUrl: string };
   };
   messageData: {
     value: MessageData;
@@ -72,6 +78,14 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         blacklist.createIndex("peerPublicKey", "peerPublicKey", {
           unique: true,
         });
+      }
+
+      if (!db.objectStoreNames.contains("uniqueRoom")) {
+        const uniqueRoom = db.createObjectStore("uniqueRoom", {
+          keyPath: ["roomId"],
+        });
+        uniqueRoom.createIndex("roomUrl", "roomUrl", { unique: true });
+        uniqueRoom.createIndex("roomId", "roomId", { unique: true });
       }
 
       if (!db.objectStoreNames.contains("messageData")) {
@@ -363,6 +377,56 @@ async function fnDeleteDBPeerFromBlacklist(
   db.close();
 }
 
+async function fnGetAllDBUniqueRooms(): Promise<UniqueRoom[]> {
+  const db = await getDB();
+
+  try {
+    const rooms = await db.getAll("uniqueRoom");
+    db.close();
+
+    return rooms;
+  } catch (error) {
+    db.close();
+
+    return [];
+  }
+}
+
+async function fnSetDBUniqueRoom(
+  roomUrl: string,
+  roomId: string,
+): Promise<void> {
+  const db = await getDB();
+
+  try {
+    const tx = db.transaction("uniqueRoom", "readwrite");
+    const index1 = tx.objectStore("uniqueRoom").index("roomUrl");
+    const index2 = tx.objectStore("uniqueRoom").index("roomId");
+
+    const item1 = await index1.get(roomUrl);
+    const item2 = await index2.get(roomId);
+
+    await tx.done;
+
+    if (!item1 && !item2) {
+      const d = Date.now();
+      await db.put("uniqueRoom", {
+        // username,
+        roomId,
+        roomUrl,
+        messageCount: 0,
+        lastMessageMerkleRoot: "",
+        createdAt: d,
+        updatedAt: d,
+      });
+    }
+  } catch (error) {
+    console.error(error);
+  }
+
+  db.close();
+}
+
 async function fnGetDBRoomMessageData(
   roomId: string,
 ): Promise<SetMessageAllChunksArgs[]> {
@@ -413,6 +477,22 @@ async function fnSetDBRoomMessageData(
         totalSize: message.totalSize,
         channelLabel: message.channelLabel,
       });
+
+      const roomTx = db.transaction("uniqueRoom", "readwrite");
+      const indx = roomTx.objectStore("uniqueRoom").index("roomId");
+      const itm = await indx.get(roomId);
+      await roomTx.done;
+
+      if (itm && itm.lastMessageMerkleRoot !== message.merkleRootHex) {
+        await db.put("uniqueRoom", {
+          roomId,
+          roomUrl: itm.roomUrl,
+          messageCount: itm.messageCount + 1,
+          lastMessageMerkleRoot: message.merkleRootHex,
+          createdAt: itm.createdAt,
+          updatedAt: Date.now(),
+        });
+      }
     }
   } catch (error) {
     await db.put("messageData", {
@@ -426,6 +506,22 @@ async function fnSetDBRoomMessageData(
       totalSize: message.totalSize,
       channelLabel: message.channelLabel,
     });
+
+    const roomTx = db.transaction("uniqueRoom", "readwrite");
+    const indx = roomTx.objectStore("uniqueRoom").index("roomId");
+    const itm = await indx.get(roomId);
+    await roomTx.done;
+
+    if (itm && itm.lastMessageMerkleRoot !== message.merkleRootHex) {
+      await db.put("uniqueRoom", {
+        roomId,
+        roomUrl: itm.roomUrl,
+        messageCount: itm.messageCount + 1,
+        lastMessageMerkleRoot: message.merkleRootHex,
+        createdAt: itm.createdAt,
+        updatedAt: Date.now(),
+      });
+    }
   }
 
   db.close();
@@ -656,6 +752,16 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnDeleteDBPeerFromBlacklist(
           ...message.args,
         )) as WorkerMethodReturnTypes["deleteDBPeerFromBlacklist"];
+        break;
+      case "getAllDBUniqueRooms":
+        result = (await fnGetAllDBUniqueRooms(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getAllDBUniqueRooms"];
+        break;
+      case "setDBUniqueRoom":
+        result = (await fnSetDBUniqueRoom(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["setDBUniqueRoom"];
         break;
       case "getDBRoomMessageData":
         result = (await fnGetDBRoomMessageData(

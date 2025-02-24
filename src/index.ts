@@ -9,6 +9,7 @@ import {
   deleteDBPeerFromBlacklist,
   getAllDBAddressBookEntries,
   getAllDBBlacklisted,
+  getAllDBUniqueRooms,
   getDBAddressBookEntry,
   getDBAllChunks,
   getDBPeerIsBlacklisted,
@@ -44,6 +45,7 @@ import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
+import type { SignalingState } from "./reducers/signalingServerSlice";
 import {
   MessageCategory,
   MessageType,
@@ -62,7 +64,7 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import type { BlacklistedPeer, UsernamedPeer } from "./db/types";
+import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
 
 const connect = (
   roomUrl: string,
@@ -154,8 +156,22 @@ const disconnectFromPeer = (peerId: string) => {
   dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
 };
 
-const disconnectFromRoom = (roomId: string, _deleteMessages = false) => {
-  dispatch(webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId }));
+const disconnectFromRoom = (roomId: string, deleteMessages = false) => {
+  dispatch(
+    webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId, deleteMessages }),
+  );
+};
+
+const disconnectFromAllRooms = (
+  deleteMessages = false,
+  exceptionRoomIds: string[] = [],
+) => {
+  dispatch(
+    webrtcApi.endpoints.disconnectFromAllRooms.initiate({
+      deleteMessages,
+      exceptionRoomIds,
+    }),
+  );
 };
 
 const allowConnectionRelay = (roomId: string, allowed = true) => {
@@ -652,6 +668,7 @@ export default {
   connectToSignalingServer,
   disconnectFromSignalingServer,
   disconnectFromRoom,
+  disconnectFromAllRooms,
   disconnectFromPeer,
   allowConnectionRelay,
   onlyAllowConnectionsFromAddressBook,
@@ -663,6 +680,7 @@ export default {
   blacklistPeer,
   getPeerIsBlacklisted: getDBPeerIsBlacklisted,
   removePeerFromBlacklist: deleteDBPeerFromBlacklist,
+  getAllExistingRooms: getAllDBUniqueRooms,
   openChannel,
   sendMessage,
   readMessage,
@@ -692,6 +710,8 @@ export type {
   FileExtension,
   UsernamedPeer,
   BlacklistedPeer,
+  UniqueRoom,
+  SignalingState,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,

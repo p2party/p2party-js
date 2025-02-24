@@ -4,7 +4,9 @@ import type {
   IRTCPeerConnection,
   RTCDisconnectFromRoomParams,
 } from "./interfaces";
-import { deletePeer } from "../../reducers/roomSlice";
+import { deletePeer, deleteMessage } from "../../reducers/roomSlice";
+
+import type { State } from "../../store";
 
 export interface RTCDisconnectFromRoomParamsExtension
   extends RTCDisconnectFromRoomParams {
@@ -16,7 +18,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
   RTCDisconnectFromRoomParamsExtension,
   void,
   unknown
-> = async ({ roomId, peerConnections, dataChannels }, api) => {
+> = async ({ roomId, deleteMessages, peerConnections, dataChannels }, api) => {
   return new Promise((resolve, reject) => {
     try {
       const CHANNELS_LEN = dataChannels.length;
@@ -67,6 +69,22 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
 
             delete peerConnections[i];
             peerConnections.splice(i, 1);
+          }
+        }
+      }
+
+      if (deleteMessages) {
+        const { rooms } = api.getState() as State;
+        const roomIndex = rooms.findIndex((r) => r.id === roomId);
+
+        if (roomIndex > -1) {
+          const messagesLen = rooms[roomIndex].messages.length;
+          for (let j = 0; j < messagesLen; j++) {
+            api.dispatch(
+              deleteMessage({
+                merkleRootHex: rooms[roomIndex].messages[j].merkleRootHex,
+              }),
+            );
           }
         }
       }

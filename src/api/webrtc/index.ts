@@ -7,6 +7,7 @@ import webrtcOpenChannelQuery from "./openChannelQuery";
 import webrtcMessageQuery from "./sendMessageQuery";
 import webrtcDisconnectQuery from "./disconnectQuery";
 import webrtcDisconnectRoomQuery from "./disconnectFromRoomQuery";
+import webrtcDisconnectAllRoomsQuery from "./disconnectFromAllRoomsQuery";
 import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
@@ -28,6 +29,7 @@ import type {
   RTCSetCandidateParams,
   RTCOpenChannelParams,
   RTCDisconnectFromRoomParams,
+  RTCDisconnectFromAllRoomsParams,
   RTCDisconnectFromPeerParams,
   RTCDisconnectFromChannelLabelParams,
   RTCDisconnectFromPeerChannelLabelParams,
@@ -163,6 +165,18 @@ const webrtcApi = createApi({
     disconnectFromRoom: builder.mutation<void, RTCDisconnectFromRoomParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectRoomQuery(
+          { ...args, peerConnections, dataChannels },
+          api,
+          extraOptions,
+        ),
+    }),
+
+    disconnectFromAllRooms: builder.mutation<
+      void,
+      RTCDisconnectFromAllRoomsParams
+    >({
+      queryFn: (args, api, extraOptions) =>
+        webrtcDisconnectAllRoomsQuery(
           { ...args, peerConnections, dataChannels },
           api,
           extraOptions,

@@ -9,10 +9,12 @@ export interface SignalingState {
   serverUrl: string;
 }
 
+const defaultServerUrl = "wss://signaling.p2party.com/ws";
+
 const initialState: SignalingState = {
   isEstablishingConnection: false,
   isConnected: false,
-  serverUrl: "ws://localhost:3001/ws",
+  serverUrl: defaultServerUrl,
 };
 
 const signalingServerSlice = createSlice({
@@ -21,7 +23,7 @@ const signalingServerSlice = createSlice({
   reducers: {
     startConnecting: (state, action: PayloadAction<string | undefined>) => {
       state.isEstablishingConnection = true;
-      state.serverUrl = action.payload ?? "wss://signaling.p2party.com/ws";
+      state.serverUrl = action.payload ?? defaultServerUrl;
     },
 
     connectionEstablished: (state) => {

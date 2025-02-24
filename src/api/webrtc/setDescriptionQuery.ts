@@ -109,8 +109,9 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     //     (makingOffer || epc.signalingState !== "stable");
     // if (offerCollision && connectionIndex > -1) return { data: undefined };
 
-    await epc.setRemoteDescription(description);
+    // await epc.setRemoteDescription(description);
     if (description.type === "offer") {
+      await epc.setRemoteDescription(description);
       await epc.setLocalDescription();
       const answer = epc.localDescription;
       if (answer) {
@@ -129,8 +130,9 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       }
     } else {
       if (
-        epc.signalingState === "have-local-offer" ||
-        epc.signalingState === "have-remote-offer"
+        epc.signalingState !== "stable" &&
+        (epc.signalingState === "have-local-offer" ||
+          epc.signalingState === "have-remote-offer")
       ) {
         await epc.setRemoteDescription(description);
       } else {

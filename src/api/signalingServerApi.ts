@@ -106,15 +106,20 @@ let ws: WebSocket | null = null;
 
 const websocketBaseQuery: BaseQueryFn<
   WebSocketParams,
-  string,
+  undefined,
   unknown
 > = async ({ signalingServerUrl }, api) => {
-  if (ws) {
-    const { keyPair } = api.getState() as State;
-
+  const { signalingServer } = api.getState() as State;
+  if (
+    ws ||
+    signalingServer.isConnected ||
+    signalingServer.isEstablishingConnection
+  ) {
     console.log("WebSocket already connected");
 
-    return { data: keyPair.publicKey };
+    return { data: undefined };
+  } else {
+    api.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
   }
 
   try {
@@ -159,7 +164,6 @@ const websocketBaseQuery: BaseQueryFn<
     }
 
     const fullUrl = signalingServerUrl + "?publickey=" + publicKey;
-    api.dispatch(signalingServerActions.startConnecting(signalingServerUrl));
 
     ws = new WebSocket(fullUrl);
     ws.binaryType = "arraybuffer";
@@ -170,7 +174,7 @@ const websocketBaseQuery: BaseQueryFn<
           console.log("WebSocket connected to:", fullUrl);
           api.dispatch(signalingServerActions.connectionEstablished());
 
-          const { keyPair, rooms, commonState } = api.getState() as State;
+          const { rooms, commonState } = api.getState() as State;
 
           const roomIndex =
             commonState.currentRoomUrl.length === 64
@@ -203,7 +207,7 @@ const websocketBaseQuery: BaseQueryFn<
             });
           }
 
-          resolve({ data: publicKey });
+          resolve({ data: undefined });
         };
 
         ws!.onerror = (error) => {
@@ -236,7 +240,7 @@ const websocketBaseQuery: BaseQueryFn<
 
           api.dispatch(signalingServerActions.disconnect());
           console.log("WebSocket disconnected");
-          resolve({ data: publicKey });
+          resolve({ data: undefined });
         };
       } catch (error) {
         reject(error);
@@ -270,7 +274,7 @@ const websocketBaseQuery: BaseQueryFn<
   }
 };
 
-const websocketDisconnectQuery: BaseQueryFn<void, string, unknown> = async (
+const websocketDisconnectQuery: BaseQueryFn<void, undefined, unknown> = async (
   _: void,
   api,
 ) => {
@@ -285,11 +289,9 @@ const websocketDisconnectQuery: BaseQueryFn<void, string, unknown> = async (
     console.log("WebSocket manually disconnected");
   }
 
-  const { keyPair } = api.getState() as State;
-
   api.dispatch(signalingServerActions.disconnect());
 
-  return { data: keyPair.publicKey };
+  return { data: undefined };
 };
 
 // BaseQuery for sending messages over WebSocket
@@ -429,7 +431,7 @@ const signalingServerApi = createApi({
         signalingServerUrl,
       }),
     }),
-    disconnectWebSocket: builder.mutation<string, void>({
+    disconnectWebSocket: builder.mutation<void, void>({
       queryFn: websocketDisconnectQuery,
     }),
     sendMessage: builder.mutation<void, WebSocketMessage>({

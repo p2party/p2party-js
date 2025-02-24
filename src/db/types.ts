@@ -15,6 +15,15 @@ export interface BlacklistedPeer extends Peer {
   dateAdded: number;
 }
 
+export interface UniqueRoom {
+  roomUrl: string;
+  roomId: string;
+  messageCount: number;
+  lastMessageMerkleRoot: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface MessageData {
   roomId: string;
   timestamp: number;
@@ -77,6 +86,16 @@ export type WorkerMessages =
       id: number;
       method: "setDBPeerInBlacklist";
       args: [peerId: string, peerPublicKey: string];
+    }
+  | {
+      id: number;
+      method: "getAllDBUniqueRooms";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setDBUniqueRoom";
+      args: [roomUrl: string, roomId: string];
     }
   | {
       id: number;
@@ -147,6 +166,8 @@ export interface WorkerMethodReturnTypes {
   getDBPeerIsBlacklisted: boolean;
   getAllDBBlacklisted: BlacklistedPeer[];
   setDBPeerInBlacklist: void;
+  getAllDBUniqueRooms: UniqueRoom[];
+  setDBUniqueRoom: void;
   deleteDBPeerFromBlacklist: void;
   getDBRoomMessageData: SetMessageAllChunksArgs[];
   getDBChunk: Blob | undefined;

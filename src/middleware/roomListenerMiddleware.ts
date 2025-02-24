@@ -20,6 +20,7 @@ import {
   deleteDBChunk,
   deleteDBMessageData,
   getDBRoomMessageData,
+  setDBUniqueRoom,
 } from "../db/api";
 
 import type { State } from "../store";
@@ -67,6 +68,8 @@ roomListenerMiddleware.startListening({
         );
       }
     } else if (setRoom.match(action)) {
+      await setDBUniqueRoom(action.payload.url, action.payload.id);
+
       const oldMessages = await getDBRoomMessageData(action.payload.id);
       const oldMessagesLen = oldMessages.length;
       for (let i = 0; i < oldMessagesLen; i++) {

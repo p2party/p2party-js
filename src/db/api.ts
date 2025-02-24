@@ -68,6 +68,11 @@ export const deleteDBPeerFromBlacklist = (
   peerPublicKey?: string,
 ) => callWorker("deleteDBPeerFromBlacklist", peerId, peerPublicKey);
 
+export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
+
+export const setDBUniqueRoom = (roomUrl: string, roomId: string) =>
+  callWorker("setDBUniqueRoom", roomUrl, roomId);
+
 export const getDBRoomMessageData = (roomId: string) =>
   callWorker("getDBRoomMessageData", roomId);
 

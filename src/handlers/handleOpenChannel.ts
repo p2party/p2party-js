@@ -48,9 +48,38 @@ export const handleOpenChannel = async (
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   try {
-    const { keyPair } = api.getState() as State;
+    const { keyPair, rooms } = api.getState() as State;
 
     // const dataChannelsWithPeer = dataChannels.filter((d) => d.withPeerId === epc.withPeerId);
+
+    if (typeof channel !== "string") {
+      const decompiledLabel = await decompileChannelMessageLabel(channel.label);
+
+      if (decompiledLabel.merkleRootHex.length === 128) {
+        const roomIndex = rooms.findIndex((r) => r.id === roomId);
+
+        if (roomIndex > -1) {
+          const messageIndex = rooms[roomIndex].messages.findIndex(
+            (m) => m.merkleRootHex === decompiledLabel.merkleRootHex,
+          );
+
+          if (
+            messageIndex > -1 &&
+            rooms[roomIndex].messages[messageIndex].savedSize ===
+              rooms[roomIndex].messages[messageIndex].totalSize
+          ) {
+            channel.close();
+
+            api.dispatch(
+              webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
+                peerId: epc.withPeerId,
+                label: channel.label,
+              }),
+            );
+          }
+        }
+      }
+    }
 
     const label = typeof channel === "string" ? channel : channel.label;
     const dataChannel =

@@ -25,6 +25,7 @@ export interface Message {
   messageType: MessageType;
   savedSize: number;
   totalSize: number;
+  totalDeliveredSize: number;
   channelLabel: string;
   timestamp: number;
 }
@@ -68,6 +69,14 @@ export interface SetMessageAllChunksArgs {
   totalSize: number;
   channelLabel: string;
   timestamp: number;
+}
+
+export interface SetMessageDeliveredSizeArgs {
+  roomId: string;
+  merkleRootHex: string;
+  sha512Hex: string;
+  fromPeerId: string;
+  deliveredSize: number;
 }
 
 export interface SetChannelArgs {
@@ -411,6 +420,7 @@ const roomSlice = createSlice({
               savedSize:
                 action.payload.chunkSize > 0 ? action.payload.chunkSize : 0,
               totalSize: action.payload.totalSize,
+              totalDeliveredSize: action.payload.totalSize,
             });
           }
         } else if (
@@ -456,7 +466,35 @@ const roomSlice = createSlice({
             timestamp: action.payload.timestamp,
             savedSize: action.payload.totalSize,
             totalSize: action.payload.totalSize,
+            totalDeliveredSize: 0,
           });
+        }
+      }
+    },
+
+    setMessageDeliveredSize: (
+      state,
+      action: PayloadAction<SetMessageDeliveredSizeArgs>,
+    ) => {
+      const { roomId, merkleRootHex, sha512Hex, deliveredSize } =
+        action.payload;
+
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+
+      if (roomIndex > -1) {
+        const messageIndex = state[roomIndex].messages.findIndex(
+          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
+        );
+
+        if (
+          messageIndex > -1 &&
+          deliveredSize > 0 &&
+          state[roomIndex].messages[messageIndex].totalDeliveredSize +
+            deliveredSize <=
+            state[roomIndex].messages[messageIndex].totalSize
+        ) {
+          state[roomIndex].messages[messageIndex].totalDeliveredSize +=
+            deliveredSize;
         }
       }
     },

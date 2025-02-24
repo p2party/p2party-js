@@ -91,6 +91,12 @@ export interface RTCDisconnectParams {
 
 export interface RTCDisconnectFromRoomParams {
   roomId: string;
+  deleteMessages?: boolean;
+}
+
+export interface RTCDisconnectFromAllRoomsParams {
+  deleteMessages?: boolean;
+  exceptionRoomIds?: string[];
 }
 
 export interface RTCDisconnectFromPeerParams {

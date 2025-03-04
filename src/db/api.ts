@@ -1,5 +1,5 @@
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
-import type { WorkerMessages } from "./types";
+import type { WorkerMessages, Chunk, NewChunk, SendQueue } from "./types";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
 const workerBlob = new Blob([workerSrc], {
@@ -87,6 +87,12 @@ export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
 export const existsDBChunk = (merkleRootHex: string, chunkIndex: number) =>
   callWorker("existsDBChunk", merkleRootHex, chunkIndex);
 
+export const getDBNewChunk = (hashHex: string, chunkIndex: number) =>
+  callWorker("getDBNewChunk", hashHex, chunkIndex);
+
+export const existsDBNewChunk = (hashHex: string, chunkIndex: number) =>
+  callWorker("existsDBNewChunk", hashHex, chunkIndex);
+
 export const getDBSendQueue = (label: string, toPeerId: string) =>
   callWorker("getDBSendQueue", label, toPeerId);
 
@@ -96,10 +102,18 @@ export const getDBAllChunks = (merkleRootHex: string) =>
 export const getDBAllChunksCount = (merkleRootHex: string) =>
   callWorker("getDBAllChunksCount", merkleRootHex);
 
-export const setDBChunk = (chunk: import("./types").Chunk) =>
-  callWorker("setDBChunk", chunk);
+export const setDBChunk = (chunk: Chunk) => callWorker("setDBChunk", chunk);
 
-export const setDBSendQueue = (item: import("./types").SendQueue) =>
+export const getDBAllNewChunks = (hashHex?: string, merkleRootHex?: string) =>
+  callWorker("getDBAllNewChunks", hashHex, merkleRootHex);
+
+export const getDBAllNewChunksCount = (hashHex: string) =>
+  callWorker("getDBAllNewChunksCount", hashHex);
+
+export const setDBNewChunk = (chunk: NewChunk) =>
+  callWorker("setDBNewChunk", chunk);
+
+export const setDBSendQueue = (item: SendQueue) =>
   callWorker("setDBSendQueue", item);
 
 export const countDBSendQueue = (label: string, toPeerId: string) =>
@@ -107,6 +121,9 @@ export const countDBSendQueue = (label: string, toPeerId: string) =>
 
 export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
+
+export const deleteDBNewChunk = (hashHex: string, chunkIndex?: number) =>
+  callWorker("deleteDBNewChunk", hashHex, chunkIndex);
 
 export const deleteDBMessageData = (merkleRootHex: string) =>
   callWorker("deleteDBMessageData", merkleRootHex);

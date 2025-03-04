@@ -11,6 +11,7 @@ import type {
   BlacklistedPeer,
   UsernamedPeer,
   UniqueRoom,
+  NewChunk,
 } from "./types";
 import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 
@@ -47,6 +48,11 @@ export interface RepoSchema extends DBSchema {
     value: Chunk;
     key: [string, number];
     indexes: { merkleRoot: string };
+  };
+  newChunks: {
+    value: NewChunk;
+    key: [string, number];
+    indexes: { hash: string; merkleRoot: string };
   };
   sendQueue: {
     value: SendQueue;
@@ -103,6 +109,14 @@ async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
           keyPath: ["merkleRoot", "chunkIndex"],
         });
         chunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("newChunks")) {
+        const newChunks = db.createObjectStore("newChunks", {
+          keyPath: ["hash", "chunkIndex"],
+        });
+        newChunks.createIndex("hash", "hash", { unique: false });
+        newChunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
       }
 
       if (!db.objectStoreNames.contains("sendQueue")) {
@@ -547,6 +561,26 @@ async function fnExistsDBChunk(
   return count > 0;
 }
 
+async function fnGetDBNewChunk(
+  hashHex: string,
+  chunkIndex: number,
+): Promise<NewChunk | undefined> {
+  const db = await getDB();
+  const chunk = await db.get("newChunks", [hashHex, chunkIndex]);
+  db.close();
+  return chunk;
+}
+
+async function fnExistsDBNewChunk(
+  hashHex: string,
+  chunkIndex: number,
+): Promise<boolean> {
+  const db = await getDB();
+  const count = await db.count("newChunks", [hashHex, chunkIndex]);
+  db.close();
+  return count > 0;
+}
+
 async function fnGetDBSendQueue(
   label: string,
   toPeerId: string,
@@ -636,6 +670,47 @@ async function fnSetDBChunk(chunk: Chunk): Promise<void> {
   db.close();
 }
 
+async function fnGetDBAllNewChunks(
+  hashHex?: string,
+  merkleRootHex?: string,
+): Promise<NewChunk[]> {
+  if (!hashHex && !merkleRootHex) return [];
+  const db = await getDB();
+  const chunksCount = hashHex
+    ? await db.countFromIndex("newChunks", "hash", hashHex)
+    : await db.countFromIndex("newChunks", "merkleRoot", merkleRootHex);
+  if (chunksCount > 0) {
+    const chunks = hashHex
+      ? await db.getAllFromIndex("newChunks", "hash", hashHex)
+      : await db.getAllFromIndex("newChunks", "merkleRoot", merkleRootHex);
+    db.close();
+    return chunks;
+  } else {
+    const tx = db.transaction("newChunks", "readonly");
+    const store = tx.objectStore("newChunks");
+    const index = hashHex ? store.index("hash") : store.index("merkleRoot");
+    const keyRange = hashHex
+      ? IDBKeyRange.only(hashHex)
+      : IDBKeyRange.only(merkleRootHex);
+    const chunks = await index.getAll(keyRange);
+    db.close();
+    return chunks;
+  }
+}
+
+async function fnGetDBAllNewChunksCount(hashHex: string): Promise<number> {
+  const db = await getDB();
+  const chunksCount = await db.countFromIndex("newChunks", "hash", hashHex);
+  db.close();
+  return chunksCount;
+}
+
+async function fnSetDBNewChunk(chunk: NewChunk): Promise<void> {
+  const db = await getDB();
+  await db.put("newChunks", chunk);
+  db.close();
+}
+
 async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
   const db = await getDB();
   await db.put("sendQueue", item);
@@ -657,6 +732,32 @@ async function fnDeleteDBChunk(
     } else {
       const index = store.index("merkleRoot");
       const keys = await index.getAllKeys(merkleRootHex);
+      const len = keys.length;
+      for (let i = 0; i < len; i++) {
+        await store.delete(keys[i]);
+      }
+    }
+
+    await tx.done;
+    db.close();
+  } catch (error) {}
+}
+
+async function fnDeleteDBNewChunk(
+  hashHex: string,
+  chunkIndex?: number,
+): Promise<void> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction("newChunks", "readwrite");
+    const store = tx.objectStore("newChunks");
+
+    if (chunkIndex) {
+      const keys = IDBKeyRange.only([hashHex, chunkIndex]);
+      await store.delete(keys);
+    } else {
+      const index = store.index("hash");
+      const keys = await index.getAllKeys(hashHex);
       const len = keys.length;
       for (let i = 0; i < len; i++) {
         await store.delete(keys[i]);
@@ -702,9 +803,11 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
 }
 
 async function fnDeleteDB(): Promise<void> {
-  const db = await getDB();
-  db.close();
-  await deleteDB(dbName);
+  await deleteDB(dbName, {
+    blocked() {
+      console.error("DB deletion BLOCKED");
+    },
+  });
 }
 
 onmessage = async (e: MessageEvent) => {
@@ -783,6 +886,16 @@ onmessage = async (e: MessageEvent) => {
           ...message.args,
         )) as WorkerMethodReturnTypes["existsDBChunk"];
         break;
+      case "getDBNewChunk":
+        result = (await fnGetDBNewChunk(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBNewChunk"];
+        break;
+      case "existsDBNewChunk":
+        result = (await fnExistsDBNewChunk(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["existsDBNewChunk"];
+        break;
       case "getDBSendQueue":
         result = (await fnGetDBSendQueue(
           ...message.args,
@@ -803,6 +916,21 @@ onmessage = async (e: MessageEvent) => {
           ...message.args,
         )) as WorkerMethodReturnTypes["setDBChunk"];
         break;
+      case "getDBAllNewChunks":
+        result = (await fnGetDBAllNewChunks(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBAllNewChunks"];
+        break;
+      case "getDBAllNewChunksCount":
+        result = (await fnGetDBAllNewChunksCount(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBAllNewChunksCount"];
+        break;
+      case "setDBNewChunk":
+        result = (await fnSetDBNewChunk(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["setDBNewChunk"];
+        break;
       case "setDBSendQueue":
         result = (await fnSetDBSendQueue(
           ...message.args,
@@ -817,6 +945,11 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnDeleteDBChunk(
           ...message.args,
         )) as WorkerMethodReturnTypes["deleteDBChunk"];
+        break;
+      case "deleteDBNewChunk":
+        result = (await fnDeleteDBNewChunk(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["deleteDBNewChunk"];
         break;
       case "deleteDBMessageData":
         result = (await fnDeleteDBMessageData(

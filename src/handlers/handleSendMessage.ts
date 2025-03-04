@@ -8,14 +8,24 @@ import {
   // uint8ArrayToHex,
 } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
-import { deleteDBSendQueue, getDBSendQueue, setDBSendQueue } from "../db/api";
+import {
+  deleteDBSendQueue,
+  getDBNewChunk,
+  getDBSendQueue,
+  setDBChunk,
+  setDBNewChunk,
+  setDBSendQueue,
+} from "../db/api";
 
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
-import { compileChannelMessageLabel } from "../utils/channelLabel";
+import {
+  compileChannelMessageLabel,
+  decompileChannelMessageLabel,
+} from "../utils/channelLabel";
 
 // import { deleteMessage } from "../reducers/roomSlice";
 
-import { CHUNK_LEN } from "../utils/splitToChunks";
+import { CHUNK_LEN, PROOF_LEN } from "../utils/splitToChunks";
 
 import type {
   IRTCDataChannel,
@@ -24,6 +34,10 @@ import type {
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
+import { getMerkleProof } from "../cryptography/merkle";
+import { deserializeMetadata } from "../utils/metadata";
+import { getMimeType } from "../utils/messageTypes";
+import { setMessage } from "../reducers/roomSlice";
 
 export const wait = (milliseconds: number) => {
   return new Promise((resolve) => {
@@ -31,112 +45,198 @@ export const wait = (milliseconds: number) => {
   });
 };
 
-const createChannelAndSendChunks = async (
-  channelMessageLabel: string,
+const sendChunks = async (
+  channel: IRTCDataChannel,
   roomId: string,
+  fromPeerId: string,
   senderSecretKey: Uint8Array,
-  unencryptedChunks: Uint8Array[],
+  chunksLen: number,
+  chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   epc: IRTCPeerConnection,
   api: BaseQueryApi,
-  dataChannels: IRTCDataChannel[],
   encryptionModule: LibCrypto,
-  decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ) => {
-  let putItemInDBSendQueue = false;
-  const chunksLen = unencryptedChunks.length;
-  // const merkleRootHex = uint8ArrayToHex(merkleRoot);
-  const channel = await handleOpenChannel(
-    {
-      channel: channelMessageLabel,
-      epc,
-      roomId,
-      dataChannels,
-      decryptionModule,
-      merkleModule,
-    },
-    api,
-  );
+  try {
+    let putItemInDBSendQueue = false;
+    // const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  const peerPublicKeyHex = epc.withPeerPublicKey;
-  const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
+    const peerPublicKeyHex = epc.withPeerPublicKey;
+    const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-  const indexes = Array.from({ length: chunksLen }, (_, i) => i);
-  const indexesRandomized = await fisherYatesShuffle(indexes);
-  for (let j = 0; j < chunksLen; j++) {
-    const jRandom = indexesRandomized[j];
+    const { channelLabel, hashHex, merkleRootHex } =
+      await decompileChannelMessageLabel(channel.label);
 
-    const senderEphemeralKey = await newKeyPair(encryptionModule);
-    const ephemeralSignature = await sign(
-      senderEphemeralKey.publicKey,
-      senderSecretKey,
-      encryptionModule,
-    );
+    const indexes = Array.from({ length: chunksLen }, (_, i) => i);
+    const indexesRandomized = await fisherYatesShuffle(indexes);
+    for (let i = 0; i < chunksLen; i++) {
+      const iRandom = indexesRandomized[i];
 
-    const encryptedMessage = await encryptAsymmetric(
-      unencryptedChunks[jRandom],
-      receiverPublicKey,
-      senderEphemeralKey.secretKey, // senderSecretKey,
-      merkleRoot,
-      encryptionModule,
-    );
+      const senderEphemeralKey = await newKeyPair(encryptionModule);
+      const ephemeralSignature = await sign(
+        senderEphemeralKey.publicKey,
+        senderSecretKey,
+        encryptionModule,
+      );
 
-    const message = (await concatUint8Arrays([
-      senderEphemeralKey.publicKey,
-      ephemeralSignature,
-      encryptedMessage,
-    ])) as Uint8Array<ArrayBuffer>;
+      const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
+      if (!unencryptedChunk) continue;
 
-    const timeoutMilliseconds = await randomNumberInRange(1, 10);
-    await wait(timeoutMilliseconds);
-    if (
-      channel.readyState === "open" &&
-      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-    ) {
-      channel.send(message.buffer);
-    } else if (
-      // channel.readyState !== "closing" &&
-      channel.readyState !== "closed"
-    ) {
-      putItemInDBSendQueue = true;
-      await setDBSendQueue({
-        position: jRandom,
-        label: channel.label,
-        toPeerId: channel.withPeerId,
-        encryptedData: message.buffer, // new Blob([message]),
-      });
-    }
-  }
+      const merkleProof = new Uint8Array(PROOF_LEN);
+      if (unencryptedChunk.merkleProof.byteLength === 0) {
+        const m = await getMerkleProof(
+          chunkHashes,
+          new Uint8Array(unencryptedChunk.realChunkHash),
+          merkleModule,
+          PROOF_LEN,
+        );
 
-  if (!putItemInDBSendQueue) {
-    channel.close();
-  } else {
-    while (
-      channel.readyState === "open" &&
-      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-    ) {
-      const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
-      if (sendQueue.length === 0) channel.close();
+        merkleProof.set(m);
 
-      while (
-        sendQueue.length > 0 &&
-        channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-        channel.readyState === "open"
+        await setDBNewChunk({
+          hash: hashHex,
+          merkleRoot: merkleRootHex,
+          realChunkHash: unencryptedChunk.realChunkHash,
+          chunkIndex: iRandom,
+          data: unencryptedChunk.data,
+          metadata: unencryptedChunk.metadata,
+          merkleProof: m.buffer as ArrayBuffer,
+        });
+      } else {
+        merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
+
+        if (unencryptedChunk.merkleRoot.length === 0) {
+          await setDBNewChunk({
+            hash: hashHex,
+            merkleRoot: merkleRootHex,
+            realChunkHash: unencryptedChunk.realChunkHash,
+            chunkIndex: iRandom,
+            data: unencryptedChunk.data,
+            metadata: unencryptedChunk.metadata,
+            merkleProof: unencryptedChunk.merkleProof,
+          });
+        }
+      }
+
+      const metadataArray = new Uint8Array(unencryptedChunk.metadata);
+      const metadata = deserializeMetadata(metadataArray);
+
+      if (
+        metadata.chunkStartIndex > 0 &&
+        metadata.chunkEndIndex > metadata.chunkStartIndex &&
+        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
       ) {
-        const timeoutMilliseconds = await randomNumberInRange(1, 10);
-        await wait(timeoutMilliseconds);
+        api.dispatch(
+          setMessage({
+            roomId,
+            merkleRootHex,
+            sha512Hex: hashHex,
+            fromPeerId,
+            chunkSize: metadata.chunkEndIndex - metadata.chunkStartIndex,
+            totalSize: metadata.totalSize,
+            messageType: metadata.messageType,
+            filename: metadata.name,
+            channelLabel,
+          }),
+        );
 
-        let pos = await randomNumberInRange(0, sendQueue.length);
-        if (pos === sendQueue.length) pos = 0;
+        const mimeType = getMimeType(metadata.messageType);
+        await setDBChunk({
+          merkleRoot: merkleRootHex,
+          chunkIndex: metadata.chunkIndex,
+          data: unencryptedChunk.data.slice(
+            metadata.chunkStartIndex,
+            metadata.chunkEndIndex,
+          ), // new Blob([realChunk]),
+          mimeType,
+        });
+      }
 
-        const [item] = sendQueue.splice(pos, 1);
-        if (channel.readyState === "open") {
-          channel.send(item.encryptedData);
-          await deleteDBSendQueue(channel.label, epc.withPeerId, item.position);
+      const chunk = await concatUint8Arrays([
+        metadataArray,
+        merkleProof,
+        new Uint8Array(unencryptedChunk.data),
+      ]);
+
+      const encryptedMessage = await encryptAsymmetric(
+        chunk,
+        // unencryptedChunks[jRandom],
+        receiverPublicKey,
+        senderEphemeralKey.secretKey, // senderSecretKey,
+        merkleRoot,
+        encryptionModule,
+      );
+
+      const message = (await concatUint8Arrays([
+        senderEphemeralKey.publicKey,
+        ephemeralSignature,
+        encryptedMessage,
+      ])) as Uint8Array<ArrayBuffer>;
+
+      const timeoutMilliseconds = await randomNumberInRange(1, 10);
+      await wait(timeoutMilliseconds);
+      if (
+        channel.readyState === "open" &&
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+      ) {
+        channel.send(message.buffer);
+      } else if (
+        // channel.readyState !== "closing" &&
+        channel.readyState !== "closed"
+      ) {
+        putItemInDBSendQueue = true;
+        await setDBSendQueue({
+          position: iRandom,
+          label: channel.label,
+          toPeerId: channel.withPeerId,
+          encryptedData: message.buffer, // new Blob([message]),
+        });
+      } else {
+        console.log(
+          "Cannot send message because channel is " +
+            channel.readyState +
+            " and bufferedAmount is " +
+            channel.bufferedAmount,
+        );
+      }
+    }
+
+    if (!putItemInDBSendQueue) {
+      channel.close();
+    } else {
+      while (
+        channel.readyState === "open" &&
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+      ) {
+        const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
+        if (sendQueue.length === 0) channel.close();
+
+        while (
+          sendQueue.length > 0 &&
+          channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+          channel.readyState === "open"
+        ) {
+          const timeoutMilliseconds = await randomNumberInRange(1, 10);
+          await wait(timeoutMilliseconds);
+
+          let pos = await randomNumberInRange(0, sendQueue.length);
+          if (pos === sendQueue.length) pos = 0;
+
+          const [item] = sendQueue.splice(pos, 1);
+          if (channel.readyState === "open") {
+            channel.send(item.encryptedData);
+            await deleteDBSendQueue(
+              channel.label,
+              epc.withPeerId,
+              item.position,
+            );
+          }
         }
       }
     }
+  } catch (error) {
+    throw error;
   }
 };
 
@@ -168,7 +268,13 @@ export const handleSendMessage = async (
       if (channelIndex === -1)
         throw new Error("No channel with label " + label);
 
-      const { merkleRoot, merkleRootHex, hashHex, unencryptedChunks } =
+      const {
+        merkleRoot,
+        merkleRootHex,
+        hashHex,
+        totalChunks,
+        chunkHashes,
+      } = //, unencryptedChunks } =
         await splitToChunks(
           data,
           api,
@@ -195,18 +301,30 @@ export const handleSendMessage = async (
         );
         if (peerIndex === -1) continue;
 
-        promises.push(
-          createChannelAndSendChunks(
-            channelMessageLabel,
+        const channel = await handleOpenChannel(
+          {
+            channel: channelMessageLabel,
+            epc: peerConnections[peerIndex],
             roomId,
+            dataChannels,
+            decryptionModule,
+            merkleModule,
+          },
+          api,
+        );
+
+        promises.push(
+          sendChunks(
+            channel,
+            roomId,
+            keyPair.peerId,
             senderSecretKey,
-            unencryptedChunks,
+            totalChunks,
+            chunkHashes,
             merkleRoot,
             peerConnections[peerIndex],
             api,
-            dataChannels,
             encryptionModule,
-            decryptionModule,
             merkleModule,
           ),
         );

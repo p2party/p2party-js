@@ -98,13 +98,13 @@ export const getMerkleRoot = async (
  * Can be used as a receipt of a transaction etc.
  *
  * @param {Uint8Array[]} treeHashes: The tree.
- * @param {Uint8Array} element: The element.
+ * @param {Uint8Array} elementHash: The element.
  *
  * @returns {Promise<Uint8Array>}: The Merkle proof.
  */
 export const getMerkleProof = async (
   treeHashes: Uint8Array,
-  element: Uint8Array,
+  elementHash: Uint8Array,
   module?: LibCrypto,
   proofFixedLen?: number,
 ): Promise<Uint8Array> => {
@@ -137,14 +137,15 @@ export const getMerkleProof = async (
   leavesHashed.set(treeHashes);
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
-  const elementHash = new Uint8Array(
+  const element = new Uint8Array(
     wasmMemory.buffer,
     ptr2,
     crypto_hash_sha512_BYTES,
   );
-  const digest = await window.crypto.subtle.digest("SHA-512", element);
+  // const digest = await window.crypto.subtle.digest("SHA-512", element);
   // hash = await sha512(element);
-  elementHash.set(new Uint8Array(digest));
+  // elementHash.set(new Uint8Array(digest));
+  element.set(elementHash);
 
   const proofLen = treeLen * (crypto_hash_sha512_BYTES + 1);
   // Math.ceil(Math.log2(treeLen)) * (crypto_hash_sha512_BYTES + 1);
@@ -155,7 +156,7 @@ export const getMerkleProof = async (
     treeLen,
     // proofLen,
     leavesHashed.byteOffset,
-    elementHash.byteOffset,
+    element.byteOffset,
     proof.byteOffset,
   );
 

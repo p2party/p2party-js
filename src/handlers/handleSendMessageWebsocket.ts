@@ -1,7 +1,7 @@
 import signalingServerApi from "../api/signalingServerApi";
 
 import { setMessage } from "../reducers/roomSlice";
-import { deleteDBChunk } from "../db/api";
+import { deleteDBChunk, getDBNewChunk } from "../db/api";
 
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
@@ -40,10 +40,15 @@ export const handleSendMessageWebsocket = async (
       : 0;
     if (channelIndex === -1) throw new Error("No channel with label " + label);
 
-    const { merkleRoot, merkleRootHex, hashHex, totalSize, unencryptedChunks } =
+    const {
+      merkleRoot,
+      merkleRootHex,
+      hashHex,
+      totalSize,
+      totalChunks,
+    } = // , unencryptedChunks } =
       await splitToChunks(data, api, label, roomId); // db);
 
-    const chunksLen = unencryptedChunks.length;
     const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
     for (let i = 0; i < PEERS_LEN; i++) {
       const peerId = dataChannels[channelIndex].peerIds[i];
@@ -53,13 +58,16 @@ export const handleSendMessageWebsocket = async (
       const peerPublicKeyHex = peerConnections[peerIndex].peerPublicKey;
       const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-      const indexes = Array.from({ length: chunksLen }, (_, i) => i);
+      const indexes = Array.from({ length: totalChunks }, (_, i) => i);
       const indexesRandomized = await fisherYatesShuffle(indexes);
-      for (let j = 0; j < chunksLen; j++) {
+      for (let j = 0; j < totalChunks; j++) {
         const jRandom = indexesRandomized[j];
 
+        const unencryptedChunk = await getDBNewChunk(hashHex, jRandom);
+        if (!unencryptedChunk) continue;
+
         const m = deserializeMetadata(
-          unencryptedChunks[jRandom].slice(0, METADATA_LEN),
+          new Uint8Array(unencryptedChunk.data).slice(0, METADATA_LEN),
         );
         if (m.chunkStartIndex < m.chunkEndIndex) {
           api.dispatch(
@@ -80,7 +88,7 @@ export const handleSendMessageWebsocket = async (
         }
 
         const encryptedMessage = await encryptAsymmetric(
-          unencryptedChunks[jRandom],
+          new Uint8Array(unencryptedChunk.data),
           receiverPublicKey,
           senderSecretKey,
           merkleRoot,

@@ -106,7 +106,7 @@ roomListenerMiddleware.startListening({
       }
     } else if (setMessage.match(action)) {
       const { roomId } = action.payload;
-      const { rooms } = listenerApi.getState() as State;
+      const { keyPair, rooms } = listenerApi.getState() as State;
       const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
@@ -116,6 +116,8 @@ roomListenerMiddleware.startListening({
 
         if (
           messageIndex > -1 &&
+          rooms[roomIndex].messages[messageIndex].fromPeerId !==
+            keyPair.peerId &&
           rooms[roomIndex].messages[messageIndex].savedSize ===
             rooms[roomIndex].messages[messageIndex].totalSize
         ) {

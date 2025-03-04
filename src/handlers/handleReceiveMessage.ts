@@ -28,6 +28,7 @@ export const handleReceiveMessage = async (
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ): Promise<{
+  date: Date;
   chunkSize: number;
   chunkIndex: number;
   receivedFullSize: boolean;
@@ -56,6 +57,7 @@ export const handleReceiveMessage = async (
 
     if (!verifySig)
       return {
+        date: new Date(),
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
@@ -86,6 +88,7 @@ export const handleReceiveMessage = async (
 
     if (chunkSize === 0)
       return {
+        date: metadata.date,
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
@@ -116,6 +119,7 @@ export const handleReceiveMessage = async (
 
     if (!messageRelevant)
       return {
+        date: metadata.date,
         chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
         receivedFullSize,
@@ -136,6 +140,7 @@ export const handleReceiveMessage = async (
     const proofLen = proofLenView.getUint32(0, false); // Big-endian
     if (proofLen > PROOF_LEN)
       return {
+        date: metadata.date,
         chunkIndex: -1,
         chunkSize: -3,
         receivedFullSize,
@@ -145,7 +150,10 @@ export const handleReceiveMessage = async (
       };
 
     const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
-    const chunk = decryptedMessage.slice(METADATA_LEN + PROOF_LEN);
+    const chunk = decryptedMessage.slice(
+      METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
+      METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
+    );
 
     const verifyProof = await verifyMerkleProof(
       chunk,
@@ -156,6 +164,7 @@ export const handleReceiveMessage = async (
 
     if (!verifyProof)
       return {
+        date: metadata.date,
         chunkIndex: -1,
         chunkSize: -4,
         receivedFullSize,
@@ -179,6 +188,7 @@ export const handleReceiveMessage = async (
     });
 
     return {
+      date: metadata.date,
       chunkIndex: metadata.chunkIndex,
       chunkSize,
       receivedFullSize,
@@ -187,6 +197,7 @@ export const handleReceiveMessage = async (
       filename: metadata.name,
     };
   } catch (error) {
+    console.error(error);
     throw error;
   }
 };

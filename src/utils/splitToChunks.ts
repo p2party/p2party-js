@@ -1,20 +1,18 @@
-import { getMessageType, getMimeType, MessageType } from "./messageTypes";
-import { serializer, uint8ArrayToHex, concatUint8Arrays } from "./uint8array";
+import { getMessageType, MessageType } from "./messageTypes";
+import { uint8ArrayToHex } from "./uint8array";
 import { serializeMetadata, METADATA_LEN } from "./metadata";
-import { setDBChunk, setDBRoomMessageData } from "../db/api";
 
-import { setMessageAllChunks } from "../reducers/roomSlice";
+import { setDBNewChunk, setDBRoomMessageData } from "../db/api";
 
-import { rtcDataChannelMessageLimit } from "../api/webrtc";
+import { setMessage } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
 import libcrypto from "../cryptography/libcrypto";
-import { getMerkleProof, getMerkleRoot } from "../cryptography/merkle";
+import { getMerkleRoot } from "../cryptography/merkle";
 import {
   generateRandomRoomUrl,
   randomNumberInRange,
 } from "../cryptography/utils";
-
 import {
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
   crypto_box_poly1305_AUTHTAGBYTES,
@@ -38,7 +36,7 @@ export const IMPORTANT_DATA_LEN =
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
   crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
 export const CHUNK_LEN =
-  rtcDataChannelMessageLimit - // 64kb max message size on RTCDataChannel
+  64 * 1024 - // 64kb max message size on RTCDataChannel
   // crypto_hash_sha512_BYTES - // merkle root of message
   IMPORTANT_DATA_LEN;
 
@@ -70,9 +68,10 @@ export const splitToChunks = async (
   merkleRootHex: string;
   hash: Uint8Array;
   hashHex: string;
+  totalChunks: number;
   totalSize: number;
   messageType: MessageType;
-  unencryptedChunks: Uint8Array[];
+  chunkHashes: Uint8Array;
 }> => {
   // if (minChunks < 3) throw new Error("We need at least 3 chunks");
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
@@ -84,36 +83,50 @@ export const splitToChunks = async (
       `Chunk length needs to be between ${IMPORTANT_DATA_LEN} and ${CHUNK_LEN}`,
     );
 
-  const data = await serializer(message);
-  const totalSize = data.length;
-
-  if (data.length < 1) throw new Error("No data to split");
-
-  const hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", data);
-  const hash = new Uint8Array(hashArrayBuffer);
-  const sha512Hex = uint8ArrayToHex(hash);
-
   const messageType = getMessageType(message);
   const name =
     messageType === MessageType.Text
       ? await generateRandomRoomUrl(256)
       : (message as File).name.slice(0, 255);
 
-  const date = new Date();
+  const file =
+    typeof message === "string" ? new TextEncoder().encode(message) : message;
+
+  const storage = await navigator.storage.estimate();
+  const quota = storage.quota ?? 10 * 1024 * 1024 * 1024;
+  const usage = storage.usage ?? 64 * 1024;
+  const availableSpace = quota - usage;
+
+  const totalSize =
+    typeof message === "string"
+      ? (file as Uint8Array).length
+      : (file as File).size;
+  if (totalSize > availableSpace)
+    throw new Error("Not enough space to save the file in the browser.");
+  if (totalSize < 1) throw new Error("No data to split in chunks");
 
   const totalChunks = Math.max(
     minChunks,
     Math.ceil(totalSize / (chunkSize * percentageFilledChunk)),
   );
 
-  const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
-  const merkleCryptoModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
-  });
+  const date = new Date();
 
-  const chunks: Uint8Array[] = [];
+  // TODO fix hasher
+  const hashArrayBuffer = await window.crypto.subtle.digest(
+    "SHA-512",
+    totalSize < 10 * 1024 * 1024
+      ? typeof message === "string"
+        ? ((file as Uint8Array).buffer as ArrayBuffer)
+        : await (file as File).arrayBuffer()
+      : typeof message === "string"
+        ? (file as Uint8Array).slice(0, 10 * 1024 * 1024).buffer
+        : await (file as File).slice(0, 10 * 1024 * 1024).arrayBuffer(),
+  );
+  const hash = new Uint8Array(hashArrayBuffer);
+  const sha512Hex = uint8ArrayToHex(hash);
+
   const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
-  const metadata: Metadata[] = [];
   let offset = 0;
   for (let i = 0; i < totalChunks; i++) {
     const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
@@ -131,19 +144,36 @@ export const splitToChunks = async (
     let chunkEndIndex = chunkStartIndex + bytesToCopy;
 
     if (remainingBytes > 0) {
-      chunk.set(data.slice(offset, offset + bytesToCopy), chunkStartIndex);
+      // new file read
+      const blob = file.slice(offset, offset + bytesToCopy);
+      if (typeof message === "string") {
+        chunk.set(blob as Uint8Array, chunkStartIndex);
+
+        const hash = await window.crypto.subtle.digest(
+          "SHA-512",
+          (blob as Uint8Array).buffer as ArrayBuffer,
+        );
+        chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+      } else {
+        const buffer = await (blob as Blob).arrayBuffer();
+        chunk.set(new Uint8Array(buffer), chunkStartIndex);
+
+        const hash = await window.crypto.subtle.digest("SHA-512", buffer);
+        chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+      }
+
       offset += bytesToCopy;
     } else {
       const start = chunkEndIndex + totalSize + 1;
-      const r = await randomNumberInRange(
-        start,
-        chunkEndIndex + Number.MAX_SAFE_INTEGER - start,
-      );
+      const end = Number.MAX_SAFE_INTEGER - start;
+      const r = await randomNumberInRange(start, end);
       chunkEndIndex += r;
+
+      const hash = await window.crypto.subtle.digest("SHA-512", chunk);
+      chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
     }
 
-    chunks.push(chunk);
-    metadata.push({
+    const m: Metadata = {
       schemaVersion: metadataSchemaVersion,
       messageType,
       name,
@@ -152,57 +182,30 @@ export const splitToChunks = async (
       chunkIndex: i,
       totalSize,
       date,
-    });
+    };
+    const mSerialized = serializeMetadata(m);
 
-    const hash = await window.crypto.subtle.digest("SHA-512", chunk);
-    chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+    await setDBNewChunk({
+      hash: sha512Hex,
+      merkleRoot: "",
+      chunkIndex: i,
+      realChunkHash: chunkHashes.slice(
+        i * crypto_hash_sha512_BYTES,
+        (i + 1) * crypto_hash_sha512_BYTES,
+      ).buffer,
+      data: chunk.buffer,
+      metadata: mSerialized.buffer as ArrayBuffer,
+      merkleProof: new Uint8Array().buffer,
+    });
   }
+
+  const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
+  const merkleCryptoModule = await libcrypto({
+    wasmMemory: merkleWasmMemory,
+  });
 
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
-
-  const unencryptedChunks: Uint8Array[] = [];
-  for (let i = 0; i < totalChunks; i++) {
-    const proof = await getMerkleProof(
-      chunkHashes,
-      chunks[i],
-      merkleCryptoModule,
-      PROOF_LEN,
-    );
-
-    const realChunk =
-      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex > totalSize
-        ? new Uint8Array()
-        : chunks[i].slice(
-            metadata[i].chunkStartIndex,
-            metadata[i].chunkEndIndex,
-          );
-    const mimeType = getMimeType(metadata[i].messageType);
-
-    const chunkSize =
-      metadata[i].chunkEndIndex - metadata[i].chunkStartIndex >
-      metadata[i].totalSize
-        ? 0
-        : metadata[i].chunkEndIndex - metadata[i].chunkStartIndex;
-    if (chunkSize > 0) {
-      await setDBChunk({
-        merkleRoot: merkleRootHex,
-        chunkIndex: metadata[i].chunkIndex,
-        data: realChunk.buffer, // new Blob([realChunk]),
-        mimeType,
-      });
-    }
-
-    const m = serializeMetadata(metadata[i]);
-
-    delete metadata[i];
-
-    const unencrypted = await concatUint8Arrays([m, proof, chunks[i]]);
-
-    delete chunks[i];
-
-    unencryptedChunks.push(unencrypted);
-  }
 
   const { keyPair } = api.getState() as State;
 
@@ -218,7 +221,20 @@ export const splitToChunks = async (
     timestamp: Date.now(),
   };
 
-  api.dispatch(setMessageAllChunks(messageData));
+  // api.dispatch(setMessageAllChunks(messageData));
+  api.dispatch(
+    setMessage({
+      roomId,
+      merkleRootHex,
+      sha512Hex,
+      fromPeerId: keyPair.peerId,
+      chunkSize: 0,
+      totalSize,
+      messageType,
+      filename: name,
+      channelLabel: label,
+    }),
+  );
 
   await setDBRoomMessageData(roomId, messageData);
 
@@ -228,7 +244,8 @@ export const splitToChunks = async (
     hash,
     hashHex: sha512Hex,
     totalSize,
+    totalChunks,
     messageType,
-    unencryptedChunks,
+    chunkHashes,
   };
 };

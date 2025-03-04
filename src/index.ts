@@ -66,6 +66,12 @@ import type {
 import type { RoomData } from "./api/webrtc/interfaces";
 import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
 
+// const originalClose = RTCDataChannel.prototype.close;
+// RTCDataChannel.prototype.close = function () {
+//   console.trace("RTCDataChannel closed from:");
+//   originalClose.apply(this);
+// };
+
 const connect = (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
@@ -315,7 +321,7 @@ const readMessage = async (
   category: MessageCategory;
 }> => {
   try {
-    const { rooms } = store.getState();
+    const { keyPair, rooms } = store.getState();
     const roomsLen = rooms.length;
     let index = -1;
     for (let i = 0; i < roomsLen; i++) {
@@ -355,7 +361,10 @@ const readMessage = async (
           100,
       );
 
-      if (percentage === 100) {
+      if (
+        percentage === 100 &&
+        rooms[index].messages[messageIndex].fromPeerId !== keyPair.peerId
+      ) {
         const label = await compileChannelMessageLabel(
           rooms[index].messages[messageIndex].channelLabel,
           rooms[index].messages[messageIndex].merkleRootHex,

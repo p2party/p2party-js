@@ -43,6 +43,16 @@ export interface Chunk {
   mimeType: string;
 }
 
+export interface NewChunk {
+  hash: string;
+  chunkIndex: number;
+  merkleRoot: string;
+  realChunkHash: ArrayBuffer;
+  data: ArrayBuffer;
+  metadata: ArrayBuffer;
+  merkleProof: ArrayBuffer;
+}
+
 export interface SendQueue {
   position: number;
   label: string;
@@ -124,12 +134,29 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getDBNewChunk";
+      args: [hashHex: string, chunkIndex: number];
+    }
+  | {
+      id: number;
+      method: "existsDBNewChunk";
+      args: [hashHex: string, chunkIndex: number];
+    }
+  | {
+      id: number;
       method: "getDBSendQueue";
       args: [label: string, toPeerId: string, position?: number];
     }
   | { id: number; method: "getDBAllChunks"; args: [merkleRootHex: string] }
   | { id: number; method: "getDBAllChunksCount"; args: [merkleRootHex: string] }
   | { id: number; method: "setDBChunk"; args: [chunk: Chunk] }
+  | {
+      id: number;
+      method: "getDBAllNewChunks";
+      args: [hashHex?: string, merkleRootHex?: string];
+    }
+  | { id: number; method: "getDBAllNewChunksCount"; args: [hashHex: string] }
+  | { id: number; method: "setDBNewChunk"; args: [chunk: NewChunk] }
   | { id: number; method: "setDBSendQueue"; args: [item: SendQueue] }
   | {
       id: number;
@@ -140,6 +167,11 @@ export type WorkerMessages =
       id: number;
       method: "deleteDBChunk";
       args: [merkleRootHex: string, chunkIndex?: number];
+    }
+  | {
+      id: number;
+      method: "deleteDBNewChunk";
+      args: [hashHex: string, chunkIndex?: number];
     }
   | {
       id: number;
@@ -170,16 +202,22 @@ export interface WorkerMethodReturnTypes {
   setDBUniqueRoom: void;
   deleteDBPeerFromBlacklist: void;
   getDBRoomMessageData: SetMessageAllChunksArgs[];
-  getDBChunk: Blob | undefined;
+  getDBChunk: ArrayBuffer | undefined;
   existsDBChunk: boolean;
+  getDBNewChunk: NewChunk | undefined;
+  existsDBNewChunk: boolean;
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
   getDBAllChunksCount: number;
-  setDBRoomMessageData: void;
   setDBChunk: void;
+  getDBAllNewChunks: NewChunk[];
+  getDBAllNewChunksCount: number;
+  setDBNewChunk: void;
+  setDBRoomMessageData: void;
   setDBSendQueue: void;
   countDBSendQueue: number;
   deleteDBChunk: void;
+  deleteDBNewChunk: void;
   deleteDBMessageData: void;
   deleteDBSendQueue: void;
   deleteDB: void;

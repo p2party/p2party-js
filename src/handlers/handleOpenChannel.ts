@@ -70,15 +70,22 @@ export const handleOpenChannel = async (
           ) {
             channel.close();
 
-            api.dispatch(
-              webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-                peerId: epc.withPeerId,
-                label: channel.label,
-              }),
-            );
+            // api.dispatch(
+            //   webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
+            //     peerId: epc.withPeerId,
+            //     label: channel.label,
+            //   }),
+            // );
           }
         }
       }
+    } else {
+      const channelIndex = dataChannels.findIndex(
+        (dc) => dc.label === channel && dc.withPeerId === epc.withPeerId,
+      );
+
+      if (channelIndex > -1 && dataChannels[channelIndex].readyState === "open")
+        return dataChannels[channelIndex];
     }
 
     const label = typeof channel === "string" ? channel : channel.label;

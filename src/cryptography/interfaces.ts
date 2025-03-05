@@ -21,6 +21,8 @@ export const crypto_aead_chacha20poly1305_ietf_KEYBYTES =
   32 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_aead_chacha20poly1305_ietf_NPUBBYTES =
   12 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_pwhash_argon2id_SALTBYTES =
+  16 * Uint8Array.BYTES_PER_ELEMENT;
 
 export interface SignKeyPair {
   publicKey: Uint8Array;

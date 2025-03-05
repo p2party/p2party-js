@@ -133,6 +133,43 @@ const libsodiumKx5 = path.join(
   "scalarmult_ed25519_ref10.c",
 );
 
+const libsodiumArgon1 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "argon2.c",
+);
+const libsodiumArgon2 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "argon2-core.c",
+);
+const libsodiumArgon3 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "argon2-encoding.c",
+);
+const libsodiumArgon4 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "argon2-fill-block-ref.c",
+);
+const libsodiumArgon5 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "blake2b-long.c",
+);
+const libsodiumArgon6 = path.join(
+  libsodiumPath,
+  "crypto_pwhash",
+  "argon2",
+  "pwhash_argon2id.c",
+);
+
 module.exports = {
   methodsPath,
 
@@ -171,4 +208,11 @@ module.exports = {
   libsodiumKx3,
   libsodiumKx4,
   libsodiumKx5,
+
+  libsodiumArgon1,
+  libsodiumArgon2,
+  libsodiumArgon3,
+  libsodiumArgon4,
+  libsodiumArgon5,
+  libsodiumArgon6,
 };

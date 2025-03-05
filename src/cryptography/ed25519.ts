@@ -1,4 +1,4 @@
-import demosMemory from "./memory";
+import memory from "./memory";
 
 import libcrypto from "./libcrypto";
 
@@ -13,7 +13,7 @@ import type { SignKeyPair } from "./interfaces";
 import type { LibCrypto } from "./libcrypto";
 
 export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
-  const wasmMemory = module?.wasmMemory ?? demosMemory.newKeyPairMemory();
+  const wasmMemory = module?.wasmMemory ?? memory.newKeyPairMemory();
 
   const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
@@ -73,7 +73,7 @@ export const keyPairFromSeed = async (
   seed: Uint8Array,
   module?: LibCrypto,
 ): Promise<SignKeyPair> => {
-  const wasmMemory = module?.wasmMemory ?? demosMemory.keyPairFromSeedMemory();
+  const wasmMemory = module?.wasmMemory ?? memory.keyPairFromSeedMemory();
 
   const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
@@ -133,8 +133,7 @@ export const keyPairFromSecretKey = async (
   secretKey: Uint8Array,
   module?: LibCrypto,
 ): Promise<SignKeyPair> => {
-  const wasmMemory =
-    module?.wasmMemory ?? demosMemory.keyPairFromSecretKeyMemory();
+  const wasmMemory = module?.wasmMemory ?? memory.keyPairFromSecretKeyMemory();
 
   const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
@@ -191,9 +190,7 @@ export const sign = async (
 ): Promise<Uint8Array> => {
   const messageLen = message.length;
 
-  const wasmMemory = module
-    ? module.wasmMemory
-    : demosMemory.signMemory(messageLen);
+  const wasmMemory = module ? module.wasmMemory : memory.signMemory(messageLen);
 
   const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 
@@ -244,7 +241,7 @@ export const verify = async (
 ): Promise<boolean> => {
   const len = message.length;
 
-  const wasmMemory = module ? module.wasmMemory : demosMemory.verifyMemory(len);
+  const wasmMemory = module ? module.wasmMemory : memory.verifyMemory(len);
 
   const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
 

@@ -11,6 +11,7 @@ import {
   getEncryptedLen,
   getDecryptedLen,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  crypto_pwhash_argon2id_SALTBYTES,
 } from "./interfaces";
 
 /**
@@ -163,6 +164,18 @@ const verifyMerkleProofMemory = (proofLen: number): WebAssembly.Memory => {
   });
 };
 
+const argon2Memory = (mnemonicLen: number): WebAssembly.Memory => {
+  const memoryLen =
+    (75 * 1024 * 1024 +
+      mnemonicLen +
+      crypto_sign_ed25519_SEEDBYTES +
+      crypto_pwhash_argon2id_SALTBYTES) *
+    Uint8Array.BYTES_PER_ELEMENT;
+  const pages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({ initial: pages, maximum: pages });
+};
+
 export default {
   newKeyPairMemory,
   keyPairFromSeedMemory,
@@ -174,4 +187,5 @@ export default {
   getMerkleRootMemory,
   getMerkleProofMemory,
   verifyMerkleProofMemory,
+  argon2Memory,
 };

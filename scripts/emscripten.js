@@ -30,6 +30,12 @@ const {
   libsodiumKx3,
   libsodiumKx4,
   libsodiumKx5,
+  libsodiumArgon1,
+  libsodiumArgon2,
+  libsodiumArgon3,
+  libsodiumArgon4,
+  libsodiumArgon5,
+  libsodiumArgon6,
 } = require("./paths");
 
 const buildPath = path.join(process.cwd(), "src", "cryptography");
@@ -143,7 +149,8 @@ _get_merkle_root,\
 _get_merkle_root_from_proof,\
 _verify_merkle_proof,\
 _keypair_from_seed,\
-_keypair_from_secret_key \
+_keypair_from_secret_key,\
+_argon2 \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \
 -I${libsodiumIncludePrivatePath} \
@@ -173,6 +180,12 @@ ${libsodiumKx2} \
 ${libsodiumKx3} \
 ${libsodiumKx4} \
 ${libsodiumKx5} \
+${libsodiumArgon1} \
+${libsodiumArgon2} \
+${libsodiumArgon3} \
+${libsodiumArgon4} \
+${libsodiumArgon5} \
+${libsodiumArgon6} \
 `,
   { stdio: "inherit" },
 );

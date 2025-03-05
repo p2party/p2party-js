@@ -74,6 +74,13 @@ export interface LibCrypto extends EmscriptenModule {
     root: number, // Uint8Array.byteOffset
     proof: number, // Uint8Array.byteOffset
   ): number;
+
+  _argon2(
+    MNEMONIC_LEN: number,
+    seed: number,
+    mnemonic: number,
+    salt: number,
+  ): number;
 }
 
 declare const libcrypto: EmscriptenModuleFactory<LibCrypto>;

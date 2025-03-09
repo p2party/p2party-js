@@ -68,41 +68,57 @@ roomListenerMiddleware.startListening({
         );
       }
     } else if (setRoom.match(action)) {
-      await setDBUniqueRoom(action.payload.url, action.payload.id);
-
-      const oldMessages = await getDBRoomMessageData(action.payload.id);
-      const oldMessagesLen = oldMessages.length;
-      for (let i = 0; i < oldMessagesLen; i++) {
-        listenerApi.dispatch(setMessageAllChunks(oldMessages[i]));
-      }
-
-      if (action.payload.onlyConnectWithKnownPeers != undefined) {
-        localStorage.setItem(
-          action.payload.url + "-onlyConnectWithKnownPeers",
-          String(action.payload.onlyConnectWithKnownPeers),
-        );
-      }
-
       const { signalingServer, keyPair, rooms } =
         listenerApi.getState() as State;
 
-      const roomIndex = rooms.findIndex((r) => r.id === action.payload.id);
+      const { url, id, onlyConnectWithKnownPeers } = action.payload;
 
-      if (
-        signalingServer.isConnected &&
-        isUUID(keyPair.peerId) &&
-        roomIndex > -1 &&
-        isUUID(rooms[roomIndex].id)
-      ) {
-        listenerApi.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "peers",
-              fromPeerId: keyPair.peerId,
-              roomId: rooms[roomIndex].id,
-            } as WebSocketMessagePeersRequest,
-          }),
+      if (url.length === 64 && onlyConnectWithKnownPeers != undefined) {
+        localStorage.setItem(
+          url + "-onlyConnectWithKnownPeers",
+          String(onlyConnectWithKnownPeers),
         );
+      }
+
+      if (url.length === 64 && isUUID(id)) {
+        await setDBUniqueRoom(url, id);
+
+        const oldMessages = await getDBRoomMessageData(id);
+        const oldMessagesLen = oldMessages.length;
+        for (let i = 0; i < oldMessagesLen; i++) {
+          listenerApi.dispatch(
+            setMessageAllChunks({
+              roomId: oldMessages[i].roomId,
+              merkleRootHex: oldMessages[i].merkleRoot,
+              sha512Hex: oldMessages[i].hash,
+              fromPeerId: oldMessages[i].fromPeerId,
+              filename: oldMessages[i].filename,
+              messageType: oldMessages[i].messageType,
+              totalSize: oldMessages[i].totalSize,
+              channelLabel: oldMessages[i].channelLabel,
+              timestamp: oldMessages[i].timestamp,
+            }),
+          );
+        }
+
+        const roomIndex = rooms.findIndex((r) => r.id === id);
+
+        if (
+          signalingServer.isConnected &&
+          isUUID(keyPair.peerId) &&
+          roomIndex > -1 &&
+          isUUID(rooms[roomIndex].id)
+        ) {
+          listenerApi.dispatch(
+            signalingServerApi.endpoints.sendMessage.initiate({
+              content: {
+                type: "peers",
+                fromPeerId: keyPair.peerId,
+                roomId: rooms[roomIndex].id,
+              } as WebSocketMessagePeersRequest,
+            }),
+          );
+        }
       }
     } else if (setMessage.match(action)) {
       const { roomId } = action.payload;

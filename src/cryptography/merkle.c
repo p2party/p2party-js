@@ -7,7 +7,7 @@ get_merkle_root(const unsigned int LEAVES_LEN,
 {
   size_t i, j;
 
-  uint8_t(*concat_hashes)[crypto_hash_sha512_BYTES]
+  uint8_t (*concat_hashes)[crypto_hash_sha512_BYTES]
       = malloc(sizeof(uint8_t[2][crypto_hash_sha512_BYTES]));
   if (concat_hashes == NULL) return -1;
 
@@ -89,7 +89,7 @@ get_merkle_proof(const unsigned int LEAVES_LEN,
 
   unsigned int element_of_interest = index;
 
-  uint8_t(*concat_hashes)[crypto_hash_sha512_BYTES]
+  uint8_t (*concat_hashes)[crypto_hash_sha512_BYTES]
       = malloc(sizeof(uint8_t[2][crypto_hash_sha512_BYTES]));
   if (concat_hashes == NULL) return -2;
 
@@ -217,7 +217,7 @@ get_merkle_root_from_proof(
     }
   }
 
-  uint8_t(*concat_hashes)[crypto_hash_sha512_BYTES]
+  uint8_t (*concat_hashes)[crypto_hash_sha512_BYTES]
       = malloc(sizeof(uint8_t[2][crypto_hash_sha512_BYTES]));
   if (concat_hashes == NULL) return -1;
 
@@ -287,7 +287,7 @@ verify_merkle_proof(
     }
   }
 
-  uint8_t(*concat_hashes)[crypto_hash_sha512_BYTES]
+  uint8_t (*concat_hashes)[crypto_hash_sha512_BYTES]
       = malloc(sizeof(uint8_t[2][crypto_hash_sha512_BYTES]));
   if (concat_hashes == NULL) return -2;
 

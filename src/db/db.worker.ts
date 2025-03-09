@@ -13,7 +13,7 @@ import type {
   UniqueRoom,
   NewChunk,
 } from "./types";
-import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
+import type { MessageType } from "../utils/messageTypes";
 
 export const dbName = "p2party";
 export const dbVersion = 7;
@@ -441,23 +441,36 @@ async function fnSetDBUniqueRoom(
   db.close();
 }
 
-async function fnGetDBRoomMessageData(
-  roomId: string,
-): Promise<SetMessageAllChunksArgs[]> {
+async function fnGetDBMessageData(
+  merkleRootHex: string,
+): Promise<MessageData | undefined> {
+  const db = await getDB();
+  const messageData = await db.getFromIndex(
+    "messageData",
+    "merkleRoot",
+    merkleRootHex,
+  );
+  db.close();
+
+  return messageData;
+}
+
+async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
   const db = await getDB();
   const messageData = await db.getAllFromIndex("messageData", "roomId", roomId);
   db.close();
 
-  const messages: SetMessageAllChunksArgs[] = [];
+  const messages: MessageData[] = [];
   const messageDataLen = messageData.length;
   for (let i = 0; i < messageDataLen; i++) {
     messages.push({
       roomId,
-      merkleRootHex: messageData[i].merkleRoot,
-      sha512Hex: messageData[i].hash,
-      fromPeerId: messageData[i].fromPeedId,
+      merkleRoot: messageData[i].merkleRoot,
+      hash: messageData[i].hash,
+      fromPeerId: messageData[i].fromPeerId,
       filename: messageData[i].filename,
       messageType: messageData[i].messageType,
+      savedSize: messageData[i].savedSize,
       totalSize: messageData[i].totalSize,
       channelLabel: messageData[i].channelLabel,
       timestamp: messageData[i].timestamp,
@@ -469,73 +482,59 @@ async function fnGetDBRoomMessageData(
 
 async function fnSetDBRoomMessageData(
   roomId: string,
-  message: SetMessageAllChunksArgs,
+  merkleRootHex: string,
+  sha512Hex: string,
+  fromPeerId: string,
+  chunkSize: number,
+  totalSize: number,
+  messageType: MessageType,
+  filename: string,
+  channelLabel: string,
+  timestamp: number,
 ): Promise<void> {
   const db = await getDB();
 
   try {
     const tx = db.transaction("messageData", "readonly");
     const index = tx.objectStore("messageData").index("merkleRoot");
-    const item = await index.get(message.merkleRootHex);
+    const item = await index.get(merkleRootHex);
     await tx.done;
 
     if (!item) {
       await db.put("messageData", {
         roomId,
-        timestamp: Date.now(),
-        merkleRoot: message.merkleRootHex,
-        hash: message.sha512Hex,
-        fromPeedId: message.fromPeerId,
-        filename: message.filename,
-        messageType: message.messageType,
-        totalSize: message.totalSize,
-        channelLabel: message.channelLabel,
+        timestamp,
+        merkleRoot: merkleRootHex,
+        hash: sha512Hex,
+        fromPeerId,
+        filename,
+        messageType,
+        savedSize: chunkSize,
+        totalSize,
+        channelLabel,
       });
-
-      const roomTx = db.transaction("uniqueRoom", "readwrite");
-      const indx = roomTx.objectStore("uniqueRoom").index("roomId");
-      const itm = await indx.get(roomId);
-      await roomTx.done;
-
-      if (itm && itm.lastMessageMerkleRoot !== message.merkleRootHex) {
-        await db.put("uniqueRoom", {
-          roomId,
-          roomUrl: itm.roomUrl,
-          messageCount: itm.messageCount + 1,
-          lastMessageMerkleRoot: message.merkleRootHex,
-          createdAt: itm.createdAt,
-          updatedAt: Date.now(),
-        });
-      }
+    } else {
+      await db.put("messageData", {
+        ...item,
+        savedSize: item.savedSize + chunkSize,
+      });
     }
-  } catch (error) {
-    await db.put("messageData", {
-      roomId,
-      timestamp: Date.now(),
-      merkleRoot: message.merkleRootHex,
-      hash: message.sha512Hex,
-      fromPeedId: message.fromPeerId,
-      filename: message.filename,
-      messageType: message.messageType,
-      totalSize: message.totalSize,
-      channelLabel: message.channelLabel,
-    });
 
     const roomTx = db.transaction("uniqueRoom", "readwrite");
     const indx = roomTx.objectStore("uniqueRoom").index("roomId");
     const itm = await indx.get(roomId);
     await roomTx.done;
 
-    if (itm && itm.lastMessageMerkleRoot !== message.merkleRootHex) {
+    if (itm && itm.lastMessageMerkleRoot !== merkleRootHex && !item) {
       await db.put("uniqueRoom", {
-        roomId,
-        roomUrl: itm.roomUrl,
+        ...itm,
+        lastMessageMerkleRoot: merkleRootHex,
         messageCount: itm.messageCount + 1,
-        lastMessageMerkleRoot: message.merkleRootHex,
-        createdAt: itm.createdAt,
         updatedAt: Date.now(),
       });
     }
+  } catch (error) {
+    console.error(error);
   }
 
   db.close();
@@ -865,6 +864,11 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnSetDBUniqueRoom(
           ...message.args,
         )) as WorkerMethodReturnTypes["setDBUniqueRoom"];
+        break;
+      case "getDBMessageData":
+        result = (await fnGetDBMessageData(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["getDBMessageData"];
         break;
       case "getDBRoomMessageData":
         result = (await fnGetDBRoomMessageData(

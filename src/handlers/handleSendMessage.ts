@@ -1,6 +1,9 @@
 import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
 import { newKeyPair, sign } from "../cryptography/ed25519";
+import { getMerkleProof } from "../cryptography/merkle";
+
+import { setMessage } from "../reducers/roomSlice";
 
 import {
   concatUint8Arrays,
@@ -8,6 +11,13 @@ import {
   // uint8ArrayToHex,
 } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
+import { deserializeMetadata } from "../utils/metadata";
+import { getMimeType } from "../utils/messageTypes";
+import {
+  compileChannelMessageLabel,
+  decompileChannelMessageLabel,
+} from "../utils/channelLabel";
+
 import {
   deleteDBSendQueue,
   getDBNewChunk,
@@ -18,10 +28,6 @@ import {
 } from "../db/api";
 
 import { handleOpenChannel, MAX_BUFFERED_AMOUNT } from "./handleOpenChannel";
-import {
-  compileChannelMessageLabel,
-  decompileChannelMessageLabel,
-} from "../utils/channelLabel";
 
 // import { deleteMessage } from "../reducers/roomSlice";
 
@@ -34,10 +40,6 @@ import type {
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
-import { getMerkleProof } from "../cryptography/merkle";
-import { deserializeMetadata } from "../utils/metadata";
-import { getMimeType } from "../utils/messageTypes";
-import { setMessage } from "../reducers/roomSlice";
 
 export const wait = (milliseconds: number) => {
   return new Promise((resolve) => {
@@ -83,6 +85,42 @@ const sendChunks = async (
       const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
       if (!unencryptedChunk) continue;
 
+      const metadataArray = new Uint8Array(unencryptedChunk.metadata);
+      const metadata = deserializeMetadata(metadataArray);
+
+      if (
+        metadata.chunkStartIndex > 0 &&
+        metadata.chunkEndIndex > metadata.chunkStartIndex &&
+        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
+      ) {
+        const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
+
+        api.dispatch(
+          setMessage({
+            roomId,
+            merkleRootHex,
+            sha512Hex: hashHex,
+            fromPeerId,
+            chunkSize,
+            totalSize: metadata.totalSize,
+            messageType: metadata.messageType,
+            filename: metadata.name,
+            channelLabel,
+          }),
+        );
+
+        const mimeType = getMimeType(metadata.messageType);
+        await setDBChunk({
+          merkleRoot: merkleRootHex,
+          chunkIndex: metadata.chunkIndex,
+          data: unencryptedChunk.data.slice(
+            metadata.chunkStartIndex,
+            metadata.chunkEndIndex,
+          ), // new Blob([realChunk]),
+          mimeType,
+        });
+      }
+
       const merkleProof = new Uint8Array(PROOF_LEN);
       if (unencryptedChunk.merkleProof.byteLength === 0) {
         const m = await getMerkleProof(
@@ -117,40 +155,6 @@ const sendChunks = async (
             merkleProof: unencryptedChunk.merkleProof,
           });
         }
-      }
-
-      const metadataArray = new Uint8Array(unencryptedChunk.metadata);
-      const metadata = deserializeMetadata(metadataArray);
-
-      if (
-        metadata.chunkStartIndex > 0 &&
-        metadata.chunkEndIndex > metadata.chunkStartIndex &&
-        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
-      ) {
-        api.dispatch(
-          setMessage({
-            roomId,
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId,
-            chunkSize: metadata.chunkEndIndex - metadata.chunkStartIndex,
-            totalSize: metadata.totalSize,
-            messageType: metadata.messageType,
-            filename: metadata.name,
-            channelLabel,
-          }),
-        );
-
-        const mimeType = getMimeType(metadata.messageType);
-        await setDBChunk({
-          merkleRoot: merkleRootHex,
-          chunkIndex: metadata.chunkIndex,
-          data: unencryptedChunk.data.slice(
-            metadata.chunkStartIndex,
-            metadata.chunkEndIndex,
-          ), // new Blob([realChunk]),
-          mimeType,
-        });
       }
 
       const chunk = await concatUint8Arrays([

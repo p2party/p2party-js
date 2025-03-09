@@ -1,5 +1,5 @@
-import type { SetMessageAllChunksArgs } from "../reducers/roomSlice";
 import type { WorkerMessages, Chunk, NewChunk, SendQueue } from "./types";
+import type { MessageType } from "../utils/messageTypes";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
 const workerBlob = new Blob([workerSrc], {
@@ -73,13 +73,37 @@ export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
 export const setDBUniqueRoom = (roomUrl: string, roomId: string) =>
   callWorker("setDBUniqueRoom", roomUrl, roomId);
 
+export const getDBMessageData = (merkleRootHex: string) =>
+  callWorker("getDBMessageData", merkleRootHex);
+
 export const getDBRoomMessageData = (roomId: string) =>
   callWorker("getDBRoomMessageData", roomId);
 
 export const setDBRoomMessageData = (
   roomId: string,
-  message: SetMessageAllChunksArgs,
-) => callWorker("setDBRoomMessageData", roomId, message);
+  merkleRootHex: string,
+  sha512Hex: string,
+  fromPeerId: string,
+  chunkSize: number,
+  totalSize: number,
+  messageType: MessageType,
+  filename: string,
+  channelLabel: string,
+  timestamp: number,
+) =>
+  callWorker(
+    "setDBRoomMessageData",
+    roomId,
+    merkleRootHex,
+    sha512Hex,
+    fromPeerId,
+    chunkSize,
+    totalSize,
+    messageType,
+    filename,
+    channelLabel,
+    timestamp,
+  );
 
 export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
   callWorker("getDBChunk", merkleRootHex, chunkIndex);

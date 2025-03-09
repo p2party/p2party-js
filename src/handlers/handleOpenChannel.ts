@@ -170,6 +170,7 @@ export const handleOpenChannel = async (
 
         if (roomIndex > -1) {
           const {
+            date,
             chunkSize,
             chunkIndex,
             // relevant,
@@ -187,18 +188,6 @@ export const handleOpenChannel = async (
             merkleModule,
           );
 
-          await setDBRoomMessageData(roomId, {
-            roomId,
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: epc.withPeerId,
-            totalSize,
-            messageType,
-            filename,
-            channelLabel,
-            timestamp: Date.now(),
-          });
-
           if (chunkSize > 0) {
             api.dispatch(
               setMessage({
@@ -212,6 +201,19 @@ export const handleOpenChannel = async (
                 filename,
                 channelLabel,
               }),
+            );
+
+            await setDBRoomMessageData(
+              roomId,
+              merkleRootHex,
+              hashHex,
+              epc.withPeerId,
+              chunkSize,
+              totalSize,
+              messageType,
+              filename,
+              channelLabel,
+              date.getTime(),
             );
           }
 

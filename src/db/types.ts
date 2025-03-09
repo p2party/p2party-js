@@ -1,4 +1,4 @@
-import type { Peer, SetMessageAllChunksArgs } from "../reducers/roomSlice";
+import type { Peer } from "../reducers/roomSlice";
 import type { MessageType } from "../utils/messageTypes";
 
 export interface UsernamedPeer extends Peer {
@@ -27,13 +27,14 @@ export interface UniqueRoom {
 export interface MessageData {
   roomId: string;
   timestamp: number;
-  fromPeedId: string;
+  fromPeerId: string;
   channelLabel: string;
   hash: string;
   merkleRoot: string;
   filename: string;
   messageType: MessageType;
   totalSize: number;
+  savedSize: number;
 }
 
 export interface Chunk {
@@ -114,13 +115,29 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getDBMessageData";
+      args: [merkleRootHex: string];
+    }
+  | {
+      id: number;
       method: "getDBRoomMessageData";
       args: [roomId: string];
     }
   | {
       id: number;
       method: "setDBRoomMessageData";
-      args: [roomId: string, message: SetMessageAllChunksArgs];
+      args: [
+        roomId: string,
+        merkleRootHex: string,
+        sha512Hex: string,
+        fromPeerId: string,
+        chunkSize: number,
+        totalSize: number,
+        messageType: MessageType,
+        filename: string,
+        channelLabel: string,
+        timestamp: number,
+      ];
     }
   | {
       id: number;
@@ -201,7 +218,8 @@ export interface WorkerMethodReturnTypes {
   getAllDBUniqueRooms: UniqueRoom[];
   setDBUniqueRoom: void;
   deleteDBPeerFromBlacklist: void;
-  getDBRoomMessageData: SetMessageAllChunksArgs[];
+  getDBMessageData: MessageData | undefined;
+  getDBRoomMessageData: MessageData[];
   getDBChunk: ArrayBuffer | undefined;
   existsDBChunk: boolean;
   getDBNewChunk: NewChunk | undefined;

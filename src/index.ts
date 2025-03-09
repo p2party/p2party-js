@@ -13,6 +13,7 @@ import {
   getDBAddressBookEntry,
   getDBAllChunks,
   getDBPeerIsBlacklisted,
+  getDBMessageData,
   setDBAddressBookEntry,
   setDBPeerInBlacklist,
 } from "./db/api";
@@ -321,54 +322,28 @@ const readMessage = async (
   category: MessageCategory;
 }> => {
   try {
-    const { keyPair, rooms } = store.getState();
-    const roomsLen = rooms.length;
-    let index = -1;
-    for (let i = 0; i < roomsLen; i++) {
-      const messageIndex = rooms[i].messages.findIndex(
-        (m) => m.merkleRootHex === merkleRootHex,
-      );
-      if (messageIndex > -1) {
-        index = i;
-        break;
-      }
-    }
-
-    if (index > -1) {
-      const messageIndex = rooms[index].messages.findIndex(
-        (m) => m.merkleRootHex === merkleRootHex,
-      );
-      if (messageIndex === -1) {
-        return {
-          message: "Unknown message",
-          percentage: 0,
-          size: 0,
-          filename: "",
-          mimeType: "text/plain",
-          extension: "",
-          category: MessageCategory.Text,
-        };
-      }
-
-      const messageType = rooms[index].messages[messageIndex].messageType;
+    const { keyPair } = store.getState();
+    const msg = await getDBMessageData(merkleRootHex);
+    if (msg) {
+      const messageType = msg.messageType;
       const mimeType = getMimeType(messageType);
       const extension = getFileExtension(messageType);
       const category = getMessageCategory(messageType);
 
-      const percentage = Math.floor(
-        (rooms[index].messages[messageIndex].savedSize /
-          rooms[index].messages[messageIndex].totalSize) *
-          100,
-      );
+      // const chunks = await getDBAllChunks(merkleRootHex);
+      // const chunksLen = chunks.length;
+      // let savedSize = 0;
+      // for (let i = 0; i < chunksLen; i++) {
+      //   savedSize += new Uint8Array(chunks[i].data).length;
+      // }
 
-      if (
-        percentage === 100 &&
-        rooms[index].messages[messageIndex].fromPeerId !== keyPair.peerId
-      ) {
+      const percentage = Math.floor((msg.savedSize / msg.totalSize) * 100);
+
+      if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
         const label = await compileChannelMessageLabel(
-          rooms[index].messages[messageIndex].channelLabel,
-          rooms[index].messages[messageIndex].merkleRootHex,
-          rooms[index].messages[messageIndex].sha512Hex,
+          msg.channelLabel,
+          msg.merkleRoot,
+          msg.hash,
         );
 
         await store.dispatch(
@@ -379,18 +354,9 @@ const readMessage = async (
         );
       }
 
-      const root = rooms[index].messages[messageIndex].merkleRootHex;
       const chunks =
-        percentage === 100
-          ? await getDBAllChunks(root)
-          : [
-              // {
-              //   merkleRoot: merkleRootHex,
-              //   chunkIndex: -1,
-              //   data: new Uint8Array().buffer,
-              //   mimeType,
-              // },
-            ];
+        percentage === 100 ? await getDBAllChunks(merkleRootHex) : [];
+
       const dataChunks =
         chunks.length > 0
           ? chunks
@@ -405,7 +371,7 @@ const readMessage = async (
         return {
           message: await data.text(),
           percentage,
-          size: rooms[index].messages[messageIndex].totalSize,
+          size: msg.totalSize,
           filename: "",
           mimeType,
           extension,
@@ -415,8 +381,8 @@ const readMessage = async (
         return {
           message: data,
           percentage,
-          size: rooms[index].messages[messageIndex].totalSize,
-          filename: rooms[index].messages[messageIndex].filename,
+          size: msg.totalSize,
+          filename: msg.filename,
           mimeType,
           extension,
           category,
@@ -425,8 +391,8 @@ const readMessage = async (
         return {
           message: "Invalid message",
           percentage: 0,
-          size: rooms[index].messages[messageIndex].totalSize,
-          filename: rooms[index].messages[messageIndex].filename,
+          size: msg.totalSize,
+          filename: msg.filename,
           mimeType,
           extension,
           category,
@@ -434,7 +400,7 @@ const readMessage = async (
       }
     } else {
       return {
-        message: "Unknown message",
+        message: "Irretrievable message",
         percentage: 0,
         size: 0,
         filename: "",

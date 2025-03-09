@@ -4,7 +4,7 @@ import { serializeMetadata, METADATA_LEN } from "./metadata";
 
 import { setDBNewChunk, setDBRoomMessageData } from "../db/api";
 
-import { setMessage } from "../reducers/roomSlice";
+// import { setMessage } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
 import libcrypto from "../cryptography/libcrypto";
@@ -209,34 +209,33 @@ export const splitToChunks = async (
 
   const { keyPair } = api.getState() as State;
 
-  const messageData = {
+  // api.dispatch(setMessageAllChunks(messageData));
+  // api.dispatch(
+  //   setMessage({
+  //     roomId,
+  //     merkleRootHex,
+  //     sha512Hex,
+  //     fromPeerId: keyPair.peerId,
+  //     chunkSize: 0,
+  //     totalSize,
+  //     messageType,
+  //     filename: name,
+  //     channelLabel: label,
+  //   }),
+  // );
+
+  await setDBRoomMessageData(
     roomId,
     merkleRootHex,
     sha512Hex,
-    fromPeerId: keyPair.peerId,
+    keyPair.peerId,
+    totalSize,
     totalSize,
     messageType,
-    filename: name,
-    channelLabel: label,
-    timestamp: Date.now(),
-  };
-
-  // api.dispatch(setMessageAllChunks(messageData));
-  api.dispatch(
-    setMessage({
-      roomId,
-      merkleRootHex,
-      sha512Hex,
-      fromPeerId: keyPair.peerId,
-      chunkSize: 0,
-      totalSize,
-      messageType,
-      filename: name,
-      channelLabel: label,
-    }),
+    name,
+    label,
+    Date.now(),
   );
-
-  await setDBRoomMessageData(roomId, messageData);
 
   return {
     merkleRoot,

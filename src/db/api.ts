@@ -73,8 +73,8 @@ export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
 export const setDBUniqueRoom = (roomUrl: string, roomId: string) =>
   callWorker("setDBUniqueRoom", roomUrl, roomId);
 
-export const getDBMessageData = (merkleRootHex: string) =>
-  callWorker("getDBMessageData", merkleRootHex);
+export const getDBMessageData = (merkleRootHex?: string, hashHex?: string) =>
+  callWorker("getDBMessageData", merkleRootHex, hashHex);
 
 export const getDBRoomMessageData = (roomId: string) =>
   callWorker("getDBRoomMessageData", roomId);
@@ -111,7 +111,7 @@ export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
 export const existsDBChunk = (merkleRootHex: string, chunkIndex: number) =>
   callWorker("existsDBChunk", merkleRootHex, chunkIndex);
 
-export const getDBNewChunk = (hashHex: string, chunkIndex: number) =>
+export const getDBNewChunk = (hashHex: string, chunkIndex?: number) =>
   callWorker("getDBNewChunk", hashHex, chunkIndex);
 
 export const existsDBNewChunk = (hashHex: string, chunkIndex: number) =>
@@ -146,11 +146,25 @@ export const countDBSendQueue = (label: string, toPeerId: string) =>
 export const deleteDBChunk = (merkleRootHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", merkleRootHex, chunkIndex);
 
-export const deleteDBNewChunk = (hashHex: string, chunkIndex?: number) =>
-  callWorker("deleteDBNewChunk", hashHex, chunkIndex);
+export const deleteDBNewChunk = (
+  merkleRootHex?: string,
+  realChunkHashHex?: string,
+  hashHex?: string,
+  chunkIndex?: number,
+) =>
+  callWorker(
+    "deleteDBNewChunk",
+    merkleRootHex,
+    realChunkHashHex,
+    hashHex,
+    chunkIndex,
+  );
 
 export const deleteDBMessageData = (merkleRootHex: string) =>
   callWorker("deleteDBMessageData", merkleRootHex);
+
+export const deleteDBUniqueRoom = (roomId: string) =>
+  callWorker("deleteDBUniqueRoom", roomId);
 
 export const deleteDB = () => callWorker("deleteDB");
 

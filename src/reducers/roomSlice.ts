@@ -25,7 +25,8 @@ export interface Message {
   messageType: MessageType;
   savedSize: number;
   totalSize: number;
-  totalDeliveredSize: number;
+  chunksCreated: number;
+  totalChunks: number;
   channelLabel: string;
   timestamp: number;
 }
@@ -52,10 +53,13 @@ export interface SetMessageArgs {
   merkleRootHex: string;
   sha512Hex: string;
   chunkSize: number;
+  totalSize: number;
+  chunksCreated?: number;
+  totalChunks?: number;
+  timestamp?: number;
   fromPeerId: string;
   filename: string;
   messageType: MessageType;
-  totalSize: number;
   channelLabel: string;
 }
 
@@ -391,46 +395,82 @@ const roomSlice = createSlice({
     },
 
     setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
-      const { roomId } = action.payload;
+      const {
+        roomId,
+        merkleRootHex,
+        sha512Hex,
+        filename,
+        channelLabel,
+        fromPeerId,
+        messageType,
+        chunkSize,
+        totalSize,
+        chunksCreated,
+        totalChunks,
+        timestamp,
+      } = action.payload;
 
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
         const messageIndex = state[roomIndex].messages.findIndex(
-          (m) => m.merkleRootHex === action.payload.merkleRootHex,
+          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
         );
 
         if (messageIndex === -1) {
           if (
-            action.payload.channelLabel &&
-            action.payload.fromPeerId &&
-            isUUID(action.payload.fromPeerId) &&
-            action.payload.messageType &&
-            action.payload.chunkSize > 0 &&
-            action.payload.totalSize
+            channelLabel &&
+            fromPeerId &&
+            isUUID(fromPeerId) &&
+            messageType &&
+            // chunkSize > 0 &&
+            totalSize
           ) {
             state[roomIndex].messages.push({
-              merkleRootHex: action.payload.merkleRootHex,
-              sha512Hex: action.payload.sha512Hex,
-              channelLabel: action.payload.channelLabel,
-              filename: action.payload.filename ?? "txt",
-              messageType: action.payload.messageType,
-              fromPeerId: action.payload.fromPeerId,
-              timestamp: Date.now(),
-              savedSize:
-                action.payload.chunkSize > 0 ? action.payload.chunkSize : 0,
-              totalSize: action.payload.totalSize,
-              totalDeliveredSize: action.payload.totalSize,
+              merkleRootHex,
+              sha512Hex,
+              channelLabel,
+              filename: filename ?? "txt",
+              messageType,
+              fromPeerId,
+              timestamp: timestamp ?? Date.now(),
+              savedSize: chunkSize > 0 ? chunkSize : 0,
+              totalSize,
+              chunksCreated: chunksCreated ?? 0,
+              totalChunks: totalChunks ?? 0,
             });
           }
-        } else if (
-          action.payload.chunkSize > 0 &&
-          state[roomIndex].messages[messageIndex].totalSize >=
-            state[roomIndex].messages[messageIndex].savedSize +
-              action.payload.chunkSize
-        ) {
-          state[roomIndex].messages[messageIndex].savedSize +=
-            action.payload.chunkSize;
+        } else {
+          if (
+            merkleRootHex.length > 0 &&
+            state[roomIndex].messages[messageIndex].merkleRootHex === ""
+          ) {
+            state[roomIndex].messages[messageIndex].merkleRootHex =
+              merkleRootHex;
+          }
+
+          if (
+            totalSize > 0 &&
+            state[roomIndex].messages[messageIndex].totalSize < totalSize
+          ) {
+            state[roomIndex].messages[messageIndex].totalSize = totalSize;
+          }
+
+          if (
+            chunkSize > 0 &&
+            state[roomIndex].messages[messageIndex].totalSize >=
+              state[roomIndex].messages[messageIndex].savedSize + chunkSize
+          ) {
+            state[roomIndex].messages[messageIndex].savedSize += chunkSize;
+          }
+
+          if (
+            chunksCreated &&
+            chunksCreated <= state[roomIndex].messages[messageIndex].totalChunks
+          ) {
+            state[roomIndex].messages[messageIndex].chunksCreated =
+              chunksCreated + 1;
+          }
         }
       }
     },
@@ -439,45 +479,17 @@ const roomSlice = createSlice({
       state,
       action: PayloadAction<SetMessageAllChunksArgs>,
     ) => {
-      const { roomId } = action.payload;
-
-      const roomIndex = state.findIndex((r) => r.id === roomId);
-
-      if (roomIndex > -1) {
-        const messageIndex = state[roomIndex].messages.findIndex(
-          (m) => m.merkleRootHex === action.payload.merkleRootHex,
-        );
-
-        if (
-          messageIndex === -1 &&
-          action.payload.channelLabel &&
-          action.payload.fromPeerId &&
-          isUUID(action.payload.fromPeerId) &&
-          action.payload.messageType &&
-          action.payload.totalSize
-        ) {
-          state[roomIndex].messages.push({
-            merkleRootHex: action.payload.merkleRootHex,
-            sha512Hex: action.payload.sha512Hex,
-            channelLabel: action.payload.channelLabel,
-            filename: action.payload.filename ?? "txt",
-            messageType: action.payload.messageType,
-            fromPeerId: action.payload.fromPeerId,
-            timestamp: action.payload.timestamp,
-            savedSize: action.payload.totalSize,
-            totalSize: action.payload.totalSize,
-            totalDeliveredSize: 0,
-          });
-        }
-      }
-    },
-
-    setMessageDeliveredSize: (
-      state,
-      action: PayloadAction<SetMessageDeliveredSizeArgs>,
-    ) => {
-      const { roomId, merkleRootHex, sha512Hex, deliveredSize } =
-        action.payload;
+      const {
+        roomId,
+        merkleRootHex,
+        sha512Hex,
+        channelLabel,
+        filename,
+        messageType,
+        fromPeerId,
+        timestamp,
+        totalSize,
+      } = action.payload;
 
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
@@ -487,14 +499,26 @@ const roomSlice = createSlice({
         );
 
         if (
-          messageIndex > -1 &&
-          deliveredSize > 0 &&
-          state[roomIndex].messages[messageIndex].totalDeliveredSize +
-            deliveredSize <=
-            state[roomIndex].messages[messageIndex].totalSize
+          messageIndex === -1 &&
+          channelLabel &&
+          fromPeerId &&
+          isUUID(fromPeerId) &&
+          messageType &&
+          totalSize
         ) {
-          state[roomIndex].messages[messageIndex].totalDeliveredSize +=
-            deliveredSize;
+          state[roomIndex].messages.push({
+            merkleRootHex,
+            sha512Hex,
+            channelLabel,
+            filename: filename ?? "txt",
+            messageType,
+            fromPeerId,
+            timestamp,
+            savedSize: totalSize,
+            totalSize,
+            chunksCreated: 0,
+            totalChunks: 0,
+          });
         }
       }
     },

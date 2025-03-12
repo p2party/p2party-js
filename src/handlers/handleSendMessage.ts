@@ -3,7 +3,7 @@ import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
 import { newKeyPair, sign } from "../cryptography/ed25519";
 import { getMerkleProof } from "../cryptography/merkle";
 
-import { setMessage } from "../reducers/roomSlice";
+// import { setMessage } from "../reducers/roomSlice";
 
 import {
   concatUint8Arrays,
@@ -49,14 +49,14 @@ export const wait = (milliseconds: number) => {
 
 const sendChunks = async (
   channel: IRTCDataChannel,
-  roomId: string,
-  fromPeerId: string,
+  // roomId: string,
+  // fromPeerId: string,
   senderSecretKey: Uint8Array,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   epc: IRTCPeerConnection,
-  api: BaseQueryApi,
+  // api: BaseQueryApi,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ) => {
@@ -67,8 +67,11 @@ const sendChunks = async (
     const peerPublicKeyHex = epc.withPeerPublicKey;
     const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-    const { channelLabel, hashHex, merkleRootHex } =
-      await decompileChannelMessageLabel(channel.label);
+    const {
+      // channelLabel,
+      hashHex,
+      merkleRootHex,
+    } = await decompileChannelMessageLabel(channel.label);
 
     const indexes = Array.from({ length: chunksLen }, (_, i) => i);
     const indexesRandomized = await fisherYatesShuffle(indexes);
@@ -93,21 +96,21 @@ const sendChunks = async (
         metadata.chunkEndIndex > metadata.chunkStartIndex &&
         metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
       ) {
-        const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
-
-        api.dispatch(
-          setMessage({
-            roomId,
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId,
-            chunkSize,
-            totalSize: metadata.totalSize,
-            messageType: metadata.messageType,
-            filename: metadata.name,
-            channelLabel,
-          }),
-        );
+        // const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
+        //
+        // api.dispatch(
+        //   setMessage({
+        //     roomId,
+        //     merkleRootHex,
+        //     sha512Hex: hashHex,
+        //     fromPeerId,
+        //     chunkSize,
+        //     totalSize: metadata.totalSize,
+        //     messageType: metadata.messageType,
+        //     filename: metadata.name,
+        //     channelLabel,
+        //   }),
+        // );
 
         const mimeType = getMimeType(metadata.messageType);
         await setDBChunk({
@@ -125,7 +128,7 @@ const sendChunks = async (
       if (unencryptedChunk.merkleProof.byteLength === 0) {
         const m = await getMerkleProof(
           chunkHashes,
-          new Uint8Array(unencryptedChunk.realChunkHash),
+          hexToUint8Array(unencryptedChunk.realChunkHash),
           merkleModule,
           PROOF_LEN,
         );
@@ -203,12 +206,15 @@ const sendChunks = async (
             " and bufferedAmount is " +
             channel.bufferedAmount,
         );
+
+        break;
       }
     }
 
-    if (!putItemInDBSendQueue) {
-      channel.close();
-    } else {
+    // if (!putItemInDBSendQueue) {
+    //   channel.close();
+    // } else {
+    if (putItemInDBSendQueue) {
       while (
         channel.readyState === "open" &&
         channel.bufferedAmount < MAX_BUFFERED_AMOUNT
@@ -240,6 +246,7 @@ const sendChunks = async (
       }
     }
   } catch (error) {
+    console.error(error);
     throw error;
   }
 };
@@ -320,14 +327,14 @@ export const handleSendMessage = async (
         promises.push(
           sendChunks(
             channel,
-            roomId,
-            keyPair.peerId,
+            // roomId,
+            // keyPair.peerId,
             senderSecretKey,
             totalChunks,
             chunkHashes,
             merkleRoot,
             peerConnections[peerIndex],
-            api,
+            // api,
             encryptionModule,
             merkleModule,
           ),

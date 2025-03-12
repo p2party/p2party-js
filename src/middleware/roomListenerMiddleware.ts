@@ -3,12 +3,10 @@ import { isUUID } from "class-validator";
 
 import {
   setConnectingToPeers,
-  // setOnlyConnectWithKnownPeers,
   setRoom,
   setMessage,
   deleteMessage,
   deleteRoom,
-  setMessageAllChunks,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
@@ -19,6 +17,7 @@ import { compileChannelMessageLabel } from "../utils/channelLabel";
 import {
   deleteDBChunk,
   deleteDBMessageData,
+  deleteDBNewChunk,
   getDBRoomMessageData,
   setDBUniqueRoom,
 } from "../db/api";
@@ -87,13 +86,14 @@ roomListenerMiddleware.startListening({
         const oldMessagesLen = oldMessages.length;
         for (let i = 0; i < oldMessagesLen; i++) {
           listenerApi.dispatch(
-            setMessageAllChunks({
+            setMessage({
               roomId: oldMessages[i].roomId,
               merkleRootHex: oldMessages[i].merkleRoot,
               sha512Hex: oldMessages[i].hash,
               fromPeerId: oldMessages[i].fromPeerId,
               filename: oldMessages[i].filename,
               messageType: oldMessages[i].messageType,
+              chunkSize: oldMessages[i].savedSize,
               totalSize: oldMessages[i].totalSize,
               channelLabel: oldMessages[i].channelLabel,
               timestamp: oldMessages[i].timestamp,
@@ -155,10 +155,16 @@ roomListenerMiddleware.startListening({
       const { merkleRootHex } = action.payload;
 
       await deleteDBChunk(merkleRootHex);
+      await deleteDBNewChunk(merkleRootHex);
       await deleteDBMessageData(merkleRootHex);
     } else if (deleteRoom.match(action)) {
+      const roomId = action.payload;
+
       listenerApi.dispatch(
-        webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
+        webrtcApi.endpoints.disconnectFromRoom.initiate({
+          roomId,
+          deleteMessages: true,
+        }),
       );
     }
   },

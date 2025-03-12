@@ -48,7 +48,7 @@ export interface NewChunk {
   hash: string;
   chunkIndex: number;
   merkleRoot: string;
-  realChunkHash: ArrayBuffer;
+  realChunkHash: string;
   data: ArrayBuffer;
   metadata: ArrayBuffer;
   merkleProof: ArrayBuffer;
@@ -116,7 +116,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBMessageData";
-      args: [merkleRootHex: string];
+      args: [merkleRootHex?: string, hashHex?: string];
     }
   | {
       id: number;
@@ -152,7 +152,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBNewChunk";
-      args: [hashHex: string, chunkIndex: number];
+      args: [hashHex: string, chunkIndex?: number];
     }
   | {
       id: number;
@@ -188,7 +188,12 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteDBNewChunk";
-      args: [hashHex: string, chunkIndex?: number];
+      args: [
+        merkleRootHex?: string,
+        realChunkHashHex?: string,
+        hashHex?: string,
+        chunkIndex?: number,
+      ];
     }
   | {
       id: number;
@@ -199,6 +204,11 @@ export type WorkerMessages =
       id: number;
       method: "deleteDBSendQueue";
       args: [label: string, toPeerId: string, position?: number];
+    }
+  | {
+      id: number;
+      method: "deleteDBUniqueRoom";
+      args: [roomId: string];
     }
   | {
       id: number;
@@ -238,5 +248,6 @@ export interface WorkerMethodReturnTypes {
   deleteDBNewChunk: void;
   deleteDBMessageData: void;
   deleteDBSendQueue: void;
+  deleteDBUniqueRoom: void;
   deleteDB: void;
 }

@@ -1,6 +1,10 @@
 import { decryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { verifyMerkleProof } from "../cryptography/merkle";
 import { verify } from "../cryptography/ed25519";
+import {
+  crypto_sign_ed25519_BYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
+} from "../cryptography/interfaces";
 
 import {
   // existsDBChunk,
@@ -14,10 +18,6 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { Room } from "../reducers/roomSlice";
-import {
-  crypto_sign_ed25519_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-} from "../cryptography/interfaces";
 
 export const handleReceiveMessage = async (
   data: ArrayBuffer,
@@ -30,9 +30,10 @@ export const handleReceiveMessage = async (
 ): Promise<{
   date: Date;
   chunkSize: number;
-  chunkIndex: number;
-  receivedFullSize: boolean;
   totalSize: number;
+  chunkIndex: number;
+  chunkHash: ArrayBuffer;
+  receivedFullSize: boolean;
   messageType: MessageType;
   filename: string;
 }> => {
@@ -64,6 +65,7 @@ export const handleReceiveMessage = async (
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
+        chunkHash: new Uint8Array().buffer,
       };
 
     const encryptedMessage = message.slice(
@@ -86,6 +88,19 @@ export const handleReceiveMessage = async (
         ? 0
         : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
+    const realChunk =
+      chunkSize > 0
+        ? decryptedMessage.slice(
+            METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
+            METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
+          )
+        : decryptedMessage.slice(METADATA_LEN + PROOF_LEN);
+
+    const realChunkHash = await window.crypto.subtle.digest(
+      "SHA-512",
+      realChunk,
+    );
+
     if (chunkSize === 0)
       return {
         date: metadata.date,
@@ -95,6 +110,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
+        chunkHash: realChunkHash,
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
@@ -126,6 +142,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
+        chunkHash: realChunkHash,
       };
 
     const merkleProofArray = decryptedMessage.slice(
@@ -147,6 +164,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
+        chunkHash: realChunkHash,
       };
 
     const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
@@ -171,12 +189,8 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
+        chunkHash: realChunkHash,
       };
-
-    const realChunk = decryptedMessage.slice(
-      METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
-      METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
-    );
 
     const mimeType = getMimeType(metadata.messageType);
 
@@ -195,6 +209,7 @@ export const handleReceiveMessage = async (
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,
+      chunkHash: realChunkHash,
     };
   } catch (error) {
     console.error(error);

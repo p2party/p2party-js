@@ -4,7 +4,7 @@ import { serializeMetadata, METADATA_LEN } from "./metadata";
 
 import { setDBNewChunk, setDBRoomMessageData } from "../db/api";
 
-// import { setMessage } from "../reducers/roomSlice";
+import { setMessage } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
 import libcrypto from "../cryptography/libcrypto";
@@ -73,6 +73,8 @@ export const splitToChunks = async (
   messageType: MessageType;
   chunkHashes: Uint8Array;
 }> => {
+  const { keyPair } = api.getState() as State;
+
   // if (minChunks < 3) throw new Error("We need at least 3 chunks");
   if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
@@ -183,20 +185,39 @@ export const splitToChunks = async (
       totalSize,
       date,
     };
+
     const mSerialized = serializeMetadata(m);
 
     await setDBNewChunk({
       hash: sha512Hex,
       merkleRoot: "",
       chunkIndex: i,
-      realChunkHash: chunkHashes.slice(
-        i * crypto_hash_sha512_BYTES,
-        (i + 1) * crypto_hash_sha512_BYTES,
-      ).buffer,
+      realChunkHash: uint8ArrayToHex(
+        chunkHashes.slice(
+          i * crypto_hash_sha512_BYTES,
+          (i + 1) * crypto_hash_sha512_BYTES,
+        ),
+      ),
       data: chunk.buffer,
       metadata: mSerialized.buffer as ArrayBuffer,
       merkleProof: new Uint8Array().buffer,
     });
+
+    api.dispatch(
+      setMessage({
+        roomId,
+        merkleRootHex: "",
+        sha512Hex,
+        fromPeerId: keyPair.peerId,
+        chunkSize: 0,
+        totalSize,
+        chunksCreated: i,
+        totalChunks,
+        messageType,
+        filename: name,
+        channelLabel: label,
+      }),
+    );
   }
 
   const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
@@ -207,22 +228,7 @@ export const splitToChunks = async (
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  const { keyPair } = api.getState() as State;
-
   // api.dispatch(setMessageAllChunks(messageData));
-  // api.dispatch(
-  //   setMessage({
-  //     roomId,
-  //     merkleRootHex,
-  //     sha512Hex,
-  //     fromPeerId: keyPair.peerId,
-  //     chunkSize: 0,
-  //     totalSize,
-  //     messageType,
-  //     filename: name,
-  //     channelLabel: label,
-  //   }),
-  // );
 
   await setDBRoomMessageData(
     roomId,
@@ -235,6 +241,22 @@ export const splitToChunks = async (
     name,
     label,
     Date.now(),
+  );
+
+  api.dispatch(
+    setMessage({
+      roomId,
+      merkleRootHex,
+      sha512Hex,
+      fromPeerId: keyPair.peerId,
+      chunkSize: 0,
+      totalSize,
+      chunksCreated: totalChunks,
+      totalChunks,
+      messageType,
+      filename: name,
+      channelLabel: label,
+    }),
   );
 
   return {

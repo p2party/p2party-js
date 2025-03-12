@@ -311,7 +311,8 @@ const sendMessage = (
 };
 
 const readMessage = async (
-  merkleRootHex: string,
+  merkleRootHex?: string,
+  hashHex?: string,
 ): Promise<{
   message: string | Blob;
   percentage: number;
@@ -321,9 +322,21 @@ const readMessage = async (
   extension: FileExtension;
   category: MessageCategory;
 }> => {
+  if (!merkleRootHex && !hashHex)
+    return {
+      message: "No message",
+      percentage: 0,
+      size: 0,
+      filename: "",
+      mimeType: "text/plain",
+      extension: "txt",
+      category: MessageCategory.Text,
+    };
+
   try {
     const { keyPair } = store.getState();
-    const msg = await getDBMessageData(merkleRootHex);
+    const msg = await getDBMessageData(merkleRootHex, hashHex);
+
     if (msg) {
       const messageType = msg.messageType;
       const mimeType = getMimeType(messageType);
@@ -355,7 +368,7 @@ const readMessage = async (
       }
 
       const chunks =
-        percentage === 100 ? await getDBAllChunks(merkleRootHex) : [];
+        percentage === 100 ? await getDBAllChunks(msg.merkleRoot) : [];
 
       const dataChunks =
         chunks.length > 0
@@ -487,20 +500,26 @@ const cancelMessage = async (
     }
   }
 
-  if (roomIndex === -1 || messageIndex === -1) return;
+  if (roomIndex > -1 && messageIndex > -1) {
+    const label = await compileChannelMessageLabel(
+      channelLabel,
+      rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      rooms[roomIndex].messages[messageIndex].sha512Hex,
+    );
 
-  const label = await compileChannelMessageLabel(
-    channelLabel,
-    rooms[roomIndex].messages[messageIndex].merkleRootHex,
-    rooms[roomIndex].messages[messageIndex].sha512Hex,
-  );
+    await store.dispatch(
+      webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+        label,
+        alsoDeleteData: true,
+      }),
+    );
 
-  dispatch(
-    webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      label,
-      alsoDeleteData: true,
-    }),
-  );
+    store.dispatch(
+      deleteMessage({
+        merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      }),
+    );
+  }
 };
 
 const deleteMsg = async (
@@ -565,26 +584,26 @@ const deleteMsg = async (
     }
   }
 
-  if (roomIndex === -1 || messageIndex === -1) return;
+  if (roomIndex > -1 && messageIndex > -1) {
+    const label = await compileChannelMessageLabel(
+      rooms[roomIndex].messages[messageIndex].channelLabel,
+      rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      rooms[roomIndex].messages[messageIndex].sha512Hex,
+    );
 
-  const label = await compileChannelMessageLabel(
-    rooms[roomIndex].messages[messageIndex].channelLabel,
-    rooms[roomIndex].messages[messageIndex].merkleRootHex,
-    rooms[roomIndex].messages[messageIndex].sha512Hex,
-  );
+    await store.dispatch(
+      webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+        label,
+        alsoDeleteData: true,
+      }),
+    );
 
-  store.dispatch(
-    webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      label,
-      alsoDeleteData: true,
-    }),
-  );
-
-  dispatch(
-    deleteMessage({
-      merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
-    }),
-  );
+    store.dispatch(
+      deleteMessage({
+        merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      }),
+    );
+  }
 };
 
 const purgeIdentity = () => {
@@ -608,16 +627,15 @@ const purgeRoom = (roomUrl: string) => {
   dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const purge = () => {
+const purge = async () => {
   dispatch(resetIdentity());
+  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 
-  const { rooms } = store.getState() as State;
+  const rooms = await getAllDBUniqueRooms();
   const roomsLen = rooms.length;
   for (let i = 0; i < roomsLen; i++) {
-    dispatch(deleteRoom(rooms[i].id));
+    dispatch(deleteRoom(rooms[i].roomId));
   }
-
-  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
 const newRoomUrl = async () => {

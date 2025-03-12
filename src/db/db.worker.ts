@@ -1,137 +1,21 @@
-import { openDB, deleteDB } from "idb";
+import { deleteDB } from "idb";
 
-import type { DBSchema, IDBPDatabase } from "idb";
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
+import { getDB, dbName } from "./src/getDB";
+
 import type {
   MessageData,
   Chunk,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
-  AddressBook,
   BlacklistedPeer,
   UsernamedPeer,
   UniqueRoom,
   NewChunk,
 } from "./types";
 import type { MessageType } from "../utils/messageTypes";
-
-export const dbName = "p2party";
-export const dbVersion = 7;
-
-export interface RepoSchema extends DBSchema {
-  addressBook: {
-    value: AddressBook;
-    key: [string];
-    indexes: { peerId: string; peerPublicKey: string; username: string };
-  };
-  blacklist: {
-    value: BlacklistedPeer;
-    key: [string];
-    indexes: { peerId: string; peerPublicKey: string; username: string };
-  };
-  uniqueRoom: {
-    value: UniqueRoom;
-    key: [string];
-    indexes: { roomId: string; roomUrl: string };
-  };
-  messageData: {
-    value: MessageData;
-    key: [number, string, string];
-    indexes: {
-      roomId: string;
-      hash: string;
-      merkleRoot: string;
-      fromPeerId: string;
-    };
-  };
-  chunks: {
-    value: Chunk;
-    key: [string, number];
-    indexes: { merkleRoot: string };
-  };
-  newChunks: {
-    value: NewChunk;
-    key: [string, number];
-    indexes: { hash: string; merkleRoot: string };
-  };
-  sendQueue: {
-    value: SendQueue;
-    key: [number, string, string];
-    indexes: { labelPeer: string };
-  };
-}
-
-async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
-  return openDB<RepoSchema>(dbName, dbVersion, {
-    upgrade(db) {
-      if (!db.objectStoreNames.contains("addressBook")) {
-        const addressBook = db.createObjectStore("addressBook", {
-          keyPath: ["peerId"],
-        });
-        addressBook.createIndex("username", "username", { unique: false });
-        addressBook.createIndex("peerId", "peerId", { unique: true });
-        addressBook.createIndex("peerPublicKey", "peerPublicKey", {
-          unique: true,
-        });
-      }
-
-      if (!db.objectStoreNames.contains("blacklist")) {
-        const blacklist = db.createObjectStore("blacklist", {
-          keyPath: ["peerId"],
-        });
-        blacklist.createIndex("username", "username", { unique: false });
-        blacklist.createIndex("peerId", "peerId", { unique: true });
-        blacklist.createIndex("peerPublicKey", "peerPublicKey", {
-          unique: true,
-        });
-      }
-
-      if (!db.objectStoreNames.contains("uniqueRoom")) {
-        const uniqueRoom = db.createObjectStore("uniqueRoom", {
-          keyPath: ["roomId"],
-        });
-        uniqueRoom.createIndex("roomUrl", "roomUrl", { unique: true });
-        uniqueRoom.createIndex("roomId", "roomId", { unique: true });
-      }
-
-      if (!db.objectStoreNames.contains("messageData")) {
-        const messageData = db.createObjectStore("messageData", {
-          keyPath: ["timestamp", "roomId", "hash"],
-        });
-        messageData.createIndex("roomId", "roomId", { unique: false });
-        messageData.createIndex("hash", "hash", { unique: false });
-        messageData.createIndex("merkleRoot", "merkleRoot", { unique: true });
-        messageData.createIndex("fromPeerId", "fromPeerId", { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains("chunks")) {
-        const chunks = db.createObjectStore("chunks", {
-          keyPath: ["merkleRoot", "chunkIndex"],
-        });
-        chunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains("newChunks")) {
-        const newChunks = db.createObjectStore("newChunks", {
-          keyPath: ["hash", "chunkIndex"],
-        });
-        newChunks.createIndex("hash", "hash", { unique: false });
-        newChunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains("sendQueue")) {
-        const sendQueue = db.createObjectStore("sendQueue", {
-          keyPath: ["position", "label", "toPeerId"],
-        });
-        sendQueue.createIndex("labelPeer", ["label", "toPeerId"], {
-          unique: false,
-        });
-      }
-    },
-  });
-}
-
-// Define each function with the expected arguments and return type:
 
 async function fnGetDBAddressBookEntry(
   peerId?: string,
@@ -442,17 +326,30 @@ async function fnSetDBUniqueRoom(
 }
 
 async function fnGetDBMessageData(
-  merkleRootHex: string,
+  merkleRootHex?: string,
+  hashHex?: string,
 ): Promise<MessageData | undefined> {
   const db = await getDB();
-  const messageData = await db.getFromIndex(
-    "messageData",
-    "merkleRoot",
-    merkleRootHex,
-  );
-  db.close();
 
-  return messageData;
+  if (merkleRootHex && merkleRootHex.length === 2 * crypto_hash_sha512_BYTES) {
+    const messageData = await db.getFromIndex(
+      "messageData",
+      "merkleRoot",
+      merkleRootHex,
+    );
+
+    db.close();
+
+    return messageData;
+  } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+    const messageData = await db.getFromIndex("messageData", "hash", hashHex);
+
+    db.close();
+
+    return messageData;
+  } else {
+    return undefined;
+  }
 }
 
 async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
@@ -562,12 +459,42 @@ async function fnExistsDBChunk(
 
 async function fnGetDBNewChunk(
   hashHex: string,
-  chunkIndex: number,
+  chunkIndex?: number,
 ): Promise<NewChunk | undefined> {
-  const db = await getDB();
-  const chunk = await db.get("newChunks", [hashHex, chunkIndex]);
-  db.close();
-  return chunk;
+  try {
+    const db = await getDB();
+
+    const c = chunkIndex ?? -1;
+    if (c > -1) {
+      const tx = db.transaction("newChunks", "readonly");
+      const store = tx.objectStore("newChunks");
+      const index = store.index("hash");
+      const chunks = await index.getAll(hashHex);
+      await tx.done;
+      db.close();
+
+      const len = chunks.length;
+      for (let i = 0; i < len; i++) {
+        if (chunks[i].chunkIndex === c) return chunks[i];
+      }
+
+      return undefined;
+    } else {
+      const tx = db.transaction("newChunks");
+      const store = tx.objectStore("newChunks");
+      const index = store.index("realChunkHash");
+      const item = await index.get(hashHex);
+
+      await tx.done;
+      db.close();
+
+      return item;
+    }
+  } catch (error) {
+    console.error(error);
+
+    return undefined;
+  }
 }
 
 async function fnExistsDBNewChunk(
@@ -716,6 +643,23 @@ async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
   db.close();
 }
 
+async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction("uniqueRoom", "readwrite");
+    const store = tx.objectStore("uniqueRoom");
+    const index = store.index("roomId");
+    const item = await index.getKey(roomId);
+    if (item) {
+      await store.delete(item);
+    }
+
+    await tx.done;
+
+    db.close();
+  } catch (error) {}
+}
+
 async function fnDeleteDBChunk(
   merkleRootHex: string,
   chunkIndex?: number,
@@ -743,7 +687,9 @@ async function fnDeleteDBChunk(
 }
 
 async function fnDeleteDBNewChunk(
-  hashHex: string,
+  merkleRootHex?: string,
+  realChunkHashHex?: string,
+  hashHex?: string,
   chunkIndex?: number,
 ): Promise<void> {
   try {
@@ -751,21 +697,28 @@ async function fnDeleteDBNewChunk(
     const tx = db.transaction("newChunks", "readwrite");
     const store = tx.objectStore("newChunks");
 
-    if (chunkIndex) {
-      const keys = IDBKeyRange.only([hashHex, chunkIndex]);
-      await store.delete(keys);
-    } else {
-      const index = store.index("hash");
-      const keys = await index.getAllKeys(hashHex);
+    if (merkleRootHex) {
+      const index = store.index("merkleRoot");
+      const keys = await index.getAllKeys(merkleRootHex);
       const len = keys.length;
       for (let i = 0; i < len; i++) {
         await store.delete(keys[i]);
       }
+    } else if (hashHex && chunkIndex) {
+      const keys = IDBKeyRange.only([hashHex, chunkIndex]);
+      await store.delete(keys);
+    } else if (realChunkHashHex) {
+      const index = store.index("realChunkHash");
+      const keyrange = await index.getKey(realChunkHashHex);
+      const key = IDBKeyRange.only(keyrange);
+      await store.delete(key);
     }
 
     await tx.done;
     db.close();
-  } catch (error) {}
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 async function fnDeleteDBSendQueue(
@@ -959,6 +912,11 @@ onmessage = async (e: MessageEvent) => {
         result = (await fnDeleteDBMessageData(
           ...message.args,
         )) as WorkerMethodReturnTypes["deleteDBMessageData"];
+        break;
+      case "deleteDBUniqueRoom":
+        result = (await fnDeleteDBUniqueRoom(
+          ...message.args,
+        )) as WorkerMethodReturnTypes["deleteDBUniqueRoom"];
         break;
       case "deleteDBSendQueue":
         result = (await fnDeleteDBSendQueue(

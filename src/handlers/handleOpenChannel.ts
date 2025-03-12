@@ -4,6 +4,7 @@ import webrtcApi from "../api/webrtc";
 
 import { setChannel, setMessage } from "../reducers/roomSlice";
 
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { randomNumberInRange } from "../cryptography/utils";
 
 import {
@@ -14,8 +15,8 @@ import {
 } from "../db/api";
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
-
 import { wait } from "./handleSendMessage";
+import { handleReadReceipt } from "./handleReadReceipt";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -34,7 +35,9 @@ export interface OpenChannelHelperParams {
   merkleModule: LibCrypto;
 }
 
-export const MAX_BUFFERED_AMOUNT = 2 * 64 * 1024;
+export const KB64 = 64 * 1024;
+
+export const MAX_BUFFERED_AMOUNT = 2 * KB64;
 
 export const handleOpenChannel = async (
   {
@@ -55,7 +58,7 @@ export const handleOpenChannel = async (
     if (typeof channel !== "string") {
       const decompiledLabel = await decompileChannelMessageLabel(channel.label);
 
-      if (decompiledLabel.merkleRootHex.length === 128) {
+      if (decompiledLabel.merkleRootHex.length === crypto_hash_sha512_BYTES) {
         const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
         if (roomIndex > -1) {
@@ -100,7 +103,7 @@ export const handleOpenChannel = async (
           })
         : channel;
     dataChannel.binaryType = "arraybuffer";
-    dataChannel.bufferedAmountLowThreshold = 64 * 1024;
+    dataChannel.bufferedAmountLowThreshold = KB64;
     dataChannel.onbufferedamountlow = async () => {
       while (dataChannel.readyState === "open") {
         const sendQueue = await getDBSendQueue(label, epc.withPeerId);
@@ -169,56 +172,79 @@ export const handleOpenChannel = async (
         const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
         if (roomIndex > -1) {
-          const {
-            date,
-            chunkSize,
-            chunkIndex,
-            // relevant,
-            receivedFullSize,
-            totalSize,
-            messageType,
-            filename,
-          } = await handleReceiveMessage(
-            e.data as ArrayBuffer,
-            merkleRoot,
-            senderPublicKey,
-            receiverSecretKey,
-            rooms[roomIndex],
-            decryptionModule,
-            merkleModule,
-          );
+          const data = e.data as ArrayBuffer;
+          if (data.byteLength === crypto_hash_sha512_BYTES) {
+            await handleReadReceipt(
+              new Uint8Array(data),
+              extChannel.label,
+              api,
+              dataChannels,
+            );
+          } else if (data.byteLength === KB64) {
+            const {
+              date,
+              chunkSize,
+              chunkIndex,
+              // relevant,
+              receivedFullSize,
+              totalSize,
+              messageType,
+              filename,
+              chunkHash,
+            } = await handleReceiveMessage(
+              data,
+              merkleRoot,
+              senderPublicKey,
+              receiverSecretKey,
+              rooms[roomIndex],
+              decryptionModule,
+              merkleModule,
+            );
 
-          if (chunkSize > 0) {
-            api.dispatch(
-              setMessage({
+            if (
+              totalSize > 0 &&
+              chunkHash.byteLength === crypto_hash_sha512_BYTES &&
+              extChannel.readyState === "open"
+            ) {
+              // Receipt
+              extChannel.send(chunkHash);
+            }
+
+            if (chunkSize > 0 && chunkIndex > -1) {
+              await setDBRoomMessageData(
                 roomId,
                 merkleRootHex,
-                sha512Hex: hashHex,
-                fromPeerId: epc.withPeerId,
+                hashHex,
+                epc.withPeerId,
                 chunkSize,
                 totalSize,
                 messageType,
                 filename,
                 channelLabel,
-              }),
-            );
+                date.getTime(),
+              );
 
-            await setDBRoomMessageData(
-              roomId,
-              merkleRootHex,
-              hashHex,
-              epc.withPeerId,
-              chunkSize,
-              totalSize,
-              messageType,
-              filename,
-              channelLabel,
-              date.getTime(),
-            );
+              api.dispatch(
+                setMessage({
+                  roomId,
+                  merkleRootHex,
+                  sha512Hex: hashHex,
+                  fromPeerId: epc.withPeerId,
+                  chunkSize,
+                  totalSize,
+                  messageType,
+                  filename,
+                  channelLabel,
+                }),
+              );
+
+              if (receivedFullSize) {
+                extChannel.close();
+              }
+            }
+          } else {
+            console.error("Data length is " + data.byteLength);
           }
-
-          if (chunkIndex > -1 && chunkSize > 0 && receivedFullSize)
-            extChannel.close();
         }
       } catch (error) {
         console.error(error);

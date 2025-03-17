@@ -52,16 +52,13 @@ async function fnGetDBAddressBookEntry(
 }
 
 async function fnGetAllDBAddressBookEntries(): Promise<UsernamedPeer[]> {
-  const db = await getDB();
-
   try {
+    const db = await getDB();
     const peers = await db.getAll("addressBook");
     db.close();
 
     return peers;
   } catch (error) {
-    db.close();
-
     return [];
   }
 }
@@ -71,36 +68,36 @@ async function fnSetDBAddressBookEntry(
   peerId: string,
   peerPublicKey: string,
 ): Promise<void> {
-  const db = await getDB();
-
   try {
-    const tx = db.transaction("addressBook", "readonly");
-    const index1 = tx.objectStore("addressBook").index("peerId");
-    const index2 = tx.objectStore("addressBook").index("peerPublicKey");
+    const db = await getDB();
+    const tx = db.transaction(["addressBook"], "readwrite");
+    const store = tx.objectStore("addressBook");
+    const index1 = store.index("peerId");
+    const index2 = store.index("peerPublicKey");
 
     const item1 = await index1.get(peerId);
     const item2 = await index2.get(peerPublicKey);
 
-    await tx.done;
-
     if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
-      await db.put("addressBook", {
+      await store.put({
         username,
         peerId,
         peerPublicKey,
         dateAdded: Date.now(),
       });
     }
-  } catch (error) {
-    await db.put("addressBook", {
-      username,
-      peerId,
-      peerPublicKey,
-      dateAdded: Date.now(),
-    });
-  }
 
-  db.close();
+    await tx.done;
+    db.close();
+  } catch (error) {
+    // await db.put("addressBook", {
+    //   username,
+    //   peerId,
+    //   peerPublicKey,
+    //   dateAdded: Date.now(),
+    // });
+    console.error(error);
+  }
 }
 
 async function fnDeleteDBAddressBookEntry(
@@ -115,14 +112,14 @@ async function fnDeleteDBAddressBookEntry(
   if (noUsername && noPeerId && noPeerPublicKey)
     throw new Error("Cannot delete address book with no data");
 
-  const db = await getDB();
-
-  const tx = db.transaction("addressBook", "readwrite");
-  const store = tx.objectStore("addressBook");
-
   let pId = peerId ?? "";
 
   try {
+    const db = await getDB();
+
+    const tx = db.transaction("addressBook", "readwrite");
+    const store = tx.objectStore("addressBook");
+
     if (!noPeerId) {
       const index = store.index("peerId");
       const item = await index.getKey(peerId);
@@ -151,9 +148,8 @@ async function fnDeleteDBAddressBookEntry(
     }
 
     await tx.done;
+    db.close();
   } catch {}
-
-  db.close();
 
   return pId;
 }
@@ -166,9 +162,8 @@ async function fnGetDBPeerIsBlackisted(
   if (peerId && peerId.length < 10 && !peerPublicKey) return false;
   if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return false;
 
-  const db = await getDB();
-
   try {
+    const db = await getDB();
     const tx = db.transaction("blacklist", "readonly");
     const index = peerId
       ? tx.objectStore("blacklist").index("peerId")
@@ -179,11 +174,8 @@ async function fnGetDBPeerIsBlackisted(
     await tx.done;
 
     db.close();
-
     return peer ? true : false;
   } catch (error) {
-    db.close();
-
     return false;
   }
 }
@@ -208,36 +200,30 @@ async function fnSetDBPeerInBlacklist(
   peerId: string,
   peerPublicKey: string,
 ): Promise<void> {
-  const db = await getDB();
-
   try {
-    const tx = db.transaction("blacklist", "readonly");
-    const index1 = tx.objectStore("blacklist").index("peerId");
-    const index2 = tx.objectStore("blacklist").index("peerPublicKey");
+    const db = await getDB();
+    const tx = db.transaction(["blacklist"], "readwrite");
+    const store = tx.objectStore("blacklist");
+    const index1 = store.index("peerId");
+    const index2 = store.index("peerPublicKey");
 
     const item1 = await index1.get(peerId);
     const item2 = await index2.get(peerPublicKey);
 
-    await tx.done;
-
     if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
-      await db.put("blacklist", {
+      await store.put({
         // username,
         peerId,
         peerPublicKey,
         dateAdded: Date.now(),
       });
     }
-  } catch (error) {
-    await db.put("blacklist", {
-      // username,
-      peerId,
-      peerPublicKey,
-      dateAdded: Date.now(),
-    });
-  }
 
-  db.close();
+    await tx.done;
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 async function fnDeleteDBPeerFromBlacklist(
@@ -251,12 +237,11 @@ async function fnDeleteDBPeerFromBlacklist(
   if (noPeerId && noPeerPublicKey)
     throw new Error("Cannot delete blacklisted with no data");
 
-  const db = await getDB();
-
-  const tx = db.transaction("blacklist", "readwrite");
-  const store = tx.objectStore("blacklist");
-
   try {
+    const db = await getDB();
+    const tx = db.transaction("blacklist", "readwrite");
+    const store = tx.objectStore("blacklist");
+
     if (!noPeerId) {
       const index = store.index("peerId");
       const item = await index.getKey(peerId);
@@ -270,9 +255,10 @@ async function fnDeleteDBPeerFromBlacklist(
     }
 
     await tx.done;
-  } catch {}
-
-  db.close();
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 async function fnGetAllDBUniqueRooms(): Promise<UniqueRoom[]> {
@@ -294,21 +280,19 @@ async function fnSetDBUniqueRoom(
   roomUrl: string,
   roomId: string,
 ): Promise<void> {
-  const db = await getDB();
-
   try {
-    const tx = db.transaction("uniqueRoom", "readwrite");
-    const index1 = tx.objectStore("uniqueRoom").index("roomUrl");
-    const index2 = tx.objectStore("uniqueRoom").index("roomId");
+    const db = await getDB();
+    const tx = db.transaction(["uniqueRoom"], "readwrite");
+    const store = tx.objectStore("uniqueRoom");
+    const index1 = store.index("roomUrl");
+    const index2 = store.index("roomId");
 
     const item1 = await index1.get(roomUrl);
     const item2 = await index2.get(roomId);
 
-    await tx.done;
-
     if (!item1 && !item2) {
       const d = Date.now();
-      await db.put("uniqueRoom", {
+      await store.put({
         // username,
         roomId,
         roomUrl,
@@ -318,36 +302,67 @@ async function fnSetDBUniqueRoom(
         updatedAt: d,
       });
     }
+
+    await tx.done;
+    db.close();
   } catch (error) {
     console.error(error);
   }
-
-  db.close();
 }
 
 async function fnGetDBMessageData(
   merkleRootHex?: string,
   hashHex?: string,
 ): Promise<MessageData | undefined> {
-  const db = await getDB();
+  try {
+    const db = await getDB();
+    const tx = db.transaction(["messageData"], "readonly");
+    const store = tx.objectStore("messageData");
+    const index1 = store.index("merkleRoot");
+    const index2 = store.index("hash");
 
-  if (merkleRootHex && merkleRootHex.length === 2 * crypto_hash_sha512_BYTES) {
-    const messageData = await db.getFromIndex(
-      "messageData",
-      "merkleRoot",
-      merkleRootHex,
-    );
+    if (
+      merkleRootHex &&
+      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    ) {
+      const messageData = await index1.get(merkleRootHex);
 
-    db.close();
+      if (!messageData) {
+        if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+          const messageData = await index2.get(hashHex);
 
-    return messageData;
-  } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
-    const messageData = await db.getFromIndex("messageData", "hash", hashHex);
+          await tx.done;
+          db.close();
 
-    db.close();
+          return messageData;
+        } else {
+          await tx.done;
+          db.close();
 
-    return messageData;
-  } else {
+          return undefined;
+        }
+      } else {
+        await tx.done;
+        db.close();
+
+        return messageData;
+      }
+    } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+      const messageData = await index2.get(hashHex);
+
+      await tx.done;
+      db.close();
+
+      return messageData;
+    } else {
+      await tx.done;
+      db.close();
+
+      return undefined;
+    }
+  } catch (error) {
+    console.error(error);
+
     return undefined;
   }
 }
@@ -389,52 +404,65 @@ async function fnSetDBRoomMessageData(
   channelLabel: string,
   timestamp: number,
 ): Promise<void> {
-  const db = await getDB();
-
   try {
-    const tx = db.transaction("messageData", "readonly");
-    const index = tx.objectStore("messageData").index("merkleRoot");
-    const item = await index.get(merkleRootHex);
+    const db = await getDB();
+    const tx = db.transaction(["messageData", "uniqueRoom"], "readwrite");
+    const messageStore = tx.objectStore("messageData");
+    const roomStore = tx.objectStore("uniqueRoom");
+
+    const msg = await messageStore.index("merkleRoot").get(merkleRootHex);
+
+    // const msg = await db.getFromIndex(
+    //   "messageData",
+    //   "merkleRoot",
+    //   merkleRootHex,
+    // );
+
+    const savedSize = msg?.savedSize ?? 0;
+
+    // console.log(
+    //   "Received " +
+    //     (savedSize + chunkSize) +
+    //     " with chunk size " +
+    //     chunkSize +
+    //     " of total " +
+    //     totalSize,
+    // );
+
+    // await db.put("messageData", {
+    await messageStore.put({
+      roomId,
+      timestamp,
+      merkleRoot: merkleRootHex,
+      hash: sha512Hex,
+      fromPeerId,
+      filename,
+      messageType,
+      savedSize: chunkSize + savedSize,
+      totalSize,
+      channelLabel,
+    });
+
+    if (!msg) {
+      const room = await roomStore.index("roomId").get(roomId);
+      // const room = await db.getFromIndex("uniqueRoom", "roomId", roomId);
+      if (room && room.lastMessageMerkleRoot !== merkleRootHex) {
+        // await db.put("uniqueRoom", {
+        await roomStore.put({
+          ...room,
+          lastMessageMerkleRoot: merkleRootHex,
+          messageCount: room.messageCount + 1,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+
     await tx.done;
-
-    if (!item) {
-      await db.put("messageData", {
-        roomId,
-        timestamp,
-        merkleRoot: merkleRootHex,
-        hash: sha512Hex,
-        fromPeerId,
-        filename,
-        messageType,
-        savedSize: chunkSize,
-        totalSize,
-        channelLabel,
-      });
-    } else {
-      await db.put("messageData", {
-        ...item,
-        savedSize: item.savedSize + chunkSize,
-      });
-    }
-
-    const roomTx = db.transaction("uniqueRoom", "readwrite");
-    const indx = roomTx.objectStore("uniqueRoom").index("roomId");
-    const itm = await indx.get(roomId);
-    await roomTx.done;
-
-    if (itm && itm.lastMessageMerkleRoot !== merkleRootHex && !item) {
-      await db.put("uniqueRoom", {
-        ...itm,
-        lastMessageMerkleRoot: merkleRootHex,
-        messageCount: itm.messageCount + 1,
-        updatedAt: Date.now(),
-      });
-    }
+    db.close();
   } catch (error) {
     console.error(error);
+    throw error;
   }
-
-  db.close();
 }
 
 async function fnGetDBChunk(
@@ -466,19 +494,10 @@ async function fnGetDBNewChunk(
 
     const c = chunkIndex ?? -1;
     if (c > -1) {
-      const tx = db.transaction("newChunks", "readonly");
-      const store = tx.objectStore("newChunks");
-      const index = store.index("hash");
-      const chunks = await index.getAll(hashHex);
-      await tx.done;
+      const item = await db.get("newChunks", [hashHex, c]);
       db.close();
 
-      const len = chunks.length;
-      for (let i = 0; i < len; i++) {
-        if (chunks[i].chunkIndex === c) return chunks[i];
-      }
-
-      return undefined;
+      return item;
     } else {
       const tx = db.transaction("newChunks");
       const store = tx.objectStore("newChunks");
@@ -554,28 +573,19 @@ async function fnCountDBSendQueue(
 }
 
 async function fnGetDBAllChunks(merkleRootHex: string): Promise<Chunk[]> {
-  const db = await getDB();
-  const chunksCount = await db.countFromIndex(
-    "chunks",
-    "merkleRoot",
-    merkleRootHex,
-  );
-  if (chunksCount > 0) {
-    const chunks = await db.getAllFromIndex(
-      "chunks",
-      "merkleRoot",
-      merkleRootHex,
-    );
-    db.close();
-    return chunks;
-  } else {
+  try {
+    const db = await getDB();
     const tx = db.transaction("chunks", "readonly");
     const store = tx.objectStore("chunks");
     const index = store.index("merkleRoot");
-    const keyRange = IDBKeyRange.only(merkleRootHex);
-    const chunks = await index.getAll(keyRange);
+    const chunks = await index.getAll(merkleRootHex);
     db.close();
+
     return chunks;
+  } catch (error) {
+    console.error(error);
+
+    return [];
   }
 }
 
@@ -601,6 +611,12 @@ async function fnGetDBAllNewChunks(
   merkleRootHex?: string,
 ): Promise<NewChunk[]> {
   if (!hashHex && !merkleRootHex) return [];
+  if (
+    hashHex?.length !== crypto_hash_sha512_BYTES * 2 &&
+    merkleRootHex?.length !== crypto_hash_sha512_BYTES * 2
+  )
+    return [];
+
   const db = await getDB();
   const chunksCount = hashHex
     ? await db.countFromIndex("newChunks", "hash", hashHex)
@@ -705,13 +721,11 @@ async function fnDeleteDBNewChunk(
         await store.delete(keys[i]);
       }
     } else if (hashHex && chunkIndex) {
-      const keys = IDBKeyRange.only([hashHex, chunkIndex]);
-      await store.delete(keys);
+      await store.delete([hashHex, chunkIndex]);
     } else if (realChunkHashHex) {
       const index = store.index("realChunkHash");
       const keyrange = await index.getKey(realChunkHashHex);
-      const key = IDBKeyRange.only(keyrange);
-      await store.delete(key);
+      if (keyrange) await store.delete(keyrange);
     }
 
     await tx.done;

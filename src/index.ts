@@ -67,11 +67,11 @@ import type {
 import type { RoomData } from "./api/webrtc/interfaces";
 import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
 
-// const originalClose = RTCDataChannel.prototype.close;
-// RTCDataChannel.prototype.close = function () {
-//   console.trace("RTCDataChannel closed from:");
-//   originalClose.apply(this);
-// };
+const originalClose = RTCDataChannel.prototype.close;
+RTCDataChannel.prototype.close = function () {
+  console.trace("RTCDataChannel closed from:");
+  originalClose.apply(this);
+};
 
 const connect = (
   roomUrl: string,
@@ -334,41 +334,58 @@ const readMessage = async (
     };
 
   try {
-    const { keyPair } = store.getState();
-    const msg = await getDBMessageData(merkleRootHex, hashHex);
+    const { rooms } = store.getState();
+    const roomsLen = rooms.length;
+    let roomIndex = -1;
+    let messageIndex = -1;
+    for (let i = 0; i < roomsLen; i++) {
+      messageIndex = rooms[i].messages.findLastIndex(
+        (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
+      );
+      if (messageIndex > -1) {
+        roomIndex = i;
+        break;
+      }
+    }
 
-    if (msg) {
-      const messageType = msg.messageType;
+    if (roomIndex > -1 && messageIndex > -1) {
+      const messageType = rooms[roomIndex].messages[messageIndex].messageType;
       const mimeType = getMimeType(messageType);
       const extension = getFileExtension(messageType);
       const category = getMessageCategory(messageType);
+      const percentage = Math.floor(
+        (rooms[roomIndex].messages[messageIndex].savedSize /
+          rooms[roomIndex].messages[messageIndex].totalSize) *
+          100,
+      );
 
-      // const chunks = await getDBAllChunks(merkleRootHex);
-      // const chunksLen = chunks.length;
-      // let savedSize = 0;
-      // for (let i = 0; i < chunksLen; i++) {
-      //   savedSize += new Uint8Array(chunks[i].data).length;
+      // if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
+      //   const label = await compileChannelMessageLabel(
+      //     msg.channelLabel,
+      //     msg.merkleRoot,
+      //     msg.hash,
+      //   );
+      // if (percentage === 100) {
+      //   const label = await compileChannelMessageLabel(
+      //     rooms[roomIndex].messages[messageIndex].channelLabel,
+      //     rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      //     rooms[roomIndex].messages[messageIndex].sha512Hex,
+      //   );
+      //
+      //   await store.dispatch(
+      //     webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+      //       label,
+      //       alsoDeleteData: false,
+      //     }),
+      //   );
       // }
 
-      const percentage = Math.floor((msg.savedSize / msg.totalSize) * 100);
-
-      if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
-        const label = await compileChannelMessageLabel(
-          msg.channelLabel,
-          msg.merkleRoot,
-          msg.hash,
-        );
-
-        await store.dispatch(
-          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-            label,
-            alsoDeleteData: false,
-          }),
-        );
-      }
-
       const chunks =
-        percentage === 100 ? await getDBAllChunks(msg.merkleRoot) : [];
+        percentage === 100
+          ? await getDBAllChunks(
+              rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            )
+          : [];
 
       const dataChunks =
         chunks.length > 0
@@ -384,7 +401,7 @@ const readMessage = async (
         return {
           message: await data.text(),
           percentage,
-          size: msg.totalSize,
+          size: rooms[roomIndex].messages[messageIndex].totalSize,
           filename: "",
           mimeType,
           extension,
@@ -394,8 +411,8 @@ const readMessage = async (
         return {
           message: data,
           percentage,
-          size: msg.totalSize,
-          filename: msg.filename,
+          size: rooms[roomIndex].messages[messageIndex].totalSize,
+          filename: rooms[roomIndex].messages[messageIndex].filename,
           mimeType,
           extension,
           category,
@@ -404,23 +421,77 @@ const readMessage = async (
         return {
           message: "Invalid message",
           percentage: 0,
-          size: msg.totalSize,
-          filename: msg.filename,
+          size: rooms[roomIndex].messages[messageIndex].totalSize,
+          filename: rooms[roomIndex].messages[messageIndex].filename,
           mimeType,
           extension,
           category,
         };
       }
     } else {
-      return {
-        message: "Irretrievable message",
-        percentage: 0,
-        size: 0,
-        filename: "",
-        mimeType: "text/plain",
-        extension: "",
-        category: MessageCategory.Text,
-      };
+      const msg = await getDBMessageData(merkleRootHex, hashHex);
+      if (msg) {
+        const messageType = msg.messageType;
+        const mimeType = getMimeType(messageType);
+        const extension = getFileExtension(messageType);
+        const category = getMessageCategory(messageType);
+
+        const percentage = Math.floor((msg.savedSize / msg.totalSize) * 100);
+        const chunks =
+          percentage === 100 ? await getDBAllChunks(msg.merkleRoot) : [];
+
+        const dataChunks =
+          chunks.length > 0
+            ? chunks
+                .sort((a, b) => a.chunkIndex - b.chunkIndex)
+                .map((c) => c.data)
+            : [new Uint8Array().buffer];
+        const data = new Blob(dataChunks, {
+          type: mimeType,
+        });
+
+        if (messageType === MessageType.Text) {
+          return {
+            message: await data.text(),
+            percentage,
+            size: msg.totalSize,
+            filename: "",
+            mimeType,
+            extension,
+            category,
+          };
+        } else if (data) {
+          return {
+            message: data,
+            percentage,
+            size: msg.totalSize,
+            filename: msg.filename,
+            mimeType,
+            extension,
+            category,
+          };
+        } else {
+          return {
+            message: "Invalid message",
+            percentage: 0,
+            size: msg.totalSize,
+            filename: msg.filename,
+            mimeType,
+            extension,
+            category,
+          };
+        }
+      } else {
+        return {
+          message: "Irretrievable message",
+          percentage: 0,
+          size: 0,
+          filename: "",
+          mimeType: "text/plain",
+          extension: "",
+          category: MessageCategory.Text,
+        };
+      }
     }
   } catch (error) {
     console.error(error);

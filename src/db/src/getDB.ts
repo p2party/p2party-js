@@ -12,7 +12,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 10;
+export const dbVersion = 11;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -134,7 +134,7 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 
       if (!db.objectStoreNames.contains("messageData")) {
         const messageData = db.createObjectStore("messageData", {
-          keyPath: ["timestamp", "roomId", "hash"],
+          keyPath: ["timestamp", "roomId", "merkleRoot"],
         });
         messageData.createIndex("roomId", "roomId", { unique: false });
         messageData.createIndex("hash", "hash", { unique: false });

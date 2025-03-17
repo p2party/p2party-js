@@ -2,7 +2,11 @@ import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
 
-import { setChannel, setMessage } from "../reducers/roomSlice";
+import {
+  setChannel,
+  setMessage,
+  setMessageAllChunks,
+} from "../reducers/roomSlice";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { randomNumberInRange } from "../cryptography/utils";
@@ -12,6 +16,7 @@ import {
   deleteDBSendQueue,
   getDBSendQueue,
   setDBRoomMessageData,
+  // setDBRoomMessageData,
 } from "../db/api";
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
@@ -53,12 +58,13 @@ export const handleOpenChannel = async (
   try {
     const { keyPair, rooms } = api.getState() as State;
 
-    // const dataChannelsWithPeer = dataChannels.filter((d) => d.withPeerId === epc.withPeerId);
-
     if (typeof channel !== "string") {
       const decompiledLabel = await decompileChannelMessageLabel(channel.label);
 
-      if (decompiledLabel.merkleRootHex.length === crypto_hash_sha512_BYTES) {
+      if (
+        decompiledLabel.merkleRootHex.length ===
+        crypto_hash_sha512_BYTES * 2
+      ) {
         const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
         if (roomIndex > -1) {
@@ -67,18 +73,11 @@ export const handleOpenChannel = async (
           );
 
           if (
-            messageIndex > -1 &&
-            rooms[roomIndex].messages[messageIndex].savedSize ===
-              rooms[roomIndex].messages[messageIndex].totalSize
+            messageIndex > -1 // &&
+            // rooms[roomIndex].messages[messageIndex].savedSize ===
+            //   rooms[roomIndex].messages[messageIndex].totalSize
           ) {
             channel.close();
-
-            // api.dispatch(
-            //   webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-            //     peerId: epc.withPeerId,
-            //     label: channel.label,
-            //   }),
-            // );
           }
         }
       }
@@ -161,7 +160,7 @@ export const handleOpenChannel = async (
 
     extChannel.onmessage = async (e) => {
       try {
-        const { channelLabel, merkleRoot, merkleRootHex, hashHex } =
+        const { channelLabel, merkleRoot, merkleRootHex, hashHex, hash } =
           await decompileChannelMessageLabel(label);
 
         const peerPublicKeyHex = epc.withPeerPublicKey;
@@ -176,7 +175,8 @@ export const handleOpenChannel = async (
           if (data.byteLength === crypto_hash_sha512_BYTES) {
             await handleReadReceipt(
               new Uint8Array(data),
-              extChannel.label,
+              extChannel,
+              rooms[roomIndex],
               api,
               dataChannels,
             );
@@ -185,38 +185,39 @@ export const handleOpenChannel = async (
               date,
               chunkSize,
               chunkIndex,
-              // relevant,
+              // // relevant,
               receivedFullSize,
+              messageAlreadyExists,
+              // savedSize,
               totalSize,
               messageType,
               filename,
-              chunkHash,
+              chunkHashHex,
             } = await handleReceiveMessage(
               data,
               merkleRoot,
+              hashHex,
+              // epc.withPeerId,
               senderPublicKey,
               receiverSecretKey,
               rooms[roomIndex],
+              // channelLabel,
+              // api,
               decryptionModule,
               merkleModule,
             );
 
-            if (
-              totalSize > 0 &&
-              chunkHash.byteLength === crypto_hash_sha512_BYTES &&
-              extChannel.readyState === "open"
-            ) {
-              // Receipt
-              extChannel.send(chunkHash);
-            }
+            if (receivedFullSize && messageAlreadyExists) {
+              if (extChannel.readyState === "open") {
+                extChannel.send(hash.buffer as ArrayBuffer);
+              }
 
-            if (chunkSize > 0 && chunkIndex > -1) {
               await setDBRoomMessageData(
                 roomId,
                 merkleRootHex,
                 hashHex,
                 epc.withPeerId,
-                chunkSize,
+                totalSize,
                 totalSize,
                 messageType,
                 filename,
@@ -225,25 +226,82 @@ export const handleOpenChannel = async (
               );
 
               api.dispatch(
-                setMessage({
+                setMessageAllChunks({
                   roomId,
                   merkleRootHex,
                   sha512Hex: hashHex,
                   fromPeerId: epc.withPeerId,
-                  chunkSize,
                   totalSize,
                   messageType,
                   filename,
                   channelLabel,
+                  timestamp: date.getTime(),
                 }),
               );
 
+              extChannel.close();
+            } else {
+              if (
+                // totalSize > 0 &&
+                chunkHashHex.length === crypto_hash_sha512_BYTES * 2 &&
+                extChannel.readyState === "open"
+              ) {
+                if (receivedFullSize) {
+                  extChannel.send(hash.buffer as ArrayBuffer);
+                } else {
+                  // Send Receipt
+                  extChannel.send(hexToUint8Array(chunkHashHex).buffer);
+                }
+              }
+
               if (receivedFullSize) {
+                await setDBRoomMessageData(
+                  roomId,
+                  merkleRootHex,
+                  hashHex,
+                  epc.withPeerId,
+                  totalSize,
+                  totalSize,
+                  messageType,
+                  filename,
+                  channelLabel,
+                  date.getTime(),
+                );
+
+                api.dispatch(
+                  setMessageAllChunks({
+                    roomId,
+                    merkleRootHex,
+                    sha512Hex: hashHex,
+                    fromPeerId: epc.withPeerId,
+                    totalSize,
+                    messageType,
+                    filename,
+                    channelLabel,
+                    timestamp: date.getTime(),
+                  }),
+                );
+
                 extChannel.close();
+              } else if (chunkSize > 0 && chunkIndex > -1) {
+                api.dispatch(
+                  setMessage({
+                    roomId,
+                    merkleRootHex,
+                    sha512Hex: hashHex,
+                    fromPeerId: epc.withPeerId,
+                    chunkSize,
+                    totalSize,
+                    messageType,
+                    filename,
+                    channelLabel,
+                    timestamp: date.getTime(),
+                  }),
+                );
               }
             }
           } else {
-            console.error("Data length is " + data.byteLength);
+            console.error("Unrecognized data size");
           }
         }
       } catch (error) {

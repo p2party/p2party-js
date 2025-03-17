@@ -413,7 +413,7 @@ const roomSlice = createSlice({
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
-        const messageIndex = state[roomIndex].messages.findIndex(
+        const messageIndex = state[roomIndex].messages.findLastIndex(
           (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
         );
 
@@ -440,9 +440,32 @@ const roomSlice = createSlice({
               totalChunks: totalChunks ?? 0,
             });
           }
+        } else if (
+          // state[roomIndex].messages[messageIndex].merkleRootHex.length === 0 &&
+          state[roomIndex].messages[messageIndex].timestamp !== timestamp &&
+          // Same message at different time
+          // state[roomIndex].messages[messageIndex].merkleRootHex !==
+          //   merkleRootHex &&
+          state[roomIndex].messages[messageIndex].sha512Hex === sha512Hex &&
+          state[roomIndex].messages[messageIndex].savedSize ===
+            state[roomIndex].messages[messageIndex].totalSize
+        ) {
+          state[roomIndex].messages.push({
+            merkleRootHex,
+            sha512Hex,
+            channelLabel,
+            filename: filename ?? "txt",
+            messageType,
+            fromPeerId,
+            timestamp: timestamp ?? Date.now(),
+            savedSize: chunkSize ?? 0,
+            totalSize,
+            chunksCreated: chunksCreated ?? 0,
+            totalChunks: totalChunks ?? 0,
+          });
         } else {
           if (
-            merkleRootHex.length > 0 &&
+            merkleRootHex.length === crypto_hash_sha512_BYTES * 2 &&
             state[roomIndex].messages[messageIndex].merkleRootHex === ""
           ) {
             state[roomIndex].messages[messageIndex].merkleRootHex =

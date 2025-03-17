@@ -96,22 +96,6 @@ const sendChunks = async (
         metadata.chunkEndIndex > metadata.chunkStartIndex &&
         metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
       ) {
-        // const chunkSize = metadata.chunkEndIndex - metadata.chunkStartIndex;
-        //
-        // api.dispatch(
-        //   setMessage({
-        //     roomId,
-        //     merkleRootHex,
-        //     sha512Hex: hashHex,
-        //     fromPeerId,
-        //     chunkSize,
-        //     totalSize: metadata.totalSize,
-        //     messageType: metadata.messageType,
-        //     filename: metadata.name,
-        //     channelLabel,
-        //   }),
-        // );
-
         const mimeType = getMimeType(metadata.messageType);
         await setDBChunk({
           merkleRoot: merkleRootHex,
@@ -220,8 +204,6 @@ const sendChunks = async (
         channel.bufferedAmount < MAX_BUFFERED_AMOUNT
       ) {
         const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
-        if (sendQueue.length === 0) channel.close();
-
         while (
           sendQueue.length > 0 &&
           channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&

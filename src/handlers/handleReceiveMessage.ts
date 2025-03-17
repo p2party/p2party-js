@@ -6,11 +6,8 @@ import {
   crypto_sign_ed25519_PUBLICKEYBYTES,
 } from "../cryptography/interfaces";
 
-import {
-  // existsDBChunk,
-  getDBChunk,
-  setDBChunk,
-} from "../db/api";
+import { getDBMessageData, setDBChunk } from "../db/api";
+
 import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
 import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -22,18 +19,24 @@ import type { Room } from "../reducers/roomSlice";
 export const handleReceiveMessage = async (
   data: ArrayBuffer,
   merkleRoot: Uint8Array,
+  hashHex: string,
+  // fromPeerId: string,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
   room: Room,
+  // channelLabel: string,
+  // api: BaseQueryApi,
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ): Promise<{
   date: Date;
   chunkSize: number;
+  savedSize: number;
   totalSize: number;
   chunkIndex: number;
-  chunkHash: ArrayBuffer;
+  chunkHashHex: string;
   receivedFullSize: boolean;
+  messageAlreadyExists: boolean;
   messageType: MessageType;
   filename: string;
 }> => {
@@ -62,10 +65,12 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
+        messageAlreadyExists: false,
+        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
-        chunkHash: new Uint8Array().buffer,
+        chunkHashHex: "",
       };
 
     const encryptedMessage = message.slice(
@@ -100,6 +105,7 @@ export const handleReceiveMessage = async (
       "SHA-512",
       realChunk,
     );
+    const chunkHashHex = uint8ArrayToHex(new Uint8Array(realChunkHash));
 
     if (chunkSize === 0)
       return {
@@ -107,10 +113,12 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
+        messageAlreadyExists: false,
+        savedSize: 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHash: realChunkHash,
+        chunkHashHex,
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
@@ -119,7 +127,8 @@ export const handleReceiveMessage = async (
     );
 
     // const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
-    const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
+    // const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
+    const exists = await getDBMessageData(merkleRootHex, hashHex);
 
     const messageRelevant =
       incomingMessageIndex === -1 ||
@@ -131,7 +140,9 @@ export const handleReceiveMessage = async (
       incomingMessageIndex > -1
         ? room.messages[incomingMessageIndex].totalSize ===
           room.messages[incomingMessageIndex].savedSize + chunkSize
-        : false;
+        : exists
+          ? exists.savedSize === exists.totalSize
+          : chunkSize === metadata.totalSize;
 
     if (!messageRelevant)
       return {
@@ -139,10 +150,17 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
         receivedFullSize,
+        messageAlreadyExists: exists != undefined,
+        savedSize:
+          incomingMessageIndex > -1
+            ? room.messages[incomingMessageIndex].savedSize
+            : exists
+              ? exists.savedSize
+              : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHash: realChunkHash,
+        chunkHashHex,
       };
 
     const merkleProofArray = decryptedMessage.slice(
@@ -161,10 +179,17 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: -3,
         receivedFullSize,
+        messageAlreadyExists: exists != undefined,
+        savedSize:
+          incomingMessageIndex > -1
+            ? room.messages[incomingMessageIndex].savedSize
+            : exists
+              ? exists.savedSize
+              : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHash: realChunkHash,
+        chunkHashHex,
       };
 
     const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
@@ -186,10 +211,17 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: -4,
         receivedFullSize,
+        messageAlreadyExists: exists != undefined,
+        savedSize:
+          incomingMessageIndex > -1
+            ? room.messages[incomingMessageIndex].savedSize
+            : exists
+              ? exists.savedSize
+              : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHash: realChunkHash,
+        chunkHashHex,
       };
 
     const mimeType = getMimeType(metadata.messageType);
@@ -206,10 +238,17 @@ export const handleReceiveMessage = async (
       chunkIndex: metadata.chunkIndex,
       chunkSize,
       receivedFullSize,
+      messageAlreadyExists: exists != undefined,
+      savedSize:
+        incomingMessageIndex > -1
+          ? room.messages[incomingMessageIndex].savedSize
+          : exists
+            ? exists.savedSize
+            : 0,
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,
-      chunkHash: realChunkHash,
+      chunkHashHex,
     };
   } catch (error) {
     console.error(error);

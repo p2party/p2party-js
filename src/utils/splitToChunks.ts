@@ -21,7 +21,6 @@ import {
   crypto_sign_ed25519_PUBLICKEYBYTES,
 } from "../cryptography/interfaces";
 
-import type { Metadata } from "./metadata";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
@@ -107,11 +106,6 @@ export const splitToChunks = async (
     throw new Error("Not enough space to save the file in the browser.");
   if (totalSize < 1) throw new Error("No data to split in chunks");
 
-  const totalChunks = Math.max(
-    minChunks,
-    Math.ceil(totalSize / (chunkSize * percentageFilledChunk)),
-  );
-
   const date = new Date();
 
   // TODO fix hasher
@@ -128,25 +122,79 @@ export const splitToChunks = async (
   const hash = new Uint8Array(hashArrayBuffer);
   const sha512Hex = uint8ArrayToHex(hash);
 
-  const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
-  let offset = 0;
-  for (let i = 0; i < totalChunks; i++) {
-    const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
+  const m = {
+    schemaVersion: metadataSchemaVersion,
+    messageType,
+    name,
+    totalSize,
+    date,
+  };
 
-    const remainingBytes = totalSize - offset;
-    const bytesToCopy =
-      remainingBytes > 0
-        ? Math.min(remainingBytes, Math.ceil(chunkSize * percentageFilledChunk))
-        : 0;
+  let offset = 0;
+  // const chunkSizes: number[] = [];
+  // while (offset < totalSize) {
+  //   const chunkStartIndex = await randomNumberInRange(
+  //     0,
+  //     Math.floor(chunkSize * (1 - percentageFilledChunk)),
+  //   );
+  //   const remainingBytes = totalSize - offset;
+  //   const bytesToCopy =
+  //     remainingBytes > 0
+  //       ? Math.min(
+  //           remainingBytes,
+  //           // Math.ceil(chunkSize * percentageFilledChunk),
+  //           await randomNumberInRange(
+  //             Math.max(
+  //               chunkStartIndex + 1,
+  //               Math.ceil(chunkSize * percentageFilledChunk) - 5,
+  //             ),
+  //             Math.ceil(chunkSize * percentageFilledChunk),
+  //           ),
+  //         )
+  //       : 0;
+  //
+  //   chunkSizes.push(bytesToCopy);
+  //   offset += bytesToCopy;
+  // }
+  //
+  // const totalChunks = Math.max(minChunks, chunkSizes.length);
+
+  const totalChunks = Math.max(
+    minChunks,
+    // +2 to get different merkle roots even for files
+    Math.ceil(totalSize / (chunkSize * percentageFilledChunk)) + 2,
+  );
+
+  const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
+  // offset = 0;
+  for (let i = 0; i < totalChunks; i++) {
+    // const size = chunkSizes[i] ?? 0;
+    const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
 
     const chunkStartIndex = await randomNumberInRange(
       0,
+      // Math.max(0, chunkSize - size),
       Math.floor(chunkSize * (1 - percentageFilledChunk)),
     );
+    const remainingBytes = totalSize - offset;
+    const bytesToCopy = Math.min(
+      Math.max(remainingBytes, 0),
+      Math.ceil(chunkSize * percentageFilledChunk),
+      // await randomNumberInRange(
+      //   Math.max(
+      //     chunkStartIndex + 1,
+      //     Math.ceil(chunkSize * percentageFilledChunk) - 5,
+      //   ),
+      //   Math.ceil(chunkSize * percentageFilledChunk),
+      // ),
+    );
+
+    // let chunkEndIndex = chunkStartIndex + size;
     let chunkEndIndex = chunkStartIndex + bytesToCopy;
 
     if (remainingBytes > 0) {
-      // new file read
+      // // new file read
+      // const blob = file.slice(offset, offset + size);
       const blob = file.slice(offset, offset + bytesToCopy);
       if (typeof message === "string") {
         chunk.set(blob as Uint8Array, chunkStartIndex);
@@ -164,6 +212,7 @@ export const splitToChunks = async (
         chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
       }
 
+      // offset += size; // bytesToCopy;
       offset += bytesToCopy;
     } else {
       const start = chunkEndIndex + totalSize + 1;
@@ -175,18 +224,12 @@ export const splitToChunks = async (
       chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
     }
 
-    const m: Metadata = {
-      schemaVersion: metadataSchemaVersion,
-      messageType,
-      name,
+    const mSerialized = serializeMetadata({
+      ...m,
       chunkStartIndex,
       chunkEndIndex,
       chunkIndex: i,
-      totalSize,
-      date,
-    };
-
-    const mSerialized = serializeMetadata(m);
+    });
 
     await setDBNewChunk({
       hash: sha512Hex,
@@ -211,11 +254,12 @@ export const splitToChunks = async (
         fromPeerId: keyPair.peerId,
         chunkSize: 0,
         totalSize,
-        chunksCreated: i,
+        chunksCreated: i + 1,
         totalChunks,
         messageType,
         filename: name,
         channelLabel: label,
+        timestamp: date.getTime(),
       }),
     );
   }
@@ -228,8 +272,6 @@ export const splitToChunks = async (
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  // api.dispatch(setMessageAllChunks(messageData));
-
   await setDBRoomMessageData(
     roomId,
     merkleRootHex,
@@ -240,7 +282,7 @@ export const splitToChunks = async (
     messageType,
     name,
     label,
-    Date.now(),
+    date.getTime(),
   );
 
   api.dispatch(
@@ -256,6 +298,7 @@ export const splitToChunks = async (
       messageType,
       filename: name,
       channelLabel: label,
+      timestamp: date.getTime(),
     }),
   );
 

@@ -2,7 +2,7 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
 import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
-import { handleReceiveMessage } from "./handleReceiveMessage";
+// import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
@@ -10,8 +10,8 @@ import signalingServerApi from "../api/signalingServerApi";
 import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
 
-import { hexToUint8Array } from "../utils/uint8array";
-import { PROOF_LEN } from "../utils/splitToChunks";
+// import { hexToUint8Array } from "../utils/uint8array";
+// import { PROOF_LEN } from "../utils/splitToChunks";
 
 import {
   crypto_hash_sha512_BYTES,
@@ -52,12 +52,12 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
-const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  100 * 64 * 1024,
-  crypto_hash_sha512_BYTES, // additional data is the merkle root
-);
-
-const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
+// const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
+//   100 * 64 * 1024,
+//   crypto_hash_sha512_BYTES, // additional data is the merkle root
+// );
+//
+// const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -289,51 +289,51 @@ const handleWebSocketMessage = async (
         break;
       }
 
-      case "message": {
-        const decryptionModule = await libcrypto({
-          wasmMemory: decryptionWasmMemory,
-        });
-
-        const merkleModule = await libcrypto({
-          wasmMemory: merkleWasmMemory,
-        });
-
-        const { keyPair, rooms, commonState } = api.getState() as State;
-
-        const roomIndex =
-          commonState.currentRoomUrl.length === 64
-            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-            : -1;
-
-        if (roomIndex > -1) {
-          const peerIndex = rooms[roomIndex].peers.findIndex(
-            (p) => p.peerId === message.fromPeerId,
-          );
-          if (peerIndex === -1)
-            throw new Error("Received a message from unknown peer");
-
-          const peerPublicKeyHex =
-            rooms[roomIndex].peers[peerIndex].peerPublicKey;
-          const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
-          const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
-          const messageData = hexToUint8Array(message.message);
-
-          await handleReceiveMessage(
-            messageData.buffer, // new Blob([messageData]), //
-            new Uint8Array(),
-            senderPublicKey,
-            receiverSecretKey,
-            rooms[roomIndex],
-            decryptionModule,
-            merkleModule,
-            // message.label,
-            // message.fromPeerId,
-            // api,
-          );
-        }
-
-        break;
-      }
+      // case "message": {
+      //   const decryptionModule = await libcrypto({
+      //     wasmMemory: decryptionWasmMemory,
+      //   });
+      //
+      //   const merkleModule = await libcrypto({
+      //     wasmMemory: merkleWasmMemory,
+      //   });
+      //
+      //   const { keyPair, rooms, commonState } = api.getState() as State;
+      //
+      //   const roomIndex =
+      //     commonState.currentRoomUrl.length === 64
+      //       ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+      //       : -1;
+      //
+      //   if (roomIndex > -1) {
+      //     const peerIndex = rooms[roomIndex].peers.findIndex(
+      //       (p) => p.peerId === message.fromPeerId,
+      //     );
+      //     if (peerIndex === -1)
+      //       throw new Error("Received a message from unknown peer");
+      //
+      //     const peerPublicKeyHex =
+      //       rooms[roomIndex].peers[peerIndex].peerPublicKey;
+      //     const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
+      //     const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+      //     const messageData = hexToUint8Array(message.message);
+      //
+      //     await handleReceiveMessage(
+      //       messageData.buffer, // new Blob([messageData]), //
+      //       new Uint8Array(),
+      //       senderPublicKey,
+      //       receiverSecretKey,
+      //       rooms[roomIndex],
+      //       decryptionModule,
+      //       merkleModule,
+      //       // message.label,
+      //       // message.fromPeerId,
+      //       // api,
+      //     );
+      //   }
+      //
+      //   break;
+      // }
 
       case "connection": {
         const { keyPair } = api.getState() as State;

@@ -1,6 +1,10 @@
-import { deleteChannel, deletePeer } from "../../reducers/roomSlice";
+import {
+  deleteChannel,
+  deletePeer,
+  // setMessageAllChunks
+} from "../../reducers/roomSlice";
 
-import { deleteDBSendQueue } from "../../db/api";
+import { deleteDBSendQueue, setDBRoomMessageData } from "../../db/api";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -9,6 +13,7 @@ import type {
   IRTCPeerConnection,
   RTCDisconnectFromPeerChannelLabelParams,
 } from "./interfaces";
+import { decompileChannelMessageLabel } from "../../utils/channelLabel";
 
 export interface RTCDisconnectFromPeerChannelLabelParamsExtension
   extends RTCDisconnectFromPeerChannelLabelParams {
@@ -57,10 +62,58 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
       }
     }
 
-    const { rooms } = api.getState() as State;
+    const { channelLabel, merkleRootHex, hashHex } =
+      await decompileChannelMessageLabel(label);
+    const hasLen = merkleRootHex.length > 0 || hashHex.length > 0;
+
+    const { rooms, keyPair } = api.getState() as State;
     const roomsLen = rooms.length;
     let peerHasChannel = false;
     for (let i = 0; i < roomsLen; i++) {
+      if (hasLen) {
+        const messageIndex = rooms[i].messages.findLastIndex(
+          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
+        );
+        if (
+          messageIndex > -1 &&
+          rooms[i].messages[messageIndex].fromPeerId === keyPair.peerId
+        ) {
+          const roomId = rooms[i].id;
+          const savedSize = rooms[i].messages[messageIndex].savedSize;
+          const totalSize = rooms[i].messages[messageIndex].totalSize;
+          const messageType = rooms[i].messages[messageIndex].messageType;
+          const filename = rooms[i].messages[messageIndex].filename;
+          const date = rooms[i].messages[messageIndex].timestamp;
+
+          await setDBRoomMessageData(
+            roomId,
+            merkleRootHex,
+            hashHex,
+            keyPair.peerId,
+            savedSize,
+            totalSize,
+            messageType,
+            filename,
+            channelLabel,
+            date,
+          );
+
+          // api.dispatch(
+          //   setMessageAllChunks({
+          //     roomId,
+          //     merkleRootHex,
+          //     sha512Hex: hashHex,
+          //     fromPeerId: keyPair.peerId,
+          //     totalSize,
+          //     messageType,
+          //     filename,
+          //     channelLabel,
+          //     timestamp: date,
+          //   }),
+          // );
+        }
+      }
+
       const channelsLen = rooms[i].channels.length;
       for (let j = 0; j < channelsLen; j++) {
         if (rooms[i].channels[j].peerIds.includes(peerId)) {

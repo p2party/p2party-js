@@ -7,12 +7,14 @@ import {
   setMessage,
   deleteMessage,
   deleteRoom,
+  setMessageAllChunks,
+  setChannel,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
-// import { compileChannelMessageLabel } from "../utils/channelLabel";
+import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 import {
   deleteDBChunk,
@@ -33,7 +35,9 @@ roomListenerMiddleware.startListening({
     setConnectingToPeers,
     // setOnlyConnectWithKnownPeers,
     setRoom,
-    setMessage,
+    setChannel,
+    // setMessage,
+    setMessageAllChunks,
     deleteMessage,
     deleteRoom,
   ),
@@ -68,6 +72,16 @@ roomListenerMiddleware.startListening({
           setConnectingToPeers({ roomId, connectingToPeers: false }),
         );
       }
+    } else if (setChannel.match(action)) {
+      // const { roomId, peerId } = action.payload;
+      //
+      // const pastMessages = await getDBRoomMessageData(roomId);
+      // const len = pastMessages.length;
+      // for (let i = 0; i < len; i++) {
+      //   if (pastMessages[i]. pastMessages[i].savedSize < pastMessages[i].totalSize) {
+      //
+      //   }
+      // }
     } else if (setRoom.match(action)) {
       const { signalingServer, keyPair, rooms } =
         listenerApi.getState() as State;
@@ -122,64 +136,61 @@ roomListenerMiddleware.startListening({
           );
         }
       }
-    } else if (setMessage.match(action)) {
-      // const { roomId, merkleRootHex, sha512Hex, chunkSize } = action.payload;
-      // const { rooms, keyPair } = listenerApi.getState() as State;
-      // const roomIndex = rooms.findIndex((r) => r.id === roomId);
-      //
-      // if (roomIndex > -1) {
-      //   const messageIndex = rooms[roomIndex].messages.findIndex(
-      //     (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
-      //   );
-      //
-      //
-      //   // const msg = await getDBMessageData(merkleRootHex);
-      //   // if (
-      //   //   messageIndex > -1 &&
-      //   //   (rooms[roomIndex].messages[messageIndex].savedSize ===
-      //   //     rooms[roomIndex].messages[messageIndex].totalSize ||
-      //   //     rooms[roomIndex].messages[messageIndex].savedSize + chunkSize ===
-      //   //       rooms[roomIndex].messages[messageIndex].totalSize) &&
-      //   //   msg &&
-      //   //   rooms[roomIndex].messages[messageIndex].totalSize === msg.totalSize &&
-      //   //   msg.savedSize < msg.totalSize
-      //   // ) {
-      //   //   await setDBRoomMessageData(
-      //   //     roomId,
-      //   //     merkleRootHex,
-      //   //     msg.hash,
-      //   //     msg.fromPeerId,
-      //   //     msg.totalSize - msg.savedSize,
-      //   //     msg.totalSize,
-      //   //     msg.messageType,
-      //   //     msg.filename,
-      //   //     msg.channelLabel,
-      //   //     msg.timestamp,
-      //   //   );
-      //   // }
-      //
-      //   if (
-      //     messageIndex > -1 &&
-      //     // If message receiver
-      //     rooms[roomIndex].messages[messageIndex].fromPeerId !==
-      //       keyPair.peerId &&
-      //     rooms[roomIndex].messages[messageIndex].savedSize + chunkSize ===
-      //       rooms[roomIndex].messages[messageIndex].totalSize
-      //   ) {
-      //     const label = await compileChannelMessageLabel(
-      //       rooms[roomIndex].messages[messageIndex].channelLabel,
-      //       rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      //       rooms[roomIndex].messages[messageIndex].sha512Hex,
-      //     );
-      //
-      //     listenerApi.dispatch(
-      //       webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      //         label,
-      //         alsoDeleteData: false,
-      //       }),
-      //     );
-      //   }
-      // }
+      // } else if (setMessage.match(action)) {
+    } else if (setMessageAllChunks.match(action)) {
+      const { roomId, merkleRootHex, sha512Hex } = action.payload;
+      const { rooms, keyPair } = listenerApi.getState() as State;
+      const roomIndex = rooms.findIndex((r) => r.id === roomId);
+
+      if (roomIndex > -1) {
+        const messageIndex = rooms[roomIndex].messages.findLastIndex(
+          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
+        );
+
+        // const msg = await getDBMessageData(merkleRootHex);
+        // if (
+        //   messageIndex > -1 &&
+        //   (rooms[roomIndex].messages[messageIndex].savedSize ===
+        //     rooms[roomIndex].messages[messageIndex].totalSize ||
+        //     rooms[roomIndex].messages[messageIndex].savedSize + chunkSize ===
+        //       rooms[roomIndex].messages[messageIndex].totalSize) &&
+        //   msg &&
+        //   rooms[roomIndex].messages[messageIndex].totalSize === msg.totalSize &&
+        //   msg.savedSize < msg.totalSize
+        // ) {
+        //   await setDBRoomMessageData(
+        //     roomId,
+        //     merkleRootHex,
+        //     msg.hash,
+        //     msg.fromPeerId,
+        //     msg.totalSize - msg.savedSize,
+        //     msg.totalSize,
+        //     msg.messageType,
+        //     msg.filename,
+        //     msg.channelLabel,
+        //     msg.timestamp,
+        //   );
+        // }
+
+        if (
+          messageIndex > -1 &&
+          // If message receiver
+          rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
+        ) {
+          const label = await compileChannelMessageLabel(
+            rooms[roomIndex].messages[messageIndex].channelLabel,
+            rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            rooms[roomIndex].messages[messageIndex].sha512Hex,
+          );
+
+          listenerApi.dispatch(
+            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+              label,
+              alsoDeleteData: false,
+            }),
+          );
+        }
+      }
     } else if (deleteMessage.match(action)) {
       const { merkleRootHex } = action.payload;
 

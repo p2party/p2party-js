@@ -1,3 +1,5 @@
+import { wait } from "./handleSendMessage";
+import { handleReadReceipt } from "./handleReadReceipt";
 import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
@@ -16,12 +18,10 @@ import {
   deleteDBSendQueue,
   getDBSendQueue,
   setDBRoomMessageData,
-  // setDBRoomMessageData,
 } from "../db/api";
+
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
-import { wait } from "./handleSendMessage";
-import { handleReadReceipt } from "./handleReadReceipt";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -239,10 +239,11 @@ export const handleOpenChannel = async (
                 }),
               );
 
-              extChannel.close();
+              // await wait(10);
+              // extChannel.close();
             } else {
               if (
-                // totalSize > 0 &&
+                totalSize > 0 &&
                 chunkHashHex.length === crypto_hash_sha512_BYTES * 2 &&
                 extChannel.readyState === "open"
               ) {
@@ -252,6 +253,7 @@ export const handleOpenChannel = async (
                   // Send Receipt
                   extChannel.send(hexToUint8Array(chunkHashHex).buffer);
                 }
+                // await wait(10);
               }
 
               if (receivedFullSize) {
@@ -282,7 +284,8 @@ export const handleOpenChannel = async (
                   }),
                 );
 
-                extChannel.close();
+                // await wait(10);
+                // extChannel.close();
               } else if (chunkSize > 0 && chunkIndex > -1) {
                 api.dispatch(
                   setMessage({

@@ -517,7 +517,7 @@ const roomSlice = createSlice({
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
-        const messageIndex = state[roomIndex].messages.findIndex(
+        const messageIndex = state[roomIndex].messages.findLastIndex(
           (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
         );
 
@@ -542,6 +542,30 @@ const roomSlice = createSlice({
             chunksCreated: 0,
             totalChunks: 0,
           });
+        } else if (
+          messageIndex > -1 &&
+          state[roomIndex].messages[messageIndex].timestamp < timestamp
+        ) {
+          state[roomIndex].messages.push({
+            merkleRootHex,
+            sha512Hex,
+            channelLabel,
+            filename: filename ?? "txt",
+            messageType,
+            fromPeerId,
+            timestamp,
+            savedSize: totalSize,
+            totalSize,
+            chunksCreated: 0,
+            totalChunks: 0,
+          });
+        } else if (
+          messageIndex > -1 &&
+          state[roomIndex].messages[messageIndex].savedSize !== totalSize
+        ) {
+          state[roomIndex].messages[messageIndex].savedSize = totalSize;
+        } else {
+          console.log("HEre");
         }
       }
     },

@@ -97,15 +97,19 @@ const sendChunks = async (
         metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
       ) {
         const mimeType = getMimeType(metadata.messageType);
-        await setDBChunk({
-          merkleRoot: merkleRootHex,
-          chunkIndex: metadata.chunkIndex,
-          data: unencryptedChunk.data.slice(
-            metadata.chunkStartIndex,
-            metadata.chunkEndIndex,
-          ), // new Blob([realChunk]),
-          mimeType,
-        });
+
+        try {
+          await setDBChunk({
+            merkleRoot: merkleRootHex,
+            hash: hashHex,
+            chunkIndex: metadata.chunkIndex,
+            data: unencryptedChunk.data.slice(
+              metadata.chunkStartIndex,
+              metadata.chunkEndIndex,
+            ), // new Blob([realChunk]),
+            mimeType,
+          });
+        } catch (error) {}
       }
 
       const merkleProof = new Uint8Array(PROOF_LEN);

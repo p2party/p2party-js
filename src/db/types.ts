@@ -39,6 +39,7 @@ export interface MessageData {
 
 export interface Chunk {
   merkleRoot: string;
+  hash: string;
   chunkIndex: number;
   data: ArrayBuffer;
   mimeType: string;
@@ -142,12 +143,12 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBChunk";
-      args: [merkleRootHex: string, chunkIndex: number];
+      args: [hashHex: string, chunkIndex: number];
     }
   | {
       id: number;
       method: "existsDBChunk";
-      args: [merkleRootHex: string, chunkIndex: number];
+      args: [hashHex: string, chunkIndex: number];
     }
   | {
       id: number;
@@ -164,8 +165,16 @@ export type WorkerMessages =
       method: "getDBSendQueue";
       args: [label: string, toPeerId: string, position?: number];
     }
-  | { id: number; method: "getDBAllChunks"; args: [merkleRootHex: string] }
-  | { id: number; method: "getDBAllChunksCount"; args: [merkleRootHex: string] }
+  | {
+      id: number;
+      method: "getDBAllChunks";
+      args: [merkleRootHex?: string, hashHex?: string];
+    }
+  | {
+      id: number;
+      method: "getDBAllChunksCount";
+      args: [merkleRootHex?: string, hashHex?: string];
+    }
   | { id: number; method: "setDBChunk"; args: [chunk: Chunk] }
   | {
       id: number;
@@ -183,7 +192,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteDBChunk";
-      args: [merkleRootHex: string, chunkIndex?: number];
+      args: [hashHex: string, chunkIndex?: number];
     }
   | {
       id: number;

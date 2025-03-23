@@ -5,7 +5,7 @@ import {
   getDBNewChunk,
 } from "../db/api";
 
-import { setMessage } from "../reducers/roomSlice";
+import { setMessage, setMessageAllChunks } from "../reducers/roomSlice";
 
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -40,12 +40,11 @@ export const handleReadReceipt = async (
 
       if (messageIndex > -1) {
         api.dispatch(
-          setMessage({
+          setMessageAllChunks({
             roomId: room.id,
             merkleRootHex,
             sha512Hex: hashHex,
             fromPeerId: room.messages[messageIndex].fromPeerId,
-            chunkSize: room.messages[messageIndex].totalSize,
             totalSize: room.messages[messageIndex].totalSize,
             messageType: room.messages[messageIndex].messageType,
             filename: room.messages[messageIndex].filename,
@@ -62,13 +61,13 @@ export const handleReadReceipt = async (
           (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
         );
 
-        const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
+        const dbChunk = await getDBChunk(hashHex, chunkIndex);
         if (dbChunk && messageIndex > -1) {
           const chunkSize = dbChunk.byteLength;
           if (
-            chunkSize > 0 &&
-            room.messages[messageIndex].totalSize >=
-              room.messages[messageIndex].savedSize + chunkSize
+            chunkSize > 0 // &&
+            // room.messages[messageIndex].totalSize >=
+            //   room.messages[messageIndex].savedSize + chunkSize
           ) {
             // console.log(
             //   "Sent " +
@@ -78,28 +77,40 @@ export const handleReadReceipt = async (
             //     " with chunk index " +
             //     chunkIndex,
             // );
-            api.dispatch(
-              setMessage({
-                roomId: room.id,
-                merkleRootHex,
-                sha512Hex: hashHex,
-                fromPeerId: room.messages[messageIndex].fromPeerId,
-                chunkSize,
-                totalSize: room.messages[messageIndex].totalSize,
-                messageType: room.messages[messageIndex].messageType,
-                filename: room.messages[messageIndex].filename,
-                channelLabel,
-                timestamp: room.messages[messageIndex].timestamp,
-              }),
-            );
-
             if (
               room.messages[messageIndex].savedSize + chunkSize ===
               room.messages[messageIndex].totalSize // ||
               // room.messages[messageIndex].savedSize ===
               //   room.messages[messageIndex].totalSize
             ) {
-              channel.close();
+              api.dispatch(
+                setMessageAllChunks({
+                  roomId: room.id,
+                  merkleRootHex,
+                  sha512Hex: hashHex,
+                  fromPeerId: room.messages[messageIndex].fromPeerId,
+                  totalSize: room.messages[messageIndex].totalSize,
+                  messageType: room.messages[messageIndex].messageType,
+                  filename: room.messages[messageIndex].filename,
+                  channelLabel,
+                  timestamp: room.messages[messageIndex].timestamp,
+                }),
+              );
+            } else {
+              api.dispatch(
+                setMessage({
+                  roomId: room.id,
+                  merkleRootHex,
+                  sha512Hex: hashHex,
+                  fromPeerId: room.messages[messageIndex].fromPeerId,
+                  chunkSize,
+                  totalSize: room.messages[messageIndex].totalSize,
+                  messageType: room.messages[messageIndex].messageType,
+                  filename: room.messages[messageIndex].filename,
+                  channelLabel,
+                  timestamp: room.messages[messageIndex].timestamp,
+                }),
+              );
             }
           } else if (
             room.messages[messageIndex].totalSize ===

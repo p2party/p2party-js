@@ -334,7 +334,7 @@ const readMessage = async (
     };
 
   try {
-    const { rooms } = store.getState();
+    const { keyPair, rooms } = store.getState();
     const roomsLen = rooms.length;
     let roomIndex = -1;
     let messageIndex = -1;
@@ -359,31 +359,29 @@ const readMessage = async (
           100,
       );
 
-      // if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
-      //   const label = await compileChannelMessageLabel(
-      //     msg.channelLabel,
-      //     msg.merkleRoot,
-      //     msg.hash,
-      //   );
-      // if (percentage === 100) {
-      //   const label = await compileChannelMessageLabel(
-      //     rooms[roomIndex].messages[messageIndex].channelLabel,
-      //     rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      //     rooms[roomIndex].messages[messageIndex].sha512Hex,
-      //   );
-      //
-      //   await store.dispatch(
-      //     webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      //       label,
-      //       alsoDeleteData: false,
-      //     }),
-      //   );
-      // }
+      if (
+        percentage === 100 &&
+        rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
+      ) {
+        const label = await compileChannelMessageLabel(
+          rooms[roomIndex].messages[messageIndex].channelLabel,
+          rooms[roomIndex].messages[messageIndex].merkleRootHex,
+          rooms[roomIndex].messages[messageIndex].sha512Hex,
+        );
+
+        await store.dispatch(
+          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+            label,
+            alsoDeleteData: false,
+          }),
+        );
+      }
 
       const chunks =
         percentage === 100
           ? await getDBAllChunks(
               rooms[roomIndex].messages[messageIndex].merkleRootHex,
+              rooms[roomIndex].messages[messageIndex].sha512Hex,
             )
           : [];
 
@@ -435,8 +433,23 @@ const readMessage = async (
         const mimeType = getMimeType(messageType);
         const extension = getFileExtension(messageType);
         const category = getMessageCategory(messageType);
-
         const percentage = Math.floor((msg.savedSize / msg.totalSize) * 100);
+
+        if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
+          const label = await compileChannelMessageLabel(
+            msg.channelLabel,
+            msg.merkleRoot,
+            msg.hash,
+          );
+
+          await store.dispatch(
+            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+              label,
+              alsoDeleteData: false,
+            }),
+          );
+        }
+
         const chunks =
           percentage === 100 ? await getDBAllChunks(msg.merkleRoot) : [];
 

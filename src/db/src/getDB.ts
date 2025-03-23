@@ -12,7 +12,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 11;
+export const dbVersion = 12;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -43,7 +43,7 @@ export interface RepoSchema extends DBSchema {
   chunks: {
     value: Chunk;
     key: [string, number];
-    indexes: { merkleRoot: string };
+    indexes: { merkleRoot: string; hash: string };
   };
   newChunks: {
     value: NewChunk;
@@ -162,14 +162,19 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 
       if (!db.objectStoreNames.contains("chunks")) {
         const chunks = db.createObjectStore("chunks", {
-          keyPath: ["merkleRoot", "chunkIndex"],
+          keyPath: ["hash", "chunkIndex"],
         });
         chunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
+        chunks.createIndex("hash", "hash", { unique: false });
       } else {
         const store = tx.objectStore("chunks");
 
         if (!store.indexNames.contains("merkleRoot")) {
           store.createIndex("merkleRoot", "merkleRoot", { unique: false });
+        }
+
+        if (!store.indexNames.contains("hash")) {
+          store.createIndex("hash", "hash", { unique: false });
         }
       }
 

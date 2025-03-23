@@ -122,13 +122,19 @@ export const handleReceiveMessage = async (
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
-    const incomingMessageIndex = room.messages.findIndex(
-      (m) => m.merkleRootHex === merkleRootHex,
+    const incomingMessageIndex = room.messages.findLastIndex(
+      (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
     );
 
     // const exists = await existsDBChunk(merkleRootHex, metadata.chunkIndex); //, db);
     // const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
     const exists = await getDBMessageData(merkleRootHex, hashHex);
+
+    const alreadyHasEverything =
+      (exists != undefined && exists.savedSize === exists.totalSize) ||
+      (incomingMessageIndex > -1 &&
+        room.messages[incomingMessageIndex].totalSize ===
+          room.messages[incomingMessageIndex].savedSize);
 
     const messageRelevant =
       incomingMessageIndex === -1 ||
@@ -137,14 +143,13 @@ export const handleReceiveMessage = async (
         !exists);
 
     const receivedFullSize =
-      incomingMessageIndex > -1
-        ? room.messages[incomingMessageIndex].totalSize ===
-          room.messages[incomingMessageIndex].savedSize + chunkSize
-        : exists
-          ? exists.savedSize === exists.totalSize
-          : chunkSize === metadata.totalSize;
+      alreadyHasEverything ||
+      (incomingMessageIndex > -1 &&
+        room.messages[incomingMessageIndex].totalSize ===
+          room.messages[incomingMessageIndex].savedSize + chunkSize) ||
+      (incomingMessageIndex === -1 && chunkSize === metadata.totalSize);
 
-    if (!messageRelevant)
+    if (!messageRelevant) {
       return {
         date: metadata.date,
         chunkIndex: -1,
@@ -162,6 +167,7 @@ export const handleReceiveMessage = async (
         filename: metadata.name,
         chunkHashHex,
       };
+    }
 
     const merkleProofArray = decryptedMessage.slice(
       METADATA_LEN,
@@ -226,30 +232,51 @@ export const handleReceiveMessage = async (
 
     const mimeType = getMimeType(metadata.messageType);
 
-    await setDBChunk({
-      merkleRoot: merkleRootHex,
-      chunkIndex: metadata.chunkIndex,
-      data: realChunk.buffer, // new Blob([realChunk]),
-      mimeType,
-    });
+    try {
+      await setDBChunk({
+        merkleRoot: merkleRootHex,
+        hash: hashHex,
+        chunkIndex: metadata.chunkIndex,
+        data: realChunk.buffer, // new Blob([realChunk]),
+        mimeType,
+      });
 
-    return {
-      date: metadata.date,
-      chunkIndex: metadata.chunkIndex,
-      chunkSize,
-      receivedFullSize,
-      messageAlreadyExists: exists != undefined,
-      savedSize:
-        incomingMessageIndex > -1
-          ? room.messages[incomingMessageIndex].savedSize
-          : exists
-            ? exists.savedSize
-            : 0,
-      totalSize: metadata.totalSize,
-      messageType: metadata.messageType,
-      filename: metadata.name,
-      chunkHashHex,
-    };
+      return {
+        date: metadata.date,
+        chunkIndex: metadata.chunkIndex,
+        chunkSize,
+        receivedFullSize,
+        messageAlreadyExists: exists != undefined,
+        savedSize:
+          incomingMessageIndex > -1
+            ? room.messages[incomingMessageIndex].savedSize
+            : exists
+              ? exists.savedSize
+              : 0,
+        totalSize: metadata.totalSize,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+        chunkHashHex,
+      };
+    } catch (error) {
+      return {
+        date: metadata.date,
+        chunkIndex: metadata.chunkIndex,
+        chunkSize: 0,
+        receivedFullSize: exists != undefined ? receivedFullSize : false,
+        messageAlreadyExists: exists != undefined,
+        savedSize:
+          incomingMessageIndex > -1
+            ? room.messages[incomingMessageIndex].savedSize
+            : exists
+              ? exists.savedSize
+              : 0,
+        totalSize: 0,
+        messageType: metadata.messageType,
+        filename: metadata.name,
+        chunkHashHex,
+      };
+    }
   } catch (error) {
     console.error(error);
     throw error;

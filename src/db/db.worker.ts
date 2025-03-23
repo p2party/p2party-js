@@ -369,27 +369,28 @@ async function fnGetDBMessageData(
 
 async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
   const db = await getDB();
-  const messageData = await db.getAllFromIndex("messageData", "roomId", roomId);
+  const messages = await db.getAllFromIndex("messageData", "roomId", roomId);
   db.close();
 
-  const messages: MessageData[] = [];
-  const messageDataLen = messageData.length;
-  for (let i = 0; i < messageDataLen; i++) {
-    messages.push({
+  const messagesLen = messages.length;
+
+  const messageData: MessageData[] = [];
+  for (let i = 0; i < messagesLen; i++) {
+    messageData.push({
       roomId,
-      merkleRoot: messageData[i].merkleRoot,
-      hash: messageData[i].hash,
-      fromPeerId: messageData[i].fromPeerId,
-      filename: messageData[i].filename,
-      messageType: messageData[i].messageType,
-      savedSize: messageData[i].savedSize,
-      totalSize: messageData[i].totalSize,
-      channelLabel: messageData[i].channelLabel,
-      timestamp: messageData[i].timestamp,
+      merkleRoot: messages[i].merkleRoot,
+      hash: messages[i].hash,
+      fromPeerId: messages[i].fromPeerId,
+      filename: messages[i].filename,
+      messageType: messages[i].messageType,
+      savedSize: messages[i].savedSize,
+      totalSize: messages[i].totalSize,
+      channelLabel: messages[i].channelLabel,
+      timestamp: messages[i].timestamp,
     });
   }
 
-  return messages;
+  return messageData;
 }
 
 async function fnSetDBRoomMessageData(
@@ -438,7 +439,7 @@ async function fnSetDBRoomMessageData(
       fromPeerId,
       filename,
       messageType,
-      savedSize: chunkSize + savedSize,
+      savedSize: savedSize !== totalSize ? chunkSize + savedSize : chunkSize,
       totalSize,
       channelLabel,
     });
@@ -466,22 +467,24 @@ async function fnSetDBRoomMessageData(
 }
 
 async function fnGetDBChunk(
-  merkleRootHex: string,
+  hashHex: string,
   chunkIndex: number,
 ): Promise<ArrayBuffer | undefined> {
   const db = await getDB();
-  const chunk = await db.get("chunks", [merkleRootHex, chunkIndex]);
+  const chunk = await db.get("chunks", [hashHex, chunkIndex]);
   db.close();
+
   return chunk?.data;
 }
 
 async function fnExistsDBChunk(
-  merkleRootHex: string,
+  hashHex: string,
   chunkIndex: number,
 ): Promise<boolean> {
   const db = await getDB();
-  const count = await db.count("chunks", [merkleRootHex, chunkIndex]);
+  const count = await db.count("chunks", [hashHex, chunkIndex]);
   db.close();
+
   return count > 0;
 }
 
@@ -572,37 +575,142 @@ async function fnCountDBSendQueue(
   return sendQueueCount;
 }
 
-async function fnGetDBAllChunks(merkleRootHex: string): Promise<Chunk[]> {
+async function fnGetDBAllChunks(
+  merkleRootHex?: string,
+  hashHex?: string,
+): Promise<Chunk[]> {
   try {
     const db = await getDB();
     const tx = db.transaction("chunks", "readonly");
     const store = tx.objectStore("chunks");
-    const index = store.index("merkleRoot");
-    const chunks = await index.getAll(merkleRootHex);
-    db.close();
+    const index1 = store.index("hash");
+    const index2 = store.index("merkleRoot");
 
-    return chunks;
+    if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+      const chunks = await index1.getAll(hashHex);
+
+      if (chunks.length === 0) {
+        if (
+          merkleRootHex &&
+          merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+        ) {
+          const chunks = await index2.getAll(merkleRootHex);
+
+          await tx.done;
+          db.close();
+
+          return chunks;
+        } else {
+          await tx.done;
+          db.close();
+
+          return [];
+        }
+      } else {
+        await tx.done;
+        db.close();
+
+        return chunks;
+      }
+    } else if (
+      merkleRootHex &&
+      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    ) {
+      const chunks = await index2.getAll(merkleRootHex);
+
+      await tx.done;
+      db.close();
+
+      return chunks;
+    } else {
+      await tx.done;
+      db.close();
+
+      return [];
+    }
   } catch (error) {
     console.error(error);
 
     return [];
   }
+  //
+  // try {
+  //   const db = await getDB();
+  //   const tx = db.transaction("chunks", "readonly");
+  //   const store = tx.objectStore("chunks");
+  //   const index = store.index("merkleRoot");
+  //   const chunks = await index.getAll(merkleRootHex);
+  //   db.close();
+  //
+  //   return chunks;
+  // } catch (error) {
+  //   console.error(error);
+  //
+  //   return [];
+  // }
 }
 
-async function fnGetDBAllChunksCount(merkleRootHex: string): Promise<number> {
-  const db = await getDB();
-  const chunksCount = await db.countFromIndex(
-    "chunks",
-    "merkleRoot",
-    merkleRootHex,
-  );
-  db.close();
-  return chunksCount;
+async function fnGetDBAllChunksCount(
+  merkleRootHex?: string,
+  hashHex?: string,
+): Promise<number> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(["chunks"], "readonly");
+    const store = tx.objectStore("chunks");
+    const index1 = store.index("hash");
+    const index2 = store.index("merkleRoot");
+
+    if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+      const chunks = await index1.count(hashHex);
+
+      if (chunks === 0) {
+        if (
+          merkleRootHex &&
+          merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+        ) {
+          const chunks = await index2.count(merkleRootHex);
+
+          await tx.done;
+          db.close();
+
+          return chunks;
+        } else {
+          await tx.done;
+          db.close();
+
+          return 0;
+        }
+      } else {
+        await tx.done;
+        db.close();
+
+        return chunks;
+      }
+    } else if (
+      merkleRootHex &&
+      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    ) {
+      const chunks = await index2.count(merkleRootHex);
+
+      await tx.done;
+      db.close();
+
+      return chunks;
+    } else {
+      await tx.done;
+      db.close();
+
+      return 0;
+    }
+  } catch (error) {
+    return 0;
+  }
 }
 
 async function fnSetDBChunk(chunk: Chunk): Promise<void> {
   const db = await getDB();
-  await db.put("chunks", chunk);
+  await db.add("chunks", chunk);
   db.close();
 }
 
@@ -677,7 +785,7 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
 }
 
 async function fnDeleteDBChunk(
-  merkleRootHex: string,
+  hashHex: string,
   chunkIndex?: number,
 ): Promise<void> {
   try {
@@ -686,14 +794,24 @@ async function fnDeleteDBChunk(
     const store = tx.objectStore("chunks");
 
     if (chunkIndex) {
-      const keys = IDBKeyRange.only([merkleRootHex, chunkIndex]);
+      const keys = IDBKeyRange.only([hashHex, chunkIndex]);
       await store.delete(keys);
     } else {
-      const index = store.index("merkleRoot");
-      const keys = await index.getAllKeys(merkleRootHex);
+      const index = store.index("hash");
+      const keys = await index.getAllKeys(hashHex);
       const len = keys.length;
-      for (let i = 0; i < len; i++) {
-        await store.delete(keys[i]);
+
+      if (len === 0) {
+        const index = store.index("merkleRoot");
+        const keys = await index.getAllKeys(hashHex);
+        const len = keys.length;
+        for (let i = 0; i < len; i++) {
+          await store.delete(keys[i]);
+        }
+      } else {
+        for (let i = 0; i < len; i++) {
+          await store.delete(keys[i]);
+        }
       }
     }
 
@@ -755,14 +873,45 @@ async function fnDeleteDBSendQueue(
 async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
   try {
     const db = await getDB();
-    const tx = db.transaction("messageData", "readwrite");
-    const store = tx.objectStore("messageData");
-    const index = store.index("merkleRoot");
-    const keys = await index.getAllKeys(merkleRootHex);
+    const tx = db.transaction(["messageData", "uniqueRoom"], "readwrite");
+    const messageStore = tx.objectStore("messageData");
+    const roomStore = tx.objectStore("uniqueRoom");
+
+    const messageIndex = messageStore.index("merkleRoot");
+    const keys = await messageIndex.getAllKeys(merkleRootHex);
     const len = keys.length;
+    let roomId = "";
     for (let i = 0; i < len; i++) {
-      await store.delete(keys[i]);
+      if (i === 0 || roomId.length === 0) {
+        const msg = await messageStore.get(keys[i]);
+        roomId = msg?.roomId ?? "";
+      }
+
+      await messageStore.delete(keys[i]);
     }
+
+    if (roomId.length > 0) {
+      const roomIndex = roomStore.index("roomId");
+      const room = await roomIndex.get(roomId);
+      if (room) {
+        const messageRoomIndex = messageStore.index("roomId");
+        const messageKeys = await messageRoomIndex.getAllKeys(roomId);
+
+        const messageKeysLen = messageKeys.length;
+        const lastMessage =
+          messageKeysLen > 0
+            ? await messageStore.get(messageKeys[messageKeysLen - 1])
+            : undefined;
+
+        await roomStore.put({
+          ...room,
+          messageCount: room.messageCount > 0 ? room.messageCount - 1 : 0,
+          updatedAt: lastMessage?.timestamp ?? Date.now(),
+          lastMessageMerkleRoot: lastMessage?.merkleRoot ?? "",
+        });
+      }
+    }
+
     await tx.done;
     db.close();
   } catch (error) {}

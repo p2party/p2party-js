@@ -1,0 +1,21 @@
+{
+  "entries": [
+    {
+      "filePath": "./src/index.ts",
+      "outFile": "./lib/p2party.d.ts",
+      "libraries": {
+        "inlinedLibraries": [
+          "@reduxjs/toolkit",
+          "redux",
+          "redux-thunk",
+          "immer"
+        ]
+      },
+      "output": {
+        "sortNodes": true,
+        "umdModuleName": "p2party",
+        "noBanner": true
+      }
+    }
+  ]
+}

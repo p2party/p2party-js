@@ -2,7 +2,14 @@ import { isUUID } from "class-validator";
 
 import { store, dispatch } from "./store";
 
+import { newKeyPair, sign, verify } from "./cryptography/ed25519";
+import {
+  encryptAsymmetric,
+  decryptAsymmetric,
+} from "./cryptography/chacha20poly1305";
+import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
 import { generateRandomRoomUrl } from "./cryptography/utils";
+import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 import {
   deleteDBAddressBookEntry,
@@ -21,6 +28,8 @@ import {
   getFileExtension,
   getMessageCategory,
   getMimeType,
+  MessageCategory,
+  MessageType,
 } from "./utils/messageTypes";
 import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/splitToChunks";
 
@@ -42,17 +51,11 @@ import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
 import { uint8ArrayToHex } from "./utils/uint8array";
-import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
 import type { SignalingState } from "./reducers/signalingServerSlice";
-import {
-  MessageCategory,
-  MessageType,
-  type MimeType,
-  type FileExtension,
-} from "./utils/messageTypes";
+import type { MimeType, FileExtension } from "./utils/messageTypes";
 import type {
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
@@ -66,12 +69,13 @@ import type {
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
 import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
+import type { KeyPair } from "./reducers/keyPairSlice";
 
-const originalClose = RTCDataChannel.prototype.close;
-RTCDataChannel.prototype.close = function () {
-  console.trace("RTCDataChannel closed from:");
-  originalClose.apply(this);
-};
+// const originalClose = RTCDataChannel.prototype.close;
+// RTCDataChannel.prototype.close = function () {
+//   console.trace("RTCDataChannel closed from:");
+//   originalClose.apply(this);
+// };
 
 const connect = (
   roomUrl: string,
@@ -320,7 +324,7 @@ const readMessage = async (
   filename: string;
   mimeType: MimeType;
   extension: FileExtension;
-  category: MessageCategory;
+  category: string;
 }> => {
   if (!merkleRootHex && !hashHex)
     return {
@@ -353,29 +357,32 @@ const readMessage = async (
       const mimeType = getMimeType(messageType);
       const extension = getFileExtension(messageType);
       const category = getMessageCategory(messageType);
-      const percentage = Math.floor(
-        (rooms[roomIndex].messages[messageIndex].savedSize /
-          rooms[roomIndex].messages[messageIndex].totalSize) *
-          100,
-      );
+      const percentage =
+        rooms[roomIndex].messages[messageIndex].fromPeerId === keyPair.peerId
+          ? 100
+          : Math.floor(
+              (rooms[roomIndex].messages[messageIndex].savedSize /
+                rooms[roomIndex].messages[messageIndex].totalSize) *
+                100,
+            );
 
-      if (
-        percentage === 100 &&
-        rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
-      ) {
-        const label = await compileChannelMessageLabel(
-          rooms[roomIndex].messages[messageIndex].channelLabel,
-          rooms[roomIndex].messages[messageIndex].merkleRootHex,
-          rooms[roomIndex].messages[messageIndex].sha512Hex,
-        );
+      // if (
+      //   percentage === 100 &&
+      //   rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
+      // ) {
+      //   const label = await compileChannelMessageLabel(
+      //     rooms[roomIndex].messages[messageIndex].channelLabel,
+      //     rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      //     rooms[roomIndex].messages[messageIndex].sha512Hex,
+      //   );
 
-        await store.dispatch(
-          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-            label,
-            alsoDeleteData: false,
-          }),
-        );
-      }
+      //   await store.dispatch(
+      //     webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+      //       label,
+      //       alsoDeleteData: false,
+      //     }),
+      //   );
+      // }
 
       const chunks =
         percentage === 100
@@ -735,7 +742,7 @@ const newRoomUrl = async () => {
   return uint8ArrayToHex(hash);
 };
 
-export default {
+export const p2party = {
   store,
   commonStateSelector,
   signalingServerSelector,
@@ -767,14 +774,34 @@ export default {
   purgeRoom,
   purge,
   generateRandomRoomUrl: newRoomUrl,
+  encrypt: encryptAsymmetric,
+  decrypt: decryptAsymmetric,
+  sign,
+  verify,
+  newKeyPair,
+  generateMnemonic,
+  keyPairFromMnemonic,
   MIN_CHUNKS: 3,
   MIN_CHUNK_SIZE: IMPORTANT_DATA_LEN + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   MAX_PERCENTAGE_FILLED_CHUNK: 1,
+  ROOM_URL_LENGTH: 64,
+  MessageType,
+  MessageCategory,
 };
 
-export { MessageType, MessageCategory };
+if (typeof window !== "undefined") {
+  (window as any).p2party = p2party;
+}
+
+declare global {
+  interface Window {
+    p2party: typeof p2party;
+  }
+}
+
+// export { MessageType, MessageCategory };
 
 export type {
   State,
@@ -789,6 +816,7 @@ export type {
   BlacklistedPeer,
   UniqueRoom,
   SignalingState,
+  KeyPair,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,
@@ -799,3 +827,5 @@ export type {
   WebSocketMessageCandidateReceive,
   WebSocketMessageError,
 };
+
+export default p2party;

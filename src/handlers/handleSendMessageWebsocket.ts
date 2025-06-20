@@ -47,7 +47,7 @@ export const handleSendMessageWebsocket = async (
       totalSize,
       totalChunks,
     } = // , unencryptedChunks } =
-      await splitToChunks(data, api, label, roomId); // db);
+      await splitToChunks(data, api, label, rooms[roomIndex]); // db);
 
     const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
     for (let i = 0; i < PEERS_LEN; i++) {

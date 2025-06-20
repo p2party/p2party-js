@@ -5,7 +5,7 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
-import type { MessageType } from "../utils/messageTypes";
+// import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
   label: string;
@@ -22,7 +22,7 @@ export interface Message {
   sha512Hex: string;
   fromPeerId: string;
   filename: string;
-  messageType: MessageType;
+  messageType: number;
   savedSize: number;
   totalSize: number;
   chunksCreated: number;
@@ -59,7 +59,7 @@ export interface SetMessageArgs {
   timestamp?: number;
   fromPeerId: string;
   filename: string;
-  messageType: MessageType;
+  messageType: number;
   channelLabel: string;
 }
 
@@ -69,10 +69,11 @@ export interface SetMessageAllChunksArgs {
   sha512Hex: string;
   fromPeerId: string;
   filename: string;
-  messageType: MessageType;
+  messageType: number;
   totalSize: number;
   channelLabel: string;
   timestamp: number;
+  alsoSendFinishedMessage?: boolean;
 }
 
 export interface SetMessageDeliveredSizeArgs {
@@ -564,9 +565,10 @@ const roomSlice = createSlice({
           state[roomIndex].messages[messageIndex].savedSize !== totalSize
         ) {
           state[roomIndex].messages[messageIndex].savedSize = totalSize;
-        } else {
-          console.log("HEre");
         }
+        // else {
+        //   console.log("HEre");
+        // }
       }
     },
 

@@ -15,7 +15,7 @@ import type {
   UniqueRoom,
   NewChunk,
 } from "./types";
-import type { MessageType } from "../utils/messageTypes";
+// import type { MessageType } from "../utils/messageTypes";
 
 async function fnGetDBAddressBookEntry(
   peerId?: string,
@@ -400,7 +400,7 @@ async function fnSetDBRoomMessageData(
   fromPeerId: string,
   chunkSize: number,
   totalSize: number,
-  messageType: MessageType,
+  messageType: number, // MessageType,
   filename: string,
   channelLabel: string,
   timestamp: number,

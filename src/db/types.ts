@@ -1,5 +1,5 @@
 import type { Peer } from "../reducers/roomSlice";
-import type { MessageType } from "../utils/messageTypes";
+// import type { MessageType } from "../utils/messageTypes";
 
 export interface UsernamedPeer extends Peer {
   username: string;
@@ -32,9 +32,10 @@ export interface MessageData {
   hash: string;
   merkleRoot: string;
   filename: string;
-  messageType: MessageType;
-  totalSize: number;
+  messageType: number; // MessageType;
   savedSize: number;
+  totalSize: number;
+  // recipients: number;
 }
 
 export interface Chunk {
@@ -134,7 +135,7 @@ export type WorkerMessages =
         fromPeerId: string,
         chunkSize: number,
         totalSize: number,
-        messageType: MessageType,
+        messageType: number, // MessageType,
         filename: string,
         channelLabel: string,
         timestamp: number,

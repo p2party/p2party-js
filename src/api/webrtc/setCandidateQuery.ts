@@ -25,6 +25,20 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
       const cand = new RTCIceCandidate(candidate);
 
       if (!epc.remoteDescription || epc.signalingState !== "stable") {
+        // if (cand.usernameFragment === candidate.usernameFragment) {
+        //   return { data: undefined };
+        // }
+        // const receivers = epc.getReceivers();
+        //
+        // for (const receiver of receivers) {
+        //   // const parameters = receiver.getParameters();
+        //   const parameters = receiver.transport?.iceTransport.getRemoteParameters();
+        //
+        //   if (parameters.usernameFragment === candidate.usernameFragment) {
+        //     return { data: undefined };
+        //   }
+        // }
+
         epc.iceCandidates.push(cand);
       } else {
         try {

@@ -1,8 +1,8 @@
-import { MessageType } from "./messageTypes";
+// import { MessageType } from "./messageTypes";
 
 export interface BasicMetadata {
   schemaVersion: number; // 8 bytes
-  messageType: MessageType; // 1 byte
+  messageType: number; // MessageType; // 1 byte
   totalSize: number; // 8 bytes, number of bytes, max file totalSize 10GB
   date: Date; // 8 bytes
   name: string; // 256 bytes, serialized string

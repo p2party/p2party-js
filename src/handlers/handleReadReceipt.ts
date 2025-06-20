@@ -1,19 +1,12 @@
-import {
-  deleteDBNewChunk,
-  getDBChunk,
-  // getDBMessageData,
-  getDBNewChunk,
-} from "../db/api";
+import { deleteDBNewChunk, getDBChunk, getDBNewChunk } from "../db/api";
 
 import { setMessage, setMessageAllChunks } from "../reducers/roomSlice";
 
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import { uint8ArrayToHex } from "../utils/uint8array";
-// import { MessageType } from "../utils/messageTypes";
 
 import type { IRTCDataChannel } from "../api/webrtc/interfaces";
 import type { BaseQueryApi } from "@reduxjs/toolkit/dist/query";
-// import type { State } from "../store";
 import type { Room } from "../reducers/roomSlice";
 
 export const handleReadReceipt = async (
@@ -33,7 +26,7 @@ export const handleReadReceipt = async (
     const { channelLabel, merkleRootHex, hashHex } =
       await decompileChannelMessageLabel(channel.label);
 
-    if (uint8ArrayToHex(receivedChunkHash) === hashHex) {
+    if (hex === hashHex) {
       const messageIndex = room.messages.findLastIndex(
         (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
       );
@@ -61,68 +54,36 @@ export const handleReadReceipt = async (
           (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
         );
 
-        const dbChunk = await getDBChunk(hashHex, chunkIndex);
-        if (dbChunk && messageIndex > -1) {
-          const chunkSize = dbChunk.byteLength;
+        const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
+        const chunkSize = dbChunk?.byteLength || 0;
+        if (dbChunk && chunkSize > 0 && messageIndex > -1) {
           if (
-            chunkSize > 0 // &&
-            // room.messages[messageIndex].totalSize >=
-            //   room.messages[messageIndex].savedSize + chunkSize
+            room.messages[messageIndex].savedSize + chunkSize ===
+              room.messages[messageIndex].totalSize ||
+            room.messages[messageIndex].savedSize ===
+              room.messages[messageIndex].totalSize
           ) {
-            // console.log(
-            //   "Sent " +
-            //     (room.messages[messageIndex].savedSize + chunkSize) +
-            //     " of total " +
-            //     room.messages[messageIndex].totalSize +
-            //     " with chunk index " +
-            //     chunkIndex,
-            // );
-            if (
-              room.messages[messageIndex].savedSize + chunkSize ===
-              room.messages[messageIndex].totalSize // ||
-              // room.messages[messageIndex].savedSize ===
-              //   room.messages[messageIndex].totalSize
-            ) {
-              api.dispatch(
-                setMessageAllChunks({
-                  roomId: room.id,
-                  merkleRootHex,
-                  sha512Hex: hashHex,
-                  fromPeerId: room.messages[messageIndex].fromPeerId,
-                  totalSize: room.messages[messageIndex].totalSize,
-                  messageType: room.messages[messageIndex].messageType,
-                  filename: room.messages[messageIndex].filename,
-                  channelLabel,
-                  timestamp: room.messages[messageIndex].timestamp,
-                }),
-              );
-            } else {
-              api.dispatch(
-                setMessage({
-                  roomId: room.id,
-                  merkleRootHex,
-                  sha512Hex: hashHex,
-                  fromPeerId: room.messages[messageIndex].fromPeerId,
-                  chunkSize,
-                  totalSize: room.messages[messageIndex].totalSize,
-                  messageType: room.messages[messageIndex].messageType,
-                  filename: room.messages[messageIndex].filename,
-                  channelLabel,
-                  timestamp: room.messages[messageIndex].timestamp,
-                }),
-              );
-            }
-          } else if (
-            room.messages[messageIndex].totalSize ===
-            room.messages[messageIndex].savedSize
-          ) {
+            api.dispatch(
+              setMessageAllChunks({
+                roomId: room.id,
+                merkleRootHex,
+                sha512Hex: hashHex,
+                fromPeerId: room.messages[messageIndex].fromPeerId,
+                totalSize: room.messages[messageIndex].totalSize,
+                messageType: room.messages[messageIndex].messageType,
+                filename: room.messages[messageIndex].filename,
+                channelLabel,
+                timestamp: room.messages[messageIndex].timestamp,
+              }),
+            );
+          } else {
             api.dispatch(
               setMessage({
                 roomId: room.id,
                 merkleRootHex,
                 sha512Hex: hashHex,
                 fromPeerId: room.messages[messageIndex].fromPeerId,
-                chunkSize: room.messages[messageIndex].totalSize,
+                chunkSize,
                 totalSize: room.messages[messageIndex].totalSize,
                 messageType: room.messages[messageIndex].messageType,
                 filename: room.messages[messageIndex].filename,
@@ -131,9 +92,12 @@ export const handleReadReceipt = async (
               }),
             );
           }
+        } else if (messageIndex === -1) {
+          console.log("No message with hex " + hashHex);
         }
       } else {
-        console.log("Did not find chunk with receipt hex");
+        console.log(chunk?.hash);
+        console.log("Did not find chunk with receipt hex", hex);
       }
     }
 

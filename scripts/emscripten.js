@@ -124,7 +124,6 @@ const testing =
 -Og \
 -g3 \
 --profiling \
--gsource-map \
 -fsanitize=undefined \
 -s ASSERTIONS=2 \
 -s RUNTIME_DEBUG=1 \

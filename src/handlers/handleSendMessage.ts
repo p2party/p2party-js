@@ -5,11 +5,7 @@ import { getMerkleProof } from "../cryptography/merkle";
 
 // import { setMessage } from "../reducers/roomSlice";
 
-import {
-  concatUint8Arrays,
-  hexToUint8Array,
-  // uint8ArrayToHex,
-} from "../utils/uint8array";
+import { concatUint8Arrays, hexToUint8Array } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata } from "../utils/metadata";
 import { getMimeType } from "../utils/messageTypes";
@@ -109,7 +105,7 @@ const sendChunks = async (
             ), // new Blob([realChunk]),
             mimeType,
           });
-        } catch (error) {}
+        } catch {}
       }
 
       const merkleProof = new Uint8Array(PROOF_LEN);
@@ -123,19 +119,7 @@ const sendChunks = async (
 
         merkleProof.set(m);
 
-        await setDBNewChunk({
-          hash: hashHex,
-          merkleRoot: merkleRootHex,
-          realChunkHash: unencryptedChunk.realChunkHash,
-          chunkIndex: iRandom,
-          data: unencryptedChunk.data,
-          metadata: unencryptedChunk.metadata,
-          merkleProof: m.buffer as ArrayBuffer,
-        });
-      } else {
-        merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
-
-        if (unencryptedChunk.merkleRoot.length === 0) {
+        try {
           await setDBNewChunk({
             hash: hashHex,
             merkleRoot: merkleRootHex,
@@ -143,8 +127,28 @@ const sendChunks = async (
             chunkIndex: iRandom,
             data: unencryptedChunk.data,
             metadata: unencryptedChunk.metadata,
-            merkleProof: unencryptedChunk.merkleProof,
+            merkleProof: merkleProof.buffer as ArrayBuffer,
           });
+        } catch (error) {
+          console.warn(error);
+        }
+      } else {
+        merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
+
+        if (unencryptedChunk.merkleRoot.length === 0) {
+          try {
+            await setDBNewChunk({
+              hash: hashHex,
+              merkleRoot: merkleRootHex,
+              realChunkHash: unencryptedChunk.realChunkHash,
+              chunkIndex: iRandom,
+              data: unencryptedChunk.data,
+              metadata: unencryptedChunk.metadata,
+              merkleProof: unencryptedChunk.merkleProof,
+            });
+          } catch (error) {
+            console.warn(error);
+          }
         }
       }
 
@@ -167,7 +171,7 @@ const sendChunks = async (
         senderEphemeralKey.publicKey,
         ephemeralSignature,
         encryptedMessage,
-      ])) as Uint8Array<ArrayBuffer>;
+      ])) as Uint8Array;
 
       const timeoutMilliseconds = await randomNumberInRange(1, 10);
       await wait(timeoutMilliseconds);
@@ -175,18 +179,23 @@ const sendChunks = async (
         channel.readyState === "open" &&
         channel.bufferedAmount < MAX_BUFFERED_AMOUNT
       ) {
-        channel.send(message.buffer);
+        channel.send(message.buffer as ArrayBuffer);
       } else if (
         // channel.readyState !== "closing" &&
         channel.readyState !== "closed"
       ) {
         putItemInDBSendQueue = true;
-        await setDBSendQueue({
-          position: iRandom,
-          label: channel.label,
-          toPeerId: channel.withPeerId,
-          encryptedData: message.buffer, // new Blob([message]),
-        });
+
+        try {
+          await setDBSendQueue({
+            position: iRandom,
+            label: channel.label,
+            toPeerId: channel.withPeerId,
+            encryptedData: message.buffer as ArrayBuffer, // new Blob([message]),
+          });
+        } catch (error) {
+          console.error(error);
+        }
       } else {
         console.log(
           "Cannot send message because channel is " +
@@ -222,11 +231,16 @@ const sendChunks = async (
           const [item] = sendQueue.splice(pos, 1);
           if (channel.readyState === "open") {
             channel.send(item.encryptedData);
-            await deleteDBSendQueue(
-              channel.label,
-              epc.withPeerId,
-              item.position,
-            );
+
+            try {
+              await deleteDBSendQueue(
+                channel.label,
+                epc.withPeerId,
+                item.position,
+              );
+            } catch (error) {
+              console.error(error);
+            }
           }
         }
       }
@@ -276,7 +290,7 @@ export const handleSendMessage = async (
           data,
           api,
           label,
-          roomId,
+          rooms[roomIndex], // roomId,
           minChunks,
           chunkSize,
           percentageFilledChunk,
@@ -330,6 +344,6 @@ export const handleSendMessage = async (
       await Promise.allSettled(promises);
     }
   } catch (error) {
-    console.error(error);
+    console.trace(error);
   }
 };

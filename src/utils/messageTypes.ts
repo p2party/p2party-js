@@ -1,84 +1,84 @@
 // MessageType enum
-export enum MessageType {
-  Text = 1,
-  ImagePNG = 2,
-  ImageJPEG = 3,
-  ImageJPG = 4,
-  ImageGIF = 5,
-  ImageBMP = 6,
-  ImageTIFF = 7,
-  ImageSVG = 8,
-  ImageWEBP = 9,
-  ImageHEIC = 10,
-  DocumentPDF = 11,
-  DocumentDOC = 12,
-  DocumentDOCX = 13,
-  DocumentXLS = 14,
-  DocumentXLSX = 15,
-  DocumentPPT = 16,
-  DocumentPPTX = 17,
-  DocumentTXT = 18,
-  DocumentRTF = 19,
-  DocumentODT = 20,
-  AudioMP3 = 21,
-  AudioWAV = 22,
-  AudioAAC = 23,
-  AudioFLAC = 24,
-  AudioOGG = 25,
-  AudioM4A = 26,
-  VideoMP4 = 27,
-  VideoAVI = 28,
-  VideoMKV = 29,
-  VideoMOV = 30,
-  VideoWMV = 31,
-  VideoFLV = 32,
-  VideoWEBM = 33,
-  CompressedZIP = 34,
-  CompressedRAR = 35,
-  Compressed7Z = 36,
-  CompressedTAR = 37,
-  CompressedGZ = 38,
-  CodeHTML = 39,
-  CodeCSS = 40,
-  CodeJS = 41,
-  CodeJSX = 42,
-  CodeTS = 43,
-  CodeTSX = 44,
-  CodeJSON = 45,
-  CodeXML = 46,
-  CodePY = 47,
-  CodeJAVA = 48,
-  CodeC = 49,
-  CodeCPP = 50,
-  CodeCS = 51,
-  CodeRB = 52,
-  CodePHP = 53,
-  CodeSQL = 54,
-  EbookEPUB = 55,
-  EbookMOBI = 56,
-  EbookAZW = 57,
-  FontTTF = 58,
-  FontOTF = 59,
-  ImageICO = 60,
-  ExecutableEXE = 61,
-  ExecutableDMG = 62,
-  ExecutableAPK = 63,
-  Unknown = 64,
-}
+export const MessageType = {
+  Text: 1,
+  ImagePNG: 2,
+  ImageJPEG: 3,
+  ImageJPG: 4,
+  ImageGIF: 5,
+  ImageBMP: 6,
+  ImageTIFF: 7,
+  ImageSVG: 8,
+  ImageWEBP: 9,
+  ImageHEIC: 10,
+  DocumentPDF: 11,
+  DocumentDOC: 12,
+  DocumentDOCX: 13,
+  DocumentXLS: 14,
+  DocumentXLSX: 15,
+  DocumentPPT: 16,
+  DocumentPPTX: 17,
+  DocumentTXT: 18,
+  DocumentRTF: 19,
+  DocumentODT: 20,
+  AudioMP3: 21,
+  AudioWAV: 22,
+  AudioAAC: 23,
+  AudioFLAC: 24,
+  AudioOGG: 25,
+  AudioM4A: 26,
+  VideoMP4: 27,
+  VideoAVI: 28,
+  VideoMKV: 29,
+  VideoMOV: 30,
+  VideoWMV: 31,
+  VideoFLV: 32,
+  VideoWEBM: 33,
+  CompressedZIP: 34,
+  CompressedRAR: 35,
+  Compressed7Z: 36,
+  CompressedTAR: 37,
+  CompressedGZ: 38,
+  CodeHTML: 39,
+  CodeCSS: 40,
+  CodeJS: 41,
+  CodeJSX: 42,
+  CodeTS: 43,
+  CodeTSX: 44,
+  CodeJSON: 45,
+  CodeXML: 46,
+  CodePY: 47,
+  CodeJAVA: 48,
+  CodeC: 49,
+  CodeCPP: 50,
+  CodeCS: 51,
+  CodeRB: 52,
+  CodePHP: 53,
+  CodeSQL: 54,
+  EbookEPUB: 55,
+  EbookMOBI: 56,
+  EbookAZW: 57,
+  FontTTF: 58,
+  FontOTF: 59,
+  ImageICO: 60,
+  ExecutableEXE: 61,
+  ExecutableDMG: 62,
+  ExecutableAPK: 63,
+  Unknown: 64,
+};
 
-export enum MessageCategory {
-  Text = "Text",
-  Image = "Image",
-  Document = "Document",
-  Audio = "Audio",
-  Video = "Video",
-  Compressed = "Compressed",
-  Code = "Code",
-  Ebook = "Ebook",
-  Font = "Font",
-  Executable = "Executable",
-  Unknown = "Unknown",
-}
+export const MessageCategory = {
+  Text: "Text",
+  Image: "Image",
+  Document: "Document",
+  Audio: "Audio",
+  Video: "Video",
+  Compressed: "Compressed",
+  Code: "Code",
+  Ebook: "Ebook",
+  Font: "Font",
+  Executable: "Executable",
+  Unknown: "Unknown",
+};
 
 export type KnownMimeType =
   | "text/plain"
@@ -208,11 +208,11 @@ export type KnownFileExtension =
 
 export type FileExtension = KnownFileExtension | "";
 
-export const getMessageType = (data: string | File): MessageType => {
+export const getMessageType = (data: string | File): number => {
   if (typeof data === "string") return MessageType.Text;
 
   const extension = data.name.split(".").pop()?.toLowerCase() || "";
-  const extensionToMessageType: { [key: string]: MessageType } = {
+  const extensionToMessageType: { [key: string]: number } = {
     png: MessageType.ImagePNG,
     jpeg: MessageType.ImageJPEG,
     jpg: MessageType.ImageJPG,
@@ -280,7 +280,7 @@ export const getMessageType = (data: string | File): MessageType => {
   return extensionToMessageType[extension] || MessageType.Unknown;
 };
 
-export const getFileExtension = (messageType: MessageType): FileExtension => {
+export const getFileExtension = (messageType: number): FileExtension => {
   switch (messageType) {
     case MessageType.ImagePNG:
       return "png";
@@ -411,13 +411,14 @@ export const getFileExtension = (messageType: MessageType): FileExtension => {
   }
 };
 
-export const getMimeType = (messageType: MessageType): MimeType => {
+export const getMimeType = (messageType: number): MimeType => {
   switch (messageType) {
     case MessageType.Text:
       return "text/plain";
     case MessageType.ImagePNG:
       return "image/png";
     case MessageType.ImageJPEG:
+      return "image/jpeg";
     case MessageType.ImageJPG:
       return "image/jpeg";
     case MessageType.ImageGIF:
@@ -541,9 +542,7 @@ export const getMimeType = (messageType: MessageType): MimeType => {
   }
 };
 
-export const getMessageCategory = (
-  messageType: MessageType,
-): MessageCategory => {
+export const getMessageCategory = (messageType: number): string => {
   switch (messageType) {
     case MessageType.Text:
       return MessageCategory.Text;

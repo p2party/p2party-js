@@ -28,7 +28,7 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
         j = 0;
       const CHANNELS_LEN = dataChannels.length;
       for (i = 0; i < CHANNELS_LEN; i++) {
-        if (dataChannels[i].readyState !== "open") continue;
+        if (!dataChannels[i] || dataChannels[i].readyState !== "open") continue;
 
         if (exceptionRoomIds && exceptionRoomIds.length > 0) {
           const ROOM_IDS_LEN = dataChannels[i].roomIds.length;
@@ -51,7 +51,11 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
 
       const PEERS_LEN = peerConnections.length;
       for (i = 0; i < PEERS_LEN; i++) {
-        if (peerConnections[i].connectionState !== "connected") continue;
+        if (
+          !peerConnections[i] ||
+          peerConnections[i].connectionState !== "connected"
+        )
+          continue;
 
         if (exceptionRoomIds && exceptionRoomIds.length > 0) {
           const PEER_ROOMS_LEN = peerConnections[i].roomIds.length;

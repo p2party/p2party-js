@@ -40,10 +40,13 @@
     // For workers
     "isolatedModules": true,
     "noEmit": true,
+    "preserveConstEnums": true,
 
     "paths": {
       "@libcrypto": ["./src/cryptography"]
-    }
+    },
+
+    "types": ["@types/node", "@reduxjs/toolkit", "immer"]
   },
   "include": ["src"],
   "exclude": ["node_modules"]

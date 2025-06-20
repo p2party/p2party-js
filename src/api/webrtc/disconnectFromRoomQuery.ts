@@ -27,6 +27,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
     const CHANNELS_LEN = dataChannels.length;
     for (let i = 0; i < CHANNELS_LEN; i++) {
       if (
+        !dataChannels[i] ||
         !dataChannels[i].roomIds.includes(roomId) ||
         dataChannels[i].readyState !== "open"
       )
@@ -43,6 +44,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
     const PEERS_LEN = peerConnections.length;
     for (let i = 0; i < PEERS_LEN; i++) {
       if (
+        !peerConnections[i] ||
         !peerConnections[i].roomIds.includes(roomId) ||
         peerConnections[i].connectionState !== "connected"
       )

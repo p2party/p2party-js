@@ -138,7 +138,8 @@ roomListenerMiddleware.startListening({
       }
       // } else if (setMessage.match(action)) {
     } else if (setMessageAllChunks.match(action)) {
-      const { roomId, merkleRootHex, sha512Hex } = action.payload;
+      const { roomId, merkleRootHex, sha512Hex, alsoSendFinishedMessage } =
+        action.payload;
       const { rooms, keyPair } = listenerApi.getState() as State;
       const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
@@ -187,6 +188,7 @@ roomListenerMiddleware.startListening({
             webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
               label,
               alsoDeleteData: false,
+              alsoSendFinishedMessage,
             }),
           );
         }

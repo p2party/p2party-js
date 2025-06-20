@@ -177,3 +177,5 @@ dist
 .DS_Store
 
 libcrypto.js
+*wasm
+*.map

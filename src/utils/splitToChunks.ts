@@ -23,6 +23,7 @@ import {
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
+import type { Room } from "../reducers/roomSlice";
 
 export const PROOF_LEN =
   4 + // length of the proof
@@ -56,7 +57,8 @@ export const splitToChunks = async (
   message: string | File,
   api: BaseQueryApi,
   label: string,
-  roomId: string,
+  room: Room,
+  // roomId: string,
   // db: IDBPDatabase<RepoSchema>,
   minChunks = 5, // TODO errors when =2 due to merkle
   chunkSize = CHUNK_LEN,
@@ -69,7 +71,7 @@ export const splitToChunks = async (
   hashHex: string;
   totalChunks: number;
   totalSize: number;
-  messageType: MessageType;
+  messageType: number;
   chunkHashes: Uint8Array;
 }> => {
   const { keyPair } = api.getState() as State;
@@ -99,6 +101,7 @@ export const splitToChunks = async (
   const availableSpace = quota - usage;
 
   const totalSize =
+    // room.peers.length *
     typeof message === "string"
       ? (file as Uint8Array).length
       : (file as File).size;
@@ -170,7 +173,6 @@ export const splitToChunks = async (
   for (let i = 0; i < totalChunks; i++) {
     // const size = chunkSizes[i] ?? 0;
     const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
-
     const chunkStartIndex = await randomNumberInRange(
       0,
       // Math.max(0, chunkSize - size),
@@ -199,17 +201,17 @@ export const splitToChunks = async (
       if (typeof message === "string") {
         chunk.set(blob as Uint8Array, chunkStartIndex);
 
-        const hash = await window.crypto.subtle.digest(
-          "SHA-512",
-          (blob as Uint8Array).buffer as ArrayBuffer,
-        );
-        chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+        // const hash = await window.crypto.subtle.digest(
+        //   "SHA-512",
+        //   (blob as Uint8Array).buffer as ArrayBuffer,
+        // );
+        // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
       } else {
         const buffer = await (blob as Blob).arrayBuffer();
         chunk.set(new Uint8Array(buffer), chunkStartIndex);
 
-        const hash = await window.crypto.subtle.digest("SHA-512", buffer);
-        chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+        // const hash = await window.crypto.subtle.digest("SHA-512", buffer);
+        // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
       }
 
       // offset += size; // bytesToCopy;
@@ -220,9 +222,16 @@ export const splitToChunks = async (
       const r = await randomNumberInRange(start, end);
       chunkEndIndex += r;
 
-      const hash = await window.crypto.subtle.digest("SHA-512", chunk);
-      chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+      // const hash = await window.crypto.subtle.digest("SHA-512", chunk);
+      // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
     }
+
+    const hash = await window.crypto.subtle.digest(
+      "SHA-512",
+      // (blob as Uint8Array).buffer as ArrayBuffer,
+      chunk.buffer as ArrayBuffer,
+    );
+    chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
 
     const mSerialized = serializeMetadata({
       ...m,
@@ -231,24 +240,28 @@ export const splitToChunks = async (
       chunkIndex: i,
     });
 
-    await setDBNewChunk({
-      hash: sha512Hex,
-      merkleRoot: "",
-      chunkIndex: i,
-      realChunkHash: uint8ArrayToHex(
-        chunkHashes.slice(
-          i * crypto_hash_sha512_BYTES,
-          (i + 1) * crypto_hash_sha512_BYTES,
+    try {
+      await setDBNewChunk({
+        hash: sha512Hex,
+        merkleRoot: "",
+        chunkIndex: i,
+        realChunkHash: uint8ArrayToHex(
+          chunkHashes.slice(
+            i * crypto_hash_sha512_BYTES,
+            (i + 1) * crypto_hash_sha512_BYTES,
+          ),
         ),
-      ),
-      data: chunk.buffer,
-      metadata: mSerialized.buffer as ArrayBuffer,
-      merkleProof: new Uint8Array().buffer,
-    });
+        data: chunk.buffer,
+        metadata: mSerialized.buffer as ArrayBuffer,
+        merkleProof: new Uint8Array().buffer,
+      });
+    } catch (error) {
+      console.error(error);
+    }
 
     api.dispatch(
       setMessage({
-        roomId,
+        roomId: room.id, // roomId,
         merkleRootHex: "",
         sha512Hex,
         fromPeerId: keyPair.peerId,
@@ -272,22 +285,26 @@ export const splitToChunks = async (
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-  await setDBRoomMessageData(
-    roomId,
-    merkleRootHex,
-    sha512Hex,
-    keyPair.peerId,
-    totalSize,
-    totalSize,
-    messageType,
-    name,
-    label,
-    date.getTime(),
-  );
+  try {
+    await setDBRoomMessageData(
+      room.id, // roomId,
+      merkleRootHex,
+      sha512Hex,
+      keyPair.peerId,
+      totalSize,
+      totalSize,
+      messageType,
+      name,
+      label,
+      date.getTime(),
+    );
+  } catch (error) {
+    console.error(error);
+  }
 
   api.dispatch(
     setMessage({
-      roomId,
+      roomId: room.id, // roomId,
       merkleRootHex,
       sha512Hex,
       fromPeerId: keyPair.peerId,

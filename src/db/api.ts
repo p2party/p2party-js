@@ -1,5 +1,5 @@
 import type { WorkerMessages, Chunk, NewChunk, SendQueue } from "./types";
-import type { MessageType } from "../utils/messageTypes";
+// import type { MessageType } from "../utils/messageTypes";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
 const workerBlob = new Blob([workerSrc], {
@@ -86,7 +86,7 @@ export const setDBRoomMessageData = (
   fromPeerId: string,
   chunkSize: number,
   totalSize: number,
-  messageType: MessageType,
+  messageType: number, // MessageType,
   filename: string,
   channelLabel: string,
   timestamp: number,

@@ -16,9 +16,14 @@ const input = "src/index.ts";
 const idbWorkerPath = path.resolve("lib", "db.worker.js");
 const idbWorkerJs = fs.readFileSync(idbWorkerPath, { encoding: "utf-8" });
 
+const isDist = process.env.NODE_ENV === "production";
+
 const plugins = [
   replace({
     "process.env.INDEXEDDB_WORKER_JS": JSON.stringify(idbWorkerJs),
+    "process.env.NODE_ENV": isDist
+      ? JSON.stringify("production")
+      : JSON.stringify("development"),
     preventAssignment: true,
   }),
 
@@ -49,6 +54,12 @@ const plugins = [
     outDir: `${dir}`,
   }),
 
+  isDist &&
+    terser({
+      ecma: 2020,
+      toplevel: true,
+    }),
+
   // copy({
   //   targets: [
   //     {
@@ -69,6 +80,10 @@ export default [
     input,
     plugins: [
       ...plugins,
+      replace({
+        "process.env.NODE_ENV": JSON.stringify("production"),
+        preventAssignment: true,
+      }),
       terser({
         ecma: 2020,
         toplevel: true,
@@ -95,7 +110,7 @@ export default [
   {
     input,
     plugins,
-    external: ["module"],
+    external: ["module", "@reduxjs", "class-validator"],
     output: [
       {
         // dir: "lib",
@@ -115,7 +130,7 @@ export default [
         file: `lib${path.sep}index.js`,
         format: "cjs",
         esModule: false,
-        interop: "defaultOnly",
+        interop: "auto",
         exports: "named", // "default",
         sourcemap: true,
         // preserveModules: true,

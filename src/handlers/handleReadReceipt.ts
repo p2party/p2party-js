@@ -96,8 +96,7 @@ export const handleReadReceipt = async (
           console.log("No message with hex " + hashHex);
         }
       } else {
-        console.log(chunk?.hash);
-        console.log("Did not find chunk with receipt hex", hex);
+        console.log("Did not find chunk with receipt hex: " + hex);
       }
     }
 

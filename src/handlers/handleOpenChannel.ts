@@ -138,10 +138,10 @@ export const handleOpenChannel = async (
     //   console.log(`Channel with label ${extChannel.label} is closing.`);
     // };
 
-    extChannel.onclose = () => {
+    extChannel.onclose = async () => {
       console.log(`Channel with label ${extChannel.label} has closed.`);
 
-      api.dispatch(
+      await api.dispatch(
         webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
           peerId: epc.withPeerId,
           label: extChannel.label,
@@ -153,12 +153,13 @@ export const handleOpenChannel = async (
       }
     };
 
-    extChannel.onerror = (e) => {
+    extChannel.onerror = async (e) => {
       console.error(e);
 
-      api.dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
-
-      api.dispatch(
+      await api.dispatch(
+        signalingServerApi.endpoints.disconnectWebSocket.initiate(),
+      );
+      await api.dispatch(
         webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
           peerId: epc.withPeerId,
           label: extChannel.label,

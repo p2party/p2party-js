@@ -60,9 +60,9 @@ export const splitToChunks = async (
   room: Room,
   // roomId: string,
   // db: IDBPDatabase<RepoSchema>,
-  minChunks = 5, // TODO errors when =2 due to merkle
+  minChunks = 1,
   chunkSize = CHUNK_LEN,
-  percentageFilledChunk = 0.8,
+  percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
 ): Promise<{
   merkleRoot: Uint8Array;
@@ -76,8 +76,8 @@ export const splitToChunks = async (
 }> => {
   const { keyPair } = api.getState() as State;
 
-  // if (minChunks < 3) throw new Error("We need at least 3 chunks");
-  if (percentageFilledChunk <= 0 || percentageFilledChunk > 1)
+  if (minChunks < 1) throw new Error("Need at least one chunk.");
+  if (percentageFilledChunk < 0.0001 || percentageFilledChunk > 1)
     throw new Error("Percentage of useful data in chunk should be in (0, 1].");
   if (!metadataSchemaVersions.includes(metadataSchemaVersion))
     throw new Error("Unknown metadata version schema.");
@@ -164,8 +164,7 @@ export const splitToChunks = async (
 
   const totalChunks = Math.max(
     minChunks,
-    // +2 to get different merkle roots even for files
-    Math.ceil(totalSize / (chunkSize * percentageFilledChunk)) + 2,
+    Math.ceil(totalSize / (chunkSize * percentageFilledChunk)),
   );
 
   const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);

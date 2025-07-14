@@ -105,7 +105,7 @@ export const handleReceiveMessage = async (
 
     const realChunkHash = await window.crypto.subtle.digest(
       "SHA-512",
-      realChunk,
+      realChunk.buffer,
     );
     const chunkHashHex = uint8ArrayToHex(new Uint8Array(realChunkHash));
 

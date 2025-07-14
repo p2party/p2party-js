@@ -278,13 +278,6 @@ verify_merkle_proof(
     {
       return 0;
     }
-    else
-    {
-      // If 1 artifact then either proof is the same
-      // as the element hash, and therefore
-      // the same as the root, or we have an error
-      return -1;
-    }
   }
 
   uint8_t (*concat_hashes)[crypto_hash_sha512_BYTES]

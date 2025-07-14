@@ -288,9 +288,9 @@ const sendMessage = (
   data: string | File,
   toChannel: string,
   roomId: string,
+  percentageFilledChunk = 0.9,
   minChunks = 3,
   chunkSize = CHUNK_LEN,
-  percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
 ) => {
   // dispatch(

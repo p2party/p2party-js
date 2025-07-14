@@ -431,30 +431,39 @@ async function fnSetDBRoomMessageData(
     // );
 
     // await db.put("messageData", {
-    await messageStore.put({
-      roomId,
-      timestamp,
-      merkleRoot: merkleRootHex,
-      hash: sha512Hex,
-      fromPeerId,
-      filename,
-      messageType,
-      savedSize: savedSize !== totalSize ? chunkSize + savedSize : chunkSize,
-      totalSize,
-      channelLabel,
-    });
+
+    try {
+      await messageStore.put({
+        roomId,
+        timestamp,
+        merkleRoot: merkleRootHex,
+        hash: sha512Hex,
+        fromPeerId,
+        filename,
+        messageType,
+        savedSize: savedSize !== totalSize ? chunkSize + savedSize : chunkSize,
+        totalSize,
+        channelLabel,
+      });
+    } catch (error) {
+      throw error;
+    }
 
     if (!msg) {
       const room = await roomStore.index("roomId").get(roomId);
       // const room = await db.getFromIndex("uniqueRoom", "roomId", roomId);
       if (room && room.lastMessageMerkleRoot !== merkleRootHex) {
         // await db.put("uniqueRoom", {
-        await roomStore.put({
-          ...room,
-          lastMessageMerkleRoot: merkleRootHex,
-          messageCount: room.messageCount + 1,
-          updatedAt: Date.now(),
-        });
+        try {
+          await roomStore.put({
+            ...room,
+            lastMessageMerkleRoot: merkleRootHex,
+            messageCount: room.messageCount + 1,
+            updatedAt: Date.now(),
+          });
+        } catch (error) {
+          throw error;
+        }
       }
     }
 

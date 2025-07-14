@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Create WebRTC mesh networks in two LOC",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/p2party/p2party-ts.git"
@@ -27,7 +27,7 @@
     "public key cryptography",
     "typescript"
   ],
-  "homepage": "https://github.com/p2party/p2party-js#readme",
+  "homepage": "https://github.com/p2party/p2party-ts#readme",
   "main": "lib/index.js",
   "module": "lib/index.mjs",
   "types": "lib/index.d.ts",

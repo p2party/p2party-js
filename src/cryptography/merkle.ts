@@ -117,7 +117,31 @@ export const getMerkleProof = async (
     throw new Error("Cannot calculate Merkle proof of element of empty tree.");
   } else if (treeLen === 1) {
     // "No point in calculating proof of a tree with single leaf.",
-    return new Uint8Array(crypto_hash_sha512_BYTES + 1).fill(1);
+    const proof = new Uint8Array(crypto_hash_sha512_BYTES + 1);
+    proof.set(elementHash);
+
+    if (proofFixedLen) {
+      const result = crypto_hash_sha512_BYTES + 1;
+      const proofArray = window.crypto.getRandomValues(
+        new Uint8Array(proofFixedLen),
+      );
+
+      let offset = 0;
+      const proofLenBytes = 4;
+      const proofLenView = new DataView(
+        proofArray.buffer,
+        offset,
+        proofLenBytes,
+      );
+      proofLenView.setUint32(0, result, false); // Big-endian
+      offset += proofLenBytes;
+
+      proofArray.set(proof, offset);
+
+      return proofArray;
+    } else {
+      return proof;
+    }
   }
 
   const wasmMemory =

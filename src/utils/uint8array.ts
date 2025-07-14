@@ -9,7 +9,7 @@ export const concatUint8Arrays = (
     const result = new Uint8Array(
       arrays.reduce((sum, arr) => sum + arr.length, 0),
     );
-    for (const arr of arrays) result.set(arr, offset), (offset += arr.length);
+    for (const arr of arrays) (result.set(arr, offset), (offset += arr.length));
 
     resolve(result);
   });

@@ -88,7 +88,7 @@ const sendChunks = async (
       const metadata = deserializeMetadata(metadataArray);
 
       if (
-        metadata.chunkStartIndex > 0 &&
+        metadata.chunkStartIndex >= 0 &&
         metadata.chunkEndIndex > metadata.chunkStartIndex &&
         metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
       ) {
@@ -261,7 +261,7 @@ export const handleSendMessage = async (
   encryptionModule: LibCrypto,
   decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
-  minChunks = 3, // TODO errors when =2 due to merkle
+  minChunks = 1,
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,

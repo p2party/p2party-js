@@ -92,17 +92,16 @@ export const handleReadReceipt = async (
               }),
             );
           }
+          // Only one peer receives the message
+          if (channelsSendingSameItem.length === 1) {
+            await deleteDBNewChunk(undefined, hex);
+          }
         } else if (messageIndex === -1) {
           console.log("No message with hex " + hashHex);
         }
       } else {
         console.log("Did not find chunk with receipt hex: " + hex);
       }
-    }
-
-    // Only one peer receives the message
-    if (channelsSendingSameItem.length === 1) {
-      await deleteDBNewChunk(undefined, hex);
     }
   } catch (error) {
     console.error(error);

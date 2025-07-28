@@ -174,7 +174,6 @@ export const splitToChunks = async (
     const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
     const chunkStartIndex = await randomNumberInRange(
       0,
-      // Math.max(0, chunkSize - size),
       Math.floor(chunkSize * (1 - percentageFilledChunk)),
     );
     const remainingBytes = totalSize - offset;
@@ -225,12 +224,14 @@ export const splitToChunks = async (
       // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
     }
 
-    const hash = await window.crypto.subtle.digest(
+    const h = await window.crypto.subtle.digest(
       "SHA-512",
       // (blob as Uint8Array).buffer as ArrayBuffer,
-      chunk.buffer as ArrayBuffer,
+      chunk,
     );
-    chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
+    const hash = new Uint8Array(h);
+    const realChunkHash = uint8ArrayToHex(hash);
+    chunkHashes.set(hash, i * crypto_hash_sha512_BYTES);
 
     const mSerialized = serializeMetadata({
       ...m,
@@ -244,12 +245,7 @@ export const splitToChunks = async (
         hash: sha512Hex,
         merkleRoot: "",
         chunkIndex: i,
-        realChunkHash: uint8ArrayToHex(
-          chunkHashes.slice(
-            i * crypto_hash_sha512_BYTES,
-            (i + 1) * crypto_hash_sha512_BYTES,
-          ),
-        ),
+        realChunkHash,
         data: chunk.buffer,
         metadata: mSerialized.buffer as ArrayBuffer,
         merkleProof: new Uint8Array().buffer,

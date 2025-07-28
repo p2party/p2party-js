@@ -595,15 +595,15 @@ async function fnGetDBAllChunks(
     const index1 = store.index("hash");
     const index2 = store.index("merkleRoot");
 
-    if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
-      const chunks = await index1.getAll(hashHex);
+    if (
+      merkleRootHex &&
+      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    ) {
+      const chunks = await index2.getAll(merkleRootHex);
 
       if (chunks.length === 0) {
-        if (
-          merkleRootHex &&
-          merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-        ) {
-          const chunks = await index2.getAll(merkleRootHex);
+        if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+          const chunks = await index1.getAll(hashHex);
 
           await tx.done;
           db.close();
@@ -621,11 +621,8 @@ async function fnGetDBAllChunks(
 
         return chunks;
       }
-    } else if (
-      merkleRootHex &&
-      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    ) {
-      const chunks = await index2.getAll(merkleRootHex);
+    } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+      const chunks = await index1.getAll(hashHex);
 
       await tx.done;
       db.close();
@@ -637,6 +634,49 @@ async function fnGetDBAllChunks(
 
       return [];
     }
+
+    // if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+    //   const chunks = await index1.getAll(hashHex);
+    //
+    //   if (chunks.length === 0) {
+    //     if (
+    //       merkleRootHex &&
+    //       merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    //     ) {
+    //       const chunks = await index2.getAll(merkleRootHex);
+    //
+    //       await tx.done;
+    //       db.close();
+    //
+    //       return chunks;
+    //     } else {
+    //       await tx.done;
+    //       db.close();
+    //
+    //       return [];
+    //     }
+    //   } else {
+    //     await tx.done;
+    //     db.close();
+    //
+    //     return chunks;
+    //   }
+    // } else if (
+    //   merkleRootHex &&
+    //   merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
+    // ) {
+    //   const chunks = await index2.getAll(merkleRootHex);
+    //
+    //   await tx.done;
+    //   db.close();
+    //
+    //   return chunks;
+    // } else {
+    //   await tx.done;
+    //   db.close();
+    //
+    //   return [];
+    // }
   } catch (error) {
     console.error(error);
 

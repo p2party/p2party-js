@@ -173,7 +173,7 @@ export const handleOpenChannel = async (
 
     extChannel.onmessage = async (e) => {
       try {
-        const { channelLabel, merkleRoot, merkleRootHex, hashHex } =
+        const { channelLabel, merkleRoot, merkleRootHex, hash, hashHex } =
           await decompileChannelMessageLabel(label);
 
         const peerPublicKeyHex = epc.withPeerPublicKey;
@@ -205,7 +205,7 @@ export const handleOpenChannel = async (
               totalSize,
               messageType,
               filename,
-              chunkHashHex,
+              chunkHash,
             } = await handleReceiveMessage(
               data,
               merkleRoot,
@@ -258,12 +258,12 @@ export const handleOpenChannel = async (
             // } else {
             if (
               totalSize > 0 &&
-              chunkHashHex.length === crypto_hash_sha512_BYTES * 2 &&
-              extChannel.readyState === "open" &&
+              chunkHash.length === crypto_hash_sha512_BYTES &&
+              extChannel.readyState === "open" // &&
               // !chunkAlreadyExists &&
-              !receivedFullSize
+              // !receivedFullSize
             ) {
-              extChannel.send(hexToUint8Array(chunkHashHex).buffer);
+              extChannel.send(chunkHash.buffer as ArrayBuffer);
               // await wait(10);
             }
 
@@ -281,9 +281,9 @@ export const handleOpenChannel = async (
                 date.getTime(),
               );
 
-              // if (extChannel.readyState === "open") {
-              //   extChannel.send(hash.buffer as ArrayBuffer);
-              // }
+              if (extChannel.readyState === "open") {
+                extChannel.send(hash.buffer as ArrayBuffer);
+              }
 
               api.dispatch(
                 setMessageAllChunks({

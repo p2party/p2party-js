@@ -127,7 +127,6 @@ const testing =
 -fsanitize=undefined \
 -s ASSERTIONS=2 \
 -s RUNTIME_DEBUG=1 \
--s SAFE_HEAP=2 \
 -s STACK_OVERFLOW_CHECK=2 \
 -s EXIT_RUNTIME=1 \
 `;

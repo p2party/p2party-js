@@ -34,7 +34,7 @@ export const handleReceiveMessage = async (
   savedSize: number;
   totalSize: number;
   chunkIndex: number;
-  chunkHashHex: string;
+  chunkHash: Uint8Array;
   receivedFullSize: boolean;
   messageAlreadyExists: boolean;
   chunkAlreadyExists: boolean;
@@ -72,7 +72,7 @@ export const handleReceiveMessage = async (
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
-        chunkHashHex: "",
+        chunkHash: new Uint8Array(),
       };
 
     const encryptedMessage = message.slice(
@@ -103,11 +103,17 @@ export const handleReceiveMessage = async (
           )
         : decryptedMessage.slice(METADATA_LEN + PROOF_LEN);
 
-    const realChunkHash = await window.crypto.subtle.digest(
+    const chunkHashBuffer = await window.crypto.subtle.digest(
       "SHA-512",
-      realChunk.buffer,
+      decryptedMessage.slice(METADATA_LEN + PROOF_LEN),
     );
-    const chunkHashHex = uint8ArrayToHex(new Uint8Array(realChunkHash));
+    const chunkHash = new Uint8Array(chunkHashBuffer);
+
+    // const realChunkHash = await window.crypto.subtle.digest(
+    //   "SHA-512",
+    //   realChunk.buffer,
+    // );
+    // const chunkHashHex = uint8ArrayToHex(new Uint8Array(realChunkHash));
 
     if (chunkSize === 0)
       return {
@@ -121,7 +127,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
@@ -176,7 +182,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
     }
 
@@ -207,7 +213,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
 
     const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
@@ -240,7 +246,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
 
     const mimeType = getMimeType(metadata.messageType);
@@ -272,7 +278,7 @@ export const handleReceiveMessage = async (
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
     } catch (error) {
       return {
@@ -291,7 +297,7 @@ export const handleReceiveMessage = async (
         totalSize: 0,
         messageType: metadata.messageType,
         filename: metadata.name,
-        chunkHashHex,
+        chunkHash,
       };
     }
   } catch (error) {

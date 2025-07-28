@@ -375,7 +375,7 @@ const readMessage = async (
       //     rooms[roomIndex].messages[messageIndex].merkleRootHex,
       //     rooms[roomIndex].messages[messageIndex].sha512Hex,
       //   );
-
+      //
       //   await store.dispatch(
       //     webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
       //       label,

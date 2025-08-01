@@ -62,9 +62,9 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
       }
     }
 
-    const { channelLabel, merkleRootHex, hashHex } =
+    const { channelLabel, merkleRootHex } =
       await decompileChannelMessageLabel(label);
-    const hasLen = merkleRootHex.length > 0 || hashHex.length > 0;
+    const hasLen = merkleRootHex.length > 0;
 
     const { rooms, keyPair } = api.getState() as State;
     const roomsLen = rooms.length;
@@ -72,12 +72,13 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     for (let i = 0; i < roomsLen; i++) {
       if (hasLen) {
         const messageIndex = rooms[i].messages.findLastIndex(
-          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
+          (m) => m.merkleRootHex === merkleRootHex,
         );
         if (
           messageIndex > -1 &&
           rooms[i].messages[messageIndex].fromPeerId === keyPair.peerId
         ) {
+          const hashHex = rooms[i].messages[messageIndex].sha512Hex;
           const roomId = rooms[i].id;
           const savedSize = rooms[i].messages[messageIndex].savedSize;
           const totalSize = rooms[i].messages[messageIndex].totalSize;

@@ -268,6 +268,7 @@ export const handleSendMessage = async (
 ) => {
   try {
     const { rooms, keyPair } = api.getState() as State;
+
     const senderSecretKey = hexToUint8Array(keyPair.secretKey);
 
     const roomIndex = rooms.findIndex((r) => r.id === roomId);
@@ -296,6 +297,14 @@ export const handleSendMessage = async (
           percentageFilledChunk,
           metadataSchemaVersion,
         );
+
+      if (
+        merkleRoot.length === 0 ||
+        hashHex.length === 0 ||
+        totalChunks === 0 ||
+        chunkHashes.length === 0
+      )
+        return;
 
       const channelMessageLabel = await compileChannelMessageLabel(
         label,

@@ -31,7 +31,11 @@ import {
   MessageCategory,
   MessageType,
 } from "./utils/messageTypes";
-import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/splitToChunks";
+import {
+  CHUNK_LEN,
+  IMPORTANT_DATA_LEN,
+  CANCEL_SEND,
+} from "./utils/splitToChunks";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -560,6 +564,9 @@ const cancelMessage = async (
   )
     throw new Error("Invalid hash length");
 
+  const evt = new CustomEvent(CANCEL_SEND);
+  window.dispatchEvent(evt);
+
   const merkleRootHex =
     merkleRoot && typeof merkleRoot === "string"
       ? merkleRoot
@@ -591,7 +598,12 @@ const cancelMessage = async (
     }
   }
 
-  if (roomIndex > -1 && messageIndex > -1) {
+  if (
+    roomIndex > -1 &&
+    messageIndex > -1 &&
+    rooms[roomIndex].messages[messageIndex].merkleRootHex.length ===
+      crypto_hash_sha512_BYTES * 2
+  ) {
     const label = await compileChannelMessageLabel(
       channelLabel,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,
@@ -644,6 +656,9 @@ const deleteMsg = async (
   )
     throw new Error("Invalid hash length");
 
+  const evt = new CustomEvent(CANCEL_SEND);
+  window.dispatchEvent(evt);
+
   const merkleRootHex =
     merkleRoot && typeof merkleRoot === "string"
       ? merkleRoot
@@ -675,7 +690,12 @@ const deleteMsg = async (
     }
   }
 
-  if (roomIndex > -1 && messageIndex > -1) {
+  if (
+    roomIndex > -1 &&
+    messageIndex > -1 &&
+    rooms[roomIndex].messages[messageIndex].merkleRootHex.length ===
+      crypto_hash_sha512_BYTES * 2
+  ) {
     const label = await compileChannelMessageLabel(
       rooms[roomIndex].messages[messageIndex].channelLabel,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,

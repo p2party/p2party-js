@@ -129,6 +129,7 @@ const testing =
 -s RUNTIME_DEBUG=1 \
 -s STACK_OVERFLOW_CHECK=2 \
 -s EXIT_RUNTIME=1 \
+-s INVOKE_RUN=0 \
 `;
 
 execSync(

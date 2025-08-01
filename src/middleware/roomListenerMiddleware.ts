@@ -14,6 +14,8 @@ import {
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 import {
@@ -194,11 +196,24 @@ roomListenerMiddleware.startListening({
         }
       }
     } else if (deleteMessage.match(action)) {
-      const { merkleRootHex } = action.payload;
+      const { merkleRootHex, hashHex } = action.payload;
 
-      await deleteDBChunk(merkleRootHex);
-      await deleteDBNewChunk(merkleRootHex);
-      await deleteDBMessageData(merkleRootHex);
+      if (!merkleRootHex && !hashHex) return;
+      if (
+        merkleRootHex &&
+        merkleRootHex.length !== crypto_hash_sha512_BYTES * 2
+      )
+        return;
+      if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
+
+      if (merkleRootHex) {
+        await deleteDBChunk(merkleRootHex);
+        await deleteDBNewChunk(merkleRootHex);
+        await deleteDBMessageData(merkleRootHex);
+      } else if (hashHex) {
+        // await deleteDBChunk(hashHex);
+        await deleteDBNewChunk(undefined, undefined, hashHex);
+      }
     } else if (deleteRoom.match(action)) {
       const roomId = action.payload;
 

@@ -21,10 +21,7 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
   void,
   unknown
-> = async (
-  { label, alsoDeleteData, alsoSendFinishedMessage, dataChannels },
-  api,
-) => {
+> = async ({ label, alsoDeleteData, dataChannels }, api) => {
   try {
     const CHANNELS_LEN = dataChannels.length;
     if (CHANNELS_LEN === 0) return { data: undefined };
@@ -37,13 +34,8 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
       )
         continue;
 
-      if (alsoDeleteData || alsoSendFinishedMessage) {
-        const { hash, merkleRootHex } =
-          await decompileChannelMessageLabel(label);
-
-        if (alsoSendFinishedMessage && dataChannels[i].readyState === "open") {
-          dataChannels[i].send(hash.buffer as ArrayBuffer);
-        }
+      if (alsoDeleteData) {
+        const { merkleRootHex } = await decompileChannelMessageLabel(label);
 
         if (alsoDeleteData) {
           api.dispatch(deleteMessage({ merkleRootHex }));

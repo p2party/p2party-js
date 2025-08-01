@@ -889,6 +889,13 @@ async function fnDeleteDBNewChunk(
       }
     } else if (hashHex && chunkIndex) {
       await store.delete([hashHex, chunkIndex]);
+    } else if (hashHex) {
+      const index = store.index("hash");
+      const keys = await index.getAllKeys(hashHex);
+      const len = keys.length;
+      for (let i = 0; i < len; i++) {
+        await store.delete(keys[i]);
+      }
     } else if (realChunkHashHex) {
       const index = store.index("realChunkHash");
       const keyrange = await index.getKey(realChunkHashHex);

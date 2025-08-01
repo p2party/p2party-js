@@ -2,9 +2,13 @@ import { getMessageType, MessageType } from "./messageTypes";
 import { uint8ArrayToHex } from "./uint8array";
 import { serializeMetadata, METADATA_LEN } from "./metadata";
 
-import { setDBNewChunk, setDBRoomMessageData } from "../db/api";
+import {
+  setDBNewChunk,
+  deleteDBNewChunk,
+  setDBRoomMessageData,
+} from "../db/api";
 
-import { setMessage } from "../reducers/roomSlice";
+import { setMessage, deleteMessage } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
 import libcrypto from "../cryptography/libcrypto";
@@ -41,6 +45,8 @@ export const CHUNK_LEN =
   IMPORTANT_DATA_LEN;
 
 export const metadataSchemaVersions = [1];
+
+export const CANCEL_SEND = "CANCEL_SEND";
 
 /**
  * Splits a Uint8Array into chunks of a specified size, padding with zeros if necessary.
@@ -85,6 +91,11 @@ export const splitToChunks = async (
     throw new Error(
       `Chunk length needs to be between ${IMPORTANT_DATA_LEN} and ${CHUNK_LEN}`,
     );
+
+  let shouldStop = false;
+  window.addEventListener(CANCEL_SEND, () => {
+    shouldStop = true;
+  });
 
   const messageType = getMessageType(message);
   const name =
@@ -170,6 +181,9 @@ export const splitToChunks = async (
   const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
   // offset = 0;
   for (let i = 0; i < totalChunks; i++) {
+    // Cancel event fired
+    if (shouldStop) break;
+
     // const size = chunkSizes[i] ?? 0;
     const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
     const chunkStartIndex = await randomNumberInRange(
@@ -272,6 +286,22 @@ export const splitToChunks = async (
     );
   }
 
+  if (shouldStop) {
+    await deleteDBNewChunk(undefined, undefined, sha512Hex);
+    api.dispatch(deleteMessage({ hashHex: sha512Hex }));
+
+    return {
+      merkleRoot: new Uint8Array(),
+      merkleRootHex: "",
+      hash: new Uint8Array(),
+      hashHex: "",
+      totalChunks: 0,
+      totalSize: 0,
+      messageType: 0,
+      chunkHashes: new Uint8Array(),
+    };
+  }
+
   const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
   const merkleCryptoModule = await libcrypto({
     wasmMemory: merkleWasmMemory,
@@ -313,6 +343,24 @@ export const splitToChunks = async (
       timestamp: date.getTime(),
     }),
   );
+
+  if (shouldStop) {
+    await deleteDBNewChunk(merkleRootHex);
+    api.dispatch(deleteMessage({ merkleRootHex }));
+
+    return {
+      merkleRoot: new Uint8Array(),
+      merkleRootHex: "",
+      hash: new Uint8Array(),
+      hashHex: "",
+      totalChunks: 0,
+      totalSize: 0,
+      messageType: 0,
+      chunkHashes: new Uint8Array(),
+    };
+  }
+
+  window.removeEventListener(CANCEL_SEND, () => {});
 
   return {
     merkleRoot,

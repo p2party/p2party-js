@@ -91,7 +91,8 @@ export interface SetChannelArgs {
 }
 
 export interface DeleteMessageArgs {
-  merkleRootHex: string;
+  merkleRootHex?: string;
+  hashHex?: string;
 }
 
 export interface DeleteChannelArgs {
@@ -573,16 +574,31 @@ const roomSlice = createSlice({
     },
 
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
-      const { merkleRootHex } = action.payload;
-      if (merkleRootHex.length !== crypto_hash_sha512_BYTES * 2) return;
+      const { merkleRootHex, hashHex } = action.payload;
+
+      if (!merkleRootHex && !hashHex) return;
+      if (
+        merkleRootHex &&
+        merkleRootHex.length !== crypto_hash_sha512_BYTES * 2
+      )
+        return;
+      if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
 
       const roomsLen = state.length;
       for (let i = 0; i < roomsLen; i++) {
-        const messageIndex = state[i].messages.findIndex(
-          (m) => m.merkleRootHex === merkleRootHex,
-        );
+        if (merkleRootHex) {
+          const messageIndex = state[i].messages.findIndex(
+            (m) => m.merkleRootHex === merkleRootHex,
+          );
 
-        if (messageIndex > -1) state[i].messages.splice(messageIndex, 1);
+          if (messageIndex > -1) state[i].messages.splice(messageIndex, 1);
+        } else if (hashHex) {
+          const messageIndex = state[i].messages.findLastIndex(
+            (m) => m.sha512Hex === hashHex,
+          );
+
+          if (messageIndex > -1) state[i].messages.splice(messageIndex, 1);
+        }
       }
     },
 

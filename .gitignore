@@ -179,3 +179,4 @@ dist
 libcrypto.js
 *wasm
 *.map
+.aider*

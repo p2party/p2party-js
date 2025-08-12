@@ -274,7 +274,10 @@ export const getMerkleRootFromProof = async (
     ptr1,
     crypto_hash_sha512_BYTES,
   );
-  const hash = await window.crypto.subtle.digest("SHA-512", item);
+  const hash = await window.crypto.subtle.digest(
+    "SHA-512",
+    item as Uint8Array<ArrayBuffer>,
+  );
   elementHash.set(new Uint8Array(hash));
 
   const ptr2 = cryptoModule._malloc(proofLen);
@@ -368,7 +371,10 @@ export const verifyMerkleProof = async (
     ptr1,
     crypto_hash_sha512_BYTES,
   );
-  const hash = await window.crypto.subtle.digest("SHA-512", item);
+  const hash = await window.crypto.subtle.digest(
+    "SHA-512",
+    item as Uint8Array<ArrayBuffer>,
+  );
   elementHash.set(new Uint8Array(hash));
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);

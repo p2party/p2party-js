@@ -13,6 +13,7 @@ export default [
       "coverage/*",
       "eslint.config.mjs",
       "rollup.config.ts",
+      "rollup.worker.config.ts",
       "emsdk",
       "src/cryptography/libcrypto.js",
     ],
@@ -32,5 +33,10 @@ export default [
   {
     files: ["**/*.js"],
     ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    rules: {
+      "@typescript-eslint/no-empty-function": "off",
+    },
   },
 ];

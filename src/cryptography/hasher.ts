@@ -22,7 +22,10 @@ export class Hasher {
 
   async digest(encoding: "hex" | "base64" = "hex"): Promise<string> {
     const combinedData = this.concatUint8Arrays(this.data);
-    const hashBuffer = await crypto.subtle.digest("SHA-256", combinedData);
+    const hashBuffer = await crypto.subtle.digest(
+      "SHA-256",
+      combinedData as Uint8Array<ArrayBuffer>,
+    );
     return this.encodeBuffer(hashBuffer, encoding);
   }
 

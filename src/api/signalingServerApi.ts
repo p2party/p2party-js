@@ -85,7 +85,7 @@ const waitForSocketConnection = (
       callback();
     } else {
       attempts += 1;
-      console.log(`Waiting for connection... Attempt ${attempts}`);
+      console.log(`Waiting for connection... Attempt ${String(attempts)}`);
 
       if (attempts >= maxAttempts) {
         clearInterval(checkConnection);
@@ -106,8 +106,7 @@ let ws: WebSocket | null = null;
 
 const websocketBaseQuery: BaseQueryFn<
   WebSocketParams,
-  undefined,
-  unknown
+  undefined
 > = async ({ signalingServerUrl }, api) => {
   const { signalingServer } = api.getState() as State;
   if (

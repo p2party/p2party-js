@@ -35,6 +35,7 @@ export const handleConnectToPeer = async (
 
       if (!initiator) initiator = true;
       if (!rtcConfig) rtcConfig = defaultRTCConfig;
+      console.log(rtcConfig);
       if (initiator)
         console.log(`You are initiating a peer connection with ${peerId}.`);
 

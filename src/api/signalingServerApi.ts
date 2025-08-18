@@ -104,10 +104,10 @@ const waitForSocketConnection = (
 
 let ws: WebSocket | null = null;
 
-const websocketBaseQuery: BaseQueryFn<
-  WebSocketParams,
-  undefined
-> = async ({ signalingServerUrl }, api) => {
+const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
+  { signalingServerUrl },
+  api,
+) => {
   const { signalingServer } = api.getState() as State;
   if (
     ws ||

@@ -58,32 +58,9 @@ export const handleOpenChannel = async (
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   try {
-    const { keyPair, rooms } = api.getState() as State;
+    const { keyPair } = api.getState() as State;
 
-    if (typeof channel !== "string") {
-      const decompiledLabel = await decompileChannelMessageLabel(channel.label);
-
-      if (
-        decompiledLabel.merkleRootHex.length ===
-        crypto_hash_sha512_BYTES * 2
-      ) {
-        const roomIndex = rooms.findIndex((r) => r.id === roomId);
-
-        if (roomIndex > -1) {
-          const messageIndex = rooms[roomIndex].messages.findIndex(
-            (m) => m.merkleRootHex === decompiledLabel.merkleRootHex,
-          );
-
-          if (
-            messageIndex > -1 // &&
-            // rooms[roomIndex].messages[messageIndex].savedSize ===
-            //   rooms[roomIndex].messages[messageIndex].totalSize
-          ) {
-            channel.close();
-          }
-        }
-      }
-    } else {
+    if (typeof channel === "string") {
       const channelIndex = dataChannels.findIndex(
         (dc) => dc.label === channel && dc.withPeerId === epc.withPeerId,
       );
@@ -166,9 +143,7 @@ export const handleOpenChannel = async (
         }),
       );
 
-      // if (extChannel.label === "main") {
       api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
-      // }
     };
 
     extChannel.onmessage = async (e) => {
@@ -200,7 +175,7 @@ export const handleOpenChannel = async (
               chunkIndex,
               receivedFullSize,
               // messageAlreadyExists,
-              chunkAlreadyExists,
+              // chunkAlreadyExists,
               // savedSize,
               totalSize,
               messageType,
@@ -210,12 +185,9 @@ export const handleOpenChannel = async (
               data,
               merkleRoot,
               hashHex,
-              // epc.withPeerId,
               senderPublicKey,
               receiverSecretKey,
               rooms[roomIndex],
-              // channelLabel,
-              // api,
               decryptionModule,
               merkleModule,
             );
@@ -299,13 +271,10 @@ export const handleOpenChannel = async (
                   alsoSendFinishedMessage: true,
                 }),
               );
-
-              // await wait(10);
-              // extChannel.close();
             } else if (
               chunkSize > 0 &&
-              chunkIndex > -1 &&
-              !chunkAlreadyExists
+              chunkIndex > -1 // &&
+              // !chunkAlreadyExists
             ) {
               await setDBRoomMessageData(
                 roomId,
@@ -335,7 +304,6 @@ export const handleOpenChannel = async (
                 }),
               );
             }
-            // }
           } else {
             console.error("Unrecognized data size");
           }

@@ -409,7 +409,6 @@ async function fnSetDBRoomMessageData(
     const db = await getDB();
     const tx = db.transaction(["messageData", "uniqueRoom"], "readwrite");
     const messageStore = tx.objectStore("messageData");
-    const roomStore = tx.objectStore("uniqueRoom");
 
     const msg = await messageStore.index("merkleRoot").get(merkleRootHex);
 
@@ -446,10 +445,13 @@ async function fnSetDBRoomMessageData(
         channelLabel,
       });
     } catch (error) {
+      await tx.done;
+      db.close();
       throw error;
     }
 
     if (!msg) {
+      const roomStore = tx.objectStore("uniqueRoom");
       const room = await roomStore.index("roomId").get(roomId);
       // const room = await db.getFromIndex("uniqueRoom", "roomId", roomId);
       if (room && room.lastMessageMerkleRoot !== merkleRootHex) {
@@ -602,19 +604,23 @@ async function fnGetDBAllChunks(
       const chunks = await index2.getAll(merkleRootHex);
 
       if (chunks.length === 0) {
-        if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
-          const chunks = await index1.getAll(hashHex);
+        await tx.done;
+        db.close();
 
-          await tx.done;
-          db.close();
-
-          return chunks;
-        } else {
-          await tx.done;
-          db.close();
-
-          return [];
-        }
+        return [];
+        // if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+        //   const chunks = await index1.getAll(hashHex);
+        //
+        //   await tx.done;
+        //   db.close();
+        //
+        //   return chunks;
+        // } else {
+        //   await tx.done;
+        //   db.close();
+        //
+        //   return [];
+        // }
       } else {
         await tx.done;
         db.close();

@@ -105,7 +105,9 @@ const sendChunks = async (
             ), // new Blob([realChunk]),
             mimeType,
           });
-        } catch {}
+        } catch (error) {
+          console.error(error);
+        }
       }
 
       const merkleProof = new Uint8Array(PROOF_LEN);

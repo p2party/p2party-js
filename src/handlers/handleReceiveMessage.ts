@@ -109,12 +109,6 @@ export const handleReceiveMessage = async (
     );
     const chunkHash = new Uint8Array(chunkHashBuffer);
 
-    // const realChunkHash = await window.crypto.subtle.digest(
-    //   "SHA-512",
-    //   realChunk.buffer,
-    // );
-    // const chunkHashHex = uint8ArrayToHex(new Uint8Array(realChunkHash));
-
     if (chunkSize === 0)
       return {
         date: metadata.date,
@@ -132,7 +126,7 @@ export const handleReceiveMessage = async (
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
     const incomingMessageIndex = room.messages.findLastIndex(
-      (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
+      (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
     );
 
     const chunkAlreadyExists = await existsDBChunk(
@@ -140,7 +134,7 @@ export const handleReceiveMessage = async (
       metadata.chunkIndex,
     ); //, db);
     // const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
-    const messageExists = await getDBMessageData(merkleRootHex, hashHex);
+    const messageExists = await getDBMessageData(merkleRootHex); //, hashHex);
 
     const alreadyHasEverything =
       (messageExists != undefined &&

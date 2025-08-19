@@ -450,7 +450,7 @@ const readMessage = async (
           const label = await compileChannelMessageLabel(
             msg.channelLabel,
             msg.merkleRoot,
-            msg.hash,
+            // msg.hash,
           );
 
           await store.dispatch(
@@ -607,7 +607,7 @@ const cancelMessage = async (
     const label = await compileChannelMessageLabel(
       channelLabel,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      rooms[roomIndex].messages[messageIndex].sha512Hex,
+      // rooms[roomIndex].messages[messageIndex].sha512Hex,
     );
 
     await store.dispatch(
@@ -699,7 +699,7 @@ const deleteMsg = async (
     const label = await compileChannelMessageLabel(
       rooms[roomIndex].messages[messageIndex].channelLabel,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      rooms[roomIndex].messages[messageIndex].sha512Hex,
+      // rooms[roomIndex].messages[messageIndex].sha512Hex,
     );
 
     await store.dispatch(

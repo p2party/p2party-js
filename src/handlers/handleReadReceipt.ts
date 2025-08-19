@@ -23,8 +23,17 @@ export const handleReadReceipt = async (
 
     const hex = uint8ArrayToHex(receivedChunkHash);
 
-    const { channelLabel, merkleRootHex, hashHex } =
-      await decompileChannelMessageLabel(channel.label);
+    const { channelLabel, merkleRootHex } = await decompileChannelMessageLabel(
+      channel.label,
+    );
+
+    const messageIndex = room.messages.findIndex(
+      (m) => m.merkleRootHex === merkleRootHex,
+    );
+
+    if (messageIndex < 0) return;
+
+    const hashHex = room.messages[messageIndex].sha512Hex;
 
     if (hex === hashHex) {
       const messageIndex = room.messages.findLastIndex(
@@ -99,9 +108,10 @@ export const handleReadReceipt = async (
         } else if (messageIndex === -1) {
           console.log("No message with hex " + hashHex);
         }
-      } else {
-        console.log("Did not find chunk with receipt hex: " + hex);
       }
+      // else {
+      //   console.log("Did not find chunk with receipt hex: " + hex);
+      // }
     }
   } catch (error) {
     console.error(error);

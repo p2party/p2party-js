@@ -19,7 +19,7 @@ import type { Room } from "../reducers/roomSlice";
 export const handleReceiveMessage = async (
   data: ArrayBuffer,
   merkleRoot: Uint8Array,
-  hashHex: string,
+  // hashHex: string,
   // fromPeerId: string,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
@@ -35,6 +35,7 @@ export const handleReceiveMessage = async (
   totalSize: number;
   chunkIndex: number;
   chunkHash: Uint8Array;
+  messageHash: Uint8Array;
   receivedFullSize: boolean;
   messageAlreadyExists: boolean;
   chunkAlreadyExists: boolean;
@@ -73,6 +74,7 @@ export const handleReceiveMessage = async (
         messageType: MessageType.Text,
         filename: "",
         chunkHash: new Uint8Array(),
+        messageHash: new Uint8Array(),
       };
 
     const encryptedMessage = message.slice(
@@ -122,6 +124,7 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
@@ -177,6 +180,7 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
     }
 
@@ -208,11 +212,12 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
 
     const merkleProof = merkleProofArray.slice(4, 4 + proofLen);
     const chunk = decryptedMessage.slice(
-      METADATA_LEN + PROOF_LEN, // + metadata.chunkStartIndex,
+      METADATA_LEN + PROOF_LEN,
       // METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
     );
 
@@ -241,6 +246,7 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
 
     const mimeType = getMimeType(metadata.messageType);
@@ -249,9 +255,9 @@ export const handleReceiveMessage = async (
       if (!chunkAlreadyExists) {
         await setDBChunk({
           merkleRoot: merkleRootHex,
-          hash: hashHex,
+          hash: uint8ArrayToHex(metadata.hash),
           chunkIndex: metadata.chunkIndex,
-          data: realChunk.buffer, // new Blob([realChunk]),
+          data: realChunk.buffer,
           mimeType,
         });
       }
@@ -273,6 +279,7 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
     } catch (error) {
       return {
@@ -292,6 +299,7 @@ export const handleReceiveMessage = async (
         messageType: metadata.messageType,
         filename: metadata.name,
         chunkHash,
+        messageHash: metadata.hash,
       };
     }
   } catch (error) {

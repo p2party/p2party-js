@@ -183,7 +183,6 @@ roomListenerMiddleware.startListening({
           const label = await compileChannelMessageLabel(
             rooms[roomIndex].messages[messageIndex].channelLabel,
             rooms[roomIndex].messages[messageIndex].merkleRootHex,
-            rooms[roomIndex].messages[messageIndex].sha512Hex,
           );
 
           listenerApi.dispatch(

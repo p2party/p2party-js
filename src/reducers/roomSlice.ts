@@ -416,7 +416,9 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const messageIndex = state[roomIndex].messages.findLastIndex(
-          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
+          (m) =>
+            m.merkleRootHex === merkleRootHex ||
+            (m.sha512Hex === sha512Hex && m.merkleRootHex.length === 0),
         );
 
         if (messageIndex === -1) {
@@ -520,7 +522,7 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const messageIndex = state[roomIndex].messages.findLastIndex(
-          (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === sha512Hex,
+          (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === sha512Hex,
         );
 
         if (

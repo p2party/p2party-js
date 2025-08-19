@@ -409,14 +409,7 @@ async function fnSetDBRoomMessageData(
     const db = await getDB();
     const tx = db.transaction(["messageData", "uniqueRoom"], "readwrite");
     const messageStore = tx.objectStore("messageData");
-
     const msg = await messageStore.index("merkleRoot").get(merkleRootHex);
-
-    // const msg = await db.getFromIndex(
-    //   "messageData",
-    //   "merkleRoot",
-    //   merkleRootHex,
-    // );
 
     const savedSize = msg?.savedSize ?? 0;
 
@@ -428,8 +421,6 @@ async function fnSetDBRoomMessageData(
     //     " of total " +
     //     totalSize,
     // );
-
-    // await db.put("messageData", {
 
     try {
       await messageStore.put({
@@ -450,22 +441,20 @@ async function fnSetDBRoomMessageData(
       throw error;
     }
 
-    if (!msg) {
-      const roomStore = tx.objectStore("uniqueRoom");
-      const room = await roomStore.index("roomId").get(roomId);
-      // const room = await db.getFromIndex("uniqueRoom", "roomId", roomId);
-      if (room && room.lastMessageMerkleRoot !== merkleRootHex) {
-        // await db.put("uniqueRoom", {
-        try {
-          await roomStore.put({
-            ...room,
-            lastMessageMerkleRoot: merkleRootHex,
-            messageCount: room.messageCount + 1,
-            updatedAt: Date.now(),
-          });
-        } catch (error) {
-          throw error;
-        }
+    const roomStore = tx.objectStore("uniqueRoom");
+    const room = await roomStore.index("roomId").get(roomId);
+    if (room && room.lastMessageMerkleRoot !== merkleRootHex) {
+      try {
+        await roomStore.put({
+          ...room,
+          lastMessageMerkleRoot: merkleRootHex,
+          messageCount: room.messageCount + 1,
+          updatedAt: Date.now(),
+        });
+      } catch (error) {
+        await tx.done;
+        db.close();
+        throw error;
       }
     }
 

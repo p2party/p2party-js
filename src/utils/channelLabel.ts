@@ -1,22 +1,22 @@
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { hexToUint8Array, uint8ArrayToHex } from "./uint8array";
 
-export const LABEL_ELEMENTS = 3;
+export const LABEL_ELEMENTS = 2; // 3;
 
 const LABEL_SERIALIZED_LEN =
   32 + // label name
-  64 + // merkle root
-  64; // hash
+  // 64 + // hash
+  64; // merkle root
 
 // +3 for separators and the rest is hex
-export const LABEL_STRING_LEN = LABEL_SERIALIZED_LEN * 2 + 2;
+export const LABEL_STRING_LEN = LABEL_SERIALIZED_LEN * 2 + 1; // + 2;
 
 export const LABEL_ELEMENTS_SEPARATOR = "~";
 
 export const compileChannelMessageLabel = (
   channelLabel: string,
   merkleRoot: string | Uint8Array,
-  hash: string | Uint8Array,
+  // hash: string | Uint8Array,
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     try {
@@ -35,17 +35,17 @@ export const compileChannelMessageLabel = (
         reject(new Error("Merkle root should be 64 bytes"));
       }
 
-      if (
-        typeof hash === "string" &&
-        hash.length !== crypto_hash_sha512_BYTES * 2
-      ) {
-        reject(new Error("Hash hex should be 128 bytes"));
-      } else if (
-        typeof hash !== "string" &&
-        hash.length !== crypto_hash_sha512_BYTES
-      ) {
-        reject(new Error("Hash should be 64 bytes"));
-      }
+      // if (
+      //   typeof hash === "string" &&
+      //   hash.length !== crypto_hash_sha512_BYTES * 2
+      // ) {
+      //   reject(new Error("Hash hex should be 128 bytes"));
+      // } else if (
+      //   typeof hash !== "string" &&
+      //   hash.length !== crypto_hash_sha512_BYTES
+      // ) {
+      //   reject(new Error("Hash should be 64 bytes"));
+      // }
 
       let label = "";
 
@@ -59,17 +59,17 @@ export const compileChannelMessageLabel = (
 
       if (typeof merkleRoot === "string") {
         label += merkleRoot;
-        label += LABEL_ELEMENTS_SEPARATOR;
+        // label += LABEL_ELEMENTS_SEPARATOR;
       } else {
         label += uint8ArrayToHex(merkleRoot);
-        label += LABEL_ELEMENTS_SEPARATOR;
+        // label += LABEL_ELEMENTS_SEPARATOR;
       }
 
-      if (typeof hash === "string") {
-        label += hash;
-      } else {
-        label += uint8ArrayToHex(hash);
-      }
+      // if (typeof hash === "string") {
+      //   label += hash;
+      // } else {
+      //   label += uint8ArrayToHex(hash);
+      // }
 
       resolve(label);
     } catch (error) {
@@ -84,8 +84,8 @@ export const decompileChannelMessageLabel = (
   channelLabel: string;
   merkleRootHex: string;
   merkleRoot: Uint8Array;
-  hashHex: string;
-  hash: Uint8Array;
+  // hashHex: string;
+  // hash: Uint8Array;
 }> => {
   return new Promise((resolve, reject) => {
     try {
@@ -105,8 +105,8 @@ export const decompileChannelMessageLabel = (
           channelLabel: channelMessageLabel,
           merkleRootHex: "",
           merkleRoot: new Uint8Array(),
-          hashHex: "",
-          hash: new Uint8Array(),
+          // hashHex: "",
+          // hash: new Uint8Array(),
         });
       }
 
@@ -121,16 +121,16 @@ export const decompileChannelMessageLabel = (
       if (merkleRoot.length !== crypto_hash_sha512_BYTES)
         reject(new Error("Merkle root has invalid length"));
 
-      const hash = hexToUint8Array(split[2]);
-      if (hash.length !== crypto_hash_sha512_BYTES)
-        reject(new Error("Message hash has invalid length"));
+      // const hash = hexToUint8Array(split[2]);
+      // if (hash.length !== crypto_hash_sha512_BYTES)
+      //   reject(new Error("Message hash has invalid length"));
 
       resolve({
         channelLabel,
         merkleRoot,
         merkleRootHex: split[1],
-        hash,
-        hashHex: split[2],
+        // hash,
+        // hashHex: split[2],
       });
     } catch (error) {
       reject(error);

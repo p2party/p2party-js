@@ -4,7 +4,11 @@ import {
   // setMessageAllChunks
 } from "../../reducers/roomSlice";
 
-import { deleteDBSendQueue, setDBRoomMessageData } from "../../db/api";
+import {
+  deleteDBNewChunk,
+  deleteDBSendQueue,
+  setDBRoomMessageData,
+} from "../../db/api";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -65,6 +69,16 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     const { channelLabel, merkleRootHex } =
       await decompileChannelMessageLabel(label);
     const hasLen = merkleRootHex.length > 0;
+
+    if (hasLen) {
+      const c = dataChannels.findIndex(async (c) => {
+        const m = await decompileChannelMessageLabel(c.label);
+
+        return m.merkleRootHex === merkleRootHex;
+      });
+
+      if (c < 0) await deleteDBNewChunk(merkleRootHex);
+    }
 
     const { rooms, keyPair } = api.getState() as State;
     const roomsLen = rooms.length;

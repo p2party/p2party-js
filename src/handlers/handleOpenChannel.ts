@@ -22,7 +22,7 @@ import {
   setDBRoomMessageData,
 } from "../db/api";
 
-import { hexToUint8Array } from "../utils/uint8array";
+import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -148,8 +148,8 @@ export const handleOpenChannel = async (
 
     extChannel.onmessage = async (e) => {
       try {
-        const { channelLabel, merkleRoot, merkleRootHex, hash, hashHex } =
-          await decompileChannelMessageLabel(label);
+        const { channelLabel, merkleRoot, merkleRootHex } =
+          await decompileChannelMessageLabel(label); // , hash, hashHex } =
 
         const peerPublicKeyHex = epc.withPeerPublicKey;
         const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
@@ -181,10 +181,11 @@ export const handleOpenChannel = async (
               messageType,
               filename,
               chunkHash,
+              messageHash,
             } = await handleReceiveMessage(
               data,
               merkleRoot,
-              hashHex,
+              // hashHex,
               senderPublicKey,
               receiverSecretKey,
               rooms[roomIndex],
@@ -239,6 +240,8 @@ export const handleOpenChannel = async (
               // await wait(10);
             }
 
+            const hashHex = uint8ArrayToHex(messageHash);
+
             if (receivedFullSize) {
               await setDBRoomMessageData(
                 roomId,
@@ -254,7 +257,7 @@ export const handleOpenChannel = async (
               );
 
               if (extChannel.readyState === "open") {
-                extChannel.send(hash.buffer as ArrayBuffer);
+                extChannel.send(messageHash.buffer as ArrayBuffer);
               }
 
               api.dispatch(

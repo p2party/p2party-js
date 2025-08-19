@@ -51,6 +51,7 @@ const sendChunks = async (
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
+  hashHex: string,
   epc: IRTCPeerConnection,
   // api: BaseQueryApi,
   encryptionModule: LibCrypto,
@@ -63,11 +64,7 @@ const sendChunks = async (
     const peerPublicKeyHex = epc.withPeerPublicKey;
     const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-    const {
-      // channelLabel,
-      hashHex,
-      merkleRootHex,
-    } = await decompileChannelMessageLabel(channel.label);
+    const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
 
     const indexes = Array.from({ length: chunksLen }, (_, i) => i);
     const indexesRandomized = await fisherYatesShuffle(indexes);
@@ -311,7 +308,7 @@ export const handleSendMessage = async (
       const channelMessageLabel = await compileChannelMessageLabel(
         label,
         merkleRootHex,
-        hashHex,
+        // hashHex,
       );
 
       const PEERS_LEN = rooms[roomIndex].channels[channelIndex].peerIds.length;
@@ -344,6 +341,7 @@ export const handleSendMessage = async (
             totalChunks,
             chunkHashes,
             merkleRoot,
+            hashHex,
             peerConnections[peerIndex],
             // api,
             encryptionModule,

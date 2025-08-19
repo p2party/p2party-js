@@ -133,12 +133,13 @@ export const splitToChunks = async (
         ? (file as Uint8Array).slice(0, 10 * 1024 * 1024).buffer
         : await (file as File).slice(0, 10 * 1024 * 1024).arrayBuffer(),
   );
-  const hash = new Uint8Array(hashArrayBuffer);
-  const sha512Hex = uint8ArrayToHex(hash);
+  const sha512 = new Uint8Array(hashArrayBuffer);
+  const sha512Hex = uint8ArrayToHex(sha512);
 
   const m = {
     schemaVersion: metadataSchemaVersion,
     messageType,
+    hash: sha512,
     name,
     totalSize,
     date,
@@ -178,6 +179,7 @@ export const splitToChunks = async (
     Math.ceil(totalSize / (chunkSize * percentageFilledChunk)),
   );
 
+  const chunk = new Uint8Array(chunkSize);
   const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
   // offset = 0;
   for (let i = 0; i < totalChunks; i++) {
@@ -185,7 +187,8 @@ export const splitToChunks = async (
     if (shouldStop) break;
 
     // const size = chunkSizes[i] ?? 0;
-    const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
+    // const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
+    window.crypto.getRandomValues(chunk);
     const chunkStartIndex = await randomNumberInRange(
       0,
       Math.floor(chunkSize * (1 - percentageFilledChunk)),
@@ -264,13 +267,13 @@ export const splitToChunks = async (
         metadata: mSerialized.buffer as ArrayBuffer,
         merkleProof: new Uint8Array().buffer,
       });
-    } catch (error) {
-      console.error(error);
-    }
+    } catch {} // (error) {
+    //   console.error(error);
+    // }
 
     api.dispatch(
       setMessage({
-        roomId: room.id, // roomId,
+        roomId: room.id,
         merkleRootHex: "",
         sha512Hex,
         fromPeerId: keyPair.peerId,
@@ -312,7 +315,7 @@ export const splitToChunks = async (
 
   try {
     await setDBRoomMessageData(
-      room.id, // roomId,
+      room.id,
       merkleRootHex,
       sha512Hex,
       keyPair.peerId,
@@ -329,7 +332,7 @@ export const splitToChunks = async (
 
   api.dispatch(
     setMessage({
-      roomId: room.id, // roomId,
+      roomId: room.id,
       merkleRootHex,
       sha512Hex,
       fromPeerId: keyPair.peerId,
@@ -365,7 +368,7 @@ export const splitToChunks = async (
   return {
     merkleRoot,
     merkleRootHex,
-    hash,
+    hash: sha512,
     hashHex: sha512Hex,
     totalSize,
     totalChunks,

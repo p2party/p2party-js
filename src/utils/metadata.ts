@@ -1,8 +1,11 @@
 // import { MessageType } from "./messageTypes";
 
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
 export interface BasicMetadata {
   schemaVersion: number; // 8 bytes
   messageType: number; // MessageType; // 1 byte
+  hash: Uint8Array; // 64 bytes, uint8
   totalSize: number; // 8 bytes, number of bytes, max file totalSize 10GB
   date: Date; // 8 bytes
   name: string; // 256 bytes, serialized string
@@ -17,6 +20,7 @@ export interface Metadata extends BasicMetadata {
 export const METADATA_LEN =
   8 + // schemaVersion (8 bytes)
   1 + // messageType (1 byte)
+  crypto_hash_sha512_BYTES + // hash
   8 + // totalSize (8 bytes)
   8 + // date (8 bytes)
   256 + // name (256 bytes)
@@ -48,6 +52,10 @@ export const serializeMetadata = (metadata: Metadata): Uint8Array => {
   // messageType (1 byte)
   buffer[offset] = metadata.messageType;
   offset += 1;
+
+  // hash (64 bytes)
+  buffer.set(metadata.hash, offset);
+  offset += crypto_hash_sha512_BYTES;
 
   // totalSize (8 bytes)
   const totalSizeView = new DataView(buffer.buffer, offset, 8);
@@ -103,6 +111,10 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
   const messageType = buffer[offset];
   offset += 1;
 
+  // hash (64 bytes)
+  const hash = buffer.slice(offset, offset + crypto_hash_sha512_BYTES);
+  offset += crypto_hash_sha512_BYTES;
+
   // totalSize (8 bytes)
   const totalSizeView = new DataView(
     buffer.buffer,
@@ -152,6 +164,7 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
   return {
     schemaVersion,
     messageType,
+    hash,
     totalSize,
     date,
     name,

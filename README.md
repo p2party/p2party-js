@@ -17,7 +17,7 @@
 [code-style-prettier-image]: https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square
 [code-style-prettier-url]: https://github.com/prettier/prettier
 
-> Peer-to-peer WebRTC mesh communication with offensive cryptographic encoding.
+> Peer-to-peer WebRTC mesh networking with a kind-of "offensive" cryptographic.
 
 **p2party** connects peers visiting the same URL into a WebRTC mesh network and enables secure, chunked message exchange over ephemeral data channels. Unlike traditional privacy libraries, `p2party` actively obfuscates traffic using randomized padding, byte-level noise, isomorphic packet transmission (64kb), making message intent opaque. Of course it also adds a layer of ChaChaPoly1305 end-to-end encryption with ephemeral Ed25519 sender keys.
 
@@ -31,7 +31,7 @@ The API is not completely stable and the code has not undergone external securit
 
 - 📡 Auto-connect peers based on shared URLs
 - 🔀 WebRTC mesh topology (no central servers except for signaling and STUN/TURN)
-- 🔐 Offensive cryptography: every message can be split in multiple 64KB chunks so the attacker needs to store a lot of useless info
+- 🔐 "Offensive" cryptography: every message can be split in multiple 64KB chunks so a stalker stores a lot of useless info
 - 🧩 Supports `File` and `string` messages via chunked encoding
 - 🧠 Built-in address book (whitelist), blacklist, and room memory, all stored in the browser's IndexedDB
 - 🛠 Easy API and integration with React via custom hooks
@@ -44,7 +44,9 @@ This library relies heavily on [libsodium](https://github.com/jedisct1/libsodium
 
 The library offers mnemonic generation, validation and Ed25519 key pair from mnemonic functionality that was inspired by [bip39](https://github.com/bitcoinjs/bip39) but instead of Blake2b we use Argon2, provided by libsodium, and instead of SHA256 we use SHA512 (native browser functionality).
 
-On the js side, the library depends on [Redux](https://github.com/redux) for state management,
+A project that was previously developed and gave a lot of inspiration for this library was [libcrypto](https://github.com/deliberative/crypto).
+
+On the js side, the library depends on [Redux](https://github.com/redux) for state management.
 
 ## Install
 
@@ -57,13 +59,13 @@ npm install p2party
 and include as ES module
 
 ```typescript
-import dcrypto from "@deliberative/crypto";
+import p2party from "p2party";
 ```
 
-as CommonJS module
+or as CommonJS module
 
 ```javascript
-const dcrypto = require("@deliberative/crypto");
+const p2party = require("p2party");
 ```
 
 or as UMD in the browser

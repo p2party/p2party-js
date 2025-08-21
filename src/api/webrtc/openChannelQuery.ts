@@ -33,46 +33,28 @@ const webrtcOpenChannelQuery: BaseQueryFn<
   },
   api,
 ) => {
-  try {
-    const { keyPair } = api.getState() as State;
+  const { keyPair } = api.getState() as State;
 
-    const decryptionModule = await libcrypto({
-      wasmMemory: decryptionWasmMemory,
-    });
+  const decryptionModule = await libcrypto({
+    wasmMemory: decryptionWasmMemory,
+  });
 
-    const merkleModule = await libcrypto({
-      wasmMemory: merkleWasmMemory,
-    });
+  const merkleModule = await libcrypto({
+    wasmMemory: merkleWasmMemory,
+  });
 
-    if (withPeers && withPeers.length > 0) {
-      const PEERS_LEN = withPeers.length;
-      for (let i = 0; i < PEERS_LEN; i++) {
-        if (keyPair.peerId === withPeers[i].peerId) continue;
+  if (withPeers && withPeers.length > 0) {
+    const PEERS_LEN = withPeers.length;
+    for (let i = 0; i < PEERS_LEN; i++) {
+      if (keyPair.peerId === withPeers[i].peerId) continue;
 
-        const peerIndex = peerConnections.findIndex(
-          (p) => p.withPeerId === withPeers[i].peerId,
-        );
+      const peerIndex = peerConnections.findIndex(
+        (p) => p.withPeerId === withPeers[i].peerId,
+      );
 
-        if (peerIndex > -1) {
-          const epc = peerConnections[peerIndex];
-          await handleOpenChannel(
-            {
-              channel,
-              epc,
-              roomId,
-              dataChannels,
-              decryptionModule,
-              merkleModule,
-            },
-            api,
-          );
-        }
-      }
-    } else {
-      const PEERS_LEN = peerConnections.length;
-      for (let i = 0; i < PEERS_LEN; i++) {
-        const epc = peerConnections[i];
-        await handleOpenChannel(
+      if (peerIndex > -1) {
+        const epc = peerConnections[peerIndex];
+        handleOpenChannel(
           {
             channel,
             epc,
@@ -85,11 +67,25 @@ const webrtcOpenChannelQuery: BaseQueryFn<
         );
       }
     }
-
-    return { data: undefined };
-  } catch (error) {
-    throw error;
+  } else {
+    const PEERS_LEN = peerConnections.length;
+    for (let i = 0; i < PEERS_LEN; i++) {
+      const epc = peerConnections[i];
+      handleOpenChannel(
+        {
+          channel,
+          epc,
+          roomId,
+          dataChannels,
+          decryptionModule,
+          merkleModule,
+        },
+        api,
+      );
+    }
   }
+
+  return { data: undefined };
 };
 
 export default webrtcOpenChannelQuery;

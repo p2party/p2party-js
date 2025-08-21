@@ -38,39 +38,35 @@ const webrtcMessageQuery: BaseQueryFn<
   },
   api,
 ) => {
-  try {
-    const encryptionModule = await libcrypto({
-      wasmMemory: encryptionWasmMemory,
-    });
+  const encryptionModule = await libcrypto({
+    wasmMemory: encryptionWasmMemory,
+  });
 
-    const decryptionModule = await libcrypto({
-      wasmMemory: decryptionWasmMemory,
-    });
+  const decryptionModule = await libcrypto({
+    wasmMemory: decryptionWasmMemory,
+  });
 
-    const merkleModule = await libcrypto({
-      wasmMemory: merkleWasmMemory,
-    });
+  const merkleModule = await libcrypto({
+    wasmMemory: merkleWasmMemory,
+  });
 
-    await handleSendMessage(
-      data,
-      api,
-      label,
-      roomId,
-      peerConnections,
-      dataChannels,
-      encryptionModule,
-      decryptionModule,
-      merkleModule,
-      minChunks,
-      chunkSize,
-      percentageFilledChunk,
-      metadataSchemaVersion,
-    );
+  await handleSendMessage(
+    data,
+    api,
+    label,
+    roomId,
+    peerConnections,
+    dataChannels,
+    encryptionModule,
+    decryptionModule,
+    merkleModule,
+    minChunks,
+    chunkSize,
+    percentageFilledChunk,
+    metadataSchemaVersion,
+  );
 
-    return { data: undefined };
-  } catch (error) {
-    throw error;
-  }
+  return { data: undefined };
 };
 
 export default webrtcMessageQuery;

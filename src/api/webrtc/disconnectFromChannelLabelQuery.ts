@@ -22,33 +22,29 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   void,
   unknown
 > = async ({ label, alsoDeleteData, dataChannels }, api) => {
-  try {
-    const CHANNELS_LEN = dataChannels.length;
-    if (CHANNELS_LEN === 0) return { data: undefined };
+  const CHANNELS_LEN = dataChannels.length;
+  if (CHANNELS_LEN === 0) return { data: undefined };
 
-    for (let i = 0; i < CHANNELS_LEN; i++) {
-      if (
-        !dataChannels[i] ||
-        dataChannels[i].label !== label ||
-        dataChannels[i].readyState !== "open"
-      )
-        continue;
+  for (let i = 0; i < CHANNELS_LEN; i++) {
+    if (
+      !dataChannels[i] ||
+      dataChannels[i].label !== label ||
+      dataChannels[i].readyState !== "open"
+    )
+      continue;
+
+    if (alsoDeleteData) {
+      const { merkleRootHex } = await decompileChannelMessageLabel(label);
 
       if (alsoDeleteData) {
-        const { merkleRootHex } = await decompileChannelMessageLabel(label);
-
-        if (alsoDeleteData) {
-          api.dispatch(deleteMessage({ merkleRootHex }));
-        }
+        api.dispatch(deleteMessage({ merkleRootHex }));
       }
-
-      dataChannels[i].close();
     }
 
-    return { data: undefined };
-  } catch (error) {
-    throw error;
+    dataChannels[i].close();
   }
+
+  return { data: undefined };
 };
 
 export default webrtcDisconnectFromChannelLabelQuery;

@@ -27,7 +27,7 @@ keyPairListenerMiddleware.startListening({
     setChallengeId,
     resetIdentity,
   ),
-  effect: (action, listenerApi) => {
+  effect: async (action, listenerApi) => {
     if (setKeyPair.match(action)) {
       const { publicKey, secretKey } = action.payload;
 
@@ -98,7 +98,7 @@ keyPairListenerMiddleware.startListening({
           isUUID(keyPair.peerId) &&
           commonState.currentRoomUrl.length === 64
         ) {
-          listenerApi.dispatch(
+          await listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "room",
@@ -123,7 +123,7 @@ keyPairListenerMiddleware.startListening({
         localStorage.setItem("challenge", challenge);
         localStorage.setItem("signature", signature);
 
-        listenerApi.dispatch(
+        await listenerApi.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "challenge",
@@ -176,7 +176,7 @@ keyPairListenerMiddleware.startListening({
               isUUID(keyPair.peerId) &&
               commonState.currentRoomUrl.length === 64
             ) {
-              listenerApi.dispatch(
+              await listenerApi.dispatch(
                 signalingServerApi.endpoints.sendMessage.initiate({
                   content: {
                     type: "room",
@@ -191,7 +191,7 @@ keyPairListenerMiddleware.startListening({
           isUUID(keyPair.peerId) &&
           commonState.currentRoomUrl.length === 64
         ) {
-          listenerApi.dispatch(
+          await listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "room",

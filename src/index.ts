@@ -81,7 +81,7 @@ import type { KeyPair } from "./reducers/keyPairSlice";
 //   originalClose.apply(this);
 // };
 
-const connect = (
+const connect = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
@@ -110,7 +110,7 @@ const connect = (
 
   if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
     if (roomIndex === -1) {
-      dispatch(
+      await dispatch(
         signalingServerApi.endpoints.sendMessage.initiate({
           content: {
             type: "room",
@@ -128,7 +128,7 @@ const connect = (
       );
     }
   } else {
-    dispatch(
+    await dispatch(
       signalingServerApi.endpoints.connectWebSocket.initiate(
         signalingServerUrl,
       ),
@@ -136,7 +136,7 @@ const connect = (
   }
 };
 
-const connectToSignalingServer = (
+const connectToSignalingServer = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
@@ -155,7 +155,7 @@ const connectToSignalingServer = (
     signalingServer.serverUrl !== signalingServerUrl ||
     (!signalingServer.isConnected && !signalingServer.isEstablishingConnection)
   ) {
-    dispatch(
+    await dispatch(
       signalingServerApi.endpoints.connectWebSocket.initiate(
         signalingServerUrl,
       ),
@@ -163,25 +163,25 @@ const connectToSignalingServer = (
   }
 };
 
-const disconnectFromSignalingServer = () => {
-  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+const disconnectFromSignalingServer = async () => {
+  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const disconnectFromPeer = (peerId: string) => {
-  dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
+const disconnectFromPeer = async (peerId: string) => {
+  await dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
 };
 
-const disconnectFromRoom = (roomId: string, deleteMessages = false) => {
-  dispatch(
+const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
+  await dispatch(
     webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId, deleteMessages }),
   );
 };
 
-const disconnectFromAllRooms = (
+const disconnectFromAllRooms = async (
   deleteMessages = false,
   exceptionRoomIds: string[] = [],
 ) => {
-  dispatch(
+  await dispatch(
     webrtcApi.endpoints.disconnectFromAllRooms.initiate({
       deleteMessages,
       exceptionRoomIds,
@@ -224,7 +224,7 @@ const onlyAllowConnectionsFromAddressBook = async (
         );
 
         if (!address) {
-          dispatch(
+          await dispatch(
             webrtcApi.endpoints.disconnectFromPeer.initiate({
               peerId: rooms[roomIndex].peers[i].peerId,
               alsoDeleteData: false,
@@ -251,7 +251,7 @@ const deletePeerFromAddressBook = async (
 ) => {
   const pId = await deleteDBAddressBookEntry(username, peerId, peerPublicKey);
   if (isUUID(pId)) {
-    dispatch(
+    await dispatch(
       webrtcApi.endpoints.disconnectFromPeer.initiate({
         peerId: pId,
         alsoDeleteData: false,
@@ -262,7 +262,7 @@ const deletePeerFromAddressBook = async (
 
 const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
   await setDBPeerInBlacklist(peerId, peerPublicKey);
-  dispatch(
+  await dispatch(
     webrtcApi.endpoints.disconnectFromPeer.initiate({
       peerId,
       alsoDeleteData: true,
@@ -275,7 +275,7 @@ const openChannel = async (
   label: string,
   withPeers?: { peerId: string; peerPublicKey: string }[],
 ) => {
-  dispatch(
+  await dispatch(
     webrtcApi.endpoints.openChannel.initiate({
       roomId,
       channel: label,
@@ -288,7 +288,7 @@ const openChannel = async (
  * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = (
+const sendMessage = async (
   data: string | File,
   toChannel: string,
   roomId: string,
@@ -305,7 +305,7 @@ const sendMessage = (
   //   }),
   // );
 
-  dispatch(
+  await dispatch(
     webrtcApi.endpoints.sendMessage.initiate({
       data,
       label: toChannel,
@@ -717,30 +717,30 @@ const deleteMsg = async (
   }
 };
 
-const purgeIdentity = () => {
+const purgeIdentity = async () => {
   dispatch(resetIdentity());
 
-  const { rooms } = store.getState() as State;
+  const { rooms } = store.getState();
   const roomsLen = rooms.length;
   for (let i = 0; i < roomsLen; i++) {
-    dispatch(
+    await dispatch(
       webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: rooms[i].id }),
     );
   }
-  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
-const purgeRoom = (roomUrl: string) => {
-  const { rooms } = store.getState() as State;
+const purgeRoom = async (roomUrl: string) => {
+  const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
   if (roomIndex > -1) dispatch(deleteRoom(rooms[roomIndex].id));
 
-  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 };
 
 const purge = async () => {
   dispatch(resetIdentity());
-  dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 
   const rooms = await getAllDBUniqueRooms();
   const roomsLen = rooms.length;
@@ -812,7 +812,7 @@ export const p2party = {
 };
 
 if (typeof window !== "undefined") {
-  (window as any).p2party = p2party;
+  window.p2party = p2party;
 }
 
 declare global {

@@ -64,7 +64,7 @@ export const handleReadReceipt = async (
         );
 
         const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
-        const chunkSize = dbChunk?.byteLength || 0;
+        const chunkSize = dbChunk?.byteLength ?? 0;
         if (dbChunk && chunkSize > 0 && messageIndex > -1) {
           if (
             room.messages[messageIndex].savedSize + chunkSize ===

@@ -76,23 +76,19 @@ export const generateRandomRoomUrl = async (
   withAlphabetCapital = true,
   withNumbers = true,
 ): Promise<string> => {
-  try {
-    if (!lenMax) lenMax = lenMin;
-    if (lenMax === 0 && lenMin === lenMax) return "";
+  if (!lenMax) lenMax = lenMin;
+  if (lenMax === 0 && lenMin === lenMax) return "";
 
-    const len =
-      lenMax > lenMin ? await randomNumberInRange(lenMin, lenMax) : lenMin;
-    const url = await randomBytesToString(
-      len,
-      withAlphabetSmall,
-      withAlphabetCapital,
-      withNumbers,
-    );
+  const len =
+    lenMax > lenMin ? await randomNumberInRange(lenMin, lenMax) : lenMin;
+  const url = await randomBytesToString(
+    len,
+    withAlphabetSmall,
+    withAlphabetCapital,
+    withNumbers,
+  );
 
-    return url;
-  } catch (error) {
-    throw error;
-  }
+  return url;
 };
 
 /**

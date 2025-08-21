@@ -65,7 +65,11 @@ const handleWebSocketMessage = async (
   api: BaseQueryApi,
 ) => {
   try {
-    if (event.data === "PING") return ws.send("PONG");
+    if (event.data === "PING") {
+      ws.send("PONG");
+
+      return;
+    }
 
     // console.log(event.data);
 
@@ -86,7 +90,7 @@ const handleWebSocketMessage = async (
       case "ping": {
         const { keyPair } = api.getState() as State;
 
-        api.dispatch(
+        await api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "pong",
@@ -101,8 +105,8 @@ const handleWebSocketMessage = async (
       case "peerId": {
         const { keyPair } = api.getState() as State;
 
-        const peerId = message.peerId ?? "";
-        const challenge = message.challenge ?? "";
+        const peerId = message.peerId.length > 0 ? message.peerId : "";
+        const challenge = message.challenge.length > 0 ? message.challenge : "";
 
         const isNewPeerId =
           isUUID(peerId) &&
@@ -180,7 +184,7 @@ const handleWebSocketMessage = async (
           if (!inAddressBook) break;
         }
 
-        api.dispatch(
+        await api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "peerConnection",
@@ -241,7 +245,7 @@ const handleWebSocketMessage = async (
             //   }),
             // );
 
-            api.dispatch(
+            await api.dispatch(
               webrtcApi.endpoints.connectWithPeer.initiate({
                 roomId: message.roomId,
                 peerId: message.peers[i].id,
@@ -263,7 +267,7 @@ const handleWebSocketMessage = async (
         );
 
         if (!blacklisted)
-          api.dispatch(
+          await api.dispatch(
             webrtcApi.endpoints.setDescription.initiate({
               peerId: message.fromPeerId,
               peerPublicKey: message.fromPeerPublicKey,
@@ -279,7 +283,7 @@ const handleWebSocketMessage = async (
         const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
 
         if (!blacklisted)
-          api.dispatch(
+          await api.dispatch(
             webrtcApi.endpoints.setCandidate.initiate({
               peerId: message.fromPeerId,
               candidate: message.candidate,
@@ -391,7 +395,7 @@ const handleWebSocketMessage = async (
       }
 
       default: {
-        console.error("Unknown message type " + message);
+        console.error("Unknown message type " + JSON.stringify(message));
 
         break;
       }

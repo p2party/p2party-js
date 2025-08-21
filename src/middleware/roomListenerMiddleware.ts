@@ -59,7 +59,7 @@ roomListenerMiddleware.startListening({
           roomIndex > -1 &&
           isUUID(rooms[roomIndex].id)
         ) {
-          listenerApi.dispatch(
+          await listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "peers",
@@ -127,7 +127,7 @@ roomListenerMiddleware.startListening({
           roomIndex > -1 &&
           isUUID(rooms[roomIndex].id)
         ) {
-          listenerApi.dispatch(
+          await listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "peers",
@@ -185,7 +185,7 @@ roomListenerMiddleware.startListening({
             rooms[roomIndex].messages[messageIndex].merkleRootHex,
           );
 
-          listenerApi.dispatch(
+          await listenerApi.dispatch(
             webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
               label,
               alsoDeleteData: false,
@@ -216,7 +216,7 @@ roomListenerMiddleware.startListening({
     } else if (deleteRoom.match(action)) {
       const roomId = action.payload;
 
-      listenerApi.dispatch(
+      await listenerApi.dispatch(
         webrtcApi.endpoints.disconnectFromRoom.initiate({
           roomId,
           deleteMessages: true,

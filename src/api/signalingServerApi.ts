@@ -273,7 +273,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   }
 };
 
-const websocketDisconnectQuery: BaseQueryFn<void, undefined, unknown> = async (
+const websocketDisconnectQuery: BaseQueryFn<void, undefined, unknown> = (
   _: void,
   api,
 ) => {
@@ -298,7 +298,7 @@ const websocketSendMessageQuery: BaseQueryFn<
   WebSocketMessage,
   void,
   unknown
-> = async (message, api) => {
+> = (message, api) => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     const { keyPair } = api.getState() as State;
 

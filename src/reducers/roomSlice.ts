@@ -178,13 +178,11 @@ const roomSlice = createSlice({
             id,
             connectingToPeers: false,
             connectedToPeers: false,
-            canBeConnectionRelay:
-              canBeConnectionRelay != undefined ? canBeConnectionRelay : true,
+            canBeConnectionRelay: canBeConnectionRelay ?? true,
             onlyConnectWithKnownAddresses:
-              onlyConnectWithKnownPeers != undefined
-                ? onlyConnectWithKnownPeers
-                : localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-                  "true",
+              onlyConnectWithKnownPeers ??
+              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+                "true",
             rtcConfig: rtcConfig ?? defaultRTCConfig,
             peers: [],
             channels: [],
@@ -214,13 +212,11 @@ const roomSlice = createSlice({
             id: "",
             connectingToPeers: false,
             connectedToPeers: false,
-            canBeConnectionRelay:
-              canBeConnectionRelay != undefined ? canBeConnectionRelay : true,
+            canBeConnectionRelay: canBeConnectionRelay ?? true,
             onlyConnectWithKnownAddresses:
-              onlyConnectWithKnownPeers != undefined
-                ? onlyConnectWithKnownPeers
-                : localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-                  "true",
+              onlyConnectWithKnownPeers ??
+              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
+                "true",
             rtcConfig: rtcConfig ?? defaultRTCConfig,
             peers: [],
             channels: [],
@@ -434,7 +430,7 @@ const roomSlice = createSlice({
               merkleRootHex,
               sha512Hex,
               channelLabel,
-              filename: filename ?? "txt",
+              filename: filename.length > 0 ? filename : "txt",
               messageType,
               fromPeerId,
               timestamp: timestamp ?? Date.now(),
@@ -458,11 +454,11 @@ const roomSlice = createSlice({
             merkleRootHex,
             sha512Hex,
             channelLabel,
-            filename: filename ?? "txt",
+            filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
             timestamp: timestamp ?? Date.now(),
-            savedSize: chunkSize ?? 0,
+            savedSize: chunkSize,
             totalSize,
             chunksCreated: chunksCreated ?? 0,
             totalChunks: totalChunks ?? 0,
@@ -537,7 +533,7 @@ const roomSlice = createSlice({
             merkleRootHex,
             sha512Hex,
             channelLabel,
-            filename: filename ?? "txt",
+            filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
             timestamp,
@@ -554,7 +550,7 @@ const roomSlice = createSlice({
             merkleRootHex,
             sha512Hex,
             channelLabel,
-            filename: filename ?? "txt",
+            filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
             timestamp,

@@ -36,7 +36,7 @@ export const formatSize = (size: number): string => {
   } else if (size >= 1 << 10) {
     return (size / (1 << 10)).toFixed(2) + " KB";
   } else {
-    return size + " bytes";
+    return String(size) + " bytes";
   }
 };
 

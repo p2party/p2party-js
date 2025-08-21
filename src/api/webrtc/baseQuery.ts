@@ -40,97 +40,93 @@ const webrtcBaseQuery: BaseQueryFn<
   },
   api,
 ) => {
-  try {
-    const { keyPair } = api.getState() as State;
-    if (peerId === keyPair.peerId)
-      throw new Error("Cannot create a connection with oneself.");
+  const { keyPair } = api.getState() as State;
+  if (peerId === keyPair.peerId)
+    throw new Error("Cannot create a connection with oneself.");
 
-    const decryptionModule = await libcrypto({
-      wasmMemory: decryptionWasmMemory,
-    });
+  const decryptionModule = await libcrypto({
+    wasmMemory: decryptionWasmMemory,
+  });
 
-    const merkleModule = await libcrypto({
-      wasmMemory: merkleWasmMemory,
-    });
+  const merkleModule = await libcrypto({
+    wasmMemory: merkleWasmMemory,
+  });
 
-    const blacklisted = await getDBPeerIsBlacklisted(peerId);
-    if (blacklisted) return { data: undefined };
+  const blacklisted = await getDBPeerIsBlacklisted(peerId);
+  if (blacklisted) return { data: undefined };
 
-    const connectionIndex = peerConnections.findIndex(
-      (pc) => pc.withPeerId === peerId,
+  const connectionIndex = peerConnections.findIndex(
+    (pc) => pc.withPeerId === peerId,
+  );
+
+  if (connectionIndex === -1) {
+    const epc = await handleConnectToPeer(
+      { peerId, peerPublicKey, roomId, initiator, rtcConfig },
+      api,
     );
 
-    if (connectionIndex === -1) {
-      const epc = await handleConnectToPeer(
-        { peerId, peerPublicKey, roomId, initiator, rtcConfig },
+    epc.ondatachannel = (e: RTCDataChannelEvent) => {
+      handleOpenChannel(
+        {
+          channel: e.channel,
+          epc,
+          roomId,
+          dataChannels,
+          decryptionModule,
+          merkleModule,
+        },
         api,
       );
+    };
 
-      epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await handleOpenChannel(
-          {
-            channel: e.channel,
-            epc,
-            roomId,
-            dataChannels,
-            decryptionModule,
-            merkleModule,
-          },
-          api,
-        );
-      };
+    peerConnections.push(epc);
 
-      peerConnections.push(epc);
+    if (initiator) {
+      handleOpenChannel(
+        {
+          channel: "main",
+          epc,
+          roomId,
+          dataChannels,
+          decryptionModule,
+          merkleModule,
+        },
+        api,
+      );
+    }
+  } else {
+    const epc = peerConnections[connectionIndex];
+    if (epc.connectionState === "connected") {
+      epc.roomIds.push(roomId);
+      api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
-      if (initiator) {
-        await handleOpenChannel(
-          {
-            channel: "main",
-            epc,
-            roomId,
-            dataChannels,
-            decryptionModule,
-            merkleModule,
-          },
-          api,
-        );
-      }
-    } else {
-      const epc = peerConnections[connectionIndex];
-      if (epc.connectionState === "connected") {
-        epc.roomIds.push(roomId);
-        api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
-
-        const dataChannelsLen = dataChannels.length;
-        for (let i = 0; i < dataChannelsLen; i++) {
-          if (dataChannels[i].withPeerId === peerId) {
-            dataChannels[i].roomIds.push(roomId);
-          }
+      const dataChannelsLen = dataChannels.length;
+      for (let i = 0; i < dataChannelsLen; i++) {
+        if (dataChannels[i].withPeerId === peerId) {
+          dataChannels[i].roomIds.push(roomId);
         }
+      }
 
-        const { rooms } = api.getState() as State;
-        const roomsLen = rooms.length;
-        for (let i = 0; i < roomsLen; i++) {
-          const channelIndex = rooms[i].channels.findIndex((c) =>
-            c.peerIds.includes(peerId),
+      const { rooms } = api.getState() as State;
+      const roomsLen = rooms.length;
+      for (let i = 0; i < roomsLen; i++) {
+        const channelIndex = rooms[i].channels.findIndex((c) =>
+          c.peerIds.includes(peerId),
+        );
+        if (channelIndex > -1) {
+          api.dispatch(
+            setChannel({
+              roomId,
+              label: rooms[i].channels[channelIndex].label,
+              peerId,
+            }),
           );
-          if (channelIndex > -1) {
-            api.dispatch(
-              setChannel({
-                roomId,
-                label: rooms[i].channels[channelIndex].label,
-                peerId,
-              }),
-            );
-          }
         }
       }
     }
-
-    return { data: undefined };
-  } catch (error) {
-    throw error;
   }
+
+  return { data: undefined };
 };
 
 export default webrtcBaseQuery;

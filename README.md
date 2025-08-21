@@ -108,10 +108,10 @@ export const useRoom = () => {
     );
   };
 
-  const sendMessage = (message: string | File, channel: string) => {
+  const sendMessage = async (message: string | File, channel: string) => {
     if (roomIndex === -1) throw new Error("No room was selected");
 
-    p2party.sendMessage(
+    await p2party.sendMessage(
       message,
       channel,
       rooms[roomIndex].id,
@@ -178,32 +178,29 @@ export const useRoom = () => {
 The most important exported functions by p2party, with their types, are:
 
 ```typescript
-
 /**
  * Connects peer to a room.
  * A room URL is 64 chars long. We use the sha256 of the sha512 of random data.
  */
-const connect = (
+const connect = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
-        urls: [
-          "stun:stun.p2party.com:3478",
-        ],
+        urls: ["stun:stun.p2party.com:3478"],
       },
     ],
     iceTransportPolicy: "all",
   },
-) => void;
+) => Promise<void>;
 
-const connectToSignalingServer = (
+const connectToSignalingServer = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
-) => void;
+) => Promise<void>;
 
-const sendMessage = (
+const sendMessage = async (
   data: string | File,
   toChannel: string,
   roomId: string,
@@ -211,27 +208,24 @@ const sendMessage = (
   minChunks = 3,
   chunkSize = CHUNK_LEN,
   metadataSchemaVersion = 1,
-) => void;
+) => Promise<void>;
 
-const readMessage = async (
-  merkleRootHex?: string,
-  hashHex?: string,
-) => Promise<{
-  message: string | Blob;
-  percentage: number;
-  size: number;
-  filename: string;
-  mimeType: MimeType;
-  extension: FileExtension;
-  category: string;
-}>;
+const readMessage = async (merkleRootHex?: string, hashHex?: string) =>
+  Promise<{
+    message: string | Blob;
+    percentage: number;
+    size: number;
+    filename: string;
+    mimeType: MimeType;
+    extension: FileExtension;
+    category: string;
+  }>;
 
 const cancelMessage = async (
   channelLabel: string,
   merkleRoot?: string | Uint8Array,
   hash?: string | Uint8Array,
-) => void;
-
+) => Promise<void>;
 ```
 
 For a complete reference of the API you can check the library output file [index.ts](src/index.ts).

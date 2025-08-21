@@ -57,67 +57,83 @@ const sendChunks = async (
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ) => {
-  try {
-    let putItemInDBSendQueue = false;
-    // const merkleRootHex = uint8ArrayToHex(merkleRoot);
+  let putItemInDBSendQueue = false;
+  // const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
-    const peerPublicKeyHex = epc.withPeerPublicKey;
-    const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
+  const peerPublicKeyHex = epc.withPeerPublicKey;
+  const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
-    const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
+  const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
 
-    const indexes = Array.from({ length: chunksLen }, (_, i) => i);
-    const indexesRandomized = await fisherYatesShuffle(indexes);
-    for (let i = 0; i < chunksLen; i++) {
-      const iRandom = indexesRandomized[i];
+  const indexes = Array.from({ length: chunksLen }, (_, i) => i);
+  const indexesRandomized = await fisherYatesShuffle(indexes);
+  for (let i = 0; i < chunksLen; i++) {
+    const iRandom = indexesRandomized[i];
 
-      const senderEphemeralKey = await newKeyPair(encryptionModule);
-      const ephemeralSignature = await sign(
-        senderEphemeralKey.publicKey,
-        senderSecretKey,
-        encryptionModule,
+    const senderEphemeralKey = await newKeyPair(encryptionModule);
+    const ephemeralSignature = await sign(
+      senderEphemeralKey.publicKey,
+      senderSecretKey,
+      encryptionModule,
+    );
+
+    const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
+    if (!unencryptedChunk) continue;
+
+    const metadataArray = new Uint8Array(unencryptedChunk.metadata);
+    const metadata = deserializeMetadata(metadataArray);
+
+    if (
+      metadata.chunkStartIndex >= 0 &&
+      metadata.chunkEndIndex > metadata.chunkStartIndex &&
+      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
+    ) {
+      const mimeType = getMimeType(metadata.messageType);
+
+      try {
+        await setDBChunk({
+          merkleRoot: merkleRootHex,
+          hash: hashHex,
+          chunkIndex: metadata.chunkIndex,
+          data: unencryptedChunk.data.slice(
+            metadata.chunkStartIndex,
+            metadata.chunkEndIndex,
+          ), // new Blob([realChunk]),
+          mimeType,
+        });
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    const merkleProof = new Uint8Array(PROOF_LEN);
+    if (unencryptedChunk.merkleProof.byteLength === 0) {
+      const m = await getMerkleProof(
+        chunkHashes,
+        hexToUint8Array(unencryptedChunk.realChunkHash),
+        merkleModule,
+        PROOF_LEN,
       );
 
-      const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
-      if (!unencryptedChunk) continue;
+      merkleProof.set(m);
 
-      const metadataArray = new Uint8Array(unencryptedChunk.metadata);
-      const metadata = deserializeMetadata(metadataArray);
-
-      if (
-        metadata.chunkStartIndex >= 0 &&
-        metadata.chunkEndIndex > metadata.chunkStartIndex &&
-        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
-      ) {
-        const mimeType = getMimeType(metadata.messageType);
-
-        try {
-          await setDBChunk({
-            merkleRoot: merkleRootHex,
-            hash: hashHex,
-            chunkIndex: metadata.chunkIndex,
-            data: unencryptedChunk.data.slice(
-              metadata.chunkStartIndex,
-              metadata.chunkEndIndex,
-            ), // new Blob([realChunk]),
-            mimeType,
-          });
-        } catch (error) {
-          console.error(error);
-        }
+      try {
+        await setDBNewChunk({
+          hash: hashHex,
+          merkleRoot: merkleRootHex,
+          realChunkHash: unencryptedChunk.realChunkHash,
+          chunkIndex: iRandom,
+          data: unencryptedChunk.data,
+          metadata: unencryptedChunk.metadata,
+          merkleProof: merkleProof.buffer as ArrayBuffer,
+        });
+      } catch (error) {
+        console.warn(error);
       }
+    } else {
+      merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
 
-      const merkleProof = new Uint8Array(PROOF_LEN);
-      if (unencryptedChunk.merkleProof.byteLength === 0) {
-        const m = await getMerkleProof(
-          chunkHashes,
-          hexToUint8Array(unencryptedChunk.realChunkHash),
-          merkleModule,
-          PROOF_LEN,
-        );
-
-        merkleProof.set(m);
-
+      if (unencryptedChunk.merkleRoot.length === 0) {
         try {
           await setDBNewChunk({
             hash: hashHex,
@@ -126,127 +142,106 @@ const sendChunks = async (
             chunkIndex: iRandom,
             data: unencryptedChunk.data,
             metadata: unencryptedChunk.metadata,
-            merkleProof: merkleProof.buffer as ArrayBuffer,
+            merkleProof: unencryptedChunk.merkleProof,
           });
         } catch (error) {
           console.warn(error);
         }
-      } else {
-        merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
-
-        if (unencryptedChunk.merkleRoot.length === 0) {
-          try {
-            await setDBNewChunk({
-              hash: hashHex,
-              merkleRoot: merkleRootHex,
-              realChunkHash: unencryptedChunk.realChunkHash,
-              chunkIndex: iRandom,
-              data: unencryptedChunk.data,
-              metadata: unencryptedChunk.metadata,
-              merkleProof: unencryptedChunk.merkleProof,
-            });
-          } catch (error) {
-            console.warn(error);
-          }
-        }
       }
+    }
 
-      const chunk = await concatUint8Arrays([
-        metadataArray,
-        merkleProof,
-        new Uint8Array(unencryptedChunk.data),
-      ]);
+    const chunk = await concatUint8Arrays([
+      metadataArray,
+      merkleProof,
+      new Uint8Array(unencryptedChunk.data),
+    ]);
 
-      const encryptedMessage = await encryptAsymmetric(
-        chunk,
-        // unencryptedChunks[jRandom],
-        receiverPublicKey,
-        senderEphemeralKey.secretKey, // senderSecretKey,
-        merkleRoot,
-        encryptionModule,
+    const encryptedMessage = await encryptAsymmetric(
+      chunk,
+      // unencryptedChunks[jRandom],
+      receiverPublicKey,
+      senderEphemeralKey.secretKey, // senderSecretKey,
+      merkleRoot,
+      encryptionModule,
+    );
+
+    const message = (await concatUint8Arrays([
+      senderEphemeralKey.publicKey,
+      ephemeralSignature,
+      encryptedMessage,
+    ])) as Uint8Array;
+
+    const timeoutMilliseconds = await randomNumberInRange(1, 10);
+    await wait(timeoutMilliseconds);
+    if (
+      channel.readyState === "open" &&
+      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+    ) {
+      channel.send(message.buffer as ArrayBuffer);
+    } else if (
+      // channel.readyState !== "closing" &&
+      channel.readyState !== "closed"
+    ) {
+      putItemInDBSendQueue = true;
+
+      try {
+        await setDBSendQueue({
+          position: iRandom,
+          label: channel.label,
+          toPeerId: channel.withPeerId,
+          encryptedData: message.buffer as ArrayBuffer, // new Blob([message]),
+        });
+      } catch (error) {
+        console.error(error);
+      }
+    } else {
+      console.log(
+        "Cannot send message because channel is " +
+          channel.readyState +
+          " and bufferedAmount is " +
+          channel.bufferedAmount,
       );
 
-      const message = (await concatUint8Arrays([
-        senderEphemeralKey.publicKey,
-        ephemeralSignature,
-        encryptedMessage,
-      ])) as Uint8Array;
-
-      const timeoutMilliseconds = await randomNumberInRange(1, 10);
-      await wait(timeoutMilliseconds);
-      if (
-        channel.readyState === "open" &&
-        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-      ) {
-        channel.send(message.buffer as ArrayBuffer);
-      } else if (
-        // channel.readyState !== "closing" &&
-        channel.readyState !== "closed"
-      ) {
-        putItemInDBSendQueue = true;
-
-        try {
-          await setDBSendQueue({
-            position: iRandom,
-            label: channel.label,
-            toPeerId: channel.withPeerId,
-            encryptedData: message.buffer as ArrayBuffer, // new Blob([message]),
-          });
-        } catch (error) {
-          console.error(error);
-        }
-      } else {
-        console.log(
-          "Cannot send message because channel is " +
-            channel.readyState +
-            " and bufferedAmount is " +
-            channel.bufferedAmount,
-        );
-
-        break;
-      }
+      break;
     }
+  }
 
-    // if (!putItemInDBSendQueue) {
-    //   channel.close();
-    // } else {
-    if (putItemInDBSendQueue) {
+  // if (!putItemInDBSendQueue) {
+  //   channel.close();
+  // } else {
+  if (putItemInDBSendQueue) {
+    while (
+      channel.readyState === "open" &&
+      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+    ) {
+      const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
       while (
-        channel.readyState === "open" &&
-        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+        sendQueue.length > 0 &&
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+        channel.readyState === "open"
       ) {
-        const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
-        while (
-          sendQueue.length > 0 &&
-          channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-          channel.readyState === "open"
-        ) {
-          const timeoutMilliseconds = await randomNumberInRange(1, 10);
-          await wait(timeoutMilliseconds);
+        const timeoutMilliseconds = await randomNumberInRange(1, 10);
+        await wait(timeoutMilliseconds);
 
-          let pos = await randomNumberInRange(0, sendQueue.length);
-          if (pos === sendQueue.length) pos = 0;
+        let pos = await randomNumberInRange(0, sendQueue.length);
+        if (pos === sendQueue.length) pos = 0;
 
-          const [item] = sendQueue.splice(pos, 1);
-          if (channel.readyState === "open") {
-            channel.send(item.encryptedData);
+        const [item] = sendQueue.splice(pos, 1);
+        if (channel.readyState === "open") {
+          channel.send(item.encryptedData);
 
-            try {
-              await deleteDBSendQueue(
-                channel.label,
-                epc.withPeerId,
-                item.position,
-              );
-            } catch (error) {
-              console.error(error);
-            }
+          try {
+            await deleteDBSendQueue(
+              channel.label,
+              epc.withPeerId,
+              item.position,
+            );
+          } catch (error) {
+            console.error(error);
           }
         }
       }
     }
-  } catch (error) {
-    console.error(error);
-    throw error;
   }
 };
 
@@ -320,7 +315,7 @@ export const handleSendMessage = async (
         );
         if (peerIndex === -1) continue;
 
-        const channel = await handleOpenChannel(
+        const channel = handleOpenChannel(
           {
             channel: channelMessageLabel,
             epc: peerConnections[peerIndex],

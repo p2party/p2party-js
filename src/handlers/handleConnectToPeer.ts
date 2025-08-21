@@ -33,9 +33,9 @@ export const handleConnectToPeer = async (
     try {
       const { keyPair } = api.getState() as State;
 
-      if (!initiator) initiator = true;
-      if (!rtcConfig) rtcConfig = defaultRTCConfig;
-      console.log(rtcConfig);
+      initiator ??= true;
+      rtcConfig ??= defaultRTCConfig;
+
       if (initiator)
         console.log(`You are initiating a peer connection with ${peerId}.`);
 
@@ -60,7 +60,7 @@ export const handleConnectToPeer = async (
             await epc.setLocalDescription();
 
             if (epc.localDescription) {
-              api.dispatch(
+              await api.dispatch(
                 signalingServerApi.endpoints.sendMessage.initiate({
                   content: {
                     type: "description",
@@ -86,9 +86,9 @@ export const handleConnectToPeer = async (
         }
       };
 
-      epc.onicecandidate = ({ candidate }) => {
+      epc.onicecandidate = async ({ candidate }) => {
         if (candidate && candidate.candidate !== "") {
-          api.dispatch(
+          await api.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {
                 type: "candidate",
@@ -107,7 +107,7 @@ export const handleConnectToPeer = async (
         console.error(e);
       };
 
-      epc.oniceconnectionstatechange = () => {
+      epc.oniceconnectionstatechange = async () => {
         if (epc.iceConnectionState === "failed") {
           const { signalingServer } = api.getState() as State;
           if (
@@ -115,7 +115,7 @@ export const handleConnectToPeer = async (
             !signalingServer.isEstablishingConnection &&
             signalingServer.serverUrl.length > 0
           ) {
-            api.dispatch(
+            await api.dispatch(
               signalingServerApi.endpoints.connectWebSocket.initiate(
                 signalingServer.serverUrl,
               ),
@@ -184,7 +184,7 @@ export const handleConnectToPeer = async (
 
       resolve(epc);
     } catch (error) {
-      reject(error);
+      reject(error as Error);
     }
   });
 };

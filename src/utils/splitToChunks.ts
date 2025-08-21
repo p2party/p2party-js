@@ -89,7 +89,7 @@ export const splitToChunks = async (
     throw new Error("Unknown metadata version schema.");
   if (chunkSize > CHUNK_LEN || chunkSize <= IMPORTANT_DATA_LEN)
     throw new Error(
-      `Chunk length needs to be between ${IMPORTANT_DATA_LEN} and ${CHUNK_LEN}`,
+      `Chunk length needs to be between ${String(IMPORTANT_DATA_LEN)} and ${String(CHUNK_LEN)}`,
     );
 
   let shouldStop = false;

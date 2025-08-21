@@ -211,8 +211,8 @@ export type FileExtension = KnownFileExtension | "";
 export const getMessageType = (data: string | File): number => {
   if (typeof data === "string") return MessageType.Text;
 
-  const extension = data.name.split(".").pop()?.toLowerCase() || "";
-  const extensionToMessageType: { [key: string]: number } = {
+  const extension = data.name.split(".").pop()?.toLowerCase() ?? "";
+  const extensionToMessageType: Record<string, number> = {
     png: MessageType.ImagePNG,
     jpeg: MessageType.ImageJPEG,
     jpg: MessageType.ImageJPG,

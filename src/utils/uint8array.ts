@@ -9,7 +9,11 @@ export const concatUint8Arrays = (
     const result = new Uint8Array(
       arrays.reduce((sum, arr) => sum + arr.length, 0),
     );
-    for (const arr of arrays) (result.set(arr, offset), (offset += arr.length));
+
+    for (const arr of arrays) {
+      result.set(arr, offset);
+      offset += arr.length;
+    }
 
     resolve(result);
   });
@@ -54,8 +58,8 @@ export const hexToUint8Array = (hexString: string) => {
   if (hexString.length % 2 != 0) hexString = "0" + hexString;
 
   // check for some non-hex characters
-  const bad = hexString.match(/[G-Z\s]/i);
-  if (bad) throw new Error(`Found non-hex characters ${bad}`);
+  const bad = /[G-Z\s]/i.exec(hexString);
+  if (bad) throw new Error(`Found non-hex characters ${bad[0]}`);
 
   // split the string into pairs of octets
   const pairs = hexString.match(/[\dA-F]{2}/gi);

@@ -76,7 +76,7 @@ export const generateRandomRoomUrl = async (
   withAlphabetCapital = true,
   withNumbers = true,
 ): Promise<string> => {
-  if (!lenMax) lenMax = lenMin;
+  lenMax ??= lenMin;
   if (lenMax === 0 && lenMin === lenMax) return "";
 
   const len =

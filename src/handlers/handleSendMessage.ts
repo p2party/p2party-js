@@ -89,21 +89,16 @@ const sendChunks = async (
       metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
     ) {
       const mimeType = getMimeType(metadata.messageType);
-
-      try {
-        await setDBChunk({
-          merkleRoot: merkleRootHex,
-          hash: hashHex,
-          chunkIndex: metadata.chunkIndex,
-          data: unencryptedChunk.data.slice(
-            metadata.chunkStartIndex,
-            metadata.chunkEndIndex,
-          ), // new Blob([realChunk]),
-          mimeType,
-        });
-      } catch (error) {
-        console.error(error);
-      }
+      await setDBChunk({
+        merkleRoot: merkleRootHex,
+        hash: hashHex,
+        chunkIndex: metadata.chunkIndex,
+        data: unencryptedChunk.data.slice(
+          metadata.chunkStartIndex,
+          metadata.chunkEndIndex,
+        ), // new Blob([realChunk]),
+        mimeType,
+      });
     }
 
     const merkleProof = new Uint8Array(PROOF_LEN);
@@ -171,8 +166,8 @@ const sendChunks = async (
       encryptedMessage,
     ])) as Uint8Array;
 
-    const timeoutMilliseconds = await randomNumberInRange(1, 10);
-    await wait(timeoutMilliseconds);
+    // const timeoutMilliseconds = await randomNumberInRange(1, 10);
+    // await wait(timeoutMilliseconds);
     if (
       channel.readyState === "open" &&
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
@@ -220,8 +215,8 @@ const sendChunks = async (
         channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
         channel.readyState === "open"
       ) {
-        const timeoutMilliseconds = await randomNumberInRange(1, 10);
-        await wait(timeoutMilliseconds);
+        // const timeoutMilliseconds = await randomNumberInRange(1, 10);
+        // await wait(timeoutMilliseconds);
 
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;

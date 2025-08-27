@@ -23,10 +23,11 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
     const epc = peerConnections[connectionIndex];
     const cand = new RTCIceCandidate(candidate);
 
+    // if (cand.usernameFragment === candidate.usernameFragment) {
+    //   return { data: undefined };
+    // }
+
     if (!epc.remoteDescription || epc.signalingState !== "stable") {
-      // if (cand.usernameFragment === candidate.usernameFragment) {
-      //   return { data: undefined };
-      // }
       // const receivers = epc.getReceivers();
       //
       // for (const receiver of receivers) {

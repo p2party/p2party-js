@@ -16,7 +16,6 @@ import type {
 import type {
   WebSocketMessageDescriptionSend,
   WebSocketMessageCandidateSend,
-  // WebSocketMessagePeersRequest,
 } from "../utils/interfaces";
 
 export const handleConnectToPeer = async (
@@ -149,20 +148,20 @@ export const handleConnectToPeer = async (
           epc.connectionState === "failed" ||
           epc.connectionState === "disconnected"
         ) {
-          console.error(
-            `Connection with peer ${peerId} has ${epc.connectionState}.`,
-          );
-
           await api.dispatch(
             webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
           );
-        } else {
-          console.log(
-            `Connection status with peer ${peerId} is ${epc.connectionState}.`,
-          );
 
+          console.error(
+            `Connection with peer ${peerId} has ${epc.connectionState}.`,
+          );
+        } else {
           if (epc.connectionState === "connected") {
             api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
+
+            console.log(
+              `Connection status with peer ${peerId} is ${epc.connectionState}.`,
+            );
 
             // if (!initiator) {
             //   const { signalingServer } = api.getState() as State;

@@ -73,7 +73,7 @@ export const compileChannelMessageLabel = (
 
       resolve(label);
     } catch (error) {
-      reject(error);
+      reject(error as Error);
     }
   });
 };
@@ -97,7 +97,7 @@ export const decompileChannelMessageLabel = (
       if (splitLen !== LABEL_ELEMENTS && splitLen > 1) {
         reject(
           new Error(
-            `Channel message label needs to have ${LABEL_ELEMENTS} components.`,
+            `Channel message label needs to have ${String(LABEL_ELEMENTS)} components.`,
           ),
         );
       } else if (splitLen === 1) {
@@ -133,7 +133,7 @@ export const decompileChannelMessageLabel = (
         // hashHex: split[2],
       });
     } catch (error) {
-      reject(error);
+      reject(error as Error);
     }
   });
 };

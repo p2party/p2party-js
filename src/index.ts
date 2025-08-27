@@ -319,8 +319,8 @@ const sendMessage = async (
 };
 
 const readMessage = async (
-  merkleRootHex?: string,
-  hashHex?: string,
+  merkleRootHex: string,
+  // hashHex?: string,
 ): Promise<{
   message: string | Blob;
   percentage: number;
@@ -330,7 +330,8 @@ const readMessage = async (
   extension: FileExtension;
   category: string;
 }> => {
-  if (!merkleRootHex && !hashHex)
+  if (!merkleRootHex)
+    // && !hashHex)
     return {
       message: "No message",
       percentage: 0,
@@ -348,7 +349,7 @@ const readMessage = async (
     let messageIndex = -1;
     for (let i = 0; i < roomsLen; i++) {
       messageIndex = rooms[i].messages.findLastIndex(
-        (m) => m.merkleRootHex === merkleRootHex || m.sha512Hex === hashHex,
+        (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
       );
       if (messageIndex > -1) {
         roomIndex = i;
@@ -402,31 +403,34 @@ const readMessage = async (
               .sort((a, b) => a.chunkIndex - b.chunkIndex)
               .map((c) => c.data)
           : [new Uint8Array().buffer];
-      const data = new Blob(dataChunks, {
-        type: mimeType,
-      });
 
-      if (messageType === MessageType.Text) {
-        return {
-          message: await data.text(),
-          percentage,
-          size: rooms[roomIndex].messages[messageIndex].totalSize,
-          filename: "",
-          mimeType,
-          extension,
-          category,
-        };
-      } else if (data) {
-        return {
-          message: data,
-          percentage,
-          size: rooms[roomIndex].messages[messageIndex].totalSize,
-          filename: rooms[roomIndex].messages[messageIndex].filename,
-          mimeType,
-          extension,
-          category,
-        };
-      } else {
+      try {
+        const data = new Blob(dataChunks, {
+          type: mimeType,
+        });
+
+        if (messageType === MessageType.Text) {
+          return {
+            message: await data.text(),
+            percentage,
+            size: rooms[roomIndex].messages[messageIndex].totalSize,
+            filename: "",
+            mimeType,
+            extension,
+            category,
+          };
+        } else {
+          return {
+            message: data,
+            percentage,
+            size: rooms[roomIndex].messages[messageIndex].totalSize,
+            filename: rooms[roomIndex].messages[messageIndex].filename,
+            mimeType,
+            extension,
+            category,
+          };
+        }
+      } catch {
         return {
           message: "Invalid message",
           percentage: 0,
@@ -438,7 +442,7 @@ const readMessage = async (
         };
       }
     } else {
-      const msg = await getDBMessageData(merkleRootHex, hashHex);
+      const msg = await getDBMessageData(merkleRootHex); // , hashHex);
       if (msg) {
         const messageType = msg.messageType;
         const mimeType = getMimeType(messageType);
@@ -450,7 +454,6 @@ const readMessage = async (
           const label = await compileChannelMessageLabel(
             msg.channelLabel,
             msg.merkleRoot,
-            // msg.hash,
           );
 
           await store.dispatch(
@@ -470,31 +473,33 @@ const readMessage = async (
                 .sort((a, b) => a.chunkIndex - b.chunkIndex)
                 .map((c) => c.data)
             : [new Uint8Array().buffer];
-        const data = new Blob(dataChunks, {
-          type: mimeType,
-        });
 
-        if (messageType === MessageType.Text) {
-          return {
-            message: await data.text(),
-            percentage,
-            size: msg.totalSize,
-            filename: "",
-            mimeType,
-            extension,
-            category,
-          };
-        } else if (data) {
-          return {
-            message: data,
-            percentage,
-            size: msg.totalSize,
-            filename: msg.filename,
-            mimeType,
-            extension,
-            category,
-          };
-        } else {
+        try {
+          const data = new Blob(dataChunks, {
+            type: mimeType,
+          });
+          if (messageType === MessageType.Text) {
+            return {
+              message: await data.text(),
+              percentage,
+              size: msg.totalSize,
+              filename: "",
+              mimeType,
+              extension,
+              category,
+            };
+          } else {
+            return {
+              message: data,
+              percentage,
+              size: msg.totalSize,
+              filename: msg.filename,
+              mimeType,
+              extension,
+              category,
+            };
+          }
+        } catch {
           return {
             message: "Invalid message",
             percentage: 0,
@@ -534,10 +539,11 @@ const readMessage = async (
 
 const cancelMessage = async (
   channelLabel: string,
-  merkleRoot?: string | Uint8Array,
-  hash?: string | Uint8Array,
+  merkleRoot: string | Uint8Array,
+  // hash?: string | Uint8Array,
 ) => {
-  if (!merkleRoot && !hash)
+  if (!merkleRoot)
+    // && !hash)
     throw new Error("Need to provide either merkle root or hash");
   if (
     merkleRoot &&
@@ -551,18 +557,18 @@ const cancelMessage = async (
     merkleRoot.length !== crypto_hash_sha512_BYTES
   )
     throw new Error("Invalid Merkle root length");
-  if (
-    hash &&
-    typeof hash === "string" &&
-    hash.length !== crypto_hash_sha512_BYTES * 2
-  )
-    throw new Error("Invalid hash length");
-  if (
-    hash &&
-    typeof hash !== "string" &&
-    hash.length !== crypto_hash_sha512_BYTES
-  )
-    throw new Error("Invalid hash length");
+  // if (
+  //   hash &&
+  //   typeof hash === "string" &&
+  //   hash.length !== crypto_hash_sha512_BYTES * 2
+  // )
+  //   throw new Error("Invalid hash length");
+  // if (
+  //   hash &&
+  //   typeof hash !== "string" &&
+  //   hash.length !== crypto_hash_sha512_BYTES
+  // )
+  //   throw new Error("Invalid hash length");
 
   const evt = new CustomEvent(CANCEL_SEND);
   window.dispatchEvent(evt);
@@ -573,12 +579,12 @@ const cancelMessage = async (
       : merkleRoot && typeof merkleRoot !== "string"
         ? uint8ArrayToHex(merkleRoot)
         : "";
-  const hashHex =
-    hash && typeof hash === "string"
-      ? hash
-      : hash && typeof hash !== "string"
-        ? uint8ArrayToHex(hash)
-        : "";
+  // const hashHex =
+  //   hash && typeof hash === "string"
+  //     ? hash
+  //     : hash && typeof hash !== "string"
+  //       ? uint8ArrayToHex(hash)
+  //       : "";
 
   let roomIndex = -1;
   let messageIndex = -1;
@@ -588,9 +594,9 @@ const cancelMessage = async (
   for (let i = 0; i < roomsLen; i++) {
     messageIndex = merkleRoot
       ? rooms[i].messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
-      : hash
-        ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
-        : -1;
+      : // : hash
+        //   ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
+        -1;
 
     if (messageIndex > -1) {
       roomIndex = i;

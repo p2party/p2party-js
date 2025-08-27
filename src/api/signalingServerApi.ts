@@ -167,7 +167,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
     ws = new WebSocket(fullUrl);
     ws.binaryType = "arraybuffer";
 
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       try {
         ws!.onopen = () => {
           console.log("WebSocket connected to:", fullUrl);

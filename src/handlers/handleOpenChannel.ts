@@ -1,9 +1,8 @@
-import { wait } from "./handleSendMessage";
+// import { wait } from "./handleSendMessage";
 import { handleReadReceipt } from "./handleReadReceipt";
 import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
-import signalingServerApi from "../api/signalingServerApi";
 
 import {
   setChannel,
@@ -91,8 +90,8 @@ export const handleOpenChannel = (
         dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
         dataChannel.readyState === "open"
       ) {
-        const timeoutMilliseconds = await randomNumberInRange(1, 10);
-        await wait(timeoutMilliseconds);
+        // const timeoutMilliseconds = await randomNumberInRange(1, 10);
+        // await wait(timeoutMilliseconds);
 
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;
@@ -132,9 +131,6 @@ export const handleOpenChannel = (
   extChannel.onerror = async (e) => {
     console.error(e);
 
-    await api.dispatch(
-      signalingServerApi.endpoints.disconnectWebSocket.initiate(),
-    );
     await api.dispatch(
       webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
         peerId: epc.withPeerId,
@@ -318,7 +314,7 @@ export const handleOpenChannel = (
   extChannel.onopen = async () => {
     try {
       console.log(
-        `Channel with label \"${extChannel.label}\" and client ${epc.withPeerId} is open.`,
+        `Channel with label "${extChannel.label}" and client ${epc.withPeerId} is open.`,
       );
 
       dataChannels.push(extChannel);

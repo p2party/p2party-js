@@ -1,14 +1,10 @@
-import {
-  deleteChannel,
-  deletePeer,
-  // setMessageAllChunks
-} from "../../reducers/roomSlice";
+import webrtcApi from ".";
 
-import {
-  deleteDBNewChunk,
-  deleteDBSendQueue,
-  setDBRoomMessageData,
-} from "../../db/api";
+import { deleteChannel } from "../../reducers/roomSlice";
+
+import { deleteDBNewChunk, deleteDBSendQueue } from "../../db/api";
+
+import { decompileChannelMessageLabel } from "../../utils/channelLabel";
 
 import {
   LABEL_ELEMENTS,
@@ -22,7 +18,6 @@ import type {
   IRTCPeerConnection,
   RTCDisconnectFromPeerChannelLabelParams,
 } from "./interfaces";
-import { decompileChannelMessageLabel } from "../../utils/channelLabel";
 
 export interface RTCDisconnectFromPeerChannelLabelParamsExtension
   extends RTCDisconnectFromPeerChannelLabelParams {
@@ -39,42 +34,32 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     (c) => c.label === label && c.withPeerId === peerId,
   );
 
-  if (channelIndex > -1) {
-    if (dataChannels[channelIndex]) {
-      api.dispatch(
-        deleteChannel({
-          peerId,
-          label,
-        }),
-      );
+  if (channelIndex > -1 && dataChannels[channelIndex]) {
+    dataChannels[channelIndex].onopen = null;
+    dataChannels[channelIndex].onclose = null;
+    dataChannels[channelIndex].onerror = null;
+    dataChannels[channelIndex].onclosing = null;
+    dataChannels[channelIndex].onmessage = null;
+    dataChannels[channelIndex].onbufferedamountlow = null;
+    if (dataChannels[channelIndex].readyState === "open")
+      dataChannels[channelIndex].close();
 
-      await deleteDBSendQueue(label, peerId);
+    dataChannels.splice(channelIndex, 1);
 
-      if (
-        dataChannels[channelIndex] // &&
-      ) {
-        dataChannels[channelIndex].onopen = null;
-        dataChannels[channelIndex].onclose = null;
-        dataChannels[channelIndex].onerror = null;
-        dataChannels[channelIndex].onclosing = null;
-        dataChannels[channelIndex].onmessage = null;
-        dataChannels[channelIndex].onbufferedamountlow = null;
+    api.dispatch(
+      deleteChannel({
+        peerId,
+        label,
+      }),
+    );
 
-        if (dataChannels[channelIndex].readyState === "open")
-          dataChannels[channelIndex].close();
-
-        delete dataChannels[channelIndex];
-      }
-
-      dataChannels.splice(channelIndex, 1);
-    }
+    await deleteDBSendQueue(label, peerId);
   }
 
-  const { channelLabel, merkleRootHex } =
-    await decompileChannelMessageLabel(label);
-  const hasLen = merkleRootHex.length > 0;
-
-  if (hasLen) {
+  // Check whether channel is a name or a message channel
+  const { merkleRootHex } = await decompileChannelMessageLabel(label);
+  if (merkleRootHex.length > 0) {
+    // Find out if the message is sent to others
     const c = dataChannels.findIndex((c) => {
       const split = c.label.split(LABEL_ELEMENTS_SEPARATOR);
 
@@ -83,58 +68,15 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
         : false;
     });
 
+    // If the message is not sent to anyone then delete it from sending memory
     if (c < 0) await deleteDBNewChunk(merkleRootHex);
   }
 
-  const { rooms, keyPair } = api.getState() as State;
+  // Find out if the two peers have at least one channel together
+  const { rooms } = api.getState() as State;
   const roomsLen = rooms.length;
   let peerHasChannel = false;
   for (let i = 0; i < roomsLen; i++) {
-    if (hasLen) {
-      const messageIndex = rooms[i].messages.findLastIndex(
-        (m) => m.merkleRootHex === merkleRootHex,
-      );
-      if (
-        messageIndex > -1 &&
-        rooms[i].messages[messageIndex].fromPeerId === keyPair.peerId
-      ) {
-        const hashHex = rooms[i].messages[messageIndex].sha512Hex;
-        const roomId = rooms[i].id;
-        const savedSize = rooms[i].messages[messageIndex].savedSize;
-        const totalSize = rooms[i].messages[messageIndex].totalSize;
-        const messageType = rooms[i].messages[messageIndex].messageType;
-        const filename = rooms[i].messages[messageIndex].filename;
-        const date = rooms[i].messages[messageIndex].timestamp;
-
-        await setDBRoomMessageData(
-          roomId,
-          merkleRootHex,
-          hashHex,
-          keyPair.peerId,
-          savedSize,
-          totalSize,
-          messageType,
-          filename,
-          channelLabel,
-          date,
-        );
-
-        // api.dispatch(
-        //   setMessageAllChunks({
-        //     roomId,
-        //     merkleRootHex,
-        //     sha512Hex: hashHex,
-        //     fromPeerId: keyPair.peerId,
-        //     totalSize,
-        //     messageType,
-        //     filename,
-        //     channelLabel,
-        //     timestamp: date,
-        //   }),
-        // );
-      }
-    }
-
     const channelsLen = rooms[i].channels.length;
     for (let j = 0; j < channelsLen; j++) {
       if (rooms[i].channels[j].peerIds.includes(peerId)) {
@@ -148,28 +90,20 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   }
 
   if (!peerHasChannel) {
-    api.dispatch(deletePeer({ peerId }));
-
     const peerIndex = peerConnections.findIndex(
       (peer) => peer.withPeerId === peerId,
     );
 
-    if (peerIndex > -1) {
-      peerConnections[peerIndex].ontrack = null;
-      peerConnections[peerIndex].ondatachannel = null;
-      peerConnections[peerIndex].onicecandidate = null;
-      peerConnections[peerIndex].onicecandidateerror = null;
-      peerConnections[peerIndex].onnegotiationneeded = null;
-      peerConnections[peerIndex].onsignalingstatechange = null;
-      peerConnections[peerIndex].onconnectionstatechange = null;
-      peerConnections[peerIndex].onicegatheringstatechange = null;
-      peerConnections[peerIndex].oniceconnectionstatechange = null;
-
-      if (peerConnections[peerIndex].connectionState !== "closed")
-        peerConnections[peerIndex].close();
-
-      delete peerConnections[peerIndex];
-      peerConnections.splice(peerIndex, 1);
+    if (
+      peerIndex > -1 &&
+      (peerConnections[peerIndex].connectionState === "failed" ||
+        peerConnections[peerIndex].connectionState === "connected")
+    ) {
+      await api.dispatch(
+        webrtcApi.endpoints.disconnectFromPeer.initiate({
+          peerId: peerConnections[peerIndex].withPeerId,
+        }),
+      );
     }
   }
 

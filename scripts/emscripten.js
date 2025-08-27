@@ -104,7 +104,10 @@ emcc \
 -fvectorize \
 -s STRICT \
 -s SINGLE_FILE=1 \
+-s FILESYSTEM=0 \
 -s ENVIRONMENT=worker \
+-s INVOKE_RUN=0 \
+-s EXIT_RUNTIME=1 \
 ${memory} \
 ${withJS} \
 -s NODEJS_CATCH_EXIT=0 \
@@ -116,20 +119,16 @@ const testing =
     ? `\
 -flto \
 -O3 \
--s FILESYSTEM=0 \
 -s ASSERTIONS=0 \
--s INVOKE_RUN=0 \
 `
     : `\
--Og \
+-O0 \
 -g3 \
 --profiling \
 -fsanitize=undefined \
 -s ASSERTIONS=2 \
 -s RUNTIME_DEBUG=1 \
 -s STACK_OVERFLOW_CHECK=2 \
--s EXIT_RUNTIME=1 \
--s INVOKE_RUN=0 \
 `;
 
 execSync(

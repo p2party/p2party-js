@@ -1,4 +1,4 @@
-import { deletePeer, deleteMessage } from "../../reducers/roomSlice";
+import { deleteMessage } from "../../reducers/roomSlice";
 import {
   deleteDBUniqueRoom,
   getAllDBUniqueRooms,
@@ -11,6 +11,7 @@ import type {
   IRTCPeerConnection,
   RTCDisconnectFromRoomParams,
 } from "./interfaces";
+import webrtcApi from ".";
 
 export interface RTCDisconnectFromRoomParamsExtension
   extends RTCDisconnectFromRoomParams {
@@ -54,21 +55,11 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
       peerConnections[i].roomIds.splice(peerIndex, 1);
 
       if (peerConnections[i].roomIds.length === 0) {
-        peerConnections[i].ontrack = null;
-        peerConnections[i].ondatachannel = null;
-        peerConnections[i].onicecandidate = null;
-        peerConnections[i].onicecandidateerror = null;
-        peerConnections[i].onnegotiationneeded = null;
-        peerConnections[i].onsignalingstatechange = null;
-        peerConnections[i].onconnectionstatechange = null;
-        peerConnections[i].onicegatheringstatechange = null;
-        peerConnections[i].oniceconnectionstatechange = null;
-        peerConnections[i].close();
-
-        api.dispatch(deletePeer({ peerId: peerConnections[i].withPeerId }));
-
-        delete peerConnections[i];
-        peerConnections.splice(i, 1);
+        await api.dispatch(
+          webrtcApi.endpoints.disconnectFromPeer.initiate({
+            peerId: peerConnections[i].withPeerId,
+          }),
+        );
       }
     }
   }

@@ -33,6 +33,8 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
     )
       continue;
 
+    dataChannels[i].close();
+
     if (alsoDeleteData) {
       const { merkleRootHex } = await decompileChannelMessageLabel(label);
 
@@ -40,8 +42,6 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
         api.dispatch(deleteMessage({ merkleRootHex }));
       }
     }
-
-    dataChannels[i].close();
   }
 
   return { data: undefined };

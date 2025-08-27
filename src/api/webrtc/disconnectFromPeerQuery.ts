@@ -35,11 +35,12 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     peerConnections[peerIndex].onconnectionstatechange = null;
     peerConnections[peerIndex].onicegatheringstatechange = null;
     peerConnections[peerIndex].oniceconnectionstatechange = null;
-
-    if (peerConnections[peerIndex].connectionState !== "closed")
+    if (
+      peerConnections[peerIndex].connectionState === "failed" ||
+      peerConnections[peerIndex].connectionState === "connected"
+    ) {
       peerConnections[peerIndex].close();
-
-    delete peerConnections[peerIndex];
+    }
     peerConnections.splice(peerIndex, 1);
   }
 

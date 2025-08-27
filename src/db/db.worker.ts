@@ -754,7 +754,9 @@ async function fnGetDBAllChunksCount(
 
 async function fnSetDBChunk(chunk: Chunk): Promise<void> {
   const db = await getDB();
-  await db.add("chunks", chunk);
+  try {
+    await db.add("chunks", chunk);
+  } catch (error) {}
   db.close();
 }
 

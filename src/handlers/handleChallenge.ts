@@ -4,14 +4,14 @@ import { hexToUint8Array } from "../utils/uint8array";
 
 import { sign } from "../cryptography/ed25519";
 
-import type { MiddlewareAPI, Dispatch, UnknownAction } from "@reduxjs/toolkit";
+import type { MiddlewareAPI } from "@reduxjs/toolkit";
 import type { KeyPair } from "../reducers/keyPairSlice";
 
 const handleChallenge = async (
   keyPair: KeyPair,
   peerId: string,
   challenge: string,
-  store: MiddlewareAPI<Dispatch<UnknownAction>, any>,
+  store: MiddlewareAPI,
 ) => {
   const secretKey = hexToUint8Array(keyPair.secretKey);
 

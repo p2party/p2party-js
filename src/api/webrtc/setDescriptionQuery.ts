@@ -4,7 +4,6 @@ import libcrypto from "../../cryptography/libcrypto";
 
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
-import { handleQueuedIceCandidates } from "../../handlers/handleQueuedIceCandidates";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -66,14 +65,14 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
             peerId,
             peerPublicKey,
             roomId,
-            initiator: false,
+            peerConnections,
             rtcConfig,
           },
           api,
         );
 
-  epc.ondatachannel = (e: RTCDataChannelEvent) => {
-    handleOpenChannel(
+  epc.ondatachannel = async (e: RTCDataChannelEvent) => {
+    await handleOpenChannel(
       {
         channel: e.channel,
         epc,
@@ -101,16 +100,16 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
 
   if (connectionIndex === -1) peerConnections.push(epc);
 
-  // const offerCollision =
-  //   epc.signalingState !== "stable" && description.type === "offer";
-  // const offerCollision =
-  //     description.type === "offer" &&
-  //     (makingOffer || epc.signalingState !== "stable");
-  // if (offerCollision && connectionIndex > -1) return { data: undefined };
+  const offerCollision =
+    description.type === "offer" &&
+    (epc.makingOffer || epc.signalingState !== "stable");
+  const isPolite = keyPair.peerId < epc.withPeerId;
+  console.log("Is polite is " + isPolite);
+  const ignoreOffer = !isPolite && offerCollision;
+  if (ignoreOffer) return { data: undefined };
 
-  // await epc.setRemoteDescription(description);
+  await epc.setRemoteDescription(description);
   if (description.type === "offer") {
-    await epc.setRemoteDescription(description);
     await epc.setLocalDescription();
     const answer = epc.localDescription;
     if (answer) {
@@ -127,62 +126,12 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         }),
       );
     }
-  } else {
-    if (
-      epc.signalingState !== "stable" &&
-      (epc.signalingState === "have-local-offer" ||
-        epc.signalingState === "have-remote-offer")
-    ) {
-      await epc.setRemoteDescription(description);
-    } else {
-      await handleQueuedIceCandidates(epc);
-    }
   }
-
-  // if (offerCollision) {
-  //   await Promise.all([
-  //     epc.setLocalDescription({ type: "rollback" }).catch(() => {}), // ignore failure
-  //     epc.setRemoteDescription(description),
-  //   ]);
-  //   const answer = epc.localDescription;
-  //
-  //   if (answer) {
-  //     api.dispatch(
-  //       signalingServerApi.endpoints.sendMessage.initiate({
-  //         content: {
-  //           type: "description",
-  //           description: answer,
-  //           fromPeerId: keyPair.peerId,
-  //           fromPeerPublicKey: keyPair.publicKey,
-  //           toPeerId: peerId,
-  //           roomId,
-  //         } as WebSocketMessageDescriptionSend,
-  //       }),
-  //     );
-  //   }
-  // } else if (description.type === "offer") {
-  //   await epc.setRemoteDescription(description);
-  //   await epc.setLocalDescription();
-  //   const answer = epc.localDescription;
-  //
-  //   if (answer) {
-  //     api.dispatch(
-  //       signalingServerApi.endpoints.sendMessage.initiate({
-  //         content: {
-  //           type: "description",
-  //           description: answer,
-  //           fromPeerId: keyPair.peerId,
-  //           fromPeerPublicKey: keyPair.publicKey,
-  //           toPeerId: peerId,
-  //           roomId,
-  //         } as WebSocketMessageDescriptionSend,
-  //       }),
-  //     );
-  //   }
-  // } else if (description.type === "answer") {
+  // else {
   //   if (
-  //     epc.signalingState === "have-local-offer" ||
-  //     epc.signalingState === "have-remote-offer"
+  //     epc.signalingState !== "stable" &&
+  //     (epc.signalingState === "have-local-offer" ||
+  //       epc.signalingState === "have-remote-offer")
   //   ) {
   //     await epc.setRemoteDescription(description);
   //   } else {
@@ -191,7 +140,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
   // }
 
   if (epc.connectionState === "connected" && connectionIndex > -1) {
-    handleOpenChannel(
+    await handleOpenChannel(
       {
         channel: "main",
         epc,

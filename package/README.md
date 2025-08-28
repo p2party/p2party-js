@@ -17,9 +17,9 @@
 [code-style-prettier-image]: https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square
 [code-style-prettier-url]: https://github.com/prettier/prettier
 
-> Peer-to-peer WebRTC mesh networking with "offensive" cryptographic.
+> Peer-to-peer WebRTC mesh networking with a kind-of "offensive" cryptographic.
 
-**p2party** connects peers visiting the same URL into a WebRTC mesh network and enables secure message exchange of any size over ephemeral data channels. Unlike traditional privacy-enabling libraries, `p2party` obfuscates traffic using noisy and randomized padding of real information, isomorphic packet transmission (64kb), making message intent opaque. Of course it also adds a layer of ChaChaPoly1305 end-to-end encryption with ephemeral Ed25519 sender keys.
+**p2party** connects peers visiting the same URL into a WebRTC mesh network and enables secure, chunked message exchange over ephemeral data channels. Unlike traditional privacy libraries, `p2party` actively obfuscates traffic using randomized padding, byte-level noise, isomorphic packet transmission (64kb), making message intent opaque. Of course it also adds a layer of ChaChaPoly1305 end-to-end encryption with ephemeral Ed25519 sender keys.
 
 ---
 
@@ -447,8 +447,6 @@ const blacklistPeer = async (peerId: string, peerPublicKey: string) => void;
 const removePeerFromBlacklist = async (peerId?: string, peerPublicKey?: string) => void;
 
 ```
-
-Because a message is split into chunks with noisy padding for which we need to calculate Merkle proofs, it may take some time for the process to finish before starting transmitting the information over a channel.
 
 ## Development
 

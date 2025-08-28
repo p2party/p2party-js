@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Create WebRTC mesh networks in two LOC",
-  "version": "0.7.4",
+  "version": "0.7.3",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/p2party/p2party-ts.git"

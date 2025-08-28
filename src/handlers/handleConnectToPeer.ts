@@ -18,70 +18,77 @@ import type {
   WebSocketMessageCandidateSend,
 } from "../utils/interfaces";
 
+export interface IRTCPeerConnectionParams extends RTCPeerConnectionParams {
+  peerConnections: IRTCPeerConnection[];
+}
+
 export const handleConnectToPeer = async (
   {
     peerId,
     peerPublicKey,
     roomId,
-    initiator,
+    peerConnections,
     rtcConfig,
-  }: RTCPeerConnectionParams,
+  }: IRTCPeerConnectionParams,
   api: BaseQueryApi,
 ): Promise<IRTCPeerConnection> => {
   return new Promise((resolve, reject) => {
     try {
       const { keyPair } = api.getState() as State;
 
-      initiator ??= true;
       rtcConfig ??= defaultRTCConfig;
-
-      if (initiator)
-        console.log(`You are initiating a peer connection with ${peerId}.`);
 
       if (!isUUID(peerId)) reject(new Error("PeerId is not a valid uuidv4"));
       if (peerPublicKey.length !== 64)
         reject(new Error("Peer public key is not a valid length"));
 
+      const peerIndex = peerConnections.findIndex(
+        (p) => p.withPeerId === peerId,
+      );
+      if (peerIndex > -1) {
+        const roomIndex = peerConnections[peerIndex].roomIds.findIndex(
+          (r) => r === roomId,
+        );
+        if (roomIndex === -1) peerConnections[peerIndex].roomIds.push(roomId);
+
+        resolve(peerConnections[peerIndex]);
+      }
+
       const pc = new RTCPeerConnection(rtcConfig);
       const epc = pc as IRTCPeerConnection;
       epc.withPeerId = peerId;
       epc.withPeerPublicKey = peerPublicKey;
+      epc.makingOffer = false;
       epc.roomIds = [roomId];
       epc.iceCandidates = [] as RTCIceCandidate[];
 
-      // let makingOffer = false;
-
       epc.onnegotiationneeded = async () => {
-        if (epc.signalingState === "stable") {
-          // if (initiator) {
-          try {
-            // makingOffer = true;
-            await epc.setLocalDescription();
+        try {
+          epc.makingOffer = true;
+          await epc.setLocalDescription();
 
-            if (epc.localDescription) {
-              await api.dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "description",
-                    description: epc.localDescription,
-                    fromPeerId: keyPair.peerId,
-                    fromPeerPublicKey: keyPair.publicKey,
-                    toPeerId: peerId,
-                    roomId,
-                  } as WebSocketMessageDescriptionSend,
-                }),
-              );
+          if (epc.localDescription) {
+            await api.dispatch(
+              signalingServerApi.endpoints.sendMessage.initiate({
+                content: {
+                  type: "description",
+                  description: epc.localDescription,
+                  fromPeerId: keyPair.peerId,
+                  fromPeerPublicKey: keyPair.publicKey,
+                  toPeerId: peerId,
+                  roomId,
+                } as WebSocketMessageDescriptionSend,
+              }),
+            );
 
-              console.log(
-                `Negotiation was needed with ${peerId} and you sent a description ${epc.localDescription.type}.`,
-              );
-            }
-          } catch (error) {
-            console.error(error);
-          } finally {
-            // makingOffer = false;
+            console.log(
+              `Negotiation was needed with ${peerId} and you sent a description ${epc.localDescription.type}.`,
+            );
           }
-          // }
+        } catch (error) {
+          console.error(error);
+        } finally {
+          epc.makingOffer = false;
         }
       };
 

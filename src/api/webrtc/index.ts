@@ -71,7 +71,7 @@ const webrtcApi = createApi({
         peerId,
         peerPublicKey,
         roomId,
-        initiator = true,
+        initiator = false,
         rtcConfig = {
           iceServers: [
             {

@@ -61,12 +61,12 @@ const webrtcBaseQuery: BaseQueryFn<
 
   if (connectionIndex === -1) {
     const epc = await handleConnectToPeer(
-      { peerId, peerPublicKey, roomId, initiator, rtcConfig },
+      { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
       api,
     );
 
-    epc.ondatachannel = (e: RTCDataChannelEvent) => {
-      handleOpenChannel(
+    epc.ondatachannel = async (e: RTCDataChannelEvent) => {
+      await handleOpenChannel(
         {
           channel: e.channel,
           epc,
@@ -82,7 +82,7 @@ const webrtcBaseQuery: BaseQueryFn<
     peerConnections.push(epc);
 
     if (initiator) {
-      handleOpenChannel(
+      await handleOpenChannel(
         {
           channel: "main",
           epc,

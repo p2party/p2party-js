@@ -54,7 +54,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
 
       if (peerIndex > -1) {
         const epc = peerConnections[peerIndex];
-        handleOpenChannel(
+        await handleOpenChannel(
           {
             channel,
             epc,
@@ -71,7 +71,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
     const PEERS_LEN = peerConnections.length;
     for (let i = 0; i < PEERS_LEN; i++) {
       const epc = peerConnections[i];
-      handleOpenChannel(
+      await handleOpenChannel(
         {
           channel,
           epc,

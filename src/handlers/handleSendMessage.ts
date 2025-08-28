@@ -310,7 +310,7 @@ export const handleSendMessage = async (
         );
         if (peerIndex === -1) continue;
 
-        const channel = handleOpenChannel(
+        const channel = await handleOpenChannel(
           {
             channel: channelMessageLabel,
             epc: peerConnections[peerIndex],

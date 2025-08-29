@@ -162,6 +162,21 @@ export const handleConnectToPeer = async (
           console.error(
             `Connection with peer ${peerId} has ${epc.connectionState}.`,
           );
+
+          if (epc.connectionState === "closed") {
+            const { signalingServer } = api.getState() as State;
+            if (signalingServer.isConnected) {
+              api.dispatch(
+                signalingServerApi.endpoints.sendMessage.initiate({
+                  content: {
+                    type: "peers",
+                    fromPeerId: keyPair.peerId,
+                    roomId,
+                  },
+                }),
+              );
+            }
+          }
         } else {
           if (epc.connectionState === "connected") {
             api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));

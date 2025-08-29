@@ -104,7 +104,6 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     description.type === "offer" &&
     (epc.makingOffer || epc.signalingState !== "stable");
   const isPolite = keyPair.peerId < epc.withPeerId;
-  console.log("Is polite is " + isPolite);
   const ignoreOffer = !isPolite && offerCollision;
   if (ignoreOffer) return { data: undefined };
 

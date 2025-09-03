@@ -474,7 +474,7 @@ const roomSlice = createSlice({
 
           if (
             totalSize > 0 &&
-            state[roomIndex].messages[messageIndex].totalSize < totalSize
+            state[roomIndex].messages[messageIndex].totalSize !== totalSize
           ) {
             state[roomIndex].messages[messageIndex].totalSize = totalSize;
           }

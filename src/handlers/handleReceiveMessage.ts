@@ -14,7 +14,8 @@ import { uint8ArrayToHex } from "../utils/uint8array";
 import { getMimeType, MessageType } from "../utils/messageTypes";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { Room } from "../reducers/roomSlice";
+import { KB64 } from "./handleOpenChannel";
+// import type { Room } from "../reducers/roomSlice";
 
 export const handleReceiveMessage = async (
   data: ArrayBuffer,
@@ -23,7 +24,7 @@ export const handleReceiveMessage = async (
   // fromPeerId: string,
   senderPublicKey: Uint8Array,
   receiverSecretKey: Uint8Array,
-  room: Room,
+  // room: Room,
   // channelLabel: string,
   // api: BaseQueryApi,
   decryptionModule: LibCrypto,
@@ -95,7 +96,9 @@ export const handleReceiveMessage = async (
     const chunkSize =
       metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize
         ? 0
-        : metadata.chunkEndIndex - metadata.chunkStartIndex;
+        : metadata.chunkEndIndex - metadata.chunkStartIndex > KB64
+          ? 0
+          : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
     const realChunk =
       chunkSize > 0
@@ -128,54 +131,57 @@ export const handleReceiveMessage = async (
       };
 
     const merkleRootHex = uint8ArrayToHex(merkleRoot);
-    const incomingMessageIndex = room.messages.findLastIndex(
-      (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
-    );
+    // const incomingMessageIndex = room.messages.findLastIndex(
+    //   (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
+    // );
 
     const chunkAlreadyExists = await existsDBChunk(
       merkleRootHex,
       metadata.chunkIndex,
-    ); //, db);
-    // const exists = await getDBChunk(merkleRootHex, metadata.chunkIndex);
+    );
+
     const messageExists = await getDBMessageData(merkleRootHex); //, hashHex);
 
     const alreadyHasEverything =
-      (messageExists != undefined &&
-        messageExists.savedSize === messageExists.totalSize) ||
-      (incomingMessageIndex > -1 &&
-        room.messages[incomingMessageIndex].totalSize ===
-          room.messages[incomingMessageIndex].savedSize);
+      messageExists != undefined &&
+      messageExists.savedSize === messageExists.totalSize; // ||
+    // (incomingMessageIndex > -1 &&
+    //   room.messages[incomingMessageIndex].totalSize ===
+    //     room.messages[incomingMessageIndex].savedSize);
 
     const messageRelevant =
-      incomingMessageIndex === -1 ||
+      // incomingMessageIndex === -1 ||
       !messageExists ||
-      (room.messages[incomingMessageIndex].totalSize >=
-        room.messages[incomingMessageIndex].savedSize + chunkSize &&
+      (messageExists.savedSize + chunkSize <= messageExists.totalSize &&
+        // (room.messages[incomingMessageIndex].totalSize >=
+        //   room.messages[incomingMessageIndex].savedSize + chunkSize &&
         !chunkAlreadyExists);
-    // !messageExists);
 
     const receivedFullSize =
       alreadyHasEverything ||
-      (incomingMessageIndex > -1 &&
+      // (incomingMessageIndex > -1 &&
+      //   !chunkAlreadyExists &&
+      //   room.messages[incomingMessageIndex].totalSize ===
+      //     room.messages[incomingMessageIndex].savedSize + chunkSize) ||
+      // (incomingMessageIndex === -1 &&
+      chunkSize === metadata.totalSize || //)
+      (messageExists != undefined &&
         !chunkAlreadyExists &&
-        room.messages[incomingMessageIndex].totalSize ===
-          room.messages[incomingMessageIndex].savedSize + chunkSize) ||
-      (incomingMessageIndex === -1 && chunkSize === metadata.totalSize);
+        messageExists.savedSize + chunkSize === messageExists.totalSize);
 
     if (!messageRelevant) {
       return {
         date: metadata.date,
         chunkIndex: -1,
-        chunkSize: chunkSize === 0 ? 0 : incomingMessageIndex === -1 ? -1 : -2,
+        chunkSize, // incomingMessageIndex === -1 ? -1 : -2,
         receivedFullSize,
         messageAlreadyExists: messageExists != undefined,
         chunkAlreadyExists,
-        savedSize:
-          incomingMessageIndex > -1
-            ? room.messages[incomingMessageIndex].savedSize
-            : messageExists
-              ? messageExists.savedSize
-              : 0,
+        savedSize: messageExists?.savedSize ?? 0,
+        // incomingMessageIndex > -1
+        //   ? room.messages[incomingMessageIndex].savedSize
+        // :
+        // messageExists ? messageExists.savedSize : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -202,12 +208,12 @@ export const handleReceiveMessage = async (
         receivedFullSize,
         messageAlreadyExists: messageExists != undefined,
         chunkAlreadyExists,
-        savedSize:
-          incomingMessageIndex > -1
-            ? room.messages[incomingMessageIndex].savedSize
-            : messageExists
-              ? messageExists.savedSize
-              : 0,
+        savedSize: messageExists?.savedSize ?? 0,
+        // savedSize:
+        // incomingMessageIndex > -1
+        //   ? room.messages[incomingMessageIndex].savedSize
+        // :
+        // messageExists ? messageExists.savedSize : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -236,12 +242,12 @@ export const handleReceiveMessage = async (
         receivedFullSize,
         messageAlreadyExists: messageExists != undefined,
         chunkAlreadyExists,
-        savedSize:
-          incomingMessageIndex > -1
-            ? room.messages[incomingMessageIndex].savedSize
-            : messageExists
-              ? messageExists.savedSize
-              : 0,
+        savedSize: messageExists?.savedSize ?? 0,
+        // savedSize:
+        // incomingMessageIndex > -1
+        //   ? room.messages[incomingMessageIndex].savedSize
+        // :
+        // messageExists ? messageExists.savedSize : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -269,12 +275,12 @@ export const handleReceiveMessage = async (
         receivedFullSize,
         messageAlreadyExists: messageExists != undefined,
         chunkAlreadyExists,
-        savedSize:
-          incomingMessageIndex > -1
-            ? room.messages[incomingMessageIndex].savedSize
-            : messageExists
-              ? messageExists.savedSize
-              : 0,
+        savedSize: messageExists?.savedSize ?? 0,
+        // savedSize:
+        // incomingMessageIndex > -1
+        //   ? room.messages[incomingMessageIndex].savedSize
+        // :
+        // messageExists ? messageExists.savedSize : 0,
         totalSize: metadata.totalSize,
         messageType: metadata.messageType,
         filename: metadata.name,
@@ -289,12 +295,12 @@ export const handleReceiveMessage = async (
         receivedFullSize: messageExists != undefined ? receivedFullSize : false,
         messageAlreadyExists: messageExists != undefined,
         chunkAlreadyExists,
-        savedSize:
-          incomingMessageIndex > -1
-            ? room.messages[incomingMessageIndex].savedSize
-            : messageExists
-              ? messageExists.savedSize
-              : 0,
+        savedSize: messageExists?.savedSize ?? 0,
+        // savedSize:
+        // incomingMessageIndex > -1
+        //   ? room.messages[incomingMessageIndex].savedSize
+        // :
+        // messageExists ? messageExists.savedSize : 0,
         totalSize: 0,
         messageType: metadata.messageType,
         filename: metadata.name,

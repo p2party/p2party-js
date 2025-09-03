@@ -14,6 +14,7 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
+import webrtcApi from ".";
 
 export interface RTCSetDescriptionParamsExtension
   extends RTCSetDescriptionParams {
@@ -107,36 +108,43 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
   const ignoreOffer = !isPolite && offerCollision;
   if (ignoreOffer) return { data: undefined };
 
-  await epc.setRemoteDescription(description);
-  if (description.type === "offer") {
-    await epc.setLocalDescription();
-    const answer = epc.localDescription;
-    if (answer) {
-      await api.dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "description",
-            description: answer,
-            fromPeerId: keyPair.peerId,
-            fromPeerPublicKey: keyPair.publicKey,
-            toPeerId: peerId,
-            roomId,
-          } as WebSocketMessageDescriptionSend,
-        }),
-      );
+  if (epc.signalingState !== "closed") {
+    await epc.setRemoteDescription(description);
+    if (description.type === "offer") {
+      await epc.setLocalDescription();
+      const answer = epc.localDescription;
+      if (answer) {
+        await api.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "description",
+              description: answer,
+              fromPeerId: keyPair.peerId,
+              fromPeerPublicKey: keyPair.publicKey,
+              toPeerId: peerId,
+              roomId,
+            } as WebSocketMessageDescriptionSend,
+          }),
+        );
+      }
     }
+  } else {
+    await api.dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate({
+        peerId: epc.withPeerId,
+      }),
+    );
+
+    await api.dispatch(
+      signalingServerApi.endpoints.sendMessage.initiate({
+        content: {
+          type: "peers",
+          fromPeerId: keyPair.peerId,
+          roomId,
+        },
+      }),
+    );
   }
-  // else {
-  //   if (
-  //     epc.signalingState !== "stable" &&
-  //     (epc.signalingState === "have-local-offer" ||
-  //       epc.signalingState === "have-remote-offer")
-  //   ) {
-  //     await epc.setRemoteDescription(description);
-  //   } else {
-  //     await handleQueuedIceCandidates(epc);
-  //   }
-  // }
 
   if (epc.connectionState === "connected" && connectionIndex > -1) {
     await handleOpenChannel(

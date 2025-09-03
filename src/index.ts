@@ -320,7 +320,7 @@ const sendMessage = async (
 
 const readMessage = async (
   merkleRootHex: string,
-  // hashHex?: string,
+  hashHex?: string,
 ): Promise<{
   message: string | Blob;
   percentage: number;
@@ -330,8 +330,7 @@ const readMessage = async (
   extension: FileExtension;
   category: string;
 }> => {
-  if (!merkleRootHex)
-    // && !hashHex)
+  if (!merkleRootHex && !hashHex)
     return {
       message: "No message",
       percentage: 0,
@@ -349,7 +348,9 @@ const readMessage = async (
     let messageIndex = -1;
     for (let i = 0; i < roomsLen; i++) {
       messageIndex = rooms[i].messages.findLastIndex(
-        (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
+        (m) =>
+          m.merkleRootHex === merkleRootHex ||
+          (keyPair.peerId === m.fromPeerId && m.sha512Hex === hashHex),
       );
       if (messageIndex > -1) {
         roomIndex = i;
@@ -540,10 +541,9 @@ const readMessage = async (
 const cancelMessage = async (
   channelLabel: string,
   merkleRoot: string | Uint8Array,
-  // hash?: string | Uint8Array,
+  hash?: string | Uint8Array,
 ) => {
-  if (!merkleRoot)
-    // && !hash)
+  if (!merkleRoot && !hash)
     throw new Error("Need to provide either merkle root or hash");
   if (
     merkleRoot &&
@@ -557,18 +557,19 @@ const cancelMessage = async (
     merkleRoot.length !== crypto_hash_sha512_BYTES
   )
     throw new Error("Invalid Merkle root length");
-  // if (
-  //   hash &&
-  //   typeof hash === "string" &&
-  //   hash.length !== crypto_hash_sha512_BYTES * 2
-  // )
-  //   throw new Error("Invalid hash length");
-  // if (
-  //   hash &&
-  //   typeof hash !== "string" &&
-  //   hash.length !== crypto_hash_sha512_BYTES
-  // )
-  //   throw new Error("Invalid hash length");
+
+  if (
+    hash &&
+    typeof hash === "string" &&
+    hash.length !== crypto_hash_sha512_BYTES * 2
+  )
+    throw new Error("Invalid hash length");
+  if (
+    hash &&
+    typeof hash !== "string" &&
+    hash.length !== crypto_hash_sha512_BYTES
+  )
+    throw new Error("Invalid hash length");
 
   const evt = new CustomEvent(CANCEL_SEND);
   window.dispatchEvent(evt);

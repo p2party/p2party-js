@@ -11,6 +11,7 @@ import type {
   IRTCDataChannel,
   RTCDisconnectFromChannelLabelParams,
 } from "./interfaces";
+import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
 export interface RTCDisconnectFromChannelLabelParamsExtension
   extends RTCDisconnectFromChannelLabelParams {
@@ -21,7 +22,10 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
   void,
   unknown
-> = async ({ label, alsoDeleteData, dataChannels }, api) => {
+> = async (
+  { label, messageHash, alsoDeleteData, alsoSendFinishedMessage, dataChannels },
+  api,
+) => {
   const CHANNELS_LEN = dataChannels.length;
   if (CHANNELS_LEN === 0) return { data: undefined };
 
@@ -32,6 +36,13 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
       dataChannels[i].readyState !== "open"
     )
       continue;
+
+    if (
+      messageHash &&
+      alsoSendFinishedMessage &&
+      messageHash.length === crypto_hash_sha512_BYTES
+    )
+      dataChannels[i].send(messageHash.buffer as ArrayBuffer);
 
     dataChannels[i].close();
 

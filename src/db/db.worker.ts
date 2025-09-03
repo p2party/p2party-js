@@ -431,7 +431,7 @@ async function fnSetDBRoomMessageData(
         fromPeerId,
         filename,
         messageType,
-        savedSize: savedSize !== totalSize ? chunkSize + savedSize : chunkSize,
+        savedSize: savedSize < totalSize ? savedSize + chunkSize : totalSize,
         totalSize,
         channelLabel,
       });
@@ -449,7 +449,7 @@ async function fnSetDBRoomMessageData(
           ...room,
           lastMessageMerkleRoot: merkleRootHex,
           messageCount: room.messageCount + 1,
-          updatedAt: Date.now(),
+          updatedAt: timestamp, // Date.now(),
         });
       } catch (error) {
         await tx.done;

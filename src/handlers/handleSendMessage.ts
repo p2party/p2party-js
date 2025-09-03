@@ -166,12 +166,13 @@ const sendChunks = async (
       encryptedMessage,
     ])) as Uint8Array;
 
-    // const timeoutMilliseconds = await randomNumberInRange(1, 10);
-    // await wait(timeoutMilliseconds);
     if (
       channel.readyState === "open" &&
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
     ) {
+      const timeoutMilliseconds = await randomNumberInRange(1, 10);
+      await wait(timeoutMilliseconds);
+
       channel.send(message.buffer as ArrayBuffer);
     } else if (
       // channel.readyState !== "closing" &&

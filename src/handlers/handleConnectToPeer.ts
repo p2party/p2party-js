@@ -166,7 +166,7 @@ export const handleConnectToPeer = async (
           if (epc.connectionState === "closed") {
             const { signalingServer } = api.getState() as State;
             if (signalingServer.isConnected) {
-              api.dispatch(
+              await api.dispatch(
                 signalingServerApi.endpoints.sendMessage.initiate({
                   content: {
                     type: "peers",

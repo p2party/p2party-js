@@ -1,4 +1,4 @@
-// import webrtcApi from ".";
+import webrtcApi from ".";
 // import signalingServerApi from "../signalingServerApi";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -39,16 +39,18 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
           epc.makingOffer || epc.signalingState !== "stable";
         const isPolite = keyPair.peerId < epc.withPeerId;
         const ignoreOffer = !isPolite && offerCollision;
-        if (!ignoreOffer) throw error;
-        // console.error(error);
+        // if (!ignoreOffer) throw error;
 
-        // await api.dispatch(
-        //   webrtcApi.endpoints.disconnectFromPeer.initiate({
-        //     peerId: epc.withPeerId,
-        //   }),
-        // );
-        //
-        // epc.restartIce();
+        if (!ignoreOffer) {
+          // console.error(error);
+          await api.dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({
+              peerId: epc.withPeerId,
+            }),
+          );
+
+          epc.restartIce();
+        }
       }
     }
 

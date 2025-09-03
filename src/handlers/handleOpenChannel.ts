@@ -171,7 +171,7 @@ export const handleOpenChannel = (
               chunkIndex,
               receivedFullSize,
               // messageAlreadyExists,
-              // chunkAlreadyExists,
+              chunkAlreadyExists,
               // savedSize,
               totalSize,
               messageType,
@@ -184,52 +184,16 @@ export const handleOpenChannel = (
               // hashHex,
               senderPublicKey,
               receiverSecretKey,
-              rooms[roomIndex],
+              // rooms[roomIndex],
               decryptionModule,
               merkleModule,
             );
 
-            // if (receivedFullSize && messageAlreadyExists) {
-            //   // if (extChannel.readyState === "open") {
-            //   //   extChannel.send(hash.buffer as ArrayBuffer);
-            //   // }
-
-            //   await setDBRoomMessageData(
-            //     roomId,
-            //     merkleRootHex,
-            //     hashHex,
-            //     epc.withPeerId,
-            //     totalSize,
-            //     totalSize,
-            //     messageType,
-            //     filename,
-            //     channelLabel,
-            //     date.getTime(),
-            //   );
-
-            //   api.dispatch(
-            //     setMessageAllChunks({
-            //       roomId,
-            //       merkleRootHex,
-            //       sha512Hex: hashHex,
-            //       fromPeerId: epc.withPeerId,
-            //       totalSize,
-            //       messageType,
-            //       filename,
-            //       channelLabel,
-            //       timestamp: date.getTime(),
-            //       alsoSendFinishedMessage: true,
-            //     }),
-            //   );
-
-            //   // await wait(10);
-            //   // extChannel.close();
-            // } else {
             if (
               totalSize > 0 &&
               chunkHash.length === crypto_hash_sha512_BYTES &&
-              extChannel.readyState === "open" // &&
-              // !chunkAlreadyExists &&
+              extChannel.readyState === "open" &&
+              !chunkAlreadyExists // &&
               // !receivedFullSize
             ) {
               extChannel.send(chunkHash.buffer as ArrayBuffer);
@@ -252,10 +216,6 @@ export const handleOpenChannel = (
                 date.getTime(),
               );
 
-              if (extChannel.readyState === "open") {
-                extChannel.send(messageHash.buffer as ArrayBuffer);
-              }
-
               api.dispatch(
                 setMessageAllChunks({
                   roomId,
@@ -272,8 +232,8 @@ export const handleOpenChannel = (
               );
             } else if (
               chunkSize > 0 &&
-              chunkIndex > -1 // &&
-              // !chunkAlreadyExists
+              chunkIndex > -1 &&
+              !chunkAlreadyExists
             ) {
               await setDBRoomMessageData(
                 roomId,

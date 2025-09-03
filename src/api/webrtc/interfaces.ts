@@ -107,6 +107,7 @@ export interface RTCDisconnectFromPeerParams {
 
 export interface RTCDisconnectFromChannelLabelParams {
   label: string;
+  messageHash?: Uint8Array;
   alsoDeleteData?: boolean;
   alsoSendFinishedMessage?: boolean;
 }

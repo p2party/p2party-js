@@ -54,13 +54,10 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
-const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-  64 * 1024,
-  crypto_hash_sha512_BYTES,
-);
-
 const PROOF_LEN = 4 * 48 * (crypto_hash_sha512_BYTES + 1);
 const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
+
+const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -91,9 +88,7 @@ const webrtcApi = createApi({
         rtcConfig,
         peerConnections,
         dataChannels,
-        encryptionWasmMemory,
-        decryptionWasmMemory,
-        merkleWasmMemory,
+        receiveMessageWasmMemory,
       }),
     }),
 
@@ -105,8 +100,7 @@ const webrtcApi = createApi({
             peerConnections,
             iceCandidates,
             dataChannels,
-            decryptionWasmMemory,
-            merkleWasmMemory,
+            receiveMessageWasmMemory,
           },
           api,
           extraOptions,
@@ -129,8 +123,7 @@ const webrtcApi = createApi({
             ...args,
             peerConnections,
             dataChannels,
-            decryptionWasmMemory,
-            merkleWasmMemory,
+            receiveMessageWasmMemory,
           },
           api,
           extraOptions,
@@ -145,8 +138,8 @@ const webrtcApi = createApi({
             peerConnections,
             dataChannels,
             encryptionWasmMemory,
-            decryptionWasmMemory,
             merkleWasmMemory,
+            receiveMessageWasmMemory,
           },
           api,
           extraOptions,

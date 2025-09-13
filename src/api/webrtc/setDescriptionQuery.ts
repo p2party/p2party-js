@@ -21,8 +21,7 @@ export interface RTCSetDescriptionParamsExtension
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
-  decryptionWasmMemory: WebAssembly.Memory;
-  merkleWasmMemory: WebAssembly.Memory;
+  receiveMessageWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -39,19 +38,14 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
-    decryptionWasmMemory,
-    merkleWasmMemory,
+    receiveMessageWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
 
-  const decryptionModule = await libcrypto({
-    wasmMemory: decryptionWasmMemory,
-  });
-
-  const merkleModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
+  const receiveMessageModule = await libcrypto({
+    wasmMemory: receiveMessageWasmMemory,
   });
 
   const connectionIndex = peerConnections.findIndex(
@@ -79,8 +73,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         epc,
         roomId,
         dataChannels,
-        decryptionModule,
-        merkleModule,
+        receiveMessageModule,
       },
       api,
     );
@@ -153,8 +146,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         epc,
         roomId,
         dataChannels,
-        decryptionModule,
-        merkleModule,
+        receiveMessageModule,
       },
       api,
     );

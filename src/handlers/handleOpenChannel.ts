@@ -15,7 +15,6 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { randomNumberInRange } from "../cryptography/utils";
 
 import {
-  // countDBSendQueue,
   deleteDBSendQueue,
   getDBSendQueue,
   setDBRoomMessageData,
@@ -37,8 +36,7 @@ export interface OpenChannelHelperParams {
   epc: IRTCPeerConnection;
   roomId: string;
   dataChannels: IRTCDataChannel[];
-  decryptionModule: LibCrypto;
-  merkleModule: LibCrypto;
+  receiveMessageModule: LibCrypto;
 }
 
 export const KB64 = 64 * 1024;
@@ -51,8 +49,7 @@ export const handleOpenChannel = (
     epc,
     roomId,
     dataChannels,
-    decryptionModule,
-    merkleModule,
+    receiveMessageModule,
   }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
@@ -181,12 +178,9 @@ export const handleOpenChannel = (
             } = await handleReceiveMessage(
               data,
               merkleRoot,
-              // hashHex,
               senderPublicKey,
               receiverSecretKey,
-              // rooms[roomIndex],
-              decryptionModule,
-              merkleModule,
+              receiveMessageModule,
             );
 
             if (

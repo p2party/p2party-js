@@ -18,8 +18,7 @@ import type { State } from "../../store";
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  decryptionWasmMemory: WebAssembly.Memory;
-  merkleWasmMemory: WebAssembly.Memory;
+  receiveMessageWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcBaseQuery: BaseQueryFn<
@@ -35,8 +34,7 @@ const webrtcBaseQuery: BaseQueryFn<
     rtcConfig,
     peerConnections,
     dataChannels,
-    decryptionWasmMemory,
-    merkleWasmMemory,
+    receiveMessageWasmMemory,
   },
   api,
 ) => {
@@ -44,12 +42,8 @@ const webrtcBaseQuery: BaseQueryFn<
   if (peerId === keyPair.peerId)
     throw new Error("Cannot create a connection with oneself.");
 
-  const decryptionModule = await libcrypto({
-    wasmMemory: decryptionWasmMemory,
-  });
-
-  const merkleModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
+  const receiveMessageModule = await libcrypto({
+    wasmMemory: receiveMessageWasmMemory,
   });
 
   const blacklisted = await getDBPeerIsBlacklisted(peerId);
@@ -72,8 +66,7 @@ const webrtcBaseQuery: BaseQueryFn<
           epc,
           roomId,
           dataChannels,
-          decryptionModule,
-          merkleModule,
+          receiveMessageModule,
         },
         api,
       );
@@ -88,8 +81,7 @@ const webrtcBaseQuery: BaseQueryFn<
           epc,
           roomId,
           dataChannels,
-          decryptionModule,
-          merkleModule,
+          receiveMessageModule,
         },
         api,
       );

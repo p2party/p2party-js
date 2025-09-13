@@ -13,8 +13,7 @@ import type {
 export interface RTCOpenChannelParamsExtention extends RTCOpenChannelParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  decryptionWasmMemory: WebAssembly.Memory;
-  merkleWasmMemory: WebAssembly.Memory;
+  receiveMessageWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcOpenChannelQuery: BaseQueryFn<
@@ -28,19 +27,14 @@ const webrtcOpenChannelQuery: BaseQueryFn<
     withPeers,
     peerConnections,
     dataChannels,
-    decryptionWasmMemory,
-    merkleWasmMemory,
+    receiveMessageWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
 
-  const decryptionModule = await libcrypto({
-    wasmMemory: decryptionWasmMemory,
-  });
-
-  const merkleModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
+  const receiveMessageModule = await libcrypto({
+    wasmMemory: receiveMessageWasmMemory,
   });
 
   if (withPeers && withPeers.length > 0) {
@@ -60,8 +54,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
             epc,
             roomId,
             dataChannels,
-            decryptionModule,
-            merkleModule,
+            receiveMessageModule,
           },
           api,
         );
@@ -77,8 +70,7 @@ const webrtcOpenChannelQuery: BaseQueryFn<
           epc,
           roomId,
           dataChannels,
-          decryptionModule,
-          merkleModule,
+          receiveMessageModule,
         },
         api,
       );

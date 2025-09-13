@@ -148,7 +148,8 @@ _get_merkle_root_from_proof,\
 _verify_merkle_proof,\
 _keypair_from_seed,\
 _keypair_from_secret_key,\
-_argon2 \
+_argon2,\
+_receive_message \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \
 -I${libsodiumIncludePrivatePath} \

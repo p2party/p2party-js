@@ -101,7 +101,7 @@ export const splitToChunks = async (
   const name =
     messageType === MessageType.Text
       ? await generateRandomRoomUrl(256)
-      : (message as File).name.slice(0, 255);
+      : (message as File).name.substring(0, 255);
 
   const file =
     typeof message === "string" ? new TextEncoder().encode(message) : message;
@@ -130,7 +130,8 @@ export const splitToChunks = async (
         ? ((file as Uint8Array).buffer as ArrayBuffer)
         : await (file as File).arrayBuffer()
       : typeof message === "string"
-        ? (file as Uint8Array).slice(0, 10 * 1024 * 1024).buffer
+        ? ((file as Uint8Array).subarray(0, 10 * 1024 * 1024)
+            .buffer as ArrayBuffer)
         : await (file as File).slice(0, 10 * 1024 * 1024).arrayBuffer(),
   );
   const sha512 = new Uint8Array(hashArrayBuffer);

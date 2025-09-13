@@ -54,7 +54,7 @@ import { signalingServerSelector } from "./reducers/signalingServerSlice";
 import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
-import { uint8ArrayToHex } from "./utils/uint8array";
+import { hexToUint8Array, uint8ArrayToHex } from "./utils/uint8array";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
@@ -372,23 +372,26 @@ const readMessage = async (
                 100,
             );
 
-      // if (
-      //   percentage === 100 &&
-      //   rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
-      // ) {
-      //   const label = await compileChannelMessageLabel(
-      //     rooms[roomIndex].messages[messageIndex].channelLabel,
-      //     rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      //     rooms[roomIndex].messages[messageIndex].sha512Hex,
-      //   );
-      //
-      //   await store.dispatch(
-      //     webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      //       label,
-      //       alsoDeleteData: false,
-      //     }),
-      //   );
-      // }
+      if (
+        percentage === 100 &&
+        rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
+      ) {
+        const label = await compileChannelMessageLabel(
+          rooms[roomIndex].messages[messageIndex].channelLabel,
+          rooms[roomIndex].messages[messageIndex].merkleRootHex,
+        );
+
+        await store.dispatch(
+          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+            label,
+            messageHash: hexToUint8Array(
+              rooms[roomIndex].messages[messageIndex].sha512Hex,
+            ),
+            alsoDeleteData: false,
+            alsoSendFinishedMessage: true,
+          }),
+        );
+      }
 
       const chunks =
         percentage === 100
@@ -412,7 +415,8 @@ const readMessage = async (
 
         if (messageType === MessageType.Text) {
           return {
-            message: await data.text(),
+            message:
+              dataChunks.length > 0 ? await data.text() : "Incoming message...",
             percentage,
             size: rooms[roomIndex].messages[messageIndex].totalSize,
             filename: "",
@@ -460,7 +464,9 @@ const readMessage = async (
           await store.dispatch(
             webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
               label,
+              messageHash: hexToUint8Array(msg.hash),
               alsoDeleteData: false,
+              alsoSendFinishedMessage: true,
             }),
           );
         }

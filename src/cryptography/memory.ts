@@ -14,6 +14,11 @@ import {
   crypto_pwhash_argon2id_SALTBYTES,
 } from "./interfaces";
 
+export const KB64 = 64 * 1024;
+export const PROOF_LEN =
+  4 + // length of the proof
+  48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
+
 /**
  * Webassembly Memory is separated into 64kb contiguous memory "pages".
  * This function takes memory length in bytes and converts it to pages.
@@ -176,6 +181,37 @@ const argon2Memory = (mnemonicLen: number): WebAssembly.Memory => {
   return new WebAssembly.Memory({ initial: pages, maximum: pages });
 };
 
+const getReceiveMessageMemory = () => {
+  const verifySignatureMemoryLen =
+    (crypto_sign_ed25519_PUBLICKEYBYTES +
+      crypto_sign_ed25519_BYTES +
+      crypto_sign_ed25519_PUBLICKEYBYTES) *
+    Uint8Array.BYTES_PER_ELEMENT;
+  const encryptedLen =
+    KB64 - crypto_sign_ed25519_PUBLICKEYBYTES - crypto_sign_ed25519_BYTES;
+  const decryptedLen = getDecryptedLen(encryptedLen);
+  const decryptMemoryLen =
+    (encryptedLen +
+      crypto_sign_ed25519_SECRETKEYBYTES +
+      crypto_hash_sha512_BYTES +
+      decryptedLen +
+      2 * crypto_box_x25519_PUBLICKEYBYTES + // malloc'd
+      crypto_box_x25519_NONCEBYTES + // malloc'd
+      crypto_box_x25519_SECRETKEYBYTES) * // malloc'd
+    Uint8Array.BYTES_PER_ELEMENT;
+  const verifyMerkleProofLen =
+    PROOF_LEN * Uint8Array.BYTES_PER_ELEMENT + 4 * crypto_hash_sha512_BYTES;
+  const memoryLen =
+    verifySignatureMemoryLen + decryptMemoryLen + verifyMerkleProofLen;
+
+  const memoryPages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({
+    initial: memoryPages,
+    maximum: memoryPages,
+  });
+};
+
 export default {
   newKeyPairMemory,
   keyPairFromSeedMemory,
@@ -188,4 +224,5 @@ export default {
   getMerkleProofMemory,
   verifyMerkleProofMemory,
   argon2Memory,
+  getReceiveMessageMemory,
 };

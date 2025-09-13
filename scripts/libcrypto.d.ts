@@ -81,6 +81,15 @@ export interface LibCrypto extends EmscriptenModule {
     mnemonic: number,
     salt: number,
   ): number;
+
+  // P2Party
+  _receive_message(
+    decrypted: number, // Uint8Array.byteOffset
+    message: number, // Uint8Array.byteOffset
+    merkle_root: number, // Uint8Array.byteOffset
+    sender_public_key: number, // Uint8Array.byteOffset
+    receiver_secret_key: number, // Uint8Array.byteOffset
+  ): number;
 }
 
 declare const libcrypto: EmscriptenModuleFactory<LibCrypto>;

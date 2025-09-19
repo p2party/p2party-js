@@ -16,12 +16,6 @@ const unsigned int METADATA_LEN = 8 +                        // schemaVersion
                                   8 +                        // chunkStartIndex
                                   8 +                        // chunkEndIndex
                                   8;                         // chunkIndex
-const unsigned int ENCRYPTED_LEN = MESSAGE_LEN
-                                   - crypto_sign_ed25519_PUBLICKEYBYTES
-                                   - crypto_sign_ed25519_BYTES;
-const unsigned int DECRYPTED_LEN = ENCRYPTED_LEN
-                                   - crypto_aead_chacha20poly1305_ietf_NPUBBYTES
-                                   - crypto_aead_chacha20poly1305_ietf_ABYTES;
 const unsigned int PROOF_LEN
     = 4 + // length of the proof
       48
@@ -34,10 +28,20 @@ const unsigned int IMPORTANT_DATA_LEN
       PROOF_LEN +                          // Merkle proof max len of 3kb
       crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
       crypto_aead_chacha20poly1305_ietf_ABYTES; // Encrypted message auth tag
-const unsigned int CHUNK_LEN
-    = MESSAGE_LEN - // 64kb max message size on RTCDataChannel
-                    // crypto_hash_sha512_BYTES - // merkle root of message
-      IMPORTANT_DATA_LEN;
+const unsigned int CHUNK_LEN = MESSAGE_LEN - IMPORTANT_DATA_LEN;
+const unsigned int DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
+const unsigned int ENCRYPTED_LEN
+    = DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_NPUBBYTES
+      +                                         // Encrypted message nonce
+      crypto_aead_chacha20poly1305_ietf_ABYTES; // Encrypted message auth tag
+// const unsigned int ENCRYPTED_LEN = MESSAGE_LEN
+//                                    - crypto_sign_ed25519_PUBLICKEYBYTES
+//                                    - crypto_sign_ed25519_BYTES;
+// const unsigned int DECRYPTED_LEN = ENCRYPTED_LEN
+//                                    -
+//                                    crypto_aead_chacha20poly1305_ietf_NPUBBYTES
+//                                    -
+//                                    crypto_aead_chacha20poly1305_ietf_ABYTES;
 
 typedef struct
 {

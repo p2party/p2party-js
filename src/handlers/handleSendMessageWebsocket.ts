@@ -4,12 +4,13 @@ import { setMessage } from "../reducers/roomSlice";
 import { deleteDBChunk, getDBNewChunk } from "../db/api";
 
 import { splitToChunks } from "../utils/splitToChunks";
-import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
+import { deserializeMetadata } from "../utils/metadata";
 import {
   uint8ArrayToHex,
   hexToUint8Array,
   concatUint8Arrays,
 } from "../utils/uint8array";
+import { METADATA_LEN } from "../utils/constants";
 
 import { fisherYatesShuffle } from "../cryptography/utils";
 import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
@@ -47,7 +48,7 @@ export const handleSendMessageWebsocket = async (
       totalSize,
       totalChunks,
     } = // , unencryptedChunks } =
-      await splitToChunks(data, api, label, rooms[roomIndex]); // db);
+      await splitToChunks(data, api, label, rooms[roomIndex], encryptionModule); // db);
 
     const PEERS_LEN = dataChannels[channelIndex].peerIds.length;
     for (let i = 0; i < PEERS_LEN; i++) {

@@ -1,8 +1,15 @@
+import type { LibCrypto } from "../../cryptography/libcrypto";
+
+export interface IRTCPeerConnectionRoomId {
+  roomId: string;
+  receiveMessageModule: LibCrypto;
+}
+
 export interface IRTCPeerConnection extends RTCPeerConnection {
   withPeerId: string;
   withPeerPublicKey: string;
   makingOffer: boolean;
-  roomIds: string[];
+  rooms: IRTCPeerConnectionRoomId[];
   iceCandidates: RTCIceCandidate[];
 }
 

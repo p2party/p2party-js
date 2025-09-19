@@ -1,6 +1,9 @@
+import webrtcApi from ".";
+
 import signalingServerApi from "../signalingServerApi";
 
-import libcrypto from "../../cryptography/libcrypto";
+// import cryptoMemory from "../../cryptography/memory";
+// import libcrypto from "../../cryptography/libcrypto";
 
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
@@ -14,14 +17,15 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
-import webrtcApi from ".";
 
 export interface RTCSetDescriptionParamsExtension
   extends RTCSetDescriptionParams {
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
-  receiveMessageWasmMemory: WebAssembly.Memory;
+  // receiveMessageWasmMemory: WebAssembly.Memory;
+  // decryptionWasmMemory: WebAssembly.Memory;
+  // merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -38,15 +42,21 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
-    receiveMessageWasmMemory,
+    // receiveMessageWasmMemory,
+    // decryptionWasmMemory,
+    // merkleWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
 
-  const receiveMessageModule = await libcrypto({
-    wasmMemory: receiveMessageWasmMemory,
-  });
+  // const decryptionModule = await libcrypto({
+  //   wasmMemory: decryptionWasmMemory,
+  // });
+  //
+  // const merkleModule = await libcrypto({
+  //   wasmMemory: merkleWasmMemory,
+  // });
 
   const connectionIndex = peerConnections.findIndex(
     (peer) => peer.withPeerId === peerId,
@@ -66,18 +76,25 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           api,
         );
 
-  epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-    await handleOpenChannel(
-      {
-        channel: e.channel,
-        epc,
-        roomId,
-        dataChannels,
-        receiveMessageModule,
-      },
-      api,
-    );
-  };
+  if (
+    connectionIndex === -1 ||
+    peerConnections[connectionIndex].ondatachannel == undefined
+  ) {
+    epc.ondatachannel = async (e: RTCDataChannelEvent) => {
+      await handleOpenChannel(
+        {
+          channel: e.channel,
+          epc,
+          roomId,
+          dataChannels,
+          // receiveMessageModule,
+          // decryptionModule,
+          // merkleModule,
+        },
+        api,
+      );
+    };
+  }
 
   const ICE_CANDIDATES_LEN = iceCandidates.length;
   const purgeCandidates: number[] = [];
@@ -146,7 +163,9 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         epc,
         roomId,
         dataChannels,
-        receiveMessageModule,
+        // receiveMessageModule,
+        // decryptionModule,
+        // merkleModule,
       },
       api,
     );

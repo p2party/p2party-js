@@ -1,6 +1,7 @@
 import { getMessageType, MessageType } from "./messageTypes";
 import { uint8ArrayToHex } from "./uint8array";
-import { serializeMetadata, METADATA_LEN } from "./metadata";
+import { serializeMetadata } from "./metadata";
+import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./constants";
 
 import {
   setDBNewChunk,
@@ -10,39 +11,17 @@ import {
 
 import { setMessage, deleteMessage } from "../reducers/roomSlice";
 
-import cryptoMemory from "../cryptography/memory";
-import libcrypto from "../cryptography/libcrypto";
 import { getMerkleRoot } from "../cryptography/merkle";
 import {
   generateRandomRoomUrl,
   randomNumberInRange,
 } from "../cryptography/utils";
-import {
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
-  crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-} from "../cryptography/interfaces";
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 import type { Room } from "../reducers/roomSlice";
-
-export const PROOF_LEN =
-  4 + // length of the proof
-  48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-export const IMPORTANT_DATA_LEN =
-  crypto_sign_ed25519_PUBLICKEYBYTES + // ephemeral pk
-  crypto_sign_ed25519_BYTES + // pk signed with identity sk
-  METADATA_LEN + // fixed
-  PROOF_LEN + // Merkle proof max len of 3kb
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
-  crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
-export const CHUNK_LEN =
-  64 * 1024 - // 64kb max message size on RTCDataChannel
-  // crypto_hash_sha512_BYTES - // merkle root of message
-  IMPORTANT_DATA_LEN;
+import type { LibCrypto } from "../cryptography/libcrypto";
 
 export const metadataSchemaVersions = [1];
 
@@ -64,8 +43,7 @@ export const splitToChunks = async (
   api: BaseQueryApi,
   label: string,
   room: Room,
-  // roomId: string,
-  // db: IDBPDatabase<RepoSchema>,
+  merkleModule: LibCrypto,
   minChunks = 1,
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.9,
@@ -306,12 +284,12 @@ export const splitToChunks = async (
     };
   }
 
-  const merkleWasmMemory = cryptoMemory.getMerkleProofMemory(totalChunks);
-  const merkleCryptoModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
-  });
+  // const merkleWasmMemory = cryptoMemory.getMerkleRootMemory(totalChunks);
+  // const merkleCryptoModule = await libcrypto({
+  //   wasmMemory: merkleWasmMemory,
+  // });
 
-  const merkleRoot = await getMerkleRoot(chunkHashes, merkleCryptoModule);
+  const merkleRoot = await getMerkleRoot(chunkHashes, merkleModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
   try {

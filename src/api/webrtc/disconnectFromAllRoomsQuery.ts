@@ -59,19 +59,19 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
       continue;
 
     if (exceptionRoomIds && exceptionRoomIds.length > 0) {
-      const PEER_ROOMS_LEN = peerConnections[i].roomIds.length;
+      const PEER_ROOMS_LEN = peerConnections[i].rooms.length;
       const indexesToSplice: number[] = [];
       for (j = 0; j < PEER_ROOMS_LEN; j++) {
-        if (!exceptionRoomIds.includes(peerConnections[i].roomIds[j]))
+        if (!exceptionRoomIds.includes(peerConnections[i].rooms[j].roomId))
           indexesToSplice.push(j);
       }
 
       const INDEXES_TO_SPLICE_LEN = indexesToSplice.length;
       for (j = 0; j < INDEXES_TO_SPLICE_LEN; j++) {
-        peerConnections[i].roomIds.splice(indexesToSplice[j], 1);
+        peerConnections[i].rooms.splice(indexesToSplice[j], 1);
       }
 
-      if (peerConnections[i].roomIds.length === 0)
+      if (peerConnections[i].rooms.length === 0)
         await api.dispatch(
           webrtcApi.endpoints.disconnectFromPeer.initiate({
             peerId: peerConnections[i].withPeerId,

@@ -80,10 +80,10 @@ const withJS = ` \
 
 const memory = `\
 -s IMPORTED_MEMORY=1 \
--s ALLOW_MEMORY_GROWTH=1 \
+-s ALLOW_MEMORY_GROWTH=0 \
+-s ABORTING_MALLOC=1 \
 -s INITIAL_MEMORY=2mb \
 -s STACK_SIZE=512kb \
--s MEMORY_GROWTH_LINEAR_STEP=64kb \
 -s GLOBAL_BASE=4096 \
 `;
 
@@ -105,6 +105,8 @@ emcc \
 -s STRICT \
 -s SINGLE_FILE=1 \
 -s FILESYSTEM=0 \
+-s SAFE_HEAP=1 \
+-s CHECK_NULL_WRITES=1 \
 -s ENVIRONMENT=worker \
 -s INVOKE_RUN=0 \
 -s EXIT_RUNTIME=1 \
@@ -127,6 +129,7 @@ const testing =
 --profiling \
 -fsanitize=undefined \
 -s ASSERTIONS=2 \
+-s SAFE_HEAP_LOG=1 \
 -s RUNTIME_DEBUG=1 \
 -s STACK_OVERFLOW_CHECK=2 \
 `;

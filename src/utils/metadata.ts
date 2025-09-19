@@ -1,4 +1,5 @@
 // import { MessageType } from "./messageTypes";
+import { METADATA_LEN } from "./constants";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -16,17 +17,6 @@ export interface BasicMetadata {
 export interface Metadata extends BasicMetadata {
   chunkIndex: number; // 8 bytes, uint64
 }
-
-export const METADATA_LEN =
-  8 + // schemaVersion (8 bytes)
-  1 + // messageType (1 byte)
-  crypto_hash_sha512_BYTES + // hash
-  8 + // totalSize (8 bytes)
-  8 + // date (8 bytes)
-  256 + // name (256 bytes)
-  8 + // chunkStartIndex (8 bytes)
-  8 + // chunkEndIndex (8 bytes)
-  8; // chunkIndex (8 bytes)
 
 export const formatSize = (size: number): string => {
   if (size >= 1 << 30) {

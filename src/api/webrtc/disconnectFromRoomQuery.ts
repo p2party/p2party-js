@@ -45,22 +45,24 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
   for (let i = 0; i < PEERS_LEN; i++) {
     if (
       !peerConnections[i] ||
-      !peerConnections[i].roomIds.includes(roomId) ||
+      // !peerConnections[i].roomIds.includes(roomId) ||
       peerConnections[i].connectionState !== "connected"
     )
       continue;
 
-    const peerIndex = peerConnections[i].roomIds.findIndex((p) => p === roomId);
-    if (peerIndex > -1) {
-      peerConnections[i].roomIds.splice(peerIndex, 1);
+    const peerIndex = peerConnections[i].rooms.findIndex(
+      (p) => p.roomId === roomId,
+    );
+    if (peerIndex === -1) continue;
 
-      if (peerConnections[i].roomIds.length === 0) {
-        await api.dispatch(
-          webrtcApi.endpoints.disconnectFromPeer.initiate({
-            peerId: peerConnections[i].withPeerId,
-          }),
-        );
-      }
+    peerConnections[i].rooms.splice(peerIndex, 1);
+
+    if (peerConnections[i].rooms.length === 0) {
+      await api.dispatch(
+        webrtcApi.endpoints.disconnectFromPeer.initiate({
+          peerId: peerConnections[i].withPeerId,
+        }),
+      );
     }
   }
 

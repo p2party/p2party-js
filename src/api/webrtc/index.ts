@@ -12,12 +12,10 @@ import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
 
+import { CHUNK_LEN, PROOF_LEN } from "../../utils/constants";
+
 import cryptoMemory from "../../cryptography/memory";
-import {
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
-  crypto_hash_sha512_BYTES,
-} from "../../cryptography/interfaces";
+import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
 import type {
   IRTCPeerConnection,
@@ -40,24 +38,19 @@ const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
 
-export const rtcDataChannelMessageLimit = 64 * 1024;
-export const messageLen =
-  rtcDataChannelMessageLimit -
-  crypto_hash_sha512_BYTES - // merkle root
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
-  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
-export const encryptedLen =
-  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
-
 const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-  messageLen,
+  CHUNK_LEN,
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
-const PROOF_LEN = 4 * 48 * (crypto_hash_sha512_BYTES + 1);
-const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
+// const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
+//   64 * 1024,
+//   crypto_hash_sha512_BYTES,
+// );
 
-const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
+// const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
+
+const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -88,7 +81,10 @@ const webrtcApi = createApi({
         rtcConfig,
         peerConnections,
         dataChannels,
-        receiveMessageWasmMemory,
+        // receiveMessageWasmMemory,
+        // encryptionWasmMemory,
+        // decryptionWasmMemory,
+        // merkleWasmMemory,
       }),
     }),
 
@@ -100,7 +96,9 @@ const webrtcApi = createApi({
             peerConnections,
             iceCandidates,
             dataChannels,
-            receiveMessageWasmMemory,
+            // receiveMessageWasmMemory,
+            // decryptionWasmMemory,
+            // merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -123,7 +121,9 @@ const webrtcApi = createApi({
             ...args,
             peerConnections,
             dataChannels,
-            receiveMessageWasmMemory,
+            // receiveMessageWasmMemory,
+            // decryptionWasmMemory,
+            // merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -137,9 +137,10 @@ const webrtcApi = createApi({
             ...args,
             peerConnections,
             dataChannels,
+            // receiveMessageWasmMemory,
             encryptionWasmMemory,
+            // decryptionWasmMemory,
             merkleWasmMemory,
-            receiveMessageWasmMemory,
           },
           api,
           extraOptions,

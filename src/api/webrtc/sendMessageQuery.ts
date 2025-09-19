@@ -12,9 +12,10 @@ import type {
 export interface RTCChannelMessageParamsExtension extends RTCSendMessageParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
+  // receiveMessageWasmMemory: WebAssembly.Memory;
   encryptionWasmMemory: WebAssembly.Memory;
+  // decryptionWasmMemory: WebAssembly.Memory;
   merkleWasmMemory: WebAssembly.Memory;
-  receiveMessageWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcMessageQuery: BaseQueryFn<
@@ -28,9 +29,10 @@ const webrtcMessageQuery: BaseQueryFn<
     roomId,
     peerConnections,
     dataChannels,
+    // receiveMessageWasmMemory,
     encryptionWasmMemory,
+    // decryptionWasmMemory,
     merkleWasmMemory,
-    receiveMessageWasmMemory,
     minChunks,
     chunkSize,
     percentageFilledChunk,
@@ -38,16 +40,20 @@ const webrtcMessageQuery: BaseQueryFn<
   },
   api,
 ) => {
+  // const receiveMessageModule = await libcrypto({
+  //   wasmMemory: receiveMessageWasmMemory,
+  // });
+
   const encryptionModule = await libcrypto({
     wasmMemory: encryptionWasmMemory,
   });
 
+  // const decryptionModule = await libcrypto({
+  //   wasmMemory: decryptionWasmMemory,
+  // });
+
   const merkleModule = await libcrypto({
     wasmMemory: merkleWasmMemory,
-  });
-
-  const receiveMessageModule = await libcrypto({
-    wasmMemory: receiveMessageWasmMemory,
   });
 
   await handleSendMessage(
@@ -57,9 +63,10 @@ const webrtcMessageQuery: BaseQueryFn<
     roomId,
     peerConnections,
     dataChannels,
+    // receiveMessageModule,
     encryptionModule,
+    // decryptionModule,
     merkleModule,
-    receiveMessageModule,
     minChunks,
     chunkSize,
     percentageFilledChunk,

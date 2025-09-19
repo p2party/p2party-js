@@ -1,26 +1,26 @@
 import { isUUID, isHexadecimal } from "class-validator";
 
 import handleChallenge from "./handleChallenge";
-import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
+// import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
 // import { handleReceiveMessage } from "./handleReceiveMessage";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
 
-import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
+import {
+  setRoom,
+  // setPeer, setChannel
+} from "../reducers/roomSlice";
 import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
 
-// import { hexToUint8Array } from "../utils/uint8array";
-// import { PROOF_LEN } from "../utils/splitToChunks";
-
-import {
-  crypto_hash_sha512_BYTES,
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
-} from "../cryptography/interfaces";
-
-import libcrypto from "../cryptography/libcrypto";
-import cryptoMemory from "../cryptography/memory";
+// import {
+//   crypto_hash_sha512_BYTES,
+//   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+//   crypto_box_poly1305_AUTHTAGBYTES,
+// } from "../cryptography/interfaces";
+//
+// import libcrypto from "../cryptography/libcrypto";
+// import cryptoMemory from "../cryptography/memory";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -39,18 +39,17 @@ import type {
 } from "../utils/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
 
-export const rtcDataChannelMessageLimit = 64 * 1024; // limit from RTCDataChannel is 64kb
-export const messageLen =
-  rtcDataChannelMessageLimit -
-  crypto_hash_sha512_BYTES - // merkle root
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
-  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
-export const encryptedLen =
-  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
-const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-  messageLen,
-  crypto_hash_sha512_BYTES, // additional data is the merkle root
-);
+// export const messageLen =
+//   rtcDataChannelMessageLimit -
+//   crypto_hash_sha512_BYTES - // merkle root
+//   crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
+//   crypto_box_poly1305_AUTHTAGBYTES; // auth tag
+// export const encryptedLen =
+//   rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
+// const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
+//   messageLen,
+//   crypto_hash_sha512_BYTES, // additional data is the merkle root
+// );
 
 // const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
 //   100 * 64 * 1024,
@@ -339,54 +338,54 @@ const handleWebSocketMessage = async (
       //   break;
       // }
 
-      case "connection": {
-        const { keyPair } = api.getState() as State;
-        if (
-          isUUID(keyPair.peerId) &&
-          isHexadecimal(keyPair.challenge) &&
-          isHexadecimal(keyPair.signature) &&
-          // keyPair.signature.length === 1024 &&
-          keyPair.signature.length === 128 &&
-          keyPair.challenge.length === 64 &&
-          isUUID(message.fromPeerId) &&
-          message.fromPeerPublicKey.length === 64 &&
-          isUUID(message.roomId)
-        ) {
-          api.dispatch(
-            setPeer({
-              roomId: message.roomId,
-              peerId: message.fromPeerId,
-              peerPublicKey: message.fromPeerPublicKey,
-            }),
-          );
-
-          const encryptionModule = await libcrypto({
-            wasmMemory: encryptionWasmMemory,
-          });
-
-          const CHANNELS_LEN = message.labels.length;
-          for (let i = 0; i < CHANNELS_LEN; i++) {
-            api.dispatch(
-              setChannel({
-                roomId: message.roomId,
-                label: message.labels[i],
-                peerId: message.fromPeerId,
-              }),
-            );
-
-            const data = `Connected with ${keyPair.peerId} on channel ${message.labels[i]}`;
-            await handleSendMessageWebsocket(
-              data as string | File,
-              message.roomId,
-              encryptionModule,
-              api,
-              message.labels[i],
-            );
-          }
-        }
-
-        break;
-      }
+      // case "connection": {
+      //   const { keyPair } = api.getState() as State;
+      //   if (
+      //     isUUID(keyPair.peerId) &&
+      //     isHexadecimal(keyPair.challenge) &&
+      //     isHexadecimal(keyPair.signature) &&
+      //     // keyPair.signature.length === 1024 &&
+      //     keyPair.signature.length === 128 &&
+      //     keyPair.challenge.length === 64 &&
+      //     isUUID(message.fromPeerId) &&
+      //     message.fromPeerPublicKey.length === 64 &&
+      //     isUUID(message.roomId)
+      //   ) {
+      //     api.dispatch(
+      //       setPeer({
+      //         roomId: message.roomId,
+      //         peerId: message.fromPeerId,
+      //         peerPublicKey: message.fromPeerPublicKey,
+      //       }),
+      //     );
+      //
+      //     const encryptionModule = await libcrypto({
+      //       wasmMemory: encryptionWasmMemory,
+      //     });
+      //
+      //     const CHANNELS_LEN = message.labels.length;
+      //     for (let i = 0; i < CHANNELS_LEN; i++) {
+      //       api.dispatch(
+      //         setChannel({
+      //           roomId: message.roomId,
+      //           label: message.labels[i],
+      //           peerId: message.fromPeerId,
+      //         }),
+      //       );
+      //
+      //       const data = `Connected with ${keyPair.peerId} on channel ${message.labels[i]}`;
+      //       await handleSendMessageWebsocket(
+      //         data as string | File,
+      //         message.roomId,
+      //         encryptionModule,
+      //         api,
+      //         message.labels[i],
+      //       );
+      //     }
+      //   }
+      //
+      //   break;
+      // }
 
       case "error": {
         console.error(message);

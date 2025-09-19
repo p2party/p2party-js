@@ -1,31 +1,19 @@
-import cryptoMemory from "../cryptography/memory";
-import libcrypto from "../cryptography/libcrypto";
-import {
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
-  crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-  crypto_sign_ed25519_SECRETKEYBYTES,
-} from "../cryptography/interfaces";
-
-import { KB64 } from "./handleOpenChannel";
-
-import { deserializeMetadata, METADATA_LEN } from "../utils/metadata";
+import { deserializeMetadata } from "../utils/metadata";
 import { getMimeType, MessageType } from "../utils/messageTypes";
-import { PROOF_LEN } from "../utils/splitToChunks";
 import { uint8ArrayToHex } from "../utils/uint8array";
+import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 
 import { existsDBChunk, getDBMessageData, setDBChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 
 export const handleReceiveMessage = async (
-  data: ArrayBuffer,
-  merkleRoot: Uint8Array,
-  senderPublicKey: Uint8Array,
-  receiverSecretKey: Uint8Array,
-  module?: LibCrypto,
+  decrypted: Uint8Array,
+  messageArray: Uint8Array,
+  merkleRootArray: Uint8Array,
+  senderPublicKeyArray: Uint8Array,
+  receiverSecretKeyArray: Uint8Array,
+  module: LibCrypto,
 ): Promise<{
   date: Date;
   chunkSize: number;
@@ -40,80 +28,13 @@ export const handleReceiveMessage = async (
   messageType: number; // MessageType;
   filename: string;
 }> => {
-  const message = new Uint8Array(data);
-  if (message.length !== KB64)
-    throw new Error(`Message size should be ${String(KB64)} bytes`);
-  if (merkleRoot.length !== crypto_hash_sha512_BYTES)
-    throw new Error(
-      `Merkle root size should be ${String(crypto_hash_sha512_BYTES)} bytes`,
-    );
-  if (senderPublicKey.length !== crypto_sign_ed25519_PUBLICKEYBYTES)
-    throw new Error(
-      `Sender public key size should be ${String(crypto_sign_ed25519_PUBLICKEYBYTES)} bytes`,
-    );
-  if (receiverSecretKey.length !== crypto_sign_ed25519_SECRETKEYBYTES)
-    throw new Error(
-      `Receiver secret key size should be ${String(crypto_sign_ed25519_SECRETKEYBYTES)} bytes`,
-    );
-
-  const wasmMemory =
-    module?.wasmMemory ?? cryptoMemory.getReceiveMessageMemory();
-  const cryptoModule =
-    module ??
-    (await libcrypto({
-      wasmMemory,
-    }));
-
-  const ENCRYPTED_LEN =
-    KB64 - crypto_sign_ed25519_PUBLICKEYBYTES - crypto_sign_ed25519_BYTES;
-  const DECRYPTED_LEN =
-    ENCRYPTED_LEN -
-    crypto_aead_chacha20poly1305_ietf_NPUBBYTES -
-    crypto_box_poly1305_AUTHTAGBYTES;
-
-  const ptr1 = cryptoModule._malloc(DECRYPTED_LEN);
-  const decrypted = new Uint8Array(wasmMemory.buffer, ptr1, DECRYPTED_LEN);
-
-  const ptr2 = cryptoModule._malloc(KB64);
-  const messageArray = new Uint8Array(wasmMemory.buffer, ptr2, KB64);
-  messageArray.set(message);
-
-  const ptr3 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
-  const merkleRootArray = new Uint8Array(
-    wasmMemory.buffer,
-    ptr3,
-    crypto_hash_sha512_BYTES,
-  );
-  merkleRootArray.set(merkleRoot);
-
-  const ptr4 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
-  const senderPublicKeyArray = new Uint8Array(
-    wasmMemory.buffer,
-    ptr4,
-    crypto_sign_ed25519_PUBLICKEYBYTES,
-  );
-  senderPublicKeyArray.set(senderPublicKey);
-
-  const ptr5 = cryptoModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
-  const receiverSecretKeyArray = new Uint8Array(
-    wasmMemory.buffer,
-    ptr5,
-    crypto_sign_ed25519_SECRETKEYBYTES,
-  );
-  receiverSecretKeyArray.set(receiverSecretKey);
-
-  const result = cryptoModule._receive_message(
+  const result = module._receive_message(
     decrypted.byteOffset,
     messageArray.byteOffset,
     merkleRootArray.byteOffset,
     senderPublicKeyArray.byteOffset,
     receiverSecretKeyArray.byteOffset,
   );
-
-  cryptoModule._free(ptr2);
-  cryptoModule._free(ptr3);
-  cryptoModule._free(ptr4);
-  cryptoModule._free(ptr5);
 
   switch (result) {
     case 0: {
@@ -122,19 +43,17 @@ export const handleReceiveMessage = async (
       const chunkSize =
         metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize
           ? 0
-          : metadata.chunkEndIndex - metadata.chunkStartIndex > KB64
+          : metadata.chunkEndIndex - metadata.chunkStartIndex > MESSAGE_LEN
             ? 0
             : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
       const chunkHashBuffer = await window.crypto.subtle.digest(
         "SHA-512",
-        decrypted.subarray(METADATA_LEN + PROOF_LEN),
+        decrypted.subarray(METADATA_LEN + PROOF_LEN) as Uint8Array<ArrayBuffer>,
       );
       const chunkHash = new Uint8Array(chunkHashBuffer);
 
-      if (chunkSize === 0) {
-        cryptoModule._free(ptr1);
-
+      if (chunkSize === 0)
         return {
           date: metadata.date,
           chunkIndex: -1,
@@ -149,16 +68,19 @@ export const handleReceiveMessage = async (
           chunkHash,
           messageHash: metadata.hash,
         };
-      }
 
-      const merkleRootHex = uint8ArrayToHex(merkleRoot);
+      // const merkleRootHex = uint8ArrayToHex(merkleRoot);
+      const merkleRootHex = uint8ArrayToHex(
+        // Uint8Array.from([...merkleRootArray]),
+        merkleRootArray,
+      );
 
       const chunkAlreadyExists = await existsDBChunk(
         merkleRootHex,
         metadata.chunkIndex,
       );
 
-      const messageExists = await getDBMessageData(merkleRootHex); //, hashHex);
+      const messageExists = await getDBMessageData(merkleRootHex);
 
       const alreadyHasEverything =
         messageExists != undefined &&
@@ -188,7 +110,7 @@ export const handleReceiveMessage = async (
           messageExists.savedSize + chunkSize === messageExists.totalSize);
 
       if (!messageRelevant) {
-        cryptoModule._free(ptr1);
+        // cryptoModule._free(ptr1);
 
         return {
           date: metadata.date,
@@ -214,30 +136,17 @@ export const handleReceiveMessage = async (
 
       try {
         if (!chunkAlreadyExists) {
-          const realChunk = new Uint8Array(
-            metadata.chunkEndIndex - metadata.chunkStartIndex,
-          );
-          realChunk.set([
-            ...decrypted.slice(
-              METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
-              METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
-            ),
-          ]);
-          // const realChunk = decrypted.subarray(
-          //   METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
-          //   METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
-          // );
-
           await setDBChunk({
             merkleRoot: merkleRootHex,
             hash: uint8ArrayToHex(metadata.hash),
             chunkIndex: metadata.chunkIndex,
-            data: realChunk.buffer as ArrayBuffer,
+            data: decrypted.slice(
+              METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
+              METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
+            ).buffer as ArrayBuffer,
             mimeType,
           });
         }
-
-        cryptoModule._free(ptr1);
 
         return {
           date: metadata.date,
@@ -259,7 +168,6 @@ export const handleReceiveMessage = async (
           messageHash: metadata.hash,
         };
       } catch (error) {
-        cryptoModule._free(ptr1);
         return {
           date: metadata.date,
           chunkIndex: metadata.chunkIndex,
@@ -284,7 +192,6 @@ export const handleReceiveMessage = async (
     }
 
     case -1: {
-      cryptoModule._free(ptr1);
       console.error("Message signature is wrong");
 
       return {
@@ -304,7 +211,6 @@ export const handleReceiveMessage = async (
     }
 
     case -2: {
-      cryptoModule._free(ptr1);
       console.error("Could not decrypt message");
 
       return {
@@ -324,7 +230,6 @@ export const handleReceiveMessage = async (
     }
 
     case -3: {
-      cryptoModule._free(ptr1);
       console.error("Merkle proof length is wrong");
 
       return {
@@ -344,7 +249,6 @@ export const handleReceiveMessage = async (
     }
 
     case -4: {
-      cryptoModule._free(ptr1);
       console.error("Could not allocate memory for hash");
 
       return {
@@ -364,7 +268,6 @@ export const handleReceiveMessage = async (
     }
 
     case -5: {
-      cryptoModule._free(ptr1);
       console.error("Could not hash chunk");
 
       return {
@@ -384,7 +287,6 @@ export const handleReceiveMessage = async (
     }
 
     case -6: {
-      cryptoModule._free(ptr1);
       console.error("Could not verify Merkle proof");
 
       return {
@@ -404,7 +306,6 @@ export const handleReceiveMessage = async (
     }
 
     default: {
-      cryptoModule._free(ptr1);
       console.error("Unexpected error occured.");
 
       return {

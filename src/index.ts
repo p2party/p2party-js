@@ -31,11 +31,8 @@ import {
   MessageCategory,
   MessageType,
 } from "./utils/messageTypes";
-import {
-  CHUNK_LEN,
-  IMPORTANT_DATA_LEN,
-  CANCEL_SEND,
-} from "./utils/splitToChunks";
+import { CANCEL_SEND } from "./utils/splitToChunks";
+import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/constants";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -270,19 +267,19 @@ const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
   );
 };
 
-const openChannel = async (
-  roomId: string,
-  label: string,
-  withPeers?: { peerId: string; peerPublicKey: string }[],
-) => {
-  await dispatch(
-    webrtcApi.endpoints.openChannel.initiate({
-      roomId,
-      channel: label,
-      withPeers,
-    }),
-  );
-};
+// const openChannel = async (
+//   roomId: string,
+//   label: string,
+//   withPeers?: { peerId: string; peerPublicKey: string }[],
+// ) => {
+//   await dispatch(
+//     webrtcApi.endpoints.openChannel.initiate({
+//       roomId,
+//       channel: label,
+//       withPeers,
+//     }),
+//   );
+// };
 
 /**
  * If no toChannel then broadcast the message everywhere to everyone.
@@ -350,7 +347,9 @@ const readMessage = async (
       messageIndex = rooms[i].messages.findLastIndex(
         (m) =>
           m.merkleRootHex === merkleRootHex ||
-          (keyPair.peerId === m.fromPeerId && m.sha512Hex === hashHex),
+          (keyPair.peerId === m.fromPeerId &&
+            m.sha512Hex === hashHex &&
+            m.merkleRootHex === ""),
       );
       if (messageIndex > -1) {
         roomIndex = i;
@@ -798,7 +797,7 @@ export const p2party = {
   getPeerIsBlacklisted: getDBPeerIsBlacklisted,
   removePeerFromBlacklist: deleteDBPeerFromBlacklist,
   getAllExistingRooms: getAllDBUniqueRooms,
-  openChannel,
+  // openChannel,
   sendMessage,
   readMessage,
   cancelMessage,

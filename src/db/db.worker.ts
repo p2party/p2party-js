@@ -597,19 +597,6 @@ async function fnGetDBAllChunks(
         db.close();
 
         return [];
-        // if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
-        //   const chunks = await index1.getAll(hashHex);
-        //
-        //   await tx.done;
-        //   db.close();
-        //
-        //   return chunks;
-        // } else {
-        //   await tx.done;
-        //   db.close();
-        //
-        //   return [];
-        // }
       } else {
         await tx.done;
         db.close();
@@ -622,6 +609,9 @@ async function fnGetDBAllChunks(
       await tx.done;
       db.close();
 
+      if (chunks.length > 0)
+        return chunks.filter((c) => c.merkleRoot === chunks[0].merkleRoot);
+
       return chunks;
     } else {
       await tx.done;
@@ -629,69 +619,11 @@ async function fnGetDBAllChunks(
 
       return [];
     }
-
-    // if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
-    //   const chunks = await index1.getAll(hashHex);
-    //
-    //   if (chunks.length === 0) {
-    //     if (
-    //       merkleRootHex &&
-    //       merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    //     ) {
-    //       const chunks = await index2.getAll(merkleRootHex);
-    //
-    //       await tx.done;
-    //       db.close();
-    //
-    //       return chunks;
-    //     } else {
-    //       await tx.done;
-    //       db.close();
-    //
-    //       return [];
-    //     }
-    //   } else {
-    //     await tx.done;
-    //     db.close();
-    //
-    //     return chunks;
-    //   }
-    // } else if (
-    //   merkleRootHex &&
-    //   merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    // ) {
-    //   const chunks = await index2.getAll(merkleRootHex);
-    //
-    //   await tx.done;
-    //   db.close();
-    //
-    //   return chunks;
-    // } else {
-    //   await tx.done;
-    //   db.close();
-    //
-    //   return [];
-    // }
   } catch (error) {
     console.error(error);
 
     return [];
   }
-  //
-  // try {
-  //   const db = await getDB();
-  //   const tx = db.transaction("chunks", "readonly");
-  //   const store = tx.objectStore("chunks");
-  //   const index = store.index("merkleRoot");
-  //   const chunks = await index.getAll(merkleRootHex);
-  //   db.close();
-  //
-  //   return chunks;
-  // } catch (error) {
-  //   console.error(error);
-  //
-  //   return [];
-  // }
 }
 
 async function fnGetDBAllChunksCount(

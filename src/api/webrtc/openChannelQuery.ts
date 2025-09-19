@@ -1,6 +1,7 @@
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 
-import libcrypto from "../../cryptography/libcrypto";
+// import cryptoMemory from "../../cryptography/memory";
+// import libcrypto from "../../cryptography/libcrypto";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -13,7 +14,9 @@ import type {
 export interface RTCOpenChannelParamsExtention extends RTCOpenChannelParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  receiveMessageWasmMemory: WebAssembly.Memory;
+  // receiveMessageWasmMemory: WebAssembly.Memory;
+  // decryptionWasmMemory: WebAssembly.Memory;
+  // merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcOpenChannelQuery: BaseQueryFn<
@@ -27,15 +30,21 @@ const webrtcOpenChannelQuery: BaseQueryFn<
     withPeers,
     peerConnections,
     dataChannels,
-    receiveMessageWasmMemory,
+    // receiveMessageWasmMemory,
+    // decryptionWasmMemory,
+    // merkleWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
 
-  const receiveMessageModule = await libcrypto({
-    wasmMemory: receiveMessageWasmMemory,
-  });
+  // const decryptionModule = await libcrypto({
+  //   wasmMemory: decryptionWasmMemory,
+  // });
+  //
+  // const merkleModule = await libcrypto({
+  //   wasmMemory: merkleWasmMemory,
+  // });
 
   if (withPeers && withPeers.length > 0) {
     const PEERS_LEN = withPeers.length;
@@ -48,13 +57,21 @@ const webrtcOpenChannelQuery: BaseQueryFn<
 
       if (peerIndex > -1) {
         const epc = peerConnections[peerIndex];
+
+        // const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
+        // const receiveMessageModule = await libcrypto({
+        //   wasmMemory: receiveMessageWasmMemory,
+        // });
+
         await handleOpenChannel(
           {
             channel,
             epc,
             roomId,
             dataChannels,
-            receiveMessageModule,
+            // receiveMessageModule,
+            // decryptionModule,
+            // merkleModule,
           },
           api,
         );
@@ -64,13 +81,21 @@ const webrtcOpenChannelQuery: BaseQueryFn<
     const PEERS_LEN = peerConnections.length;
     for (let i = 0; i < PEERS_LEN; i++) {
       const epc = peerConnections[i];
+
+      // const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
+      // const receiveMessageModule = await libcrypto({
+      //   wasmMemory: receiveMessageWasmMemory,
+      // });
+
       await handleOpenChannel(
         {
           channel,
           epc,
           roomId,
           dataChannels,
-          receiveMessageModule,
+          // receiveMessageModule,
+          // decryptionModule,
+          // merkleModule,
         },
         api,
       );

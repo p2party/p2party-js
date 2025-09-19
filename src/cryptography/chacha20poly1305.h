@@ -2,6 +2,7 @@
 #define chacha20poly1305_H
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../../libsodium/src/libsodium/include/sodium/utils.h"

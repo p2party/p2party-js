@@ -277,7 +277,7 @@ export const getMessageType = (data: string | File): number => {
     apk: MessageType.ExecutableAPK,
   };
 
-  return extensionToMessageType[extension] || MessageType.Unknown;
+  return extensionToMessageType[extension] ?? MessageType.Unknown;
 };
 
 export const getFileExtension = (messageType: number): FileExtension => {

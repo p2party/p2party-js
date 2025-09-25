@@ -61,12 +61,11 @@ const sendChunks = async (
   merkleModule: LibCrypto,
 ) => {
   let putItemInDBSendQueue = false;
-  // const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
   const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
 
   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
-  const indexesRandomized = await fisherYatesShuffle(indexes);
+  const indexesRandomized = fisherYatesShuffle(indexes);
 
   const {
     ptr1,
@@ -132,14 +131,15 @@ const sendChunks = async (
       metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
     ) {
       const mimeType = getMimeType(metadata.messageType);
+      const realChunk = unencryptedChunk.data.slice(
+        metadata.chunkStartIndex,
+        metadata.chunkEndIndex,
+      );
       await setDBChunk({
         merkleRoot: merkleRootHex,
         hash: hashHex,
         chunkIndex: metadata.chunkIndex,
-        data: unencryptedChunk.data.slice(
-          metadata.chunkStartIndex,
-          metadata.chunkEndIndex,
-        ),
+        data: realChunk,
         mimeType,
       });
     }
@@ -163,7 +163,7 @@ const sendChunks = async (
           chunkIndex: iRandom,
           data: unencryptedChunk.data,
           metadata: unencryptedChunk.metadata,
-          merkleProof: merkleProof.buffer as ArrayBuffer,
+          merkleProof: merkleProof.buffer,
         });
       } catch (error) {
         console.warn(error);
@@ -193,11 +193,8 @@ const sendChunks = async (
       metadataArray.length +
         merkleProof.length +
         new Uint8Array(unencryptedChunk.data).length
-    ) {
-      console.error("Problem");
-
+    )
       continue;
-    }
 
     const chunk = await concatUint8Arrays([
       metadataArray,
@@ -265,16 +262,13 @@ const sendChunks = async (
         "Cannot send message because channel is " +
           channel.readyState +
           " and bufferedAmount is " +
-          channel.bufferedAmount,
+          String(channel.bufferedAmount),
       );
 
       break;
     }
   }
 
-  // if (!putItemInDBSendQueue) {
-  //   channel.close();
-  // } else {
   if (putItemInDBSendQueue) {
     while (
       channel.readyState === "open" &&
@@ -372,7 +366,6 @@ export const handleSendMessage = async (
       const channelMessageLabel = await compileChannelMessageLabel(
         label,
         merkleRootHex,
-        // hashHex,
       );
 
       const ptr4 = encryptionModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);

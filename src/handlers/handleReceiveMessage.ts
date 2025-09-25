@@ -3,7 +3,7 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 
-import { existsDBChunk, getDBMessageData, setDBChunk } from "../db/api";
+import { getDBMessageData, setDBChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 
@@ -38,7 +38,18 @@ export const handleReceiveMessage = async (
 
   switch (result) {
     case 0: {
-      const metadata = deserializeMetadata(decrypted.subarray(0, METADATA_LEN));
+      const metadataArray = decrypted.slice(0, METADATA_LEN);
+      const chunk = decrypted.slice(METADATA_LEN + PROOF_LEN);
+      const metadata = deserializeMetadata(metadataArray);
+      const realChunk = chunk.slice(
+        metadata.chunkStartIndex,
+        metadata.chunkEndIndex,
+      );
+      const chunkHashBuffer = await window.crypto.subtle.digest(
+        "SHA-512",
+        chunk,
+      );
+      const chunkHash = new Uint8Array(chunkHashBuffer);
 
       const chunkSize =
         metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize
@@ -47,12 +58,6 @@ export const handleReceiveMessage = async (
             ? 0
             : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
-      const chunkHashBuffer = await window.crypto.subtle.digest(
-        "SHA-512",
-        decrypted.subarray(METADATA_LEN + PROOF_LEN) as Uint8Array<ArrayBuffer>,
-      );
-      const chunkHash = new Uint8Array(chunkHashBuffer);
-
       if (chunkSize === 0)
         return {
           date: metadata.date,
@@ -60,7 +65,7 @@ export const handleReceiveMessage = async (
           chunkSize: 0,
           receivedFullSize: false,
           messageAlreadyExists: false,
-          chunkAlreadyExists: false,
+          chunkAlreadyExists: true,
           savedSize: 0,
           totalSize: metadata.totalSize,
           messageType: metadata.messageType,
@@ -69,17 +74,7 @@ export const handleReceiveMessage = async (
           messageHash: metadata.hash,
         };
 
-      // const merkleRootHex = uint8ArrayToHex(merkleRoot);
-      const merkleRootHex = uint8ArrayToHex(
-        // Uint8Array.from([...merkleRootArray]),
-        merkleRootArray,
-      );
-
-      const chunkAlreadyExists = await existsDBChunk(
-        merkleRootHex,
-        metadata.chunkIndex,
-      );
-
+      const merkleRootHex = uint8ArrayToHex(merkleRootArray);
       const messageExists = await getDBMessageData(merkleRootHex);
 
       const alreadyHasEverything =
@@ -92,10 +87,10 @@ export const handleReceiveMessage = async (
       const messageRelevant =
         // incomingMessageIndex === -1 ||
         !messageExists ||
-        (messageExists.savedSize + chunkSize <= messageExists.totalSize &&
-          // (room.messages[incomingMessageIndex].totalSize >=
-          //   room.messages[incomingMessageIndex].savedSize + chunkSize &&
-          !chunkAlreadyExists);
+        messageExists.savedSize + chunkSize <= messageExists.totalSize; //&&
+      // (room.messages[incomingMessageIndex].totalSize >=
+      //   room.messages[incomingMessageIndex].savedSize + chunkSize &&
+      // !chunkAlreadyExists);
 
       const receivedFullSize =
         alreadyHasEverything ||
@@ -106,7 +101,7 @@ export const handleReceiveMessage = async (
         // (incomingMessageIndex === -1 &&
         chunkSize === metadata.totalSize || //)
         (messageExists != undefined &&
-          !chunkAlreadyExists &&
+          // !chunkAlreadyExists &&
           messageExists.savedSize + chunkSize === messageExists.totalSize);
 
       if (!messageRelevant) {
@@ -117,9 +112,9 @@ export const handleReceiveMessage = async (
           chunkIndex: -1,
           chunkSize, // incomingMessageIndex === -1 ? -1 : -2,
           receivedFullSize,
-          messageAlreadyExists: messageExists != undefined,
-          chunkAlreadyExists,
-          savedSize: messageExists?.savedSize ?? 0,
+          messageAlreadyExists: true,
+          chunkAlreadyExists: true,
+          savedSize: messageExists.savedSize,
           // incomingMessageIndex > -1
           //   ? room.messages[incomingMessageIndex].savedSize
           // :
@@ -135,18 +130,13 @@ export const handleReceiveMessage = async (
       const mimeType = getMimeType(metadata.messageType);
 
       try {
-        if (!chunkAlreadyExists) {
-          await setDBChunk({
-            merkleRoot: merkleRootHex,
-            hash: uint8ArrayToHex(metadata.hash),
-            chunkIndex: metadata.chunkIndex,
-            data: decrypted.slice(
-              METADATA_LEN + PROOF_LEN + metadata.chunkStartIndex,
-              METADATA_LEN + PROOF_LEN + metadata.chunkEndIndex,
-            ).buffer as ArrayBuffer,
-            mimeType,
-          });
-        }
+        await setDBChunk({
+          merkleRoot: merkleRootHex,
+          hash: uint8ArrayToHex(metadata.hash),
+          chunkIndex: metadata.chunkIndex,
+          data: realChunk.buffer,
+          mimeType,
+        });
 
         return {
           date: metadata.date,
@@ -154,7 +144,8 @@ export const handleReceiveMessage = async (
           chunkSize,
           receivedFullSize,
           messageAlreadyExists: messageExists != undefined,
-          chunkAlreadyExists,
+          // chunkAlreadyExists,
+          chunkAlreadyExists: false,
           savedSize: messageExists?.savedSize ?? 0,
           // savedSize:
           // incomingMessageIndex > -1
@@ -175,7 +166,8 @@ export const handleReceiveMessage = async (
           receivedFullSize:
             messageExists != undefined ? receivedFullSize : false,
           messageAlreadyExists: messageExists != undefined,
-          chunkAlreadyExists,
+          // chunkAlreadyExists,
+          chunkAlreadyExists: true,
           savedSize: messageExists?.savedSize ?? 0,
           // savedSize:
           // incomingMessageIndex > -1

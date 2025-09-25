@@ -63,9 +63,9 @@ jobs:
       #     # verbose: true # optional (default = false)
 
       # Setup .npmrc file to publish to npm
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22.x"
+          node-version: "24.x"
           registry-url: "https://registry.npmjs.org"
 
       - run: npm publish --access public
@@ -73,9 +73,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTOMATION_TOKEN }}
 
       # Setup .npmrc file to publish to GitHub Packages
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22.x"
+          node-version: "24.x"
           registry-url: "https://npm.pkg.github.com"
           scope: "@p2party"
 

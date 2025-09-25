@@ -431,7 +431,10 @@ async function fnSetDBRoomMessageData(
         fromPeerId,
         filename,
         messageType,
-        savedSize: savedSize < totalSize ? savedSize + chunkSize : totalSize,
+        savedSize:
+          savedSize + chunkSize <= totalSize
+            ? savedSize + chunkSize
+            : totalSize,
         totalSize,
         channelLabel,
       });

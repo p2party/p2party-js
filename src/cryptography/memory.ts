@@ -178,52 +178,48 @@ const argon2Memory = (mnemonicLen: number): WebAssembly.Memory => {
 };
 
 const getReceiveMessageMemory = () => {
-  try {
-    const verifySignatureMemoryLen =
-      (crypto_sign_ed25519_PUBLICKEYBYTES +
-        crypto_sign_ed25519_BYTES +
-        crypto_sign_ed25519_PUBLICKEYBYTES) *
-      Uint8Array.BYTES_PER_ELEMENT;
-    const encryptedLen =
-      MESSAGE_LEN -
-      crypto_sign_ed25519_PUBLICKEYBYTES -
-      crypto_sign_ed25519_BYTES;
-    const decryptedLen = getDecryptedLen(encryptedLen);
-    const decryptMemoryLen =
-      (encryptedLen +
-        crypto_sign_ed25519_SECRETKEYBYTES +
-        crypto_hash_sha512_BYTES +
-        decryptedLen +
-        2 * crypto_box_x25519_PUBLICKEYBYTES + // malloc'd
-        crypto_box_x25519_NONCEBYTES + // malloc'd
-        crypto_box_x25519_SECRETKEYBYTES) * // malloc'd
-      Uint8Array.BYTES_PER_ELEMENT;
-    const verifyMerkleProofLen =
-      PROOF_LEN * Uint8Array.BYTES_PER_ELEMENT + 4 * crypto_hash_sha512_BYTES;
-    const receiveMessageMemoryLen =
+  const verifySignatureMemoryLen =
+    (crypto_sign_ed25519_PUBLICKEYBYTES +
+      crypto_sign_ed25519_BYTES +
+      crypto_sign_ed25519_PUBLICKEYBYTES) *
+    Uint8Array.BYTES_PER_ELEMENT;
+  const encryptedLen =
+    MESSAGE_LEN -
+    crypto_sign_ed25519_PUBLICKEYBYTES -
+    crypto_sign_ed25519_BYTES;
+  const decryptedLen = getDecryptedLen(encryptedLen);
+  const decryptMemoryLen =
+    (encryptedLen +
+      crypto_sign_ed25519_SECRETKEYBYTES +
+      crypto_hash_sha512_BYTES +
       decryptedLen +
-      MESSAGE_LEN +
-      2 * crypto_hash_sha512_BYTES +
-      crypto_sign_ed25519_PUBLICKEYBYTES +
-      crypto_sign_ed25519_SECRETKEYBYTES;
-    const memoryLen =
-      receiveMessageMemoryLen +
-      verifySignatureMemoryLen +
-      decryptMemoryLen +
-      verifyMerkleProofLen +
-      crypto_hash_sha512_BYTES;
+      2 * crypto_box_x25519_PUBLICKEYBYTES + // malloc'd
+      crypto_box_x25519_NONCEBYTES + // malloc'd
+      crypto_box_x25519_SECRETKEYBYTES) * // malloc'd
+    Uint8Array.BYTES_PER_ELEMENT;
+  const verifyMerkleProofLen =
+    PROOF_LEN * Uint8Array.BYTES_PER_ELEMENT + 4 * crypto_hash_sha512_BYTES;
+  const receiveMessageMemoryLen =
+    decryptedLen +
+    MESSAGE_LEN +
+    2 * crypto_hash_sha512_BYTES +
+    crypto_sign_ed25519_PUBLICKEYBYTES +
+    crypto_sign_ed25519_SECRETKEYBYTES;
+  const memoryLen =
+    receiveMessageMemoryLen +
+    verifySignatureMemoryLen +
+    decryptMemoryLen +
+    verifyMerkleProofLen +
+    crypto_hash_sha512_BYTES;
 
-    const memoryPages = memoryLenToPages(memoryLen);
+  const memoryPages = memoryLenToPages(memoryLen);
 
-    const memory = new WebAssembly.Memory({
-      initial: memoryPages,
-      maximum: memoryPages,
-    });
+  const memory = new WebAssembly.Memory({
+    initial: memoryPages,
+    maximum: memoryPages,
+  });
 
-    return memory;
-  } catch (error) {
-    throw error;
-  }
+  return memory;
 };
 
 export default {

@@ -1,3 +1,9 @@
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
+const HEX = "0123456789abcdef";
+const Array32 = new Array(64);
+const Array64 = new Array(128);
+
 /**
  * Turns an array of Uint8Arrays into one Uint8Array.
  */
@@ -5,11 +11,12 @@ export const concatUint8Arrays = (
   arrays: Uint8Array[],
 ): Promise<Uint8Array> => {
   return new Promise((resolve) => {
-    let offset = 0;
-    const result = new Uint8Array(
-      arrays.reduce((sum, arr) => sum + arr.length, 0),
-    );
+    let len = 0;
+    const arraysLen = arrays.length;
+    for (let i = 0; i < arraysLen; i++) len += arrays[i].length;
+    const result = new Uint8Array(len);
 
+    let offset = 0;
     for (const arr of arrays) {
       result.set(arr, offset);
       offset += arr.length;
@@ -42,9 +49,21 @@ export const uint8ArraysAreEqual = (
  * Converts Uint8Array to hex string.
  */
 export const uint8ArrayToHex = (array: Uint8Array) => {
-  return [...array]
-    .map((x) => x.toString(16).toLocaleLowerCase().padStart(2, "0"))
-    .join("");
+  const len = array.length;
+  const out =
+    len === crypto_hash_sha512_BYTES
+      ? Array64
+      : len === 32
+        ? Array32
+        : new Array(len * 2);
+  let j = 0;
+  for (let i = 0; i < len; i++) {
+    const v = array[i];
+    out[j++] = HEX[v >> 4];
+    out[j++] = HEX[v & 0x0f];
+  }
+
+  return out.join("");
 };
 
 /**
@@ -65,41 +84,11 @@ export const hexToUint8Array = (hexString: string) => {
   const pairs = hexString.match(/[\dA-F]{2}/gi);
   if (!pairs) throw new Error("No hex characters in string");
 
-  // convert the octets to integers
-  const integers = pairs.map((s) => {
-    return parseInt(s, 16);
-  });
+  const len = pairs.length;
+  const result = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    result[i] = parseInt(pairs[i], 16);
+  }
 
-  return new Uint8Array(integers);
-};
-
-/**
- * Converts a string or a File into a Uint8Array.
- */
-export const serializer = (data: string | File): Promise<Uint8Array> => {
-  return new Promise((resolve, reject) => {
-    if (typeof data === "string") {
-      const encoder = new TextEncoder();
-      const array = encoder.encode(data);
-      resolve(array);
-    } else {
-      const reader = new FileReader();
-
-      reader.onload = (e: ProgressEvent<FileReader>) => {
-        const arrayBuffer = e.target?.result;
-        if (arrayBuffer && arrayBuffer instanceof ArrayBuffer) {
-          const uint8Array = new Uint8Array(arrayBuffer);
-          resolve(uint8Array);
-        } else {
-          reject(new Error("Failed to read file as ArrayBuffer"));
-        }
-      };
-
-      reader.onerror = () => {
-        reject(new Error("Error reading file"));
-      };
-
-      reader.readAsArrayBuffer(data);
-    }
-  });
+  return result;
 };

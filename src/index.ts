@@ -400,12 +400,7 @@ const readMessage = async (
             )
           : [];
 
-      const dataChunks =
-        chunks.length > 0
-          ? chunks
-              .sort((a, b) => a.chunkIndex - b.chunkIndex)
-              .map((c) => c.data)
-          : [new Uint8Array().buffer];
+      const dataChunks = chunks.map((c) => c.data);
 
       try {
         const data = new Blob(dataChunks, {

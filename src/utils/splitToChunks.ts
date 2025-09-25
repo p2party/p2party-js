@@ -71,9 +71,10 @@ export const splitToChunks = async (
     );
 
   let shouldStop = false;
-  window.addEventListener(CANCEL_SEND, () => {
+  const onCancel = () => {
     shouldStop = true;
-  });
+  };
+  window.addEventListener(CANCEL_SEND, onCancel);
 
   const messageType = getMessageType(message);
   const name =
@@ -125,33 +126,6 @@ export const splitToChunks = async (
   };
 
   let offset = 0;
-  // const chunkSizes: number[] = [];
-  // while (offset < totalSize) {
-  //   const chunkStartIndex = await randomNumberInRange(
-  //     0,
-  //     Math.floor(chunkSize * (1 - percentageFilledChunk)),
-  //   );
-  //   const remainingBytes = totalSize - offset;
-  //   const bytesToCopy =
-  //     remainingBytes > 0
-  //       ? Math.min(
-  //           remainingBytes,
-  //           // Math.ceil(chunkSize * percentageFilledChunk),
-  //           await randomNumberInRange(
-  //             Math.max(
-  //               chunkStartIndex + 1,
-  //               Math.ceil(chunkSize * percentageFilledChunk) - 5,
-  //             ),
-  //             Math.ceil(chunkSize * percentageFilledChunk),
-  //           ),
-  //         )
-  //       : 0;
-  //
-  //   chunkSizes.push(bytesToCopy);
-  //   offset += bytesToCopy;
-  // }
-  //
-  // const totalChunks = Math.max(minChunks, chunkSizes.length);
 
   const totalChunks = Math.max(
     minChunks,
@@ -160,71 +134,39 @@ export const splitToChunks = async (
 
   const chunk = new Uint8Array(chunkSize);
   const chunkHashes = new Uint8Array(totalChunks * crypto_hash_sha512_BYTES);
-  // offset = 0;
+  const maxChunkStartIndex = Math.floor(
+    chunkSize * (1 - percentageFilledChunk),
+  );
+  const maxBytesToCopy = Math.ceil(chunkSize * percentageFilledChunk);
   for (let i = 0; i < totalChunks; i++) {
     // Cancel event fired
     if (shouldStop) break;
 
-    // const size = chunkSizes[i] ?? 0;
-    // const chunk = window.crypto.getRandomValues(new Uint8Array(chunkSize));
     window.crypto.getRandomValues(chunk);
-    const chunkStartIndex = await randomNumberInRange(
-      0,
-      Math.floor(chunkSize * (1 - percentageFilledChunk)),
-    );
+    const chunkStartIndex = await randomNumberInRange(0, maxChunkStartIndex);
     const remainingBytes = totalSize - offset;
-    const bytesToCopy = Math.min(
-      Math.max(remainingBytes, 0),
-      Math.ceil(chunkSize * percentageFilledChunk),
-      // await randomNumberInRange(
-      //   Math.max(
-      //     chunkStartIndex + 1,
-      //     Math.ceil(chunkSize * percentageFilledChunk) - 5,
-      //   ),
-      //   Math.ceil(chunkSize * percentageFilledChunk),
-      // ),
-    );
+    const bytesToCopy = Math.min(Math.max(remainingBytes, 0), maxBytesToCopy);
 
-    // let chunkEndIndex = chunkStartIndex + size;
     let chunkEndIndex = chunkStartIndex + bytesToCopy;
 
     if (remainingBytes > 0) {
-      // // new file read
-      // const blob = file.slice(offset, offset + size);
       const blob = file.slice(offset, offset + bytesToCopy);
       if (typeof message === "string") {
         chunk.set(blob as Uint8Array, chunkStartIndex);
-
-        // const hash = await window.crypto.subtle.digest(
-        //   "SHA-512",
-        //   (blob as Uint8Array).buffer as ArrayBuffer,
-        // );
-        // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
       } else {
         const buffer = await (blob as Blob).arrayBuffer();
         chunk.set(new Uint8Array(buffer), chunkStartIndex);
-
-        // const hash = await window.crypto.subtle.digest("SHA-512", buffer);
-        // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
       }
 
-      // offset += size; // bytesToCopy;
       offset += bytesToCopy;
     } else {
       const start = chunkEndIndex + totalSize + 1;
       const end = Number.MAX_SAFE_INTEGER - start;
       const r = await randomNumberInRange(start, end);
       chunkEndIndex += r;
-
-      // const hash = await window.crypto.subtle.digest("SHA-512", chunk);
-      // chunkHashes.set(new Uint8Array(hash), i * crypto_hash_sha512_BYTES);
     }
 
-    const h = await window.crypto.subtle.digest(
-      "SHA-512",
-      // (blob as Uint8Array).buffer as ArrayBuffer,
-      chunk,
-    );
+    const h = await window.crypto.subtle.digest("SHA-512", chunk);
     const hash = new Uint8Array(h);
     const realChunkHash = uint8ArrayToHex(hash);
     chunkHashes.set(hash, i * crypto_hash_sha512_BYTES);
@@ -246,7 +188,9 @@ export const splitToChunks = async (
         metadata: mSerialized.buffer as ArrayBuffer,
         merkleProof: new Uint8Array().buffer,
       });
-    } catch {} // (error) {
+    } catch {
+      /* ignore */
+    } // (error) {
     //   console.error(error);
     // }
 
@@ -269,6 +213,7 @@ export const splitToChunks = async (
   }
 
   if (shouldStop) {
+    window.removeEventListener(CANCEL_SEND, onCancel);
     await deleteDBNewChunk(undefined, undefined, sha512Hex);
     api.dispatch(deleteMessage({ hashHex: sha512Hex }));
 
@@ -326,23 +271,7 @@ export const splitToChunks = async (
     }),
   );
 
-  if (shouldStop) {
-    await deleteDBNewChunk(merkleRootHex);
-    api.dispatch(deleteMessage({ merkleRootHex }));
-
-    return {
-      merkleRoot: new Uint8Array(),
-      merkleRootHex: "",
-      hash: new Uint8Array(),
-      hashHex: "",
-      totalChunks: 0,
-      totalSize: 0,
-      messageType: 0,
-      chunkHashes: new Uint8Array(),
-    };
-  }
-
-  window.removeEventListener(CANCEL_SEND, () => {});
+  window.removeEventListener(CANCEL_SEND, onCancel);
 
   return {
     merkleRoot,

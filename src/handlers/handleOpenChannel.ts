@@ -1,6 +1,5 @@
 import { handleReadReceipt } from "./handleReadReceipt";
 import { handleReceiveMessage } from "./handleReceiveMessage";
-// import { handleReceiveMessage } from "./handleReceiveMessageOld";
 
 import webrtcApi from "../api/webrtc";
 
@@ -40,23 +39,6 @@ import type {
   IRTCPeerConnection,
   IRTCDataChannel,
 } from "../api/webrtc/interfaces";
-// import type { LibCrypto } from "../cryptography/libcrypto";
-
-export const observableBool = (
-  init: boolean,
-  onChange: (newValue: boolean) => void,
-): { get: () => boolean; set: (v: boolean) => void } => {
-  let val = init;
-  return {
-    get: () => val,
-    set: (v: boolean) => {
-      if (v !== val) {
-        val = v;
-        onChange(v);
-      }
-    },
-  };
-};
 
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
@@ -98,7 +80,9 @@ export const handleOpenChannel = async (
     });
   }
 
-  const receivedMessageQueue: Uint8Array[] = [];
+  const receivedMessageKeys = new Set<string>();
+  const receivedMessageMap = new Map<string, Uint8Array>();
+
   let runningReceivedMessageProcess = false;
 
   if (typeof channel === "string") {
@@ -112,7 +96,7 @@ export const handleOpenChannel = async (
 
   const label = typeof channel === "string" ? channel : channel.label;
   const { channelLabel, merkleRoot, merkleRootHex } =
-    await decompileChannelMessageLabel(label); // , hash, hashHex } =
+    await decompileChannelMessageLabel(label);
 
   const dataChannel =
     typeof channel === "string"
@@ -156,7 +140,9 @@ export const handleOpenChannel = async (
   extChannel.roomIds = [roomId];
 
   let ptr1: number | undefined;
+  let decrypted: Uint8Array | undefined;
   let ptr2: number | undefined;
+  let messageArray: Uint8Array | undefined;
   let ptr3: number | undefined;
   let merkleRootArray: Uint8Array | undefined;
   let ptr4: number | undefined;
@@ -165,135 +151,134 @@ export const handleOpenChannel = async (
   let receiverSecretKeyArray: Uint8Array | undefined;
 
   const processMessage = async (data: Uint8Array) => {
-    try {
-      const decrypted = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr1,
-        DECRYPTED_LEN,
-      );
+    if (
+      ptr1 &&
+      ptr2 &&
+      ptr3 &&
+      ptr4 &&
+      ptr5 &&
+      decrypted &&
+      messageArray &&
+      merkleRootArray &&
+      senderPublicKeyArray &&
+      receiverSecretKeyArray
+    ) {
+      try {
+        messageArray.set([...data]);
 
-      const messageArray = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr2,
-        MESSAGE_LEN,
-      );
-      messageArray.set(data);
-
-      const {
-        date,
-        chunkSize,
-        chunkIndex,
-        receivedFullSize,
-        // messageAlreadyExists,
-        chunkAlreadyExists,
-        // savedSize,
-        totalSize,
-        messageType,
-        filename,
-        chunkHash,
-        messageHash,
-      } = await handleReceiveMessage(
-        // data,
-        // merkleRoot,
-        // senderPublicKey,
-        // receiverSecretKey,
-        // decryptionModule,
-        // merkleModule,
-        decrypted,
-        messageArray,
-        merkleRootArray!,
-        senderPublicKeyArray!,
-        receiverSecretKeyArray!,
-        epc.rooms[peerRoomIndex].receiveMessageModule,
-      );
-
-      if (
-        totalSize > 0 &&
-        chunkHash.length === crypto_hash_sha512_BYTES &&
-        extChannel.readyState === "open" &&
-        !chunkAlreadyExists // &&
-        // !receivedFullSize
-      ) {
-        extChannel.send(chunkHash.buffer as ArrayBuffer);
-      }
-
-      const hashHex = uint8ArrayToHex(messageHash);
-
-      if (receivedFullSize) {
-        await setDBRoomMessageData(
-          roomId,
-          merkleRootHex,
-          hashHex,
-          epc.withPeerId,
-          totalSize,
+        const {
+          date,
+          chunkSize,
+          chunkIndex,
+          receivedFullSize,
+          // messageAlreadyExists,
+          chunkAlreadyExists,
+          // savedSize,
           totalSize,
           messageType,
           filename,
-          channelLabel,
-          date.getTime(),
+          chunkHash,
+          messageHash,
+        } = await handleReceiveMessage(
+          decrypted,
+          messageArray,
+          merkleRootArray,
+          senderPublicKeyArray,
+          receiverSecretKeyArray,
+          epc.rooms[peerRoomIndex].receiveMessageModule,
         );
 
-        api.dispatch(
-          setMessageAllChunks({
+        const hashHex = uint8ArrayToHex(messageHash);
+
+        if (receivedFullSize) {
+          await setDBRoomMessageData(
             roomId,
             merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: epc.withPeerId,
+            hashHex,
+            epc.withPeerId,
+            totalSize,
             totalSize,
             messageType,
             filename,
             channelLabel,
-            timestamp: date.getTime(),
-            alsoSendFinishedMessage: true,
-          }),
-        );
-      } else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
-        await setDBRoomMessageData(
-          roomId,
-          merkleRootHex,
-          hashHex,
-          epc.withPeerId,
-          chunkSize,
-          totalSize,
-          messageType,
-          filename,
-          channelLabel,
-          date.getTime(),
-        );
+            date.getTime(),
+          );
 
-        api.dispatch(
-          setMessage({
+          api.dispatch(
+            setMessageAllChunks({
+              roomId,
+              merkleRootHex,
+              sha512Hex: hashHex,
+              fromPeerId: epc.withPeerId,
+              totalSize,
+              messageType,
+              filename,
+              channelLabel,
+              timestamp: date.getTime(),
+              alsoSendFinishedMessage: true,
+            }),
+          );
+        } else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
+          await setDBRoomMessageData(
             roomId,
             merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: epc.withPeerId,
+            hashHex,
+            epc.withPeerId,
             chunkSize,
             totalSize,
             messageType,
             filename,
             channelLabel,
-            timestamp: date.getTime(),
-          }),
-        );
-      }
+            date.getTime(),
+          );
 
-      runningReceivedMessageProcess = false;
-    } catch (error) {
-      console.error(error);
+          api.dispatch(
+            setMessage({
+              roomId,
+              merkleRootHex,
+              sha512Hex: hashHex,
+              fromPeerId: epc.withPeerId,
+              chunkSize,
+              totalSize,
+              messageType,
+              filename,
+              channelLabel,
+              timestamp: date.getTime(),
+            }),
+          );
+        }
+
+        if (
+          totalSize > 0 &&
+          chunkHash.length === crypto_hash_sha512_BYTES &&
+          extChannel.readyState === "open" &&
+          !chunkAlreadyExists // &&
+        ) {
+          extChannel.send(chunkHash.buffer as ArrayBuffer);
+        }
+      } catch (error) {
+        console.error(error);
+      }
     }
   };
 
   const drainQueue = async () => {
     runningReceivedMessageProcess = true;
     try {
-      while (receivedMessageQueue.length > 0) {
-        const data = receivedMessageQueue.shift() as Uint8Array<ArrayBuffer>;
-
-        await processMessage(data);
+      while (receivedMessageKeys.size > 0) {
+        const it = receivedMessageKeys.values().next();
+        if (it.done) break;
+        const key = it.value;
+        receivedMessageKeys.delete(key);
+        const data = receivedMessageMap.get(key);
+        if (data) {
+          receivedMessageMap.delete(key);
+          await processMessage(data);
+        }
       }
     } finally {
       runningReceivedMessageProcess = false;
-      if (receivedMessageQueue.length > 0) drainQueue();
+      if (receivedMessageKeys.size > 0) await drainQueue();
     }
   };
 
@@ -304,11 +289,7 @@ export const handleOpenChannel = async (
   extChannel.onclose = async () => {
     console.log(`Channel with label ${extChannel.label} has closed.`);
 
-    if (
-      peerRoomIndex &&
-      epc.rooms[peerRoomIndex] &&
-      epc.rooms[peerRoomIndex].receiveMessageModule
-    ) {
+    if (peerRoomIndex && epc.rooms[peerRoomIndex]) {
       if (ptr1) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr1);
       if (ptr2) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr2);
       if (ptr3) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr3);
@@ -345,11 +326,7 @@ export const handleOpenChannel = async (
     const message = e.data as ArrayBuffer;
     const data = new Uint8Array(message);
 
-    if (
-      roomIndex > -1 &&
-      // !receiveMessageModule &&
-      data.byteLength === crypto_hash_sha512_BYTES
-    ) {
+    if (roomIndex > -1 && data.byteLength === crypto_hash_sha512_BYTES) {
       try {
         await handleReadReceipt(
           data,
@@ -361,20 +338,13 @@ export const handleOpenChannel = async (
       } catch (error) {
         console.error(error);
       }
-    } else if (
-      // receiveMessageModule &&
-      data.byteLength === MESSAGE_LEN &&
-      ptr1 &&
-      ptr2 &&
-      ptr3 &&
-      ptr4 &&
-      ptr5 &&
-      merkleRootArray &&
-      senderPublicKeyArray &&
-      receiverSecretKeyArray
-    ) {
-      receivedMessageQueue.push(data);
-      if (!runningReceivedMessageProcess) drainQueue();
+    } else if (data.byteLength === MESSAGE_LEN) {
+      const key = uint8ArrayToHex(data.subarray(0, 16));
+      if (!receivedMessageMap.has(key)) {
+        receivedMessageMap.set(key, data);
+        receivedMessageKeys.add(key);
+      }
+      if (!runningReceivedMessageProcess) await drainQueue();
     } else {
       console.error(new Error("Wrong data length received"));
     }
@@ -396,7 +366,19 @@ export const handleOpenChannel = async (
     try {
       ptr1 =
         epc.rooms[peerRoomIndex].receiveMessageModule._malloc(DECRYPTED_LEN);
+      decrypted = new Uint8Array(
+        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
+        ptr1,
+        DECRYPTED_LEN,
+      );
+
       ptr2 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(MESSAGE_LEN);
+      messageArray = new Uint8Array(
+        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
+        ptr2,
+        MESSAGE_LEN,
+      );
+
       ptr3 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(
         crypto_hash_sha512_BYTES,
       );

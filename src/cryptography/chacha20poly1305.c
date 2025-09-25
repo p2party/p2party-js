@@ -198,10 +198,9 @@ decrypt_chachapoly_asymmetric(
   unsigned int CIPHERTEXT_LEN
       = ENCRYPTED_LEN - crypto_aead_chacha20poly1305_ietf_NPUBBYTES;
 
-  unsigned long long DATA_LEN
-      = ENCRYPTED_LEN - crypto_aead_chacha20poly1305_ietf_NPUBBYTES
-        - crypto_aead_chacha20poly1305_ietf_ABYTES; // -
-                                                    // crypto_sign_ed25519_BYTES;
+  unsigned long long DATA_LEN = ENCRYPTED_LEN
+                                - crypto_aead_chacha20poly1305_ietf_NPUBBYTES
+                                - crypto_aead_chacha20poly1305_ietf_ABYTES;
 
   res = crypto_aead_chacha20poly1305_ietf_decrypt(
       data, &DATA_LEN, NULL,

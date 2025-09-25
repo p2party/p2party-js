@@ -91,6 +91,27 @@ export const generateRandomRoomUrl = async (
   return url;
 };
 
+export function uniformInt(min: number, max: number): number {
+  if (!(max > min)) return min;
+  const range = max - min; // > 0
+  const maxU32 = 0x1_0000_0000; // 2^32
+  const limit = Math.floor(maxU32 / range) * range;
+  let x = 0;
+  do {
+    x = crypto.getRandomValues(new Uint32Array(1))[0];
+  } while (x >= limit);
+  return min + (x % range);
+}
+
+export function fisherYatesShuffle<T>(arr: T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = uniformInt(0, i + 1); // j ∈ [0, i]
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 /**
  * @function
  * Fisher-Yates shuffle of array.
@@ -99,20 +120,20 @@ export const generateRandomRoomUrl = async (
  *
  * @returns Promise<T[]>
  */
-export const fisherYatesShuffle = async <T>(array: T[]): Promise<T[]> => {
-  const n = array.length;
-
-  // If array has <2 items, there is nothing to do
-  if (n < 2) return array;
-
-  const shuffled = [...array];
-
-  for (let i = n - 1; i > 0; i--) {
-    const j = await randomNumberInRange(0, i + 1);
-    const temp = shuffled[i];
-    shuffled[i] = shuffled[j];
-    shuffled[j] = temp;
-  }
-
-  return shuffled;
-};
+// export const fisherYatesShuffle = async <T>(array: T[]): Promise<T[]> => {
+//   const n = array.length;
+//
+//   // If array has <2 items, there is nothing to do
+//   if (n < 2) return array;
+//
+//   const shuffled = [...array];
+//
+//   for (let i = n - 1; i > 0; i--) {
+//     const j = await randomNumberInRange(0, i + 1);
+//     const temp = shuffled[i];
+//     shuffled[i] = shuffled[j];
+//     shuffled[j] = temp;
+//   }
+//
+//   return shuffled;
+// };

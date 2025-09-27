@@ -45,21 +45,10 @@ export interface OpenChannelHelperParams {
   epc: IRTCPeerConnection;
   roomId: string;
   dataChannels: IRTCDataChannel[];
-  // receiveMessageModule?: LibCrypto;
-  // decryptionModule: LibCrypto;
-  // merkleModule: LibCrypto;
 }
 
 export const handleOpenChannel = async (
-  {
-    channel,
-    epc,
-    roomId,
-    dataChannels,
-    // receiveMessageModule,
-    // decryptionModule,
-    // merkleModule,
-  }: OpenChannelHelperParams,
+  { channel, epc, roomId, dataChannels }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   const { keyPair, rooms } = api.getState() as State;
@@ -120,9 +109,6 @@ export const handleOpenChannel = async (
         dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
         dataChannel.readyState === "open"
       ) {
-        // const timeoutMilliseconds = await randomNumberInRange(1, 10);
-        // await wait(timeoutMilliseconds);
-
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;
 
@@ -171,9 +157,7 @@ export const handleOpenChannel = async (
           chunkSize,
           chunkIndex,
           receivedFullSize,
-          // messageAlreadyExists,
           chunkAlreadyExists,
-          // savedSize,
           totalSize,
           messageType,
           filename,
@@ -252,7 +236,7 @@ export const handleOpenChannel = async (
           totalSize > 0 &&
           chunkHash.length === crypto_hash_sha512_BYTES &&
           extChannel.readyState === "open" &&
-          !chunkAlreadyExists // &&
+          !chunkAlreadyExists 
         ) {
           extChannel.send(chunkHash.buffer as ArrayBuffer);
         }

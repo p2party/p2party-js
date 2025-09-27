@@ -71,42 +71,22 @@ export const handleReadReceipt = async (
 
         const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
         const chunkSize = dbChunk?.byteLength ?? 0;
-        if (dbChunk && chunkSize > 0 && messageIndex > -1) {
-          if (
-            room.messages[messageIndex].savedSize + chunkSize ===
-              room.messages[messageIndex].totalSize ||
-            room.messages[messageIndex].savedSize ===
-              room.messages[messageIndex].totalSize
-          ) {
-            api.dispatch(
-              setMessageAllChunks({
-                roomId: room.id,
-                merkleRootHex,
-                sha512Hex: hashHex,
-                fromPeerId: room.messages[messageIndex].fromPeerId,
-                totalSize: room.messages[messageIndex].totalSize,
-                messageType: room.messages[messageIndex].messageType,
-                filename: room.messages[messageIndex].filename,
-                channelLabel,
-                timestamp: room.messages[messageIndex].timestamp,
-              }),
-            );
-          } else {
-            api.dispatch(
-              setMessage({
-                roomId: room.id,
-                merkleRootHex,
-                sha512Hex: hashHex,
-                fromPeerId: room.messages[messageIndex].fromPeerId,
-                chunkSize,
-                totalSize: room.messages[messageIndex].totalSize,
-                messageType: room.messages[messageIndex].messageType,
-                filename: room.messages[messageIndex].filename,
-                channelLabel,
-                timestamp: room.messages[messageIndex].timestamp,
-              }),
-            );
-          }
+        if (dbChunk && messageIndex > -1 && chunkSize > 0 && room.messages[messageIndex].savedSize + chunkSize <= room.messages[messageIndex].totalSize) {
+          api.dispatch(
+            setMessage({
+              roomId: room.id,
+              merkleRootHex,
+              sha512Hex: hashHex,
+              fromPeerId: room.messages[messageIndex].fromPeerId,
+              chunkSize,
+              totalSize: room.messages[messageIndex].totalSize,
+              messageType: room.messages[messageIndex].messageType,
+              filename: room.messages[messageIndex].filename,
+              channelLabel,
+              timestamp: room.messages[messageIndex].timestamp,
+            }),
+          );
+
           // Only one peer receives the message
           if (channelsSendingSameItem.length === 1) {
             await deleteDBNewChunk(undefined, hex);
@@ -115,9 +95,6 @@ export const handleReadReceipt = async (
           console.log("No message with hex " + hashHex);
         }
       }
-      // else {
-      //   console.log("Did not find chunk with receipt hex: " + hex);
-      // }
     }
   } catch (error) {
     console.error(error);

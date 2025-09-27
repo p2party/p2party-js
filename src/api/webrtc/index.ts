@@ -43,13 +43,6 @@ const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
   crypto_hash_sha512_BYTES, // additional data is the merkle root
 );
 
-// const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-//   64 * 1024,
-//   crypto_hash_sha512_BYTES,
-// );
-
-// const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-
 const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const webrtcApi = createApi({
@@ -67,8 +60,6 @@ const webrtcApi = createApi({
             {
               urls: [
                 "stun:stun.p2party.com:3478",
-                // "stun:stun.l.google.com:19302",
-                // "stun:stun1.l.google.com:19302",
               ],
             },
           ],
@@ -81,10 +72,6 @@ const webrtcApi = createApi({
         rtcConfig,
         peerConnections,
         dataChannels,
-        // receiveMessageWasmMemory,
-        // encryptionWasmMemory,
-        // decryptionWasmMemory,
-        // merkleWasmMemory,
       }),
     }),
 
@@ -96,9 +83,6 @@ const webrtcApi = createApi({
             peerConnections,
             iceCandidates,
             dataChannels,
-            // receiveMessageWasmMemory,
-            // decryptionWasmMemory,
-            // merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -121,9 +105,6 @@ const webrtcApi = createApi({
             ...args,
             peerConnections,
             dataChannels,
-            // receiveMessageWasmMemory,
-            // decryptionWasmMemory,
-            // merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -137,9 +118,7 @@ const webrtcApi = createApi({
             ...args,
             peerConnections,
             dataChannels,
-            // receiveMessageWasmMemory,
             encryptionWasmMemory,
-            // decryptionWasmMemory,
             merkleWasmMemory,
           },
           api,

@@ -20,7 +20,6 @@ import {
   getDBAddressBookEntry,
   getDBAllChunks,
   getDBPeerIsBlacklisted,
-  getDBMessageData,
   setDBAddressBookEntry,
   setDBPeerInBlacklist,
 } from "./db/api";
@@ -51,7 +50,7 @@ import { signalingServerSelector } from "./reducers/signalingServerSlice";
 import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
-import { hexToUint8Array, uint8ArrayToHex } from "./utils/uint8array";
+import { uint8ArrayToHex } from "./utils/uint8array";
 
 import type { State } from "./store";
 import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
@@ -87,8 +86,6 @@ const connect = async (
       {
         urls: [
           "stun:stun.p2party.com:3478",
-          // "stun:stun.l.google.com:19302",
-          // "stun:stun1.l.google.com:19302",
         ],
       },
     ],
@@ -357,82 +354,60 @@ const readMessage = async (
       }
     }
 
-    if (roomIndex > -1 && messageIndex > -1) {
-      const messageType = rooms[roomIndex].messages[messageIndex].messageType;
-      const mimeType = getMimeType(messageType);
-      const extension = getFileExtension(messageType);
-      const category = getMessageCategory(messageType);
-      const percentage =
-        rooms[roomIndex].messages[messageIndex].fromPeerId === keyPair.peerId
-          ? 100
-          : Math.floor(
-              (rooms[roomIndex].messages[messageIndex].savedSize /
-                rooms[roomIndex].messages[messageIndex].totalSize) *
-                100,
-            );
+    if (roomIndex === -1 || messageIndex === -1)
+      return {
+        message: "No message",
+        percentage: 0,
+        size: 0,
+        filename: "",
+        mimeType: "text/plain",
+        extension: "",
+        category: MessageCategory.Text,
+      };
 
-      if (
-        percentage === 100 &&
-        rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
-      ) {
-        const label = await compileChannelMessageLabel(
-          rooms[roomIndex].messages[messageIndex].channelLabel,
-          rooms[roomIndex].messages[messageIndex].merkleRootHex,
-        );
+    const messageType = rooms[roomIndex].messages[messageIndex].messageType;
+    const mimeType = getMimeType(messageType);
+    const extension = getFileExtension(messageType);
+    const category = getMessageCategory(messageType);
+    const percentage =
+      rooms[roomIndex].messages[messageIndex].fromPeerId === keyPair.peerId
+        ? 100
+        : Math.floor(
+            (rooms[roomIndex].messages[messageIndex].savedSize /
+              rooms[roomIndex].messages[messageIndex].totalSize) *
+              100,
+          );
 
-        await store.dispatch(
-          webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-            label,
-            messageHash: hexToUint8Array(
-              rooms[roomIndex].messages[messageIndex].sha512Hex,
-            ),
-            alsoDeleteData: false,
-            alsoSendFinishedMessage: true,
-          }),
-        );
-      }
+    const chunks =
+      percentage === 100
+        ? await getDBAllChunks(
+            rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            rooms[roomIndex].messages[messageIndex].sha512Hex,
+          )
+        : [];
 
-      const chunks =
-        percentage === 100
-          ? await getDBAllChunks(
-              rooms[roomIndex].messages[messageIndex].merkleRootHex,
-              rooms[roomIndex].messages[messageIndex].sha512Hex,
-            )
-          : [];
+    const dataChunks = chunks.map((c) => c.data);
 
-      const dataChunks = chunks.map((c) => c.data);
+    try {
+      const data = new Blob(dataChunks, {
+        type: mimeType,
+      });
 
-      try {
-        const data = new Blob(dataChunks, {
-          type: mimeType,
-        });
-
-        if (messageType === MessageType.Text) {
-          return {
-            message:
-              dataChunks.length > 0 ? await data.text() : "Incoming message...",
-            percentage,
-            size: rooms[roomIndex].messages[messageIndex].totalSize,
-            filename: "",
-            mimeType,
-            extension,
-            category,
-          };
-        } else {
-          return {
-            message: data,
-            percentage,
-            size: rooms[roomIndex].messages[messageIndex].totalSize,
-            filename: rooms[roomIndex].messages[messageIndex].filename,
-            mimeType,
-            extension,
-            category,
-          };
-        }
-      } catch {
+      if (messageType === MessageType.Text) {
         return {
-          message: "Invalid message",
-          percentage: 0,
+          message:
+            dataChunks.length > 0 ? await data.text() : "Incoming message...",
+          percentage,
+          size: rooms[roomIndex].messages[messageIndex].totalSize,
+          filename: "",
+          mimeType,
+          extension,
+          category,
+        };
+      } else {
+        return {
+          message: data,
+          percentage,
           size: rooms[roomIndex].messages[messageIndex].totalSize,
           filename: rooms[roomIndex].messages[messageIndex].filename,
           mimeType,
@@ -440,88 +415,16 @@ const readMessage = async (
           category,
         };
       }
-    } else {
-      const msg = await getDBMessageData(merkleRootHex); // , hashHex);
-      if (msg) {
-        const messageType = msg.messageType;
-        const mimeType = getMimeType(messageType);
-        const extension = getFileExtension(messageType);
-        const category = getMessageCategory(messageType);
-        const percentage = Math.floor((msg.savedSize / msg.totalSize) * 100);
-
-        if (percentage === 100 && msg.fromPeerId !== keyPair.peerId) {
-          const label = await compileChannelMessageLabel(
-            msg.channelLabel,
-            msg.merkleRoot,
-          );
-
-          await store.dispatch(
-            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-              label,
-              messageHash: hexToUint8Array(msg.hash),
-              alsoDeleteData: false,
-              alsoSendFinishedMessage: true,
-            }),
-          );
-        }
-
-        const chunks =
-          percentage === 100 ? await getDBAllChunks(msg.merkleRoot) : [];
-
-        const dataChunks =
-          chunks.length > 0
-            ? chunks
-                .sort((a, b) => a.chunkIndex - b.chunkIndex)
-                .map((c) => c.data)
-            : [new Uint8Array().buffer];
-
-        try {
-          const data = new Blob(dataChunks, {
-            type: mimeType,
-          });
-          if (messageType === MessageType.Text) {
-            return {
-              message: await data.text(),
-              percentage,
-              size: msg.totalSize,
-              filename: "",
-              mimeType,
-              extension,
-              category,
-            };
-          } else {
-            return {
-              message: data,
-              percentage,
-              size: msg.totalSize,
-              filename: msg.filename,
-              mimeType,
-              extension,
-              category,
-            };
-          }
-        } catch {
-          return {
-            message: "Invalid message",
-            percentage: 0,
-            size: msg.totalSize,
-            filename: msg.filename,
-            mimeType,
-            extension,
-            category,
-          };
-        }
-      } else {
-        return {
-          message: "Irretrievable message",
-          percentage: 0,
-          size: 0,
-          filename: "",
-          mimeType: "text/plain",
-          extension: "",
-          category: MessageCategory.Text,
-        };
-      }
+    } catch {
+      return {
+        message: "Invalid message",
+        percentage: 0,
+        size: rooms[roomIndex].messages[messageIndex].totalSize,
+        filename: rooms[roomIndex].messages[messageIndex].filename,
+        mimeType,
+        extension,
+        category,
+      };
     }
   } catch (error) {
     console.error(error);
@@ -725,6 +628,9 @@ const deleteMsg = async (
 };
 
 const purgeIdentity = async () => {
+  const evt = new CustomEvent(CANCEL_SEND);
+  window.dispatchEvent(evt);
+
   dispatch(resetIdentity());
 
   const { rooms } = store.getState();
@@ -738,6 +644,9 @@ const purgeIdentity = async () => {
 };
 
 const purgeRoom = async (roomUrl: string) => {
+  const evt = new CustomEvent(CANCEL_SEND);
+  window.dispatchEvent(evt);
+
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
   if (roomIndex > -1) dispatch(deleteRoom(rooms[roomIndex].id));
@@ -746,6 +655,9 @@ const purgeRoom = async (roomUrl: string) => {
 };
 
 const purge = async () => {
+  const evt = new CustomEvent(CANCEL_SEND);
+  window.dispatchEvent(evt);
+
   dispatch(resetIdentity());
   await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
 

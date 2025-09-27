@@ -17,16 +17,14 @@ export const handleReceiveMessage = async (
 ): Promise<{
   date: Date;
   chunkSize: number;
-  savedSize: number;
-  totalSize: number;
   chunkIndex: number;
+  receivedFullSize: boolean;
+  chunkAlreadyExists: boolean;
+  totalSize: number;
+  messageType: number;
+  filename: string;
   chunkHash: Uint8Array;
   messageHash: Uint8Array;
-  receivedFullSize: boolean;
-  messageAlreadyExists: boolean;
-  chunkAlreadyExists: boolean;
-  messageType: number; // MessageType;
-  filename: string;
 }> => {
   const result = module._receive_message(
     decrypted.byteOffset,
@@ -64,9 +62,7 @@ export const handleReceiveMessage = async (
           chunkIndex: -1,
           chunkSize: 0,
           receivedFullSize: false,
-          messageAlreadyExists: false,
           chunkAlreadyExists: true,
-          savedSize: 0,
           totalSize: metadata.totalSize,
           messageType: metadata.messageType,
           filename: metadata.name,
@@ -79,53 +75,31 @@ export const handleReceiveMessage = async (
 
       const alreadyHasEverything =
         messageExists != undefined &&
-        messageExists.savedSize === messageExists.totalSize; // ||
-      // (incomingMessageIndex > -1 &&
-      //   room.messages[incomingMessageIndex].totalSize ===
-      //     room.messages[incomingMessageIndex].savedSize);
+        messageExists.savedSize === messageExists.totalSize;
 
       const messageRelevant =
-        // incomingMessageIndex === -1 ||
         !messageExists ||
-        messageExists.savedSize + chunkSize <= messageExists.totalSize; //&&
-      // (room.messages[incomingMessageIndex].totalSize >=
-      //   room.messages[incomingMessageIndex].savedSize + chunkSize &&
-      // !chunkAlreadyExists);
+        messageExists.savedSize + chunkSize <= messageExists.totalSize;
 
       const receivedFullSize =
         alreadyHasEverything ||
-        // (incomingMessageIndex > -1 &&
-        //   !chunkAlreadyExists &&
-        //   room.messages[incomingMessageIndex].totalSize ===
-        //     room.messages[incomingMessageIndex].savedSize + chunkSize) ||
-        // (incomingMessageIndex === -1 &&
-        chunkSize === metadata.totalSize || //)
+        chunkSize === metadata.totalSize ||
         (messageExists != undefined &&
-          // !chunkAlreadyExists &&
           messageExists.savedSize + chunkSize === messageExists.totalSize);
 
-      if (!messageRelevant) {
-        // cryptoModule._free(ptr1);
-
+      if (!messageRelevant) 
         return {
           date: metadata.date,
           chunkIndex: -1,
-          chunkSize, // incomingMessageIndex === -1 ? -1 : -2,
+          chunkSize,
           receivedFullSize,
-          messageAlreadyExists: true,
           chunkAlreadyExists: true,
-          savedSize: messageExists.savedSize,
-          // incomingMessageIndex > -1
-          //   ? room.messages[incomingMessageIndex].savedSize
-          // :
-          // messageExists ? messageExists.savedSize : 0,
           totalSize: metadata.totalSize,
           messageType: metadata.messageType,
           filename: metadata.name,
           chunkHash,
           messageHash: metadata.hash,
         };
-      }
 
       const mimeType = getMimeType(metadata.messageType);
 
@@ -143,15 +117,7 @@ export const handleReceiveMessage = async (
           chunkIndex: metadata.chunkIndex,
           chunkSize,
           receivedFullSize,
-          messageAlreadyExists: messageExists != undefined,
-          // chunkAlreadyExists,
           chunkAlreadyExists: false,
-          savedSize: messageExists?.savedSize ?? 0,
-          // savedSize:
-          // incomingMessageIndex > -1
-          //   ? room.messages[incomingMessageIndex].savedSize
-          // :
-          // messageExists ? messageExists.savedSize : 0,
           totalSize: metadata.totalSize,
           messageType: metadata.messageType,
           filename: metadata.name,
@@ -165,15 +131,7 @@ export const handleReceiveMessage = async (
           chunkSize: 0,
           receivedFullSize:
             messageExists != undefined ? receivedFullSize : false,
-          messageAlreadyExists: messageExists != undefined,
-          // chunkAlreadyExists,
           chunkAlreadyExists: true,
-          savedSize: messageExists?.savedSize ?? 0,
-          // savedSize:
-          // incomingMessageIndex > -1
-          //   ? room.messages[incomingMessageIndex].savedSize
-          // :
-          // messageExists ? messageExists.savedSize : 0,
           totalSize: 0,
           messageType: metadata.messageType,
           filename: metadata.name,
@@ -191,9 +149,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -210,9 +166,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -229,9 +183,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -248,9 +200,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -267,9 +217,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -286,9 +234,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",
@@ -305,9 +251,7 @@ export const handleReceiveMessage = async (
         chunkIndex: -1,
         chunkSize: 0,
         receivedFullSize: false,
-        messageAlreadyExists: false,
         chunkAlreadyExists: false,
-        savedSize: 0,
         totalSize: 0,
         messageType: MessageType.Text,
         filename: "",

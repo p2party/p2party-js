@@ -60,7 +60,7 @@ export const handleSendMessageWebsocket = async (
       const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
 
       const indexes = Array.from({ length: totalChunks }, (_, i) => i);
-      const indexesRandomized = await fisherYatesShuffle(indexes);
+      const indexesRandomized = fisherYatesShuffle(indexes);
       for (let j = 0; j < totalChunks; j++) {
         const jRandom = indexesRandomized[j];
 
@@ -101,7 +101,7 @@ export const handleSendMessageWebsocket = async (
           encryptedMessage,
         ]);
 
-        api.dispatch(
+        await api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
               type: "message",

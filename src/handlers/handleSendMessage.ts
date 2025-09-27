@@ -112,13 +112,6 @@ const sendChunks = async (
 
     if (sigResult !== 0) continue;
 
-    // const senderEphemeralKey = await newKeyPair(encryptionModule);
-    // const ephemeralSignature = await sign(
-    //   senderEphemeralKey.publicKey,
-    //   senderSecretKey,
-    //   encryptionModule,
-    // );
-
     const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
     if (!unencryptedChunk) continue;
 
@@ -218,15 +211,6 @@ const sendChunks = async (
 
     if (encResult !== 0) continue;
 
-    // const encryptedMessage = await encryptAsymmetric(
-    //   chunk,
-    //   // unencryptedChunks[jRandom],
-    //   receiverPublicKey,
-    //   senderEphemeralKey.secretKey, // senderSecretKey,
-    //   merkleRoot,
-    //   encryptionModule,
-    // );
-
     const message = await concatUint8Arrays([
       senderEphemeralPublicKey,
       senderEphemeralSignature,
@@ -237,12 +221,8 @@ const sendChunks = async (
       channel.readyState === "open" &&
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
     ) {
-      // const timeoutMilliseconds = randomNumberInRange(1, 10);
-      // await wait(timeoutMilliseconds);
-
       channel.send(message.buffer as ArrayBuffer);
     } else if (
-      // channel.readyState !== "closing" &&
       channel.readyState !== "closed"
     ) {
       putItemInDBSendQueue = true;
@@ -252,7 +232,7 @@ const sendChunks = async (
           position: iRandom,
           label: channel.label,
           toPeerId: channel.withPeerId,
-          encryptedData: message.buffer as ArrayBuffer, // new Blob([message]),
+          encryptedData: message.buffer as ArrayBuffer,
         });
       } catch (error) {
         console.error(error);
@@ -280,9 +260,6 @@ const sendChunks = async (
         channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
         channel.readyState === "open"
       ) {
-        // const timeoutMilliseconds = await randomNumberInRange(1, 10);
-        // await wait(timeoutMilliseconds);
-
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;
 
@@ -321,9 +298,7 @@ export const handleSendMessage = async (
   roomId: string,
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
-  // receiveMessageModule: LibCrypto,
   encryptionModule: LibCrypto,
-  // decryptionModule: LibCrypto,
   merkleModule: LibCrypto,
   minChunks = 1,
   chunkSize = CHUNK_LEN,
@@ -347,7 +322,7 @@ export const handleSendMessage = async (
           data,
           api,
           label,
-          rooms[roomIndex], // roomId,
+          rooms[roomIndex],
           merkleModule,
           minChunks,
           chunkSize,
@@ -399,9 +374,6 @@ export const handleSendMessage = async (
             epc: peerConnections[peerIndex],
             roomId,
             dataChannels,
-            // receiveMessageModule,
-            // decryptionModule,
-            // merkleModule,
           },
           api,
         );
@@ -412,7 +384,7 @@ export const handleSendMessage = async (
             senderSecretKey,
             totalChunks,
             chunkHashes,
-            additionalData, // merkleRoot,
+            additionalData,
             hashHex,
             peerConnections[peerIndex],
             encryptionModule,

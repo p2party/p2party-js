@@ -28,7 +28,7 @@ export const metadataSchemaVersions = [1];
 export const CANCEL_SEND = "CANCEL_SEND";
 
 /**
- * Splits a Uint8Array into chunks of a specified size, padding with zeros if necessary.
+ * Splits a Uint8Array into chunks of a specified size, padding with noise if necessary.
  * Ensures a minimum number of chunks are created.
  * Returns the chunks and the last valid byte index in the last chunk before padding.
  *
@@ -228,11 +228,6 @@ export const splitToChunks = async (
       chunkHashes: new Uint8Array(),
     };
   }
-
-  // const merkleWasmMemory = cryptoMemory.getMerkleRootMemory(totalChunks);
-  // const merkleCryptoModule = await libcrypto({
-  //   wasmMemory: merkleWasmMemory,
-  // });
 
   const merkleRoot = await getMerkleRoot(chunkHashes, merkleModule);
   const merkleRootHex = uint8ArrayToHex(merkleRoot);

@@ -8,7 +8,6 @@ import {
   deleteMessage,
   deleteRoom,
   setMessageAllChunks,
-  setChannel,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
@@ -23,9 +22,7 @@ import {
   deleteDBChunk,
   deleteDBMessageData,
   deleteDBNewChunk,
-  // getDBMessageData,
   getDBRoomMessageData,
-  // setDBRoomMessageData,
   setDBUniqueRoom,
 } from "../db/api";
 
@@ -36,15 +33,12 @@ const roomListenerMiddleware = createListenerMiddleware();
 roomListenerMiddleware.startListening({
   matcher: isAnyOf(
     setConnectingToPeers,
-    // setOnlyConnectWithKnownPeers,
     setRoom,
-    setChannel,
     setMessage,
     setMessageAllChunks,
     deleteMessage,
     deleteRoom,
   ),
-  // actionCreator: setConnectingToPeers,
   effect: async (action, listenerApi) => {
     if (setConnectingToPeers.match(action)) {
       const { roomId, connectingToPeers } = action.payload;
@@ -75,16 +69,6 @@ roomListenerMiddleware.startListening({
           setConnectingToPeers({ roomId, connectingToPeers: false }),
         );
       }
-    } else if (setChannel.match(action)) {
-      // const { roomId, peerId } = action.payload;
-      //
-      // const pastMessages = await getDBRoomMessageData(roomId);
-      // const len = pastMessages.length;
-      // for (let i = 0; i < len; i++) {
-      //   if (pastMessages[i]. pastMessages[i].savedSize < pastMessages[i].totalSize) {
-      //
-      //   }
-      // }
     } else if (setRoom.match(action)) {
       const { signalingServer, keyPair, rooms } =
         listenerApi.getState() as State;
@@ -135,40 +119,6 @@ roomListenerMiddleware.startListening({
                 fromPeerId: keyPair.peerId,
                 roomId: rooms[roomIndex].id,
               } as WebSocketMessagePeersRequest,
-            }),
-          );
-        }
-      }
-    } else if (setMessage.match(action)) {
-      const { roomId, merkleRootHex, sha512Hex, chunkSize, totalSize } =
-        action.payload;
-      const { rooms, keyPair } = listenerApi.getOriginalState() as State;
-
-      const roomIndex = rooms.findIndex((r) => r.id === roomId);
-      if (roomIndex > -1) {
-        const messageIndex = rooms[roomIndex].messages.findLastIndex(
-          (m) =>
-            m.merkleRootHex === merkleRootHex &&
-            // We are the message receiver
-            m.fromPeerId !== keyPair.peerId &&
-            // // This piece will finish the puzzle
-            m.savedSize + chunkSize === totalSize,
-        );
-
-        if (messageIndex > -1) {
-          const label = await compileChannelMessageLabel(
-            rooms[roomIndex].messages[messageIndex].channelLabel,
-            rooms[roomIndex].messages[messageIndex].merkleRootHex,
-          );
-
-          const messageHash = hexToUint8Array(sha512Hex);
-
-          await listenerApi.dispatch(
-            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-              label,
-              messageHash,
-              alsoDeleteData: false,
-              alsoSendFinishedMessage: true,
             }),
           );
         }

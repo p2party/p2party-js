@@ -1,8 +1,6 @@
 import { handleOpenChannel } from "./handleOpenChannel";
 
-// import { encryptAsymmetric } from "../cryptography/chacha20poly1305";
 import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
-// import { newKeyPair, sign } from "../cryptography/ed25519";
 import { getMerkleProof } from "../cryptography/merkle";
 import {
   crypto_hash_sha512_BYTES,
@@ -222,9 +220,7 @@ const sendChunks = async (
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
     ) {
       channel.send(message.buffer as ArrayBuffer);
-    } else if (
-      channel.readyState !== "closed"
-    ) {
+    } else if (channel.readyState !== "closed") {
       putItemInDBSendQueue = true;
 
       try {

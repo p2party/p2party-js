@@ -6,7 +6,8 @@ import { setChannel, setPeer } from "../../reducers/roomSlice";
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
 import cryptoMemory from "../../cryptography/memory";
-import libcrypto from "../../cryptography/libcrypto";
+// import libcrypto from "../../cryptography/libcrypto";
+import { wasmLoader } from "../../cryptography/wasmLoader";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -19,9 +20,6 @@ import type { State } from "../../store";
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  // receiveMessageWasmMemory: WebAssembly.Memory;
-  // decryptionWasmMemory: WebAssembly.Memory;
-  // merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcBaseQuery: BaseQueryFn<
@@ -37,23 +35,12 @@ const webrtcBaseQuery: BaseQueryFn<
     rtcConfig,
     peerConnections,
     dataChannels,
-    // receiveMessageWasmMemory,
-    // decryptionWasmMemory,
-    // merkleWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
   if (peerId === keyPair.peerId)
     throw new Error("Cannot create a connection with oneself.");
-
-  // const decryptionModule = await libcrypto({
-  //   wasmMemory: decryptionWasmMemory,
-  // });
-  //
-  // const merkleModule = await libcrypto({
-  //   wasmMemory: merkleWasmMemory,
-  // });
 
   const blacklisted = await getDBPeerIsBlacklisted(peerId);
   if (blacklisted) return { data: undefined };
@@ -69,21 +56,12 @@ const webrtcBaseQuery: BaseQueryFn<
     );
 
     epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-      // const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-      //
-      // const receiveMessageModule = await libcrypto({
-      //   wasmMemory: receiveMessageWasmMemory,
-      // });
-      //
       await handleOpenChannel(
         {
           channel: e.channel,
           epc,
           roomId,
           dataChannels,
-          // receiveMessageModule,
-          // decryptionModule,
-          // merkleModule,
         },
         api,
       );
@@ -98,9 +76,6 @@ const webrtcBaseQuery: BaseQueryFn<
           epc,
           roomId,
           dataChannels,
-          // receiveMessageModule,
-          // decryptionModule,
-          // merkleModule,
         },
         api,
       );
@@ -109,9 +84,11 @@ const webrtcBaseQuery: BaseQueryFn<
     const epc = peerConnections[connectionIndex];
     if (epc.connectionState === "connected") {
       const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-      const receiveMessageModule = await libcrypto({
-        wasmMemory: receiveMessageWasmMemory,
-      });
+      const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
+      // const receiveMessageModule = await libcrypto({
+      //   wasmMemory: receiveMessageWasmMemory,
+      // });
+
       epc.rooms.push({
         roomId,
         receiveMessageModule,

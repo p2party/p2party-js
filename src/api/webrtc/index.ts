@@ -58,9 +58,7 @@ const webrtcApi = createApi({
         rtcConfig = {
           iceServers: [
             {
-              urls: [
-                "stun:stun.p2party.com:3478",
-              ],
+              urls: ["stun:stun.p2party.com:3478"],
             },
           ],
         },

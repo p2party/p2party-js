@@ -17,7 +17,8 @@ import {
 } from "../cryptography/interfaces";
 import { randomNumberInRange } from "../cryptography/utils";
 import cryptoMemory from "../cryptography/memory";
-import libcrypto from "../cryptography/libcrypto";
+import { wasmLoader } from "../cryptography/wasmLoader";
+// import libcrypto from "../cryptography/libcrypto";
 
 import {
   deleteDBSendQueue,
@@ -58,10 +59,12 @@ export const handleOpenChannel = async (
   const roomIndex = rooms.findIndex((r) => r.id === roomId);
   let peerRoomIndex = epc.rooms.findLastIndex((r) => r.roomId === roomId);
   if (peerRoomIndex === -1) {
-    const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-    const receiveMessageModule = await libcrypto({
-      wasmMemory: receiveMessageWasmMemory,
-    });
+    const wasmMemory = cryptoMemory.getReceiveMessageMemory();
+    const receiveMessageModule = await wasmLoader(wasmMemory);
+    // const receiveMessageModule = await libcrypto({
+    //   wasmMemory,
+    // });
+
     peerRoomIndex = epc.rooms.length;
     epc.rooms.push({
       roomId,
@@ -236,7 +239,7 @@ export const handleOpenChannel = async (
           totalSize > 0 &&
           chunkHash.length === crypto_hash_sha512_BYTES &&
           extChannel.readyState === "open" &&
-          !chunkAlreadyExists 
+          !chunkAlreadyExists
         ) {
           extChannel.send(chunkHash.buffer as ArrayBuffer);
         }

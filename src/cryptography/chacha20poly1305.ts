@@ -1,6 +1,7 @@
 import cryptoMemory from "./memory";
 
-import libcrypto from "./libcrypto";
+// import libcrypto from "./libcrypto";
+import { wasmLoader } from "./wasmLoader";
 
 import {
   crypto_sign_ed25519_SECRETKEYBYTES,
@@ -80,7 +81,8 @@ export const encryptAsymmetric = async (
     module?.wasmMemory ??
     cryptoMemory.encryptAsymmetricMemory(len, additionalLen);
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(
@@ -307,7 +309,8 @@ export const decryptAsymmetric = async (
     module?.wasmMemory ??
     cryptoMemory.decryptAsymmetricMemory(len, additionalLen);
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const decryptedLen = getDecryptedLen(len);
 

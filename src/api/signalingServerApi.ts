@@ -15,7 +15,8 @@ import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 import { uint8ArrayToHex } from "../utils/uint8array";
 
 import { newKeyPair } from "../cryptography/ed25519";
-import libcrypto from "../cryptography/libcrypto";
+// import libcrypto from "../cryptography/libcrypto";
+import { wasmLoader } from "../cryptography/wasmLoader";
 import cryptoMemory from "../cryptography/memory";
 import {
   crypto_hash_sha512_BYTES,
@@ -127,22 +128,6 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
     let publicKey = localStorage.getItem("publicKey") ?? "";
     let secretKey = localStorage.getItem("secretKey") ?? "";
     if (keyPair.secretKey.length === 0 && secretKey.length === 0) {
-      // const newKeyPair = await crypto.subtle.generateKey(
-      //   {
-      //     name: "RSA-PSS",
-      //     hash: "SHA-256",
-      //     modulusLength: 4096,
-      //     publicExponent: new Uint8Array([1, 0, 1]),
-      //   },
-      //   true,
-      //   ["sign", "verify"],
-      // );
-      //
-      // const pair = await exportPemKeys(newKeyPair);
-      // publicKey = await exportPublicKeyToHex(newKeyPair.publicKey);
-      //
-      // api.dispatch(setKeyPair({ publicKey, secretKey: pair.secretKey }));
-
       const k = await newKeyPair();
       publicKey = uint8ArrayToHex(k.publicKey);
       secretKey = uint8ArrayToHex(k.secretKey);
@@ -362,9 +347,10 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
       });
 
       const CHANNELS_LEN = labels.length;
-      const encryptionModule = await libcrypto({
-        wasmMemory: encryptionWasmMemory,
-      });
+      const encryptionModule = await wasmLoader(encryptionWasmMemory);
+      // const encryptionModule = await libcrypto({
+      //   wasmMemory: encryptionWasmMemory,
+      // });
       for (let i = 0; i < CHANNELS_LEN; i++) {
         const data = `Connected with ${keyPair.peerId} on channel ${labels[i]}`;
         await handleSendMessageWebsocket(

@@ -1,6 +1,7 @@
 import { handleSendMessage } from "../../handlers/handleSendMessage";
 
-import libcrypto from "../../cryptography/libcrypto";
+// import libcrypto from "../../cryptography/libcrypto";
+import { wasmLoader } from "../../cryptography/wasmLoader";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -12,9 +13,7 @@ import type {
 export interface RTCChannelMessageParamsExtension extends RTCSendMessageParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  // receiveMessageWasmMemory: WebAssembly.Memory;
   encryptionWasmMemory: WebAssembly.Memory;
-  // decryptionWasmMemory: WebAssembly.Memory;
   merkleWasmMemory: WebAssembly.Memory;
 }
 
@@ -29,9 +28,7 @@ const webrtcMessageQuery: BaseQueryFn<
     roomId,
     peerConnections,
     dataChannels,
-    // receiveMessageWasmMemory,
     encryptionWasmMemory,
-    // decryptionWasmMemory,
     merkleWasmMemory,
     minChunks,
     chunkSize,
@@ -40,21 +37,15 @@ const webrtcMessageQuery: BaseQueryFn<
   },
   api,
 ) => {
-  // const receiveMessageModule = await libcrypto({
-  //   wasmMemory: receiveMessageWasmMemory,
+  const encryptionModule = await wasmLoader(encryptionWasmMemory);
+  // const encryptionModule = await libcrypto({
+  //   wasmMemory: encryptionWasmMemory,
   // });
 
-  const encryptionModule = await libcrypto({
-    wasmMemory: encryptionWasmMemory,
-  });
-
-  // const decryptionModule = await libcrypto({
-  //   wasmMemory: decryptionWasmMemory,
+  const merkleModule = await wasmLoader(merkleWasmMemory);
+  // const merkleModule = await libcrypto({
+  //   wasmMemory: merkleWasmMemory,
   // });
-
-  const merkleModule = await libcrypto({
-    wasmMemory: merkleWasmMemory,
-  });
 
   await handleSendMessage(
     data,
@@ -63,9 +54,7 @@ const webrtcMessageQuery: BaseQueryFn<
     roomId,
     peerConnections,
     dataChannels,
-    // receiveMessageModule,
     encryptionModule,
-    // decryptionModule,
     merkleModule,
     minChunks,
     chunkSize,

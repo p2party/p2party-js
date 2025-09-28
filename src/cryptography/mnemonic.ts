@@ -1,7 +1,8 @@
 import { keyPairFromSeed } from "./ed25519";
 import memory from "./memory";
 
-import libcrypto from "./libcrypto";
+// import libcrypto from "./libcrypto";
+import { wasmLoader } from "./wasmLoader";
 
 import wordlist from "../utils/wordlist.json";
 
@@ -23,7 +24,6 @@ export const argon2 = async (
   module?: LibCrypto,
 ): Promise<Uint8Array> => {
   const mnemonicNormalized = normalize(mnemonic);
-  // const mnemonicBuffer = Buffer.from(mnemonicNormalized, "utf8");
   const encoder = new TextEncoder();
   const mnemonicBuffer = encoder.encode(mnemonicNormalized).buffer;
   const mnemonicInt8Array = new Int8Array(mnemonicBuffer);
@@ -38,7 +38,8 @@ export const argon2 = async (
   const wasmMemory =
     module?.wasmMemory ?? memory.argon2Memory(mnemonicArrayLen);
 
-  module = module ?? (await libcrypto({ wasmMemory }));
+  // module = module ?? (await libcrypto({ wasmMemory }));
+  module = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = module._malloc(crypto_sign_ed25519_SEEDBYTES);
   const seed = new Uint8Array(

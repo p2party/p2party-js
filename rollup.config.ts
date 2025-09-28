@@ -1,12 +1,10 @@
 import path from "path";
 import fs from "fs";
-// import copy from "rollup-plugin-copy";
 import terser from "@rollup/plugin-terser";
 import commonjs from "@rollup/plugin-commonjs";
 import json from "@rollup/plugin-json";
 import resolve from "@rollup/plugin-node-resolve";
 import typescript from "@rollup/plugin-typescript";
-// import { importMetaAssets } from "@web/rollup-plugin-import-meta-assets";
 import replace from "@rollup/plugin-replace";
 import analyzer from "rollup-plugin-analyzer";
 
@@ -28,9 +26,6 @@ const plugins = [
   }),
 
   resolve({
-    // jsnext: true,
-    // main: true,
-    // module: true,
     browser: true,
     preferBuiltins: false,
   }),
@@ -48,9 +43,6 @@ const plugins = [
     declaration: true,
     declarationMap: true,
     exclude: ["playwright*", "rollup*"],
-    // paths: {
-    //   "@libdemos": [path.join(process.cwd(), "wasm", "libdemos")],
-    // },
     outDir: `${dir}`,
   }),
 
@@ -59,17 +51,6 @@ const plugins = [
       ecma: 2020,
       toplevel: true,
     }),
-
-  // copy({
-  //   targets: [
-  //     {
-  //       src: 'src/cryptography/libcrypto.wasm',
-  //       dest: 'lib',
-  //     },
-  //   ],
-  // }),
-
-  // importMetaAssets(),
 
   analyzer(),
 ];
@@ -91,7 +72,6 @@ export default [
     ],
     output: {
       name: "p2party",
-      // dir: "lib",
       file: `lib${path.sep}index.min.js`,
       format: "umd",
       esModule: false,
@@ -99,10 +79,6 @@ export default [
       extend: true,
       sourcemap: true,
       exports: "named",
-      // preserveModules: true,
-      //   paths: {
-      //     "@libdemos": [path.join(process.cwd(), "wasm", "libdemos")],
-      //   },
     },
   },
 
@@ -113,30 +89,19 @@ export default [
     external: ["module", "@reduxjs", "class-validator"],
     output: [
       {
-        // dir: "lib",
         file: `lib${path.sep}index.mjs`,
-        // format: "esm",
         esModule: true,
         interop: "esModule",
         exports: "named",
         sourcemap: true,
-        // preserveModules: true,
-        // paths: {
-        //   "@libdemos": [path.join(process.cwd(), "wasm", "libdemos")],
-        // },
       },
       {
-        // dir: "lib",
         file: `lib${path.sep}index.js`,
         format: "cjs",
         esModule: false,
         interop: "auto",
-        exports: "named", // "default",
+        exports: "named",
         sourcemap: true,
-        // preserveModules: true,
-        // paths: {
-        //   "@libdemos": [path.join(process.cwd(), "wasm", "libdemos")],
-        // },
       },
     ],
   },

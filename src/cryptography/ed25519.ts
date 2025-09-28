@@ -1,6 +1,7 @@
 import memory from "./memory";
 
-import libcrypto from "./libcrypto";
+// import libcrypto from "./libcrypto";
+import { wasmLoader } from "./wasmLoader";
 
 import {
   crypto_sign_ed25519_PUBLICKEYBYTES,
@@ -15,7 +16,8 @@ import type { LibCrypto } from "./libcrypto";
 export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
   const wasmMemory = module?.wasmMemory ?? memory.newKeyPairMemory();
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const publicKey = new Uint8Array(
@@ -75,7 +77,8 @@ export const keyPairFromSeed = async (
 ): Promise<SignKeyPair> => {
   const wasmMemory = module?.wasmMemory ?? memory.keyPairFromSeedMemory();
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const publicKey = new Uint8Array(
@@ -135,7 +138,8 @@ export const keyPairFromSecretKey = async (
 ): Promise<SignKeyPair> => {
   const wasmMemory = module?.wasmMemory ?? memory.keyPairFromSecretKeyMemory();
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(crypto_sign_ed25519_PUBLICKEYBYTES);
   const pk = new Uint8Array(
@@ -192,7 +196,8 @@ export const sign = async (
 
   const wasmMemory = module ? module.wasmMemory : memory.signMemory(messageLen);
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(messageLen * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(
@@ -243,7 +248,8 @@ export const verify = async (
 
   const wasmMemory = module ? module.wasmMemory : memory.verifyMemory(len);
 
-  const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
   const ptr1 = cryptoModule._malloc(len * Uint8Array.BYTES_PER_ELEMENT);
   const dataArray = new Uint8Array(

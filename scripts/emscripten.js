@@ -54,7 +54,7 @@ const withJS = ` \
 -s MODULARIZE=1 \
 -s MAIN_MODULE=2 \
 -s BUILD_AS_WORKER=1 \
--s INCOMING_MODULE_JS_API=\[\"wasmMemory\"\] \
+-s INCOMING_MODULE_JS_API=\[\"wasmBinary\",\"wasmMemory\"\] \
 -s POLYFILL=0 \
 -s NO_DYNAMIC_EXECUTION=1 \
 -s WEBSOCKET_SUBPROTOCOL=null \
@@ -103,7 +103,7 @@ emcc \
 -fno-keep-static-consts \
 -fvectorize \
 -s STRICT \
--s SINGLE_FILE=1 \
+-s SINGLE_FILE=0 \
 -s FILESYSTEM=0 \
 -s SAFE_HEAP=1 \
 -s CHECK_NULL_WRITES=1 \

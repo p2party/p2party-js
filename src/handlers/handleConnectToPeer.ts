@@ -8,7 +8,8 @@ import webrtcApi from "../api/webrtc";
 import { defaultRTCConfig, setPeer } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
-import libcrypto from "../cryptography/libcrypto";
+import { wasmLoader } from "../cryptography/wasmLoader";
+// import libcrypto from "../cryptography/libcrypto";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -51,9 +52,10 @@ export const handleConnectToPeer = async (
 
     if (roomIndex === -1) {
       const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-      const receiveMessageModule = await libcrypto({
-        wasmMemory: receiveMessageWasmMemory,
-      });
+      const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
+      // const receiveMessageModule = await libcrypto({
+      //   wasmMemory: receiveMessageWasmMemory,
+      // });
 
       peerConnections[peerIndex].rooms.push({
         roomId,
@@ -72,9 +74,10 @@ export const handleConnectToPeer = async (
   epc.iceCandidates = [] as RTCIceCandidate[];
 
   const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-  const receiveMessageModule = await libcrypto({
-    wasmMemory: receiveMessageWasmMemory,
-  });
+  const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
+  // const receiveMessageModule = await libcrypto({
+  //   wasmMemory: receiveMessageWasmMemory,
+  // });
   epc.rooms = [
     {
       roomId,

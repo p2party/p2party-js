@@ -84,9 +84,7 @@ const connect = async (
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
-        urls: [
-          "stun:stun.p2party.com:3478",
-        ],
+        urls: ["stun:stun.p2party.com:3478"],
       },
     ],
     iceTransportPolicy: "all",

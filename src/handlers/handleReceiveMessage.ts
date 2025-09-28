@@ -87,7 +87,7 @@ export const handleReceiveMessage = async (
         (messageExists != undefined &&
           messageExists.savedSize + chunkSize === messageExists.totalSize);
 
-      if (!messageRelevant) 
+      if (!messageRelevant)
         return {
           date: metadata.date,
           chunkIndex: -1,

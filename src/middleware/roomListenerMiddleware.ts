@@ -145,9 +145,18 @@ roomListenerMiddleware.startListening({
 
           const messageHash = hexToUint8Array(sha512Hex);
 
+          // await listenerApi.dispatch(
+          //   webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+          //     label,
+          //     messageHash,
+          //     alsoDeleteData: false,
+          //     alsoSendFinishedMessage,
+          //   }),
+          // );
           await listenerApi.dispatch(
-            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+            webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
               label,
+              peerId: rooms[roomIndex].messages[messageIndex].fromPeerId,
               messageHash,
               alsoDeleteData: false,
               alsoSendFinishedMessage,

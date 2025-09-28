@@ -1,10 +1,12 @@
 import webrtcApi from ".";
 
-import { deleteChannel } from "../../reducers/roomSlice";
+import { deleteChannel, deleteMessage } from "../../reducers/roomSlice";
 
 import { deleteDBNewChunk, deleteDBSendQueue } from "../../db/api";
 
 import { decompileChannelMessageLabel } from "../../utils/channelLabel";
+
+import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
 import {
   LABEL_ELEMENTS,
@@ -29,12 +31,31 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromPeerChannelLabelParamsExtension,
   void,
   unknown
-> = async ({ peerId, label, peerConnections, dataChannels }, api) => {
+> = async (
+  {
+    peerId,
+    label,
+    messageHash,
+    alsoDeleteData,
+    alsoSendFinishedMessage,
+    peerConnections,
+    dataChannels,
+  },
+  api,
+) => {
   const channelIndex = dataChannels.findIndex(
     (c) => c.label === label && c.withPeerId === peerId,
   );
 
   if (channelIndex > -1 && dataChannels[channelIndex]) {
+    if (
+      messageHash &&
+      alsoSendFinishedMessage &&
+      messageHash.length === crypto_hash_sha512_BYTES
+    ) {
+      dataChannels[channelIndex].send(messageHash.buffer as ArrayBuffer);
+    }
+
     dataChannels[channelIndex].onopen = null;
     dataChannels[channelIndex].onclose = null;
     dataChannels[channelIndex].onerror = null;
@@ -46,19 +67,14 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
 
     dataChannels.splice(channelIndex, 1);
 
-    api.dispatch(
-      deleteChannel({
-        peerId,
-        label,
-      }),
-    );
-
     await deleteDBSendQueue(label, peerId);
   }
 
   // Check whether channel is a name or a message channel
   const { merkleRootHex } = await decompileChannelMessageLabel(label);
   if (merkleRootHex.length > 0) {
+    if (alsoDeleteData) api.dispatch(deleteMessage({ merkleRootHex }));
+
     // Find out if the message is sent to others
     const c = dataChannels.findIndex((c) => {
       const split = c.label.split(LABEL_ELEMENTS_SEPARATOR);
@@ -70,6 +86,13 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
 
     // If the message is not sent to anyone then delete it from sending memory
     if (c < 0) await deleteDBNewChunk(merkleRootHex);
+  } else {
+    api.dispatch(
+      deleteChannel({
+        peerId,
+        label,
+      }),
+    );
   }
 
   // Find out if the two peers have at least one channel together

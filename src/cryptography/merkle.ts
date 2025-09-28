@@ -1,6 +1,7 @@
 import cryptoMemory from "./memory";
 
-import libcrypto from "./libcrypto";
+// import libcrypto from "./libcrypto";
+import { wasmLoader } from "./wasmLoader";
 
 import { crypto_hash_sha512_BYTES } from "./interfaces";
 
@@ -30,11 +31,10 @@ export const getMerkleRoot = async (
 
   const wasmMemory =
     module?.wasmMemory ?? cryptoMemory.getMerkleRootMemory(treeLen);
-  const cryptoModule =
-    module ??
-    (await libcrypto({
-      wasmMemory,
-    }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
+  // (await libcrypto({
+  //   wasmMemory,
+  // }));
 
   const ptr1 = cryptoModule._malloc(treeLen * crypto_hash_sha512_BYTES);
   const leavesHashed = new Uint8Array(
@@ -146,11 +146,10 @@ export const getMerkleProof = async (
 
   const wasmMemory =
     module?.wasmMemory ?? cryptoMemory.getMerkleProofMemory(treeLen);
-  const cryptoModule =
-    module ??
-    (await libcrypto({
-      wasmMemory,
-    }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
+  // (await libcrypto({
+  //   wasmMemory,
+  // }));
 
   const ptr1 = cryptoModule._malloc(treeLen * crypto_hash_sha512_BYTES);
   const leavesHashed = new Uint8Array(
@@ -264,9 +263,10 @@ export const getMerkleRootFromProof = async (
   const proofArtifactsLen = proofLen / (crypto_hash_sha512_BYTES + 1);
 
   const wasmMemory = cryptoMemory.verifyMerkleProofMemory(proofLen);
-  const cryptoModule = await libcrypto({
-    wasmMemory,
-  });
+  const cryptoModule = await wasmLoader(wasmMemory);
+  // const cryptoModule = await libcrypto({
+  //   wasmMemory,
+  // });
 
   const ptr1 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const elementHash = new Uint8Array(
@@ -358,12 +358,10 @@ export const verifyMerkleProof = async (
 
   const wasmMemory =
     module?.wasmMemory ?? cryptoMemory.verifyMerkleProofMemory(proofLen);
-  // const wasmMemory = cryptoMemory.verifyMerkleProofMemory(proofLen);
-  const cryptoModule =
-    module ??
-    (await libcrypto({
-      wasmMemory,
-    }));
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
+  // (await libcrypto({
+  //   wasmMemory,
+  // }));
 
   const ptr1 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const elementHash = new Uint8Array(

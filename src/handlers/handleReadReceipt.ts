@@ -54,11 +54,20 @@ export const handleReadReceipt = async (
 
       const messageHash = hexToUint8Array(hashHex);
 
+      // await api.dispatch(
+      //   webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+      //     label: channel.label,
+      //     messageHash,
+      //     alsoDeleteData: false,
+      //   }),
+      // );
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
+          peerId: channel.withPeerId,
           label: channel.label,
           messageHash,
           alsoDeleteData: false,
+          alsoSendFinishedMessage: false,
         }),
       );
     } else {
@@ -71,7 +80,13 @@ export const handleReadReceipt = async (
 
         const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
         const chunkSize = dbChunk?.byteLength ?? 0;
-        if (dbChunk && messageIndex > -1 && chunkSize > 0 && room.messages[messageIndex].savedSize + chunkSize <= room.messages[messageIndex].totalSize) {
+        if (
+          dbChunk &&
+          messageIndex > -1 &&
+          chunkSize > 0 &&
+          room.messages[messageIndex].savedSize + chunkSize <=
+            room.messages[messageIndex].totalSize
+        ) {
           api.dispatch(
             setMessage({
               roomId: room.id,

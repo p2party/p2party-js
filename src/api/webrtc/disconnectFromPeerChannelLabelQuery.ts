@@ -8,11 +8,6 @@ import { decompileChannelMessageLabel } from "../../utils/channelLabel";
 
 import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
-import {
-  LABEL_ELEMENTS,
-  LABEL_ELEMENTS_SEPARATOR,
-} from "../../utils/channelLabel";
-
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
 import type {
@@ -43,6 +38,8 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   },
   api,
 ) => {
+  const { rooms, signalingServer } = api.getState() as State;
+
   const channelIndex = dataChannels.findIndex(
     (c) => c.label === label && c.withPeerId === peerId,
   );
@@ -76,17 +73,11 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     if (alsoDeleteData) api.dispatch(deleteMessage({ merkleRootHex }));
 
     // Find out if the message is sent to others
-    const c = dataChannels.findIndex((c) => {
-      const split = c.label.split(LABEL_ELEMENTS_SEPARATOR);
-
-      return split.length === LABEL_ELEMENTS
-        ? split[1] === merkleRootHex
-        : false;
-    });
+    const c = dataChannels.findIndex((c) => c.label === label);
 
     // If the message is not sent to anyone then delete it from sending memory
     if (c < 0) await deleteDBNewChunk(merkleRootHex);
-  } else {
+  } else if (!signalingServer.isConnected || alsoDeleteData) {
     api.dispatch(
       deleteChannel({
         peerId,
@@ -96,7 +87,6 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   }
 
   // Find out if the two peers have at least one channel together
-  const { rooms } = api.getState() as State;
   const roomsLen = rooms.length;
   let peerHasChannel = false;
   for (let i = 0; i < roomsLen; i++) {

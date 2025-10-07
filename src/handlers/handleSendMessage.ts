@@ -1,5 +1,7 @@
 import { handleOpenChannel } from "./handleOpenChannel";
 
+import signalingServerApi from "../api/signalingServerApi";
+
 import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
 import { getMerkleProof } from "../cryptography/merkle";
 import {
@@ -8,7 +10,11 @@ import {
   crypto_sign_ed25519_SECRETKEYBYTES,
 } from "../cryptography/interfaces";
 
-import { concatUint8Arrays, hexToUint8Array } from "../utils/uint8array";
+import {
+  concatUint8Arrays,
+  hexToUint8Array,
+  uint8ArrayToHex,
+} from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata } from "../utils/metadata";
 import { getMimeType } from "../utils/messageTypes";
@@ -37,6 +43,7 @@ import type {
   IRTCDataChannel,
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
+import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -48,19 +55,27 @@ import type { State } from "../store";
 // };
 
 const sendChunks = async (
-  channel: IRTCDataChannel,
+  channel: IRTCDataChannel | string,
+  api: BaseQueryApi,
+  roomId: string,
   senderSecretKey: Uint8Array,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   hashHex: string,
-  epc: IRTCPeerConnection,
+  // epc: IRTCPeerConnection,
+  peerId: string,
+  peerPublicKeyHex: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
 ) => {
   let putItemInDBSendQueue = false;
 
-  const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
+  const { keyPair } = api.getState() as State;
+
+  const { channelLabel, merkleRootHex } = await decompileChannelMessageLabel(
+    typeof channel === "string" ? channel : channel.label,
+  );
 
   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
   const indexesRandomized = fisherYatesShuffle(indexes);
@@ -84,7 +99,7 @@ const sendChunks = async (
     encryptedArray,
   } = allocateSendMessage(encryptionModule);
 
-  const peerPublicKeyHex = epc.withPeerPublicKey;
+  // const peerPublicKeyHex = epc.withPeerPublicKey;
   // const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
   receiverPublicKeyArray.set(hexToUint8Array(peerPublicKeyHex));
 
@@ -126,13 +141,17 @@ const sendChunks = async (
         metadata.chunkStartIndex,
         metadata.chunkEndIndex,
       );
-      await setDBChunk({
-        merkleRoot: merkleRootHex,
-        hash: hashHex,
-        chunkIndex: metadata.chunkIndex,
-        data: realChunk,
-        mimeType,
-      });
+      try {
+        await setDBChunk({
+          merkleRoot: merkleRootHex,
+          hash: hashHex,
+          chunkIndex: metadata.chunkIndex,
+          data: realChunk,
+          mimeType,
+        });
+      } catch {
+        /* ignore */
+      }
     }
 
     const merkleProof = new Uint8Array(PROOF_LEN);
@@ -216,11 +235,29 @@ const sendChunks = async (
     ]);
 
     if (
+      typeof channel === "string" ||
+      channel.readyState !== "open" ||
+      channel.bufferedAmount >= MAX_BUFFERED_AMOUNT
+    ) {
+      await api.dispatch(
+        signalingServerApi.endpoints.sendMessage.initiate({
+          content: {
+            type: "message",
+            message: uint8ArrayToHex(message),
+            roomId,
+            fromPeerId: keyPair.peerId,
+            // toPeerId: epc.withPeerId,
+            toPeerId: peerId,
+            label: typeof channel === "string" ? channel : channel.label,
+          } as WebSocketMessageMessageSendRequest,
+        }),
+      );
+    } else if (
       channel.readyState === "open" &&
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
     ) {
       channel.send(message.buffer as ArrayBuffer);
-    } else if (channel.readyState !== "closed") {
+    } else if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
       putItemInDBSendQueue = true;
 
       try {
@@ -246,31 +283,62 @@ const sendChunks = async (
   }
 
   if (putItemInDBSendQueue) {
-    while (
-      channel.readyState === "open" &&
-      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-    ) {
-      const sendQueue = await getDBSendQueue(channel.label, epc.withPeerId);
-      while (
-        sendQueue.length > 0 &&
-        channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-        channel.readyState === "open"
-      ) {
+    if (typeof channel === "string") {
+      const sendQueue = await getDBSendQueue(channel, peerId); // epc.withPeerId);
+      while (sendQueue.length > 0) {
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;
 
         const [item] = sendQueue.splice(pos, 1);
-        if (channel.readyState === "open") {
-          channel.send(item.encryptedData);
 
-          try {
-            await deleteDBSendQueue(
-              channel.label,
-              epc.withPeerId,
-              item.position,
-            );
-          } catch (error) {
-            console.error(error);
+        await api.dispatch(
+          signalingServerApi.endpoints.sendMessage.initiate({
+            content: {
+              type: "message",
+              message: uint8ArrayToHex(new Uint8Array(item.encryptedData)),
+              roomId,
+              fromPeerId: keyPair.peerId,
+              // toPeerId: epc.withPeerId,
+              toPeerId: peerId,
+              label: channelLabel,
+            } as WebSocketMessageMessageSendRequest,
+          }),
+        );
+
+        try {
+          await deleteDBSendQueue(channel, peerId, item.position);
+        } catch (error) {
+          console.error(error);
+        }
+      }
+    } else {
+      while (
+        channel.readyState === "open" &&
+        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
+      ) {
+        const sendQueue = await getDBSendQueue(channel.label, peerId); // epc.withPeerId);
+        while (
+          sendQueue.length > 0 &&
+          channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+          channel.readyState === "open"
+        ) {
+          let pos = await randomNumberInRange(0, sendQueue.length);
+          if (pos === sendQueue.length) pos = 0;
+
+          const [item] = sendQueue.splice(pos, 1);
+          if (channel.readyState === "open") {
+            channel.send(item.encryptedData);
+
+            try {
+              await deleteDBSendQueue(
+                channel.label,
+                // epc.withPeerId,
+                peerId,
+                item.position,
+              );
+            } catch (error) {
+              console.error(error);
+            }
           }
         }
       }
@@ -302,7 +370,7 @@ export const handleSendMessage = async (
   metadataSchemaVersion = 1,
 ) => {
   try {
-    const { rooms, keyPair } = api.getState() as State;
+    const { rooms, keyPair, signalingServer } = api.getState() as State;
 
     const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
@@ -362,31 +430,59 @@ export const handleSendMessage = async (
           (p) =>
             p.withPeerId === rooms[roomIndex].channels[channelIndex].peerIds[i],
         );
-        if (peerIndex === -1) continue;
+        if (peerIndex === -1 && !signalingServer.isConnected) continue;
 
-        const channel = await handleOpenChannel(
-          {
-            channel: channelMessageLabel,
-            epc: peerConnections[peerIndex],
-            roomId,
-            dataChannels,
-          },
-          api,
+        const channel = // channelMessageLabel;
+          peerIndex > -1 &&
+          peerConnections[peerIndex].connectionState === "connected"
+            ? await handleOpenChannel(
+                {
+                  channel: channelMessageLabel,
+                  epc: peerConnections[peerIndex],
+                  roomId,
+                  dataChannels,
+                },
+                api,
+              )
+            : channelMessageLabel;
+
+        const peerId =
+          peerIndex > -1
+            ? peerConnections[peerIndex].withPeerId
+            : rooms[roomIndex].channels[channelIndex].peerIds[i];
+
+        const peerRoomIndex = rooms[roomIndex].peers.findIndex(
+          (p) => p.peerId === peerId,
         );
 
-        promises.push(
-          sendChunks(
-            channel,
-            senderSecretKey,
-            totalChunks,
-            chunkHashes,
-            additionalData,
-            hashHex,
-            peerConnections[peerIndex],
-            encryptionModule,
-            merkleModule,
-          ),
-        );
+        const peerPublicKeyHex =
+          peerIndex > -1
+            ? peerConnections[peerIndex].withPeerPublicKey
+            : peerRoomIndex > -1
+              ? rooms[roomIndex].peers[peerRoomIndex].peerPublicKey
+              : "";
+
+        if (
+          peerPublicKeyHex.length ===
+          crypto_sign_ed25519_PUBLICKEYBYTES * 2
+        ) {
+          promises.push(
+            sendChunks(
+              channel,
+              api,
+              roomId,
+              senderSecretKey,
+              totalChunks,
+              chunkHashes,
+              additionalData,
+              hashHex,
+              peerId,
+              peerPublicKeyHex,
+              encryptionModule,
+              merkleModule,
+            ),
+          );
+        }
       }
 
       await Promise.allSettled(promises);

@@ -1,32 +1,27 @@
 import webrtcApi from "../api/webrtc";
 
-import { deleteDBNewChunk, getDBChunk, getDBNewChunk } from "../db/api";
+import { getDBChunk, getDBNewChunk } from "../db/api";
 
 import { setMessage, setMessageAllChunks } from "../reducers/roomSlice";
 
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 
-import type { IRTCDataChannel } from "../api/webrtc/interfaces";
 import type { BaseQueryApi } from "@reduxjs/toolkit/dist/query";
 import type { Room } from "../reducers/roomSlice";
 
 export const handleReadReceipt = async (
   receivedChunkHash: Uint8Array,
-  channel: IRTCDataChannel,
+  channel: string,
+  peerId: string,
   room: Room,
   api: BaseQueryApi,
-  dataChannels: IRTCDataChannel[],
 ) => {
   try {
-    const channelsSendingSameItem = dataChannels.filter(
-      (dc) => dc.label === channel.label,
-    );
-
     const hex = uint8ArrayToHex(receivedChunkHash);
 
     const { channelLabel, merkleRootHex } = await decompileChannelMessageLabel(
-      channel.label,
+      channel, //.label,
     );
 
     const messageIndex = room.messages.findLastIndex(
@@ -53,18 +48,10 @@ export const handleReadReceipt = async (
       );
 
       const messageHash = hexToUint8Array(hashHex);
-
-      // await api.dispatch(
-      //   webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-      //     label: channel.label,
-      //     messageHash,
-      //     alsoDeleteData: false,
-      //   }),
-      // );
       await api.dispatch(
         webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-          peerId: channel.withPeerId,
-          label: channel.label,
+          peerId, //: channel.withPeerId,
+          label: channel, //.label,
           messageHash,
           alsoDeleteData: false,
           alsoSendFinishedMessage: false,
@@ -75,7 +62,7 @@ export const handleReadReceipt = async (
       const chunkIndex = chunk?.chunkIndex ?? -1;
       if (chunk && chunkIndex > -1) {
         const messageIndex = room.messages.findLastIndex(
-          (m) => m.merkleRootHex === merkleRootHex, // || m.sha512Hex === hashHex,
+          (m) => m.merkleRootHex === merkleRootHex,
         );
 
         const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
@@ -103,9 +90,9 @@ export const handleReadReceipt = async (
           );
 
           // Only one peer receives the message
-          if (channelsSendingSameItem.length === 1) {
-            await deleteDBNewChunk(undefined, hex);
-          }
+          // if (channelsSendingSameItem.length === 1) {
+          //   await deleteDBNewChunk(undefined, hex);
+          // }
         } else if (messageIndex === -1) {
           console.log("No message with hex " + hashHex);
         }

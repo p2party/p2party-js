@@ -130,17 +130,6 @@ export const defaultRTCConfig = {
 } as RTCConfiguration;
 
 const initialState: Room[] = [];
-// {
-//   url: "",
-//   id: "",
-//   connectingToPeers: false,
-//   connectedToPeers: false,
-//   canBeConnectionRelay: true,
-//   rtcConfig: defaultRTCConfig,
-//   peers: [],
-//   channels: [],
-//   messages: [],
-// };
 
 const roomSlice = createSlice({
   name: "rooms",

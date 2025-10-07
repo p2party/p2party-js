@@ -83,21 +83,27 @@ const webrtcBaseQuery: BaseQueryFn<
   } else {
     const epc = peerConnections[connectionIndex];
     if (epc.connectionState === "connected") {
-      const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-      const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
-      // const receiveMessageModule = await libcrypto({
-      //   wasmMemory: receiveMessageWasmMemory,
-      // });
+      const roomIndex = epc.rooms.findIndex((r) => r.roomId === roomId);
+      if (roomIndex === -1) {
+        const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
+        const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
+        // const receiveMessageModule = await libcrypto({
+        //   wasmMemory: receiveMessageWasmMemory,
+        // });
 
-      epc.rooms.push({
-        roomId,
-        receiveMessageModule,
-      });
-      api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
+        epc.rooms.push({
+          roomId,
+          receiveMessageModule,
+        });
+        api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
+      }
 
       const dataChannelsLen = dataChannels.length;
       for (let i = 0; i < dataChannelsLen; i++) {
-        if (dataChannels[i].withPeerId === peerId) {
+        if (
+          dataChannels[i].withPeerId === peerId &&
+          !dataChannels[i].roomIds.includes(roomId)
+        ) {
           dataChannels[i].roomIds.push(roomId);
         }
       }

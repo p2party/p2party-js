@@ -7,16 +7,15 @@ import {
   setMessage,
   deleteMessage,
   deleteRoom,
-  setMessageAllChunks,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 
-import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
-
-import { compileChannelMessageLabel } from "../utils/channelLabel";
 import { hexToUint8Array } from "../utils/uint8array";
+import { compileChannelMessageLabel } from "../utils/channelLabel";
+
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import {
   deleteDBChunk,
@@ -35,7 +34,6 @@ roomListenerMiddleware.startListening({
     setConnectingToPeers,
     setRoom,
     setMessage,
-    setMessageAllChunks,
     deleteMessage,
     deleteRoom,
   ),
@@ -123,18 +121,20 @@ roomListenerMiddleware.startListening({
           );
         }
       }
-    } else if (setMessageAllChunks.match(action)) {
-      const { roomId, merkleRootHex, sha512Hex, alsoSendFinishedMessage } =
+    } else if (setMessage.match(action)) {
+      const { roomId, merkleRootHex, sha512Hex, chunkSize, totalSize } =
         action.payload;
-      const { rooms, keyPair } = listenerApi.getState() as State;
+      const { rooms, keyPair } = listenerApi.getOriginalState() as State;
 
       const roomIndex = rooms.findIndex((r) => r.id === roomId);
       if (roomIndex > -1) {
-        // If message receiver set this
         const messageIndex = rooms[roomIndex].messages.findLastIndex(
           (m) =>
             m.merkleRootHex === merkleRootHex &&
-            m.fromPeerId !== keyPair.peerId,
+            // We are the message receiver
+            m.fromPeerId !== keyPair.peerId &&
+            // // This piece will finish the puzzle
+            m.savedSize + chunkSize === totalSize,
         );
 
         if (messageIndex > -1) {
@@ -145,25 +145,49 @@ roomListenerMiddleware.startListening({
 
           const messageHash = hexToUint8Array(sha512Hex);
 
-          // await listenerApi.dispatch(
-          //   webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-          //     label,
-          //     messageHash,
-          //     alsoDeleteData: false,
-          //     alsoSendFinishedMessage,
-          //   }),
-          // );
           await listenerApi.dispatch(
-            webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
+            webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
               label,
-              peerId: rooms[roomIndex].messages[messageIndex].fromPeerId,
               messageHash,
               alsoDeleteData: false,
-              alsoSendFinishedMessage,
+              alsoSendFinishedMessage: true,
             }),
           );
         }
       }
+      // } else if (setMessageAllChunks.match(action)) {
+      //   const { roomId, merkleRootHex, sha512Hex, alsoSendFinishedMessage } =
+      //     action.payload;
+      //   const { rooms, keyPair } = listenerApi.getState() as State;
+      //
+      //   const roomIndex = rooms.findIndex((r) => r.id === roomId);
+      //   if (roomIndex > -1) {
+      //     // If message receiver set this
+      //     const messageIndex = rooms[roomIndex].messages.findLastIndex(
+      //       (m) =>
+      //         m.merkleRootHex === merkleRootHex &&
+      //         m.fromPeerId !== keyPair.peerId,
+      //     );
+      //
+      //     if (messageIndex > -1) {
+      //       const label = await compileChannelMessageLabel(
+      //         rooms[roomIndex].messages[messageIndex].channelLabel,
+      //         rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      //       );
+      //
+      //       const messageHash = hexToUint8Array(sha512Hex);
+      //
+      //       await listenerApi.dispatch(
+      //         webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
+      //           label,
+      //           peerId: rooms[roomIndex].messages[messageIndex].fromPeerId,
+      //           messageHash,
+      //           alsoDeleteData: false,
+      //           alsoSendFinishedMessage,
+      //         }),
+      //       );
+      //     }
+      //   }
     } else if (deleteMessage.match(action)) {
       const { merkleRootHex, hashHex } = action.payload;
 

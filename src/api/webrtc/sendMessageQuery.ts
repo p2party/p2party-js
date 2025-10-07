@@ -1,6 +1,5 @@
 import { handleSendMessage } from "../../handlers/handleSendMessage";
 
-// import libcrypto from "../../cryptography/libcrypto";
 import { wasmLoader } from "../../cryptography/wasmLoader";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -38,14 +37,7 @@ const webrtcMessageQuery: BaseQueryFn<
   api,
 ) => {
   const encryptionModule = await wasmLoader(encryptionWasmMemory);
-  // const encryptionModule = await libcrypto({
-  //   wasmMemory: encryptionWasmMemory,
-  // });
-
   const merkleModule = await wasmLoader(merkleWasmMemory);
-  // const merkleModule = await libcrypto({
-  //   wasmMemory: merkleWasmMemory,
-  // });
 
   await handleSendMessage(
     data,

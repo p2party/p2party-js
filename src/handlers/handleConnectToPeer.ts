@@ -36,7 +36,7 @@ export const handleConnectToPeer = async (
   }: IRTCPeerConnectionParams,
   api: BaseQueryApi,
 ): Promise<IRTCPeerConnection> => {
-  const { keyPair } = api.getState() as State;
+  const { keyPair, signalingServer } = api.getState() as State;
 
   rtcConfig ??= defaultRTCConfig;
 
@@ -72,6 +72,16 @@ export const handleConnectToPeer = async (
   epc.withPeerPublicKey = peerPublicKey;
   epc.makingOffer = false;
   epc.iceCandidates = [] as RTCIceCandidate[];
+
+  if (signalingServer.isConnected) {
+    await api.dispatch(
+      signalingServerApi.endpoints.connectWithPeer.initiate({
+        roomId,
+        peerId,
+        peerPublicKey,
+      }),
+    );
+  }
 
   const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
   const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
@@ -183,7 +193,7 @@ export const handleConnectToPeer = async (
       );
 
       console.error(
-        `Connection with peer ${peerId} has ${epc.connectionState}.`,
+        `RTC Connection with peer ${peerId} has ${epc.connectionState}.`,
       );
 
       if (epc.connectionState === "closed") {
@@ -205,7 +215,7 @@ export const handleConnectToPeer = async (
         api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
         console.log(
-          `Connection status with peer ${peerId} is ${epc.connectionState}.`,
+          `RTC Connection status with peer ${peerId} is ${epc.connectionState}.`,
         );
 
         // if (!initiator) {

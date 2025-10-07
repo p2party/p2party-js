@@ -7,7 +7,7 @@ import { sign } from "../cryptography/ed25519";
 import type { MiddlewareAPI } from "@reduxjs/toolkit";
 import type { KeyPair } from "../reducers/keyPairSlice";
 
-const handleChallenge = async (
+export const handleChallenge = async (
   keyPair: KeyPair,
   peerId: string,
   challenge: string,
@@ -21,15 +21,6 @@ const handleChallenge = async (
 
   const sig = await sign(nonce, secretKey);
 
-  // const sig = await window.crypto.subtle.sign(
-  //   {
-  //     name: "RSA-PSS",
-  //     saltLength: 32,
-  //   },
-  //   secretKey,
-  //   nonce,
-  // );
-
   const signature = [...new Uint8Array(sig)]
     .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
@@ -42,5 +33,3 @@ const handleChallenge = async (
     }),
   );
 };
-
-export default handleChallenge;

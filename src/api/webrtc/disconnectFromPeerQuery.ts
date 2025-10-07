@@ -19,8 +19,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   void,
   unknown
 > = ({ peerId, alsoDeleteData, peerConnections, dataChannels }, api) => {
-  api.dispatch(deletePeer({ peerId }));
-
+  const { signalingServer } = api.getState() as State;
   const peerIndex = peerConnections.findIndex(
     (peer) => peer.withPeerId === peerId,
   );
@@ -42,6 +41,10 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       peerConnections[peerIndex].close();
     }
     peerConnections.splice(peerIndex, 1);
+  }
+
+  if (!signalingServer.isConnected || alsoDeleteData) {
+    api.dispatch(deletePeer({ peerId }));
   }
 
   const CHANNELS_LEN = dataChannels.length;

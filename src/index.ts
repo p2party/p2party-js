@@ -1,4 +1,5 @@
 import { isUUID } from "class-validator";
+import pkg from "../package.json";
 
 import { store, dispatch } from "./store";
 
@@ -394,7 +395,12 @@ const readMessage = async (
       if (messageType === MessageType.Text) {
         return {
           message:
-            dataChunks.length > 0 ? await data.text() : "Incoming message...",
+            dataChunks.length > 0
+              ? await data.text()
+              : rooms[roomIndex].messages[messageIndex].fromPeerId ===
+                  keyPair.peerId
+                ? "Outgoing message..."
+                : "Incoming message...",
           percentage,
           size: rooms[roomIndex].messages[messageIndex].totalSize,
           filename: "",
@@ -718,7 +724,7 @@ export const p2party = {
   newKeyPair,
   generateMnemonic,
   keyPairFromMnemonic,
-  MIN_CHUNKS: 3,
+  MIN_CHUNKS: 1,
   MIN_CHUNK_SIZE: IMPORTANT_DATA_LEN + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
@@ -726,6 +732,7 @@ export const p2party = {
   ROOM_URL_LENGTH: 64,
   MessageType,
   MessageCategory,
+  VERSION: pkg.version,
 };
 
 if (typeof window !== "undefined") {

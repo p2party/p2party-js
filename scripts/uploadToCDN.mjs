@@ -1,6 +1,5 @@
 import { promises as fs, readFileSync } from "fs";
 import * as path from "path";
-import dotenv from "dotenv";
 import {
   S3Client,
   ListObjectsV2Command,
@@ -8,8 +7,6 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import pkg from "../package.json" with { type: "json" };
-
-dotenv.config({ path: "./.env" });
 
 const client = new S3Client({
   region: process.env.AWS_S3_REGION,

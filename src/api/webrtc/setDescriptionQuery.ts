@@ -2,9 +2,6 @@ import webrtcApi from ".";
 
 import signalingServerApi from "../signalingServerApi";
 
-// import cryptoMemory from "../../cryptography/memory";
-// import libcrypto from "../../cryptography/libcrypto";
-
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 
@@ -23,9 +20,6 @@ export interface RTCSetDescriptionParamsExtension
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
-  // receiveMessageWasmMemory: WebAssembly.Memory;
-  // decryptionWasmMemory: WebAssembly.Memory;
-  // merkleWasmMemory: WebAssembly.Memory;
 }
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
@@ -42,21 +36,10 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
-    // receiveMessageWasmMemory,
-    // decryptionWasmMemory,
-    // merkleWasmMemory,
   },
   api,
 ) => {
   const { keyPair } = api.getState() as State;
-
-  // const decryptionModule = await libcrypto({
-  //   wasmMemory: decryptionWasmMemory,
-  // });
-  //
-  // const merkleModule = await libcrypto({
-  //   wasmMemory: merkleWasmMemory,
-  // });
 
   const connectionIndex = peerConnections.findIndex(
     (peer) => peer.withPeerId === peerId,
@@ -87,9 +70,6 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           epc,
           roomId,
           dataChannels,
-          // receiveMessageModule,
-          // decryptionModule,
-          // merkleModule,
         },
         api,
       );
@@ -163,9 +143,6 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         epc,
         roomId,
         dataChannels,
-        // receiveMessageModule,
-        // decryptionModule,
-        // merkleModule,
       },
       api,
     );

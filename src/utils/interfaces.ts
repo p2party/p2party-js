@@ -1,3 +1,27 @@
+import type { IRTCPeerConnectionRoomId } from "../api/webrtc/interfaces";
+
+export interface WSPeerConnectionRoomId extends IRTCPeerConnectionRoomId {
+  queue: Uint8Array[];
+  seen: Set<string>;
+  draining: boolean;
+  ptr1: number | undefined;
+  decrypted: Uint8Array | undefined;
+  ptr2: number | undefined;
+  messageArray: Uint8Array | undefined;
+  ptr3: number | undefined;
+  merkleRootArray: Uint8Array | undefined;
+  ptr4: number | undefined;
+  senderPublicKeyArray: Uint8Array | undefined;
+  ptr5: number | undefined;
+  receiverSecretKeyArray: Uint8Array | undefined;
+}
+
+export interface WSPeerConnection {
+  withPeerId: string;
+  withPeerPublicKey: string;
+  rooms: WSPeerConnectionRoomId[];
+}
+
 export interface WebSocketMessagePingRequest {
   type: "ping";
 }

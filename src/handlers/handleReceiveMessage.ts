@@ -128,11 +128,10 @@ export const handleReceiveMessage = async (
         return {
           date: metadata.date,
           chunkIndex: metadata.chunkIndex,
-          chunkSize: 0,
-          receivedFullSize:
-            messageExists != undefined ? receivedFullSize : false,
+          chunkSize,
+          receivedFullSize,
           chunkAlreadyExists: true,
-          totalSize: 0,
+          totalSize: metadata.totalSize,
           messageType: metadata.messageType,
           filename: metadata.name,
           chunkHash,

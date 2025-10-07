@@ -9,26 +9,16 @@ import {
 } from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 
-import { handleSendMessageWebsocket } from "../handlers/handleSendMessageWebsocket";
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
 
 import { newKeyPair } from "../cryptography/ed25519";
-// import libcrypto from "../cryptography/libcrypto";
-import { wasmLoader } from "../cryptography/wasmLoader";
-import cryptoMemory from "../cryptography/memory";
-import {
-  crypto_hash_sha512_BYTES,
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
-} from "../cryptography/interfaces";
-
-// import { exportPublicKeyToHex, exportPemKeys } from "../utils/exportPEMKeys";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 import type {
+  WSPeerConnection,
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
   WebSocketMessageChallengeResponse,
@@ -57,20 +47,6 @@ export interface WebSocketMessage {
     | WebSocketMessageConnectionResponse
     | WebSocketMessageMessageSendRequest;
 }
-
-export const rtcDataChannelMessageLimit = 64 * 1024;
-export const messageLen =
-  rtcDataChannelMessageLimit -
-  crypto_hash_sha512_BYTES - // merkle root
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
-  crypto_box_poly1305_AUTHTAGBYTES; // auth tag
-export const encryptedLen =
-  rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
-
-const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-  messageLen,
-  crypto_hash_sha512_BYTES, // additional data is the merkle root
-);
 
 const waitForSocketConnection = (
   ws: WebSocket,
@@ -104,12 +80,13 @@ const waitForSocketConnection = (
 };
 
 let ws: WebSocket | null = null;
+const peerConnections: WSPeerConnection[] = [];
 
 const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   { signalingServerUrl },
   api,
 ) => {
-  const { signalingServer } = api.getState() as State;
+  const { keyPair, signalingServer } = api.getState() as State;
   if (
     ws ||
     signalingServer.isConnected ||
@@ -123,8 +100,6 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   }
 
   try {
-    const { keyPair } = api.getState() as State;
-
     let publicKey = localStorage.getItem("publicKey") ?? "";
     let secretKey = localStorage.getItem("secretKey") ?? "";
     if (keyPair.secretKey.length === 0 && secretKey.length === 0) {
@@ -210,7 +185,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         };
 
         ws!.onmessage = async (message) => {
-          await handleWebSocketMessage(message, ws!, api);
+          await handleWebSocketMessage(message, ws!, api, peerConnections);
         };
 
         ws!.onclose = () => {
@@ -320,19 +295,13 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
       isUUID(keyPair.peerId) &&
       isHexadecimal(keyPair.challenge) &&
       isHexadecimal(keyPair.signature) &&
-      // keyPair.signature.length === 1024 &&
       keyPair.signature.length === 128 &&
       keyPair.challenge.length === 64 &&
-      isUUID(peerId) &&
-      peerPublicKey.length === 64 &&
-      isUUID(roomId)
+      peerPublicKey.length === 64
     ) {
       api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
-      const labels: string[] = [];
       api.dispatch(setChannel({ roomId, label: "main", peerId }));
-      labels.push("main");
-      api.dispatch(setChannel({ roomId, label: "signaling", peerId }));
-      labels.push("signaling");
+      console.log(`Connected with ${keyPair.peerId} on channel main`);
 
       waitForSocketConnection(ws, () => {
         ws!.send(
@@ -341,26 +310,10 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
             roomId,
             fromPeerId: keyPair.peerId,
             toPeerId: peerId,
-            labels,
+            labels: ["main"],
           } as WebSocketMessagePeerConnectionRequest),
         );
       });
-
-      const CHANNELS_LEN = labels.length;
-      const encryptionModule = await wasmLoader(encryptionWasmMemory);
-      // const encryptionModule = await libcrypto({
-      //   wasmMemory: encryptionWasmMemory,
-      // });
-      for (let i = 0; i < CHANNELS_LEN; i++) {
-        const data = `Connected with ${keyPair.peerId} on channel ${labels[i]}`;
-        await handleSendMessageWebsocket(
-          data as string | File,
-          roomId,
-          encryptionModule,
-          api,
-          labels[i],
-        );
-      }
     }
 
     return { data: undefined };

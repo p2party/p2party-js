@@ -1,26 +1,16 @@
 import { isUUID, isHexadecimal } from "class-validator";
 
-import handleChallenge from "./handleChallenge";
-// import { handleSendMessageWebsocket } from "./handleSendMessageWebsocket";
-// import { handleReceiveMessage } from "./handleReceiveMessage";
+import { handleChallenge } from "./handleChallenge";
+import { handleReadReceipt } from "./handleReadReceipt";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
 
-import {
-  setRoom,
-  // setPeer, setChannel
-} from "../reducers/roomSlice";
+import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
 import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
 
-// import {
-//   crypto_hash_sha512_BYTES,
-//   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-//   crypto_box_poly1305_AUTHTAGBYTES,
-// } from "../cryptography/interfaces";
-//
-// import libcrypto from "../cryptography/libcrypto";
-// import cryptoMemory from "../cryptography/memory";
+import cryptoMemory from "../cryptography/memory";
+import { wasmLoader } from "../cryptography/wasmLoader";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -36,32 +26,24 @@ import type {
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
   WebSocketMessageMessageSendResponse,
+  WSPeerConnection,
 } from "../utils/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
-
-// export const messageLen =
-//   rtcDataChannelMessageLimit -
-//   crypto_hash_sha512_BYTES - // merkle root
-//   crypto_aead_chacha20poly1305_ietf_NPUBBYTES - // nonce
-//   crypto_box_poly1305_AUTHTAGBYTES; // auth tag
-// export const encryptedLen =
-//   rtcDataChannelMessageLimit - crypto_hash_sha512_BYTES; // merkle root
-// const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-//   messageLen,
-//   crypto_hash_sha512_BYTES, // additional data is the merkle root
-// );
-
-// const decryptionWasmMemory = cryptoMemory.decryptAsymmetricMemory(
-//   100 * 64 * 1024,
-//   crypto_hash_sha512_BYTES, // additional data is the merkle root
-// );
-//
-// const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
+import { hexToUint8Array } from "../utils/uint8array";
+import {
+  crypto_hash_sha512_BYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
+  crypto_sign_ed25519_SECRETKEYBYTES,
+} from "../cryptography/interfaces";
+import { DECRYPTED_LEN, MESSAGE_LEN } from "../utils/constants";
+import { enqueue } from "./handleMessageQueueing";
+import { decompileChannelMessageLabel } from "../utils/channelLabel";
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
   ws: WebSocket,
   api: BaseQueryApi,
+  peerConnections: WSPeerConnection[],
 ) => {
   try {
     if (event.data === "PING") {
@@ -236,14 +218,6 @@ const handleWebSocketMessage = async (
               if (!p) continue;
             }
 
-            // api.dispatch(
-            //   signalingServerApi.endpoints.connectWithPeer.initiate({
-            //     roomId: message.roomId,
-            //     peerId: message.peers[i].id,
-            //     peerPublicKey: message.peers[i].publicKey,
-            //   }),
-            // );
-
             await api.dispatch(
               webrtcApi.endpoints.connectWithPeer.initiate({
                 roomId: message.roomId,
@@ -265,7 +239,28 @@ const handleWebSocketMessage = async (
           message.fromPeerPublicKey,
         );
 
-        if (!blacklisted)
+        if (!blacklisted) {
+          const { rooms, commonState } = api.getState() as State;
+
+          const roomIndex =
+            commonState.currentRoomUrl.length === 64
+              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+              : -1;
+
+          if (roomIndex > -1) {
+            const canOnlyConnectToKnownPeers =
+              rooms[roomIndex].onlyConnectWithKnownAddresses;
+
+            if (canOnlyConnectToKnownPeers) {
+              const p = await getDBAddressBookEntry(
+                message.fromPeerId,
+                message.fromPeerPublicKey,
+              );
+
+              if (!p) break;
+            }
+          }
+
           await api.dispatch(
             webrtcApi.endpoints.setDescription.initiate({
               peerId: message.fromPeerId,
@@ -274,6 +269,7 @@ const handleWebSocketMessage = async (
               description: message.description,
             }),
           );
+        }
 
         break;
       }
@@ -281,111 +277,299 @@ const handleWebSocketMessage = async (
       case "candidate": {
         const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
 
-        if (!blacklisted)
+        if (!blacklisted) {
+          const { rooms, commonState } = api.getState() as State;
+
+          const roomIndex =
+            commonState.currentRoomUrl.length === 64
+              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
+              : -1;
+
+          if (roomIndex > -1) {
+            const canOnlyConnectToKnownPeers =
+              rooms[roomIndex].onlyConnectWithKnownAddresses;
+
+            if (canOnlyConnectToKnownPeers) {
+              const p = await getDBAddressBookEntry(message.fromPeerId);
+
+              if (!p) break;
+            }
+          }
+
           await api.dispatch(
             webrtcApi.endpoints.setCandidate.initiate({
               peerId: message.fromPeerId,
               candidate: message.candidate,
             }),
           );
+        }
 
         break;
       }
 
-      // case "message": {
-      //   const decryptionModule = await libcrypto({
-      //     wasmMemory: decryptionWasmMemory,
-      //   });
-      //
-      //   const merkleModule = await libcrypto({
-      //     wasmMemory: merkleWasmMemory,
-      //   });
-      //
-      //   const { keyPair, rooms, commonState } = api.getState() as State;
-      //
-      //   const roomIndex =
-      //     commonState.currentRoomUrl.length === 64
-      //       ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-      //       : -1;
-      //
-      //   if (roomIndex > -1) {
-      //     const peerIndex = rooms[roomIndex].peers.findIndex(
-      //       (p) => p.peerId === message.fromPeerId,
-      //     );
-      //     if (peerIndex === -1)
-      //       throw new Error("Received a message from unknown peer");
-      //
-      //     const peerPublicKeyHex =
-      //       rooms[roomIndex].peers[peerIndex].peerPublicKey;
-      //     const senderPublicKey = hexToUint8Array(peerPublicKeyHex);
-      //     const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
-      //     const messageData = hexToUint8Array(message.message);
-      //
-      //     await handleReceiveMessage(
-      //       messageData.buffer, // new Blob([messageData]), //
-      //       new Uint8Array(),
-      //       senderPublicKey,
-      //       receiverSecretKey,
-      //       rooms[roomIndex],
-      //       decryptionModule,
-      //       merkleModule,
-      //       // message.label,
-      //       // message.fromPeerId,
-      //       // api,
-      //     );
-      //   }
-      //
-      //   break;
-      // }
+      case "message": {
+        const { rooms } = api.getState() as State;
+        const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
 
-      // case "connection": {
-      //   const { keyPair } = api.getState() as State;
-      //   if (
-      //     isUUID(keyPair.peerId) &&
-      //     isHexadecimal(keyPair.challenge) &&
-      //     isHexadecimal(keyPair.signature) &&
-      //     // keyPair.signature.length === 1024 &&
-      //     keyPair.signature.length === 128 &&
-      //     keyPair.challenge.length === 64 &&
-      //     isUUID(message.fromPeerId) &&
-      //     message.fromPeerPublicKey.length === 64 &&
-      //     isUUID(message.roomId)
-      //   ) {
-      //     api.dispatch(
-      //       setPeer({
-      //         roomId: message.roomId,
-      //         peerId: message.fromPeerId,
-      //         peerPublicKey: message.fromPeerPublicKey,
-      //       }),
-      //     );
-      //
-      //     const encryptionModule = await libcrypto({
-      //       wasmMemory: encryptionWasmMemory,
-      //     });
-      //
-      //     const CHANNELS_LEN = message.labels.length;
-      //     for (let i = 0; i < CHANNELS_LEN; i++) {
-      //       api.dispatch(
-      //         setChannel({
-      //           roomId: message.roomId,
-      //           label: message.labels[i],
-      //           peerId: message.fromPeerId,
-      //         }),
-      //       );
-      //
-      //       const data = `Connected with ${keyPair.peerId} on channel ${message.labels[i]}`;
-      //       await handleSendMessageWebsocket(
-      //         data as string | File,
-      //         message.roomId,
-      //         encryptionModule,
-      //         api,
-      //         message.labels[i],
-      //       );
-      //     }
-      //   }
-      //
-      //   break;
-      // }
+        const data = new Uint8Array(hexToUint8Array(message.message));
+
+        if (roomIndex > -1 && data.length === crypto_hash_sha512_BYTES) {
+          try {
+            await handleReadReceipt(
+              data,
+              message.label,
+              message.fromPeerId,
+              rooms[roomIndex],
+              api,
+              // dataChannels,
+            );
+          } catch (error) {
+            console.error(error);
+          }
+
+          break;
+        }
+
+        if (data.length === MESSAGE_LEN) {
+          const peerIndex = peerConnections.findIndex(
+            (p) => p.withPeerId === message.fromPeerId,
+          );
+
+          if (peerIndex === -1) break;
+
+          const peerRoomIndex = peerConnections[peerIndex].rooms.findLastIndex(
+            (r) => r.roomId === message.roomId,
+          );
+          if (peerRoomIndex === -1) break;
+
+          const { channelLabel, merkleRoot, merkleRootHex } =
+            await decompileChannelMessageLabel(message.label);
+
+          if (
+            merkleRoot.length === crypto_hash_sha512_BYTES &&
+            peerConnections[peerIndex].rooms[peerRoomIndex].ptr3 &&
+            peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray
+          ) {
+            peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray.set(
+              merkleRoot,
+            );
+
+            void enqueue(
+              data,
+              peerConnections[peerIndex].rooms[peerRoomIndex].queue,
+              peerConnections[peerIndex].rooms[peerRoomIndex].seen,
+              peerConnections[peerIndex].rooms[peerRoomIndex].draining,
+              api,
+              peerConnections[peerIndex].rooms[peerRoomIndex].roomId,
+              message.fromPeerId,
+              channelLabel,
+              merkleRootHex,
+              undefined,
+              peerConnections[peerIndex].rooms[peerRoomIndex].decrypted,
+              peerConnections[peerIndex].rooms[peerRoomIndex].messageArray,
+              peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray,
+              peerConnections[peerIndex].rooms[peerRoomIndex]
+                .senderPublicKeyArray,
+              peerConnections[peerIndex].rooms[peerRoomIndex]
+                .receiverSecretKeyArray,
+              peerConnections[peerIndex].rooms[peerRoomIndex]
+                .receiveMessageModule,
+            );
+          }
+
+          break;
+        }
+
+        console.error(
+          new Error("Wrong data length received, " + String(data.length)),
+        );
+
+        break;
+      }
+
+      case "connection": {
+        const { keyPair } = api.getState() as State;
+        if (
+          isUUID(keyPair.peerId) &&
+          isHexadecimal(keyPair.challenge) &&
+          isHexadecimal(keyPair.signature) &&
+          // keyPair.signature.length === 1024 &&
+          keyPair.signature.length === 128 &&
+          keyPair.challenge.length === 64 &&
+          isUUID(message.fromPeerId) &&
+          message.fromPeerPublicKey.length === 64 &&
+          isUUID(message.roomId)
+        ) {
+          api.dispatch(
+            setPeer({
+              roomId: message.roomId,
+              peerId: message.fromPeerId,
+              peerPublicKey: message.fromPeerPublicKey,
+            }),
+          );
+
+          const CHANNELS_LEN = message.labels.length;
+          for (let i = 0; i < CHANNELS_LEN; i++) {
+            api.dispatch(
+              setChannel({
+                roomId: message.roomId,
+                label: message.labels[i],
+                peerId: message.fromPeerId,
+              }),
+            );
+
+            console.log(
+              `Connected with ${keyPair.peerId} on websocket channel ${message.labels[i]}`,
+            );
+          }
+
+          const peerIndex = peerConnections.findIndex(
+            (p) =>
+              p.withPeerId === message.fromPeerId ||
+              p.withPeerPublicKey === message.fromPeerPublicKey,
+          );
+          if (peerIndex === -1) {
+            const wasmMemory = cryptoMemory.getReceiveMessageMemory();
+            const receiveMessageModule = await wasmLoader(wasmMemory);
+
+            const ptr1 = receiveMessageModule._malloc(DECRYPTED_LEN);
+            const decrypted = new Uint8Array(
+              receiveMessageModule.wasmMemory.buffer,
+              ptr1,
+              DECRYPTED_LEN,
+            );
+
+            const ptr2 = receiveMessageModule._malloc(MESSAGE_LEN);
+            const messageArray = new Uint8Array(
+              receiveMessageModule.wasmMemory.buffer,
+              ptr2,
+              MESSAGE_LEN,
+            );
+
+            const ptr3 = receiveMessageModule._malloc(crypto_hash_sha512_BYTES);
+            const merkleRootArray = new Uint8Array(
+              receiveMessageModule.wasmMemory.buffer,
+              ptr3,
+              crypto_hash_sha512_BYTES,
+            );
+
+            const senderPublicKey = hexToUint8Array(message.fromPeerPublicKey);
+            const ptr4 = receiveMessageModule._malloc(
+              crypto_sign_ed25519_PUBLICKEYBYTES,
+            );
+            const senderPublicKeyArray = new Uint8Array(
+              receiveMessageModule.wasmMemory.buffer,
+              ptr4,
+              crypto_sign_ed25519_PUBLICKEYBYTES,
+            );
+            senderPublicKeyArray.set(senderPublicKey);
+
+            const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
+            const ptr5 = receiveMessageModule._malloc(
+              crypto_sign_ed25519_SECRETKEYBYTES,
+            );
+            const receiverSecretKeyArray = new Uint8Array(
+              receiveMessageModule.wasmMemory.buffer,
+              ptr5,
+              crypto_sign_ed25519_SECRETKEYBYTES,
+            );
+            receiverSecretKeyArray.set(receiverSecretKey);
+
+            peerConnections.push({
+              withPeerId: message.fromPeerId,
+              withPeerPublicKey: message.fromPeerPublicKey,
+              rooms: [
+                {
+                  roomId: message.roomId,
+                  receiveMessageModule,
+                  queue: [] as Uint8Array[],
+                  seen: new Set<string>(),
+                  draining: false,
+                  ptr1,
+                  decrypted,
+                  ptr2,
+                  messageArray,
+                  ptr3,
+                  merkleRootArray,
+                  ptr4,
+                  senderPublicKeyArray,
+                  ptr5,
+                  receiverSecretKeyArray,
+                },
+              ],
+            });
+          } else {
+            const peerRoomIndex = peerConnections[
+              peerIndex
+            ].rooms.findLastIndex((r) => r.roomId === message.roomId);
+            if (peerRoomIndex === -1) {
+              const wasmMemory = cryptoMemory.getReceiveMessageMemory();
+              const receiveMessageModule = await wasmLoader(wasmMemory);
+
+              const ptr1 = receiveMessageModule._malloc(DECRYPTED_LEN);
+              const decrypted = new Uint8Array(
+                receiveMessageModule.wasmMemory.buffer,
+                ptr1,
+                DECRYPTED_LEN,
+              );
+
+              const ptr2 = receiveMessageModule._malloc(MESSAGE_LEN);
+              const messageArray = new Uint8Array(
+                receiveMessageModule.wasmMemory.buffer,
+                ptr2,
+                MESSAGE_LEN,
+              );
+
+              const ptr3 = receiveMessageModule._malloc(
+                crypto_hash_sha512_BYTES,
+              );
+              const merkleRootArray = new Uint8Array(
+                receiveMessageModule.wasmMemory.buffer,
+                ptr3,
+                crypto_hash_sha512_BYTES,
+              );
+
+              const ptr4 = receiveMessageModule._malloc(
+                crypto_sign_ed25519_PUBLICKEYBYTES,
+              );
+              const senderPublicKeyArray = new Uint8Array(
+                receiveMessageModule.wasmMemory.buffer,
+                ptr4,
+                crypto_sign_ed25519_PUBLICKEYBYTES,
+              );
+
+              const ptr5 = receiveMessageModule._malloc(
+                crypto_sign_ed25519_SECRETKEYBYTES,
+              );
+              const receiverSecretKeyArray = new Uint8Array(
+                receiveMessageModule.wasmMemory.buffer,
+                ptr5,
+                crypto_sign_ed25519_SECRETKEYBYTES,
+              );
+
+              peerConnections[peerIndex].rooms.push({
+                roomId: message.roomId,
+                receiveMessageModule,
+                queue: [] as Uint8Array[],
+                seen: new Set<string>(),
+                draining: false,
+                ptr1,
+                decrypted,
+                ptr2,
+                messageArray,
+                ptr3,
+                merkleRootArray,
+                ptr4,
+                senderPublicKeyArray,
+                ptr5,
+                receiverSecretKeyArray,
+              });
+            }
+          }
+        }
+
+        break;
+      }
 
       case "error": {
         console.error(message);

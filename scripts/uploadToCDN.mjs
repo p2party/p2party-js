@@ -78,23 +78,24 @@ const files = await getDirFiles(buildDir);
 for (const filePath of files) {
   const base = path.basename(filePath);
 
-  // Upload only .min.js.gz and .wasm (and optionally .wasm.gz)
+  // Upload only .min.js.gz, .worker.js.gz, and raw .wasm
+  // Note: we intentionally skip .wasm.gz — uploading gzipped WASM with
+  // Content-Encoding: gzip to the same key as the raw file can break
+  // Subresource Integrity checks if the CDN doesn't handle decompression
+  // transparently. Let the CDN's automatic compression handle it instead.
   const isJsGz = base.endsWith(".min.js.gz") || base.endsWith(".js.gz");
-  const isWasm = base.endsWith(".wasm");
-  const isWasmGz = base.endsWith(".wasm.gz");
+  const isWasm = base.endsWith(".wasm") && !base.endsWith(".wasm.gz");
 
-  if (!(isJsGz || isWasm || isWasmGz)) continue;
+  if (!(isJsGz || isWasm)) continue;
 
-  // Key: strip the .gz extension for gzipped assets
-  const keyFileName = isJsGz || isWasmGz ? base.replace(/\.gz$/, "") : base;
+  // Key: strip the .gz extension for gzipped JS assets
+  const keyFileName = isJsGz ? base.replace(/\.gz$/, "") : base;
 
   // Content-Type
-  const contentType =
-    isWasm || isWasmGz ? "application/wasm" : "application/javascript";
+  const contentType = isWasm ? "application/wasm" : "application/javascript";
 
-  // Only set Content-Encoding when the local file is actually gzipped
-  const maybeContentEncoding =
-    isJsGz || isWasmGz ? { ContentEncoding: "gzip" } : {};
+  // Only set Content-Encoding for gzipped JS assets
+  const maybeContentEncoding = isJsGz ? { ContentEncoding: "gzip" } : {};
 
   const putcommand = new PutObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET,

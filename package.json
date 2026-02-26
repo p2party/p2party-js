@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Create WebRTC mesh networks in two LOC",
-  "version": "0.8.0",
+  "version": "0.8.4",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/p2party/p2party-js.git"
@@ -48,12 +48,12 @@
     "lib/**/*"
   ],
   "scripts": {
-    "prebuild": "cross-env NODE_ENV=development node scripts/emscripten.js",
+    "prebuild": "cross-env NODE_ENV=development node scripts/emscripten.js && node scripts/updateWasmIntegrity.mjs",
     "build:worker": "cross-env NODE_ENV=development rollup --config rollup.worker.config.ts --configPlugin typescript",
     "build:package": "cross-env NODE_ENV=development rollup --config rollup.config.ts --configPlugin typescript",
     "build": "npm-run-all build:worker build:package",
     "postbuild": "npm pack",
-    "predist": "cross-env NODE_ENV=production node scripts/emscripten.js",
+    "predist": "cross-env NODE_ENV=production node scripts/emscripten.js && node scripts/updateWasmIntegrity.mjs",
     "dist:worker": "cross-env NODE_ENV=production rollup --config rollup.worker.config.ts --configPlugin typescript",
     "dist:package": "cross-env NODE_ENV=production rollup --config rollup.config.ts --configPlugin typescript",
     "dist:map": "rm -rf lib/*.map lib/**/*.map",
@@ -61,17 +61,18 @@
     "postdist": "npm pack",
     "format": "bun prettier --write . && clang-format -i src/cryptography/*.[ch]",
     "lint": "npx eslint .",
+    "copy:wasm": "cp src/cryptography/libcrypto.wasm lib/libcrypto.wasm",
     "gzip:js": "gzip -9 < lib/index.min.js > lib/p2party.min.js.gz",
     "gzip:worker": "gzip -9 < lib/db.worker.js > lib/db.worker.js.gz",
     "gzip:wasm": "gzip -9 < lib/libcrypto.wasm > lib/libcrypto.wasm.gz",
     "gzip": "npm-run-all gzip:js gzip:worker gzip:wasm",
-    "gzip:cleanup": "rm lib/index.min.js.gz lib/db.worker.js.gz",
+    "gzip:cleanup": "rm -f lib/p2party.min.js.gz lib/db.worker.js.gz lib/libcrypto.wasm.gz",
     "integrity:js": "openssl dgst -sha384 -binary lib/index.min.js | openssl base64 -A > lib/p2party.min.js.integrity",
     "integrity:worker": "openssl dgst -sha384 -binary lib/db.worker.js | openssl base64 -A > lib/db.worker.js.integrity",
     "integrity:wasm": "openssl dgst -sha384 -binary lib/libcrypto.wasm | openssl base64 -A > lib/libcrypto.wasm.integrity",
     "integrity": "npm-run-all integrity:js integrity:worker integrity:wasm",
-    "integrity:cleanup": "rm lib/index.min.js.integrity lib/db.worker.js.integrity",
-    "prepare:uploadcdn": "npm-run-all gzip integrity",
+    "integrity:cleanup": "rm -f lib/p2party.min.js.integrity lib/db.worker.js.integrity lib/libcrypto.wasm.integrity",
+    "prepare:uploadcdn": "npm-run-all copy:wasm gzip integrity",
     "actual:uploadcdn": "node --env-file .env scripts/uploadToCDN.mjs",
     "cleanup:uploadcdn": "npm-run-all gzip:cleanup integrity:cleanup",
     "uploadcdn": "npm-run-all -s prepare:uploadcdn actual:uploadcdn",
@@ -80,29 +81,29 @@
     "docs": "typedoc --out docs --excludeInternal src/index.ts"
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.901.0",
-    "@eslint/js": "^9.35.0",
-    "@rollup/plugin-commonjs": "^28.0.6",
+    "@aws-sdk/client-s3": "^3.998.0",
+    "@eslint/js": "^10.0.1",
+    "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-json": "^6.1.0",
-    "@rollup/plugin-node-resolve": "^16.0.2",
-    "@rollup/plugin-replace": "^6.0.2",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-replace": "^6.0.3",
     "@rollup/plugin-terser": "^0.4.4",
-    "@rollup/plugin-typescript": "^12.1.4",
-    "@types/emscripten": "^1.41.2",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/emscripten": "^1.41.5",
     "@types/eslint__js": "^9.14.0",
-    "@types/node": "^24.7.0",
+    "@types/node": "^25.3.1",
     "cross-env": "^10.1.0",
-    "eslint": "^9.37.0",
+    "eslint": "^10.0.2",
     "idb": "^8.0.3",
     "npm-run-all": "^4.1.5",
-    "prettier": "^3.6.2",
-    "rollup": "^4.52.4",
+    "prettier": "^3.8.1",
+    "rollup": "^4.59.0",
     "rollup-plugin-analyzer": "^4.0.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.0"
+    "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
-    "@reduxjs/toolkit": "^2.9.0",
-    "class-validator": "^0.14.2"
+    "@reduxjs/toolkit": "^2.11.2",
+    "class-validator": "^0.14.4"
   }
 }

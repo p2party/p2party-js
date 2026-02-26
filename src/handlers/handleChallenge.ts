@@ -15,8 +15,10 @@ export const handleChallenge = async (
 ) => {
   const secretKey = hexToUint8Array(keyPair.secretKey);
 
+  const matches = challenge.match(/.{1,2}/g);
+  if (!matches) throw new Error("Invalid challenge format");
   const nonce = Uint8Array.from(
-    challenge.match(/.{1,2}/g)!.map((byte: string) => parseInt(byte, 16)),
+    matches.map((byte: string) => parseInt(byte, 16)),
   );
 
   const sig = await sign(nonce, secretKey);

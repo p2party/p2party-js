@@ -13,16 +13,14 @@ import type {
 } from "./interfaces";
 import webrtcApi from ".";
 
-export interface RTCDisconnectFromRoomParamsExtension
-  extends RTCDisconnectFromRoomParams {
+export interface RTCDisconnectFromRoomParamsExtension extends RTCDisconnectFromRoomParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
 }
 
 const webrtcDisconnectRoomQuery: BaseQueryFn<
   RTCDisconnectFromRoomParamsExtension,
-  void,
-  unknown
+  undefined
 > = async ({ roomId, deleteMessages, peerConnections, dataChannels }, api) => {
   const CHANNELS_LEN = dataChannels.length;
   for (let i = 0; i < CHANNELS_LEN; i++) {
@@ -43,12 +41,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
 
   const PEERS_LEN = peerConnections.length;
   for (let i = 0; i < PEERS_LEN; i++) {
-    if (
-      !peerConnections[i] ||
-      // !peerConnections[i].roomIds.includes(roomId) ||
-      peerConnections[i].connectionState !== "connected"
-    )
-      continue;
+    if (peerConnections[i]?.connectionState !== "connected") continue;
 
     const peerIndex = peerConnections[i].rooms.findIndex(
       (p) => p.roomId === roomId,

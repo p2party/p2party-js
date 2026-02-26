@@ -9,6 +9,7 @@ import {
   resetIdentity,
 } from "../reducers/keyPairSlice";
 import { setConnectingToPeers, setIceServers } from "../reducers/roomSlice";
+import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 
@@ -54,6 +55,8 @@ keyPairListenerMiddleware.startListening({
         // signature.length === 1024
         signature.length === 128
       ) {
+        listenerApi.dispatch(signalingServerActions.connectionVerified());
+
         localStorage.setItem("peerId", peerId);
         localStorage.setItem("challenge", challenge);
         localStorage.setItem("signature", signature);
@@ -137,6 +140,8 @@ keyPairListenerMiddleware.startListening({
     } else if (setChallengeId.match(action)) {
       const { challengeId } = action.payload;
       if (isUUID(challengeId)) {
+        listenerApi.dispatch(signalingServerActions.connectionVerified());
+
         localStorage.setItem("challengeId", challengeId);
 
         const { keyPair, rooms, commonState } = listenerApi.getState() as State;
@@ -164,28 +169,29 @@ keyPairListenerMiddleware.startListening({
                 ],
               }),
             );
+          }
 
-            if (isUUID(rooms[roomIndex].id)) {
-              listenerApi.dispatch(
-                setConnectingToPeers({
-                  roomId: rooms[roomIndex].id,
-                  connectingToPeers: true,
-                }),
-              );
-            } else if (
-              isUUID(keyPair.peerId) &&
-              commonState.currentRoomUrl.length === 64
-            ) {
-              await listenerApi.dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "room",
-                    fromPeerId: keyPair.peerId,
-                    roomUrl: commonState.currentRoomUrl,
-                  } as WebSocketMessageRoomIdRequest,
-                }),
-              );
-            }
+          // Now check if we need to request room ID or connect to peers
+          if (isUUID(rooms[roomIndex].id)) {
+            listenerApi.dispatch(
+              setConnectingToPeers({
+                roomId: rooms[roomIndex].id,
+                connectingToPeers: true,
+              }),
+            );
+          } else if (
+            isUUID(keyPair.peerId) &&
+            commonState.currentRoomUrl.length === 64
+          ) {
+            await listenerApi.dispatch(
+              signalingServerApi.endpoints.sendMessage.initiate({
+                content: {
+                  type: "room",
+                  fromPeerId: keyPair.peerId,
+                  roomUrl: commonState.currentRoomUrl,
+                } as WebSocketMessageRoomIdRequest,
+              }),
+            );
           }
         } else if (
           isUUID(keyPair.peerId) &&
@@ -203,6 +209,7 @@ keyPairListenerMiddleware.startListening({
         }
       }
     } else if (resetIdentity.match(action)) {
+      console.trace("[keyPairListenerMiddleware] resetIdentity dispatched");
       localStorage.setItem("peerId", "");
       localStorage.setItem("challengeId", "");
       localStorage.setItem("publicKey", "");

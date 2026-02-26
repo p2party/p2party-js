@@ -84,7 +84,7 @@ export const handleReceiveMessage = async (
       const receivedFullSize =
         alreadyHasEverything ||
         chunkSize === metadata.totalSize ||
-        (messageExists != undefined &&
+        (messageExists?.savedSize !== undefined &&
           messageExists.savedSize + chunkSize === messageExists.totalSize);
 
       if (!messageRelevant)
@@ -124,7 +124,7 @@ export const handleReceiveMessage = async (
           chunkHash,
           messageHash: metadata.hash,
         };
-      } catch (error) {
+      } catch {
         return {
           date: metadata.date,
           chunkIndex: metadata.chunkIndex,

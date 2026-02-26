@@ -15,12 +15,28 @@ export interface RTCSetCandidateParamsExtention extends RTCSetCandidateParams {
   iceCandidates: IRTCIceCandidate[];
 }
 
+const normalizeCandidate = (
+  candidate: RTCIceCandidateInit | RTCIceCandidate,
+): RTCIceCandidateInit => {
+  if (typeof (candidate as RTCIceCandidate).toJSON === "function") {
+    return (candidate as RTCIceCandidate).toJSON();
+  }
+
+  const candidateInit = candidate as RTCIceCandidateInit;
+  return {
+    candidate: candidateInit.candidate,
+    sdpMid: candidateInit.sdpMid,
+    sdpMLineIndex: candidateInit.sdpMLineIndex,
+    usernameFragment: candidateInit.usernameFragment,
+  };
+};
+
 const webrtcSetIceCandidateQuery: BaseQueryFn<
   RTCSetCandidateParamsExtention,
-  void,
-  unknown
+  undefined
 > = async ({ peerId, candidate, peerConnections, iceCandidates }, api) => {
   const { keyPair } = api.getState() as State;
+  const candidateInit = normalizeCandidate(candidate);
 
   const connectionIndex = peerConnections.findIndex(
     (peer) => peer.withPeerId === peerId,
@@ -28,15 +44,16 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
 
   if (connectionIndex > -1) {
     const epc = peerConnections[connectionIndex];
-    const cand = new RTCIceCandidate(candidate);
+    if (epc.ignoreOffer) return { data: undefined };
+
     if (!epc.remoteDescription || epc.signalingState !== "stable") {
-      epc.iceCandidates.push(cand);
+      epc.iceCandidates.push(candidateInit);
     } else {
       try {
-        await epc.addIceCandidate(cand);
-      } catch (error) {
+        await epc.addIceCandidate(candidateInit);
+      } catch {
         const offerCollision =
-          epc.makingOffer || epc.signalingState !== "stable";
+          epc.makingOffer || (epc.signalingState as string) !== "stable";
         const isPolite = keyPair.peerId < epc.withPeerId;
         const ignoreOffer = !isPolite && offerCollision;
         // if (!ignoreOffer) throw error;
@@ -95,9 +112,9 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
     // }
   } else {
     iceCandidates.push({
-      ...candidate,
+      ...candidateInit,
       withPeerId: peerId,
-    });
+    } as IRTCIceCandidate);
   }
 
   return { data: undefined };

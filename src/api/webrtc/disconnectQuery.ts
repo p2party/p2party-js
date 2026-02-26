@@ -16,8 +16,7 @@ export interface RTCDisconnectParamsExtension extends RTCDisconnectParams {
 
 const webrtcDisconnectQuery: BaseQueryFn<
   RTCDisconnectParamsExtension,
-  void,
-  unknown
+  undefined
 > = async ({ alsoDeleteDB, peerConnections, dataChannels }, api) => {
   const CHANNELS_LEN = dataChannels.length;
   for (let i = 0; i < CHANNELS_LEN; i++) {

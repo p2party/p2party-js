@@ -71,7 +71,8 @@ export const handleConnectToPeer = async (
   epc.withPeerId = peerId;
   epc.withPeerPublicKey = peerPublicKey;
   epc.makingOffer = false;
-  epc.iceCandidates = [] as RTCIceCandidate[];
+  epc.ignoreOffer = false;
+  epc.iceCandidates = [] as RTCIceCandidateInit[];
 
   if (signalingServer.isConnected) {
     await api.dispatch(
@@ -95,7 +96,27 @@ export const handleConnectToPeer = async (
     },
   ];
 
+  // Track last negotiation time to prevent rapid re-negotiations
+  let lastNegotiationTime = 0;
+  const NEGOTIATION_DEBOUNCE_MS = 500;
+
   epc.onnegotiationneeded = async () => {
+    // Don't start a new negotiation if we're already making an offer or not in stable state
+    if (epc.makingOffer || epc.signalingState !== "stable") {
+      console.log(
+        `Skipping negotiation with ${peerId} - already making offer: ${String(epc.makingOffer)}, state: ${epc.signalingState}`,
+      );
+      return;
+    }
+
+    // Debounce rapid negotiations
+    const now = Date.now();
+    if (now - lastNegotiationTime < NEGOTIATION_DEBOUNCE_MS) {
+      console.log(`Skipping negotiation with ${peerId} - debounce`);
+      return;
+    }
+    lastNegotiationTime = now;
+
     try {
       epc.makingOffer = true;
       await epc.setLocalDescription();
@@ -146,8 +167,16 @@ export const handleConnectToPeer = async (
     console.error(e);
   };
 
+  // Track ICE restart attempts to prevent rapid restarts
+  let lastIceRestartTime = 0;
+  const ICE_RESTART_DEBOUNCE_MS = 3000;
+  let disconnectTimeout: ReturnType<typeof setTimeout> | undefined;
+
   epc.oniceconnectionstatechange = async () => {
-    if (epc.iceConnectionState === "failed") {
+    if (
+      epc.iceConnectionState === "failed" ||
+      epc.iceConnectionState === "disconnected"
+    ) {
       const { signalingServer } = api.getState() as State;
       if (
         !signalingServer.isConnected &&
@@ -161,7 +190,13 @@ export const handleConnectToPeer = async (
         );
       }
 
-      epc.restartIce();
+      const now = Date.now();
+
+      if (now - lastIceRestartTime > ICE_RESTART_DEBOUNCE_MS) {
+        lastIceRestartTime = now;
+        console.log(`ICE ${epc.iceConnectionState} with ${peerId}, restarting`);
+        epc.restartIce();
+      }
     }
 
     console.log(
@@ -183,11 +218,23 @@ export const handleConnectToPeer = async (
   };
 
   epc.onconnectionstatechange = async () => {
-    if (
-      epc.connectionState === "closed" ||
-      epc.connectionState === "failed" ||
-      epc.connectionState === "disconnected"
-    ) {
+    if (epc.connectionState === "disconnected") {
+      if (disconnectTimeout) clearTimeout(disconnectTimeout);
+      disconnectTimeout = setTimeout(() => {
+        if (epc.connectionState !== "disconnected") return;
+
+        void api.dispatch(
+          webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
+        );
+
+        console.error(`RTC Connection with peer ${peerId} has disconnected.`);
+      }, 8000);
+    } else if (epc.connectionState === "closed" || epc.connectionState === "failed") {
+      if (disconnectTimeout) {
+        clearTimeout(disconnectTimeout);
+        disconnectTimeout = undefined;
+      }
+
       await api.dispatch(
         webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
       );
@@ -211,6 +258,11 @@ export const handleConnectToPeer = async (
         }
       }
     } else {
+      if (disconnectTimeout) {
+        clearTimeout(disconnectTimeout);
+        disconnectTimeout = undefined;
+      }
+
       if (epc.connectionState === "connected") {
         api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 

@@ -253,7 +253,7 @@ const sendChunks = async (
         }),
       );
     } else if (
-      channel.readyState === "open" &&
+      (channel.readyState as string) === "open" &&
       channel.bufferedAmount < MAX_BUFFERED_AMOUNT
     ) {
       channel.send(message.buffer as ArrayBuffer);
@@ -320,13 +320,13 @@ const sendChunks = async (
         while (
           sendQueue.length > 0 &&
           channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-          channel.readyState === "open"
+          (channel.readyState as string) === "open"
         ) {
           let pos = await randomNumberInRange(0, sendQueue.length);
           if (pos === sendQueue.length) pos = 0;
 
           const [item] = sendQueue.splice(pos, 1);
-          if (channel.readyState === "open") {
+          if ((channel.readyState as string) === "open") {
             channel.send(item.encryptedData);
 
             try {

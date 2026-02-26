@@ -144,7 +144,7 @@ const keyPairSlice = createSlice({
       if (isUUID(challengeId)) state.challengeId = challengeId;
     },
 
-    resetIdentity: (_state, _action: PayloadAction<void>) => {
+    resetIdentity: () => {
       return {
         peerId: "",
         challengeId: "",

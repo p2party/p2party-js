@@ -13,15 +13,13 @@ import type {
 } from "./interfaces";
 import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
-export interface RTCDisconnectFromChannelLabelParamsExtension
-  extends RTCDisconnectFromChannelLabelParams {
+export interface RTCDisconnectFromChannelLabelParamsExtension extends RTCDisconnectFromChannelLabelParams {
   dataChannels: IRTCDataChannel[];
 }
 
 const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
-  void,
-  unknown
+  undefined
 > = async (
   { label, messageHash, alsoDeleteData, alsoSendFinishedMessage, dataChannels },
   api,
@@ -31,8 +29,7 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
 
   for (let i = 0; i < CHANNELS_LEN; i++) {
     if (
-      !dataChannels[i] ||
-      dataChannels[i].label !== label ||
+      dataChannels[i]?.label !== label ||
       dataChannels[i].readyState !== "open"
     )
       continue;
@@ -48,10 +45,7 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
 
     if (alsoDeleteData) {
       const { merkleRootHex } = await decompileChannelMessageLabel(label);
-
-      if (alsoDeleteData) {
-        api.dispatch(deleteMessage({ merkleRootHex }));
-      }
+      api.dispatch(deleteMessage({ merkleRootHex }));
     }
   }
 

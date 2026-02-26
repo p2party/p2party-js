@@ -49,7 +49,7 @@ const webrtcApi = createApi({
   reducerPath: "webrtcApi",
   baseQuery: webrtcBaseQuery,
   endpoints: (builder) => ({
-    connectWithPeer: builder.mutation<void, RTCPeerConnectionParams>({
+    connectWithPeer: builder.mutation<undefined, RTCPeerConnectionParams>({
       query: ({
         peerId,
         peerPublicKey,
@@ -58,9 +58,12 @@ const webrtcApi = createApi({
         rtcConfig = {
           iceServers: [
             {
-              urls: ["stun:stun.p2party.com:3478"],
+              // Use single STUN URL - multiple STUN servers slow down ICE gathering
+              urls: "stun:stun.p2party.com:3478",
             },
           ],
+          // Pre-allocate ICE candidates for faster connection setup
+          iceCandidatePoolSize: 2,
         },
       }) => ({
         peerId,
@@ -73,7 +76,7 @@ const webrtcApi = createApi({
       }),
     }),
 
-    setDescription: builder.mutation<void, RTCSetDescriptionParams>({
+    setDescription: builder.mutation<undefined, RTCSetDescriptionParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetDescriptionQuery(
           {
@@ -87,7 +90,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    setCandidate: builder.mutation<void, RTCSetCandidateParams>({
+    setCandidate: builder.mutation<undefined, RTCSetCandidateParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcSetIceCandidateQuery(
           { ...args, peerConnections, iceCandidates },
@@ -96,7 +99,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    openChannel: builder.mutation<void, RTCOpenChannelParams>({
+    openChannel: builder.mutation<undefined, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
           {
@@ -109,7 +112,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    sendMessage: builder.mutation<void, RTCSendMessageParams>({
+    sendMessage: builder.mutation<undefined, RTCSendMessageParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcMessageQuery(
           {
@@ -124,7 +127,7 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnect: builder.mutation<void, RTCDisconnectParams>({
+    disconnect: builder.mutation<undefined, RTCDisconnectParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectQuery(
           { ...args, peerConnections, dataChannels },
@@ -133,7 +136,10 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromRoom: builder.mutation<void, RTCDisconnectFromRoomParams>({
+    disconnectFromRoom: builder.mutation<
+      undefined,
+      RTCDisconnectFromRoomParams
+    >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectRoomQuery(
           { ...args, peerConnections, dataChannels },
@@ -143,7 +149,7 @@ const webrtcApi = createApi({
     }),
 
     disconnectFromAllRooms: builder.mutation<
-      void,
+      undefined,
       RTCDisconnectFromAllRoomsParams
     >({
       queryFn: (args, api, extraOptions) =>
@@ -154,7 +160,10 @@ const webrtcApi = createApi({
         ),
     }),
 
-    disconnectFromPeer: builder.mutation<void, RTCDisconnectFromPeerParams>({
+    disconnectFromPeer: builder.mutation<
+      undefined,
+      RTCDisconnectFromPeerParams
+    >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectPeerQuery(
           { ...args, peerConnections, dataChannels },
@@ -164,7 +173,7 @@ const webrtcApi = createApi({
     }),
 
     disconnectFromChannelLabel: builder.mutation<
-      void,
+      undefined,
       RTCDisconnectFromChannelLabelParams
     >({
       queryFn: (args, api, extraOptions) =>
@@ -176,7 +185,7 @@ const webrtcApi = createApi({
     }),
 
     disconnectFromPeerChannelLabel: builder.mutation<
-      void,
+      undefined,
       RTCDisconnectFromPeerChannelLabelParams
     >({
       queryFn: (args, api, extraOptions) =>

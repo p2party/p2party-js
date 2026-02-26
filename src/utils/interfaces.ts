@@ -3,7 +3,7 @@ import type { IRTCPeerConnectionRoomId } from "../api/webrtc/interfaces";
 export interface WSPeerConnectionRoomId extends IRTCPeerConnectionRoomId {
   queue: Uint8Array[];
   seen: Set<string>;
-  draining: boolean;
+  draining: { value: boolean };
   ptr1: number | undefined;
   decrypted: Uint8Array | undefined;
   ptr2: number | undefined;
@@ -62,10 +62,18 @@ export interface WebSocketMessageRoomIdRequest {
   roomUrl: string;
 }
 
+export interface TurnCredentials {
+  urls: string[];
+  username: string;
+  credential: string;
+  ttl: number;
+}
+
 export interface WebSocketMessageRoomIdResponse {
   type: "roomId";
   roomId: string;
   roomUrl: string;
+  turnCredentials?: TurnCredentials;
 }
 
 export interface WebSocketMessageDescriptionSend {
@@ -87,7 +95,7 @@ export interface WebSocketMessageDescriptionReceive {
 
 export interface WebSocketMessageCandidateSend {
   type: "candidate";
-  candidate: RTCIceCandidate;
+  candidate: RTCIceCandidateInit | RTCIceCandidate;
   fromPeerId: string;
   toPeerId: string;
   roomId: string;
@@ -95,7 +103,7 @@ export interface WebSocketMessageCandidateSend {
 
 export interface WebSocketMessageCandidateReceive {
   type: "candidate";
-  candidate: RTCIceCandidate;
+  candidate: RTCIceCandidateInit | RTCIceCandidate;
   fromPeerId: string;
   // fromPeerPublicKey: string;
   // roomId: string;

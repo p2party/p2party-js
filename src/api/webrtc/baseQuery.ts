@@ -24,8 +24,7 @@ export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
 
 const webrtcBaseQuery: BaseQueryFn<
   RTCPeerConnectionParamsExtend,
-  void,
-  unknown
+  undefined
 > = async (
   {
     peerId,
@@ -123,6 +122,53 @@ const webrtcBaseQuery: BaseQueryFn<
             }),
           );
         }
+      }
+    } else {
+      peerConnections[connectionIndex].ontrack = null;
+      peerConnections[connectionIndex].ondatachannel = null;
+      peerConnections[connectionIndex].onicecandidate = null;
+      peerConnections[connectionIndex].onicecandidateerror = null;
+      peerConnections[connectionIndex].onnegotiationneeded = null;
+      peerConnections[connectionIndex].onsignalingstatechange = null;
+      peerConnections[connectionIndex].onconnectionstatechange = null;
+      peerConnections[connectionIndex].onicegatheringstatechange = null;
+      peerConnections[connectionIndex].oniceconnectionstatechange = null;
+
+      if (peerConnections[connectionIndex].connectionState !== "closed") {
+        peerConnections[connectionIndex].close();
+      }
+
+      peerConnections.splice(connectionIndex, 1);
+
+      const newEpc = await handleConnectToPeer(
+        { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
+        api,
+      );
+
+      newEpc.ondatachannel = async (e: RTCDataChannelEvent) => {
+        await handleOpenChannel(
+          {
+            channel: e.channel,
+            epc: newEpc,
+            roomId,
+            dataChannels,
+          },
+          api,
+        );
+      };
+
+      peerConnections.push(newEpc);
+
+      if (initiator) {
+        await handleOpenChannel(
+          {
+            channel: "main",
+            epc: newEpc,
+            roomId,
+            dataChannels,
+          },
+          api,
+        );
       }
     }
   }

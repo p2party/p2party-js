@@ -230,14 +230,14 @@ export type WorkerMessages =
 export interface WorkerMethodReturnTypes {
   getDBAddressBookEntry: UsernamedPeer | undefined;
   getAllDBAddressBookEntries: UsernamedPeer[];
-  setDBAddressBookEntry: void;
+  setDBAddressBookEntry: undefined;
   deleteDBAddressBookEntry: string;
   getDBPeerIsBlacklisted: boolean;
   getAllDBBlacklisted: BlacklistedPeer[];
-  setDBPeerInBlacklist: void;
+  setDBPeerInBlacklist: undefined;
   getAllDBUniqueRooms: UniqueRoom[];
-  setDBUniqueRoom: void;
-  deleteDBPeerFromBlacklist: void;
+  setDBUniqueRoom: undefined;
+  deleteDBPeerFromBlacklist: undefined;
   getDBMessageData: MessageData | undefined;
   getDBRoomMessageData: MessageData[];
   getDBChunk: ArrayBuffer | undefined;
@@ -247,17 +247,17 @@ export interface WorkerMethodReturnTypes {
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
   getDBAllChunksCount: number;
-  setDBChunk: void;
+  setDBChunk: undefined;
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
-  setDBNewChunk: void;
-  setDBRoomMessageData: void;
-  setDBSendQueue: void;
+  setDBNewChunk: undefined;
+  setDBRoomMessageData: undefined;
+  setDBSendQueue: undefined;
   countDBSendQueue: number;
-  deleteDBChunk: void;
-  deleteDBNewChunk: void;
-  deleteDBMessageData: void;
-  deleteDBSendQueue: void;
-  deleteDBUniqueRoom: void;
-  deleteDB: void;
+  deleteDBChunk: undefined;
+  deleteDBNewChunk: undefined;
+  deleteDBMessageData: undefined;
+  deleteDBSendQueue: undefined;
+  deleteDBUniqueRoom: undefined;
+  deleteDB: undefined;
 }

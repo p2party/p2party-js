@@ -21,8 +21,7 @@ export interface RTCOpenChannelParamsExtention extends RTCOpenChannelParams {
 
 const webrtcOpenChannelQuery: BaseQueryFn<
   RTCOpenChannelParamsExtention,
-  void,
-  unknown
+  undefined
 > = async (
   {
     roomId,

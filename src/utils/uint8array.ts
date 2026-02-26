@@ -27,7 +27,7 @@ export const concatUint8Arrays = (
 };
 
 /**
- * Compares two Uint8Arrays.
+ * Compares two Uint8Arrays in constant time to prevent timing attacks.
  */
 export const uint8ArraysAreEqual = (
   array1: Uint8Array,
@@ -35,13 +35,17 @@ export const uint8ArraysAreEqual = (
 ): Promise<boolean> => {
   return new Promise((resolve) => {
     const arrLen = array1.length;
-    if (arrLen !== array2.length) resolve(false);
-
-    for (let i = 0; i < arrLen; i++) {
-      if (array1[i] !== array2[i]) resolve(false);
+    if (arrLen !== array2.length) {
+      resolve(false);
+      return;
     }
 
-    resolve(true);
+    let diff = 0;
+    for (let i = 0; i < arrLen; i++) {
+      diff |= array1[i] ^ array2[i];
+    }
+
+    resolve(diff === 0);
   });
 };
 

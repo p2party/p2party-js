@@ -119,14 +119,20 @@ export interface Room extends SetRoomArgs {
 export const defaultRTCConfig = {
   iceServers: [
     {
-      urls: [
-        "stun:stun.p2party.com:3478",
-        // "stun:stun.l.google.com:19302",
-        // "stun:stun1.l.google.com:19302",
-      ],
+      // Use single STUN URL - multiple STUN servers slow down ICE gathering
+      urls: "stun:stun.p2party.com:3478",
     },
+    // TURN server requires credentials from signaling server via TURN REST API
+    // Add TURN server entry with valid credentials when available:
+    // {
+    //   urls: ["turn:turn.p2party.com:3478", "turns:turn.p2party.com:443?transport=tcp"],
+    //   username: "<from-signaling-server>",
+    //   credential: "<from-signaling-server>",
+    // },
   ],
   iceTransportPolicy: "all",
+  // Pre-allocate ICE candidates for faster connection setup
+  iceCandidatePoolSize: 2,
 } as RTCConfiguration;
 
 const initialState: Room[] = [];

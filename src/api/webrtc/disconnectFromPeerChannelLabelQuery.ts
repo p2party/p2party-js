@@ -16,16 +16,14 @@ import type {
   RTCDisconnectFromPeerChannelLabelParams,
 } from "./interfaces";
 
-export interface RTCDisconnectFromPeerChannelLabelParamsExtension
-  extends RTCDisconnectFromPeerChannelLabelParams {
+export interface RTCDisconnectFromPeerChannelLabelParamsExtension extends RTCDisconnectFromPeerChannelLabelParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
 }
 
 const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromPeerChannelLabelParamsExtension,
-  void,
-  unknown
+  undefined
 > = async (
   {
     peerId,

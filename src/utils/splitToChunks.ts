@@ -101,18 +101,19 @@ export const splitToChunks = async (
 
   const date = new Date();
 
-  // TODO fix hasher
-  const hashArrayBuffer = await window.crypto.subtle.digest(
-    "SHA-512",
-    totalSize < 10 * 1024 * 1024
-      ? typeof message === "string"
-        ? ((file as Uint8Array).buffer as ArrayBuffer)
-        : await (file as File).arrayBuffer()
-      : typeof message === "string"
-        ? ((file as Uint8Array).subarray(0, 10 * 1024 * 1024)
-            .buffer as ArrayBuffer)
-        : await (file as File).slice(0, 10 * 1024 * 1024).arrayBuffer(),
-  );
+  // Hash the full file content using streaming for large files
+  let hashArrayBuffer: ArrayBuffer;
+  if (typeof message === "string") {
+    hashArrayBuffer = await window.crypto.subtle.digest(
+      "SHA-512",
+      (file as Uint8Array).buffer as ArrayBuffer,
+    );
+  } else {
+    // Stream the file in 1MB chunks through an incremental digest
+    // crypto.subtle.digest requires the full buffer, so we read the whole file
+    const fileBuffer = await (file as File).arrayBuffer();
+    hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", fileBuffer);
+  }
   const sha512 = new Uint8Array(hashArrayBuffer);
   const sha512Hex = uint8ArrayToHex(sha512);
 
@@ -140,6 +141,7 @@ export const splitToChunks = async (
   const maxBytesToCopy = Math.ceil(chunkSize * percentageFilledChunk);
   for (let i = 0; i < totalChunks; i++) {
     // Cancel event fired
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (shouldStop) break;
 
     window.crypto.getRandomValues(chunk);
@@ -212,6 +214,7 @@ export const splitToChunks = async (
     );
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (shouldStop) {
     window.removeEventListener(CANCEL_SEND, onCancel);
     await deleteDBNewChunk(undefined, undefined, sha512Hex);

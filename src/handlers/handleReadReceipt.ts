@@ -65,7 +65,7 @@ export const handleReadReceipt = async (
           (m) => m.merkleRootHex === merkleRootHex,
         );
 
-        const dbChunk = await getDBChunk(merkleRootHex, chunkIndex);
+        const dbChunk = await getDBChunk(hashHex, chunkIndex);
         const chunkSize = dbChunk?.byteLength ?? 0;
         if (
           dbChunk &&

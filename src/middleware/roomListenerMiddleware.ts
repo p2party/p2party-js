@@ -28,6 +28,10 @@ import {
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
 
+// Debounce peers requests per room to prevent rapid re-requests
+const lastPeersRequest = new Map<string, number>();
+const PEERS_REQUEST_DEBOUNCE_MS = 2000;
+
 const roomListenerMiddleware = createListenerMiddleware();
 roomListenerMiddleware.startListening({
   matcher: isAnyOf(
@@ -40,27 +44,52 @@ roomListenerMiddleware.startListening({
   effect: async (action, listenerApi) => {
     if (setConnectingToPeers.match(action)) {
       const { roomId, connectingToPeers } = action.payload;
+      console.log("[roomListenerMiddleware] setConnectingToPeers:", {
+        roomId,
+        connectingToPeers,
+      });
       if (connectingToPeers) {
         const { signalingServer, keyPair, rooms } =
           listenerApi.getState() as State;
 
         const roomIndex = rooms.findIndex((r) => r.id === roomId);
+        console.log("[roomListenerMiddleware] setConnectingToPeers check:", {
+          isConnected: signalingServer.isConnected,
+          peerId: keyPair.peerId,
+          isPeerIdUUID: isUUID(keyPair.peerId),
+          roomIndex,
+          roomId: roomIndex > -1 ? rooms[roomIndex].id : "N/A",
+        });
 
         if (
           signalingServer.isConnected &&
+          signalingServer.isVerified &&
           isUUID(keyPair.peerId) &&
           roomIndex > -1 &&
           isUUID(rooms[roomIndex].id)
         ) {
-          await listenerApi.dispatch(
-            signalingServerApi.endpoints.sendMessage.initiate({
-              content: {
-                type: "peers",
-                fromPeerId: keyPair.peerId,
-                roomId,
-              } as WebSocketMessagePeersRequest,
-            }),
-          );
+          // Debounce peers requests to prevent rapid re-requests
+          const now = Date.now();
+          const lastRequest = lastPeersRequest.get(roomId) ?? 0;
+          if (now - lastRequest < PEERS_REQUEST_DEBOUNCE_MS) {
+            console.log(
+              "[roomListenerMiddleware] Skipping peers request - debounced",
+            );
+          } else {
+            lastPeersRequest.set(roomId, now);
+            console.log(
+              "[roomListenerMiddleware] Sending peers request from setConnectingToPeers",
+            );
+            await listenerApi.dispatch(
+              signalingServerApi.endpoints.sendMessage.initiate({
+                content: {
+                  type: "peers",
+                  fromPeerId: keyPair.peerId,
+                  roomId,
+                } as WebSocketMessagePeersRequest,
+              }),
+            );
+          }
         }
 
         listenerApi.dispatch(
@@ -72,6 +101,11 @@ roomListenerMiddleware.startListening({
         listenerApi.getState() as State;
 
       const { url, id, onlyConnectWithKnownPeers } = action.payload;
+      console.log("[roomListenerMiddleware] setRoom:", {
+        url,
+        id,
+        onlyConnectWithKnownPeers,
+      });
 
       if (url.length === 64 && onlyConnectWithKnownPeers != undefined) {
         localStorage.setItem(
@@ -81,6 +115,14 @@ roomListenerMiddleware.startListening({
       }
 
       if (url.length === 64 && isUUID(id)) {
+        console.log("[roomListenerMiddleware] setRoom processed:", {
+          url,
+          id,
+          isConnected: signalingServer.isConnected,
+          peerId: keyPair.peerId,
+          roomsLen: rooms.length,
+        });
+
         await setDBUniqueRoom(url, id);
 
         const oldMessages = await getDBRoomMessageData(id);
@@ -104,12 +146,28 @@ roomListenerMiddleware.startListening({
 
         const roomIndex = rooms.findIndex((r) => r.id === id);
 
+        console.log(
+          "[roomListenerMiddleware] Checking peers request conditions:",
+          {
+            isConnected: signalingServer.isConnected,
+            isPeerIdUUID: isUUID(keyPair.peerId),
+            peerId: keyPair.peerId,
+            roomIndex,
+            roomId: roomIndex > -1 ? rooms[roomIndex].id : "N/A",
+          },
+        );
+
         if (
           signalingServer.isConnected &&
+          signalingServer.isVerified &&
           isUUID(keyPair.peerId) &&
           roomIndex > -1 &&
           isUUID(rooms[roomIndex].id)
         ) {
+          console.log(
+            "[roomListenerMiddleware] Sending peers request for room:",
+            rooms[roomIndex].id,
+          );
           await listenerApi.dispatch(
             signalingServerApi.endpoints.sendMessage.initiate({
               content: {

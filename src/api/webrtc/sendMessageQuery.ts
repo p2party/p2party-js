@@ -2,6 +2,8 @@ import { handleSendMessage } from "../../handlers/handleSendMessage";
 
 import { wasmLoader } from "../../cryptography/wasmLoader";
 
+import { AsyncMutex } from "../../utils/mutex";
+
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
@@ -16,10 +18,17 @@ export interface RTCChannelMessageParamsExtension extends RTCSendMessageParams {
   merkleWasmMemory: WebAssembly.Memory;
 }
 
+/**
+ * Serializes access to the shared encryptionWasmMemory and
+ * merkleWasmMemory. Without this, concurrent sendMessage mutations
+ * would interleave _malloc / _free / crypto calls on the same
+ * WebAssembly linear memory, risking buffer corruption.
+ */
+const sendMutex = new AsyncMutex();
+
 const webrtcMessageQuery: BaseQueryFn<
   RTCChannelMessageParamsExtension,
-  void,
-  unknown
+  undefined
 > = async (
   {
     data,
@@ -36,25 +45,27 @@ const webrtcMessageQuery: BaseQueryFn<
   },
   api,
 ) => {
-  const encryptionModule = await wasmLoader(encryptionWasmMemory);
-  const merkleModule = await wasmLoader(merkleWasmMemory);
+  return sendMutex.runExclusive(async () => {
+    const encryptionModule = await wasmLoader(encryptionWasmMemory);
+    const merkleModule = await wasmLoader(merkleWasmMemory);
 
-  await handleSendMessage(
-    data,
-    api,
-    label,
-    roomId,
-    peerConnections,
-    dataChannels,
-    encryptionModule,
-    merkleModule,
-    minChunks,
-    chunkSize,
-    percentageFilledChunk,
-    metadataSchemaVersion,
-  );
+    await handleSendMessage(
+      data,
+      api,
+      label,
+      roomId,
+      peerConnections,
+      dataChannels,
+      encryptionModule,
+      merkleModule,
+      minChunks,
+      chunkSize,
+      percentageFilledChunk,
+      metadataSchemaVersion,
+    );
 
-  return { data: undefined };
+    return { data: undefined };
+  });
 };
 
 export default webrtcMessageQuery;

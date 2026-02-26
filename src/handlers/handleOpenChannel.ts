@@ -31,6 +31,10 @@ import type {
   IRTCDataChannel,
 } from "../api/webrtc/interfaces";
 
+// Track last reconnection attempt per room to prevent rapid reconnection loops
+const lastReconnectAttempt = new Map<string, number>();
+const RECONNECT_DEBOUNCE_MS = 2000;
+
 export interface OpenChannelHelperParams {
   channel: string | RTCDataChannel;
   epc: IRTCPeerConnection;
@@ -64,7 +68,7 @@ export const handleOpenChannel = async (
 
   const queue: Uint8Array[] = [];
   const seen = new Set<string>();
-  let draining = false;
+  const drainingRef = { value: false };
 
   if (typeof channel === "string") {
     const channelIndex = dataChannels.findIndex(
@@ -99,13 +103,13 @@ export const handleOpenChannel = async (
       while (
         sendQueue.length > 0 &&
         dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-        dataChannel.readyState === "open"
+        (dataChannel.readyState as string) === "open"
       ) {
         let pos = await randomNumberInRange(0, sendQueue.length);
         if (pos === sendQueue.length) pos = 0;
 
         const [item] = sendQueue.splice(pos, 1);
-        if (dataChannel.readyState === "open") {
+        if ((dataChannel.readyState as string) === "open") {
           dataChannel.send(item.encryptedData);
           await deleteDBSendQueue(label, epc.withPeerId, item.position);
         }
@@ -151,7 +155,17 @@ export const handleOpenChannel = async (
     );
 
     if (extChannel.label === "main") {
-      api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+      // Debounce reconnection attempts to prevent rapid loops
+      const now = Date.now();
+      const lastAttempt = lastReconnectAttempt.get(roomId) ?? 0;
+      if (now - lastAttempt > RECONNECT_DEBOUNCE_MS) {
+        lastReconnectAttempt.set(roomId, now);
+        api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+      } else {
+        console.log(
+          `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
+        );
+      }
     }
   };
 
@@ -165,7 +179,17 @@ export const handleOpenChannel = async (
       }),
     );
 
-    api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+    // Debounce reconnection attempts to prevent rapid loops
+    const now = Date.now();
+    const lastAttempt = lastReconnectAttempt.get(roomId) ?? 0;
+    if (now - lastAttempt > RECONNECT_DEBOUNCE_MS) {
+      lastReconnectAttempt.set(roomId, now);
+      api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+    } else {
+      console.log(
+        `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
+      );
+    }
   };
 
   extChannel.onmessage = async (e) => {
@@ -177,10 +201,8 @@ export const handleOpenChannel = async (
           data,
           extChannel.label,
           extChannel.withPeerId,
-          // extChannel,
           rooms[roomIndex],
           api,
-          // dataChannels,
         );
       } catch (error) {
         console.error(error);
@@ -190,16 +212,17 @@ export const handleOpenChannel = async (
     }
 
     if (data.length === MESSAGE_LEN) {
-      void enqueue(
+      enqueue(
         data,
         queue,
         seen,
-        draining,
+        drainingRef,
         api,
         roomId,
         extChannel.withPeerId,
         channelLabel,
         merkleRootHex,
+        merkleRoot,
         extChannel,
         decrypted,
         messageArray,

@@ -52,8 +52,6 @@ fs.writeFileSync(wasmPath.replace("pto.js", "pto.d.ts"), types);
 const withJS = ` \
 -s WASM=1 \
 -s MODULARIZE=1 \
--s MAIN_MODULE=2 \
--s BUILD_AS_WORKER=1 \
 -s INCOMING_MODULE_JS_API=\[\"wasmBinary\",\"wasmMemory\"\] \
 -s POLYFILL=0 \
 -s NO_DYNAMIC_EXECUTION=1 \
@@ -107,9 +105,9 @@ emcc \
 -s FILESYSTEM=0 \
 -s SAFE_HEAP=1 \
 -s CHECK_NULL_WRITES=1 \
--s ENVIRONMENT=worker \
+-s ENVIRONMENT=web,worker \
 -s INVOKE_RUN=0 \
--s EXIT_RUNTIME=1 \
+-s EXIT_RUNTIME=0 \
 ${memory} \
 ${withJS} \
 -s NODEJS_CATCH_EXIT=0 \

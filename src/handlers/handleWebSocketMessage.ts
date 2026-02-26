@@ -6,7 +6,13 @@ import { handleReadReceipt } from "./handleReadReceipt";
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
 
-import { setRoom, setPeer, setChannel } from "../reducers/roomSlice";
+import {
+  setRoom,
+  setPeer,
+  deletePeer,
+  setChannel,
+  defaultRTCConfig,
+} from "../reducers/roomSlice";
 import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
 
 import cryptoMemory from "../cryptography/memory";
@@ -26,6 +32,7 @@ import type {
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
   WebSocketMessageMessageSendResponse,
+  WebSocketMessagePeersRequest,
   WSPeerConnection,
 } from "../utils/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
@@ -38,6 +45,8 @@ import {
 import { DECRYPTED_LEN, MESSAGE_LEN } from "../utils/constants";
 import { enqueue } from "./handleMessageQueueing";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
+
+const lastPeersRepoll = new Map<string, number>();
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -54,7 +63,7 @@ const handleWebSocketMessage = async (
 
     // console.log(event.data);
 
-    const message:
+    const message = JSON.parse(String(event.data)) as
       | WebSocketMessagePingRequest
       | WebSocketMessageChallengeRequest
       | WebSocketMessageRoomIdResponse
@@ -65,7 +74,7 @@ const handleWebSocketMessage = async (
       | WebSocketMessageSuccessfulChallenge
       | WebSocketMessageError
       | WebSocketMessagePeerConnectionResponse
-      | WebSocketMessageMessageSendResponse = JSON.parse(event.data);
+      | WebSocketMessageMessageSendResponse;
 
     switch (message.type) {
       case "ping": {
@@ -128,10 +137,27 @@ const handleWebSocketMessage = async (
       }
 
       case "roomId": {
+        // Build rtcConfig with TURN credentials if provided by server
+        let rtcConfig: RTCConfiguration | undefined;
+        if (message.turnCredentials) {
+          rtcConfig = {
+            ...defaultRTCConfig,
+            iceServers: [
+              ...(defaultRTCConfig.iceServers ?? []),
+              {
+                urls: message.turnCredentials.urls,
+                username: message.turnCredentials.username,
+                credential: message.turnCredentials.credential,
+              },
+            ],
+          };
+        }
+
         api.dispatch(
           setRoom({
             id: message.roomId,
             url: message.roomUrl,
+            rtcConfig,
           }),
         );
 
@@ -180,6 +206,11 @@ const handleWebSocketMessage = async (
       }
 
       case "peers": {
+        console.log("[handleWebSocketMessage] Received peers response:", {
+          roomId: message.roomId,
+          peersCount: message.peers.length,
+          peers: message.peers,
+        });
         const { keyPair, rooms, commonState } = api.getState() as State;
 
         const roomIndex =
@@ -188,8 +219,45 @@ const handleWebSocketMessage = async (
             : -1;
 
         if (roomIndex > -1) {
+          const serverPeerIds = new Set<string>();
+          for (const peer of message.peers) {
+            if (isUUID(peer.id)) {
+              serverPeerIds.add(peer.id);
+            }
+          }
+
+          const roomPeers = rooms[roomIndex].peers;
+          for (const peer of roomPeers) {
+            if (!serverPeerIds.has(peer.peerId)) {
+              api.dispatch(deletePeer({ peerId: peer.peerId }));
+            }
+          }
+
           const len = message.peers.length;
-          if (len === 0) break;
+          if (len === 0) {
+            const { signalingServer } = api.getState() as State;
+            const now = Date.now();
+            const lastRepoll = lastPeersRepoll.get(message.roomId) ?? 0;
+            if (
+              signalingServer.isConnected &&
+              signalingServer.isVerified &&
+              isUUID(keyPair.peerId) &&
+              now - lastRepoll > 5000
+            ) {
+              lastPeersRepoll.set(message.roomId, now);
+
+              await api.dispatch(
+                signalingServerApi.endpoints.sendMessage.initiate({
+                  content: {
+                    type: "peers",
+                    fromPeerId: keyPair.peerId,
+                    roomId: message.roomId,
+                  } as WebSocketMessagePeersRequest,
+                }),
+              );
+            }
+            break;
+          }
 
           const canOnlyConnectToKnownPeers =
             rooms[roomIndex].onlyConnectWithKnownAddresses;
@@ -202,6 +270,31 @@ const handleWebSocketMessage = async (
               message.peers[i].publicKey.length !== 64
             )
               continue;
+
+            api.dispatch(
+              setPeer({
+                roomId: message.roomId,
+                peerId: message.peers[i].id,
+                peerPublicKey: message.peers[i].publicKey,
+              }),
+            );
+
+            // Skip if we already have a connection to this peer
+            const existingConnection = peerConnections.find(
+              (pc) => pc.withPeerId === message.peers[i].id,
+            );
+            const connectionState = (
+              existingConnection as RTCPeerConnection | undefined
+            )?.connectionState;
+            const hasActiveConnection =
+              !!existingConnection && connectionState === "connected";
+
+            if (hasActiveConnection) {
+              console.log(
+                `Skipping peer ${message.peers[i].id} - already connected/connecting`,
+              );
+              continue;
+            }
 
             const blacklisted = await getDBPeerIsBlacklisted(
               message.peers[i].id,
@@ -350,11 +443,7 @@ const handleWebSocketMessage = async (
             peerConnections[peerIndex].rooms[peerRoomIndex].ptr3 &&
             peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray
           ) {
-            peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray.set(
-              merkleRoot,
-            );
-
-            void enqueue(
+            enqueue(
               data,
               peerConnections[peerIndex].rooms[peerRoomIndex].queue,
               peerConnections[peerIndex].rooms[peerRoomIndex].seen,
@@ -364,6 +453,7 @@ const handleWebSocketMessage = async (
               message.fromPeerId,
               channelLabel,
               merkleRootHex,
+              merkleRoot,
               undefined,
               peerConnections[peerIndex].rooms[peerRoomIndex].decrypted,
               peerConnections[peerIndex].rooms[peerRoomIndex].messageArray,
@@ -484,7 +574,7 @@ const handleWebSocketMessage = async (
                   receiveMessageModule,
                   queue: [] as Uint8Array[],
                   seen: new Set<string>(),
-                  draining: false,
+                  draining: { value: false },
                   ptr1,
                   decrypted,
                   ptr2,
@@ -552,7 +642,7 @@ const handleWebSocketMessage = async (
                 receiveMessageModule,
                 queue: [] as Uint8Array[],
                 seen: new Set<string>(),
-                draining: false,
+                draining: { value: false },
                 ptr1,
                 decrypted,
                 ptr2,
@@ -584,6 +674,7 @@ const handleWebSocketMessage = async (
       }
     }
   } catch (error) {
+    console.error("[p2party] WebSocket message handling error:", error);
     return;
   }
 };

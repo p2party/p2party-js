@@ -76,7 +76,6 @@ export const serializeMetadata = (metadata: Metadata): Uint8Array => {
   // chunkIndex (8 bytes)
   const chunkIndexView = new DataView(buffer.buffer, offset, 8);
   chunkIndexView.setBigUint64(0, BigInt(metadata.chunkIndex), false); // Big-endian
-  offset += 8;
 
   return buffer;
 };
@@ -122,7 +121,13 @@ export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
 
   // name (256 bytes)
   const nameBytes = buffer.slice(offset, offset + 256);
-  const name = new TextDecoder().decode(nameBytes).replace(/\0+$/, "");
+  let name = new TextDecoder().decode(nameBytes).replace(/\0+$/, "");
+  // Sanitize filename: strip path separators, control chars, and HTML-dangerous chars
+  name = name
+    .replace(/[/\\]/g, "_") // path separators
+    .replace(/[<>:"'|?*]/g, "_") // shell/HTML-dangerous chars
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ""); // control characters
   offset += 256;
 
   // chunkStartIndex (8 bytes)

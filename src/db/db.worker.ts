@@ -34,7 +34,7 @@ async function fnGetDBAddressBookEntry(
       : tx.objectStore("addressBook").index("peerPublicKey");
     const peer = peerId
       ? await index.get(peerId)
-      : await index.get(peerPublicKey!);
+      : await index.get(peerPublicKey ?? "");
     await tx.done;
     db.close();
     return peer
@@ -44,7 +44,7 @@ async function fnGetDBAddressBookEntry(
           peerPublicKey: peer.peerPublicKey,
         }
       : undefined;
-  } catch (error) {
+  } catch {
     db.close();
 
     return undefined;
@@ -58,7 +58,7 @@ async function fnGetAllDBAddressBookEntries(): Promise<UsernamedPeer[]> {
     db.close();
 
     return peers;
-  } catch (error) {
+  } catch {
     return [];
   }
 }
@@ -107,7 +107,7 @@ async function fnDeleteDBAddressBookEntry(
 ): Promise<string> {
   const noUsername = !username || username.length === 0;
   const noPeerId = !peerId || peerId.length < 10;
-  const noPeerPublicKey = !peerPublicKey || peerPublicKey.length !== 64;
+  const noPeerPublicKey = peerPublicKey?.length !== 64;
 
   if (noUsername && noPeerId && noPeerPublicKey)
     throw new Error("Cannot delete address book with no data");
@@ -137,10 +137,10 @@ async function fnDeleteDBAddressBookEntry(
       }
     } else {
       const index = store.index("username");
-      const item = await index.getKey(username!);
+      const item = await index.getKey(username ?? "");
 
       if (item) {
-        const entry = await index.get(username!);
+        const entry = await index.get(username ?? "");
         pId = entry?.peerId ?? "";
 
         await store.delete(item);
@@ -149,7 +149,9 @@ async function fnDeleteDBAddressBookEntry(
 
     await tx.done;
     db.close();
-  } catch {}
+  } catch {
+    /* empty */
+  }
 
   return pId;
 }
@@ -170,12 +172,12 @@ async function fnGetDBPeerIsBlackisted(
       : tx.objectStore("blacklist").index("peerPublicKey");
     const peer = peerId
       ? await index.get(peerId)
-      : await index.get(peerPublicKey!);
+      : await index.get(peerPublicKey ?? "");
     await tx.done;
 
     db.close();
     return peer ? true : false;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -188,7 +190,7 @@ async function fnGetAllDBBlacklisted(): Promise<BlacklistedPeer[]> {
     db.close();
 
     return peers;
-  } catch (error) {
+  } catch {
     db.close();
 
     return [];
@@ -232,7 +234,7 @@ async function fnDeleteDBPeerFromBlacklist(
   peerPublicKey?: string,
 ): Promise<void> {
   const noPeerId = !peerId || peerId.length < 10;
-  const noPeerPublicKey = !peerPublicKey || peerPublicKey.length !== 64;
+  const noPeerPublicKey = peerPublicKey?.length !== 64;
 
   if (noPeerId && noPeerPublicKey)
     throw new Error("Cannot delete blacklisted with no data");
@@ -249,7 +251,7 @@ async function fnDeleteDBPeerFromBlacklist(
       if (item) await store.delete(item);
     } else {
       const index = store.index("peerPublicKey");
-      const item = await index.getKey(peerPublicKey!);
+      const item = await index.getKey(peerPublicKey ?? "");
 
       if (item) await store.delete(item);
     }
@@ -269,7 +271,7 @@ async function fnGetAllDBUniqueRooms(): Promise<UniqueRoom[]> {
     db.close();
 
     return rooms;
-  } catch (error) {
+  } catch {
     db.close();
 
     return [];
@@ -321,14 +323,11 @@ async function fnGetDBMessageData(
     const index1 = store.index("merkleRoot");
     const index2 = store.index("hash");
 
-    if (
-      merkleRootHex &&
-      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    ) {
+    if (merkleRootHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const messageData = await index1.get(merkleRootHex);
 
       if (!messageData) {
-        if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+        if (hashHex?.length === 2 * crypto_hash_sha512_BYTES) {
           const messageData = await index2.get(hashHex);
 
           await tx.done;
@@ -347,7 +346,7 @@ async function fnGetDBMessageData(
 
         return messageData;
       }
-    } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+    } else if (hashHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const messageData = await index2.get(hashHex);
 
       await tx.done;
@@ -589,10 +588,7 @@ async function fnGetDBAllChunks(
     const index1 = store.index("hash");
     const index2 = store.index("merkleRoot");
 
-    if (
-      merkleRootHex &&
-      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    ) {
+    if (merkleRootHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const chunks = await index2.getAll(merkleRootHex);
 
       if (chunks.length === 0) {
@@ -606,7 +602,7 @@ async function fnGetDBAllChunks(
 
         return chunks;
       }
-    } else if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+    } else if (hashHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const chunks = await index1.getAll(hashHex);
 
       await tx.done;
@@ -640,14 +636,11 @@ async function fnGetDBAllChunksCount(
     const index1 = store.index("hash");
     const index2 = store.index("merkleRoot");
 
-    if (hashHex && hashHex.length === 2 * crypto_hash_sha512_BYTES) {
+    if (hashHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const chunks = await index1.count(hashHex);
 
       if (chunks === 0) {
-        if (
-          merkleRootHex &&
-          merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-        ) {
+        if (merkleRootHex?.length === 2 * crypto_hash_sha512_BYTES) {
           const chunks = await index2.count(merkleRootHex);
 
           await tx.done;
@@ -666,10 +659,7 @@ async function fnGetDBAllChunksCount(
 
         return chunks;
       }
-    } else if (
-      merkleRootHex &&
-      merkleRootHex.length === 2 * crypto_hash_sha512_BYTES
-    ) {
+    } else if (merkleRootHex?.length === 2 * crypto_hash_sha512_BYTES) {
       const chunks = await index2.count(merkleRootHex);
 
       await tx.done;
@@ -682,7 +672,7 @@ async function fnGetDBAllChunksCount(
 
       return 0;
     }
-  } catch (error) {
+  } catch {
     return 0;
   }
 }
@@ -760,7 +750,9 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
     await tx.done;
 
     db.close();
-  } catch (error) {}
+  } catch {
+    /* empty */
+  }
 }
 
 async function fnDeleteDBChunk(
@@ -796,7 +788,9 @@ async function fnDeleteDBChunk(
 
     await tx.done;
     db.close();
-  } catch (error) {}
+  } catch {
+    /* empty */
+  }
 }
 
 async function fnDeleteDBNewChunk(
@@ -853,7 +847,9 @@ async function fnDeleteDBSendQueue(
       await db.delete("sendQueue", keyRange);
     }
     db.close();
-  } catch (error) {}
+  } catch {
+    /* empty */
+  }
 }
 
 async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
@@ -900,7 +896,9 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
 
     await tx.done;
     db.close();
-  } catch (error) {}
+  } catch {
+    /* empty */
+  }
 }
 
 async function fnDeleteDB(): Promise<void> {
@@ -918,162 +916,114 @@ onmessage = async (e: MessageEvent) => {
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
       case "getDBAddressBookEntry":
-        result = (await fnGetDBAddressBookEntry(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBAddressBookEntry"];
+        result = await fnGetDBAddressBookEntry(...message.args);
         break;
       case "getAllDBAddressBookEntries":
-        result = (await fnGetAllDBAddressBookEntries(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getAllDBAddressBookEntries"];
+        result = await fnGetAllDBAddressBookEntries(...message.args);
         break;
       case "setDBAddressBookEntry":
-        result = (await fnSetDBAddressBookEntry(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBAddressBookEntry"];
+        await fnSetDBAddressBookEntry(...message.args);
+        result = undefined;
         break;
       case "deleteDBAddressBookEntry":
-        result = (await fnDeleteDBAddressBookEntry(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBAddressBookEntry"];
+        result = await fnDeleteDBAddressBookEntry(...message.args);
         break;
       case "getDBPeerIsBlacklisted":
-        result = (await fnGetDBPeerIsBlackisted(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBPeerIsBlacklisted"];
+        result = await fnGetDBPeerIsBlackisted(...message.args);
         break;
       case "getAllDBBlacklisted":
-        result = (await fnGetAllDBBlacklisted(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getAllDBBlacklisted"];
+        result = await fnGetAllDBBlacklisted(...message.args);
         break;
       case "setDBPeerInBlacklist":
-        result = (await fnSetDBPeerInBlacklist(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBPeerInBlacklist"];
+        await fnSetDBPeerInBlacklist(...message.args);
+        result = undefined;
         break;
       case "deleteDBPeerFromBlacklist":
-        result = (await fnDeleteDBPeerFromBlacklist(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBPeerFromBlacklist"];
+        await fnDeleteDBPeerFromBlacklist(...message.args);
+        result = undefined;
         break;
       case "getAllDBUniqueRooms":
-        result = (await fnGetAllDBUniqueRooms(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getAllDBUniqueRooms"];
+        result = await fnGetAllDBUniqueRooms(...message.args);
         break;
       case "setDBUniqueRoom":
-        result = (await fnSetDBUniqueRoom(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBUniqueRoom"];
+        await fnSetDBUniqueRoom(...message.args);
+        result = undefined;
         break;
       case "getDBMessageData":
-        result = (await fnGetDBMessageData(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBMessageData"];
+        result = await fnGetDBMessageData(...message.args);
         break;
       case "getDBRoomMessageData":
-        result = (await fnGetDBRoomMessageData(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBRoomMessageData"];
+        result = await fnGetDBRoomMessageData(...message.args);
         break;
       case "setDBRoomMessageData":
-        result = (await fnSetDBRoomMessageData(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBRoomMessageData"];
+        await fnSetDBRoomMessageData(...message.args);
+        result = undefined;
         break;
       case "getDBChunk":
-        result = (await fnGetDBChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBChunk"];
+        result = await fnGetDBChunk(...message.args);
         break;
       case "existsDBChunk":
-        result = (await fnExistsDBChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["existsDBChunk"];
+        result = await fnExistsDBChunk(...message.args);
         break;
       case "getDBNewChunk":
-        result = (await fnGetDBNewChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBNewChunk"];
+        result = await fnGetDBNewChunk(...message.args);
         break;
       case "existsDBNewChunk":
-        result = (await fnExistsDBNewChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["existsDBNewChunk"];
+        result = await fnExistsDBNewChunk(...message.args);
         break;
       case "getDBSendQueue":
-        result = (await fnGetDBSendQueue(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBSendQueue"];
+        result = await fnGetDBSendQueue(...message.args);
         break;
       case "getDBAllChunks":
-        result = (await fnGetDBAllChunks(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBAllChunks"];
+        result = await fnGetDBAllChunks(...message.args);
         break;
       case "getDBAllChunksCount":
-        result = (await fnGetDBAllChunksCount(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBAllChunksCount"];
+        result = await fnGetDBAllChunksCount(...message.args);
         break;
       case "setDBChunk":
-        result = (await fnSetDBChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBChunk"];
+        await fnSetDBChunk(...message.args);
+        result = undefined;
         break;
       case "getDBAllNewChunks":
-        result = (await fnGetDBAllNewChunks(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBAllNewChunks"];
+        result = await fnGetDBAllNewChunks(...message.args);
         break;
       case "getDBAllNewChunksCount":
-        result = (await fnGetDBAllNewChunksCount(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["getDBAllNewChunksCount"];
+        result = await fnGetDBAllNewChunksCount(...message.args);
         break;
       case "setDBNewChunk":
-        result = (await fnSetDBNewChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBNewChunk"];
+        await fnSetDBNewChunk(...message.args);
+        result = undefined;
         break;
       case "setDBSendQueue":
-        result = (await fnSetDBSendQueue(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["setDBSendQueue"];
+        await fnSetDBSendQueue(...message.args);
+        result = undefined;
         break;
       case "countDBSendQueue":
-        result = (await fnCountDBSendQueue(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["countDBSendQueue"];
+        result = await fnCountDBSendQueue(...message.args);
         break;
       case "deleteDBChunk":
-        result = (await fnDeleteDBChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBChunk"];
+        await fnDeleteDBChunk(...message.args);
+        result = undefined;
         break;
       case "deleteDBNewChunk":
-        result = (await fnDeleteDBNewChunk(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBNewChunk"];
+        await fnDeleteDBNewChunk(...message.args);
+        result = undefined;
         break;
       case "deleteDBMessageData":
-        result = (await fnDeleteDBMessageData(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBMessageData"];
+        await fnDeleteDBMessageData(...message.args);
+        result = undefined;
         break;
       case "deleteDBUniqueRoom":
-        result = (await fnDeleteDBUniqueRoom(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBUniqueRoom"];
+        await fnDeleteDBUniqueRoom(...message.args);
+        result = undefined;
         break;
       case "deleteDBSendQueue":
-        result = (await fnDeleteDBSendQueue(
-          ...message.args,
-        )) as WorkerMethodReturnTypes["deleteDBSendQueue"];
+        await fnDeleteDBSendQueue(...message.args);
+        result = undefined;
         break;
       case "deleteDB":
-        result = (await fnDeleteDB()) as WorkerMethodReturnTypes["deleteDB"];
+        await fnDeleteDB();
+        result = undefined;
         break;
       default:
         postMessage({ id, error: "Method not found" });
@@ -1081,7 +1031,7 @@ onmessage = async (e: MessageEvent) => {
     }
 
     postMessage({ id, result });
-  } catch (error: any) {
+  } catch (error: unknown) {
     postMessage({ id, error: String(error) });
   }
 };

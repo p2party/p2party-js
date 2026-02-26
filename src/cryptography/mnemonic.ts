@@ -116,8 +116,6 @@ export const generateMnemonic = async (
     | 480
     | 512 = 128,
 ): Promise<string> => {
-  if (!wordlist) throw new Error("English wordlist could not be loaded.");
-
   if (strength % 32 !== 0)
     throw new TypeError("Mnemonic strength needs to be multiple of 32.");
 

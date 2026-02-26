@@ -2,11 +2,7 @@ import { createApi } from "@reduxjs/toolkit/query";
 import { isUUID, isHexadecimal } from "class-validator";
 
 import { setKeyPair } from "../reducers/keyPairSlice";
-import {
-  setPeer,
-  setChannel,
-  setConnectingToPeers,
-} from "../reducers/roomSlice";
+import { setPeer, setChannel } from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
@@ -128,48 +124,20 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
     ws.binaryType = "arraybuffer";
 
     return await new Promise((resolve, reject) => {
+      if (!ws) {
+        reject(new Error("WebSocket is null"));
+        return;
+      }
+      const socket = ws;
       try {
-        ws!.onopen = () => {
+        socket.onopen = () => {
           console.log("WebSocket connected to:", fullUrl);
           api.dispatch(signalingServerActions.connectionEstablished());
-
-          const { rooms, commonState } = api.getState() as State;
-
-          const roomIndex =
-            commonState.currentRoomUrl.length === 64
-              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-              : -1;
-
-          if (
-            roomIndex > -1 &&
-            isUUID(keyPair.peerId) &&
-            isUUID(rooms[roomIndex].id)
-          ) {
-            api.dispatch(
-              setConnectingToPeers({
-                roomId: rooms[roomIndex].id,
-                connectingToPeers: true,
-              }),
-            );
-          } else if (
-            isUUID(keyPair.peerId) &&
-            commonState.currentRoomUrl.length === 64
-          ) {
-            waitForSocketConnection(ws!, () => {
-              ws!.send(
-                JSON.stringify({
-                  type: "room",
-                  fromPeerId: keyPair.peerId,
-                  roomUrl: commonState.currentRoomUrl,
-                } as WebSocketMessageRoomIdRequest),
-              );
-            });
-          }
 
           resolve({ data: undefined });
         };
 
-        ws!.onerror = (error) => {
+        socket.onerror = (error) => {
           console.error("WebSocket error:", error);
           if (ws) {
             ws.removeEventListener("message", () => {});
@@ -181,14 +149,14 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
 
           api.dispatch(signalingServerActions.disconnect());
 
-          reject({ error: "WebSocket connection failed" });
+          reject(new Error("WebSocket connection failed"));
         };
 
-        ws!.onmessage = async (message) => {
-          await handleWebSocketMessage(message, ws!, api, peerConnections);
+        socket.onmessage = async (message) => {
+          await handleWebSocketMessage(message, socket, api, peerConnections);
         };
 
-        ws!.onclose = () => {
+        socket.onclose = () => {
           if (ws) {
             ws.removeEventListener("message", () => {});
             ws.removeEventListener("open", () => {});
@@ -202,7 +170,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           resolve({ data: undefined });
         };
       } catch (error) {
-        reject(error);
+        reject(error instanceof Error ? error : new Error(String(error)));
       }
 
       // Cleanup function to close the WebSocket when the query is unsubscribed
@@ -233,8 +201,8 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   }
 };
 
-const websocketDisconnectQuery: BaseQueryFn<void, undefined, unknown> = (
-  _: void,
+const websocketDisconnectQuery: BaseQueryFn<undefined, undefined> = (
+  _: undefined,
   api,
 ) => {
   if (ws) {
@@ -254,12 +222,11 @@ const websocketDisconnectQuery: BaseQueryFn<void, undefined, unknown> = (
 };
 
 // BaseQuery for sending messages over WebSocket
-const websocketSendMessageQuery: BaseQueryFn<
-  WebSocketMessage,
-  void,
-  unknown
-> = (message, api) => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+const websocketSendMessageQuery: BaseQueryFn<WebSocketMessage, undefined> = (
+  message,
+  api,
+) => {
+  if (ws?.readyState === WebSocket.OPEN) {
     const { keyPair } = api.getState() as State;
 
     if (
@@ -271,7 +238,7 @@ const websocketSendMessageQuery: BaseQueryFn<
       keyPair.challenge.length === 64
     ) {
       waitForSocketConnection(ws, () => {
-        ws!.send(JSON.stringify(message.content));
+        ws?.send(JSON.stringify(message.content));
       });
     }
 
@@ -285,10 +252,9 @@ const websocketSendMessageQuery: BaseQueryFn<
 
 const websocketConnectWithPeerQuery: BaseQueryFn<
   WebSocketPeerConnectionParams,
-  void,
-  unknown
-> = async ({ peerId, peerPublicKey, roomId }, api) => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  undefined
+> = ({ peerId, peerPublicKey, roomId }, api) => {
+  if (ws?.readyState === WebSocket.OPEN) {
     const { keyPair } = api.getState() as State;
 
     if (
@@ -304,7 +270,7 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
       console.log(`Connected with ${keyPair.peerId} on channel main`);
 
       waitForSocketConnection(ws, () => {
-        ws!.send(
+        ws?.send(
           JSON.stringify({
             type: "connection",
             roomId,
@@ -364,20 +330,22 @@ const signalingServerApi = createApi({
   reducerPath: "signalingServerApi",
   baseQuery: websocketBaseQuery,
   endpoints: (builder) => ({
-    connectWebSocket: builder.mutation<void, string>({
-      query: (signalingServerUrl = "wss://signaling.p2party.com/ws") => ({
+    connectWebSocket: builder.mutation<undefined, string>({
+      query: (signalingServerUrl) => ({
         signalingServerUrl,
       }),
     }),
-    disconnectWebSocket: builder.mutation<void, void>({
+    disconnectWebSocket: builder.mutation<undefined, undefined>({
       queryFn: websocketDisconnectQuery,
     }),
-    sendMessage: builder.mutation<void, WebSocketMessage>({
+    sendMessage: builder.mutation<undefined, WebSocketMessage>({
       queryFn: websocketSendMessageQuery,
     }),
-    connectWithPeer: builder.mutation<void, WebSocketPeerConnectionParams>({
-      queryFn: websocketConnectWithPeerQuery,
-    }),
+    connectWithPeer: builder.mutation<undefined, WebSocketPeerConnectionParams>(
+      {
+        queryFn: websocketConnectWithPeerQuery,
+      },
+    ),
     // sendMessageToPeer: builder.mutation<void, WebSocketSendMessageToPeerParams>(
     //   {
     //     queryFn: websocketSendMessageToPeerQuery,

@@ -10,11 +10,15 @@ const worker = new Worker(URL.createObjectURL(workerBlob), { type: "module" });
 let msgId = 0;
 const pending = new Map<
   number,
-  { resolve: (value: any) => void; reject: (reason?: any) => void }
+  { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
 >();
 
 worker.onmessage = (e: MessageEvent) => {
-  const { id, result, error } = e.data;
+  const { id, result, error } = e.data as {
+    id: number;
+    result: unknown;
+    error: unknown;
+  };
   const p = pending.get(id);
   if (!p) return;
   pending.delete(id);
@@ -28,7 +32,10 @@ function callWorker<M extends WorkerMessages["method"]>(
 ): Promise<import("./types").WorkerMethodReturnTypes[M]> {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
-    pending.set(id, { resolve, reject });
+    pending.set(id, {
+      resolve: resolve as (value: unknown) => void,
+      reject,
+    });
     worker.postMessage({ id, method, args });
   });
 }

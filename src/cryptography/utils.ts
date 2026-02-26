@@ -36,7 +36,7 @@ export const randomNumberInRange = (
 
       resolve(randomInteger);
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 };
@@ -56,15 +56,14 @@ export const randomBytesToString = (
 
       let outputString = "";
 
-      const randomBytes = window.crypto.getRandomValues(new Uint8Array(len));
-
+      // Use rejection sampling to avoid modular bias
       for (let i = 0; i < len; i++) {
-        outputString += chars[randomBytes[i] % chars.length];
+        outputString += chars[uniformInt(0, chars.length)];
       }
 
       resolve(outputString);
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 };
@@ -96,7 +95,7 @@ export function uniformInt(min: number, max: number): number {
   const range = max - min; // > 0
   const maxU32 = 0x1_0000_0000; // 2^32
   const limit = Math.floor(maxU32 / range) * range;
-  let x = 0;
+  let x: number;
   do {
     x = crypto.getRandomValues(new Uint32Array(1))[0];
   } while (x >= limit);

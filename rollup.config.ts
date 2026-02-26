@@ -10,6 +10,7 @@ import analyzer from "rollup-plugin-analyzer";
 
 const dir = "lib";
 const input = "src/index.ts";
+const packageJson = JSON.parse(fs.readFileSync("package.json", "utf-8"));
 
 const idbWorkerPath = path.resolve("lib", "db.worker.js");
 const idbWorkerJs = fs.readFileSync(idbWorkerPath, { encoding: "utf-8" });
@@ -19,6 +20,7 @@ const isDist = process.env.NODE_ENV === "production";
 const plugins = [
   replace({
     "process.env.INDEXEDDB_WORKER_JS": JSON.stringify(idbWorkerJs),
+    "process.env.P2PARTY_VERSION": JSON.stringify(packageJson.version),
     "process.env.NODE_ENV": isDist
       ? JSON.stringify("production")
       : JSON.stringify("development"),

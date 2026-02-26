@@ -17,11 +17,51 @@ import type { IRTCDataChannel } from "../api/webrtc/interfaces";
 import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { State } from "../store";
 
-const k16 = (u8: Uint8Array) => {
-  const v = new DataView(u8.buffer, u8.byteOffset, 16);
-  const a = v.getBigUint64(0, false).toString(16).padStart(16, "0");
-  const b = v.getBigUint64(8, false).toString(16).padStart(16, "0");
-  return a + b; // 128-bit prefi key
+const k32 = (u8: Uint8Array) => {
+  if (u8.byteLength < 32) {
+    return `${String(u8.byteLength)}:${uint8ArrayToHex(u8)}`;
+  }
+
+  const head = new DataView(u8.buffer, u8.byteOffset, 16);
+  const tail = new DataView(u8.buffer, u8.byteOffset + u8.byteLength - 16, 16);
+
+  const h1 = head.getBigUint64(0, false).toString(16).padStart(16, "0");
+  const h2 = head.getBigUint64(8, false).toString(16).padStart(16, "0");
+  const t1 = tail.getBigUint64(0, false).toString(16).padStart(16, "0");
+  const t2 = tail.getBigUint64(8, false).toString(16).padStart(16, "0");
+
+  return h1 + h2 + t1 + t2;
+};
+
+const processingLocks = new Map<string, Promise<void>>();
+
+const withProcessingLock = async <T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> => {
+  const prev = processingLocks.get(key) ?? Promise.resolve();
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  processingLocks.set(
+    key,
+    prev.then(() => gate),
+  );
+
+  await prev;
+
+  try {
+    return await fn();
+  } finally {
+    release();
+
+    if (processingLocks.get(key) === gate) {
+      processingLocks.delete(key);
+    }
+  }
 };
 
 const processMessage = async (
@@ -31,6 +71,7 @@ const processMessage = async (
   peerId: string,
   channelLabel: string,
   merkleRootHex: string,
+  merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
   decrypted: Uint8Array | undefined,
   messageArray: Uint8Array | undefined,
@@ -48,6 +89,7 @@ const processMessage = async (
   ) {
     try {
       messageArray.set(data);
+      merkleRootArray.set(merkleRoot);
 
       const {
         date,
@@ -76,7 +118,7 @@ const processMessage = async (
         chunkHash.length === crypto_hash_sha512_BYTES &&
         !chunkAlreadyExists
       ) {
-        if (extChannel && extChannel.readyState === "open") {
+        if (extChannel?.readyState === "open") {
           extChannel.send(chunkHash.buffer as ArrayBuffer);
         } else {
           const channel = await compileChannelMessageLabel(
@@ -132,7 +174,7 @@ const processMessage = async (
           }),
         );
 
-        if (extChannel && extChannel.readyState === "open") {
+        if (extChannel?.readyState === "open") {
           extChannel.send(messageHash.buffer as ArrayBuffer);
         } else {
           const channel = await compileChannelMessageLabel(
@@ -199,12 +241,13 @@ const processMessage = async (
 const drain = async (
   queue: Uint8Array[],
   seen: Set<string>,
-  draining: boolean,
+  drainingRef: { value: boolean },
   api: BaseQueryApi,
   roomId: string,
   peerId: string,
   channelLabel: string,
   merkleRootHex: string,
+  merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
   decrypted: Uint8Array | undefined,
   messageArray: Uint8Array | undefined,
@@ -213,28 +256,32 @@ const drain = async (
   receiverSecretKeyArray: Uint8Array | undefined,
   receiveMessageModule: LibCrypto,
 ) => {
-  if (draining) return;
-  draining = true;
+  if (drainingRef.value) return;
+  drainingRef.value = true;
+  const lockKey = `${roomId}:${peerId}`;
   try {
     for (;;) {
       const chunk = queue.pop();
       if (!chunk) break;
 
       // const { receivedFullSize } =
-      await processMessage(
-        chunk,
-        api,
-        roomId,
-        peerId,
-        channelLabel,
-        merkleRootHex,
-        extChannel,
-        decrypted,
-        messageArray,
-        merkleRootArray,
-        senderPublicKeyArray,
-        receiverSecretKeyArray,
-        receiveMessageModule,
+      await withProcessingLock(lockKey, async () =>
+        processMessage(
+          chunk,
+          api,
+          roomId,
+          peerId,
+          channelLabel,
+          merkleRootHex,
+          merkleRoot,
+          extChannel,
+          decrypted,
+          messageArray,
+          merkleRootArray,
+          senderPublicKeyArray,
+          receiverSecretKeyArray,
+          receiveMessageModule,
+        ),
       );
 
       // if (receivedFullSize) {
@@ -245,17 +292,18 @@ const drain = async (
       // }
     }
   } finally {
-    draining = false;
+    drainingRef.value = false;
     if (queue.length > 0)
       void drain(
         queue,
         seen,
-        draining,
+        drainingRef,
         api,
         roomId,
         peerId,
         channelLabel,
         merkleRootHex,
+        merkleRoot,
         extChannel,
         decrypted,
         messageArray,
@@ -271,12 +319,13 @@ export const enqueue = (
   data: Uint8Array,
   queue: Uint8Array[],
   seen: Set<string>,
-  draining: boolean,
+  drainingRef: { value: boolean },
   api: BaseQueryApi,
   roomId: string,
   peerId: string,
   channelLabel: string,
   merkleRootHex: string,
+  merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
   decrypted: Uint8Array | undefined,
   messageArray: Uint8Array | undefined,
@@ -285,22 +334,30 @@ export const enqueue = (
   receiverSecretKeyArray: Uint8Array | undefined,
   receiveMessageModule: LibCrypto,
 ) => {
-  const k = k16(data);
+  const k = k32(data);
   if (seen.has(k)) return; // drop duplicate-in-queue
   seen.add(k);
 
+  // Cap the seen set and queue to prevent unbounded memory growth
+  const MAX_SEEN_SIZE = 100_000;
+  const MAX_QUEUE_SIZE = 50_000;
+  if (seen.size > MAX_SEEN_SIZE) seen.clear();
+  if (queue.length > MAX_QUEUE_SIZE)
+    queue.splice(0, queue.length - MAX_QUEUE_SIZE);
+
   queue.push(data);
 
-  if (!draining)
+  if (!drainingRef.value)
     void drain(
       queue,
       seen,
-      draining,
+      drainingRef,
       api,
       roomId,
       peerId,
       channelLabel,
       merkleRootHex,
+      merkleRoot,
       extChannel,
       decrypted,
       messageArray,

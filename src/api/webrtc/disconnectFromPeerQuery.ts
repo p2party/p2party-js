@@ -8,18 +8,15 @@ import type {
 } from "./interfaces";
 import type { State } from "../../store";
 
-export interface RTCDisconnectFromPeerParamsExtension
-  extends RTCDisconnectFromPeerParams {
+export interface RTCDisconnectFromPeerParamsExtension extends RTCDisconnectFromPeerParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
 }
 
 const webrtcDisconnectPeerQuery: BaseQueryFn<
   RTCDisconnectFromPeerParamsExtension,
-  void,
-  unknown
+  undefined
 > = ({ peerId, alsoDeleteData, peerConnections, dataChannels }, api) => {
-  const { signalingServer } = api.getState() as State;
   const peerIndex = peerConnections.findIndex(
     (peer) => peer.withPeerId === peerId,
   );
@@ -43,9 +40,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     peerConnections.splice(peerIndex, 1);
   }
 
-  if (!signalingServer.isConnected || alsoDeleteData) {
-    api.dispatch(deletePeer({ peerId }));
-  }
+  api.dispatch(deletePeer({ peerId }));
 
   const CHANNELS_LEN = dataChannels.length;
   for (let i = 0; i < CHANNELS_LEN; i++) {

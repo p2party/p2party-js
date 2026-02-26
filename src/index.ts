@@ -85,10 +85,13 @@ const connect = async (
   rtcConfig: RTCConfiguration = {
     iceServers: [
       {
-        urls: ["stun:stun.p2party.com:3478"],
+        // Use single STUN URL - multiple STUN servers slow down ICE gathering
+        urls: "stun:stun.p2party.com:3478",
       },
     ],
     iceTransportPolicy: "all",
+    // Pre-allocate ICE candidates for faster connection setup
+    iceCandidatePoolSize: 2,
   },
 ) => {
   if (roomUrl.length !== 64) throw new Error("Invalid room url length");
@@ -101,7 +104,11 @@ const connect = async (
   if (commonState.currentRoomUrl !== roomUrl)
     dispatch(setCurrentRoomUrl(roomUrl));
 
-  if (signalingServer.isConnected && isUUID(keyPair.peerId)) {
+  if (
+    signalingServer.isConnected &&
+    signalingServer.isVerified &&
+    isUUID(keyPair.peerId)
+  ) {
     if (roomIndex === -1) {
       await dispatch(
         signalingServerApi.endpoints.sendMessage.initiate({
@@ -157,7 +164,9 @@ const connectToSignalingServer = async (
 };
 
 const disconnectFromSignalingServer = async () => {
-  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(
+    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+  );
 };
 
 const disconnectFromPeer = async (peerId: string) => {
@@ -644,7 +653,9 @@ const purgeIdentity = async () => {
       webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: rooms[i].id }),
     );
   }
-  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(
+    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+  );
 };
 
 const purgeRoom = async (roomUrl: string) => {
@@ -655,7 +666,9 @@ const purgeRoom = async (roomUrl: string) => {
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
   if (roomIndex > -1) dispatch(deleteRoom(rooms[roomIndex].id));
 
-  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(
+    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+  );
 };
 
 const purge = async () => {
@@ -663,7 +676,9 @@ const purge = async () => {
   window.dispatchEvent(evt);
 
   dispatch(resetIdentity());
-  await dispatch(signalingServerApi.endpoints.disconnectWebSocket.initiate());
+  await dispatch(
+    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+  );
 
   const rooms = await getAllDBUniqueRooms();
   const roomsLen = rooms.length;

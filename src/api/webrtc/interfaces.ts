@@ -9,8 +9,9 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   withPeerId: string;
   withPeerPublicKey: string;
   makingOffer: boolean;
+  ignoreOffer: boolean;
   rooms: IRTCPeerConnectionRoomId[];
-  iceCandidates: RTCIceCandidate[];
+  iceCandidates: RTCIceCandidateInit[];
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {
@@ -27,7 +28,7 @@ export interface IRTCMessage {
   timestamp: Date;
 }
 
-export interface IRTCIceCandidate extends RTCIceCandidate {
+export interface IRTCIceCandidate extends RTCIceCandidateInit {
   withPeerId: string;
 }
 
@@ -49,7 +50,7 @@ export interface RTCSetDescriptionParams {
 
 export interface RTCSetCandidateParams {
   peerId: string;
-  candidate: RTCIceCandidate;
+  candidate: RTCIceCandidateInit | RTCIceCandidate;
 }
 
 export interface RTCOpenChannelParams {

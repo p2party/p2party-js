@@ -8,7 +8,14 @@ import {
 } from "../cryptography/interfaces";
 
 export const MESSAGE_LEN = 64 * 1024;
-export const MAX_BUFFERED_AMOUNT = 2 * MESSAGE_LEN;
+// High watermark for the data-channel send buffer (16 frames = 1 MiB). The old
+// value of 2 frames meant ordinary congestion immediately spilled full 64KiB
+// frames through the signaling server (which then sees sender/receiver, size,
+// timing and the plaintext root label) — the exact metadata the chunking scheme
+// tries to hide. Browsers buffer ~16 MiB, so 1 MiB keeps normal transfers on
+// the peer-to-peer data channel and reserves server relay for a genuinely
+// unavailable channel.
+export const MAX_BUFFERED_AMOUNT = 16 * MESSAGE_LEN;
 export const NAME_LEN = 256;
 export const METADATA_LEN =
   8 + // schemaVersion (8 bytes)

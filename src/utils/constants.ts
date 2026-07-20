@@ -39,3 +39,16 @@ export const CHUNK_LEN =
   IMPORTANT_DATA_LEN;
 export const DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
 export const ENCRYPTED_LEN = getEncryptedLen(DECRYPTED_LEN);
+
+// Per-chunk sender authentication signs a domain-separated transcript
+// (DOMAIN || merkle_root || ephemeral_pk) rather than the bare ephemeral public
+// key, so a signature harvested from the raw-nonce server-challenge oracle
+// cannot be replayed as chunk auth. Must byte-match the C side
+// (CHUNK_AUTH_* in cryptography/utils.h).
+export const CHUNK_AUTH_DOMAIN_BYTES = new TextEncoder().encode(
+  "p2party-chunk-auth-v1",
+); // 21 bytes
+export const CHUNK_AUTH_TRANSCRIPT_LEN =
+  CHUNK_AUTH_DOMAIN_BYTES.length +
+  crypto_hash_sha512_BYTES + // merkle root
+  crypto_sign_ed25519_PUBLICKEYBYTES; // ephemeral pk

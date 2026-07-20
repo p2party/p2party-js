@@ -29,6 +29,8 @@ import {
   DECRYPTED_LEN,
   MAX_BUFFERED_AMOUNT,
   PROOF_LEN,
+  CHUNK_AUTH_DOMAIN_BYTES,
+  CHUNK_AUTH_TRANSCRIPT_LEN,
 } from "../utils/constants";
 
 import {
@@ -88,6 +90,7 @@ const sendChunks = async (
     ptr7,
     ptr9,
     ptr10,
+    ptrTranscript,
     senderEphemeralPublicKey,
     senderEphemeralSecretKey,
     seedBytes,
@@ -96,11 +99,18 @@ const sendChunks = async (
     receiverPublicKeyArray,
     nonceArray,
     encryptedArray,
+    authTranscript,
   } = allocateSendMessage(encryptionModule);
 
   // const peerPublicKeyHex = epc.withPeerPublicKey;
   // const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
   receiverPublicKeyArray.set(hexToUint8Array(peerPublicKeyHex));
+
+  // Constant parts of the per-chunk sender-auth transcript
+  // (DOMAIN || merkle_root || ephemeral_pk); the ephemeral pk is filled per
+  // chunk below, then the whole transcript is signed.
+  authTranscript.set(CHUNK_AUTH_DOMAIN_BYTES, 0);
+  authTranscript.set(merkleRoot, CHUNK_AUTH_DOMAIN_BYTES.length);
 
   for (let i = 0; i < chunksLen; i++) {
     const iRandom = indexesRandomized[i];
@@ -115,9 +125,16 @@ const sendChunks = async (
 
     if (newKeyPairResult !== 0) continue;
 
+    // Bind the signature to the domain-separated transcript, not the bare
+    // ephemeral pk, so a challenge-oracle signature cannot forge a chunk.
+    authTranscript.set(
+      senderEphemeralPublicKey,
+      CHUNK_AUTH_DOMAIN_BYTES.length + merkleRoot.length,
+    );
+
     const sigResult = encryptionModule._sign(
-      crypto_sign_ed25519_PUBLICKEYBYTES,
-      senderEphemeralPublicKey.byteOffset,
+      CHUNK_AUTH_TRANSCRIPT_LEN,
+      ptrTranscript,
       senderSecretKey.byteOffset,
       senderEphemeralSignature.byteOffset,
     );
@@ -352,6 +369,7 @@ const sendChunks = async (
   encryptionModule._free(ptr7);
   encryptionModule._free(ptr9);
   encryptionModule._free(ptr10);
+  encryptionModule._free(ptrTranscript);
 };
 
 export const handleSendMessage = async (

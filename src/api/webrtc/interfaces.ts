@@ -126,4 +126,8 @@ export interface RTCDisconnectFromPeerChannelLabelParams {
   messageHash?: Uint8Array;
   alsoDeleteData?: boolean;
   alsoSendFinishedMessage?: boolean;
+  // Set by the completion path (handleReadReceipt got the final message-hash
+  // receipt): the sender may free its newChunks. On a mid-transfer disconnect
+  // this is absent, so newChunks are kept for resume-on-reconnect.
+  transferComplete?: boolean;
 }

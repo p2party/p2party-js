@@ -44,6 +44,19 @@ export interface Chunk {
   chunkIndex: number;
   data: ArrayBuffer;
   mimeType: string;
+  // The domain-separated leaf hash SHA-512(0x00 || chunk) hex — the exact
+  // read-receipt token this chunk drew. Persisted (receiver only) so it can be
+  // re-emitted on reconnect without re-hashing (the padded chunk it was hashed
+  // over is discarded; only the real slice is stored). Optional: the sender's
+  // self-copy has no receipt token, and pre-existing rows predate this field.
+  leafHash?: string;
+}
+
+// Lightweight projection of a stored chunk used by the reconnect re-emit — just
+// the receipt token and its index, never the (potentially huge) chunk body.
+export interface ChunkLeafHash {
+  chunkIndex: number;
+  leafHash?: string;
 }
 
 export interface NewChunk {
@@ -173,6 +186,11 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getDBAllChunkLeafHashes";
+      args: [merkleRootHex: string];
+    }
+  | {
+      id: number;
       method: "getDBAllChunksCount";
       args: [merkleRootHex?: string, hashHex?: string];
     }
@@ -246,6 +264,7 @@ export interface WorkerMethodReturnTypes {
   existsDBNewChunk: boolean;
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
+  getDBAllChunkLeafHashes: ChunkLeafHash[];
   getDBAllChunksCount: number;
   setDBChunk: undefined;
   getDBAllNewChunks: NewChunk[];

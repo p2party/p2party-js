@@ -71,3 +71,15 @@ export const RETRANSMIT_TIMEOUT_MS = 2000;
 // "connecting" (anything that still slips is recovered by reconcile()).
 export const CHANNEL_OPEN_TIMEOUT_MS = 3000;
 export const CHANNEL_OPEN_POLL_MS = 25;
+
+// Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
+// per-message data channel — only "main" is auto-reopened — so an in-flight send
+// must re-establish its own channel and continue. sendWithReconcile waits up to
+// RECONNECT_RESUME_TIMEOUT_MS (polling every RECONNECT_RESUME_POLL_MS) for the
+// peer's fresh connection to re-open the channel, and gives up after
+// MAX_RESUME_ATTEMPTS reconnects so a flapping peer can't loop forever. The
+// receiver re-emits its stored leaf-hash receipts on the new channel's onopen,
+// so the sender rebuilds its acked-set and resends ONLY the still-missing reals.
+export const RECONNECT_RESUME_TIMEOUT_MS = 30000;
+export const RECONNECT_RESUME_POLL_MS = 500;
+export const MAX_RESUME_ATTEMPTS = 3;

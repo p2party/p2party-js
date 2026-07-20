@@ -7,6 +7,7 @@ import { getDB, dbName } from "./src/getDB";
 import type {
   MessageData,
   Chunk,
+  ChunkLeafHash,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
@@ -625,6 +626,45 @@ async function fnGetDBAllChunks(
   }
 }
 
+// Project (chunkIndex, leafHash) for every stored chunk of a message. Used by
+// the reconnect re-emit: the leaf hashes ARE the receiver's have-set, replayed
+// as receipts so the sender reconciles. NOTE: a value cursor deserializes each
+// full Chunk record (incl. its ~62KB `data`) one at a time, so peak *resident*
+// memory is one record but total I/O is O(held message bytes). Fine at today's
+// sizes; the GB-file streaming workstream should move leaf hashes into a
+// key-only index / dedicated store so this becomes O(#chunks) — see
+// [[p2party-arbitrary-big-files]].
+async function fnGetDBAllChunkLeafHashes(
+  merkleRootHex: string,
+): Promise<ChunkLeafHash[]> {
+  if (merkleRootHex.length !== 2 * crypto_hash_sha512_BYTES) return [];
+
+  try {
+    const db = await getDB();
+    const tx = db.transaction("chunks", "readonly");
+    const index = tx.objectStore("chunks").index("merkleRoot");
+    const result: ChunkLeafHash[] = [];
+
+    let cursor = await index.openCursor(merkleRootHex);
+    while (cursor) {
+      result.push({
+        chunkIndex: cursor.value.chunkIndex,
+        leafHash: cursor.value.leafHash,
+      });
+      cursor = await cursor.continue();
+    }
+
+    await tx.done;
+    db.close();
+
+    return result;
+  } catch (error) {
+    console.error(error);
+
+    return [];
+  }
+}
+
 async function fnGetDBAllChunksCount(
   merkleRootHex?: string,
   hashHex?: string,
@@ -976,6 +1016,9 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "getDBAllChunks":
         result = await fnGetDBAllChunks(...message.args);
+        break;
+      case "getDBAllChunkLeafHashes":
+        result = await fnGetDBAllChunkLeafHashes(...message.args);
         break;
       case "getDBAllChunksCount":
         result = await fnGetDBAllChunksCount(...message.args);

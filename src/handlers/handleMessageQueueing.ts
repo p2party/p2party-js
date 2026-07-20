@@ -141,6 +141,17 @@ const processMessage = async (
             );
           }
         }
+      } else if (extChannel?.readyState === "open") {
+        // Emit a uniform 64-byte receipt for every non-real frame (decoys,
+        // already-stored, or crypto-failed) so the reverse receipt count equals
+        // the forward frame count — a DTLS-record observer can no longer
+        // subtract to recover the real chunk count. A fresh random token
+        // matches no newChunk on the sender (handleReadReceipt is a no-op for
+        // it) and is sent over the data channel only, to avoid junk relay
+        // metadata.
+        const decoyReceipt = new Uint8Array(crypto_hash_sha512_BYTES);
+        crypto.getRandomValues(decoyReceipt);
+        extChannel.send(decoyReceipt.buffer as ArrayBuffer);
       }
 
       const hashHex = uint8ArrayToHex(messageHash);

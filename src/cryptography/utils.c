@@ -123,22 +123,31 @@ receive_message(
     return -3;
   size_t proofArtifactsLen = proofLen / (crypto_hash_sha512_BYTES + 1);
 
-  uint8_t *element_hash = malloc(sizeof(uint8_t) * crypto_hash_sha512_BYTES);
-  if (element_hash == NULL) return -4;
+  /* Domain-separated leaf hash SHA-512(0x00 || chunk) — must match the sender's
+   * leaf (splitToChunks) and the receipt hash (handleReceiveMessage). */
+  uint8_t leaf[crypto_hash_sha512_BYTES];
+  crypto_hash_sha512_state leaf_state;
+  const uint8_t leaf_domain = 0x00;
+  int h = crypto_hash_sha512_init(&leaf_state);
+  if (h == 0) h = crypto_hash_sha512_update(&leaf_state, &leaf_domain, 1);
+  if (h == 0)
+    h = crypto_hash_sha512_update(&leaf_state,
+                                  &decrypted[METADATA_LEN + PROOF_LEN],
+                                  DECRYPTED_LEN - METADATA_LEN - PROOF_LEN);
+  if (h == 0) h = crypto_hash_sha512_final(&leaf_state, leaf);
+  if (h != 0) return -5;
 
-  int h = crypto_hash_sha512(element_hash, &decrypted[METADATA_LEN + PROOF_LEN],
-                             DECRYPTED_LEN - METADATA_LEN - PROOF_LEN);
-  if (h != 0)
-  {
-    free(element_hash);
-
-    return -5;
-  }
-
-  int vmp = verify_merkle_proof(proofArtifactsLen, element_hash, merkle_root,
+  /* verify_merkle_proof folds into its element buffer, so give it a copy and
+   * keep `leaf` intact. */
+  uint8_t fold[crypto_hash_sha512_BYTES];
+  memcpy(fold, leaf, crypto_hash_sha512_BYTES);
+  int vmp = verify_merkle_proof(proofArtifactsLen, fold, merkle_root,
                                 &decrypted[METADATA_LEN + 4]);
-  free(element_hash);
   if (vmp != 0) return -6;
+
+  /* Expose the leaf hash to JS (reused as the read-receipt token) by writing it
+   * over the now-consumed proof region — avoids re-hashing the 62KB chunk. */
+  memcpy(&decrypted[METADATA_LEN], leaf, crypto_hash_sha512_BYTES);
 
   return 0;
 }

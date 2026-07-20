@@ -25,6 +25,7 @@ import {
 import { allocateSendMessage } from "../utils/allocators";
 import { zeroFree } from "../utils/zeroFree";
 import { waitForOpen } from "../utils/waitForOpen";
+import { incrementMessageStats } from "../reducers/roomSlice";
 import {
   clearTransfer,
   waitForCompletion,
@@ -460,6 +461,11 @@ const sendWithReconcile = async (
       getAckedChunks(peerId, hashHex),
     );
     retries++;
+
+    // Telemetry: a retransmit round happened — lets the UI show reliability.
+    api.dispatch(
+      incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
+    );
   }
 
   clearTransfer(peerId, hashHex);

@@ -29,6 +29,20 @@ export interface Message {
   totalChunks: number;
   channelLabel: string;
   timestamp: number;
+  // Telemetry (optional; let humans see the obfuscation + reliability):
+  // frames processed incl. decoys, real chunks stored, sender retransmit rounds.
+  // Progress % stays over the REAL message (savedSize / totalSize).
+  chunksReceivedTotal?: number;
+  chunksReceivedReal?: number;
+  retransmits?: number;
+}
+
+export interface IncrementMessageStatsArgs {
+  roomId: string;
+  merkleRootHex?: string; // receiver matches by root
+  sha512Hex?: string; // sender matches by message hash (root not known there)
+  real?: boolean; // receiver: a real chunk was stored (else a decoy/other frame)
+  retransmit?: boolean; // sender: a reconcile retransmit round happened
 }
 
 export interface SetRoomArgs {
@@ -630,6 +644,29 @@ const roomSlice = createSlice({
         };
       }
     },
+
+    incrementMessageStats: (
+      state,
+      action: PayloadAction<IncrementMessageStatsArgs>,
+    ) => {
+      const { roomId, merkleRootHex, sha512Hex, real, retransmit } =
+        action.payload;
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+      if (roomIndex < 0) return;
+      const messageIndex = state[roomIndex].messages.findLastIndex(
+        (m) =>
+          (merkleRootHex !== undefined && m.merkleRootHex === merkleRootHex) ||
+          (sha512Hex !== undefined && m.sha512Hex === sha512Hex),
+      );
+      if (messageIndex < 0) return;
+      const m = state[roomIndex].messages[messageIndex];
+      if (retransmit) {
+        m.retransmits = (m.retransmits ?? 0) + 1;
+      } else {
+        m.chunksReceivedTotal = (m.chunksReceivedTotal ?? 0) + 1;
+        if (real) m.chunksReceivedReal = (m.chunksReceivedReal ?? 0) + 1;
+      }
+    },
   },
 });
 
@@ -644,6 +681,7 @@ export const {
   setIceServers,
   setMessage,
   setMessageAllChunks,
+  incrementMessageStats,
   deletePeer,
   deleteChannel,
   deleteMessage,

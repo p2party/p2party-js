@@ -148,6 +148,9 @@ _verify_merkle_proof,\
 _keypair_from_seed,\
 _keypair_from_secret_key,\
 _argon2,\
+_sha512_init,\
+_sha512_update,\
+_sha512_final,\
 _receive_message \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \

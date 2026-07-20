@@ -106,4 +106,12 @@ int receive_message(
     const uint8_t sender_public_key[crypto_sign_ed25519_PUBLICKEYBYTES],
     const uint8_t receiver_secret_key[crypto_sign_ed25519_SECRETKEYBYTES]);
 
+/* Streaming SHA-512 (see utils.c) — the state is a heap crypto_hash_sha512_state
+ * (208 bytes) allocated by JS. Plain SHA-512, no domain separation. */
+int sha512_init(crypto_hash_sha512_state *state);
+int sha512_update(crypto_hash_sha512_state *state, const uint8_t *in,
+                  const unsigned int in_len);
+int sha512_final(crypto_hash_sha512_state *state,
+                 uint8_t out[crypto_hash_sha512_BYTES]);
+
 #endif

@@ -24,6 +24,7 @@ import {
 } from "../utils/channelLabel";
 import { allocateSendMessage } from "../utils/allocators";
 import { zeroFree } from "../utils/zeroFree";
+import { waitForOpen } from "../utils/waitForOpen";
 import {
   clearTransfer,
   waitForCompletion,
@@ -411,6 +412,10 @@ const sendWithReconcile = async (
   merkleModule: LibCrypto,
 ): Promise<void> => {
   clearTransfer(peerId, hashHex);
+
+  // Wait for the per-message channel to open before the first send, so its
+  // initial frames aren't spilled to the WS relay while it is still connecting.
+  if (typeof channel !== "string") await waitForOpen(channel);
 
   // Initial pass: all chunks (real + decoy).
   await sendChunks(

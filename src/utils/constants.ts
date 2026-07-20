@@ -65,3 +65,9 @@ export const CHUNK_AUTH_TRANSCRIPT_LEN =
 // MAX_RETRANSMITS attempts with a base timeout that backs off linearly.
 export const MAX_RETRANSMITS = 5;
 export const RETRANSMIT_TIMEOUT_MS = 2000;
+
+// Wait this long for a per-message data channel to reach "open" before sending,
+// so its first frames aren't spilled to the WS relay while it is still
+// "connecting" (anything that still slips is recovered by reconcile()).
+export const CHANNEL_OPEN_TIMEOUT_MS = 3000;
+export const CHANNEL_OPEN_POLL_MS = 25;

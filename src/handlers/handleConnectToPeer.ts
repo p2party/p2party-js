@@ -96,10 +96,6 @@ export const handleConnectToPeer = async (
     },
   ];
 
-  // Track last negotiation time to prevent rapid re-negotiations
-  let lastNegotiationTime = 0;
-  const NEGOTIATION_DEBOUNCE_MS = 500;
-
   epc.onnegotiationneeded = async () => {
     // Don't start a new negotiation if we're already making an offer or not in stable state
     if (epc.makingOffer || epc.signalingState !== "stable") {
@@ -108,14 +104,6 @@ export const handleConnectToPeer = async (
       );
       return;
     }
-
-    // Debounce rapid negotiations
-    const now = Date.now();
-    if (now - lastNegotiationTime < NEGOTIATION_DEBOUNCE_MS) {
-      console.log(`Skipping negotiation with ${peerId} - debounce`);
-      return;
-    }
-    lastNegotiationTime = now;
 
     try {
       epc.makingOffer = true;

@@ -110,8 +110,6 @@ emcc \
 -s EXIT_RUNTIME=0 \
 ${memory} \
 ${withJS} \
--s NODEJS_CATCH_EXIT=0 \
--s NODEJS_CATCH_REJECTION=0 \
 `;
 
 const testing =

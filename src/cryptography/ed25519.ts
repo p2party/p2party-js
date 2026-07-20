@@ -10,6 +10,8 @@ import {
   crypto_sign_ed25519_BYTES,
 } from "./interfaces";
 
+import { zeroFree } from "../utils/zeroFree";
+
 import type { SignKeyPair } from "./interfaces";
 import type { LibCrypto } from "./libcrypto";
 
@@ -47,7 +49,7 @@ export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
     seedBytes.byteOffset,
   );
 
-  cryptoModule._free(ptr3);
+  zeroFree(cryptoModule, seedBytes);
 
   switch (result) {
     case 0: {
@@ -57,14 +59,14 @@ export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
       };
 
       cryptoModule._free(ptr1);
-      cryptoModule._free(ptr2);
+      zeroFree(cryptoModule, secretKey);
 
       return keyPair;
     }
 
     default: {
       cryptoModule._free(ptr1);
-      cryptoModule._free(ptr2);
+      zeroFree(cryptoModule, secretKey);
 
       throw new Error("An unexpected error occured.");
     }
@@ -108,7 +110,7 @@ export const keyPairFromSeed = async (
     seedBytes.byteOffset,
   );
 
-  cryptoModule._free(ptr3);
+  zeroFree(cryptoModule, seedBytes);
 
   switch (result) {
     case 0: {
@@ -118,14 +120,14 @@ export const keyPairFromSeed = async (
       };
 
       cryptoModule._free(ptr1);
-      cryptoModule._free(ptr2);
+      zeroFree(cryptoModule, secretKey);
 
       return keyPair;
     }
 
     default: {
       cryptoModule._free(ptr1);
-      cryptoModule._free(ptr2);
+      zeroFree(cryptoModule, secretKey);
 
       throw new Error("An unexpected error occured.");
     }

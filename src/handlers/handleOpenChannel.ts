@@ -1,6 +1,8 @@
 import { handleReadReceipt } from "./handleReadReceipt";
 import { enqueue } from "./handleMessageQueueing";
 
+import { zeroFree } from "../utils/zeroFree";
+
 import webrtcApi from "../api/webrtc";
 
 import { setChannel, setConnectingToPeers } from "../reducers/roomSlice";
@@ -144,7 +146,11 @@ export const handleOpenChannel = async (
       if (ptr2) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr2);
       if (ptr3) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr3);
       if (ptr4) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr4);
-      if (ptr5) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr5);
+      if (ptr5 && receiverSecretKeyArray)
+        zeroFree(
+          epc.rooms[peerRoomIndex].receiveMessageModule,
+          receiverSecretKeyArray,
+        );
     }
 
     await api.dispatch(

@@ -1,6 +1,7 @@
 import { deleteDB } from "idb";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+import { OPFS_REASSEMBLE_DIR } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
 
@@ -665,6 +666,193 @@ async function fnGetDBAllChunkLeafHashes(
   }
 }
 
+// The OPFS StorageManager (worker context). getDirectory + the file handle's
+// createSyncAccessHandle are the two capabilities we feature-detect.
+const opfsStorage = ():
+  | { getDirectory?: () => Promise<FileSystemDirectoryHandle> }
+  | undefined =>
+  (
+    globalThis as unknown as {
+      navigator?: {
+        storage?: { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+      };
+    }
+  ).navigator?.storage;
+
+// Coalesce concurrent assembles for the SAME message: readMessage is a poll-style
+// API, so overlapping polls for one merkleRoot would each open a sync access
+// handle. createSyncAccessHandle takes an EXCLUSIVE lock and rejects immediately
+// if one is already open, so without this the losers would fall back to the
+// in-memory Blob — reintroducing the whole-file-in-RAM OOM this feature removes.
+// At most one assemble per merkleRoot is ever in flight; the rest share it.
+const opfsAssembling = new Map<string, Promise<File | null>>();
+
+const wrapOPFSFile = (
+  file: File,
+  filename: string,
+  merkleRootHex: string,
+  mimeType: string,
+): File =>
+  // The OPFS handle is named by merkleRoot; hand back a File carrying the real
+  // filename + mimeType. Blob parts are by-reference, so it stays disk-backed
+  // (the whole file is never read into RAM).
+  new File([file], filename.length > 0 ? filename : merkleRootHex, {
+    type: mimeType,
+  });
+
+// Reassemble a completed FILE message from its IndexedDB chunks into a single
+// disk-backed OPFS file WITHOUT ever holding the whole file in RAM: stream the
+// chunks in ascending chunkIndex order (a cursor — one record resident at a
+// time) and write each straight to the OPFS file via a sync access handle
+// (worker-only / Safari-safe). Real chunks occupy contiguous indices 0..R-1 and
+// their real slices are stored in order, so a sequential append reconstructs the
+// file (no stored offset needed). Idempotent: the OPFS file is content-addressed
+// by merkleRoot, so a correctly-sized existing file is returned as-is — never
+// re-truncated (which would invalidate a File handed out earlier) or re-streamed.
+// Returns null (OPFS unavailable / error) so the caller falls back to an
+// in-memory Blob — that fallback DOES hold the file in RAM, so the never-in-RAM
+// guarantee holds only where worker OPFS exists (Chrome/Edge, Firefox 111+,
+// Safari 16.4+).
+async function fnAssembleToOPFS(
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+): Promise<File | null> {
+  if (merkleRootHex.length !== 2 * crypto_hash_sha512_BYTES) return null;
+
+  const inFlight = opfsAssembling.get(merkleRootHex);
+  if (inFlight) return inFlight;
+
+  const run = assembleToOPFSImpl(merkleRootHex, totalSize, filename, mimeType);
+  opfsAssembling.set(merkleRootHex, run);
+  try {
+    return await run;
+  } finally {
+    opfsAssembling.delete(merkleRootHex);
+  }
+}
+
+async function assembleToOPFSImpl(
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+): Promise<File | null> {
+  try {
+    const storage = opfsStorage();
+    if (!storage || typeof storage.getDirectory !== "function") {
+      console.warn("OPFS unavailable — reassembling file in memory");
+      return null;
+    }
+
+    const root = await storage.getDirectory();
+    const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
+      create: true,
+    });
+    const fileHandle = await dir.getFileHandle(merkleRootHex, { create: true });
+
+    // Idempotency: a correctly-sized content-addressed file is already complete
+    // and immutable — return it directly (O(1), no lock, no rewrite).
+    const existing = await fileHandle.getFile();
+    if (totalSize > 0 && existing.size === totalSize)
+      return wrapOPFSFile(existing, filename, merkleRootHex, mimeType);
+
+    const createSyncAccessHandle = (
+      fileHandle as unknown as {
+        createSyncAccessHandle?: () => Promise<{
+          truncate: (size: number) => void;
+          write: (buffer: ArrayBufferView, options: { at: number }) => number;
+          flush: () => void;
+          close: () => void;
+        }>;
+      }
+    ).createSyncAccessHandle;
+    if (typeof createSyncAccessHandle !== "function") {
+      console.warn("OPFS sync access handle unavailable — reassembling in memory");
+      return null;
+    }
+
+    const access = await createSyncAccessHandle.call(fileHandle);
+    let db: Awaited<ReturnType<typeof getDB>> | undefined;
+    try {
+      db = await getDB();
+      access.truncate(0);
+      let offset = 0;
+
+      const tx = db.transaction("chunks", "readonly");
+      const index = tx.objectStore("chunks").index("merkleRoot");
+      let cursor = await index.openCursor(merkleRootHex);
+      while (cursor) {
+        const view = new Uint8Array(cursor.value.data);
+        // write() may write fewer bytes than requested (storage pressure); loop
+        // until the whole chunk lands so the file isn't silently truncated.
+        let written = 0;
+        while (written < view.length) {
+          const n = access.write(view.subarray(written), {
+            at: offset + written,
+          });
+          if (n <= 0) throw new Error("OPFS short write");
+          written += n;
+        }
+        offset += view.length;
+        cursor = await cursor.continue();
+      }
+      await tx.done;
+      access.flush();
+    } catch (streamError) {
+      // Close, then drop the partial file so it can't linger and consume quota.
+      try {
+        access.close();
+      } catch {
+        /* ignore */
+      }
+      if (db)
+        try {
+          db.close();
+        } catch {
+          /* ignore */
+        }
+      await dir.removeEntry(merkleRootHex).catch(() => {
+        /* ignore */
+      });
+      throw streamError;
+    }
+    access.close();
+    db.close();
+
+    return wrapOPFSFile(
+      await fileHandle.getFile(),
+      filename,
+      merkleRootHex,
+      mimeType,
+    );
+  } catch (error) {
+    console.error(error);
+
+    return null;
+  }
+}
+
+// Remove a message's reassembled OPFS file (best-effort). Wired into the message
+// deletion path so assembled files don't accumulate as orphaned full-size copies.
+async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
+  try {
+    const storage = opfsStorage();
+    if (!storage || typeof storage.getDirectory !== "function") return;
+    const root = await storage.getDirectory();
+    const dir = await root
+      .getDirectoryHandle(OPFS_REASSEMBLE_DIR)
+      .catch(() => null);
+    if (dir)
+      await dir.removeEntry(merkleRootHex).catch(() => {
+        /* not present — fine */
+      });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function fnGetDBAllChunksCount(
   merkleRootHex?: string,
   hashHex?: string,
@@ -936,12 +1124,36 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
 
     await tx.done;
     db.close();
+
+    // Reclaim the reassembled OPFS file too — IndexedDB deletion alone leaves it
+    // as an orphaned full-size copy on disk.
+    await fnDeleteOPFSFile(merkleRootHex);
   } catch {
     /* empty */
   }
 }
 
 async function fnDeleteDB(): Promise<void> {
+  // Also remove the whole OPFS reassembly subtree (a separate storage system
+  // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
+  try {
+    const storage = opfsStorage();
+    if (storage && typeof storage.getDirectory === "function") {
+      const root = await storage.getDirectory();
+      await (
+        root as unknown as {
+          removeEntry: (name: string, opts: { recursive: boolean }) => Promise<void>;
+        }
+      )
+        .removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true })
+        .catch(() => {
+          /* not present — fine */
+        });
+    }
+  } catch {
+    /* ignore */
+  }
+
   await deleteDB(dbName, {
     blocked() {
       console.error("DB deletion BLOCKED");
@@ -1019,6 +1231,9 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "getDBAllChunkLeafHashes":
         result = await fnGetDBAllChunkLeafHashes(...message.args);
+        break;
+      case "assembleToOPFS":
+        result = await fnAssembleToOPFS(...message.args);
         break;
       case "getDBAllChunksCount":
         result = await fnGetDBAllChunksCount(...message.args);

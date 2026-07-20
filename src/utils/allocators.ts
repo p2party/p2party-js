@@ -1,7 +1,6 @@
 import { ENCRYPTED_LEN, DECRYPTED_LEN } from "./constants";
 
 import {
-  crypto_hash_sha512_BYTES,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
   crypto_sign_ed25519_BYTES,
   crypto_sign_ed25519_PUBLICKEYBYTES,
@@ -33,8 +32,6 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     crypto_sign_ed25519_SEEDBYTES,
   );
 
-  const ptr4 = encryptionModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
-
   const ptr5 = encryptionModule._malloc(crypto_sign_ed25519_BYTES);
   const senderEphemeralSignature = new Uint8Array(
     encryptionModule.wasmMemory.buffer,
@@ -56,8 +53,6 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     crypto_sign_ed25519_PUBLICKEYBYTES,
   );
 
-  const ptr8 = encryptionModule._malloc(crypto_hash_sha512_BYTES);
-
   const ptr9 = encryptionModule._malloc(
     crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
   );
@@ -78,11 +73,9 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     ptr1,
     ptr2,
     ptr3,
-    ptr4,
     ptr5,
     ptr6,
     ptr7,
-    ptr8,
     ptr9,
     ptr10,
     senderEphemeralPublicKey,

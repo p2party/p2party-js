@@ -65,7 +65,7 @@ import type { LibCrypto } from "./libcrypto";
  * @param additionalData - the additional data for aead
  * @param module - wasm module in case of bulk encryptions
  *
- * @returns Encrypted box [nonce 16 || encrypted_data || auth tag 12]
+ * @returns Encrypted box [nonce 12 || encrypted_data || auth tag 16]
  */
 export const encryptAsymmetric = async (
   message: Uint8Array,
@@ -246,7 +246,7 @@ export const encryptAsymmetric = async (
  * crypto_sign_ed25519_pk_to_curve25519 and crypto_sign_ed25519_sk_to_curve25519
  * functions.
  * The symmetric key for encryption is then computed by crypto_kx_client_session_keys.
- * The encrypted box is a Uint8Array[nonce 16 || encrypted_data || auth tag 12].
+ * The encrypted box is a Uint8Array[nonce 12 || encrypted_data || auth tag 16].
  *
  * If you need to perform bulk decryptions with predictable box
  * and additional data sizes then it will be more efficient to preload

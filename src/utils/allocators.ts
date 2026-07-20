@@ -1,4 +1,4 @@
-import { ENCRYPTED_LEN, DECRYPTED_LEN } from "./constants";
+import { ENCRYPTED_LEN, DECRYPTED_LEN, CHUNK_AUTH_TRANSCRIPT_LEN } from "./constants";
 
 import {
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
@@ -69,6 +69,15 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     ENCRYPTED_LEN,
   );
 
+  // Buffer for the per-chunk sender-auth transcript
+  // (DOMAIN || merkle_root || ephemeral_pk), signed instead of the bare pk.
+  const ptrTranscript = encryptionModule._malloc(CHUNK_AUTH_TRANSCRIPT_LEN);
+  const authTranscript = new Uint8Array(
+    encryptionModule.wasmMemory.buffer,
+    ptrTranscript,
+    CHUNK_AUTH_TRANSCRIPT_LEN,
+  );
+
   return {
     ptr1,
     ptr2,
@@ -78,6 +87,7 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     ptr7,
     ptr9,
     ptr10,
+    ptrTranscript,
     senderEphemeralPublicKey,
     senderEphemeralSecretKey,
     seedBytes,
@@ -86,5 +96,6 @@ export const allocateSendMessage = (encryptionModule: LibCrypto) => {
     receiverPublicKeyArray,
     nonceArray,
     encryptedArray,
+    authTranscript,
   };
 };

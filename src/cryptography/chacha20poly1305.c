@@ -153,7 +153,7 @@ decrypt_chachapoly_asymmetric(
 
   uint8_t *sender_x25519_pk
       = (uint8_t *)malloc(sizeof(uint8_t[crypto_scalarmult_curve25519_BYTES]));
-  if (receiver_x25519_pk == NULL)
+  if (sender_x25519_pk == NULL)
   {
     free(receiver_x25519_pk);
     sodium_free(receiver_x25519_sk);

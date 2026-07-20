@@ -8,33 +8,36 @@ export const randomNumberInRange = (
 ): Promise<number> => {
   return new Promise((resolve, reject) => {
     try {
-      if (min === max) resolve(min);
+      if (min === max) {
+        resolve(min);
+        return;
+      }
+      if (max < min) {
+        throw new RangeError("randomNumberInRange: max must be >= min");
+      }
 
-      const RANGE = max - min;
-      const BYTES_NEEDED = Math.ceil(Math.log2(RANGE) / 8);
-      const MAX_RANGE = Math.pow(Math.pow(2, 8), BYTES_NEEDED);
-      const EXTENDED_RANGE = Math.floor(MAX_RANGE / RANGE) * RANGE;
+      // Use BigInt so ranges up to Number.MAX_SAFE_INTEGER (2^53) sample
+      // correctly. The previous implementation accumulated bytes with a
+      // signed 32-bit `<<= 8`, which overflowed (and went negative) for any
+      // range needing more than 4 bytes — e.g. the decoy chunkEndIndex range.
+      const range = BigInt(max) - BigInt(min); // > 0
+      const bytesNeeded = Math.ceil(range.toString(2).length / 8);
+      const maxRange = 1n << BigInt(bytesNeeded * 8); // 2^(8 * bytesNeeded)
+      // Largest multiple of `range` that fits in maxRange: reject above it to
+      // avoid modulo bias.
+      const limit = (maxRange / range) * range;
 
-      let randomBytes = new Uint8Array(BYTES_NEEDED);
-
-      let randomInteger = EXTENDED_RANGE;
-      while (randomInteger >= EXTENDED_RANGE) {
-        randomBytes = window.crypto.getRandomValues(randomBytes);
-
-        randomInteger = 0;
-        for (let i = 0; i < BYTES_NEEDED; i++) {
-          randomInteger <<= 8;
-          randomInteger += randomBytes[i];
-        }
-
-        if (randomInteger < EXTENDED_RANGE) {
-          randomInteger %= RANGE;
-
-          resolve(min + randomInteger);
+      const randomBytes = new Uint8Array(bytesNeeded);
+      let value = limit; // force at least one draw
+      while (value >= limit) {
+        window.crypto.getRandomValues(randomBytes);
+        value = 0n;
+        for (let i = 0; i < bytesNeeded; i++) {
+          value = (value << 8n) + BigInt(randomBytes[i]);
         }
       }
 
-      resolve(randomInteger);
+      resolve(min + Number(value % range));
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
     }

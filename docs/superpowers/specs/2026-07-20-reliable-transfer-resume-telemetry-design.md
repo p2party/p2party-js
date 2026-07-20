@@ -29,82 +29,113 @@ many were real, retransmit count; progress % over the REAL message).
 - **Obj 4 — count done, timing/relay open.** Receipt-count uniformity merged (one receipt per real+decoy frame). Open: (i) real chunks are delayed by verify+IndexedDB before their receipt while decoys aren't → inter-receipt **timing** separates them; (ii) real receipts relayed via the signaling server on the WS-relay path leak leaf hashes + the split.
 - **Obj 2 — GAP.** Send loop is one-pass; no retransmit.
 
+## Principles (KISS / DRY / SSOT)
+
+- **DRY — retransmit *is* resume.** Both are one operation: "resend the real
+  chunks the receiver hasn't acked." The only difference is the trigger — a
+  live timeout, or a reconnect (where the receiver re-emits its receipts first).
+  ONE `reconcile()` path, two triggers. No separate resume machinery.
+- **DRY — one send path.** Selective resend reuses `sendChunks` with an optional
+  `onlyIndices?: Set<number>` filter, not a second function.
+- **KISS — no new wire, no new store, no bitfield.** Receipts are the have-set;
+  the sender extrapolates. The sender's ack-set is disposable in-memory state
+  (rebuilt from receipts). The durable sources already exist: sender `newChunks`,
+  receiver `chunks`.
+- **SSOT — one place per fact.** Real-vs-decoy is read from a chunk's metadata
+  (`chunkEndIndex − chunkStartIndex ≤ totalSize`), never tracked separately. The
+  leaf hash is stored once, as a field on the receiver's chunk record (not a
+  parallel set). All tunables live in `src/utils/constants.ts`.
+- **KISS — layer the subtle stuff.** The core (reconcile + telemetry + real %)
+  ships first and is simple. The obj-4 *timing* hardening (normalized receipt
+  emission + close-gated-on-all-receipted) is an optional later layer — it does
+  not block the reliability/resume value.
+
 ## Design overview
 
-A per-message-per-peer transfer becomes a small state machine backed by durable
-state, with **selective** retransmit (resend only what's missing) and a close
-gated on full receipting.
+A per-message-per-peer transfer is a small in-memory state machine over the
+already-persistent chunk stores, driven by one `reconcile()` (selective resend
+of un-acked reals).
 
 ```
-sender edge state  (persistent, per (peerId, hashHex)):
-  ackedReal : Set<chunkIndex>     // real chunks the receiver has acked
-  totalFrames : number            // real + decoy (sender knows this)
-  receiptsSeen : number           // any 64-byte receipt (for close gating)
+sender edge state  (IN-MEMORY per (peerId, hashHex); durable source is newChunks):
+  ackedReal : Set<chunkIndex>     // EXTRAPOLATED from received leaf-hash receipts
+  totalFrames : number            // real + decoy (the sender created them)
+  receiptsSeen : number           // any 64-byte receipt (close gating)
   retransmits : number            // telemetry
   complete : boolean
+  // Rebuilt on reconnect from the receiver's re-sent receipts — no persistent
+  // sender ack store. `newChunks` (IndexedDB, already persisted) is the durable
+  // resend source.
 
-receiver edge state (persistent — mostly already in IndexedDB):
+receiver edge state (mostly already in IndexedDB):
   chunks store                    // received real chunks, keyed [merkleRoot, idx]
   messageData.savedSize/totalSize // real progress
-  receivedIdx : Set<chunkIndex>   // NEW: indices received (real+decoy) — for the
-                                  //      reconnect have-set; persisted per message
+  receivedHashes                  // NEW (small): the leaf hashes it has receipted,
+                                  //      stored alongside each chunk, so it can
+                                  //      re-emit them as receipts on reconnect
 ```
 
 ## Wire changes
 
-1. **Add `totalChunks` (u64) to the encrypted metadata** (`utils.h` Metadata +
-   `serialize_metadata`/`deserialize_metadata` in C, `metadata.ts` twin,
-   `METADATA_LEN` in `utils.h`/`constants.ts`). It rides inside the AEAD, so no
-   leak. Lets the receiver size its `receivedIdx` set / bitfield and lets both
-   sides reason about "all frames". Rebuild WASM.
-2. **Have-set reconcile message** (control frame): on reconnect the receiver
-   sends its `receivedIdx` as a compact bitfield (`ceil(totalChunks/8)` bytes)
-   over the (re-opened) per-message channel, padded to the uniform 64-byte
-   receipt size class or larger, framed with an in-band type marker so it routes
-   distinctly from data (65536) and receipts (64). Sender replies by resending
-   the missing REAL chunks. (Encoding + routing marker: see Open questions.)
+**None.** The reconcile reuses the existing 64-byte leaf-hash receipt — the
+receipts ARE the have-set. There is no `totalChunks` metadata field, no bitfield,
+and no new control-frame type or routing marker.
 
-## Sender behavior
+Key insight: the receiver's per-chunk receipt is the chunk's leaf hash, and the
+sender already resolves a received receipt to a chunk index via
+`getDBNewChunk(hash) → chunkIndex` (handleReadReceipt.ts:61). So the set of
+receipts the sender has seen IS the acked set — the sender **extrapolates** which
+real chunks the receiver holds, and therefore which are missing, without the
+receiver ever transmitting sizes, indices, or a bitfield. On reconnect the
+receiver simply re-emits the leaf-hash receipts for the chunks it holds, and the
+sender rebuilds the acked set from them.
 
-- **Selective retransmit** (obj 2). After the initial `sendChunks` pass, loop:
-  wait `RETRANSMIT_TIMEOUT_MS` (linear backoff) polling `complete`; if not
-  complete and channel open, **resend only `realIndices \ ackedReal`** via a new
-  `sendChunks(…, onlyIndices)` variant (re-encrypts fresh frames for just those
-  indices). Stop on `complete` or `MAX_RETRANSMITS`. `ackedReal` is updated in
-  `handleReadReceipt` (real receipt → `getDBNewChunk` → index → add). Selective
-  (not resend-all) is REQUIRED: resend-all buffered dups that (a) broke receipt
-  uniformity and (b) left ~235 KB un-drained at teardown.
-- **`realIndices`**: real chunks are created first in `splitToChunks`, so they
-  are indices `[0, realCount)`. Persist `realCount` (or derive from `totalSize`
-  and the chunk-fill) in the sender edge state at send time.
-- **Constants** live in `src/utils/constants.ts` (SSOT): `MAX_RETRANSMITS`,
-  `RETRANSMIT_TIMEOUT_MS`, `DRAIN_CLOSE_TIMEOUT_MS`, `DRAIN_CLOSE_POLL_MS`.
+## Sender behavior — one `reconcile()`, two triggers
+
+`reconcile()` = "resend the real chunks not in `ackedReal`, read from `newChunks`,
+via `sendChunks(channel, …, onlyIndices)`." Reused for both cases:
+- **Live** (obj 2): after the initial send, while `!complete` — wait
+  `RETRANSMIT_TIMEOUT_MS` (linear backoff) polling `complete`, then `reconcile()`;
+  stop on `complete` or `MAX_RETRANSMITS`.
+- **Resume** (reconnect): the receiver re-emits its receipts, the sender rebuilds
+  `ackedReal`, then `reconcile()` — the same call.
+
+`ackedReal` is built in `handleReadReceipt`: a real receipt resolves via
+`getDBNewChunk(hash) → chunkIndex` (already the code today) → add to the set.
+Real indices are `[0, realCount)` (splitToChunks creates reals first); read
+real-vs-decoy from a chunk's metadata (`chunkEnd − chunkStart ≤ totalSize`) — do
+NOT track it separately (SSOT). Selective only (never resend-all): resend-all
+buffered dups that broke uniformity and left buffers un-drained. Tunables
+(`MAX_RETRANSMITS`, `RETRANSMIT_TIMEOUT_MS`, `DRAIN_CLOSE_*`) in `constants.ts`.
 
 ## Receiver behavior
 
-- **Timing-normalized receipt emission** (obj 4 timing). Reintroduce the
-  per-channel receipt scheduler (queue + fixed-cadence batch flush) so emission
-  time reflects the timer, not per-chunk verify/DB latency. Safe now because the
-  sender's close is gated on all-frames-receipted (below), so trailing decoy
-  receipts are never cut off — the exact race that killed the standalone
-  scheduler.
-- **`receivedIdx` tracking**: on each stored/decoy frame, record its index;
-  persist per `(merkleRoot)` so a reconnecting receiver can produce the have-set.
-- **No WS-relay of receipt content** (obj 4 relay): stop relaying real-receipt
-  leaf hashes through the signaling server; rely on the data channel + retransmit
-  (and the raised `MAX_BUFFERED_AMOUNT` already keeps traffic on the DC).
+Core (ships with the reliability layer):
+- **Store the leaf hash on the chunk record** (SSOT). The receiver already stores
+  received chunks; add the 64-byte leaf hash as a field so it can re-emit receipts
+  on reconnect without recomputing (it kept only the real slice, not the full
+  padded chunk). No parallel set.
+- **Emit receipts as today** (one 64-byte receipt per frame — real leaf hash /
+  decoy random / final message-hash), and **re-emit them all on reconnect** from
+  the stored leaf hashes.
+- **Stop relaying receipt content via the signaling server** (obj 4 relay): the
+  real-receipt hash currently goes through the WS relay when the channel isn't
+  open; drop it (the raised `MAX_BUFFERED_AMOUNT` + retransmit make it moot).
 
-## Close sequencing (obj 3 + obj 4 timing)
+Optional obj-4 *timing* layer (later — see Sequencing): normalize per-receipt
+emission timing (fixed-cadence flush) so real-vs-decoy processing latency doesn't
+show through. Only safe together with close-gating-on-all-receipted, which is why
+it's layered, not in the core.
 
-Sender closes the per-message channel only when ALL hold:
-1. `complete` — all real chunks acked (receiver's final message-hash receipt).
-2. `receiptsSeen >= totalFrames` — every frame (real + decoy) has drawn a
-   receipt, so the receiver's trailing decoy receipts are not cut off (preserves
-   count + timing uniformity). Bounded by a grace timeout as a safety net.
-3. `bufferedAmount === 0` via `drainAndClose` (already merged).
+## Close sequencing
 
-This replaces "close immediately on the final receipt" and is what makes the
-timing-normalized scheduler safe.
+Core close (obj 3): close the per-message channel when `complete` (receiver's
+final message-hash receipt) AND `bufferedAmount === 0` (`drainAndClose`, merged).
+Selective retransmit means no dup frames pile up, so drain is cheap.
+
+Optional (with the timing layer): additionally gate on
+`receiptsSeen >= totalFrames` (the sender knows `totalFrames`) so the receiver's
+timing-delayed trailing receipts aren't cut off. Bounded by a grace timeout.
 
 ## Relay-open fix
 
@@ -118,14 +149,17 @@ retransmit. Removes the intermittent uniformity-defeating relay.
 The reconnect path (`handleConnectToPeer` `restartIce`/reconnect, and the
 per-peer negotiation mutex already added) triggers, for each in-flight message:
 1. Re-open the same Merkle-root-labeled per-message channel.
-2. Receiver sends its `receivedIdx` have-set (bitfield).
-3. Sender resends missing real chunks from `newChunks` (persistent).
-4. Idempotent apply (obj 1) absorbs any overlap; completion/close as above.
+2. Receiver **re-emits the ordinary 64-byte leaf-hash receipts** for the chunks
+   it already holds (from `receivedHashes`) — no special frame.
+3. Sender resolves each via `getDBNewChunk`, rebuilds `ackedReal`, and resends
+   the missing REAL chunks from `newChunks` (already persisted).
+4. Idempotent apply (obj 1) absorbs overlap; completion/close as above.
 
-Because sender `ackedReal` and receiver `receivedIdx`/`chunks` are persisted,
-state survives the drop. This is the same durable per-edge record that will hold
-the Double Ratchet session keys ([[p2party-double-ratchet-plan]]) — build ONE
-per-edge store, not two.
+Durable state that must survive the drop: the sender's `newChunks` (already
+persisted) and the receiver's `chunks` + `receivedHashes`. The sender's ack-set
+is disposable — rebuilt from the receiver's re-sent receipts. (The Double Ratchet
+session keys will still want a durable per-edge record — [[p2party-double-ratchet-plan]] —
+but the transfer reconcile itself needs no new sender store.)
 
 ## Telemetry + real progress
 
@@ -161,37 +195,41 @@ implemented in the consumer.
 
 ## Risks & open questions
 
-- **Have-set/control-frame framing & routing.** Data routes by size (65536),
-  receipts by size (64). A have-set/reconcile frame needs an in-band type marker
-  and a routing branch in `handleOpenChannel.onmessage` without shifting the
-  fixed WASM offsets for data frames. Decide the marker scheme (reserved control
-  size vs a tagged 64-byte frame) — must not be a NEW distinguishable size class
-  that leaks (per obj 4).
-- **`receiptsSeen >= totalFrames` under loss.** Reliable SCTP delivers all
-  frames, but the grace-timeout fallback must be tuned so close isn't delayed
-  unduly; and retransmit interacts with the counter (count receipts for resent
-  frames? — yes, each received frame is receipted once by index-dedup).
-- **State growth / cleanup.** Persistent sender/receiver edge state must be
-  cleaned on completion/cancel/purge; cap per-edge memory (MAX_SKIP-style).
-- **`totalChunks` metadata add** breaks the wire again (rebuild + CDN redeploy) —
-  batch it with the metadata change, keep within 0.9.0 (unreleased).
-- **Selective resend of decoys.** Decoys are cover; do NOT resend them (they are
-  never acked) — resend only reals. Confirm the receiver still gets uniform
-  receipts for the resent reals.
+RESOLVED by receipts-as-have-set: no control-frame framing/routing question
+(reconcile reuses the 64-byte receipt) and no `totalChunks` metadata change (the
+sender already knows totalFrames; the receiver never needs it). **No wire change
+at all for the core.**
+
+Remaining:
+- **Reconnect trigger & single re-emit.** On reconnect the receiver re-emits its
+  stored leaf-hash receipts once and the sender re-runs `reconcile()`. Keying
+  "same in-flight message on the new channel" off the Merkle-root channel label —
+  confirm the label survives the ICE restart.
+- **Cleanup — reuse, don't parallel.** Clear the sender's in-memory edge state
+  and cancel the reconcile loop on complete/cancel/purge; `newChunks`/`chunks`
+  are already cleaned on those paths — hook the same lifecycle.
+- **Caps.** `MAX_RETRANSMITS` + linear backoff bound the live loop (start 5 × 2s);
+  the optional `receiptsSeen >= totalFrames` gate needs a grace fallback.
+- **Decoys are never resent** (cover, never acked) — intended; `reconcile()`
+  resends only reals.
 
 ## Implementation sequencing
 
-1. **Metadata `totalChunks`** (C + TS + WASM rebuild) — enables everything below.
-2. **Persistent edge state** (IndexedDB store keyed by `(peerId, hashHex)`): sender
-   `ackedReal`/`realCount`/`retransmits`; receiver `receivedIdx`. Shared with the
-   ratchet later.
-3. **Selective retransmit** (`sendChunks` `onlyIndices` variant + the loop) +
-   `handleReadReceipt` ack tracking. E2E loss injection.
-4. **Close gating** (complete + all-receipted + drained) + **relay-open wait**.
-5. **Timing-normalized receipt scheduler** (now safe under close gating) + stop
-   relaying receipt content. E2E.
-6. **Reconcile-on-reconnect** (have-set control frame + resend missing). E2E resume.
-7. **Telemetry + real progress** in message state and p2party.com UI.
+Core — ships the reliability + resume + telemetry value, **no wire change, no new
+WASM build**:
+1. **`reconcile()` + selective resend** — `sendChunks(…, onlyIndices)` (DRY) +
+   in-memory `ackedReal` built in `handleReadReceipt` + the live timeout loop.
+   Store the receiver's leaf hash on the chunk record. E2E: loss injection.
+2. **Relay-open wait** — send a per-message channel's frames only once it's
+   `open` (bounded); anything that slips is recovered by `reconcile()`.
+3. **Reconcile-on-reconnect** — receiver re-emits receipts; sender re-runs
+   `reconcile()`. Same code as (1). E2E: kill/restart mid-transfer → byte-exact.
+4. **Telemetry + real %** — message-state fields (total/real/retransmit) + fix
+   the sender split-% to reals; p2party.com renders them.
 
-Each step is independently E2E-verifiable; ship as further 0.9.0 protocol-v2
-increments. Deploy still needs `npm run uploadcdn`.
+Optional obj-4 *timing* layer (later, independent — touches C, needs a rebuild):
+5. **Timing-normalized receipts** + **stop relaying receipt content** +
+   **close-gate on `receiptsSeen >= totalFrames`** — together, or not at all.
+
+Each step is independently E2E-verifiable; ship as 0.9.0 protocol-v2 increments.
+`npm run uploadcdn` only if step 5 touches the WASM.

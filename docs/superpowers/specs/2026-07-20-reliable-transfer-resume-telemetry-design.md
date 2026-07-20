@@ -233,3 +233,70 @@ Optional obj-4 *timing* layer (later, independent — touches C, needs a rebuild
 
 Each step is independently E2E-verifiable; ship as 0.9.0 protocol-v2 increments.
 `npm run uploadcdn` only if step 5 touches the WASM.
+
+## Post-implementation notes — step 3 resume (2026-07-20)
+
+**Built (no wire change, no WASM rebuild).** Resume is realized by keeping
+`sendWithReconcile` ALIVE across the reconnect instead of the spec's original
+"registry + re-derive destroyed WASM state" plan. When the per-message channel
+goes `closed`/`closing`, the loop calls `resumeChannel()` (poll `peerConnections`
+— the module-scoped array is mutated in place, so it gets the fresh `epc` — for a
+`connected` peer, re-open the SAME Merkle-root label, wait the remaining budget),
+sets `currentChannel` and continues. `senderSecretKey`/modules/`ackedReal` stay
+in scope, so nothing is re-derived. Receiver persists `Chunk.leafHash` (optional
+value field — NO dbVersion bump) and re-emits stored leaf-hash receipts on the
+new channel's `onopen`, gated `merkleRootHex !== "" && typeof channel !== "string"`
+(the receiver RECEIVES the per-message channel as an object; the sender OPENS it
+as a string). New `getDBAllChunkLeafHashes` cursor getter. Verified end-to-end in
+headless Chromium over real WebRTC: forced FULL reconnect mid-transfer with the WS
+relay blocked → byte-exact completion, new `RTCPeerConnection`, P2P resend,
+sender-retransmit telemetry, AND a send-buffer-leak assertion.
+
+**Root-cause bug (the whole debug).** The per-message channel's `onclose`
+deleted the sender's `newChunks` on ANY close — including a mid-transfer
+disconnect — destroying the resend source (receiver stalled ~98%). Fixed by
+gating `deleteDBNewChunk` on transfer completion. The WS-relay fallback masks
+resume by silently completing broken transfers; block relay in the harness to
+force pure-P2P and make resume deterministic.
+
+**Adversarial-review fixes folded in (2026-07-20).**
+- Completion `newChunks` leak (HIGH, deterministic on real links): the first gate
+  re-read volatile reconcile state (`isTransferComplete`) AFTER `await
+  drainAndClose`, which `clearTransfer` races → the whole message body leaked into
+  IndexedDB on EVERY completed transfer. Fixed with an EXPLICIT `transferComplete`
+  param from `handleReadReceipt` (race-free), regression-tested by the E2E
+  send-buffer assertion via the new `getSendChunksCount` export.
+- `resumeChannel` duplicate channels (HIGH): a slow-opening (>3.5s) resumed
+  channel got re-created (dedup only matches OPEN channels), leaking WASM buffers
+  and blocking `newChunks` cleanup. Fixed: create once, wait the REMAINING budget,
+  neutralize an abandoned channel; also tightened the death test to `closed`/
+  `closing` only.
+- Permanent-disconnect `newChunks` leak (MEDIUM): gating removed the only
+  auto-cleanup for abandoned sends. Fixed with a terminal `deleteDBNewChunk` after
+  `Promise.allSettled` (idempotent, multi-peer-safe).
+- Completion close now `drainAndClose` (obj 3) instead of bare `close()`.
+- Re-emit loop got `bufferedAmount` backpressure (latent, pre-big-files).
+
+**Documented residual limitations (deferred, NOT shipped-as-preserved):**
+- **Obj-4 reconnect count leak.** The reconnect re-emit sends one receipt per REAL
+  chunk held (not decoy-padded like live 1:1 operation), so the burst length
+  reveals the real-chunk count to a passive DTLS traffic-analysis observer. Same
+  category as the already-deferred obj-4 timing/relay gaps → belongs in the obj-4
+  hardening layer (pace 1:1 with forward frames, or pad with decoy receipts). Live
+  transfers (the common case) keep the 1:1 count-hiding. Content stays DTLS-
+  confidential; only a size hint leaks, only on reconnect.
+- **Send-mutex hold on drop (~timeout).** `handleSendMessage` runs under the
+  process-global `sendMutex`; the resume poll holds it while waiting for the peer,
+  so a peer that drops and never returns stalls other sends up to
+  `RECONNECT_RESUME_TIMEOUT_MS`. Bounded (pre-diff all sends were already
+  serialized). Proper fix: narrow the mutex to the WASM-touching sections.
+- **`getDBAllChunkLeafHashes` is O(held bytes).** A value cursor deserializes each
+  ~62KB chunk record to read a 128-char hex; fine today, but the GB-file streaming
+  workstream should move leaf hashes to a key-only index / dedicated store.
+- Pre-existing (NOT this diff): `handleOpenChannel` `onclose` frees ptr1..ptr5
+  under `if (peerRoomIndex && ...)` which is falsy for index 0, and the completion
+  path nulls `onclose` before close — receive buffers can leak per message-channel
+  over a long-lived pc. Separate follow-up.
+- Legacy chunks stored before `leafHash` existed are skipped by the re-emit (they
+  fall back to normal reconcile resend) — transient to the upgrade window, self-
+  healing thereafter.

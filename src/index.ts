@@ -20,6 +20,7 @@ import {
   getAllDBUniqueRooms,
   getDBAddressBookEntry,
   getDBAllChunks,
+  getDBAllNewChunksCount,
   getDBPeerIsBlacklisted,
   setDBAddressBookEntry,
   setDBPeerInBlacklist,
@@ -742,6 +743,10 @@ export const p2party = {
   // openChannel,
   sendMessage,
   readMessage,
+  // Read-only diagnostic: how many outbound (send-side) chunks are still held in
+  // IndexedDB for a message hash. 0 after a completed/abandoned send (the buffer
+  // is reclaimed). Useful for surfacing send-buffer usage and for tests.
+  getSendChunksCount: getDBAllNewChunksCount,
   cancelMessage,
   deleteMessage: deleteMsg,
   purgeIdentity,

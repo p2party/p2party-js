@@ -5,6 +5,7 @@ import { deleteChannel, deleteMessage } from "../../reducers/roomSlice";
 import { deleteDBNewChunk, deleteDBSendQueue } from "../../db/api";
 
 import { decompileChannelMessageLabel } from "../../utils/channelLabel";
+import { drainAndClose } from "../../utils/drainAndClose";
 
 import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
@@ -31,6 +32,7 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     messageHash,
     alsoDeleteData,
     alsoSendFinishedMessage,
+    transferComplete,
     peerConnections,
     dataChannels,
   },
@@ -57,8 +59,10 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     dataChannels[channelIndex].onclosing = null;
     dataChannels[channelIndex].onmessage = null;
     dataChannels[channelIndex].onbufferedamountlow = null;
+    // Drain the send buffer before closing so any still-buffered frames are not
+    // wiped by close() (objective 3) — mirrors disconnectFromChannelLabelQuery.
     if (dataChannels[channelIndex].readyState === "open")
-      dataChannels[channelIndex].close();
+      await drainAndClose(dataChannels[channelIndex]);
 
     dataChannels.splice(channelIndex, 1);
 
@@ -73,8 +77,16 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
     // Find out if the message is sent to others
     const c = dataChannels.findIndex((c) => c.label === label);
 
-    // If the message is not sent to anyone then delete it from sending memory
-    if (c < 0) await deleteDBNewChunk(merkleRootHex);
+    // If the message is not sent to anyone then delete it from sending memory —
+    // BUT only once the transfer completed (transferComplete, set by the
+    // completion path) or the caller asked to drop the data. On an UNEXPECTED
+    // mid-transfer disconnect the channel also closes here with no such flag;
+    // deleting newChunks then would destroy the resend source and make
+    // resume-on-reconnect impossible, so we keep them for the resume path.
+    // (transferComplete is an explicit param, not volatile reconcile state, so
+    // it can't be raced by sendWithReconcile's clearTransfer.)
+    if (c < 0 && (alsoDeleteData || transferComplete))
+      await deleteDBNewChunk(merkleRootHex);
   } else if (!signalingServer.isConnected || alsoDeleteData) {
     api.dispatch(
       deleteChannel({

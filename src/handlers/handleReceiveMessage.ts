@@ -1,6 +1,7 @@
 import { deserializeMetadata } from "../utils/metadata";
 import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
+import { isStorableChunkRange } from "../utils/chunkBounds";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 
 import { getDBMessageData, setDBChunk } from "../db/api";
@@ -57,6 +58,29 @@ export const handleReceiveMessage = async (
             : metadata.chunkEndIndex - metadata.chunkStartIndex;
 
       if (chunkSize === 0)
+        return {
+          date: metadata.date,
+          chunkIndex: -1,
+          chunkSize: 0,
+          receivedFullSize: false,
+          chunkAlreadyExists: true,
+          totalSize: metadata.totalSize,
+          messageType: metadata.messageType,
+          filename: metadata.name,
+          chunkHash,
+          messageHash: metadata.hash,
+        };
+
+      // The real-data offsets come from attacker-controllable metadata; reject
+      // any that would slice outside the chunk or are inverted, so a malicious
+      // sender cannot store the wrong bytes and corrupt reassembly.
+      if (
+        !isStorableChunkRange(
+          metadata.chunkStartIndex,
+          metadata.chunkEndIndex,
+          chunk.length,
+        )
+      )
         return {
           date: metadata.date,
           chunkIndex: -1,

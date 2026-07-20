@@ -59,3 +59,9 @@ export const CHUNK_AUTH_TRANSCRIPT_LEN =
   CHUNK_AUTH_DOMAIN_BYTES.length +
   crypto_hash_sha512_BYTES + // merkle root
   crypto_sign_ed25519_PUBLICKEYBYTES; // ephemeral pk
+
+// Selective-retransmit / reconcile tuning: after the initial send, resend only
+// the un-acked real chunks until the receiver confirms completion, up to
+// MAX_RETRANSMITS attempts with a base timeout that backs off linearly.
+export const MAX_RETRANSMITS = 5;
+export const RETRANSMIT_TIMEOUT_MS = 2000;

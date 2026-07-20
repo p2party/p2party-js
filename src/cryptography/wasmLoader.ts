@@ -10,7 +10,7 @@ export const wasmLoader = async (wasmMemory: WebAssembly.Memory) => {
   const url = new URL(`https://cdn.p2party.com/@${wasmVersion}/libcrypto.wasm`);
   const resp = await fetch(url, {
     integrity:
-      "sha384-oqRpnCEHOn1BvZpI4vBvvsWxgRpi/hPAU/1hqNeT1F5QkvO8ldi+yxsUCGCzzaca",
+      "sha384-4ZosFh9V8BQ+6giDJkCz1qKWI4VeuTedGsZm3LkUQFUxFVT0n66Ky46akKuKtRh9",
   });
   const bytes = await resp.arrayBuffer();
 

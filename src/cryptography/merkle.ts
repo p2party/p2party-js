@@ -4,6 +4,7 @@ import cryptoMemory from "./memory";
 import { wasmLoader } from "./wasmLoader";
 
 import { crypto_hash_sha512_BYTES } from "./interfaces";
+import { hashMerkleLeaf } from "../utils/leafHash";
 
 import type { LibCrypto } from "./libcrypto";
 
@@ -274,11 +275,7 @@ export const getMerkleRootFromProof = async (
     ptr1,
     crypto_hash_sha512_BYTES,
   );
-  const hash = await window.crypto.subtle.digest(
-    "SHA-512",
-    item as Uint8Array<ArrayBuffer>,
-  );
-  elementHash.set(new Uint8Array(hash));
+  elementHash.set(await hashMerkleLeaf(item));
 
   const ptr2 = cryptoModule._malloc(proofLen);
   const proofArray = new Uint8Array(wasmMemory.buffer, ptr2, proofLen);
@@ -369,11 +366,7 @@ export const verifyMerkleProof = async (
     ptr1,
     crypto_hash_sha512_BYTES,
   );
-  const hash = await window.crypto.subtle.digest(
-    "SHA-512",
-    item as Uint8Array<ArrayBuffer>,
-  );
-  elementHash.set(new Uint8Array(hash));
+  elementHash.set(await hashMerkleLeaf(item));
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const rootArray = new Uint8Array(

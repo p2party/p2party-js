@@ -138,6 +138,9 @@ export const handleReceiveMessage = async (
           chunkIndex: metadata.chunkIndex,
           data: realChunk.buffer,
           mimeType,
+          // Persist the exact receipt token so it can be re-emitted verbatim on
+          // reconnect (the padded chunk it was hashed over is discarded here).
+          leafHash: uint8ArrayToHex(chunkHash),
         });
 
         return {

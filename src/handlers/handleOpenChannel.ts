@@ -16,7 +16,12 @@ import { randomNumberInRange } from "../cryptography/utils";
 import cryptoMemory from "../cryptography/memory";
 import { wasmLoader } from "../cryptography/wasmLoader";
 
-import { deleteDBSendQueue, getDBSendQueue } from "../db/api";
+import {
+  deleteDBSendQueue,
+  getDBSendQueue,
+  getDBAllChunkLeafHashes,
+  getDBMessageData,
+} from "../db/api";
 
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
@@ -304,6 +309,60 @@ export const handleOpenChannel = async (
       receiverSecretKeyArray.set(receiverSecretKey);
     } catch (error) {
       console.error(error);
+    }
+
+    // Resume-on-reconnect (receiver side): a full reconnect hands us a brand-new
+    // per-message channel. Re-emit the leaf-hash receipts for the chunks we
+    // already hold so the sender rebuilds its acked-set and resends ONLY what we
+    // are still missing. Guarded to the RECEIVING end of a per-message channel:
+    // "main" carries no merkleRoot, and the sender OPENED this channel (string
+    // arg) so `channel` is an RTCDataChannel object only on the receiver's end.
+    //
+    // OBJ-4 CAVEAT (known, deferred): this burst emits one receipt per REAL
+    // chunk held (decoys are never stored), so unlike live operation — where
+    // every frame, real or decoy, draws a receipt (1:1) — the reconnect burst's
+    // length reveals the real-chunk count to a passive DTLS traffic-analysis
+    // observer. Same category as the already-deferred obj-4 timing/relay gaps;
+    // the obj-4 hardening layer should pace these 1:1 with forward frames or pad
+    // with decoy receipts. Content stays confidential (DTLS); only a size hint
+    // leaks, only on reconnect.
+    if (merkleRootHex !== "" && typeof channel !== "string") {
+      void (async () => {
+        try {
+          const stored = await getDBAllChunkLeafHashes(merkleRootHex);
+          if (stored.length === 0) return;
+
+          for (const { leafHash } of stored) {
+            if (leafHash?.length !== crypto_hash_sha512_BYTES * 2) continue;
+            // Backpressure: let the SCTP buffer drain (and yield the event loop
+            // so drain callbacks run) instead of racing the ~16 MiB send cap on
+            // a large have-set.
+            while (
+              extChannel.readyState === "open" &&
+              extChannel.bufferedAmount >= MAX_BUFFERED_AMOUNT
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            if (extChannel.readyState !== "open") return;
+            extChannel.send(hexToUint8Array(leafHash).buffer);
+          }
+
+          // If we already hold the whole message, re-emit the final message-hash
+          // receipt too, so the sender reaches completion and closes cleanly.
+          const md = await getDBMessageData(merkleRootHex);
+          if (
+            md &&
+            md.totalSize > 0 &&
+            md.savedSize === md.totalSize &&
+            md.hash.length === crypto_hash_sha512_BYTES * 2 &&
+            extChannel.readyState === "open"
+          ) {
+            extChannel.send(hexToUint8Array(md.hash).buffer);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      })();
     }
   };
 

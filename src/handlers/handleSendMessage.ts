@@ -40,9 +40,13 @@ import {
   CHUNK_AUTH_TRANSCRIPT_LEN,
   MAX_RETRANSMITS,
   RETRANSMIT_TIMEOUT_MS,
+  RECONNECT_RESUME_TIMEOUT_MS,
+  RECONNECT_RESUME_POLL_MS,
+  MAX_RESUME_ATTEMPTS,
 } from "../utils/constants";
 
 import {
+  deleteDBNewChunk,
   deleteDBSendQueue,
   getDBNewChunk,
   getDBSendQueue,
@@ -394,10 +398,69 @@ const sendChunks = async (
   encryptionModule._free(ptrTranscript);
 };
 
+// Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
+// per-message channel — only "main" is auto-reopened, and frames buffered in the
+// dead channel were lost and never relayed. Wait (bounded) for the peer's fresh
+// connection, re-open the SAME Merkle-root-labeled channel on it, and return it
+// so the reconcile loop continues. The label is a pure function of the message,
+// so it is byte-identical across the reconnect; the receiver re-emits its stored
+// receipts on the new channel's onopen, letting the sender resend only the reals
+// still missing. Returns null if the peer does not come back in time.
+const resumeChannel = async (
+  api: BaseQueryApi,
+  roomId: string,
+  peerId: string,
+  channelMessageLabel: string,
+  peerConnections: IRTCPeerConnection[],
+  dataChannels: IRTCDataChannel[],
+  timeoutMs: number,
+): Promise<IRTCDataChannel | null> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const epc = peerConnections.find(
+      (p) => p.withPeerId === peerId && p.connectionState === "connected",
+    );
+    if (!epc) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECONNECT_RESUME_POLL_MS),
+      );
+      continue;
+    }
+    try {
+      const ch = await handleOpenChannel(
+        { channel: channelMessageLabel, epc, roomId, dataChannels },
+        api,
+      );
+      // Await opening for the REMAINING budget rather than a fixed window, so a
+      // slow-to-open channel is waited on — NOT re-created, which would spawn a
+      // duplicate same-label channel that leaks receive buffers and blocks the
+      // newChunks cleanup. If it still hasn't opened (timed out, or the pc died
+      // again mid-open), neutralize it so it can never later open, push into
+      // dataChannels, or malloc receive buffers, then look for a fresh epc.
+      if (await waitForOpen(ch, deadline - Date.now())) return ch;
+      try {
+        ch.onopen = null;
+        ch.onclose = null;
+        ch.onerror = null;
+        ch.onmessage = null;
+        ch.onbufferedamountlow = null;
+        if (ch.readyState !== "closed") ch.close();
+      } catch (error) {
+        console.error(error);
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  return null;
+};
+
 // Send once (all chunks), then reconcile: resend ONLY the un-acked real chunks
 // until the receiver confirms completion (its final message-hash receipt) or the
 // retry budget is exhausted. The acked set is extrapolated from receipts in
-// handleReadReceipt. Selective (never resend-all) so no dup frames pile up.
+// handleReadReceipt. Selective (never resend-all) so no dup frames pile up. On a
+// full reconnect the loop re-establishes the per-message channel and continues
+// (resume), rather than giving up — the same reconcile drives both.
 const sendWithReconcile = async (
   channel: IRTCDataChannel | string,
   api: BaseQueryApi,
@@ -411,16 +474,24 @@ const sendWithReconcile = async (
   peerPublicKeyHex: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
+  peerConnections: IRTCPeerConnection[],
+  dataChannels: IRTCDataChannel[],
 ): Promise<void> => {
   clearTransfer(peerId, hashHex);
 
+  let currentChannel = channel;
+  // The per-message channel label is a pure function of the message, so the dead
+  // channel's own label is exactly what we re-open on reconnect.
+  const channelMessageLabel =
+    typeof channel === "string" ? channel : channel.label;
+
   // Wait for the per-message channel to open before the first send, so its
   // initial frames aren't spilled to the WS relay while it is still connecting.
-  if (typeof channel !== "string") await waitForOpen(channel);
+  if (typeof currentChannel !== "string") await waitForOpen(currentChannel);
 
   // Initial pass: all chunks (real + decoy).
   await sendChunks(
-    channel,
+    currentChannel,
     api,
     roomId,
     senderSecretKey,
@@ -435,6 +506,7 @@ const sendWithReconcile = async (
   );
 
   let retries = 0;
+  let resumeAttempts = 0;
   while (retries < MAX_RETRANSMITS) {
     const done = await waitForCompletion(
       peerId,
@@ -442,11 +514,43 @@ const sendWithReconcile = async (
       RETRANSMIT_TIMEOUT_MS * (retries + 1),
     );
     if (done) break;
-    if (typeof channel !== "string" && channel.readyState !== "open") break;
+
+    // Channel died — a full reconnect. Re-establish it on the peer's fresh
+    // connection and continue; the receiver re-emits its receipts so we resend
+    // only the still-missing reals. Bounded so a flapping peer can't loop. Only
+    // treat a genuinely dead (closed/closing) channel as needing resume — a
+    // still-"connecting" channel is given more time via waitForCompletion.
+    if (
+      typeof currentChannel !== "string" &&
+      (currentChannel.readyState === "closed" ||
+        currentChannel.readyState === "closing")
+    ) {
+      if (resumeAttempts >= MAX_RESUME_ATTEMPTS) break;
+      resumeAttempts++;
+      const resumed = await resumeChannel(
+        api,
+        roomId,
+        peerId,
+        channelMessageLabel,
+        peerConnections,
+        dataChannels,
+        RECONNECT_RESUME_TIMEOUT_MS,
+      );
+      if (!resumed) break;
+      currentChannel = resumed;
+      retries = 0; // fresh retransmit budget for the resumed transfer
+
+      // Telemetry: surface the reconnect recovery to the UI as a reliability
+      // event (the user validates the transfer survived a dropped connection).
+      api.dispatch(
+        incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
+      );
+      continue;
+    }
 
     // Reconcile: resend only the reals the receiver hasn't acked yet.
     await sendChunks(
-      channel,
+      currentChannel,
       api,
       roomId,
       senderSecretKey,
@@ -596,12 +700,22 @@ export const handleSendMessage = async (
               peerPublicKeyHex,
               encryptionModule,
               merkleModule,
+              peerConnections,
+              dataChannels,
             ),
           );
         }
       }
 
       await Promise.allSettled(promises);
+
+      // Every peer has now either completed (its newChunks were freed via the
+      // transferComplete path) or permanently given up on resume. No resume is
+      // outstanding, so reclaim any newChunks a give-up left behind — otherwise
+      // an abandoned transfer would leak its whole (padded) body into IndexedDB.
+      // Idempotent (no-op for already-freed completed peers) and multi-peer-safe
+      // (runs only after ALL peers' sendWithReconcile settle).
+      await deleteDBNewChunk(undefined, undefined, hashHex);
 
       zeroFree(encryptionModule, senderSecretKey);
       encryptionModule._free(ptr8);

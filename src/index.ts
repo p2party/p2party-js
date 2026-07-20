@@ -16,6 +16,7 @@ import {
   deleteDBAddressBookEntry,
   deleteDBPeerFromBlacklist,
   getAllDBAddressBookEntries,
+  assembleToOPFS,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
   getDBAddressBookEntry,
@@ -400,6 +401,33 @@ const readMessage = async (
         rooms[roomIndex].messages[messageIndex].chunksReceivedReal ?? 0,
       retransmits: rooms[roomIndex].messages[messageIndex].retransmits ?? 0,
     };
+
+    // A completed FILE is reassembled by streaming its IndexedDB chunks straight
+    // to a disk-backed OPFS file in the worker — the whole file is never held in
+    // RAM (arbitrary-size support). Text and in-progress reads use the in-memory
+    // path below; if OPFS is unavailable, assembleToOPFS returns null and we fall
+    // through to the in-memory Blob too.
+    if (messageType !== MessageType.Text && percentage === 100) {
+      const filename = rooms[roomIndex].messages[messageIndex].filename;
+      const opfsFile = await assembleToOPFS(
+        rooms[roomIndex].messages[messageIndex].merkleRootHex,
+        rooms[roomIndex].messages[messageIndex].totalSize,
+        filename,
+        mimeType,
+      );
+      if (opfsFile) {
+        return {
+          message: opfsFile,
+          percentage,
+          size: rooms[roomIndex].messages[messageIndex].totalSize,
+          filename,
+          mimeType,
+          extension,
+          category,
+          ...telemetry,
+        };
+      }
+    }
 
     const chunks =
       percentage === 100

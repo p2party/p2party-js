@@ -5,7 +5,11 @@ import { setDBRoomMessageData } from "../db/api";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 
-import { setMessage, setMessageAllChunks } from "../reducers/roomSlice";
+import {
+  setMessage,
+  setMessageAllChunks,
+  incrementMessageStats,
+} from "../reducers/roomSlice";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -237,6 +241,18 @@ const processMessage = async (
           }),
         );
       }
+
+      // Telemetry: count every frame received (incl. decoys), flag the reals —
+      // lets the UI show total ≫ real (the obfuscation working). Dispatched
+      // AFTER the message is created above so the increment lands. Progress %
+      // stays over the real message (savedSize / totalSize), unchanged.
+      api.dispatch(
+        incrementMessageStats({
+          roomId,
+          merkleRootHex,
+          real: chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists,
+        }),
+      );
 
       return { receivedFullSize };
     } catch (error) {

@@ -5,6 +5,7 @@ import {
 
 // import { deleteDBSendQueue } from "../../db/api";
 import { decompileChannelMessageLabel } from "../../utils/channelLabel";
+import { drainAndClose } from "../../utils/drainAndClose";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -41,7 +42,9 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
     )
       dataChannels[i].send(messageHash.buffer as ArrayBuffer);
 
-    dataChannels[i].close();
+    // Drain the send buffer before closing so the just-queued finished-message
+    // (and any still-buffered chunks) are not wiped by close().
+    await drainAndClose(dataChannels[i]);
 
     if (alsoDeleteData) {
       const { merkleRootHex } = await decompileChannelMessageLabel(label);

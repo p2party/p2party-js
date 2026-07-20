@@ -36,11 +36,10 @@ describe("allocateSendMessage", () => {
       .filter(([k]) => /^ptr\d+$/.test(k))
       .map(([, v]) => v as number);
 
-    const viewOffsets = new Set(
-      Object.values(alloc)
-        .filter((v): v is Uint8Array => v instanceof Uint8Array)
-        .map((v) => v.byteOffset),
-    );
+    const viewOffsets = new Set<number>();
+    for (const v of Object.values(alloc)) {
+      if (v instanceof Uint8Array) viewOffsets.add(v.byteOffset);
+    }
 
     for (const p of pointers) {
       expect(viewOffsets.has(p)).toBe(true);

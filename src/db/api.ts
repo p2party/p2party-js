@@ -133,6 +133,13 @@ export const getDBAllChunks = (merkleRootHex?: string, hashHex?: string) =>
 export const getDBAllChunkLeafHashes = (merkleRootHex: string) =>
   callWorker("getDBAllChunkLeafHashes", merkleRootHex);
 
+export const assembleToOPFS = (
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+) => callWorker("assembleToOPFS", merkleRootHex, totalSize, filename, mimeType);
+
 export const getDBAllChunksCount = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBAllChunksCount", merkleRootHex, hashHex);
 

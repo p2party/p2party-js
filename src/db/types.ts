@@ -191,6 +191,16 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "assembleToOPFS";
+      args: [
+        merkleRootHex: string,
+        totalSize: number,
+        filename: string,
+        mimeType: string,
+      ];
+    }
+  | {
+      id: number;
       method: "getDBAllChunksCount";
       args: [merkleRootHex?: string, hashHex?: string];
     }
@@ -265,6 +275,7 @@ export interface WorkerMethodReturnTypes {
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
   getDBAllChunkLeafHashes: ChunkLeafHash[];
+  assembleToOPFS: File | null;
   getDBAllChunksCount: number;
   setDBChunk: undefined;
   getDBAllNewChunks: NewChunk[];

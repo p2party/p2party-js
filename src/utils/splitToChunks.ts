@@ -1,5 +1,6 @@
 import { getMessageType, MessageType } from "./messageTypes";
 import { uint8ArrayToHex } from "./uint8array";
+import { hashMerkleLeaf } from "./leafHash";
 import { serializeMetadata } from "./metadata";
 import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./constants";
 
@@ -168,8 +169,7 @@ export const splitToChunks = async (
       chunkEndIndex += r;
     }
 
-    const h = await window.crypto.subtle.digest("SHA-512", chunk);
-    const hash = new Uint8Array(h);
+    const hash = await hashMerkleLeaf(chunk);
     const realChunkHash = uint8ArrayToHex(hash);
     chunkHashes.set(hash, i * crypto_hash_sha512_BYTES);
 

@@ -6,6 +6,7 @@ import { setMessage, setMessageAllChunks } from "../reducers/roomSlice";
 
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
+import { markChunkAcked, markTransferComplete } from "./reconcile";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/dist/query";
 import type { Room } from "../reducers/roomSlice";
@@ -33,6 +34,9 @@ export const handleReadReceipt = async (
     const hashHex = room.messages[messageIndex].sha512Hex;
 
     if (hex === hashHex) {
+      // Receiver confirmed full receipt — stops the sender's reconcile loop.
+      markTransferComplete(peerId, hashHex);
+
       api.dispatch(
         setMessageAllChunks({
           roomId: room.id,
@@ -61,6 +65,10 @@ export const handleReadReceipt = async (
       const chunk = await getDBNewChunk(hex);
       const chunkIndex = chunk?.chunkIndex ?? -1;
       if (chunk && chunkIndex > -1) {
+        // Extrapolate the receiver's have-set from receipts: this real chunk is
+        // acked, so the reconcile loop won't resend it.
+        markChunkAcked(peerId, hashHex, chunkIndex);
+
         const messageIndex = room.messages.findLastIndex(
           (m) => m.merkleRootHex === merkleRootHex,
         );

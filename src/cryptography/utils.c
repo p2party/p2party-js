@@ -1,5 +1,34 @@
 #include "utils.h"
 
+/* Streaming SHA-512 exposed to JS so the send side can hash an arbitrarily large
+ * file incrementally (window-by-window) instead of loading the whole file into
+ * memory for crypto.subtle.digest. Thin wrappers over the already-linked
+ * libsodium multipart API; PLAIN SHA-512 (no domain prefix) so the result is
+ * byte-identical to crypto.subtle.digest("SHA-512", ...). The JS side allocates
+ * the 208-byte crypto_hash_sha512_state on the heap and passes its pointer. */
+int
+sha512_init(crypto_hash_sha512_state *state)
+{
+  if (!state) return -1;
+  return crypto_hash_sha512_init(state);
+}
+
+int
+sha512_update(crypto_hash_sha512_state *state, const uint8_t *in,
+              const unsigned int in_len)
+{
+  if (!state || !in) return -1;
+  return crypto_hash_sha512_update(state, in, (unsigned long long)in_len);
+}
+
+int
+sha512_final(crypto_hash_sha512_state *state,
+             uint8_t out[crypto_hash_sha512_BYTES])
+{
+  if (!state || !out) return -1;
+  return crypto_hash_sha512_final(state, out);
+}
+
 int
 serialize_metadata(uint8_t out[METADATA_LEN], uint64_t schemaVersion,
                    uint8_t messageType,

@@ -13,6 +13,7 @@ import {
 import { setMessage, deleteMessage } from "../reducers/roomSlice";
 
 import { getMerkleRoot } from "../cryptography/merkle";
+import { hashFileStreaming } from "../cryptography/hashStream";
 import {
   generateRandomRoomUrl,
   randomNumberInRange,
@@ -102,20 +103,20 @@ export const splitToChunks = async (
 
   const date = new Date();
 
-  // Hash the full file content using streaming for large files
-  let hashArrayBuffer: ArrayBuffer;
+  // Hash the full content. A string is already in memory (crypto.subtle). A File
+  // is streamed from disk through the WASM incremental SHA-512 (hashFileStreaming)
+  // so the whole file is never resident — this is what makes arbitrarily large
+  // files sendable. Both produce plain SHA-512, so the value is unchanged.
+  let sha512: Uint8Array;
   if (typeof message === "string") {
-    hashArrayBuffer = await window.crypto.subtle.digest(
+    const hashArrayBuffer = await window.crypto.subtle.digest(
       "SHA-512",
       (file as Uint8Array).buffer as ArrayBuffer,
     );
+    sha512 = new Uint8Array(hashArrayBuffer);
   } else {
-    // Stream the file in 1MB chunks through an incremental digest
-    // crypto.subtle.digest requires the full buffer, so we read the whole file
-    const fileBuffer = await (file as File).arrayBuffer();
-    hashArrayBuffer = await window.crypto.subtle.digest("SHA-512", fileBuffer);
+    sha512 = await hashFileStreaming(file as File, merkleModule);
   }
-  const sha512 = new Uint8Array(hashArrayBuffer);
   const sha512Hex = uint8ArrayToHex(sha512);
 
   const m = {

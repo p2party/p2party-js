@@ -90,7 +90,18 @@ receive_message(
     const uint8_t sender_public_key[crypto_sign_ed25519_PUBLICKEYBYTES],
     const uint8_t receiver_secret_key[crypto_sign_ed25519_SECRETKEYBYTES])
 {
-  int v = verify(crypto_sign_ed25519_PUBLICKEYBYTES, message, sender_public_key,
+  /* Authenticate the sender over a domain-separated transcript
+   * (DOMAIN || merkle_root || ephemeral_pk), not the bare ephemeral pk, so a
+   * signature harvested from the raw-nonce challenge oracle cannot be replayed
+   * as chunk auth. Must match the send path exactly. */
+  uint8_t transcript[CHUNK_AUTH_TRANSCRIPT_LEN];
+  memcpy(transcript, CHUNK_AUTH_DOMAIN, CHUNK_AUTH_DOMAIN_LEN);
+  memcpy(transcript + CHUNK_AUTH_DOMAIN_LEN, merkle_root,
+         crypto_hash_sha512_BYTES);
+  memcpy(transcript + CHUNK_AUTH_DOMAIN_LEN + crypto_hash_sha512_BYTES, message,
+         crypto_sign_ed25519_PUBLICKEYBYTES);
+
+  int v = verify(CHUNK_AUTH_TRANSCRIPT_LEN, transcript, sender_public_key,
                  &message[crypto_sign_ed25519_PUBLICKEYBYTES]);
 
   if (v != 0) return -1;

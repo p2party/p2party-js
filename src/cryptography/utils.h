@@ -29,6 +29,19 @@ const unsigned int IMPORTANT_DATA_LEN
       crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
       crypto_aead_chacha20poly1305_ietf_ABYTES; // Encrypted message auth tag
 const unsigned int CHUNK_LEN = MESSAGE_LEN - IMPORTANT_DATA_LEN;
+
+/* Per-chunk sender authentication signs a domain-separated transcript
+ * (DOMAIN || merkle_root || ephemeral_pk) instead of the bare ephemeral public
+ * key. Signing a context-free value let a signature harvested from the
+ * raw-nonce server challenge oracle be replayed as chunk auth (message
+ * forgery); binding to a distinct domain + the message root makes the two
+ * signature domains incompatible. Defined as macros so they are usable for
+ * fixed-size array bounds (no VLA). */
+#define CHUNK_AUTH_DOMAIN "p2party-chunk-auth-v1"
+#define CHUNK_AUTH_DOMAIN_LEN 21U /* strlen(CHUNK_AUTH_DOMAIN) */
+#define CHUNK_AUTH_TRANSCRIPT_LEN                                             \
+  (CHUNK_AUTH_DOMAIN_LEN + crypto_hash_sha512_BYTES                          \
+   + crypto_sign_ed25519_PUBLICKEYBYTES)
 const unsigned int DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
 const unsigned int ENCRYPTED_LEN
     = DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_NPUBBYTES

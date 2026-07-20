@@ -25,12 +25,19 @@ import {
 import { allocateSendMessage } from "../utils/allocators";
 import { zeroFree } from "../utils/zeroFree";
 import {
+  clearTransfer,
+  waitForCompletion,
+  getAckedChunks,
+} from "./reconcile";
+import {
   CHUNK_LEN,
   DECRYPTED_LEN,
   MAX_BUFFERED_AMOUNT,
   PROOF_LEN,
   CHUNK_AUTH_DOMAIN_BYTES,
   CHUNK_AUTH_TRANSCRIPT_LEN,
+  MAX_RETRANSMITS,
+  RETRANSMIT_TIMEOUT_MS,
 } from "../utils/constants";
 
 import {
@@ -71,6 +78,9 @@ const sendChunks = async (
   peerPublicKeyHex: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
+  // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
+  // real chunks — skip decoys and already-acked reals.
+  reconcileAcked?: Set<number>,
 ) => {
   let putItemInDBSendQueue = false;
 
@@ -146,6 +156,16 @@ const sendChunks = async (
 
     const metadataArray = new Uint8Array(unencryptedChunk.metadata);
     const metadata = deserializeMetadata(metadataArray);
+
+    // Reconcile: resend only un-acked REAL chunks. Real-vs-decoy is read from
+    // the chunk's own metadata (SSOT) — a decoy has chunkEnd − chunkStart >
+    // totalSize. Decoys are cover and never resent; acked reals are skipped.
+    if (reconcileAcked !== undefined) {
+      const isReal =
+        metadata.chunkEndIndex > metadata.chunkStartIndex &&
+        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
+      if (!isReal || reconcileAcked.has(metadata.chunkIndex)) continue;
+    }
 
     if (
       metadata.chunkStartIndex >= 0 &&
@@ -372,6 +392,74 @@ const sendChunks = async (
   encryptionModule._free(ptrTranscript);
 };
 
+// Send once (all chunks), then reconcile: resend ONLY the un-acked real chunks
+// until the receiver confirms completion (its final message-hash receipt) or the
+// retry budget is exhausted. The acked set is extrapolated from receipts in
+// handleReadReceipt. Selective (never resend-all) so no dup frames pile up.
+const sendWithReconcile = async (
+  channel: IRTCDataChannel | string,
+  api: BaseQueryApi,
+  roomId: string,
+  senderSecretKey: Uint8Array,
+  chunksLen: number,
+  chunkHashes: Uint8Array,
+  merkleRoot: Uint8Array,
+  hashHex: string,
+  peerId: string,
+  peerPublicKeyHex: string,
+  encryptionModule: LibCrypto,
+  merkleModule: LibCrypto,
+): Promise<void> => {
+  clearTransfer(peerId, hashHex);
+
+  // Initial pass: all chunks (real + decoy).
+  await sendChunks(
+    channel,
+    api,
+    roomId,
+    senderSecretKey,
+    chunksLen,
+    chunkHashes,
+    merkleRoot,
+    hashHex,
+    peerId,
+    peerPublicKeyHex,
+    encryptionModule,
+    merkleModule,
+  );
+
+  let retries = 0;
+  while (retries < MAX_RETRANSMITS) {
+    const done = await waitForCompletion(
+      peerId,
+      hashHex,
+      RETRANSMIT_TIMEOUT_MS * (retries + 1),
+    );
+    if (done) break;
+    if (typeof channel !== "string" && channel.readyState !== "open") break;
+
+    // Reconcile: resend only the reals the receiver hasn't acked yet.
+    await sendChunks(
+      channel,
+      api,
+      roomId,
+      senderSecretKey,
+      chunksLen,
+      chunkHashes,
+      merkleRoot,
+      hashHex,
+      peerId,
+      peerPublicKeyHex,
+      encryptionModule,
+      merkleModule,
+      getAckedChunks(peerId, hashHex),
+    );
+    retries++;
+  }
+
+  clearTransfer(peerId, hashHex);
+};
+
 export const handleSendMessage = async (
   data: string | File,
   api: BaseQueryApi,
@@ -484,7 +572,7 @@ export const handleSendMessage = async (
           crypto_sign_ed25519_PUBLICKEYBYTES * 2
         ) {
           promises.push(
-            sendChunks(
+            sendWithReconcile(
               channel,
               api,
               roomId,

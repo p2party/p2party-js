@@ -83,3 +83,10 @@ export const CHANNEL_OPEN_POLL_MS = 25;
 export const RECONNECT_RESUME_TIMEOUT_MS = 30000;
 export const RECONNECT_RESUME_POLL_MS = 500;
 export const MAX_RESUME_ATTEMPTS = 3;
+
+// Streaming send-side hash: read the file from disk one HASH_WINDOW_BYTES slice
+// at a time (O(1) memory — never the whole file) and feed it to the WASM
+// incremental SHA-512 in HASH_WASM_CHUNK_BYTES sub-chunks (the WASM heap buffer
+// is tiny and fixed; the merkle module's memory can't grow). SSOT.
+export const HASH_WINDOW_BYTES = 1024 * 1024; // 1 MiB disk read window
+export const HASH_WASM_CHUNK_BYTES = 64 * 1024; // 64 KiB WASM update buffer

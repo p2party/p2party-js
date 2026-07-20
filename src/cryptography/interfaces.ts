@@ -2,6 +2,10 @@ export const crypto_auth_hmacsha512_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_auth_hmacsha512_KEYBYTES =
   32 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_hash_sha512_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+// sizeof(crypto_hash_sha512_state) = uint64_t state[8] (64) + uint64_t count[2]
+// (16) + uint8_t buf[128] (128) = 208 bytes; the JS side mallocs this for the
+// streaming-hash state passed to _sha512_init/update/final.
+export const crypto_hash_sha512_STATEBYTES = 208;
 export const crypto_sign_ed25519_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_sign_ed25519_SEEDBYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_sign_ed25519_PUBLICKEYBYTES =

@@ -82,6 +82,21 @@ export interface LibCrypto extends EmscriptenModule {
     salt: number,
   ): number;
 
+  // Streaming SHA-512 (plain, no domain separation) — state is a heap
+  // crypto_hash_sha512_state (208 bytes) allocated by JS.
+  _sha512_init(
+    state: number, // Uint8Array.byteOffset (208-byte state)
+  ): number;
+  _sha512_update(
+    state: number, // Uint8Array.byteOffset
+    in_data: number, // Uint8Array.byteOffset
+    in_len: number,
+  ): number;
+  _sha512_final(
+    state: number, // Uint8Array.byteOffset
+    out: number, // Uint8Array.byteOffset (64 bytes)
+  ): number;
+
   // P2Party
   _receive_message(
     decrypted: number, // Uint8Array.byteOffset

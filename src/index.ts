@@ -331,6 +331,11 @@ const readMessage = async (
   mimeType: MimeType;
   extension: FileExtension;
   category: string;
+  // Telemetry (percentage stays over the REAL message): frames seen incl.
+  // decoys, real chunks, and sender retransmit rounds.
+  chunksReceivedTotal?: number;
+  chunksReceivedReal?: number;
+  retransmits?: number;
 }> => {
   if (!merkleRootHex && !hashHex)
     return {
@@ -386,6 +391,15 @@ const readMessage = async (
               100,
           );
 
+    // Telemetry over the padded transfer — percentage above stays real-only.
+    const telemetry = {
+      chunksReceivedTotal:
+        rooms[roomIndex].messages[messageIndex].chunksReceivedTotal ?? 0,
+      chunksReceivedReal:
+        rooms[roomIndex].messages[messageIndex].chunksReceivedReal ?? 0,
+      retransmits: rooms[roomIndex].messages[messageIndex].retransmits ?? 0,
+    };
+
     const chunks =
       percentage === 100
         ? await getDBAllChunks(
@@ -416,6 +430,7 @@ const readMessage = async (
           mimeType,
           extension,
           category,
+          ...telemetry,
         };
       } else {
         return {
@@ -426,6 +441,7 @@ const readMessage = async (
           mimeType,
           extension,
           category,
+          ...telemetry,
         };
       }
     } catch {

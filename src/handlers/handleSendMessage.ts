@@ -23,6 +23,7 @@ import {
   decompileChannelMessageLabel,
 } from "../utils/channelLabel";
 import { allocateSendMessage } from "../utils/allocators";
+import { zeroFree } from "../utils/zeroFree";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
@@ -82,8 +83,6 @@ const sendChunks = async (
 
   const {
     ptr1,
-    ptr2,
-    ptr3,
     ptr5,
     ptr6,
     ptr7,
@@ -346,8 +345,8 @@ const sendChunks = async (
   }
 
   encryptionModule._free(ptr1);
-  encryptionModule._free(ptr2);
-  encryptionModule._free(ptr3);
+  zeroFree(encryptionModule, senderEphemeralSecretKey);
+  zeroFree(encryptionModule, seedBytes);
   encryptionModule._free(ptr5);
   encryptionModule._free(ptr6);
   encryptionModule._free(ptr7);
@@ -487,7 +486,7 @@ export const handleSendMessage = async (
 
       await Promise.allSettled(promises);
 
-      encryptionModule._free(ptr4);
+      zeroFree(encryptionModule, senderSecretKey);
       encryptionModule._free(ptr8);
     }
   } catch (error) {

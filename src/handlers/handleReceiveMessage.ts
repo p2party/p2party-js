@@ -3,6 +3,7 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { isStorableChunkRange } from "../utils/chunkBounds";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import { getDBMessageData, setDBChunk } from "../db/api";
 
@@ -44,11 +45,14 @@ export const handleReceiveMessage = async (
         metadata.chunkStartIndex,
         metadata.chunkEndIndex,
       );
-      const chunkHashBuffer = await window.crypto.subtle.digest(
-        "SHA-512",
-        chunk,
+      // The domain-separated leaf hash SHA-512(0x00 || chunk) was already
+      // computed in C during proof verification and written over the consumed
+      // proof region — reuse it as the read-receipt token instead of
+      // re-hashing the 62KB chunk here.
+      const chunkHash = decrypted.slice(
+        METADATA_LEN,
+        METADATA_LEN + crypto_hash_sha512_BYTES,
       );
-      const chunkHash = new Uint8Array(chunkHashBuffer);
 
       const chunkSize =
         metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize

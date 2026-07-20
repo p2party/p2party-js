@@ -130,6 +130,9 @@ export const getDBSendQueue = (label: string, toPeerId: string) =>
 export const getDBAllChunks = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBAllChunks", merkleRootHex, hashHex);
 
+export const getDBAllChunkLeafHashes = (merkleRootHex: string) =>
+  callWorker("getDBAllChunkLeafHashes", merkleRootHex);
+
 export const getDBAllChunksCount = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBAllChunksCount", merkleRootHex, hashHex);
 

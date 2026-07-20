@@ -59,6 +59,8 @@ export const handleReadReceipt = async (
           messageHash,
           alsoDeleteData: false,
           alsoSendFinishedMessage: false,
+          // The transfer completed — the sender may free its newChunks now.
+          transferComplete: true,
         }),
       );
     } else {

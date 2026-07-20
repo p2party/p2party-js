@@ -49,5 +49,5 @@
     "types": ["@types/node", "@reduxjs/toolkit", "immer"]
   },
   "include": ["src"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "src/**/*.test.ts", "src/**/*.spec.ts"]
 }

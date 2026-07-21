@@ -34,6 +34,13 @@ through disk instead of ever sitting in memory. **No wire-protocol change** — 
 - **`getSendChunksCount(hashHex)`** — a read-only diagnostic returning how many
   outbound chunks are still buffered for a message (0 once a send completes or is
   abandoned). Useful for surfacing send-buffer usage.
+- **`readMessage(merkleRootHex, hashHex?, materialize?)`** — a `materialize`
+  flag (default `true`, backward-compatible). Pass `false` to read a completed
+  file's metadata (name/size/category) **without** reassembling the file — so a
+  UI can render list previews and file bubbles cheaply and only materialize the
+  `File` on open/download/save. Consumers can then offer a "Save as…" that
+  streams the disk-backed `File` straight to a user-chosen location
+  (`showSaveFilePicker`) without ever holding it in RAM.
 
 ### Changed
 

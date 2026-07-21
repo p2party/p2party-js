@@ -325,6 +325,11 @@ const sendMessage = async (
 const readMessage = async (
   merkleRootHex: string,
   hashHex?: string,
+  // When false, a COMPLETED file is NOT materialized (no OPFS reassembly / Blob):
+  // the result carries metadata only (message: ""). Use this to render list
+  // previews and file bubbles cheaply, and materialize (default) only when the
+  // user actually opens / downloads / saves the file. Text is always returned.
+  materialize = true,
 ): Promise<{
   message: string | Blob;
   percentage: number;
@@ -401,6 +406,22 @@ const readMessage = async (
         rooms[roomIndex].messages[messageIndex].chunksReceivedReal ?? 0,
       retransmits: rooms[roomIndex].messages[messageIndex].retransmits ?? 0,
     };
+
+    // Metadata-only read: skip the (potentially huge) file materialization for a
+    // completed file when the caller only needs name/size/category (list
+    // previews, file bubbles). Avoids reassembling the whole file on the render
+    // path — materialize it only on open/download/save.
+    if (messageType !== MessageType.Text && !materialize)
+      return {
+        message: "",
+        percentage,
+        size: rooms[roomIndex].messages[messageIndex].totalSize,
+        filename: rooms[roomIndex].messages[messageIndex].filename,
+        mimeType,
+        extension,
+        category,
+        ...telemetry,
+      };
 
     // A completed FILE is reassembled by streaming its IndexedDB chunks straight
     // to a disk-backed OPFS file in the worker — the whole file is never held in

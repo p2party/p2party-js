@@ -17,6 +17,7 @@ import {
   deleteDBPeerFromBlacklist,
   getAllDBAddressBookEntries,
   assembleToOPFS,
+  getReceiveFile,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
   getDBAddressBookEntry,
@@ -423,19 +424,30 @@ const readMessage = async (
         ...telemetry,
       };
 
-    // A completed FILE is reassembled by streaming its IndexedDB chunks straight
-    // to a disk-backed OPFS file in the worker — the whole file is never held in
-    // RAM (arbitrary-size support). Text and in-progress reads use the in-memory
-    // path below; if OPFS is unavailable, assembleToOPFS returns null and we fall
-    // through to the in-memory Blob too.
+    // A completed FILE is served from a disk-backed OPFS file — the whole file
+    // is never held in RAM (arbitrary-size support). A RECEIVED file already
+    // lives in OPFS (chunks were written there at their offsets as they
+    // arrived), so getReceiveFile just opens it. A SENT copy's bytes are in the
+    // IndexedDB chunks store, so it is streamed to OPFS by assembleToOPFS. Text
+    // and in-progress reads use the in-memory path below; if OPFS is unavailable
+    // either call returns null and we fall through to the in-memory Blob too.
     if (messageType !== MessageType.Text && percentage === 100) {
       const filename = rooms[roomIndex].messages[messageIndex].filename;
-      const opfsFile = await assembleToOPFS(
-        rooms[roomIndex].messages[messageIndex].merkleRootHex,
-        rooms[roomIndex].messages[messageIndex].totalSize,
-        filename,
-        mimeType,
-      );
+      const isSent =
+        rooms[roomIndex].messages[messageIndex].fromPeerId === keyPair.peerId;
+      const opfsFile = isSent
+        ? await assembleToOPFS(
+            rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            rooms[roomIndex].messages[messageIndex].totalSize,
+            filename,
+            mimeType,
+          )
+        : await getReceiveFile(
+            rooms[roomIndex].messages[messageIndex].merkleRootHex,
+            rooms[roomIndex].messages[messageIndex].totalSize,
+            filename,
+            mimeType,
+          );
       if (opfsFile) {
         return {
           message: opfsFile,
@@ -458,7 +470,13 @@ const readMessage = async (
           )
         : [];
 
-    const dataChunks = chunks.map((c) => c.data);
+    // Only records that still carry bytes belong in the in-memory Blob. This
+    // fallback runs for text, in-progress reads, and completed files where OPFS
+    // was unavailable/old-format (all such records have `data`); a received file
+    // whose bytes are in OPFS never reaches here (getReceiveFile returned it).
+    const dataChunks = chunks
+      .map((c) => c.data)
+      .filter((d): d is ArrayBuffer => d != null);
 
     try {
       const data = new Blob(dataChunks, {
@@ -483,6 +501,26 @@ const readMessage = async (
           ...telemetry,
         };
       } else {
+        // Guard: with receive-time OPFS writes, a received file's bytes live in
+        // OPFS and its IndexedDB records are bytesless. This in-memory Blob
+        // fallback is only complete when the bytes ARE in IndexedDB (OPFS
+        // unavailable / sender copy / old rows). If we reach here for a completed
+        // file yet the assembled Blob is short (getReceiveFile failed
+        // exceptionally), never hand back a silently truncated file.
+        if (
+          percentage === 100 &&
+          data.size !== rooms[roomIndex].messages[messageIndex].totalSize
+        )
+          return {
+            message: "Irretrievable message",
+            percentage: 0,
+            size: rooms[roomIndex].messages[messageIndex].totalSize,
+            filename: rooms[roomIndex].messages[messageIndex].filename,
+            mimeType,
+            extension,
+            category,
+          };
+
         return {
           message: data,
           percentage,

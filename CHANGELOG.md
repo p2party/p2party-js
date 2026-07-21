@@ -4,6 +4,43 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.2] — 2026-07-21
+
+Receive-side storage for files is re-architected so a received file's bytes live
+in exactly one place — its disk-backed OPFS file — instead of being buffered in
+IndexedDB and reassembled on read. This halves peak storage for large transfers
+and makes reload-resume fill only the still-missing gaps. **No wire-protocol
+change** and **no public-API change** — `readMessage` still returns a disk-backed
+`File`; a 0.9.2 peer interoperates with 0.9.1/0.9.0.
+
+### Changed
+
+- **Receive-time OPFS writes (no double storage).** Each received real FILE chunk
+  is now written straight into a per-message OPFS file at its byte offset
+  (`chunkIndex × uniformSize`) as it arrives — out of order — into a file
+  pre-sized to the total size (zero-filled). IndexedDB keeps only the per-chunk
+  leaf-hash "have-set" (bytesless records), not the bytes. Previously every
+  received chunk's bytes were stored in IndexedDB **and** the whole file was
+  reassembled into OPFS on read, doubling peak disk for the duration; that
+  reassembly pass is gone. `uniformSize` (real bytes per full chunk) is a
+  per-send tunable not carried on the wire, so it is learned empirically
+  (`max(realLen)`, exact after two chunks or from chunk 0); the ≤1 chunk that
+  arrives before it is known is kept in IndexedDB and migrated into OPFS when the
+  file is opened.
+- **Reload-resume fills only the gaps.** Because the OPFS file (with zeros in the
+  not-yet-received gaps) and the leaf-hash have-set both persist across a page
+  reload, a resumed transfer overwrites only the remaining gaps rather than
+  restarting. The have-set is a strict subset of the bytes actually on disk
+  (bytes are written before the record is recorded), so a resumed sender never
+  skips a chunk whose bytes are missing.
+
+### Notes
+
+- Text messages and the sender's own copy of a sent file are unchanged (still
+  stored in IndexedDB); only the receive path for files changed.
+- Where worker OPFS is unavailable (very old browsers), received file bytes fall
+  back to IndexedDB and the in-memory `Blob` read path, exactly as before.
+
 ## [0.9.1] — 2026-07-21
 
 Reliability and scale for the peer-to-peer file transfer layer: an in-flight

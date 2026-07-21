@@ -42,14 +42,42 @@ export interface Chunk {
   merkleRoot: string;
   hash: string;
   chunkIndex: number;
-  data: ArrayBuffer;
+  // The real chunk bytes. OPTIONAL on the receiver: a received FILE chunk is
+  // written straight into its pre-sized OPFS file at chunkIndex*uniformSize as it
+  // arrives, and only its leaf-hash is kept here (the have-set), so `data` is
+  // absent. It IS present for (a) the sender's self-copy, (b) received TEXT
+  // chunks, and (c) the <=1 receiver "straggler" chunk that arrived before
+  // uniformSize was known (kept in IndexedDB until getReceiveFile migrates it
+  // into OPFS). Invariant: a receiver have-set record with NO `data` means its
+  // bytes are durably in OPFS — so the have-set is always a subset of the bytes
+  // actually on disk, which is what makes crash/reload resume safe.
+  data?: ArrayBuffer;
   mimeType: string;
+  // Real byte length of this chunk (chunkEndIndex - chunkStartIndex). Persisted
+  // on the receiver so uniformSize = max(realLen) is recomputable at any time
+  // (e.g. at read-time migration), even from bytesless records. Absent on old
+  // rows and on the sender's self-copy.
+  realLen?: number;
   // The domain-separated leaf hash SHA-512(0x00 || chunk) hex — the exact
   // read-receipt token this chunk drew. Persisted (receiver only) so it can be
   // re-emitted on reconnect without re-hashing (the padded chunk it was hashed
   // over is discarded; only the real slice is stored). Optional: the sender's
   // self-copy has no receipt token, and pre-existing rows predate this field.
   leafHash?: string;
+}
+
+// Input to the receive-time OPFS write path. Carries the real chunk bytes plus
+// everything the worker needs to (a) place them at chunkIndex*uniformSize in the
+// pre-sized OPFS file and (b) persist the bytesless have-set record.
+export interface ReceiveChunk {
+  merkleRoot: string;
+  hash: string;
+  chunkIndex: number;
+  mimeType: string;
+  leafHash: string;
+  realLen: number;
+  totalSize: number;
+  data: ArrayBuffer;
 }
 
 // Lightweight projection of a stored chunk used by the reconnect re-emit — just
@@ -207,6 +235,22 @@ export type WorkerMessages =
   | { id: number; method: "setDBChunk"; args: [chunk: Chunk] }
   | {
       id: number;
+      method: "storeReceiveChunk";
+      args: [chunk: ReceiveChunk];
+    }
+  | {
+      id: number;
+      method: "getReceiveFile";
+      args: [
+        merkleRootHex: string,
+        totalSize: number,
+        filename: string,
+        mimeType: string,
+      ];
+    }
+  | { id: number; method: "closeReceiveFile"; args: [merkleRootHex: string] }
+  | {
+      id: number;
       method: "getDBAllNewChunks";
       args: [hashHex?: string, merkleRootHex?: string];
     }
@@ -278,6 +322,10 @@ export interface WorkerMethodReturnTypes {
   assembleToOPFS: File | null;
   getDBAllChunksCount: number;
   setDBChunk: undefined;
+  // true if the chunk was newly stored; false if it was already present (dedup).
+  storeReceiveChunk: boolean;
+  getReceiveFile: File | null;
+  closeReceiveFile: undefined;
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
   setDBNewChunk: undefined;

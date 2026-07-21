@@ -9,6 +9,7 @@ import type {
   MessageData,
   Chunk,
   ChunkLeafHash,
+  ReceiveChunk,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
@@ -669,8 +670,7 @@ async function fnGetDBAllChunkLeafHashes(
 // The OPFS StorageManager (worker context). getDirectory + the file handle's
 // createSyncAccessHandle are the two capabilities we feature-detect.
 const opfsStorage = ():
-  | { getDirectory?: () => Promise<FileSystemDirectoryHandle> }
-  | undefined =>
+  { getDirectory?: () => Promise<FileSystemDirectoryHandle> } | undefined =>
   (
     globalThis as unknown as {
       navigator?: {
@@ -686,6 +686,25 @@ const opfsStorage = ():
 // in-memory Blob — reintroducing the whole-file-in-RAM OOM this feature removes.
 // At most one assemble per merkleRoot is ever in flight; the rest share it.
 const opfsAssembling = new Map<string, Promise<File | null>>();
+
+// The worker-only synchronous OPFS file access handle (Safari-safe). getSize is
+// used by the receive path to detect whether the file is already pre-sized.
+type OPFSSyncAccessHandle = {
+  getSize: () => number;
+  truncate: (size: number) => void;
+  write: (buffer: ArrayBufferView, options: { at: number }) => number;
+  flush: () => void;
+  close: () => void;
+};
+
+const getCreateSyncAccessHandle = (
+  fileHandle: FileSystemFileHandle,
+): (() => Promise<OPFSSyncAccessHandle>) | undefined =>
+  (
+    fileHandle as unknown as {
+      createSyncAccessHandle?: () => Promise<OPFSSyncAccessHandle>;
+    }
+  ).createSyncAccessHandle;
 
 const wrapOPFSFile = (
   file: File,
@@ -769,7 +788,9 @@ async function assembleToOPFSImpl(
       }
     ).createSyncAccessHandle;
     if (typeof createSyncAccessHandle !== "function") {
-      console.warn("OPFS sync access handle unavailable — reassembling in memory");
+      console.warn(
+        "OPFS sync access handle unavailable — reassembling in memory",
+      );
       return null;
     }
 
@@ -784,7 +805,9 @@ async function assembleToOPFSImpl(
       const index = tx.objectStore("chunks").index("merkleRoot");
       let cursor = await index.openCursor(merkleRootHex);
       while (cursor) {
-        const view = new Uint8Array(cursor.value.data);
+        // This path streams a SENT copy, whose chunks always carry `data`; a
+        // bytesless record (receiver have-set) contributes 0 bytes.
+        const view = new Uint8Array(cursor.value.data ?? new ArrayBuffer(0));
         // write() may write fewer bytes than requested (storage pressure); loop
         // until the whole chunk lands so the file isn't silently truncated.
         let written = 0;
@@ -850,6 +873,435 @@ async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
       });
   } catch {
     /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Receive-time OPFS write path
+//
+// Instead of storing every received real chunk's bytes in IndexedDB and
+// reassembling the whole file at read time (double storage — fatal for GB
+// files), each received real chunk is written straight into a per-message OPFS
+// file at its byte offset (chunkIndex * uniformSize) as it arrives, out of
+// order. IndexedDB keeps only the leaf-hash have-set (bytesless records). The
+// file is pre-sized to totalSize (truncate zero-fills), so not-yet-received
+// chunks read as zeros and resume just overwrites the gaps.
+//
+// uniformSize (real bytes per full chunk) is NOT in the wire metadata and is a
+// per-send tunable, so it is learned empirically: max(realLen) over received
+// chunks — exact once >=2 chunks have been seen, or immediately from chunk 0
+// (always a full chunk unless the file is a single chunk). The <=1 chunk that
+// arrives before uniformSize is known (a non-zero index as the first received
+// chunk) can't be offset-placed yet, so it is kept in IndexedDB WITH its bytes
+// (durable, acked normally) and migrated into OPFS later by getReceiveFile.
+//
+// Invariant: a bytesless have-set record means the chunk's bytes are durably in
+// OPFS, so the have-set is always a subset of the bytes on disk — this is what
+// makes crash/reload resume safe (a resumed sender never skips a chunk whose
+// bytes are missing).
+// ---------------------------------------------------------------------------
+
+interface ReceiveFileEntry {
+  access: OPFSSyncAccessHandle;
+  uniformSize: number; // real bytes per full chunk; 0 until known
+  uniformKnown: boolean;
+  maxRealLen: number;
+  seenCount: number;
+}
+
+// One open sync-access-handle per active transfer, held across all its writes.
+const opfsReceiving = new Map<string, ReceiveFileEntry>();
+// In-flight opens: createSyncAccessHandle takes an EXCLUSIVE lock and throws if
+// one is already open, so concurrent openers (e.g. the same file broadcast from
+// two peers) share a single open instead of each racing to lock.
+const opfsReceivingOpening = new Map<
+  string,
+  Promise<ReceiveFileEntry | null>
+>();
+// Coalesce concurrent finalize/read opens for one merkleRoot (readMessage polls).
+const opfsFinalizing = new Map<string, Promise<File | null>>();
+
+// Serialize ALL receive-file operations (write / finalize / close / delete) for a
+// given merkleRoot. The worker's onmessage is async and interleaves at awaits, so
+// without this the same file arriving concurrently from two peers would race the
+// shared ReceiveFileEntry (double-counting a chunk and locking uniformSize to the
+// short final chunk) and the dedup count()->add() would be a TOCTOU. A single
+// per-merkleRoot queue makes the whole receive path for one file strictly ordered.
+const receiveLocks = new Map<string, Promise<void>>();
+async function withReceiveLock<T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = receiveLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const mine = prev.then(() => gate);
+  receiveLocks.set(key, mine);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (receiveLocks.get(key) === mine) receiveLocks.delete(key);
+  }
+}
+
+// Bound the number of simultaneously-open receive handles. A transfer that stalls
+// and is never completed/read/deleted would otherwise keep its exclusive handle
+// open for the worker's lifetime; evicting the oldest (closing its handle) caps
+// that — an evicted transfer's next chunk simply reopens the file (truncate is a
+// no-op on the already-sized file), so eviction is safe.
+const MAX_OPEN_RECEIVE_HANDLES = 8;
+
+async function openReceiveHandleImpl(
+  merkleRootHex: string,
+  totalSize: number,
+): Promise<ReceiveFileEntry | null> {
+  const storage = opfsStorage();
+  if (!storage || typeof storage.getDirectory !== "function") return null;
+  const root = await storage.getDirectory();
+  const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
+    create: true,
+  });
+  const fileHandle = await dir.getFileHandle(merkleRootHex, { create: true });
+  const createSyncAccessHandle = getCreateSyncAccessHandle(fileHandle);
+  if (typeof createSyncAccessHandle !== "function") return null;
+  const access = await createSyncAccessHandle.call(fileHandle);
+  // Pre-size to totalSize; truncate to a larger size zero-fills, so gaps are
+  // zeros until their chunks land. On resume the file is already totalSize
+  // (OPFS persists across reloads) so this is a no-op that preserves the data.
+  if (totalSize > 0 && access.getSize() !== totalSize)
+    access.truncate(totalSize);
+  return {
+    access,
+    uniformSize: 0,
+    uniformKnown: false,
+    maxRealLen: 0,
+    seenCount: 0,
+  };
+}
+
+async function ensureReceiveHandle(
+  merkleRootHex: string,
+  totalSize: number,
+): Promise<ReceiveFileEntry | null> {
+  const open = opfsReceiving.get(merkleRootHex);
+  if (open) return open;
+  const inflight = opfsReceivingOpening.get(merkleRootHex);
+  if (inflight) return inflight;
+  // Cap open handles: evict the oldest (never the one we're opening) so a set of
+  // stalled, never-completed transfers can't pin exclusive handles forever.
+  if (opfsReceiving.size >= MAX_OPEN_RECEIVE_HANDLES) {
+    for (const k of opfsReceiving.keys()) {
+      if (k !== merkleRootHex) {
+        await fnCloseReceiveFile(k);
+        break;
+      }
+    }
+  }
+  const p = openReceiveHandleImpl(merkleRootHex, totalSize).catch((error) => {
+    console.error(error);
+    return null;
+  });
+  opfsReceivingOpening.set(merkleRootHex, p);
+  try {
+    const entry = await p;
+    if (entry) opfsReceiving.set(merkleRootHex, entry);
+    return entry;
+  } finally {
+    opfsReceivingOpening.delete(merkleRootHex);
+  }
+}
+
+// write() may write fewer bytes than requested (storage pressure) — loop until
+// the whole chunk lands so the file is not silently truncated.
+function writeReceiveAt(
+  access: OPFSSyncAccessHandle,
+  offset: number,
+  data: ArrayBuffer,
+): void {
+  const view = new Uint8Array(data);
+  let written = 0;
+  while (written < view.length) {
+    const n = access.write(view.subarray(written), { at: offset + written });
+    if (n <= 0) throw new Error("OPFS short write");
+    written += n;
+  }
+}
+
+// Place a real chunk's bytes into the OPFS file if its offset is computable;
+// return false if it isn't yet (uniformSize unknown for a non-zero chunk) or
+// OPFS is unavailable — in which case the caller keeps the bytes in IndexedDB.
+async function placeReceiveChunk(
+  merkleRootHex: string,
+  chunkIndex: number,
+  realLen: number,
+  totalSize: number,
+  data: ArrayBuffer,
+): Promise<boolean> {
+  const entry = await ensureReceiveHandle(merkleRootHex, totalSize);
+  if (!entry) return false; // OPFS unavailable
+
+  entry.maxRealLen = Math.max(entry.maxRealLen, realLen);
+  entry.seenCount += 1;
+
+  if (!entry.uniformKnown) {
+    if (chunkIndex === 0) {
+      // Chunk 0 is a full chunk whenever the file has >1 chunk, so it pins
+      // uniformSize exactly. A single-chunk file (realLen === totalSize) writes
+      // at offset 0 regardless, so uniformSize stays irrelevant.
+      if (realLen < totalSize) entry.uniformSize = realLen;
+      entry.uniformKnown = true;
+    } else if (entry.seenCount >= 2) {
+      // Any 2 chunks include >=1 full one (only the last chunk is short), so
+      // max(realLen) is the exact uniform size.
+      entry.uniformSize = entry.maxRealLen;
+      entry.uniformKnown = true;
+    }
+  }
+
+  if (!entry.uniformKnown) return false; // first non-zero chunk — keep in IDB
+
+  const offset = chunkIndex === 0 ? 0 : chunkIndex * entry.uniformSize;
+  writeReceiveAt(entry.access, offset, data);
+  // Flush so the bytes are durable BEFORE fnStoreReceiveChunk commits the
+  // (bytesless) have-set record. Without this a bytesless record could reach
+  // disk while its OPFS write is still buffered (independent storage backends,
+  // no cross-store ordering), and after a crash a resumed sender would skip a
+  // chunk whose bytes were lost — a silent zero-gap. This is what makes the
+  // "bytesless record ⇒ bytes durably in OPFS" invariant actually hold.
+  entry.access.flush();
+  return true;
+}
+
+// Store a received real FILE chunk: write its bytes into the OPFS file at its
+// offset if placeable, else keep them in the have-set record; always persist the
+// (leaf-hash) have-set entry. Returns true if newly stored, false on dedup.
+async function fnStoreReceiveChunk(chunk: ReceiveChunk): Promise<boolean> {
+  const {
+    merkleRoot,
+    hash,
+    chunkIndex,
+    mimeType,
+    leafHash,
+    realLen,
+    totalSize,
+    data,
+  } = chunk;
+
+  // Dedup first — also skips a redundant OPFS write for a chunk we already have.
+  const existsDb = await getDB();
+  const already = await existsDb.count("chunks", [merkleRoot, chunkIndex]);
+  existsDb.close();
+  if (already > 0) return false;
+
+  // Write bytes to OPFS FIRST (durable), then record the have-set entry: if we
+  // crash between the two we get bytes-without-record (resent + rewritten
+  // idempotently) — never the corrupting record-without-bytes.
+  let wroteToOPFS = false;
+  try {
+    wroteToOPFS = await placeReceiveChunk(
+      merkleRoot,
+      chunkIndex,
+      realLen,
+      totalSize,
+      data,
+    );
+  } catch (error) {
+    console.error(error);
+    wroteToOPFS = false;
+  }
+
+  const record: Chunk = wroteToOPFS
+    ? { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash }
+    : { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash, data };
+
+  try {
+    const db = await getDB();
+    await db.add("chunks", record); // throws on a race duplicate — dedup backstop
+    db.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Flush + close the open write handle for a transfer so the finished file can be
+// opened for reading without hitting the exclusive lock. Idempotent.
+async function fnCloseReceiveFile(merkleRootHex: string): Promise<void> {
+  const inflight = opfsReceivingOpening.get(merkleRootHex);
+  if (inflight) {
+    try {
+      await inflight;
+    } catch {
+      /* ignore */
+    }
+  }
+  const entry = opfsReceiving.get(merkleRootHex);
+  if (entry) {
+    opfsReceiving.delete(merkleRootHex);
+    try {
+      entry.access.flush();
+      entry.access.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function closeAllReceiveFiles(): Promise<void> {
+  // Await in-flight opens too, so a handle that is opening concurrently with a
+  // full wipe is captured and closed rather than leaked past removeEntry.
+  const opening = [...opfsReceivingOpening.values()];
+  for (let i = 0; i < opening.length; i++) {
+    try {
+      await opening[i];
+    } catch {
+      /* ignore */
+    }
+  }
+  const keys = [...opfsReceiving.keys()];
+  for (let i = 0; i < keys.length; i++) await fnCloseReceiveFile(keys[i]);
+}
+
+// Return a fully-received message's OPFS file as a disk-backed File (no
+// reassembly). Migrates any straggler bytes still in IndexedDB into the file
+// first. Returns null (→ caller falls back to an in-memory Blob) when OPFS is
+// unavailable or the records are old-format (no realLen to derive offsets).
+async function fnGetReceiveFile(
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+): Promise<File | null> {
+  if (merkleRootHex.length !== 2 * crypto_hash_sha512_BYTES) return null;
+  // Drop any open write handle so we can finalize/read under a fresh lock.
+  await fnCloseReceiveFile(merkleRootHex);
+
+  const inFlight = opfsFinalizing.get(merkleRootHex);
+  if (inFlight) return inFlight;
+  const run = getReceiveFileImpl(merkleRootHex, totalSize, filename, mimeType);
+  opfsFinalizing.set(merkleRootHex, run);
+  try {
+    return await run;
+  } finally {
+    opfsFinalizing.delete(merkleRootHex);
+  }
+}
+
+async function getReceiveFileImpl(
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+): Promise<File | null> {
+  try {
+    const storage = opfsStorage();
+    if (!storage || typeof storage.getDirectory !== "function") return null;
+    const root = await storage.getDirectory();
+    const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
+      create: true,
+    });
+    const fileHandle = await dir.getFileHandle(merkleRootHex, { create: true });
+
+    const db = await getDB();
+
+    // Scan the have-set with a cursor (one record resident) to find any chunks
+    // still carrying bytes (the <=1 straggler received before uniformSize was
+    // known, or everything if OPFS was unavailable during receive) and to derive
+    // uniformSize = max(realLen). Bytesless records deserialize to a few hundred
+    // bytes each, so this never loads the file into RAM.
+    const dataBearing: Chunk[] = [];
+    let uniformSize = 0;
+    try {
+      const tx = db.transaction("chunks", "readonly");
+      const index = tx.objectStore("chunks").index("merkleRoot");
+      let cursor = await index.openCursor(merkleRootHex);
+      while (cursor) {
+        const v = cursor.value;
+        if (v.realLen && v.realLen > uniformSize) uniformSize = v.realLen;
+        if (v.data && v.data.byteLength > 0) dataBearing.push(v);
+        cursor = await cursor.continue();
+      }
+      await tx.done;
+    } catch (error) {
+      console.error(error);
+      db.close();
+      return null;
+    }
+
+    // Fast path: file is the right size and there is nothing left to migrate.
+    const existing = await fileHandle.getFile();
+    if (
+      totalSize > 0 &&
+      existing.size === totalSize &&
+      dataBearing.length === 0
+    ) {
+      db.close();
+      return wrapOPFSFile(existing, filename, merkleRootHex, mimeType);
+    }
+
+    // Old-format straggler (bytes but no realLen) → can't compute its offset;
+    // bail to the in-memory Blob fallback (its bytes are still in IndexedDB).
+    if (
+      dataBearing.length > 0 &&
+      (uniformSize === 0 || dataBearing.some((r) => r.realLen == null))
+    ) {
+      db.close();
+      return null;
+    }
+
+    const createSyncAccessHandle = getCreateSyncAccessHandle(fileHandle);
+    if (typeof createSyncAccessHandle !== "function") {
+      db.close();
+      return null;
+    }
+    const access = await createSyncAccessHandle.call(fileHandle);
+    try {
+      if (totalSize > 0 && access.getSize() !== totalSize)
+        access.truncate(totalSize);
+      for (let i = 0; i < dataBearing.length; i++) {
+        const r = dataBearing[i];
+        const offset = r.chunkIndex === 0 ? 0 : r.chunkIndex * uniformSize;
+        writeReceiveAt(access, offset, r.data as ArrayBuffer);
+      }
+      access.flush();
+    } finally {
+      access.close();
+    }
+
+    // Strip the now-redundant bytes from the migrated have-set records so the
+    // invariant (bytesless record ⇒ bytes in OPFS) is restored.
+    if (dataBearing.length > 0) {
+      try {
+        const tx = db.transaction("chunks", "readwrite");
+        const store = tx.objectStore("chunks");
+        for (let i = 0; i < dataBearing.length; i++) {
+          const r = dataBearing[i];
+          await store.put({
+            merkleRoot: r.merkleRoot,
+            hash: r.hash,
+            chunkIndex: r.chunkIndex,
+            mimeType: r.mimeType,
+            realLen: r.realLen,
+            leafHash: r.leafHash,
+          });
+        }
+        await tx.done;
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    db.close();
+
+    const file = await fileHandle.getFile();
+    if (totalSize > 0 && file.size !== totalSize) return null; // incomplete
+    return wrapOPFSFile(file, filename, merkleRootHex, mimeType);
+  } catch (error) {
+    console.error(error);
+    return null;
   }
 }
 
@@ -1125,9 +1577,15 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
     await tx.done;
     db.close();
 
-    // Reclaim the reassembled OPFS file too — IndexedDB deletion alone leaves it
-    // as an orphaned full-size copy on disk.
-    await fnDeleteOPFSFile(merkleRootHex);
+    // Drop any open receive write handle FIRST — removeEntry fails while the
+    // exclusive sync-access-handle is held — then reclaim the OPFS file, which
+    // IndexedDB deletion alone would leave as an orphaned full-size copy. Under
+    // the per-merkleRoot lock so a chunk arriving mid-delete can't reopen the
+    // handle between the close and the removeEntry (which would throw + leak).
+    await withReceiveLock(merkleRootHex, async () => {
+      await fnCloseReceiveFile(merkleRootHex);
+      await fnDeleteOPFSFile(merkleRootHex);
+    });
   } catch {
     /* empty */
   }
@@ -1137,12 +1595,18 @@ async function fnDeleteDB(): Promise<void> {
   // Also remove the whole OPFS reassembly subtree (a separate storage system
   // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
   try {
+    // Close every open receive handle first, or removeEntry(recursive) trips
+    // over the still-held exclusive locks.
+    await closeAllReceiveFiles();
     const storage = opfsStorage();
     if (storage && typeof storage.getDirectory === "function") {
       const root = await storage.getDirectory();
       await (
         root as unknown as {
-          removeEntry: (name: string, opts: { recursive: boolean }) => Promise<void>;
+          removeEntry: (
+            name: string,
+            opts: { recursive: boolean },
+          ) => Promise<void>;
         }
       )
         .removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true })
@@ -1240,6 +1704,26 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "setDBChunk":
         await fnSetDBChunk(...message.args);
+        result = undefined;
+        break;
+      case "storeReceiveChunk": {
+        const chunk = message.args[0];
+        result = await withReceiveLock(chunk.merkleRoot, () =>
+          fnStoreReceiveChunk(chunk),
+        );
+        break;
+      }
+      case "getReceiveFile": {
+        const args = message.args;
+        result = await withReceiveLock(args[0], () =>
+          fnGetReceiveFile(...args),
+        );
+        break;
+      }
+      case "closeReceiveFile":
+        await withReceiveLock(message.args[0], () =>
+          fnCloseReceiveFile(...message.args),
+        );
         result = undefined;
         break;
       case "getDBAllNewChunks":

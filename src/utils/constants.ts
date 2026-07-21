@@ -91,10 +91,11 @@ export const MAX_RESUME_ATTEMPTS = 3;
 export const HASH_WINDOW_BYTES = 1024 * 1024; // 1 MiB disk read window
 export const HASH_WASM_CHUNK_BYTES = 64 * 1024; // 64 KiB WASM update buffer
 
-// Receive-side big-file reassembly: a completed FILE message is streamed from
-// its IndexedDB chunks to a file in the Origin Private File System (OPFS) inside
-// the DB worker (createSyncAccessHandle is worker-only / Safari-safe), so the
-// whole file is never built in RAM. Assembled files live under this OPFS
-// subdirectory, keyed by merkleRoot. Falls back to an in-memory Blob where OPFS
-// is unavailable.
+// Big-file storage in the Origin Private File System (OPFS), inside the DB
+// worker (createSyncAccessHandle is worker-only / Safari-safe), so the whole
+// file is never built in RAM. Two producers write here, keyed by merkleRoot:
+//   - RECEIVE: each real chunk is written at its offset into a pre-sized file as
+//     it arrives (receive-time write); IndexedDB keeps only the leaf-hash.
+//   - SEND: a sent copy's IndexedDB chunks are streamed here on read.
+// Falls back to an in-memory Blob where OPFS is unavailable.
 export const OPFS_REASSEMBLE_DIR = "p2party-reassembled";

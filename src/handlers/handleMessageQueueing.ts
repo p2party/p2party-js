@@ -1,6 +1,6 @@
 import { handleReceiveMessage } from "./handleReceiveMessage";
 
-import { setDBRoomMessageData } from "../db/api";
+import { setDBRoomMessageData, closeReceiveFile } from "../db/api";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
@@ -161,6 +161,11 @@ const processMessage = async (
       const hashHex = uint8ArrayToHex(messageHash);
 
       if (receivedFullSize) {
+        // Flush + close the OPFS write handle before flipping the UI to 100% so
+        // readMessage can open the finished file without hitting the write lock.
+        // No-op for text (no handle) and for a re-observed completion.
+        await closeReceiveFile(merkleRootHex);
+
         await setDBRoomMessageData(
           roomId,
           merkleRootHex,

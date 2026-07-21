@@ -1,4 +1,10 @@
-import type { WorkerMessages, Chunk, NewChunk, SendQueue } from "./types";
+import type {
+  WorkerMessages,
+  Chunk,
+  ReceiveChunk,
+  NewChunk,
+  SendQueue,
+} from "./types";
 // import type { MessageType } from "../utils/messageTypes";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
@@ -144,6 +150,28 @@ export const getDBAllChunksCount = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBAllChunksCount", merkleRootHex, hashHex);
 
 export const setDBChunk = (chunk: Chunk) => callWorker("setDBChunk", chunk);
+
+// Receive-time OPFS write: hand the worker a real chunk's bytes; it writes them
+// straight into the message's pre-sized OPFS file at chunkIndex*uniformSize (or
+// keeps them in IndexedDB if it can't place them yet / OPFS is unavailable) and
+// records the bytesless have-set entry. Resolves true if newly stored.
+export const storeReceiveChunk = (chunk: ReceiveChunk) =>
+  callWorker("storeReceiveChunk", chunk);
+
+// Open the finished (all offsets filled) OPFS file for a fully-received message
+// and hand it back as a disk-backed File — no reassembly. Returns null if OPFS
+// is unavailable, so the caller can fall back to the in-memory Blob path.
+export const getReceiveFile = (
+  merkleRootHex: string,
+  totalSize: number,
+  filename: string,
+  mimeType: string,
+) => callWorker("getReceiveFile", merkleRootHex, totalSize, filename, mimeType);
+
+// Flush + close the open write handle for a transfer (called on completion) so
+// the finished file can be opened for reading without hitting the exclusive lock.
+export const closeReceiveFile = (merkleRootHex: string) =>
+  callWorker("closeReceiveFile", merkleRootHex);
 
 export const getDBAllNewChunks = (hashHex?: string, merkleRootHex?: string) =>
   callWorker("getDBAllNewChunks", hashHex, merkleRootHex);

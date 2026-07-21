@@ -5,7 +5,7 @@ import { isStorableChunkRange } from "../utils/chunkBounds";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
-import { getDBMessageData, setDBChunk } from "../db/api";
+import { getDBMessageData, setDBChunk, storeReceiveChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 
@@ -132,23 +132,44 @@ export const handleReceiveMessage = async (
       const mimeType = getMimeType(metadata.messageType);
 
       try {
-        await setDBChunk({
-          merkleRoot: merkleRootHex,
-          hash: uint8ArrayToHex(metadata.hash),
-          chunkIndex: metadata.chunkIndex,
-          data: realChunk.buffer,
-          mimeType,
-          // Persist the exact receipt token so it can be re-emitted verbatim on
-          // reconnect (the padded chunk it was hashed over is discarded here).
-          leafHash: uint8ArrayToHex(chunkHash),
-        });
+        let stored: boolean;
+        if (metadata.messageType === MessageType.Text) {
+          // Text is small and read back via Blob.text(), so keep its bytes in
+          // IndexedDB (no OPFS file). setDBChunk throws on a duplicate key.
+          await setDBChunk({
+            merkleRoot: merkleRootHex,
+            hash: uint8ArrayToHex(metadata.hash),
+            chunkIndex: metadata.chunkIndex,
+            data: realChunk.buffer,
+            mimeType,
+            realLen: chunkSize,
+            // Persist the exact receipt token so it can be re-emitted verbatim
+            // on reconnect (the padded chunk it was hashed over is discarded).
+            leafHash: uint8ArrayToHex(chunkHash),
+          });
+          stored = true;
+        } else {
+          // FILE: write the real bytes straight into the message's pre-sized
+          // OPFS file at chunkIndex*uniformSize; IndexedDB keeps only the
+          // leaf-hash have-set (bytesless). Returns false if already stored.
+          stored = await storeReceiveChunk({
+            merkleRoot: merkleRootHex,
+            hash: uint8ArrayToHex(metadata.hash),
+            chunkIndex: metadata.chunkIndex,
+            mimeType,
+            leafHash: uint8ArrayToHex(chunkHash),
+            realLen: chunkSize,
+            totalSize: metadata.totalSize,
+            data: realChunk.buffer,
+          });
+        }
 
         return {
           date: metadata.date,
           chunkIndex: metadata.chunkIndex,
           chunkSize,
           receivedFullSize,
-          chunkAlreadyExists: false,
+          chunkAlreadyExists: !stored,
           totalSize: metadata.totalSize,
           messageType: metadata.messageType,
           filename: metadata.name,

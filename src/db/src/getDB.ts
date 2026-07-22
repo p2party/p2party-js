@@ -10,6 +10,7 @@ import type {
   UniqueRoom,
   NewChunk,
   RatchetSession,
+  StoredIdentityX25519,
 } from "../types";
 
 export const dbName = "p2party";
@@ -65,7 +66,7 @@ export interface RepoSchema extends DBSchema {
   // (key = "ratchetWrapKey"). Value is a live CryptoKey object (structured-
   // cloneable, never its raw bytes).
   meta: {
-    value: CryptoKey;
+    value: CryptoKey | StoredIdentityX25519;
     key: string;
   };
 }

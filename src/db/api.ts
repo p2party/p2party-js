@@ -5,6 +5,7 @@ import type {
   NewChunk,
   SendQueue,
   RatchetSession,
+  IdentityX25519,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
 
@@ -228,3 +229,11 @@ export const setRatchetSession = (session: RatchetSession) =>
 
 export const deleteRatchetSession = (roomId: string, peerPublicKey: string) =>
   callWorker("deleteRatchetSession", roomId, peerPublicKey);
+
+// D2=B: the dedicated X25519 identity, WebCrypto-wrapped at rest (worker-side).
+export const getIdentityX25519 = () => callWorker("getIdentityX25519");
+
+export const setIdentityX25519 = (identity: IdentityX25519) =>
+  callWorker("setIdentityX25519", identity);
+
+export const deleteIdentityX25519 = () => callWorker("deleteIdentityX25519");

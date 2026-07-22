@@ -189,3 +189,69 @@ describe("db.worker ratchetSessions wiring", () => {
     expect(resp.result).toBeUndefined();
   });
 });
+
+describe("db.worker identityX25519 wiring (WebCrypto-wrapped at rest)", () => {
+  const sampleIdentity = () => ({
+    pub: rnd(32),
+    secret: rnd(32),
+    crossSig: rnd(64),
+  });
+
+  test("setIdentityX25519 -> getIdentityX25519 round-trips pub/secret/crossSig", async () => {
+    const idn = sampleIdentity();
+    const setResp = await callWorker("setIdentityX25519", [idn]);
+    expect(setResp.error).toBeUndefined();
+
+    const getResp = await callWorker("getIdentityX25519", []);
+    expect(getResp.error).toBeUndefined();
+    const got = getResp.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      crossSig: ArrayBuffer;
+    };
+    expect(got).toBeDefined();
+    expect(eq(got.pub, idn.pub)).toBe(true);
+    expect(eq(got.secret, idn.secret)).toBe(true);
+    expect(eq(got.crossSig, idn.crossSig)).toBe(true);
+  });
+
+  test("KEY SECURITY ASSERTION: the raw stored identity secret is ciphertext; pub/crossSig are plaintext", async () => {
+    const idn = sampleIdentity();
+    await callWorker("setIdentityX25519", [idn]);
+
+    // Read the raw record directly, bypassing the unwrap step.
+    const db = await getDB();
+    const raw = (await db.get("meta", "identityX25519")) as unknown as {
+      pub: ArrayBuffer;
+      wrappedSecret: ArrayBuffer;
+      crossSig: ArrayBuffer;
+    };
+    db.close();
+
+    expect(raw).toBeDefined();
+    // secret is wrapped (iv||ct): different bytes AND longer than the 32B plaintext.
+    expect(eq(raw.wrappedSecret, idn.secret)).toBe(false);
+    expect(raw.wrappedSecret.byteLength).toBeGreaterThan(idn.secret.byteLength);
+    // public fields are stored in the clear.
+    expect(eq(raw.pub, idn.pub)).toBe(true);
+    expect(eq(raw.crossSig, idn.crossSig)).toBe(true);
+  });
+
+  test("deleteIdentityX25519 removes the record; get then returns undefined", async () => {
+    const idn = sampleIdentity();
+    await callWorker("setIdentityX25519", [idn]);
+    expect((await callWorker("getIdentityX25519", [])).result).toBeDefined();
+
+    const delResp = await callWorker("deleteIdentityX25519", []);
+    expect(delResp.error).toBeUndefined();
+
+    const after = await callWorker("getIdentityX25519", []);
+    expect(after.result).toBeUndefined();
+  });
+
+  test("getIdentityX25519 with no record returns undefined (not an error)", async () => {
+    const resp = await callWorker("getIdentityX25519", []);
+    expect(resp.error).toBeUndefined();
+    expect(resp.result).toBeUndefined();
+  });
+});

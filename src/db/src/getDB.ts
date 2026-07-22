@@ -9,10 +9,11 @@ import type {
   BlacklistedPeer,
   UniqueRoom,
   NewChunk,
+  RatchetSession,
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 16;
+export const dbVersion = 17;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -54,6 +55,18 @@ export interface RepoSchema extends DBSchema {
     value: SendQueue;
     key: [number, string, string];
     indexes: { labelPeer: string };
+  };
+  ratchetSessions: {
+    value: RatchetSession;
+    key: [string, string];
+    indexes: { peerId: string; peerPublicKey: string; roomId: string };
+  };
+  // Out-of-line store for the single non-extractable AES-GCM wrap CryptoKey
+  // (key = "ratchetWrapKey"). Value is a live CryptoKey object (structured-
+  // cloneable, never its raw bytes).
+  meta: {
+    value: CryptoKey;
+    key: string;
   };
 }
 
@@ -220,6 +233,21 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
             unique: false,
           });
         }
+      }
+
+      if (!db.objectStoreNames.contains("ratchetSessions")) {
+        const ratchetSessions = db.createObjectStore("ratchetSessions", {
+          keyPath: ["roomId", "peerPublicKey"],
+        });
+        ratchetSessions.createIndex("peerId", "peerId", { unique: false });
+        ratchetSessions.createIndex("peerPublicKey", "peerPublicKey", {
+          unique: false,
+        });
+        ratchetSessions.createIndex("roomId", "roomId", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("meta")) {
+        db.createObjectStore("meta");
       }
     },
   });

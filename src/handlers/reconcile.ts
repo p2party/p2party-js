@@ -35,19 +35,15 @@ export const markChunkAcked = (
 
 // A defensive copy — the caller (sendChunks reconcile filter) must not mutate
 // the live set, which keeps growing as more receipts arrive.
-export const getAckedChunks = (
-  peerId: string,
-  hashHex: string,
-): Set<number> => new Set(edge(peerId, hashHex).acked);
+export const getAckedChunks = (peerId: string, hashHex: string): Set<number> =>
+  new Set(edge(peerId, hashHex).acked);
 
 export const markTransferComplete = (peerId: string, hashHex: string): void => {
   edge(peerId, hashHex).complete = true;
 };
 
-export const isTransferComplete = (
-  peerId: string,
-  hashHex: string,
-): boolean => edges.get(key(peerId, hashHex))?.complete ?? false;
+export const isTransferComplete = (peerId: string, hashHex: string): boolean =>
+  edges.get(key(peerId, hashHex))?.complete ?? false;
 
 export const clearTransfer = (peerId: string, hashHex: string): void => {
   edges.delete(key(peerId, hashHex));

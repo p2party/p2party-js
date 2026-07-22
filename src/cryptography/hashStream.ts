@@ -42,7 +42,9 @@ export const hashFileStreaming = async (
 
     for (let offset = 0; offset < file.size; offset += HASH_WINDOW_BYTES) {
       const end = Math.min(offset + HASH_WINDOW_BYTES, file.size);
-      const window = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      const window = new Uint8Array(
+        await file.slice(offset, end).arrayBuffer(),
+      );
 
       for (let s = 0; s < window.length; s += HASH_WASM_CHUNK_BYTES) {
         const n = Math.min(HASH_WASM_CHUNK_BYTES, window.length - s);

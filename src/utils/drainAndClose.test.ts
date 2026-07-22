@@ -5,7 +5,11 @@ import { drainAndClose } from "./drainAndClose";
 describe("drainAndClose", () => {
   test("closes immediately when already drained", async () => {
     let closed = false;
-    const dc = { readyState: "open", bufferedAmount: 0, close: () => (closed = true) };
+    const dc = {
+      readyState: "open",
+      bufferedAmount: 0,
+      close: () => (closed = true),
+    };
     await drainAndClose(dc);
     expect(closed).toBe(true);
   });
@@ -30,7 +34,11 @@ describe("drainAndClose", () => {
 
   test("closes after the timeout even if the buffer never drains (no hang)", async () => {
     let closed = false;
-    const dc = { readyState: "open", bufferedAmount: 500, close: () => (closed = true) };
+    const dc = {
+      readyState: "open",
+      bufferedAmount: 500,
+      close: () => (closed = true),
+    };
     const start = Date.now();
     await drainAndClose(dc, 120, 20);
     expect(closed).toBe(true);

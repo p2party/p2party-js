@@ -2,8 +2,8 @@ import { deriveGenerator, cpaceStart, cpaceShared } from "../cryptography/cpace"
 import { x3dhDeriveSecret } from "../cryptography/x3dh";
 import { x25519Keypair } from "../cryptography/x25519";
 import { initRatchet, serializeRatchet } from "../cryptography/ratchet";
-import { getWrapKey, wrapSecret } from "../db/ratchetWrap";
-import { setRatchetSession } from "../db/api";
+import { verifyIdentityCrossSig } from "../cryptography/identityCrossSig";
+import { setRatchetSession, getIdentityX25519 } from "../db/api";
 import { store } from "../store";
 import { openRatchetGate, rejectRatchetGate } from "./ratchetGate";
 import { zeroFree } from "../utils/zeroFree";
@@ -183,23 +183,33 @@ const HS_KC_DOMAIN = new TextEncoder().encode("p2party-hs-v1");
 // reflected/replayed for one another.
 const HS_MAC_TAG_RESPONDER = new Uint8Array([HS_STEP_CONFIRM]);
 const HS_MAC_TAG_INITIATOR = new Uint8Array([HS_STEP_HELLO]);
-// CPace generator session-id. It must be byte-identical on both legs, yet the
-// two random per-party nonces (sid) are only exchanged simultaneously inside
-// HELLO — so neither leg knows the peer's nonce before it must publish its
-// CPace Y. Binding either nonce into the generator would make the two legs'
-// generators differ and K disagree. Freshness instead comes from the
-// channel-input (CI = channelId ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG, whose
-// per-connection DTLS fingerprints are session-unique) plus the random sids,
-// which ARE bound into the key-confirmation transcript below. See task report.
-const CPACE_GEN_SID = new Uint8Array(0);
+// CPace generator session-id (D1). The generator G = deriveGenerator(pin, sid,
+// CI) must be byte-identical on both legs, so both must feed the SAME sid. We
+// bind the INITIATOR's sid: it is the one value both legs can agree on without a
+// prior round, which forces an initiator-first ordering — the initiator knows
+// its own sid upfront and derives G before sending HELLO, while the responder
+// must RECEIVE the initiator's HELLO first, take the initiator's sid from it,
+// and only then derive its matching G and reply. (Binding both sids is
+// impossible: neither leg knows the peer's before it must publish its CPace Y.)
+// Freshness comes from the channel-input (CI = channelId ‖ IK_a ‖ IK_b ‖ fp_a ‖
+// fp_b ‖ PQ_TAG, whose per-connection DTLS fingerprints are session-unique) plus
+// the initiator's random sid folded into G; BOTH sids are additionally bound
+// into the key-confirmation transcript below. See task report.
 
 const DH_LEN = 32;
 const SID_LEN = 32;
 const EK_LEN = 32;
 const Y_LEN = 32;
 const MAC_LEN = 64;
+// In-band X25519 identity carried by each HELLO: the dedicated X25519 identity
+// pub plus its Ed25519 cross-signature (verified against the pinned peer Ed25519
+// identity before any DH). IDENTITY_SIG_LEN stays distinct from MAC_LEN (both
+// happen to be 64) so the two 64-byte roles never get conflated.
+const X25519_ID_PUB_LEN = 32;
+const IDENTITY_SIG_LEN = 64;
 
-const HELLO_LEN = 1 + SID_LEN + EK_LEN + Y_LEN;
+const HELLO_LEN =
+  1 + SID_LEN + EK_LEN + Y_LEN + X25519_ID_PUB_LEN + IDENTITY_SIG_LEN;
 const CONFIRM_LEN = 1 + DH_LEN + MAC_LEN;
 
 export interface HandshakeTransport {
@@ -213,7 +223,9 @@ export interface HandshakeCoreParams {
   channelInput: Uint8Array;
   amInitiator: boolean;
   idSelfSec: Uint8Array;
-  idPeerPub: Uint8Array;
+  selfIdentityX25519Pub: Uint8Array;
+  selfIdentityCrossSignature: Uint8Array;
+  peerIdentityEd25519Pub: Uint8Array;
 }
 
 // HMAC-SHA512(key, msg) via the Stage-1 export (HKDF-Extract == HMAC with the
@@ -250,19 +262,24 @@ const hmacSha512 = (
   }
 };
 
-// HELLO   = [HS_STEP_HELLO   ‖ sid(32) ‖ EK(32) ‖ Y(32)]  (Y = zeros in no-PIN)
+// HELLO   = [HS_STEP_HELLO ‖ sid(32) ‖ EK(32) ‖ Y(32) ‖ X25519_id_pub(32) ‖ crossSig(64)]
+//           (Y = zeros in no-PIN; X25519_id_pub + crossSig carry the in-band identity)
 // CONFIRM = [HS_STEP_CONFIRM ‖ dhPub(32) ‖ mac(64)]       (dhPub = zeros from initiator)
 // Both fixed size, one FRAME_TYPE_HANDSHAKE frame each.
 const packHello = (
   sid: Uint8Array,
   ek: Uint8Array,
   y: Uint8Array,
+  x25519Pub: Uint8Array,
+  crossSig: Uint8Array,
 ): Uint8Array => {
   const out = new Uint8Array(HELLO_LEN);
   out[0] = HS_STEP_HELLO;
   out.set(sid, 1);
   out.set(ek, 1 + SID_LEN);
   out.set(y, 1 + SID_LEN + EK_LEN);
+  out.set(x25519Pub, 1 + SID_LEN + EK_LEN + Y_LEN);
+  out.set(crossSig, 1 + SID_LEN + EK_LEN + Y_LEN + X25519_ID_PUB_LEN);
   return out;
 };
 
@@ -300,7 +317,16 @@ export const performHandshakeCore = async (
   params: HandshakeCoreParams,
   module: LibCrypto,
 ): Promise<{ state: RatchetState; secret: Uint8Array }> => {
-  const { mode, pin, channelInput, amInitiator, idSelfSec, idPeerPub } = params;
+  const {
+    mode,
+    pin,
+    channelInput,
+    amInitiator,
+    idSelfSec,
+    selfIdentityX25519Pub,
+    selfIdentityCrossSignature,
+    peerIdentityEd25519Pub,
+  } = params;
 
   // R1: build our HELLO. Ephemeral X25519 EK is always generated (its pub is in
   // the transcript for both modes); its secret is only DH'd in no-PIN mode.
@@ -310,19 +336,51 @@ export const performHandshakeCore = async (
   let cpaceScalar: Uint8Array | null = null; // our secret CPace scalar y
   let secret: Uint8Array | undefined;
 
-  try {
-    if (mode === "pin") {
-      if (!pin) throw new Error("PIN mode requires a PIN");
-      const G = deriveGenerator(pin, CPACE_GEN_SID, channelInput, module);
-      const started = cpaceStart(G, module);
-      cpaceScalar = started.y;
-      cpaceY = started.Y;
-      G.fill(0); // public point, but no reason to keep it around
-    }
-    transport.send(packHello(sidSelf, ek.publicKey, cpaceY));
+  // D1: CPace generator over the INITIATOR's sid. Returns null in no-PIN mode
+  // (there is no CPace generator there); the initiator-first ordering below is
+  // applied uniformly in both modes for simplicity. The scalar/Y are assigned in
+  // the caller's direct control flow (not inside this closure) so the finally's
+  // cpaceScalar wipe sees the correct `Uint8Array | null` type.
+  const startCpace = (
+    sidForG: Uint8Array,
+  ): { y: Uint8Array; Y: Uint8Array } | null => {
+    if (mode !== "pin") return null;
+    if (!pin) throw new Error("PIN mode requires a PIN");
+    const G = deriveGenerator(pin, sidForG, channelInput, module);
+    const started = cpaceStart(G, module);
+    G.fill(0); // public point, but no reason to keep it around
+    return started;
+  };
 
-    // R1: receive peer HELLO. Fail closed on any malformed/short/mis-tagged frame.
-    const peerHello = await transport.recv();
+  const buildHello = (): Uint8Array =>
+    packHello(
+      sidSelf,
+      ek.publicKey,
+      cpaceY,
+      selfIdentityX25519Pub,
+      selfIdentityCrossSignature,
+    );
+
+  try {
+    // R1 — initiator-first exchange (D1). The initiator knows its own sid
+    // upfront, so it derives G, starts CPace, and sends HELLO before receiving.
+    // The responder must receive the initiator's HELLO FIRST to learn the
+    // initiator's sid, then derive its matching G and reply.
+    let peerHello: Uint8Array;
+    if (amInitiator) {
+      // generator binds MY sid (I am the initiator)
+      const started = startCpace(sidSelf);
+      if (started) {
+        cpaceScalar = started.y;
+        cpaceY = started.Y;
+      }
+      transport.send(buildHello());
+      peerHello = await transport.recv();
+    } else {
+      peerHello = await transport.recv();
+    }
+
+    // Parse peer HELLO. Fail closed on any malformed/short/mis-tagged frame.
     if (peerHello.length !== HELLO_LEN || peerHello[0] !== HS_STEP_HELLO)
       throw new Error("Malformed handshake HELLO");
     const sidPeer = peerHello.subarray(1, 1 + SID_LEN);
@@ -331,16 +389,50 @@ export const performHandshakeCore = async (
       1 + SID_LEN + EK_LEN,
       1 + SID_LEN + EK_LEN + Y_LEN,
     );
+    const peerX25519Pub = peerHello.subarray(
+      1 + SID_LEN + EK_LEN + Y_LEN,
+      1 + SID_LEN + EK_LEN + Y_LEN + X25519_ID_PUB_LEN,
+    );
+    const peerCrossSig = peerHello.subarray(
+      1 + SID_LEN + EK_LEN + Y_LEN + X25519_ID_PUB_LEN,
+      HELLO_LEN,
+    );
+
+    // T5: verify-before-DH, fail-closed. The peer's X25519 identity pub must be
+    // cross-signed by the pinned peer Ed25519 identity; otherwise abort BEFORE
+    // computing any shared secret. The finally-block below wipes ek.secretKey /
+    // cpaceScalar and the catch wipes `secret`, so a throw here is free of leaks.
+    if (
+      !(await verifyIdentityCrossSig(
+        peerX25519Pub,
+        peerCrossSig,
+        peerIdentityEd25519Pub,
+        module,
+      ))
+    )
+      throw new Error("Handshake peer X25519 identity cross-signature invalid");
+
+    // Responder: now that the initiator's sid is known, derive the matching G
+    // and send our HELLO in reply.
+    if (!amInitiator) {
+      // generator binds the INITIATOR's (peer's) sid
+      const started = startCpace(sidPeer);
+      if (started) {
+        cpaceScalar = started.y;
+        cpaceY = started.Y;
+      }
+      transport.send(buildHello());
+    }
 
     // Derive the shared 32-byte secret. Both modes fold CI: no-PIN via
-    // x3dh(idKeys, EKs); PIN via G = deriveGenerator(pin, sid, CI) so CI is
-    // already bound into K.
+    // x3dh(idKeys, EKs) over the VERIFIED peer X25519 pub from the HELLO; PIN via
+    // G = deriveGenerator(pin, sid, CI) so CI is already bound into K.
     if (mode === "pin") {
       secret = cpaceShared(cpaceScalar!, yPeer, module);
     } else {
       secret = x3dhDeriveSecret(
         idSelfSec,
-        idPeerPub,
+        peerX25519Pub,
         ek.secretKey,
         ekPeer,
         amInitiator,
@@ -504,40 +596,55 @@ export const runHandshake = async (
   try {
     await verifyDtlsFingerprints(epc);
 
-    const { publicKey, secretKey } = store.getState().keyPair;
+    // Tie-break role on the STABLE Ed25519 identity edge (unchanged). The
+    // handshake's DH/verify now uses the dedicated X25519 identity: unwrap its
+    // secret + pub + cross-sig from IndexedDB, and pin the peer's Ed25519 pub as
+    // the anchor the in-band peer X25519 pub must be cross-signed by (T5/T6).
+    const { publicKey } = store.getState().keyPair;
     const amInitiator = publicKey < epc.withPeerPublicKey; // deterministic tie-break
-    const idSelfSec = hexToUint8Array(secretKey);
-    const idPeerPub = hexToUint8Array(epc.withPeerPublicKey);
+    const identity = await getIdentityX25519();
+    if (!identity) throw new Error("X25519 identity not provisioned");
+    const idSelfSec = new Uint8Array(identity.secret);
+    const selfIdentityX25519Pub = new Uint8Array(identity.pub);
+    const selfIdentityCrossSignature = new Uint8Array(identity.crossSig);
+    const peerIdentityEd25519Pub = hexToUint8Array(epc.withPeerPublicKey);
 
     const transport = transportForPeer(epc.withPeerId);
     const { state, secret } = await performHandshakeCore(
       transport,
-      { mode, pin, channelInput, amInitiator, idSelfSec, idPeerPub },
+      {
+        mode,
+        pin,
+        channelInput,
+        amInitiator,
+        idSelfSec,
+        selfIdentityX25519Pub,
+        selfIdentityCrossSignature,
+        peerIdentityEd25519Pub,
+      },
       module,
     );
 
-    // Persist wrapped, keyed to the STABLE identity edge. roomId comes from the
+    // Persist keyed to the STABLE identity edge. roomId comes from the
     // registered main channel (falling back to the peer's first room).
+    // Build the session from the PLAINTEXT serializeRatchet output: the worker's
+    // fnSetRatchetSession wraps the secret fields exactly once. (Wrapping here
+    // too would double-wrap them into an unreadable session — the T6 fix.)
     const inbox = inboxes.get(epc.withPeerId);
     const roomId =
       (inbox?.channel as IRTCDataChannel).roomIds?.[0] ??
       epc.rooms[0]?.roomId ??
       "";
     const s = serializeRatchet(state);
-    const wrapKey = await getWrapKey();
     const session: RatchetSession = {
       roomId,
       peerPublicKey: epc.withPeerPublicKey,
       peerId: epc.withPeerId,
-      rootKey: await wrapSecret(wrapKey, s.rootKey),
-      sendingChainKey: s.sendingChainKey
-        ? await wrapSecret(wrapKey, s.sendingChainKey)
-        : null,
-      receivingChainKey: s.receivingChainKey
-        ? await wrapSecret(wrapKey, s.receivingChainKey)
-        : null,
+      rootKey: s.rootKey,
+      sendingChainKey: s.sendingChainKey,
+      receivingChainKey: s.receivingChainKey,
       dhSelfPub: s.dhSelfPub,
-      dhSelfSec: await wrapSecret(wrapKey, s.dhSelfSec),
+      dhSelfSec: s.dhSelfSec,
       dhRemotePub: s.dhRemotePub,
       Ns: s.Ns,
       Nr: s.Nr,
@@ -548,8 +655,9 @@ export const runHandshake = async (
     await setRatchetSession(session);
 
     // The returned root secret is now folded into the (persisted) ratchet; wipe
-    // the loose copy.
+    // the loose copy AND the unwrapped X25519 identity secret.
     secret.fill(0);
+    idSelfSec.fill(0);
 
     epc.ratchetState = state;
     epc.session = session;

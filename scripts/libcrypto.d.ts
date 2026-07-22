@@ -105,6 +105,46 @@ export interface LibCrypto extends EmscriptenModule {
     sender_public_key: number, // Uint8Array.byteOffset
     receiver_secret_key: number, // Uint8Array.byteOffset
   ): number;
+
+  // v3 PAKE + ratchet primitives (pake_ratchet.c)
+  _cpace_ristretto255_from_hash(out: number, hash: number): void;
+  _cpace_ristretto255_scalarmult(
+    out: number,
+    scalar: number,
+    point: number,
+  ): number;
+  _cpace_ristretto255_scalar_random(out: number): void;
+  _x25519_keypair(pk: number, sk: number): number;
+  _x25519_dh(shared: number, sk: number, pk: number): number;
+  _hkdf_sha512_extract(
+    prk: number,
+    salt: number,
+    salt_len: number,
+    ikm: number,
+    ikm_len: number,
+  ): number;
+  _hkdf_sha512_expand(
+    out: number,
+    out_len: number,
+    prk: number,
+    info: number,
+    info_len: number,
+  ): number;
+  _encrypt_chachapoly_symmetric(
+    out: number,
+    data: number,
+    data_len: number,
+    key: number,
+    nonce: number,
+    aad: number,
+    aad_len: number,
+  ): number;
+  _receive_message_with_key(
+    decrypted: number,
+    message: number,
+    merkle_root: number,
+    message_key: number,
+  ): number;
 }
 
 declare const libcrypto: EmscriptenModuleFactory<LibCrypto>;

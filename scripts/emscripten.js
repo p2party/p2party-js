@@ -30,6 +30,11 @@ const {
   libsodiumKx3,
   libsodiumKx4,
   libsodiumKx5,
+  libsodiumRandomBytesPath,
+  libsodiumRistretto1,
+  libsodiumRistretto2,
+  libsodiumRistretto3,
+  libsodiumRistretto4,
   libsodiumArgon1,
   libsodiumArgon2,
   libsodiumArgon3,
@@ -151,7 +156,16 @@ _argon2,\
 _sha512_init,\
 _sha512_update,\
 _sha512_final,\
-_receive_message \
+_receive_message,\
+_cpace_ristretto255_from_hash,\
+_cpace_ristretto255_scalarmult,\
+_cpace_ristretto255_scalar_random,\
+_x25519_keypair,\
+_x25519_dh,\
+_hkdf_sha512_extract,\
+_hkdf_sha512_expand,\
+_encrypt_chachapoly_symmetric,\
+_receive_message_with_key \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \
 -I${libsodiumIncludePrivatePath} \
@@ -187,6 +201,11 @@ ${libsodiumArgon3} \
 ${libsodiumArgon4} \
 ${libsodiumArgon5} \
 ${libsodiumArgon6} \
+${libsodiumRandomBytesPath} \
+${libsodiumRistretto1} \
+${libsodiumRistretto2} \
+${libsodiumRistretto3} \
+${libsodiumRistretto4} \
 `,
   { stdio: "inherit" },
 );

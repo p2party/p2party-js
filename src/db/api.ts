@@ -4,6 +4,7 @@ import type {
   ReceiveChunk,
   NewChunk,
   SendQueue,
+  RatchetSession,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
 
@@ -218,3 +219,12 @@ export const deleteDBSendQueue = (
   toPeerId: string,
   position?: number,
 ) => callWorker("deleteDBSendQueue", label, toPeerId, position);
+
+export const getRatchetSession = (roomId: string, peerPublicKey: string) =>
+  callWorker("getRatchetSession", roomId, peerPublicKey);
+
+export const setRatchetSession = (session: RatchetSession) =>
+  callWorker("setRatchetSession", session);
+
+export const deleteRatchetSession = (roomId: string, peerPublicKey: string) =>
+  callWorker("deleteRatchetSession", roomId, peerPublicKey);

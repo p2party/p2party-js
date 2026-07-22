@@ -21,6 +21,12 @@ const ensure = (peerId: string): Gate => {
       resolve = res;
       reject = rej;
     });
+    // Attach a no-op handler synchronously so a reject() on a peer nobody has
+    // awaited yet never fires the runtime's unhandled-rejection event. This
+    // does not consume the rejection for real awaiters: `getRatchetGate`
+    // returns this same promise, and each independent `.catch`/`await` on it
+    // still observes the rejection (a promise may have multiple listeners).
+    promise.catch(() => {});
     gate = { promise, resolve, reject, settled: false };
     gates.set(peerId, gate);
   }

@@ -98,4 +98,39 @@ describe("verifyDtlsFingerprints", () => {
       verifyDtlsFingerprints(mockEpc(fpHex, fpHex, tampered)),
     ).rejects.toThrow(/fingerprint/i);
   });
+
+  test("throws (fails closed) when the remote certificate stat is missing/unverifiable", async () => {
+    // Transport reports a remoteCertificateId, but no matching "certificate"
+    // stat exists in the report (e.g. an attacker-influenced or truncated
+    // stats report) — SDPs both parse fine. The live remote fingerprint can
+    // never be confirmed, so the tripwire must abort rather than resolve.
+    const epc = {
+      localDescription: { sdp: sdpWith(fpHex) },
+      remoteDescription: { sdp: sdpWith(fpHex) },
+      getStats: async () =>
+        new Map<string, any>([
+          [
+            "T",
+            {
+              type: "transport",
+              localCertificateId: "LC",
+              remoteCertificateId: "RC",
+            },
+          ],
+          [
+            "LC",
+            {
+              type: "certificate",
+              fingerprint: fpHex,
+              fingerprintAlgorithm: "sha-256",
+            },
+          ],
+          // Note: no "RC" certificate entry — the remote cert stat is absent.
+        ]),
+    } as unknown as IRTCPeerConnection;
+
+    await expect(verifyDtlsFingerprints(epc)).rejects.toThrow(
+      /fingerprint|MITM/i,
+    );
+  });
 });

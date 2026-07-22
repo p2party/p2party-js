@@ -136,12 +136,16 @@ export const verifyDtlsFingerprints = async (
   const liveLocalFp = certificateFingerprint(localCertId);
   const liveRemoteFp = certificateFingerprint(remoteCertId);
 
-  if (liveLocalFp !== null && liveLocalFp !== localSdpFp)
+  // Fail closed: a tripwire that cannot confirm a fingerprint must abort, not
+  // pass. If the live certificate can't be located in the stats report (e.g.
+  // a missing/attacker-truncated report), that is treated the same as an
+  // outright mismatch — never as "unable to verify, so allow".
+  if (liveLocalFp === null || liveLocalFp !== localSdpFp)
     throw new Error(
-      "DTLS fingerprint mismatch: local certificate does not match local SDP fingerprint",
+      "DTLS fingerprint mismatch: local certificate not found or does not match local SDP fingerprint",
     );
-  if (liveRemoteFp !== null && liveRemoteFp !== remoteSdpFp)
+  if (liveRemoteFp === null || liveRemoteFp !== remoteSdpFp)
     throw new Error(
-      "DTLS fingerprint mismatch: remote certificate does not match remote SDP fingerprint (possible MITM)",
+      "DTLS fingerprint mismatch: remote certificate not found or does not match remote SDP fingerprint (possible MITM)",
     );
 };

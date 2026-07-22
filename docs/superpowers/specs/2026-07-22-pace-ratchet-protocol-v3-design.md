@@ -119,12 +119,17 @@ MITMs — this is the acknowledged no-PIN limit.
 - `sid` = a fresh random session nonce exchanged at the start of the handshake
   (standard CPace; prevents cross-session replay). `channel-id` = the connection's
   `main`-channel identifier.
-- `G = crypto_core_ristretto255_from_hash( H( PRS, sid, CI ) )` where the
-  **channel-input** `CI = channel-id ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG`,
-  binding both identity keys and both DTLS fingerprints. `PQ_TAG` is a fixed-size
-  **algorithm/epoch marker** (a few bytes, `0` in v3), reserving transcript
-  structure so a future hybrid KEM binds cleanly without a v4 wire break — it is
-  NOT the KEM ciphertext.
+- `G = crypto_core_ristretto255_from_hash( H( lv(DOMAIN), lv(PRS), lv(sid), lv(CI) ) )`
+  where the **channel-input** `CI = channel-id ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG`,
+  binding both identity keys and both DTLS fingerprints. **`lv(·)` = length-prefixed
+  encoding** (each field is preceded by its byte-length as a fixed-width integer),
+  per IRTF `draft-irtf-cfrg-cpace`'s `lv_cat` — MANDATORY because `PRS` (the PIN)
+  and `CI` (which will bind variable-length DTLS-fingerprint/identity data in a
+  secure room) are variable-length: bare concatenation would let distinct
+  `(PRS, CI)` pairs hash to the same generator, amplifying online guessing and
+  breaking the CPace security argument. `PQ_TAG` is a fixed-size **algorithm/epoch
+  marker** (a few bytes, `0` in v3), reserving transcript structure so a future
+  hybrid KEM binds cleanly without a v4 wire break — it is NOT the KEM ciphertext.
 - Each side: `y ← scalar_random`, sends `Y = y·G`; shared `K = y·Y_peer`;
   `secret = HKDF(K, CI)`.
 - Explicit **key-confirmation** exchange (MAC over the transcript) before any

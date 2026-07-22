@@ -104,6 +104,33 @@ export interface SendQueue {
   encryptedData: ArrayBuffer;
 }
 
+// One Double-Ratchet session per STABLE identity edge (roomId, peerPublicKey) —
+// not per per-session peerId, which changes on reconnect — so the ratchet
+// survives reconnect/reload. All secret fields (rootKey, both chain keys,
+// dhSelfSec, and each skipped messageKey) are stored WRAPPED (AES-GCM under the
+// non-extractable CryptoKey in the `meta` store); public/counter fields are
+// stored plaintext. See src/db/ratchetWrap.ts.
+export interface RatchetSession {
+  roomId: string;
+  peerPublicKey: string;
+  peerId: string;
+  rootKey: ArrayBuffer;
+  sendingChainKey: ArrayBuffer | null;
+  receivingChainKey: ArrayBuffer | null;
+  dhSelfPub: ArrayBuffer;
+  dhSelfSec: ArrayBuffer;
+  dhRemotePub: ArrayBuffer | null;
+  Ns: number;
+  Nr: number;
+  PN: number;
+  skippedMessageKeys: Array<{
+    dhPub: ArrayBuffer;
+    n: number;
+    messageKey: ArrayBuffer;
+  }>; // capped at MAX_SKIP_SESSION (total, evict-oldest) by the ratchet layer (Stage 2)
+  updatedAt: number;
+}
+
 // Each method and its arguments/return type
 export type WorkerMessages =
   | {
@@ -294,6 +321,21 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getRatchetSession";
+      args: [roomId: string, peerPublicKey: string];
+    }
+  | {
+      id: number;
+      method: "setRatchetSession";
+      args: [session: RatchetSession];
+    }
+  | {
+      id: number;
+      method: "deleteRatchetSession";
+      args: [roomId: string, peerPublicKey: string];
+    }
+  | {
+      id: number;
       method: "deleteDB";
       args: [];
     };
@@ -337,5 +379,8 @@ export interface WorkerMethodReturnTypes {
   deleteDBMessageData: undefined;
   deleteDBSendQueue: undefined;
   deleteDBUniqueRoom: undefined;
+  getRatchetSession: RatchetSession | undefined;
+  setRatchetSession: undefined;
+  deleteRatchetSession: undefined;
   deleteDB: undefined;
 }

@@ -3,3 +3,4 @@
 #include "./ed25519.c"
 #include "./merkle.c"
 #include "./utils.c"
+#include "./pake_ratchet.c"

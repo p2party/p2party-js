@@ -133,6 +133,32 @@ const libsodiumKx5 = path.join(
   "scalarmult_ed25519_ref10.c",
 );
 
+const libsodiumRistretto1 = path.join(
+  libsodiumPath,
+  "crypto_core",
+  "ed25519",
+  "core_ristretto255.c",
+);
+const libsodiumRistretto2 = path.join(
+  libsodiumPath,
+  "crypto_core",
+  "ed25519",
+  "core_ed25519.c",
+);
+const libsodiumRistretto3 = path.join(
+  libsodiumPath,
+  "crypto_core",
+  "ed25519",
+  "core_h2c.c",
+);
+const libsodiumRistretto4 = path.join(
+  libsodiumPath,
+  "crypto_scalarmult",
+  "ristretto255",
+  "ref10",
+  "scalarmult_ristretto255_ref10.c",
+);
+
 const libsodiumArgon1 = path.join(
   libsodiumPath,
   "crypto_pwhash",
@@ -208,6 +234,11 @@ module.exports = {
   libsodiumKx3,
   libsodiumKx4,
   libsodiumKx5,
+
+  libsodiumRistretto1,
+  libsodiumRistretto2,
+  libsodiumRistretto3,
+  libsodiumRistretto4,
 
   libsodiumArgon1,
   libsodiumArgon2,

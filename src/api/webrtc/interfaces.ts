@@ -1,4 +1,6 @@
 import type { LibCrypto } from "../../cryptography/libcrypto";
+import type { RatchetState } from "../../cryptography/ratchet";
+import type { RatchetSession } from "../../db/types";
 
 export interface IRTCPeerConnectionRoomId {
   roomId: string;
@@ -12,6 +14,12 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   ignoreOffer: boolean;
   rooms: IRTCPeerConnectionRoomId[];
   iceCandidates: RTCIceCandidateInit[];
+  // protocol-v3: live Double-Ratchet handle (never Redux; secrets stay off the
+  // store). `session` is the last-persisted (wrapped) record; `ratchetEstablished`
+  // is the per-peer gate promise (ratchetGate.ts) the `main` channel resolves.
+  ratchetState?: RatchetState;
+  session?: RatchetSession;
+  ratchetEstablished?: Promise<void>;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

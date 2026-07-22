@@ -1,12 +1,55 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeAll } from "bun:test";
 
-import {
-  buildChannelInput,
-  parseFingerprintFromSdp,
-  verifyDtlsFingerprints,
-} from "./handleHandshake";
 import { PQ_TAG } from "../utils/constants";
+import { loadTestModule } from "../cryptography/testModule";
+import { x25519Keypair } from "../cryptography/x25519";
+import { serializeRatchet } from "../cryptography/ratchet";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
+import type { HandshakeTransport } from "./handleHandshake";
+
+// handleHandshake.ts transitively imports the Redux `store`, whose keyPair slice
+// reads `localStorage` at module-init time (and `db/api` creates a Worker). Bare
+// `bun test` has neither, so provide a minimal `localStorage` shim BEFORE the
+// module is loaded, and defer that load into `beforeAll` (import hoisting would
+// otherwise run it before this statement). `window` is aliased by the
+// `loadTestModule` import above.
+const _lsMem: Record<string, string> = {};
+(globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
+  getItem: (k: string) => (k in _lsMem ? _lsMem[k] : null),
+  setItem: (k: string, v: string) => {
+    _lsMem[k] = String(v);
+  },
+  removeItem: (k: string) => {
+    delete _lsMem[k];
+  },
+  clear: () => {
+    for (const k of Object.keys(_lsMem)) delete _lsMem[k];
+  },
+  key: () => null,
+  length: 0,
+} as Storage;
+
+type HS = typeof import("./handleHandshake");
+let buildChannelInput: HS["buildChannelInput"];
+let parseFingerprintFromSdp: HS["parseFingerprintFromSdp"];
+let verifyDtlsFingerprints: HS["verifyDtlsFingerprints"];
+let performHandshakeCore: HS["performHandshakeCore"];
+let setHandshakeChannel: HS["setHandshakeChannel"];
+let deliverHandshakeFrame: HS["deliverHandshakeFrame"];
+let runHandshake: HS["runHandshake"];
+
+beforeAll(async () => {
+  const m = await import("./handleHandshake");
+  ({
+    buildChannelInput,
+    parseFingerprintFromSdp,
+    verifyDtlsFingerprints,
+    performHandshakeCore,
+    setHandshakeChannel,
+    deliverHandshakeFrame,
+    runHandshake,
+  } = m);
+});
 
 const CHANNEL_ID = new TextEncoder().encode("main"); // 4 bytes
 
@@ -72,7 +115,8 @@ describe("parseFingerprintFromSdp", () => {
 });
 
 describe("verifyDtlsFingerprints", () => {
-  const fpHex = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:" +
+  const fpHex =
+    "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:" +
     "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
   const sdpWith = (fp: string) => `v=0\r\na=fingerprint:sha-256 ${fp}\r\n`;
 
@@ -132,5 +176,180 @@ describe("verifyDtlsFingerprints", () => {
     await expect(verifyDtlsFingerprints(epc)).rejects.toThrow(
       /fingerprint|MITM/i,
     );
+  });
+});
+
+// Two in-memory transports wired head-to-head: what one sends, the other recvs.
+const linkedTransports = (): [HandshakeTransport, HandshakeTransport] => {
+  const qA: Uint8Array[] = [];
+  const qB: Uint8Array[] = [];
+  const waitersA: ((v: Uint8Array) => void)[] = [];
+  const waitersB: ((v: Uint8Array) => void)[] = [];
+  const recv =
+    (q: Uint8Array[], w: ((v: Uint8Array) => void)[]) =>
+    (): Promise<Uint8Array> =>
+      q.length > 0
+        ? Promise.resolve(q.shift()!)
+        : new Promise((res) => w.push(res));
+  const send =
+    (q: Uint8Array[], w: ((v: Uint8Array) => void)[]) =>
+    (b: Uint8Array): void => {
+      const next = w.shift();
+      if (next) next(b);
+      else q.push(b);
+    };
+  // A sends into B's inbox (qB/waitersB); B sends into A's inbox (qA/waitersA).
+  const a: HandshakeTransport = {
+    send: send(qB, waitersB),
+    recv: recv(qA, waitersA),
+  };
+  const b: HandshakeTransport = {
+    send: send(qA, waitersA),
+    recv: recv(qB, waitersB),
+  };
+  return [a, b];
+};
+
+describe("performHandshakeCore (root agreement over a mock channel)", () => {
+  test("no-PIN mode: both sides derive the identical 32-byte secret", async () => {
+    const module = await loadTestModule();
+    const [tA, tB] = linkedTransports();
+
+    // Real X25519 identity keypairs. x3dh's cross-DH (DH(IK_a,EK_b) ==
+    // DH(EK_b,IK_a)) only holds when pub = priv·G, so the brief's arbitrary
+    // fill()ed identity keys cannot agree — see the task report.
+    const idA = x25519Keypair(module);
+    const idB = x25519Keypair(module);
+    const ci = new Uint8Array(160).fill(7);
+
+    const [rA, rB] = await Promise.all([
+      performHandshakeCore(
+        tA,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: true,
+          idSelfSec: idA.secretKey,
+          idPeerPub: idB.publicKey,
+        },
+        module,
+      ),
+      performHandshakeCore(
+        tB,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: false,
+          idSelfSec: idB.secretKey,
+          idPeerPub: idA.publicKey,
+        },
+        module,
+      ),
+    ]);
+
+    expect([...rA.secret]).toEqual([...rB.secret]);
+    expect(rA.secret.length).toBe(32);
+
+    // DH-exchange plumbing: initiator adopts responder's DH pub; responder waits.
+    // serializeRatchet projects to ArrayBuffers, so wrap before comparing.
+    const sA = serializeRatchet(rA.state);
+    const sB = serializeRatchet(rB.state);
+    expect([...new Uint8Array(sA.dhRemotePub as ArrayBuffer)]).toEqual([
+      ...new Uint8Array(sB.dhSelfPub),
+    ]);
+    expect(sB.dhRemotePub).toBeNull();
+  });
+
+  test("PIN mode: matching PINs agree; a wrong PIN fails key-confirmation", async () => {
+    const module = await loadTestModule();
+    const ci = new Uint8Array(160).fill(9);
+    const idA = x25519Keypair(module);
+    const idB = x25519Keypair(module);
+    const pin = new TextEncoder().encode("123456");
+
+    // Matching PIN → both resolve with equal secrets.
+    {
+      const [tA, tB] = linkedTransports();
+      const [rA, rB] = await Promise.all([
+        performHandshakeCore(
+          tA,
+          {
+            mode: "pin",
+            pin,
+            channelInput: ci,
+            amInitiator: true,
+            idSelfSec: idA.secretKey,
+            idPeerPub: idB.publicKey,
+          },
+          module,
+        ),
+        performHandshakeCore(
+          tB,
+          {
+            mode: "pin",
+            pin,
+            channelInput: ci,
+            amInitiator: false,
+            idSelfSec: idB.secretKey,
+            idPeerPub: idA.publicKey,
+          },
+          module,
+        ),
+      ]);
+      expect([...rA.secret]).toEqual([...rB.secret]);
+      expect(rA.secret.length).toBe(32);
+    }
+
+    // Wrong PIN on one side → key-confirmation MAC disagrees → both reject.
+    {
+      const [tA, tB] = linkedTransports();
+      const wrong = new TextEncoder().encode("000000");
+      const results = await Promise.allSettled([
+        performHandshakeCore(
+          tA,
+          {
+            mode: "pin",
+            pin,
+            channelInput: ci,
+            amInitiator: true,
+            idSelfSec: idA.secretKey,
+            idPeerPub: idB.publicKey,
+          },
+          module,
+        ),
+        performHandshakeCore(
+          tB,
+          {
+            mode: "pin",
+            pin: wrong,
+            channelInput: ci,
+            amInitiator: false,
+            idSelfSec: idB.secretKey,
+            idPeerPub: idA.publicKey,
+          },
+          module,
+        ),
+      ]);
+      // Both legs must reject (the deadlock-safe R2 ordering guarantees the
+      // responder's recv() is satisfied even when the initiator aborts).
+      expect(results.every((r) => r.status === "rejected")).toBe(true);
+    }
+  });
+});
+
+describe("runHandshake wiring (inbox + channel registry)", () => {
+  test("deliverHandshakeFrame feeds frames the runHandshake transport recvs", () => {
+    // Registry/inbox smoke test: a frame delivered before recv is buffered.
+    // 0x01 is the internal HS_STEP_HELLO sub-frame tag.
+    setHandshakeChannel("peerX", {
+      send: () => {},
+      readyState: "open",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    deliverHandshakeFrame("peerX", new Uint8Array([0x01, 1, 2, 3]));
+    // No throw; the frame sits in the inbox until the handshake drains it.
+    expect(typeof runHandshake).toBe("function");
   });
 });

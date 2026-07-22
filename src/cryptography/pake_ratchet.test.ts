@@ -32,7 +32,12 @@ const view = (ptr: number, len: number): Uint8Array =>
 
 beforeAll(async () => {
   mem = new WebAssembly.Memory({ initial: PAGES, maximum: PAGES });
-  const wasmBinary = readFileSync(join(import.meta.dir, "libcrypto.wasm"));
+  // The emscripten factory's wasmBinary is typed ArrayBuffer; readFileSync
+  // returns a Buffer, so copy the bytes into a fresh ArrayBuffer (type-correct
+  // for `tsc`, and WebAssembly.instantiate accepts an ArrayBuffer at runtime).
+  const fileBytes = readFileSync(join(import.meta.dir, "libcrypto.wasm"));
+  const wasmBinary = new ArrayBuffer(fileBytes.byteLength);
+  new Uint8Array(wasmBinary).set(fileBytes);
   mod = (await libcrypto({
     wasmBinary,
     wasmMemory: mem,

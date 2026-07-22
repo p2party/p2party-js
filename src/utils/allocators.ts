@@ -1,4 +1,8 @@
-import { ENCRYPTED_LEN, DECRYPTED_LEN, CHUNK_AUTH_TRANSCRIPT_LEN } from "./constants";
+import {
+  ENCRYPTED_LEN,
+  DECRYPTED_LEN,
+  CHUNK_AUTH_TRANSCRIPT_LEN,
+} from "./constants";
 
 import {
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,

@@ -217,7 +217,10 @@ export const handleConnectToPeer = async (
 
         console.error(`RTC Connection with peer ${peerId} has disconnected.`);
       }, 8000);
-    } else if (epc.connectionState === "closed" || epc.connectionState === "failed") {
+    } else if (
+      epc.connectionState === "closed" ||
+      epc.connectionState === "failed"
+    ) {
       if (disconnectTimeout) {
         clearTimeout(disconnectTimeout);
         disconnectTimeout = undefined;

@@ -26,11 +26,7 @@ import { allocateSendMessage } from "../utils/allocators";
 import { zeroFree } from "../utils/zeroFree";
 import { waitForOpen } from "../utils/waitForOpen";
 import { incrementMessageStats } from "../reducers/roomSlice";
-import {
-  clearTransfer,
-  waitForCompletion,
-  getAckedChunks,
-} from "./reconcile";
+import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,

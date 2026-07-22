@@ -71,6 +71,26 @@ export const CHUNK_AUTH_TRANSCRIPT_LEN =
 // above.
 export const CPACE_DOMAIN = "p2party-cpace-v1";
 
+// Double Ratchet KDF domain-separation labels (protocol-v3). These are the
+// `info` strings for the two HKDF-SHA512 chains of the ratchet, and are SSOT
+// constants that MUST byte-match any C-side kdf_rk/kdf_ck should one be added
+// (the ratchet state machine currently derives them in TS on the compiled
+// crypto_auth_hmacsha512 via hkdf.ts). Same "p2party-*-v1" convention as
+// CPACE_DOMAIN above.
+//   kdf_rk: (rootKey, DH(...)) -> (newRootKey ‖ chainKey)   [HKDF extract+expand]
+//   kdf_ck: chainKey           -> (nextChainKey, messageKey) [two labelled HMACs]
+export const KDF_RK_LABEL = "p2party-rk-v1";
+export const KDF_CK_LABEL = "p2party-ck-v1";
+export const KDF_MK_LABEL = "p2party-mk-v1";
+
+// Anti-DoS bound on the Double Ratchet's out-of-order skipped-message-key map.
+// A single DH-ratchet step (or a header with a large N) may derive at most
+// MAX_SKIP message keys before the requested one; a jump beyond this MUST throw
+// rather than loop unboundedly. The skipped-key map lives in JS (the WASM heap
+// is fixed at 2 MB with growth off), so this bounds JS-side derivations, not the
+// WASM heap. Measured conservatively against the 2 MB heap (~500).
+export const MAX_SKIP = 512;
+
 // Selective-retransmit / reconcile tuning: after the initial send, resend only
 // the un-acked real chunks until the receiver confirms completion, up to
 // MAX_RETRANSMITS attempts with a base timeout that backs off linearly.

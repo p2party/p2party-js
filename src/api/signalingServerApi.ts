@@ -7,9 +7,16 @@ import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
-import { uint8ArrayToHex } from "../utils/uint8array";
+import { uint8ArrayToHex, hexToUint8Array } from "../utils/uint8array";
 
 import { newKeyPair } from "../cryptography/ed25519";
+import { newX25519KeyPair } from "../cryptography/x25519";
+import {
+  crossSignIdentityX25519,
+  verifyIdentityCrossSig,
+} from "../cryptography/identityCrossSig";
+
+import { getIdentityX25519, setIdentityX25519 } from "../db/api";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -116,6 +123,41 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
       }
     } else {
       publicKey = keyPair.publicKey;
+    }
+
+    // D2=B: ensure the dedicated X25519 identity exists — generated once, wrapped in
+    // IndexedDB, cross-signed by the Ed25519 identity under a domain separator so
+    // peers trust it transitively. Self-healing: if the stored record's cross-sig no
+    // longer verifies against the current Ed25519 identity (e.g. the Ed25519 key was
+    // rotated/regenerated), it is regenerated so no orphaned cross-sig survives.
+    const edSecretHex = secretKey.length > 0 ? secretKey : keyPair.secretKey;
+    const edPubHex = publicKey.length > 0 ? publicKey : keyPair.publicKey;
+    if (edSecretHex.length > 0 && edPubHex.length > 0) {
+      const existing = await getIdentityX25519();
+      const valid =
+        existing != null &&
+        (await verifyIdentityCrossSig(
+          new Uint8Array(existing.pub),
+          new Uint8Array(existing.crossSig),
+          hexToUint8Array(edPubHex),
+        ));
+      if (!valid) {
+        const x = await newX25519KeyPair();
+        const crossSig = await crossSignIdentityX25519(
+          x.publicKey,
+          hexToUint8Array(edSecretHex),
+        );
+        const toBuf = (u: Uint8Array): ArrayBuffer => {
+          const b = new ArrayBuffer(u.byteLength);
+          new Uint8Array(b).set(u);
+          return b;
+        };
+        await setIdentityX25519({
+          pub: toBuf(x.publicKey),
+          secret: toBuf(x.secretKey),
+          crossSig: toBuf(crossSig),
+        });
+      }
     }
 
     const fullUrl = signalingServerUrl + "?publickey=" + publicKey;

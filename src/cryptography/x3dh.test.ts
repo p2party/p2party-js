@@ -46,4 +46,17 @@ describe("x3dh", () => {
     const sb = x3dhDeriveSecret(IKb.secretKey, IKa.publicKey, EKb.secretKey, EKa.publicKey, false, module);
     expect(Buffer.from(sa)).not.toEqual(Buffer.from(sb));
   });
+
+  test("a substituted initiator identity breaks agreement", async () => {
+    const module = await loadTestModule();
+    const IKa = x25519Keypair(module);
+    const IKb = x25519Keypair(module);
+    const IKevil = x25519Keypair(module);
+    const EKa = x25519Keypair(module);
+    const EKb = x25519Keypair(module);
+
+    const sa = x3dhDeriveSecret(IKevil.secretKey, IKb.publicKey, EKa.secretKey, EKb.publicKey, true, module);
+    const sb = x3dhDeriveSecret(IKb.secretKey, IKa.publicKey, EKb.secretKey, EKa.publicKey, false, module);
+    expect(Buffer.from(sa)).not.toEqual(Buffer.from(sb));
+  });
 });

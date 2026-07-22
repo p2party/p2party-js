@@ -60,6 +60,15 @@ export const CHUNK_AUTH_TRANSCRIPT_LEN =
   crypto_hash_sha512_BYTES + // merkle root
   crypto_sign_ed25519_PUBLICKEYBYTES; // ephemeral pk
 
+// CPace (PAKE, protocol-v3) generator-derivation domain separator. The TS CPace
+// layer derives the session generator as
+//   G = ristretto255_from_hash( SHA512(CPACE_DOMAIN || PRS || sid || CI) )
+// so this label domain-separates the CPace transcript from every other SHA-512
+// use in the codebase (the C-side cpace_ristretto255_from_hash is a bare wrapper
+// with no built-in DSI, so the separation must live here). Same naming
+// convention as CHUNK_AUTH_DOMAIN_BYTES above.
+export const CPACE_DOMAIN = "p2party-cpace-v1";
+
 // Selective-retransmit / reconcile tuning: after the initial send, resend only
 // the un-acked real chunks until the receiver confirms completion, up to
 // MAX_RETRANSMITS attempts with a base timeout that backs off linearly.

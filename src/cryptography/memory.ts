@@ -4,6 +4,8 @@ import {
   crypto_sign_ed25519_SECRETKEYBYTES,
   crypto_sign_ed25519_SEEDBYTES,
   crypto_sign_ed25519_BYTES,
+  crypto_scalarmult_curve25519_BYTES,
+  crypto_scalarmult_curve25519_SCALARBYTES,
   crypto_box_x25519_NONCEBYTES,
   crypto_box_x25519_PUBLICKEYBYTES,
   crypto_box_x25519_SECRETKEYBYTES,
@@ -41,6 +43,16 @@ const memoryLenToPages = (
 const newKeyPairMemory = (): WebAssembly.Memory => {
   const memoryLen =
     (crypto_sign_ed25519_PUBLICKEYBYTES + crypto_sign_ed25519_SECRETKEYBYTES) *
+    Uint8Array.BYTES_PER_ELEMENT;
+  const pages = memoryLenToPages(memoryLen);
+
+  return new WebAssembly.Memory({ initial: pages, maximum: pages });
+};
+
+const identityX25519KeypairMemory = (): WebAssembly.Memory => {
+  const memoryLen =
+    (crypto_scalarmult_curve25519_BYTES +
+      crypto_scalarmult_curve25519_SCALARBYTES) *
     Uint8Array.BYTES_PER_ELEMENT;
   const pages = memoryLenToPages(memoryLen);
 
@@ -224,6 +236,7 @@ const getReceiveMessageMemory = () => {
 
 export default {
   newKeyPairMemory,
+  identityX25519KeypairMemory,
   keyPairFromSeedMemory,
   keyPairFromSecretKeyMemory,
   signMemory,

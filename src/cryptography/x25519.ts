@@ -1,3 +1,6 @@
+import memory from "./memory";
+import { wasmLoader } from "./wasmLoader";
+
 import {
   crypto_scalarmult_curve25519_BYTES,
   crypto_scalarmult_curve25519_SCALARBYTES,
@@ -55,6 +58,22 @@ export const x25519Keypair = (module: LibCrypto): X25519KeyPair => {
   );
 
   return { publicKey, secretKey };
+};
+
+/**
+ * Async, optional-module wrapper over `x25519Keypair`, mirroring `ed25519.newKeyPair`:
+ * self-loads a LibCrypto module (sizing its own fixed 2 MiB heap) when none is passed,
+ * so identity-generation call sites can mint the dedicated X25519 identity keypair the
+ * same way they call `newKeyPair()`. The keypair is random (`_x25519_keypair` draws its
+ * own entropy); `x25519Keypair` copies the secret out and zero-frees the wasm scratch.
+ */
+export const newX25519KeyPair = async (
+  module?: LibCrypto,
+): Promise<X25519KeyPair> => {
+  const wasmMemory = module?.wasmMemory ?? memory.identityX25519KeypairMemory();
+  const cryptoModule = module ?? (await wasmLoader(wasmMemory));
+
+  return x25519Keypair(cryptoModule);
 };
 
 export const x25519Dh = (

@@ -18,7 +18,14 @@ export const x25519Keypair = (module: LibCrypto): X25519KeyPair => {
   const r = module._x25519_keypair(pkPtr, skPtr);
   if (r !== 0) {
     module._free(pkPtr);
-    module._free(skPtr);
+    zeroFree(
+      module,
+      new Uint8Array(
+        module.wasmMemory.buffer,
+        skPtr,
+        crypto_scalarmult_curve25519_SCALARBYTES,
+      ),
+    );
     throw new Error("x25519_keypair failed");
   }
 
@@ -83,7 +90,14 @@ export const x25519Dh = (
         )
       : null;
 
-  module._free(shPtr);
+  zeroFree(
+    module,
+    new Uint8Array(
+      module.wasmMemory.buffer,
+      shPtr,
+      crypto_scalarmult_curve25519_BYTES,
+    ),
+  );
   zeroFree(
     module,
     new Uint8Array(

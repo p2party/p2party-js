@@ -10,6 +10,7 @@
 #include "../../libsodium/src/libsodium/include/sodium/crypto_scalarmult_ristretto255.h"
 #include "../../libsodium/src/libsodium/include/sodium/crypto_scalarmult_curve25519.h"
 #include "../../libsodium/src/libsodium/include/sodium/crypto_auth_hmacsha512.h"
+#include "../../libsodium/src/libsodium/include/sodium/crypto_kdf_hkdf_sha512.h"
 #include "../../libsodium/src/libsodium/include/sodium/randombytes.h"
 
 /* ---- v3 frame-layout constants (byte-matched to src/utils/constants.ts) ----

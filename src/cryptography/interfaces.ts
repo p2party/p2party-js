@@ -27,6 +27,21 @@ export const crypto_aead_chacha20poly1305_ietf_NPUBBYTES =
   12 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_pwhash_argon2id_SALTBYTES =
   16 * Uint8Array.BYTES_PER_ELEMENT;
+// Ristretto255 (CPace / PAKE) — byte sizes for the wasm exports in
+// pake_ratchet.c; mirror libsodium crypto_core_ristretto255.h /
+// crypto_scalarmult_ristretto255.h.
+export const crypto_core_ristretto255_BYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_core_ristretto255_HASHBYTES =
+  64 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_core_ristretto255_SCALARBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_scalarmult_ristretto255_BYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+// X25519 DH-ratchet — mirror libsodium crypto_scalarmult_curve25519.h.
+export const crypto_scalarmult_curve25519_BYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_scalarmult_curve25519_SCALARBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
 
 export interface SignKeyPair {
   publicKey: Uint8Array;
@@ -66,4 +81,10 @@ export default {
   crypto_aead_chacha20poly1305_ietf_KEYBYTES,
   getEncryptedLen,
   getDecryptedLen,
+  crypto_core_ristretto255_BYTES,
+  crypto_core_ristretto255_HASHBYTES,
+  crypto_core_ristretto255_SCALARBYTES,
+  crypto_scalarmult_ristretto255_BYTES,
+  crypto_scalarmult_curve25519_BYTES,
+  crypto_scalarmult_curve25519_SCALARBYTES,
 };

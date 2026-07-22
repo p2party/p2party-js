@@ -8,7 +8,19 @@ import {
   serializeRatchet,
   deserializeRatchet,
 } from "./ratchet";
-import { MAX_SKIP } from "../utils/constants";
+import type { RatchetSessionSecrets } from "./ratchet";
+import { MAX_SKIP, MAX_SKIP_SESSION } from "../utils/constants";
+
+// True iff the (dhPub, n) pair is present in a serialized skipped-key snapshot
+// — used to probe eviction without depending on the internal Map key encoding.
+const hasSkippedEntry = (
+  secrets: RatchetSessionSecrets,
+  dhPub: Uint8Array,
+  n: number,
+): boolean =>
+  secrets.skippedMessageKeys.some(
+    (e) => e.n === n && Buffer.from(e.dhPub).equals(Buffer.from(dhPub)),
+  );
 
 const seed = () => {
   const s = new Uint8Array(32);
@@ -87,5 +99,77 @@ describe("ratchet", () => {
     const bob2 = deserializeRatchet(snap);
     const k0 = ratchetDecrypt(bob2, m0.header, module);
     expect(Buffer.from(k0)).toEqual(Buffer.from(m0.messageKey));
+  });
+
+  test("global MAX_SKIP_SESSION cap evicts the oldest skipped keys across many DH steps", async () => {
+    const { module, alice, bob } = await pair();
+
+    // Each round: Alice fires `perRound + 1` messages on her current chain but
+    // only the LAST is delivered to Bob, so decrypting it stashes `perRound`
+    // skipped keys (well under the per-call MAX_SKIP=512 bound). Bob then
+    // replies and Alice decrypts the reply, which DH-steps Alice onto a fresh
+    // dhPub for the next round — so each round's skipped keys are stored under
+    // a distinct dhPub, matching "a peer that repeatedly DH-steps".
+    const perRound = 500;
+    const rounds = 5; // 5 * 500 = 2500 > MAX_SKIP_SESSION (2000): forces eviction
+    expect(perRound).toBeLessThan(MAX_SKIP);
+    expect(rounds * perRound).toBeGreaterThan(MAX_SKIP_SESSION);
+
+    let firstRoundDhPub: Uint8Array | null = null;
+    let lastRoundDhPub: Uint8Array | null = null;
+    let lastRoundFirstMessageKey: Uint8Array | null = null;
+
+    for (let r = 0; r < rounds; r++) {
+      const first = ratchetEncrypt(alice, module); // N=0 of this round's chain
+      let last = first;
+      for (let i = 0; i < perRound; i++) {
+        last = ratchetEncrypt(alice, module);
+      }
+      ratchetDecrypt(bob, last.header, module);
+
+      if (r === 0) firstRoundDhPub = Uint8Array.from(last.header.dhPub);
+      if (r === rounds - 1) {
+        lastRoundDhPub = Uint8Array.from(last.header.dhPub);
+        lastRoundFirstMessageKey = first.messageKey;
+      }
+
+      const reply = ratchetEncrypt(bob, module);
+      ratchetDecrypt(alice, reply.header, module);
+    }
+
+    // Bounded: never exceeds the global cap despite ~2500 logical skips.
+    expect(bob.skipped.size).toBeLessThanOrEqual(MAX_SKIP_SESSION);
+
+    const snap = serializeRatchet(bob);
+    // Oldest round's entries are gone (evicted first)...
+    expect(hasSkippedEntry(snap, firstRoundDhPub!, 0)).toBe(false);
+    // ...while a still-needed key from the most recent round survives and
+    // remains usable (and matches the original message key exactly).
+    expect(hasSkippedEntry(snap, lastRoundDhPub!, 0)).toBe(true);
+    const bob2 = deserializeRatchet(snap);
+    const recovered = ratchetDecrypt(
+      bob2,
+      { dhPub: lastRoundDhPub!, N: 0, PN: perRound },
+      module,
+    );
+    expect(Buffer.from(recovered)).toEqual(Buffer.from(lastRoundFirstMessageKey!));
+  });
+
+  test("a header with a negative or non-integer N/PN is rejected", async () => {
+    const { module, alice, bob } = await pair();
+    const m0 = ratchetEncrypt(alice, module);
+
+    expect(() =>
+      ratchetDecrypt(bob, { ...m0.header, N: -1 }, module),
+    ).toThrow(/invalid ratchet header/);
+    expect(() =>
+      ratchetDecrypt(bob, { ...m0.header, N: 1.5 }, module),
+    ).toThrow(/invalid ratchet header/);
+    expect(() =>
+      ratchetDecrypt(bob, { ...m0.header, PN: -1 }, module),
+    ).toThrow(/invalid ratchet header/);
+    expect(() =>
+      ratchetDecrypt(bob, { ...m0.header, PN: 1.5 }, module),
+    ).toThrow(/invalid ratchet header/);
   });
 });

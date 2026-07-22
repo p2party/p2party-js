@@ -62,11 +62,13 @@ export const CHUNK_AUTH_TRANSCRIPT_LEN =
 
 // CPace (PAKE, protocol-v3) generator-derivation domain separator. The TS CPace
 // layer derives the session generator as
-//   G = ristretto255_from_hash( SHA512(CPACE_DOMAIN || PRS || sid || CI) )
-// so this label domain-separates the CPace transcript from every other SHA-512
-// use in the codebase (the C-side cpace_ristretto255_from_hash is a bare wrapper
-// with no built-in DSI, so the separation must live here). Same naming
-// convention as CHUNK_AUTH_DOMAIN_BYTES above.
+//   G = ristretto255_from_hash( SHA512(lv_cat(CPACE_DOMAIN, PRS, sid, CI)) )
+// where lv_cat length-prefixes each field (IRTF draft-irtf-cfrg-cpace) so the
+// transcript encoding is injective. This label domain-separates the CPace
+// transcript from every other SHA-512 use in the codebase (the C-side
+// cpace_ristretto255_from_hash is a bare wrapper with no built-in DSI, so the
+// separation must live here). Same naming convention as CHUNK_AUTH_DOMAIN_BYTES
+// above.
 export const CPACE_DOMAIN = "p2party-cpace-v1";
 
 // Selective-retransmit / reconcile tuning: after the initial send, resend only

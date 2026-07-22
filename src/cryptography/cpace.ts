@@ -12,21 +12,60 @@ import type { LibCrypto } from "./libcrypto";
 
 const CPACE_DOMAIN_BYTES = new TextEncoder().encode(CPACE_DOMAIN);
 
-// SHA-512 over the ordered concatenation of the parts, streamed through the wasm
-// incremental hash. Returns the 64-byte digest as an owned copy.
-const sha512Concat = (module: LibCrypto, parts: Uint8Array[]): Uint8Array => {
+// A transcript field for sha512Concat. `secret` marks fields that carry key
+// material (the PRS/PIN) so their wasm-heap staging buffer is wiped with
+// zeroFree instead of plain _free.
+type TranscriptPart = { data: Uint8Array; secret?: boolean };
+
+// SHA-512 over the lv_cat (length-value concatenation) of the parts, streamed
+// through the wasm incremental hash.
+//
+// Per IRTF draft-irtf-cfrg-cpace, every field fed into the generator hash MUST
+// be length-prefixed (lv_cat) rather than bare-concatenated: each part is
+// preceded by its own byte length, encoded here as a fixed-width 8-byte
+// little-endian integer, before its bytes are hashed. This makes the map
+// (DOMAIN, PRS, sid, CI) -> digest injective in the field boundaries, not just
+// in the concatenated byte string — without it, two different splits (e.g.
+// PRS="ab" || CI="cd" vs. PRS="a" || CI="bcd") could hash to the same
+// generator once CI carries variable-length data, which would amplify online
+// PIN-guessing power.
+//
+// Returns the 64-byte digest as an owned copy.
+const sha512Concat = (
+  module: LibCrypto,
+  parts: TranscriptPart[],
+): Uint8Array => {
   const statePtr = module._malloc(crypto_hash_sha512_STATEBYTES);
   const outPtr = module._malloc(crypto_hash_sha512_BYTES);
   try {
     if (module._sha512_init(statePtr) !== 0)
       throw new Error("sha512_init failed");
 
-    for (const part of parts) {
-      if (part.length === 0) continue;
-      const p = module._malloc(part.length);
-      new Uint8Array(module.wasmMemory.buffer, p, part.length).set(part);
-      const r = module._sha512_update(statePtr, p, part.length);
-      module._free(p);
+    for (const { data, secret } of parts) {
+      // len8: fixed-width 8-byte little-endian length prefix (the "L" in lv_cat).
+      const lenBuf = new Uint8Array(8);
+      new DataView(lenBuf.buffer).setBigUint64(0, BigInt(data.length), true);
+
+      const lenPtr = module._malloc(8);
+      new Uint8Array(module.wasmMemory.buffer, lenPtr, 8).set(lenBuf);
+      let r = module._sha512_update(statePtr, lenPtr, 8);
+      module._free(lenPtr);
+      if (r !== 0) throw new Error("sha512_update failed");
+
+      if (data.length === 0) continue;
+
+      const p = module._malloc(data.length);
+      const view = new Uint8Array(module.wasmMemory.buffer, p, data.length);
+      view.set(data);
+      r = module._sha512_update(statePtr, p, data.length);
+      // The PRS/PIN is the crown-jewel PAKE secret: wipe its wasm-heap staging
+      // buffer before free rather than leaving it to linger. Non-secret fields
+      // (DOMAIN, sid, CI) are public and may be freed directly.
+      if (secret) {
+        zeroFree(module, view);
+      } else {
+        module._free(p);
+      }
       if (r !== 0) throw new Error("sha512_update failed");
     }
 
@@ -43,8 +82,10 @@ const sha512Concat = (module: LibCrypto, parts: Uint8Array[]): Uint8Array => {
 };
 
 /**
- * G = ristretto255_from_hash( SHA512(CPACE_DOMAIN || PRS || sid || CI) ).
+ * G = ristretto255_from_hash( SHA512(lv_cat(CPACE_DOMAIN, PRS, sid, CI)) ).
  * Both parties feed identical (PRS, sid, CI) and get the identical generator.
+ * lv_cat length-prefixes each field (see sha512Concat) so the transcript
+ * encoding is injective in the field boundaries per IRTF draft-irtf-cfrg-cpace.
  */
 export const deriveGenerator = (
   pin: Uint8Array,
@@ -52,7 +93,12 @@ export const deriveGenerator = (
   channelInput: Uint8Array,
   module: LibCrypto,
 ): Uint8Array => {
-  const h = sha512Concat(module, [CPACE_DOMAIN_BYTES, pin, sid, channelInput]);
+  const h = sha512Concat(module, [
+    { data: CPACE_DOMAIN_BYTES },
+    { data: pin, secret: true },
+    { data: sid },
+    { data: channelInput },
+  ]);
 
   const hPtr = module._malloc(crypto_core_ristretto255_HASHBYTES);
   const gPtr = module._malloc(crypto_core_ristretto255_BYTES);

@@ -71,6 +71,18 @@ export const PQ_TAG = new Uint8Array(PQ_TAG_LEN); // [0]
 export const CHUNK_AUTH_DOMAIN_BYTES = new TextEncoder().encode(
   "p2party-chunk-auth-v1",
 ); // 21 bytes
+
+// D2=B / SECURITY-1: domain separator for the Ed25519 cross-signature over the
+// dedicated X25519 identity pub. The cross-sig signs
+// (IDENTITY_CROSS_SIGN_DOMAIN_BYTES ‖ X25519_pub), NOT the bare pub, so it cannot
+// collide with the login-challenge signing oracle (handleChallenge signs a raw
+// 32-byte server-supplied nonce with the same Ed25519 identity key; a bare cross-sig
+// would be forgeable by sending a chosen X25519 pub as that challenge). Same
+// convention as CHUNK_AUTH_DOMAIN_BYTES above; TS-only (the cross-sig is
+// produced/verified entirely in TS via ed25519 sign/verify — no C-side use).
+export const IDENTITY_CROSS_SIGN_DOMAIN_BYTES = new TextEncoder().encode(
+  "p2party-x25519-idsig-v1",
+); // 23 bytes
 export const CHUNK_AUTH_TRANSCRIPT_LEN =
   CHUNK_AUTH_DOMAIN_BYTES.length +
   crypto_hash_sha512_BYTES + // merkle root

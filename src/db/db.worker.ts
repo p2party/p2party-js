@@ -6,6 +6,8 @@ import { OPFS_REASSEMBLE_DIR } from "../utils/constants";
 import { getDB, dbName } from "./src/getDB";
 import {
   getWrapKey,
+  wrapSecret,
+  unwrapSecret,
   wrapRatchetSession,
   unwrapRatchetSession,
 } from "./ratchetWrap";
@@ -23,6 +25,8 @@ import type {
   UniqueRoom,
   NewChunk,
   RatchetSession,
+  IdentityX25519,
+  StoredIdentityX25519,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
 
@@ -1464,6 +1468,55 @@ async function fnDeleteRatchetSession(
   }
 }
 
+// D2=B: the dedicated X25519 identity, stored in the `meta` store under
+// IDENTITY_X25519_META_ID. Only the secret is WebCrypto-wrapped at rest (getWrapKey/
+// wrapSecret); pub + crossSig are public and stored in the clear.
+const IDENTITY_X25519_META_ID = "identityX25519";
+
+async function fnGetIdentityX25519(): Promise<IdentityX25519 | undefined> {
+  try {
+    const db = await getDB();
+    const stored = (await db.get("meta", IDENTITY_X25519_META_ID)) as
+      | StoredIdentityX25519
+      | undefined;
+    db.close();
+    if (!stored) return undefined;
+    const key = await getWrapKey();
+    const secret = await unwrapSecret(key, stored.wrappedSecret);
+    return { pub: stored.pub, secret, crossSig: stored.crossSig };
+  } catch (error) {
+    console.error(error);
+    return undefined;
+  }
+}
+
+async function fnSetIdentityX25519(identity: IdentityX25519): Promise<void> {
+  try {
+    const key = await getWrapKey();
+    const wrappedSecret = await wrapSecret(key, identity.secret);
+    const stored: StoredIdentityX25519 = {
+      pub: identity.pub,
+      wrappedSecret,
+      crossSig: identity.crossSig,
+    };
+    const db = await getDB();
+    await db.put("meta", stored, IDENTITY_X25519_META_ID);
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function fnDeleteIdentityX25519(): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.delete("meta", IDENTITY_X25519_META_ID);
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
   try {
     const db = await getDB();
@@ -1820,6 +1873,17 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteRatchetSession":
         await fnDeleteRatchetSession(...message.args);
+        result = undefined;
+        break;
+      case "getIdentityX25519":
+        result = await fnGetIdentityX25519();
+        break;
+      case "setIdentityX25519":
+        await fnSetIdentityX25519(...message.args);
+        result = undefined;
+        break;
+      case "deleteIdentityX25519":
+        await fnDeleteIdentityX25519();
         result = undefined;
         break;
       case "deleteDB":

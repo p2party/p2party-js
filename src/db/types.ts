@@ -131,6 +131,22 @@ export interface RatchetSession {
   updatedAt: number;
 }
 
+// The dedicated X25519 identity keypair (D2=B). `secret` is plaintext at the api
+// boundary; it is WebCrypto-wrapped (getWrapKey/wrapSecret) before it touches disk.
+export interface IdentityX25519 {
+  pub: ArrayBuffer;
+  secret: ArrayBuffer;
+  crossSig: ArrayBuffer;
+}
+
+// The at-rest shape in the `meta` store (key "identityX25519"): the secret is the
+// wrapped iv‖ciphertext blob; pub + crossSig are public and stored in the clear.
+export interface StoredIdentityX25519 {
+  pub: ArrayBuffer;
+  wrappedSecret: ArrayBuffer;
+  crossSig: ArrayBuffer;
+}
+
 // Each method and its arguments/return type
 export type WorkerMessages =
   | {
@@ -336,6 +352,21 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getIdentityX25519";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setIdentityX25519";
+      args: [identity: IdentityX25519];
+    }
+  | {
+      id: number;
+      method: "deleteIdentityX25519";
+      args: [];
+    }
+  | {
+      id: number;
       method: "deleteDB";
       args: [];
     };
@@ -382,5 +413,8 @@ export interface WorkerMethodReturnTypes {
   getRatchetSession: RatchetSession | undefined;
   setRatchetSession: undefined;
   deleteRatchetSession: undefined;
+  getIdentityX25519: IdentityX25519 | undefined;
+  setIdentityX25519: undefined;
+  deleteIdentityX25519: undefined;
   deleteDB: undefined;
 }

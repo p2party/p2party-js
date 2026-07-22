@@ -593,6 +593,10 @@ export const runHandshake = async (
   channelInput: Uint8Array,
   module: LibCrypto,
 ): Promise<void> => {
+  // Hoisted so the finally wipes them on EVERY exit (success or throw), not just
+  // the success path — idSelfSec is the long-term X25519 identity secret.
+  let idSelfSec: Uint8Array | null = null;
+  let secret: Uint8Array | null = null;
   try {
     await verifyDtlsFingerprints(epc);
 
@@ -604,13 +608,13 @@ export const runHandshake = async (
     const amInitiator = publicKey < epc.withPeerPublicKey; // deterministic tie-break
     const identity = await getIdentityX25519();
     if (!identity) throw new Error("X25519 identity not provisioned");
-    const idSelfSec = new Uint8Array(identity.secret);
+    idSelfSec = new Uint8Array(identity.secret);
     const selfIdentityX25519Pub = new Uint8Array(identity.pub);
     const selfIdentityCrossSignature = new Uint8Array(identity.crossSig);
     const peerIdentityEd25519Pub = hexToUint8Array(epc.withPeerPublicKey);
 
     const transport = transportForPeer(epc.withPeerId);
-    const { state, secret } = await performHandshakeCore(
+    const { state, secret: coreSecret } = await performHandshakeCore(
       transport,
       {
         mode,
@@ -624,6 +628,7 @@ export const runHandshake = async (
       },
       module,
     );
+    secret = coreSecret;
 
     // Persist keyed to the STABLE identity edge. roomId comes from the
     // registered main channel (falling back to the peer's first room).
@@ -654,16 +659,17 @@ export const runHandshake = async (
     };
     await setRatchetSession(session);
 
-    // The returned root secret is now folded into the (persisted) ratchet; wipe
-    // the loose copy AND the unwrapped X25519 identity secret.
-    secret.fill(0);
-    idSelfSec.fill(0);
-
     epc.ratchetState = state;
     epc.session = session;
     openRatchetGate(epc.withPeerId);
   } catch (err) {
     rejectRatchetGate(epc.withPeerId, err);
     throw err;
+  } finally {
+    // Fail-closed hygiene: the loose root-secret copy is folded into the persisted
+    // ratchet on success and unused on failure; wipe it and the unwrapped long-term
+    // X25519 identity secret on EVERY exit.
+    secret?.fill(0);
+    idSelfSec?.fill(0);
   }
 };

@@ -1,6 +1,8 @@
 # p2party — Design Decisions & Security Findings
 
 > Consolidated project record synthesized from four mined datasets (git history, spec docs, crypto code, curated memory). Commit hashes (`abc1234`) and source files are preserved where the inputs recorded them. Nothing here is asserted beyond what those inputs support; a few points where the inputs disagree or leave a gap are flagged inline.
+>
+> **Companion:** the chronological *decision log* — every protocol-evolution dilemma (resolved, decided, and future), including the two hard handshake calls **D1 (initiator-random CPace `sid`)** and **D2 (dedicated X25519 identity key + key separation)** decided 2026-07-22 — lives in [`protocol-evolution-decision-log.md`](./protocol-evolution-decision-log.md).
 
 ---
 

@@ -42,6 +42,16 @@ const unsigned int CHUNK_LEN = MESSAGE_LEN - IMPORTANT_DATA_LEN;
 #define CHUNK_AUTH_TRANSCRIPT_LEN                                             \
   (CHUNK_AUTH_DOMAIN_LEN + crypto_hash_sha512_BYTES                          \
    + crypto_sign_ed25519_PUBLICKEYBYTES)
+
+/* protocol-v3 wire framing. Byte-matched to src/utils/constants.ts
+ * (FRAME_TYPE_*, PQ_TAG_LEN). A mismatch mis-routes / mis-slices frames
+ * silently; src/utils/constants.test.ts asserts C == TS. */
+#define FRAME_TYPE_LEN 1U
+#define FRAME_TYPE_HANDSHAKE 1U
+#define FRAME_TYPE_CHUNK 2U
+#define FRAME_TYPE_RECEIPT 3U
+#define PQ_TAG_LEN 1U
+
 const unsigned int DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
 const unsigned int ENCRYPTED_LEN
     = DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_NPUBBYTES

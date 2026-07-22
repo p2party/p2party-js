@@ -47,6 +47,22 @@ export const CHUNK_LEN =
 export const DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
 export const ENCRYPTED_LEN = getEncryptedLen(DECRYPTED_LEN);
 
+// ── protocol-v3 wire framing (SSOT; byte-matched in cryptography/utils.h) ─────
+// Clean v3 break: every data-channel frame now begins with a 1-byte type tag so
+// the inbound classifier is unambiguous (replaces the old length-only 64B /
+// MESSAGE_LEN test). A mismatch here mis-routes frames silently, so the values
+// are asserted equal to the C #defines by src/utils/constants.test.ts.
+export const PROTOCOL_VERSION = 3;
+export const FRAME_TYPE_LEN = 1;
+export const FRAME_TYPE_HANDSHAKE = 1;
+export const FRAME_TYPE_CHUNK = 2;
+export const FRAME_TYPE_RECEIPT = 3;
+// CPace channel-input transcript marker (algorithm/epoch; value 0 in v3). It
+// reserves transcript structure so a future hybrid KEM binds without a v4 wire
+// break — it is NOT the KEM ciphertext. See spec §5/§10.
+export const PQ_TAG_LEN = 1;
+export const PQ_TAG = new Uint8Array(PQ_TAG_LEN); // [0]
+
 // Per-chunk sender authentication signs a domain-separated transcript
 // (DOMAIN || merkle_root || ephemeral_pk) rather than the bare ephemeral public
 // key, so a signature harvested from the raw-nonce server-challenge oracle

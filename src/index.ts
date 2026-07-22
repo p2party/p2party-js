@@ -20,6 +20,7 @@ import {
   getReceiveFile,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
+  deleteIdentityX25519,
   getDBAddressBookEntry,
   getDBAllChunks,
   getDBAllNewChunksCount,
@@ -749,6 +750,10 @@ const purgeIdentity = async () => {
   window.dispatchEvent(evt);
 
   dispatch(resetIdentity());
+  // D2=B: the X25519 identity lives WebCrypto-wrapped in IndexedDB, not in the
+  // Redux/localStorage identity — clear it too so a rotated Ed25519 identity never
+  // leaves an orphaned X25519 record + cross-sig behind.
+  await deleteIdentityX25519();
 
   const { rooms } = store.getState();
   const roomsLen = rooms.length;
@@ -780,6 +785,7 @@ const purge = async () => {
   window.dispatchEvent(evt);
 
   dispatch(resetIdentity());
+  await deleteIdentityX25519(); // D2=B: clear the wrapped X25519 identity record too
   await dispatch(
     signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
   );

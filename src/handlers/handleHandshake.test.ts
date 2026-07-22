@@ -3,6 +3,8 @@ import { describe, expect, test, beforeAll } from "bun:test";
 import { PQ_TAG } from "../utils/constants";
 import { loadTestModule } from "../cryptography/testModule";
 import { x25519Keypair } from "../cryptography/x25519";
+import { newKeyPair } from "../cryptography/ed25519";
+import { crossSignIdentityX25519 } from "../cryptography/identityCrossSig";
 import { serializeRatchet } from "../cryptography/ratchet";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { HandshakeTransport } from "./handleHandshake";
@@ -220,6 +222,13 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     // fill()ed identity keys cannot agree — see the task report.
     const idA = x25519Keypair(module);
     const idB = x25519Keypair(module);
+    // Ed25519 identities + X25519 cross-sigs, exactly as runHandshake supplies
+    // them: each side presents its X25519 pub cross-signed by its Ed25519 secret,
+    // and pins the peer's Ed25519 pub as the anchor to verify against.
+    const edA = await newKeyPair(module);
+    const edB = await newKeyPair(module);
+    const crossA = await crossSignIdentityX25519(idA.publicKey, edA.secretKey, module);
+    const crossB = await crossSignIdentityX25519(idB.publicKey, edB.secretKey, module);
     const ci = new Uint8Array(160).fill(7);
 
     const [rA, rB] = await Promise.all([
@@ -231,7 +240,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
           channelInput: ci,
           amInitiator: true,
           idSelfSec: idA.secretKey,
-          idPeerPub: idB.publicKey,
+          selfIdentityX25519Pub: idA.publicKey,
+          selfIdentityCrossSignature: crossA,
+          peerIdentityEd25519Pub: edB.publicKey,
         },
         module,
       ),
@@ -243,7 +254,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
           channelInput: ci,
           amInitiator: false,
           idSelfSec: idB.secretKey,
-          idPeerPub: idA.publicKey,
+          selfIdentityX25519Pub: idB.publicKey,
+          selfIdentityCrossSignature: crossB,
+          peerIdentityEd25519Pub: edA.publicKey,
         },
         module,
       ),
@@ -267,6 +280,10 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     const ci = new Uint8Array(160).fill(9);
     const idA = x25519Keypair(module);
     const idB = x25519Keypair(module);
+    const edA = await newKeyPair(module);
+    const edB = await newKeyPair(module);
+    const crossA = await crossSignIdentityX25519(idA.publicKey, edA.secretKey, module);
+    const crossB = await crossSignIdentityX25519(idB.publicKey, edB.secretKey, module);
     const pin = new TextEncoder().encode("123456");
 
     // Matching PIN → both resolve with equal secrets.
@@ -281,7 +298,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
             channelInput: ci,
             amInitiator: true,
             idSelfSec: idA.secretKey,
-            idPeerPub: idB.publicKey,
+            selfIdentityX25519Pub: idA.publicKey,
+            selfIdentityCrossSignature: crossA,
+            peerIdentityEd25519Pub: edB.publicKey,
           },
           module,
         ),
@@ -293,7 +312,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
             channelInput: ci,
             amInitiator: false,
             idSelfSec: idB.secretKey,
-            idPeerPub: idA.publicKey,
+            selfIdentityX25519Pub: idB.publicKey,
+            selfIdentityCrossSignature: crossB,
+            peerIdentityEd25519Pub: edA.publicKey,
           },
           module,
         ),
@@ -315,7 +336,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
             channelInput: ci,
             amInitiator: true,
             idSelfSec: idA.secretKey,
-            idPeerPub: idB.publicKey,
+            selfIdentityX25519Pub: idA.publicKey,
+            selfIdentityCrossSignature: crossA,
+            peerIdentityEd25519Pub: edB.publicKey,
           },
           module,
         ),
@@ -327,7 +350,9 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
             channelInput: ci,
             amInitiator: false,
             idSelfSec: idB.secretKey,
-            idPeerPub: idA.publicKey,
+            selfIdentityX25519Pub: idB.publicKey,
+            selfIdentityCrossSignature: crossB,
+            peerIdentityEd25519Pub: edA.publicKey,
           },
           module,
         ),
@@ -336,6 +361,74 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
       // responder's recv() is satisfied even when the initiator aborts).
       expect(results.every((r) => r.status === "rejected")).toBe(true);
     }
+  });
+
+  test("no-PIN mode: a peer HELLO whose X25519 cross-sig does not verify against the pinned peer Ed25519 rejects (fail-closed, before any DH/secret)", async () => {
+    const module = await loadTestModule();
+
+    // Our (initiator) identity, correctly cross-signed.
+    const idSelf = x25519Keypair(module);
+    const edSelf = await newKeyPair(module);
+    const crossSelf = await crossSignIdentityX25519(
+      idSelf.publicKey,
+      edSelf.secretKey,
+      module,
+    );
+
+    // The peer presents its real X25519 pub, but its cross-sig is produced by a
+    // DIFFERENT (attacker) Ed25519 key — NOT the peer Ed25519 identity we pin —
+    // so verifyIdentityCrossSig must return false and abort before any DH.
+    const idPeer = x25519Keypair(module);
+    const edPeerPinned = await newKeyPair(module); // what the initiator trusts
+    const edAttacker = await newKeyPair(module); // what actually signed
+    const badCrossSig = await crossSignIdentityX25519(
+      idPeer.publicKey,
+      edAttacker.secretKey,
+      module,
+    );
+
+    // Assemble the peer HELLO exactly as packHello would (layout, 193 bytes):
+    // [0x01 ‖ sid(32) ‖ EK(32) ‖ Y(32) ‖ X25519_id_pub(32) ‖ crossSig(64)].
+    // 0x01 is the internal HS_STEP_HELLO sub-frame tag. EK is any valid X25519
+    // pub — verify fails before x3dh ever reads it; Y stays zeros (no-PIN).
+    const HS_STEP_HELLO = 0x01;
+    const peerHello = new Uint8Array(1 + 32 + 32 + 32 + 32 + 64);
+    peerHello[0] = HS_STEP_HELLO;
+    peerHello.set(crypto.getRandomValues(new Uint8Array(32)), 1);
+    peerHello.set(idPeer.publicKey, 1 + 32);
+    // Y (offset 1+32+32) stays zeros.
+    peerHello.set(idPeer.publicKey, 1 + 32 + 32 + 32);
+    peerHello.set(badCrossSig, 1 + 32 + 32 + 32 + 32);
+
+    // Scripted one-shot transport: swallow our HELLO, hand back the crafted one.
+    // (A two-sided linkedTransports run would leave the honest peer's recv()
+    // hanging once the verifying side throws mid-protocol, so drive one leg.)
+    const transport: HandshakeTransport = {
+      send: () => {},
+      recv: async () => peerHello,
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(
+        transport,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: new Uint8Array(160).fill(5),
+          amInitiator: true,
+          idSelfSec: idSelf.secretKey,
+          selfIdentityX25519Pub: idSelf.publicKey,
+          selfIdentityCrossSignature: crossSelf,
+          peerIdentityEd25519Pub: edPeerPinned.publicKey,
+        },
+        module,
+      ),
+    ]);
+
+    expect(results[0].status).toBe("rejected");
+    expect(String((results[0] as PromiseRejectedResult).reason)).toMatch(
+      /cross-signature/i,
+    );
   });
 });
 

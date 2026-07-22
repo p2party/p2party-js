@@ -149,8 +149,9 @@ advances **per logical message per edge** — never per chunk (chunks are
 Fisher-Yates-shuffled, decoy-interleaved, relay-reorderable, and reconcile resends
 only gaps, so a per-chunk step would desync). All chunks of a message share the
 one message key; **nonce = chunkIndex** (unique within a message). A **retransmit
-of a chunkIndex MUST reuse the identical ciphertext** (deterministic) — never a
-fresh nonce on the same key+different plaintext, never a message key reused across
+of a chunkIndex MUST reuse the identical ciphertext** — achieved by **resending the
+cached ciphertext** from the existing retransmit store (R3), never by re-encrypting
+with a fresh nonce on the same key+different plaintext, and never a message key reused across
 two logical messages. Out-of-order/lost messages use a bounded
 **skipped-message-keys** map (`MAX_SKIP`, measured against the 2 MB heap, ~500).
 
@@ -285,9 +286,14 @@ Confirmed: Ristretto255 is **not** compiled; X25519/`crypto_kx` are compiled but
   found" at runtime. Regenerate `.tgz`/`lib`; **SRI repin + CDN upload** (wire +
   wasm change → version bump; `npm run predist && npm run uploadcdn`).
 - **Heap budget (Risk R3):** `INITIAL_MEMORY=2mb`, `ALLOW_MEMORY_GROWTH=0`,
-  `STACK_SIZE=512kb`. Ristretto field/group ops + `MAX_SKIP` map + per-message
-  DH/KDF scratch must fit; measure via `cryptography/memory.ts`, cap `MAX_SKIP`
-  conservatively. Confirm the prod `-O3 -flto` build size stays in budget.
+  `STACK_SIZE=512kb`. The WASM holds **no ratchet state** — the skipped-message-key
+  map + all session state live in **JS/IndexedDB**, and WASM only runs a single
+  operation at a time (Ristretto/CPace, one KDF, or the AEAD of one 64 KiB chunk),
+  so the heap need only fit the **largest single op** (measure via
+  `cryptography/memory.ts`; raise `INITIAL_MEMORY` if needed — growth stays off).
+  `MAX_SKIP` bounds the **JS-side** skipped-key derivations to stop a malicious
+  huge-`N` DoS, not the WASM heap. Confirm the prod `-O3 -flto` build size stays
+  in budget.
 
 ## 10. SSOT / DRY
 
@@ -319,24 +325,37 @@ Confirmed: Ristretto255 is **not** compiled; X25519/`crypto_kx` are compiled but
 
 Each has one purpose, a narrow interface, and is testable without the others.
 
-## 12. Risks (tracked)
+## 12. Risks (tracked) + decided mitigations
 
-- **R1 — Atomicity.** Dropping the signature is a net downgrade unless it lands in
-  the *same* release as a mutual-identity-authenticated ratchet, and unless *both*
-  seed paths mix both identity keys. Locked: sig-drop gated on the authenticated
-  ratchet; both modes bind both identities.
+- **R1 — Authentication continuity.** Dropping the signature is a net downgrade
+  unless it lands in the *same* release as a mutual-identity-authenticated ratchet,
+  and unless *both* seed paths mix *both* identity keys.
+  **DECIDED — Atomic drop (option A):** signature removal + authenticated ratchet
+  ship together in v3; both modes bind both identity keys; correctness is gated by
+  the E2E forgery + MITM-abort tests (§13), not by a redundant signature — which
+  preserves deniability. (Rejected: keep-signature = loses deniability + per-chunk
+  cost; phased = two wire breaks.)
 - **R2 — Async-onopen retrofit + cross-datachannel ordering.** `onopen` is
   synchronous fire-and-forget today; per-message transfers use *separate* data
-  channels the sender can blast independently. Gating per-message flow + the
-  reconnect receipt-replay behind the per-peer `main` handshake creates a
-  cross-channel ordering dependency (deadlock risk) + a frame-classifier collision
-  (length-only). Biggest restructuring unknown. Mitigation: type-tagged handshake
-  frames, explicit `ratchetEstablished` gate, buffer-then-drain.
-- **R3 — Persistence + at-rest + reorder under a fixed heap.** Persisted secrets
-  (wrapped) are a new at-rest surface; the skipped-key map + Ristretto scratch
-  pressure the 2 MB non-growable heap; nonce-reuse hazard on retransmit. Deepest
-  correctness unknown. Mitigation: measured `MAX_SKIP`, deterministic-ciphertext
-  retransmit, memory profiling.
+  channels the sender can blast independently; the inbound classifier is
+  length-only (64 B receipt / `MESSAGE_LEN` chunk). Biggest restructuring unknown.
+  **DECIDED:** (a) a **1-byte type tag on every data-channel frame** (handshake /
+  chunk / receipt) — unambiguous, future-proof, ~free after the 48 B frame
+  shrink; (b) the handshake runs **only on the persistent `main` channel**; (c)
+  per-message channels **and** the reconnect receipt-replay burst **await a
+  per-peer `ratchetEstablished` gate** (a promise `main` resolves — no deadlock,
+  since nothing `main` needs depends on the per-message channels); inbound frames
+  before the gate opens are buffered on the existing `queue`/`seen`/`drainingRef`
+  and drained after.
+- **R3 — Persistence + at-rest + reorder.** Persisted secrets are a new at-rest
+  surface; retransmit risks nonce reuse; heap budget under a fixed 2 MB WASM.
+  **DECIDED:** (a) **at-rest wrap** with a non-extractable WebCrypto key (§8); (b)
+  the **skipped-key map + all ratchet state live in JS/IndexedDB, not the WASM
+  heap** (WASM runs one op at a time — §9), so `MAX_SKIP` only bounds JS-side
+  derivations as an anti-DoS cap; (c) **retransmit resends the CACHED ciphertext**
+  (reusing p2party's existing retransmit-from-store model), making nonce reuse
+  structurally impossible — never re-encrypt with a fresh nonce, never reuse a
+  message key across two logical messages.
 
 ## 13. Testing
 

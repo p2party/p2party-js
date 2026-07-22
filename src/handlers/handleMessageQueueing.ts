@@ -16,7 +16,7 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import signalingServerApi from "../api/signalingServerApi";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { BaseQueryApi } from "@reduxjs/toolkit/dist/query";
+import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { IRTCDataChannel } from "../api/webrtc/interfaces";
 import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { State } from "../store";

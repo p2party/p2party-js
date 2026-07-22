@@ -46,27 +46,19 @@ x25519_dh(uint8_t shared[crypto_scalarmult_curve25519_BYTES],
   return crypto_scalarmult_curve25519(shared, sk, pk);
 }
 
-/* ---------------- HKDF-SHA512 (RFC 5869) on HMAC-SHA512 ---------------- */
+/* ---------------- HKDF-SHA512 (RFC 5869) via libsodium ----------------
+ * Thin wrappers over libsodium's native crypto_kdf_hkdf_sha512_{extract,expand}
+ * (crypto_kdf_hkdf_sha512_KEYBYTES == crypto_auth_hmacsha512_BYTES == 64).
+ * Export names/signatures are unchanged so src/cryptography/hkdf.ts and all
+ * consumers (cpace/x3dh/ratchet) stay untouched. Both return 0 on success. */
 
 int
 hkdf_sha512_extract(uint8_t prk[crypto_auth_hmacsha512_BYTES],
                     const uint8_t *salt, const unsigned int salt_len,
                     const uint8_t *ikm, const unsigned int ikm_len)
 {
-  crypto_auth_hmacsha512_state st;
-  uint8_t zero_salt[crypto_auth_hmacsha512_BYTES];
-  const uint8_t *k = salt;
-  size_t klen = salt_len;
-  if (salt == NULL || salt_len == 0)
-  {
-    memset(zero_salt, 0, sizeof zero_salt); /* RFC 5869: HashLen zeros */
-    k = zero_salt;
-    klen = sizeof zero_salt;
-  }
-  if (crypto_auth_hmacsha512_init(&st, k, klen) != 0) return -1;
-  if (crypto_auth_hmacsha512_update(&st, ikm, ikm_len) != 0) return -2;
-  if (crypto_auth_hmacsha512_final(&st, prk) != 0) return -3;
-  return 0;
+  return crypto_kdf_hkdf_sha512_extract(prk, salt, (size_t)salt_len, ikm,
+                                        (size_t)ikm_len);
 }
 
 int
@@ -74,37 +66,10 @@ hkdf_sha512_expand(uint8_t *out, const unsigned int out_len,
                    const uint8_t prk[crypto_auth_hmacsha512_BYTES],
                    const uint8_t *info, const unsigned int info_len)
 {
-  const unsigned int HASH_LEN = crypto_auth_hmacsha512_BYTES; /* 64 */
-  if (out_len > 255U * HASH_LEN) return -1;
-
-  uint8_t t[crypto_auth_hmacsha512_BYTES];
-  unsigned int t_len = 0;
-  unsigned int done = 0;
-  uint8_t counter = 0;
-
-  while (done < out_len)
-  {
-    counter++;
-    crypto_auth_hmacsha512_state st;
-    if (crypto_auth_hmacsha512_init(&st, prk, HASH_LEN) != 0) return -2;
-    if (t_len > 0)
-    {
-      if (crypto_auth_hmacsha512_update(&st, t, t_len) != 0) return -3;
-    }
-    if (info_len > 0 && info != NULL)
-    {
-      if (crypto_auth_hmacsha512_update(&st, info, info_len) != 0) return -4;
-    }
-    if (crypto_auth_hmacsha512_update(&st, &counter, 1) != 0) return -5;
-    if (crypto_auth_hmacsha512_final(&st, t) != 0) return -6;
-    t_len = HASH_LEN;
-
-    unsigned int n = out_len - done;
-    if (n > HASH_LEN) n = HASH_LEN;
-    memcpy(out + done, t, n);
-    done += n;
-  }
-  return 0;
+  /* libsodium's expand takes ctx (= our info) then the prk LAST. */
+  return crypto_kdf_hkdf_sha512_expand(out, (size_t)out_len,
+                                       (const char *)info, (size_t)info_len,
+                                       prk);
 }
 
 /* ---------------- Symmetric AEAD (message-key path) ---------------- */

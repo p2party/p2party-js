@@ -21,6 +21,7 @@ const {
   libsodiumGenericHash3Path,
   libsodiumPolyPath,
   libsodiumAuthPath,
+  libsodiumHkdfPath,
   libsodiumChacha1,
   libsodiumChacha2,
   libsodiumChacha3,
@@ -186,6 +187,7 @@ ${libsodiumGenericHash2Path} \
 ${libsodiumGenericHash3Path} \
 ${libsodiumPolyPath} \
 ${libsodiumAuthPath} \
+${libsodiumHkdfPath} \
 ${libsodiumChacha1} \
 ${libsodiumChacha2} \
 ${libsodiumChacha3} \

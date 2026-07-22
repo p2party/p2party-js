@@ -79,6 +79,13 @@ const libsodiumAuthPath = path.join(
   "auth_hmacsha512.c",
 );
 
+const libsodiumHkdfPath = path.join(
+  libsodiumPath,
+  "crypto_kdf",
+  "hkdf",
+  "kdf_hkdf_sha512.c",
+);
+
 const libsodiumChacha1 = path.join(
   libsodiumPath,
   "crypto_aead",
@@ -223,6 +230,8 @@ module.exports = {
   libsodiumPolyPath,
 
   libsodiumAuthPath,
+
+  libsodiumHkdfPath,
 
   libsodiumChacha1,
   libsodiumChacha2,

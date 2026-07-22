@@ -4,6 +4,11 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { OPFS_REASSEMBLE_DIR } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
+import {
+  getWrapKey,
+  wrapRatchetSession,
+  unwrapRatchetSession,
+} from "./ratchetWrap";
 
 import type {
   MessageData,
@@ -17,6 +22,7 @@ import type {
   UsernamedPeer,
   UniqueRoom,
   NewChunk,
+  RatchetSession,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
 
@@ -1416,6 +1422,48 @@ async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
   db.close();
 }
 
+async function fnGetRatchetSession(
+  roomId: string,
+  peerPublicKey: string,
+): Promise<RatchetSession | undefined> {
+  try {
+    const db = await getDB();
+    const stored = await db.get("ratchetSessions", [roomId, peerPublicKey]);
+    db.close();
+    if (!stored) return undefined;
+    const key = await getWrapKey();
+    return await unwrapRatchetSession(stored, key);
+  } catch (error) {
+    console.error(error);
+    return undefined;
+  }
+}
+
+async function fnSetRatchetSession(session: RatchetSession): Promise<void> {
+  try {
+    const key = await getWrapKey();
+    const wrapped = await wrapRatchetSession(session, key);
+    const db = await getDB();
+    await db.put("ratchetSessions", { ...wrapped, updatedAt: Date.now() });
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function fnDeleteRatchetSession(
+  roomId: string,
+  peerPublicKey: string,
+): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.delete("ratchetSessions", [roomId, peerPublicKey]);
+    db.close();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
   try {
     const db = await getDB();
@@ -1761,6 +1809,17 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteDBSendQueue":
         await fnDeleteDBSendQueue(...message.args);
+        result = undefined;
+        break;
+      case "getRatchetSession":
+        result = await fnGetRatchetSession(...message.args);
+        break;
+      case "setRatchetSession":
+        await fnSetRatchetSession(...message.args);
+        result = undefined;
+        break;
+      case "deleteRatchetSession":
+        await fnDeleteRatchetSession(...message.args);
         result = undefined;
         break;
       case "deleteDB":

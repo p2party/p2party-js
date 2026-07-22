@@ -228,3 +228,35 @@ describe("receive_message_with_key (smoke: exported, links, callable)", () => {
     [msgp, decp, rootp, keyp].forEach((p) => mod._free(p));
   });
 });
+
+describe("2 MB heap budget (growth off)", () => {
+  test("module links + largest Stage-1 op runs in exactly 32 pages", async () => {
+    const budgetMem = new WebAssembly.Memory({ initial: 32, maximum: 32 });
+    // The emscripten factory's wasmBinary is typed ArrayBuffer; readFileSync
+    // returns a Buffer, so copy the bytes into a fresh ArrayBuffer (type-correct
+    // for `tsc`, and WebAssembly.instantiate accepts an ArrayBuffer at runtime).
+    const fileBytes = readFileSync(join(import.meta.dir, "libcrypto.wasm"));
+    const wasmBinary = new ArrayBuffer(fileBytes.byteLength);
+    new Uint8Array(wasmBinary).set(fileBytes);
+    const m = (await libcrypto({
+      wasmBinary,
+      wasmMemory: budgetMem,
+    })) as unknown as LibCrypto;
+
+    const MESSAGE_LEN = 64 * 1024;
+    const msgp = m._malloc(MESSAGE_LEN);
+    const decp = m._malloc(MESSAGE_LEN);
+    const rootp = m._malloc(64);
+    const keyp = m._malloc(32);
+    new Uint8Array(budgetMem.buffer, msgp, MESSAGE_LEN).fill(0);
+    new Uint8Array(budgetMem.buffer, rootp, 64).fill(0);
+    new Uint8Array(budgetMem.buffer, keyp, 32).fill(0);
+
+    // Runs the whole receive path (largest single op) without OOM / abort.
+    const r = m._receive_message_with_key(decp, msgp, rootp, keyp);
+    expect(r).toBeLessThan(0); // auth fails on zeros, but it did not abort
+    expect(budgetMem.buffer.byteLength).toBe(32 * 64 * 1024); // never grew
+
+    [msgp, decp, rootp, keyp].forEach((p) => m._free(p));
+  });
+});

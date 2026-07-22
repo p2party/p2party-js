@@ -91,6 +91,16 @@ export const KDF_MK_LABEL = "p2party-mk-v1";
 // WASM heap. Measured conservatively against the 2 MB heap (~500).
 export const MAX_SKIP = 512;
 
+// Anti-DoS bound on the Double Ratchet's out-of-order skipped-message-key map,
+// TOTAL across the whole session (not just one `ratchetDecrypt` call). MAX_SKIP
+// above only bounds derivations within a single call; nothing stopped a peer
+// from repeatedly forcing DH-steps (or gaps) across many calls to grow
+// `state.skipped` — and thus RAM and the persisted IndexedDB row — without
+// ceiling. 2000 is a few chains' worth of legitimate reordering headroom
+// (MAX_SKIP=512 * ~4), bounded so an adversarial peer can't grow the map
+// unboundedly; the oldest entries are evicted first when this is exceeded.
+export const MAX_SKIP_SESSION = 2000;
+
 // Selective-retransmit / reconcile tuning: after the initial send, resend only
 // the un-acked real chunks until the receiver confirms completion, up to
 // MAX_RETRANSMITS attempts with a base timeout that backs off linearly.

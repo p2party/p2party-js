@@ -5,6 +5,7 @@ import {
   KDF_CK_LABEL,
   KDF_MK_LABEL,
   MAX_SKIP,
+  MAX_SKIP_SESSION,
 } from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
@@ -229,6 +230,19 @@ const skipMessageKeys = (
     state.skipped.set(`${toHex(state.dhRemotePub!)}:${state.Nr}`, messageKey);
     state.Nr += 1;
   }
+
+  // Anti-DoS: MAX_SKIP above only bounds derivations within THIS call; bound
+  // the CUMULATIVE size of `state.skipped` across the whole session too, else
+  // a peer that repeatedly forces DH-steps (or gaps) can grow it — and the
+  // persisted IndexedDB row — without ceiling. Evict the OLDEST entries first
+  // (a `Map` preserves insertion order) rather than throwing, so availability
+  // for recent/legitimate reordering is preserved.
+  if (state.skipped.size > MAX_SKIP_SESSION) {
+    for (const k of state.skipped.keys()) {
+      if (state.skipped.size <= MAX_SKIP_SESSION) break;
+      state.skipped.delete(k);
+    }
+  }
 };
 
 // A DH-ratchet step: the peer moved to a new DH pub. Finish nothing here (the
@@ -271,16 +285,45 @@ const dhRatchet = (
 
 /**
  * Advance the receiving side for an inbound header and return its message key.
- * Handles three cases: (a) a stored skipped key (replay/out-of-order within a
- * seen chain), (b) a new peer DH pub — skip the old chain's tail, then DH-step,
- * (c) a forward message in the current chain — skip any gap, then derive.
- * The consumed chain key is wiped once its successor is derived.
+ *
+ * CAUTION — this function is UNAUTHENTICATED: it mutates `state` (and may fire
+ * a DH-ratchet step) from the cleartext header alone, before the AEAD tag is
+ * ever checked (authentication happens later, in Stage 5). A duplicate or
+ * replayed message that is NOT a stored skipped key — e.g. a retransmit of a
+ * message from a chain the session has since stepped past — is NOT detected
+ * here: it falls through to the "new peer DH pub" case below and can fire a
+ * spurious backward DH-step, permanently desyncing the session. This is
+ * reachable by our own retransmit/reconcile layer, so callers MUST:
+ *   1. Dedup already-seen `(header.dhPub, header.N)` pairs BEFORE calling this
+ *      function — never invoke it a second time for a message already
+ *      processed.
+ *   2. Call `ratchetDecrypt` on a CLONE of `state` (via
+ *      `deserializeRatchet(serializeRatchet(state))`) and commit that clone as
+ *      the live state ONLY after the returned message key successfully
+ *      authenticates the AEAD ciphertext. If authentication fails, discard the
+ *      clone and leave the live state untouched.
+ * `ratchetDecrypt` itself performs neither dedup nor authentication — the safe
+ * integration of both rules is wired in Stage 4/5, not here.
+ *
+ * Against that (untrusted) header, handles three cases: (a) a stored skipped
+ * key — out-of-order delivery within an already-seen chain, (b) a new peer DH
+ * pub — skip the old chain's tail, then DH-step, (c) a forward message in the
+ * current chain — skip any gap, then derive. The consumed chain key is wiped
+ * once its successor is derived.
  */
 export const ratchetDecrypt = (
   state: RatchetState,
   header: RatchetHeader,
   module: LibCrypto,
 ): Uint8Array => {
+  if (
+    !Number.isInteger(header.N) ||
+    header.N < 0 ||
+    !Number.isInteger(header.PN) ||
+    header.PN < 0
+  )
+    throw new Error("invalid ratchet header");
+
   const skipped = trySkipped(state, header);
   if (skipped) return skipped;
 

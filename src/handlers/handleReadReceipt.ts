@@ -8,7 +8,7 @@ import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { markChunkAcked, markTransferComplete } from "./reconcile";
 
-import type { BaseQueryApi } from "@reduxjs/toolkit/dist/query";
+import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { Room } from "../reducers/roomSlice";
 
 export const handleReadReceipt = async (

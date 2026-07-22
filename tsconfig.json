@@ -6,7 +6,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
 
     // // Output map
     // "declaration": true,
@@ -23,7 +23,6 @@
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "alwaysStrict": true,
-    "downlevelIteration": false,
     "noImplicitThis": true,
     "noImplicitAny": true,
     "noImplicitReturns": true,

@@ -82,7 +82,7 @@ main channel onopen (per peer edge, over DTLS)
         │
         ▼
    every logical message → advance ratchet (per edge) → ONE message key
-        → all 64KiB chunks AEAD'd under it (nonce = chunkIndex), header in cleartext
+        → all 64KiB chunks AEAD'd under it (fresh random 12-byte nonce per chunk in the cleartext header)
 ```
 
 One ratchet implementation (SSOT), seeded by one of exactly two functions. The
@@ -148,17 +148,24 @@ MITM check. No fallback to identity-only unless a browser removes cert access
 advances **per logical message per edge** — never per chunk (chunks are
 Fisher-Yates-shuffled, decoy-interleaved, relay-reorderable, and reconcile resends
 only gaps, so a per-chunk step would desync). All chunks of a message share the
-one message key; **nonce = chunkIndex** (unique within a message). A **retransmit
-of a chunkIndex MUST reuse the identical ciphertext** — achieved by **resending the
-cached ciphertext** from the existing retransmit store (R3), never by re-encrypting
-with a fresh nonce on the same key+different plaintext, and never a message key reused across
-two logical messages. Out-of-order/lost messages use a bounded
+one message key; each chunk carries a **fresh random 12-byte nonce in its cleartext
+frame header** (`chunkIndex` CANNOT be the nonce — it lives inside the encrypted
+metadata, so the receiver can't know it before decrypting, and a message-level value
+reused across a message's chunks would break the AEAD; a cleartext raw index would
+also leak chunk count/order, so the nonce is random — birthday-safe within one
+per-message key). A **retransmit MUST reuse the identical (nonce, ciphertext)** —
+achieved by **resending the cached pair** from the existing retransmit store (R3),
+never by re-encrypting with a fresh nonce on the same key+different plaintext, and
+never a message key reused across two logical messages. Out-of-order/lost messages use a bounded
 **skipped-message-keys** map (`MAX_SKIP`, measured against the 2 MB heap, ~500).
 
 **Frame layout change (frame SHRINKS):** the current 96-byte cleartext prefix is
-`ephemeral_pk(32) + signature(64)` (`MESSAGE_START`, `constants.ts:33`). Remap to
-**48 bytes**: `DH_ratchet_pub(32) + N(8) + PN(8)`, reclaiming 48 bytes. The DH pub
-must be cleartext (the receiver needs it to derive the key before decrypting). `N`
+`ephemeral_pk(32) + signature(64)` (`MESSAGE_START`, `constants.ts:33`). Remap the
+cleartext header to **62 bytes**:
+`FRAME_TYPE(1) + DH_ratchet_pub(32) + N(8) + PN(8) + PQ_EPOCH(1) + nonce(12)`
+(`MESSAGE_START = 62`, still well under 96). The DH pub must be cleartext (the
+receiver needs it to derive the key before decrypting); the 12-byte **random nonce**
+must be cleartext (the receiver needs it to decrypt). `N`
 (message number) and `PN` (previous-chain length) fold into the **AEAD AAD**
 (today AAD = merkle_root only) so they're authenticated without a separate MAC.
 The header also carries a small **`PQ_EPOCH`** marker (decision 7) — a per-message
@@ -182,7 +189,8 @@ the `handleReceiveMessage` `case -1` "signature wrong" path is removed.
   `_encrypt_chachapoly_asymmetric` with symmetric AEAD
   (`crypto_aead_chacha20poly1305_ietf_encrypt`) under the message key. Derive the
   message key **once per (message, peer edge)** before the chunk loop; delete the
-  per-chunk ephemeral keypair + the `_sign` transcript; nonce = chunkIndex counter;
+  per-chunk ephemeral keypair + the `_sign` transcript; generate a fresh random
+  12-byte nonce per chunk and place it in the cleartext header;
   rewrite frame assembly to `[type ‖ DH_pub ‖ N ‖ PN ‖ ciphertext]`. Drop
   `senderSecretKey` plumbing; `allocateSendMessage` shrinks.
 - **Receiver** new C `receive_message_with_key(decrypted, message, merkle_root,
@@ -299,8 +307,9 @@ Confirmed: Ristretto255 is **not** compiled; X25519/`crypto_kx` are compiled but
 
 - **One ratchet implementation**, seeded by one of two functions.
 - **Frame-layout constants live once** in `src/utils/constants.ts`
-  (`MESSAGE_START` remap, `RATCHET_DHPUB_LEN=32`, `RATCHET_N_LEN=8`,
-  `RATCHET_PN_LEN=8`, `PQ_EPOCH_LEN` header marker, `PQ_TAG_LEN` transcript marker)
+  (`MESSAGE_START=62` remap, `RATCHET_DHPUB_LEN=32`, `RATCHET_N_LEN=8`,
+  `RATCHET_PN_LEN=8`, `RATCHET_NONCE_LEN=12` cleartext random AEAD nonce,
+  `PQ_EPOCH_LEN` header marker, `PQ_TAG_LEN` transcript marker)
   and are **byte-matched in `utils.h`** with
   cross-referencing comments both ways (the known C↔TS duplication hazard — a
   mismatch mis-slices chunks silently). A unit test asserts C and TS agree.

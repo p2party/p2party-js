@@ -87,8 +87,11 @@ the no-PIN X3DH seed (and later the ratchet identity mixing) stands on.
 3. **No-PIN X3DH uses the dedicated X25519 keys.** `idSelfSec` = own X25519 secret;
    `idPeerPub` = peer's **cross-sig-verified** X25519 pub — replacing the broken
    raw-Ed25519-secret path.
-4. **Persist in localStorage** alongside the Ed25519 identity (its own keys), reset
-   together with it.
+4. **Persist the X25519 identity WRAPPED in IndexedDB** — reusing the Stage-3
+   non-extractable-WebCrypto `getWrapKey`/`wrapSecret` infra — **not** as plaintext
+   `localStorage` hex (user, 2026-07-22: use the WebCrypto infra now; no
+   to-be-deprecated plaintext path). Secret wrapped; pub + cross-sig public; reset
+   deletes the IndexedDB record (§3.3).
 5. **Box scheme REMOVED ENTIRELY in Stage 5** (not deprecated): `encrypt/decrypt_chachapoly_asymmetric`
    (C + wasm exports), `encryptAsymmetric/decryptAsymmetric` (public API + TS
    wrapper), the memory helpers, `handleSendMessage.ts`'s direct call, and — the
@@ -159,70 +162,59 @@ every verifier build the same `IDENTITY_CROSS_SIGN_DOMAIN ‖ pub` transcript.
 already exist; the generation logic must never regenerate the Ed25519 identity in
 the upgrade case (§8).
 
-### 3.3 Persistence (`keyPairSlice.ts` + `keyPairListenerMiddleware.ts`)
+### 3.3 Persistence — WebCrypto-wrapped in IndexedDB (reuses Stage 3), NOT localStorage
 
-State + localStorage hold only Ed25519 identity + challenge material today
-(`peerId/challengeId/publicKey/secretKey/challenge/signature`). Extend:
+**Decision (user, 2026-07-22): the X25519 identity secret is NOT stored as plaintext
+hex in `localStorage`.** It reuses the Stage-3 at-rest infrastructure — wrapped under
+the existing non-extractable AES-GCM WebCrypto key (`getWrapKey`, `db/ratchetWrap.ts`)
+and stored in IndexedDB. This avoids a to-be-deprecated plaintext path **and
+eliminates risks R2/R3/R4** (the confusing X25519-vs-Ed25519 hex-length validation in
+`keyPairSlice` simply disappears — there is no plaintext hex secret to validate).
 
-- **`KeyPair` + `SetKeyPair` interfaces** (`keyPairSlice.ts:7-19`): add
-  `publicKeyX25519`, `secretKeyX25519`, `identityCrossSignature` (all hex strings).
-- **`initialState`** (`:42-43` pattern): read the three new fields from localStorage
-  (`localStorage.getItem("publicKeyX25519") ?? ""`, etc.).
-- **`setKeyPair` reducer** (`:97-101`): persist the three new fields under
-  X25519-**correct** length validation. **Do NOT reuse the existing
-  `publicKey.length===64 && secretKey.length===128` check** (Ed25519-specific):
-  - X25519 pub = 32 B = **64 hex chars** (same length as an Ed25519 pub — risk R2).
-  - X25519 sec = 32 B = **64 hex chars** (NOT 128 like Ed25519 — risk R3; reusing
-    `===128` silently rejects every valid X25519 secret).
-  - cross-sig = 64 B = **128 hex chars**.
-  Because X25519 pub and sec are the *same* hex length, validation must key off
-  **field identity**, never length alone (risk R4). Consider validating each of the
-  three fields by its own expected length as an internally consistent triple.
-- **`resetIdentity` reducer** (`:147-155`): add the three new fields (empty string)
-  to the returned all-empty object.
-- **Persist branch** (`keyPairListenerMiddleware.ts` `setKeyPair.match`, ~:32-38):
-  `localStorage.setItem` the three new keys when the extended action fires.
-- **Reset branch** (`resetIdentity.match`, ~:211-219): `localStorage.setItem(...,'')`
-  the three new keys alongside the existing six. **Correctness-critical (risk R5):**
-  a reset that rotates the Ed25519 identity but leaves the old X25519 pub + its now
-  orphaned cross-sig in localStorage produces a **permanently broken cross-sig**
-  (signed by an Ed25519 key that no longer matches) — every future no-PIN handshake's
-  cross-sig verify fails silently. Both identities must reset atomically. The
-  existing sequential non-transactional `setItem('')` writes already have a
-  partial-reset crash window; adding three keys widens it (pre-existing in kind, not
-  new — flagged, not blocking).
-- **At-rest posture (SECURITY-4) + deprecation path:** the X25519 identity **secret**
-  is stored in `localStorage` as plaintext hex — the **same** posture as the existing
-  Ed25519 identity secret, and weaker than the ratchet session secrets (non-extractable
-  WebCrypto wrap, Stage 3). Consistent with the current model, not a regression.
-  **Deprecation (planned, NOT in D2=B):** the insecure plaintext-`localStorage` wiring
-  is slated to be replaced by wrapping *both* identity secrets under the same Stage-3
-  non-extractable WebCrypto key (`getWrapKey`), relocating them from `localStorage`
-  into wrapped IndexedDB — a storage dump then yields ciphertext + a non-exportable
-  handle, not the key bytes. Best sequenced **after Stage 5** removes the box scheme's
-  raw-Ed25519-secret readers (`handleOpenChannel`/`handleMessageQueueing`), which is
-  what forces the keys to be plaintext-usable today. Honest limit (as with the ratchet
-  keys): non-extractable bars *export*, not *use* — a live same-origin XSS could still
-  use the handle mid-session; removing the bytes from JS entirely means moving identity
-  sign/DH onto native WebCrypto `CryptoKey`s (off libsodium-WASM), a larger optional
-  Level-B step. Logged as a future item (protocol-evolution decision log / roadmap).
+- **New IndexedDB record in the existing `meta` store** (no dbVersion bump — a new key
+  in a store that already exists): `"identityX25519"` →
+  `{ pub: ArrayBuffer(32), wrappedSecret: ArrayBuffer(iv‖ct), crossSig: ArrayBuffer(64) }`.
+  `pub` + `crossSig` are **public** → stored in the clear; only the **secret** is
+  `wrapSecret`-wrapped (fresh 12-byte IV, Stage-3 `wrapSecret`).
+- **New `db/api` + worker functions** mirroring the Stage-3 ratchet-session pair:
+  `getIdentityX25519()` (read record → `unwrapSecret` the secret) and
+  `setIdentityX25519({pub, secret, crossSig})` (`wrapSecret` → put), via the same
+  `getWrapKey` get-or-create-inside-the-readwrite-transaction path.
+- **`keyPairSlice` / `localStorage` are UNCHANGED** for the X25519 secret — no new
+  `secretKeyX25519` hex field, no new length validation, no widened reset window. (The
+  public `pub`/`crossSig` may optionally be mirrored into Redux for synchronous read,
+  but the *secret* lives only wrapped in IndexedDB.)
+- **Reset/purge (former risk R5, now an IndexedDB delete):** `purgeIdentity`/`purge`
+  must also delete the `"identityX25519"` record (add `deleteIdentityX25519()` to the
+  purge path) so a rotated Ed25519 identity never leaves an orphaned cross-sig.
+- **At-rest posture (SECURITY-4) — resolved for X25519:** the X25519 secret is now
+  wrapped at rest (non-extractable key; a storage dump yields ciphertext + a
+  non-exportable handle, not the bytes). Honest limit unchanged: non-extractable bars
+  *export*, not *use* — a live same-origin XSS could still use the handle mid-session;
+  removing bytes from JS entirely means native-WebCrypto `CryptoKey` sign/DH (off
+  libsodium-WASM), a larger optional Level-B step. **The Ed25519 secret stays in
+  `localStorage`** for now (read synchronously by `handleChallenge` + the still-live
+  box scheme); it migrates into the same wrapped store as part of **Stage 5** (when
+  the box readers are deleted), so we never rework doomed code. Transient split
+  resolves at Stage 5 → both wrapped.
 
 ### 3.4 Generation / upgrade point (`signalingServerApi.ts` websocketBaseQuery)
 
-`websocketBaseQuery` (~:98-119) is the **sole** lazy identity-generation point: if
-no Ed25519 secret is in store/localStorage it calls `newKeyPair()` and dispatches
-`setKeyPair`; otherwise it rehydrates. Today it handles three states (present in
-store / present in localStorage / absent-or-corrupt). Add a **4th state**:
+`websocketBaseQuery` (~:98-119) is the **sole** lazy identity-generation point (it is
+**async**, so an IndexedDB round-trip fits): if no Ed25519 secret is in
+store/localStorage it calls `newKeyPair()`; otherwise it rehydrates. The **X25519
+presence check is now an async `getIdentityX25519()`** (IndexedDB), not a localStorage
+read:
 
-| State | Ed25519 | X25519 | Action |
+| State | Ed25519 | `identityX25519` record | Action |
 |---|---|---|---|
-| First run | absent | absent | generate **both**, cross-sign, dispatch extended `setKeyPair` |
-| **Upgrade** | present | absent | generate **X25519 only**, cross-sign with the **existing** Ed25519 secret, dispatch extended `setKeyPair` — **never** regenerate Ed25519 |
-| Steady state | present | present | rehydrate all fields (no generation) |
+| First run | absent | absent | generate **both**; cross-sign; `wrapSecret` the X25519 sec; `setIdentityX25519({pub, secret, crossSig})` |
+| **Upgrade** | present | absent | generate **X25519 only**; cross-sign with the **existing** Ed25519 secret; `setIdentityX25519(...)` — **never** regenerate Ed25519 |
+| Steady state | present | present | rehydrate (no generation) |
 | Corrupt | invalid | — | repair as today, regenerating whatever is invalid |
 
-The generation site must obtain/load a `LibCrypto` module (via `wasmLoader`) before
-calling the X25519 wrapper, or the wrapper must self-load (§3.1).
+The generation site loads a `LibCrypto` module (via the T1 wrapper / `wasmLoader`)
+before generating + cross-signing; wrapping uses `getWrapKey` (Stage 3).
 
 ### 3.5 Distribution to peers — IN-BAND (superseding the signaling-wire design)
 
@@ -304,18 +296,19 @@ const idPeerPub = hexToUint8Array(epc.withPeerPublicKey);   // 32B Ed25519 pub  
 
 ```ts
 // AFTER (D2=B, in-band per §5.2):
-const { publicKey, secretKeyX25519, publicKeyX25519, identityCrossSignature } =
-  store.getState().keyPair;
+const { publicKey } = store.getState().keyPair;             // Ed25519 pub, for the tie-break
+const { pub: pubX25519, secret: secX25519, crossSig } = await getIdentityX25519(); // unwrapped
 const amInitiator = publicKey < epc.withPeerPublicKey;      // UNCHANGED — Ed25519-hex tie-break
-const idSelfSec = hexToUint8Array(secretKeyX25519);         // 32B X25519 identity secret  ✓
+const idSelfSec = secX25519;                                // 32B X25519 identity secret (unwrapped)  ✓
 // idPeerPub is NO LONGER read here — the peer's X25519 pub arrives in the HELLO and
 // is cross-sig-verified INSIDE performHandshakeCore (§5.2). runHandshake instead passes:
-//   selfIdentityX25519Pub      = hexToUint8Array(publicKeyX25519)
-//   selfIdentityCrossSignature = hexToUint8Array(identityCrossSignature)
+//   selfIdentityX25519Pub      = pubX25519
+//   selfIdentityCrossSignature = crossSig
 //   peerIdentityEd25519Pub     = hexToUint8Array(epc.withPeerPublicKey)  // pinned Ed25519 IK
 ```
 
-- `idSelfSec` = own dedicated X25519 identity secret (new `keyPairSlice` field, §3.3).
+- `idSelfSec` = own dedicated X25519 identity secret — **unwrapped from the wrapped
+  IndexedDB record via `getIdentityX25519()`** (§3.3), never a plaintext field.
 - The peer's X25519 pub (`idPeerPub`) is **parsed from the peer's HELLO and
   cross-sig-verified inside `performHandshakeCore`** (§5.2) — never sourced from
   signaling. `runHandshake` supplies only its own key material + the pinned peer
@@ -661,18 +654,19 @@ consume.
    over `x25519Keypair` (+ `identityX25519KeypairMemory` if self-loading), mirroring
    `newKeyPair()`. *Test:* returns a valid 32B/32B pair; callable with and without a
    passed module. (§3.1)
-2. **T2 — keyPairSlice fields + validation.** Add `publicKeyX25519`/`secretKeyX25519`/
-   `identityCrossSignature` to `KeyPair`/`SetKeyPair`/`initialState`/`setKeyPair`
-   (X25519-correct lengths) / `resetIdentity`. *Test:* accepts a valid triple,
-   rejects a 128-hex secret, round-trips localStorage, reset zeroes all three.
-   (§3.3)
-3. **T3 — middleware persist + reset.** Persist the three keys on `setKeyPair`; clear
-   them on `resetIdentity`. *Test:* localStorage has/loses the three keys; no
-   orphaned cross-sig after reset. (§3.3, R5)
-4. **T4 — generation/upgrade branch in `websocketBaseQuery`.** Generate both
-   (first-run) or X25519-only + cross-sign (upgrade), never regenerate Ed25519;
-   dispatch extended `setKeyPair`. *Test:* the 4-state table (§3.4), esp. the upgrade
-   row preserving the Ed25519 secret. (§3.4, R4)
+2. **T2 — IndexedDB identity store + wrap/unwrap (reuses Stage 3).** Add
+   `getIdentityX25519`/`setIdentityX25519`/`deleteIdentityX25519` to `db/api.ts` + the
+   db worker, storing `{pub, wrappedSecret, crossSig}` in the `meta` store under
+   `"identityX25519"`, wrapping the secret via `getWrapKey`/`wrapSecret`. *Test
+   (fake-indexeddb):* set→get round-trips the pub/crossSig in the clear and the secret
+   through wrap→unwrap; wrong-key unwrap throws; delete removes it. (§3.3)
+3. **T3 — purge deletes the identity record.** Wire `deleteIdentityX25519()` into the
+   `purgeIdentity`/`purge` path so an Ed25519 reset never leaves an orphaned X25519
+   record/cross-sig. *Test:* after purge, `getIdentityX25519()` returns absent. (§3.3)
+4. **T4 — generation/upgrade branch in `websocketBaseQuery`.** Async-check
+   `getIdentityX25519()`; generate both (first-run) or X25519-only + cross-sign
+   (upgrade, never regenerate Ed25519); `wrapSecret` + `setIdentityX25519`. *Test:* the
+   4-state table (§3.4), esp. the upgrade row preserving the Ed25519 secret. (§3.4, R4)
 5. **T5 — HELLO-frame carrier + cross-sig verify in `performHandshakeCore` (in-band).**
    Append `X25519_id_pub`(32) + `crossSig`(64) to the HELLO layout (HELLO_LEN 97→193,
    local consts); add `selfIdentityX25519Pub`/`selfIdentityCrossSignature`/
@@ -682,12 +676,13 @@ consume.
    PIN/no-PIN branch, fail-closed via the existing try/finally. **No signaling /
    `interfaces.ts` change.** *Test:* good binding accepted; forged/mismatched/wrong-IK/
    **oracle-harvested** cross-sig all rejected before any DH. (§5.2, SECURITY-1/2/3)
-6. **T6 — runHandshake rewire.** Read `secretKeyX25519`/`publicKeyX25519`/
-   `identityCrossSignature` and pass them + the pinned `epc.withPeerPublicKey`
-   (Ed25519) into `performHandshakeCore`; **no `idPeerPub` from signaling** (it comes
-   from the peer's HELLO — T5). Keep the Ed25519 `amInitiator` tie-break. *Test:* the
-   DH inputs are genuine 32B X25519 scalars; existing x3dh/handleHandshake tests stay
-   green; a bad-cross-sig peer never reaches the DH. (§5.1, R6)
+6. **T6 — runHandshake rewire.** `await getIdentityX25519()` (unwraps the X25519
+   secret) for `idSelfSec` + reads `pub`/`crossSig`; pass them + the pinned
+   `epc.withPeerPublicKey` (Ed25519) into `performHandshakeCore`; **no `idPeerPub` from
+   signaling** (it comes from the peer's HELLO — T5). Keep the Ed25519 `amInitiator`
+   tie-break. *Test:* the DH inputs are genuine 32B X25519 scalars; existing
+   x3dh/handleHandshake tests stay green; a bad-cross-sig peer never reaches the DH.
+   (§5.1, R6)
 7. **T7 — CI/transcript confirmation.** Assert `buildChannelInput` stays Ed25519-only
    (no X25519 threaded in); optionally (Q3) bind X25519 IK pubs into `T`. *Test:*
    CI byte layout unchanged. (§4)

@@ -46,6 +46,13 @@ const {
 
 const buildPath = path.join(process.cwd(), "src", "cryptography");
 const wasmPath = path.join(buildPath, "libcrypto.js");
+const mlkem768Path = path.join(buildPath, "mlkem768.c");
+const mlkem768IncludePath = path.join(
+  buildPath,
+  "vendor",
+  "mlkem-native",
+  "mlkem",
+);
 
 if (fs.existsSync(buildPath)) {
   fs.rmSync(wasmPath, { force: true });
@@ -167,12 +174,17 @@ _hkdf_sha512_extract,\
 _hkdf_sha512_expand,\
 _encrypt_chachapoly_symmetric,\
 _decrypt_chachapoly_symmetric,\
-_receive_message_with_key \
+_receive_message_with_key,\
+_mlkem768_keypair,\
+_mlkem768_encaps,\
+_mlkem768_decaps \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \
 -I${libsodiumIncludePrivatePath} \
+-I${mlkem768IncludePath} \
 -o ${wasmPath} \
 ${methodsPath} \
+${mlkem768Path} \
 ${libsodiumCorePath} \
 ${libsodiumCodecsPath} \
 ${libsodiumUtilsPath} \

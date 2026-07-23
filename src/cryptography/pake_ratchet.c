@@ -92,7 +92,7 @@ encrypt_chachapoly_symmetric(
 }
 
 /* ---------------- v3 receive path (no signature) ----------------
- * Frame: [type(1) | DH_pub(32) | N(8) | PN(8) | PQ_EPOCH(1) | ciphertext||tag]
+ * Frame: [type(1) | DH_pub(32) | N(8) | PN(8) | PQ_EPOCH(1) | nonce(12) | ciphertext||tag]
  * Symmetric-decrypt under message_key with AAD = merkle_root || N || PN, then
  * run the merkle-proof / leaf-hash / receipt logic VERBATIM from
  * receive_message (utils.c:146-181). Return codes mirror receive_message
@@ -112,13 +112,12 @@ receive_message_with_key(
   memcpy(aad + crypto_hash_sha512_BYTES + RATCHET_N_LEN, pn_ptr,
          RATCHET_PN_LEN);
 
-  /* Nonce = 12-byte big-endian message counter N. Stage 5 refines this to the
-   * true per-chunk chunkIndex when the frame remap lands; unique per
-   * (message-key, chunk) either way. */
-  uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES];
-  memset(nonce, 0, sizeof nonce);
-  memcpy(nonce + (crypto_aead_chacha20poly1305_ietf_NPUBBYTES - RATCHET_N_LEN),
-         n_ptr, RATCHET_N_LEN);
+  /* Nonce = the fresh, random 12-byte per-chunk nonce carried in the CLEARTEXT
+   * frame header (right after PQ_EPOCH, before the ciphertext). Receiver-derivable
+   * because it is literally on the wire, metadata-safe because it is random (not an
+   * index), and birthday-safe within a per-message key. NPUBBYTES == RATCHET_NONCE_LEN
+   * (both 12). */
+  const uint8_t *nonce = pn_ptr + RATCHET_PN_LEN + PQ_EPOCH_LEN;
 
   unsigned long long DATA_LEN = DECRYPTED_LEN;
   int d = crypto_aead_chacha20poly1305_ietf_decrypt(

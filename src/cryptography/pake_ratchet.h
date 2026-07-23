@@ -22,9 +22,11 @@
 #define RATCHET_N_LEN 8U
 #define RATCHET_PN_LEN 8U
 #define PQ_EPOCH_LEN 1U
+#define RATCHET_NONCE_LEN 12U
 #define CHUNK_HEADER_LEN                                                     \
-  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN) /* 49 */
-#define MESSAGE_START (FRAME_TYPE_LEN + CHUNK_HEADER_LEN) /* 50 */
+  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN          \
+   + RATCHET_NONCE_LEN) /* 61 */
+#define MESSAGE_START (FRAME_TYPE_LEN + CHUNK_HEADER_LEN) /* 62 */
 
 void cpace_ristretto255_from_hash(
     uint8_t out[crypto_core_ristretto255_BYTES],

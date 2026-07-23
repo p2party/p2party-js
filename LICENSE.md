@@ -630,7 +630,7 @@ the "copyright" line and a pointer to where the full notice is found.
 
 P2Party is a peer-to-peer mesh network and end-to-end cryptography library for
 the browser.
-Copyright (C) 2025 Deliberative Technologies P.C.
+Copyright (C) 2025 p2party contributors.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published

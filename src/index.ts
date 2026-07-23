@@ -844,6 +844,10 @@ export const p2party = {
   generateRandomRoomUrl: newRoomUrl,
   sign,
   verify,
+  // Industry-standard name (cf. WebCrypto `generateKey`, libsodium
+  // `crypto_sign_keypair`) + consistent with `generateMnemonic` below.
+  generateKeyPair: newKeyPair,
+  // Deprecated alias of `generateKeyPair`, kept for back-compat.
   newKeyPair,
   generateMnemonic,
   keyPairFromMnemonic,

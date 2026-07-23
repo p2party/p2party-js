@@ -62,8 +62,12 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
   verifiable in the Stage-7 headless-Chromium E2E (fail-safe either way).
 
 ## NEXT — Stage 5 (the big remaining chunk: message crypto onto the ratchet + box removal)
-Plan: `docs/superpowers/plans/2026-07-22-pace-ratchet-protocol-v3.md` (Stage 5). Box
-removal surface: the D2=B spec **§6** has the COMPLETE file-by-file list.
+**READ FIRST: `docs/stage5-message-crypto-swap-design.md`** — the precise swap design,
+incl. the **per-message-ratchet + messageKey-cache subtlety** (the #1 bug to avoid:
+`ratchetDecrypt` is per-message, not per-chunk — call it once + cache the key), the
+clone-rollback-dedup contract, the 62-byte frame layout, and a landable-green task
+decomposition. Plan (older, amend per Q4): `docs/superpowers/plans/2026-07-22-pace-ratchet-protocol-v3.md`;
+box-removal surface: D2=B spec **§6**.
 1. **Swap message crypto to the ratchet AEAD** (the ratchet is seeded by the handshake
    but NOT yet used for messages):
    - `handleSendMessage.ts:256` `_encrypt_chachapoly_asymmetric` → `_encrypt_chachapoly_symmetric`

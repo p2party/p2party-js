@@ -32,7 +32,7 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
     `"identityX25519"`, reuses Stage-3 wrap) — NOT plaintext localStorage. api:
     `db/api.ts` get/set/deleteIdentityX25519; worker: `db/db.worker.ts` fn*.
   - **Domain-separated cross-signature** `IDENTITY_CROSS_SIGN_DOMAIN_BYTES =
-    "p2party-x25519-idsig-v1"` (`src/cryptography/identityCrossSig.ts`) — closes
+    `"p2party-x25519-idsig-v1"` (`src/cryptography/identityCrossSig.ts`) — closes
     **SECURITY-1**: a bare `sign(x25519pub, ed25519sec)` collides with the
     login-challenge signing oracle (`handleChallenge` signs a raw 32B server nonce),
     letting a malicious server forge a cross-sig. Regression-tested.
@@ -63,9 +63,10 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
 
 ## SESSION 2026-07-23 (late) — standalone use, browser E2E, Redux coupling
 - **BROWSER E2E PASSED (headless Chromium, no WebRTC):** message crypto 11/11, AND the **FULL standalone protocol 5/5** — real `performHandshakeCore` over in-memory transports + bidirectional byte-exact messaging + tampered-cross-sig rejection. Self-driven via playwright `chromium.launch` (Playwright MCP wanted the missing Chrome channel). Crypto is now browser-proven.
-- **`examples/standalone-e2ee.ts` + `examples/_env.ts` (NEW, verified `bun run`)** — E2EE-library-style demo (`const alice`/`const bob`, real handshake over two in-memory links = simulated channels, encrypt/decrypt both ways). The reference for using the machinery without WebRTC, and the exact flow `createSession()` should wrap.
+- **`examples/standalone-e2ee.ts` (NEW, verified `bun run` with no browser-global shim)** — E2EE-library-style demo (`const alice`/`const bob`, real handshake over two in-memory links = simulated channels, encrypt/decrypt both ways). The reference for using the machinery without WebRTC, and the exact flow `createSession()` should wrap.
 - **KEY PARAM FACT:** `performHandshakeCore`'s `idSelfSec` = the **X25519 identity SECRET** (X3DH DH), NOT Ed25519; the Ed25519 key only cross-signs the X25519 pub + is the pinned anchor (`peerIdentityEd25519Pub`). Copy `handleHandshake.test.ts:215-263`.
-- **REDUX/db COUPLING (user asked to decouple):** `handleHandshake.ts` imports `../store` + `../db/api`, and `runHandshake` reads `store.getState().keyPair` (:607) + persists via db — so importing `performHandshakeCore` drags in Redux + a db Worker + localStorage (why the node example needs `_env.ts`). BUT `performHandshakeCore`/`buildChannelInput`/`HandshakeTransport` use **neither** → **split the pure core into a store-free `handshakeCore.ts`**, leaving the WebRTC/store glue in `handleHandshake.ts`. Verify `messageChunkCrypto.ts`/`ratchet.ts` are already store-free. This is the enabling refactor for a clean standalone `createSession()` + smaller consumer bundles. **DO THIS FIRST**, then build `createSession()` (wraps the example flow: handshake step bytes = the "two prior steps", `.encrypt()/.decrypt()`, pass `root` alongside frames, `.serialize()/restoreSession()`).
+- **PRE-SPLIT REDUX/db COUPLING finding:** `handleHandshake.ts` imported `../store` + `../db/api`, and `runHandshake` read `store.getState().keyPair` + persisted via db, so importing `performHandshakeCore` dragged in Redux + a db Worker + localStorage. The core functions themselves used neither dependency, making a module split the enabling refactor for a clean standalone `createSession()` + smaller consumer bundles.
+- **REDUX/db DECOUPLING COMPLETE:** `handshakeCore.ts` now owns `performHandshakeCore` / `buildChannelInput` / `HandshakeTransport` and imports only crypto + byte utilities. `handleHandshake.ts` retains Redux, DB persistence, DTLS/WebRTC transport, and ratchet gates. `messageChunkCrypto.ts` and `ratchet.ts` are confirmed store-free. The standalone example no longer needs `_env.ts`; the remaining crypto random calls it exercises use `globalThis.crypto`.
 
 ## Stage 5 STATUS (2026-07-23)
 - ✅ T1 `a9712e0` (frame codec+constants), ✅ T2 `90a7191` (C reads cleartext nonce), ✅ T3-core `293ce4c`+`2776f1a` (messageChunkCrypto, per-message cache + clone-rollback, **libsodium** decrypt), ✅ **T3-wiring `39ce532` — DONE but UNVERIFIED (E2E pending)**: live send/receive swapped onto the ratchet, `MESSAGE_START` 96→62 decoupled from `DECRYPTED_LEN` (zero Merkle/OPFS ripple), box left dead, 103/0, typecheck clean.
@@ -160,3 +161,14 @@ box-removal surface: D2=B spec **§6**.
 - Durable ledger (gitignored, on disk): `.superpowers/sdd/progress.md`. Per-task
   reports/reviews: `.superpowers/sdd/*.md`. Specs: `docs/superpowers/specs/`. Plan:
   `docs/superpowers/plans/`. Decision arc: `docs/protocol-evolution-decision-log.md`.
+
+## CAPSTONE (deferred — do after the core lands, or in parallel where it fits)
+
+- p2party.com INTEGRATION: the frontend installs file:../p2party-js/p2party-0.9.2.tgz. Rebuild+repack the v3 branch (npm run predist && build:package && build:worker && npm pack) and reinstall it in p2party.com;
+  wire the site to the v3 handshake + message crypto; surface a standalone createSession() demo. The blog also lives on p2party.com.
+- BLOG SERIES on p2party.com: a 'road to today' narrative built from the git history, culminating in the Double Ratchet (the #1 NLnet/TrustChain grant promise = this protocol-v3 work). Voice = hacker / 'offensive
+  cryptography'; match the grant prose + existing docs tone, not corporate. Source material: p2party-js/docs/protocol-v3-implementation-log.md, protocol-evolution-decision-log.md, and git log.
+- PAPER (LaTeX, offensive-crypto systems paper): architecture-SPECIFIC, not another generic Double-Ratchet paper. Novel claim: fixed-size uniform chunks make the PQ/ratchet ciphertext overhead 'free' (absorbed in
+  a chunk) and hideable among decoy chunk slots = metadata-hiding transport. Extend the prior-art pass in p2party-js/docs/paper-prior-art-and-related-work.md before drafting.
+- VISUAL PASS on p2party.com: elevate to a professional polish (responsive, a11y, consistency) while KEEPING the retro-90s / hacker aesthetic and brand (the two-column retro landing). Do NOT sanitize it into
+  generic SaaS.

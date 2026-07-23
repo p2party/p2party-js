@@ -4,9 +4,9 @@ import {
   setHandshakeChannel,
   deliverHandshakeFrame,
   runHandshake,
-  buildChannelInput,
   parseFingerprintFromSdp,
 } from "./handleHandshake";
+import { buildChannelInput } from "./handshakeCore";
 import { classifyFrame } from "./frameType";
 
 import webrtcApi from "../api/webrtc";

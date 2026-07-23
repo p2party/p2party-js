@@ -41,7 +41,7 @@ export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
     ptr3,
     crypto_sign_ed25519_SEEDBYTES,
   );
-  window.crypto.getRandomValues(seedBytes);
+  globalThis.crypto.getRandomValues(seedBytes);
 
   const result = cryptoModule._keypair_from_seed(
     publicKey.byteOffset,

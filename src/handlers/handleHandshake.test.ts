@@ -7,14 +7,15 @@ import { newKeyPair } from "../cryptography/ed25519";
 import { crossSignIdentityX25519 } from "../cryptography/identityCrossSig";
 import { serializeRatchet } from "../cryptography/ratchet";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
-import type { HandshakeTransport } from "./handleHandshake";
+import {
+  buildChannelInput,
+  performHandshakeCore,
+  type HandshakeTransport,
+} from "./handshakeCore";
 
-// handleHandshake.ts transitively imports the Redux `store`, whose keyPair slice
-// reads `localStorage` at module-init time (and `db/api` creates a Worker). Bare
-// `bun test` has neither, so provide a minimal `localStorage` shim BEFORE the
-// module is loaded, and defer that load into `beforeAll` (import hoisting would
-// otherwise run it before this statement). `window` is aliased by the
-// `loadTestModule` import above.
+// Only the WebRTC orchestration module imports the Redux store/db worker. Bare
+// `bun test` has no localStorage, so shim it before dynamically importing that
+// module. The store-free handshake core above loads without this browser glue.
 const _lsMem: Record<string, string> = {};
 (globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
   getItem: (k: string) => (k in _lsMem ? _lsMem[k] : null),
@@ -32,10 +33,8 @@ const _lsMem: Record<string, string> = {};
 } as Storage;
 
 type HS = typeof import("./handleHandshake");
-let buildChannelInput: HS["buildChannelInput"];
 let parseFingerprintFromSdp: HS["parseFingerprintFromSdp"];
 let verifyDtlsFingerprints: HS["verifyDtlsFingerprints"];
-let performHandshakeCore: HS["performHandshakeCore"];
 let setHandshakeChannel: HS["setHandshakeChannel"];
 let deliverHandshakeFrame: HS["deliverHandshakeFrame"];
 let runHandshake: HS["runHandshake"];
@@ -43,10 +42,8 @@ let runHandshake: HS["runHandshake"];
 beforeAll(async () => {
   const m = await import("./handleHandshake");
   ({
-    buildChannelInput,
     parseFingerprintFromSdp,
     verifyDtlsFingerprints,
-    performHandshakeCore,
     setHandshakeChannel,
     deliverHandshakeFrame,
     runHandshake,
@@ -128,9 +125,30 @@ describe("verifyDtlsFingerprints", () => {
       remoteDescription: { sdp: sdpWith(remoteFp) },
       getStats: async () =>
         new Map<string, any>([
-          ["T", { type: "transport", localCertificateId: "LC", remoteCertificateId: "RC" }],
-          ["LC", { type: "certificate", fingerprint: localFp, fingerprintAlgorithm: "sha-256" }],
-          ["RC", { type: "certificate", fingerprint: statsFp, fingerprintAlgorithm: "sha-256" }],
+          [
+            "T",
+            {
+              type: "transport",
+              localCertificateId: "LC",
+              remoteCertificateId: "RC",
+            },
+          ],
+          [
+            "LC",
+            {
+              type: "certificate",
+              fingerprint: localFp,
+              fingerprintAlgorithm: "sha-256",
+            },
+          ],
+          [
+            "RC",
+            {
+              type: "certificate",
+              fingerprint: statsFp,
+              fingerprintAlgorithm: "sha-256",
+            },
+          ],
         ]),
     }) as unknown as IRTCPeerConnection;
 
@@ -227,8 +245,16 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     // and pins the peer's Ed25519 pub as the anchor to verify against.
     const edA = await newKeyPair(module);
     const edB = await newKeyPair(module);
-    const crossA = await crossSignIdentityX25519(idA.publicKey, edA.secretKey, module);
-    const crossB = await crossSignIdentityX25519(idB.publicKey, edB.secretKey, module);
+    const crossA = await crossSignIdentityX25519(
+      idA.publicKey,
+      edA.secretKey,
+      module,
+    );
+    const crossB = await crossSignIdentityX25519(
+      idB.publicKey,
+      edB.secretKey,
+      module,
+    );
     const ci = new Uint8Array(160).fill(7);
 
     const [rA, rB] = await Promise.all([
@@ -282,8 +308,16 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     const idB = x25519Keypair(module);
     const edA = await newKeyPair(module);
     const edB = await newKeyPair(module);
-    const crossA = await crossSignIdentityX25519(idA.publicKey, edA.secretKey, module);
-    const crossB = await crossSignIdentityX25519(idB.publicKey, edB.secretKey, module);
+    const crossA = await crossSignIdentityX25519(
+      idA.publicKey,
+      edA.secretKey,
+      module,
+    );
+    const crossB = await crossSignIdentityX25519(
+      idB.publicKey,
+      edB.secretKey,
+      module,
+    );
     const pin = new TextEncoder().encode("123456");
 
     // Matching PIN → both resolve with equal secrets.

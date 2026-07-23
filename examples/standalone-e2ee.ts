@@ -13,7 +13,6 @@
  * ratchet primitives). A `p2party.createSession(...)` wrapper that packages this
  * flow behind `.encrypt()/.decrypt()` is the planned public API (see docs/HANDOFF).
  */
-import "./_env"; // MUST be first — shims window/localStorage before the imports below
 import { readFileSync } from "node:fs";
 
 import libcrypto from "../src/cryptography/libcrypto";
@@ -24,7 +23,7 @@ import {
   buildChannelInput,
   performHandshakeCore,
   type HandshakeTransport,
-} from "../src/handlers/handleHandshake";
+} from "../src/handlers/handshakeCore";
 import { ratchetEncrypt } from "../src/cryptography/ratchet";
 import { getMerkleRoot, getMerkleProof } from "../src/cryptography/merkle";
 import { hashMerkleLeafWasm } from "../src/utils/leafHash";
@@ -54,7 +53,8 @@ const loadModule = async (): Promise<LibCrypto> => {
   return (await libcrypto({ wasmBinary, wasmMemory })) as LibCrypto;
 };
 
-const rand = (n: number): Uint8Array => crypto.getRandomValues(new Uint8Array(n));
+const rand = (n: number): Uint8Array =>
+  crypto.getRandomValues(new Uint8Array(n));
 const eq = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((v, i) => v === b[i]);
 
@@ -78,7 +78,11 @@ const makeLink = () => {
 const makeIdentity = async (module: LibCrypto) => {
   const ed = await newKeyPair(module);
   const x = await newX25519KeyPair(module);
-  const crossSig = await crossSignIdentityX25519(x.publicKey, ed.secretKey, module);
+  const crossSig = await crossSignIdentityX25519(
+    x.publicKey,
+    ed.secretKey,
+    module,
+  );
   return { ed, x, crossSig };
 };
 type Identity = Awaited<ReturnType<typeof makeIdentity>>;
@@ -159,7 +163,9 @@ const send = async (
 ): Promise<Uint8Array[]> => {
   const { root, plaintexts } = await buildMessage(fromMod, payloads);
   const { messageKey, header } = ratchetEncrypt(from, fromMod); // one step / message
-  const frames = plaintexts.map((pt) => sealChunk(messageKey, header, pt, root, fromMod));
+  const frames = plaintexts.map((pt) =>
+    sealChunk(messageKey, header, pt, root, fromMod),
+  );
   messageKey.fill(0);
   const cache = new Map<string, Uint8Array>();
   return frames.map((f) => {
@@ -200,13 +206,21 @@ const main = async () => {
   //    responder has no sending chain until it has received once).
   const msg1 = new TextEncoder().encode("hello bob, from alice");
   const got1 = await send(alice, aliceMod, bob, bobMod, [msg1]);
-  console.log("alice → bob:", new TextDecoder().decode(got1[0].subarray(0, msg1.length)));
-  if (!eq(got1[0].subarray(0, msg1.length), msg1)) throw new Error("alice→bob mismatch");
+  console.log(
+    "alice → bob:",
+    new TextDecoder().decode(got1[0].subarray(0, msg1.length)),
+  );
+  if (!eq(got1[0].subarray(0, msg1.length), msg1))
+    throw new Error("alice→bob mismatch");
 
   const msg2 = new TextEncoder().encode("hi alice, bob here");
   const got2 = await send(bob, bobMod, alice, aliceMod, [msg2]);
-  console.log("bob → alice:", new TextDecoder().decode(got2[0].subarray(0, msg2.length)));
-  if (!eq(got2[0].subarray(0, msg2.length), msg2)) throw new Error("bob→alice mismatch");
+  console.log(
+    "bob → alice:",
+    new TextDecoder().decode(got2[0].subarray(0, msg2.length)),
+  );
+  if (!eq(got2[0].subarray(0, msg2.length), msg2))
+    throw new Error("bob→alice mismatch");
 
   console.log("\nOK — standalone E2EE round-trip verified (no WebRTC).");
 };

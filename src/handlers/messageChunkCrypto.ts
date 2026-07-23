@@ -218,6 +218,41 @@ const adoptRatchetState = (live: RatchetState, next: RatchetState): void => {
 };
 
 /**
+ * Seal ONE chunk under an already-derived per-message `messageKey` + `header`:
+ * fresh random nonce, AEAD over `merkleRoot ‖ N ‖ PN`, framed as
+ * `packChunkFrameHeader(header, nonce) ‖ ciphertext`. Does NOT touch the ratchet
+ * (the caller stepped it ONCE via `ratchetEncrypt` for the whole message) and
+ * does NOT wipe `messageKey` (the caller owns its lifecycle — it must stay live
+ * across a big-file's streamed chunks AND across selective-retransmit rounds).
+ *
+ * This is the streaming/reconcile-friendly primitive the live send path uses: it
+ * seals chunks one-at-a-time as they are read from IndexedDB, so a multi-GB
+ * message is never materialised in RAM (unlike `encryptMessageChunks`, which
+ * takes all chunks at once). A retransmit re-seals the same plaintext under the
+ * SAME `messageKey` with a FRESH random nonce — cryptographically safe (distinct
+ * 96-bit random nonces under one key) and decryptable by the receiver's cached
+ * per-message key (a HIT on `(dhPub, N)`), so no frame-cache is needed.
+ */
+export const sealChunk = (
+  messageKey: Uint8Array,
+  header: RatchetHeader,
+  chunk: Uint8Array,
+  merkleRoot: Uint8Array,
+  module: LibCrypto,
+): Uint8Array => {
+  if (merkleRoot.length !== crypto_hash_sha512_BYTES)
+    throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
+  const aad = buildAad(merkleRoot, header.N, header.PN);
+  const nonce = randomNonce(); // fresh + random per chunk
+  const ciphertext = aeadSeal(module, messageKey, nonce, chunk, aad);
+  const frameHeader = packChunkFrameHeader(header, nonce);
+  const frame = new Uint8Array(frameHeader.length + ciphertext.length);
+  frame.set(frameHeader, 0);
+  frame.set(ciphertext, frameHeader.length);
+  return frame;
+};
+
+/**
  * SEND: step the ratchet ONCE for the whole message, then AEAD-encrypt every
  * chunk under the single message key with a fresh random per-chunk nonce, and
  * frame each as `packChunkFrameHeader(header, nonce) ‖ ciphertext`.
@@ -228,6 +263,10 @@ const adoptRatchetState = (live: RatchetState, next: RatchetState): void => {
  *
  * `merkleRoot` is the message's 64-byte root; it (plus the header's N/PN) forms
  * the per-chunk AAD, matching the C receive path.
+ *
+ * NOTE: this buffers all chunks — the LIVE send path instead calls
+ * `ratchetEncrypt` + `sealChunk` per chunk (streaming). This all-at-once form is
+ * kept for the unit tests / small callers.
  */
 export const encryptMessageChunks = (
   state: RatchetState,
@@ -242,16 +281,9 @@ export const encryptMessageChunks = (
 
   const { messageKey, header } = ratchetEncrypt(state, module); // ONCE per message
   try {
-    const aad = buildAad(merkleRoot, header.N, header.PN);
-    return chunks.map((chunk) => {
-      const nonce = randomNonce(); // fresh + random per chunk
-      const ciphertext = aeadSeal(module, messageKey, nonce, chunk, aad);
-      const frameHeader = packChunkFrameHeader(header, nonce);
-      const frame = new Uint8Array(frameHeader.length + ciphertext.length);
-      frame.set(frameHeader, 0);
-      frame.set(ciphertext, frameHeader.length);
-      return frame;
-    });
+    return chunks.map((chunk) =>
+      sealChunk(messageKey, header, chunk, merkleRoot, module),
+    );
   } finally {
     messageKey.fill(0);
   }

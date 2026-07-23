@@ -4,11 +4,8 @@ import signalingServerApi from "../api/signalingServerApi";
 
 import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
 import { getMerkleProof } from "../cryptography/merkle";
-import {
-  crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-  crypto_sign_ed25519_SECRETKEYBYTES,
-} from "../cryptography/interfaces";
+import { crypto_sign_ed25519_PUBLICKEYBYTES } from "../cryptography/interfaces";
+import { ratchetEncrypt } from "../cryptography/ratchet";
 
 import {
   concatUint8Arrays,
@@ -22,18 +19,17 @@ import {
   compileChannelMessageLabel,
   decompileChannelMessageLabel,
 } from "../utils/channelLabel";
-import { allocateSendMessage } from "../utils/allocators";
-import { zeroFree } from "../utils/zeroFree";
 import { waitForOpen } from "../utils/waitForOpen";
 import { incrementMessageStats } from "../reducers/roomSlice";
 import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
+import { sealChunk } from "./messageChunkCrypto";
+import { getRatchetGate } from "./ratchetGate";
+import { persistRatchetSession } from "./ratchetPersist";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
   MAX_BUFFERED_AMOUNT,
   PROOF_LEN,
-  CHUNK_AUTH_DOMAIN_BYTES,
-  CHUNK_AUTH_TRANSCRIPT_LEN,
   MAX_RETRANSMITS,
   RETRANSMIT_TIMEOUT_MS,
   RECONNECT_RESUME_TIMEOUT_MS,
@@ -57,6 +53,7 @@ import type {
 } from "../api/webrtc/interfaces";
 import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { RatchetHeader } from "../cryptography/ratchet";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
@@ -70,14 +67,17 @@ const sendChunks = async (
   channel: IRTCDataChannel | string,
   api: BaseQueryApi,
   roomId: string,
-  senderSecretKey: Uint8Array,
+  // protocol-v3: the message key + header derived ONCE for the whole message by
+  // the caller (`ratchetEncrypt`). Every chunk of the message — across the initial
+  // pass AND every selective-retransmit round — is sealed under this same key with
+  // a FRESH random nonce (streaming-safe; no per-message frame cache needed).
+  messageKey: Uint8Array,
+  header: RatchetHeader,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   hashHex: string,
-  // epc: IRTCPeerConnection,
   peerId: string,
-  peerPublicKeyHex: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
@@ -95,63 +95,8 @@ const sendChunks = async (
   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
   const indexesRandomized = fisherYatesShuffle(indexes);
 
-  const {
-    ptr1,
-    ptr5,
-    ptr6,
-    ptr7,
-    ptr9,
-    ptr10,
-    ptrTranscript,
-    senderEphemeralPublicKey,
-    senderEphemeralSecretKey,
-    seedBytes,
-    senderEphemeralSignature,
-    chunkArray,
-    receiverPublicKeyArray,
-    nonceArray,
-    encryptedArray,
-    authTranscript,
-  } = allocateSendMessage(encryptionModule);
-
-  // const peerPublicKeyHex = epc.withPeerPublicKey;
-  // const receiverPublicKey = hexToUint8Array(peerPublicKeyHex);
-  receiverPublicKeyArray.set(hexToUint8Array(peerPublicKeyHex));
-
-  // Constant parts of the per-chunk sender-auth transcript
-  // (DOMAIN || merkle_root || ephemeral_pk); the ephemeral pk is filled per
-  // chunk below, then the whole transcript is signed.
-  authTranscript.set(CHUNK_AUTH_DOMAIN_BYTES, 0);
-  authTranscript.set(merkleRoot, CHUNK_AUTH_DOMAIN_BYTES.length);
-
   for (let i = 0; i < chunksLen; i++) {
     const iRandom = indexesRandomized[i];
-
-    window.crypto.getRandomValues(seedBytes);
-
-    const newKeyPairResult = encryptionModule._keypair_from_seed(
-      senderEphemeralPublicKey.byteOffset,
-      senderEphemeralSecretKey.byteOffset,
-      seedBytes.byteOffset,
-    );
-
-    if (newKeyPairResult !== 0) continue;
-
-    // Bind the signature to the domain-separated transcript, not the bare
-    // ephemeral pk, so a challenge-oracle signature cannot forge a chunk.
-    authTranscript.set(
-      senderEphemeralPublicKey,
-      CHUNK_AUTH_DOMAIN_BYTES.length + merkleRoot.length,
-    );
-
-    const sigResult = encryptionModule._sign(
-      CHUNK_AUTH_TRANSCRIPT_LEN,
-      ptrTranscript,
-      senderSecretKey.byteOffset,
-      senderEphemeralSignature.byteOffset,
-    );
-
-    if (sigResult !== 0) continue;
 
     const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
     if (!unencryptedChunk) continue;
@@ -249,28 +194,20 @@ const sendChunks = async (
       merkleProof,
       new Uint8Array(unencryptedChunk.data),
     ]);
-    chunkArray.set(chunk);
 
-    window.crypto.getRandomValues(nonceArray);
-
-    const encResult = encryptionModule._encrypt_chachapoly_asymmetric(
-      DECRYPTED_LEN,
-      chunkArray.byteOffset,
-      receiverPublicKeyArray.byteOffset,
-      senderEphemeralSecretKey.byteOffset,
-      nonceArray.byteOffset,
-      crypto_hash_sha512_BYTES,
-      merkleRoot.byteOffset,
-      encryptedArray.byteOffset,
-    );
-
-    if (encResult !== 0) continue;
-
-    const message = await concatUint8Arrays([
-      senderEphemeralPublicKey,
-      senderEphemeralSignature,
-      encryptedArray,
-    ]);
+    // protocol-v3: seal the DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk)
+    // under the per-message ratchet key with a fresh random nonce, framed as
+    // FRAME_TYPE_CHUNK ‖ dhPub ‖ N ‖ PN ‖ PQ_EPOCH ‖ nonce ‖ ciphertext‖tag.
+    // Replaces the box scheme's per-chunk ephemeral keypair + signature + asymmetric
+    // encrypt. A retransmit re-seals the same plaintext (fresh nonce) — the receiver
+    // reuses its cached per-(dhPub,N) key, so no frame cache is required.
+    let message: Uint8Array;
+    try {
+      message = sealChunk(messageKey, header, chunk, merkleRoot, encryptionModule);
+    } catch (error) {
+      console.error(error);
+      continue;
+    }
 
     if (
       typeof channel === "string" ||
@@ -382,16 +319,9 @@ const sendChunks = async (
       }
     }
   }
-
-  encryptionModule._free(ptr1);
-  zeroFree(encryptionModule, senderEphemeralSecretKey);
-  zeroFree(encryptionModule, seedBytes);
-  encryptionModule._free(ptr5);
-  encryptionModule._free(ptr6);
-  encryptionModule._free(ptr7);
-  encryptionModule._free(ptr9);
-  encryptionModule._free(ptr10);
-  encryptionModule._free(ptrTranscript);
+  // protocol-v3: no box wasm scratch to free — `sealChunk` allocates + frees its
+  // own transient buffers per chunk; the message key is owned + wiped by the
+  // caller (sendWithReconcile) after the last retransmit round.
 };
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
@@ -461,13 +391,12 @@ const sendWithReconcile = async (
   channel: IRTCDataChannel | string,
   api: BaseQueryApi,
   roomId: string,
-  senderSecretKey: Uint8Array,
+  epc: IRTCPeerConnection,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   hashHex: string,
   peerId: string,
-  peerPublicKeyHex: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
   peerConnections: IRTCPeerConnection[],
@@ -475,100 +404,148 @@ const sendWithReconcile = async (
 ): Promise<void> => {
   clearTransfer(peerId, hashHex);
 
-  let currentChannel = channel;
-  // The per-message channel label is a pure function of the message, so the dead
-  // channel's own label is exactly what we re-open on reconnect.
-  const channelMessageLabel =
-    typeof channel === "string" ? channel : channel.label;
+  // protocol-v3: do not send until the PACE + Double-Ratchet handshake has seeded
+  // this peer's ratchet (the `main` channel opens the gate). A rejected gate =
+  // failed handshake → abort this peer's send.
+  try {
+    await getRatchetGate(peerId);
+  } catch (error) {
+    console.error("v3 send: ratchet gate rejected", error);
+    return;
+  }
+  if (!epc.ratchetState) {
+    console.error("v3 send: no ratchet state for peer");
+    return;
+  }
 
-  // Wait for the per-message channel to open before the first send, so its
-  // initial frames aren't spilled to the WS relay while it is still connecting.
-  if (typeof currentChannel !== "string") await waitForOpen(currentChannel);
+  // Step the ratchet ONCE for the whole message → one message key + one header
+  // (dhPub, N, PN) shared by every chunk (design §"per-MESSAGE, not per-chunk").
+  // The responder cannot send before it has received (no sending chain yet) —
+  // `ratchetEncrypt` throws; abort gracefully (the send retries after a receive).
+  let messageKey: Uint8Array;
+  let header: RatchetHeader;
+  try {
+    const stepped = ratchetEncrypt(epc.ratchetState, encryptionModule);
+    messageKey = stepped.messageKey;
+    header = stepped.header;
+  } catch (error) {
+    console.error("v3 send: ratchetEncrypt failed", error);
+    return;
+  }
 
-  // Initial pass: all chunks (real + decoy).
-  await sendChunks(
-    currentChannel,
-    api,
-    roomId,
-    senderSecretKey,
-    chunksLen,
-    chunkHashes,
-    merkleRoot,
-    hashHex,
-    peerId,
-    peerPublicKeyHex,
-    encryptionModule,
-    merkleModule,
-  );
+  // Persist the advanced sending chain BEFORE any frame goes out, so a crash
+  // mid-send can't reuse a chain key (nonce/key-reuse safety).
+  try {
+    await persistRatchetSession(epc, roomId);
+  } catch (error) {
+    console.error(error);
+  }
 
-  let retries = 0;
-  let resumeAttempts = 0;
-  while (retries < MAX_RETRANSMITS) {
-    const done = await waitForCompletion(
-      peerId,
-      hashHex,
-      RETRANSMIT_TIMEOUT_MS * (retries + 1),
-    );
-    if (done) break;
+  try {
+    let currentChannel = channel;
+    // The per-message channel label is a pure function of the message, so the dead
+    // channel's own label is exactly what we re-open on reconnect.
+    const channelMessageLabel =
+      typeof channel === "string" ? channel : channel.label;
 
-    // Channel died — a full reconnect. Re-establish it on the peer's fresh
-    // connection and continue; the receiver re-emits its receipts so we resend
-    // only the still-missing reals. Bounded so a flapping peer can't loop. Only
-    // treat a genuinely dead (closed/closing) channel as needing resume — a
-    // still-"connecting" channel is given more time via waitForCompletion.
-    if (
-      typeof currentChannel !== "string" &&
-      (currentChannel.readyState === "closed" ||
-        currentChannel.readyState === "closing")
-    ) {
-      if (resumeAttempts >= MAX_RESUME_ATTEMPTS) break;
-      resumeAttempts++;
-      const resumed = await resumeChannel(
-        api,
-        roomId,
-        peerId,
-        channelMessageLabel,
-        peerConnections,
-        dataChannels,
-        RECONNECT_RESUME_TIMEOUT_MS,
-      );
-      if (!resumed) break;
-      currentChannel = resumed;
-      retries = 0; // fresh retransmit budget for the resumed transfer
+    // Wait for the per-message channel to open before the first send, so its
+    // initial frames aren't spilled to the WS relay while it is still connecting.
+    if (typeof currentChannel !== "string") await waitForOpen(currentChannel);
 
-      // Telemetry: surface the reconnect recovery to the UI as a reliability
-      // event (the user validates the transfer survived a dropped connection).
-      api.dispatch(
-        incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
-      );
-      continue;
-    }
-
-    // Reconcile: resend only the reals the receiver hasn't acked yet.
+    // Initial pass: all chunks (real + decoy).
     await sendChunks(
       currentChannel,
       api,
       roomId,
-      senderSecretKey,
+      messageKey,
+      header,
       chunksLen,
       chunkHashes,
       merkleRoot,
       hashHex,
       peerId,
-      peerPublicKeyHex,
       encryptionModule,
       merkleModule,
-      getAckedChunks(peerId, hashHex),
     );
-    retries++;
 
-    // Telemetry: a retransmit round happened — lets the UI show reliability.
-    api.dispatch(
-      incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
-    );
+    let retries = 0;
+    let resumeAttempts = 0;
+    while (retries < MAX_RETRANSMITS) {
+      const done = await waitForCompletion(
+        peerId,
+        hashHex,
+        RETRANSMIT_TIMEOUT_MS * (retries + 1),
+      );
+      if (done) break;
+
+      // Channel died — a full reconnect. Re-establish it on the peer's fresh
+      // connection and continue; the receiver re-emits its receipts so we resend
+      // only the still-missing reals. Bounded so a flapping peer can't loop. Only
+      // treat a genuinely dead (closed/closing) channel as needing resume — a
+      // still-"connecting" channel is given more time via waitForCompletion.
+      if (
+        typeof currentChannel !== "string" &&
+        (currentChannel.readyState === "closed" ||
+          currentChannel.readyState === "closing")
+      ) {
+        if (resumeAttempts >= MAX_RESUME_ATTEMPTS) break;
+        resumeAttempts++;
+        const resumed = await resumeChannel(
+          api,
+          roomId,
+          peerId,
+          channelMessageLabel,
+          peerConnections,
+          dataChannels,
+          RECONNECT_RESUME_TIMEOUT_MS,
+        );
+        if (!resumed) break;
+        currentChannel = resumed;
+        retries = 0; // fresh retransmit budget for the resumed transfer
+
+        // Telemetry: surface the reconnect recovery to the UI as a reliability
+        // event (the user validates the transfer survived a dropped connection).
+        api.dispatch(
+          incrementMessageStats({
+            roomId,
+            sha512Hex: hashHex,
+            retransmit: true,
+          }),
+        );
+        continue;
+      }
+
+      // Reconcile: resend only the reals the receiver hasn't acked yet. Same
+      // message key + header (the ratchet is NOT re-stepped); a fresh nonce per
+      // re-seal keeps it safe and the receiver's cached key still opens it.
+      await sendChunks(
+        currentChannel,
+        api,
+        roomId,
+        messageKey,
+        header,
+        chunksLen,
+        chunkHashes,
+        merkleRoot,
+        hashHex,
+        peerId,
+        encryptionModule,
+        merkleModule,
+        getAckedChunks(peerId, hashHex),
+      );
+      retries++;
+
+      // Telemetry: a retransmit round happened — lets the UI show reliability.
+      api.dispatch(
+        incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
+      );
+    }
+  } finally {
+    // The message key is dead once every retransmit round for this message is
+    // done (or given up) — wipe it. The ratchet has already advanced past it.
+    messageKey.fill(0);
+    clearTransfer(peerId, hashHex);
   }
-
-  clearTransfer(peerId, hashHex);
 };
 
 export const handleSendMessage = async (
@@ -586,7 +563,7 @@ export const handleSendMessage = async (
   metadataSchemaVersion = 1,
 ) => {
   try {
-    const { rooms, keyPair, signalingServer } = api.getState() as State;
+    const { rooms } = api.getState() as State;
 
     const roomIndex = rooms.findIndex((r) => r.id === roomId);
 
@@ -623,22 +600,6 @@ export const handleSendMessage = async (
         merkleRootHex,
       );
 
-      const ptr4 = encryptionModule._malloc(crypto_sign_ed25519_SECRETKEYBYTES);
-      const senderSecretKey = new Uint8Array(
-        encryptionModule.wasmMemory.buffer,
-        ptr4,
-        crypto_sign_ed25519_SECRETKEYBYTES,
-      );
-      senderSecretKey.set(hexToUint8Array(keyPair.secretKey));
-
-      const ptr8 = encryptionModule._malloc(crypto_hash_sha512_BYTES);
-      const additionalData = new Uint8Array(
-        encryptionModule.wasmMemory.buffer,
-        ptr8,
-        crypto_hash_sha512_BYTES,
-      );
-      additionalData.set(merkleRoot);
-
       const PEERS_LEN = rooms[roomIndex].channels[channelIndex].peerIds.length;
       const promises: Promise<void>[] = [];
       for (let i = 0; i < PEERS_LEN; i++) {
@@ -646,54 +607,41 @@ export const handleSendMessage = async (
           (p) =>
             p.withPeerId === rooms[roomIndex].channels[channelIndex].peerIds[i],
         );
-        if (peerIndex === -1 && !signalingServer.isConnected) continue;
 
-        const channel = // channelMessageLabel;
-          peerIndex > -1 &&
-          peerConnections[peerIndex].connectionState === "connected"
-            ? await handleOpenChannel(
-                {
-                  channel: channelMessageLabel,
-                  epc: peerConnections[peerIndex],
-                  roomId,
-                  dataChannels,
-                },
-                api,
-              )
-            : channelMessageLabel;
+        // protocol-v3: a message can only be sent over an established per-peer
+        // ratchet, seeded by the handshake on the connected `main` DATA CHANNEL.
+        // A peer with no live connection (relay-only) has no ratchet, so it is
+        // skipped (behaviour change vs. the box scheme's WS-relay send — see
+        // report). The reconnect/resume path re-establishes the channel + ratchet
+        // when the peer returns, and the next send goes through.
+        if (
+          peerIndex === -1 ||
+          peerConnections[peerIndex].connectionState !== "connected"
+        )
+          continue;
 
-        const peerId =
-          peerIndex > -1
-            ? peerConnections[peerIndex].withPeerId
-            : rooms[roomIndex].channels[channelIndex].peerIds[i];
+        const epc = peerConnections[peerIndex];
 
-        const peerRoomIndex = rooms[roomIndex].peers.findIndex(
-          (p) => p.peerId === peerId,
+        const channel = await handleOpenChannel(
+          { channel: channelMessageLabel, epc, roomId, dataChannels },
+          api,
         );
 
-        const peerPublicKeyHex =
-          peerIndex > -1
-            ? peerConnections[peerIndex].withPeerPublicKey
-            : peerRoomIndex > -1
-              ? rooms[roomIndex].peers[peerRoomIndex].peerPublicKey
-              : "";
+        const peerId = epc.withPeerId;
+        const peerPublicKeyHex = epc.withPeerPublicKey;
 
-        if (
-          peerPublicKeyHex.length ===
-          crypto_sign_ed25519_PUBLICKEYBYTES * 2
-        ) {
+        if (peerPublicKeyHex.length === crypto_sign_ed25519_PUBLICKEYBYTES * 2) {
           promises.push(
             sendWithReconcile(
               channel,
               api,
               roomId,
-              senderSecretKey,
+              epc,
               totalChunks,
               chunkHashes,
-              additionalData,
+              merkleRoot,
               hashHex,
               peerId,
-              peerPublicKeyHex,
               encryptionModule,
               merkleModule,
               peerConnections,
@@ -712,9 +660,6 @@ export const handleSendMessage = async (
       // Idempotent (no-op for already-freed completed peers) and multi-peer-safe
       // (runs only after ALL peers' sendWithReconcile settle).
       await deleteDBNewChunk(undefined, undefined, hashHex);
-
-      zeroFree(encryptionModule, senderSecretKey);
-      encryptionModule._free(ptr8);
     }
   } catch (error) {
     console.trace(error);

@@ -30,14 +30,24 @@ export const METADATA_LEN =
 export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-export const MESSAGE_START =
+// Box-scheme frame header (ephemeral pk ‖ identity-signed ephemeral pk) = 96B.
+// RETAINED here ONLY as the sizing basis for DECRYPTED_LEN / CHUNK_LEN so the
+// chunk PLAINTEXT framing (metadata‖proof‖chunk), the Merkle leaf sizing, and the
+// receive-time OPFS write offsets stay byte-identical across the v3 ratchet swap.
+// The v3 ON-WIRE header is MESSAGE_START (62) — defined below, DECOUPLED from
+// this. Byte-matches C utils.h IMPORTANT_DATA_LEN (which likewise sizes from the
+// 96B box header while pake_ratchet.h MESSAGE_START=62 is the wire offset). See
+// docs/stage5-message-crypto-swap-design.md.
+export const BOX_MESSAGE_HEADER_LEN =
   crypto_sign_ed25519_PUBLICKEYBYTES + // ephemeral pk
   crypto_sign_ed25519_BYTES; // pk signed with identity sk
 export const CHUNK_START =
   METADATA_LEN + // fixed
   PROOF_LEN; // Merkle proof max len of 3kb
 export const MESSAGE_DATA_BEFORE_START_INDEX =
-  MESSAGE_START + CHUNK_START + crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // Encrypted message nonce
+  BOX_MESSAGE_HEADER_LEN +
+  CHUNK_START +
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // Encrypted message nonce
 export const IMPORTANT_DATA_LEN =
   MESSAGE_DATA_BEFORE_START_INDEX + crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
 export const CHUNK_LEN =
@@ -84,6 +94,20 @@ export const CHUNK_HEADER_LEN =
   RATCHET_PN_LEN +
   PQ_EPOCH_LEN +
   RATCHET_NONCE_LEN; // 61
+
+// v3 message-chunk ON-WIRE header length (ciphertext begins here) = the byte the
+// send path relocates to and the receive path parses from. REPLACES the box
+// scheme's BOX_MESSAGE_HEADER_LEN (96) on the wire; byte-matches
+// pake_ratchet.h MESSAGE_START and chunkFrame.ts CHUNK_FRAME_HEADER_LEN. It is
+// intentionally decoupled from the DECRYPTED_LEN sizing above (Stage-5 task 3).
+export const MESSAGE_START = FRAME_TYPE_LEN + CHUNK_HEADER_LEN; // 62
+// Full v3 chunk frame length on the wire = header(62) ‖ ciphertext(DECRYPTED_LEN)
+// ‖ AEAD tag(16) = 62 + 65412 + 16 = 65490. The receive-side frame classifier
+// keys on this exact length + the leading FRAME_TYPE_CHUNK tag (the box frame was
+// the full MESSAGE_LEN = 65536; the v3 frame is 46 bytes shorter because the
+// ratchet header replaces the larger box header).
+export const WIRE_CHUNK_FRAME_LEN =
+  MESSAGE_START + DECRYPTED_LEN + crypto_box_poly1305_AUTHTAGBYTES; // 65490
 
 // Per-chunk sender authentication signs a domain-separated transcript
 // (DOMAIN || merkle_root || ephemeral_pk) rather than the bare ephemeral public

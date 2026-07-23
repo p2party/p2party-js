@@ -20,6 +20,12 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   ratchetState?: RatchetState;
   session?: RatchetSession;
   ratchetEstablished?: Promise<void>;
+  // protocol-v3 receive: per-EDGE per-message key cache (Stage-5 task 3). Keyed by
+  // messageCacheKey(dhPub, N); the first-arriving chunk of a message derives +
+  // caches its key (one ratchet step), every later chunk of that message reuses
+  // it, and the entry is evicted when the message completes. Lives on the edge
+  // (not per per-message channel) because the ratchet it derives from is per-edge.
+  messageKeyCache?: Map<string, Uint8Array>;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

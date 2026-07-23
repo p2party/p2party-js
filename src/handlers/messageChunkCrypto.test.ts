@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadTestModule } from "../cryptography/testModule";
-import { initRatchet } from "../cryptography/ratchet";
+import { initRatchet, ratchetEncrypt } from "../cryptography/ratchet";
 import { parseChunkFrameHeader } from "./chunkFrame";
 import {
   encryptMessageChunks,
   decryptMessageChunk,
+  sealChunk,
   messageCacheKey,
 } from "./messageChunkCrypto";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
@@ -115,6 +116,49 @@ describe("messageChunkCrypto", () => {
     expect(cache.has(keyB)).toBe(true);
     expect(Buffer.from(b0.plaintext)).toEqual(Buffer.from(chunksB[0]));
     expect(Buffer.from(b1.plaintext)).toEqual(Buffer.from(chunksB[1]));
+  });
+
+  test("sealChunk (streaming send primitive): step once, seal per chunk, decrypt byte-exact; a reconcile re-seal (same key/header, fresh nonce) rides the cache", async () => {
+    const { module, alice, bob } = await pair();
+    const r = root();
+    const chunks = [rand(1100), rand(950)];
+
+    // The live send path: ONE ratchet step for the whole message (handleSendMessage /
+    // sendWithReconcile), then sealChunk per chunk as they stream out of IndexedDB —
+    // NOT encryptMessageChunks (which would buffer every chunk in RAM, regressing
+    // big-file transfers). The messageKey outlives the loop (retransmit rounds reuse
+    // it) and is wiped by the caller afterward.
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frames = chunks.map((c) => sealChunk(messageKey, header, c, r, module));
+
+    // Same per-message header on every frame, distinct random nonce per chunk —
+    // byte-identical to encryptMessageChunks' framing.
+    const h0 = parseChunkFrameHeader(frames[0]);
+    const h1 = parseChunkFrameHeader(frames[1]);
+    expect(Buffer.from(h1.header.dhPub)).toEqual(Buffer.from(h0.header.dhPub));
+    expect(h1.header.N).toBe(h0.header.N);
+    expect(Buffer.from(h1.nonce)).not.toEqual(Buffer.from(h0.nonce));
+
+    const cache = new Map<string, Uint8Array>();
+    const d0 = decryptMessageChunk(bob, frames[0], cache, r, module);
+    const d1 = decryptMessageChunk(bob, frames[1], cache, r, module);
+    expect(d0.stateAdvanced).toBe(true);
+    expect(d1.stateAdvanced).toBe(false); // per-message cache, not per-chunk
+    expect(Buffer.from(d0.plaintext)).toEqual(Buffer.from(chunks[0]));
+    expect(Buffer.from(d1.plaintext)).toEqual(Buffer.from(chunks[1]));
+
+    // Reconcile / selective-retransmit: re-seal an un-acked chunk under the SAME
+    // (still-live) messageKey + header with a FRESH nonce. It is a distinct frame
+    // on the wire, yet the receiver's cached per-(dhPub, N) key opens it (cache
+    // HIT, no ratchet step) to the same plaintext — the streaming-safe alternative
+    // to caching every ciphertext frame.
+    const resend0 = sealChunk(messageKey, header, chunks[0], r, module);
+    expect(Buffer.from(resend0)).not.toEqual(Buffer.from(frames[0])); // fresh nonce
+    const re0 = decryptMessageChunk(bob, resend0, cache, r, module);
+    expect(re0.stateAdvanced).toBe(false);
+    expect(Buffer.from(re0.plaintext)).toEqual(Buffer.from(chunks[0]));
+
+    messageKey.fill(0);
   });
 
   test("clone-rollback: a corrupted chunk fails to authenticate and leaves the ratchet unadvanced", async () => {

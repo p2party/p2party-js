@@ -1,5 +1,13 @@
 import { handleReadReceipt } from "./handleReadReceipt";
 import { enqueue } from "./handleMessageQueueing";
+import {
+  setHandshakeChannel,
+  deliverHandshakeFrame,
+  runHandshake,
+  buildChannelInput,
+  parseFingerprintFromSdp,
+} from "./handleHandshake";
+import { classifyFrame } from "./frameType";
 
 import { zeroFree } from "../utils/zeroFree";
 
@@ -27,6 +35,7 @@ import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import {
   DECRYPTED_LEN,
+  FRAME_TYPE_HANDSHAKE,
   MAX_BUFFERED_AMOUNT,
   MESSAGE_LEN,
 } from "../utils/constants";
@@ -246,6 +255,21 @@ export const handleOpenChannel = async (
       return;
     }
 
+    // protocol-v3 handshake frames ride the persistent `main` channel only and
+    // carry a leading 1-byte FRAME_TYPE_HANDSHAKE tag. Their framed lengths
+    // (HELLO 194B, CONFIRM 98B) never equal the box-scheme's 64B receipt or the
+    // MESSAGE_LEN message, so they only ever reach here — leaving the two
+    // length-classified box paths above untouched (Stage 5 has not yet swapped
+    // messages onto the ratchet). Strip exactly the 1-byte tag and hand the
+    // payload to the waiting runHandshake; per-message channels never carry these.
+    if (extChannel.label === "main") {
+      const { type, payload } = classifyFrame(data);
+      if (type === FRAME_TYPE_HANDSHAKE) {
+        deliverHandshakeFrame(epc.withPeerId, payload);
+        return;
+      }
+    }
+
     console.error(new Error("Wrong data length received"));
   };
 
@@ -309,6 +333,64 @@ export const handleOpenChannel = async (
       receiverSecretKeyArray.set(receiverSecretKey);
     } catch (error) {
       console.error(error);
+    }
+
+    // protocol-v3 (Stage 4/5): drive the PACE + Double-Ratchet handshake, but
+    // ONLY on the persistent `main` channel (per-message channels carry no
+    // handshake frames). Register this channel as the peer's handshake inbox,
+    // build the byte-identical channel-input (CI) transcript, then fire-and-forget
+    // runHandshake — it verifies the DTLS fingerprints, runs the two-round core,
+    // and (only on success) seeds + persists the ratchet and opens the per-peer
+    // gate; on any failure it rejects that gate internally. A handshake failure
+    // MUST NOT throw out of onopen or disturb the still-live box-scheme
+    // messaging, so the CI construction is wrapped and the promise is
+    // `.catch`-logged. The ratchet is seeded here but NOT yet used for messages
+    // (swapping messages onto it is Stage 5).
+    if (extChannel.label === "main") {
+      try {
+        setHandshakeChannel(epc.withPeerId, extChannel);
+
+        // Role tie-break on the STABLE Ed25519 identity edge — the SAME rule
+        // runHandshake applies — so both peers assign initiator/responder
+        // identically and thus build a byte-identical CI.
+        const amInitiator = keyPair.publicKey < epc.withPeerPublicKey;
+        const selfIdentityEd25519 = hexToUint8Array(keyPair.publicKey);
+        const peerIdentityEd25519 = hexToUint8Array(epc.withPeerPublicKey);
+
+        // DTLS fingerprints straight from each side's SDP: self = local
+        // description, peer = remote description. parseFingerprintFromSdp throws
+        // on a missing/malformed fingerprint, caught below (fail-safe).
+        const selfFingerprint = parseFingerprintFromSdp(
+          epc.localDescription?.sdp ?? "",
+        );
+        const peerFingerprint = parseFingerprintFromSdp(
+          epc.remoteDescription?.sdp ?? "",
+        );
+
+        // CI = channelId ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG (a=initiator,
+        // b=responder). channelId = the shared "main" label both peers agree on.
+        const channelInput = buildChannelInput({
+          channelId: new TextEncoder().encode(extChannel.label),
+          ikInitiator: amInitiator ? selfIdentityEd25519 : peerIdentityEd25519,
+          ikResponder: amInitiator ? peerIdentityEd25519 : selfIdentityEd25519,
+          fpInitiator: amInitiator ? selfFingerprint : peerFingerprint,
+          fpResponder: amInitiator ? peerFingerprint : selfFingerprint,
+        });
+
+        void runHandshake(
+          epc,
+          "nopin",
+          null,
+          channelInput,
+          epc.rooms[peerRoomIndex].receiveMessageModule,
+        ).catch((error) => {
+          // The per-peer ratchet gate is already rejected internally and nothing
+          // was persisted; box-scheme messaging is unaffected, so log only.
+          console.error("protocol-v3 handshake failed:", error);
+        });
+      } catch (error) {
+        console.error("protocol-v3 handshake wiring failed:", error);
+      }
     }
 
     // Resume-on-reconnect (receiver side): a full reconnect hands us a brand-new

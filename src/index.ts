@@ -4,10 +4,6 @@ import pkg from "../package.json";
 import { store, dispatch } from "./store";
 
 import { newKeyPair, sign, verify } from "./cryptography/ed25519";
-import {
-  encryptAsymmetric,
-  decryptAsymmetric,
-} from "./cryptography/chacha20poly1305";
 import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
 import { generateRandomRoomUrl } from "./cryptography/utils";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
@@ -846,8 +842,6 @@ export const p2party = {
   purgeRoom,
   purge,
   generateRandomRoomUrl: newRoomUrl,
-  encrypt: encryptAsymmetric,
-  decrypt: decryptAsymmetric,
   sign,
   verify,
   newKeyPair,

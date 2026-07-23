@@ -4,8 +4,6 @@ import { uint8ArrayToHex } from "../utils/uint8array";
 import { isStorableChunkRange } from "../utils/chunkBounds";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
-import { verifyMerkleProof } from "../cryptography/merkle";
-import { hashMerkleLeafWasm } from "../utils/leafHash";
 
 import { decryptMessageChunk, messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
@@ -49,16 +47,15 @@ const dropped = (): ReceiveMessageResult => ({
 // Decrypt one inbound v3 CHUNK frame off the seeded Double Ratchet (replacing the
 // box `_receive_message` path), verify its Merkle proof, and store the real bytes.
 //
-// Crypto: `decryptMessageChunk` derives/uses the per-MESSAGE key (one ratchet step
-// per message, cached per `(dhPub, N)` on the edge; clone-rollback so a replayed
-// header can't desync the session) and AEAD-opens the chunk to the DECRYPTED_LEN
-// plaintext `metadata ‖ merkle-proof ‖ chunk`. When the ratchet advanced we persist
-// it. Every crypto primitive on this path runs in libsodium/C: the AEAD open
-// (`_decrypt_chachapoly_symmetric`), the Merkle proof walk (`_verify_merkle_proof`),
-// and the domain-separated leaf/receipt hash (`hashMerkleLeafWasm` → `_sha512_*`) —
-// byte-identical to what the C `receive_message` did over the same plaintext. Only
-// the frame parsing, ratchet-state bookkeeping, and storage are TS. The
-// verify-store-receipt tail below is verbatim from the box path.
+// Crypto: `decryptMessageChunk` derives the per-MESSAGE key off the ratchet (one
+// step per message, cached per `(dhPub, N)`; clone-rollback so a replayed header
+// can't desync the session), then hands the raw frame + key + expected root to the
+// C `_receive_message_with_key`, which decrypts, hashes the leaf, verifies the
+// Merkle proof, and writes the receipt leaf — the ENTIRE receive crypto in ONE
+// libsodium call, in place, no TS↔WASM back-and-forth. On success it returns the
+// DECRYPTED_LEN plaintext `metadata ‖ receiptLeaf ‖ chunk`; only frame parsing,
+// ratchet bookkeeping, and storage remain in TS. The store-receipt tail below is
+// verbatim from the box path.
 export const handleReceiveMessage = async (
   frame: Uint8Array,
   roomId: string,
@@ -85,21 +82,25 @@ export const handleReceiveMessage = async (
     return dropped();
   }
 
-  // 1) Ratchet + AEAD. Throws on auth failure (clone-rollback already left the
-  //    live state untouched) — treat exactly like the box "could not decrypt".
-  let plaintext: Uint8Array;
+  // 1) The ENTIRE receive crypto in one C call: derive the per-message key off the
+  //    ratchet (clone-rollback), then `_receive_message_with_key` decrypts, hashes
+  //    the leaf, verifies the Merkle proof, and writes the receipt — all libsodium.
+  let decrypted: Uint8Array | null;
+  let ok: boolean;
   let stateAdvanced: boolean;
   try {
     const d = decryptMessageChunk(epc.ratchetState, frame, cache, merkleRoot, module);
-    plaintext = d.plaintext;
+    decrypted = d.decrypted;
+    ok = d.ok;
     stateAdvanced = d.stateAdvanced;
   } catch {
     console.error("Could not decrypt message");
     return dropped();
   }
 
-  // 2) Persist the ratchet as soon as it advances (the first-arriving chunk of a
-  //    message), so a crash after receipt can't replay the DH step.
+  // 2) Persist the ratchet as soon as it advances (first-arriving chunk whose AEAD
+  //    authenticated), so a crash after receipt can't replay the DH step — even if
+  //    the chunk is then dropped for a bad Merkle proof.
   if (stateAdvanced) {
     try {
       await persistRatchetSession(epc, roomId);
@@ -120,45 +121,23 @@ export const handleReceiveMessage = async (
     }
   }
 
-  // 3) Split the plaintext: metadata ‖ merkle-proof(4B len ‖ artifacts) ‖ chunk.
-  const metadataArray = plaintext.slice(0, METADATA_LEN);
-  const proofRegion = plaintext.slice(METADATA_LEN, METADATA_LEN + PROOF_LEN);
-  const chunk = plaintext.slice(METADATA_LEN + PROOF_LEN);
+  // 3) A drop (AEAD auth OR Merkle proof failed inside the C call, or a stale-chain
+  //    replay) → emit a decoy receipt, don't store.
+  if (!ok || !decrypted) {
+    console.error("Could not decrypt or verify message");
+    return dropped();
+  }
+
+  // 4) Split the C output: metadata ‖ receiptLeaf ‖ chunk. The C wrote the leaf
+  //    hash SHA-512(0x00 ‖ chunk) over the (now-consumed) proof region — that IS
+  //    the read-receipt token, so no second hash is computed here.
+  const metadataArray = decrypted.slice(0, METADATA_LEN);
+  const chunkHash = decrypted.slice(
+    METADATA_LEN,
+    METADATA_LEN + crypto_hash_sha512_BYTES,
+  );
+  const chunk = decrypted.slice(METADATA_LEN + PROOF_LEN);
   const metadata = deserializeMetadata(metadataArray);
-
-  // 4) Verify the Merkle proof over the domain-separated leaf SHA-512(0x00 ‖ chunk)
-  //    against the message root. proofLen is a big-endian u32 prefix; reject a
-  //    malformed length (box path return -3) or a proof that doesn't fold to the
-  //    root (return -6).
-  const proofLen =
-    (proofRegion[0] << 24) |
-    (proofRegion[1] << 16) |
-    (proofRegion[2] << 8) |
-    proofRegion[3];
-  if (
-    proofLen % (crypto_hash_sha512_BYTES + 1) !== 0 ||
-    proofLen > PROOF_LEN - 4 ||
-    proofLen <= 0
-  ) {
-    console.error("Merkle proof length is wrong");
-    return dropped();
-  }
-  const proof = proofRegion.slice(4, 4 + proofLen);
-  try {
-    const ok = await verifyMerkleProof(chunk, merkleRoot, proof, module);
-    if (!ok) {
-      console.error("Could not verify Merkle proof");
-      return dropped();
-    }
-  } catch (error) {
-    console.error(error);
-    return dropped();
-  }
-
-  // The read-receipt token is the leaf hash (SHA-512(0x00 ‖ chunk)) — the same
-  // value the sender used as the Merkle leaf (splitToChunks). Computed in
-  // libsodium (C), matching the C `receive_message_with_key` receipt.
-  const chunkHash = hashMerkleLeafWasm(chunk, module);
 
   const realChunk = chunk.slice(
     metadata.chunkStartIndex,

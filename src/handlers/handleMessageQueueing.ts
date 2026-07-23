@@ -1,4 +1,5 @@
 import { handleReceiveMessage } from "./handleReceiveMessage";
+import { getRatchetGate } from "./ratchetGate";
 
 import { setDBRoomMessageData, closeReceiveFile } from "../db/api";
 
@@ -17,7 +18,10 @@ import signalingServerApi from "../api/signalingServerApi";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { IRTCDataChannel } from "../api/webrtc/interfaces";
+import type {
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "../api/webrtc/interfaces";
 import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { State } from "../store";
 
@@ -77,23 +81,16 @@ const processMessage = async (
   merkleRootHex: string,
   merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
-  decrypted: Uint8Array | undefined,
-  messageArray: Uint8Array | undefined,
-  merkleRootArray: Uint8Array | undefined,
-  senderPublicKeyArray: Uint8Array | undefined,
-  receiverSecretKeyArray: Uint8Array | undefined,
+  epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
 ): Promise<{ receivedFullSize: boolean }> => {
-  if (
-    decrypted &&
-    messageArray &&
-    merkleRootArray &&
-    senderPublicKeyArray &&
-    receiverSecretKeyArray
-  ) {
+  if (epc) {
     try {
-      messageArray.set(data);
-      merkleRootArray.set(merkleRoot);
+      // Do not decrypt until the PACE + Double-Ratchet handshake has seeded the
+      // per-peer ratchet (the `main` channel opens this gate). A chunk that
+      // races ahead of the handshake waits here rather than being dropped; a
+      // failed handshake rejects the gate, caught below.
+      await getRatchetGate(peerId);
 
       const {
         date,
@@ -107,11 +104,10 @@ const processMessage = async (
         chunkHash,
         messageHash,
       } = await handleReceiveMessage(
-        decrypted,
-        messageArray,
-        merkleRootArray,
-        senderPublicKeyArray,
-        receiverSecretKeyArray,
+        data,
+        roomId,
+        epc,
+        merkleRoot,
         receiveMessageModule,
       );
 
@@ -281,11 +277,7 @@ const drain = async (
   merkleRootHex: string,
   merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
-  decrypted: Uint8Array | undefined,
-  messageArray: Uint8Array | undefined,
-  merkleRootArray: Uint8Array | undefined,
-  senderPublicKeyArray: Uint8Array | undefined,
-  receiverSecretKeyArray: Uint8Array | undefined,
+  epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
 ) => {
   if (drainingRef.value) return;
@@ -307,11 +299,7 @@ const drain = async (
           merkleRootHex,
           merkleRoot,
           extChannel,
-          decrypted,
-          messageArray,
-          merkleRootArray,
-          senderPublicKeyArray,
-          receiverSecretKeyArray,
+          epc,
           receiveMessageModule,
         ),
       );
@@ -337,11 +325,7 @@ const drain = async (
         merkleRootHex,
         merkleRoot,
         extChannel,
-        decrypted,
-        messageArray,
-        merkleRootArray,
-        senderPublicKeyArray,
-        receiverSecretKeyArray,
+        epc,
         receiveMessageModule,
       );
   }
@@ -359,11 +343,7 @@ export const enqueue = (
   merkleRootHex: string,
   merkleRoot: Uint8Array,
   extChannel: IRTCDataChannel | undefined,
-  decrypted: Uint8Array | undefined,
-  messageArray: Uint8Array | undefined,
-  merkleRootArray: Uint8Array | undefined,
-  senderPublicKeyArray: Uint8Array | undefined,
-  receiverSecretKeyArray: Uint8Array | undefined,
+  epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
 ) => {
   const k = k32(data);
@@ -391,11 +371,7 @@ export const enqueue = (
       merkleRootHex,
       merkleRoot,
       extChannel,
-      decrypted,
-      messageArray,
-      merkleRootArray,
-      senderPublicKeyArray,
-      receiverSecretKeyArray,
+      epc,
       receiveMessageModule,
     );
 };

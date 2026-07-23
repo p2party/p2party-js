@@ -9,17 +9,11 @@ import {
 } from "./handleHandshake";
 import { classifyFrame } from "./frameType";
 
-import { zeroFree } from "../utils/zeroFree";
-
 import webrtcApi from "../api/webrtc";
 
 import { setChannel, setConnectingToPeers } from "../reducers/roomSlice";
 
-import {
-  crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-  crypto_sign_ed25519_SECRETKEYBYTES,
-} from "../cryptography/interfaces";
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { randomNumberInRange } from "../cryptography/utils";
 import cryptoMemory from "../cryptography/memory";
 import { wasmLoader } from "../cryptography/wasmLoader";
@@ -34,10 +28,11 @@ import {
 import { hexToUint8Array } from "../utils/uint8array";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import {
-  DECRYPTED_LEN,
+  FRAME_TYPE_CHUNK,
   FRAME_TYPE_HANDSHAKE,
   MAX_BUFFERED_AMOUNT,
   MESSAGE_LEN,
+  WIRE_CHUNK_FRAME_LEN,
 } from "../utils/constants";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -64,8 +59,6 @@ export const handleOpenChannel = async (
 ): Promise<IRTCDataChannel> => {
   const { keyPair, rooms } = api.getState() as State;
 
-  const senderPublicKey = hexToUint8Array(epc.withPeerPublicKey);
-  const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
   const roomIndex = rooms.findIndex((r) => r.id === roomId);
   let peerRoomIndex = epc.rooms.findLastIndex((r) => r.roomId === roomId);
   if (peerRoomIndex === -1) {
@@ -137,17 +130,6 @@ export const handleOpenChannel = async (
   extChannel.withPeerId = epc.withPeerId;
   extChannel.roomIds = [roomId];
 
-  let ptr1: number | undefined;
-  let decrypted: Uint8Array | undefined;
-  let ptr2: number | undefined;
-  let messageArray: Uint8Array | undefined;
-  let ptr3: number | undefined;
-  let merkleRootArray: Uint8Array | undefined;
-  let ptr4: number | undefined;
-  let senderPublicKeyArray: Uint8Array | undefined;
-  let ptr5: number | undefined;
-  let receiverSecretKeyArray: Uint8Array | undefined;
-
   // extChannel.onclosing = () => {
   //   console.log(`Channel with label ${extChannel.label} is closing.`);
   // };
@@ -155,17 +137,10 @@ export const handleOpenChannel = async (
   extChannel.onclose = async () => {
     console.log(`Channel with label ${extChannel.label} has closed.`);
 
-    if (peerRoomIndex && epc.rooms[peerRoomIndex]) {
-      if (ptr1) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr1);
-      if (ptr2) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr2);
-      if (ptr3) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr3);
-      if (ptr4) epc.rooms[peerRoomIndex].receiveMessageModule._free(ptr4);
-      if (ptr5 && receiverSecretKeyArray)
-        zeroFree(
-          epc.rooms[peerRoomIndex].receiveMessageModule,
-          receiverSecretKeyArray,
-        );
-    }
+    // protocol-v3: the receive path no longer pre-allocates box wasm scratch on
+    // the channel (decrypt is per-frame via the ratchet), so there is nothing to
+    // free here. The per-edge ratchet state + messageKey cache live on `epc` and
+    // are reclaimed on peer teardown, not per per-message channel.
 
     await api.dispatch(
       webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
@@ -231,7 +206,12 @@ export const handleOpenChannel = async (
       return;
     }
 
-    if (data.length === MESSAGE_LEN) {
+    // protocol-v3 message-chunk frame: leading FRAME_TYPE_CHUNK tag + the exact
+    // v3 wire length (header 62 ‖ ciphertext DECRYPTED_LEN ‖ AEAD tag 16 = 65490,
+    // 46B shorter than the box scheme's MESSAGE_LEN frame). The 64B receipt test
+    // above runs first, so a receipt whose first byte happens to be
+    // FRAME_TYPE_CHUNK is never misrouted here.
+    if (data.length === WIRE_CHUNK_FRAME_LEN && data[0] === FRAME_TYPE_CHUNK) {
       enqueue(
         data,
         queue,
@@ -244,11 +224,7 @@ export const handleOpenChannel = async (
         merkleRootHex,
         merkleRoot,
         extChannel,
-        decrypted,
-        messageArray,
-        merkleRootArray,
-        senderPublicKeyArray,
-        receiverSecretKeyArray,
+        epc,
         epc.rooms[peerRoomIndex].receiveMessageModule,
       );
 
@@ -257,11 +233,10 @@ export const handleOpenChannel = async (
 
     // protocol-v3 handshake frames ride the persistent `main` channel only and
     // carry a leading 1-byte FRAME_TYPE_HANDSHAKE tag. Their framed lengths
-    // (HELLO 194B, CONFIRM 98B) never equal the box-scheme's 64B receipt or the
-    // MESSAGE_LEN message, so they only ever reach here — leaving the two
-    // length-classified box paths above untouched (Stage 5 has not yet swapped
-    // messages onto the ratchet). Strip exactly the 1-byte tag and hand the
-    // payload to the waiting runHandshake; per-message channels never carry these.
+    // (HELLO 194B, CONFIRM 98B) never equal the 64B receipt or the v3 chunk
+    // frame, so they only ever reach here. Strip exactly the 1-byte tag and hand
+    // the payload to the waiting runHandshake; per-message channels never carry
+    // these.
     if (extChannel.label === "main") {
       const { type, payload } = classifyFrame(data);
       if (type === FRAME_TYPE_HANDSHAKE) {
@@ -286,54 +261,12 @@ export const handleOpenChannel = async (
       );
     }
 
-    try {
-      ptr1 =
-        epc.rooms[peerRoomIndex].receiveMessageModule._malloc(DECRYPTED_LEN);
-      decrypted = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr1,
-        DECRYPTED_LEN,
-      );
-
-      ptr2 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(MESSAGE_LEN);
-      messageArray = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr2,
-        MESSAGE_LEN,
-      );
-
-      ptr3 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(
-        crypto_hash_sha512_BYTES,
-      );
-      merkleRootArray = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr3,
-        crypto_hash_sha512_BYTES,
-      );
-      merkleRootArray.set(merkleRoot);
-
-      ptr4 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(
-        crypto_sign_ed25519_PUBLICKEYBYTES,
-      );
-      senderPublicKeyArray = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr4,
-        crypto_sign_ed25519_PUBLICKEYBYTES,
-      );
-      senderPublicKeyArray.set(senderPublicKey);
-
-      ptr5 = epc.rooms[peerRoomIndex].receiveMessageModule._malloc(
-        crypto_sign_ed25519_SECRETKEYBYTES,
-      );
-      receiverSecretKeyArray = new Uint8Array(
-        epc.rooms[peerRoomIndex].receiveMessageModule.wasmMemory.buffer,
-        ptr5,
-        crypto_sign_ed25519_SECRETKEYBYTES,
-      );
-      receiverSecretKeyArray.set(receiverSecretKey);
-    } catch (error) {
-      console.error(error);
-    }
+    // protocol-v3: no box wasm scratch is pre-allocated on the channel anymore —
+    // the receive path decrypts each v3 chunk frame per-frame off the peer's
+    // ratchet (handleReceiveMessage → decryptMessageChunk), allocating its own
+    // transient wasm buffers inside the receiveMessageModule per call. The peer's
+    // Ed25519 pub / our secret key are no longer needed on the receive hot path
+    // (the ratchet AEAD replaces the box asymmetric decrypt + signature check).
 
     // protocol-v3 (Stage 4/5): drive the PACE + Double-Ratchet handshake, but
     // ONLY on the persistent `main` channel (per-message channels carry no

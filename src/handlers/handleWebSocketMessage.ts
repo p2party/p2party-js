@@ -42,9 +42,12 @@ import {
   crypto_sign_ed25519_PUBLICKEYBYTES,
   crypto_sign_ed25519_SECRETKEYBYTES,
 } from "../cryptography/interfaces";
-import { DECRYPTED_LEN, MESSAGE_LEN } from "../utils/constants";
-import { enqueue } from "./handleMessageQueueing";
-import { decompileChannelMessageLabel } from "../utils/channelLabel";
+import {
+  DECRYPTED_LEN,
+  FRAME_TYPE_CHUNK,
+  MESSAGE_LEN,
+  WIRE_CHUNK_FRAME_LEN,
+} from "../utils/constants";
 
 const lastPeersRepoll = new Map<string, number>();
 
@@ -423,50 +426,18 @@ const handleWebSocketMessage = async (
           break;
         }
 
-        if (data.length === MESSAGE_LEN) {
-          const peerIndex = peerConnections.findIndex(
-            (p) => p.withPeerId === message.fromPeerId,
-          );
-
-          if (peerIndex === -1) break;
-
-          const peerRoomIndex = peerConnections[peerIndex].rooms.findLastIndex(
-            (r) => r.roomId === message.roomId,
-          );
-          if (peerRoomIndex === -1) break;
-
-          const { channelLabel, merkleRoot, merkleRootHex } =
-            await decompileChannelMessageLabel(message.label);
-
-          if (
-            merkleRoot.length === crypto_hash_sha512_BYTES &&
-            peerConnections[peerIndex].rooms[peerRoomIndex].ptr3 &&
-            peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray
-          ) {
-            enqueue(
-              data,
-              peerConnections[peerIndex].rooms[peerRoomIndex].queue,
-              peerConnections[peerIndex].rooms[peerRoomIndex].seen,
-              peerConnections[peerIndex].rooms[peerRoomIndex].draining,
-              api,
-              peerConnections[peerIndex].rooms[peerRoomIndex].roomId,
-              message.fromPeerId,
-              channelLabel,
-              merkleRootHex,
-              merkleRoot,
-              undefined,
-              peerConnections[peerIndex].rooms[peerRoomIndex].decrypted,
-              peerConnections[peerIndex].rooms[peerRoomIndex].messageArray,
-              peerConnections[peerIndex].rooms[peerRoomIndex].merkleRootArray,
-              peerConnections[peerIndex].rooms[peerRoomIndex]
-                .senderPublicKeyArray,
-              peerConnections[peerIndex].rooms[peerRoomIndex]
-                .receiverSecretKeyArray,
-              peerConnections[peerIndex].rooms[peerRoomIndex]
-                .receiveMessageModule,
-            );
-          }
-
+        // protocol-v3: message chunks are decrypted off the per-peer Double
+        // Ratchet, seeded by the handshake that runs on the `main` DATA CHANNEL.
+        // The signaling-server relay owns a SEPARATE set of WSPeerConnection
+        // objects (signalingServerApi.ts) with no ratchet handle, so a v3 chunk
+        // relayed here cannot be decrypted — drop it. The sender's data-channel
+        // reconcile/retransmit delivers it once the direct channel is up; the
+        // relay is not a v3 message transport. (T3-wiring: relay-only message
+        // RECEIVE is a known behaviour change vs. the box scheme — see report.)
+        if (
+          data.length === WIRE_CHUNK_FRAME_LEN &&
+          data[0] === FRAME_TYPE_CHUNK
+        ) {
           break;
         }
 

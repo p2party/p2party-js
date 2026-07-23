@@ -61,7 +61,12 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
 - ⚠️ getStats fingerprint timing at very-early onopen + live-cert CI equality are only
   verifiable in the Stage-7 headless-Chromium E2E (fail-safe either way).
 
-## NEXT — Stage 5 (the big remaining chunk: message crypto onto the ratchet + box removal)
+## Stage 5 STATUS (2026-07-23)
+- ✅ T1 `a9712e0` (frame codec+constants), ✅ T2 `90a7191` (C reads cleartext nonce), ✅ T3-core `293ce4c`+`2776f1a` (messageChunkCrypto, per-message cache + clone-rollback, **libsodium** decrypt), ✅ **T3-wiring `39ce532` — DONE but UNVERIFIED (E2E pending)**: live send/receive swapped onto the ratchet, `MESSAGE_START` 96→62 decoupled from `DECRYPTED_LEN` (zero Merkle/OPFS ripple), box left dead, 103/0, typecheck clean.
+- **Top E2E risks to check (report: `.superpowers/sdd/task-s5t3-wiring-report.md`):** (1) responder-sends-first — `ratchetEncrypt` throws "no sending chain" until the responder receives once (graceful no-op now); (2) reconcile re-seals under the cached key with a fresh nonce (not "resend identical"); (3) WS relay drops v3 chunks (ratchet is per-data-channel-edge) → relay fallback disabled for v3.
+- **REMAINING: T4** (box full removal, spec §6, + Ed25519-secret WebCrypto wrap) → **T5** (headless-Chromium E2E = the gate that makes T3-wiring trustworthy → merge).
+
+## Stage 5 reference (message crypto onto the ratchet + box removal)
 **READ FIRST: `docs/stage5-message-crypto-swap-design.md`** — the precise swap design,
 incl. the **per-message-ratchet + messageKey-cache subtlety** (the #1 bug to avoid:
 `ratchetDecrypt` is per-message, not per-chunk — call it once + cache the key), the

@@ -123,7 +123,7 @@ export const getMerkleProof = async (
 
     if (proofFixedLen) {
       const result = crypto_hash_sha512_BYTES + 1;
-      const proofArray = window.crypto.getRandomValues(
+      const proofArray = globalThis.crypto.getRandomValues(
         new Uint8Array(proofFixedLen),
       );
 
@@ -211,7 +211,7 @@ export const getMerkleProof = async (
     default: {
       if (result > 0) {
         if (proofFixedLen && proofFixedLen >= result) {
-          const proofArray = window.crypto.getRandomValues(
+          const proofArray = globalThis.crypto.getRandomValues(
             new Uint8Array(proofFixedLen),
           );
 

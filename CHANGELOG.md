@@ -135,5 +135,5 @@ Protocol-v2 security hardening and the reliable-transfer foundation.
   count uniformity; and per-message transfer telemetry (total/real chunk counts,
   retransmits).
 
-[0.9.1]: https://github.com/deliberative/p2party/releases/tag/v0.9.1
-[0.9.0]: https://github.com/deliberative/p2party/releases/tag/v0.9.0
+[0.9.1]: https://github.com/p2party/p2party-js/releases/tag/v0.9.1
+[0.9.0]: https://github.com/p2party/p2party-js/releases/tag/v0.9.0

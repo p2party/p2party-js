@@ -1,7 +1,5 @@
 # p2party-js
 
-<!-- [![codecov][codecov-image]][codecov-url] -->
-
 [![Known Vulnerabilities](https://snyk.io/test/github/p2party/p2party-js/badge.svg?targetFile=package.json)](https://snyk.io/test/github/p2party/p2party-js?targetFile=package.json)
 <br>
 ![NPM Version](https://img.shields.io/npm/v/p2party)
@@ -10,9 +8,6 @@
 <br>
 ![NPM Downloads](https://img.shields.io/npm/dw/p2party)
 [![](https://data.jsdelivr.com/v1/package/npm/p2party/badge)](https://www.jsdelivr.com/package/npm/p2party)
-
-<!-- [codecov-image]: https://codecov.io/gh/deliberative/crypto/branch/master/graph/badge.svg -->
-<!-- [codecov-url]: https://codecov.io/gh/deliberative/crypto -->
 
 [code-style-prettier-image]: https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square
 [code-style-prettier-url]: https://github.com/prettier/prettier
@@ -44,7 +39,7 @@ This library relies heavily on [libsodium](https://github.com/jedisct1/libsodium
 
 The library offers mnemonic generation, validation and Ed25519 key pair from mnemonic functionality that was inspired by [bip39](https://github.com/bitcoinjs/bip39) but instead of Blake2b we use Argon2, provided by libsodium, and instead of SHA256 we use SHA512 (native browser functionality).
 
-A project that was previously developed and gave a lot of inspiration for this library was [libcrypto](https://github.com/deliberative/crypto).
+An earlier libcrypto prototype provided substantial inspiration for this library.
 
 On the js side, the library depends on [Redux](https://github.com/redux) for state management.
 
@@ -482,4 +477,4 @@ The source code is licensed under the terms of the Affero General Public License
 
 ## Copyright
 
-Copyright (C) 2025 Deliberative Technologies P.C.
+Copyright (C) 2025 p2party contributors.

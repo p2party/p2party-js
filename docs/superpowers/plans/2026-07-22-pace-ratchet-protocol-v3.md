@@ -913,10 +913,10 @@ Five self-contained TDD tasks. All functions are **synchronous** (the contract s
 ### Task 1 — interface size constants, the test module loader, and the X25519 wrapper
 
 **Files:**
-- Modify `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/interfaces.ts` (append after line 29, the `crypto_pwhash_argon2id_SALTBYTES` block)
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/testModule.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/x25519.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/x25519.test.ts`
+- Modify `./src/cryptography/interfaces.ts` (append after line 29, the `crypto_pwhash_argon2id_SALTBYTES` block)
+- Create `./src/cryptography/testModule.ts`
+- Create `./src/cryptography/x25519.ts`
+- Create `./src/cryptography/x25519.test.ts`
 
 **Interfaces:**
 - *Consumes:* Stage-1 exports `_x25519_keypair(pk32, sk32)->int`, `_x25519_dh(shared32, sk32, pk32)->int`; existing `zeroFree(module, view)`.
@@ -1110,8 +1110,8 @@ export const x25519Dh = (
 ### Task 2 — HKDF-SHA512 wrapper (`hkdf.ts`)
 
 **Files:**
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/hkdf.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/hkdf.test.ts`
+- Create `./src/cryptography/hkdf.ts`
+- Create `./src/cryptography/hkdf.test.ts`
 
 **Interfaces:**
 - *Consumes:* Stage-1 exports `_hkdf_sha512_extract(prk64, salt_ptr, salt_len, ikm_ptr, ikm_len)->int`, `_hkdf_sha512_expand(out_ptr, out_len, prk64, info_ptr, info_len)->int`; existing `crypto_auth_hmacsha512_BYTES=64` from interfaces.ts; `loadTestModule` (Task 1).
@@ -1264,8 +1264,8 @@ export const hkdfExpand = (
 ### Task 3 — CPace over Ristretto255 (`cpace.ts`)
 
 **Files:**
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/cpace.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/cpace.test.ts`
+- Create `./src/cryptography/cpace.ts`
+- Create `./src/cryptography/cpace.test.ts`
 
 **Interfaces:**
 - *Consumes:* Stage-1 exports `_cpace_ristretto255_from_hash(out32, hash64)->void`, `_cpace_ristretto255_scalarmult(out32, scalar32, point32)->int`, `_cpace_ristretto255_scalar_random(out32)->void`, existing `_sha512_init/_update/_final`; constants `CPACE_DOMAIN` (string) from `../utils/constants`; sizes `crypto_core_ristretto255_BYTES=32`, `crypto_core_ristretto255_HASHBYTES=64`, `crypto_hash_sha512_BYTES=64`, `crypto_hash_sha512_STATEBYTES=208` from interfaces.ts; `loadTestModule`.
@@ -1531,8 +1531,8 @@ export const cpaceShared = (
 ### Task 4 — X3DH no-PIN secret (`x3dh.ts`)
 
 **Files:**
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/x3dh.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/x3dh.test.ts`
+- Create `./src/cryptography/x3dh.ts`
+- Create `./src/cryptography/x3dh.test.ts`
 
 **Interfaces:**
 - *Consumes:* `x25519Dh`, `x25519Keypair` (Task 1); `hkdfExtract`, `hkdfExpand` (Task 2); `loadTestModule`.
@@ -1663,8 +1663,8 @@ export const x3dhDeriveSecret = (
 ### Task 5 — Double Ratchet state machine (`ratchet.ts`)
 
 **Files:**
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/ratchet.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/ratchet.test.ts`
+- Create `./src/cryptography/ratchet.ts`
+- Create `./src/cryptography/ratchet.test.ts`
 
 **Interfaces:**
 - *Consumes:* `x25519Keypair`, `x25519Dh` (Task 1); `hkdfExtract`, `hkdfExpand` (Task 2); constants `KDF_RK_LABEL`, `KDF_CK_LABEL`, `KDF_MK_LABEL`, `MAX_SKIP` from `../utils/constants`; `loadTestModule`.
@@ -6255,10 +6255,10 @@ git add src/reducers/roomSlice.ts && git commit -m "stage6: serializable isSecur
 
 ## Stage 7 — Real-WebRTC E2E + atomic protocol-v3 release
 
-This stage adds the protocol-v3 end-to-end proofs to the existing headless-Chromium harness (`/Users/deliberative/Desktop/@p2party/p2party.com/e2e/run.mjs`) and then ships the atomic wire break (version bump, CHANGELOG, `npm run dist` → wasm rebuild + SRI repin + fresh `.tgz`, rebuild the app against it, run the full suite green, and note the manual CDN upload).
+This stage adds the protocol-v3 end-to-end proofs to the existing headless-Chromium harness (`../p2party.com/e2e/run.mjs`) and then ships the atomic wire break (version bump, CHANGELOG, `npm run dist` → wasm rebuild + SRI repin + fresh `.tgz`, rebuild the app against it, run the full suite green, and note the manual CDN upload).
 
 Two ground-truth facts established by reading the code seams:
-- The SDK sets `window.p2party = p2party` at import (`/Users/deliberative/Desktop/@p2party/p2party-js/src/index.ts` bottom), so the harness reaches everything on the public object.
+- The SDK sets `window.p2party = p2party` at import (`./src/index.ts` bottom), so the harness reaches everything on the public object.
 - The harness reuses two persistent Playwright contexts A/B (`setupContext`) whose `addInitScript` already wraps `RTCDataChannel.prototype.send`, `.close`, `RTCPeerConnection`, and `WebSocket`. New scenarios navigate both pages to a *fresh* 64-char room and connect there, so they never disturb the existing transport flow. The existing flow ends at `await browser.close(); log("DONE …")` — all v3 scenarios are inserted immediately before that line.
 
 Preconditions to run the suite (unchanged from the existing harness / definition-of-done): the local signaling server and the app are running; invoke with `APP_URL` and `SIGNALING_URL` env pointing at the local stack, e.g. `APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws`.
@@ -6270,9 +6270,9 @@ Preconditions to run the suite (unchanged from the existing harness / definition
 The FS / resume / reload scenarios must observe ratchet counters (`Ns/Nr/PN`, skipped-key count, whether a persisted root exists) from the page. The persisted secret bytes are wrapped and must never enter JS (§8), so we expose a **metadata-only projection** — no `ArrayBuffer` secret ever appears in the returned object. Pure projection is unit-tested; the public export composes it with the Stage-5 `getRatchetSession` worker call.
 
 **Files:**
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/db/ratchetSessionInfo.ts`
-- Create `/Users/deliberative/Desktop/@p2party/p2party-js/src/db/ratchetSessionInfo.test.ts`
-- Modify `/Users/deliberative/Desktop/@p2party/p2party-js/src/index.ts` (import from `./db/api`, add `ratchetSessionInfo` fn + export-object entry near `getSendChunksCount`, ~line 807 block)
+- Create `./src/db/ratchetSessionInfo.ts`
+- Create `./src/db/ratchetSessionInfo.test.ts`
+- Modify `./src/index.ts` (import from `./db/api`, add `ratchetSessionInfo` fn + export-object entry near `getSendChunksCount`, ~line 807 block)
 
 **Interfaces:**
 - Consumes: `RatchetSession` (type, `src/db/types.ts`, Stage 5); `getRatchetSession(roomId:string, peerPublicKey:string): Promise<RatchetSession|null>` (`src/db/api.ts`, Stage 5).
@@ -6345,7 +6345,7 @@ describe("projectRatchetSessionInfo", () => {
 
 2. Run it — fails (module does not exist):
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && bun test src/db/ratchetSessionInfo.test.ts
+cd . && bun test src/db/ratchetSessionInfo.test.ts
 ```
 Expected: `error: Cannot find module './ratchetSessionInfo'` (0 pass).
 
@@ -6389,7 +6389,7 @@ export const projectRatchetSessionInfo = (
 
 4. Run the test — passes:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && bun test src/db/ratchetSessionInfo.test.ts
+cd . && bun test src/db/ratchetSessionInfo.test.ts
 ```
 Expected: `4 pass`, `0 fail`.
 
@@ -6413,13 +6413,13 @@ const ratchetSessionInfo = async (roomId: string, peerPublicKey: string) =>
 
 6. Typecheck:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && npm run typecheck
+cd . && npm run typecheck
 ```
 Expected: no errors.
 
 7. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && git checkout -b stage7-e2e-release 2>/dev/null; git add src/db/ratchetSessionInfo.ts src/db/ratchetSessionInfo.test.ts src/index.ts && git commit -m "$(printf 'feat(db): secret-free ratchetSessionInfo accessor for UI + E2E\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd . && git checkout -b stage7-e2e-release 2>/dev/null; git add src/db/ratchetSessionInfo.ts src/db/ratchetSessionInfo.test.ts src/index.ts && git commit -m "$(printf 'feat(db): secret-free ratchetSessionInfo accessor for UI + E2E\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -6429,7 +6429,7 @@ cd /Users/deliberative/Desktop/@p2party/p2party-js && git checkout -b stage7-e2e
 Extend `setupContext`'s `addInitScript` (page-side instrumentation) and the module-level helpers so the v3 scenarios can: capture every 64 KiB chunk frame's cleartext header + a synchronous content hash, tamper the post-connect `getStats` DTLS fingerprint (MITM), drop the first reverse receipt (retransmit-determinism), and connect a room with/without a PIN by calling `window.p2party.connect` directly (the app Connect button passes no PIN).
 
 **Files:**
-- Modify `/Users/deliberative/Desktop/@p2party/p2party.com/e2e/run.mjs` — inside `setupContext` `addInitScript` (the block that starts at `window.__dc = {…}`, ~:25) append the new instrumentation; add module-level helpers after `roomState` (~:143); add `SIGNALING`/`STUN` consts near `APP` (~:9).
+- Modify `../p2party.com/e2e/run.mjs` — inside `setupContext` `addInitScript` (the block that starts at `window.__dc = {…}`, ~:25) append the new instrumentation; add module-level helpers after `roomState` (~:143); add `SIGNALING`/`STUN` consts near `APP` (~:9).
 
 **Interfaces:**
 - Consumes: `FRAME_TYPE_CHUNK = 2`, `MESSAGE_START = 50`, header layout `type(1)‖DH_pub(32)‖N(8)‖PN(8)‖PQ_EPOCH(1)` (SSOT `src/utils/constants.ts`, Stage 5); `window.p2party.connect(roomUrl, signalingServerUrl, rtcConfig, secureRoomPin?)` (Stage 6); `window.p2party.ratchetSessionInfo` (Task 1).
@@ -6595,20 +6595,20 @@ const freshRoom = () => randomBytes(32).toString("hex");
 
 5. Sanity-run the untouched suite to confirm the instrumentation did not regress the existing transport flow:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | tail -20
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | tail -20
 ```
 Expected: still ends with `DONE — all transfers verified over real WebRTC` and exit 0.
 
 6. Commit (in the p2party.com repo):
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git checkout -b stage7-protocol-v3-e2e 2>/dev/null; git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): v3 harness substrate — frame capture, fp/receipt tamper, PIN connect\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git checkout -b stage7-protocol-v3-e2e 2>/dev/null; git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): v3 harness substrate — frame capture, fp/receipt tamper, PIN connect\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
 
 ### Task 3 — No-PIN room: byte-exact transfer + ratchet engaged
 
-**Files:** Modify `/Users/deliberative/Desktop/@p2party/p2party.com/e2e/run.mjs` — insert the block below immediately before the final `await browser.close();\n    log("DONE — all transfers verified over real WebRTC");` (~:763).
+**Files:** Modify `../p2party.com/e2e/run.mjs` — insert the block below immediately before the final `await browser.close();\n    log("DONE — all transfers verified over real WebRTC");` (~:763).
 
 **Interfaces:** Consumes `connectRoom`, `peerRatchet`, `freshRoom`, `waitFor` (Task 2); `window.p2party.sendMessage/readMessage/roomSelector` (existing). No PIN → X3DH-DH seed (Stage 2/4).
 
@@ -6681,13 +6681,13 @@ cd /Users/deliberative/Desktop/@p2party/p2party.com && git checkout -b stage7-pr
 
 2. Run the suite; confirm the new line:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 NO-PIN|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 NO-PIN|FAILED"
 ```
 Expected: `✅ V3 NO-PIN: ratchet engaged (FS everywhere) + byte-exact transfer`. If it fails on `ratchetEstablished`, the defect is in the Stage-4 handshake orchestration (`src/handlers/handleHandshake.ts` / `handleOpenChannel.ts` main-onopen gating), not here.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): no-PIN room ratchet-engaged + byte-exact\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): no-PIN room ratchet-engaged + byte-exact\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -6696,7 +6696,7 @@ cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && gi
 
 Both peers connect with the **same** 6-digit PIN → CPace seed + key-confirm → `pakeVerified` true. Capture message #1's cleartext header; then advance the ratchet with several more messages and prove the receiver's persisted state no longer holds the key for the captured frame (`Nr` moved past it, `skippedCount === 0`). Combined with the one-way KDF chain that is Stage 3's ratchet, the captured ciphertext is unrecoverable from current state — forward secrecy.
 
-**Files:** Modify `/Users/deliberative/Desktop/@p2party/p2party.com/e2e/run.mjs` — insert after the Task 3 block, before `browser.close()`.
+**Files:** Modify `../p2party.com/e2e/run.mjs` — insert after the Task 3 block, before `browser.close()`.
 
 **Interfaces:** Consumes `connectRoom({pin})`, `peerRatchet`, `window.__chunkFrames` (Task 2); PIN ⇒ CPace seed + key-confirm (Stage 1/4); `pakeVerified` Peer flag (Stage 6).
 
@@ -6813,13 +6813,13 @@ Both peers connect with the **same** 6-digit PIN → CPace seed + key-confirm �
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 PIN|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 PIN|FAILED"
 ```
 Expected: `✅ V3 PIN: pakeVerified + byte-exact + FORWARD SECRECY …`. A failure on `pakeVerified` points at Stage 1/4 CPace + key-confirm; a failure on `skippedCount` points at Stage 3 skipped-key pruning.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): PIN room pakeVerified + byte-exact + forward secrecy\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): PIN room pakeVerified + byte-exact + forward secrecy\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -6880,13 +6880,13 @@ cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && gi
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "WRONG-PIN|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "WRONG-PIN|FAILED"
 ```
 Expected: `✅ V3 WRONG-PIN: fail closed …`.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): wrong-PIN fail-closed (no ratchet, no data)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): wrong-PIN fail-closed (no ratchet, no data)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -6953,13 +6953,13 @@ Arm the `getStats`-fingerprint tamper on B so its post-connect DTLS fingerprint 
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 MITM|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 MITM|FAILED"
 ```
 Expected: `✅ V3 MITM: swapped DTLS fingerprint → channel torn down, no data delivered`. A failure here (ratchet established anyway) is a Stage-4 defect in the `getStats` certificate re-verify.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): MITM abort on swapped DTLS fingerprint\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): MITM abort on swapped DTLS fingerprint\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -7073,13 +7073,13 @@ A full reconnect (brand-new `RTCPeerConnection`) mid-transfer, with the WS relay
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws RESUME_TIMEOUT=200000 node e2e/run.mjs 2>&1 | grep -E "V3 RESUME|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws RESUME_TIMEOUT=200000 node e2e/run.mjs 2>&1 | grep -E "V3 RESUME|FAILED"
 ```
 Expected: `✅ V3 RESUME: mid-transfer full reconnect resumed the ratchet from the wrapped store, byte-exact`.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): reconnect mid-transfer resumes ratchet byte-exact\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): reconnect mid-transfer resumes ratchet byte-exact\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -7190,13 +7190,13 @@ After B reloads (worker torn down, in-memory ratchet gone), B rebuilds `epc` and
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "RELOAD PERSISTENCE|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "RELOAD PERSISTENCE|FAILED"
 ```
 Expected: `✅ V3 RELOAD PERSISTENCE: wrapped ratchet unwrapped and continued after a page reload`. A failure decrypting `post-reload` points at Stage-5/8 `ratchetWrap` unwrap-on-read or the reconnect rebind by `peerPublicKey`.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): reload persistence continues the ratchet (unwrap)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): reload persistence continues the ratchet (unwrap)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -7332,13 +7332,13 @@ Two properties from §6/R3: (a) a retransmit of a chunk resends the **cached cip
 
 2. Run and confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 DETERMINISM|NO-KEY-REUSE|FAILED"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "V3 DETERMINISM|NO-KEY-REUSE|FAILED"
 ```
 Expected both: `✅ V3 DETERMINISM …` and `✅ V3 NO-KEY-REUSE …`.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): retransmit determinism + no message-key reuse\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): retransmit determinism + no message-key reuse\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -7437,13 +7437,13 @@ Decoy frames must carry ratchet headers indistinguishable from reals (§6): same
 
 2. Run the FULL suite end-to-end (all v3 scenarios + the pre-existing transport flow) and confirm every marker:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "^\[.*✅|❌|DONE"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws node e2e/run.mjs 2>&1 | grep -E "^\[.*✅|❌|DONE"
 ```
 Expected: all `✅` markers (NO-PIN, PIN/FS, WRONG-PIN, MITM, RESUME, RELOAD PERSISTENCE, DETERMINISM, NO-KEY-REUSE, DECOY, plus the original transport markers) then `DONE — all transfers verified over real WebRTC`, exit 0.
 
 3. Commit:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): decoy-header indistinguishability; full protocol-v3 suite green\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add e2e/run.mjs && git commit -m "$(printf 'test(e2e): decoy-header indistinguishability; full protocol-v3 suite green\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 ---
@@ -7453,10 +7453,10 @@ cd /Users/deliberative/Desktop/@p2party/p2party.com && git add e2e/run.mjs && gi
 Ships the wire break as one artifact. `npm run dist` runs its `predist` prehook (production `emscripten.js` rebuild of `src/cryptography/libcrypto.wasm` + `updateWasmIntegrity.mjs` repin of `wasmLoader.ts`), bundles the library, and its `postdist` `npm pack` emits `p2party-0.10.0.tgz`. The app is repointed at that tgz and rebuilt so the E2E exercises the shipped bytes with matching SRI. The manual `npm run uploadcdn` (user AWS creds) is documented, not executed.
 
 **Files:**
-- Modify `/Users/deliberative/Desktop/@p2party/p2party-js/package.json` (`"version": "0.9.2"` → `"0.10.0"`, ~:3)
-- Modify `/Users/deliberative/Desktop/@p2party/p2party-js/CHANGELOG.md` (new `## [0.10.0]` entry above `## [0.9.2]`, ~:7)
-- (build outputs) `/Users/deliberative/Desktop/@p2party/p2party-js/src/cryptography/libcrypto.wasm`, `src/cryptography/wasmLoader.ts` (SRI), `lib/**`, `p2party-0.10.0.tgz`
-- Modify `/Users/deliberative/Desktop/@p2party/p2party.com/package.json` (`"p2party": "file:../p2party-js/p2party-0.9.2.tgz"` → `…/p2party-0.10.0.tgz`)
+- Modify `./package.json` (`"version": "0.9.2"` → `"0.10.0"`, ~:3)
+- Modify `./CHANGELOG.md` (new `## [0.10.0]` entry above `## [0.9.2]`, ~:7)
+- (build outputs) `./src/cryptography/libcrypto.wasm`, `src/cryptography/wasmLoader.ts` (SRI), `lib/**`, `p2party-0.10.0.tgz`
+- Modify `../p2party.com/package.json` (`"p2party": "file:../p2party-js/p2party-0.9.2.tgz"` → `…/p2party-0.10.0.tgz`)
 
 **Interfaces:** Consumes `PROTOCOL_VERSION = 3` (`src/utils/constants.ts`, Stage 6) — verified, not changed here; the full E2E suite (Tasks 3–10). Produces the shipped `0.10.0` artifact + repinned wasm SRI.
 
@@ -7464,7 +7464,7 @@ Ships the wire break as one artifact. `npm run dist` runs its `predist` prehook 
 
 1. Verify the wire version constant is already 3 (set in earlier stages) — the release must not proceed otherwise:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && grep -n "PROTOCOL_VERSION" src/utils/constants.ts
+cd . && grep -n "PROTOCOL_VERSION" src/utils/constants.ts
 ```
 Expected: `export const PROTOCOL_VERSION = 3;`.
 
@@ -7529,46 +7529,46 @@ rooms/data remain separate.
 
 4. Build + pack the release (predist prehook rebuilds wasm + repins SRI; postdist packs):
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && npm run dist
+cd . && npm run dist
 ```
 Expected: emscripten production build runs, `Updated wasmLoader.ts integrity → sha384-…`, rollup bundles, and `npm pack` writes `p2party-0.10.0.tgz`. Confirm:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && ls -1 p2party-0.10.0.tgz && grep -n "integrity:" src/cryptography/wasmLoader.ts
+cd . && ls -1 p2party-0.10.0.tgz && grep -n "integrity:" src/cryptography/wasmLoader.ts
 ```
 Expected: the tgz exists and the printed integrity matches the freshly built `src/cryptography/libcrypto.wasm` (the value `run.mjs` serves).
 
-5. Repoint the app dependency and reinstall/rebuild so the E2E runs the shipped artifact with matching SRI. Edit `/Users/deliberative/Desktop/@p2party/p2party.com/package.json`:
+5. Repoint the app dependency and reinstall/rebuild so the E2E runs the shipped artifact with matching SRI. Edit `../p2party.com/package.json`:
 ```
 "p2party": "file:../p2party-js/p2party-0.10.0.tgz",
 ```
 then:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && bun install && bun run build
+cd ../p2party.com && bun install && bun run build
 ```
 Expected: install picks up `0.10.0`, `tsc -b && vite build` succeeds.
 
 6. Run the full E2E suite against the freshly built app + wasm (the definition-of-done gate):
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws RESUME_TIMEOUT=200000 node e2e/run.mjs 2>&1 | tee /private/tmp/claude-501/-Users-deliberative-Desktop--p2party/029dcf6f-9570-44b9-8109-3656d8f237f5/scratchpad/e2e-final.log | grep -E "✅|❌|DONE"
+cd ../p2party.com && APP_URL=http://localhost:5190 SIGNALING_URL=ws://localhost:3001/ws RESUME_TIMEOUT=200000 node e2e/run.mjs 2>&1 | tee /private/tmp/p2party-e2e-final.log | grep -E "✅|❌|DONE"
 ```
 Expected: all `✅` markers and `DONE — all transfers verified over real WebRTC`, exit 0. (If serving `dist` on :5190, re-serve it after `bun run build` before running.)
 
 7. Typecheck + unit tests still green across the SDK:
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && npm run typecheck && bun test
+cd . && npm run typecheck && bun test
 ```
 Expected: no type errors; all `bun test` pass (including the C↔TS constant-agreement test and `ratchetSessionInfo` test).
 
 8. Commit the release (both repos):
 ```
-cd /Users/deliberative/Desktop/@p2party/p2party-js && git add package.json CHANGELOG.md src/cryptography/wasmLoader.ts src/cryptography/libcrypto.wasm lib p2party-0.10.0.tgz && git commit -m "$(printf 'release: protocol-v3 (0.10.0) — atomic wire break; wasm rebuild + SRI repin\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
-cd /Users/deliberative/Desktop/@p2party/p2party.com && git add package.json bun.lock && git commit -m "$(printf 'chore: consume p2party 0.10.0 (protocol-v3)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd . && git add package.json CHANGELOG.md src/cryptography/wasmLoader.ts src/cryptography/libcrypto.wasm lib p2party-0.10.0.tgz && git commit -m "$(printf 'release: protocol-v3 (0.10.0) — atomic wire break; wasm rebuild + SRI repin\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
+cd ../p2party.com && git add package.json bun.lock && git commit -m "$(printf 'chore: consume p2party 0.10.0 (protocol-v3)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
 9. **CDN upload — user action (AWS creds).** Do not run automatically; document the exact command. After the release commit lands, publish the repinned wasm + bundles to the CDN so deployed clients fetch bytes matching the new SRI:
 ```
 # requires the user's AWS credentials in p2party-js/.env
-cd /Users/deliberative/Desktop/@p2party/p2party-js && npm run uploadcdn
+cd . && npm run uploadcdn
 ```
 This runs `prepare:uploadcdn` (copy wasm → `lib/`, gzip, compute `.integrity`), `actual:uploadcdn` (`scripts/uploadToCDN.mjs`), then `cleanup:uploadcdn`. The `cdn.p2party.com/@<version>/libcrypto.wasm` object must be published for the new `0.10.0` path before v3 clients are served. State this to the user as the final manual step and stop.
 

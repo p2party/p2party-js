@@ -63,6 +63,28 @@ export const FRAME_TYPE_RECEIPT = 3;
 export const PQ_TAG_LEN = 1;
 export const PQ_TAG = new Uint8Array(PQ_TAG_LEN); // [0]
 
+// ── protocol-v3 CHUNK frame header (SSOT; byte-match in cryptography/utils.h when the
+// C receive path is cut over in Stage-5 task 2) ─────────────────────────────────────
+// A v3 message-chunk frame is:
+//   FRAME_TYPE_CHUNK(1) ‖ dhPub(32) ‖ N(8 BE) ‖ PN(8 BE) ‖ PQ_EPOCH(1) ‖ nonce(12) ‖ ciphertext
+// The ratchet header (dhPub, N, PN) is SHARED by every chunk of a message (one ratchet
+// step per message); the 12-byte nonce is fresh + random per chunk. PQ_EPOCH is 0 in v3
+// (reserved). Ciphertext begins at FRAME_TYPE_LEN + CHUNK_HEADER_LEN = 62 — the v3
+// replacement for the box scheme's MESSAGE_START=96 (the send/receive swap that relocates
+// MESSAGE_START is Stage-5 task 3; these constants are additive foundation). N/PN are the
+// ratchet counters, serialized 8-byte big-endian, guarded < 2^53.
+export const RATCHET_DHPUB_LEN = 32;
+export const RATCHET_N_LEN = 8;
+export const RATCHET_PN_LEN = 8;
+export const PQ_EPOCH_LEN = 1;
+export const RATCHET_NONCE_LEN = 12;
+export const CHUNK_HEADER_LEN =
+  RATCHET_DHPUB_LEN +
+  RATCHET_N_LEN +
+  RATCHET_PN_LEN +
+  PQ_EPOCH_LEN +
+  RATCHET_NONCE_LEN; // 61
+
 // Per-chunk sender authentication signs a domain-separated transcript
 // (DOMAIN || merkle_root || ephemeral_pk) rather than the bare ephemeral public
 // key, so a signature harvested from the raw-nonce server-challenge oracle

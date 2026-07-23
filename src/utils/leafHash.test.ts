@@ -4,7 +4,14 @@ import { describe, expect, test } from "bun:test";
 // but `window` is not, so alias it.
 (globalThis as unknown as { window: typeof globalThis }).window = globalThis;
 
-import { hashMerkleLeaf } from "./leafHash";
+import { hashMerkleLeaf, hashMerkleLeafWasm } from "./leafHash";
+import { loadTestModule } from "../cryptography/testModule";
+
+const rand = (n: number): Uint8Array => {
+  const u = new Uint8Array(n);
+  crypto.getRandomValues(u);
+  return u;
+};
 
 const sha512 = async (b: Uint8Array) =>
   new Uint8Array(
@@ -28,5 +35,17 @@ describe("hashMerkleLeaf", () => {
     const expected = await sha512(prefixed);
     const leaf = await hashMerkleLeaf(chunk);
     expect(Buffer.from(leaf).equals(Buffer.from(expected))).toBe(true);
+  });
+});
+
+describe("hashMerkleLeafWasm (libsodium/C leaf hash)", () => {
+  test("byte-identical to the WebCrypto hashMerkleLeaf across sizes", async () => {
+    const module = await loadTestModule();
+    for (const n of [0, 1, 64, 1000, 65000]) {
+      const chunk = rand(n);
+      expect(Buffer.from(hashMerkleLeafWasm(chunk, module))).toEqual(
+        Buffer.from(await hashMerkleLeaf(chunk)),
+      );
+    }
   });
 });

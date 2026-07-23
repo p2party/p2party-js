@@ -166,6 +166,7 @@ _x25519_dh,\
 _hkdf_sha512_extract,\
 _hkdf_sha512_expand,\
 _encrypt_chachapoly_symmetric,\
+_decrypt_chachapoly_symmetric,\
 _receive_message_with_key \
 -s EXPORT_NAME=libcrypto \
 -I${libsodiumIncludePath} \

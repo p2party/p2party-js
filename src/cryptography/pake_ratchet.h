@@ -57,6 +57,12 @@ int encrypt_chachapoly_symmetric(
     const uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES],
     const uint8_t *aad, const unsigned int aad_len);
 
+int decrypt_chachapoly_symmetric(
+    uint8_t *out, const uint8_t *in, const unsigned int in_len,
+    const uint8_t key[crypto_aead_chacha20poly1305_ietf_KEYBYTES],
+    const uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES],
+    const uint8_t *aad, const unsigned int aad_len);
+
 int receive_message_with_key(
     uint8_t decrypted[DECRYPTED_LEN], const uint8_t message[MESSAGE_LEN],
     const uint8_t merkle_root[crypto_hash_sha512_BYTES],

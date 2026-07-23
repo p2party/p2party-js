@@ -1,5 +1,4 @@
 import {
-  ratchetEncrypt,
   ratchetDecrypt,
   serializeRatchet,
   deserializeRatchet,
@@ -9,7 +8,12 @@ import {
   parseChunkFrameHeader,
 } from "./chunkFrame";
 import { zeroFree } from "../utils/zeroFree";
-import { RATCHET_N_LEN, RATCHET_PN_LEN } from "../utils/constants";
+import {
+  RATCHET_N_LEN,
+  RATCHET_PN_LEN,
+  MESSAGE_LEN,
+  DECRYPTED_LEN,
+} from "../utils/constants";
 import {
   crypto_aead_chacha20poly1305_ietf_KEYBYTES,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
@@ -29,14 +33,16 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 // every chunk of that message. Each chunk gets a fresh random 12-byte nonce.
 //
 // AEAD: symmetric ChaCha20-Poly1305-IETF under the message key. AAD = the
-// per-message `merkleRoot(64) ‖ N(8 BE) ‖ PN(8 BE)`, byte-identical to the C
-// `receive_message_with_key` (pake_ratchet.c) so this crypto interoperates with
-// the C receive path once it is wired in (Stage-7). N/PN come from the ratchet
+// per-message `merkleRoot(64) ‖ N(8 BE) ‖ PN(8 BE)`. N/PN come from the ratchet
 // header, so the AAD is the same for every chunk of a message.
 //
-// SCOPE: this is the self-contained, unit-tested crypto CORE. It does NOT touch
-// the handlers, the merkle/proof path, or the C. The receive-side AEAD open is
-// merkle-free on purpose (see `aeadOpen`).
+// SEND builds the AAD + seals in TS (`buildAad`/`aeadSeal`/`sealChunk`). RECEIVE
+// is done ENTIRELY in one C call: `decryptMessageChunk` derives the per-message
+// key off the ratchet (the only state C needs, passed in as an arg) and hands the
+// raw frame + key + expected root to `_receive_message_with_key`, which
+// AEAD-decrypts, hashes the leaf, verifies the Merkle proof, and writes the
+// receipt — all in libsodium, in place, no TS↔WASM back-and-forth (DRY/KISS: the
+// C receive path is the SSOT for receive crypto).
 
 const AEAD_KEY_LEN = crypto_aead_chacha20poly1305_ietf_KEYBYTES; // 32
 const AEAD_NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
@@ -133,61 +139,54 @@ const aeadSeal = (
 };
 
 /**
- * AEAD open of `ciphertext = body ‖ tag(16)` under `key`/`nonce` via libsodium's
- * exported `_decrypt_chachapoly_symmetric` (crypto_aead_chacha20poly1305_ietf_decrypt):
- * the Poly1305 tag is verified in constant time inside libsodium and NO plaintext
- * is written on authentication failure. Returns the plaintext, or `null` if the
- * tag does not verify. AAD must be byte-identical to the seal's.
+ * RECEIVE one chunk frame ENTIRELY in libsodium. Hand the raw wire `frame`, the
+ * ratchet-derived per-message `key` (the only state C needs — passed as an arg),
+ * and the expected `merkleRoot` to the C `_receive_message_with_key`, which:
+ * AEAD-decrypts `frame + MESSAGE_START` (AAD = root ‖ N ‖ PN read from the
+ * cleartext header, nonce from the header), hashes the domain-separated leaf,
+ * verifies the Merkle proof, and writes the receipt leaf over the proof region —
+ * all in one call, in place, no TS↔WASM back-and-forth.
+ *
+ * Returns the C status + the DECRYPTED_LEN plaintext (`metadata ‖ receiptLeaf ‖
+ * chunk`), meaningful only when `code === 0`:
+ *   code  0  → decrypt + Merkle both passed
+ *   code -2  → AEAD auth failed (forgery/replay) → caller ROLLS the ratchet back
+ *   code <0  → AEAD passed but Merkle/proof bad → caller COMMITS the ratchet, drops
  */
-const aeadOpen = (
+const receiveWithKey = (
   module: LibCrypto,
+  frame: Uint8Array,
+  merkleRoot: Uint8Array,
   key: Uint8Array,
-  nonce: Uint8Array,
-  ciphertext: Uint8Array,
-  aad: Uint8Array,
-): Uint8Array | null => {
-  if (ciphertext.length < AEAD_TAG_LEN) return null;
-  const outLen = ciphertext.length - AEAD_TAG_LEN;
-  const outAlloc = Math.max(outLen, 1);
-  const aadAlloc = Math.max(aad.length, 1);
-
+): { code: number; decrypted: Uint8Array } => {
+  const msgPtr = module._malloc(MESSAGE_LEN);
+  const decPtr = module._malloc(DECRYPTED_LEN);
+  const rootPtr = module._malloc(crypto_hash_sha512_BYTES);
   const keyPtr = module._malloc(AEAD_KEY_LEN);
-  const noncePtr = module._malloc(AEAD_NONCE_LEN);
-  const inPtr = module._malloc(ciphertext.length);
-  const aadPtr = module._malloc(aadAlloc);
-  const outPtr = module._malloc(outAlloc);
 
+  // The C signature reads a full MESSAGE_LEN buffer; the wire frame is shorter
+  // (WIRE_CHUNK_FRAME_LEN) so zero the tail, then copy the frame in.
+  const msg = new Uint8Array(module.wasmMemory.buffer, msgPtr, MESSAGE_LEN);
+  msg.fill(0);
+  msg.set(frame.subarray(0, MESSAGE_LEN), 0);
+  new Uint8Array(module.wasmMemory.buffer, rootPtr, crypto_hash_sha512_BYTES).set(
+    merkleRoot,
+  );
   new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN).set(key);
-  new Uint8Array(module.wasmMemory.buffer, noncePtr, AEAD_NONCE_LEN).set(nonce);
-  new Uint8Array(module.wasmMemory.buffer, inPtr, ciphertext.length).set(
-    ciphertext,
-  );
-  if (aad.length)
-    new Uint8Array(module.wasmMemory.buffer, aadPtr, aad.length).set(aad);
 
-  const r = module._decrypt_chachapoly_symmetric(
-    outPtr,
-    inPtr,
-    ciphertext.length,
-    keyPtr,
-    noncePtr,
-    aadPtr,
-    aad.length,
+  const code = module._receive_message_with_key(decPtr, msgPtr, rootPtr, keyPtr);
+
+  const decrypted = Uint8Array.from(
+    new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN),
   );
 
-  const out =
-    r === 0
-      ? Uint8Array.from(new Uint8Array(module.wasmMemory.buffer, outPtr, outLen))
-      : null;
-
-  // key + out (holds the plaintext on success) are secret — wipe before free.
+  // key + decrypted (holds the plaintext) are secret — wipe before free.
+  module._free(msgPtr);
+  module._free(rootPtr);
   zeroFree(module, new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN));
-  module._free(noncePtr);
-  module._free(inPtr);
-  module._free(aadPtr);
-  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, outPtr, outAlloc));
+  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN));
 
-  return out;
+  return { code, decrypted };
 };
 
 // Wipe the secret-bearing fields of a ratchet state (used to discard a rolled-
@@ -227,11 +226,10 @@ const adoptRatchetState = (live: RatchetState, next: RatchetState): void => {
  *
  * This is the streaming/reconcile-friendly primitive the live send path uses: it
  * seals chunks one-at-a-time as they are read from IndexedDB, so a multi-GB
- * message is never materialised in RAM (unlike `encryptMessageChunks`, which
- * takes all chunks at once). A retransmit re-seals the same plaintext under the
- * SAME `messageKey` with a FRESH random nonce — cryptographically safe (distinct
- * 96-bit random nonces under one key) and decryptable by the receiver's cached
- * per-message key (a HIT on `(dhPub, N)`), so no frame-cache is needed.
+ * message is never materialised in RAM. A retransmit re-seals the same plaintext
+ * under the SAME `messageKey` with a FRESH random nonce — cryptographically safe
+ * (distinct 96-bit random nonces under one key) and decryptable by the receiver's
+ * cached per-message key (a HIT on `(dhPub, N)`), so no frame-cache is needed.
  */
 export const sealChunk = (
   messageKey: Uint8Array,
@@ -252,71 +250,42 @@ export const sealChunk = (
   return frame;
 };
 
-/**
- * SEND: step the ratchet ONCE for the whole message, then AEAD-encrypt every
- * chunk under the single message key with a fresh random per-chunk nonce, and
- * frame each as `packChunkFrameHeader(header, nonce) ‖ ciphertext`.
- *
- * `state` is advanced in place (the sending chain steps). The CALLER persists it
- * (`serializeRatchet` / `setRatchetSession`) — this function does NOT persist.
- * The message key is wiped after the last chunk.
- *
- * `merkleRoot` is the message's 64-byte root; it (plus the header's N/PN) forms
- * the per-chunk AAD, matching the C receive path.
- *
- * NOTE: this buffers all chunks — the LIVE send path instead calls
- * `ratchetEncrypt` + `sealChunk` per chunk (streaming). This all-at-once form is
- * kept for the unit tests / small callers.
- */
-export const encryptMessageChunks = (
-  state: RatchetState,
-  chunks: Uint8Array[],
-  merkleRoot: Uint8Array,
-  module: LibCrypto,
-): Uint8Array[] => {
-  if (chunks.length === 0)
-    throw new Error("messageChunkCrypto: a message needs at least one chunk");
-  if (merkleRoot.length !== crypto_hash_sha512_BYTES)
-    throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
-
-  const { messageKey, header } = ratchetEncrypt(state, module); // ONCE per message
-  try {
-    return chunks.map((chunk) =>
-      sealChunk(messageKey, header, chunk, merkleRoot, module),
-    );
-  } finally {
-    messageKey.fill(0);
-  }
-};
-
 export interface DecryptedChunk {
-  plaintext: Uint8Array;
-  /** True iff this chunk stepped the ratchet (the first chunk of a message that
-   *  was not already in the cache). The caller persists `state` when true. */
+  /** The DECRYPTED_LEN plaintext `metadata ‖ receiptLeaf ‖ chunk` written by the C
+   *  receive, or `null` when the chunk was dropped (AEAD or Merkle failure). */
+  decrypted: Uint8Array | null;
+  /** True iff C returned 0 — AEAD **and** Merkle both passed. When false the caller
+   *  drops the chunk (but still persists the ratchet if `stateAdvanced`). */
+  ok: boolean;
+  /** True iff this chunk stepped the ratchet (first-arriving chunk of a message
+   *  whose AEAD authenticated). The caller persists `state` when true — even if
+   *  `ok` is false, since the DH step is real once the AEAD authenticates. */
   stateAdvanced: boolean;
 }
 
 /**
- * RECEIVE one chunk frame.
+ * RECEIVE one chunk frame: derive the per-message key off the ratchet (in TS —
+ * the ratchet state is a TS object), then do ALL the crypto in ONE C call
+ * (`receiveWithKey` → `_receive_message_with_key`: decrypt + leaf-hash + Merkle +
+ * receipt, in place).
  *
  * The `cache` (caller-owned, keyed by `messageCacheKey(dhPub, N)`) holds the
- * per-message key. On a HIT — chunk 2..n of a message, an out-of-order chunk, or
- * a duplicate — the key is reused WITHOUT touching the ratchet (per-message
- * reuse + dedup in one). On a MISS the key is derived via the clone-rollback
- * contract and cached.
+ * per-message key. On a HIT — chunk 2..n, out-of-order, or a duplicate — the key
+ * is reused WITHOUT touching the ratchet. On a MISS the key is derived under the
+ * clone-rollback contract and cached.
  *
  * Clone-rollback (MANDATORY — `ratchetDecrypt` mutates BEFORE the AEAD
  * authenticates, so a replayed/old-chain header could otherwise fire a spurious
  * DH-step and desync the session):
  *   1. `clone = deserializeRatchet(serializeRatchet(state))`.
  *   2. `messageKey = ratchetDecrypt(clone, header)` — mutates the CLONE only.
- *   3. AEAD-open the chunk. COMMIT (adopt the clone as live, cache the key) ONLY
- *      if it authenticates; otherwise DISCARD the clone — the live `state` is
- *      byte-for-byte untouched — and throw.
+ *   3. C decrypts+verifies. COMMIT (adopt the clone, cache the key) iff the AEAD
+ *      authenticated (`code !== -2`); on `-2` DISCARD the clone — the live `state`
+ *      is byte-for-byte untouched. `ok` (store-vs-drop) then follows `code === 0`.
  *
- * Cache lifecycle: the caller evicts a message's key (via `messageCacheKey`)
- * when the message completes (all leaves present) or on a TTL, so a peer can't
- * pin keys with never-completing messages.
+ * Cache lifecycle: the caller evicts a message's key (via `messageCacheKey`) when
+ * the message completes (all leaves present) or on a TTL, so a peer can't pin keys
+ * with never-completing messages.
  */
 export const decryptMessageChunk = (
   state: RatchetState,
@@ -328,33 +297,41 @@ export const decryptMessageChunk = (
   if (merkleRoot.length !== crypto_hash_sha512_BYTES)
     throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
 
-  const { header, nonce, ciphertext } = parseChunkFrameHeader(frame);
-  const aad = buildAad(merkleRoot, header.N, header.PN);
-  const key = messageCacheKey(header.dhPub, header.N);
+  const { header } = parseChunkFrameHeader(frame); // ratchet header + cache key
+  const cacheK = messageCacheKey(header.dhPub, header.N);
 
-  // HIT — reuse the per-message key; the ratchet is NOT advanced.
-  const cached = cache.get(key);
+  // HIT — reuse the per-message key; the ratchet is NOT touched.
+  const cached = cache.get(cacheK);
   if (cached) {
-    const plaintext = aeadOpen(module, cached, nonce, ciphertext, aad);
-    if (!plaintext)
-      throw new Error("messageChunkCrypto: chunk failed to authenticate");
-    return { plaintext, stateAdvanced: false };
+    const { code, decrypted } = receiveWithKey(module, frame, merkleRoot, cached);
+    return { decrypted: code === 0 ? decrypted : null, ok: code === 0, stateAdvanced: false };
   }
 
-  // MISS — derive on a CLONE; commit only after the AEAD authenticates.
+  // MISS — derive the message key on a CLONE.
   const clone = deserializeRatchet(serializeRatchet(state));
-  const messageKey = deriveOnClone(clone, header, module);
-  const plaintext = aeadOpen(module, messageKey, nonce, ciphertext, aad);
-  if (!plaintext) {
-    // ROLLBACK — discard the clone; the live `state` never advanced.
+  let messageKey: Uint8Array;
+  try {
+    messageKey = deriveOnClone(clone, header, module);
+  } catch {
+    // ratchetDecrypt rejected the header (e.g. a stale-chain replay) — drop; the
+    // live state is untouched (deriveOnClone already wiped the clone).
+    return { decrypted: null, ok: false, stateAdvanced: false };
+  }
+
+  const { code, decrypted } = receiveWithKey(module, frame, merkleRoot, messageKey);
+
+  if (code === -2) {
+    // AEAD auth failed → ROLLBACK: discard the clone + key, live state unadvanced.
     messageKey.fill(0);
     wipeRatchetSecrets(clone);
-    throw new Error("messageChunkCrypto: chunk failed to authenticate");
+    return { decrypted: null, ok: false, stateAdvanced: false };
   }
-  // COMMIT — adopt the advanced clone, cache the key for the message's rest.
+
+  // AEAD authenticated → COMMIT the ratchet step + cache the key for the rest of
+  // the message. `ok` still depends on the Merkle result (`code === 0`).
   adoptRatchetState(state, clone);
-  cache.set(key, messageKey);
-  return { plaintext, stateAdvanced: true };
+  cache.set(cacheK, messageKey);
+  return { decrypted: code === 0 ? decrypted : null, ok: code === 0, stateAdvanced: true };
 };
 
 // Derive the message key on a clone. Isolated so a `ratchetDecrypt` throw (e.g.

@@ -13,8 +13,14 @@ import {
 
 describe("v3 chunk-frame codec", () => {
   test("pack -> parse round-trips the ratchet header, nonce, and ciphertext byte-exact", () => {
-    const dhPub = Uint8Array.from({ length: RATCHET_DHPUB_LEN }, (_, i) => i + 1);
-    const nonce = Uint8Array.from({ length: RATCHET_NONCE_LEN }, (_, i) => 100 + i);
+    const dhPub = Uint8Array.from(
+      { length: RATCHET_DHPUB_LEN },
+      (_, i) => i + 1,
+    );
+    const nonce = Uint8Array.from(
+      { length: RATCHET_NONCE_LEN },
+      (_, i) => 100 + i,
+    );
     const header = { dhPub, N: 5, PN: 3 };
     const ciphertext = new Uint8Array([9, 8, 7, 6, 5]);
 
@@ -58,5 +64,12 @@ describe("v3 chunk-frame codec", () => {
     const notChunk = new Uint8Array(CHUNK_FRAME_HEADER_LEN);
     notChunk[0] = 99;
     expect(() => parseChunkFrameHeader(notChunk)).toThrow();
+
+    // PQ epoch is reserved at zero for protocol v3; unknown epochs fail closed.
+    const futureEpoch = Uint8Array.from(hdr);
+    futureEpoch[49] = 1;
+    expect(() => parseChunkFrameHeader(futureEpoch)).toThrow(
+      "unsupported PQ epoch",
+    );
   });
 });

@@ -1,12 +1,10 @@
 import {
+  adoptRatchet,
+  cloneRatchet,
   ratchetDecrypt,
-  serializeRatchet,
-  deserializeRatchet,
+  wipeRatchet,
 } from "../cryptography/ratchet";
-import {
-  packChunkFrameHeader,
-  parseChunkFrameHeader,
-} from "./chunkFrame";
+import { packChunkFrameHeader, parseChunkFrameHeader } from "./chunkFrame";
 import { zeroFree } from "../utils/zeroFree";
 import {
   RATCHET_N_LEN,
@@ -123,14 +121,22 @@ const aeadSeal = (
 
   const out =
     r === 0
-      ? Uint8Array.from(new Uint8Array(module.wasmMemory.buffer, outPtr, outLen))
+      ? Uint8Array.from(
+          new Uint8Array(module.wasmMemory.buffer, outPtr, outLen),
+        )
       : null;
 
   // key, data (plaintext) and out (holds plaintext on the decrypt path) are
   // secret — zero them before returning the heap to the allocator.
-  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN));
+  zeroFree(
+    module,
+    new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN),
+  );
   module._free(noncePtr);
-  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, dataPtr, dataAlloc));
+  zeroFree(
+    module,
+    new Uint8Array(module.wasmMemory.buffer, dataPtr, dataAlloc),
+  );
   module._free(aadPtr);
   zeroFree(module, new Uint8Array(module.wasmMemory.buffer, outPtr, outLen));
 
@@ -169,12 +175,19 @@ const receiveWithKey = (
   const msg = new Uint8Array(module.wasmMemory.buffer, msgPtr, MESSAGE_LEN);
   msg.fill(0);
   msg.set(frame.subarray(0, MESSAGE_LEN), 0);
-  new Uint8Array(module.wasmMemory.buffer, rootPtr, crypto_hash_sha512_BYTES).set(
-    merkleRoot,
-  );
+  new Uint8Array(
+    module.wasmMemory.buffer,
+    rootPtr,
+    crypto_hash_sha512_BYTES,
+  ).set(merkleRoot);
   new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN).set(key);
 
-  const code = module._receive_message_with_key(decPtr, msgPtr, rootPtr, keyPtr);
+  const code = module._receive_message_with_key(
+    decPtr,
+    msgPtr,
+    rootPtr,
+    keyPtr,
+  );
 
   const decrypted = Uint8Array.from(
     new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN),
@@ -183,37 +196,16 @@ const receiveWithKey = (
   // key + decrypted (holds the plaintext) are secret — wipe before free.
   module._free(msgPtr);
   module._free(rootPtr);
-  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN));
-  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN));
+  zeroFree(
+    module,
+    new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN),
+  );
+  zeroFree(
+    module,
+    new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN),
+  );
 
   return { code, decrypted };
-};
-
-// Wipe the secret-bearing fields of a ratchet state (used to discard a rolled-
-// back clone, and to retire superseded live secrets on commit).
-const wipeRatchetSecrets = (s: RatchetState): void => {
-  s.rootKey.fill(0);
-  s.sendingChainKey?.fill(0);
-  s.receivingChainKey?.fill(0);
-  s.dhSelfSec.fill(0);
-  for (const mk of s.skipped.values()) mk.fill(0);
-};
-
-// Commit an authenticated clone into the live state in place: retire the live
-// state's superseded secrets, then adopt every field of `next` (the clone owns
-// independent buffers — no aliasing with the retired ones).
-const adoptRatchetState = (live: RatchetState, next: RatchetState): void => {
-  wipeRatchetSecrets(live);
-  live.rootKey = next.rootKey;
-  live.sendingChainKey = next.sendingChainKey;
-  live.receivingChainKey = next.receivingChainKey;
-  live.dhSelfPub = next.dhSelfPub;
-  live.dhSelfSec = next.dhSelfSec;
-  live.dhRemotePub = next.dhRemotePub;
-  live.Ns = next.Ns;
-  live.Nr = next.Nr;
-  live.PN = next.PN;
-  live.skipped = next.skipped;
 };
 
 /**
@@ -303,12 +295,21 @@ export const decryptMessageChunk = (
   // HIT — reuse the per-message key; the ratchet is NOT touched.
   const cached = cache.get(cacheK);
   if (cached) {
-    const { code, decrypted } = receiveWithKey(module, frame, merkleRoot, cached);
-    return { decrypted: code === 0 ? decrypted : null, ok: code === 0, stateAdvanced: false };
+    const { code, decrypted } = receiveWithKey(
+      module,
+      frame,
+      merkleRoot,
+      cached,
+    );
+    return {
+      decrypted: code === 0 ? decrypted : null,
+      ok: code === 0,
+      stateAdvanced: false,
+    };
   }
 
   // MISS — derive the message key on a CLONE.
-  const clone = deserializeRatchet(serializeRatchet(state));
+  const clone = cloneRatchet(state);
   let messageKey: Uint8Array;
   try {
     messageKey = deriveOnClone(clone, header, module);
@@ -318,20 +319,29 @@ export const decryptMessageChunk = (
     return { decrypted: null, ok: false, stateAdvanced: false };
   }
 
-  const { code, decrypted } = receiveWithKey(module, frame, merkleRoot, messageKey);
+  const { code, decrypted } = receiveWithKey(
+    module,
+    frame,
+    merkleRoot,
+    messageKey,
+  );
 
   if (code === -2) {
     // AEAD auth failed → ROLLBACK: discard the clone + key, live state unadvanced.
     messageKey.fill(0);
-    wipeRatchetSecrets(clone);
+    wipeRatchet(clone);
     return { decrypted: null, ok: false, stateAdvanced: false };
   }
 
   // AEAD authenticated → COMMIT the ratchet step + cache the key for the rest of
   // the message. `ok` still depends on the Merkle result (`code === 0`).
-  adoptRatchetState(state, clone);
+  adoptRatchet(state, clone);
   cache.set(cacheK, messageKey);
-  return { decrypted: code === 0 ? decrypted : null, ok: code === 0, stateAdvanced: true };
+  return {
+    decrypted: code === 0 ? decrypted : null,
+    ok: code === 0,
+    stateAdvanced: true,
+  };
 };
 
 // Derive the message key on a clone. Isolated so a `ratchetDecrypt` throw (e.g.
@@ -345,7 +355,7 @@ const deriveOnClone = (
   try {
     return ratchetDecrypt(clone, header, module);
   } catch (e) {
-    wipeRatchetSecrets(clone);
+    wipeRatchet(clone);
     throw e;
   }
 };

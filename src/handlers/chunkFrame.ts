@@ -81,6 +81,8 @@ export const parseChunkFrameHeader = (frame: Uint8Array): ParsedChunkFrame => {
     throw new Error("chunkFrame: frame shorter than the header");
   if (frame[0] !== FRAME_TYPE_CHUNK)
     throw new Error("chunkFrame: leading byte is not FRAME_TYPE_CHUNK");
+  if (frame[PQ_EPOCH_OFF] !== 0)
+    throw new Error("chunkFrame: unsupported PQ epoch");
   return {
     header: {
       dhPub: frame.subarray(DHPUB_OFF, DHPUB_OFF + RATCHET_DHPUB_LEN),

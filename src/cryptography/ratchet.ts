@@ -161,7 +161,8 @@ export const initRatchet = (
   };
 
   if (amInitiator) {
-    if (!remoteDhPub) throw new Error("ratchet: initiator requires remoteDhPub");
+    if (!remoteDhPub)
+      throw new Error("ratchet: initiator requires remoteDhPub");
     state.dhRemotePub = Uint8Array.from(remoteDhPub);
     const dhOut = x25519Dh(state.dhSelfSec, state.dhRemotePub, module);
     const rk = kdfRk(state.rootKey, dhOut, module);
@@ -399,4 +400,35 @@ export const deserializeRatchet = (s: RatchetSessionSecrets): RatchetState => {
     PN: s.PN,
     skipped,
   };
+};
+
+/** Deep-clone a live ratchet state into independently owned key buffers. */
+export const cloneRatchet = (state: RatchetState): RatchetState =>
+  deserializeRatchet(serializeRatchet(state));
+
+/** Wipe every secret-bearing buffer owned by a ratchet state. */
+export const wipeRatchet = (state: RatchetState): void => {
+  state.rootKey.fill(0);
+  state.sendingChainKey?.fill(0);
+  state.receivingChainKey?.fill(0);
+  state.dhSelfSec.fill(0);
+  for (const messageKey of state.skipped.values()) messageKey.fill(0);
+};
+
+/**
+ * Replace a live state with an independently owned authenticated successor.
+ * The superseded live secrets are wiped before ownership moves from `next`.
+ */
+export const adoptRatchet = (live: RatchetState, next: RatchetState): void => {
+  wipeRatchet(live);
+  live.rootKey = next.rootKey;
+  live.sendingChainKey = next.sendingChainKey;
+  live.receivingChainKey = next.receivingChainKey;
+  live.dhSelfPub = next.dhSelfPub;
+  live.dhSelfSec = next.dhSelfSec;
+  live.dhRemotePub = next.dhRemotePub;
+  live.Ns = next.Ns;
+  live.Nr = next.Nr;
+  live.PN = next.PN;
+  live.skipped = next.skipped;
 };

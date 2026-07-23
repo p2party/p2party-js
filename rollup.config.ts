@@ -9,60 +9,96 @@ import replace from "@rollup/plugin-replace";
 import analyzer from "rollup-plugin-analyzer";
 
 const dir = "lib";
-const input = "src/index.ts";
+const rootInput = "src/index.ts";
+const sessionInput = "src/session.ts";
 const packageJson = JSON.parse(fs.readFileSync("package.json", "utf-8"));
 
-const idbWorkerPath = path.resolve("lib", "db.worker.js");
-const idbWorkerJs = fs.readFileSync(idbWorkerPath, { encoding: "utf-8" });
-
 const isDist = process.env.NODE_ENV === "production";
+const isSessionOnly = process.env.P2PARTY_ROLLUP_TARGET === "session";
 
-const plugins = [
-  replace({
-    "process.env.INDEXEDDB_WORKER_JS": JSON.stringify(idbWorkerJs),
+const createPlugins = (includeIndexedDbWorker) => {
+  const values = {
+    ...(includeIndexedDbWorker
+      ? {
+          "process.env.INDEXEDDB_WORKER_JS": JSON.stringify(
+            fs.readFileSync(path.resolve(dir, "db.worker.js"), {
+              encoding: "utf-8",
+            }),
+          ),
+        }
+      : {}),
     "process.env.P2PARTY_VERSION": JSON.stringify(packageJson.version),
     "process.env.NODE_ENV": isDist
       ? JSON.stringify("production")
       : JSON.stringify("development"),
     preventAssignment: true,
-  }),
+  };
 
-  resolve({
-    browser: true,
-    preferBuiltins: false,
-  }),
+  return [
+    replace(values),
 
-  commonjs(),
-
-  json({
-    compact: true,
-    preferConst: true,
-  }),
-
-  typescript({
-    sourceMap: true,
-    inlineSources: false,
-    declaration: true,
-    declarationMap: true,
-    exclude: ["playwright*", "rollup*"],
-    outDir: `${dir}`,
-  }),
-
-  isDist &&
-    terser({
-      ecma: 2020,
-      toplevel: true,
+    resolve({
+      browser: true,
+      preferBuiltins: false,
     }),
 
-  analyzer(),
-];
+    commonjs(),
 
-export default [
+    json({
+      compact: true,
+      preferConst: true,
+    }),
+
+    typescript({
+      sourceMap: true,
+      inlineSources: false,
+      declaration: true,
+      declarationMap: true,
+      exclude: ["playwright*", "rollup*"],
+      outDir: `${dir}`,
+    }),
+
+    isDist &&
+      terser({
+        ecma: 2020,
+        toplevel: true,
+      }),
+
+    analyzer(),
+  ];
+};
+
+const sessionConfig = {
+  input: sessionInput,
+  plugins: createPlugins(false),
+  external: ["module"],
+  output: [
+    {
+      file: `lib${path.sep}session.mjs`,
+      format: "es",
+      esModule: true,
+      interop: "esModule",
+      exports: "named",
+      sourcemap: true,
+    },
+    {
+      file: `lib${path.sep}session.js`,
+      format: "cjs",
+      esModule: false,
+      interop: "auto",
+      exports: "named",
+      sourcemap: true,
+    },
+  ],
+};
+
+const rootPlugins = isSessionOnly ? [] : createPlugins(true);
+const rootConfigs = [
   // UMD
   {
-    input,
+    input: rootInput,
     plugins: [
-      ...plugins,
+      ...rootPlugins,
       replace({
         "process.env.NODE_ENV": JSON.stringify("production"),
         preventAssignment: true,
@@ -86,8 +122,8 @@ export default [
 
   // ESM and CJS
   {
-    input,
-    plugins,
+    input: rootInput,
+    plugins: rootPlugins,
     external: ["module", "@reduxjs", "class-validator"],
     output: [
       {
@@ -108,3 +144,7 @@ export default [
     ],
   },
 ];
+
+export default isSessionOnly
+  ? [sessionConfig]
+  : [...rootConfigs, sessionConfig];

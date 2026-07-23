@@ -64,7 +64,15 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
 ## Stage 5 STATUS (2026-07-23)
 - ✅ T1 `a9712e0` (frame codec+constants), ✅ T2 `90a7191` (C reads cleartext nonce), ✅ T3-core `293ce4c`+`2776f1a` (messageChunkCrypto, per-message cache + clone-rollback, **libsodium** decrypt), ✅ **T3-wiring `39ce532` — DONE but UNVERIFIED (E2E pending)**: live send/receive swapped onto the ratchet, `MESSAGE_START` 96→62 decoupled from `DECRYPTED_LEN` (zero Merkle/OPFS ripple), box left dead, 103/0, typecheck clean.
 - **Top E2E risks to check (report: `.superpowers/sdd/task-s5t3-wiring-report.md`):** (1) responder-sends-first — `ratchetEncrypt` throws "no sending chain" until the responder receives once (graceful no-op now); (2) reconcile re-seals under the cached key with a fresh nonce (not "resend identical"); (3) WS relay drops v3 chunks (ratchet is per-data-channel-edge) → relay fallback disabled for v3.
-- **REMAINING: T4** (box full removal, spec §6, + Ed25519-secret WebCrypto wrap) → **T5** (headless-Chromium E2E = the gate that makes T3-wiring trustworthy → merge).
+- ✅ **T4-partial `98d6daa`** — removed box TS wrapper (`chacha20poly1305.ts`) + deprecated `p2party.encrypt`/`.decrypt` public API. typecheck clean, 103/0. Safe unit-verifiable slice; did NOT rebuild WASM.
+- **REMAINING (T4 rest — do in the E2E-equipped session; each needs `predist` + a real transfer to verify, so held back deliberately):**
+  1. C-source deletion: `chacha20poly1305.c/.h`, the `libcrypto.c` include, `utils.c::receive_message`.
+  2. WASM export strip in `scripts/emscripten.js` + `scripts/libcrypto.d.ts`: `_encrypt/_decrypt_chachapoly_asymmetric`, `_receive_message`, **and now-also-dead `_receive_message_with_key`** (see divergence) → then `npm run predist` to rebuild + repin SRI.
+  3. `memory.ts` `encrypt/decryptAsymmetricMemory` removal **+ REPOINT the LIVE send-path sizer** — `api/webrtc/index.ts:41 encryptionWasmMemory` is threaded via `sendMessageQuery.ts` and still sizes the send heap off the box layout; a wrong size OOMs/underallocates and the unit suite won't catch it (spec §6.3 risk R-include).
+  4. `allocators.ts::allocateSendMessage` shrink (drop the per-chunk ephemeral-Ed25519 buffers).
+  5. Ed25519-secret → WebCrypto wrap (mirror the Stage-3 X25519 store; broad — touches login/challenge signing).
+- **DIVERGENCE from spec §6:** T3-wiring went pure-TS on receive (`decryptMessageChunk` + TS Merkle), so `_receive_message_with_key` — which §6 assumed would *become* the receive path — is dead. Decide at cutover: drop it, or keep as the C-interop reference.
+- **T5** = headless-Chromium E2E vs local stack (frontend installs `file:../p2party-js/p2party-0.9.2.tgz`, a packed tarball — must rebuild+repack+reinstall the v3 branch first; `p2party.com/e2e/run.mjs` is the harness; Postgres already runs on :5432, DO NOT disturb — server may use SQLite) = the gate that makes T3-wiring + T4 trustworthy → merge to master.
 
 ## Stage 5 reference (message crypto onto the ratchet + box removal)
 **READ FIRST: `docs/stage5-message-crypto-swap-design.md`** — the precise swap design,

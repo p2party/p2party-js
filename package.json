@@ -42,6 +42,13 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.min.js"
     },
+    "./session": {
+      "types": "./lib/session.d.ts",
+      "import": "./lib/session.mjs",
+      "module": "./lib/session.mjs",
+      "require": "./lib/session.js",
+      "default": "./lib/session.mjs"
+    },
     "./package.json": "./lib/package.json"
   },
   "files": [
@@ -51,11 +58,13 @@
     "prebuild": "cross-env NODE_ENV=development node scripts/emscripten.js && node scripts/updateWasmIntegrity.mjs",
     "build:worker": "cross-env NODE_ENV=development rollup --config rollup.worker.config.ts --configPlugin typescript",
     "build:package": "cross-env NODE_ENV=development rollup --config rollup.config.ts --configPlugin typescript",
+    "build:session": "cross-env NODE_ENV=development P2PARTY_ROLLUP_TARGET=session rollup --config rollup.config.ts --configPlugin typescript",
     "build": "npm-run-all build:worker build:package",
     "postbuild": "npm pack",
     "predist": "cross-env NODE_ENV=production node scripts/emscripten.js && node scripts/updateWasmIntegrity.mjs",
     "dist:worker": "cross-env NODE_ENV=production rollup --config rollup.worker.config.ts --configPlugin typescript",
     "dist:package": "cross-env NODE_ENV=production rollup --config rollup.config.ts --configPlugin typescript",
+    "dist:session": "cross-env NODE_ENV=production P2PARTY_ROLLUP_TARGET=session rollup --config rollup.config.ts --configPlugin typescript",
     "dist:map": "rm -rf lib/*.map lib/**/*.map",
     "dist": "npm-run-all dist:worker dist:package",
     "postdist": "npm pack",

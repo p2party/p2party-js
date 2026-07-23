@@ -4,6 +4,11 @@ import pkg from "../package.json";
 import { store, dispatch } from "./store";
 
 import { newKeyPair, sign, verify } from "./cryptography/ed25519";
+import {
+  createSession,
+  generateSessionIdentity,
+  restoreSession,
+} from "./session";
 import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
 import { generateRandomRoomUrl } from "./cryptography/utils";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
@@ -844,6 +849,9 @@ export const p2party = {
   generateRandomRoomUrl: newRoomUrl,
   sign,
   verify,
+  createSession,
+  restoreSession,
+  generateSessionIdentity,
   // Industry-standard name (cf. WebCrypto `generateKey`, libsodium
   // `crypto_sign_keypair`) + consistent with `generateMnemonic` below.
   generateKeyPair: newKeyPair,
@@ -898,5 +906,19 @@ export type {
   WebSocketMessageCandidateReceive,
   WebSocketMessageError,
 };
+
+export { createSession, restoreSession, generateSessionIdentity };
+
+export type {
+  CreateSessionOptions,
+  EncryptedSessionMessage,
+  GenerateSessionIdentityOptions,
+  GeneratedSessionIdentity,
+  HandshakeTransport,
+  LocalSessionIdentity,
+  P2PartySession,
+  SessionChannelBinding,
+  SessionCryptoOptions,
+} from "./session";
 
 export default p2party;

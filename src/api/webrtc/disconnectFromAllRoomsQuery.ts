@@ -1,6 +1,6 @@
 import webrtcApi from ".";
 
-import { deleteMessage } from "../../reducers/roomSlice";
+import { deleteMessage, deletePeer } from "../../reducers/roomSlice";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -23,69 +23,34 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
   { deleteMessages, exceptionRoomIds, peerConnections, dataChannels },
   api,
 ) => {
-  const CHANNELS_LEN = dataChannels.length;
-  for (let i = 0; i < CHANNELS_LEN; i++) {
-    if (dataChannels[i]?.readyState !== "open") continue;
+  const exceptions = new Set(exceptionRoomIds ?? []);
 
-    if (exceptionRoomIds && exceptionRoomIds.length > 0) {
-      const ROOM_IDS_LEN = dataChannels[i].roomIds.length;
-      const indexesToSplice: number[] = [];
-      for (let roomIndex = 0; roomIndex < ROOM_IDS_LEN; roomIndex++) {
-        if (!exceptionRoomIds.includes(dataChannels[i].roomIds[roomIndex]))
-          indexesToSplice.push(roomIndex);
-      }
+  for (let i = dataChannels.length - 1; i >= 0; i--) {
+    const channel = dataChannels[i];
+    if (channel.roomIds.some((roomId) => exceptions.has(roomId))) continue;
 
-      const INDEXES_TO_SPLICE_LEN = indexesToSplice.length;
-      for (
-        let spliceIndex = 0;
-        spliceIndex < INDEXES_TO_SPLICE_LEN;
-        spliceIndex++
-      ) {
-        dataChannels[i].roomIds.splice(indexesToSplice[spliceIndex], 1);
-      }
-
-      if (dataChannels[i].roomIds.length === 0) dataChannels[i].close();
-    } else {
-      dataChannels[i].close();
-    }
+    channel.releaseProtocolResources?.();
+    channel.onopen = null;
+    channel.onclose = null;
+    channel.onerror = null;
+    channel.onclosing = null;
+    channel.onmessage = null;
+    channel.onbufferedamountlow = null;
+    if (channel.readyState !== "closed") channel.close();
+    dataChannels.splice(i, 1);
   }
 
-  const PEERS_LEN = peerConnections.length;
-  for (let i = 0; i < PEERS_LEN; i++) {
-    if (peerConnections[i]?.connectionState !== "connected") continue;
-
-    if (exceptionRoomIds && exceptionRoomIds.length > 0) {
-      const PEER_ROOMS_LEN = peerConnections[i].rooms.length;
-      const indexesToSplice: number[] = [];
-      for (let roomIndex = 0; roomIndex < PEER_ROOMS_LEN; roomIndex++) {
-        if (
-          !exceptionRoomIds.includes(peerConnections[i].rooms[roomIndex].roomId)
-        )
-          indexesToSplice.push(roomIndex);
-      }
-
-      const INDEXES_TO_SPLICE_LEN = indexesToSplice.length;
-      for (
-        let spliceIndex = 0;
-        spliceIndex < INDEXES_TO_SPLICE_LEN;
-        spliceIndex++
-      ) {
-        peerConnections[i].rooms.splice(indexesToSplice[spliceIndex], 1);
-      }
-
-      if (peerConnections[i].rooms.length === 0)
-        await api.dispatch(
-          webrtcApi.endpoints.disconnectFromPeer.initiate({
-            peerId: peerConnections[i].withPeerId,
-          }),
-        );
-    } else {
-      await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          peerId: peerConnections[i].withPeerId,
-        }),
-      );
-    }
+  const targets = peerConnections
+    .filter((connection) => !exceptions.has(connection.roomId))
+    .map((connection) => ({
+      roomId: connection.roomId,
+      peerId: connection.withPeerId,
+    }));
+  for (const target of targets) {
+    await api.dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate(target),
+    );
+    api.dispatch(deletePeer(target));
   }
 
   if (deleteMessages) {
@@ -99,6 +64,7 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
       for (let messageIndex = 0; messageIndex < messagesLen; messageIndex++) {
         api.dispatch(
           deleteMessage({
+            roomId: rooms[i].id,
             merkleRootHex: rooms[i].messages[messageIndex].merkleRootHex,
           }),
         );

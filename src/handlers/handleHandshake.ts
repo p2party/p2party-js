@@ -1,13 +1,28 @@
-import { serializeRatchet } from "../cryptography/ratchet";
-import { setRatchetSession, getIdentityX25519 } from "../db/api";
+import { wipeRatchet } from "../cryptography/ratchet";
+import { getIdentityX25519 } from "../db/api";
 import { store } from "../store";
-import { openRatchetGate, rejectRatchetGate } from "./ratchetGate";
+import {
+  isCurrentRatchetGateLease,
+  openRatchetGate,
+  rejectRatchetGate,
+} from "./ratchetGate";
+import {
+  claimRatchetPersistence,
+  persistAndActivateClaimedRatchetState,
+} from "./ratchetPersist";
 import { FRAME_TYPE_HANDSHAKE } from "../utils/constants";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
-import { performHandshakeCore, type HandshakeTransport } from "./handshakeCore";
+import { isIdentityInitiator } from "../utils/identityRole";
+import {
+  isHandshakePayloadForStep,
+  performHandshakeCore,
+  type HandshakeStep,
+  type HandshakeTransport,
+} from "./handshakeCore";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { RatchetSession } from "../db/types";
+import type { RatchetState } from "../cryptography/ratchet";
+import type { RatchetGateLease } from "./ratchetGate";
 import type {
   IRTCPeerConnection,
   IRTCDataChannel,
@@ -120,35 +135,106 @@ export const verifyDtlsFingerprints = async (
 // FRAME_TYPE_HANDSHAKE payloads here (tag stripped); runHandshake's
 // transport.recv() awaits them, buffering any that arrive before a recv.
 interface Inbox {
+  lease: HandshakeLease;
   channel: IRTCDataChannel | { send: (b: ArrayBuffer | Uint8Array) => void };
   queue: Uint8Array[];
-  waiters: ((v: Uint8Array) => void)[];
+  nextStep: HandshakeStep | null;
+  waiters: Array<{
+    resolve: (value: Uint8Array) => void;
+    reject: (error: Error) => void;
+  }>;
 }
+
+/** Opaque owner of one concrete main-channel handshake attempt. */
+export interface HandshakeLease {
+  readonly token: symbol;
+}
+
 const inboxes = new Map<string, Inbox>();
+const HANDSHAKE_STEP_TIMEOUT_MS = 30_000;
+
+const inboxKey = (roomId: string, peerId: string): string =>
+  `${roomId}\u0000${peerId}`;
 
 export const setHandshakeChannel = (
+  roomId: string,
   peerId: string,
   channel: IRTCDataChannel | { send: (b: ArrayBuffer | Uint8Array) => void },
-): void => {
-  inboxes.set(peerId, { channel, queue: [], waiters: [] });
+): HandshakeLease => {
+  const key = inboxKey(roomId, peerId);
+  const previous = inboxes.get(key);
+  if (previous) {
+    const error = new Error("Handshake channel replaced");
+    for (const waiter of previous.waiters) waiter.reject(error);
+  }
+  const lease: HandshakeLease = { token: Symbol("handshake-inbox") };
+  inboxes.set(key, {
+    lease,
+    channel,
+    queue: [],
+    nextStep: 1,
+    waiters: [],
+  });
+  return lease;
+};
+
+export const clearHandshakeChannel = (
+  roomId: string,
+  peerId: string,
+  reason = new Error("Handshake channel closed"),
+  lease?: HandshakeLease,
+): boolean => {
+  const key = inboxKey(roomId, peerId);
+  const inbox = inboxes.get(key);
+  if (!inbox || (lease && inbox.lease !== lease)) return false;
+  inboxes.delete(key);
+  for (const waiter of inbox.waiters) waiter.reject(reason);
+  return true;
 };
 
 export const deliverHandshakeFrame = (
+  roomId: string,
   peerId: string,
   payload: Uint8Array,
-): void => {
-  const inbox = inboxes.get(peerId);
-  if (!inbox) return;
+  lease: HandshakeLease,
+): boolean => {
+  const inbox = inboxes.get(inboxKey(roomId, peerId));
+  if (!inbox || inbox.lease !== lease) return false;
+  if (
+    inbox.nextStep === null ||
+    !isHandshakePayloadForStep(payload, inbox.nextStep)
+  ) {
+    clearHandshakeChannel(
+      roomId,
+      peerId,
+      new Error("Malformed, surplus, or out-of-order handshake frame"),
+      lease,
+    );
+    return false;
+  }
+  inbox.nextStep = inbox.nextStep === 1 ? 2 : null;
   const next = inbox.waiters.shift();
-  if (next) next(payload);
+  if (next) next.resolve(payload);
   else inbox.queue.push(payload);
+  return true;
 };
 
-const transportForPeer = (peerId: string): HandshakeTransport => {
-  const inbox = inboxes.get(peerId);
-  if (!inbox) throw new Error(`No handshake channel registered for ${peerId}`);
+const transportForPeer = (
+  roomId: string,
+  peerId: string,
+  lease: HandshakeLease,
+): HandshakeTransport => {
+  const key = inboxKey(roomId, peerId);
+  const inbox = inboxes.get(key);
+  if (!inbox || inbox.lease !== lease)
+    throw new Error(`No owned handshake channel registered for ${peerId}`);
+  const assertOwnership = (): void => {
+    if (inboxes.get(key) !== inbox || inbox.lease !== lease)
+      throw new Error("Handshake channel lease is stale");
+  };
   return {
     send: (bytes: Uint8Array): void => {
+      assertOwnership();
       // Prefix the FRAME_TYPE_HANDSHAKE tag on the wire; the peer's onmessage
       // strips it before deliverHandshakeFrame.
       const framed = new Uint8Array(1 + bytes.length);
@@ -159,10 +245,33 @@ const transportForPeer = (peerId: string): HandshakeTransport => {
       // the channel union's send() signature.
       inbox.channel.send(framed.buffer as ArrayBuffer);
     },
-    recv: (): Promise<Uint8Array> =>
-      inbox.queue.length > 0
-        ? Promise.resolve(inbox.queue.shift()!)
-        : new Promise((res) => inbox.waiters.push(res)),
+    recv: (): Promise<Uint8Array> => {
+      try {
+        assertOwnership();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (inbox.queue.length > 0) return Promise.resolve(inbox.queue.shift()!);
+      return new Promise((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const waiter = {
+          resolve: (value: Uint8Array): void => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          reject: (error: Error): void => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        };
+        timer = setTimeout(() => {
+          const index = inbox.waiters.indexOf(waiter);
+          if (index > -1) inbox.waiters.splice(index, 1);
+          reject(new Error("Handshake step timed out"));
+        }, HANDSHAKE_STEP_TIMEOUT_MS);
+        inbox.waiters.push(waiter);
+      });
+    },
   };
 };
 
@@ -171,21 +280,26 @@ const transportForPeer = (peerId: string): HandshakeTransport => {
  * the DTLS fingerprints (getStats vs SDP), runs the two-round core, then — ONLY
  * on success — seeds + persists the (wrapped) ratchet, sets epc.ratchetState /
  * epc.session, and opens the per-peer gate. Any failure (fingerprint mismatch,
- * CPace/X3DH error, key-confirmation mismatch, a bad/short frame, a transport or
+ * CPace/interactive-3DH error, key-confirmation mismatch, a bad/short frame,
+ * a transport or
  * persistence error) rejects the gate and re-throws, having persisted NOTHING —
  * the caller tears the channel down.
  */
 export const runHandshake = async (
   epc: IRTCPeerConnection,
+  roomId: string,
   mode: "pin" | "nopin",
   pin: Uint8Array | null,
   channelInput: Uint8Array,
   module: LibCrypto,
+  handshakeLease: HandshakeLease,
+  gateLease: RatchetGateLease,
 ): Promise<void> => {
   // Hoisted so the finally wipes them on EVERY exit (success or throw), not just
   // the success path — idSelfSec is the long-term X25519 identity secret.
   let idSelfSec: Uint8Array | null = null;
   let secret: Uint8Array | null = null;
+  let state: RatchetState | null = null;
   try {
     await verifyDtlsFingerprints(epc);
 
@@ -194,7 +308,10 @@ export const runHandshake = async (
     // secret + pub + cross-sig from IndexedDB, and pin the peer's Ed25519 pub as
     // the anchor the in-band peer X25519 pub must be cross-signed by.
     const { publicKey } = store.getState().keyPair;
-    const amInitiator = publicKey < epc.withPeerPublicKey;
+    const amInitiator = isIdentityInitiator(
+      publicKey,
+      epc.withPeerPublicKey,
+    );
     const identity = await getIdentityX25519();
     if (!identity) throw new Error("X25519 identity not provisioned");
     idSelfSec = new Uint8Array(identity.secret);
@@ -202,8 +319,12 @@ export const runHandshake = async (
     const selfIdentityCrossSignature = new Uint8Array(identity.crossSig);
     const peerIdentityEd25519Pub = hexToUint8Array(epc.withPeerPublicKey);
 
-    const transport = transportForPeer(epc.withPeerId);
-    const { state, secret: coreSecret } = await performHandshakeCore(
+    const transport = transportForPeer(
+      roomId,
+      epc.withPeerId,
+      handshakeLease,
+    );
+    const result = await performHandshakeCore(
       transport,
       {
         mode,
@@ -217,44 +338,47 @@ export const runHandshake = async (
       },
       module,
     );
-    secret = coreSecret;
+    state = result.state;
+    secret = result.secret;
 
-    // Build the session from the PLAINTEXT serializeRatchet output: the worker's
-    // fnSetRatchetSession wraps the secret fields exactly once.
-    const inbox = inboxes.get(epc.withPeerId);
-    const roomId =
-      (inbox?.channel as IRTCDataChannel).roomIds?.[0] ??
-      epc.rooms[0]?.roomId ??
-      "";
-    const s = serializeRatchet(state);
-    const session: RatchetSession = {
+    if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
+      throw new Error("Handshake transport lease is stale");
+
+    // Invalidate queued mutations from any replaced PC before writing this new
+    // handshake seed. The stable-edge persistence lock makes this seed land
+    // after any old write already in flight.
+    claimRatchetPersistence(epc, roomId);
+    await persistAndActivateClaimedRatchetState(
+      epc,
+      state,
       roomId,
-      peerPublicKey: epc.withPeerPublicKey,
-      peerId: epc.withPeerId,
-      rootKey: s.rootKey,
-      sendingChainKey: s.sendingChainKey,
-      receivingChainKey: s.receivingChainKey,
-      dhSelfPub: s.dhSelfPub,
-      dhSelfSec: s.dhSelfSec,
-      dhRemotePub: s.dhRemotePub,
-      Ns: s.Ns,
-      Nr: s.Nr,
-      PN: s.PN,
-      skippedMessageKeys: [],
-      updatedAt: Date.now(),
-    };
-    await setRatchetSession(session);
+      () => {
+        if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
+          throw new Error(
+            "Handshake transport lease was replaced during persistence",
+          );
+        if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
+          throw new Error("Handshake transport gate is already settled");
 
-    epc.ratchetState = state;
-    epc.session = session;
-    openRatchetGate(epc.withPeerId);
+        if (epc.ratchetState) wipeRatchet(epc.ratchetState);
+        epc.ratchetState = state!;
+        state = null; // ownership transferred to the live connection
+      },
+    );
   } catch (err) {
-    rejectRatchetGate(epc.withPeerId, err);
+    rejectRatchetGate(roomId, epc.withPeerId, err, gateLease);
     throw err;
   } finally {
     // Wipe the loose root-secret copy and unwrapped long-term X25519 identity
     // secret on every exit.
     secret?.fill(0);
     idSelfSec?.fill(0);
+    if (state) wipeRatchet(state);
+    clearHandshakeChannel(
+      roomId,
+      epc.withPeerId,
+      new Error("Handshake attempt finished"),
+      handshakeLease,
+    );
   }
 };

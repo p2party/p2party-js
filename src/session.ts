@@ -1,7 +1,7 @@
 import libcrypto from "./cryptography/libcrypto";
 import { wasmLoader } from "./cryptography/wasmLoader";
 import { newKeyPair } from "./cryptography/ed25519";
-import { newX25519KeyPair } from "./cryptography/x25519";
+import { newX25519KeyPair, x25519Dh } from "./cryptography/x25519";
 import {
   crossSignIdentityX25519,
   verifyIdentityCrossSig,
@@ -50,7 +50,10 @@ import type {
   RatchetState,
 } from "./cryptography/ratchet";
 
-const SESSION_SNAPSHOT_VERSION = 1;
+// Format version 3 has a dedicated suite-provenance byte. Suite tag 3
+// invalidates pre-draft-21 CPace roots and names interactive 3DH accurately.
+const SESSION_SNAPSHOT_VERSION = 3;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3 = 3;
 const SESSION_MAGIC = new Uint8Array([
   0x50, 0x32, 0x50, 0x53, 0x45, 0x53, 0x53, 0x00,
 ]); // "P2PSESS\0"
@@ -63,7 +66,7 @@ const SNAPSHOT_KNOWN_FLAGS =
   SNAPSHOT_FLAG_REMOTE_DH;
 const SNAPSHOT_FIXED_PREFIX_LEN =
   SESSION_MAGIC.length +
-  4 + // snapshot version, protocol version, flags, reserved
+  4 + // snapshot version, protocol version, flags, root suite
   3 * 8 + // Ns, Nr, PN
   32 + // root key
   32 + // self DH public key
@@ -78,7 +81,7 @@ export type { HandshakeTransport };
 export interface LocalSessionIdentity {
   ed25519PublicKey: Uint8Array;
   x25519PublicKey: Uint8Array;
-  /** The 32-byte X25519 identity secret used by X3DH; never an Ed25519 key. */
+  /** The X25519 identity secret used by interactive 3DH; never Ed25519. */
   x25519SecretKey: Uint8Array;
   x25519CrossSignature: Uint8Array;
 }
@@ -102,8 +105,7 @@ export interface SessionCryptoOptions {
 }
 
 export type SessionAuth =
-  | { mode: "nopin"; pin?: never }
-  | { mode: "pin"; pin: Uint8Array };
+  { mode: "nopin"; pin?: never } | { mode: "pin"; pin: Uint8Array };
 
 export type CreateSessionOptions = {
   transport: HandshakeTransport;
@@ -125,7 +127,7 @@ export interface EncryptedSessionMessage {
 
 export interface P2PartySession {
   readonly protocolVersion: 3;
-  /** False for a fresh responder until it authenticates the initiator's first message. */
+  /** True for either role after a successful handshake; false after destroy. */
   readonly canEncrypt: boolean;
   encrypt(plaintext: Uint8Array): Promise<EncryptedSessionMessage>;
   decrypt(message: EncryptedSessionMessage): Promise<Uint8Array>;
@@ -225,6 +227,37 @@ const validateLocalIdentity = (identity: LocalSessionIdentity): void => {
     "identity.x25519CrossSignature",
     crypto_sign_ed25519_BYTES,
   );
+};
+
+const validateLocalIdentityCryptographically = async (
+  identity: LocalSessionIdentity,
+  module: LibCrypto,
+): Promise<void> => {
+  // RFC 7748 X25519 base point (u = 9): scalar-multiplying it derives the
+  // public key corresponding to the supplied secret.
+  const basePoint = new Uint8Array(crypto_scalarmult_curve25519_BYTES);
+  basePoint[0] = 9;
+  const derivedPublic = x25519Dh(
+    identity.x25519SecretKey,
+    basePoint,
+    module,
+  );
+  try {
+    if (!bytesEqual(derivedPublic, identity.x25519PublicKey))
+      throw new Error("identity X25519 public and secret keys do not match");
+  } finally {
+    derivedPublic.fill(0);
+  }
+
+  if (
+    !(await verifyIdentityCrossSig(
+      identity.x25519PublicKey,
+      identity.x25519CrossSignature,
+      identity.ed25519PublicKey,
+      module,
+    ))
+  )
+    throw new Error("identity X25519 cross-signature is invalid");
 };
 
 export const generateSessionIdentity = async (
@@ -645,7 +678,7 @@ const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
     output[offset++] = SESSION_SNAPSHOT_VERSION;
     output[offset++] = PROTOCOL_VERSION;
     output[offset++] = flags;
-    output[offset++] = 0;
+    output[offset++] = SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3;
     offset = writeU64(view, offset, serialized.Ns);
     offset = writeU64(view, offset, serialized.Nr);
     offset = writeU64(view, offset, serialized.PN);
@@ -699,6 +732,8 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
   requireBytes(snapshot, "snapshot");
   const bytes = copyBytes(snapshot);
   let offset = 0;
+  let ownershipTransferred = false;
+  const ownedSecretCopies: Uint8Array[] = [];
   const take = (length: number): Uint8Array => {
     if (
       !Number.isSafeInteger(length) ||
@@ -706,9 +741,17 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
       offset + length > bytes.length
     )
       throw new Error("snapshot: truncated input");
-    const value = bytes.slice(offset, offset + length);
+    // A view avoids the old take().slice() temporary. The aggregate `bytes`
+    // buffer is wiped in finally; fields that must outlive parsing get exactly
+    // one owned copy below.
+    const value = bytes.subarray(offset, offset + length);
     offset += length;
     return value;
+  };
+  const takeBuffer = (length: number, secret = false): ArrayBuffer => {
+    const buffer = take(length).slice().buffer;
+    if (secret) ownedSecretCopies.push(new Uint8Array(buffer));
+    return buffer;
   };
   const readU64 = (): number => {
     if (offset + 8 > bytes.length)
@@ -734,21 +777,21 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
     const flags = take(1)[0];
     if ((flags & ~SNAPSHOT_KNOWN_FLAGS) !== 0)
       throw new Error("snapshot: unknown flags");
-    if (take(1)[0] !== 0)
-      throw new Error("snapshot: reserved byte must be zero");
+    if (take(1)[0] !== SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3)
+      throw new Error("snapshot: unsupported root suite");
 
     const Ns = readU64();
     const Nr = readU64();
     const PN = readU64();
-    const rootKey = exactArrayBuffer(take(32));
+    const rootKey = takeBuffer(32, true);
     const sendingChainKey =
-      flags & SNAPSHOT_FLAG_SENDING_CHAIN ? exactArrayBuffer(take(32)) : null;
+      flags & SNAPSHOT_FLAG_SENDING_CHAIN ? takeBuffer(32, true) : null;
     const receivingChainKey =
-      flags & SNAPSHOT_FLAG_RECEIVING_CHAIN ? exactArrayBuffer(take(32)) : null;
-    const dhSelfPub = exactArrayBuffer(take(32));
-    const dhSelfSec = exactArrayBuffer(take(32));
+      flags & SNAPSHOT_FLAG_RECEIVING_CHAIN ? takeBuffer(32, true) : null;
+    const dhSelfPub = takeBuffer(32);
+    const dhSelfSec = takeBuffer(32, true);
     const dhRemotePub =
-      flags & SNAPSHOT_FLAG_REMOTE_DH ? exactArrayBuffer(take(32)) : null;
+      flags & SNAPSHOT_FLAG_REMOTE_DH ? takeBuffer(32) : null;
     if ((sendingChainKey || receivingChainKey) && dhRemotePub === null)
       throw new Error("snapshot: chain state requires a remote DH key");
     if (offset + 2 > bytes.length)
@@ -778,14 +821,18 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
         throw new Error("snapshot: duplicate skipped message key");
       seen.add(key);
       skippedMessageKeys.push({
-        dhPub: exactArrayBuffer(dhPubBytes),
+        dhPub: dhPubBytes.slice().buffer,
         n,
-        messageKey: exactArrayBuffer(messageKeyBytes),
+        messageKey: (() => {
+          const buffer = messageKeyBytes.slice().buffer;
+          ownedSecretCopies.push(new Uint8Array(buffer));
+          return buffer;
+        })(),
       });
     }
     if (offset !== bytes.length) throw new Error("snapshot: trailing bytes");
 
-    return deserializeRatchet({
+    const state = deserializeRatchet({
       rootKey,
       sendingChainKey,
       receivingChainKey,
@@ -797,8 +844,12 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
       PN,
       skippedMessageKeys,
     });
+    ownershipTransferred = true;
+    return state;
   } finally {
     bytes.fill(0);
+    if (!ownershipTransferred)
+      for (const secret of ownedSecretCopies) secret.fill(0);
   }
 };
 
@@ -870,6 +921,15 @@ export const createSession = async (
   let state: RatchetState | null = null;
   try {
     module = await loadSessionCrypto(options.crypto);
+    await validateLocalIdentityCryptographically(
+      {
+        ed25519PublicKey: identityEd25519Public,
+        x25519PublicKey: identityX25519Public,
+        x25519SecretKey: identitySecret,
+        x25519CrossSignature: identityCrossSignature,
+      },
+      module,
+    );
     const initiator = options.role === "initiator";
     const channelInput = buildChannelInput({
       channelId,

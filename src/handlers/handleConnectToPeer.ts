@@ -4,11 +4,23 @@ import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
+import {
+  findRoomIdentityAliases,
+  findRoomPeerConnection,
+} from "../api/webrtc/roomPeer";
+import {
+  getRoomIdentityMutex,
+  releaseRoomIdentityMutex,
+} from "../api/webrtc/negotiationLock";
 
 import { defaultRTCConfig, setPeer } from "../reducers/roomSlice";
 
 import cryptoMemory from "../cryptography/memory";
 import { wasmLoader } from "../cryptography/wasmLoader";
+import { resetRatchetGate } from "./ratchetGate";
+import { claimRatchetPersistence } from "./ratchetPersist";
+import { assertCanonicalEd25519Identity } from "../utils/identityRole";
+import { PROTOCOL_VERSION } from "../utils/constants";
 // import libcrypto from "../cryptography/libcrypto";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -41,60 +53,102 @@ export const handleConnectToPeer = async (
   rtcConfig ??= defaultRTCConfig;
 
   if (!isUUID(peerId)) throw new Error("PeerId is not a valid uuidv4");
-  if (peerPublicKey.length !== 64)
-    throw new Error("Peer public key is not a valid length");
+  assertCanonicalEd25519Identity(keyPair.publicKey, "Self Ed25519 identity");
+  assertCanonicalEd25519Identity(peerPublicKey, "Peer Ed25519 identity");
+  if (peerPublicKey === keyPair.publicKey)
+    throw new Error("Cannot connect to the same Ed25519 identity");
 
-  const peerIndex = peerConnections.findIndex((p) => p.withPeerId === peerId);
-  if (peerIndex > -1) {
-    const roomIndex = peerConnections[peerIndex].rooms.findIndex(
-      (r) => r.roomId === roomId,
-    );
-
-    if (roomIndex === -1) {
-      const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-      const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
-      // const receiveMessageModule = await libcrypto({
-      //   wasmMemory: receiveMessageWasmMemory,
-      // });
-
-      peerConnections[peerIndex].rooms.push({
+  const identityMutex = getRoomIdentityMutex(roomId, peerPublicKey);
+  await identityMutex.acquire();
+  try {
+  // The signaling peerId may rotate, but a room may have only one live
+  // transport for a stable Ed25519 identity. Tear down aliases before claiming
+  // the edge's durable ratchet owner.
+  const aliases = findRoomIdentityAliases(
+    peerConnections,
+    roomId,
+    peerId,
+    peerPublicKey,
+  );
+  for (const alias of aliases) {
+    await api.dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate({
         roomId,
-        receiveMessageModule,
-      });
-    }
-
-    return peerConnections[peerIndex];
+        peerId: alias.withPeerId,
+      }),
+    );
   }
+
+  let existing = findRoomPeerConnection(peerConnections, roomId, peerId);
+  if (existing && existing.withPeerPublicKey !== peerPublicKey) {
+    await api.dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate({ roomId, peerId }),
+    );
+    existing = undefined;
+  }
+  if (existing) {
+    await existing.initialization;
+    return existing;
+  }
+
+  // A reconnect is a new cryptographic transport and must never inherit the
+  // previous connection's resolved/rejected handshake promise.
+  const ratchetGateLease = resetRatchetGate(
+    roomId,
+    peerId,
+    new Error("Ratchet transport replaced by a new room/peer connection"),
+  );
 
   const pc = new RTCPeerConnection(rtcConfig);
   const epc = pc as IRTCPeerConnection;
+  epc.roomId = roomId;
   epc.withPeerId = peerId;
   epc.withPeerPublicKey = peerPublicKey;
   epc.makingOffer = false;
   epc.ignoreOffer = false;
   epc.iceCandidates = [] as RTCIceCandidateInit[];
+  epc.ratchetGateLease = ratchetGateLease;
+  // Claim the durable stable-identity edge before any await. This invalidates a
+  // replaced connection's queued handshake/send writes immediately, rather
+  // than waiting until the new main-channel handshake succeeds.
+  claimRatchetPersistence(epc, roomId);
+  // Reserve the transport synchronously before the first await. Two signaling
+  // aliases for one stable identity therefore cannot both observe an empty
+  // registry and become live ratchet owners.
+  peerConnections.push(epc);
 
-  if (signalingServer.isConnected) {
-    await api.dispatch(
-      signalingServerApi.endpoints.connectWithPeer.initiate({
-        roomId,
-        peerId,
-        peerPublicKey,
-      }),
-    );
+  const assertStillReserved = (): void => {
+    if (!peerConnections.includes(epc))
+      throw new Error("WebRTC transport was replaced during initialization");
+  };
+  const initialization = (async (): Promise<void> => {
+    const receiveMessageWasmMemory = cryptoMemory.protocolV3Memory();
+    const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
+    assertStillReserved();
+    epc.receiveMessageModule = receiveMessageModule;
+
+    if (signalingServer.isConnected) {
+      await api.dispatch(
+        signalingServerApi.endpoints.connectWithPeer.initiate({
+          roomId,
+          peerId,
+          peerPublicKey,
+        }),
+      );
+      assertStillReserved();
+    }
+  })();
+  epc.initialization = initialization;
+  try {
+    await initialization;
+  } catch (error) {
+    const index = peerConnections.indexOf(epc);
+    if (index > -1) peerConnections.splice(index, 1);
+    if (epc.connectionState !== "closed") epc.close();
+    throw error;
+  } finally {
+    epc.initialization = undefined;
   }
-
-  const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-  const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
-  // const receiveMessageModule = await libcrypto({
-  //   wasmMemory: receiveMessageWasmMemory,
-  // });
-  epc.rooms = [
-    {
-      roomId,
-      receiveMessageModule,
-    },
-  ];
 
   epc.onnegotiationneeded = async () => {
     // Don't start a new negotiation if we're already making an offer or not in stable state
@@ -119,6 +173,7 @@ export const handleConnectToPeer = async (
               fromPeerPublicKey: keyPair.publicKey,
               toPeerId: peerId,
               roomId,
+              protocolVersion: PROTOCOL_VERSION,
             } as WebSocketMessageDescriptionSend,
           }),
         );
@@ -144,6 +199,7 @@ export const handleConnectToPeer = async (
             fromPeerId: keyPair.peerId,
             toPeerId: peerId,
             roomId,
+            protocolVersion: PROTOCOL_VERSION,
           } as WebSocketMessageCandidateSend,
         }),
       );
@@ -212,10 +268,12 @@ export const handleConnectToPeer = async (
         if (epc.connectionState !== "disconnected") return;
 
         void api.dispatch(
-          webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
+          webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
         );
 
-        console.error(`RTC Connection with peer ${peerId} has disconnected.`);
+        console.error(
+          `RTC Connection with peer ${peerId} in room ${roomId} has disconnected.`,
+        );
       }, 8000);
     } else if (
       epc.connectionState === "closed" ||
@@ -227,11 +285,11 @@ export const handleConnectToPeer = async (
       }
 
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
       );
 
       console.error(
-        `RTC Connection with peer ${peerId} has ${epc.connectionState}.`,
+        `RTC Connection with peer ${peerId} in room ${roomId} has ${epc.connectionState}.`,
       );
 
       if (epc.connectionState === "closed") {
@@ -243,6 +301,7 @@ export const handleConnectToPeer = async (
                 type: "peers",
                 fromPeerId: keyPair.peerId,
                 roomId,
+                protocolVersion: PROTOCOL_VERSION,
               },
             }),
           );
@@ -279,5 +338,9 @@ export const handleConnectToPeer = async (
     }
   };
 
-  return epc;
+    return epc;
+  } finally {
+    identityMutex.release();
+    releaseRoomIdentityMutex(roomId, peerPublicKey);
+  }
 };

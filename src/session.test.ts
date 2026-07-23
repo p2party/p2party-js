@@ -128,30 +128,33 @@ const expectBytes = (actual: Uint8Array, expected: Uint8Array): void => {
 };
 
 describe("public store-free session API", () => {
-  test("no-PIN handshake + multi-chunk bidirectional round trip", async () => {
+  test("no-PIN handshake + simultaneous first outbound round trip", async () => {
     const { alice, bob } = await createPair();
     expect(alice.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(alice.canEncrypt).toBe(true);
-    expect(bob.canEncrypt).toBe(false);
-    const responderBefore = await bob.serialize();
-    await expect(bob.encrypt(new Uint8Array([9]))).rejects.toThrow(
-      "no sending chain",
-    );
-    expectBytes(await bob.serialize(), responderBefore);
+    expect(bob.canEncrypt).toBe(true);
 
     const outbound = patternedBytes(CHUNK_LEN + 137, 7);
-    const encrypted = await alice.encrypt(outbound);
+    const reply = patternedBytes(777, 19);
+    // Both message-0 envelopes are produced before either session processes an
+    // inbound frame, exercising the fresh responder's handshake-primed chain.
+    const [encrypted, encryptedReply] = await Promise.all([
+      alice.encrypt(outbound),
+      bob.encrypt(reply),
+    ]);
     expect(encrypted.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(encrypted.root.length).toBe(64);
     expect(encrypted.frames).toHaveLength(2);
     expect(
       encrypted.frames.every((f) => f.length === WIRE_CHUNK_FRAME_LEN),
     ).toBe(true);
-    expectBytes(await bob.decrypt(encrypted), outbound);
-    expect(bob.canEncrypt).toBe(true);
 
-    const reply = patternedBytes(777, 19);
-    expectBytes(await alice.decrypt(await bob.encrypt(reply)), reply);
+    const [receivedByBob, receivedByAlice] = await Promise.all([
+      bob.decrypt(encrypted),
+      alice.decrypt(encryptedReply),
+    ]);
+    expectBytes(receivedByBob, outbound);
+    expectBytes(receivedByAlice, reply);
     await Promise.all([alice.destroy(), bob.destroy()]);
   });
 
@@ -248,6 +251,40 @@ describe("public store-free session API", () => {
     await Promise.all([alice.destroy(), bob.destroy()]);
   });
 
+  test("snapshots require explicit ML-KEM-768 root-suite provenance", async () => {
+    const { alice, bob } = await createPair();
+    const snapshot = await alice.serialize();
+
+    // "P2PSESS\0" occupies bytes 0..7; format v3 and root-suite byte 3 reject
+    // pre-draft-21 CPace / pre-interactive-3DH roots.
+    expect(snapshot[8]).toBe(3);
+    expect(snapshot[11]).toBe(3);
+
+    const preHybrid = Uint8Array.from(snapshot);
+    preHybrid[8] = 2;
+    await expect(restoreSession(preHybrid, cryptoOptions)).rejects.toThrow(
+      "unsupported snapshot version",
+    );
+
+    const untagged = Uint8Array.from(snapshot);
+    untagged[11] = 0;
+    await expect(restoreSession(untagged, cryptoOptions)).rejects.toThrow(
+      "unsupported root suite",
+    );
+
+    const preIdentityPossession = Uint8Array.from(snapshot);
+    preIdentityPossession[11] = 1;
+    await expect(
+      restoreSession(preIdentityPossession, cryptoOptions),
+    ).rejects.toThrow("unsupported root suite");
+
+    snapshot.fill(0);
+    preHybrid.fill(0);
+    untagged.fill(0);
+    preIdentityPossession.fill(0);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
   test("serialize waits for an in-flight encrypt before snapshotting the ratchet", async () => {
     const original = await createPair();
     const firstPlaintext = patternedBytes(CHUNK_LEN + 17, 61);
@@ -267,9 +304,7 @@ describe("public store-free session API", () => {
 
     const secondPlaintext = patternedBytes(511, 62);
     expectBytes(
-      await original.bob.decrypt(
-        await restoredAlice.encrypt(secondPlaintext),
-      ),
+      await original.bob.decrypt(await restoredAlice.encrypt(secondPlaintext)),
       secondPlaintext,
     );
     snapshot.fill(0);
@@ -429,5 +464,83 @@ describe("public store-free session API", () => {
       "destroyed",
     );
     await bob.destroy();
+  });
+
+  test("rejects imported identities whose X25519 keypair or cross-signature is inconsistent", async () => {
+    const identity = await generateSessionIdentity(cryptoOptions);
+    const base = {
+      role: "initiator" as const,
+      peerIdentityEd25519PublicKey: identity.ed25519PublicKey,
+      transport: {
+        send: () => undefined,
+        recv: () => Promise.resolve(new Uint8Array()),
+      },
+      channel: {
+        channelId: new Uint8Array([1]),
+        localFingerprint: new Uint8Array(32),
+        remoteFingerprint: new Uint8Array(32),
+      },
+      mode: "nopin" as const,
+      crypto: cryptoOptions,
+    };
+
+    try {
+      const wrongPublic = Uint8Array.from(identity.x25519PublicKey);
+      wrongPublic[0] ^= 0x80;
+      await expect(
+        createSession({
+          ...base,
+          identity: { ...identity, x25519PublicKey: wrongPublic },
+        }),
+      ).rejects.toThrow("public and secret keys do not match");
+
+      const wrongSignature = Uint8Array.from(identity.x25519CrossSignature);
+      wrongSignature[0] ^= 0x80;
+      await expect(
+        createSession({
+          ...base,
+          identity: {
+            ...identity,
+            x25519CrossSignature: wrongSignature,
+          },
+        }),
+      ).rejects.toThrow("cross-signature is invalid");
+    } finally {
+      wipeIdentity(identity);
+    }
+  });
+
+  test("awaits and propagates an asynchronous transport send failure", async () => {
+    const identity = await generateSessionIdentity(cryptoOptions);
+    let recvCalled = false;
+    try {
+      await expect(
+        createSession({
+          role: "initiator",
+          identity,
+          peerIdentityEd25519PublicKey: identity.ed25519PublicKey,
+          transport: {
+            send: async () => {
+              await Promise.resolve();
+              throw new Error("async transport write failed");
+            },
+            recv: () => {
+              recvCalled = true;
+              return Promise.resolve(new Uint8Array());
+            },
+          },
+          channel: {
+            channelId: new Uint8Array([1]),
+            localFingerprint: new Uint8Array(32),
+            remoteFingerprint: new Uint8Array(32),
+          },
+          mode: "nopin",
+          crypto: cryptoOptions,
+        }),
+      ).rejects.toThrow("async transport write failed");
+      expect(recvCalled).toBe(false);
+    } finally {
+      wipeIdentity(identity);
+    }
   });
 });

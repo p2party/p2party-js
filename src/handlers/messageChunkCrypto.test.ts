@@ -1,11 +1,24 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadTestModule } from "../cryptography/testModule";
-import { initRatchet, ratchetEncrypt } from "../cryptography/ratchet";
+import {
+  cloneRatchet,
+  initRatchet,
+  ratchetEncrypt,
+} from "../cryptography/ratchet";
 import { getMerkleRoot, getMerkleProof } from "../cryptography/merkle";
 import { hashMerkleLeafWasm } from "../utils/leafHash";
 import { parseChunkFrameHeader } from "./chunkFrame";
-import { sealChunk, decryptMessageChunk } from "./messageChunkCrypto";
+import {
+  sealChunk,
+  decryptMessageChunk,
+  messageCacheKey,
+} from "./messageChunkCrypto";
+import {
+  decryptMessageChunkDurably,
+  forgetReceiveMessageKeyDurably,
+  ratchetEncryptDurably,
+} from "./ratchetPersist";
 import {
   crypto_hash_sha512_BYTES,
 } from "../cryptography/interfaces";
@@ -17,6 +30,8 @@ import {
 } from "../utils/constants";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { RatchetState } from "../cryptography/ratchet";
+import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 
 const rand = (n: number): Uint8Array => {
   const u = new Uint8Array(n);
@@ -66,6 +81,16 @@ const chunkOf = (decrypted: Uint8Array): Uint8Array =>
   decrypted.slice(METADATA_LEN + PROOF_LEN);
 const receiptOf = (decrypted: Uint8Array): Uint8Array =>
   decrypted.slice(METADATA_LEN, METADATA_LEN + crypto_hash_sha512_BYTES);
+
+const edge = (
+  ratchetState: RatchetState,
+): IRTCPeerConnection =>
+  ({
+    roomId: "room-1",
+    withPeerId: "peer-1",
+    withPeerPublicKey: "aa".repeat(32),
+    ratchetState,
+  }) as unknown as IRTCPeerConnection;
 
 describe("messageChunkCrypto (single-call C receive)", () => {
   test("round-trip: a real 2-chunk message decrypts byte-exact through the C receive; chunk 0 steps the ratchet, chunk 1 rides the per-message cache", async () => {
@@ -144,6 +169,56 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(Buffer.from(chunkOf(good.decrypted!))).toEqual(Buffer.from(datas[0]));
   });
 
+  test("failed receive starts with zeroed decrypt scratch and exposes no stale WASM plaintext", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    messageKey.fill(0);
+
+    const originalMalloc = module._malloc;
+    const originalReceive = module._receive_message_with_key;
+    let scratchWasZero = false;
+    module._malloc = (size: number): number => {
+      const ptr = originalMalloc(size);
+      // Simulate allocator reuse containing a previous plaintext.
+      if (size === DECRYPTED_LEN)
+        new Uint8Array(module.wasmMemory.buffer, ptr, size).fill(0xa5);
+      return ptr;
+    };
+    module._receive_message_with_key = (
+      decryptedPtr: number,
+      _messagePtr: number,
+      _rootPtr: number,
+      _keyPtr: number,
+    ): number => {
+      const scratch = new Uint8Array(
+        module.wasmMemory.buffer,
+        decryptedPtr,
+        DECRYPTED_LEN,
+      );
+      scratchWasZero = scratch.every((byte) => byte === 0);
+      scratch.fill(0x5a);
+      return -2;
+    };
+
+    try {
+      const result = decryptMessageChunk(
+        bob,
+        frame,
+        new Map<string, Uint8Array>(),
+        root,
+        module,
+      );
+      expect(scratchWasZero).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.decrypted).toBeNull();
+    } finally {
+      module._malloc = originalMalloc;
+      module._receive_message_with_key = originalReceive;
+    }
+  });
+
   test("AEAD-authentic but bad Merkle proof: C returns != -2, so the ratchet COMMITS (stateAdvanced) even though the chunk is dropped (ok false)", async () => {
     const { module, alice, bob } = await pair();
     const { root, plaintexts } = await buildMessage(module, 2);
@@ -185,5 +260,165 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(re.ok).toBe(true);
     expect(re.stateAdvanced).toBe(false); // cache HIT, no ratchet step
     expect(Buffer.from(chunkOf(re.decrypted!))).toEqual(Buffer.from(datas[0]));
+  });
+
+  test("failed pre-send persistence leaves live state unchanged and wipes the staged successor", async () => {
+    const { module, alice } = await pair();
+    const epc = edge(alice);
+    const chainBefore = Uint8Array.from(alice.sendingChainKey!);
+    let stagedChain: Uint8Array | undefined;
+
+    await expect(
+      ratchetEncryptDurably(
+        epc,
+        "room-1",
+        module,
+        async (candidate) => {
+          stagedChain = candidate.sendingChainKey!;
+          throw new Error("injected persistence failure");
+        },
+      ),
+    ).rejects.toThrow("injected persistence failure");
+
+    expect(alice.Ns).toBe(0);
+    expect(Buffer.from(alice.sendingChainKey!)).toEqual(
+      Buffer.from(chainBefore),
+    );
+    expect(stagedChain?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  test("failed receive persistence exposes no plaintext and commits neither ratchet nor cache", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    messageKey.fill(0);
+
+    const epc = edge(bob);
+    const rootBefore = Uint8Array.from(bob.rootKey);
+    const cache = new Map<string, Uint8Array>();
+    let stagedReceivingChain: Uint8Array | undefined;
+
+    await expect(
+      decryptMessageChunkDurably(
+        epc,
+        "room-1",
+        frame,
+        cache,
+        root,
+        module,
+        async (candidate) => {
+          stagedReceivingChain = candidate.receivingChainKey!;
+          throw new Error("injected persistence failure");
+        },
+      ),
+    ).rejects.toThrow("injected persistence failure");
+
+    expect(bob.Nr).toBe(0);
+    expect(Buffer.from(bob.rootKey)).toEqual(Buffer.from(rootBefore));
+    expect(cache.size).toBe(0);
+    expect(stagedReceivingChain?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  test("active multi-chunk receive key survives a state restore until durable completion", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, datas, plaintexts } = await buildMessage(module, 2);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frames = plaintexts.map((plaintext) =>
+      sealChunk(messageKey, header, plaintext, root, module),
+    );
+    messageKey.fill(0);
+    const cacheKey = messageCacheKey(header.dhPub, header.N);
+    const persist = async () => {};
+
+    const firstCache = new Map<string, Uint8Array>();
+    const first = await decryptMessageChunkDurably(
+      edge(bob),
+      "room-1",
+      frames[0],
+      firstCache,
+      root,
+      module,
+      persist,
+    );
+    expect(first.ok).toBe(true);
+    expect(bob.skipped.has(cacheKey)).toBe(true);
+    expect(firstCache.has(cacheKey)).toBe(true);
+
+    // Simulate a replacement PC/reload: restore only the persisted ratchet and
+    // start with an empty RAM cache. The retained skipped-key copy rebuilds it.
+    const restored = cloneRatchet(bob);
+    const restoredEpc = edge(restored);
+    const restoredCache = new Map<string, Uint8Array>();
+    const second = await decryptMessageChunkDurably(
+      restoredEpc,
+      "room-1",
+      frames[1],
+      restoredCache,
+      root,
+      module,
+      persist,
+    );
+    expect(second.ok).toBe(true);
+    expect(Buffer.from(chunkOf(second.decrypted!))).toEqual(
+      Buffer.from(datas[1]),
+    );
+    expect(restored.skipped.has(cacheKey)).toBe(true);
+    expect(restoredCache.has(cacheKey)).toBe(true);
+
+    await forgetReceiveMessageKeyDurably(
+      restoredEpc,
+      "room-1",
+      restoredCache,
+      cacheKey,
+      persist,
+    );
+    expect(restored.skipped.has(cacheKey)).toBe(false);
+    expect(restoredCache.has(cacheKey)).toBe(false);
+  });
+
+  test("concurrent sends serialize into distinct durable ratchet steps", async () => {
+    const { module, alice } = await pair();
+    const epc = edge(alice);
+    const persistedNs: number[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+
+    const persist = async (candidate: RatchetState) => {
+      persistedNs.push(candidate.Ns);
+      if (candidate.Ns === 1) {
+        markFirstStarted();
+        await firstBlocked;
+      }
+    };
+    const first = ratchetEncryptDurably(
+      epc,
+      "room-1",
+      module,
+      persist,
+    );
+    const second = ratchetEncryptDurably(
+      epc,
+      "room-1",
+      module,
+      persist,
+    );
+
+    await firstStarted;
+    expect(persistedNs).toEqual([1]);
+    releaseFirst();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(persistedNs).toEqual([1, 2]);
+    expect([a.header.N, b.header.N]).toEqual([0, 1]);
+    expect(alice.Ns).toBe(2);
+    a.messageKey.fill(0);
+    b.messageKey.fill(0);
   });
 });

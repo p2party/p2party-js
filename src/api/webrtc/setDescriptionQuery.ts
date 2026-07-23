@@ -1,6 +1,13 @@
 import signalingServerApi from "../signalingServerApi";
 
-import { getPeerMutex } from "./negotiationLock";
+import { getRoomPeerMutex } from "./negotiationLock";
+import { findRoomPeerConnectionIndex } from "./roomPeer";
+import {
+  discardIceCandidatesForAttempt,
+  takePendingIceCandidates,
+} from "./pendingIceCandidates";
+import { isIdentityInitiator } from "../../utils/identityRole";
+import { PROTOCOL_VERSION } from "../../utils/constants";
 
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
@@ -37,11 +44,13 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
   },
   api,
 ) => {
-  return getPeerMutex(peerId).runExclusive(async () => {
+  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
     const { keyPair } = api.getState() as State;
 
-    const connectionIndex = peerConnections.findIndex(
-      (peer) => peer.withPeerId === peerId,
+    const connectionIndex = findRoomPeerConnectionIndex(
+      peerConnections,
+      roomId,
+      peerId,
     );
 
     const epc =
@@ -63,15 +72,21 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       peerConnections[connectionIndex].ondatachannel == undefined
     ) {
       epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await handleOpenChannel(
-          {
-            channel: e.channel,
-            epc,
-            roomId,
-            dataChannels,
-          },
-          api,
-        );
+        try {
+          const channel = await handleOpenChannel(
+            {
+              channel: e.channel,
+              epc,
+              roomId: epc.roomId,
+              dataChannels,
+              incoming: true,
+            },
+            api,
+          );
+          if (channel.label === "main") epc.mainChannel = channel;
+        } catch (error) {
+          console.error("Rejected incoming DataChannel:", error);
+        }
       };
     }
 
@@ -83,10 +98,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     const ignoreOffer = !isPolite && offerCollision;
     epc.ignoreOffer = ignoreOffer;
 
+    const discardIceForAttempt = (): void => {
+      discardIceCandidatesForAttempt(
+        epc.iceCandidates,
+        iceCandidates,
+        roomId,
+        peerId,
+      );
+    };
+
     if (ignoreOffer) {
-      for (let i = iceCandidates.length - 1; i >= 0; i--) {
-        if (iceCandidates[i].withPeerId === peerId) iceCandidates.splice(i, 1);
-      }
+      discardIceForAttempt();
       return { data: undefined };
     }
 
@@ -100,22 +122,15 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       }
     }
 
-    const ICE_CANDIDATES_LEN = iceCandidates.length;
-    const purgeCandidates: number[] = [];
-    for (let i = 0; i < ICE_CANDIDATES_LEN; i++) {
-      if (iceCandidates[i].withPeerId !== peerId) continue;
+    epc.iceCandidates.push(
+      ...takePendingIceCandidates(iceCandidates, roomId, peerId),
+    );
 
-      purgeCandidates.push(i);
-      epc.iceCandidates.push(iceCandidates[i]);
-    }
-    const PURGE_CANDIDATES_LEN = purgeCandidates.length;
-    for (let i = PURGE_CANDIDATES_LEN - 1; i >= 0; i--) {
-      iceCandidates.splice(purgeCandidates[i], 1);
-    }
-
-    if (connectionIndex === -1) peerConnections.push(epc);
+    if (findRoomPeerConnectionIndex(peerConnections, roomId, peerId) === -1)
+      peerConnections.push(epc);
 
     if (epc.signalingState === "closed") {
+      discardIceForAttempt();
       return { data: undefined };
     }
 
@@ -126,6 +141,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       console.warn(
         `Ignoring stale answer from ${peerId} in signaling state ${epc.signalingState}`,
       );
+      discardIceForAttempt();
       return { data: undefined };
     }
 
@@ -141,6 +157,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           error.message?.includes("Called in wrong state")
         ) {
           console.warn(`Ignoring late answer from ${peerId}: ${error.message}`);
+          discardIceForAttempt();
           return { data: undefined };
         }
 
@@ -159,15 +176,23 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
               `Failed to handle ICE restart for ${peerId}:`,
               retryError,
             );
+            discardIceForAttempt();
             return { data: undefined };
           }
         } else {
           console.error(`setRemoteDescription failed for ${peerId}:`, e);
+          discardIceForAttempt();
           return { data: undefined };
         }
       }
       if (description.type === "offer") {
-        await epc.setLocalDescription();
+        try {
+          await epc.setLocalDescription();
+        } catch (error) {
+          console.error(`setLocalDescription failed for ${peerId}:`, error);
+          discardIceForAttempt();
+          return { data: undefined };
+        }
         const answer = epc.localDescription;
         if (answer) {
           await api.dispatch(
@@ -179,6 +204,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
                 fromPeerPublicKey: keyPair.publicKey,
                 toPeerId: peerId,
                 roomId,
+                protocolVersion: PROTOCOL_VERSION,
               } as WebSocketMessageDescriptionSend,
             }),
           );
@@ -186,14 +212,21 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       }
     }
 
-    if (epc.connectionState === "connected" && connectionIndex > -1) {
-      await handleOpenChannel(
-        {
-          channel: "main",
-          epc,
-          roomId,
-          dataChannels,
-        },
+    if (
+      epc.connectionState === "connected" &&
+      connectionIndex > -1 &&
+      isIdentityInitiator(keyPair.publicKey, epc.withPeerPublicKey) &&
+      (!epc.mainChannel ||
+        epc.mainChannel.readyState === "closing" ||
+        epc.mainChannel.readyState === "closed")
+    ) {
+      const channel = epc.createDataChannel("main", {
+        // Handshake HELLO/CONFIRM frames are a strict transcript sequence.
+        ordered: true,
+        protocol: "raw",
+      });
+      epc.mainChannel = await handleOpenChannel(
+        { channel, epc, roomId: epc.roomId, dataChannels },
         api,
       );
     }

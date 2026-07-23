@@ -6,6 +6,47 @@ import { loadTestModule } from "./testModule";
 import { hkdfExtract, hkdfExpand } from "./hkdf";
 
 describe("hkdf-sha512", () => {
+  test("extract zeroes salt, IKM, and PRK staging before freeing", async () => {
+    const realModule = await loadTestModule();
+    const allocations = new Map<number, number>();
+    const zeroedAtFree: boolean[] = [];
+    const module = new Proxy(realModule, {
+      get(target, property, receiver) {
+        if (property === "_malloc")
+          return (length: number): number => {
+            const pointer = target._malloc(length);
+            allocations.set(pointer, length);
+            return pointer;
+          };
+        if (property === "_free")
+          return (pointer: number): void => {
+            const length = allocations.get(pointer);
+            if (length !== undefined) {
+              const view = new Uint8Array(
+                target.wasmMemory.buffer,
+                pointer,
+                length,
+              );
+              zeroedAtFree.push(view.every((byte) => byte === 0));
+              allocations.delete(pointer);
+            }
+            target._free(pointer);
+          };
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const prk = hkdfExtract(
+      new Uint8Array(32).fill(0x71),
+      new Uint8Array(64).fill(0x93),
+      module,
+    );
+
+    expect(prk).toHaveLength(64);
+    expect(zeroedAtFree).toEqual([true, true, true]);
+    expect(allocations.size).toBe(0);
+  });
+
   test("extract is deterministic and 64 bytes", async () => {
     const module = await loadTestModule();
     const salt = new Uint8Array(32).fill(7);
@@ -20,7 +61,11 @@ describe("hkdf-sha512", () => {
 
   test("expand honours outLen and separates by info label", async () => {
     const module = await loadTestModule();
-    const prk = hkdfExtract(new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), module);
+    const prk = hkdfExtract(
+      new Uint8Array(32).fill(1),
+      new Uint8Array(32).fill(2),
+      module,
+    );
 
     const enc = new TextEncoder();
     const o1 = hkdfExpand(prk, enc.encode("label-a"), 64, module);

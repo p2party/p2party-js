@@ -1,13 +1,11 @@
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 
-import { setChannel, setPeer } from "../../reducers/roomSlice";
-
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
-import cryptoMemory from "../../cryptography/memory";
-// import libcrypto from "../../cryptography/libcrypto";
-import { wasmLoader } from "../../cryptography/wasmLoader";
+import { findRoomPeerConnectionIndex } from "./roomPeer";
+import { getRoomPeerMutex } from "./negotiationLock";
+import { isIdentityInitiator } from "../../utils/identityRole";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -22,6 +20,61 @@ export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   dataChannels: IRTCDataChannel[];
 }
 
+const clearConnectionHandlers = (epc: IRTCPeerConnection): void => {
+  epc.ontrack = null;
+  epc.ondatachannel = null;
+  epc.onicecandidate = null;
+  epc.onicecandidateerror = null;
+  epc.onnegotiationneeded = null;
+  epc.onsignalingstatechange = null;
+  epc.onconnectionstatechange = null;
+  epc.onicegatheringstatechange = null;
+  epc.oniceconnectionstatechange = null;
+};
+
+const attachDataChannelHandler = (
+  epc: IRTCPeerConnection,
+  dataChannels: IRTCDataChannel[],
+  api: Parameters<typeof handleOpenChannel>[1],
+): void => {
+  epc.ondatachannel = async (event: RTCDataChannelEvent) => {
+    try {
+      const channel = await handleOpenChannel(
+        {
+          channel: event.channel,
+          epc,
+          roomId: epc.roomId,
+          dataChannels,
+          incoming: true,
+        },
+        api,
+      );
+      if (channel.label === "main") epc.mainChannel = channel;
+    } catch (error) {
+      console.error("Rejected incoming DataChannel:", error);
+    }
+  };
+};
+
+const openMainChannel = async (
+  epc: IRTCPeerConnection,
+  dataChannels: IRTCDataChannel[],
+  api: Parameters<typeof handleOpenChannel>[1],
+): Promise<void> => {
+  // Passing the newly-created channel object bypasses handleOpenChannel's
+  // legacy peer+label lookup, which cannot distinguish identical labels in
+  // different rooms.
+  const channel = epc.createDataChannel("main", {
+    // Handshake HELLO/CONFIRM frames are a strict transcript sequence.
+    ordered: true,
+    protocol: "raw",
+  });
+  epc.mainChannel = await handleOpenChannel(
+    { channel, epc, roomId: epc.roomId, dataChannels },
+    api,
+  );
+};
+
 const webrtcBaseQuery: BaseQueryFn<
   RTCPeerConnectionParamsExtend,
   undefined
@@ -30,150 +83,62 @@ const webrtcBaseQuery: BaseQueryFn<
     peerId,
     peerPublicKey,
     roomId,
-    initiator,
     rtcConfig,
     peerConnections,
     dataChannels,
   },
   api,
 ) => {
-  const { keyPair } = api.getState() as State;
-  if (peerId === keyPair.peerId)
-    throw new Error("Cannot create a connection with oneself.");
+  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
+    const { keyPair } = api.getState() as State;
+    if (peerId === keyPair.peerId)
+      throw new Error("Cannot create a connection with oneself.");
+    const opensMain = isIdentityInitiator(
+      keyPair.publicKey,
+      peerPublicKey,
+    );
 
-  const blacklisted = await getDBPeerIsBlacklisted(peerId);
-  if (blacklisted) return { data: undefined };
+    const blacklisted = await getDBPeerIsBlacklisted(peerId);
+    if (blacklisted) return { data: undefined };
 
-  const connectionIndex = peerConnections.findIndex(
-    (pc) => pc.withPeerId === peerId,
-  );
+    const connectionIndex = findRoomPeerConnectionIndex(
+      peerConnections,
+      roomId,
+      peerId,
+    );
 
-  if (connectionIndex === -1) {
+    if (connectionIndex > -1) {
+      const epc = peerConnections[connectionIndex];
+      if (
+        epc.connectionState !== "closed" &&
+        epc.connectionState !== "failed"
+      ) {
+        if (
+          opensMain &&
+          (!epc.mainChannel ||
+            epc.mainChannel.readyState === "closing" ||
+            epc.mainChannel.readyState === "closed")
+        )
+          await openMainChannel(epc, dataChannels, api);
+        return { data: undefined };
+      }
+
+      clearConnectionHandlers(epc);
+      if (epc.connectionState !== "closed") epc.close();
+      peerConnections.splice(connectionIndex, 1);
+    }
+
     const epc = await handleConnectToPeer(
       { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
       api,
     );
+    attachDataChannelHandler(epc, dataChannels, api);
+    if (!peerConnections.includes(epc)) peerConnections.push(epc);
 
-    epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-      await handleOpenChannel(
-        {
-          channel: e.channel,
-          epc,
-          roomId,
-          dataChannels,
-        },
-        api,
-      );
-    };
+    if (opensMain) await openMainChannel(epc, dataChannels, api);
 
-    peerConnections.push(epc);
-
-    if (initiator) {
-      await handleOpenChannel(
-        {
-          channel: "main",
-          epc,
-          roomId,
-          dataChannels,
-        },
-        api,
-      );
-    }
-  } else {
-    const epc = peerConnections[connectionIndex];
-    if (epc.connectionState === "connected") {
-      const roomIndex = epc.rooms.findIndex((r) => r.roomId === roomId);
-      if (roomIndex === -1) {
-        const receiveMessageWasmMemory = cryptoMemory.getReceiveMessageMemory();
-        const receiveMessageModule = await wasmLoader(receiveMessageWasmMemory);
-        // const receiveMessageModule = await libcrypto({
-        //   wasmMemory: receiveMessageWasmMemory,
-        // });
-
-        epc.rooms.push({
-          roomId,
-          receiveMessageModule,
-        });
-        api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
-      }
-
-      const dataChannelsLen = dataChannels.length;
-      for (let i = 0; i < dataChannelsLen; i++) {
-        if (
-          dataChannels[i].withPeerId === peerId &&
-          !dataChannels[i].roomIds.includes(roomId)
-        ) {
-          dataChannels[i].roomIds.push(roomId);
-        }
-      }
-
-      const { rooms } = api.getState() as State;
-      const roomsLen = rooms.length;
-      for (let i = 0; i < roomsLen; i++) {
-        const channelIndex = rooms[i].channels.findIndex((c) =>
-          c.peerIds.includes(peerId),
-        );
-        if (channelIndex > -1) {
-          api.dispatch(
-            setChannel({
-              roomId,
-              label: rooms[i].channels[channelIndex].label,
-              peerId,
-            }),
-          );
-        }
-      }
-    } else {
-      peerConnections[connectionIndex].ontrack = null;
-      peerConnections[connectionIndex].ondatachannel = null;
-      peerConnections[connectionIndex].onicecandidate = null;
-      peerConnections[connectionIndex].onicecandidateerror = null;
-      peerConnections[connectionIndex].onnegotiationneeded = null;
-      peerConnections[connectionIndex].onsignalingstatechange = null;
-      peerConnections[connectionIndex].onconnectionstatechange = null;
-      peerConnections[connectionIndex].onicegatheringstatechange = null;
-      peerConnections[connectionIndex].oniceconnectionstatechange = null;
-
-      if (peerConnections[connectionIndex].connectionState !== "closed") {
-        peerConnections[connectionIndex].close();
-      }
-
-      peerConnections.splice(connectionIndex, 1);
-
-      const newEpc = await handleConnectToPeer(
-        { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
-        api,
-      );
-
-      newEpc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        await handleOpenChannel(
-          {
-            channel: e.channel,
-            epc: newEpc,
-            roomId,
-            dataChannels,
-          },
-          api,
-        );
-      };
-
-      peerConnections.push(newEpc);
-
-      if (initiator) {
-        await handleOpenChannel(
-          {
-            channel: "main",
-            epc: newEpc,
-            roomId,
-            dataChannels,
-          },
-          api,
-        );
-      }
-    }
-  }
-
-  return { data: undefined };
+    return { data: undefined };
+  });
 };
 
 export default webrtcBaseQuery;

@@ -1,11 +1,11 @@
 import { handleOpenChannel } from "./handleOpenChannel";
 
-import signalingServerApi from "../api/signalingServerApi";
-
-import { fisherYatesShuffle, randomNumberInRange } from "../cryptography/utils";
+import { fisherYatesShuffle } from "../cryptography/utils";
 import { getMerkleProof } from "../cryptography/merkle";
-import { crypto_sign_ed25519_PUBLICKEYBYTES } from "../cryptography/interfaces";
-import { ratchetEncrypt } from "../cryptography/ratchet";
+import {
+  crypto_hash_sha512_BYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
+} from "../cryptography/interfaces";
 
 import {
   concatUint8Arrays,
@@ -14,17 +14,22 @@ import {
 } from "../utils/uint8array";
 import { splitToChunks } from "../utils/splitToChunks";
 import { deserializeMetadata } from "../utils/metadata";
-import { getMimeType } from "../utils/messageTypes";
+import { createChunkReceiptToken } from "../utils/receiptToken";
 import {
   compileChannelMessageLabel,
   decompileChannelMessageLabel,
 } from "../utils/channelLabel";
 import { waitForOpen } from "../utils/waitForOpen";
-import { incrementMessageStats } from "../reducers/roomSlice";
+import { deleteMessage, incrementMessageStats } from "../reducers/roomSlice";
 import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
 import { sealChunk } from "./messageChunkCrypto";
 import { getRatchetGate } from "./ratchetGate";
-import { persistRatchetSession } from "./ratchetPersist";
+import { ratchetEncryptDurably } from "./ratchetPersist";
+import {
+  claimTransfer,
+  throwIfTransferAborted,
+  waitWithTransferAbort,
+} from "./transferAbort";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
@@ -35,23 +40,22 @@ import {
   RECONNECT_RESUME_TIMEOUT_MS,
   RECONNECT_RESUME_POLL_MS,
   MAX_RESUME_ATTEMPTS,
+  CHANNEL_OPEN_POLL_MS,
 } from "../utils/constants";
 
 import {
   deleteDBNewChunk,
+  deleteReceiveTransfer,
   deleteDBSendQueue,
   getDBNewChunk,
-  getDBSendQueue,
-  setDBChunk,
   setDBNewChunk,
-  setDBSendQueue,
 } from "../db/api";
+import { roomSendQueueLabel } from "../utils/sendQueueKey";
 
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
-import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -64,9 +68,7 @@ import type { State } from "../store";
 // };
 
 const sendChunks = async (
-  channel: IRTCDataChannel | string,
-  api: BaseQueryApi,
-  roomId: string,
+  channel: IRTCDataChannel,
   // protocol-v3: the message key + header derived ONCE for the whole message by
   // the caller (`ratchetEncrypt`). Every chunk of the message — across the initial
   // pass AND every selective-retransmit round — is sealed under this same key with
@@ -76,33 +78,39 @@ const sendChunks = async (
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
+  transferId: string,
   hashHex: string,
-  peerId: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
+  signal?: AbortSignal,
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
   // real chunks — skip decoys and already-acked reals.
   reconcileAcked?: Set<number>,
 ) => {
-  let putItemInDBSendQueue = false;
-
-  const { keyPair } = api.getState() as State;
-
-  const { channelLabel, merkleRootHex } = await decompileChannelMessageLabel(
-    typeof channel === "string" ? channel : channel.label,
-  );
+  throwIfTransferAborted(signal);
+  const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
+  if (merkleRootHex !== uint8ArrayToHex(merkleRoot))
+    throw new Error("Outbound channel label does not match its Merkle root");
 
   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
   const indexesRandomized = fisherYatesShuffle(indexes);
 
   for (let i = 0; i < chunksLen; i++) {
+    throwIfTransferAborted(signal);
     const iRandom = indexesRandomized[i];
 
-    const unencryptedChunk = await getDBNewChunk(hashHex, iRandom);
-    if (!unencryptedChunk) continue;
+    const unencryptedChunk = await getDBNewChunk(transferId, iRandom);
+    throwIfTransferAborted(signal);
+    if (!unencryptedChunk)
+      throw new Error(`Missing staged outbound chunk ${String(iRandom)}`);
 
     const metadataArray = new Uint8Array(unencryptedChunk.metadata);
     const metadata = deserializeMetadata(metadataArray);
+    if (
+      metadata.chunkIndex !== iRandom ||
+      unencryptedChunk.chunkIndex !== iRandom
+    )
+      throw new Error("Outbound chunk index does not match its staging key");
 
     // Reconcile: resend only un-acked REAL chunks. Real-vs-decoy is read from
     // the chunk's own metadata (SSOT) — a decoy has chunkEnd − chunkStart >
@@ -114,71 +122,54 @@ const sendChunks = async (
       if (!isReal || reconcileAcked.has(metadata.chunkIndex)) continue;
     }
 
-    if (
-      metadata.chunkStartIndex >= 0 &&
-      metadata.chunkEndIndex > metadata.chunkStartIndex &&
-      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize
-    ) {
-      const mimeType = getMimeType(metadata.messageType);
-      const realChunk = unencryptedChunk.data.slice(
-        metadata.chunkStartIndex,
-        metadata.chunkEndIndex,
-      );
-      try {
-        await setDBChunk({
-          merkleRoot: merkleRootHex,
-          hash: hashHex,
-          chunkIndex: metadata.chunkIndex,
-          data: realChunk,
-          mimeType,
-        });
-      } catch {
-        /* ignore */
-      }
-    }
-
     const merkleProof = new Uint8Array(PROOF_LEN);
     if (unencryptedChunk.merkleProof.byteLength === 0) {
       const m = await getMerkleProof(
         chunkHashes,
-        hexToUint8Array(unencryptedChunk.realChunkHash),
+        hexToUint8Array(unencryptedChunk.leafHash),
         merkleModule,
         PROOF_LEN,
       );
+      throwIfTransferAborted(signal);
 
       merkleProof.set(m);
-
-      try {
-        await setDBNewChunk({
-          hash: hashHex,
-          merkleRoot: merkleRootHex,
-          realChunkHash: unencryptedChunk.realChunkHash,
-          chunkIndex: iRandom,
-          data: unencryptedChunk.data,
-          metadata: unencryptedChunk.metadata,
-          merkleProof: merkleProof.buffer,
-        });
-      } catch (error) {
-        console.warn(error);
-      }
     } else {
       merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
+    }
 
-      if (unencryptedChunk.merkleRoot.length === 0) {
-        try {
-          await setDBNewChunk({
-            hash: hashHex,
-            merkleRoot: merkleRootHex,
-            realChunkHash: unencryptedChunk.realChunkHash,
-            chunkIndex: iRandom,
-            data: unencryptedChunk.data,
-            metadata: unencryptedChunk.metadata,
-            merkleProof: unencryptedChunk.merkleProof,
-          });
-        } catch (error) {
-          console.warn(error);
-        }
-      }
+    const receiptToken =
+      unencryptedChunk.receiptToken.length ===
+      crypto_hash_sha512_BYTES * 2
+        ? unencryptedChunk.receiptToken
+        : uint8ArrayToHex(
+            await createChunkReceiptToken(
+              merkleRoot,
+              metadata.chunkIndex,
+              hexToUint8Array(unencryptedChunk.leafHash),
+            ),
+          );
+    throwIfTransferAborted(signal);
+
+    // Persist proof + scoped receipt lookup BEFORE putting the frame on wire.
+    // If quota/storage fails, propagating the error is the only recoverable
+    // behaviour: a sent frame whose resend source was not committed can never
+    // participate correctly in reconnect reconciliation.
+    if (
+      unencryptedChunk.merkleProof.byteLength === 0 ||
+      unencryptedChunk.merkleRoot !== merkleRootHex ||
+      unencryptedChunk.receiptToken !== receiptToken
+    ) {
+      await setDBNewChunk({
+        transferId,
+        hash: hashHex,
+        merkleRoot: merkleRootHex,
+        leafHash: unencryptedChunk.leafHash,
+        receiptToken,
+        chunkIndex: iRandom,
+        data: unencryptedChunk.data,
+        metadata: unencryptedChunk.metadata,
+        merkleProof: merkleProof.buffer,
+      });
     }
 
     if (
@@ -187,13 +178,14 @@ const sendChunks = async (
         merkleProof.length +
         new Uint8Array(unencryptedChunk.data).length
     )
-      continue;
+      throw new Error("Outbound staged chunk has invalid cell length");
 
     const chunk = await concatUint8Arrays([
       metadataArray,
       merkleProof,
       new Uint8Array(unencryptedChunk.data),
     ]);
+    throwIfTransferAborted(signal);
 
     // protocol-v3: seal the DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk)
     // under the per-message ratchet key with a fresh random nonce, framed as
@@ -201,51 +193,22 @@ const sendChunks = async (
     // Replaces the box scheme's per-chunk ephemeral keypair + signature + asymmetric
     // encrypt. A retransmit re-seals the same plaintext (fresh nonce) — the receiver
     // reuses its cached per-(dhPub,N) key, so no frame cache is required.
-    let message: Uint8Array;
-    try {
-      message = sealChunk(messageKey, header, chunk, merkleRoot, encryptionModule);
-    } catch (error) {
-      console.error(error);
-      continue;
-    }
-
-    if (
-      typeof channel === "string" ||
-      channel.readyState !== "open" ||
+    // Backpressure stays inside this logical send. Persisting ciphertext here is
+    // unsafe: a replacement RTCPeerConnection performs a fresh handshake, so
+    // ciphertext sealed under the dead transport's ratchet can never be replayed
+    // on the replacement. The durable resend source is the plaintext newChunks
+    // store; after reconnect those chunks are resealed under a fresh message key.
+    while (
+      (channel.readyState as string) === "open" &&
       channel.bufferedAmount >= MAX_BUFFERED_AMOUNT
     ) {
-      await api.dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "message",
-            message: uint8ArrayToHex(message),
-            roomId,
-            fromPeerId: keyPair.peerId,
-            // toPeerId: epc.withPeerId,
-            toPeerId: peerId,
-            label: typeof channel === "string" ? channel : channel.label,
-          } as WebSocketMessageMessageSendRequest,
-        }),
+      await new Promise((resolve) =>
+        setTimeout(resolve, CHANNEL_OPEN_POLL_MS),
       );
-    } else if (
-      (channel.readyState as string) === "open" &&
-      channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-    ) {
-      channel.send(message.buffer as ArrayBuffer);
-    } else if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-      putItemInDBSendQueue = true;
+      throwIfTransferAborted(signal);
+    }
 
-      try {
-        await setDBSendQueue({
-          position: iRandom,
-          label: channel.label,
-          toPeerId: channel.withPeerId,
-          encryptedData: message.buffer as ArrayBuffer,
-        });
-      } catch (error) {
-        console.error(error);
-      }
-    } else {
+    if ((channel.readyState as string) !== "open") {
       console.log(
         "Cannot send message because channel is " +
           channel.readyState +
@@ -255,68 +218,25 @@ const sendChunks = async (
 
       break;
     }
-  }
 
-  if (putItemInDBSendQueue) {
-    if (typeof channel === "string") {
-      const sendQueue = await getDBSendQueue(channel, peerId); // epc.withPeerId);
-      while (sendQueue.length > 0) {
-        let pos = await randomNumberInRange(0, sendQueue.length);
-        if (pos === sendQueue.length) pos = 0;
+    let message: Uint8Array;
+    try {
+      message = sealChunk(messageKey, header, chunk, merkleRoot, encryptionModule);
+    } catch (error) {
+      throw new Error("Could not seal outbound message chunk", {
+        cause: error,
+      });
+    }
 
-        const [item] = sendQueue.splice(pos, 1);
-
-        await api.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "message",
-              message: uint8ArrayToHex(new Uint8Array(item.encryptedData)),
-              roomId,
-              fromPeerId: keyPair.peerId,
-              // toPeerId: epc.withPeerId,
-              toPeerId: peerId,
-              label: channelLabel,
-            } as WebSocketMessageMessageSendRequest,
-          }),
-        );
-
-        try {
-          await deleteDBSendQueue(channel, peerId, item.position);
-        } catch (error) {
-          console.error(error);
-        }
-      }
-    } else {
-      while (
-        channel.readyState === "open" &&
-        channel.bufferedAmount < MAX_BUFFERED_AMOUNT
-      ) {
-        const sendQueue = await getDBSendQueue(channel.label, peerId); // epc.withPeerId);
-        while (
-          sendQueue.length > 0 &&
-          channel.bufferedAmount < MAX_BUFFERED_AMOUNT &&
-          (channel.readyState as string) === "open"
-        ) {
-          let pos = await randomNumberInRange(0, sendQueue.length);
-          if (pos === sendQueue.length) pos = 0;
-
-          const [item] = sendQueue.splice(pos, 1);
-          if ((channel.readyState as string) === "open") {
-            channel.send(item.encryptedData);
-
-            try {
-              await deleteDBSendQueue(
-                channel.label,
-                // epc.withPeerId,
-                peerId,
-                item.position,
-              );
-            } catch (error) {
-              console.error(error);
-            }
-          }
-        }
-      }
+    throwIfTransferAborted(signal);
+    try {
+      channel.send(message.buffer as ArrayBuffer);
+    } catch (error) {
+      // The channel can close between the readyState check and send(). Return to
+      // the reconcile loop so it can reopen/rekey instead of rejecting the whole
+      // logical send at this unavoidable async transport race.
+      if ((channel.readyState as string) !== "open") break;
+      throw error;
     }
   }
   // protocol-v3: no box wasm scratch to free — `sealChunk` allocates + frees its
@@ -340,19 +260,35 @@ const resumeChannel = async (
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
   timeoutMs: number,
-): Promise<IRTCDataChannel | null> => {
+  signal?: AbortSignal,
+): Promise<{
+  epc: IRTCPeerConnection;
+  channel: IRTCDataChannel;
+} | null> => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfTransferAborted(signal);
     const epc = peerConnections.find(
-      (p) => p.withPeerId === peerId && p.connectionState === "connected",
+      (p) =>
+        p.roomId === roomId &&
+        p.withPeerId === peerId &&
+        p.connectionState === "connected",
     );
     if (!epc) {
       await new Promise((resolve) =>
         setTimeout(resolve, RECONNECT_RESUME_POLL_MS),
       );
+      throwIfTransferAborted(signal);
       continue;
     }
     try {
+      // A previous build may have left ciphertext in the legacy durable queue.
+      // Drop it before the replacement channel can observe bufferedamountlow:
+      // its ratchet belongs to the dead transport and is not replay-safe here.
+      await deleteDBSendQueue(
+        roomSendQueueLabel(roomId, channelMessageLabel),
+        peerId,
+      );
       const ch = await handleOpenChannel(
         { channel: channelMessageLabel, epc, roomId, dataChannels },
         api,
@@ -363,23 +299,293 @@ const resumeChannel = async (
       // newChunks cleanup. If it still hasn't opened (timed out, or the pc died
       // again mid-open), neutralize it so it can never later open, push into
       // dataChannels, or malloc receive buffers, then look for a fresh epc.
-      if (await waitForOpen(ch, deadline - Date.now())) return ch;
+      if (await waitForOpen(ch, deadline - Date.now(), undefined, signal))
+        return { epc, channel: ch };
       try {
-        ch.onopen = null;
-        ch.onclose = null;
-        ch.onerror = null;
-        ch.onmessage = null;
-        ch.onbufferedamountlow = null;
-        if (ch.readyState !== "closed") ch.close();
+        closeTransferChannel(ch);
       } catch (error) {
         console.error(error);
       }
+      throwIfTransferAborted(signal);
     } catch (error) {
       console.error(error);
     }
   }
   return null;
 };
+
+interface TransferCipher {
+  epc: IRTCPeerConnection;
+  messageKey: Uint8Array;
+  header: RatchetHeader;
+}
+
+/**
+ * Stop a per-message transport without depending on its eventual `close`
+ * event to release protocol accounting. This also covers cancellation while
+ * the SCTP stream is still connecting and has not entered `dataChannels`.
+ */
+export const closeTransferChannel = (channel: IRTCDataChannel): void => {
+  channel.releaseProtocolResources?.();
+  if (channel.readyState !== "closed") channel.close();
+};
+
+type WaitForRatchetGate = (roomId: string, peerId: string) => Promise<void>;
+type DurableRatchetStep = (
+  epc: IRTCPeerConnection,
+  roomId: string,
+  module: LibCrypto,
+) => Promise<{ messageKey: Uint8Array; header: RatchetHeader }>;
+
+/**
+ * Bind an in-flight message to the active cryptographic transport.
+ *
+ * Reopening only its DataChannel on the SAME RTCPeerConnection retains the
+ * ratchet session, so the per-message key/header remain valid. A replacement
+ * RTCPeerConnection, however, performs a fresh hybrid handshake and owns an
+ * unrelated ratchet. It must advance that ratchet once and reseal the missing
+ * plaintext chunks; replaying the old ciphertext/key/header cannot decrypt.
+ *
+ * Exported only so the transport-identity and key-erasure contract has a focused
+ * unit test. It is not part of the package's public root exports.
+ */
+export const bindTransferCipherToConnection = async (
+  transfer: TransferCipher,
+  nextEpc: IRTCPeerConnection,
+  roomId: string,
+  module: LibCrypto,
+  waitForGate: WaitForRatchetGate = getRatchetGate,
+  ratchetStep: DurableRatchetStep = ratchetEncryptDurably,
+  signal?: AbortSignal,
+): Promise<TransferCipher> => {
+  throwIfTransferAborted(signal);
+  if (transfer.epc === nextEpc) return transfer;
+
+  await waitWithTransferAbort(
+    waitForGate(roomId, nextEpc.withPeerId),
+    signal,
+  );
+  if (!nextEpc.ratchetState)
+    throw new Error("v3 send: replacement connection has no ratchet state");
+
+  const stepped = await ratchetStep(nextEpc, roomId, module);
+  if (signal?.aborted) {
+    stepped.messageKey.fill(0);
+    throwIfTransferAborted(signal);
+  }
+  transfer.messageKey.fill(0);
+  return {
+    epc: nextEpc,
+    messageKey: stepped.messageKey,
+    header: stepped.header,
+  };
+};
+
+export const isAuthenticatedPeerCancel = (
+  currentEpc: IRTCPeerConnection,
+  peerConnections: IRTCPeerConnection[],
+  roomId: string,
+  peerId: string,
+): boolean =>
+  currentEpc.connectionState === "connected" &&
+  peerConnections.some(
+    (candidate) =>
+      candidate === currentEpc &&
+      candidate.roomId === roomId &&
+      candidate.withPeerId === peerId,
+  );
+
+export interface PeerSendTarget {
+  peerId: string;
+  epc?: IRTCPeerConnection;
+}
+
+export type PeerDeliveryOutcome =
+  | {
+      peerId: string;
+      status: "delivered";
+    }
+  | {
+      peerId: string;
+      status: "failed";
+      phase: "setup" | "transfer";
+      reason: unknown;
+    }
+  | {
+      peerId: string;
+      status: "skipped";
+      reason: "not-connected" | "unauthenticated" | "cancelled";
+    };
+
+export interface PeerSendFanoutResult {
+  outcomes: PeerDeliveryOutcome[];
+  startedTransfers: number;
+}
+
+type OpenPeerTransferChannel = (
+  target: Required<PeerSendTarget>,
+) => Promise<IRTCDataChannel>;
+type StartPeerTransfer = (
+  target: Required<PeerSendTarget>,
+  channel: IRTCDataChannel,
+) => Promise<void>;
+
+/**
+ * Set up every eligible room edge and settle every transfer that was started.
+ *
+ * Opening channels remains sequential so it cannot burst through the per-edge
+ * channel budget. Transfer promises run concurrently, however, and are given a
+ * rejection handler immediately. A later setup failure therefore becomes that
+ * peer's outcome instead of unwinding past already-running sends and freeing
+ * their shared `newChunks` staging records.
+ */
+export const runPeerSendFanout = async (
+  targets: readonly PeerSendTarget[],
+  openChannel: OpenPeerTransferChannel,
+  startTransfer: StartPeerTransfer,
+  signal?: AbortSignal,
+  onTransferStarted?: () => void,
+): Promise<PeerSendFanoutResult> => {
+  const outcomes: Array<
+    PeerDeliveryOutcome | Promise<PeerDeliveryOutcome>
+  > = [];
+  let startedTransfers = 0;
+
+  for (const target of targets) {
+    if (signal?.aborted) {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "cancelled",
+      });
+      continue;
+    }
+
+    if (!target.epc || target.epc.connectionState !== "connected") {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "not-connected",
+      });
+      continue;
+    }
+    if (
+      target.epc.withPeerPublicKey.length !==
+      crypto_sign_ed25519_PUBLICKEYBYTES * 2
+    ) {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "unauthenticated",
+      });
+      continue;
+    }
+
+    const authenticatedTarget = target as Required<PeerSendTarget>;
+    let channel: IRTCDataChannel;
+    try {
+      channel = await openChannel(authenticatedTarget);
+    } catch (reason) {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "failed",
+        phase: "setup",
+        reason,
+      });
+      continue;
+    }
+
+    // Cancellation can race the asynchronous channel setup. No transfer owns
+    // this channel yet, so close it here rather than relying on sendWithReconcile
+    // (whose first abort check intentionally precedes its own try/finally).
+    if (signal?.aborted) {
+      closeTransferChannel(channel);
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "cancelled",
+      });
+      continue;
+    }
+
+    startedTransfers++;
+    onTransferStarted?.();
+    try {
+      const started = startTransfer(authenticatedTarget, channel);
+      outcomes.push(
+        Promise.resolve(started).then<
+          PeerDeliveryOutcome,
+          PeerDeliveryOutcome
+        >(
+          () => ({
+            peerId: target.peerId,
+            status: "delivered",
+          }),
+          (reason: unknown) => ({
+            peerId: target.peerId,
+            status: "failed",
+            phase: "transfer",
+            reason,
+          }),
+        ),
+      );
+    } catch (reason) {
+      // The production callback is async, but retaining the synchronous guard
+      // makes this lifecycle helper safe for injected transports as well.
+      closeTransferChannel(channel);
+      outcomes.push({
+        peerId: target.peerId,
+        status: "failed",
+        phase: "transfer",
+        reason,
+      });
+    }
+  }
+
+  return {
+    outcomes: await Promise.all(outcomes),
+    startedTransfers,
+  };
+};
+
+export interface SendMessageResult extends PeerSendFanoutResult {
+  transferId: string;
+  merkleRootHex: string;
+}
+
+export class MessageDeliveryError extends AggregateError {
+  readonly result: SendMessageResult;
+
+  constructor(result: SendMessageResult, message: string) {
+    super(
+      result.outcomes
+        .filter(
+          (
+            outcome,
+          ): outcome is Extract<
+            PeerDeliveryOutcome,
+            { status: "failed" }
+          > => outcome.status === "failed",
+        )
+        .map((outcome) => outcome.reason),
+      message,
+    );
+    this.name = "MessageDeliveryError";
+    this.result = result;
+  }
+}
+
+/**
+ * The sender's history is independent of remote delivery once splitToChunks
+ * has committed its complete local copy. Network/setup failures may annotate
+ * delivery status, but only an explicit local cancel removes that history.
+ */
+export const shouldDeleteLocalMessageAfterFailure = (
+  localMessageCommitted: boolean,
+  wireWorkStarted: boolean,
+  explicitlyCancelled: boolean,
+): boolean =>
+  explicitlyCancelled || (!localMessageCommitted && !wireWorkStarted);
 
 // Send once (all chunks), then reconcile: resend ONLY the un-acked real chunks
 // until the receiver confirms completion (its final message-hash receipt) or the
@@ -388,95 +594,120 @@ const resumeChannel = async (
 // full reconnect the loop re-establishes the per-message channel and continues
 // (resume), rather than giving up — the same reconcile drives both.
 const sendWithReconcile = async (
-  channel: IRTCDataChannel | string,
+  channel: IRTCDataChannel,
   api: BaseQueryApi,
   roomId: string,
   epc: IRTCPeerConnection,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
+  transferId: string,
   hashHex: string,
   peerId: string,
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
+  signal?: AbortSignal,
 ): Promise<void> => {
-  clearTransfer(peerId, hashHex);
+  throwIfTransferAborted(signal);
+  clearTransfer(roomId, peerId, transferId);
+
+  // This path no longer persists ciphertext. Remove any queue records left by an
+  // older runtime before this channel can drain them; plaintext newChunks are the
+  // sole durable resend source.
+  await deleteDBSendQueue(
+    roomSendQueueLabel(roomId, channel.label),
+    peerId,
+  );
+  throwIfTransferAborted(signal);
 
   // protocol-v3: do not send until the PACE + Double-Ratchet handshake has seeded
   // this peer's ratchet (the `main` channel opens the gate). A rejected gate =
   // failed handshake → abort this peer's send.
   try {
-    await getRatchetGate(peerId);
+    await waitWithTransferAbort(getRatchetGate(roomId, peerId), signal);
   } catch (error) {
-    console.error("v3 send: ratchet gate rejected", error);
-    return;
+    throw new Error("v3 send: ratchet gate rejected", { cause: error });
   }
-  if (!epc.ratchetState) {
-    console.error("v3 send: no ratchet state for peer");
-    return;
-  }
+  if (!epc.ratchetState)
+    throw new Error("v3 send: no ratchet state for peer");
 
-  // Step the ratchet ONCE for the whole message → one message key + one header
-  // (dhPub, N, PN) shared by every chunk (design §"per-MESSAGE, not per-chunk").
-  // The responder cannot send before it has received (no sending chain yet) —
-  // `ratchetEncrypt` throws; abort gracefully (the send retries after a receive).
+  // Stage one ratchet step for the whole message, persist its successor, then
+  // adopt it in memory. No frame is built or sent until durability succeeds.
+  // The per-edge transaction lock also prevents concurrent sends from deriving
+  // the same message key or persisting snapshots out of order.
   let messageKey: Uint8Array;
   let header: RatchetHeader;
   try {
-    const stepped = ratchetEncrypt(epc.ratchetState, encryptionModule);
+    const stepped = await ratchetEncryptDurably(
+      epc,
+      roomId,
+      encryptionModule,
+    );
+    if (signal?.aborted) {
+      stepped.messageKey.fill(0);
+      throwIfTransferAborted(signal);
+    }
     messageKey = stepped.messageKey;
     header = stepped.header;
   } catch (error) {
-    console.error("v3 send: ratchetEncrypt failed", error);
-    return;
+    throw new Error("v3 send: durable ratchet advance failed", {
+      cause: error,
+    });
   }
 
-  // Persist the advanced sending chain BEFORE any frame goes out, so a crash
-  // mid-send can't reuse a chain key (nonce/key-reuse safety).
+  let currentChannel = channel;
+  let currentEpc = epc;
   try {
-    await persistRatchetSession(epc, roomId);
-  } catch (error) {
-    console.error(error);
-  }
-
-  try {
-    let currentChannel = channel;
     // The per-message channel label is a pure function of the message, so the dead
     // channel's own label is exactly what we re-open on reconnect.
-    const channelMessageLabel =
-      typeof channel === "string" ? channel : channel.label;
+    const channelMessageLabel = channel.label;
 
     // Wait for the per-message channel to open before the first send, so its
     // initial frames aren't spilled to the WS relay while it is still connecting.
-    if (typeof currentChannel !== "string") await waitForOpen(currentChannel);
+    if (
+      !(await waitForOpen(
+        currentChannel,
+        undefined,
+        undefined,
+        signal,
+      ))
+    )
+      throw new Error("Message DataChannel did not open before send timeout");
+    throwIfTransferAborted(signal);
 
     // Initial pass: all chunks (real + decoy).
     await sendChunks(
       currentChannel,
-      api,
-      roomId,
       messageKey,
       header,
       chunksLen,
       chunkHashes,
       merkleRoot,
+      transferId,
       hashHex,
-      peerId,
       encryptionModule,
       merkleModule,
+      signal,
     );
 
     let retries = 0;
     let resumeAttempts = 0;
+    let completed = false;
     while (retries < MAX_RETRANSMITS) {
       const done = await waitForCompletion(
+        roomId,
         peerId,
-        hashHex,
+        transferId,
         RETRANSMIT_TIMEOUT_MS * (retries + 1),
+        signal,
       );
-      if (done) break;
+      throwIfTransferAborted(signal);
+      if (done) {
+        completed = true;
+        break;
+      }
 
       // Channel died — a full reconnect. Re-establish it on the peer's fresh
       // connection and continue; the receiver re-emits its receipts so we resend
@@ -484,10 +715,23 @@ const sendWithReconcile = async (
       // treat a genuinely dead (closed/closing) channel as needing resume — a
       // still-"connecting" channel is given more time via waitForCompletion.
       if (
-        typeof currentChannel !== "string" &&
-        (currentChannel.readyState === "closed" ||
-          currentChannel.readyState === "closing")
+        currentChannel.readyState === "closed" ||
+        currentChannel.readyState === "closing"
       ) {
+        // One DataChannel is one logical message. If only this stream closed
+        // while its authenticated RTCPeerConnection remains current and
+        // connected, that close is the peer's immediate-mode CANCEL signal.
+        // Resume is reserved for a replacement PC after a transport failure.
+        if (
+          isAuthenticatedPeerCancel(
+            currentEpc,
+            peerConnections,
+            roomId,
+            peerId,
+          )
+        )
+          throw new Error("Message transfer cancelled by peer");
+
         if (resumeAttempts >= MAX_RESUME_ATTEMPTS) break;
         resumeAttempts++;
         const resumed = await resumeChannel(
@@ -498,9 +742,22 @@ const sendWithReconcile = async (
           peerConnections,
           dataChannels,
           RECONNECT_RESUME_TIMEOUT_MS,
+          signal,
         );
         if (!resumed) break;
-        currentChannel = resumed;
+        const rebound = await bindTransferCipherToConnection(
+          { epc: currentEpc, messageKey, header },
+          resumed.epc,
+          roomId,
+          encryptionModule,
+          getRatchetGate,
+          ratchetEncryptDurably,
+          signal,
+        );
+        currentEpc = rebound.epc;
+        messageKey = rebound.messageKey;
+        header = rebound.header;
+        currentChannel = resumed.channel;
         retries = 0; // fresh retransmit budget for the resumed transfer
 
         // Telemetry: surface the reconnect recovery to the UI as a reliability
@@ -520,18 +777,17 @@ const sendWithReconcile = async (
       // re-seal keeps it safe and the receiver's cached key still opens it.
       await sendChunks(
         currentChannel,
-        api,
-        roomId,
         messageKey,
         header,
         chunksLen,
         chunkHashes,
         merkleRoot,
+        transferId,
         hashHex,
-        peerId,
         encryptionModule,
         merkleModule,
-        getAckedChunks(peerId, hashHex),
+        signal,
+        getAckedChunks(roomId, peerId, transferId),
       );
       retries++;
 
@@ -540,11 +796,18 @@ const sendWithReconcile = async (
         incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
       );
     }
+    if (!completed)
+      throw new Error("Message transfer ended without receiver confirmation");
   } finally {
+    // Completion, cancellation, timeout, and retry exhaustion are all terminal
+    // for this message-scoped SCTP stream. Closing here also prevents a channel
+    // cancelled while still connecting from opening later and consuming the
+    // per-edge channel budget indefinitely.
+    closeTransferChannel(currentChannel);
     // The message key is dead once every retransmit round for this message is
     // done (or given up) — wipe it. The ratchet has already advanced past it.
     messageKey.fill(0);
-    clearTransfer(peerId, hashHex);
+    clearTransfer(roomId, peerId, transferId);
   }
 };
 
@@ -557,15 +820,22 @@ export const handleSendMessage = async (
   dataChannels: IRTCDataChannel[],
   encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
+  transferId: string,
   minChunks = 1,
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.9,
   metadataSchemaVersion = 1,
-) => {
+): Promise<SendMessageResult | undefined> => {
+  const transfer = claimTransfer(roomId, transferId);
+  let merkleRootForFailureCleanup = "";
+  let localMessageCommitted = false;
+  let wireWorkStarted = false;
   try {
+    throwIfTransferAborted(transfer.signal);
     const { rooms } = api.getState() as State;
 
     const roomIndex = rooms.findIndex((r) => r.id === roomId);
+    if (roomIndex === -1) throw new Error("No room with id " + roomId);
 
     if (roomIndex > -1) {
       const channelIndex = rooms[roomIndex].channels.findIndex(
@@ -581,11 +851,16 @@ export const handleSendMessage = async (
           label,
           rooms[roomIndex],
           merkleModule,
+          transfer,
           minChunks,
           chunkSize,
           percentageFilledChunk,
           metadataSchemaVersion,
         );
+
+      transfer.bindMerkleRoot(merkleRootHex);
+      merkleRootForFailureCleanup = merkleRootHex;
+      throwIfTransferAborted(transfer.signal);
 
       if (
         merkleRoot.length === 0 ||
@@ -594,74 +869,102 @@ export const handleSendMessage = async (
         chunkHashes.length === 0
       )
         return;
+      localMessageCommitted = true;
 
       const channelMessageLabel = await compileChannelMessageLabel(
         label,
         merkleRootHex,
       );
 
-      const PEERS_LEN = rooms[roomIndex].channels[channelIndex].peerIds.length;
-      const promises: Promise<void>[] = [];
-      for (let i = 0; i < PEERS_LEN; i++) {
-        const peerIndex = peerConnections.findIndex(
-          (p) =>
-            p.withPeerId === rooms[roomIndex].channels[channelIndex].peerIds[i],
+      const targets = rooms[roomIndex].channels[channelIndex].peerIds.map(
+        (peerId): PeerSendTarget => ({
+          peerId,
+          epc: peerConnections.find(
+            (candidate) =>
+              candidate.roomId === roomId &&
+              candidate.withPeerId === peerId,
+          ),
+        }),
+      );
+
+      const fanout = await runPeerSendFanout(
+        targets,
+        ({ epc }) =>
+          handleOpenChannel(
+            { channel: channelMessageLabel, epc, roomId, dataChannels },
+            api,
+          ),
+        ({ peerId, epc }, channel) =>
+          sendWithReconcile(
+            channel,
+            api,
+            roomId,
+            epc,
+            totalChunks,
+            chunkHashes,
+            merkleRoot,
+            transfer.transferId,
+            hashHex,
+            peerId,
+            encryptionModule,
+            merkleModule,
+            peerConnections,
+            dataChannels,
+            transfer.signal,
+          ),
+        transfer.signal,
+        () => {
+          wireWorkStarted = true;
+        },
+      );
+      const result: SendMessageResult = {
+        transferId: transfer.transferId,
+        merkleRootHex,
+        ...fanout,
+      };
+
+      throwIfTransferAborted(transfer.signal);
+      const delivered = result.outcomes.filter(
+        (outcome) => outcome.status === "delivered",
+      ).length;
+      if (result.startedTransfers === 0)
+        throw new MessageDeliveryError(
+          result,
+          "No authenticated connected peers accepted the send",
+        );
+      if (delivered === 0)
+        throw new MessageDeliveryError(
+          result,
+          "Message was not delivered to any peer",
         );
 
-        // protocol-v3: a message can only be sent over an established per-peer
-        // ratchet, seeded by the handshake on the connected `main` DATA CHANNEL.
-        // A peer with no live connection (relay-only) has no ratchet, so it is
-        // skipped (behaviour change vs. the box scheme's WS-relay send — see
-        // report). The reconnect/resume path re-establishes the channel + ratchet
-        // when the peer returns, and the next send goes through.
-        if (
-          peerIndex === -1 ||
-          peerConnections[peerIndex].connectionState !== "connected"
-        )
-          continue;
-
-        const epc = peerConnections[peerIndex];
-
-        const channel = await handleOpenChannel(
-          { channel: channelMessageLabel, epc, roomId, dataChannels },
-          api,
-        );
-
-        const peerId = epc.withPeerId;
-        const peerPublicKeyHex = epc.withPeerPublicKey;
-
-        if (peerPublicKeyHex.length === crypto_sign_ed25519_PUBLICKEYBYTES * 2) {
-          promises.push(
-            sendWithReconcile(
-              channel,
-              api,
-              roomId,
-              epc,
-              totalChunks,
-              chunkHashes,
-              merkleRoot,
-              hashHex,
-              peerId,
-              encryptionModule,
-              merkleModule,
-              peerConnections,
-              dataChannels,
-            ),
-          );
-        }
-      }
-
-      await Promise.allSettled(promises);
-
-      // Every peer has now either completed (its newChunks were freed via the
-      // transferComplete path) or permanently given up on resume. No resume is
-      // outstanding, so reclaim any newChunks a give-up left behind — otherwise
-      // an abandoned transfer would leak its whole (padded) body into IndexedDB.
-      // Idempotent (no-op for already-freed completed peers) and multi-peer-safe
-      // (runs only after ALL peers' sendWithReconcile settle).
-      await deleteDBNewChunk(undefined, undefined, hashHex);
+      // Mixed success is a completed room send, not a reason to erase the
+      // sender's history. The caller can surface every peer's setup/transfer
+      // outcome and decide whether to retry only the failed edges.
+      return result;
     }
+    return undefined;
   } catch (error) {
+    if (
+      shouldDeleteLocalMessageAfterFailure(
+        localMessageCommitted,
+        wireWorkStarted,
+        transfer.signal.aborted,
+      )
+    ) {
+      if (merkleRootForFailureCleanup.length > 0) {
+        await deleteReceiveTransfer(merkleRootForFailureCleanup);
+      }
+      api.dispatch(deleteMessage({ roomId, transferId: transfer.transferId }));
+    }
+    if (transfer.signal.aborted)
+      throw transfer.signal.reason instanceof Error
+        ? transfer.signal.reason
+        : new Error("Message transfer cancelled");
     console.trace(error);
+    throw error;
+  } finally {
+    await deleteDBNewChunk({ transferId: transfer.transferId });
+    transfer.finish();
   }
 };

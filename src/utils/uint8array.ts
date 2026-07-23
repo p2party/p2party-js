@@ -77,12 +77,17 @@ export const hexToUint8Array = (hexString: string) => {
   // remove the leading 0x
   hexString = hexString.replace(/^0x/, "");
 
+  if (hexString.length === 0) throw new Error("No hex characters in string");
+
+  // Reject the whole input if any character is not hexadecimal. The previous
+  // pair-matching implementation silently skipped punctuation (for example,
+  // "aa:bb" decoded as [0xaa, 0xbb]), which is unsafe for identity and
+  // transcript material.
+  const bad = /[^0-9a-f]/i.exec(hexString);
+  if (bad) throw new Error(`Found non-hex characters ${bad[0]}`);
+
   // ensure even number of characters
   if (hexString.length % 2 != 0) hexString = "0" + hexString;
-
-  // check for some non-hex characters
-  const bad = /[G-Z\s]/i.exec(hexString);
-  if (bad) throw new Error(`Found non-hex characters ${bad[0]}`);
 
   // split the string into pairs of octets
   const pairs = hexString.match(/[\dA-F]{2}/gi);

@@ -21,6 +21,7 @@ import {
   getReceiveFile,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
+  deleteIdentityEd25519,
   deleteIdentityX25519,
   getDBAddressBookEntry,
   getDBAllChunks,
@@ -36,8 +37,33 @@ import {
   MessageCategory,
   MessageType,
 } from "./utils/messageTypes";
-import { CANCEL_SEND } from "./utils/splitToChunks";
-import { CHUNK_LEN, IMPORTANT_DATA_LEN } from "./utils/constants";
+import {
+  CHUNK_LEN,
+  CHUNK_SIZE_FLOOR,
+  PROTOCOL_VERSION,
+} from "./utils/constants";
+import {
+  abortAllTransfers,
+  abortRoomTransfers,
+  abortTransfer,
+  beginTransfer,
+  createTransferId,
+} from "./handlers/transferAbort";
+import {
+  DEFAULT_ROOM_POLICY_V1,
+  canonicalizeRoomPolicyV1,
+  decodeRoomPolicyV1,
+  encodeRoomPolicyV1,
+  hashRoomPolicyV1,
+  roomPoliciesEqualV1,
+} from "./roomPolicy";
+import {
+  clearRoomPins,
+  deleteRoomPin,
+  hasRoomPin,
+  putRoomPin,
+} from "./roomPinVault";
+import { clearPinAttempts } from "./roomPinAttempts";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -47,6 +73,7 @@ import {
   roomSelector,
   setConnectionRelay,
   setRoom,
+  setRoomPolicy,
   deleteMessage,
   deleteRoom,
   setConnectingToPeers,
@@ -76,12 +103,28 @@ import type {
 import type { RoomData } from "./api/webrtc/interfaces";
 import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
 import type { KeyPair } from "./reducers/keyPairSlice";
+import type { RoomPolicyV1 } from "./roomPolicy";
+import type { SendMessageResult } from "./handlers/handleSendMessage";
 
 // const originalClose = RTCDataChannel.prototype.close;
 // RTCDataChannel.prototype.close = function () {
 //   console.trace("RTCDataChannel closed from:");
 //   originalClose.apply(this);
 // };
+
+export interface ConnectRoomOptions {
+  /**
+   * Canonical public room policy. Omit on reconnect to preserve the room's
+   * existing policy; a new room defaults to hybrid-PQ, no-PIN, immediate
+   * delivery over the currently shipped signaling path.
+   */
+  policy?: RoomPolicyV1;
+  /**
+   * Required exactly when `policy.authMode` is `pin`. Copied into an in-memory
+   * vault keyed by the local room URL; never enters Redux, storage, or logs.
+   */
+  pin?: Uint8Array;
+}
 
 const connect = async (
   roomUrl: string,
@@ -98,13 +141,67 @@ const connect = async (
     // Pre-allocate ICE candidates for faster connection setup
     iceCandidatePoolSize: 2,
   },
+  options: ConnectRoomOptions = {},
 ) => {
   if (roomUrl.length !== 64) throw new Error("Invalid room url length");
+  if (options === null || typeof options !== "object" || Array.isArray(options))
+    throw new Error("Invalid room connection options");
 
   const { keyPair, signalingServer, rooms, commonState } = store.getState();
 
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  if (roomIndex === -1) dispatch(setRoom({ url: roomUrl, id: "", rtcConfig }));
+  let persistedPolicy: RoomPolicyV1 | undefined;
+  if (roomIndex === -1) {
+    const persistedRooms = await getAllDBUniqueRooms();
+    const persisted = persistedRooms.find((room) => room.roomUrl === roomUrl);
+    if (persisted?.roomPolicy) {
+      persistedPolicy = decodeRoomPolicyV1(
+        new Uint8Array(persisted.roomPolicy),
+      );
+    }
+  }
+  if (
+    persistedPolicy &&
+    options.policy &&
+    !roomPoliciesEqualV1(persistedPolicy, options.policy)
+  )
+    throw new Error("Persisted room policy is immutable");
+  const policy = canonicalizeRoomPolicyV1(
+    options.policy ??
+      (roomIndex > -1
+        ? rooms[roomIndex].policy
+        : (persistedPolicy ?? DEFAULT_ROOM_POLICY_V1)),
+  );
+
+  // Stable descriptor codes may precede their live implementation, but the
+  // public connect path must never silently claim an unwired guarantee.
+  if (policy.pqMode !== "hybrid-mlkem768")
+    throw new Error("Protocol v3 requires hybrid ML-KEM-768");
+  if (policy.rendezvousMode !== "legacy-signaling")
+    throw new Error("Private rendezvous room connections are not wired yet");
+  if (policy.coverMode !== "immediate")
+    throw new Error("Scheduled-cover room connections are not wired yet");
+
+  if (policy.authMode === "pin") {
+    if (options.pin !== undefined) {
+      putRoomPin(roomUrl, options.pin);
+      const existingRoomId = roomIndex > -1 ? rooms[roomIndex].id : "";
+      if (existingRoomId) await clearPinAttempts(existingRoomId);
+    } else if (!hasRoomPin(roomUrl)) {
+      throw new Error("PIN room connection requires a PIN");
+    }
+  } else {
+    if (options.pin !== undefined)
+      throw new Error("PIN must not be provided for a no-PIN room");
+    // A deliberate switch back to no-PIN must not leave the old secret alive.
+    deleteRoomPin(roomUrl);
+  }
+
+  if (roomIndex === -1) {
+    dispatch(setRoom({ url: roomUrl, id: "", rtcConfig, policy }));
+  } else {
+    dispatch(setRoomPolicy({ roomContext: roomUrl, policy }));
+  }
 
   if (commonState.currentRoomUrl !== roomUrl)
     dispatch(setCurrentRoomUrl(roomUrl));
@@ -121,6 +218,7 @@ const connect = async (
             type: "room",
             fromPeerId: keyPair.peerId,
             roomUrl,
+            protocolVersion: PROTOCOL_VERSION,
           } as WebSocketMessageRoomIdRequest,
         }),
       );
@@ -234,6 +332,7 @@ const onlyAllowConnectionsFromAddressBook = async (
           await dispatch(
             webrtcApi.endpoints.disconnectFromPeer.initiate({
               peerId: rooms[roomIndex].peers[i].peerId,
+              roomId: rooms[roomIndex].id,
               alsoDeleteData: false,
             }),
           );
@@ -295,7 +394,18 @@ const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
  * If no toChannel then broadcast the message everywhere to everyone.
  * If toChannel then broadcast to all peers with that channel.
  */
-const sendMessage = async (
+export interface MessageTransferHandle {
+  readonly transferId: string;
+  /**
+   * Resolves only after every started peer send/reconciliation and cleanup
+   * settles, preserving the ordered per-peer delivery outcomes.
+   */
+  readonly done: Promise<SendMessageResult | undefined>;
+  /** Cancels exactly this logical send, even before hashing/WASM setup finishes. */
+  cancel(): Promise<void>;
+}
+
+const sendMessage = (
   data: string | File,
   toChannel: string,
   roomId: string,
@@ -303,17 +413,14 @@ const sendMessage = async (
   minChunks = 3,
   chunkSize = CHUNK_LEN,
   metadataSchemaVersion = 1,
-) => {
-  // dispatch(
-  //   signalingServerApi.endpoints.sendMessageToPeer.initiate({
-  //     data,
-  //     // fromPeerId: keyPair.peerId,
-  //     toChannel,
-  //   }),
-  // );
-
-  await dispatch(
+  transferId = createTransferId(),
+): MessageTransferHandle => {
+  if (!/^[0-9a-f]{64}$/.test(transferId))
+    throw new Error("Invalid transfer ID");
+  const transfer = beginTransfer(roomId, transferId);
+  const request = dispatch(
     webrtcApi.endpoints.sendMessage.initiate({
+      transferId,
       data,
       label: toChannel,
       roomId,
@@ -323,6 +430,20 @@ const sendMessage = async (
       metadataSchemaVersion,
     }),
   );
+  const done = request.unwrap().finally(() => transfer.finish());
+
+  return {
+    transferId,
+    done,
+    cancel: () =>
+      cancelMessage(
+        roomId,
+        toChannel,
+        undefined,
+        undefined,
+        transferId,
+      ),
+  };
 };
 
 const readMessage = async (
@@ -561,12 +682,16 @@ const readMessage = async (
 };
 
 const cancelMessage = async (
+  roomId: string,
   channelLabel: string,
-  merkleRoot: string | Uint8Array,
+  merkleRoot?: string | Uint8Array,
   hash?: string | Uint8Array,
+  transferId?: string,
 ) => {
-  if (!merkleRoot && !hash)
-    throw new Error("Need to provide either merkle root or hash");
+  if (!transferId && !merkleRoot && !hash)
+    throw new Error("Need to provide a transfer ID, Merkle root, or hash");
+  if (transferId && !/^[0-9a-f]{64}$/.test(transferId))
+    throw new Error("Invalid transfer ID");
   if (
     merkleRoot &&
     typeof merkleRoot === "string" &&
@@ -593,39 +718,41 @@ const cancelMessage = async (
   )
     throw new Error("Invalid hash length");
 
-  const evt = new CustomEvent(CANCEL_SEND);
-  window.dispatchEvent(evt);
-
   const merkleRootHex =
     merkleRoot && typeof merkleRoot === "string"
       ? merkleRoot
       : merkleRoot && typeof merkleRoot !== "string"
         ? uint8ArrayToHex(merkleRoot)
         : "";
-  // const hashHex =
-  //   hash && typeof hash === "string"
-  //     ? hash
-  //     : hash && typeof hash !== "string"
-  //       ? uint8ArrayToHex(hash)
-  //       : "";
+  const hashHex =
+    hash && typeof hash === "string"
+      ? hash
+      : hash && typeof hash !== "string"
+        ? uint8ArrayToHex(hash)
+        : "";
 
-  let roomIndex = -1;
-  let messageIndex = -1;
+  abortTransfer(roomId, {
+    transferId,
+    merkleRootHex: merkleRootHex || undefined,
+    hashHex: hashHex || undefined,
+  });
 
   const { rooms } = store.getState();
-  const roomsLen = rooms.length;
-  for (let i = 0; i < roomsLen; i++) {
-    messageIndex = merkleRoot
-      ? rooms[i].messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
-      : // : hash
-        //   ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
-        -1;
-
-    if (messageIndex > -1) {
-      roomIndex = i;
-      break;
-    }
-  }
+  const roomIndex = rooms.findIndex((room) => room.id === roomId);
+  const messageIndex =
+    roomIndex > -1
+      ? transferId
+        ? rooms[roomIndex].messages.findIndex(
+            (message) => message.transferId === transferId,
+          )
+        : merkleRoot
+        ? rooms[roomIndex].messages.findIndex(
+            (message) => message.merkleRootHex === merkleRootHex,
+          )
+        : rooms[roomIndex].messages.findIndex(
+            (message) => message.sha512Hex === hashHex,
+          )
+      : -1;
 
   if (
     roomIndex > -1 &&
@@ -641,6 +768,7 @@ const cancelMessage = async (
 
     await store.dispatch(
       webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+        roomId: rooms[roomIndex].id,
         label,
         alsoDeleteData: true,
       }),
@@ -648,6 +776,7 @@ const cancelMessage = async (
 
     store.dispatch(
       deleteMessage({
+        roomId,
         merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
       }),
     );
@@ -655,6 +784,7 @@ const cancelMessage = async (
 };
 
 const deleteMsg = async (
+  roomId: string,
   merkleRoot?: string | Uint8Array,
   hash?: string | Uint8Array,
 ) => {
@@ -685,9 +815,6 @@ const deleteMsg = async (
   )
     throw new Error("Invalid hash length");
 
-  const evt = new CustomEvent(CANCEL_SEND);
-  window.dispatchEvent(evt);
-
   const merkleRootHex =
     merkleRoot && typeof merkleRoot === "string"
       ? merkleRoot
@@ -701,23 +828,25 @@ const deleteMsg = async (
         ? uint8ArrayToHex(hash)
         : "";
 
-  let roomIndex = -1;
-  let messageIndex = -1;
+  abortTransfer(roomId, {
+    merkleRootHex: merkleRootHex || undefined,
+    hashHex: hashHex || undefined,
+  });
 
   const { rooms } = store.getState();
-  const roomsLen = rooms.length;
-  for (let i = 0; i < roomsLen; i++) {
-    messageIndex = merkleRoot
-      ? rooms[i].messages.findIndex((m) => m.merkleRootHex === merkleRootHex)
-      : hash
-        ? rooms[i].messages.findIndex((m) => m.sha512Hex === hashHex)
-        : -1;
-
-    if (messageIndex > -1) {
-      roomIndex = i;
-      break;
-    }
-  }
+  const roomIndex = rooms.findIndex((room) => room.id === roomId);
+  const messageIndex =
+    roomIndex > -1
+      ? merkleRoot
+        ? rooms[roomIndex].messages.findIndex(
+            (message) => message.merkleRootHex === merkleRootHex,
+          )
+        : hash
+          ? rooms[roomIndex].messages.findIndex(
+              (message) => message.sha512Hex === hashHex,
+            )
+          : -1
+      : -1;
 
   if (
     roomIndex > -1 &&
@@ -733,6 +862,7 @@ const deleteMsg = async (
 
     await store.dispatch(
       webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+        roomId: rooms[roomIndex].id,
         label,
         alsoDeleteData: true,
       }),
@@ -740,6 +870,7 @@ const deleteMsg = async (
 
     store.dispatch(
       deleteMessage({
+        roomId,
         merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
       }),
     );
@@ -747,14 +878,15 @@ const deleteMsg = async (
 };
 
 const purgeIdentity = async () => {
-  const evt = new CustomEvent(CANCEL_SEND);
-  window.dispatchEvent(evt);
+  abortAllTransfers();
 
+  clearRoomPins();
   dispatch(resetIdentity());
   // D2=B: the X25519 identity lives WebCrypto-wrapped in IndexedDB, not in the
   // Redux/localStorage identity — clear it too so a rotated Ed25519 identity never
   // leaves an orphaned X25519 record + cross-sig behind.
   await deleteIdentityX25519();
+  await deleteIdentityEd25519();
 
   const { rooms } = store.getState();
   const roomsLen = rooms.length;
@@ -769,12 +901,14 @@ const purgeIdentity = async () => {
 };
 
 const purgeRoom = async (roomUrl: string) => {
-  const evt = new CustomEvent(CANCEL_SEND);
-  window.dispatchEvent(evt);
-
+  deleteRoomPin(roomUrl);
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  if (roomIndex > -1) dispatch(deleteRoom(rooms[roomIndex].id));
+  if (roomIndex > -1) {
+    abortRoomTransfers(rooms[roomIndex].id);
+    if (rooms[roomIndex].id) await clearPinAttempts(rooms[roomIndex].id);
+    dispatch(deleteRoom(rooms[roomIndex].id));
+  }
 
   await dispatch(
     signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
@@ -782,11 +916,12 @@ const purgeRoom = async (roomUrl: string) => {
 };
 
 const purge = async () => {
-  const evt = new CustomEvent(CANCEL_SEND);
-  window.dispatchEvent(evt);
+  abortAllTransfers();
 
+  clearRoomPins();
   dispatch(resetIdentity());
   await deleteIdentityX25519(); // D2=B: clear the wrapped X25519 identity record too
+  await deleteIdentityEd25519();
   await dispatch(
     signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
   );
@@ -837,11 +972,12 @@ export const p2party = {
   // openChannel,
   sendMessage,
   readMessage,
-  // Read-only diagnostic: how many outbound (send-side) chunks are still held in
-  // IndexedDB for a message hash. 0 after a completed/abandoned send (the buffer
-  // is reclaimed). Useful for surfacing send-buffer usage and for tests.
+  // Read-only diagnostic: how many outbound chunks are held for one random
+  // transfer ID. 0 after completion/abandonment. Content hashes are deliberately
+  // not accepted because identical concurrent sends are independent.
   getSendChunksCount: getDBAllNewChunksCount,
   cancelMessage,
+  createTransferId,
   deleteMessage: deleteMsg,
   purgeIdentity,
   purgeRoom,
@@ -852,6 +988,11 @@ export const p2party = {
   createSession,
   restoreSession,
   generateSessionIdentity,
+  DEFAULT_ROOM_POLICY_V1,
+  encodeRoomPolicyV1,
+  decodeRoomPolicyV1,
+  hashRoomPolicyV1,
+  roomPoliciesEqualV1,
   // Industry-standard name (cf. WebCrypto `generateKey`, libsodium
   // `crypto_sign_keypair`) + consistent with `generateMnemonic` below.
   generateKeyPair: newKeyPair,
@@ -860,10 +1001,13 @@ export const p2party = {
   generateMnemonic,
   keyPairFromMnemonic,
   MIN_CHUNKS: 1,
-  MIN_CHUNK_SIZE: IMPORTANT_DATA_LEN + 1,
+  MIN_CHUNK_SIZE: CHUNK_SIZE_FLOOR + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
-  MAX_PERCENTAGE_FILLED_CHUNK: 1,
+  // 100%-full cells make identical content roots deterministic. Keep at least
+  // 1% RNG padding as the fresh wire/storage transfer namespace; this is not a
+  // room cover-cadence setting.
+  MAX_PERCENTAGE_FILLED_CHUNK: 0.99,
   ROOM_URL_LENGTH: 64,
   MessageType,
   MessageCategory,
@@ -896,6 +1040,7 @@ export type {
   UniqueRoom,
   SignalingState,
   KeyPair,
+  RoomPolicyV1,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,
@@ -908,6 +1053,22 @@ export type {
 };
 
 export { createSession, restoreSession, generateSessionIdentity };
+
+export {
+  DEFAULT_ROOM_POLICY_V1,
+  canonicalizeRoomPolicyV1,
+  decodeRoomPolicyV1,
+  encodeRoomPolicyV1,
+  hashRoomPolicyV1,
+  roomPoliciesEqualV1,
+};
+
+export type {
+  RoomAuthMode,
+  RoomCoverMode,
+  RoomPqMode,
+  RoomRendezvousMode,
+} from "./roomPolicy";
 
 export type {
   CreateSessionOptions,

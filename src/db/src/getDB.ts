@@ -11,10 +11,12 @@ import type {
   NewChunk,
   RatchetSession,
   StoredIdentityX25519,
+  StoredIdentityEd25519,
+  PinAttemptState,
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 17;
+export const dbVersion = 18;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -50,7 +52,12 @@ export interface RepoSchema extends DBSchema {
   newChunks: {
     value: NewChunk;
     key: [string, number];
-    indexes: { hash: string; merkleRoot: string; realChunkHash: string };
+    indexes: {
+      transferId: string;
+      hash: string;
+      merkleRoot: string;
+      receiptScope: [string, string];
+    };
   };
   sendQueue: {
     value: SendQueue;
@@ -66,14 +73,18 @@ export interface RepoSchema extends DBSchema {
   // (key = "ratchetWrapKey"). Value is a live CryptoKey object (structured-
   // cloneable, never its raw bytes).
   meta: {
-    value: CryptoKey | StoredIdentityX25519;
+    value:
+      | CryptoKey
+      | StoredIdentityX25519
+      | StoredIdentityEd25519
+      | PinAttemptState;
     key: string;
   };
 }
 
 export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   return openDB<RepoSchema>(dbName, dbVersion, {
-    upgrade(db, _oldVersion, _newVersion, tx) {
+    upgrade(db, oldVersion, _newVersion, tx) {
       if (!db.objectStoreNames.contains("addressBook")) {
         const addressBook = db.createObjectStore("addressBook", {
           keyPath: ["peerId"],
@@ -192,17 +203,33 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         }
       }
 
+      // v18 changes the outbound staging identity from content hash to a random
+      // per-send transferId. Old rows cannot be mapped unambiguously when two
+      // identical sends overlap, so recreate ONLY this outbound/transient
+      // store. Received chunks, messages, rooms, and ratchets remain intact.
+      if (oldVersion < 18 && db.objectStoreNames.contains("newChunks"))
+        db.deleteObjectStore("newChunks");
+
       if (!db.objectStoreNames.contains("newChunks")) {
         const newChunks = db.createObjectStore("newChunks", {
-          keyPath: ["hash", "chunkIndex"],
+          keyPath: ["transferId", "chunkIndex"],
         });
+        newChunks.createIndex("transferId", "transferId", { unique: false });
         newChunks.createIndex("hash", "hash", { unique: false });
         newChunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
-        newChunks.createIndex("realChunkHash", "realChunkHash", {
-          unique: true,
-        });
+        newChunks.createIndex(
+          "receiptScope",
+          ["merkleRoot", "receiptToken"],
+          {
+            unique: false,
+          },
+        );
       } else {
         const store = tx.objectStore("newChunks");
+
+        if (!store.indexNames.contains("transferId")) {
+          store.createIndex("transferId", "transferId", { unique: false });
+        }
 
         if (!store.indexNames.contains("hash")) {
           store.createIndex("hash", "hash", { unique: false });
@@ -212,10 +239,14 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
           store.createIndex("merkleRoot", "merkleRoot", { unique: false });
         }
 
-        if (!store.indexNames.contains("realChunkHash")) {
-          store.createIndex("realChunkHash", "realChunkHash", {
-            unique: true,
-          });
+        if (!store.indexNames.contains("receiptScope")) {
+          store.createIndex(
+            "receiptScope",
+            ["merkleRoot", "receiptToken"],
+            {
+              unique: false,
+            },
+          );
         }
       }
 

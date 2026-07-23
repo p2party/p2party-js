@@ -1,7 +1,15 @@
 import webrtcApi from ".";
 // import signalingServerApi from "../signalingServerApi";
 
-import { getPeerMutex } from "./negotiationLock";
+import { getRoomPeerMutex } from "./negotiationLock";
+import { findRoomPeerConnectionIndex } from "./roomPeer";
+import {
+  enqueueConnectionIceCandidate,
+  enqueuePendingIceCandidate,
+  normalizeIceCandidate,
+} from "./pendingIceCandidates";
+import { candidateMatchesRemoteIceGeneration } from "./iceGeneration";
+import { repairIceTransportAfterCandidateFailure } from "./iceRepair";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -17,32 +25,21 @@ export interface RTCSetCandidateParamsExtention extends RTCSetCandidateParams {
   iceCandidates: IRTCIceCandidate[];
 }
 
-const normalizeCandidate = (
-  candidate: RTCIceCandidateInit | RTCIceCandidate,
-): RTCIceCandidateInit => {
-  if (typeof (candidate as RTCIceCandidate).toJSON === "function") {
-    return (candidate as RTCIceCandidate).toJSON();
-  }
-
-  const candidateInit = candidate as RTCIceCandidateInit;
-  return {
-    candidate: candidateInit.candidate,
-    sdpMid: candidateInit.sdpMid,
-    sdpMLineIndex: candidateInit.sdpMLineIndex,
-    usernameFragment: candidateInit.usernameFragment,
-  };
-};
-
 const webrtcSetIceCandidateQuery: BaseQueryFn<
   RTCSetCandidateParamsExtention,
   undefined
-> = async ({ peerId, candidate, peerConnections, iceCandidates }, api) => {
-  return getPeerMutex(peerId).runExclusive(async () => {
+> = async (
+  { peerId, roomId, candidate, peerConnections, iceCandidates },
+  api,
+) => {
+  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
     const { keyPair } = api.getState() as State;
-    const candidateInit = normalizeCandidate(candidate);
+    const candidateInit = normalizeIceCandidate(candidate);
 
-    const connectionIndex = peerConnections.findIndex(
-      (peer) => peer.withPeerId === peerId,
+    const connectionIndex = findRoomPeerConnectionIndex(
+      peerConnections,
+      roomId,
+      peerId,
     );
 
     if (connectionIndex > -1) {
@@ -50,8 +47,13 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
       if (epc.ignoreOffer) return { data: undefined };
 
       if (!epc.remoteDescription || epc.signalingState !== "stable") {
-        epc.iceCandidates.push(candidateInit);
-      } else {
+        enqueueConnectionIceCandidate(epc.iceCandidates, candidateInit);
+      } else if (
+        candidateMatchesRemoteIceGeneration(
+          candidateInit,
+          epc.remoteDescription,
+        )
+      ) {
         try {
           await epc.addIceCandidate(candidateInit);
         } catch {
@@ -62,62 +64,26 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
           // if (!ignoreOffer) throw error;
 
           if (!ignoreOffer) {
-            // console.error(error);
-            await api.dispatch(
-              webrtcApi.endpoints.disconnectFromPeer.initiate({
-                peerId: epc.withPeerId,
-              }),
-            );
-
-            epc.restartIce();
+            await repairIceTransportAfterCandidateFailure(epc, async () => {
+              // A later room peer update creates a fresh transport. This
+              // callback runs only when in-place restart is impossible, never
+              // before restartIce().
+              epc.iceCandidates.length = 0;
+              await api.dispatch(
+                webrtcApi.endpoints.disconnectFromPeer.initiate({
+                  peerId: epc.withPeerId,
+                  roomId: epc.roomId,
+                }),
+              );
+            });
           }
         }
       }
 
-      // if (cand.usernameFragment === candidate.usernameFragment) {
-      //   await api.dispatch(
-      //     webrtcApi.endpoints.disconnectFromPeer.initiate({
-      //       peerId: epc.withPeerId,
-      //     }),
-      //   );
-      //
-      //   const { commonState, keyPair } = api.getState() as State;
-      //   if (isUUID(keyPair.peerId) && commonState.currentRoomUrl.length === 64) {
-      //     await api.dispatch(
-      //       signalingServerApi.endpoints.sendMessage.initiate({
-      //         content: {
-      //           type: "room",
-      //           fromPeerId: keyPair.peerId,
-      //           roomUrl: commonState.currentRoomUrl,
-      //         },
-      //       }),
-      //     );
-      //   }
-      //
-      //   return { data: undefined };
-      // }
-
-      // if (!epc.remoteDescription || epc.signalingState !== "stable") {
-      //   // const receivers = epc.getReceivers();
-      //   //
-      //   // for (const receiver of receivers) {
-      //   //   // const parameters = receiver.getParameters();
-      //   //   const parameters = receiver.transport?.iceTransport.getRemoteParameters();
-      //   //
-      //   //   if (parameters.usernameFragment === candidate.usernameFragment) {
-      //   //     return { data: undefined };
-      //   //   }
-      //   // }
-      //
-      //   epc.iceCandidates.push(cand);
-      // } else {
-      //   await epc.addIceCandidate(cand);
-      // }
+      // An explicit ufrag absent from the active remote SDP belongs to an
+      // abandoned offer/answer or pre-restart generation and is dropped.
     } else {
-      iceCandidates.push({
-        ...candidateInit,
-        withPeerId: peerId,
-      } as IRTCIceCandidate);
+      enqueuePendingIceCandidate(iceCandidates, roomId, peerId, candidateInit);
     }
 
     return { data: undefined };

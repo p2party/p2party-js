@@ -15,7 +15,7 @@ import {
 import {
   crypto_aead_chacha20poly1305_ietf_KEYBYTES,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
+  crypto_aead_chacha20poly1305_ietf_ABYTES,
   crypto_hash_sha512_BYTES,
 } from "../cryptography/interfaces";
 
@@ -44,7 +44,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 
 const AEAD_KEY_LEN = crypto_aead_chacha20poly1305_ietf_KEYBYTES; // 32
 const AEAD_NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
-const AEAD_TAG_LEN = crypto_box_poly1305_AUTHTAGBYTES; // 16
+const AEAD_TAG_LEN = crypto_aead_chacha20poly1305_ietf_ABYTES; // 16
 const AAD_LEN = crypto_hash_sha512_BYTES + RATCHET_N_LEN + RATCHET_PN_LEN; // 80
 
 const toHex = (u8: Uint8Array): string =>
@@ -164,7 +164,7 @@ const receiveWithKey = (
   frame: Uint8Array,
   merkleRoot: Uint8Array,
   key: Uint8Array,
-): { code: number; decrypted: Uint8Array } => {
+): { code: number; decrypted: Uint8Array | null } => {
   const msgPtr = module._malloc(MESSAGE_LEN);
   const decPtr = module._malloc(DECRYPTED_LEN);
   const rootPtr = module._malloc(crypto_hash_sha512_BYTES);
@@ -173,7 +173,16 @@ const receiveWithKey = (
   // The C signature reads a full MESSAGE_LEN buffer; the wire frame is shorter
   // (WIRE_CHUNK_FRAME_LEN) so zero the tail, then copy the frame in.
   const msg = new Uint8Array(module.wasmMemory.buffer, msgPtr, MESSAGE_LEN);
+  const dec = new Uint8Array(
+    module.wasmMemory.buffer,
+    decPtr,
+    DECRYPTED_LEN,
+  );
   msg.fill(0);
+  // malloc may return a region containing a previous plaintext. Initialize the
+  // output before C runs, then copy it into JS only after full AEAD + Merkle
+  // success. Failed receives never expose stale heap contents.
+  dec.fill(0);
   msg.set(frame.subarray(0, MESSAGE_LEN), 0);
   new Uint8Array(
     module.wasmMemory.buffer,
@@ -189,9 +198,7 @@ const receiveWithKey = (
     keyPtr,
   );
 
-  const decrypted = Uint8Array.from(
-    new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN),
-  );
+  const decrypted = code === 0 ? Uint8Array.from(dec) : null;
 
   // key + decrypted (holds the plaintext) are secret — wipe before free.
   module._free(msgPtr);
@@ -200,10 +207,7 @@ const receiveWithKey = (
     module,
     new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN),
   );
-  zeroFree(
-    module,
-    new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN),
-  );
+  zeroFree(module, dec);
 
   return { code, decrypted };
 };

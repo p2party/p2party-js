@@ -14,12 +14,13 @@ import webrtcApi from "../api/webrtc";
 
 import { hexToUint8Array } from "../utils/uint8array";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
+import { encodeRoomPolicyV1 } from "../roomPolicy";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+import { PROTOCOL_VERSION } from "../utils/constants";
 
 import {
-  deleteDBChunk,
-  deleteDBMessageData,
+  deleteReceiveTransfer,
   deleteDBNewChunk,
   getDBRoomMessageData,
   setDBUniqueRoom,
@@ -83,9 +84,10 @@ roomListenerMiddleware.startListening({
             await listenerApi.dispatch(
               signalingServerApi.endpoints.sendMessage.initiate({
                 content: {
-                  type: "peers",
-                  fromPeerId: keyPair.peerId,
-                  roomId,
+                    type: "peers",
+                    fromPeerId: keyPair.peerId,
+                    roomId,
+                    protocolVersion: PROTOCOL_VERSION,
                 } as WebSocketMessagePeersRequest,
               }),
             );
@@ -123,7 +125,11 @@ roomListenerMiddleware.startListening({
           roomsLen: rooms.length,
         });
 
-        await setDBUniqueRoom(url, id);
+        const roomIndex = rooms.findIndex((r) => r.id === id);
+        if (roomIndex === -1) return;
+        const encodedPolicy = encodeRoomPolicyV1(rooms[roomIndex].policy);
+        const persistedPolicy = encodedPolicy.slice().buffer as ArrayBuffer;
+        await setDBUniqueRoom(url, id, persistedPolicy);
 
         const oldMessages = await getDBRoomMessageData(id);
         const oldMessagesLen = oldMessages.length;
@@ -131,6 +137,7 @@ roomListenerMiddleware.startListening({
           listenerApi.dispatch(
             setMessage({
               roomId: oldMessages[i].roomId,
+              transferId: oldMessages[i].transferId,
               merkleRootHex: oldMessages[i].merkleRoot,
               sha512Hex: oldMessages[i].hash,
               fromPeerId: oldMessages[i].fromPeerId,
@@ -143,8 +150,6 @@ roomListenerMiddleware.startListening({
             }),
           );
         }
-
-        const roomIndex = rooms.findIndex((r) => r.id === id);
 
         console.log(
           "[roomListenerMiddleware] Checking peers request conditions:",
@@ -174,6 +179,7 @@ roomListenerMiddleware.startListening({
                 type: "peers",
                 fromPeerId: keyPair.peerId,
                 roomId: rooms[roomIndex].id,
+                protocolVersion: PROTOCOL_VERSION,
               } as WebSocketMessagePeersRequest,
             }),
           );
@@ -205,6 +211,7 @@ roomListenerMiddleware.startListening({
 
           await listenerApi.dispatch(
             webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+              roomId,
               label,
               messageHash,
               alsoDeleteData: false,
@@ -259,12 +266,11 @@ roomListenerMiddleware.startListening({
       if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
 
       if (merkleRootHex) {
-        await deleteDBChunk(merkleRootHex);
-        await deleteDBNewChunk(merkleRootHex);
-        await deleteDBMessageData(merkleRootHex);
+        await deleteReceiveTransfer(merkleRootHex);
+        await deleteDBNewChunk({ merkleRootHex });
       } else if (hashHex) {
         // await deleteDBChunk(hashHex);
-        await deleteDBNewChunk(undefined, undefined, hashHex);
+        await deleteDBNewChunk({ hashHex });
       }
     } else if (deleteRoom.match(action)) {
       const roomId = action.payload;

@@ -40,54 +40,12 @@ const initialState: KeyPair = {
   peerId: localStorage.getItem("peerId") ?? "",
   challengeId: localStorage.getItem("challengeId") ?? "",
   publicKey: localStorage.getItem("publicKey") ?? "",
-  secretKey: localStorage.getItem("secretKey") ?? "",
+  // Secrets are restored from the WebCrypto-wrapped IndexedDB identity record
+  // when a connection starts; never hydrate them from plaintext localStorage.
+  secretKey: "",
   challenge: localStorage.getItem("challenge") ?? "",
   signature: localStorage.getItem("signature") ?? "",
 };
-
-// export const setKeyPair = createAsyncThunk(
-//   "keyPair/setKeyPair",
-//   async (_: void, thunkApi) => {
-//     try {
-//       const publicKey = localStorage.getItem("publicKey") ?? "";
-//       const secretKey = localStorage.getItem("secretKey") ?? "";
-//
-//       if (publicKey.length === 0 || secretKey.length === 0) {
-//         const newKeyPair = await crypto.subtle.generateKey(
-//           {
-//             name: "RSA-PSS",
-//             hash: "SHA-256",
-//             modulusLength: 4096,
-//             publicExponent: new Uint8Array([1, 0, 1]),
-//           },
-//           true,
-//           ["sign", "verify"],
-//         );
-//
-//         const pair = await exportPemKeys(newKeyPair);
-//
-//         localStorage.setItem("secretKey", pair.secretKey);
-//         localStorage.setItem("publicKey", pair.publicKey);
-//
-//         return pair as SetKeyPair;
-//       } else {
-//         return { publicKey, secretKey } as SetKeyPair;
-//       }
-//     } catch (error) {
-//       return thunkApi.rejectWithValue(error);
-//     }
-//   },
-//   {
-//     condition: (_: void, { getState }) => {
-//       const { keyPair } = getState() as RoomState;
-//       if (keyPair.secretKey.length > 0 && keyPair.publicKey.length > 0) {
-//         return false;
-//       } else {
-//         return true;
-//       }
-//     },
-//   },
-// );
 
 const keyPairSlice = createSlice({
   name: "keyPair",

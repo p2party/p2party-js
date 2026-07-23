@@ -1,0 +1,162 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  DEFAULT_ROOM_POLICY_V1,
+  roomPoliciesEqualV1,
+} from "../roomPolicy";
+
+(globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
+  getItem: () => null,
+  setItem: () => undefined,
+  removeItem: () => undefined,
+  clear: () => undefined,
+  key: () => null,
+  length: 0,
+} as Storage;
+
+const { default: roomReducer, deleteRoom, setMessage, setRoom, setRoomPolicy } =
+  await import("./roomSlice");
+
+describe("room policy reducer boundary", () => {
+  test("new rooms receive the mandatory hybrid-v3 default", () => {
+    const roomUrl = "a".repeat(64);
+    const state = roomReducer(
+      undefined,
+      setRoom({ url: roomUrl, id: "" }),
+    );
+
+    expect(state).toHaveLength(1);
+    expect(state[0].policy.pqMode).toBe("hybrid-mlkem768");
+    expect("pin" in state[0].policy).toBe(false);
+  });
+
+  test("an existing room accepts an idempotent policy but rejects changes", () => {
+    const roomUrl = "b".repeat(64);
+    const initial = roomReducer(
+      undefined,
+      setRoom({ url: roomUrl, id: "", policy: DEFAULT_ROOM_POLICY_V1 }),
+    );
+
+    const idempotent = roomReducer(
+      initial,
+      setRoomPolicy({
+        roomContext: roomUrl,
+        policy: { ...DEFAULT_ROOM_POLICY_V1 },
+      }),
+    );
+    expect(idempotent).toBe(initial);
+    expect(
+      roomPoliciesEqualV1(idempotent[0].policy, DEFAULT_ROOM_POLICY_V1),
+    ).toBe(true);
+
+    const changedPolicy = {
+      ...DEFAULT_ROOM_POLICY_V1,
+      revision: 1,
+      authMode: "pin" as const,
+    };
+    expect(() =>
+      roomReducer(
+        idempotent,
+        setRoomPolicy({ roomContext: roomUrl, policy: changedPolicy }),
+      ),
+    ).toThrow("room policy is immutable after creation");
+    expect(
+      roomPoliciesEqualV1(idempotent[0].policy, DEFAULT_ROOM_POLICY_V1),
+    ).toBe(true);
+  });
+
+  test("setRoom cannot bypass immutability for an existing room", () => {
+    const roomUrl = "c".repeat(64);
+    const initial = roomReducer(
+      undefined,
+      setRoom({ url: roomUrl, id: "", policy: DEFAULT_ROOM_POLICY_V1 }),
+    );
+    const changedPolicy = {
+      ...DEFAULT_ROOM_POLICY_V1,
+      revision: 1,
+      authMode: "pin" as const,
+    };
+
+    expect(() =>
+      roomReducer(
+        initial,
+        setRoom({ url: roomUrl, id: "", policy: changedPolicy }),
+      ),
+    ).toThrow("room policy is immutable after creation");
+    expect(roomPoliciesEqualV1(initial[0].policy, DEFAULT_ROOM_POLICY_V1)).toBe(
+      true,
+    );
+  });
+
+  test("disconnecting a retained room URL cannot downgrade its PIN policy", () => {
+    const roomUrl = "d".repeat(64);
+    const roomId = "00000000-0000-4000-8000-000000000004";
+    const pinPolicy = {
+      ...DEFAULT_ROOM_POLICY_V1,
+      revision: 4,
+      authMode: "pin" as const,
+    };
+    const connected = roomReducer(
+      undefined,
+      setRoom({ url: roomUrl, id: roomId, policy: pinPolicy }),
+    );
+
+    const disconnected = roomReducer(connected, deleteRoom(roomId));
+    expect(disconnected[0].id).toBe("");
+    expect(roomPoliciesEqualV1(disconnected[0].policy, pinPolicy)).toBe(true);
+
+    expect(() =>
+      roomReducer(
+        disconnected,
+        setRoomPolicy({ roomContext: roomUrl, policy: pinPolicy }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      roomReducer(
+        disconnected,
+        setRoomPolicy({
+          roomContext: roomUrl,
+          policy: DEFAULT_ROOM_POLICY_V1,
+        }),
+      ),
+    ).toThrow("room policy is immutable after creation");
+  });
+
+  test("concurrent identical outbound content remains two logical messages", () => {
+    const roomId = "00000000-0000-4000-8000-000000000005";
+    const fromPeerId = "00000000-0000-4000-8000-000000000006";
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "e".repeat(64), id: roomId }),
+    );
+    const common = {
+      roomId,
+      merkleRootHex: "",
+      sha512Hex: "ff".repeat(64),
+      fromPeerId,
+      chunkSize: 0,
+      totalSize: 10,
+      chunksCreated: 1,
+      totalChunks: 2,
+      messageType: 1,
+      filename: "same.txt",
+      channelLabel: "main",
+      timestamp: 123,
+    };
+
+    state = roomReducer(
+      state,
+      setMessage({ ...common, transferId: "11".repeat(32) }),
+    );
+    state = roomReducer(
+      state,
+      setMessage({ ...common, transferId: "22".repeat(32) }),
+    );
+
+    expect(state[0].messages).toHaveLength(2);
+    expect(state[0].messages.map((message) => message.transferId)).toEqual([
+      "11".repeat(32),
+      "22".repeat(32),
+    ]);
+  });
+});

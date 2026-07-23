@@ -1,5 +1,5 @@
 // import { MessageType } from "./messageTypes";
-import { METADATA_LEN } from "./constants";
+import { MAX_MESSAGE_SIZE, METADATA_LEN } from "./constants";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -7,7 +7,7 @@ export interface BasicMetadata {
   schemaVersion: number; // 8 bytes
   messageType: number; // MessageType; // 1 byte
   hash: Uint8Array; // 64 bytes, uint8
-  totalSize: number; // 8 bytes, number of bytes, max file totalSize 10GB
+  totalSize: number; // 8 bytes, number of bytes, max file totalSize 10 GiB
   date: Date; // 8 bytes
   name: string; // 256 bytes, serialized string
   chunkStartIndex: number; // 8 bytes, uint64
@@ -17,6 +17,42 @@ export interface BasicMetadata {
 export interface Metadata extends BasicMetadata {
   chunkIndex: number; // 8 bytes, uint64
 }
+
+/**
+ * Validate the authenticated metadata profile before any offsets are used or
+ * storage is allocated. All numeric wire fields are uint64s; converting a
+ * value above 2^53-1 to Number loses precision, so those values fail closed.
+ */
+export const assertMetadataV1 = (metadata: Metadata): void => {
+  if (metadata.schemaVersion !== 1)
+    throw new Error("Unsupported metadata schema version");
+  if (
+    !Number.isSafeInteger(metadata.messageType) ||
+    metadata.messageType < 1 ||
+    metadata.messageType > 64
+  )
+    throw new Error("Invalid metadata message type");
+  if (metadata.hash.length !== crypto_hash_sha512_BYTES)
+    throw new Error("Invalid metadata hash");
+  if (
+    !Number.isSafeInteger(metadata.totalSize) ||
+    metadata.totalSize < 1 ||
+    metadata.totalSize > MAX_MESSAGE_SIZE
+  )
+    throw new Error("Invalid metadata total size");
+  if (!Number.isSafeInteger(metadata.date.getTime()))
+    throw new Error("Invalid metadata timestamp");
+  for (const [name, value] of [
+    ["chunkStartIndex", metadata.chunkStartIndex],
+    ["chunkEndIndex", metadata.chunkEndIndex],
+    ["chunkIndex", metadata.chunkIndex],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Invalid metadata ${name}`);
+  }
+  if (metadata.chunkEndIndex < metadata.chunkStartIndex)
+    throw new Error("Invalid metadata chunk range");
+};
 
 export const formatSize = (size: number): string => {
   if (size >= 1 << 30) {

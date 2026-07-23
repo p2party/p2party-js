@@ -18,6 +18,8 @@ export interface BlacklistedPeer extends Peer {
 export interface UniqueRoom {
   roomUrl: string;
   roomId: string;
+  /** Canonical 32-byte public RoomPolicyV1 descriptor; absent on pre-v3 rows. */
+  roomPolicy?: ArrayBuffer;
   messageCount: number;
   lastMessageMerkleRoot: string;
   createdAt: number;
@@ -25,6 +27,8 @@ export interface UniqueRoom {
 }
 
 export interface MessageData {
+  /** Sender-only random logical-send identity; absent on received/legacy rows. */
+  transferId?: string;
   roomId: string;
   timestamp: number;
   fromPeerId: string;
@@ -70,14 +74,33 @@ export interface Chunk {
 // everything the worker needs to (a) place them at chunkIndex*uniformSize in the
 // pre-sized OPFS file and (b) persist the bytesless have-set record.
 export interface ReceiveChunk {
+  /** Authenticated wire-metadata schema; protocol v3 accepts exactly v1. */
+  schemaVersion: number;
+  roomId: string;
+  fromPeerId: string;
+  channelLabel: string;
+  timestamp: number;
   merkleRoot: string;
   hash: string;
+  filename: string;
+  messageType: number;
   chunkIndex: number;
   mimeType: string;
   leafHash: string;
   realLen: number;
   totalSize: number;
   data: ArrayBuffer;
+  /** Text stays in IndexedDB; files use the OPFS-first receive path. */
+  storage: "indexeddb" | "opfs";
+}
+
+export interface ReceiveChunkStoreResult {
+  /** True only when this call inserted a previously absent chunk index. */
+  stored: boolean;
+  /** Sum of distinct committed realLen values for this Merkle root. */
+  savedSize: number;
+  /** Authoritative distinct-byte completion after this transaction. */
+  complete: boolean;
 }
 
 // Lightweight projection of a stored chunk used by the reconnect re-emit — just
@@ -88,13 +111,25 @@ export interface ChunkLeafHash {
 }
 
 export interface NewChunk {
+  /** Random 32-byte lowercase-hex identity of this logical outbound send. */
+  transferId: string;
   hash: string;
   chunkIndex: number;
   merkleRoot: string;
-  realChunkHash: string;
+  /** Domain-separated Merkle leaf hash SHA-512(0x00 || paddedChunk). */
+  leafHash: string;
+  /** SHA-512(receipt-domain || root || u64(index) || leafHash), once rooted. */
+  receiptToken: string;
   data: ArrayBuffer;
   metadata: ArrayBuffer;
   merkleProof: ArrayBuffer;
+}
+
+export interface NewChunkSelector {
+  transferId?: string;
+  merkleRootHex?: string;
+  hashHex?: string;
+  chunkIndex?: number;
 }
 
 export interface SendQueue {
@@ -111,6 +146,11 @@ export interface SendQueue {
 // non-extractable CryptoKey in the `meta` store); public/counter fields are
 // stored plaintext. See src/db/ratchetWrap.ts.
 export interface RatchetSession {
+  /**
+   * Mandatory identity-possession root: interactive 3DH + ML-KEM-768 in every
+   * room, with draft-21 CPace ISK additionally mixed for PIN rooms.
+   */
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v3";
   roomId: string;
   peerPublicKey: string;
   peerId: string;
@@ -145,6 +185,24 @@ export interface StoredIdentityX25519 {
   pub: ArrayBuffer;
   wrappedSecret: ArrayBuffer;
   crossSig: ArrayBuffer;
+}
+
+/** Ed25519 account identity at the worker API boundary. */
+export interface IdentityEd25519 {
+  pub: ArrayBuffer;
+  secret: ArrayBuffer;
+}
+
+/** At-rest Ed25519 record (meta key "identityEd25519"). */
+export interface StoredIdentityEd25519 {
+  pub: ArrayBuffer;
+  wrappedSecret: ArrayBuffer;
+}
+
+/** Non-secret online PIN-guess throttle state for one room/peer-identity edge. */
+export interface PinAttemptState {
+  failures: number;
+  retryAfter: number;
 }
 
 // Each method and its arguments/return type
@@ -192,7 +250,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "setDBUniqueRoom";
-      args: [roomUrl: string, roomId: string];
+      args: [roomUrl: string, roomId: string, roomPolicy: ArrayBuffer];
     }
   | {
       id: number;
@@ -223,27 +281,33 @@ export type WorkerMessages =
         filename: string,
         channelLabel: string,
         timestamp: number,
+        transferId?: string,
       ];
     }
   | {
       id: number;
       method: "getDBChunk";
-      args: [hashHex: string, chunkIndex: number];
+      args: [merkleRootHex: string, chunkIndex: number];
     }
   | {
       id: number;
       method: "existsDBChunk";
-      args: [hashHex: string, chunkIndex: number];
+      args: [merkleRootHex: string, chunkIndex: number];
     }
   | {
       id: number;
       method: "getDBNewChunk";
-      args: [hashHex: string, chunkIndex?: number];
+      args: [transferId: string, chunkIndex: number];
+    }
+  | {
+      id: number;
+      method: "getDBNewChunkByReceipt";
+      args: [merkleRootHex: string, receiptTokenHex: string];
     }
   | {
       id: number;
       method: "existsDBNewChunk";
-      args: [hashHex: string, chunkIndex: number];
+      args: [transferId: string, chunkIndex: number];
     }
   | {
       id: number;
@@ -294,10 +358,19 @@ export type WorkerMessages =
   | { id: number; method: "closeReceiveFile"; args: [merkleRootHex: string] }
   | {
       id: number;
-      method: "getDBAllNewChunks";
-      args: [hashHex?: string, merkleRootHex?: string];
+      method: "deleteReceiveTransfer";
+      args: [merkleRootHex: string];
     }
-  | { id: number; method: "getDBAllNewChunksCount"; args: [hashHex: string] }
+  | {
+      id: number;
+      method: "getDBAllNewChunks";
+      args: [selector: NewChunkSelector];
+    }
+  | {
+      id: number;
+      method: "getDBAllNewChunksCount";
+      args: [transferId: string];
+    }
   | { id: number; method: "setDBNewChunk"; args: [chunk: NewChunk] }
   | { id: number; method: "setDBSendQueue"; args: [item: SendQueue] }
   | {
@@ -313,12 +386,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteDBNewChunk";
-      args: [
-        merkleRootHex?: string,
-        realChunkHashHex?: string,
-        hashHex?: string,
-        chunkIndex?: number,
-      ];
+      args: [selector: NewChunkSelector];
     }
   | {
       id: number;
@@ -352,6 +420,28 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getPinAttemptState";
+      args: [roomId: string, peerIdentityEd25519: string];
+    }
+  | {
+      id: number;
+      method: "incrementPinAttemptState";
+      args: [
+        roomId: string,
+        peerIdentityEd25519: string,
+        now: number,
+        maxImmediateAttempts: number,
+        baseMs: number,
+        maxMs: number,
+      ];
+    }
+  | {
+      id: number;
+      method: "deletePinAttemptState";
+      args: [roomId: string, peerIdentityEd25519?: string];
+    }
+  | {
+      id: number;
       method: "getIdentityX25519";
       args: [];
     }
@@ -363,6 +453,21 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteIdentityX25519";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "getIdentityEd25519";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setIdentityEd25519";
+      args: [identity: IdentityEd25519];
+    }
+  | {
+      id: number;
+      method: "deleteIdentityEd25519";
       args: [];
     }
   | {
@@ -388,6 +493,7 @@ export interface WorkerMethodReturnTypes {
   getDBChunk: ArrayBuffer | undefined;
   existsDBChunk: boolean;
   getDBNewChunk: NewChunk | undefined;
+  getDBNewChunkByReceipt: NewChunk | undefined;
   existsDBNewChunk: boolean;
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
@@ -396,9 +502,10 @@ export interface WorkerMethodReturnTypes {
   getDBAllChunksCount: number;
   setDBChunk: undefined;
   // true if the chunk was newly stored; false if it was already present (dedup).
-  storeReceiveChunk: boolean;
+  storeReceiveChunk: ReceiveChunkStoreResult;
   getReceiveFile: File | null;
   closeReceiveFile: undefined;
+  deleteReceiveTransfer: undefined;
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
   setDBNewChunk: undefined;
@@ -413,8 +520,14 @@ export interface WorkerMethodReturnTypes {
   getRatchetSession: RatchetSession | undefined;
   setRatchetSession: undefined;
   deleteRatchetSession: undefined;
+  getPinAttemptState: PinAttemptState | undefined;
+  incrementPinAttemptState: PinAttemptState;
+  deletePinAttemptState: undefined;
   getIdentityX25519: IdentityX25519 | undefined;
   setIdentityX25519: undefined;
   deleteIdentityX25519: undefined;
+  getIdentityEd25519: IdentityEd25519 | undefined;
+  setIdentityEd25519: undefined;
+  deleteIdentityEd25519: undefined;
   deleteDB: undefined;
 }

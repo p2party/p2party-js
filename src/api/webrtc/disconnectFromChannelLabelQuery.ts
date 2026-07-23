@@ -13,6 +13,7 @@ import type {
   RTCDisconnectFromChannelLabelParams,
 } from "./interfaces";
 import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
+import { sendReceiptFrame } from "../../handlers/receiptFrame";
 
 export interface RTCDisconnectFromChannelLabelParamsExtension extends RTCDisconnectFromChannelLabelParams {
   dataChannels: IRTCDataChannel[];
@@ -22,7 +23,14 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   RTCDisconnectFromChannelLabelParamsExtension,
   undefined
 > = async (
-  { label, messageHash, alsoDeleteData, alsoSendFinishedMessage, dataChannels },
+  {
+    roomId,
+    label,
+    messageHash,
+    alsoDeleteData,
+    alsoSendFinishedMessage,
+    dataChannels,
+  },
   api,
 ) => {
   const CHANNELS_LEN = dataChannels.length;
@@ -31,16 +39,21 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   for (let i = 0; i < CHANNELS_LEN; i++) {
     if (
       dataChannels[i]?.label !== label ||
+      !dataChannels[i].roomIds.includes(roomId) ||
       dataChannels[i].readyState !== "open"
     )
       continue;
 
+    const targetChannel = dataChannels[i];
+    if (alsoDeleteData && targetChannel.cancelReceiveTransfer)
+      await targetChannel.cancelReceiveTransfer();
+    else targetChannel.releaseProtocolResources?.();
     if (
       messageHash &&
       alsoSendFinishedMessage &&
       messageHash.length === crypto_hash_sha512_BYTES
     )
-      dataChannels[i].send(messageHash.buffer as ArrayBuffer);
+      sendReceiptFrame(dataChannels[i], messageHash);
 
     // Drain the send buffer before closing so the just-queued finished-message
     // (and any still-buffered chunks) are not wiped by close().
@@ -48,7 +61,7 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
 
     if (alsoDeleteData) {
       const { merkleRootHex } = await decompileChannelMessageLabel(label);
-      api.dispatch(deleteMessage({ merkleRootHex }));
+      api.dispatch(deleteMessage({ roomId, merkleRootHex }));
     }
   }
 

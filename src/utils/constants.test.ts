@@ -10,7 +10,10 @@ import {
   PQ_TAG,
 } from "./constants";
 
-const h = readFileSync(new URL("../cryptography/utils.h", import.meta.url), "utf8");
+const h = readFileSync(
+  new URL("../cryptography/utils.h", import.meta.url),
+  "utf8",
+);
 const cDefine = (name: string): number => {
   const m = h.match(new RegExp(`#define\\s+${name}\\s+(\\d+)`));
   if (!m) throw new Error(`#define ${name} not found in utils.h`);
@@ -26,10 +29,10 @@ describe("protocol-v3 frame-type constants (C == TS)", () => {
     expect(cDefine("PQ_TAG_LEN")).toBe(PQ_TAG_LEN);
   });
 
-  test("the tags are distinct and PQ_TAG is a zero byte", () => {
+  test("the frame tags are distinct and PQ_TAG selects ML-KEM-768 hybrid v3", () => {
     const tags = [FRAME_TYPE_HANDSHAKE, FRAME_TYPE_CHUNK, FRAME_TYPE_RECEIPT];
     expect(new Set(tags).size).toBe(3);
     expect(PQ_TAG.length).toBe(PQ_TAG_LEN);
-    expect([...PQ_TAG]).toEqual([0]);
+    expect([...PQ_TAG]).toEqual([1]);
   });
 });

@@ -98,16 +98,26 @@ const main = async () => {
     }),
   ]);
   console.log("handshake complete — protocol", alice.protocolVersion);
+  if (!alice.canEncrypt || !bob.canEncrypt)
+    throw new Error("both sessions must be ready to encrypt after handshake");
 
   // The envelope carries the Merkle root once alongside uniform chunk frames.
+  // Produce both message-0 envelopes before either side decrypts: the handshake
+  // primes both ratchet directions, so responder-first and simultaneous sends
+  // need no application-level initiator-first ordering.
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const aliceMessage = encoder.encode("hello bob, from alice");
-  const receivedByBob = await bob.decrypt(await alice.encrypt(aliceMessage));
-  console.log("alice → bob:", decoder.decode(receivedByBob));
-
   const bobMessage = encoder.encode("hi alice, bob here");
-  const receivedByAlice = await alice.decrypt(await bob.encrypt(bobMessage));
+  const [aliceEnvelope, bobEnvelope] = await Promise.all([
+    alice.encrypt(aliceMessage),
+    bob.encrypt(bobMessage),
+  ]);
+  const [receivedByBob, receivedByAlice] = await Promise.all([
+    bob.decrypt(aliceEnvelope),
+    alice.decrypt(bobEnvelope),
+  ]);
+  console.log("alice → bob:", decoder.decode(receivedByBob));
   console.log("bob → alice:", decoder.decode(receivedByAlice));
 
   // Snapshots are plaintext secrets: encrypt them at rest and protect against

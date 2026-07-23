@@ -6,6 +6,7 @@ import {
   KDF_MK_LABEL,
   MAX_SKIP,
   MAX_SKIP_SESSION,
+  RATCHET_DHPUB_LEN,
 } from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
@@ -127,13 +128,15 @@ const kdfCk = (
 };
 
 /**
- * Seed a ratchet from a 32-byte root secret (CPace `K` or X3DH secret).
+ * Seed a ratchet from the handshake's 32-byte, transcript-bound hybrid root.
  *
  * Initiator/responder asymmetry (must match so the two sides interoperate):
  *  - The **responder** (`amInitiator=false`, `remoteDhPub=null`) generates its
- *    DH keypair and stops: both chains stay `null`. It publishes `dhSelfPub`;
- *    the first inbound message triggers its first DH-ratchet step, which builds
- *    the receiving chain (and, in the same step, its sending chain).
+ *    DH keypair and stops: both chains stay `null`. After the initiator's
+ *    initial DH pub is authenticated, `primeResponderRatchet` performs the
+ *    receive-side DH step without consuming a message key and opens both
+ *    chains. A lower-level caller that does not prime retains the legacy
+ *    first-inbound-message behavior.
  *  - The **initiator** (`amInitiator=true`) is handed the responder's
  *    `dhSelfPub` as `remoteDhPub`, runs one `kdf_rk` over `DH(selfSec, remote)`
  *    to advance the root and open its **sending** chain immediately, so it can
@@ -171,7 +174,7 @@ export const initRatchet = (
     state.rootKey = rk.rootKey;
     state.sendingChainKey = rk.chainKey;
   }
-  // Responder: chains stay null; the first inbound header triggers the DH step.
+  // Responder: chains stay null until primeResponderRatchet or first inbound.
 
   return state;
 };
@@ -241,6 +244,7 @@ const skipMessageKeys = (
   if (state.skipped.size > MAX_SKIP_SESSION) {
     for (const k of state.skipped.keys()) {
       if (state.skipped.size <= MAX_SKIP_SESSION) break;
+      state.skipped.get(k)?.fill(0);
       state.skipped.delete(k);
     }
   }
@@ -282,6 +286,47 @@ const dhRatchet = (
   state.rootKey = rk.rootKey;
   state.sendingChainKey?.fill(0);
   state.sendingChainKey = rk.chainKey;
+};
+
+/**
+ * Complete the responder's handshake-time ratchet bootstrap after the
+ * initiator's initial DH public key has been authenticated by key confirmation.
+ *
+ * This is the receive-side DH step that an unprimed responder would otherwise
+ * perform on the initiator's first message, deliberately stopped before
+ * `kdfCk`: it opens the receiving chain from
+ * `DH(initialResponder, initialInitiator)`, rotates the responder DH keypair,
+ * and opens the sending chain from `DH(rotatedResponder, initialInitiator)`.
+ * Consequently both peers can send message 0 immediately after the handshake,
+ * including simultaneously, without consuming or skipping a message key.
+ */
+export const primeResponderRatchet = (
+  state: RatchetState,
+  initiatorDhPub: Uint8Array,
+  module: LibCrypto,
+): void => {
+  if (initiatorDhPub.length !== RATCHET_DHPUB_LEN)
+    throw new Error("ratchet: invalid initiator DH public key");
+  if (
+    state.sendingChainKey ||
+    state.receivingChainKey ||
+    state.dhRemotePub ||
+    state.Ns !== 0 ||
+    state.Nr !== 0 ||
+    state.PN !== 0 ||
+    state.skipped.size !== 0
+  )
+    throw new Error("ratchet: responder bootstrap requires pristine state");
+
+  dhRatchet(
+    state,
+    {
+      dhPub: initiatorDhPub,
+      N: 0,
+      PN: 0,
+    },
+    module,
+  );
 };
 
 /**

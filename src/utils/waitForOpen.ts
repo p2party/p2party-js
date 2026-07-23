@@ -9,10 +9,15 @@ export const waitForOpen = async (
   dc: { readyState: string },
   timeoutMs = CHANNEL_OPEN_TIMEOUT_MS,
   pollMs = CHANNEL_OPEN_POLL_MS,
+  signal?: AbortSignal,
 ): Promise<boolean> => {
   const start = Date.now();
-  while (dc.readyState === "connecting" && Date.now() - start < timeoutMs) {
+  while (
+    dc.readyState === "connecting" &&
+    Date.now() - start < timeoutMs &&
+    !signal?.aborted
+  ) {
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
-  return dc.readyState === "open";
+  return !signal?.aborted && dc.readyState === "open";
 };

@@ -31,26 +31,6 @@ export interface LibCrypto extends EmscriptenModule {
     signature: number, // Uint8Array,
   ): number;
 
-  _encrypt_chachapoly_asymmetric(
-    DATA_LEN: number,
-    data: number, // Uint8Array,
-    public_key: number, // Uint8Array,
-    secret_key: number, // Uint8Array,
-    nonce: number,
-    ADDITIONAL_DATA_LEN: number,
-    additional_data: number, // Uint8Array,
-    encrypted: number, // Uint8Array,
-  ): number;
-  _decrypt_chachapoly_asymmetric(
-    ENCRYPTED_LEN: number,
-    encrypted_data: number, // Uint8Array,
-    public_key: number, // Uint8Array,
-    secret_key: number, // Uint8Array,
-    ADDITIONAL_DATA_LEN: number,
-    additional_data: number, // Uint8Array,
-    data: number, // Uint8Array,
-  ): number;
-
   _get_merkle_root(
     LEAVES_LEN: number,
     leaves_hashed: number, // Uint8Array.byteOffset
@@ -95,15 +75,6 @@ export interface LibCrypto extends EmscriptenModule {
   _sha512_final(
     state: number, // Uint8Array.byteOffset
     out: number, // Uint8Array.byteOffset (64 bytes)
-  ): number;
-
-  // P2Party
-  _receive_message(
-    decrypted: number, // Uint8Array.byteOffset
-    message: number, // Uint8Array.byteOffset
-    merkle_root: number, // Uint8Array.byteOffset
-    sender_public_key: number, // Uint8Array.byteOffset
-    receiver_secret_key: number, // Uint8Array.byteOffset
   ): number;
 
   // v3 PAKE + ratchet primitives (pake_ratchet.c)

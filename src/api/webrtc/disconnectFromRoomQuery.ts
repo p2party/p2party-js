@@ -1,4 +1,4 @@
-import { deleteMessage } from "../../reducers/roomSlice";
+import { deleteMessage, deletePeer } from "../../reducers/roomSlice";
 import {
   deleteDBUniqueRoom,
   getAllDBUniqueRooms,
@@ -22,41 +22,29 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
   RTCDisconnectFromRoomParamsExtension,
   undefined
 > = async ({ roomId, deleteMessages, peerConnections, dataChannels }, api) => {
-  const CHANNELS_LEN = dataChannels.length;
-  for (let i = 0; i < CHANNELS_LEN; i++) {
-    if (
-      !dataChannels[i] ||
-      !dataChannels[i].roomIds.includes(roomId) ||
-      dataChannels[i].readyState !== "open"
-    )
-      continue;
+  for (let i = dataChannels.length - 1; i >= 0; i--) {
+    const channel = dataChannels[i];
+    if (!channel.roomIds.includes(roomId)) continue;
 
-    const roomIndex = dataChannels[i].roomIds.findIndex((r) => r === roomId);
-    if (roomIndex > -1) {
-      dataChannels[i].roomIds.splice(roomIndex, 1);
-
-      if (dataChannels[i].roomIds.length === 0) dataChannels[i].close();
-    }
+    channel.releaseProtocolResources?.();
+    channel.onopen = null;
+    channel.onclose = null;
+    channel.onerror = null;
+    channel.onclosing = null;
+    channel.onmessage = null;
+    channel.onbufferedamountlow = null;
+    if (channel.readyState !== "closed") channel.close();
+    dataChannels.splice(i, 1);
   }
 
-  const PEERS_LEN = peerConnections.length;
-  for (let i = 0; i < PEERS_LEN; i++) {
-    if (peerConnections[i]?.connectionState !== "connected") continue;
-
-    const peerIndex = peerConnections[i].rooms.findIndex(
-      (p) => p.roomId === roomId,
+  const roomPeers = peerConnections
+    .filter((connection) => connection.roomId === roomId)
+    .map((connection) => connection.withPeerId);
+  for (const peerId of roomPeers) {
+    await api.dispatch(
+      webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
     );
-    if (peerIndex === -1) continue;
-
-    peerConnections[i].rooms.splice(peerIndex, 1);
-
-    if (peerConnections[i].rooms.length === 0) {
-      await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          peerId: peerConnections[i].withPeerId,
-        }),
-      );
-    }
+    api.dispatch(deletePeer({ peerId, roomId }));
   }
 
   if (deleteMessages) {
@@ -70,6 +58,7 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
       for (let j = 0; j < messagesLen; j++) {
         api.dispatch(
           deleteMessage({
+            roomId,
             merkleRootHex: messages[j].merkleRoot,
           }),
         );

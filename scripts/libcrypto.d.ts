@@ -139,6 +139,15 @@ export interface LibCrypto extends EmscriptenModule {
     aad: number,
     aad_len: number,
   ): number;
+  _decrypt_chachapoly_symmetric(
+    out: number,
+    ciphertext: number,
+    ciphertext_len: number,
+    key: number,
+    nonce: number,
+    aad: number,
+    aad_len: number,
+  ): number;
   _receive_message_with_key(
     decrypted: number,
     message: number,

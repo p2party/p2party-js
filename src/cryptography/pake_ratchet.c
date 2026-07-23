@@ -91,6 +91,24 @@ encrypt_chachapoly_symmetric(
   return 0;
 }
 
+/* Inverse of encrypt_chachapoly_symmetric via libsodium's own AEAD decrypt:
+ * in = ciphertext || Poly1305 tag (in_len == out_len + ABYTES), out = plaintext.
+ * libsodium verifies the tag in constant time and writes NO plaintext on auth
+ * failure. Returns 0 on success, -1 on authentication failure. */
+int
+decrypt_chachapoly_symmetric(
+    uint8_t *out, const uint8_t *in, const unsigned int in_len,
+    const uint8_t key[crypto_aead_chacha20poly1305_ietf_KEYBYTES],
+    const uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES],
+    const uint8_t *aad, const unsigned int aad_len)
+{
+  unsigned long long mlen = 0;
+  int res = crypto_aead_chacha20poly1305_ietf_decrypt(
+      out, &mlen, NULL, in, in_len, aad, aad_len, nonce, key);
+  if (res != 0) return -1;
+  return 0;
+}
+
 /* ---------------- v3 receive path (no signature) ----------------
  * Frame: [type(1) | DH_pub(32) | N(8) | PN(8) | PQ_EPOCH(1) | nonce(12) | ciphertext||tag]
  * Symmetric-decrypt under message_key with AAD = merkle_root || N || PN, then

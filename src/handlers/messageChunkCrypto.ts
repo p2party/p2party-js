@@ -75,14 +75,6 @@ const randomNonce = (): Uint8Array => {
   return nonce;
 };
 
-// Constant-time 16-byte tag comparison (mirrors libsodium's crypto_verify_16).
-const tagsEqual = (a: Uint8Array, b: Uint8Array): boolean => {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
-};
-
 /**
  * AEAD seal: `out = ChaCha20(key,nonce) XOR data ‖ Poly1305(aad, ciphertext)`,
  * length `data.length + 16`. Thin wrapper over the exported
@@ -141,22 +133,11 @@ const aeadSeal = (
 };
 
 /**
- * AEAD open (merkle-free) of `ciphertext = body ‖ tag(16)` under `key`/`nonce`,
- * returning the plaintext, or `null` on authentication failure.
- *
- * WHY not `crypto_aead_chacha20poly1305_ietf_decrypt`: that raw libsodium
- * decrypt is NOT among the wasm's EXPORTED_FUNCTIONS, and this task must not
- * rebuild the wasm or touch the C. The only symmetric-key decrypt that IS
- * exported, `_receive_message_with_key`, is merkle-coupled (needs a full
- * metadata+proof frame). So we open via the exported seal primitive using the
- * standard stream-AEAD identity — cryptographically exact to a real AEAD open:
- *   1. ChaCha20 encryption is its own inverse over the keystream, so
- *      `seal(body).body = keystream XOR body = plaintext`.
- *   2. The authentication tag is over the CIPHERTEXT body, so
- *      `seal(plaintext).tag = Poly1305(aad, keystream XOR plaintext = body)` is
- *      exactly the tag a genuine decrypt verifies. We recompute it and compare
- *      in constant time; plaintext is released ONLY if the tag matches (never
- *      release unverified plaintext).
+ * AEAD open of `ciphertext = body ‖ tag(16)` under `key`/`nonce` via libsodium's
+ * exported `_decrypt_chachapoly_symmetric` (crypto_aead_chacha20poly1305_ietf_decrypt):
+ * the Poly1305 tag is verified in constant time inside libsodium and NO plaintext
+ * is written on authentication failure. Returns the plaintext, or `null` if the
+ * tag does not verify. AAD must be byte-identical to the seal's.
  */
 const aeadOpen = (
   module: LibCrypto,
@@ -166,25 +147,47 @@ const aeadOpen = (
   aad: Uint8Array,
 ): Uint8Array | null => {
   if (ciphertext.length < AEAD_TAG_LEN) return null;
-  const bodyLen = ciphertext.length - AEAD_TAG_LEN;
-  const body = ciphertext.subarray(0, bodyLen);
-  const tag = ciphertext.subarray(bodyLen);
+  const outLen = ciphertext.length - AEAD_TAG_LEN;
+  const outAlloc = Math.max(outLen, 1);
+  const aadAlloc = Math.max(aad.length, 1);
 
-  // Step 1 — recover plaintext (keystream XOR body).
-  const sealA = aeadSeal(module, key, nonce, body, aad);
-  const plaintext = sealA.slice(0, bodyLen);
-  sealA.fill(0); // sealA's tag half is over the plaintext — not the check; wipe.
+  const keyPtr = module._malloc(AEAD_KEY_LEN);
+  const noncePtr = module._malloc(AEAD_NONCE_LEN);
+  const inPtr = module._malloc(ciphertext.length);
+  const aadPtr = module._malloc(aadAlloc);
+  const outPtr = module._malloc(outAlloc);
 
-  // Step 2 — recompute the authentication tag over `body` and compare.
-  const sealB = aeadSeal(module, key, nonce, plaintext, aad);
-  const ok = tagsEqual(sealB.subarray(bodyLen, bodyLen + AEAD_TAG_LEN), tag);
-  sealB.fill(0);
+  new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN).set(key);
+  new Uint8Array(module.wasmMemory.buffer, noncePtr, AEAD_NONCE_LEN).set(nonce);
+  new Uint8Array(module.wasmMemory.buffer, inPtr, ciphertext.length).set(
+    ciphertext,
+  );
+  if (aad.length)
+    new Uint8Array(module.wasmMemory.buffer, aadPtr, aad.length).set(aad);
 
-  if (!ok) {
-    plaintext.fill(0);
-    return null;
-  }
-  return plaintext;
+  const r = module._decrypt_chachapoly_symmetric(
+    outPtr,
+    inPtr,
+    ciphertext.length,
+    keyPtr,
+    noncePtr,
+    aadPtr,
+    aad.length,
+  );
+
+  const out =
+    r === 0
+      ? Uint8Array.from(new Uint8Array(module.wasmMemory.buffer, outPtr, outLen))
+      : null;
+
+  // key + out (holds the plaintext on success) are secret — wipe before free.
+  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, keyPtr, AEAD_KEY_LEN));
+  module._free(noncePtr);
+  module._free(inPtr);
+  module._free(aadPtr);
+  zeroFree(module, new Uint8Array(module.wasmMemory.buffer, outPtr, outAlloc));
+
+  return out;
 };
 
 // Wipe the secret-bearing fields of a ratchet state (used to discard a rolled-

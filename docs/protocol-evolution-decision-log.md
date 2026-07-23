@@ -6,7 +6,7 @@
 
 ## 0. Framing: the protocol as an evolution, decisions as the through-line
 
-p2party did not begin with a handshake. It began with a naive per-chunk scheme: a message split into uniform 64 KiB chunks, each carrying a per-chunk Ed25519 signature, sent from the initiator to every peer in the mesh in parallel, with the WebRTC data-channel label literally spelling out the message's Merkle root. Every subsequent version is a decision made under pressure — a malleability class closed here, a metadata leak plugged there, a whole reliability subsystem rewritten spec-first after two incremental prototypes died of races — until the accumulated pressure forced the current rewrite: **protocol-v3**, which retires the per-chunk signature and folds a PACE-style PAKE handshake (CPace over Ristretto255 for PIN rooms, X3DH-style identity-mixed DH for no-PIN rooms) into a per-edge Double Ratchet seeded by exactly one of those two handshakes. The decisions below *are* that evolution; the last two — **D1** (session binding) and **D2** (the no-PIN identity key) — were where the road ran out of paved surface, and both are now decided (maintainer, 2026-07-22; see §2).
+p2party did not begin with a handshake. It began with a naive per-chunk scheme: a message split into uniform 64 KiB chunks, each carrying a per-chunk Ed25519 signature, sent from the initiator to every peer in the mesh in parallel, with the WebRTC data-channel label literally spelling out the message's Merkle root. Every subsequent version is a decision made under pressure — a malleability class closed here, a metadata leak plugged there, a whole reliability subsystem rewritten spec-first after two incremental prototypes died of races — until the accumulated pressure forced the current rewrite: **protocol-v3**, which retires the per-chunk signature and exposes one mandatory hybrid suite. Every room proves possession of the cross-signed X25519 identity through an online interactive 3DH exchange and mixes mandatory ML-KEM-768 into the bootstrap root; a PIN room additionally mixes CPace, rather than substituting CPace for 3DH. This is not Signal X3DH because there are no asynchronous prekeys. That root seeds one Double Ratchet per room/peer edge. The decisions below *are* that evolution; **D1** and **D2** settle the handshake, **D7** records the single-suite composition, and **D3** preserves message-scoped WebRTC channels inside a future scheduled-cover mode (maintainer decisions, 2026-07-22–23; see §2).
 
 ---
 
@@ -17,7 +17,7 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 ### 1a. Crypto-primitive
 
 **C-1 — Merkle-tree malleability (CVE-2012-2459 class).**
-*Paper:* Undifferentiated leaf/internal-node hashing plus self-hashing of lone odd nodes (`H(x‖x)`) let distinct leaf multisets collide to one root; fixed by domain-separating leaves (`SHA-512(0x00‖chunk)`) from internal nodes (`SHA-512(0x01‖l‖r)`) via a `hash_node` helper and promoting lone odd nodes unchanged (with a free efficiency win: the receiver computes the leaf once and reuses it as its receipt token).
+*Paper:* Undifferentiated leaf/internal-node hashing plus self-hashing of lone odd nodes (`H(x‖x)`) let distinct leaf multisets collide to one root; fixed by domain-separating leaves (`SHA-512(0x00‖chunk)`) from internal nodes (`SHA-512(0x01‖l‖r)`) via a `hash_node` helper and promoting lone odd nodes unchanged. Protocol-v2 reused that leaf directly as its receipt; current v3 keeps the one-pass leaf computation but derives a separate root/index/leaf-bound receipt token (T-6).
 *Source:* finding #8 / ADR-K1; commits `c39c4d6`, merge `2c1df22`; shipped protocol-v2.
 
 **C-2 — Chunk-auth challenge-oracle message forgery.**
@@ -29,21 +29,21 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Source:* finding #1; commit `8340686` (introduced `bun:test` + `tsconfig.test.json`).
 
 **C-4 — WASM send-buffer leak and unzeroed secret buffers.**
-*Paper:* `allocateSendMessage` malloc'd an ephemeral Ed25519 secret and a SHA-512 scratch buffer that `sendChunks` never freed (128 bytes orphaned per send into the fixed non-growable heap → eventual self-DoS), and freed secret buffers were never cleared before free; fixed by removing the dead allocations and routing all secret frees through a `zeroFree` helper mirroring `sodium_free`.
+*Paper:* `allocateSendMessage` malloc'd an ephemeral Ed25519 secret and a SHA-512 scratch buffer that `sendChunks` never freed (128 bytes orphaned per send into the then-fixed, non-growable heap → eventual self-DoS), and freed secret buffers were never cleared before free; fixed by removing the dead allocations and routing all secret frees through a `zeroFree` helper mirroring `sodium_free`.
 *Source:* findings #2 and #4; commits `656d6dd`, `ffef0e1`.
 
 **C-5 — Received chunk offsets stored unvalidated.**
 *Paper:* `handleReceiveMessage` sliced `[chunkStartIndex, chunkEndIndex]` from attacker-controllable decrypted metadata checked only against `totalSize`; added a pure `isStorableChunkRange` guard (`0 ≤ start ≤ end ≤ chunk.length`), dropping failing chunks like decoys.
 *Source:* finding #3; commit `8fc2e9e`.
 
-**C-6 — Fixed 2 MB WASM heap: link-time claim vs runtime-verified budget gate.**
-*Paper:* `INITIAL_MEMORY=2mb / ALLOW_MEMORY_GROWTH=0` was only a build flag once Ristretto255/X25519/HKDF/AEAD shared the heap; added a runtime test that runs the heaviest Stage-1 op (`receive_message_with_key` over a full 64 KiB frame) on a fresh 32-page memory and asserts `byteLength` is still exactly 2,097,152, trapping any future `maximum` change that reintroduces headroom.
+**C-6 — Historical fixed-2-MiB gate → growable module with operation-scoped maxima.**
+*Paper:* Stage 1 originally made `INITIAL_MEMORY=2mb / ALLOW_MEMORY_GROWTH=0` a tested budget by running `receive_message_with_key` in exactly 32 pages. That remains useful provenance, but it is no longer the current global memory contract. The generated module now permits growth (`ALLOW_MEMORY_GROWTH=1`, build ceiling 1 GiB), while callers supply an explicit maximum sized for the operation: small protocol-v3 operations may retain a 32-page cap, while Merkle and Argon2 helpers allocate larger bounded memories. The security invariant is therefore “no operation may exceed its declared maximum,” not “all crypto always fits in 2 MiB.”
 *Source:* Stage 1; commit `a848694`.
 
 **C-7 — Unrealizable per-chunk nonce (`nonce = chunkIndex`) → fresh random 12-byte cleartext nonce.** *(hard)*
-*Paper:* The v3 plan's `nonce = chunkIndex` is unrealizable (chunkIndex lives inside the encrypted metadata, so the receiver can't know it before decrypting), and both obvious repairs are broken (one message-counter `N` across all chunks = catastrophic ChaCha20-Poly1305 nonce reuse; a cleartext raw index leaks chunk count/order); resolved as a fresh random 12-byte nonce per chunk carried in the cleartext frame header — receiver-derivable, metadata-safe, birthday-safe within one message key — with a retransmit required to reuse the identical cached `(nonce, ciphertext)`.
+*Paper:* The v3 plan's `nonce = chunkIndex` is unrealizable (chunkIndex lives inside the encrypted metadata, so the receiver can't know it before decrypting), and both obvious repairs are broken (one message-counter `N` across all chunks = catastrophic ChaCha20-Poly1305 nonce reuse; a cleartext raw index leaks chunk count/order); resolved as a fresh random 12-byte nonce carried in each cleartext frame header — receiver-derivable, metadata-safe, and birthday-safe within one message key. Current streaming reconciliation reseals a retransmitted chunk with another fresh nonce rather than retaining whole cached ciphertext; the invariant is never to reuse a `(message key, nonce)` pair.
 *Blog:* Adversarial review caught this before a single send↔receive round-trip existed — the "obvious" nonce was one that the receiver literally cannot read until after it has already decrypted.
-*Source:* Stage 1 narrative + Methodology item 1; commit `92b07e8`. **NB:** the C-level `#define`s and the placeholder nonce in `receive_message_with_key` were deliberately left at the old values with an in-code note, scheduled for reconciliation in Stage 5 — see **F-4** (this is the source of the still-live 62-vs-50 frame-layout fork).
+*Source:* Stage 1 narrative + Methodology item 1; commit `92b07e8`. **Historical follow-up:** the C `#define`s and placeholder nonce were deliberately left at the old values for Stage 5; that fork is now resolved at 62/61 with a fresh 12-byte cleartext nonce (see resolved F-4).
 
 **C-8 — CPace transcript ambiguity → IRTF-CPace `lv_cat` length-prefixing.**
 *Paper:* Bare-concatenation `SHA512(DOMAIN‖PRS‖sid‖CI)` becomes ambiguous once CI binds variable-length data, letting distinct `(PRS, CI)` pairs collide to one generator `G`; mandated IRTF-CPace `lv_cat` length-prefixing of every transcript field (and wiped leftover PRS/PIN bytes from the heap).
@@ -57,25 +57,25 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Paper:* The X25519 shared secret and the keypair failure path were freed without `zeroFree`, leaving key material in the reused WASM heap; fixed to zero-before-free, noting that a passing agreement test proves the DH is correct but says nothing about erasure.
 *Source:* Stage 2 `x25519` + Methodology item 3; commit `26d353f`.
 
-**C-11 — X3DH test suite blind to the initiator's own identity-key binding.**
-*Paper:* The X3DH tests bound the peer's IK but had no negative control for the initiator's own `IK_a` — silently dropping `IK_a` from the DH mix would have kept every test green; added the missing negative test corrupting `IK_a` and asserting agreement breaks.
+**C-11 — Interactive-3DH test suite blind to the initiator's own identity-key binding.**
+*Paper:* The historically named `x3dh` tests bound the peer's IK but had no negative control for the initiator's own `IK_a` — silently dropping `IK_a` from the DH mix would have kept every test green; added the missing negative test corrupting `IK_a` and asserting agreement breaks. The live protocol is an online three-DH exchange, not Signal X3DH: it has no prekey bundle.
 *Source:* Stage 2 `x3dh` + Methodology item 4; commit `b4b713d`.
 
 **C-12 — Unbounded skipped-message-key retention (no global cap).**
 *Paper:* Only a per-decrypt `MAX_SKIP=512` bound existed on the ratchet's out-of-order skipped-key map, with no global cap (unbounded RAM and later persisted-row growth), and the plan's "capped at MAX_SKIP" comment was false; fixed with `MAX_SKIP_SESSION=2000` (evict-oldest), header integer validation (`Number.isInteger, >=0`), and an honest doc-comment.
 *Source:* Stage 2 `ratchet` + Methodology item 5(#2); commits `8bba4e9`, `d65ce73`.
 
-**C-13 — Ratchet decrypt mutates state before AEAD authentication (replay-desync).** *(Deferred; hard)*
-*Paper:* `ratchetDecrypt` mutates ratchet state (possibly firing a backward DH step) *before* the AEAD tag verifies, so a duplicate/replayed old-chain message — reachable via p2party's own retransmit layer — can desync a session that should have been rejected; **deferred** to Stage 4/5 as a documented caller contract (decrypt on a serialize/deserialize clone, commit only after auth, dedup `(dhPub,N)`), not yet structurally fixed as of Stage 3.
-*Blog:* The right fix is to restructure decrypt so it authenticates before it mutates; for now the danger is fenced off by a caller discipline written into the plan's Global Constraints, with the structural rewrite named and parked — an authenticated-encryption invariant (never mutate on unverified input) that today lives in a contract instead of the code.
-*Source:* Stage 2 Methodology item 5(#1).
+**C-13 — Ratchet decrypt mutates state before AEAD authentication (replay-desync).** *(resolved at the durable caller boundary; hard)*
+*Paper:* Stage 2 found that `ratchetDecrypt` mutates its input state before the AEAD tag verifies, so a duplicate/replayed old-chain message could desynchronize a live session. The primitive retains that mutation model, but current message receive runs it on a clone, authenticates and validates the frame, persists the successor, and only then adopts it and publishes the message-key cache; a failed authentication discards and wipes the candidate. The once-deferred caller contract is now enforced by the durable receive boundary.
+*Blog:* The primitive still moves first, so production gives it a disposable copy. Only an authenticated, durably stored successor is allowed to become the live ratchet.
+*Source:* Stage 2 Methodology item 5(#1); `src/handlers/messageChunkCrypto.ts`; `src/handlers/ratchetPersist.ts`.
 
 **C-14 — Ratchet granularity: per-chunk vs per-logical-message.**
-*Paper:* Chunks of one message are shuffled, interleaved with decoys, and may retransmit, so per-chunk ratchet advance complicates deterministic-ciphertext retransmit; resolved as pairwise per `(roomId, peerPublicKey)` with the DH/chain ratchet advancing **per logical message** (one message key for all its chunks, nonce disambiguates chunks), a message key never reused across two messages, out-of-order/lost messages handled by the bounded skipped-keys map.
+*Paper:* Chunks of one message are shuffled, interleaved with decoys, and may retransmit, so advancing the ratchet per chunk would make out-of-order recovery and reconciliation needlessly stateful; resolved as durable pairwise state per `(roomId, peerPublicKey)` with the DH/chain ratchet advancing **per logical message**. One message key serves all of that message's chunks, fresh random nonces disambiguate every seal/reseal, a message key is never shared across logical messages, and the bounded skipped-key map handles out-of-order/lost messages.
 *Source:* ADR-A2 "Ratchet granularity."
 
 **C-15 — Drop the 0.9.0 per-chunk Ed25519 signature — but only *atomically* with the ratchet.** *(hard)*
-*Paper:* The per-chunk signature (added in 0.9.0 to close C-2) costs 64 bytes plus a sign+verify per chunk; once both PACE seed paths mix both parties' static identity keys — making the Poly1305 tag itself a genuine sender authenticator under an authenticated root — it becomes redundant, but dropping it *before* the authenticated ratchet lands would be a net downgrade; resolved to drop it atomically in the same release as the ratchet, tracked as Risk R1, never phased (phased = two wire breaks).
+*Paper:* The per-chunk signature (added in 0.9.0 to close C-2) costs 64 bytes plus a sign+verify per chunk; once the mandatory interactive-3DH leg proves possession of both cross-signed identity keys (with CPace additionally authenticating PIN rooms) — making the Poly1305 tag a genuine sender authenticator under the confirmed hybrid root — it becomes redundant, but dropping it *before* the authenticated ratchet lands would be a net downgrade; resolved to drop it atomically in the same release as the ratchet, tracked as Risk R1, never phased (phased = two wire breaks).
 *Blog:* The one piece of hard-won 0.9.0 armor is scheduled for removal — but only at the exact moment its replacement (a mutually-authenticated ratchet) is load-bearing, not one commit sooner.
 *Source:* ADR-A2 "Drop the 0.9.0 per-chunk Ed25519 signature — atomically"; §5 threat-model + Risk R1; design §12.
 
@@ -86,20 +86,20 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Source:* ADR-A2; §8 prior-art positioning.
 
 **H-2 — PACE + Double Ratchet: separate deferred-PAKE phase vs merged handshake/ratchet as SSOT.**
-*Paper:* Considered shipping a server-blind, no-PAKE high-entropy link path (Phase 1) first as a stepping stone; chose instead to **merge** PACE with the ratchet immediately as the single source of truth — the handshake output seeds the ratchet root and messaging runs over the ratchet from the first message; Phase 1 explicitly deferred (see **F-3**).
+*Paper:* The original decision rejected a separate PAKE-less stepping-stone ratchet and merged CPace with the v3 handshake/ratchet source of truth. The implemented single suite refined that branch model: interactive 3DH and ML-KEM-768 now feed every bootstrap root, PIN policy additionally feeds CPace, and all application messaging uses the same ratchet construction from the first logical message. The old opaque-token “Phase 1” is superseded by D5's separately scoped L1/L2 rendezvous research.
 *Source:* ADR-A2 spec `91fd123`; plan `9f8acc3`.
 
 **H-3 — Capability negotiation rejected in favor of a binary version tag with fail-closed reject.**
-*Paper:* Rejected per-peer capability negotiation with best-effort downgrade to an "unverified" mode; chose a minimal `protocolVersion` tag with strict equality against `PROTOCOL_VERSION = 3` (`isProtocolVersionCompatible`), no fallback (missing field = pre-v3 = rejected), "presence of a PIN is the mode," no "unverified" degradation UX.
+*Paper:* Rejected per-peer capability negotiation with best-effort downgrade to an "unverified" mode; chose a minimal `protocolVersion` tag with strict equality against `PROTOCOL_VERSION = 3` (`isProtocolVersionCompatible`), no fallback (missing field = pre-v3 = rejected). The canonical room policy selects `authMode=pin|nopin`; it does not negotiate a second cipher suite.
 *Source:* design §2 pt 3, §7; plan Stage 6 Task 1 (`protocolVersion.ts`), Task 2 (`selectHandshakeMode`).
 
 **H-4 — Atomic v3 wire break — no v2↔v3 interoperability.**
 *Paper:* Considered a capability-detect/downgrade interop path to the old per-chunk-signature scheme; chose a clean, non-interoperable break (`0.9.2 → 0.10.0`), old v2 rooms/data kept separate — the same reason R1's signature-drop must ship atomically.
 *Source:* design §2 pt 4, §3, §15, §12 R1; plan Global Constraints; Stage 7 CHANGELOG draft.
 
-**H-5 — Throttling online PIN-guessing: `MAX_PIN_ATTEMPTS` + exponential backoff, keyed to the room not the identity.**
-*Paper:* CPace defeats offline dictionary attacks but a MITM signaling server still gets one online guess per session; resolved with `MAX_PIN_ATTEMPTS = 3` free key-confirmation failures per room, then `PIN_BACKOFF_BASE_MS·2^(n-1)` (base 500 ms, capped ~5 min) — **backoff, not a hard lock** (a permanent lock would let one malicious peer DoS the room) — counter persisted **per room only** (identities are attacker-chosen, so a per-identity counter resets on reconnect), cleared on success or PIN rotation, all failure states fail closed via a serializable secret-free `Peer.pakeVerified` boolean.
-*Source:* design §7; plan Stage 6 Tasks 1/3/7 (`pinBackoff.ts`, `pakeVerified`).
+**H-5 — Throttling online PIN-guessing: durable stable-identity backoff plus a soft room aggregate.**
+*Paper:* CPace defeats offline dictionary attacks but an active signaling adversary still gets online guesses. Current v3 gives each stable Ed25519 peer identity three free failures for a room, then applies 500-ms exponential backoff capped at five minutes, persisted by `(roomId, peerIdentityEd25519)`. Success clears that identity's state. To make cheap identity rotation non-free without letting one peer hard-lock every honest member, an additional in-tab room aggregate softly throttles after 30 failures in a five-minute window. Both controls are backoff/window throttles, not permanent locks.
+*Source:* `src/roomPinAttempts.ts`; `src/db/types.ts`; `src/db/db.worker.ts`; `src/handlers/handleOpenChannel.ts`.
 
 **H-6 — DTLS remote-certificate verify failed OPEN when the live cert stat was unverifiable.** *(review-driven fix; hard)*
 *Paper:* `verifyDtlsFingerprints` guarded with `if (liveRemoteFp !== null && liveRemoteFp !== remoteSdpFp) throw` — but `certificateFingerprint` legitimately returns `null` (missing transport stat / absent `remoteCertificateId` / no matching cert stat), and `null` short-circuited the `&&` so an *unverifiable* MITM tripwire silently passed; rewritten to fail closed on both branches (`if (liveLocalFp === null || liveLocalFp !== localSdpFp) throw`, and symmetric for remote), with a regression test asserting rejection.
@@ -125,11 +125,11 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 ### 1c. Transport / framing
 
 **T-1 — Low data-channel buffer watermark spilling metadata to the relay.**
-*Paper:* `MAX_BUFFERED_AMOUNT` was 2 frames (131072 B), so ordinary send congestion immediately spilled full 64 KiB frames through the signaling-relay path (handing it sender/receiver identity, size, timing, and the plaintext root label); raised to 16 frames (1 MiB; browsers buffer ~16 MiB), keeping normal transfers P2P and reserving relay for a genuinely dead channel.
+*Paper:* In v2, `MAX_BUFFERED_AMOUNT` was 2 frames (131072 B), so ordinary send congestion immediately spilled full 64-KiB frames through the signaling-relay path (handing it sender/receiver identity, size, timing, and the plaintext root label); raising it to 16 frames kept ordinary traffic P2P. Current protocol-v3 removes WebSocket payload fallback entirely and relies on authenticated reconnect/reconcile for availability.
 *Source:* finding #9; commit `c584ed0`.
 
 **T-2 — Read-receipt count leaking the real-vs-decoy split.**
-*Paper:* Receipts were emitted only for accepted REAL chunks, so a DTLS-record observer could count the 64-byte reverse records to recover the real chunk count and defeat decoy padding; rejected padding every receipt to full frame size (needs a WASM-offset marker + 1024× reverse amplification); resolved by emitting exactly one fixed 64-byte receipt per **every** forward frame (real/decoy/dup/crypto-fail), reals carrying the true leaf hash and everything else a fresh random 64-byte token — so reverse count == forward count, safe by construction.
+*Paper:* Protocol-v2 receipts were emitted only for accepted REAL chunks, so a DTLS-record observer could count the 64-byte reverse records to recover the real chunk count and defeat decoy padding. V2 resolved this by emitting one 64-byte true-or-random token for every forward frame. Current v3 retains that count property but wraps the token in an exact 65-byte typed frame, `FRAME_TYPE_RECEIPT(1) ‖ token(64)`, and rejects raw 64-byte frames. A valid token is `SHA-512(receipt_domain ‖ merkleRoot ‖ u64(chunkIndex) ‖ leafHash)`; the v18 sender resolves by root and additionally requires the stored chunk's random `transferId` to match the active send.
 *Source:* finding #10; commit `6016862`.
 
 **T-3 — `close()` before drain wipes still-buffered send data.**
@@ -146,7 +146,7 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Source:* ADR-R1; spec `2026-07-20-reliable-transfer-resume-telemetry-design.md`, commit `927c4ac`.
 
 **T-6 — Have-set representation: new wire/bitfield vs reusing receipts.**
-*Paper:* Considered a new bitfield/`totalChunks` wire field + store to track which chunks the receiver has; chose to treat the existing 64-byte leaf-hash receipts as the have-set itself (KISS/DRY/SSOT) — the sender resolves each receipt to a `chunkIndex` via `getDBNewChunk(hash)` and extrapolates missing reals, ack-set is disposable in-memory state rebuilt from receipts.
+*Paper:* Considered a new bitfield/`totalChunks` wire field + store to track which chunks the receiver has; chose to keep receipts as the have-set (KISS/DRY/SSOT). In current v3 the 64-byte token is not a raw leaf hash: it binds root, index, and leaf; lookup is by `(merkleRoot, receiptToken)`; and the returned staging row must match the active v18 `transferId` before its `chunkIndex` enters the disposable in-memory ack set. The token is transfer-safe acknowledgement identity, not strict durable-storage proof: the current storage-exception path can still emit it.
 *Source:* ADR-R2; commit `7187836`.
 
 **T-7 — Retransmit vs resume: separate mechanisms or one reconcile path.**
@@ -160,6 +160,10 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 **T-9 — `serializeRatchet` returns `ArrayBuffer` fields, not `Uint8Array`.** *(review-driven fix; persistence-adjacent)*
 *Paper:* The brief accessed `s.rootKey.buffer` and spread `[...(sA.dhRemotePub as Uint8Array)]`, but `RatchetSessionSecrets` fields are plain `ArrayBuffer` (no `.buffer`, doesn't iterate bytes on spread); passed the `ArrayBuffer` values directly to `wrapSecret` and fixed the test's spread to `[...new Uint8Array(sA.dhRemotePub as ArrayBuffer)]`.
 *Source:* commit `c835244`; `.superpowers/sdd/task-s4t4-report.md` consumed-signature deviation #2.
+
+**T-10 — Transfer identity and immediate cancellation: content hash → random v18 `transferId`.**
+*Paper:* Identical concurrent sends cannot safely share cancellation, staging, progress, or reconciliation state. Database v18 therefore recreates only the transient `newChunks` store with key `['transferId','chunkIndex']`, where `transferId` is a fresh random 32-byte value returned synchronously with the send handle. Hash/root cancellation remains compatibility syntax but fails when ambiguous. In immediate mode, closing only the per-message DataChannel while the same authenticated room/peer RTCPeerConnection remains connected is the peer-cancel signal; a dead/replaced transport remains eligible for resume and receives a fresh ratchet step. Scheduled cover is not implemented, so its explicit encrypted `CANCEL` control record remains future D3 work.
+*Source:* `src/index.ts`; `src/handlers/transferAbort.ts`; `src/handlers/handleSendMessage.ts`; `src/db/src/getDB.ts`.
 
 ### 1d. Persistence
 
@@ -180,8 +184,8 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Source:* design §8, §15, §12 R3(a); plan Stage 3 (`ratchetWrap.ts`).
 
 **P-5 — Resume across a full peer reconnect: registry + re-derive vs keep-state-alive.**
-*Paper:* The original spec plan re-derived destroyed WASM state via a registry; chose instead to keep `sendWithReconcile` alive across the reconnect, reopening the same Merkle-root-labeled channel on the peer's fresh connection with `senderSecretKey/modules/ackedReal` still in scope; the receiver persists `Chunk.leafHash` (additive, no dbVersion bump) and re-emits stored receipts on reopen.
-*Source:* ADR-R7; commit `69568e0` (step 3).
+*Paper:* The original reliability slice kept `sendWithReconcile` alive and re-opened the same Merkle-root-labelled channel, with the receiver persisting each leaf for receipt replay. Protocol-v3 tightens the transport boundary: reopening on the same authenticated RTCPeerConnection may retain the message key/header, but a replacement connection has a fresh hybrid root and must wait for its leased gate, advance its own ratchet, wipe the old message key, and reseal missing plaintext chunks. Receipt replay derives the current root/index/leaf token; v18 transfer identity keeps concurrent equal sends separate.
+*Source:* ADR-R7; commit `69568e0` (historical step 3); `src/handlers/handleSendMessage.ts`; `src/handlers/handleOpenChannel.ts`.
 
 **P-6 — Large-file handling: whole-file-in-RAM vs streaming to OPFS.**
 *Paper:* The two whole-file-in-RAM spots (send-side message hash, receive-side reassembly Blob) blocked GB+ files; resolved by streaming both — a JS-callable incremental SHA-512 WASM export fed ~1 MiB at a time on send, and `assembleToOPFS` writing each chunk's slice to its file offset via a worker-only `createSyncAccessHandle` on receive; eventually (0.9.2) received chunks are written straight to OPFS at their offsets as they arrive, dropping the reassembly pass entirely.
@@ -211,17 +215,21 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Source:* Methodology sections across Stages 1–3.
 
 **M-2 — `ratchetGate` brief test asserted a tautology that fails strict typecheck (TS2801).** *(review-driven fix)*
-*Paper:* The brief's memoization test `expect(getRatchetGate('B')).not.toBe(getRatchetGate('B') && null)` triggers TS2801 (the `Promise<void>` is provably never falsy) and at runtime reduces to `not.toBe(null)`, testing nothing; replaced with an equivalent typechecking assertion verifying both halves of the title (memoized while unreset; distinct after `resetRatchetGate`), gate implementation untouched.
+*Paper:* The historical peer-only brief's memoization assertion reduced to `not.toBe(null)` and tested nothing; it was replaced with a real identity/reset assertion. The current registry is keyed by `(roomId, peerId)` and `resetRatchetGate` returns an opaque ownership lease, so equivalent peer IDs in different rooms and a replaced transport's stale completion cannot share or settle one another's gate.
 *Source:* commit `b21fe78`; `.superpowers/sdd/task-s4t2-report.md` §4.
 
 **M-3 — `rejectRatchetGate` on a never-awaited peer fires an unhandled-rejection event.** *(review-driven fix)*
 *Paper:* Rejecting a lazily-minted promise with zero listeners fires the runtime's unhandled-rejection event even though a later consumer still receives the error; added a synchronous no-op `promise.catch(() => {})` at construction inside `ensure()`, with a regression test crossing two macrotask boundaries.
 *Source:* commit `4b98c62` (re-reviewed APPROVED); `.superpowers/sdd/task-s4t2-report.md`.
 
+**M-4 — Reconnect ownership: registries need leases, not just composite keys.**
+*Paper:* Room/peer keys stop cross-room collision but do not stop late async completion from an old transport overwriting its replacement at the same key. Current v3 gives each ratchet gate a `RatchetGateLease` and each main-channel handshake inbox a `HandshakeLease`; open/reject/deliver/clear paths validate the captured lease. Persistence separately serializes the stable `(roomId, peerPublicKey)` edge and invalidates an old connection's owner token before the replacement seed lands.
+*Source:* `src/handlers/ratchetGate.ts`; `src/handlers/handleHandshake.ts`; `src/handlers/ratchetPersist.ts`.
+
 ### 1f. Signaling
 
 **S-1 — SDP/ICE glare race breaking peer establishment.**
-*Paper:* Concurrent SDP/ICE signaling for the same peer interleaved at `await` points, leaving `epc.signalingState` stale and `setRemoteDescription` in the wrong state ("Called in wrong state: stable"); resolved with a module-level `Map<peerId, AsyncMutex>` wrapping the set-description/ICE bodies in `getPeerMutex(peerId).runExclusive` (per-peer serialized, different peers still parallel), removing the ad-hoc `NEGOTIATION_DEBOUNCE_MS` and keeping the perfect-negotiation guard.
+*Paper:* Concurrent SDP/ICE signaling for the same transport interleaved at `await` points, leaving `epc.signalingState` stale and `setRemoteDescription` in the wrong state ("Called in wrong state: stable"). The original peer-only mutex fixed the immediate race; the current registry is room-scoped (`(roomId, peerId)`), with a second `(roomId, stable Ed25519 identity)` lock preventing aliases from concurrently claiming one durable edge. Terminal release waits for the active critical section to drain before deleting the mutex.
 *Source:* finding #7; commit `c5386611`.
 
 ### 1g. Scope / capability
@@ -234,7 +242,7 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 
 ## 2. DECIDED — the two hard handshake calls (maintainer, 2026-07-22)
 
-> These were the two genuinely-open decisions of the v3 handshake, escalated to the design owner in `.superpowers/sdd/progress.md` ("ESCALATIONS to design owner") and analyzed in the companion rigor memo (`scratchpad/handshake-rigor-memo.md`, workflow `wf_a20541e8-a93`). Both are now **DECIDED** (2026-07-22). The shipped Stage-4 code (`src/handlers/handleHandshake.ts`, commit `c835244`) had converged on *none* of the options for either — for D1 it exchanges a real 32-byte `sidSelf` in HELLO but feeds an empty `CPACE_GEN_SID` to the generator; for D2 it reads the Ed25519 `keyPair` straight out of Redux and passes raw bytes into `x25519Dh` with no conversion or dedicated-key step — so both decisions are also implementation work, not just doc updates. Recording these is what unblocks the ADR-A2 update that was the pending DOCS TODO gating Stage-4 Task 5.
+> These were the two genuinely-open decisions of the v3 handshake, escalated to the design owner in `.superpowers/sdd/progress.md` ("ESCALATIONS to design owner") and analyzed in the companion rigor memo (`scratchpad/handshake-rigor-memo.md`, workflow `wf_a20541e8-a93`). Both were **DECIDED** on 2026-07-22. At the historical `c835244` Stage-4 checkpoint, the code had implemented neither final choice: it fed an empty CPace generator `sid` and passed Ed25519 bytes toward X25519. The current implementation instead feeds the initiator-random `sid` and uses a separately generated, wrapped, cross-signed X25519 identity. The paragraph is retained to explain why D1/D2 required implementation rather than a documentation-only ruling.
 
 ### D1 — DECIDED: initiator-random `sid` (fill the existing single-round HELLO field)
 
@@ -252,11 +260,11 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 *Rationale:* Fill the `sid` because it is the on-spec, free move that takes the design from "sanctioned degenerate mode" to inside the letter of the cited proof; keep CI as belt-and-suspenders against signaling-layer bugs; name the PIN as the MITM defense (matching RFC 8827's SAS/IdP requirement and MLS's don't-trust-the-transport posture). The cert-fingerprint reuse concern is the **same class** as the historical `tls-unique` / triple-handshake failures — a static/reusable artifact standing in for a fresh-secret binding — **not literally that failure**; the fresh-`sid` + fresh-cert invariant plus the PIN is what neutralizes it in-browser today.
 *Standards:* CPace draft §3.1 (initiator chooses a fresh random `sid`, ≥8 bytes; use 16+) and §10.9 (`sid` SHOULD NOT be reused — UC composability depends on it); RFC 9266 (channel binding to fresh handshake secrets; the corrected successor to fingerprint/`Finished`-based binding, parked as F-8); RFC 8827 (WebRTC Security Architecture: assume signaling is adversarial, require SAS/IdP).
 *Blog:* The handshake's own author shipped empty-`sid` and, to his credit, flagged it as a Concern rather than a silent choice; a rigor pass then showed the "fix" rested on conflating *mutual contribution* with mere *freshness* — and that a fresh unilateral `sid`, on-spec and free, was already sitting in a HELLO field the code fills but doesn't yet read. The decision took the free fix, kept the belt-and-suspenders, and held a slot (F-8) for the binding that browsers won't yet expose.
-*Source:* design spec `…v3-design.md` lines 117–123; `.superpowers/sdd/task-s4t4-report.md` deviation #5 / Concern #2; `.superpowers/sdd/progress.md` (escalation, now resolved); `scratchpad/handshake-rigor-memo.md` §D1; `src/handlers/handleHandshake.ts` lines 186–194 (`CPACE_GEN_SID` empty — to be fed the real `sid`), 307 (`sidSelf` random); `docs/paper-prior-art-and-related-work.md` line 342 (RFC 9266 nearest prior art). Implementation follow-up: audit the generator-string byte layout against draft §8.1 (`CI`-before-`sid` ordering, PRS/DSI zero-padding) and confirm the `K == G.I` identity-element abort is present.
+*Source:* design spec `…v3-design.md` lines 117–123; `.superpowers/sdd/task-s4t4-report.md` deviation #5 / Concern #2; `.superpowers/sdd/progress.md` (escalation, now resolved); `scratchpad/handshake-rigor-memo.md` §D1; historical `c835244` flow; current `src/handlers/handshakeCore.ts`; `docs/paper-prior-art-and-related-work.md` line 342 (RFC 9266 nearest prior art).
 
 ### D2 — DECIDED: Option B, dedicated X25519 identity key + codebase-wide key separation
 
-*Paper:* The no-PIN identity-mixed X3DH DH `secret = HKDF(DH(IK_a,EK_b)‖DH(EK_a,IK_b)‖DH(EK_a,EK_b))` runs over a **dedicated, separately-generated X25519 identity key**, never the Ed25519 signing key. The Ed25519 identity key stays the sole signing/identity anchor and **cross-signs** the X25519 key so it inherits identity authentication; the X25519 key is **seed-derived from the existing mnemonic via a domain-separated KDF** (single-seed backup/upgrade UX, never one scalar for two group operations). This is the textbook key-separation choice and is PQ-forward — the planned hybrid KEM key is unavoidably separate too, so committing to separation now is the forward-compatible move.
+*Paper:* The identity-mixed interactive-3DH calculation `secret = HKDF(DH(IK_a,EK_b)‖DH(EK_a,IK_b)‖DH(EK_a,EK_b))` runs over a **dedicated, separately-generated X25519 identity key**, never the Ed25519 signing key. Its helper/file was historically named `x3dh`, but current v3 runs an online three-DH exchange in every room and lets PIN policy add CPace; it is not Signal X3DH because there are no asynchronous prekeys. The Ed25519 identity key stays the sole signing/identity anchor and **cross-signs** the X25519 key so it inherits identity authentication. This is the textbook key-separation choice and is PQ-forward — the mandatory ML-KEM key is separately generated too.
 
 **Chosen: Option B (dedicated X25519 key + key separation).** Options weighed (from the rigor memo):
 
@@ -266,12 +274,237 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 | **B. Dedicated separate X25519 identity key** ⭐ | **DECIDED** | Removes the entire unanalyzed cross-protocol-reuse class; matches NIST SP 800-57 §5.2, libsodium's FAQ ("always safer"), Noise §14, and MLS/RFC 9420's separate `signature_key`/`encryption_key`. Independent lifecycle, PQ-forward, tiny cost (one 32-byte pubkey in a CI that already carries an IK, two fingerprints, and a PQ tag). Cross-sign or same-seed-derive for UX. |
 | **C. Defer no-PIN; ship PIN-only** | Acceptable interim only | Zero D2 crypto risk now (CPace never touches the identity keys); a legitimate product-scope call — *provided* the eventual no-PIN path lands on B, **never** A as a "temporary" measure. |
 
-*Precedent it migrates off:* p2party's **shipped** `chacha20poly1305` box scheme already converts the one Ed25519 identity to X25519 (`crypto_sign_ed25519_sk_to_curve25519` / `pk_to_curve25519` + `crypto_kx`), thereby reusing a single key for **both** signing and DH — exactly the XEdDSA-uncertified pattern. D2=B deliberately migrates the codebase *off* that reuse: the box scheme is **deprecated-in-place** (decrypt kept for legacy interop, v3 never uses it), and v3's no-PIN path consumes the dedicated X25519 key instead. The WASM already exports `_x25519_keypair` + `_sign`/`_verify`, so **no new Ed25519→X25519 conversion export is added** (the truncation footgun is removed by never taking that path).
+*Historical precedent and migration plan:* protocol-v2's `chacha20poly1305` box scheme converted the Ed25519 identity to X25519, reusing one key for signing and DH. The first D2 plan proposed deprecating that box in place while retaining legacy decrypt. Current v3 completed the migration instead: the box/conversion surface is removed from `src`/WASM exports, and both auth policies consume the dedicated X25519 identity; no Ed25519→X25519 conversion export was added.
 *Rationale + honest caveat:* This is risk-aversion + PQ-forwardness, **not a demonstrated break** — there is **no published attack** on Ed25519/X25519 reuse specifically (unlike the RSA/EMV case in Degabriele et al.). The reasoning is "no one has proven the exact scheme-pair jointly secure, the field default is separation, and the PQ KEM key forces separation anyway," not "a forgery is imminent."
 *Standards:* XEdDSA §8 (reuse for sign + certain DH is "a complicated topic requiring careful analysis… outside the scope"); NIST SP 800-57 Pt.1 Rev.5 §5.2 ("a single key shall be used for only one purpose"); libsodium FAQ (prefer distinct keypairs; PQ sig/KEM keys are incompatible types); Noise §14 (reusing a static key outside its protocol "would require extremely careful analysis"); MLS/RFC 9420 (structurally separate `signature_key` / `encryption_key`; Signal's PQXDH likewise added a *separate* KEM key).
-*Implementation shape (current plan):* X25519 key seed-derived from the mnemonic (domain-separated, upgrade/backup-friendly); Ed25519 cross-signs the X25519 pub; box scheme deprecated-in-place; CI optionally carries the X25519 IK (or its cross-signature) so both peers bind it; `performHandshakeCore`'s no-PIN branch reads a real X25519 key rather than converting, PIN branch untouched. This supersedes the shipped `c835244` flow that fed a 64-byte Ed25519 secret into a function expecting a 32-byte X25519 scalar.
+*Implementation shape (current correction):* the dedicated X25519 identity is generated independently, wrapped in IndexedDB, and cross-signed by Ed25519; its public key and cross-signature travel in-band and are verified before interactive 3DH. `performHandshakeCore` always runs that three-DH leg, while the PIN branch additionally runs CPace. This supersedes both the old `c835244` flow that fed a 64-byte Ed25519 secret into a 32-byte X25519 slot and the intermediate plan that left the PIN branch untouched.
 *Blog:* The spec committed, in a single passing clause, to converting the one identity key p2party already has — and implementation then discovered the conversion primitive was never even exported, and the wired data flow was feeding a 64-byte Ed25519 secret into a 32-byte X25519 slot. The gap between "what one line of the design decided" and "what a safe implementation requires" *was* the dilemma; the decision resolves it by separating the keys — and, in doing so, migrating p2party off the very same one-key-for-both reuse its shipped `chacha20poly1305` box scheme has quietly relied on all along.
-*Source:* design spec `…v3-design.md` line 108, §9 (no conversion primitive listed); `.superpowers/sdd/task-s4t4-report.md` Concern #1; `.superpowers/sdd/progress.md` (escalation, now resolved); `scratchpad/handshake-rigor-memo.md` §D2; `src/handlers/handleHandshake.ts` line 509 (`idSelfSec = hexToUint8Array(secretKey)` — to be replaced by the dedicated X25519 key); `src/cryptography/x3dh.ts`, `src/cryptography/x25519.ts`; shipped box scheme `src/cryptography/chacha20poly1305.*` (the reuse being migrated off).
+*Source:* design spec `…v3-design.md` line 108, §9 (no conversion primitive listed); `.superpowers/sdd/task-s4t4-report.md` Concern #1; `.superpowers/sdd/progress.md` (escalation, now resolved); `scratchpad/handshake-rigor-memo.md` §D2; historical `handleHandshake.ts`/box implementation; current `src/handlers/handshakeCore.ts`, `src/cryptography/x3dh.ts`, and `src/cryptography/x25519.ts`.
+
+### D3 — DECIDED: message-scoped DataChannels with a room-wide immediate/cover policy
+
+**Status:** Architecture accepted 2026-07-23. Immediate-mode authenticated channel-close cancellation is implemented; the scheduler, encrypted cover-mode `CANCEL`, and packet-trace validation are not implemented.
+
+**Context and decision drivers:** One WebRTC DataChannel per logical message is useful product machinery, not accidental plumbing: each transfer gets an isolated lifecycle, backpressure budget, progress state, retry boundary, and cancel handle. Replacing it with one permanent multiplexed channel would throw those boundaries away. Opening a channel only when a person sends, however, exposes message timing; closing it immediately on cancel or completion exposes those events too.
+
+**Decision:** Keep one ephemeral DataChannel per real message. The transport-privacy setting is a **room-wide policy**, with **immediate / no cover as the default**. A cover-enabled room fixes its cadence, lane count `C`, frames per cell `F`, and file-duration classes independently of activity. Every peer-to-peer edge derives the same epoch origin from its authenticated handshake and provisions the configured direction-specific, neutrally-labelled message lanes whether users are idle or active. A queued real message replaces one dummy lane; otherwise the lane carries cover. Each lane sends exactly `F` fixed 65,490-byte application frames at fixed offsets and one exact 65-byte tagged true-or-random receipt frame (`type(1) ‖ token(64)`) per forward frame, then follows its declared close boundary. Excess messages wait for a later epoch. The initiator/responder role supplies a stable tie-break so both sides agree who opens each lane. WebSocket payload fallback is forbidden in cover mode because it would reveal the event to the signaling server.
+
+The signaling service may distribute the room policy but is not trusted to select it. A canonical policy descriptor and version are bound into the authenticated handshake transcript and key confirmation. A mismatch fails closed for a cover room; it must never silently fall back to immediate mode. A room-policy change is a versioned, all-peer transition at an agreed future epoch boundary, with the old schedule continuing until the transition commits. It is never triggered by typing, a queued message, or a file attachment.
+
+Cancellation is immediate in the local UI. In the implemented immediate mode, closing only the message-scoped DataChannel while the same authenticated room/peer transport remains connected is interpreted as peer cancellation; a failed/replaced peer connection instead enters resume. The future privacy mode must **not** close early: before admission cancellation removes the intent and leaves the lane dummy; after admission an encrypted `CANCEL` replaces the next scheduled payload, remaining slots become cover, and the lane closes only at its scheduled boundary.
+
+Large messages require a room-declared duration/capacity class (for example 1, 4, or 16 epochs) or another fixed schedule. Otherwise a longer-lived channel reveals a size bucket. The exact cadence, `C`, `F`, offsets, lifetime classes, congestion behavior, and suspension policy remain evaluation parameters, not paper constants.
+
+*Paper:* We preserve message-scoped RTCDataChannels as per-transfer isolation boundaries and make scheduled cover an authenticated room policy rather than an always-on product default. In a cover room, a real transfer or authenticated ML-KEM control step substitutes for bytes that the schedule would have sent as cover; therefore its **marginal observer-visible application-frame and byte cost is zero relative to that configured schedule**, not zero bandwidth in absolute terms. The protected observation is real-versus-cover activity, bounded size, and cancel/complete timing on an already-established WebRTC/DTLS association. Immediate rooms make no traffic-analysis claim. Cover excludes peer IPs, association existence, room membership, endpoint compromise, global correlation, browser suspension, congestion/loss artifacts, and leakage from duration classes. Because WebRTC fragments application frames, the result is a hypothesis until TURN/on-path packet captures show that the scheduled application calls yield the intended observable trace.
+
+*Blog:* Immediate delivery stays the default. When a room turns cover on, picture a tiny encrypted train that leaves on the room's timetable even when nobody is travelling. An idle train carries convincing junk. A real message takes the seat the junk was going to occupy, so the watcher still sees one train. Canceling kicks the message off inside the tunnel, but the train keeps its timetable and arrives full of junk. We keep a separate train for each transfer because cancellation, progress, retries, and cleanup stay wonderfully local. Privacy here is bought with a room-wide timetable, not a per-message incognito button or a magic compression trick.
+
+**Cadence trade-off (`C=1, F=1`):**
+
+| Cadence | Mean / maximum admission wait | Scheduled payload per endpoint outbound / across pair per day | Approx. channel opens across pair per day | Pros | Cons / intended use |
+|---|---:|---:|---:|---|---|
+| **No cover (product default)** | **immediate / immediate** | **0 idle** | activity-dependent | Native chat UX; no idle battery, bandwidth, or TURN bill. | Send, completion, and cancellation timing are visible; no real-versus-cover claim. |
+| 10 s | 5 s / 10 s | 565.8 MB / 1.132 GB | 17,280 | Best listed cover UX for a foreground chat room; remote cancel and PQ control are bounded to ten seconds. | High battery/TURN cost and extreme DataChannel churn; 1.132 GB/day is for only one pair. |
+| 15 s | 7.5 s / 15 s | 377.2 MB / 754.4 MB | 11,520 | Feels close to live chat; fastest scheduled cancel delivery and PQ healing opportunity. | Severe mobile/TURN cost and DataChannel churn; foreground high-assurance mode only. |
+| 30 s | 15 s / 30 s | 188.6 MB / 377.2 MB | 5,760 | Conversational delay remains tolerable; halves the 15-second cost. | Still expensive for an idle pair and demanding on browser stream-reset behavior. |
+| 60 s | 30 s / 60 s | 94.3 MB / 188.6 MB | 2,880 | Balanced lower-data cover; cancellation remains locally instant and remotely bounded to one minute; five times faster than five-minute cells. | A minute feels broken for ordinary chat; still too expensive for casual always-on mobile cover. |
+| 2 min | 1 min / 2 min | 47.2 MB / 94.3 MB | 1,440 | Half the chosen bandwidth and channel churn; plausible for asynchronous rooms. | Noticeable conversational stalls; cancel/PQ control can wait two minutes. |
+| 5 min | 2.5 min / 5 min | 18.9 MB / 37.7 MB | 576 | Cheap enough for background file-drop or slow rekey cover. | Poor chat UX; a remote cancellation can appear stuck for minutes. |
+| 10 min | 5 min / 10 min | 9.4 MB / 18.9 MB | 288 | Lowest listed continuous-cover cost. | Store-and-forward UX, not conversation; slow recovery/control propagation. |
+
+The byte figures count only one 65,490-byte application frame per direction per epoch and use decimal MB. Receipts, DCEP, SCTP, DTLS, TURN, and IP overhead are excluded. Costs scale linearly with `C×F` and with the number of WebRTC edges. **Rooms are shipped n-party (`n>2`) full peer meshes:** the signaling/discovery service is centralized and star-shaped, but every room member receives the peer list and opens a WebRTC edge to every other member. The data plane therefore has `n(n−1)/2` covered edges. At 10 seconds, five peers create ten covered edges and roughly **11.32 GB/day** of scheduled application payload across the room. Each endpoint participates in `n−1` edges. A faster cadence may be a room privacy profile, but **must not activate in response to typing or queued data**: an activity-triggered cadence change recreates the timing signal the cover schedule is meant to remove.
+
+**Large-file consequence:** One live chunk is normally 90% filled, so a frame carries at most about 55,728 useful file bytes. At a 10-second `F=1` chat cadence that is only 5.57 kB/s: about 5.2 hours for 100 MiB or 53.5 hours for 1 GiB. A cover room therefore needs an explicit room-wide bulk policy:
+
+1. **Base-lane only:** the file uses ordinary chat cells. This best hides file existence but is intentionally slow.
+2. **Bucketed bulk lanes:** the room declares fixed `F` and duration buckets. A file starts only at a bulk boundary, stays on one message-scoped channel, and sends cover until its bucket ends even after completion or cancellation. For a 10-second cadence, `F=16` yields about 89 kB/s (100 MiB in 19.6 minutes; 1 GiB in 3.35 hours), while `F=64` yields about 357 kB/s (100 MiB in 4.9 minutes; 1 GiB in 50 minutes). The observer learns the bulk class and duration bucket, but not exact size, progress, completion, or cancellation.
+3. **Immediate bulk:** send at available WebRTC speed. This preserves content encryption and per-message cancel/progress isolation but reveals that a bulk transfer is active and exposes its approximate traffic volume.
+
+Hiding even the **existence** of a fast large-file transfer requires dummy bulk lanes to run independently of demand, which is expensive: symmetric 10-second cover at `F=16` schedules about 754 MB per pair per hour while active; `F=64` schedules about 3.02 GB per pair per hour. There is no protocol trick that simultaneously gives arbitrary-file speed, negligible cover bandwidth, and hides whether a large transfer exists.
+
+**Threat-model boundary:** This is link-local application-layer cover against a passive observer of an already-established direct or TURN-carried WebRTC association. It is not an anonymity network and does not hide who connected to whom. Dummy payloads must be cryptographically and syntactically valid at the encrypted-frame layer. ML-KEM control must remain inside the authenticated application encryption and DTLS envelope; at this declared observer layer, Kemeleon's raw-encoding distinguisher has no raw ML-KEM bytes to inspect. F-2 records the boundary and the condition under which an OKEM would become necessary.
+
+*Source:* maintainer decisions and cover-scheduler analysis, 2026-07-23 (immediate default; cover is room-wide); `src/api/webrtc/handleSendMessage.ts` / `handleOpenChannel.ts` (current per-message-channel lifecycle); `src/handlers/chunkFrame.ts` and `src/utils/constants.ts` (65,490-byte v3 application frame); `src/handlers/handleSendMessage.ts` (0.9 useful fill); finding #10 / `6016862` (historical true-or-random token decision) plus `src/handlers/receiptFrame.ts` (current 65-byte tagged frame); F-1/F-2 below (PQ substitution and byte-uniformity); `docs/paper-prior-art-and-related-work.md` (claim boundary).
+
+### D4 — DECIDED: paper claim re-scoped after independent SOTA adjudication
+
+**Status:** Claim boundary accepted 2026-07-23; it supersedes the earlier “C3 is the only NOVEL / no preemption found” language.
+
+*Paper:* The broader crypto-and-networking pass found that the original search overfocused on Signal-like secure messaging. Post Quantum Sphinx and Outfox already put PQ KEMs into metadata-hiding packet formats; CCS 2024 OKE/Kemeleon and CRYPTO 2025 Hybrid OKE already solve the stronger primitive problem of random-looking exposed PQ/hybrid KEM transcripts; and Zerion's public 2026-07-23 v3 source combines exact 4096-byte real-or-cover frames at roughly 750 ms with in-frame ML-KEM. Therefore p2party does **not** claim a new cryptographic construction, the first fixed frame to carry PQ material, or an unpreempted “free ciphertext” insight.
+
+The research question is narrower and comparative: can a **shipped n-party (`n>2`) browser/WebRTC full peer mesh** place sparse, authenticated Triple-Ratchet PQ advances into cells an optional room-wide schedule would already send, thereby avoiding Zerion's permanent per-frame KEM tax, while message-scoped RTCDataChannels retain cancellation/progress/backpressure/retry/teardown isolation? The server remains only the star-shaped signaling/bootstrap point; it is not the room data hub. “Free” means only zero marginal observer-visible application frames/bytes relative to sufficient scheduled capacity. Immediate/no-cover rooms make no metadata claim. This is **NOVEL-ADJACENT / open until evaluated**, with WPES or PoPETs as the honest first venue.
+
+The signaling star is nevertheless a room-membership observer. Today the client gives it `roomUrl` + stable `peerId`, then asks for the `roomId` roster, receives peer IDs/public keys, and brokers each pair's SDP/ICE through it. High-entropy/PIN rooms protect discovery/authentication and keep E2E secrets in-band, but do not hide which clients share a room. Never merge the cover claim with the active-but-unshipped L2 target in D5: L1 opaque/OPRF tokens still reveal same-token co-presence, and even private writes + PIR do not erase source-IP/timing/TURN residuals.
+
+Claude's prior-art pass remains useful: it correctly rejected primitive novelty; identified SPQR/Triple Ratchet/PQ3; fixed SPQR 42→32 bytes and “Reed–Solomon”→“erasure codes”; and demanded a measured threat model. Its errors were the broad negative-result claim and treating Kemeleon as a current blocker. Kemeleon matters only if an observer receives raw KEM encodings. With PQ control inside old-epoch application AEAD and then DTLS, the declared direct/TURN observer sees ciphertext; packet captures must verify that premise. If a future layer exposes the KEM before DTLS, use the published OKE/Hybrid-OKE construction rather than inventing an encoding.
+
+The dated p2party commits (`6ba8558b...`, `68fd058f...`) precede Zerion v3 commit `1f9d00f...` by roughly 28 and 19 hours respectively. Record this only as independent near-concurrent provenance, never as academic priority or a “won by hours” argument.
+
+*Blog:* The first survey gave us a beautiful headline and then the wider field took a hammer to it. Good. Signal proved the bandwidth problem; the mixnet people proved PQ packets were already a thing; the obfuscation people had already taught ML-KEM to wear random-looking clothes; and Zerion put dense ML-KEM into a constant-rate messenger. What is left is more specific and more interesting to build: **sparse rather than dense PQ healing, smuggled into a room timetable a browser mesh was already paying for, without sacrificing the per-message channel UX.** The paper earns that sentence with traces and measurements, not typography.
+
+*Required evidence:* multi-browser direct+TURN packet traces; n>2 full-mesh regression tests as a release gate; classifier tests across idle/text/PQ/cancel/complete/file classes; bandwidth/latency/CPU/battery/TURN/channel-churn measurements across cadences and mesh size; dense-Zerion vs sparse-p2party vs SPQR/PQ3 comparison; downgrade/policy/epoch/retry/fork/crash tests; and a precise leakage function restricted to cover-enabled rooms. The production milestone is the v3 package actually running on `p2party.com`; the current live site proves the n-party browser mesh exists, not that the new PQ-cover result has shipped.
+
+*Source:* `docs/paper-prior-art-and-related-work.md` §1.1, §D, §3 C3, §4–5, refs 99–104; Zerion commit `1f9d00fce039fd99c2cd90e14da3a213f6ffa80a`; p2party provenance commits `6ba8558b57c2b08509385030ac520e692f4a5c22`, `68fd058fd834dde0c72f969fc67c4f6c07aa5678`.
+
+### D5 — DECIDED: fold strong L2 server-blind rooms into the combined target
+
+**Status:** Scope and working construction accepted 2026-07-23; it is not yet implemented. This promotes and supersedes the old deferred L1/OPRF note in F-3.
+
+**Current-state correction:** Shipped p2party has a centralized signaling star and a full WebRTC data mesh. It is server-blind for E2E payloads and in-band secret key material, but not for membership: the client exposes a stable Ed25519 key in the WebSocket URL, sends raw `roomUrl` + stable `peerId`, receives the room's peer-ID/public-key roster, and brokers every pair's SDP/ICE through the service. A high-entropy room is unguessable to outsiders and a PIN/CPace room authenticates peers; neither prevents the service from enumerating the room graph.
+
+**Target:** The combined system must protect three different surfaces:
+
+1. **Control plane / L2 rendezvous:** the signaling service must not learn a room's stable identifier, stable peer identities, roster, or which fixed-size signaling records form one room graph.
+2. **Data-plane association:** the full mesh remains pairwise WebRTC, with one independently authenticated/serialized hybrid ratchet per `(room, stable-peer)` edge and one ephemeral DataChannel per logical message. The server never becomes a content relay merely to gain blindness.
+3. **On-edge activity:** optional room-wide scheduled cells hide bounded real-vs-cover/PQ/cancel/file events after associations exist.
+
+An OPRF over one common room token is **not** sufficient L2: it can hide the token's input while still letting the server group every client that uses the same output/mailbox. Likewise, encrypting a roster under the room key hides its contents but not which clients read/write the same object. OPRF/Privacy Pass remains useful for unlinkable quota credentials; it is not the rendezvous address. PSI can find an intersection, but does not supply asynchronous n-party presence and private signaling.
+
+**Working construction:** prototype a short-lived anytrust private rendezvous service over two or three independently operated replicas, initially with a Talek-style hidden log while measuring whether Myco's asymmetric two-server/oblivious-data-structure design is the viable efficiency target. A new invite carries a 256-bit room capability in the URL **fragment**, plus a canonical authenticated room policy; the human PIN remains a separate peer-authentication input and never derives a public-board AEAD key, which would expose an offline PIN verifier. Epoch-derived hidden presence rows use private writes and private reads. Records contain only rotating presence IDs, short-lived inbox handles, expiry, capabilities, and ephemeral X25519 + ML-KEM rendezvous keys. Stable identities appear only inside the encrypted authenticated pairwise exchange. Fixed-size fragmented SDP/ICE records move through one hidden inbox per peer, and rotating presence IDs deterministically select the WebRTC offerer. L2 then leaves the path: it bootstraps or repairs `n−1` pairwise WebRTC edges while application data stays in-band.
+
+Talek is a plausible simple substrate and comparator, not a drop-in or the current SOTA efficiency claim. **Myco (IEEE S&P 2025)** changes that frontier with `O(N log² N)` work in an asymmetric two-server distributed-trust model and reports large throughput gains over PIR systems. **Peer2PIR (IEEE S&P 2025)** separately demonstrates private peer routing, provider advertisements, and content retrieval in IPFS. Neither supplies p2party's dynamic room semantics: a capability room still needs a fixed-capacity multi-writer presence design, private subslot allocation, collision handling, expiry, active-server equivocation/partition auditing, and a browser WebRTC handoff. A cheap global trial-decryption board is an acceptable experimental baseline, but it hides membership only when every online client performs indistinguishable real-or-dummy accesses at a service-wide cadence. Otherwise join timing reclusters the room.
+
+**Two levels must remain explicit.** L2a is protocol-level graph blindness: the application server sees fixed-size random records but cannot partition them into rooms or stable identities. L2b adds network unlinkability: source IP, connection timing, and a co-operated TURN service otherwise remain correlators, so the strong claim needs independently operated ingress/board/TURN services, OHTTP-style trust splitting, or an anonymity/mix/onion layer plus an explicit residual-leakage statement. OHTTP alone hides IP from the request processor but neither hides a shared mailbox nor survives ingress/processor collusion. Direct WebRTC necessarily reveals endpoints to peers; a compromised room member knows the roster by design. “L2 shipped” means the chosen target level and leakage are tested, not that the room token is merely opaque.
+
+**n-party invariant:** `createSession()` remains the correct two-party cryptographic primitive. A room endpoint owns `n−1` independent sessions; it never shares ML-KEM keys, PQ epochs, counters, skipped keys, retry/fork state, or serialized secrets across edges. A logical room message is encrypted separately for every peer edge. Join readiness requires every expected edge to be authenticated and bidirectionally send-ready.
+
+*Paper:* The combined question is whether a server-blind n-party control plane, sparse PQ-healing full-mesh data plane, and scheduled activity cover can be composed without turning the self-hosted service into a private-access supercomputer or the browser into an unusable bandwidth furnace. DP5 and Private Signaling already establish private presence/signaling; Signal Private Groups hides the roster but not accesses; Talek and 2PPS establish anytrust hidden-access logs/pub-sub; Myco is the polylogarithmic two-server efficiency baseline; Peer2PIR is the direct private-P2P-query baseline. Pung, DPIR, Riposte, Express, Vuvuzela, Stadium, Karaoke, and Alpenhorn complete the mandatory comparison. The contribution must be sold as an evaluated dynamic-room/WebRTC architecture, not a newly invented privacy primitive.
+
+*Blog:* The server used to know the guest list even when it could not read the party. L2 puts the guest list inside the attack surface: no stable name at the door, no common clipboard everyone signs, no public roster endpoint. The room members do the expensive pattern-matching; the dumb server moves equal-looking envelopes. Then the WebRTC mesh takes over and the scheduled trains hide when those peers actually speak.
+
+**Release/OSS blockers discovered while scoping (historical checkpoint):** the client then hardcoded `nopin`, left responder-first sending unprimed, and keyed runtime gates by peer only. Those client blockers are now addressed: room policy selects PIN/no-PIN, interactive 3DH and ML-KEM remain mandatory in both, the responder ratchet is primed before return, and gate/inbox ownership is `(room, peer)` plus per-attempt leases. The separately recorded server-side roster/membership-authorization findings are not made true by those client fixes and still require verification in the server repository before any L2 claim.
+
+*Source:* maintainer decision 2026-07-23; `src/api/signalingServerApi.ts`, `src/middleware/keyPairListenerMiddleware.ts`, `src/handlers/handleWebSocketMessage.ts`, `src/handlers/handleConnectToPeer.ts`, `src/handlers/handleSendMessage.ts`, `src/handlers/handleOpenChannel.ts`; server `src/ws/handleRoom.ts`, `src/ws/handlePeers.ts`, `src/wss.ts`, `src/routes.ts`; `docs/paper-prior-art-and-related-work.md`; DP5 (PoPETs 2015), Talek (ACSAC 2020), 2PPS (2021), Private Signaling (USENIX Security 2022), Myco (IEEE S&P 2025, https://eprint.iacr.org/2025/687), Peer2PIR (IEEE S&P 2025, https://doi.org/10.1109/SP61157.2025.00231), and the metadata-protection SoK (PoPETs 2024).
+
+### D6 — DECIDED: explore p2party crypto as a fail-closed BitTorrent private-swarm extension
+
+**Status:** Architecture/research direction accepted 2026-07-23; **P2BT is not implemented**. It follows the protocol-v3 core and does not replace the room-mesh implementation. “BitTorrent” here means extending discovery and the peer wire protocol, not merely borrowing the Mainline DHT or tunnelling an unchanged client.
+
+**Protocol direction:** define a capability-gated private-swarm mode with no silent compatibility downgrade:
+
+1. A high-entropy swarm capability is distributed out of band or held only in a local URI fragment. Strong mode discovers peers through D5's private rendezvous; hashing or blinding the `info_hash` and using an ordinary tracker/DHT is only L1 because the common lookup key and source endpoints still cluster the swarm.
+2. Before any standard BitTorrent handshake bytes are exposed, peers establish an authenticated X25519 + ML-KEM-768 p2party session bound to the swarm capability, protocol version, content identity, and canonical swarm policy. The conventional handshake and peer messages then travel only inside authenticated encryption.
+3. HAVE/bitfield/request/piece/cancel/choke state is encoded into a fixed-size cell profile. Preserve piece/Merkle verification, pipelining, choking, rarest-first, resume, and cancellation. Dummy cells never advertise false verified content and never count toward tit-for-tat or upload credit; only verified useful piece bytes do.
+4. Cover is a swarm-wide **rate profile**, not just a cadence: `payload_per_cell / cadence` bounds goodput. A fixed duration/rate class can hide exact size/progress/cancellation inside that class; immediate bulk mode leaks that bulk activity exists. Never accelerate the cover profile in response to demand.
+5. Disable legacy trackers, Mainline DHT, PEX, LSD, plaintext handshakes, and hole-punch rendezvous in strong mode. Content and piece semantics may remain compatible, but legacy wire/discovery interoperability is incompatible with the privacy claim. A gateway is explicitly a graph observer.
+6. Keep BitTorrent's sparse bounded-neighbor graph. Importing p2party rooms' all-to-all edges and per-edge cover into a large swarm would make bandwidth quadratic and destroy the protocol's scaling and incentive model.
+7. The strong carrier is WebRTC/DTLS or TLS 1.3/QUIC with the p2party channel input bound to a TLS exporter. Do **not** put the current 2,465-byte hybrid HELLO directly on raw TCP and then claim camouflage: its length and raw ML-KEM encoding are fingerprintable. Raw TCP requires a published obfuscated-key-exchange construction such as OKE/Kemeleon, or an explicitly weaker confidentiality-only claim.
+8. Chat keeps one physical DataChannel per logical message because cancel/close lifecycle is useful UX. P2BT does not copy that mapping: torrents multiplex bounded logical transfer IDs and standard peer-wire records over one long-lived covered neighbor connection. Opening a stream/channel for every request or block would itself reveal demand and create pathological churn on large files.
+9. The first prototype profile is `P2BT/1`: an encrypted `OPEN` cell repeats the exact version, content identity, policy hash, cell profile, mandatory-feature bitmap, and ordinary BitTorrent handshake; later fixed cells fragment/reassemble ordinary peer-wire bytes. Security-critical features are descriptor-selected and cannot be disabled through BEP 10. Unknown mandatory features abort without plaintext fallback.
+
+**Capacity consequence:** one current p2party frame carries at most 61,919 useful bytes. At one cell per 10 seconds that is only about 49.5 kbit/s per neighbor direction and roughly 48 hours/GiB from one source; at 60 seconds it is about 8.26 kbit/s and roughly 289 hours/GiB. Ten seconds is a plausible control/small-transfer profile, not a bulk-file profile. Covered bulk needs a predeclared higher cell count/rate or a preannounced bulk window whose transitions occur at swarm epochs rather than on demand. PQ bytes are “free” only in the narrow observer-visible sense when they replace padding in an already-paid cell; in a saturated torrent they displace useful piece bytes.
+
+**Prior-art correction:** a broad “first BitTorrent with ML-KEM and a Double Ratchet” claim is false. I2P ships BitTorrent through I2PSnark; its ECIES-X25519-AEAD protocol incorporates Signal's Double Ratchet, and proposal 169 reports the hybrid ratchet complete in Java I2P and i2pd. The separate hybrid specification still labels implementation, testing, and rollout in progress, so “ratchet implementation complete” must not become “universally deployed.” Peer2PIR already implements private peer routing, provider advertisement, and content retrieval for IPFS. OneSwarm, Tribler, Aqua, anonymous DHT lookup work, BEP 37 anonymous mode, and BitTorrent's MSE/PE also occupy pieces of the anonymity/obfuscation design space. The narrower opening is application-layer **private logical swarm discovery + uniform authenticated peer-wire cells + demand-independent cover**, evaluated as a privacy/throughput/incentive/interoperability trade-off.
+
+*Paper:* For the main p2party paper this is initially a secondary implementation that demonstrates `createSession()` is transport-neutral and tests the large-file case on a sparse graph. It becomes a separate publishable result only if a BEP-shaped prototype implements private discovery and the fixed-cell wire mode, states a precise leakage function, and beats or meaningfully shifts the design frontier against Peer2PIR, I2P, OneSwarm, Tribler, and Aqua. Required measurements include discovery leakage, throughput/time-to-first-piece, cover amplification, CPU/energy, tracker/DHT/PEX downgrade resistance, churn/NAT traversal, free-riding under dummy traffic, and classifier accuracy over idle/control/piece/cancel traces. OneSwarm already has capabilities, disposable addresses, private lookup, tunneled BitTorrent semantics, and incentive work; Peer2PIR already puts PIR into a large real P2P stack; Aqua targets high-bandwidth traffic against a stronger mix-network adversary. The differentiator therefore cannot be “encrypted capability BitTorrent,” only the measured anytrust-rendezvous + fixed-cell + hybrid-PQ + fail-closed operating point.
+
+*Blog:* We are not “putting torrents in a chat room.” We are making a torrent that refuses to announce its swarm in public, refuses to speak its handshake in clear structure, and refuses to tell a watcher whether the next equal-looking cell was a HAVE, a CANCEL, a piece, or deliberate noise. The hard part is keeping BitTorrent's economics honest: chaff buys privacy, never upload credit.
+
+*Source:* maintainer clarification 2026-07-23; BEP 3/5/10/11/27/42/44/55; I2P ECIES-X25519-AEAD, hybrid ML-KEM ratchet, proposal 169, and BitTorrent-over-I2P documentation; Peer2PIR (IEEE S&P 2025, https://doi.org/10.1109/SP61157.2025.00231); OneSwarm; Tribler; Aqua; `docs/paper-prior-art-and-related-work.md`.
+
+### D7 — DECIDED: one mandatory v3 suite; no negotiation or fallback
+
+**Status:** Implemented for the v3 bootstrap/session root. The later sparse PQ
+ratchet-epoch mechanism in F-1 is still separate work.
+
+Protocol v3 deliberately exposes one cryptographic wire suite:
+
+- Ed25519 is the pinned identity/signature anchor and cross-signs a dedicated
+  X25519 identity key.
+- The identity-bound interactive X25519 3DH leg runs in **every** room and proves possession
+  of the cross-signed identity key. PIN policy **adds** CPace; it never replaces
+  3DH. This is not Signal X3DH: there are no asynchronous prekey bundles; both
+  peers are online and contribute fresh ephemeral keys. PIN/no-PIN are
+  authentication policies inside one suite, not cipher
+  suites.
+- ML-KEM-768 is mandatory in both policies. No-PIN combines
+  `3DH ‖ ML-KEM`; PIN combines `CPace-ISK ‖ 3DH ‖ ML-KEM`, each under a distinct
+  domain-separated HKDF-SHA-512 combiner. All KEM fields are
+  key-confirmation/transcript bound.
+- PIN rooms implement draft-21's `CPACE-RISTR255-SHA512` construction and feed
+  only the transcript-derived ISK to the root combiner; the raw CPace point
+  never leaves WASM. Ristretto255/SHA-512 is explicitly supported by the draft,
+  though the draft's primary recommended low-cost profile is
+  `CPACE-X25519-SHA512`.
+- The live Double Ratchet uses X25519 and message chunks use
+  ChaCha20-Poly1305-IETF. Ratchet snapshots carry explicit
+  root-suite provenance `hybrid-3dh-mlkem768-cpace21-v3`. IndexedDB rejects any other
+  `rootSuite`; standalone snapshots use snapshot version `3`, protocol version
+  `3`, and suite byte `3`, while `PQ_TAG=[0x01]` binds the mandatory v3 hybrid
+  suite into the channel-input transcript. Pre-hybrid/untagged snapshots fail
+  closed.
+
+The reason for the hybrid is robustness across assumptions, not
+backward-compatibility. The classical 3DH leg avoids making the bootstrap depend
+only on a newer lattice assumption; ML-KEM protects the bootstrap against
+store-now/decrypt-later attacks if scalable quantum computers later defeat the
+classical DH leg. This does **not** make authentication post-quantum: Ed25519 is
+still the identity anchor, and the current ongoing ratchet has not yet landed
+the sparse PQ healing epochs in F-1. Nor do we claim a formal X-Wing-style
+robust-combiner proof for the whole interactive handshake: the component
+secrets are fixed-order/domain-separated through HKDF and the transcript is
+key-confirmed, but the paper must either prove that exact composition or state
+it as an engineered hybrid assumption.
+
+There is no suite list on the wire, no “best common” choice, and no legacy
+fallback. A peer either implements the exact v3 room policy and suite or the
+handshake aborts. Adding AES-GCM merely for choice would expand the downgrade,
+transcript, test, and implementation surface without adding a meaningful
+security property. Plausible future suites—only after an independent design and
+review—include an ML-KEM-1024 high-assurance profile, a genuinely
+post-quantum-authenticated identity profile, or an algorithm-diversity profile
+such as HQC. A second suite must have a concrete threat-model or platform
+benefit, a distinct protocol-version/suite identifier bound into every
+transcript and snapshot, and exhaustive cross-suite rejection tests.
+
+The actual option space is larger than the wire surface. FIPS 203 defines
+ML-KEM-512, -768, and -1024 in increasing security/decreasing performance
+order. ML-KEM-768 is the balanced mandatory choice. ML-KEM-512 saves little
+observable bandwidth inside a fixed 65,490-byte cell; ML-KEM-1024 is the
+credible high-assurance alternative. CPace draft-21 defines or supports
+X25519/SHA-512, P-256/SHA-256, X448/SHAKE-256, P-384/SHA-384,
+P-521/SHA-512, Ristretto255/SHA-512, and Decaf448/SHAKE-256 profiles. Those
+are future protocol-suite ingredients, not values a v3 peer negotiates.
+
+This composition is p2party's transcript-bound hybrid protocol; it must not be
+mislabelled X-Wing merely because both use X25519 and ML-KEM-768. X-Wing remains
+relevant prior art and a possible standardized KEM component for a future
+redesign. As of draft-10 it is an active individual Internet-Draft, not a final
+RFC, and it specifies a non-interactive, unauthenticated KEM rather than an
+interactive identity/PAKE handshake.
+
+The closest formal handshake baseline is Signal **PQXDH**, whose specification
+reports ProVerif/CryptoVerif authentication and secrecy analyses implying
+forward secrecy, HNDL resistance, KCI resistance, and session independence
+under their stated models and assumptions. PQXDH targets asynchronous messaging
+through a server-hosted prekey directory and an offline responder; p2party
+targets two live peers on a WebRTC edge and optionally adds CPace room-PIN
+authentication. That is an architecture-fit difference, not proof of superior
+cryptography. PQXDH has higher formal assurance today. It also explicitly keeps
+authentication classical and provides no authentication guarantee against an
+active quantum adversary, matching the boundary p2party must state for its
+Ed25519 identity anchor.
+
+*Paper:* Treat the suite as standard-component systems engineering, not a new
+hybrid combiner. The research claim lives in how the authenticated hybrid state,
+room policy, WebRTC edge, uniform cells, and private rendezvous compose and are
+measured.
+
+*Blog:* One suite, one transcript, one way to fail. The hybrid's design goal is
+two locks made from different mathematics, so the initial session should not
+depend on only one assumption. Until the exact composition has a proof, that is
+an engineered assumption rather than a theorem. The price is larger bootstrap
+material; p2party's fixed cells make that price cheap to carry, not
+cryptographically “free.”
+
+*Source:* maintainer questions/decisions 2026-07-23; Signal PQXDH specification
+(https://signal.org/docs/specifications/pqxdh/); RFC 9794
+(https://www.rfc-editor.org/rfc/rfc9794.html); X-Wing draft-10
+(https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/10/);
+`src/handlers/handshakeCore.ts`,
+`src/cryptography/ratchet.ts`, `src/handlers/messageChunkCrypto.ts`,
+`src/session.ts`, `src/db/ratchetWrap.ts`, and
+`docs/paper-prior-art-and-related-work.md`.
 
 ---
 
@@ -279,24 +512,24 @@ Grouped by concern, roughly chronological within each group. "Deferred" entries 
 
 Named destinations and known-open technical dependencies past the current work. Some carry genuine recorded option-sets (full treatment); the roadmap items carry only a stated direction — no fabricated debate is attached where none is on record.
 
-### F-1 — The PQ epoch: whole-ciphertext-per-epoch vs SPQR-style micro-chunking *(recorded options; hard)*
-*Paper:* Once v3's classical ratchet ships, how should a future hybrid PQ KEM (ML-KEM-768 / X-Wing) fold into the ratchet? p2party's stated insight is to exploit its uniform 64 KiB transport to carry a whole ~1 KB KEM ciphertext in a single chunk at <2% occupancy per epoch — skipping the erasure-coding that Signal's SPQR needs only because its per-message PCS budget caps at ~40 bytes — and even ride a decoy slot for free cover-traffic rekey-hiding. v3 reserves the seam (`PQ_TAG` in CI, a `PQ_EPOCH` header marker, both value 0 in v3) so a future hybrid KEM folds into the root without another wire break; **no KEM is implemented in v3.** Sub-decision (open): KEM sourcing — upgrade vendored libsodium 1.0.22 (may expose `crypto_kem_*` X-Wing — VERIFY) vs `mlkem-native`/`libcrux-ml-kem` vs `@noble/post-quantum`.
-*Blog:* This is the grant's headline promise, and the log culminates here: the uniform chunk that hides real data behind decoys turns out to make a post-quantum rekey nearly free to carry and free to hide — a structural gift SPQR and Apple's PQ3 don't have. The design is sketched; nothing is scheduled.
+### F-1 — The PQ epoch: sparse whole-ciphertext CKA vs SPQR-style micro-chunking *(designed, unimplemented; hard)*
+*Paper:* The bootstrap already uses mandatory ML-KEM-768, but periodic/sparse PQ healing does not. The chosen future direction is a standard authenticated hybrid/Triple-Ratchet composition: keep classical and PQ roots/chains separate, derive both message keys, and combine them with a domain-separated KDF. Carry one whole ML-KEM-768 public key/ciphertext in a scheduled cell for a sparse CKA advance rather than inventing a bespoke fold into the classical root or erasure-coding it into 32-byte SPQR pieces. The vendored primitive is compiled to WASM; the epoch/turn state machine, full-width counters, authenticated control transcript, retry/idempotence, scheduling, and persistence boundaries are unimplemented. This is a systems comparison with SPQR/PQ3/Zerion, not a new ratchet construction.
+*Blog:* This is still the grant's headline promise, but the honest antagonist changed. Signal amortizes the KEM, Apple throttles it, and Zerion pays for one in every fast cover frame. We are testing the sparse point: do the full standard ratchet advance only when healing needs it, and let an already-running room cell carry it.
 *Source:* §2 "uniform chunks make a PQ ratchet ciphertext free"; ADR-A2 "PQ-reserved"; design §2 pt 7, §5–6, §15; plan Global Constraints, Stage 1/5 (`PQ_TAG_LEN=1`, `PQ_EPOCH_LEN=1`); `p2party-double-ratchet-plan` (phasing, sourcing caveat); `paper-prior-art-and-related-work.md` §D/§3.
 
-### F-2 — Kemeleon byte-uniformity obstacle to C3 *(recorded options; hard)*
-*Paper:* C3 (the paper's strongest, only-novel claim) includes hiding a PQ rekey inside a pure-noise decoy chunk — but Kemeleon (Günther–Rosenberg–Stebila–Veitch, RWC 2025) shows raw ML-KEM public keys/ciphertexts are **not** computationally uniform (unlike Elligator-encoded X25519), so a raw KEM ciphertext dropped into a "pure-noise" slot is byte-level fingerprintable, undermining the decoy-hiding half of C3 as stated. Options: **(a)** apply a Kemeleon/Elligator-style obfuscation encoding to the ciphertext before hiding it (technically complete, currently unimplemented), or **(b)** scope the C3 claim to size/timing/ordering uniformity only and openly concede byte-content uniformity requires Kemeleon.
-*Blog:* The prettiest line in the paper — "we can hide the post-quantum rekey inside noise" — runs straight into the one result that says raw ML-KEM bytes don't look like noise. The prior-art doc calls this "the sharpest unresolved objection… must be answered head-on," and leaves (a)-vs-(b) as an explicit to-do, not a decision.
-*Source:* `paper-prior-art-and-related-work.md` §D (Kemeleon), §3 C3 verdict, §4 threats table, §5, ref #80.
+### F-2 — Kemeleon boundary: encrypted inner record now; OKEM if the boundary moves *(decided boundary; hard)*
+*Paper:* OKE/Kemeleon (CCS 2024) proves raw ML-KEM public keys/ciphertexts are not uniform and Hybrid OKE (CRYPTO 2025) gives the relevant hybrid obfuscating combiner. The earlier memo incorrectly made this the current transport blocker without checking who sees the raw bytes. Decision: PQ control remains inside an authenticated application cell protected under the preceding epoch and then DTLS. The declared passive direct/TURN observer sees fixed-length ciphertext, so raw ML-KEM byte uniformity is not required at that layer. If a future bootstrap/control path exposes the KEM outside that encrypted envelope—or claims the key exchange itself resembles random traffic—adopt the published OKEM construction; do not improvise an Elligator-like wrapper.
+*Blog:* Kemeleon was a real paper pointed at the wrong layer. The watcher outside DTLS never gets the ML-KEM polynomial to fingerprint. Keep it that way. If we ever drag the rekey into daylight, then we use the cryptographers' proper disguise.
+*Source:* `paper-prior-art-and-related-work.md` §1.1, §D, §3 C3, refs 99–100; D3/D4 above.
 
-### F-3 — Deferred Phase-1 server-blind high-entropy link *(direction only)*
-*Paper:* The double-ratchet plan's "Phase 0/1" structure includes a server-blind, no-PAKE high-entropy link path that H-2 explicitly deferred in favor of going straight to the merged v3. The v3 design/plan files do **not** restate that phase content — they only cross-reference "the ratchet plan's Phase 0 (classical)" — so no Phase-1-vs-Phase-2 debate is asserted from these artifacts; the substance lives in the separate `p2party-double-ratchet-plan` document.
-*Source:* H-2 (ADR-A2); design §2 pt 1 cross-reference; `p2party-double-ratchet-plan`.
+### F-3 — SUPERSEDED: deferred L1 server-blind high-entropy link
+*Paper:* The old double-ratchet plan deferred an opaque-token/no-PAKE “Phase 1.” D5 supersedes that sequencing: L1 remains a migration/baseline mode, while the active combined research target is strong L2 graph-blind rendezvous. An opaque or common OPRF-derived token must never be relabelled L2.
+*Source:* H-2 (ADR-A2); D5; `p2party-double-ratchet-plan`.
 
-### F-4 — Stage-5 frame-layout reconciliation: `MESSAGE_START` 62 vs 50 *(open, internally inconsistent; hard)*
-*Paper:* The per-chunk nonce discipline is decided in principle (C-7: fresh random 12-byte cleartext nonce → `MESSAGE_START`/`CHUNK_HEADER_LEN` = 62/61) and the plan's Global Constraints preamble restates it, explicitly flagging the old `nonce = chunkIndex` as "WRONG." **But the plan's executed Stage-5 task bodies still implement the deterministic layout** (`nonce = chunkNonce(chunkIndex)`, 50/49), carried through the sender/receiver swap, Stage 6/7 consumer contracts, and the draft CHANGELOG. This is a live, unpropagated fork; the C-level `#define`s and the placeholder nonce in `receive_message_with_key` were also left at old values pending Stage 5. The maintainer must pick one layout and actually edit the plan, landing it against the first real send↔receive round-trip KAT.
-*Blog:* The design won the argument — random nonce, 62-byte header — but the win never propagated into the task bodies that ship the code, which still carry the rejected `nonce = chunkIndex` and its 50-byte header. Stage 5 is where that contradiction, deferred since Stage 1, finally has to be reconciled against the first end-to-end round-trip test.
-*Source:* design §6 (random-nonce rationale, `MESSAGE_START`=62); plan Global Constraints line 17 vs Stage 5 Task 1/3 (`chunkNonce`, 50/49), Task 11 CHANGELOG; C-7 in-code note (Stage-1 log).
+### F-4 — RESOLVED: Stage-5 frame-layout reconciliation chose 62/61
+*Paper:* The historical plan fork is closed. Current v3 serializes `FRAME_TYPE_CHUNK(1) ‖ dhPub(32) ‖ N(8) ‖ PN(8) ‖ PQ_EPOCH(1) ‖ nonce(12)`, so `CHUNK_HEADER_LEN=61`, `MESSAGE_START=62`, and each seal/reseal uses a fresh random nonce. The receiver reads that cleartext nonce; `PQ_EPOCH` is currently required to be zero because sparse epoch advancement remains unimplemented.
+*Blog:* The random-nonce design finally reached both sides of the wire. The rejected 50-byte, index-derived layout survives only as history.
+*Source:* `src/utils/constants.ts`; `src/handlers/chunkFrame.ts`; `src/cryptography/pake_ratchet.h`; `src/cryptography/pake_ratchet.c`.
 
 ### F-5 — Optimized chunk-flooding: peer-to-peer relay instead of sender-fans-out-to-all *(roadmap; direction only)*
 *Paper:* Today "data is transferred naively from the initiator to every node in the mesh in parallel"; roadmap beat ② is to have peers relay chunks to each other so flood throughput scales with peer count. The sources record only the destination, not a weighed set of relay-topology alternatives — no such debate is on record, so none is asserted.
@@ -316,4 +549,4 @@ Named destinations and known-open technical dependencies past the current work. 
 
 ---
 
-*End of log. Resolved and deferred entries are anchored to specific fixing commits or ADR/finding sections. D1 and D2 are now DECIDED (2026-07-22) with the chosen option, a tight pros/cons summary, rationale, and standards citations; their deep pros/cons derive from the companion rigor memo. Future entries state only what the artifacts record, with roadmap items marked direction-only where no debate exists. Depth is proportional to difficulty: the hard decisions (C-7, C-13, C-15, H-6, D1, D2, F-1, F-2, F-4) carry both registers; the obvious calls are one-liners.*
+*End of log. Resolved and deferred entries are anchored to specific fixing commits or ADR/finding sections. D1–D7 record the active 2026-07-22–23 decisions, rationale, consequences, and explicit claim boundaries; D5/D6 are research architectures until implemented and evaluated. Future entries state only what the artifacts record, with roadmap items marked direction-only where no debate exists. Depth is proportional to difficulty: the hard decisions (C-7, C-13, C-15, H-6, D1–D7, F-1, F-2, F-4) carry both registers; the obvious calls are one-liners.*

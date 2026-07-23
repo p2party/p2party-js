@@ -2,12 +2,15 @@ import webrtcApi from ".";
 
 import { deleteChannel, deleteMessage } from "../../reducers/roomSlice";
 
-import { deleteDBNewChunk, deleteDBSendQueue } from "../../db/api";
+import { deleteDBSendQueue } from "../../db/api";
 
 import { decompileChannelMessageLabel } from "../../utils/channelLabel";
 import { drainAndClose } from "../../utils/drainAndClose";
 
 import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
+import { sendReceiptFrame } from "../../handlers/receiptFrame";
+import { findRoomPeerConnectionIndex } from "./roomPeer";
+import { roomSendQueueLabel } from "../../utils/sendQueueKey";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -27,12 +30,13 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   undefined
 > = async (
   {
+    roomId,
     peerId,
     label,
     messageHash,
     alsoDeleteData,
     alsoSendFinishedMessage,
-    transferComplete,
+    channel,
     peerConnections,
     dataChannels,
   },
@@ -41,16 +45,27 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   const { rooms, signalingServer } = api.getState() as State;
 
   const channelIndex = dataChannels.findIndex(
-    (c) => c.label === label && c.withPeerId === peerId,
+    (c) =>
+      (channel
+        ? c === channel
+        : c.label === label &&
+          c.withPeerId === peerId &&
+          c.roomIds.includes(roomId)),
   );
 
   if (channelIndex > -1 && dataChannels[channelIndex]) {
+    if (
+      alsoDeleteData &&
+      dataChannels[channelIndex].cancelReceiveTransfer
+    )
+      await dataChannels[channelIndex].cancelReceiveTransfer();
+    else dataChannels[channelIndex].releaseProtocolResources?.();
     if (
       messageHash &&
       alsoSendFinishedMessage &&
       messageHash.length === crypto_hash_sha512_BYTES
     ) {
-      dataChannels[channelIndex].send(messageHash.buffer as ArrayBuffer);
+      sendReceiptFrame(dataChannels[channelIndex], messageHash);
     }
 
     dataChannels[channelIndex].onopen = null;
@@ -66,30 +81,24 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
 
     dataChannels.splice(channelIndex, 1);
 
-    await deleteDBSendQueue(label, peerId);
+    await deleteDBSendQueue(roomSendQueueLabel(roomId, label), peerId);
   }
 
   // Check whether channel is a name or a message channel
   const { merkleRootHex } = await decompileChannelMessageLabel(label);
   if (merkleRootHex.length > 0) {
-    if (alsoDeleteData) api.dispatch(deleteMessage({ merkleRootHex }));
+    if (alsoDeleteData)
+      api.dispatch(deleteMessage({ roomId, merkleRootHex }));
 
-    // Find out if the message is sent to others
-    const c = dataChannels.findIndex((c) => c.label === label);
-
-    // If the message is not sent to anyone then delete it from sending memory —
-    // BUT only once the transfer completed (transferComplete, set by the
-    // completion path) or the caller asked to drop the data. On an UNEXPECTED
-    // mid-transfer disconnect the channel also closes here with no such flag;
-    // deleting newChunks then would destroy the resend source and make
-    // resume-on-reconnect impossible, so we keep them for the resume path.
-    // (transferComplete is an explicit param, not volatile reconcile state, so
-    // it can't be raced by sendWithReconcile's clearTransfer.)
-    if (c < 0 && (alsoDeleteData || transferComplete))
-      await deleteDBNewChunk(merkleRootHex);
+    // `newChunks` is shared by every peer edge of one logical room send.
+    // Never free it from a per-peer close/completion path: a fast peer may
+    // finish before another peer's same-label channel has even reached onopen
+    // (and therefore before it appears in dataChannels). The outer
+    // handleSendMessage job owns final cleanup after all peer sends settle.
   } else if (!signalingServer.isConnected || alsoDeleteData) {
     api.dispatch(
       deleteChannel({
+        roomId,
         peerId,
         label,
       }),
@@ -97,34 +106,22 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   }
 
   // Find out if the two peers have at least one channel together
-  const roomsLen = rooms.length;
-  let peerHasChannel = false;
-  for (let i = 0; i < roomsLen; i++) {
-    const channelsLen = rooms[i].channels.length;
-    for (let j = 0; j < channelsLen; j++) {
-      if (rooms[i].channels[j].peerIds.includes(peerId)) {
-        peerHasChannel = true;
-
-        break;
-      }
-    }
-
-    if (peerHasChannel) break;
-  }
+  const room = rooms.find((candidate) => candidate.id === roomId);
+  const peerHasChannel =
+    room?.channels.some((channel) => channel.peerIds.includes(peerId)) ?? false;
 
   if (!peerHasChannel) {
-    const peerIndex = peerConnections.findIndex(
-      (peer) => peer.withPeerId === peerId,
+    const peerIndex = findRoomPeerConnectionIndex(
+      peerConnections,
+      roomId,
+      peerId,
     );
 
-    if (
-      peerIndex > -1 &&
-      (peerConnections[peerIndex].connectionState === "failed" ||
-        peerConnections[peerIndex].connectionState === "connected")
-    ) {
+    if (peerIndex > -1) {
       await api.dispatch(
         webrtcApi.endpoints.disconnectFromPeer.initiate({
           peerId: peerConnections[peerIndex].withPeerId,
+          roomId,
         }),
       );
     }

@@ -64,7 +64,9 @@ export const packChunkFrameHeader = (
   out.set(header.dhPub, DHPUB_OFF);
   writeU64BE(out, N_OFF, header.N);
   writeU64BE(out, PN_OFF, header.PN);
-  out[PQ_EPOCH_OFF] = 0; // PQ_EPOCH reserved (v3)
+  // Epoch zero is the mandatory ML-KEM bootstrap root. Periodic/sparse KEM
+  // epoch advancement is intentionally not part of the current v3 ratchet.
+  out[PQ_EPOCH_OFF] = 0;
   out.set(nonce, NONCE_OFF);
   return out;
 };

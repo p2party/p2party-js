@@ -1,27 +1,3 @@
-import type { IRTCPeerConnectionRoomId } from "../api/webrtc/interfaces";
-
-export interface WSPeerConnectionRoomId extends IRTCPeerConnectionRoomId {
-  queue: Uint8Array[];
-  seen: Set<string>;
-  draining: { value: boolean };
-  ptr1: number | undefined;
-  decrypted: Uint8Array | undefined;
-  ptr2: number | undefined;
-  messageArray: Uint8Array | undefined;
-  ptr3: number | undefined;
-  merkleRootArray: Uint8Array | undefined;
-  ptr4: number | undefined;
-  senderPublicKeyArray: Uint8Array | undefined;
-  ptr5: number | undefined;
-  receiverSecretKeyArray: Uint8Array | undefined;
-}
-
-export interface WSPeerConnection {
-  withPeerId: string;
-  withPeerPublicKey: string;
-  rooms: WSPeerConnectionRoomId[];
-}
-
 export interface WebSocketMessagePingRequest {
   type: "ping";
 }
@@ -35,10 +11,7 @@ export interface WebSocketMessageChallengeRequest {
   type: "peerId";
   peerId: string;
   challenge: string;
-  signature?: string;
-  challengeId?: string;
-  username?: string;
-  credential?: string;
+  protocolVersion: number;
   message: string;
 }
 
@@ -47,11 +20,13 @@ export interface WebSocketMessageChallengeResponse {
   challenge: string;
   signature: string;
   fromPeerId: string;
+  protocolVersion: number;
 }
 
 export interface WebSocketMessageSuccessfulChallenge {
   type: "challenge";
   challengeId: string;
+  protocolVersion: number;
   username?: string;
   credential?: string;
 }
@@ -60,6 +35,7 @@ export interface WebSocketMessageRoomIdRequest {
   type: "room";
   fromPeerId: string;
   roomUrl: string;
+  protocolVersion: number;
 }
 
 export interface TurnCredentials {
@@ -74,6 +50,8 @@ export interface WebSocketMessageRoomIdResponse {
   roomId: string;
   roomUrl: string;
   turnCredentials?: TurnCredentials;
+  /** Optional only so missing/pre-v3 server responses fail closed at runtime. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketMessageDescriptionSend {
@@ -83,6 +61,7 @@ export interface WebSocketMessageDescriptionSend {
   fromPeerPublicKey: string;
   toPeerId: string;
   roomId: string;
+  protocolVersion: number;
 }
 
 export interface WebSocketMessageDescriptionReceive {
@@ -91,6 +70,8 @@ export interface WebSocketMessageDescriptionReceive {
   fromPeerId: string;
   fromPeerPublicKey: string;
   roomId: string;
+  /** Optional only so missing/pre-v3 messages can be rejected at runtime. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketMessageCandidateSend {
@@ -99,20 +80,23 @@ export interface WebSocketMessageCandidateSend {
   fromPeerId: string;
   toPeerId: string;
   roomId: string;
+  protocolVersion: number;
 }
 
 export interface WebSocketMessageCandidateReceive {
   type: "candidate";
   candidate: RTCIceCandidateInit | RTCIceCandidate;
   fromPeerId: string;
-  // fromPeerPublicKey: string;
-  // roomId: string;
+  roomId: string;
+  /** Optional only so missing/pre-v3 messages can be rejected at runtime. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketMessagePeersRequest {
   type: "peers";
   fromPeerId: string;
   roomId: string;
+  protocolVersion: number;
 }
 
 export interface RoomPeer {
@@ -124,12 +108,16 @@ export interface WebSocketMessagePeersResponse {
   type: "peers";
   roomId: string;
   peers: RoomPeer[];
+  /** Optional only so missing/pre-v3 server responses fail closed at runtime. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketMessageConnectionRequest {
   type: "peerConnection";
   roomId: string;
   peer: RoomPeer;
+  /** Optional only so missing/pre-v3 messages can be rejected at runtime. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketMessageConnectionResponse {
@@ -137,6 +125,7 @@ export interface WebSocketMessageConnectionResponse {
   roomId: string;
   fromPeerId: string;
   toPeerId: string;
+  protocolVersion: number;
 }
 
 export interface WebSocketMessagePeerConnectionRequest {
@@ -145,6 +134,7 @@ export interface WebSocketMessagePeerConnectionRequest {
   fromPeerId: string;
   toPeerId: string;
   labels: string[];
+  protocolVersion: number;
 }
 
 export interface WebSocketMessagePeerConnectionResponse {
@@ -153,23 +143,8 @@ export interface WebSocketMessagePeerConnectionResponse {
   fromPeerId: string;
   fromPeerPublicKey: string;
   labels: string[];
-}
-
-export interface WebSocketMessageMessageSendRequest {
-  type: "message";
-  message: string;
-  roomId: string;
-  fromPeerId: string;
-  toPeerId: string;
-  label: string;
-}
-
-export interface WebSocketMessageMessageSendResponse {
-  type: "message";
-  message: string;
-  roomId: string;
-  fromPeerId: string;
-  label: string;
+  /** Optional only so a pre-v3/malformed server response can be rejected. */
+  protocolVersion?: number;
 }
 
 export interface WebSocketPeerConnectionParams {

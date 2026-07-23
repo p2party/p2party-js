@@ -15,6 +15,7 @@
 export class AsyncMutex {
   private queue: (() => void)[] = [];
   private locked = false;
+  private idleWaiters: (() => void)[] = [];
 
   async acquire(): Promise<void> {
     if (!this.locked) {
@@ -35,7 +36,19 @@ export class AsyncMutex {
       next();
     } else {
       this.locked = false;
+      for (const resolve of this.idleWaiters.splice(0)) resolve();
     }
+  }
+
+  isIdle(): boolean {
+    return !this.locked && this.queue.length === 0;
+  }
+
+  whenIdle(): Promise<void> {
+    if (this.isIdle()) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
   }
 
   async runExclusive<T>(fn: () => Promise<T>): Promise<T> {

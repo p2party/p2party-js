@@ -1,7 +1,6 @@
 import { isUUID, isHexadecimal } from "class-validator";
 
 import { handleChallenge } from "./handleChallenge";
-import { handleReadReceipt } from "./handleReadReceipt";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
@@ -13,10 +12,7 @@ import {
   setChannel,
   defaultRTCConfig,
 } from "../reducers/roomSlice";
-import { setChallengeId, setReconnectData } from "../reducers/keyPairSlice";
-
-import cryptoMemory from "../cryptography/memory";
-import { wasmLoader } from "../cryptography/wasmLoader";
+import { setChallengeId } from "../reducers/keyPairSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -31,23 +27,22 @@ import type {
   WebSocketMessageError,
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
-  WebSocketMessageMessageSendResponse,
   WebSocketMessagePeersRequest,
-  WSPeerConnection,
 } from "../utils/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
-import { hexToUint8Array } from "../utils/uint8array";
+import { isCanonicalEd25519Identity } from "../utils/identityRole";
+import { isProtocolVersionCompatible } from "../utils/protocolVersion";
 import {
-  crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
-  crypto_sign_ed25519_SECRETKEYBYTES,
-} from "../cryptography/interfaces";
+  isFreshV3Challenge,
+  isV3ChallengeSuccess,
+} from "../utils/signalingAuth";
+import { PROTOCOL_VERSION } from "../utils/constants";
 import {
-  DECRYPTED_LEN,
-  FRAME_TYPE_CHUNK,
-  MESSAGE_LEN,
-  WIRE_CHUNK_FRAME_LEN,
-} from "../utils/constants";
+  areBoundedDataChannelLabels,
+  isBoundedDescription,
+  isBoundedIceCandidate,
+  MAX_SIGNALING_MESSAGE_CHARS,
+} from "../utils/signalingBounds";
 
 const lastPeersRepoll = new Map<string, number>();
 
@@ -55,7 +50,6 @@ const handleWebSocketMessage = async (
   event: MessageEvent,
   ws: WebSocket,
   api: BaseQueryApi,
-  peerConnections: WSPeerConnection[],
 ) => {
   try {
     if (event.data === "PING") {
@@ -66,7 +60,12 @@ const handleWebSocketMessage = async (
 
     // console.log(event.data);
 
-    const message = JSON.parse(String(event.data)) as
+    const serialized = String(event.data);
+    if (serialized.length > MAX_SIGNALING_MESSAGE_CHARS) {
+      console.error("Rejecting oversized signaling message");
+      return;
+    }
+    const message = JSON.parse(serialized) as
       | WebSocketMessagePingRequest
       | WebSocketMessageChallengeRequest
       | WebSocketMessageRoomIdResponse
@@ -76,8 +75,7 @@ const handleWebSocketMessage = async (
       | WebSocketMessageConnectionRequest
       | WebSocketMessageSuccessfulChallenge
       | WebSocketMessageError
-      | WebSocketMessagePeerConnectionResponse
-      | WebSocketMessageMessageSendResponse;
+      | WebSocketMessagePeerConnectionResponse;
 
     switch (message.type) {
       case "ping": {
@@ -96,50 +94,34 @@ const handleWebSocketMessage = async (
       }
 
       case "peerId": {
+        if (!isFreshV3Challenge(message)) {
+          console.error("Rejecting malformed or incompatible auth challenge");
+          ws.close(1002, "protocol-v3 auth required");
+          break;
+        }
         const { keyPair } = api.getState() as State;
 
-        const peerId = message.peerId.length > 0 ? message.peerId : "";
-        const challenge = message.challenge.length > 0 ? message.challenge : "";
-
-        const isNewPeerId =
-          isUUID(peerId) &&
-          isHexadecimal(challenge) &&
-          challenge.length === 64 &&
-          keyPair.challenge.length === 0 &&
-          keyPair.signature.length === 0 &&
-          !message.challengeId &&
-          !message.username &&
-          !message.credential;
-
-        const isNewDbEntry =
-          isUUID(peerId) &&
-          isUUID(keyPair.peerId) &&
-          keyPair.peerId !== peerId &&
-          isHexadecimal(challenge) &&
-          challenge.length === 64 &&
-          !message.challengeId &&
-          !message.username &&
-          !message.credential;
-
-        if (isNewPeerId || isNewDbEntry) {
-          await handleChallenge(keyPair, peerId, challenge, api);
-        } else {
-          api.dispatch(
-            setReconnectData({
-              peerId,
-              challenge,
-              signature: message.signature ?? "",
-              challengeId: message.challengeId ?? "",
-              username: message.username ?? "",
-              credential: message.credential ?? "",
-            }),
-          );
-        }
+        // Protocol v3 has no reconnect bearer shortcut: every WebSocket proves
+        // the Ed25519 identity against a fresh server nonce.
+        await handleChallenge(
+          keyPair,
+          message.peerId,
+          message.challenge,
+          api,
+        );
 
         break;
       }
 
       case "roomId": {
+        if (
+          !isProtocolVersionCompatible(message.protocolVersion) ||
+          !isUUID(message.roomId) ||
+          !/^[0-9a-f]{64}$/.test(message.roomUrl)
+        ) {
+          console.error("Rejecting incompatible or malformed room response");
+          break;
+        }
         // Build rtcConfig with TURN credentials if provided by server
         let rtcConfig: RTCConfiguration | undefined;
         if (message.turnCredentials) {
@@ -168,12 +150,23 @@ const handleWebSocketMessage = async (
       }
 
       case "challenge": {
+        if (!isV3ChallengeSuccess(message)) {
+          console.error("Rejecting malformed or incompatible auth success");
+          ws.close(1002, "protocol-v3 auth required");
+          break;
+        }
         api.dispatch(setChallengeId(message));
 
         break;
       }
 
       case "peerConnection": {
+        if (
+          !isProtocolVersionCompatible(message.protocolVersion) ||
+          !isUUID(message.peer.id) ||
+          !isCanonicalEd25519Identity(message.peer.publicKey)
+        )
+          break;
         const blacklisted = await getDBPeerIsBlacklisted(
           message.peer.id,
           message.peer.publicKey,
@@ -201,6 +194,7 @@ const handleWebSocketMessage = async (
               roomId: message.roomId,
               fromPeerId: keyPair.peerId,
               toPeerId: message.peer.id,
+              protocolVersion: PROTOCOL_VERSION,
             },
           }),
         );
@@ -209,31 +203,33 @@ const handleWebSocketMessage = async (
       }
 
       case "peers": {
+        if (
+          !isProtocolVersionCompatible(message.protocolVersion) ||
+          !isUUID(message.roomId) ||
+          !Array.isArray(message.peers)
+        ) {
+          console.error("Rejecting incompatible or malformed peer roster");
+          break;
+        }
         console.log("[handleWebSocketMessage] Received peers response:", {
           roomId: message.roomId,
           peersCount: message.peers.length,
           peers: message.peers,
         });
-        const { keyPair, rooms, commonState } = api.getState() as State;
-
-        const roomIndex =
-          commonState.currentRoomUrl.length === 64
-            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-            : -1;
+        const { keyPair, rooms } = api.getState() as State;
+        const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
 
         if (roomIndex > -1) {
-          const serverPeerIds = new Set<string>();
-          for (const peer of message.peers) {
-            if (isUUID(peer.id)) {
-              serverPeerIds.add(peer.id);
-            }
-          }
-
-          const roomPeers = rooms[roomIndex].peers;
-          for (const peer of roomPeers) {
-            if (!serverPeerIds.has(peer.peerId)) {
-              api.dispatch(deletePeer({ peerId: peer.peerId }));
-            }
+          const serverPeerIds = new Set(
+            message.peers
+              .filter((peer) => isUUID(peer.id))
+              .map((peer) => peer.id),
+          );
+          for (const peer of rooms[roomIndex].peers) {
+            if (!serverPeerIds.has(peer.peerId))
+              api.dispatch(
+                deletePeer({ roomId: message.roomId, peerId: peer.peerId }),
+              );
           }
 
           const len = message.peers.length;
@@ -255,6 +251,7 @@ const handleWebSocketMessage = async (
                     type: "peers",
                     fromPeerId: keyPair.peerId,
                     roomId: message.roomId,
+                    protocolVersion: PROTOCOL_VERSION,
                   } as WebSocketMessagePeersRequest,
                 }),
               );
@@ -270,7 +267,7 @@ const handleWebSocketMessage = async (
               message.peers[i].publicKey === keyPair.publicKey ||
               message.peers[i].id === keyPair.peerId ||
               !isUUID(message.peers[i].id) ||
-              message.peers[i].publicKey.length !== 64
+              !isCanonicalEd25519Identity(message.peers[i].publicKey)
             )
               continue;
 
@@ -281,23 +278,6 @@ const handleWebSocketMessage = async (
                 peerPublicKey: message.peers[i].publicKey,
               }),
             );
-
-            // Skip if we already have a connection to this peer
-            const existingConnection = peerConnections.find(
-              (pc) => pc.withPeerId === message.peers[i].id,
-            );
-            const connectionState = (
-              existingConnection as RTCPeerConnection | undefined
-            )?.connectionState;
-            const hasActiveConnection =
-              !!existingConnection && connectionState === "connected";
-
-            if (hasActiveConnection) {
-              console.log(
-                `Skipping peer ${message.peers[i].id} - already connected/connecting`,
-              );
-              continue;
-            }
 
             const blacklisted = await getDBPeerIsBlacklisted(
               message.peers[i].id,
@@ -319,7 +299,6 @@ const handleWebSocketMessage = async (
                 roomId: message.roomId,
                 peerId: message.peers[i].id,
                 peerPublicKey: message.peers[i].publicKey,
-                initiator: true,
                 rtcConfig: rooms[roomIndex].rtcConfig,
               }),
             );
@@ -330,31 +309,40 @@ const handleWebSocketMessage = async (
       }
 
       case "description": {
+        if (
+          !isProtocolVersionCompatible(message.protocolVersion) ||
+          !isUUID(message.fromPeerId) ||
+          !isCanonicalEd25519Identity(message.fromPeerPublicKey) ||
+          !isUUID(message.roomId) ||
+          !isBoundedDescription(message.description)
+        ) {
+          if (!isProtocolVersionCompatible(message.protocolVersion))
+            console.error(
+              `Rejecting SDP from ${message.fromPeerId}: incompatible protocol ` +
+                `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
+            );
+          break;
+        }
         const blacklisted = await getDBPeerIsBlacklisted(
           message.fromPeerId,
           message.fromPeerPublicKey,
         );
 
         if (!blacklisted) {
-          const { rooms, commonState } = api.getState() as State;
+          const { rooms } = api.getState() as State;
+          const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
+          if (roomIndex === -1) break;
 
-          const roomIndex =
-            commonState.currentRoomUrl.length === 64
-              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-              : -1;
+          const canOnlyConnectToKnownPeers =
+            rooms[roomIndex].onlyConnectWithKnownAddresses;
 
-          if (roomIndex > -1) {
-            const canOnlyConnectToKnownPeers =
-              rooms[roomIndex].onlyConnectWithKnownAddresses;
+          if (canOnlyConnectToKnownPeers) {
+            const p = await getDBAddressBookEntry(
+              message.fromPeerId,
+              message.fromPeerPublicKey,
+            );
 
-            if (canOnlyConnectToKnownPeers) {
-              const p = await getDBAddressBookEntry(
-                message.fromPeerId,
-                message.fromPeerPublicKey,
-              );
-
-              if (!p) break;
-            }
+            if (!p) break;
           }
 
           await api.dispatch(
@@ -363,6 +351,7 @@ const handleWebSocketMessage = async (
               peerPublicKey: message.fromPeerPublicKey,
               roomId: message.roomId,
               description: message.description,
+              rtcConfig: rooms[roomIndex].rtcConfig,
             }),
           );
         }
@@ -371,30 +360,38 @@ const handleWebSocketMessage = async (
       }
 
       case "candidate": {
+        if (
+          !isProtocolVersionCompatible(message.protocolVersion) ||
+          !isUUID(message.fromPeerId) ||
+          !isUUID(message.roomId) ||
+          !isBoundedIceCandidate(message.candidate)
+        ) {
+          console.error(
+            `Rejecting ICE from ${message.fromPeerId}: incompatible protocol ` +
+              `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
+          );
+          break;
+        }
         const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
 
         if (!blacklisted) {
-          const { rooms, commonState } = api.getState() as State;
+          const { rooms } = api.getState() as State;
+          const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
+          if (roomIndex === -1) break;
 
-          const roomIndex =
-            commonState.currentRoomUrl.length === 64
-              ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-              : -1;
+          const canOnlyConnectToKnownPeers =
+            rooms[roomIndex].onlyConnectWithKnownAddresses;
 
-          if (roomIndex > -1) {
-            const canOnlyConnectToKnownPeers =
-              rooms[roomIndex].onlyConnectWithKnownAddresses;
+          if (canOnlyConnectToKnownPeers) {
+            const p = await getDBAddressBookEntry(message.fromPeerId);
 
-            if (canOnlyConnectToKnownPeers) {
-              const p = await getDBAddressBookEntry(message.fromPeerId);
-
-              if (!p) break;
-            }
+            if (!p) break;
           }
 
           await api.dispatch(
             webrtcApi.endpoints.setCandidate.initiate({
               peerId: message.fromPeerId,
+              roomId: message.roomId,
               candidate: message.candidate,
             }),
           );
@@ -403,54 +400,10 @@ const handleWebSocketMessage = async (
         break;
       }
 
-      case "message": {
-        const { rooms } = api.getState() as State;
-        const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
-
-        const data = new Uint8Array(hexToUint8Array(message.message));
-
-        if (roomIndex > -1 && data.length === crypto_hash_sha512_BYTES) {
-          try {
-            await handleReadReceipt(
-              data,
-              message.label,
-              message.fromPeerId,
-              rooms[roomIndex],
-              api,
-              // dataChannels,
-            );
-          } catch (error) {
-            console.error(error);
-          }
-
-          break;
-        }
-
-        // protocol-v3: message chunks are decrypted off the per-peer Double
-        // Ratchet, seeded by the handshake that runs on the `main` DATA CHANNEL.
-        // The signaling-server relay owns a SEPARATE set of WSPeerConnection
-        // objects (signalingServerApi.ts) with no ratchet handle, so a v3 chunk
-        // relayed here cannot be decrypted — drop it. The sender's data-channel
-        // reconcile/retransmit delivers it once the direct channel is up; the
-        // relay is not a v3 message transport. (T3-wiring: relay-only message
-        // RECEIVE is a known behaviour change vs. the box scheme — see report.)
-        if (
-          data.length === WIRE_CHUNK_FRAME_LEN &&
-          data[0] === FRAME_TYPE_CHUNK
-        ) {
-          break;
-        }
-
-        console.error(
-          new Error("Wrong data length received, " + String(data.length)),
-        );
-
-        break;
-      }
-
       case "connection": {
         const { keyPair } = api.getState() as State;
         if (
+          isProtocolVersionCompatible(message.protocolVersion) &&
           isUUID(keyPair.peerId) &&
           isHexadecimal(keyPair.challenge) &&
           isHexadecimal(keyPair.signature) &&
@@ -458,8 +411,9 @@ const handleWebSocketMessage = async (
           keyPair.signature.length === 128 &&
           keyPair.challenge.length === 64 &&
           isUUID(message.fromPeerId) &&
-          message.fromPeerPublicKey.length === 64 &&
-          isUUID(message.roomId)
+          isCanonicalEd25519Identity(message.fromPeerPublicKey) &&
+          isUUID(message.roomId) &&
+          areBoundedDataChannelLabels(message.labels)
         ) {
           api.dispatch(
             setPeer({
@@ -484,149 +438,11 @@ const handleWebSocketMessage = async (
             );
           }
 
-          const peerIndex = peerConnections.findIndex(
-            (p) =>
-              p.withPeerId === message.fromPeerId ||
-              p.withPeerPublicKey === message.fromPeerPublicKey,
+        } else if (!isProtocolVersionCompatible(message.protocolVersion)) {
+          console.error(
+            `Rejecting peer ${message.fromPeerId}: incompatible protocol ` +
+              `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
           );
-          if (peerIndex === -1) {
-            const wasmMemory = cryptoMemory.getReceiveMessageMemory();
-            const receiveMessageModule = await wasmLoader(wasmMemory);
-
-            const ptr1 = receiveMessageModule._malloc(DECRYPTED_LEN);
-            const decrypted = new Uint8Array(
-              receiveMessageModule.wasmMemory.buffer,
-              ptr1,
-              DECRYPTED_LEN,
-            );
-
-            const ptr2 = receiveMessageModule._malloc(MESSAGE_LEN);
-            const messageArray = new Uint8Array(
-              receiveMessageModule.wasmMemory.buffer,
-              ptr2,
-              MESSAGE_LEN,
-            );
-
-            const ptr3 = receiveMessageModule._malloc(crypto_hash_sha512_BYTES);
-            const merkleRootArray = new Uint8Array(
-              receiveMessageModule.wasmMemory.buffer,
-              ptr3,
-              crypto_hash_sha512_BYTES,
-            );
-
-            const senderPublicKey = hexToUint8Array(message.fromPeerPublicKey);
-            const ptr4 = receiveMessageModule._malloc(
-              crypto_sign_ed25519_PUBLICKEYBYTES,
-            );
-            const senderPublicKeyArray = new Uint8Array(
-              receiveMessageModule.wasmMemory.buffer,
-              ptr4,
-              crypto_sign_ed25519_PUBLICKEYBYTES,
-            );
-            senderPublicKeyArray.set(senderPublicKey);
-
-            const receiverSecretKey = hexToUint8Array(keyPair.secretKey);
-            const ptr5 = receiveMessageModule._malloc(
-              crypto_sign_ed25519_SECRETKEYBYTES,
-            );
-            const receiverSecretKeyArray = new Uint8Array(
-              receiveMessageModule.wasmMemory.buffer,
-              ptr5,
-              crypto_sign_ed25519_SECRETKEYBYTES,
-            );
-            receiverSecretKeyArray.set(receiverSecretKey);
-
-            peerConnections.push({
-              withPeerId: message.fromPeerId,
-              withPeerPublicKey: message.fromPeerPublicKey,
-              rooms: [
-                {
-                  roomId: message.roomId,
-                  receiveMessageModule,
-                  queue: [] as Uint8Array[],
-                  seen: new Set<string>(),
-                  draining: { value: false },
-                  ptr1,
-                  decrypted,
-                  ptr2,
-                  messageArray,
-                  ptr3,
-                  merkleRootArray,
-                  ptr4,
-                  senderPublicKeyArray,
-                  ptr5,
-                  receiverSecretKeyArray,
-                },
-              ],
-            });
-          } else {
-            const peerRoomIndex = peerConnections[
-              peerIndex
-            ].rooms.findLastIndex((r) => r.roomId === message.roomId);
-            if (peerRoomIndex === -1) {
-              const wasmMemory = cryptoMemory.getReceiveMessageMemory();
-              const receiveMessageModule = await wasmLoader(wasmMemory);
-
-              const ptr1 = receiveMessageModule._malloc(DECRYPTED_LEN);
-              const decrypted = new Uint8Array(
-                receiveMessageModule.wasmMemory.buffer,
-                ptr1,
-                DECRYPTED_LEN,
-              );
-
-              const ptr2 = receiveMessageModule._malloc(MESSAGE_LEN);
-              const messageArray = new Uint8Array(
-                receiveMessageModule.wasmMemory.buffer,
-                ptr2,
-                MESSAGE_LEN,
-              );
-
-              const ptr3 = receiveMessageModule._malloc(
-                crypto_hash_sha512_BYTES,
-              );
-              const merkleRootArray = new Uint8Array(
-                receiveMessageModule.wasmMemory.buffer,
-                ptr3,
-                crypto_hash_sha512_BYTES,
-              );
-
-              const ptr4 = receiveMessageModule._malloc(
-                crypto_sign_ed25519_PUBLICKEYBYTES,
-              );
-              const senderPublicKeyArray = new Uint8Array(
-                receiveMessageModule.wasmMemory.buffer,
-                ptr4,
-                crypto_sign_ed25519_PUBLICKEYBYTES,
-              );
-
-              const ptr5 = receiveMessageModule._malloc(
-                crypto_sign_ed25519_SECRETKEYBYTES,
-              );
-              const receiverSecretKeyArray = new Uint8Array(
-                receiveMessageModule.wasmMemory.buffer,
-                ptr5,
-                crypto_sign_ed25519_SECRETKEYBYTES,
-              );
-
-              peerConnections[peerIndex].rooms.push({
-                roomId: message.roomId,
-                receiveMessageModule,
-                queue: [] as Uint8Array[],
-                seen: new Set<string>(),
-                draining: { value: false },
-                ptr1,
-                decrypted,
-                ptr2,
-                messageArray,
-                ptr3,
-                merkleRootArray,
-                ptr4,
-                senderPublicKeyArray,
-                ptr5,
-                receiverSecretKeyArray,
-              });
-            }
-          }
         }
 
         break;

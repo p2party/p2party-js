@@ -2,9 +2,15 @@ import { createSlice } from "@reduxjs/toolkit";
 import { isUUID } from "class-validator";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+import {
+  DEFAULT_ROOM_POLICY_V1,
+  canonicalizeRoomPolicyV1,
+  roomPoliciesEqualV1,
+} from "../roomPolicy";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
+import type { RoomPolicyV1 } from "../roomPolicy";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
@@ -18,6 +24,8 @@ export interface Peer {
 }
 
 export interface Message {
+  /** Sender-only random identity for one logical outbound transfer. */
+  transferId?: string;
   merkleRootHex: string;
   sha512Hex: string;
   fromPeerId: string;
@@ -51,6 +59,13 @@ export interface SetRoomArgs {
   canBeConnectionRelay?: boolean;
   onlyConnectWithKnownPeers?: boolean;
   rtcConfig?: RTCConfiguration;
+  /** Public/authenticated room settings only. PIN bytes never enter Redux. */
+  policy?: RoomPolicyV1;
+}
+
+export interface SetRoomPolicyArgs {
+  roomContext: string;
+  policy: RoomPolicyV1;
 }
 
 export interface SetPeerArgs extends Peer {
@@ -64,6 +79,7 @@ export interface SetIceServersArgs {
 
 export interface SetMessageArgs {
   roomId: string;
+  transferId?: string;
   merkleRootHex: string;
   sha512Hex: string;
   chunkSize: number;
@@ -79,6 +95,7 @@ export interface SetMessageArgs {
 
 export interface SetMessageAllChunksArgs {
   roomId: string;
+  transferId?: string;
   merkleRootHex: string;
   sha512Hex: string;
   fromPeerId: string;
@@ -105,11 +122,14 @@ export interface SetChannelArgs {
 }
 
 export interface DeleteMessageArgs {
+  roomId: string;
+  transferId?: string;
   merkleRootHex?: string;
   hashHex?: string;
 }
 
 export interface DeleteChannelArgs {
+  roomId?: string;
   peerId?: string;
   label?: string;
 }
@@ -120,6 +140,7 @@ export interface SetCanOnlyConnectWithKnownPeers {
 }
 
 export interface Room extends SetRoomArgs {
+  policy: RoomPolicyV1;
   connectingToPeers: boolean;
   connectedToPeers: boolean;
   canBeConnectionRelay: boolean;
@@ -151,6 +172,15 @@ export const defaultRTCConfig = {
 
 const initialState: Room[] = [];
 
+const assertRoomPolicyUnchanged = (
+  current: RoomPolicyV1,
+  requested: RoomPolicyV1,
+): void => {
+  const candidate = canonicalizeRoomPolicyV1(requested);
+  if (!roomPoliciesEqualV1(current, candidate))
+    throw new Error("roomSlice: room policy is immutable after creation");
+};
+
 const roomSlice = createSlice({
   name: "rooms",
   initialState,
@@ -162,12 +192,15 @@ const roomSlice = createSlice({
         canBeConnectionRelay,
         rtcConfig,
         onlyConnectWithKnownPeers,
+        policy,
       } = action.payload;
 
       if (url.length === 64 && isUUID(id)) {
         const roomIndex = state.findIndex((r) => r.url === url || r.id === id);
 
         if (roomIndex > -1) {
+          if (policy)
+            assertRoomPolicyUnchanged(state[roomIndex].policy, policy);
           state[roomIndex].url = url;
           state[roomIndex].id = id;
           if (canBeConnectionRelay != undefined)
@@ -193,6 +226,7 @@ const roomSlice = createSlice({
               localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
                 "true",
             rtcConfig: rtcConfig ?? defaultRTCConfig,
+            policy: canonicalizeRoomPolicyV1(policy ?? DEFAULT_ROOM_POLICY_V1),
             peers: [],
             channels: [],
             messages: [],
@@ -202,6 +236,8 @@ const roomSlice = createSlice({
         const roomIndex = state.findIndex((r) => r.url === url);
 
         if (roomIndex > -1) {
+          if (policy)
+            assertRoomPolicyUnchanged(state[roomIndex].policy, policy);
           state[roomIndex].url = url;
           state[roomIndex].id = "";
           if (canBeConnectionRelay != undefined)
@@ -227,12 +263,26 @@ const roomSlice = createSlice({
               localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
                 "true",
             rtcConfig: rtcConfig ?? defaultRTCConfig,
+            policy: canonicalizeRoomPolicyV1(policy ?? DEFAULT_ROOM_POLICY_V1),
             peers: [],
             channels: [],
             messages: [],
           });
         }
       }
+    },
+
+    setRoomPolicy: (state, action: PayloadAction<SetRoomPolicyArgs>) => {
+      const roomIndex = state.findIndex(
+        (room) =>
+          room.url === action.payload.roomContext ||
+          room.id === action.payload.roomContext,
+      );
+      if (roomIndex > -1)
+        assertRoomPolicyUnchanged(
+          state[roomIndex].policy,
+          action.payload.policy,
+        );
     },
 
     setConnectingToPeers: (
@@ -288,9 +338,17 @@ const roomSlice = createSlice({
       }
     },
 
-    deletePeer: (state, action: PayloadAction<{ peerId: string }>) => {
+    deletePeer: (
+      state,
+      action: PayloadAction<{ peerId: string; roomId?: string }>,
+    ) => {
       const roomsLen = state.length;
       for (let i = 0; i < roomsLen; i++) {
+        if (
+          action.payload.roomId !== undefined &&
+          state[i].id !== action.payload.roomId
+        )
+          continue;
         const peerIndex = state[i].peers.findIndex(
           (p) => p.peerId === action.payload.peerId,
         );
@@ -327,10 +385,11 @@ const roomSlice = createSlice({
     },
 
     deleteChannel: (state, action: PayloadAction<DeleteChannelArgs>) => {
-      const { peerId, label } = action.payload;
+      const { roomId, peerId, label } = action.payload;
 
       const roomsLen = state.length;
       for (let i = 0; i < roomsLen; i++) {
+        if (roomId !== undefined && state[i].id !== roomId) continue;
         if (label && !peerId) {
           const channelIndex = state[i].channels.findIndex(
             (c) => c.label === label,
@@ -338,9 +397,8 @@ const roomSlice = createSlice({
 
           if (channelIndex > -1) state[i].channels.splice(channelIndex, 1);
         } else if (!label && peerId) {
-          const channelsLen = state[i].channels.length;
-          for (let j = 0; j < channelsLen; j++) {
-            const peerIndex = state[i].channels[i].peerIds.findIndex(
+          for (let j = state[i].channels.length - 1; j >= 0; j--) {
+            const peerIndex = state[i].channels[j].peerIds.findIndex(
               (p) => p === peerId,
             );
 
@@ -404,6 +462,7 @@ const roomSlice = createSlice({
     setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
       const {
         roomId,
+        transferId,
         merkleRootHex,
         sha512Hex,
         filename,
@@ -422,8 +481,12 @@ const roomSlice = createSlice({
       if (roomIndex > -1) {
         const messageIndex = state[roomIndex].messages.findLastIndex(
           (m) =>
-            m.merkleRootHex === merkleRootHex ||
-            (m.sha512Hex === sha512Hex && m.merkleRootHex.length === 0),
+            (transferId !== undefined
+              ? m.transferId === transferId
+              : m.merkleRootHex === merkleRootHex) ||
+            (transferId === undefined &&
+              m.sha512Hex === sha512Hex &&
+              m.merkleRootHex.length === 0),
         );
 
         if (messageIndex === -1) {
@@ -436,6 +499,7 @@ const roomSlice = createSlice({
             totalSize
           ) {
             state[roomIndex].messages.push({
+              transferId,
               merkleRootHex,
               sha512Hex,
               channelLabel,
@@ -460,6 +524,7 @@ const roomSlice = createSlice({
             state[roomIndex].messages[messageIndex].totalSize
         ) {
           state[roomIndex].messages.push({
+            transferId,
             merkleRootHex,
             sha512Hex,
             channelLabel,
@@ -513,6 +578,7 @@ const roomSlice = createSlice({
     ) => {
       const {
         roomId,
+        transferId,
         merkleRootHex,
         sha512Hex,
         channelLabel,
@@ -539,6 +605,7 @@ const roomSlice = createSlice({
           totalSize
         ) {
           state[roomIndex].messages.push({
+            transferId,
             merkleRootHex,
             sha512Hex,
             channelLabel,
@@ -556,6 +623,7 @@ const roomSlice = createSlice({
           state[roomIndex].messages[messageIndex].timestamp < timestamp
         ) {
           state[roomIndex].messages.push({
+            transferId,
             merkleRootHex,
             sha512Hex,
             channelLabel,
@@ -581,9 +649,10 @@ const roomSlice = createSlice({
     },
 
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
-      const { merkleRootHex, hashHex } = action.payload;
+      const { roomId, transferId, merkleRootHex, hashHex } = action.payload;
 
-      if (!merkleRootHex && !hashHex) return;
+      if (!transferId && !merkleRootHex && !hashHex) return;
+      if (transferId && !/^[0-9a-f]{64}$/.test(transferId)) return;
       if (
         merkleRootHex &&
         merkleRootHex.length !== crypto_hash_sha512_BYTES * 2
@@ -591,21 +660,30 @@ const roomSlice = createSlice({
         return;
       if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
 
-      const roomsLen = state.length;
-      for (let i = 0; i < roomsLen; i++) {
-        if (merkleRootHex) {
-          const messageIndex = state[i].messages.findIndex(
-            (m) => m.merkleRootHex === merkleRootHex,
-          );
+      const roomIndex = state.findIndex((room) => room.id === roomId);
+      if (roomIndex === -1) return;
 
-          if (messageIndex > -1) state[i].messages.splice(messageIndex, 1);
-        } else if (hashHex) {
-          const messageIndex = state[i].messages.findLastIndex(
-            (m) => m.sha512Hex === hashHex,
-          );
+      if (transferId) {
+        const messageIndex = state[roomIndex].messages.findIndex(
+          (m) => m.transferId === transferId,
+        );
 
-          if (messageIndex > -1) state[i].messages.splice(messageIndex, 1);
-        }
+        if (messageIndex > -1)
+          state[roomIndex].messages.splice(messageIndex, 1);
+      } else if (merkleRootHex) {
+        const messageIndex = state[roomIndex].messages.findIndex(
+          (m) => m.merkleRootHex === merkleRootHex,
+        );
+
+        if (messageIndex > -1)
+          state[roomIndex].messages.splice(messageIndex, 1);
+      } else if (hashHex) {
+        const messageIndex = state[roomIndex].messages.findLastIndex(
+          (m) => m.sha512Hex === hashHex,
+        );
+
+        if (messageIndex > -1)
+          state[roomIndex].messages.splice(messageIndex, 1);
       }
     },
 
@@ -629,6 +707,7 @@ const roomSlice = createSlice({
       );
       if (roomIndex > -1) {
         const url = state[roomIndex].url;
+        const policy = state[roomIndex].policy;
 
         state[roomIndex] = {
           url,
@@ -638,6 +717,10 @@ const roomSlice = createSlice({
           canBeConnectionRelay: true,
           onlyConnectWithKnownAddresses: false,
           rtcConfig: defaultRTCConfig,
+          // The descriptor is public room identity, not ephemeral connection
+          // state. Retaining the URL while silently resetting a PIN room to
+          // no-PIN would create a local downgrade on reconnect.
+          policy: canonicalizeRoomPolicyV1(policy),
           peers: [],
           channels: [],
           messages: [],
@@ -672,6 +755,7 @@ const roomSlice = createSlice({
 
 export const {
   setRoom,
+  setRoomPolicy,
   setConnectingToPeers,
   setConnectedToPeers,
   setConnectionRelay,

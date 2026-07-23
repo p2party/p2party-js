@@ -18,18 +18,26 @@ const webrtcDisconnectQuery: BaseQueryFn<
   RTCDisconnectParamsExtension,
   undefined
 > = async ({ alsoDeleteDB, peerConnections, dataChannels }, api) => {
-  const CHANNELS_LEN = dataChannels.length;
-  for (let i = 0; i < CHANNELS_LEN; i++) {
-    if (dataChannels[i].readyState !== "open") continue;
-
-    dataChannels[i].close();
+  for (let i = dataChannels.length - 1; i >= 0; i--) {
+    const channel = dataChannels[i];
+    channel.releaseProtocolResources?.();
+    channel.onopen = null;
+    channel.onclose = null;
+    channel.onerror = null;
+    channel.onclosing = null;
+    channel.onmessage = null;
+    channel.onbufferedamountlow = null;
+    if (channel.readyState !== "closed") channel.close();
+    dataChannels.splice(i, 1);
   }
 
-  const PEERS_LEN = peerConnections.length;
-  for (let i = 0; i < PEERS_LEN; i++) {
+  const peerIds = [
+    ...new Set(peerConnections.map((connection) => connection.withPeerId)),
+  ];
+  for (const peerId of peerIds) {
     await api.dispatch(
       webrtcApi.endpoints.disconnectFromPeer.initiate({
-        peerId: peerConnections[i].withPeerId,
+        peerId,
       }),
     );
   }

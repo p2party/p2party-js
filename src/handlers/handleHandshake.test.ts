@@ -5,11 +5,22 @@ import { loadTestModule } from "../cryptography/testModule";
 import { x25519Keypair } from "../cryptography/x25519";
 import { newKeyPair } from "../cryptography/ed25519";
 import { crossSignIdentityX25519 } from "../cryptography/identityCrossSig";
-import { serializeRatchet } from "../cryptography/ratchet";
+import {
+  ML_KEM_768_CIPHERTEXT_BYTES,
+  ML_KEM_768_PUBLIC_KEY_BYTES,
+} from "../cryptography/mlkem";
+import {
+  ratchetDecrypt,
+  ratchetEncrypt,
+  serializeRatchet,
+  wipeRatchet,
+} from "../cryptography/ratchet";
+import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import {
   buildChannelInput,
   performHandshakeCore,
+  type HandshakeCoreParams,
   type HandshakeTransport,
 } from "./handshakeCore";
 
@@ -36,6 +47,7 @@ type HS = typeof import("./handleHandshake");
 let parseFingerprintFromSdp: HS["parseFingerprintFromSdp"];
 let verifyDtlsFingerprints: HS["verifyDtlsFingerprints"];
 let setHandshakeChannel: HS["setHandshakeChannel"];
+let clearHandshakeChannel: HS["clearHandshakeChannel"];
 let deliverHandshakeFrame: HS["deliverHandshakeFrame"];
 let runHandshake: HS["runHandshake"];
 
@@ -45,12 +57,22 @@ beforeAll(async () => {
     parseFingerprintFromSdp,
     verifyDtlsFingerprints,
     setHandshakeChannel,
+    clearHandshakeChannel,
     deliverHandshakeFrame,
     runHandshake,
   } = m);
 });
 
 const CHANNEL_ID = new TextEncoder().encode("main"); // 4 bytes
+const HS_STEP_HELLO = 0x01;
+const HS_STEP_CONFIRM = 0x02;
+const HELLO_CLASSICAL_FIELDS_LEN = 1 + 32 + 32 + 32 + 32 + 64;
+const HELLO_ML_KEM_PUBLIC_KEY_OFF = HELLO_CLASSICAL_FIELDS_LEN;
+const HELLO_ML_KEM_CIPHERTEXT_OFF =
+  HELLO_ML_KEM_PUBLIC_KEY_OFF + ML_KEM_768_PUBLIC_KEY_BYTES;
+const HELLO_PAYLOAD_LEN =
+  HELLO_ML_KEM_CIPHERTEXT_OFF + ML_KEM_768_CIPHERTEXT_BYTES;
+const CONFIRM_PAYLOAD_LEN = 1 + 32 + 64;
 
 describe("buildChannelInput (CI)", () => {
   test("concatenates channelId ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG", () => {
@@ -71,7 +93,7 @@ describe("buildChannelInput (CI)", () => {
     expect(ci[4 + 32]).toBe(2);
     expect(ci[4 + 64]).toBe(3);
     expect(ci[4 + 96]).toBe(4);
-    expect(ci[ci.length - 1]).toBe(0); // PQ_TAG
+    expect(ci[ci.length - 1]).toBe(1); // ML-KEM-768 hybrid PQ_TAG
   });
 
   test("role ordering matters: swapping a/b yields a different CI", () => {
@@ -230,7 +252,105 @@ const linkedTransports = (): [HandshakeTransport, HandshakeTransport] => {
   return [a, b];
 };
 
+const makeNoPinHandshakeParams = async (
+  module: LibCrypto,
+  channelInput: Uint8Array,
+): Promise<[HandshakeCoreParams, HandshakeCoreParams]> => {
+  const idA = x25519Keypair(module);
+  const idB = x25519Keypair(module);
+  const edA = await newKeyPair(module);
+  const edB = await newKeyPair(module);
+  const crossA = await crossSignIdentityX25519(
+    idA.publicKey,
+    edA.secretKey,
+    module,
+  );
+  const crossB = await crossSignIdentityX25519(
+    idB.publicKey,
+    edB.secretKey,
+    module,
+  );
+
+  return [
+    {
+      mode: "nopin",
+      pin: null,
+      channelInput,
+      amInitiator: true,
+      idSelfSec: idA.secretKey,
+      selfIdentityX25519Pub: idA.publicKey,
+      selfIdentityCrossSignature: crossA,
+      peerIdentityEd25519Pub: edB.publicKey,
+    },
+    {
+      mode: "nopin",
+      pin: null,
+      channelInput,
+      amInitiator: false,
+      idSelfSec: idB.secretKey,
+      selfIdentityX25519Pub: idB.publicKey,
+      selfIdentityCrossSignature: crossB,
+      peerIdentityEd25519Pub: edA.publicKey,
+    },
+  ];
+};
+
+const establishNoPinHandshake = async (
+  module: LibCrypto,
+  channelInput: Uint8Array,
+) => {
+  const [initiatorTransport, responderTransport] = linkedTransports();
+  const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
+    module,
+    channelInput,
+  );
+  const [initiator, responder] = await Promise.all([
+    performHandshakeCore(initiatorTransport, initiatorParams, module),
+    performHandshakeCore(responderTransport, responderParams, module),
+  ]);
+  return { initiator, responder };
+};
+
 describe("performHandshakeCore (root agreement over a mock channel)", () => {
+  test("fails closed before sending when mandatory ML-KEM exports are absent", async () => {
+    const module = await loadTestModule();
+    let sent = false;
+    const withoutMlKem = new Proxy(module, {
+      get(target, property, receiver) {
+        if (
+          property === "_mlkem768_keypair" ||
+          property === "_mlkem768_encaps" ||
+          property === "_mlkem768_decaps"
+        )
+          return undefined;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    await expect(
+      performHandshakeCore(
+        {
+          send: () => {
+            sent = true;
+          },
+          recv: async () => new Uint8Array(),
+        },
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: new Uint8Array(160),
+          amInitiator: true,
+          idSelfSec: new Uint8Array(32),
+          selfIdentityX25519Pub: new Uint8Array(32),
+          selfIdentityCrossSignature: new Uint8Array(64),
+          peerIdentityEd25519Pub: new Uint8Array(32),
+        },
+        withoutMlKem,
+      ),
+    ).rejects.toThrow(/ML-KEM-768 WASM exports are unavailable/);
+    expect(sent).toBe(false);
+  });
+
   test("no-PIN mode: both sides derive the identical 32-byte secret", async () => {
     const module = await loadTestModule();
     const [tA, tB] = linkedTransports();
@@ -291,14 +411,117 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     expect([...rA.secret]).toEqual([...rB.secret]);
     expect(rA.secret.length).toBe(32);
 
-    // DH-exchange plumbing: initiator adopts responder's DH pub; responder waits.
-    // serializeRatchet projects to ArrayBuffers, so wrap before comparing.
+    // Handshake bootstrap: the responder has authenticated/adopted the
+    // initiator's initial DH pub and opened both chains. Its own DH key has
+    // already rotated, so the initiator learns that new pub on responder msg 0.
     const sA = serializeRatchet(rA.state);
     const sB = serializeRatchet(rB.state);
-    expect([...new Uint8Array(sA.dhRemotePub as ArrayBuffer)]).toEqual([
-      ...new Uint8Array(sB.dhSelfPub),
+    expect([...new Uint8Array(sB.dhRemotePub as ArrayBuffer)]).toEqual([
+      ...new Uint8Array(sA.dhSelfPub),
     ]);
-    expect(sB.dhRemotePub).toBeNull();
+    expect(sA.sendingChainKey).not.toBeNull();
+    expect(sB.sendingChainKey).not.toBeNull();
+    expect(sB.receivingChainKey).not.toBeNull();
+  });
+
+  test("responder can encrypt first immediately after handshake return", async () => {
+    const module = await loadTestModule();
+    const { initiator, responder } = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(0x31),
+    );
+
+    const firstFromResponder = ratchetEncrypt(responder.state, module);
+    const receivedByInitiator = ratchetDecrypt(
+      initiator.state,
+      firstFromResponder.header,
+      module,
+    );
+
+    expect(Buffer.from(receivedByInitiator)).toEqual(
+      Buffer.from(firstFromResponder.messageKey),
+    );
+  });
+
+  test("simultaneous first outbound messages decrypt on both sides", async () => {
+    const module = await loadTestModule();
+    const { initiator, responder } = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(0x32),
+    );
+
+    // Derive both outbound message-0 keys before either peer processes inbound
+    // traffic. This is the simultaneous-first-message case that previously
+    // failed because the responder had no sending chain.
+    const firstFromInitiator = ratchetEncrypt(initiator.state, module);
+    const firstFromResponder = ratchetEncrypt(responder.state, module);
+
+    const receivedByInitiator = ratchetDecrypt(
+      initiator.state,
+      firstFromResponder.header,
+      module,
+    );
+    const receivedByResponder = ratchetDecrypt(
+      responder.state,
+      firstFromInitiator.header,
+      module,
+    );
+
+    expect(Buffer.from(receivedByInitiator)).toEqual(
+      Buffer.from(firstFromResponder.messageKey),
+    );
+    expect(Buffer.from(receivedByResponder)).toEqual(
+      Buffer.from(firstFromInitiator.messageKey),
+    );
+  });
+
+  test("tampered initiator ratchet DH public key fails responder key confirmation", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
+      module,
+      new Uint8Array(160).fill(0x33),
+    );
+    let changedInitiatorDhPub = false;
+    const tamperingInitiatorTransport: HandshakeTransport = {
+      recv: initiatorTransport.recv,
+      send(bytes): void {
+        const forwarded = Uint8Array.from(bytes);
+        if (
+          !changedInitiatorDhPub &&
+          forwarded.length === CONFIRM_PAYLOAD_LEN &&
+          forwarded[0] === HS_STEP_CONFIRM
+        ) {
+          // CONFIRM's existing 32-byte field now carries the initiator's actual
+          // ratchet pub. The MAC was computed over the untampered value.
+          forwarded[1 + 11] ^= 0x80;
+          changedInitiatorDhPub = true;
+        }
+        initiatorTransport.send(forwarded);
+      },
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(
+        tamperingInitiatorTransport,
+        initiatorParams,
+        module,
+      ),
+      performHandshakeCore(responderTransport, responderParams, module),
+    ]);
+
+    expect(changedInitiatorDhPub).toBe(true);
+    expect(results[1].status).toBe("rejected");
+    expect(String((results[1] as PromiseRejectedResult).reason)).toMatch(
+      /key-confirmation/i,
+    );
+
+    // The final initiator flight has no acknowledgment in this two-round
+    // protocol, so that leg may already have returned. Clean up if it did.
+    if (results[0].status === "fulfilled") {
+      wipeRatchet(results[0].value.state);
+      results[0].value.secret.fill(0);
+    }
   });
 
   test("PIN mode: matching PINs agree; a wrong PIN fails key-confirmation", async () => {
@@ -397,6 +620,284 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     }
   });
 
+  test("PIN mode rejects a replayed cross-signed identity whose presenter does not possess its X25519 secret", async () => {
+    const module = await loadTestModule();
+    const ci = new Uint8Array(160).fill(0x59);
+    const pin = new TextEncoder().encode("correct-room-pin");
+
+    // Mallory recorded Victim's public credential. It verifies perfectly
+    // against Victim's pinned Ed25519 identity, but Mallory has only an unrelated
+    // X25519 secret. CPace alone would authenticate this replay whenever Mallory
+    // also knew the room PIN; the mandatory X3DH contribution must make both
+    // confirmation MACs disagree.
+    const victimX25519 = x25519Keypair(module);
+    const attackerX25519 = x25519Keypair(module);
+    const responderX25519 = x25519Keypair(module);
+    const victimEd25519 = await newKeyPair(module);
+    const responderEd25519 = await newKeyPair(module);
+    const victimCrossSignature = await crossSignIdentityX25519(
+      victimX25519.publicKey,
+      victimEd25519.secretKey,
+      module,
+    );
+    const responderCrossSignature = await crossSignIdentityX25519(
+      responderX25519.publicKey,
+      responderEd25519.secretKey,
+      module,
+    );
+    const [attackerTransport, responderTransport] = linkedTransports();
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(
+        attackerTransport,
+        {
+          mode: "pin",
+          pin,
+          channelInput: ci,
+          amInitiator: true,
+          // Deliberately does NOT correspond to the replayed public credential.
+          idSelfSec: attackerX25519.secretKey,
+          selfIdentityX25519Pub: victimX25519.publicKey,
+          selfIdentityCrossSignature: victimCrossSignature,
+          peerIdentityEd25519Pub: responderEd25519.publicKey,
+        },
+        module,
+      ),
+      performHandshakeCore(
+        responderTransport,
+        {
+          mode: "pin",
+          pin,
+          channelInput: ci,
+          amInitiator: false,
+          idSelfSec: responderX25519.secretKey,
+          selfIdentityX25519Pub: responderX25519.publicKey,
+          selfIdentityCrossSignature: responderCrossSignature,
+          peerIdentityEd25519Pub: victimEd25519.publicKey,
+        },
+        module,
+      ),
+    ]);
+
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    for (const result of results) {
+      if (result.status === "rejected")
+        expect(String(result.reason)).toMatch(/key-confirmation/i);
+    }
+  });
+
+  test("tampering with the ML-KEM ciphertext makes both legs fail key confirmation", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const idA = x25519Keypair(module);
+    const idB = x25519Keypair(module);
+    const edA = await newKeyPair(module);
+    const edB = await newKeyPair(module);
+    const crossA = await crossSignIdentityX25519(
+      idA.publicKey,
+      edA.secretKey,
+      module,
+    );
+    const crossB = await crossSignIdentityX25519(
+      idB.publicKey,
+      edB.secretKey,
+      module,
+    );
+    const ci = new Uint8Array(160).fill(0x6a);
+    let changedResponderHello = false;
+    const tamperingResponderTransport: HandshakeTransport = {
+      recv: responderTransport.recv,
+      send(bytes): void {
+        const forwarded = Uint8Array.from(bytes);
+        if (
+          !changedResponderHello &&
+          forwarded.length === HELLO_PAYLOAD_LEN &&
+          forwarded[0] === HS_STEP_HELLO
+        ) {
+          forwarded[HELLO_ML_KEM_CIPHERTEXT_OFF + 17] ^= 0x80;
+          changedResponderHello = true;
+        }
+        responderTransport.send(forwarded);
+      },
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(
+        initiatorTransport,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: true,
+          idSelfSec: idA.secretKey,
+          selfIdentityX25519Pub: idA.publicKey,
+          selfIdentityCrossSignature: crossA,
+          peerIdentityEd25519Pub: edB.publicKey,
+        },
+        module,
+      ),
+      performHandshakeCore(
+        tamperingResponderTransport,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: false,
+          idSelfSec: idB.secretKey,
+          selfIdentityX25519Pub: idB.publicKey,
+          selfIdentityCrossSignature: crossB,
+          peerIdentityEd25519Pub: edA.publicKey,
+        },
+        module,
+      ),
+    ]);
+
+    expect(changedResponderHello).toBe(true);
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    for (const result of results) {
+      if (result.status === "rejected")
+        expect(String(result.reason)).toMatch(/key-confirmation/i);
+    }
+  });
+
+  test("tampering with the initiator ML-KEM public key makes both legs fail key confirmation", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const idA = x25519Keypair(module);
+    const idB = x25519Keypair(module);
+    const edA = await newKeyPair(module);
+    const edB = await newKeyPair(module);
+    const crossA = await crossSignIdentityX25519(
+      idA.publicKey,
+      edA.secretKey,
+      module,
+    );
+    const crossB = await crossSignIdentityX25519(
+      idB.publicKey,
+      edB.secretKey,
+      module,
+    );
+    const ci = new Uint8Array(160).fill(0x6b);
+    let changedInitiatorHello = false;
+    const tamperingInitiatorTransport: HandshakeTransport = {
+      recv: initiatorTransport.recv,
+      send(bytes): void {
+        const forwarded = Uint8Array.from(bytes);
+        if (
+          !changedInitiatorHello &&
+          forwarded.length === HELLO_PAYLOAD_LEN &&
+          forwarded[0] === HS_STEP_HELLO
+        ) {
+          // Change rho, the final 32-byte public seed, so the key remains
+          // syntactically valid while no longer matching the initiator's secret.
+          forwarded[
+            HELLO_ML_KEM_PUBLIC_KEY_OFF + ML_KEM_768_PUBLIC_KEY_BYTES - 1
+          ] ^= 0x80;
+          changedInitiatorHello = true;
+        }
+        initiatorTransport.send(forwarded);
+      },
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(
+        tamperingInitiatorTransport,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: true,
+          idSelfSec: idA.secretKey,
+          selfIdentityX25519Pub: idA.publicKey,
+          selfIdentityCrossSignature: crossA,
+          peerIdentityEd25519Pub: edB.publicKey,
+        },
+        module,
+      ),
+      performHandshakeCore(
+        responderTransport,
+        {
+          mode: "nopin",
+          pin: null,
+          channelInput: ci,
+          amInitiator: false,
+          idSelfSec: idB.secretKey,
+          selfIdentityX25519Pub: idB.publicKey,
+          selfIdentityCrossSignature: crossB,
+          peerIdentityEd25519Pub: edA.publicKey,
+        },
+        module,
+      ),
+    ]);
+
+    expect(changedInitiatorHello).toBe(true);
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    for (const result of results) {
+      if (result.status === "rejected")
+        expect(String(result.reason)).toMatch(/key-confirmation/i);
+    }
+  });
+
+  test("rejects non-canonical or absent role-specific ML-KEM fields instead of downgrading", async () => {
+    const module = await loadTestModule();
+    const common = {
+      mode: "nopin" as const,
+      pin: null,
+      channelInput: new Uint8Array(160),
+      idSelfSec: new Uint8Array(32),
+      selfIdentityX25519Pub: new Uint8Array(32),
+      selfIdentityCrossSignature: new Uint8Array(64),
+      peerIdentityEd25519Pub: new Uint8Array(32),
+    };
+    const oneShot = (hello: Uint8Array): HandshakeTransport => ({
+      send: () => {},
+      recv: async () => hello,
+    });
+    const hello = (): Uint8Array => {
+      const bytes = new Uint8Array(HELLO_PAYLOAD_LEN);
+      bytes[0] = HS_STEP_HELLO;
+      return bytes;
+    };
+
+    const initiatorWithCiphertext = hello();
+    initiatorWithCiphertext[HELLO_ML_KEM_PUBLIC_KEY_OFF] = 1;
+    initiatorWithCiphertext[HELLO_ML_KEM_CIPHERTEXT_OFF] = 1;
+    await expect(
+      performHandshakeCore(
+        oneShot(initiatorWithCiphertext),
+        { ...common, amInitiator: false },
+        module,
+      ),
+    ).rejects.toThrow(/initiator ML-KEM ciphertext field must be zero/);
+
+    await expect(
+      performHandshakeCore(
+        oneShot(hello()),
+        { ...common, amInitiator: false },
+        module,
+      ),
+    ).rejects.toThrow(/initiator ML-KEM public key is required/);
+
+    const responderWithPublicKey = hello();
+    responderWithPublicKey[HELLO_ML_KEM_PUBLIC_KEY_OFF] = 1;
+    responderWithPublicKey[HELLO_ML_KEM_CIPHERTEXT_OFF] = 1;
+    await expect(
+      performHandshakeCore(
+        oneShot(responderWithPublicKey),
+        { ...common, amInitiator: true },
+        module,
+      ),
+    ).rejects.toThrow(/responder ML-KEM public-key field must be zero/);
+
+    await expect(
+      performHandshakeCore(
+        oneShot(hello()),
+        { ...common, amInitiator: true },
+        module,
+      ),
+    ).rejects.toThrow(/responder ML-KEM ciphertext is required/);
+  });
+
   test("no-PIN mode: a peer HELLO whose X25519 cross-sig does not verify against the pinned peer Ed25519 rejects (fail-closed, before any DH/secret)", async () => {
     const module = await loadTestModule();
 
@@ -421,18 +922,20 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
       module,
     );
 
-    // Assemble the peer HELLO exactly as packHello would (layout, 193 bytes):
-    // [0x01 ‖ sid(32) ‖ EK(32) ‖ Y(32) ‖ X25519_id_pub(32) ‖ crossSig(64)].
-    // 0x01 is the internal HS_STEP_HELLO sub-frame tag. EK is any valid X25519
-    // pub — verify fails before x3dh ever reads it; Y stays zeros (no-PIN).
-    const HS_STEP_HELLO = 0x01;
-    const peerHello = new Uint8Array(1 + 32 + 32 + 32 + 32 + 64);
+    // Assemble the peer responder HELLO exactly as packHello would. Its
+    // role-unused ML-KEM public-key field stays zero and its ciphertext field is
+    // nonzero; identity verification fails before decapsulation reads it.
+    const peerHello = new Uint8Array(HELLO_PAYLOAD_LEN);
     peerHello[0] = HS_STEP_HELLO;
     peerHello.set(crypto.getRandomValues(new Uint8Array(32)), 1);
     peerHello.set(idPeer.publicKey, 1 + 32);
     // Y (offset 1+32+32) stays zeros.
     peerHello.set(idPeer.publicKey, 1 + 32 + 32 + 32);
     peerHello.set(badCrossSig, 1 + 32 + 32 + 32 + 32);
+    peerHello.set(
+      crypto.getRandomValues(new Uint8Array(ML_KEM_768_CIPHERTEXT_BYTES)),
+      HELLO_ML_KEM_CIPHERTEXT_OFF,
+    );
 
     // Scripted one-shot transport: swallow our HELLO, hand back the crafted one.
     // (A two-sided linkedTransports run would leave the honest peer's recv()
@@ -470,13 +973,131 @@ describe("runHandshake wiring (inbox + channel registry)", () => {
   test("deliverHandshakeFrame feeds frames the runHandshake transport recvs", () => {
     // Registry/inbox smoke test: a frame delivered before recv is buffered.
     // 0x01 is the internal HS_STEP_HELLO sub-frame tag.
-    setHandshakeChannel("peerX", {
+    const lease = setHandshakeChannel("roomX", "peerX", {
       send: () => {},
       readyState: "open",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
-    deliverHandshakeFrame("peerX", new Uint8Array([0x01, 1, 2, 3]));
+    expect(
+      deliverHandshakeFrame(
+        "roomX",
+        "peerX",
+        (() => {
+          const hello = new Uint8Array(HELLO_PAYLOAD_LEN);
+          hello[0] = HS_STEP_HELLO;
+          return hello;
+        })(),
+        lease,
+      ),
+    ).toBe(true);
     // No throw; the frame sits in the inbox until the handshake drains it.
     expect(typeof runHandshake).toBe("function");
+    clearHandshakeChannel("roomX", "peerX", undefined, lease);
+  });
+
+  test("rejects malformed, out-of-order, and surplus pre-auth frames", () => {
+    const malformedLease = setHandshakeChannel("room-bounds", "peer-bounds", {
+      send: () => {},
+    });
+    expect(
+      deliverHandshakeFrame(
+        "room-bounds",
+        "peer-bounds",
+        new Uint8Array([HS_STEP_HELLO]),
+        malformedLease,
+      ),
+    ).toBe(false);
+
+    const lease = setHandshakeChannel("room-bounds", "peer-bounds", {
+      send: () => {},
+    });
+    const hello = new Uint8Array(HELLO_PAYLOAD_LEN);
+    hello[0] = HS_STEP_HELLO;
+    const confirm = new Uint8Array(1 + 32 + 64);
+    confirm[0] = 2;
+    expect(
+      deliverHandshakeFrame(
+        "room-bounds",
+        "peer-bounds",
+        confirm,
+        lease,
+      ),
+    ).toBe(false);
+
+    const orderedLease = setHandshakeChannel(
+      "room-bounds",
+      "peer-bounds",
+      { send: () => {} },
+    );
+    expect(
+      deliverHandshakeFrame(
+        "room-bounds",
+        "peer-bounds",
+        hello,
+        orderedLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-bounds",
+        "peer-bounds",
+        confirm,
+        orderedLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-bounds",
+        "peer-bounds",
+        confirm,
+        orderedLease,
+      ),
+    ).toBe(false);
+  });
+
+  test("stale inbox completion cannot clear or receive frames for a replacement main channel", () => {
+    const oldLease = setHandshakeChannel("room-lease", "peer-lease", {
+      send: () => {},
+    });
+    const freshLease = setHandshakeChannel("room-lease", "peer-lease", {
+      send: () => {},
+    });
+
+    expect(
+      deliverHandshakeFrame(
+        "room-lease",
+        "peer-lease",
+        new Uint8Array([0x01]),
+        oldLease,
+      ),
+    ).toBe(false);
+    expect(
+      clearHandshakeChannel(
+        "room-lease",
+        "peer-lease",
+        new Error("stale finally"),
+        oldLease,
+      ),
+    ).toBe(false);
+    expect(
+      deliverHandshakeFrame(
+        "room-lease",
+        "peer-lease",
+        (() => {
+          const hello = new Uint8Array(HELLO_PAYLOAD_LEN);
+          hello[0] = HS_STEP_HELLO;
+          return hello;
+        })(),
+        freshLease,
+      ),
+    ).toBe(true);
+    expect(
+      clearHandshakeChannel(
+        "room-lease",
+        "peer-lease",
+        new Error("fresh finished"),
+        freshLease,
+      ),
+    ).toBe(true);
   });
 });

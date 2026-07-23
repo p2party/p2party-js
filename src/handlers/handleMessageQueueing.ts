@@ -1,10 +1,13 @@
 import { handleReceiveMessage } from "./handleReceiveMessage";
-import { getRatchetGate } from "./ratchetGate";
+import {
+  getRatchetGate,
+  isCurrentRatchetGateLease,
+} from "./ratchetGate";
+import { sendReceiptFrame } from "./receiptFrame";
 
-import { setDBRoomMessageData, closeReceiveFile } from "../db/api";
+import { closeReceiveFile } from "../db/api";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
-import { compileChannelMessageLabel } from "../utils/channelLabel";
 
 import {
   setMessage,
@@ -14,16 +17,12 @@ import {
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
-import signalingServerApi from "../api/signalingServerApi";
-
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
-import type { WebSocketMessageMessageSendRequest } from "../utils/interfaces";
-import type { State } from "../store";
 
 const k32 = (u8: Uint8Array) => {
   if (u8.byteLength < 32) {
@@ -42,6 +41,73 @@ const k32 = (u8: Uint8Array) => {
 };
 
 const processingLocks = new Map<string, Promise<void>>();
+const queuedBytesByEdge = new Map<string, number>();
+const queuedBytesByChannel = new WeakMap<Uint8Array[], number>();
+const queuedReceiptsByEdge = new Map<string, number>();
+
+export const MAX_QUEUED_FRAMES_PER_CHANNEL = 64;
+export const MAX_QUEUED_BYTES_PER_EDGE = 16 * 1024 * 1024;
+export const MAX_QUEUED_RECEIPTS_PER_CHANNEL = 2_048;
+export const MAX_QUEUED_RECEIPTS_PER_EDGE = 8_192;
+
+const edgeQueueKey = (roomId: string, peerId: string): string =>
+  `${String(roomId.length)}:${roomId}${peerId}`;
+
+export interface MessageProcessingState {
+  value: boolean;
+  released?: boolean;
+  idleWaiters?: Set<() => void>;
+}
+
+const settleMessageQueueIdle = (
+  queue: Uint8Array[],
+  state: MessageProcessingState,
+): void => {
+  if (state.value || queue.length > 0) return;
+  const waiters = state.idleWaiters;
+  state.idleWaiters = undefined;
+  if (waiters) for (const resolve of waiters) resolve();
+};
+
+export const waitForQueuedMessageFrames = (
+  queue: Uint8Array[],
+  state: MessageProcessingState,
+): Promise<void> => {
+  if (!state.value && queue.length === 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    state.idleWaiters ??= new Set();
+    state.idleWaiters.add(resolve);
+  });
+};
+
+const adjustQueuedBytes = (
+  queue: Uint8Array[],
+  roomId: string,
+  peerId: string,
+  delta: number,
+): void => {
+  const nextChannel = Math.max(0, (queuedBytesByChannel.get(queue) ?? 0) + delta);
+  if (nextChannel === 0) queuedBytesByChannel.delete(queue);
+  else queuedBytesByChannel.set(queue, nextChannel);
+
+  const key = edgeQueueKey(roomId, peerId);
+  const nextEdge = Math.max(0, (queuedBytesByEdge.get(key) ?? 0) + delta);
+  if (nextEdge === 0) queuedBytesByEdge.delete(key);
+  else queuedBytesByEdge.set(key, nextEdge);
+};
+
+export const releaseQueuedMessageFrames = (
+  queue: Uint8Array[],
+  roomId: string,
+  peerId: string,
+  state?: MessageProcessingState,
+): void => {
+  if (state) state.released = true;
+  const bytes = queue.reduce((total, frame) => total + frame.byteLength, 0);
+  queue.length = 0;
+  if (bytes > 0) adjustQueuedBytes(queue, roomId, peerId, -bytes);
+  if (state) settleMessageQueueIdle(queue, state);
+};
 
 const withProcessingLock = async <T>(
   key: string,
@@ -54,10 +120,8 @@ const withProcessingLock = async <T>(
     release = resolve;
   });
 
-  processingLocks.set(
-    key,
-    prev.then(() => gate),
-  );
+  const tail = prev.then(() => gate);
+  processingLocks.set(key, tail);
 
   await prev;
 
@@ -66,10 +130,119 @@ const withProcessingLock = async <T>(
   } finally {
     release();
 
-    if (processingLocks.get(key) === gate) {
+    if (processingLocks.get(key) === tail) {
       processingLocks.delete(key);
     }
   }
+};
+
+export interface ReceiptProcessingQueue {
+  readonly roomId: string;
+  readonly peerId: string;
+  readonly pending: Uint8Array[];
+  readonly seen: Set<string>;
+  draining: boolean;
+  released: boolean;
+}
+
+export const createReceiptProcessingQueue = (
+  roomId: string,
+  peerId: string,
+): ReceiptProcessingQueue => ({
+  roomId,
+  peerId,
+  pending: [],
+  seen: new Set<string>(),
+  draining: false,
+  released: false,
+});
+
+const adjustQueuedReceipts = (
+  state: ReceiptProcessingQueue,
+  delta: number,
+): void => {
+  const key = edgeQueueKey(state.roomId, state.peerId);
+  const next = Math.max(0, (queuedReceiptsByEdge.get(key) ?? 0) + delta);
+  if (next === 0) queuedReceiptsByEdge.delete(key);
+  else queuedReceiptsByEdge.set(key, next);
+};
+
+export const releaseQueuedReceipts = (
+  state: ReceiptProcessingQueue,
+): void => {
+  if (state.released) return;
+  state.released = true;
+  const count = state.pending.length;
+  state.pending.length = 0;
+  state.seen.clear();
+  if (count > 0) adjustQueuedReceipts(state, -count);
+};
+
+const drainReceipts = async (
+  state: ReceiptProcessingQueue,
+  processReceipt: (receipt: Uint8Array) => Promise<void>,
+): Promise<void> => {
+  if (state.draining || state.released) return;
+  state.draining = true;
+  const lockKey = edgeQueueKey(state.roomId, state.peerId);
+  try {
+    for (;;) {
+      if (state.released) break;
+      const receipt = state.pending.shift();
+      if (!receipt) break;
+      adjustQueuedReceipts(state, -1);
+      try {
+        await withProcessingLock(lockKey, () => processReceipt(receipt));
+      } finally {
+        // Deduplicate only while queued/in flight. A later retransmit must be
+        // allowed to retry after a transient worker/storage failure.
+        state.seen.delete(k32(receipt));
+      }
+    }
+  } catch (error) {
+    // One malformed/unresolvable authenticated receipt must not strand every
+    // later acknowledgement behind a permanently rejected drain promise.
+    console.error(error);
+  } finally {
+    state.draining = false;
+    if (!state.released && state.pending.length > 0)
+      void drainReceipts(state, processReceipt);
+  }
+};
+
+/**
+ * Queue one already-classified 64-byte receipt token. This is deliberately a
+ * bounded data queue, not one promise per onmessage event. At most one handler
+ * executes per room/peer edge, even when many message channels are open.
+ */
+export const enqueueReceipt = (
+  receipt: Uint8Array,
+  state: ReceiptProcessingQueue,
+  processReceipt: (receipt: Uint8Array) => Promise<void>,
+): boolean => {
+  if (state.released) return false;
+
+  const fingerprint = k32(receipt);
+  if (state.seen.has(fingerprint)) return true;
+
+  const edgeCount =
+    queuedReceiptsByEdge.get(edgeQueueKey(state.roomId, state.peerId)) ?? 0;
+  if (
+    state.pending.length >= MAX_QUEUED_RECEIPTS_PER_CHANNEL ||
+    edgeCount >= MAX_QUEUED_RECEIPTS_PER_EDGE
+  )
+    return false;
+
+  state.seen.add(fingerprint);
+  // Keep flood-dedup memory finite. Receipt semantics remain independently
+  // idempotent in reconcile.ts when an old token is observed again.
+  if (state.seen.size > MAX_QUEUED_RECEIPTS_PER_CHANNEL * 2)
+    state.seen.clear();
+
+  state.pending.push(receipt);
+  adjustQueuedReceipts(state, 1);
+  if (!state.draining) void drainReceipts(state, processReceipt);
+  return true;
 };
 
 const processMessage = async (
@@ -83,14 +256,26 @@ const processMessage = async (
   extChannel: IRTCDataChannel | undefined,
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
+  signal?: AbortSignal,
 ): Promise<{ receivedFullSize: boolean }> => {
+  if (signal?.aborted) return { receivedFullSize: false };
   if (epc) {
     try {
+      const transportGateLease = epc.ratchetGateLease;
+      if (
+        !isCurrentRatchetGateLease(roomId, peerId, transportGateLease)
+      )
+        return { receivedFullSize: false };
       // Do not decrypt until the PACE + Double-Ratchet handshake has seeded the
       // per-peer ratchet (the `main` channel opens this gate). A chunk that
       // races ahead of the handshake waits here rather than being dropped; a
       // failed handshake rejects the gate, caught below.
-      await getRatchetGate(peerId);
+      await getRatchetGate(roomId, peerId);
+      if (signal?.aborted) return { receivedFullSize: false };
+      if (
+        !isCurrentRatchetGateLease(roomId, peerId, transportGateLease)
+      )
+        return { receivedFullSize: false };
 
       const {
         date,
@@ -106,44 +291,25 @@ const processMessage = async (
       } = await handleReceiveMessage(
         data,
         roomId,
+        channelLabel,
         epc,
         merkleRoot,
         receiveMessageModule,
+        signal,
       );
 
-      const { signalingServer, keyPair } = api.getState() as State;
+      if (signal?.aborted) return { receivedFullSize: false };
 
       if (
         totalSize > 0 &&
         chunkHash.length === crypto_hash_sha512_BYTES &&
-        !chunkAlreadyExists
+        chunkIndex > -1 &&
+        chunkSize > 0
       ) {
-        if (extChannel?.readyState === "open") {
-          extChannel.send(chunkHash.buffer as ArrayBuffer);
-        } else {
-          const channel = await compileChannelMessageLabel(
-            channelLabel,
-            merkleRootHex,
-          );
-
-          if (signalingServer.isConnected) {
-            await api.dispatch(
-              signalingServerApi.endpoints.sendMessage.initiate({
-                content: {
-                  type: "message",
-                  message: uint8ArrayToHex(chunkHash),
-                  roomId,
-                  fromPeerId: keyPair.peerId,
-                  toPeerId: peerId,
-                  label: channel,
-                } as WebSocketMessageMessageSendRequest,
-              }),
-            );
-          }
-        }
+        if (extChannel) sendReceiptFrame(extChannel, chunkHash);
       } else if (extChannel?.readyState === "open") {
-        // Emit a uniform 64-byte receipt for every non-real frame (decoys,
-        // already-stored, or crypto-failed) so the reverse receipt count equals
+        // Emit one uniform tagged receipt for every non-real frame (decoys or
+        // crypto-failed) so the reverse receipt count equals
         // the forward frame count — a DTLS-record observer can no longer
         // subtract to recover the real chunk count. A fresh random token
         // matches no newChunk on the sender (handleReadReceipt is a no-op for
@@ -151,7 +317,7 @@ const processMessage = async (
         // metadata.
         const decoyReceipt = new Uint8Array(crypto_hash_sha512_BYTES);
         crypto.getRandomValues(decoyReceipt);
-        extChannel.send(decoyReceipt.buffer as ArrayBuffer);
+        sendReceiptFrame(extChannel, decoyReceipt);
       }
 
       const hashHex = uint8ArrayToHex(messageHash);
@@ -161,19 +327,6 @@ const processMessage = async (
         // readMessage can open the finished file without hitting the write lock.
         // No-op for text (no handle) and for a re-observed completion.
         await closeReceiveFile(merkleRootHex);
-
-        await setDBRoomMessageData(
-          roomId,
-          merkleRootHex,
-          hashHex,
-          peerId,
-          totalSize,
-          totalSize,
-          messageType,
-          filename,
-          channelLabel,
-          date.getTime(),
-        );
 
         api.dispatch(
           setMessageAllChunks({
@@ -190,43 +343,8 @@ const processMessage = async (
           }),
         );
 
-        if (extChannel?.readyState === "open") {
-          extChannel.send(messageHash.buffer as ArrayBuffer);
-        } else {
-          const channel = await compileChannelMessageLabel(
-            channelLabel,
-            merkleRootHex,
-          );
-
-          if (signalingServer.isConnected) {
-            await api.dispatch(
-              signalingServerApi.endpoints.sendMessage.initiate({
-                content: {
-                  type: "message",
-                  message: uint8ArrayToHex(messageHash),
-                  roomId,
-                  fromPeerId: keyPair.peerId,
-                  toPeerId: peerId,
-                  label: channel,
-                } as WebSocketMessageMessageSendRequest,
-              }),
-            );
-          }
-        }
+        if (extChannel) sendReceiptFrame(extChannel, messageHash);
       } else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
-        await setDBRoomMessageData(
-          roomId,
-          merkleRootHex,
-          hashHex,
-          peerId,
-          chunkSize,
-          totalSize,
-          messageType,
-          filename,
-          channelLabel,
-          date.getTime(),
-        );
-
         api.dispatch(
           setMessage({
             roomId,
@@ -269,7 +387,7 @@ const processMessage = async (
 const drain = async (
   queue: Uint8Array[],
   seen: Set<string>,
-  drainingRef: { value: boolean },
+  drainingRef: MessageProcessingState,
   api: BaseQueryApi,
   roomId: string,
   peerId: string,
@@ -279,14 +397,17 @@ const drain = async (
   extChannel: IRTCDataChannel | undefined,
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
+  signal?: AbortSignal,
 ) => {
-  if (drainingRef.value) return;
+  if (drainingRef.value || drainingRef.released || signal?.aborted) return;
   drainingRef.value = true;
-  const lockKey = `${roomId}:${peerId}`;
+  const lockKey = edgeQueueKey(roomId, peerId);
   try {
     for (;;) {
+      if (drainingRef.released || signal?.aborted) break;
       const chunk = queue.pop();
       if (!chunk) break;
+      adjustQueuedBytes(queue, roomId, peerId, -chunk.byteLength);
 
       // const { receivedFullSize } =
       await withProcessingLock(lockKey, async () =>
@@ -301,6 +422,7 @@ const drain = async (
           extChannel,
           epc,
           receiveMessageModule,
+          signal,
         ),
       );
 
@@ -313,7 +435,11 @@ const drain = async (
     }
   } finally {
     drainingRef.value = false;
-    if (queue.length > 0)
+    if (
+      queue.length > 0 &&
+      !drainingRef.released &&
+      !signal?.aborted
+    )
       void drain(
         queue,
         seen,
@@ -327,7 +453,9 @@ const drain = async (
         extChannel,
         epc,
         receiveMessageModule,
+        signal,
       );
+    else settleMessageQueueIdle(queue, drainingRef);
   }
 };
 
@@ -335,7 +463,7 @@ export const enqueue = (
   data: Uint8Array,
   queue: Uint8Array[],
   seen: Set<string>,
-  drainingRef: { value: boolean },
+  drainingRef: MessageProcessingState,
   api: BaseQueryApi,
   roomId: string,
   peerId: string,
@@ -345,19 +473,27 @@ export const enqueue = (
   extChannel: IRTCDataChannel | undefined,
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
-) => {
+  signal?: AbortSignal,
+): boolean => {
+  if (drainingRef.released || signal?.aborted) return false;
   const k = k32(data);
-  if (seen.has(k)) return; // drop duplicate-in-queue
+  if (seen.has(k)) return true; // drop duplicate-in-queue
+
+  const edgeBytes = queuedBytesByEdge.get(edgeQueueKey(roomId, peerId)) ?? 0;
+  if (
+    queue.length >= MAX_QUEUED_FRAMES_PER_CHANNEL ||
+    edgeBytes + data.byteLength > MAX_QUEUED_BYTES_PER_EDGE
+  )
+    return false;
+
   seen.add(k);
 
-  // Cap the seen set and queue to prevent unbounded memory growth
-  const MAX_SEEN_SIZE = 100_000;
-  const MAX_QUEUE_SIZE = 50_000;
+  // Dedup state is disposable. Keep it bounded well below an OOM-sized history.
+  const MAX_SEEN_SIZE = 4096;
   if (seen.size > MAX_SEEN_SIZE) seen.clear();
-  if (queue.length > MAX_QUEUE_SIZE)
-    queue.splice(0, queue.length - MAX_QUEUE_SIZE);
 
   queue.push(data);
+  adjustQueuedBytes(queue, roomId, peerId, data.byteLength);
 
   if (!drainingRef.value)
     void drain(
@@ -373,5 +509,8 @@ export const enqueue = (
       extChannel,
       epc,
       receiveMessageModule,
+      signal,
     );
+
+  return true;
 };

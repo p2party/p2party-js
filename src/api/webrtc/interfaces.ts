@@ -1,24 +1,25 @@
 import type { LibCrypto } from "../../cryptography/libcrypto";
 import type { RatchetState } from "../../cryptography/ratchet";
-import type { RatchetSession } from "../../db/types";
-
-export interface IRTCPeerConnectionRoomId {
-  roomId: string;
-  receiveMessageModule: LibCrypto;
-}
+import type { RatchetGateLease } from "../../handlers/ratchetGate";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
+  /** The room this transport belongs to. A room/peer pair owns one PC. */
+  roomId: string;
   withPeerId: string;
   withPeerPublicKey: string;
   makingOffer: boolean;
   ignoreOffer: boolean;
-  rooms: IRTCPeerConnectionRoomId[];
+  receiveMessageModule: LibCrypto;
   iceCandidates: RTCIceCandidateInit[];
+  /** Persistent control channel for this room/peer transport. */
+  mainChannel?: IRTCDataChannel;
+  /** Gate ownership captured when this concrete transport is created. */
+  ratchetGateLease: RatchetGateLease;
+  /** Resolves once the per-transport WASM dependency is ready. */
+  initialization?: Promise<void>;
   // protocol-v3: live Double-Ratchet handle (never Redux; secrets stay off the
-  // store). `session` is the last-persisted (wrapped) record; `ratchetEstablished`
-  // is the per-peer gate promise (ratchetGate.ts) the `main` channel resolves.
+  // store). `ratchetEstablished` is the gate the `main` channel resolves.
   ratchetState?: RatchetState;
-  session?: RatchetSession;
   ratchetEstablished?: Promise<void>;
   // protocol-v3 receive: per-EDGE per-message key cache (Stage-5 task 3). Keyed by
   // messageCacheKey(dhPub, N); the first-arriving chunk of a message derives +
@@ -26,11 +27,23 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   // it, and the entry is evicted when the message completes. Lives on the edge
   // (not per per-message channel) because the ratchet it derives from is per-edge.
   messageKeyCache?: Map<string, Uint8Array>;
+  /** Maps a live transfer root to its `(dhPub,N)` receive-cache key for cancel cleanup. */
+  messageKeyByMerkleRoot?: Map<string, string>;
+  /** All configured non-main channels, including connecting channels. */
+  messageChannels?: Set<IRTCDataChannel>;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {
   withPeerId: string;
-  roomIds: string[];
+  /** A data channel belongs to exactly one room. */
+  roomIds: [string];
+  /** Releases queue/channel accounting even when teardown nulls onclose. */
+  releaseProtocolResources?: () => void;
+  /**
+   * Abort an inbound message pipeline, retire its persisted receive key, and
+   * delete its storage artifacts after the active handler reaches quiescence.
+   */
+  cancelReceiveTransfer?: () => Promise<void>;
 }
 
 export interface IRTCMessage {
@@ -43,6 +56,7 @@ export interface IRTCMessage {
 }
 
 export interface IRTCIceCandidate extends RTCIceCandidateInit {
+  roomId: string;
   withPeerId: string;
 }
 
@@ -50,7 +64,6 @@ export interface RTCPeerConnectionParams {
   peerId: string;
   peerPublicKey: string;
   roomId: string;
-  initiator?: boolean;
   rtcConfig?: RTCConfiguration;
 }
 
@@ -64,6 +77,7 @@ export interface RTCSetDescriptionParams {
 
 export interface RTCSetCandidateParams {
   peerId: string;
+  roomId: string;
   candidate: RTCIceCandidateInit | RTCIceCandidate;
 }
 
@@ -74,6 +88,8 @@ export interface RTCOpenChannelParams {
 }
 
 export interface RTCSendMessageParams {
+  /** Random 32-byte lowercase-hex identity allocated by the public API. */
+  transferId: string;
   data: string | File;
   label: string;
   roomId: string;
@@ -124,10 +140,13 @@ export interface RTCDisconnectFromAllRoomsParams {
 
 export interface RTCDisconnectFromPeerParams {
   peerId: string;
+  /** When present, tear down only this room/peer transport. */
+  roomId?: string;
   alsoDeleteData?: boolean;
 }
 
 export interface RTCDisconnectFromChannelLabelParams {
+  roomId: string;
   label: string;
   messageHash?: Uint8Array;
   alsoDeleteData?: boolean;
@@ -135,13 +154,12 @@ export interface RTCDisconnectFromChannelLabelParams {
 }
 
 export interface RTCDisconnectFromPeerChannelLabelParams {
+  roomId: string;
   peerId: string;
   label: string;
   messageHash?: Uint8Array;
   alsoDeleteData?: boolean;
   alsoSendFinishedMessage?: boolean;
-  // Set by the completion path (handleReadReceipt got the final message-hash
-  // receipt): the sender may free its newChunks. On a mid-transfer disconnect
-  // this is absent, so newChunks are kept for resume-on-reconnect.
-  transferComplete?: boolean;
+  /** Internal exact-object selector; prevents a stale callback closing a replacement. */
+  channel?: IRTCDataChannel;
 }

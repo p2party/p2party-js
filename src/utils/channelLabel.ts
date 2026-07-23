@@ -20,19 +20,22 @@ export const compileChannelMessageLabel = (
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     try {
-      if (channelLabel.length <= 0 || channelLabel.length > 32)
-        reject(new Error("Label larger than 128 characters"));
+      const nameBytes = new TextEncoder().encode(channelLabel);
+      if (nameBytes.length <= 0 || nameBytes.length > 32)
+        throw new Error("Channel label must be between 1 and 32 UTF-8 bytes");
 
       if (
         typeof merkleRoot === "string" &&
-        merkleRoot.length !== crypto_hash_sha512_BYTES * 2
+        !/^[0-9a-f]{128}$/.test(merkleRoot)
       ) {
-        reject(new Error("Merkle root hex should be 128 bytes"));
+        throw new Error(
+          "Merkle root hex should be 128 canonical lowercase characters",
+        );
       } else if (
         typeof merkleRoot !== "string" &&
         merkleRoot.length !== crypto_hash_sha512_BYTES
       ) {
-        reject(new Error("Merkle root should be 64 bytes"));
+        throw new Error("Merkle root should be 64 bytes");
       }
 
       // if (
@@ -50,7 +53,6 @@ export const compileChannelMessageLabel = (
       let label = "";
 
       // name (256 bytes)
-      const nameBytes = new TextEncoder().encode(channelLabel);
       const namePadded = new Uint8Array(32);
       namePadded.set(nameBytes.subarray(0, Math.min(32, nameBytes.length)));
 
@@ -94,13 +96,7 @@ export const decompileChannelMessageLabel = (
 
       const split = channelMessageLabel.split(LABEL_ELEMENTS_SEPARATOR);
       const splitLen = split.length;
-      if (splitLen !== LABEL_ELEMENTS && splitLen > 1) {
-        reject(
-          new Error(
-            `Channel message label needs to have ${String(LABEL_ELEMENTS)} components.`,
-          ),
-        );
-      } else if (splitLen === 1) {
+      if (splitLen === 1) {
         resolve({
           channelLabel: channelMessageLabel,
           merkleRootHex: "",
@@ -108,18 +104,28 @@ export const decompileChannelMessageLabel = (
           // hashHex: "",
           // hash: new Uint8Array(),
         });
+        return;
       }
+      if (
+        splitLen !== LABEL_ELEMENTS ||
+        channelMessageLabel.length !== LABEL_STRING_LEN
+      )
+        throw new Error(
+          `Channel message label needs exactly ${String(LABEL_ELEMENTS)} bounded components.`,
+        );
+      if (!/^[0-9a-f]{64}~[0-9a-f]{128}$/.test(channelMessageLabel))
+        throw new Error("Channel message label must use canonical lowercase hex");
 
       const channelLabelUint8 = hexToUint8Array(split[0]);
       if (channelLabelUint8.length !== 32)
-        reject(new Error("Channel label is not 128 bytes long."));
+        throw new Error("Channel label is not 32 bytes long.");
       const channelLabel = new TextDecoder()
         .decode(channelLabelUint8)
         .replace(/\0+$/, "");
 
       const merkleRoot = hexToUint8Array(split[1]);
       if (merkleRoot.length !== crypto_hash_sha512_BYTES)
-        reject(new Error("Merkle root has invalid length"));
+        throw new Error("Merkle root has invalid length");
 
       // const hash = hexToUint8Array(split[2]);
       // if (hash.length !== crypto_hash_sha512_BYTES)

@@ -12,10 +12,6 @@ import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
 
-import { CHUNK_LEN, PROOF_LEN } from "../../utils/constants";
-
-import cryptoMemory from "../../cryptography/memory";
-import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
 
 import type {
   IRTCPeerConnection,
@@ -33,17 +29,11 @@ import type {
   RTCDisconnectFromPeerChannelLabelParams,
   RTCDisconnectParams,
 } from "./interfaces";
+import type { SendMessageResult } from "../../handlers/handleSendMessage";
 
 const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
-
-const encryptionWasmMemory = cryptoMemory.encryptAsymmetricMemory(
-  CHUNK_LEN,
-  crypto_hash_sha512_BYTES, // additional data is the merkle root
-);
-
-const merkleWasmMemory = cryptoMemory.verifyMerkleProofMemory(PROOF_LEN);
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -54,7 +44,6 @@ const webrtcApi = createApi({
         peerId,
         peerPublicKey,
         roomId,
-        initiator = false,
         rtcConfig = {
           iceServers: [
             {
@@ -69,7 +58,6 @@ const webrtcApi = createApi({
         peerId,
         peerPublicKey,
         roomId,
-        initiator,
         rtcConfig,
         peerConnections,
         dataChannels,
@@ -112,15 +100,16 @@ const webrtcApi = createApi({
         ),
     }),
 
-    sendMessage: builder.mutation<undefined, RTCSendMessageParams>({
+    sendMessage: builder.mutation<
+      SendMessageResult | undefined,
+      RTCSendMessageParams
+    >({
       queryFn: (args, api, extraOptions) =>
         webrtcMessageQuery(
           {
             ...args,
             peerConnections,
             dataChannels,
-            encryptionWasmMemory,
-            merkleWasmMemory,
           },
           api,
           extraOptions,
@@ -166,7 +155,7 @@ const webrtcApi = createApi({
     >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectPeerQuery(
-          { ...args, peerConnections, dataChannels },
+          { ...args, peerConnections, dataChannels, iceCandidates },
           api,
           extraOptions,
         ),

@@ -155,6 +155,31 @@ describe("ratchet", () => {
     expect(Buffer.from(recovered)).toEqual(Buffer.from(lastRoundFirstMessageKey!));
   });
 
+  test("global skipped-key eviction wipes the evicted key buffer", async () => {
+    const { module, alice, bob } = await pair();
+    const m0 = ratchetEncrypt(alice, module);
+    ratchetDecrypt(bob, m0.header, module); // establish recv chain, Nr = 1
+
+    const m1 = ratchetEncrypt(alice, module);
+    const m2 = ratchetEncrypt(alice, module);
+    expect(m1.header.N).toBe(1);
+    expect(m2.header.N).toBe(2);
+
+    // Fill the cumulative cache to its cap with a sentinel as the oldest
+    // insertion. Decrypting m2 derives/stashes m1, forcing exactly one
+    // oldest-first eviction while this reference remains observable.
+    const evictedKeyReference = new Uint8Array(32).fill(0xa5);
+    bob.skipped.set("oldest-sentinel", evictedKeyReference);
+    for (let i = 1; i < MAX_SKIP_SESSION; i++) {
+      bob.skipped.set(`synthetic:${i}`, new Uint8Array(32).fill(i & 0xff));
+    }
+
+    const recovered = ratchetDecrypt(bob, m2.header, module);
+    expect(Buffer.from(recovered)).toEqual(Buffer.from(m2.messageKey));
+    expect(bob.skipped.has("oldest-sentinel")).toBe(false);
+    expect(evictedKeyReference.every((byte) => byte === 0)).toBe(true);
+  });
+
   test("a header with a negative or non-integer N/PN is rejected", async () => {
     const { module, alice, bob } = await pair();
     const m0 = ratchetEncrypt(alice, module);

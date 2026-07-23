@@ -5,8 +5,8 @@ import type { LibCrypto } from "./libcrypto";
 
 // Internal HKDF params for the no-PIN handshake (both peers are pure TS; not on
 // the wire, so no C SSOT needed).
-const X3DH_INFO = new TextEncoder().encode("p2party-x3dh-v1");
-const X3DH_SALT = new Uint8Array(64); // HashLen zeros
+const THREE_DH_INFO = new TextEncoder().encode("p2party-interactive-3dh-v2");
+const THREE_DH_SALT = new Uint8Array(64); // HashLen zeros
 
 /**
  * No-PIN identity-mixed ephemeral DH. Mixes
@@ -15,7 +15,7 @@ const X3DH_SALT = new Uint8Array(64); // HashLen zeros
  * passes amInitiator=false; the three DH calls are re-ordered so both sides
  * concatenate the identical shared values.
  */
-export const x3dhDeriveSecret = (
+export const deriveInteractive3dhSecret = (
   idSelfSec: Uint8Array,
   idPeerPub: Uint8Array,
   ephSelfSec: Uint8Array,
@@ -40,8 +40,8 @@ export const x3dhDeriveSecret = (
   ikm.set(dh2, 32);
   ikm.set(dh3, 64);
 
-  const prk = hkdfExtract(X3DH_SALT, ikm, module);
-  const secret = hkdfExpand(prk, X3DH_INFO, 32, module);
+  const prk = hkdfExtract(THREE_DH_SALT, ikm, module);
+  const secret = hkdfExpand(prk, THREE_DH_INFO, 32, module);
 
   ikm.fill(0);
   dh1.fill(0);

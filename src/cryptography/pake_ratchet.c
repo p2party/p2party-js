@@ -74,9 +74,8 @@ hkdf_sha512_expand(uint8_t *out, const unsigned int out_len,
 
 /* ---------------- Symmetric AEAD (message-key path) ---------------- */
 
-/* out = ciphertext || Poly1305 tag  (out_len == data_len + ABYTES).
- * No nonce is prepended (unlike encrypt_chachapoly_asymmetric): the v3 send
- * path derives the nonce from the chunk index, so it is not on the wire. */
+/* out = ciphertext || Poly1305 tag (out_len == data_len + ABYTES).
+ * The caller carries the fresh nonce in the v3 chunk header. */
 int
 encrypt_chachapoly_symmetric(
     uint8_t *out, const uint8_t *data, const unsigned int data_len,
@@ -112,9 +111,8 @@ decrypt_chachapoly_symmetric(
 /* ---------------- v3 receive path (no signature) ----------------
  * Frame: [type(1) | DH_pub(32) | N(8) | PN(8) | PQ_EPOCH(1) | nonce(12) | ciphertext||tag]
  * Symmetric-decrypt under message_key with AAD = merkle_root || N || PN, then
- * run the merkle-proof / leaf-hash / receipt logic VERBATIM from
- * receive_message (utils.c:146-181). Return codes mirror receive_message
- * minus the -1 "signature wrong" case. */
+ * verify the Merkle proof, derive the leaf receipt, and return it in the
+ * decrypted buffer. */
 int
 receive_message_with_key(
     uint8_t decrypted[DECRYPTED_LEN], const uint8_t message[MESSAGE_LEN],
@@ -145,7 +143,7 @@ receive_message_with_key(
       aad, sizeof aad, nonce, message_key);
   if (d != 0) return -2;
 
-  /* ---- VERBATIM from receive_message (utils.c:146-181) ---- */
+  /* Verify the authenticated plaintext's Merkle proof and derive its receipt. */
   uint32_t proofLen = ((uint32_t)decrypted[METADATA_LEN] << 24)
                       | ((uint32_t)decrypted[METADATA_LEN + 1] << 16)
                       | ((uint32_t)decrypted[METADATA_LEN + 2] << 8)

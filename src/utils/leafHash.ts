@@ -7,9 +7,8 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 
 // Merkle leaf domain byte (0x00). Internal nodes use 0x01 (in merkle.c), so an
 // internal-node hash can never be reinterpreted as a leaf (CVE-2012-2459 class).
-// This leaf value is also the read-receipt token (realChunkHash), so the sender
-// (splitToChunks), the receiver's proof leaf (utils.c receive_message), and the
-// receiver's receipt hash (handleReceiveMessage) must all compute it the same.
+// Receipts do NOT expose this leaf directly: receiptToken.ts binds it to the
+// message root and chunk index before the receiver sends a 64-byte token.
 export const MERKLE_LEAF_DOMAIN = 0x00;
 
 /**

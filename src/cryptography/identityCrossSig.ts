@@ -12,7 +12,7 @@ import type { LibCrypto } from "./libcrypto";
 // gated to exactly 32 bytes, the size of an X25519 pub). Prefixing
 // IDENTITY_CROSS_SIGN_DOMAIN makes the cross-sig transcript disjoint from that
 // challenge transcript, so no oracle output is ever a valid cross-signature.
-// Mirrors the CHUNK_AUTH_DOMAIN_BYTES construction.
+// Uses the same explicit domain-separation convention as the v3 KDF labels.
 
 /** The signed/verified transcript: IDENTITY_CROSS_SIGN_DOMAIN ‖ X25519_pub. */
 export const identityCrossSignMessage = (x25519Pub: Uint8Array): Uint8Array => {

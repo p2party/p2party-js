@@ -1,6 +1,5 @@
-// Stage 3 / Task 2 — dbVersion 16 -> 17, additive `ratchetSessions` + `meta`
-// stores. Exercised against fake-indexeddb so it runs under `bun test`
-// without a real browser.
+// IndexedDB migrations exercised against fake-indexeddb so they run under
+// `bun test` without a real browser.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 
@@ -20,12 +19,10 @@ afterEach(() => {
   openDbs = [];
 });
 
-const LEGACY_VERSION = 16;
+const LEGACY_VERSION = 17;
 
-// Simulates a real user's pre-existing v16 database: hand-rolled `chunks`
-// store (mirrors the pre-Stage-3 `getDB.ts` create-branch) with one real row
-// of data already in it, and nothing else. `getDB()` (already bumped to
-// v17) must upgrade this in place, additively, in the test below.
+// Simulates a real user's pre-existing v17 database, including the unsafe
+// content-hash-keyed outbound staging store. v18 must discard only newChunks.
 function openLegacyDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(dbName, LEGACY_VERSION);
@@ -36,6 +33,14 @@ function openLegacyDB(): Promise<IDBDatabase> {
       });
       chunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
       chunks.createIndex("hash", "hash", { unique: false });
+      const newChunks = db.createObjectStore("newChunks", {
+        keyPath: ["hash", "chunkIndex"],
+      });
+      newChunks.createIndex("hash", "hash", { unique: false });
+      newChunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
+      newChunks.createIndex("realChunkHash", "realChunkHash", {
+        unique: true,
+      });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -51,12 +56,21 @@ function putLegacyChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
   });
 }
 
-describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
-  test("dbVersion is bumped to exactly 17", () => {
-    expect(dbVersion).toBe(17);
+function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("newChunks", "readwrite");
+    tx.objectStore("newChunks").put(chunk);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+describe("getDB — v17 -> v18 outbound transfer identity migration", () => {
+  test("dbVersion is bumped to exactly 18", () => {
+    expect(dbVersion).toBe(18);
   });
 
-  test("upgrade adds ratchetSessions + meta stores and preserves existing chunks data", async () => {
+  test("upgrade preserves received data but recreates only outbound newChunks", async () => {
     const legacyChunk = {
       merkleRoot: "deadbeef",
       hash: "cafebabe",
@@ -67,6 +81,12 @@ describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
     // Arrange: a v16 database that already has real data in `chunks`.
     const legacyDb = await openLegacyDB();
     await putLegacyChunk(legacyDb, legacyChunk);
+    await putLegacyNewChunk(legacyDb, {
+      hash: "11".repeat(64),
+      chunkIndex: 0,
+      merkleRoot: "",
+      realChunkHash: "22".repeat(64),
+    });
     legacyDb.close();
 
     // Act: open through the real (updated) getDB(), which runs the module's
@@ -74,7 +94,7 @@ describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
-    // Assert: new stores exist.
+    // Stores introduced before this migration still exist.
     expect(db.objectStoreNames.contains("ratchetSessions")).toBe(true);
     expect(db.objectStoreNames.contains("meta")).toBe(true);
 
@@ -90,11 +110,22 @@ describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
     expect(ratchetSessions.index("roomId").unique).toBe(false);
     await tx.done;
 
-    // Assert: the pre-existing `chunks` store and its data survived the
-    // upgrade completely untouched (additive-only guarantee).
+    // Received data survives the migration completely untouched.
     expect(db.objectStoreNames.contains("chunks")).toBe(true);
     const stored = await db.get("chunks", ["deadbeef", 0]);
     expect(stored).toEqual(legacyChunk);
+
+    // Outbound staging is transient and is the ONLY store recreated: v17 rows
+    // cannot be assigned an unambiguous random transfer identity.
+    expect(await db.count("newChunks")).toBe(0);
+    const outboundTx = db.transaction("newChunks");
+    const outbound = outboundTx.objectStore("newChunks");
+    expect(outbound.keyPath).toEqual(["transferId", "chunkIndex"]);
+    expect((Array.from(outbound.indexNames) as string[]).sort()).toEqual(
+      ["hash", "merkleRoot", "receiptScope", "transferId"].sort(),
+    );
+    expect(outbound.index("receiptScope").unique).toBe(false);
+    await outboundTx.done;
   });
 
   test("meta store is an out-of-line (keyPath-less) store that round-trips by explicit key", async () => {
@@ -113,7 +144,7 @@ describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
     expect(value).toEqual(fakeKey);
   });
 
-  test("opening at v17 fresh (no pre-existing database) also creates both new stores", async () => {
+  test("opening at v18 fresh creates the complete schema", async () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
@@ -127,5 +158,52 @@ describe("getDB — Stage 3 Task 2 (v16 -> v17 additive upgrade)", () => {
     expect(db.objectStoreNames.contains("chunks")).toBe(true);
     expect(db.objectStoreNames.contains("newChunks")).toBe(true);
     expect(db.objectStoreNames.contains("sendQueue")).toBe(true);
+  });
+
+  test("identical content stages independently and receipts are root-scoped", async () => {
+    const db = await getDB();
+    openDbs.push(db as unknown as IDBDatabase);
+    const sameHash = "ab".repeat(64);
+    const sameLeaf = "cd".repeat(64);
+    const first = {
+      transferId: "11".repeat(32),
+      hash: sameHash,
+      chunkIndex: 0,
+      merkleRoot: "21".repeat(64),
+      leafHash: sameLeaf,
+      receiptToken: "31".repeat(64),
+      data: new Uint8Array([1]).buffer,
+      metadata: new Uint8Array().buffer,
+      merkleProof: new Uint8Array().buffer,
+    };
+    const second = {
+      ...first,
+      transferId: "12".repeat(32),
+      merkleRoot: "22".repeat(64),
+      receiptToken: "32".repeat(64),
+    };
+
+    await db.put("newChunks", first);
+    await db.put("newChunks", second);
+
+    expect(
+      await db.countFromIndex("newChunks", "transferId", first.transferId),
+    ).toBe(1);
+    expect(
+      await db.countFromIndex("newChunks", "transferId", second.transferId),
+    ).toBe(1);
+    expect(await db.countFromIndex("newChunks", "hash", sameHash)).toBe(2);
+    expect(
+      await db.getFromIndex("newChunks", "receiptScope", [
+        first.merkleRoot,
+        first.receiptToken,
+      ]),
+    ).toEqual(first);
+    expect(
+      await db.getFromIndex("newChunks", "receiptScope", [
+        second.merkleRoot,
+        second.receiptToken,
+      ]),
+    ).toEqual(second);
   });
 });

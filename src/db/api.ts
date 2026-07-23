@@ -3,8 +3,10 @@ import type {
   Chunk,
   ReceiveChunk,
   NewChunk,
+  NewChunkSelector,
   SendQueue,
   RatchetSession,
+  IdentityEd25519,
   IdentityX25519,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
@@ -85,8 +87,11 @@ export const deleteDBPeerFromBlacklist = (
 
 export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
 
-export const setDBUniqueRoom = (roomUrl: string, roomId: string) =>
-  callWorker("setDBUniqueRoom", roomUrl, roomId);
+export const setDBUniqueRoom = (
+  roomUrl: string,
+  roomId: string,
+  roomPolicy: ArrayBuffer,
+) => callWorker("setDBUniqueRoom", roomUrl, roomId, roomPolicy);
 
 export const getDBMessageData = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBMessageData", merkleRootHex, hashHex);
@@ -105,6 +110,7 @@ export const setDBRoomMessageData = (
   filename: string,
   channelLabel: string,
   timestamp: number,
+  transferId?: string,
 ) =>
   callWorker(
     "setDBRoomMessageData",
@@ -118,19 +124,25 @@ export const setDBRoomMessageData = (
     filename,
     channelLabel,
     timestamp,
+    transferId,
   );
 
-export const getDBChunk = (hashHex: string, chunkIndex: number) =>
-  callWorker("getDBChunk", hashHex, chunkIndex);
+export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>
+  callWorker("getDBChunk", merkleRootHex, chunkIndex);
 
-export const existsDBChunk = (hashHex: string, chunkIndex: number) =>
-  callWorker("existsDBChunk", hashHex, chunkIndex);
+export const existsDBChunk = (merkleRootHex: string, chunkIndex: number) =>
+  callWorker("existsDBChunk", merkleRootHex, chunkIndex);
 
-export const getDBNewChunk = (hashHex: string, chunkIndex?: number) =>
-  callWorker("getDBNewChunk", hashHex, chunkIndex);
+export const getDBNewChunk = (transferId: string, chunkIndex: number) =>
+  callWorker("getDBNewChunk", transferId, chunkIndex);
 
-export const existsDBNewChunk = (hashHex: string, chunkIndex: number) =>
-  callWorker("existsDBNewChunk", hashHex, chunkIndex);
+export const getDBNewChunkByReceipt = (
+  merkleRootHex: string,
+  receiptTokenHex: string,
+) => callWorker("getDBNewChunkByReceipt", merkleRootHex, receiptTokenHex);
+
+export const existsDBNewChunk = (transferId: string, chunkIndex: number) =>
+  callWorker("existsDBNewChunk", transferId, chunkIndex);
 
 export const getDBSendQueue = (label: string, toPeerId: string) =>
   callWorker("getDBSendQueue", label, toPeerId);
@@ -153,10 +165,10 @@ export const getDBAllChunksCount = (merkleRootHex?: string, hashHex?: string) =>
 
 export const setDBChunk = (chunk: Chunk) => callWorker("setDBChunk", chunk);
 
-// Receive-time OPFS write: hand the worker a real chunk's bytes; it writes them
-// straight into the message's pre-sized OPFS file at chunkIndex*uniformSize (or
-// keeps them in IndexedDB if it can't place them yet / OPFS is unavailable) and
-// records the bytesless have-set entry. Resolves true if newly stored.
+// Atomic receive-time insert + progress: text stays in IndexedDB; file bytes go
+// to OPFS at chunkIndex*uniformSize when possible. The worker returns whether
+// this distinct index was inserted and the authoritative committed byte count,
+// so a duplicate can never be mistaken for the completing chunk.
 export const storeReceiveChunk = (chunk: ReceiveChunk) =>
   callWorker("storeReceiveChunk", chunk);
 
@@ -175,11 +187,20 @@ export const getReceiveFile = (
 export const closeReceiveFile = (merkleRootHex: string) =>
   callWorker("closeReceiveFile", merkleRootHex);
 
-export const getDBAllNewChunks = (hashHex?: string, merkleRootHex?: string) =>
-  callWorker("getDBAllNewChunks", hashHex, merkleRootHex);
+/**
+ * Atomically retires one inbound transfer behind the same per-Merkle worker
+ * lock used by storeReceiveChunk. This is the cancellation primitive: a chunk
+ * write that was already in flight completes first and is then removed, while
+ * later writes are stopped by the channel's AbortSignal.
+ */
+export const deleteReceiveTransfer = (merkleRootHex: string) =>
+  callWorker("deleteReceiveTransfer", merkleRootHex);
 
-export const getDBAllNewChunksCount = (hashHex: string) =>
-  callWorker("getDBAllNewChunksCount", hashHex);
+export const getDBAllNewChunks = (selector: NewChunkSelector) =>
+  callWorker("getDBAllNewChunks", selector);
+
+export const getDBAllNewChunksCount = (transferId: string) =>
+  callWorker("getDBAllNewChunksCount", transferId);
 
 export const setDBNewChunk = (chunk: NewChunk) =>
   callWorker("setDBNewChunk", chunk);
@@ -193,19 +214,8 @@ export const countDBSendQueue = (label: string, toPeerId: string) =>
 export const deleteDBChunk = (hashHex: string, chunkIndex?: number) =>
   callWorker("deleteDBChunk", hashHex, chunkIndex);
 
-export const deleteDBNewChunk = (
-  merkleRootHex?: string,
-  realChunkHashHex?: string,
-  hashHex?: string,
-  chunkIndex?: number,
-) =>
-  callWorker(
-    "deleteDBNewChunk",
-    merkleRootHex,
-    realChunkHashHex,
-    hashHex,
-    chunkIndex,
-  );
+export const deleteDBNewChunk = (selector: NewChunkSelector) =>
+  callWorker("deleteDBNewChunk", selector);
 
 export const deleteDBMessageData = (merkleRootHex: string) =>
   callWorker("deleteDBMessageData", merkleRootHex);
@@ -230,6 +240,34 @@ export const setRatchetSession = (session: RatchetSession) =>
 export const deleteRatchetSession = (roomId: string, peerPublicKey: string) =>
   callWorker("deleteRatchetSession", roomId, peerPublicKey);
 
+export const getPinAttemptState = (
+  roomId: string,
+  peerIdentityEd25519: string,
+) => callWorker("getPinAttemptState", roomId, peerIdentityEd25519);
+
+export const incrementPinAttemptState = (
+  roomId: string,
+  peerIdentityEd25519: string,
+  now: number,
+  maxImmediateAttempts: number,
+  baseMs: number,
+  maxMs: number,
+) =>
+  callWorker(
+    "incrementPinAttemptState",
+    roomId,
+    peerIdentityEd25519,
+    now,
+    maxImmediateAttempts,
+    baseMs,
+    maxMs,
+  );
+
+export const deletePinAttemptState = (
+  roomId: string,
+  peerIdentityEd25519?: string,
+) => callWorker("deletePinAttemptState", roomId, peerIdentityEd25519);
+
 // D2=B: the dedicated X25519 identity, WebCrypto-wrapped at rest (worker-side).
 export const getIdentityX25519 = () => callWorker("getIdentityX25519");
 
@@ -237,3 +275,11 @@ export const setIdentityX25519 = (identity: IdentityX25519) =>
   callWorker("setIdentityX25519", identity);
 
 export const deleteIdentityX25519 = () => callWorker("deleteIdentityX25519");
+
+// Ed25519 account identity, also WebCrypto-wrapped at rest (worker-side).
+export const getIdentityEd25519 = () => callWorker("getIdentityEd25519");
+
+export const setIdentityEd25519 = (identity: IdentityEd25519) =>
+  callWorker("setIdentityEd25519", identity);
+
+export const deleteIdentityEd25519 = () => callWorker("deleteIdentityEd25519");

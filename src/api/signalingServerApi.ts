@@ -8,6 +8,11 @@ import { signalingServerActions } from "../reducers/signalingServerSlice";
 import handleWebSocketMessage from "../handlers/handleWebSocketMessage";
 
 import { uint8ArrayToHex, hexToUint8Array } from "../utils/uint8array";
+import {
+  assertCanonicalEd25519Identity,
+  isCanonicalEd25519Identity,
+} from "../utils/identityRole";
+import { PROTOCOL_VERSION } from "../utils/constants";
 
 import { newKeyPair } from "../cryptography/ed25519";
 import { newX25519KeyPair } from "../cryptography/x25519";
@@ -16,12 +21,16 @@ import {
   verifyIdentityCrossSig,
 } from "../cryptography/identityCrossSig";
 
-import { getIdentityX25519, setIdentityX25519 } from "../db/api";
+import {
+  getIdentityEd25519,
+  getIdentityX25519,
+  setIdentityEd25519,
+  setIdentityX25519,
+} from "../db/api";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 import type {
-  WSPeerConnection,
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
   WebSocketMessageChallengeResponse,
@@ -29,7 +38,6 @@ import type {
   WebSocketMessagePeersRequest,
   WebSocketMessageConnectionResponse,
   WebSocketMessagePongResponse,
-  WebSocketMessageMessageSendRequest,
   WebSocketPeerConnectionParams,
   // WebSocketSendMessageToPeerParams,
   WebSocketMessagePeerConnectionRequest,
@@ -47,8 +55,7 @@ export interface WebSocketMessage {
     | WebSocketMessageChallengeResponse
     | WebSocketMessageRoomIdRequest
     | WebSocketMessagePeersRequest
-    | WebSocketMessageConnectionResponse
-    | WebSocketMessageMessageSendRequest;
+    | WebSocketMessageConnectionResponse;
 }
 
 const waitForSocketConnection = (
@@ -83,8 +90,6 @@ const waitForSocketConnection = (
 };
 
 let ws: WebSocket | null = null;
-const peerConnections: WSPeerConnection[] = [];
-
 const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   { signalingServerUrl },
   api,
@@ -103,27 +108,76 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   }
 
   try {
-    let publicKey = localStorage.getItem("publicKey") ?? "";
-    let secretKey = localStorage.getItem("secretKey") ?? "";
-    if (keyPair.secretKey.length === 0 && secretKey.length === 0) {
-      const k = await newKeyPair();
-      publicKey = uint8ArrayToHex(k.publicKey);
-      secretKey = uint8ArrayToHex(k.secretKey);
+    const toBuf = (u: Uint8Array): ArrayBuffer => {
+      const b = new ArrayBuffer(u.byteLength);
+      new Uint8Array(b).set(u);
+      return b;
+    };
 
-      api.dispatch(setKeyPair({ publicKey, secretKey }));
-    } else if (keyPair.secretKey.length === 0) {
-      if (secretKey.length === 128 && publicKey.length === 64) {
-        api.dispatch(setKeyPair({ publicKey, secretKey }));
+    let publicKey = keyPair.publicKey;
+    let secretKey = keyPair.secretKey;
+    const storedEd = await getIdentityEd25519();
+    const storedEdPublicKey = storedEd
+      ? uint8ArrayToHex(new Uint8Array(storedEd.pub))
+      : "";
+    const storedEdSecret = storedEd
+      ? new Uint8Array(storedEd.secret)
+      : undefined;
+    const storedEdSecretKey = storedEdSecret
+      ? uint8ArrayToHex(storedEdSecret)
+      : "";
+    storedEdSecret?.fill(0);
+
+    const canonicalSecretKey = /^[0-9a-f]{128}$/;
+    if (
+      !isCanonicalEd25519Identity(publicKey) ||
+      !canonicalSecretKey.test(secretKey)
+    ) {
+      if (storedEd) {
+        publicKey = storedEdPublicKey;
+        secretKey = storedEdSecretKey;
       } else {
-        const k = await newKeyPair();
-        publicKey = uint8ArrayToHex(k.publicKey);
-        secretKey = uint8ArrayToHex(k.secretKey);
-
-        api.dispatch(setKeyPair({ publicKey, secretKey }));
+        // One-way clean-v3 migration from the old plaintext localStorage row.
+        const legacyPublic = localStorage.getItem("publicKey") ?? "";
+        const legacySecret = localStorage.getItem("secretKey") ?? "";
+        if (
+          isCanonicalEd25519Identity(legacyPublic) &&
+          canonicalSecretKey.test(legacySecret)
+        ) {
+          publicKey = legacyPublic;
+          secretKey = legacySecret;
+          const secretBytes = hexToUint8Array(secretKey);
+          await setIdentityEd25519({
+            pub: toBuf(hexToUint8Array(publicKey)),
+            secret: toBuf(secretBytes),
+          });
+          secretBytes.fill(0);
+        } else {
+          const generated = await newKeyPair();
+          publicKey = uint8ArrayToHex(generated.publicKey);
+          secretKey = uint8ArrayToHex(generated.secretKey);
+          await setIdentityEd25519({
+            pub: toBuf(generated.publicKey),
+            secret: toBuf(generated.secretKey),
+          });
+          generated.secretKey.fill(0);
+        }
       }
-    } else {
-      publicKey = keyPair.publicKey;
+      api.dispatch(setKeyPair({ publicKey, secretKey }));
+    } else if (
+      !storedEd ||
+      storedEdPublicKey !== publicKey ||
+      storedEdSecretKey !== secretKey
+    ) {
+      const secretBytes = hexToUint8Array(secretKey);
+      await setIdentityEd25519({
+        pub: toBuf(hexToUint8Array(publicKey)),
+        secret: toBuf(secretBytes),
+      });
+      secretBytes.fill(0);
     }
+    assertCanonicalEd25519Identity(publicKey, "Self Ed25519 identity");
+    localStorage.removeItem("secretKey");
 
     // D2=B: ensure the dedicated X25519 identity exists — generated once, wrapped in
     // IndexedDB, cross-signed by the Ed25519 identity under a domain separator so
@@ -147,11 +201,6 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           x.publicKey,
           hexToUint8Array(edSecretHex),
         );
-        const toBuf = (u: Uint8Array): ArrayBuffer => {
-          const b = new ArrayBuffer(u.byteLength);
-          new Uint8Array(b).set(u);
-          return b;
-        };
         await setIdentityX25519({
           pub: toBuf(x.publicKey),
           secret: toBuf(x.secretKey),
@@ -195,7 +244,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         };
 
         socket.onmessage = async (message) => {
-          await handleWebSocketMessage(message, socket, api, peerConnections);
+          await handleWebSocketMessage(message, socket, api);
         };
 
         socket.onclose = () => {
@@ -305,7 +354,7 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
       isHexadecimal(keyPair.signature) &&
       keyPair.signature.length === 128 &&
       keyPair.challenge.length === 64 &&
-      peerPublicKey.length === 64
+      isCanonicalEd25519Identity(peerPublicKey)
     ) {
       api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
       api.dispatch(setChannel({ roomId, label: "main", peerId }));
@@ -319,6 +368,7 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
             fromPeerId: keyPair.peerId,
             toPeerId: peerId,
             labels: ["main"],
+            protocolVersion: PROTOCOL_VERSION,
           } as WebSocketMessagePeerConnectionRequest),
         );
       });

@@ -12,6 +12,7 @@ import { setConnectingToPeers, setIceServers } from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
+import { PROTOCOL_VERSION } from "../utils/constants";
 
 import type { State } from "../store";
 import type {
@@ -34,7 +35,9 @@ keyPairListenerMiddleware.startListening({
 
       if (publicKey.length === 64 && secretKey.length === 128) {
         localStorage.setItem("publicKey", action.payload.publicKey);
-        localStorage.setItem("secretKey", action.payload.secretKey);
+        // Clean v3 migration: the secret is wrapped in IndexedDB by the
+        // signaling bootstrap and remains memory-only in Redux.
+        localStorage.removeItem("secretKey");
       }
     } else if (setReconnectData.match(action)) {
       const {
@@ -107,6 +110,7 @@ keyPairListenerMiddleware.startListening({
                 type: "room",
                 fromPeerId: keyPair.peerId,
                 roomUrl: commonState.currentRoomUrl,
+                protocolVersion: PROTOCOL_VERSION,
               } as WebSocketMessageRoomIdRequest,
             }),
           );
@@ -133,6 +137,7 @@ keyPairListenerMiddleware.startListening({
               fromPeerId: peerId,
               challenge,
               signature,
+              protocolVersion: PROTOCOL_VERSION,
             } as WebSocketMessageChallengeResponse,
           }),
         );
@@ -189,6 +194,7 @@ keyPairListenerMiddleware.startListening({
                   type: "room",
                   fromPeerId: keyPair.peerId,
                   roomUrl: commonState.currentRoomUrl,
+                  protocolVersion: PROTOCOL_VERSION,
                 } as WebSocketMessageRoomIdRequest,
               }),
             );
@@ -203,6 +209,7 @@ keyPairListenerMiddleware.startListening({
                 type: "room",
                 fromPeerId: keyPair.peerId,
                 roomUrl: commonState.currentRoomUrl,
+                protocolVersion: PROTOCOL_VERSION,
               } as WebSocketMessageRoomIdRequest,
             }),
           );
@@ -213,7 +220,7 @@ keyPairListenerMiddleware.startListening({
       localStorage.setItem("peerId", "");
       localStorage.setItem("challengeId", "");
       localStorage.setItem("publicKey", "");
-      localStorage.setItem("secretKey", "");
+      localStorage.removeItem("secretKey");
       localStorage.setItem("challenge", "");
       localStorage.setItem("signature", "");
     }

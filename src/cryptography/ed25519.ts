@@ -138,6 +138,10 @@ export const keyPairFromSecretKey = async (
   secretKey: Uint8Array,
   module?: LibCrypto,
 ): Promise<SignKeyPair> => {
+  if (secretKey.length !== crypto_sign_ed25519_SECRETKEYBYTES)
+    throw new Error(
+      `Ed25519 secret key must be ${String(crypto_sign_ed25519_SECRETKEYBYTES)} bytes`,
+    );
   const wasmMemory = module?.wasmMemory ?? memory.keyPairFromSecretKeyMemory();
 
   // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
@@ -158,30 +162,20 @@ export const keyPairFromSecretKey = async (
   );
   sk.set(secretKey);
 
-  const result = cryptoModule._keypair_from_secret_key(
-    pk.byteOffset,
-    sk.byteOffset,
-  );
-
-  cryptoModule._free(ptr2);
-
-  switch (result) {
-    case 0: {
-      const keyPair = {
-        publicKey: Uint8Array.from(pk),
-        secretKey,
-      };
-
-      cryptoModule._free(ptr1);
-
-      return keyPair;
-    }
-
-    default: {
-      cryptoModule._free(ptr1);
-
-      throw new Error("An unexpected error occured.");
-    }
+  try {
+    const result = cryptoModule._keypair_from_secret_key(
+      pk.byteOffset,
+      sk.byteOffset,
+    );
+    if (result !== 0)
+      throw new Error("Could not derive Ed25519 public key");
+    return {
+      publicKey: Uint8Array.from(pk),
+      secretKey,
+    };
+  } finally {
+    cryptoModule._free(ptr1);
+    zeroFree(cryptoModule, sk);
   }
 };
 
@@ -194,6 +188,10 @@ export const sign = async (
   secretKey: Uint8Array,
   module?: LibCrypto,
 ): Promise<Uint8Array> => {
+  if (secretKey.length !== crypto_sign_ed25519_SECRETKEYBYTES)
+    throw new Error(
+      `Ed25519 secret key must be ${String(crypto_sign_ed25519_SECRETKEYBYTES)} bytes`,
+    );
   const messageLen = message.length;
 
   const wasmMemory = module ? module.wasmMemory : memory.signMemory(messageLen);
@@ -201,7 +199,9 @@ export const sign = async (
   // const cryptoModule = module ?? (await libcrypto({ wasmMemory }));
   const cryptoModule = module ?? (await wasmLoader(wasmMemory));
 
-  const ptr1 = cryptoModule._malloc(messageLen * Uint8Array.BYTES_PER_ELEMENT);
+  const ptr1 = cryptoModule._malloc(
+    Math.max(messageLen * Uint8Array.BYTES_PER_ELEMENT, 1),
+  );
   const dataArray = new Uint8Array(
     wasmMemory.buffer,
     ptr1,
@@ -224,20 +224,20 @@ export const sign = async (
   );
   sk.set(secretKey);
 
-  cryptoModule._sign(
-    messageLen,
-    dataArray.byteOffset,
-    sk.byteOffset,
-    signature.byteOffset,
-  );
-
-  const sig = Uint8Array.from([...signature]);
-
-  cryptoModule._free(ptr1);
-  cryptoModule._free(ptr2);
-  cryptoModule._free(ptr3);
-
-  return sig;
+  try {
+    const result = cryptoModule._sign(
+      messageLen,
+      dataArray.byteOffset,
+      sk.byteOffset,
+      signature.byteOffset,
+    );
+    if (result !== 0) throw new Error("Could not sign with Ed25519");
+    return Uint8Array.from(signature);
+  } finally {
+    cryptoModule._free(ptr1);
+    cryptoModule._free(ptr2);
+    zeroFree(cryptoModule, sk);
+  }
 };
 
 export const verify = async (

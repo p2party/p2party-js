@@ -1,9 +1,8 @@
 #ifndef utils_H
 #define utils_H
 
-#include "chacha20poly1305.h"
-#include "ed25519.h"
 #include "merkle.h"
+#include "../../libsodium/src/libsodium/include/sodium/crypto_aead_chacha20poly1305.h"
 
 const unsigned int MESSAGE_LEN = 64 * 1024;
 const unsigned int NAME_LEN = 256;
@@ -21,27 +20,12 @@ const unsigned int PROOF_LEN
       48
           * (crypto_hash_sha512_BYTES
              + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-const unsigned int IMPORTANT_DATA_LEN
-    = crypto_sign_ed25519_PUBLICKEYBYTES + // ephemeral pk
-      crypto_sign_ed25519_BYTES +          // pk signed with identity sk
-      METADATA_LEN +                       // fixed
-      PROOF_LEN +                          // Merkle proof max len of 3kb
-      crypto_aead_chacha20poly1305_ietf_NPUBBYTES + // Encrypted message nonce
-      crypto_aead_chacha20poly1305_ietf_ABYTES; // Encrypted message auth tag
-const unsigned int CHUNK_LEN = MESSAGE_LEN - IMPORTANT_DATA_LEN;
-
-/* Per-chunk sender authentication signs a domain-separated transcript
- * (DOMAIN || merkle_root || ephemeral_pk) instead of the bare ephemeral public
- * key. Signing a context-free value let a signature harvested from the
- * raw-nonce server challenge oracle be replayed as chunk auth (message
- * forgery); binding to a distinct domain + the message root makes the two
- * signature domains incompatible. Defined as macros so they are usable for
- * fixed-size array bounds (no VLA). */
-#define CHUNK_AUTH_DOMAIN "p2party-chunk-auth-v1"
-#define CHUNK_AUTH_DOMAIN_LEN 21U /* strlen(CHUNK_AUTH_DOMAIN) */
-#define CHUNK_AUTH_TRANSCRIPT_LEN                                             \
-  (CHUNK_AUTH_DOMAIN_LEN + crypto_hash_sha512_BYTES                          \
-   + crypto_sign_ed25519_PUBLICKEYBYTES)
+/* Frozen v3 authenticated-plaintext profile. Byte-match
+ * CHUNK_PLAINTEXT_LEN in src/utils/constants.ts. The 62-byte ratchet header and
+ * 16-byte AEAD tag produce a uniform 65,490-byte wire cell. */
+#define CHUNK_PLAINTEXT_LEN 65412U
+const unsigned int DECRYPTED_LEN = CHUNK_PLAINTEXT_LEN;
+const unsigned int CHUNK_LEN = DECRYPTED_LEN - METADATA_LEN - PROOF_LEN;
 
 /* protocol-v3 wire framing. Byte-matched to src/utils/constants.ts
  * (FRAME_TYPE_*, PQ_TAG_LEN). A mismatch mis-routes / mis-slices frames
@@ -51,20 +35,6 @@ const unsigned int CHUNK_LEN = MESSAGE_LEN - IMPORTANT_DATA_LEN;
 #define FRAME_TYPE_CHUNK 2U
 #define FRAME_TYPE_RECEIPT 3U
 #define PQ_TAG_LEN 1U
-
-const unsigned int DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
-const unsigned int ENCRYPTED_LEN
-    = DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_NPUBBYTES
-      +                                         // Encrypted message nonce
-      crypto_aead_chacha20poly1305_ietf_ABYTES; // Encrypted message auth tag
-// const unsigned int ENCRYPTED_LEN = MESSAGE_LEN
-//                                    - crypto_sign_ed25519_PUBLICKEYBYTES
-//                                    - crypto_sign_ed25519_BYTES;
-// const unsigned int DECRYPTED_LEN = ENCRYPTED_LEN
-//                                    -
-//                                    crypto_aead_chacha20poly1305_ietf_NPUBBYTES
-//                                    -
-//                                    crypto_aead_chacha20poly1305_ietf_ABYTES;
 
 typedef struct
 {
@@ -109,12 +79,6 @@ int serialize_metadata(uint8_t out[METADATA_LEN], uint64_t schemaVersion,
                        uint64_t chunkIndex);
 
 Metadata deserialize_metadata(const uint8_t in[METADATA_LEN]);
-
-int receive_message(
-    uint8_t decrypted[DECRYPTED_LEN], const uint8_t message[MESSAGE_LEN],
-    const uint8_t merkle_root[crypto_hash_sha512_BYTES],
-    const uint8_t sender_public_key[crypto_sign_ed25519_PUBLICKEYBYTES],
-    const uint8_t receiver_secret_key[crypto_sign_ed25519_SECRETKEYBYTES]);
 
 /* Streaming SHA-512 (see utils.c) — the state is a heap crypto_hash_sha512_state
  * (208 bytes) allocated by JS. Plain SHA-512, no domain separation. */

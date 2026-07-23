@@ -23,12 +23,19 @@ import type { LibCrypto } from "./libcrypto";
 export const hashFileStreaming = async (
   file: File,
   module: LibCrypto,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> => {
+  const throwIfAborted = (): void => {
+    if (!signal?.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    throw new Error("Message transfer cancelled");
+  };
   const statePtr = module._malloc(crypto_hash_sha512_STATEBYTES);
   const bufPtr = module._malloc(HASH_WASM_CHUNK_BYTES);
   const outPtr = module._malloc(crypto_hash_sha512_BYTES);
 
   try {
+    throwIfAborted();
     if (module._sha512_init(statePtr) !== 0)
       throw new Error("sha512_init failed");
 
@@ -41,12 +48,15 @@ export const hashFileStreaming = async (
     );
 
     for (let offset = 0; offset < file.size; offset += HASH_WINDOW_BYTES) {
+      throwIfAborted();
       const end = Math.min(offset + HASH_WINDOW_BYTES, file.size);
       const window = new Uint8Array(
         await file.slice(offset, end).arrayBuffer(),
       );
+      throwIfAborted();
 
       for (let s = 0; s < window.length; s += HASH_WASM_CHUNK_BYTES) {
+        throwIfAborted();
         const n = Math.min(HASH_WASM_CHUNK_BYTES, window.length - s);
         bufView.set(window.subarray(s, s + n), 0);
         if (module._sha512_update(statePtr, bufPtr, n) !== 0)
@@ -54,6 +64,7 @@ export const hashFileStreaming = async (
       }
     }
 
+    throwIfAborted();
     if (module._sha512_final(statePtr, outPtr) !== 0)
       throw new Error("sha512_final failed");
 

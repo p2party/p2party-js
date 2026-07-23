@@ -1,18 +1,26 @@
-import { deserializeMetadata } from "../utils/metadata";
+import { assertMetadataV1, deserializeMetadata } from "../utils/metadata";
 import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { isStorableChunkRange } from "../utils/chunkBounds";
+import { createChunkReceiptToken } from "../utils/receiptToken";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
-import { decryptMessageChunk, messageCacheKey } from "./messageChunkCrypto";
+import { messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
-import { persistRatchetSession } from "./ratchetPersist";
+import {
+  decryptMessageChunkDurably,
+  forgetReceiveMessageKeyDurably,
+} from "./ratchetPersist";
 
-import { getDBMessageData, setDBChunk, storeReceiveChunk } from "../db/api";
+import { storeReceiveChunk as persistReceiveChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
+import type {
+  ReceiveChunk,
+  ReceiveChunkStoreResult,
+} from "../db/types";
 
 export interface ReceiveMessageResult {
   date: Date;
@@ -23,6 +31,7 @@ export interface ReceiveMessageResult {
   totalSize: number;
   messageType: number;
   filename: string;
+  /** 64-byte root/index/leaf-bound receipt token (legacy field name). */
   chunkHash: Uint8Array;
   messageHash: Uint8Array;
 }
@@ -43,9 +52,33 @@ const dropped = (): ReceiveMessageResult => ({
   messageHash: new Uint8Array(),
 });
 
+type ReceiveChunkStore = (
+  chunk: ReceiveChunk,
+) => Promise<ReceiveChunkStoreResult>;
+
+/**
+ * Worker storage is the durability boundary for a receipt. A failed write must
+ * look exactly like a decoy/drop to the caller, and the owned real-byte copy is
+ * erased after postMessage has cloned it (or after an injected failure).
+ */
+export const storeReceiveChunkFailClosed = async (
+  chunk: Omit<ReceiveChunk, "data">,
+  realChunk: Uint8Array,
+  store: ReceiveChunkStore = persistReceiveChunk,
+): Promise<ReceiveChunkStoreResult | null> => {
+  try {
+    return await store({ ...chunk, data: realChunk.buffer as ArrayBuffer });
+  } catch (error) {
+    console.error("Could not durably store received chunk", error);
+    return null;
+  } finally {
+    realChunk.fill(0);
+  }
+};
+
 // ── protocol-v3 receive (Stage-5 task 3) ─────────────────────────────────────────
 // Decrypt one inbound v3 CHUNK frame off the seeded Double Ratchet (replacing the
-// box `_receive_message` path), verify its Merkle proof, and store the real bytes.
+// authenticated v3 receive path), verify its Merkle proof, and store real bytes.
 //
 // Crypto: `decryptMessageChunk` derives the per-MESSAGE key off the ratchet (one
 // step per message, cached per `(dhPub, N)`; clone-rollback so a replayed header
@@ -59,10 +92,13 @@ const dropped = (): ReceiveMessageResult => ({
 export const handleReceiveMessage = async (
   frame: Uint8Array,
   roomId: string,
+  channelLabel: string,
   epc: IRTCPeerConnection,
   merkleRoot: Uint8Array,
   module: LibCrypto,
+  signal?: AbortSignal,
 ): Promise<ReceiveMessageResult> => {
+  if (signal?.aborted) return dropped();
   if (!epc.ratchetState) {
     // Ratchet not established yet (should not happen: the queue awaits the gate
     // before draining) — drop rather than mis-decrypt.
@@ -82,31 +118,25 @@ export const handleReceiveMessage = async (
     return dropped();
   }
 
-  // 1) The ENTIRE receive crypto in one C call: derive the per-message key off the
-  //    ratchet (clone-rollback), then `_receive_message_with_key` decrypts, hashes
-  //    the leaf, verifies the Merkle proof, and writes the receipt — all libsodium.
+  // 1) Derive/decrypt against a staged clone, then persist and adopt the
+  //    authenticated successor before exposing any plaintext. The per-edge lock
+  //    also serializes concurrent send/receive ratchet transitions.
   let decrypted: Uint8Array | null;
   let ok: boolean;
-  let stateAdvanced: boolean;
   try {
-    const d = decryptMessageChunk(epc.ratchetState, frame, cache, merkleRoot, module);
+    const d = await decryptMessageChunkDurably(
+      epc,
+      roomId,
+      frame,
+      cache,
+      merkleRoot,
+      module,
+    );
     decrypted = d.decrypted;
     ok = d.ok;
-    stateAdvanced = d.stateAdvanced;
-  } catch {
-    console.error("Could not decrypt message");
+  } catch (error) {
+    console.error("Could not durably decrypt message", error);
     return dropped();
-  }
-
-  // 2) Persist the ratchet as soon as it advances (first-arriving chunk whose AEAD
-  //    authenticated), so a crash after receipt can't replay the DH step — even if
-  //    the chunk is then dropped for a bad Merkle proof.
-  if (stateAdvanced) {
-    try {
-      await persistRatchetSession(epc, roomId);
-    } catch (error) {
-      console.error(error);
-    }
   }
 
   // Anti-DoS backstop: a completing message evicts its own key below, but a peer
@@ -118,149 +148,139 @@ export const handleReceiveMessage = async (
       if (cache.size <= MESSAGE_KEY_CACHE_MAX) break;
       cache.get(k)?.fill(0);
       cache.delete(k);
+      if (epc.messageKeyByMerkleRoot) {
+        for (const [root, mappedKey] of epc.messageKeyByMerkleRoot) {
+          if (mappedKey === k) epc.messageKeyByMerkleRoot.delete(root);
+        }
+      }
     }
   }
 
-  // 3) A drop (AEAD auth OR Merkle proof failed inside the C call, or a stale-chain
+  // 2) A drop (AEAD auth OR Merkle proof failed inside the C call, or a stale-chain
   //    replay) → emit a decoy receipt, don't store.
   if (!ok || !decrypted) {
     console.error("Could not decrypt or verify message");
     return dropped();
   }
 
-  // 4) Split the C output: metadata ‖ receiptLeaf ‖ chunk. The C wrote the leaf
-  //    hash SHA-512(0x00 ‖ chunk) over the (now-consumed) proof region — that IS
-  //    the read-receipt token, so no second hash is computed here.
-  const metadataArray = decrypted.slice(0, METADATA_LEN);
-  const chunkHash = decrypted.slice(
-    METADATA_LEN,
-    METADATA_LEN + crypto_hash_sha512_BYTES,
-  );
-  const chunk = decrypted.slice(METADATA_LEN + PROOF_LEN);
-  const metadata = deserializeMetadata(metadataArray);
-
-  const realChunk = chunk.slice(
-    metadata.chunkStartIndex,
-    metadata.chunkEndIndex,
-  );
-
-  const chunkSize =
-    metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize
-      ? 0
-      : metadata.chunkEndIndex - metadata.chunkStartIndex > MESSAGE_LEN
-        ? 0
-        : metadata.chunkEndIndex - metadata.chunkStartIndex;
-
-  const evict = () => {
-    if (cacheKey) {
-      cache.get(cacheKey)?.fill(0);
-      cache.delete(cacheKey);
-    }
-  };
-
-  if (chunkSize === 0)
-    return {
-      date: metadata.date,
-      chunkIndex: -1,
-      chunkSize: 0,
-      receivedFullSize: false,
-      chunkAlreadyExists: true,
-      totalSize: metadata.totalSize,
-      messageType: metadata.messageType,
-      filename: metadata.name,
-      chunkHash,
-      messageHash: metadata.hash,
-    };
-
-  // The real-data offsets come from attacker-controllable metadata; reject any
-  // that would slice outside the chunk or are inverted, so a malicious sender
-  // cannot store the wrong bytes and corrupt reassembly.
-  if (
-    !isStorableChunkRange(
-      metadata.chunkStartIndex,
-      metadata.chunkEndIndex,
-      chunk.length,
-    )
-  )
-    return {
-      date: metadata.date,
-      chunkIndex: -1,
-      chunkSize: 0,
-      receivedFullSize: false,
-      chunkAlreadyExists: true,
-      totalSize: metadata.totalSize,
-      messageType: metadata.messageType,
-      filename: metadata.name,
-      chunkHash,
-      messageHash: metadata.hash,
-    };
-
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
-  const messageExists = await getDBMessageData(merkleRootHex);
-
-  const alreadyHasEverything =
-    messageExists != undefined &&
-    messageExists.savedSize === messageExists.totalSize;
-
-  const messageRelevant =
-    !messageExists ||
-    messageExists.savedSize + chunkSize <= messageExists.totalSize;
-
-  const receivedFullSize =
-    alreadyHasEverything ||
-    chunkSize === metadata.totalSize ||
-    (messageExists?.savedSize !== undefined &&
-      messageExists.savedSize + chunkSize === messageExists.totalSize);
-
-  if (receivedFullSize) evict();
-
-  if (!messageRelevant)
-    return {
-      date: metadata.date,
-      chunkIndex: -1,
-      chunkSize,
-      receivedFullSize,
-      chunkAlreadyExists: true,
-      totalSize: metadata.totalSize,
-      messageType: metadata.messageType,
-      filename: metadata.name,
-      chunkHash,
-      messageHash: metadata.hash,
-    };
-
-  const mimeType = getMimeType(metadata.messageType);
+  epc.messageKeyByMerkleRoot ??= new Map<string, string>();
+  epc.messageKeyByMerkleRoot.set(merkleRootHex, cacheKey);
 
   try {
-    let stored: boolean;
-    if (metadata.messageType === MessageType.Text) {
-      // Text is small and read back via Blob.text(), so keep its bytes in
-      // IndexedDB (no OPFS file). setDBChunk throws on a duplicate key.
-      await setDBChunk({
+    // Cancellation waits for this handler to quiesce before retiring the
+    // mapped receive key. Stop before any plaintext reaches storage.
+    if (signal?.aborted) return dropped();
+
+    // 3) Split the C output: metadata ‖ receiptLeaf ‖ chunk. The C wrote the
+    //    leaf hash SHA-512(0x00 ‖ chunk) over the proof region; that is the
+    //    receipt token, so no second hash is computed here.
+    const metadataArray = decrypted.subarray(0, METADATA_LEN);
+    const leafHash = decrypted.slice(
+      METADATA_LEN,
+      METADATA_LEN + crypto_hash_sha512_BYTES,
+    );
+    const chunk = decrypted.subarray(METADATA_LEN + PROOF_LEN);
+    const metadata = deserializeMetadata(metadataArray);
+    assertMetadataV1(metadata);
+
+    const chunkSize =
+      metadata.chunkEndIndex - metadata.chunkStartIndex > metadata.totalSize
+        ? 0
+        : metadata.chunkEndIndex - metadata.chunkStartIndex > MESSAGE_LEN
+          ? 0
+          : metadata.chunkEndIndex - metadata.chunkStartIndex;
+
+    const rejectedResult = (): ReceiveMessageResult => ({
+      date: metadata.date,
+      chunkIndex: -1,
+      chunkSize: 0,
+      receivedFullSize: false,
+      chunkAlreadyExists: true,
+      totalSize: metadata.totalSize,
+      messageType: metadata.messageType,
+      filename: metadata.name,
+      chunkHash: leafHash,
+      messageHash: metadata.hash,
+    });
+
+    if (chunkSize === 0) return rejectedResult();
+
+    // The real-data offsets come from attacker-controllable metadata; reject
+    // anything outside the padded chunk or inverted.
+    if (
+      !isStorableChunkRange(
+        metadata.chunkStartIndex,
+        metadata.chunkEndIndex,
+        chunk.length,
+      )
+    )
+      return rejectedResult();
+
+    const receiptToken = await createChunkReceiptToken(
+      merkleRoot,
+      metadata.chunkIndex,
+      leafHash,
+    );
+    if (signal?.aborted) {
+      receiptToken.fill(0);
+      return dropped();
+    }
+    const mimeType = getMimeType(metadata.messageType);
+    // Create this owned plaintext copy only once all fallible preprocessing is
+    // done; storeReceiveChunkFailClosed assumes ownership and always wipes it.
+    const realChunk = chunk.slice(
+      metadata.chunkStartIndex,
+      metadata.chunkEndIndex,
+    );
+
+    const progress = await storeReceiveChunkFailClosed(
+      {
+        schemaVersion: metadata.schemaVersion,
+        roomId,
+        fromPeerId: epc.withPeerId,
+        channelLabel,
+        timestamp: metadata.date.getTime(),
         merkleRoot: merkleRootHex,
         hash: uint8ArrayToHex(metadata.hash),
-        chunkIndex: metadata.chunkIndex,
-        data: realChunk.buffer,
-        mimeType,
-        realLen: chunkSize,
-        // Persist the exact receipt token so it can be re-emitted verbatim on
-        // reconnect (the padded chunk it was hashed over is discarded).
-        leafHash: uint8ArrayToHex(chunkHash),
-      });
-      stored = true;
-    } else {
-      // FILE: write the real bytes straight into the message's pre-sized OPFS
-      // file at chunkIndex*uniformSize; IndexedDB keeps only the leaf-hash
-      // have-set (bytesless). Returns false if already stored.
-      stored = await storeReceiveChunk({
-        merkleRoot: merkleRootHex,
-        hash: uint8ArrayToHex(metadata.hash),
+        filename: metadata.name,
+        messageType: metadata.messageType,
         chunkIndex: metadata.chunkIndex,
         mimeType,
-        leafHash: uint8ArrayToHex(chunkHash),
+        // Keep the leaf on the receiver so reconnect can derive the same scoped
+        // token without retaining the padded body.
+        leafHash: uint8ArrayToHex(leafHash),
         realLen: chunkSize,
         totalSize: metadata.totalSize,
-        data: realChunk.buffer,
-      });
+        storage:
+          metadata.messageType === MessageType.Text ? "indexeddb" : "opfs",
+      },
+      realChunk,
+    );
+    if (!progress) {
+      receiptToken.fill(0);
+      return dropped();
+    }
+    if (signal?.aborted) {
+      // The worker write may already have crossed its durability boundary.
+      // cancelReceiveTransfer queues a locked delete after this handler exits.
+      receiptToken.fill(0);
+      return dropped();
+    }
+
+    // `complete` comes from the same transaction that inserted/deduplicated
+    // the chunk and updated messageData. A duplicate of an incomplete message
+    // remains incomplete; a duplicate after a crash may safely re-emit the
+    // idempotent terminal receipt for an already-durable complete message.
+    const receivedFullSize = progress.complete;
+    if (receivedFullSize && cacheKey) {
+      await forgetReceiveMessageKeyDurably(
+        epc,
+        roomId,
+        cache,
+        cacheKey,
+      );
+      epc.messageKeyByMerkleRoot.delete(merkleRootHex);
     }
 
     return {
@@ -268,25 +288,19 @@ export const handleReceiveMessage = async (
       chunkIndex: metadata.chunkIndex,
       chunkSize,
       receivedFullSize,
-      chunkAlreadyExists: !stored,
+      chunkAlreadyExists: !progress.stored,
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,
-      chunkHash,
+      chunkHash: receiptToken,
       messageHash: metadata.hash,
     };
-  } catch {
-    return {
-      date: metadata.date,
-      chunkIndex: metadata.chunkIndex,
-      chunkSize,
-      receivedFullSize,
-      chunkAlreadyExists: true,
-      totalSize: metadata.totalSize,
-      messageType: metadata.messageType,
-      filename: metadata.name,
-      chunkHash,
-      messageHash: metadata.hash,
-    };
+  } catch (error) {
+    console.error("Could not parse or store decrypted message", error);
+    return dropped();
+  } finally {
+    // `receiveWithKey` returned an owned plaintext copy. All returned metadata
+    // and receipt fields are independent slices, so erase the padded body now.
+    decrypted.fill(0);
   }
 };

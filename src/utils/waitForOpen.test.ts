@@ -25,4 +25,13 @@ describe("waitForOpen", () => {
     const dc = { readyState: "closed" };
     expect(await waitForOpen(dc, 120, 20)).toBe(false);
   });
+
+  test("returns promptly when the logical transfer is aborted", async () => {
+    const dc = { readyState: "connecting" };
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 30);
+    const start = Date.now();
+    expect(await waitForOpen(dc, 2000, 10, controller.signal)).toBe(false);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
 });

@@ -1,8 +1,9 @@
 import { handleSendMessage } from "../../handlers/handleSendMessage";
 
 import { wasmLoader } from "../../cryptography/wasmLoader";
-
-import { AsyncMutex } from "../../utils/mutex";
+import cryptoMemory from "../../cryptography/memory";
+import { CHUNK_LEN } from "../../utils/constants";
+import { planMessageChunkCount } from "../../utils/splitToChunks";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -10,34 +11,29 @@ import type {
   IRTCPeerConnection,
   RTCSendMessageParams,
 } from "./interfaces";
+import type { SendMessageResult } from "../../handlers/handleSendMessage";
 
 export interface RTCChannelMessageParamsExtension extends RTCSendMessageParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
-  encryptionWasmMemory: WebAssembly.Memory;
-  merkleWasmMemory: WebAssembly.Memory;
 }
 
 /**
- * Serializes access to the shared encryptionWasmMemory and
- * merkleWasmMemory. Without this, concurrent sendMessage mutations
- * would interleave _malloc / _free / crypto calls on the same
- * WebAssembly linear memory, risking buffer corruption.
+ * Every logical send owns independent fixed WASM memories. Large-file hashing,
+ * per-message reconciliation, and reconnect waits therefore never hold a
+ * process-wide crypto mutex or block sends in another room.
  */
-const sendMutex = new AsyncMutex();
-
 const webrtcMessageQuery: BaseQueryFn<
   RTCChannelMessageParamsExtension,
-  undefined
+  SendMessageResult | undefined
 > = async (
   {
     data,
+    transferId,
     label,
     roomId,
     peerConnections,
     dataChannels,
-    encryptionWasmMemory,
-    merkleWasmMemory,
     minChunks,
     chunkSize,
     percentageFilledChunk,
@@ -45,27 +41,42 @@ const webrtcMessageQuery: BaseQueryFn<
   },
   api,
 ) => {
-  return sendMutex.runExclusive(async () => {
-    const encryptionModule = await wasmLoader(encryptionWasmMemory);
-    const merkleModule = await wasmLoader(merkleWasmMemory);
+  const effectiveMinChunks = minChunks ?? 1;
+  const effectiveChunkSize = chunkSize ?? CHUNK_LEN;
+  const effectivePercentageFilledChunk = percentageFilledChunk ?? 0.9;
+  const totalSize =
+    typeof data === "string" ? new TextEncoder().encode(data).length : data.size;
+  const totalChunks = planMessageChunkCount(
+    totalSize,
+    effectiveMinChunks,
+    effectiveChunkSize,
+    effectivePercentageFilledChunk,
+  );
+  const encryptionModule = await wasmLoader(cryptoMemory.protocolV3Memory());
+  const merkleModule = await wasmLoader(
+    cryptoMemory.getMerkleProofMemory(totalChunks),
+  );
 
-    await handleSendMessage(
-      data,
-      api,
-      label,
-      roomId,
-      peerConnections,
-      dataChannels,
-      encryptionModule,
-      merkleModule,
-      minChunks,
-      chunkSize,
-      percentageFilledChunk,
-      metadataSchemaVersion,
-    );
+  const result = await handleSendMessage(
+    data,
+    api,
+    label,
+    roomId,
+    // Keep the live registry reference: reconnect/resume must observe a
+    // replacement PC pushed after this send began. The handler scopes every
+    // lookup by (roomId, peerId).
+    peerConnections,
+    dataChannels,
+    encryptionModule,
+    merkleModule,
+    transferId,
+    effectiveMinChunks,
+    effectiveChunkSize,
+    effectivePercentageFilledChunk,
+    metadataSchemaVersion,
+  );
 
-    return { data: undefined };
-  });
+  return { data: result };
 };
 
 export default webrtcMessageQuery;

@@ -1,13 +1,13 @@
 import {
-  getEncryptedLen,
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
-  crypto_box_poly1305_AUTHTAGBYTES,
+  crypto_aead_chacha20poly1305_ietf_ABYTES,
   crypto_hash_sha512_BYTES,
-  crypto_sign_ed25519_BYTES,
-  crypto_sign_ed25519_PUBLICKEYBYTES,
 } from "../cryptography/interfaces";
 
 export const MESSAGE_LEN = 64 * 1024;
+// Protocol-wide application payload ceiling. This is enforced before outbound
+// chunk planning and again after authenticated metadata is decrypted / inside
+// the DB worker, before OPFS can pre-size a receive file.
+export const MAX_MESSAGE_SIZE = 10 * 1024 * 1024 * 1024; // 10 GiB
 // High watermark for the data-channel send buffer (16 frames = 1 MiB). The old
 // value of 2 frames meant ordinary congestion immediately spilled full 64KiB
 // frames through the signaling server (which then sees sender/receiver, size,
@@ -30,32 +30,20 @@ export const METADATA_LEN =
 export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-// Box-scheme frame header (ephemeral pk ‖ identity-signed ephemeral pk) = 96B.
-// RETAINED here ONLY as the sizing basis for DECRYPTED_LEN / CHUNK_LEN so the
-// chunk PLAINTEXT framing (metadata‖proof‖chunk), the Merkle leaf sizing, and the
-// receive-time OPFS write offsets stay byte-identical across the v3 ratchet swap.
-// The v3 ON-WIRE header is MESSAGE_START (62) — defined below, DECOUPLED from
-// this. Byte-matches C utils.h IMPORTANT_DATA_LEN (which likewise sizes from the
-// 96B box header while pake_ratchet.h MESSAGE_START=62 is the wire offset). See
-// docs/stage5-message-crypto-swap-design.md.
-export const BOX_MESSAGE_HEADER_LEN =
-  crypto_sign_ed25519_PUBLICKEYBYTES + // ephemeral pk
-  crypto_sign_ed25519_BYTES; // pk signed with identity sk
 export const CHUNK_START =
   METADATA_LEN + // fixed
   PROOF_LEN; // Merkle proof max len of 3kb
-export const MESSAGE_DATA_BEFORE_START_INDEX =
-  BOX_MESSAGE_HEADER_LEN +
-  CHUNK_START +
-  crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // Encrypted message nonce
-export const IMPORTANT_DATA_LEN =
-  MESSAGE_DATA_BEFORE_START_INDEX + crypto_box_poly1305_AUTHTAGBYTES; // Encrypted message auth tag
-export const CHUNK_LEN =
-  MESSAGE_LEN - // 64kb max message size on RTCDataChannel
-  // crypto_hash_sha512_BYTES - // merkle root of message
-  IMPORTANT_DATA_LEN;
-export const DECRYPTED_LEN = METADATA_LEN + PROOF_LEN + CHUNK_LEN;
-export const ENCRYPTED_LEN = getEncryptedLen(DECRYPTED_LEN);
+// The v3 profile freezes the authenticated plaintext cell at 65,412 bytes.
+// This retains the deployed v3 Merkle/OPFS geometry and yields a uniform 65,490
+// byte wire cell after the 62-byte ratchet header and 16-byte AEAD tag. Crypto
+// overhead consumes the cell budget rather than changing observer-visible size.
+export const CHUNK_PLAINTEXT_LEN = 65_412;
+export const CHUNK_LEN = CHUNK_PLAINTEXT_LEN - CHUNK_START;
+// Historical public send options require the configurable chunk payload to be
+// larger than the non-payload budget. Keep that product bound explicitly named;
+// it is not an on-wire box header.
+export const CHUNK_SIZE_FLOOR = MESSAGE_LEN - CHUNK_LEN;
+export const DECRYPTED_LEN = CHUNK_PLAINTEXT_LEN;
 
 // ── protocol-v3 wire framing (SSOT; byte-matched in cryptography/utils.h) ─────
 // Clean v3 break: every data-channel frame now begins with a 1-byte type tag so
@@ -67,19 +55,27 @@ export const FRAME_TYPE_LEN = 1;
 export const FRAME_TYPE_HANDSHAKE = 1;
 export const FRAME_TYPE_CHUNK = 2;
 export const FRAME_TYPE_RECEIPT = 3;
-// CPace channel-input transcript marker (algorithm/epoch; value 0 in v3). It
-// reserves transcript structure so a future hybrid KEM binds without a v4 wire
-// break — it is NOT the KEM ciphertext. See spec §5/§10.
+// Receipts are protocol frames, not bare SHA-512 values. Both ordinary
+// chunk acknowledgements and the terminal content-hash acknowledgement use
+// this exact tagged geometry.
+export const RECEIPT_TOKEN_LEN = crypto_hash_sha512_BYTES;
+export const WIRE_RECEIPT_FRAME_LEN =
+  FRAME_TYPE_LEN + RECEIPT_TOKEN_LEN; // 65
+// CPace/channel-input suite marker. 0x01 means the mandatory protocol-v3
+// classical-or-CPace + ML-KEM-768 hybrid bootstrap. It is transcript/KDF
+// context, not the KEM ciphertext and not a negotiation/fallback bit.
 export const PQ_TAG_LEN = 1;
-export const PQ_TAG = new Uint8Array(PQ_TAG_LEN); // [0]
+export const PQ_TAG = new Uint8Array([0x01]);
 
 // ── protocol-v3 CHUNK frame header (SSOT; byte-match in cryptography/utils.h when the
 // C receive path is cut over in Stage-5 task 2) ─────────────────────────────────────
 // A v3 message-chunk frame is:
 //   FRAME_TYPE_CHUNK(1) ‖ dhPub(32) ‖ N(8 BE) ‖ PN(8 BE) ‖ PQ_EPOCH(1) ‖ nonce(12) ‖ ciphertext
 // The ratchet header (dhPub, N, PN) is SHARED by every chunk of a message (one ratchet
-// step per message); the 12-byte nonce is fresh + random per chunk. PQ_EPOCH is 0 in v3
-// (reserved). Ciphertext begins at FRAME_TYPE_LEN + CHUNK_HEADER_LEN = 62 — the v3
+// step per message); the 12-byte nonce is fresh + random per chunk. PQ_EPOCH=0
+// truthfully names the bootstrap epoch established by the mandatory ML-KEM
+// handshake; periodic/sparse KEM epoch advancement is not implemented here.
+// Ciphertext begins at FRAME_TYPE_LEN + CHUNK_HEADER_LEN = 62 — the v3
 // replacement for the box scheme's MESSAGE_START=96 (the send/receive swap that relocates
 // MESSAGE_START is Stage-5 task 3; these constants are additive foundation). N/PN are the
 // ratchet counters, serialized 8-byte big-endian, guarded < 2^53.
@@ -107,16 +103,7 @@ export const MESSAGE_START = FRAME_TYPE_LEN + CHUNK_HEADER_LEN; // 62
 // the full MESSAGE_LEN = 65536; the v3 frame is 46 bytes shorter because the
 // ratchet header replaces the larger box header).
 export const WIRE_CHUNK_FRAME_LEN =
-  MESSAGE_START + DECRYPTED_LEN + crypto_box_poly1305_AUTHTAGBYTES; // 65490
-
-// Per-chunk sender authentication signs a domain-separated transcript
-// (DOMAIN || merkle_root || ephemeral_pk) rather than the bare ephemeral public
-// key, so a signature harvested from the raw-nonce server-challenge oracle
-// cannot be replayed as chunk auth. Must byte-match the C side
-// (CHUNK_AUTH_* in cryptography/utils.h).
-export const CHUNK_AUTH_DOMAIN_BYTES = new TextEncoder().encode(
-  "p2party-chunk-auth-v1",
-); // 21 bytes
+  MESSAGE_START + DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_ABYTES; // 65490
 
 // D2=B / SECURITY-1: domain separator for the Ed25519 cross-signature over the
 // dedicated X25519 identity pub. The cross-sig signs
@@ -124,33 +111,30 @@ export const CHUNK_AUTH_DOMAIN_BYTES = new TextEncoder().encode(
 // collide with the login-challenge signing oracle (handleChallenge signs a raw
 // 32-byte server-supplied nonce with the same Ed25519 identity key; a bare cross-sig
 // would be forgeable by sending a chosen X25519 pub as that challenge). Same
-// convention as CHUNK_AUTH_DOMAIN_BYTES above; TS-only (the cross-sig is
+// convention as the other p2party domain labels; TS-only (the cross-sig is
 // produced/verified entirely in TS via ed25519 sign/verify — no C-side use).
 export const IDENTITY_CROSS_SIGN_DOMAIN_BYTES = new TextEncoder().encode(
   "p2party-x25519-idsig-v1",
 ); // 23 bytes
-export const CHUNK_AUTH_TRANSCRIPT_LEN =
-  CHUNK_AUTH_DOMAIN_BYTES.length +
-  crypto_hash_sha512_BYTES + // merkle root
-  crypto_sign_ed25519_PUBLICKEYBYTES; // ephemeral pk
 
-// CPace (PAKE, protocol-v3) generator-derivation domain separator. The TS CPace
-// layer derives the session generator as
-//   G = ristretto255_from_hash( SHA512(lv_cat(CPACE_DOMAIN, PRS, sid, CI)) )
-// where lv_cat length-prefixes each field (IRTF draft-irtf-cfrg-cpace) so the
-// transcript encoding is injective. This label domain-separates the CPace
-// transcript from every other SHA-512 use in the codebase (the C-side
-// cpace_ristretto255_from_hash is a bare wrapper with no built-in DSI, so the
-// separation must live here). Same naming convention as CHUNK_AUTH_DOMAIN_BYTES
-// above.
-export const CPACE_DOMAIN = "p2party-cpace-v1";
+// Exact group DSIs for the draft-21 CPACE-RISTR255-SHA512 cipher suite. These
+// are standards constants, not p2party-local labels: changing either changes
+// the PAKE and forfeits the draft's test vectors/security analysis.
+export const CPACE_RISTRETTO255_DSI = "CPaceRistretto255";
+export const CPACE_RISTRETTO255_ISK_DSI = "CPaceRistretto255_ISK";
+
+// Persisted/snapshot provenance for the one protocol-v3 bootstrap suite. The
+// "3dh" name is deliberate: this is interactive triple-DH, not Signal's
+// asynchronous X3DH prekey protocol. PIN policy adds exact draft-21 CPace.
+export const RATCHET_ROOT_SUITE =
+  "hybrid-3dh-mlkem768-cpace21-v3" as const;
 
 // Double Ratchet KDF domain-separation labels (protocol-v3). These are the
 // `info` strings for the two HKDF-SHA512 chains of the ratchet, and are SSOT
 // constants that MUST byte-match any C-side kdf_rk/kdf_ck should one be added
 // (the ratchet state machine currently derives them in TS on the compiled
 // crypto_auth_hmacsha512 via hkdf.ts). Same "p2party-*-v1" convention as
-// CPACE_DOMAIN above.
+// CPace DSIs above.
 //   kdf_rk: (rootKey, DH(...)) -> (newRootKey ‖ chainKey)   [HKDF extract+expand]
 //   kdf_ck: chainKey           -> (nextChainKey, messageKey) [two labelled HMACs]
 export const KDF_RK_LABEL = "p2party-rk-v1";

@@ -4,7 +4,7 @@ import cryptoMemory from "./memory";
 import { wasmLoader } from "./wasmLoader";
 
 import { crypto_hash_sha512_BYTES } from "./interfaces";
-import { hashMerkleLeaf } from "../utils/leafHash";
+import { hashMerkleLeaf, hashMerkleLeafWasm } from "../utils/leafHash";
 
 import type { LibCrypto } from "./libcrypto";
 
@@ -366,7 +366,8 @@ export const verifyMerkleProof = async (
     ptr1,
     crypto_hash_sha512_BYTES,
   );
-  elementHash.set(await hashMerkleLeaf(item));
+  // Receive-side leaf hash in libsodium (C), not browser crypto.
+  elementHash.set(hashMerkleLeafWasm(item, cryptoModule));
 
   const ptr2 = cryptoModule._malloc(crypto_hash_sha512_BYTES);
   const rootArray = new Uint8Array(

@@ -5,7 +5,7 @@ import { isStorableChunkRange } from "../utils/chunkBounds";
 import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { verifyMerkleProof } from "../cryptography/merkle";
-import { hashMerkleLeaf } from "../utils/leafHash";
+import { hashMerkleLeafWasm } from "../utils/leafHash";
 
 import { decryptMessageChunk, messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
@@ -53,10 +53,12 @@ const dropped = (): ReceiveMessageResult => ({
 // per message, cached per `(dhPub, N)` on the edge; clone-rollback so a replayed
 // header can't desync the session) and AEAD-opens the chunk to the DECRYPTED_LEN
 // plaintext `metadata ‖ merkle-proof ‖ chunk`. When the ratchet advanced we persist
-// it. Merkle verification + the leaf/receipt hash then run in TS (verify_merkle_proof
-// + the 0x00-domain leaf hash) — byte-identical to what the C `receive_message`
-// used to do over the same plaintext. The verify-store-receipt tail below is verbatim
-// from the box path.
+// it. Every crypto primitive on this path runs in libsodium/C: the AEAD open
+// (`_decrypt_chachapoly_symmetric`), the Merkle proof walk (`_verify_merkle_proof`),
+// and the domain-separated leaf/receipt hash (`hashMerkleLeafWasm` → `_sha512_*`) —
+// byte-identical to what the C `receive_message` did over the same plaintext. Only
+// the frame parsing, ratchet-state bookkeeping, and storage are TS. The
+// verify-store-receipt tail below is verbatim from the box path.
 export const handleReceiveMessage = async (
   frame: Uint8Array,
   roomId: string,
@@ -154,9 +156,9 @@ export const handleReceiveMessage = async (
   }
 
   // The read-receipt token is the leaf hash (SHA-512(0x00 ‖ chunk)) — the same
-  // value the sender used as the Merkle leaf (splitToChunks). Computed here since
-  // the C used to write it over the consumed proof region.
-  const chunkHash = await hashMerkleLeaf(chunk);
+  // value the sender used as the Merkle leaf (splitToChunks). Computed in
+  // libsodium (C), matching the C `receive_message_with_key` receipt.
+  const chunkHash = hashMerkleLeafWasm(chunk, module);
 
   const realChunk = chunk.slice(
     metadata.chunkStartIndex,

@@ -42,6 +42,14 @@ export const crypto_scalarmult_curve25519_BYTES =
   32 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_scalarmult_curve25519_SCALARBYTES =
   32 * Uint8Array.BYTES_PER_ELEMENT;
+// ML-KEM-768 (FIPS 203). The deterministic WASM boundary takes caller-supplied
+// coins so entropy is sourced once, by WebCrypto, in the TypeScript layer.
+export const mlkem768_PUBLICKEYBYTES = 1184 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_SECRETKEYBYTES = 2400 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_CIPHERTEXTBYTES = 1088 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_BYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_KEYPAIRCOINBYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_ENCAPSCOINBYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
 
 export interface SignKeyPair {
   publicKey: Uint8Array;
@@ -87,4 +95,10 @@ export default {
   crypto_scalarmult_ristretto255_BYTES,
   crypto_scalarmult_curve25519_BYTES,
   crypto_scalarmult_curve25519_SCALARBYTES,
+  mlkem768_PUBLICKEYBYTES,
+  mlkem768_SECRETKEYBYTES,
+  mlkem768_CIPHERTEXTBYTES,
+  mlkem768_BYTES,
+  mlkem768_KEYPAIRCOINBYTES,
+  mlkem768_ENCAPSCOINBYTES,
 };

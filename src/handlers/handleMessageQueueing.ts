@@ -7,6 +7,7 @@ import {
   isCurrentRatchetGateLease,
 } from "./ratchetGate";
 import { sendReceiptFrame } from "./receiptFrame";
+import { queueScheduledReceipt } from "./coverTransfer";
 
 import { closeReceiveFile } from "../db/api";
 
@@ -359,9 +360,20 @@ const processMessage = async (
 
       if (signal?.aborted) return { receivedFullSize: false };
 
-      sendReceiveFrameReceipt(receiveResult, extChannel);
+      // Immediate mode acks each frame with a 65-byte receipt on its channel.
+      // Scheduled mode never uses immediate receipts: acknowledgement rides a
+      // cover slot instead (a terminal receipt on completion, below).
+      if (!epc?.coverRuntime) sendReceiveFrameReceipt(receiveResult, extChannel);
 
       const hashHex = uint8ArrayToHex(messageHash);
+
+      if (receivedFullSize) {
+        // Scheduled mode: confirm the whole message with ONE terminal receipt
+        // cover cell (token == transfer root) so the sender's send resolves.
+        // It substitutes into a reverse cover slot, never an immediate frame.
+        if (epc?.coverRuntime)
+          queueScheduledReceipt(epc, merkleRoot, merkleRoot);
+      }
 
       if (receivedFullSize) {
         // Flush + close the OPFS write handle before flipping the UI to 100% so

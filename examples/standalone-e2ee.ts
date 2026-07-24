@@ -149,6 +149,33 @@ const main = async () => {
   if (decoder.decode(restoredMessage) !== decoder.decode(afterRestore))
     throw new Error("restore round-trip mismatch");
 
+  // Protocol-v4 sparse post-quantum healing over the store-free control API.
+  // The persist-before-send contract: whenever a call returns a frame, the
+  // caller must serialize() before delivering it so a crash cannot fork the
+  // OFFER/ADVANCE/ACK sequence. Drive one exchange to reach epoch 1.
+  for (let index = 0; index < 64; index += 1)
+    await bob.decrypt(await restoredAlice.encrypt(encoder.encode(`m${index}`)));
+  const offer = await restoredAlice.prepareHealing();
+  if (offer.frame) {
+    await restoredAlice.serialize();
+    const advance = await bob.acceptControlFrame(offer.frame);
+    if (!advance.frame) throw new Error("expected ADVANCE");
+    await bob.serialize();
+    const ack = await restoredAlice.acceptControlFrame(advance.frame);
+    if (!ack.frame) throw new Error("expected ACK");
+    await restoredAlice.serialize();
+    await bob.acceptControlFrame(ack.frame);
+    if (restoredAlice.pqEpoch !== 1n || bob.pqEpoch !== 1n)
+      throw new Error("sparse-PQ healing did not reach epoch 1");
+    const healed = encoder.encode("post-quantum healed");
+    const healedRoundTrip = await bob.decrypt(
+      await restoredAlice.encrypt(healed),
+    );
+    if (decoder.decode(healedRoundTrip) !== decoder.decode(healed))
+      throw new Error("post-heal round-trip mismatch");
+    console.log("sparse-PQ healing reached epoch:", String(bob.pqEpoch));
+  }
+
   aliceIdentity.ed25519SecretKey.fill(0);
   aliceIdentity.x25519SecretKey.fill(0);
   bobIdentity.ed25519SecretKey.fill(0);

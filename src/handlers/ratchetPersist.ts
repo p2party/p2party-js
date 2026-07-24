@@ -201,6 +201,7 @@ export const persistAndActivateClaimedRatchetState = async (
           throw new AggregateError(
             [error, rollbackError],
             "Ratchet establishment failed and persisted-seed rollback failed",
+            { cause: rollbackError },
           );
         }
       }

@@ -266,7 +266,6 @@ const transportForPeer = (
       }
       if (inbox.queue.length > 0) return Promise.resolve(inbox.queue.shift()!);
       return new Promise((resolve, reject) => {
-        let timer: ReturnType<typeof setTimeout>;
         const waiter = {
           resolve: (value: Uint8Array): void => {
             clearTimeout(timer);
@@ -277,7 +276,7 @@ const transportForPeer = (
             reject(error);
           },
         };
-        timer = setTimeout(() => {
+        const timer = setTimeout(() => {
           const index = inbox.waiters.indexOf(waiter);
           if (index > -1) inbox.waiters.splice(index, 1);
           reject(new Error("Handshake step timed out"));

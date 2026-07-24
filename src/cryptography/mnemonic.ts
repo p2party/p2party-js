@@ -149,7 +149,6 @@ export const generateMnemonic = async (
 
   const bits = entropyBits + checksumBits;
 
-  // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
   const chunks = bits.match(/(.{1,11})/g) as RegExpMatchArray;
 
   // if (!chunks)
@@ -189,7 +188,6 @@ export const mnemonicToEntropy = async (mnemonic: string): Promise<boolean> => {
   const checksumBits = bits.slice(dividerIndex);
 
   // convert bits to entropy
-  // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
   const entropyBitsMatched = entropyBits.match(/(.{1,8})/g) as RegExpMatchArray;
 
   // if (!entropyBitsMatched) throw new Error("Invalid entropy bits.");

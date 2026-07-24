@@ -1,481 +1,375 @@
-# p2party-js
+# p2party
 
-[![Known Vulnerabilities](https://snyk.io/test/github/p2party/p2party-js/badge.svg?targetFile=package.json)](https://snyk.io/test/github/p2party/p2party-js?targetFile=package.json)
-<br>
-![NPM Version](https://img.shields.io/npm/v/p2party)
-![NPM License](https://img.shields.io/npm/l/p2party)
-[![code-style-prettier][code-style-prettier-image]][code-style-prettier-url]
-<br>
-![NPM Downloads](https://img.shields.io/npm/dw/p2party)
-[![](https://data.jsdelivr.com/v1/package/npm/p2party/badge)](https://www.jsdelivr.com/package/npm/p2party)
+Protocol-v3 end-to-end encryption and reliable file transfer over a WebRTC
+room mesh.
 
-[code-style-prettier-image]: https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square
-[code-style-prettier-url]: https://github.com/prettier/prettier
+[![npm](https://img.shields.io/npm/v/p2party)](https://www.npmjs.com/package/p2party)
+[![license](https://img.shields.io/npm/l/p2party)](LICENSE.md)
 
-> Peer-to-peer WebRTC mesh networking with "offensive" cryptographic.
+> Status: protocol v3 is an intentional wire break. The current code has not
+> completed an independent third-party security audit.
 
-**p2party** connects peers visiting the same URL into a WebRTC mesh network and enables secure message exchange of any size over ephemeral data channels. Unlike traditional privacy-enabling libraries, `p2party` obfuscates traffic using noisy and randomized padding of real information, isomorphic packet transmission (64kb), making message intent opaque. Of course it also adds a layer of ChaChaPoly1305 end-to-end encryption with ephemeral Ed25519 sender keys.
+## What is shipped
 
----
+- Every peer in a room connects to every other present peer through WebRTC;
+  the signaling service is not the message hub.
+- Every peer edge performs authenticated interactive 3DH plus an
+  authenticated, room-fixed ML-KEM-512, ML-KEM-768 (default), or ML-KEM-1024
+  bootstrap. PIN rooms additionally authenticate with CPace.
+- Three chained key-confirmation messages complete the application-layer
+  cryptographic handshake. An `RTCDataChannel` becoming `open` establishes the
+  transport; it is not a substitute for that confirmation.
+- Per-peer Double Ratchet state protects messages after the handshake.
+- Message data travels in fixed 65,490-byte protocol-v3 frames. Cryptographic
+  overhead is absorbed inside that fixed cell budget; randomized padding and
+  decoy slots can hide a message's exact payload length within its transfer.
+- Each outbound message has its own transfer identity and data channel, a
+  cancellable handle, authenticated receipts, selective retransmission, and
+  reconnect resume.
+- Text and files up to the enforced 10 GiB application limit are supported.
+  Browser builds use IndexedDB and, where available, OPFS for disk-backed large
+  file receipt.
+- Room capabilities have a compact 43-character base64url form, a versioned
+  fragment invite, and an optional checksum-protected 24-word representation.
+- `p2party/session` exposes the cryptography without Redux, IndexedDB, WebRTC,
+  signaling, `window`, or `localStorage`.
 
-## Disclaimer
+Immediate delivery over the existing signaling rendezvous is the shipped
+default. The room-policy schema also describes scheduled timing cover and
+opaque/blind meeting points, but the public `connect()` path rejects those
+modes because their transport wiring is not complete. An internal sparse
+post-quantum healing state-machine core is implemented and tested; production
+crash-safe persistence, authenticated control routing, message-key integration,
+and scheduler wiring remain gated. The private BitTorrent extension is likewise
+a research direction, not a shipped property.
 
-The API is not completely stable and the code has not undergone external security audits. Use at your own risk.
-
-## Features
-
-- 📡 Auto-connect peers based on shared URLs
-- 🔀 WebRTC mesh topology (no central servers except for signaling and STUN/TURN)
-- 🔐 "Offensive" cryptography: every message can be split in multiple 64KB chunks so a stalker stores a lot of useless info
-- 🧩 Supports `File` and `string` messages via chunked encoding
-- 🧠 Built-in address book (whitelist), blacklist, and room memory, all stored in the browser's IndexedDB
-- 🛠 Easy API and integration with React via custom hooks
-
----
-
-## Dependencies
-
-This library relies heavily on [libsodium](https://github.com/jedisct1/libsodium) for cryptographic operations, which is a battle-tested project, compiled to WebAssembly for speed.
-
-The library offers mnemonic generation, validation and Ed25519 key pair from mnemonic functionality that was inspired by [bip39](https://github.com/bitcoinjs/bip39) but instead of Blake2b we use Argon2, provided by libsodium, and instead of SHA256 we use SHA512 (native browser functionality).
-
-An earlier libcrypto prototype provided substantial inspiration for this library.
-
-On the js side, the library depends on [Redux](https://github.com/redux) for state management.
+The current signaling operator can observe room membership, peer identities,
+network metadata, and timing. Fixed message cells and in-transfer decoys do not
+by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
-To start, you install by typing in your project
-
-```bash
+```sh
 npm install p2party
 ```
 
-and include as ES module
+## Choose your integration
 
-```typescript
-import p2party from "p2party";
+| Goal                                 | Entry point                                     | p2party owns                                                                                  | Application owns                                                   |
+| ------------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Browser room mesh                    | `p2party`                                       | Signaling, full-mesh WebRTC, Redux state, IndexedDB/OPFS, handshake, ratchet, transfer/resume | Room capability and policy, UI, optional PIN                       |
+| Node, Bun, native, or custom network | `p2party/session`                               | Handshake, ratchet, uniform encrypted envelopes, snapshots                                    | Reliable message transport, peer-key trust, storage, outer framing |
+| Offline or pinned cryptography       | `p2party/session` plus `p2party/libcrypto.wasm` | Exact release-built cryptographic module                                                      | Loading and passing the pinned bytes                               |
+
+Deeper guides:
+
+- [Getting started](https://github.com/p2party/p2party-js/blob/master/docs/getting-started.md)
+- [Store-free session API](https://github.com/p2party/p2party-js/blob/master/docs/session-api.md)
+- [Protocol-v3 security boundary](https://github.com/p2party/p2party-js/blob/master/docs/protocol-v3-security.md)
+
+## Browser mesh
+
+The browser root connects every peer present in the same room to every other
+peer. `connect()` starts the join; observe the exported store for the
+signaling-assigned room ID.
+
+```ts
+import p2party, { type Room } from "p2party";
+
+const invite = p2party.generateRoomInvite();
+const roomContext = p2party.normalizeRoomCapability(invite);
+await p2party.connect(invite);
+
+const room = await new Promise<Room>((resolve) => {
+  let unsubscribe = () => {};
+  const inspect = () => {
+    const candidate = p2party
+      .roomSelector(p2party.store.getState())
+      .find((item) => item.url === roomContext);
+    if (!candidate?.id) return;
+    unsubscribe();
+    resolve(candidate);
+  };
+  unsubscribe = p2party.store.subscribe(inspect);
+  inspect();
+});
+
+console.log("joined", room.id);
 ```
 
-or as CommonJS module
+An open RTCDataChannel means its DTLS/SCTP transport is ready. It is not the
+protocol-v3 acknowledgement: p2party next runs its authenticated HELLO plus
+three chained confirmation flights over the main channel. Message receipts are
+a third, delivery-level acknowledgement.
 
-```javascript
-const p2party = require("p2party");
+## Room invites
+
+Generate one 256-bit room capability and derive each human-facing form from the
+same bytes:
+
+```ts
+const capability = p2party.generateRoomCapability();
+const compact = p2party.encodeRoomCapabilityBase64Url(capability); // 43 chars
+const fragment = p2party.encodeRoomInviteFragment(capability); // v1.<compact>
+const words = await p2party.encodeRoomCapabilityWords(capability); // 24 words
+
+await p2party.connect(fragment);
+
+const fromWords = await p2party.decodeRoomCapabilityWords(words);
+const sameCompact = p2party.encodeRoomCapabilityBase64Url(fromWords);
+console.assert(sameCompact === compact);
 ```
 
-or as UMD in the browser
+`generateRoomInvite()` is the versioned-fragment shortcut. Put it after `#` in
+an HTTPS URL to keep it out of ordinary HTTP requests. The shipped
+`legacy-signaling` route still sends the normalized capability to signaling;
+the fragment alone is not server-blind rendezvous.
 
-```html
-<script src="https://cdn.jsdelivr.net/npm/p2party@latest/lib/index.min.js"></script>
-```
+## PIN and exact ML-KEM room policy
 
-## Usage
+The room fixes exactly one hybrid suite before the handshake. Every peer
+supplies the same immutable policy and PIN; there is no suite negotiation,
+downgrade, or classical fallback.
 
-The official website [p2party.com](https://p2party.com), which is an SPA written in React, consumes the library with a hook in the following way:
+```ts
+import p2party, { type RoomPolicyV1 } from "p2party";
 
-```typescript
-import p2party from "p2party";
+const invite = p2party.generateRoomInvite();
+const policy = {
+  ...p2party.DEFAULT_ROOM_POLICY_V1,
+  authMode: "pin",
+  pqMode: "hybrid-mlkem1024",
+} satisfies RoomPolicyV1;
+const pin = new TextEncoder().encode("replace with a room secret");
 
-import { useState } from "react";
-import { useSelector } from "react-redux";
-
-import type { Message } from "p2party";
-
-export interface MessageWithData extends Message {
-  data: string | File;
+try {
+  await p2party.connect(invite, undefined, undefined, { policy, pin });
+} finally {
+  // connect() copied it into the in-memory room PIN vault.
+  pin.fill(0);
 }
+```
 
-export const useRoom = () => {
-  const [roomIndex, setRoomIndex] = useState(-1);
-  const keyPair = useSelector(p2party.keyPairSelector);
-  const rooms = useSelector(p2party.roomSelector);
-  const signalingServerConnection = useSelector(
-    p2party.signalingServerSelector,
+Supported values are `hybrid-mlkem512`, `hybrid-mlkem768` (default), and
+`hybrid-mlkem1024`. PIN bytes never enter room policy, Redux, persistent room
+records, or logs.
+
+## Send, cancel, and read
+
+`sendMessage()` returns a handle immediately. Its `done` promise settles after
+all started peer sends and cleanup and contains ordered per-peer outcomes.
+
+```ts
+const handle = p2party.sendMessage("hello room", "chat", room.id);
+console.log(handle.transferId);
+
+// Attach this to a cancel button; it works during hashing/channel setup too.
+const cancelButton =
+  document.querySelector<HTMLButtonElement>("#cancel-transfer");
+cancelButton?.addEventListener("click", () => void handle.cancel());
+
+const result = await handle.done;
+if (result) {
+  console.table(result.outcomes);
+  const opened = await p2party.readMessage(result.merkleRootHex);
+  console.log(opened.message, opened.percentage);
+}
+```
+
+For received messages, read identifiers from room state. Pass
+`materialize = false` to inspect completed file metadata without assembling its
+Blob:
+
+```ts
+const current = p2party
+  .roomSelector(p2party.store.getState())
+  .find((candidate) => candidate.id === room.id);
+const received = current?.messages.at(-1);
+
+if (received) {
+  const metadata = await p2party.readMessage(
+    received.merkleRootHex,
+    received.sha512Hex,
+    false,
   );
+  console.log(metadata.filename, metadata.size);
+}
+```
 
-  const openChannel = async (name: string) => {
-    if (roomIndex === -1) throw new Error("No room was selected");
+## Store-free session API
 
-    await p2party.openChannel(
-      rooms[roomIndex].id,
-      name,
-      rooms[roomIndex].peers,
-    );
-  };
+This Node/Bun example supplies a custom, reliable, ordered, message-delimited
+transport and restores a ratchet snapshot. Replace the in-memory pipes with
+your network adapter.
 
-  const sendMessage = async (message: string | File, channel: string) => {
-    if (roomIndex === -1) throw new Error("No room was selected");
+```ts
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import {
+  createSession,
+  generateSessionIdentity,
+  restoreSession,
+  type HandshakeTransport,
+} from "p2party/session";
 
-    await p2party.sendMessage(
-      message,
-      channel,
-      rooms[roomIndex].id,
-      percentageFilledChunk / 100,
-      chunks,
-    );
-  };
+const require = createRequire(import.meta.url);
+const wasmBinary = Uint8Array.from(
+  await readFile(require.resolve("p2party/libcrypto.wasm")),
+);
+const cryptoOptions = { wasmBinary };
 
+const makePipe = (): HandshakeTransport => {
+  const queued: Uint8Array[] = [];
+  const waiters: Array<(bytes: Uint8Array) => void> = [];
   return {
-    keyPair,
-    peerId: keyPair.peerId,
-    signalingServerURL: signalingServerConnection.serverUrl,
-    signalingServerConnectionState: signalingServerConnection,
-    peers: roomIndex > -1 ? rooms[roomIndex].peers : [],
-    channels: roomIndex > -1 ? rooms[roomIndex].channels : [],
-    messages: roomIndex > -1 ? rooms[roomIndex].messages : [],
-    connect: p2party.connect,
-    connectToSignalingServer: p2party.connectToSignalingServer,
-    disconnect: p2party.disconnectFromRoom,
-    disconnectFromSignalingServer: p2party.disconnectFromSignalingServer,
-    disconnectFromRoom: p2party.disconnectFromRoom,
-    disconnectFromAllRooms: p2party.disconnectFromAllRooms,
-    disconnectFromPeer: p2party.disconnectFromPeer,
-    openChannel,
-    selectChannel: setSelectedChannel,
-    sendMessage,
-    readMessage: p2party.readMessage,
-    cancelMessage: p2party.cancelMessage,
-    deleteMessage: p2party.deleteMessage,
-    purge: p2party.purge,
-    purgeRoom: p2party.purgeRoom,
-    purgeIdentity: p2party.purgeIdentity,
+    send(bytes): void {
+      const owned = Uint8Array.from(bytes);
+      const waiter = waiters.shift();
+      if (waiter) waiter(owned);
+      else queued.push(owned);
+    },
+    recv(): Promise<Uint8Array> {
+      const bytes = queued.shift();
+      return bytes
+        ? Promise.resolve(bytes)
+        : new Promise((resolve) => waiters.push(resolve));
+    },
   };
 };
+
+const [aliceIdentity, bobIdentity] = await Promise.all([
+  generateSessionIdentity(cryptoOptions),
+  generateSessionIdentity(cryptoOptions),
+]);
+const aliceToBob = makePipe();
+const bobToAlice = makePipe();
+const channelId = globalThis.crypto.getRandomValues(new Uint8Array(16));
+const aliceFingerprint = globalThis.crypto.getRandomValues(new Uint8Array(32));
+const bobFingerprint = globalThis.crypto.getRandomValues(new Uint8Array(32));
+
+const [alice, bob] = await Promise.all([
+  createSession({
+    role: "initiator",
+    identity: aliceIdentity,
+    peerIdentityEd25519PublicKey: bobIdentity.ed25519PublicKey,
+    channel: {
+      channelId,
+      localFingerprint: aliceFingerprint,
+      remoteFingerprint: bobFingerprint,
+    },
+    transport: { send: aliceToBob.send, recv: bobToAlice.recv },
+    mode: "nopin",
+    pqMode: "hybrid-mlkem768",
+    crypto: cryptoOptions,
+  }),
+  createSession({
+    role: "responder",
+    identity: bobIdentity,
+    peerIdentityEd25519PublicKey: aliceIdentity.ed25519PublicKey,
+    channel: {
+      channelId,
+      localFingerprint: bobFingerprint,
+      remoteFingerprint: aliceFingerprint,
+    },
+    transport: { send: bobToAlice.send, recv: aliceToBob.recv },
+    mode: "nopin",
+    pqMode: "hybrid-mlkem768",
+    crypto: cryptoOptions,
+  }),
+]);
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+console.log(
+  decoder.decode(await bob.decrypt(await alice.encrypt(encoder.encode("hi")))),
+);
+
+// Plaintext secret: encrypt at rest and add rollback protection before storage.
+const snapshot = await alice.serialize();
+await alice.destroy();
+const restoredAlice = await restoreSession(snapshot, cryptoOptions);
+snapshot.fill(0);
+
+const reply = await bob.encrypt(encoder.encode("after restore"));
+console.log(decoder.decode(await restoredAlice.decrypt(reply)));
+
+await Promise.all([restoredAlice.destroy(), bob.destroy()]);
+aliceIdentity.ed25519SecretKey.fill(0);
+aliceIdentity.x25519SecretKey.fill(0);
+bobIdentity.ed25519SecretKey.fill(0);
+bobIdentity.x25519SecretKey.fill(0);
 ```
 
-In the [p2party.com](https://p2party.com) SPA, where we use [React-Router](https://github.com/remix-run/react-router) for navigation, we use the following function to navigate to a new room that is randomly generated. We implement it inside the hook and export it with it.
+In production, pin or explicitly TOFU-accept the peer's Ed25519 key and derive
+the 32-byte endpoint fingerprints from the authenticated transport. The
+`identity.x25519SecretKey` field is the X25519 identity-DH secret, never the
+Ed25519 signing secret.
 
-```typescript
-/**
- * Previous imports
- */
+The complete two-peer transport example, including simultaneous first messages
+and snapshot restore, is
+[`examples/standalone-e2ee.ts`](https://github.com/p2party/p2party-js/blob/master/examples/standalone-e2ee.ts):
 
-import { useNavigate } from "react-router";
-
-export const useRoom = () => {
-  const navigate = useNavigate();
-
-  /**
-   * Previous functions
-   */
-
-  const goToRandomRoom = (replace = false) => {
-    const invite = p2party.generateRoomInvite();
-    navigate("/r#" + invite, { replace });
-  };
-
-  return {
-    goToRandomRoom,
-  };
-};
+```sh
+bun run examples/standalone-e2ee.ts
 ```
 
-The most important exported functions by p2party, with their types, are:
+## Local or release-pinned WASM
 
-```typescript
-/**
- * Connects a peer to a room. The input may be the versioned fragment invite
- * (`v1.` + 43 unpadded base64url characters), the raw compact capability, or
- * the legacy 64-hex migration form. All decode to the same random 256 bits.
- */
-const connect = async (
-  roomUrl: string,
-  signalingServerUrl = "wss://signaling.p2party.com/ws",
-  rtcConfig: RTCConfiguration = {
-    iceServers: [
-      {
-        urls: ["stun:stun.p2party.com:3478"],
-      },
-    ],
-    iceTransportPolicy: "all",
-  },
-) => Promise<void>;
+The browser root always fetches the exact versioned CDN WASM with a build-pinned
+SHA-384 SRI value. `p2party/session` additionally accepts local bytes, which is
+the recommended Node, Bun, offline, and self-hosted path:
 
-const connectToSignalingServer = async (
-  roomUrl: string,
-  signalingServerUrl = "wss://signaling.p2party.com/ws",
-) => Promise<void>;
+```ts
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { generateSessionIdentity } from "p2party/session";
 
-const sendMessage = async (
-  data: string | File,
-  toChannel: string,
-  roomId: string,
-  percentageFilledChunk = 0.9,
-  minChunks = 3,
-  chunkSize = CHUNK_LEN,
-  metadataSchemaVersion = 1,
-) => Promise<void>;
+const require = createRequire(import.meta.url);
+const wasmBinary = Uint8Array.from(
+  await readFile(require.resolve("p2party/libcrypto.wasm")),
+);
 
-const readMessage = async (merkleRootHex?: string, hashHex?: string) =>
-  Promise<{
-    message: string | Blob;
-    percentage: number;
-    size: number;
-    filename: string;
-    mimeType: MimeType;
-    extension: FileExtension;
-    category: string;
-  }>;
-
-const cancelMessage = async (
-  channelLabel: string,
-  merkleRoot?: string | Uint8Array,
-  hash?: string | Uint8Array,
-) => Promise<void>;
+const identity = await generateSessionIdentity({ wasmBinary });
 ```
 
-For a complete reference of the API you can check the library output file [index.ts](src/index.ts).
-
-To load all the past room data you call
-
-```typescript
-const rooms = await p2party.getAllExistingRooms();
-```
-
-To load the contents of a private message you can use the following React item with the react hook:
-
-```tsx
-// Suppose Text React element exists
-import { Text } from "./Text";
-
-// {{ message }} comes from const { messages } = useRoom();
-const MessageItem: FC<MessageItemProps> = ({ message }) => {
-  const [state, setState] = useState<{
-    msg: string;
-    msgSize: number;
-    msgFilename: string;
-    msgCategory: string;
-    msgPercentage: number;
-    msgLoadingText: string;
-    msgExtension: FileExtension;
-  }>({
-    msg: "",
-    msgSize: 0,
-    msgFilename: "",
-    msgCategory: p2party.MessageCategory.Text,
-    msgLoadingText: "",
-    msgPercentage: 0,
-    msgExtension: "",
-  });
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    const setMessage = async () => {
-      const m = await readMessage(message.merkleRootHex, message.sha512Hex);
-
-      /**
-       * In this situation the user is the sender and before they
-       * send the message they need to split it into chunks
-       * in order to calculate the Merkle root and proof before send.
-       */
-      if (
-        message.fromPeerId === peerId &&
-        message.totalChunks > 0 &&
-        message.chunksCreated < message.totalChunks
-      ) {
-        setState((prevState) => ({
-          ...prevState,
-          msg:
-            typeof m.message === "string"
-              ? m.message
-              : m.message
-                ? URL.createObjectURL(m.message)
-                : "",
-          msgLoadingText:
-            "Split " +
-            message.chunksCreated +
-            " chunks of " +
-            message.totalChunks,
-          msgFilename: m.filename,
-          msgCategory: m.category,
-          msgExtension: m.extension,
-          msgPercentage: Math.floor(
-            (message.chunksCreated / message.totalChunks) * 100,
-          ),
-        }));
-      } else {
-        /**
-         * Here the user is the receiver and they can read the message since they have
-         * all the necessary chunks
-         */
-        if (m.percentage === 100) {
-          setState((prevState) => ({
-            ...prevState,
-            msg:
-              typeof m.message === "string"
-                ? m.message
-                : m.message
-                  ? URL.createObjectURL(m.message)
-                  : "",
-            msgSize: m.size,
-            msgLoadingText: "",
-            msgFilename: m.filename,
-            msgCategory: m.category,
-            msgExtension: m.extension,
-            msgPercentage: m.percentage, // 100,
-          }));
-        } else {
-          /**
-           * Here the receiver does not have all the chunks necessary to read the message
-           **/
-          setState((prevState) => ({
-            ...prevState,
-            msgSize: m.size,
-            msgLoadingText:
-              "Received " +
-              formatBytes(message.savedSize) +
-              " of " +
-              formatBytes(message.totalSize),
-            msgFilename: m.filename,
-            msgCategory: m.category,
-            msgExtension: m.extension,
-            msgPercentage: m.percentage,
-          }));
-        }
-      }
-    };
-
-    setMessage();
-
-    return () => {
-      controller.abort();
-
-      if (msg.length > 0 && msgCategory !== p2party.MessageCategory.Text)
-        URL.revokeObjectURL(msg);
-    };
-  }, [
-    message.merkleRootHex,
-    message.sha512Hex,
-    message.savedSize,
-    message.chunksCreated,
-  ]);
-
-  const {
-    msg,
-    msgSize,
-    msgCategory,
-    msgPercentage,
-    msgExtension,
-    msgLoadingText,
-    msgFilename,
-  } = state;
-
-  return (
-    <div>
-      {msgCategory === p2party.MessageCategory.Text && url.length === 0 && (
-        <Text>{msg as string}</Text>
-      )}
-
-      {msgCategory === p2party.MessageCategory.Text && url.length > 0 && (
-        <Text>{msg as string}</Text>
-      )}
-
-      {msgCategory !== p2party.MessageCategory.Text && (
-        <Text>{msgFilename}</Text>
-      )}
-    </div>
-  );
-};
-```
-
-For privacy features like whitelist, blacklist and room purging we have the following APIs:
-
-```typescript
-/**
- * This deletes the user's private key but keeps all the messages.
- * A side effect is that the user is disconnected from all their rooms.
- */
-const purgeIdentity = () => void;
-
-/**
- * This deletes all the data of a room and disconnects the user from it.
- */
-const purgeRoom = (roomUrl: string) => void;
-
-/**
- * This deletes both private keys and messages and gives a clean state.
- */
-const purge = async () => void;
-
-/**
- * This deletes a specific message (merkle root) or all instances of
- * a specific message (hash).
- */
-const deleteMessage = async (
-  merkleRoot?: string | Uint8Array,
-  hash?: string | Uint8Array,
-) => void;
-
-/**
- * This does not do anything by itself unless the next function is called.
- */
-const addPeerToAddressBook = async (
-  username: string,
-  peerId: string,
-  peerPublicKey: string,
-) => void;
-
-/**
- * Once this function is called with onlyAllow: true,
- * the user can only connect to peers in their whitelist in a specific room.
- * Everyone else cannot even see if the user is connected in the same URL.
- * Can be reverted by calling the function with onlyAllow: false.
- * Default state for new rooms is onlyAllow: false.
- */
-const onlyAllowConnectionsFromAddressBook = async (
-  roomUrl: string,
-  onlyAllow: boolean,
-) => void;
-const deletePeerFromAddressBook = async (
-  username?: string,
-  peerId?: string,
-  peerPublicKey?: string,
-) => void;
-
-/**
- * Once the user is here they cannot connect with us
- * and they cannot even see if we are connected in the room at the same time as them.
- * They can theoretically receive the same messages as us from our common peers who have
- * not blacklisted them.
- */
-const blacklistPeer = async (peerId: string, peerPublicKey: string) => void;
-const removePeerFromBlacklist = async (peerId?: string, peerPublicKey?: string) => void;
-
-```
-
-Because a message is split into chunks with noisy padding for which we need to calculate Merkle proofs, it may take some time for the process to finish before starting transmitting the information over a channel.
+The package also exports `p2party/libcrypto.provenance.json`. JavaScript and
+WASM are one release unit; do not pair 0.12 code with an older module. Omitting
+`wasmBinary` makes the session loader use the same immutable versioned CDN
+artifact as the browser root.
 
 ## Development
 
-If you want to build the library yourselves, you need to have [Emscripten](https://github.com/emscripten-core/emscripten)
-installed on your machine in order to compile the C code into WebAssembly.
-We have the `-s SINGLE_FILE=1` option for the `emcc` compiler, which converts the `wasm` file to a `base64` string
-that will be compiled by the glue js code into a WebAssembly module. This was done for the purpose of interoperability
-and modularity.
+The reproducible release toolchain is Node 24.11.1, npm 11.6.2, Bun 1.3.14,
+Emscripten 6.0.2, and the repository's pinned libsodium source object. npm and
+`package-lock.json` are the dependency authority; Bun is the test runner.
 
-Clone the repo, download the libsodium submodule and install packages:
-
-```
-git clone https://github.com/p2party/p2party-js.git
+```sh
+git clone --recurse-submodules https://github.com/p2party/p2party-js.git
 cd p2party-js
-git submodule init
-git submodule update
-npm i
+git -C libsodium fetch --depth=1 origin 2ce4d906a68eae82b27b4867f3d4172ec508cb27
+npm ci
+npm run predist
+npm run check
 ```
 
-Once you have all the dependencies installed, you can run
+`npm run release:pack` is the only supported package build. It rebuilds and
+validates the cryptographic artifacts in a fresh staging tree, checks the
+vendored source digests and provenance, enforces the tarball allowlist, and
+produces `p2party-<version>.tgz`. Direct source-tree publication is refused.
 
-```
-npm run dist
-```
+Tagged releases publish immutable CDN objects first, fetch the public WASM back
+and compare its exact bytes, SHA-256, and SRI to the validated build, and only
+then publish the npm tarball with provenance.
 
-and [Rollup](https://github.com/rollup/rollup) will generate the UMD, ESM and CJS bundles.
+## Security and licensing
 
-## License
+Report vulnerabilities privately according to
+[SECURITY.md](https://github.com/p2party/p2party-js/blob/master/SECURITY.md).
+Contributions are covered by
+[CONTRIBUTING.md](https://github.com/p2party/p2party-js/blob/master/CONTRIBUTING.md)
+and the
+[Code of Conduct](https://github.com/p2party/p2party-js/blob/master/CODE_OF_CONDUCT.md).
 
-The source code is licensed under the [Apache License 2.0](LICENSE.md).
-
-## Copyright
-
-Copyright (C) 2025 p2party contributors.
+p2party is licensed under [Apache-2.0](LICENSE.md). Vendored and bundled
+components retain their own terms; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

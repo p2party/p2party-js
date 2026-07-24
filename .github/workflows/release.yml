@@ -1,14 +1,25 @@
-name: "tagged-release"
+name: tagged-release
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   tagged-release:
-    name: "Tagged Release"
-    runs-on: "ubuntu-latest"
+    name: Tagged release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SOURCE_DATE_EPOCH: "0"
 
     steps:
       - name: Checkout
@@ -16,23 +27,21 @@ jobs:
         with:
           submodules: "true"
 
-      - name: Setup emsdk
+      - name: Fetch the exact libsodium release object
+        run: git -C libsodium fetch --depth=1 origin 2ce4d906a68eae82b27b4867f3d4172ec508cb27
+
+      - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
           version: 6.0.2
-          # This is the name of the cache folder.
-          # The cache folder will be placed in the build directory,
-          #  so make sure it doesn't conflict with anything!
-          actions-cache-folder: "emsdk-cache"
+          actions-cache-folder: emsdk-cache
           update: true
-
-      - name: Verify
-        run: emcc -v
 
       - name: Setup Node
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: "24.x"
+          node-version: "24.11.1"
+          cache: npm
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
@@ -40,31 +49,39 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      - name: Verify tag and toolchain
+        run: |
+          test "$(npm --version)" = "11.6.2"
+          test "$(bun --version)" = "1.3.14"
+          emcc --version
+          node -e "const expected = 'v' + require('./package.json').version; if (process.env.GITHUB_REF_NAME !== expected) throw new Error('tag ' + process.env.GITHUB_REF_NAME + ' does not match ' + expected)"
+
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Verify source
-        run: |
-          npm run typecheck
-          bun test
-          bun run examples/standalone-e2ee.ts
-
-      - name: Build and validate release tarball
+      - name: Build and validate the release tarball
         run: npm run release:pack
 
+      - name: Verify generated crypto sources are reproducible
+        run: git diff --exit-code -- src/cryptography/libcrypto.js src/cryptography/libcrypto.d.ts src/cryptography/libcrypto.provenance.json src/cryptography/wasmLoader.ts
+
+      - name: Verify source and standalone API
+        run: npm run check
+
+      - name: Publish immutable CDN assets
+        run: npm run uploadcdn
+        env:
+          AWS_S3_REGION: ${{ secrets.AWS_S3_REGION }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_S3_ACCESS_KEY: ${{ secrets.AWS_S3_ACCESS_KEY }}
+          AWS_S3_SECRET_KEY: ${{ secrets.AWS_S3_SECRET_KEY }}
+          AWS_S3_ENDPOINT: ${{ secrets.AWS_S3_ENDPOINT }}
+          AWS_S3_FORCE_PATH_STYLE: ${{ secrets.AWS_S3_FORCE_PATH_STYLE }}
+
+      - name: Verify public CDN WASM bytes and integrity
+        run: npm run verify:cdn
+
       - name: Publish validated tarball to npm
-        run: npm publish "p2party-$(node -p "require('./package.json').version").tgz" --access public --ignore-scripts
+        run: npm publish "p2party-$(node -p "require('./package.json').version").tgz" --access public --ignore-scripts --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTOMATION_TOKEN }}
-
-      # Setup .npmrc file to publish to GitHub Packages
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: "24.x"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@p2party"
-
-      # - name: Publish on github
-      #   run: npm publish
-      #   env:
-      #     NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

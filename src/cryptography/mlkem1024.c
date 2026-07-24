@@ -39,8 +39,7 @@ _Static_assert(MLKEM1024_PUBLICKEYBYTES == P2PARTY_MLKEM1024_PUBLICKEYBYTES,
                "ML-KEM-1024 public-key size mismatch");
 _Static_assert(MLKEM1024_SECRETKEYBYTES == P2PARTY_MLKEM1024_SECRETKEYBYTES,
                "ML-KEM-1024 secret-key size mismatch");
-_Static_assert(MLKEM1024_CIPHERTEXTBYTES ==
-                 P2PARTY_MLKEM1024_CIPHERTEXTBYTES,
+_Static_assert(MLKEM1024_CIPHERTEXTBYTES == P2PARTY_MLKEM1024_CIPHERTEXTBYTES,
                "ML-KEM-1024 ciphertext size mismatch");
 _Static_assert(MLKEM_BYTES == P2PARTY_MLKEM1024_BYTES,
                "ML-KEM shared-secret size mismatch");

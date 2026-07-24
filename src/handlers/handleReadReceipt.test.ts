@@ -29,7 +29,7 @@ beforeAll(async () => {
 });
 
 describe("terminal receipt edge semantics", () => {
-  test("duplicates are idempotent and one peer cannot complete another", async () => {
+  test("duplicates are idempotent, peer-scoped, and never own channel close", async () => {
     const roomId = "room-receipts";
     const transferId = "11".repeat(32);
     const merkleRootHex = "22".repeat(64);
@@ -91,7 +91,9 @@ describe("terminal receipt edge semantics", () => {
       peerId: "peer-a",
       newlyAccepted: false,
     });
-    expect(dispatched).toHaveLength(1);
+    // sendWithReconcile owns the normal terminal close after all queued cover
+    // frames and receipts drain. The receipt handler only records completion.
+    expect(dispatched).toHaveLength(0);
     expect(isTransferComplete(roomId, "peer-a", transferId)).toBe(true);
     expect(isTransferComplete(roomId, "peer-b", transferId)).toBe(false);
     expect(room.messages[0].savedSize).toBe(0);

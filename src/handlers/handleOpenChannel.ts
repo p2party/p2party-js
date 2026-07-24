@@ -62,7 +62,10 @@ import {
 } from "../utils/identityRole";
 import { MAX_DATA_CHANNEL_LABEL_CHARS } from "../utils/signalingBounds";
 import { isRemoteCancelClose } from "./transferAbort";
-import { forgetReceiveMessageKeyDurably } from "./ratchetPersist";
+import {
+  forgetCompletedReceiveMessageKey,
+  forgetMappedReceiveMessageKey,
+} from "./receiveMessageKeyLifetime";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -296,16 +299,7 @@ export const handleOpenChannel = async (
       await waitForQueuedMessageFrames(queue, drainingRef);
       if (merkleRootHex === "") return;
 
-      const cacheKey = epc.messageKeyByMerkleRoot?.get(merkleRootHex);
-      if (cacheKey && epc.messageKeyCache) {
-        await forgetReceiveMessageKeyDurably(
-          epc,
-          roomId,
-          epc.messageKeyCache,
-          cacheKey,
-        );
-        epc.messageKeyByMerkleRoot?.delete(merkleRootHex);
-      }
+      await forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex);
       await deleteReceiveTransfer(merkleRootHex);
     })();
     return cancellationPromise;
@@ -368,6 +362,8 @@ export const handleOpenChannel = async (
       releaseAuxiliaryResources();
       await waitForQueuedMessageFrames(queue, drainingRef);
       let deleteIncompleteReceive = false;
+      let receiveProgress:
+        Awaited<ReturnType<typeof getDBMessageData>> | undefined;
       if (cancellationRequested) {
         try {
           await cancellationPromise;
@@ -377,7 +373,7 @@ export const handleOpenChannel = async (
         }
       } else if (merkleRootHex !== "") {
         try {
-          const progress = await getDBMessageData(merkleRootHex);
+          receiveProgress = await getDBMessageData(merkleRootHex);
           const authenticatedTransportStillAlive =
             epc.connectionState === "connected" &&
             isCurrentRatchetGateLease(
@@ -386,14 +382,14 @@ export const handleOpenChannel = async (
               transportGateLease,
             );
           deleteIncompleteReceive = isRemoteCancelClose(
-            progress,
+            receiveProgress,
             epc.withPeerId,
             authenticatedTransportStillAlive,
           );
           // An authenticated key may have advanced before the first storage
           // write. A live-edge close still cancels that zero-byte transfer.
           if (
-            !progress &&
+            !receiveProgress &&
             authenticatedTransportStillAlive &&
             epc.messageKeyByMerkleRoot?.has(merkleRootHex)
           )
@@ -413,6 +409,20 @@ export const handleOpenChannel = async (
           deleteIncompleteReceive = false;
         }
       } else {
+        if (merkleRootHex !== "") {
+          try {
+            await forgetCompletedReceiveMessageKey(
+              epc,
+              roomId,
+              merkleRootHex,
+              receiveProgress,
+            );
+          } catch (error) {
+            // Keep the RAM binding when durable retirement fails. Peer teardown
+            // still wipes it, and the durable key remains resumable meanwhile.
+            console.error(error);
+          }
+        }
         releaseProtocolResources();
       }
       await api.dispatch(

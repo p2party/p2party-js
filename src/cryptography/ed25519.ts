@@ -12,6 +12,8 @@ import {
 
 import { zeroFree } from "../utils/zeroFree";
 
+import { fillRandomBytesInto } from "./random";
+
 import type { SignKeyPair } from "./interfaces";
 import type { LibCrypto } from "./libcrypto";
 
@@ -41,35 +43,24 @@ export const newKeyPair = async (module?: LibCrypto): Promise<SignKeyPair> => {
     ptr3,
     crypto_sign_ed25519_SEEDBYTES,
   );
-  globalThis.crypto.getRandomValues(seedBytes);
+  try {
+    fillRandomBytesInto(seedBytes);
 
-  const result = cryptoModule._keypair_from_seed(
-    publicKey.byteOffset,
-    secretKey.byteOffset,
-    seedBytes.byteOffset,
-  );
+    const result = cryptoModule._keypair_from_seed(
+      publicKey.byteOffset,
+      secretKey.byteOffset,
+      seedBytes.byteOffset,
+    );
+    if (result !== 0) throw new Error("An unexpected error occured.");
 
-  zeroFree(cryptoModule, seedBytes);
-
-  switch (result) {
-    case 0: {
-      const keyPair = {
-        publicKey: Uint8Array.from(publicKey),
-        secretKey: Uint8Array.from(secretKey),
-      };
-
-      cryptoModule._free(ptr1);
-      zeroFree(cryptoModule, secretKey);
-
-      return keyPair;
-    }
-
-    default: {
-      cryptoModule._free(ptr1);
-      zeroFree(cryptoModule, secretKey);
-
-      throw new Error("An unexpected error occured.");
-    }
+    return {
+      publicKey: Uint8Array.from(publicKey),
+      secretKey: Uint8Array.from(secretKey),
+    };
+  } finally {
+    cryptoModule._free(ptr1);
+    zeroFree(cryptoModule, secretKey);
+    zeroFree(cryptoModule, seedBytes);
   }
 };
 
@@ -167,8 +158,7 @@ export const keyPairFromSecretKey = async (
       pk.byteOffset,
       sk.byteOffset,
     );
-    if (result !== 0)
-      throw new Error("Could not derive Ed25519 public key");
+    if (result !== 0) throw new Error("Could not derive Ed25519 public key");
     return {
       publicKey: Uint8Array.from(pk),
       secretKey,

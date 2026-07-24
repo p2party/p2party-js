@@ -1,5 +1,7 @@
 import { keyPairFromSeed } from "./ed25519";
 import memory from "./memory";
+import { fillRandomBytesInto } from "./random";
+import { zeroFree } from "../utils/zeroFree";
 
 // import libcrypto from "./libcrypto";
 import { wasmLoader } from "./wasmLoader";
@@ -47,10 +49,6 @@ export const argon2 = async (
     ptr1,
     crypto_sign_ed25519_SEEDBYTES,
   );
-  const randomData = window.crypto.getRandomValues(
-    new Uint8Array(crypto_sign_ed25519_SEEDBYTES),
-  );
-  seed.set(randomData);
 
   const ptr2 = module._malloc(mnemonicArrayLen * Uint8Array.BYTES_PER_ELEMENT);
   const mnmnc = new Int8Array(
@@ -58,7 +56,6 @@ export const argon2 = async (
     ptr2,
     mnemonicArrayLen * Uint8Array.BYTES_PER_ELEMENT,
   );
-  mnmnc.set(mnemonicInt8Array);
 
   const ptr3 = module._malloc(crypto_pwhash_argon2id_SALTBYTES);
   const saltArray = new Uint8Array(
@@ -66,25 +63,32 @@ export const argon2 = async (
     ptr3,
     crypto_pwhash_argon2id_SALTBYTES,
   );
-  saltArray.set(salt);
+  try {
+    fillRandomBytesInto(seed);
+    mnmnc.set(mnemonicInt8Array);
+    saltArray.set(salt);
 
-  const result = module._argon2(
-    mnemonicArrayLen,
-    seed.byteOffset,
-    mnmnc.byteOffset,
-    saltArray.byteOffset,
-  );
-
-  const s = Uint8Array.from(seed);
-
-  module._free(ptr1);
-  module._free(ptr2);
-  module._free(ptr3);
-
-  if (result === 0) {
-    return s;
-  } else {
-    throw new Error("Could not generate argon2id for mnemonic.");
+    const result = module._argon2(
+      mnemonicArrayLen,
+      seed.byteOffset,
+      mnmnc.byteOffset,
+      saltArray.byteOffset,
+    );
+    if (result !== 0)
+      throw new Error("Could not generate argon2id for mnemonic.");
+    return Uint8Array.from(seed);
+  } finally {
+    zeroFree(module, seed);
+    zeroFree(
+      module,
+      new Uint8Array(
+        wasmMemory.buffer,
+        ptr2,
+        mnemonicArrayLen * Uint8Array.BYTES_PER_ELEMENT,
+      ),
+    );
+    module._free(ptr3);
+    mnemonicInt8Array.fill(0);
   }
 };
 

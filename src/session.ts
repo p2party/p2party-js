@@ -704,8 +704,7 @@ class Session implements P2PartySession {
 
   #adoptActiveReceiveKeys(staged: Map<string, Uint8Array>): void {
     const live = this.#pq.activeReceiveKeys;
-    for (const [key, value] of staged)
-      if (!live.has(key)) live.set(key, value);
+    for (const [key, value] of staged) if (!live.has(key)) live.set(key, value);
   }
 
   async prepareHealing(): Promise<SessionControlOutput> {
@@ -1235,12 +1234,7 @@ export const restoreSession = async (
     } finally {
       expectedBinding.fill(0);
     }
-    const session = new Session(
-      decoded.state,
-      module,
-      pq,
-      decoded.amInitiator,
-    );
+    const session = new Session(decoded.state, module, pq, decoded.amInitiator);
     pq = null;
     return session;
   } catch (error) {

@@ -1601,7 +1601,7 @@ describe("atomic edge-crypto activation (ratchet + initial PQ checkpoint)", () =
 
     epc.pqHealingState!.destroy();
     wipeRatchet(epc.ratchetState!);
-    first.responder.state && wipeRatchet(first.responder.state);
-    second.responder.state && wipeRatchet(second.responder.state);
+    if (first.responder.state) wipeRatchet(first.responder.state);
+    if (second.responder.state) wipeRatchet(second.responder.state);
   });
 });

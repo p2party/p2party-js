@@ -460,6 +460,29 @@ box-removal surface: D2=B spec **§6**.
   healing, L2 rendezvous, and P2BT remain gated/research work exactly as stated
   in the public security boundary. Both master stashes remain intact.
 
+## TRUE-L2 ROADMAP CHECKPOINT (2026-07-24)
+
+- The maintainer accepted a roadmap instead of rushing an unreviewed private
+  rendezvous implementation during the 0.12 deployment. The self-contained
+  architecture and acceptance gates live at
+  `spec/spec-architecture-l2-blind-rendezvous.md`.
+- This is not a transport toggle. It requires an isolated fixed-epoch board
+  service over independently operated anytrust replicas; robust/verifiable DPF
+  private writes plus private reads; fixed real-or-dummy cohort lanes;
+  fork-accountable commitments; local-only room/edge identifiers; an injected
+  store-free rendezvous adapter; a reviewed pre-WebRTC hybrid exchange; and
+  exact-artifact `n >= 3` WebRTC, fault, privacy-classifier, and external-review
+  gates.
+- L2a means target/identifier privacy at the application protocol under the
+  declared non-collusion and cohort schedule. Source IP, timing, ingress, and
+  co-operated TURN remain explicit residuals; only the separately scoped L2b
+  phase may claim network unlinkability. Opaque/OPRF common tokens, fragment
+  URLs alone, or two replicas under one operator do not qualify.
+- Current production remains content-blind but not membership-blind. The
+  legacy signaling path still receives a common room value, stable identity,
+  roster, SDP/ICE routing, and timing; `connect()` rejects the reserved blind
+  modes. Do not label any current room server-blind.
+
 ## Methodology + where the record lives
 
 - Subagent-driven: one implementer per task + a focused adversarial review for

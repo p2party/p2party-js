@@ -1410,3 +1410,78 @@ for already-scheduled dummy slots at zero **marginal scheduled
 application-cell** cost. Never call the cryptography or network cost universally
 “free,” and never claim anonymity or packet-trace indistinguishability without
 the L2b and capture/classifier evidence.
+
+## SESSION 2026-07-24 (resumed) — PROTOCOL-V4 CONTINUATION, STEPS 1–2 GREEN
+
+Executed from the WIP checkpoint `038ede4` following the precise continuation
+plan above. Both `master` stashes verified before and after every commit.
+
+### Step 1 done — sparse-PQ runtime compiles, is coherent, and is fully tested
+
+Commit: `9a0f943` ("fix: make the sparse-PQ runtime compile, coherent, and
+fully tested").
+
+- Fixed the exact eight TypeScript errors: the suite-erased machine is typed
+  `PqHealingMachine<MlKemParameterSet>`, the `phase` getter uses
+  `PqHealingPhase`, and each outbox branch captures a non-null local so
+  narrowing survives `await`s.
+- Fixed two real defects found while writing tests:
+  1. the ACK-receipt branch never cleared `#lastInboundOfferFrame`, so a
+     completed exchange serialized a checkpoint that its own
+     `#validateCheckpointCoherence` rejected on restore;
+  2. `writeActiveKeys` accepted non-canonical cache keys that
+     `readActiveKeys` would reject, poisoning the persisted checkpoint;
+     serialization now fails closed first.
+- Fixed a latent `noImplicitReturns` error in `coverScheduler.test.ts` that
+  the previously red source project had masked.
+- Added `src/handlers/pqHealingRuntime.test.ts` (13 tests): all three
+  ML-KEM suites end-to-end with byte-identical roots and alternating turns,
+  byte-exact serialize/restore at every durable boundary, clone-discard
+  rollback with byte-identical live checkpoints, exact dropped-flight
+  retransmission for OFFER/ADVANCE/ACK, duplicate-vs-fork classification,
+  wrong suite/binding/direction/epoch fail-closed, active-key wipe on
+  adopt/destroy, retry exhaustion without replacement records, and
+  checkpoint truncation/trailing/corruption/duplicate-key/over-budget
+  fail-closed cases.
+
+Gate result: `npm run typecheck` clean;
+`bun test pqHealingRuntime pqHealing pqHealingFrame pqMessageKey`
+37 pass / 0 fail / 501 expects.
+
+### Step 2 done — v4 WASM rebuilt and retained, message crypto recovered
+
+Commit: `ae5a140` ("feat: rebuild the protocol-v4 receive WASM and settle
+version contracts").
+
+- `npm run prebuild` regenerated `libcrypto.js` + `libcrypto.wasm` +
+  provenance; the retained artifact authenticates the v4 69-byte
+  header/AAD. All eight `messageChunkCrypto` failures recovered.
+- The first rebuild could not instantiate under Bun: the development
+  artifact (ASSERTIONS=2) emits emscripten's minimum-runtime environment
+  check, which throws when `process.versions.node` exists. Fixed exactly as
+  the prior handoff prescribed — the environment path, not the artifact:
+  `scripts/emscripten.js` now sets `ENVIRONMENT=web,worker,node` for the
+  development verification artifact only; the production/predist artifact
+  remains `ENVIRONMENT=web,worker`.
+- `wasmLoader.ts` SRI pin and `libcrypto.provenance.json` verified to match
+  the retained wasm (sha256/sri recomputed independently). The `.wasm`
+  binary itself is gitignored by design; only wrapper/provenance/pin are
+  tracked.
+- Intentional v4 contract updates pulled forward from step 10 to keep the
+  tree green: `protocolVersion.test.ts` now expects exactly 4 and rejects
+  3/5; the room-policy KAT was recomputed with the live encoder — encoding
+  `5032525001040001…` (only byte 5 changes, 0x03→0x04), hash
+  `9b0bf1033f93ae9b1b57f3771ca146ae13709c49d2d975d83a0adf2c311221fd`.
+
+Gate result: full `bun test` 369 pass / 0 fail / 12,626 expects;
+`npm run typecheck` clean; `bun run examples/standalone-e2ee.ts` → OK.
+`git diff --check` reports only a blank EOF line inside the generated
+`libcrypto.js` (emcc output, not hand-written).
+
+### Still true after steps 1–2
+
+- Live WebRTC sparse healing, scheduled dummy lanes, PQ-combined messages,
+  and the v4 session snapshot do not exist yet; `connect()` still rejects
+  scheduled cover; no tarball/browser/deploy claims.
+- Next: continuation plan step 3 (install the PQ runtime atomically in
+  `runHandshake`), then step 4 (PQ epoch on the DR message paths).

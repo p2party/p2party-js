@@ -5,7 +5,7 @@ if (typeof WebAssembly != "object") {
   throw new Error("no native wasm support detected");
 }
 
-const wasmVersion = process.env.P2PARTY_VERSION ?? "0.12.0";
+const wasmVersion = process.env.P2PARTY_VERSION ?? "0.13.0";
 const defaultWasmUrl = new URL(
   `https://cdn.p2party.com/@${wasmVersion}/libcrypto.wasm`,
 );

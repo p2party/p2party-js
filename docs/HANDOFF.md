@@ -502,3 +502,909 @@ box-removal surface: D2=B spec **§6**.
 - PAPER (LaTeX, offensive-crypto systems paper): architecture-SPECIFIC, not another generic Double-Ratchet paper. Preserve the re-adjudicated **novel-adjacent systems hypothesis**, not a broad “first/free PQ” claim: only an implemented sparse PQ advance replacing a slot in an already-running authenticated schedule could have zero marginal scheduled application frames/bytes. Compare directly with SPQR, PQ3, Post Quantum Sphinx, Outfox, OKE/Hybrid OKE, and Zerion. Extend p2party-js/docs/paper-prior-art-and-related-work.md before drafting.
 - VISUAL PASS on p2party.com: elevate to a professional polish (responsive, a11y, consistency) while KEEPING the retro-90s / hacker aesthetic and brand (the two-column retro landing). Do NOT sanitize it into
   generic SaaS.
+
+## SESSION 2026-07-24 (late) — PROTOCOL-V4 PQ/COVER IMPLEMENTATION WIP HANDOFF
+
+### Read this first: exact state and user intent
+
+The maintainer explicitly corrected the previous roadmap-only response:
+**implement production sparse PQ healing and room-wide scheduled timing cover;
+do not merely describe them**. Immediate/no-cover remains the product default.
+Scheduled cover is an authenticated, immutable-for-the-room option. This is a
+clean protocol/version break; backward compatibility with protocol v3 is not a
+requirement.
+
+This session was stopped at the maintainer's request so Claude could resume from
+an exact checkpoint. The current tree is deliberately a **WIP checkpoint, not a
+green or shippable implementation**. Do not infer completion from the amount of
+code present.
+
+Repository state at handoff:
+
+- Repository: `p2party-js`
+- Branch: `feat/pace-ratchet-protocol-v3` (keep this branch name despite the
+  protocol-v4 wire break)
+- Starting/previous HEAD: `fb57b1e6d39b0ee25c4dd7815d20c402a02e2bf3`
+- Local `master` was also
+  `fb57b1e6d39b0ee25c4dd7815d20c402a02e2bf3` before the WIP checkpoint commit.
+- Package version is still `0.12.0`; no protocol-v4 tarball was built or
+  installed in `p2party.com`.
+- No merge or fast-forward to `master` has happened in this session.
+- Postgres on `:5432` was not touched.
+- The protected sibling frontend file
+  `p2party.com/src/components/MessageInput/TextArea.tsx` was not touched.
+- The filesystem authority in this session covered only `p2party-js`, so no
+  current protocol-v4 frontend or server edits were made.
+- Three parallel agents were stopped before this handoff. They have no live
+  background work left to finish.
+
+The two pre-existing `master` stashes are still exactly:
+
+```text
+stash@{0}: WIP on master: 56e87ba Disconnect from all rooms and various bug fixes
+stash@{1}: WIP on master: a407fad Persisting messages and identity
+```
+
+Never use `git stash`, `git reset`, `git checkout`, `git clean`, or `git
+rebase`. Continue with additive edits and ordinary commits only. Before and
+after each eventual merge/fast-forward, verify the two stash entries remain.
+
+### Accepted architecture written during this session
+
+Read `docs/protocol-v4-pq-cover-architecture.md` before editing runtime code. It
+records the implementation contract selected after a persistence, wire-format,
+WebRTC, and cover-timing audit:
+
+1. Protocol v4 is a clean break. The public epoch is now an authenticated
+   unsigned 64-bit value, not the protocol-v3 one-byte reserved zero.
+2. Every large message/PQ/cover cell remains exactly 65,490 bytes:
+
+   ```text
+   type(1) | dh-or-control-id(32) | N(8) | PN(8) | pqEpoch(8) | nonce(12)
+   | padded plaintext(65,405) | tag(16)
+   ```
+
+   The seven additional epoch bytes consume padding rather than increasing the
+   externally visible application-cell size.
+3. Message AEAD authenticates the full clear header except the random nonce:
+   type, DH public key, N, PN, and PQ epoch. Cache identities include the epoch.
+4. The classical Double-Ratchet message key and current PQ root are combined
+   with a domain-separated HKDF bound to the selected suite, edge binding,
+   epoch, and ratchet header.
+5. Classical skipped keys stay classical. Already-combined active receive keys
+   must live in a separate epoch-bound collection and must be persisted there;
+   they must never be inserted into `RatchetState.skipped`.
+6. One encrypted stable-edge checkpoint must contain the DR state, PQ machine,
+   exact sealed control outbox, replay/ACK cache, and active combined receive
+   keys. Message and PQ mutations share one edge lock.
+7. A sparse exchange uses exact OFFER/ADVANCE/ACK ordering:
+
+   - prepare and seal OFFER under the current root;
+   - persist its KEM secret plus exact sealed frame;
+   - send only after durability;
+   - seal ADVANCE under the old root before committing the candidate root;
+   - persist new root plus exact old-root ADVANCE before sending;
+   - commit an accepted ADVANCE, seal ACK under the new root, persist root plus
+     exact ACK/replay cache, then send;
+   - reopen application traffic only after the ACK transition is durable.
+
+8. Scheduled cover uses absolute room-phased cycles. Exactly `C` lanes are
+   opened at a cycle boundary, each emits exactly `F` cells per epoch for `D`
+   epochs, and all close at the fixed boundary. Real data, PQ controls,
+   receipts, and cancellation substitute for dummy cells. There is no early
+   close, catch-up burst, or WebSocket payload fallback.
+9. An admitted cancellation is local-UI-immediate but emits an encrypted
+   CANCEL in the next slot and then a dummy tail through the fixed boundary.
+10. Browser suspension or missed deadlines degrades/suspends cover; resume
+    begins at a strictly future boundary. Never claim cover for the gap.
+
+The architecture ADR was selected using the local `architecture` skill. Its
+main influence was to make crash ordering, single-row atomicity, fixed lifecycle,
+and claim boundaries explicit before connecting the independently developed
+primitives.
+
+### Files changed: protocol-v4 wire and key combiner
+
+Parallel wire work is present in these files:
+
+- `src/utils/constants.ts`
+- `src/utils/constants.test.ts`
+- `src/cryptography/utils.h`
+- `src/cryptography/pake_ratchet.c`
+- `src/cryptography/pake_ratchet.h`
+- `src/handlers/chunkFrame.ts`
+- `src/handlers/chunkFrame.test.ts`
+- `src/handlers/messageChunkCrypto.ts`
+- `src/handlers/messageChunkCrypto.test.ts`
+- `src/cryptography/pqMessageKey.ts` (new)
+- `src/cryptography/pqMessageKey.test.ts` (new)
+
+Implemented wire-level behavior:
+
+- `PROTOCOL_VERSION` is now `4`.
+- `PQ_EPOCH_LEN` is `8`.
+- `FRAME_TYPE_COVER = 4`.
+- `FRAME_TYPE_PQ_CONTROL = 5`.
+- `CHUNK_PLAINTEXT_LEN`/`DECRYPTED_LEN` drops from 65,412 to 65,405
+  bytes, preserving `WIRE_CHUNK_FRAME_LEN === 65_490`.
+- C and TypeScript now define:
+
+  ```text
+  CHUNK_AAD_HEADER_LEN = 57
+  CHUNK_HEADER_LEN = 68
+  MESSAGE_START = 69
+  ```
+
+- The C receive path authenticates:
+
+  ```text
+  merkleRoot(64) || type(1) || dhPub(32) || N(8) || PN(8) || pqEpoch(8)
+  ```
+
+- `packChunkFrameHeader(header, nonce, pqEpoch)` and
+  `parseChunkFrameHeader(frame)` use the full u64 epoch.
+- `messageCacheKey(dhPub, N, pqEpoch)` emits an epoch suffix when the
+  explicit epoch is supplied. Omitting it retains the historical two-field
+  form only for low-level/bootstrap tests.
+- `PqMessageKeyContext` is:
+
+  ```ts
+  {
+    rootKey: Uint8Array;
+    binding: Uint8Array;
+    rootSuite: RatchetRootSuite;
+    epoch: bigint;
+  }
+  ```
+
+- `combinePqMessageKey(classical, context, header, module)` consumes/wipes the
+  owned classical input even when it throws, and does not wipe the context's
+  live PQ root.
+- `sealChunk(..., module, pqContext?)` emits epoch zero/raw classical behavior
+  only when no context is supplied; production must always supply the runtime
+  context.
+- `decryptMessageChunk(..., module, pqContextResolver?)` rejects a nonzero,
+  unknown, stale, mismatched-suite, or malformed epoch before mutating a ratchet
+  clone. Production must pass the runtime resolver.
+
+Important generated-artifact state:
+
+- The agent temporarily rebuilt the WASM and reported the new message/C tests
+  passing, then restored the generated artifacts before stopping.
+- Consequently, the current tracked C source understands the v4 offsets but
+  the checked-in `libcrypto.wasm` is still the prior artifact. This is the
+  likely cause of all current message-decrypt failures.
+- The next implementer must intentionally rebuild and retain the generated
+  artifacts. Run `npm run prebuild` for the development verification artifact,
+  then later `npm run predist` for the release artifact. Do not “fix” the tests
+  by rolling back the C/TS wire change.
+- After a retained rebuild, expect changes to the generated
+  `src/cryptography/libcrypto.js`, `libcrypto.wasm`,
+  `libcrypto.provenance.json`, and the pinned integrity in `wasmLoader.ts`.
+  Verify provenance/integrity rather than hand-editing them.
+
+### Files changed: sparse-PQ machine, canonical ACK, and control cells
+
+The original store-free sparse state machine was expanded in:
+
+- `src/cryptography/pqHealing.ts`
+- `src/cryptography/pqHealing.test.ts`
+
+New canonical fixed-cell codec:
+
+- `src/cryptography/pqHealingFrame.ts`
+- `src/cryptography/pqHealingFrame.test.ts`
+
+Exact APIs now implemented:
+
+```ts
+encodePqHealingAck(ack, suite, binding): Uint8Array
+decodePqHealingAck(bytes, suite, binding): PqHealingAdvanceAcknowledgement
+
+snapshotPqHealing(machine): PqHealingSnapshot
+restorePqHealing(snapshot, { module, backend, suite, binding }): PqHealingMachine
+clonePqHealing(machine): PqHealingMachine
+adoptPqHealing(live, next): void
+wipePqHealingSnapshot(snapshot): void
+
+sealPqControlFrame({
+  module,
+  suite,
+  rootKey,
+  binding,
+  direction,
+  keyEpoch,
+  record,
+}): Uint8Array
+
+openPqControlFrame({
+  module,
+  suite,
+  rootKey,
+  binding,
+  direction,
+  keyEpoch,
+  frame,
+}): Uint8Array
+```
+
+The ACK is exactly 64 bytes and binds magic/version/type, suite, edge binding,
+ADVANCE counter, and new epoch. OFFER/ADVANCE/ACK outer frames are all exactly
+65,490 bytes. Their public header uses the 32-byte edge binding as a control ID,
+the record counter as N, canonical-zero PN, and the full key epoch. The entire
+header including nonce is AEAD AAD for the control codec. Directional keys
+separate initiator-to-responder from responder-to-initiator traffic.
+
+Focused tests at this checkpoint:
+
+- `pqHealing.test.ts`: 15 pass / 0 fail.
+- `pqHealingFrame.test.ts`: 3 pass / 0 fail.
+- `pqMessageKey.test.ts`: 3 pass / 0 fail.
+
+These are primitive/core results only. They do not mean WebRTC healing is wired.
+
+### Files changed: handshake bootstrap and protocol domains
+
+`src/handlers/handshakeCore.ts` now:
+
+- changes handshake confirmation and hybrid-root domains from v3 to v4;
+- derives a separate 32-byte PQ-healing root from the authenticated hybrid
+  handshake secret;
+- derives a public 32-byte edge binding over the channel input and ordered
+  authenticated HELLO material;
+- returns:
+
+  ```ts
+  {
+    state: RatchetState;
+    secret: Uint8Array;
+    pqHealing: {
+      rootKey: Uint8Array;
+      binding: Uint8Array;
+      nextOfferer: "local" | "remote";
+    };
+  }
+  ```
+
+- chooses the first OFFER turn from the stable identity role:
+  initiator gets `"local"`, responder gets `"remote"`;
+- wipes loose PQ derivation buffers on failure.
+
+Critical integration gap:
+
+- `src/handlers/handleHandshake.ts::runHandshake` still takes only
+  `result.state` and `result.secret`. It does not construct/install a PQ runtime
+  and does not currently take ownership of or wipe `result.pqHealing`. Fix this
+  first; it is a secret-lifetime bug in the WIP tree.
+- The initial encrypted edge row therefore still receives no real PQ
+  checkpoint.
+- `src/session.ts` merely captures and wipes the returned PQ root/binding.
+  Session message encryption remains classical-only while the global protocol
+  version is already 4. Do not ship this intermediate state.
+
+Remember the established identity invariant: `idSelfSec` in
+`performHandshakeCore` is the long-term **X25519 identity secret**, never the
+Ed25519 secret. The canonical construction example remains
+`handleHandshake.test.ts:215-263`.
+
+### Files changed: encrypted edge checkpoint and database migration
+
+Changed persistence files:
+
+- `src/db/types.ts`
+- `src/db/ratchetWrap.ts`
+- `src/db/ratchetWrap.test.ts`
+- `src/db/db.worker.ts`
+- `src/db/db.worker.test.ts`
+- `src/db/src/getDB.ts`
+- `src/db/src/getDB.test.ts`
+- `src/handlers/ratchetPersist.ts`
+- `src/handlers/ratchetPersist.test.ts`
+- `src/api/webrtc/interfaces.ts`
+- `src/api/webrtc/disconnectFromPeerQuery.test.ts`
+
+Current implementation:
+
+- IndexedDB version is bumped from 18 to 19.
+- An upgrade from any nonzero version below 19 clears `ratchetSessions` and
+  `sendQueue`, while intending to preserve rooms/message history/received data.
+- `RatchetSession` now has
+  `edgeCryptoState: ArrayBuffer | null`.
+- The ratchet at-rest envelope is version 2.
+- `edgeCryptoState` is bounded to 256 KiB and is independently AES-GCM wrapped
+  in the same authenticated row/record-ID scheme.
+- Public metadata/nullability includes the presence of the edge checkpoint.
+- Ciphertext-transplant and nullability tests cover the new field.
+- Worker cleanup wipes its plaintext edge-state copy.
+- `IRTCPC.serializeEdgeCryptoState?: () => Uint8Array` is a temporary hook.
+- `withEdgeCryptoMutationLock` is now exported so PQ and DR transitions can
+  share it.
+- Initial and subsequent claimed-ratchet writes call the serializer hook and
+  wipe the returned copy after the worker call.
+
+Focused persistence result in the final diagnostic run:
+
+- `ratchetWrap.test.ts`, `db.worker.test.ts`, and `getDB.test.ts` all passed
+  (45 tests total in the earlier isolated run; all corresponding cases also
+  passed in the later 78/8 aggregate).
+
+Still missing or incorrect:
+
+1. There is no live PQ runtime serializer installed by the handshake.
+2. Receive-message persistence still copies the active message key into
+   `candidate.skipped`. That violates the v4 architecture because the key is
+   already PQ-combined and would be combined again or parsed as a classical
+   skipped key after restore.
+3. The staged receive cache is not included in the edge snapshot that is
+   persisted before the live cache is published. `mutateRatchetDurably` needs
+   an explicit candidate edge-state override, or it needs to clone/adopt the
+   entire edge runtime alongside the ratchet.
+4. The current stable-edge serialization uses locks and an authenticated
+   timestamp/rollback guard, but it does **not** yet implement the ADR's
+   cross-context generation/CAS. Either add an authenticated monotonically
+   increasing generation and IndexedDB compare-and-swap semantics, or narrow
+   the architecture/claim. For a production claim, implement CAS.
+5. Add a direct v18 fixture proving that v19 clears existing ratchets and
+   sendQueue while preserving message/chunk history. The current migration
+   tests start primarily from v17/fresh state.
+6. There is still no connection-time restore/resend of an outbox. A full page
+   reload destroys WebRTC and performs a new handshake, so decide and document
+   which crash class the persisted outbox covers. Do not claim cross-transport
+   replay of old control ciphertext.
+
+### New store-free PQ runtime file: present but intentionally unfinished
+
+`src/handlers/pqHealingRuntime.ts` was added immediately before the stop
+request. It is a large store-free controller draft and has **no tests and does
+not typecheck yet**. Treat it as useful implementation material, not trusted
+finished code.
+
+Its intended responsibilities are:
+
+- own `PqHealingMachine`, current message-combiner root/context, exact sealed
+  outbox, retry metadata, exact inbound OFFER/ADVANCE replay frames, exact
+  cached ACK frame, active combined receive keys, messages-since-heal, and
+  last-heal time;
+- choose directional control-frame keys from the stable initiator role;
+- expose the current/epoch-resolving `PqMessageKeyContext`;
+- trigger healing after 64 logical application messages or 24 hours;
+- use 5-second retry spacing with a maximum of 8 attempts;
+- prepare an exact sealed OFFER;
+- accept/decrypt OFFER, ADVANCE, or ACK;
+- answer exact duplicate OFFER/ADVANCE frames with the exact persisted response;
+- clone/serialize/adopt/destroy without importing Redux, DB, WebRTC, or timers;
+- encode a bounded, deterministic `P2EDGE4\0` checkpoint of at most 256 KiB.
+
+Current TypeScript errors from `npm run typecheck` are exactly:
+
+```text
+src/handlers/pqHealingRuntime.ts(566,13): TS2314 generic PqHealingMachine needs an argument
+src/handlers/pqHealingRuntime.ts(623,27): TS2314 generic PqHealingMachine needs an argument
+src/handlers/pqHealingRuntime.ts(704,9):  TS2531 outbox possibly null
+src/handlers/pqHealingRuntime.ts(706,5):  TS2322 nullable spread not assignable to PqHealingOutbox
+src/handlers/pqHealingRuntime.ts(708,17): TS2531 outbox possibly null
+src/handlers/pqHealingRuntime.ts(796,9):  TS2531 outbox possibly null
+src/handlers/pqHealingRuntime.ts(861,9):  TS2531 outbox possibly null
+src/handlers/pqHealingRuntime.ts(1014,18): TS2314 generic PqHealingMachine needs an argument
+```
+
+Precise first fixes:
+
+1. Type machine references as
+   `PqHealingMachine<MlKemParameterSet>` (including restore temporaries), or
+   make the class itself generic and preserve the parameter through its suite.
+2. Import/use `PqHealingPhase` for the `phase` getter; it is a property type,
+   not a function for `ReturnType`.
+3. In each branch, capture a non-null local:
+
+   ```ts
+   const outbox = this.#outbox;
+   if (!outbox) fail(...);
+   ```
+
+   Then read/wipe/spread `outbox`, not `this.#outbox`, because TypeScript does
+   not retain private-field narrowing across calls.
+4. Run typecheck, then write a dedicated
+   `src/handlers/pqHealingRuntime.test.ts` before integrating it.
+
+Minimum runtime tests:
+
+- all ML-KEM-512/768/1024 profiles complete OFFER → ADVANCE → ACK and end with
+  byte-identical roots/epochs and alternating turns;
+- serialize/restore at every durable boundary;
+- discard a mutated clone on injected persistence failure and prove the live
+  root/outbox/counters do not move;
+- drop each flight, restore/retry, and prove exact frame bytes are reused;
+- exact duplicate OFFER re-emits exact ADVANCE;
+- exact duplicate ADVANCE re-emits exact ACK after the old root is gone;
+- altered same-slot bytes fail as a fork;
+- wrong suite/binding/direction/epoch fail closed;
+- active receive keys round-trip separately and are wiped on retirement/destroy;
+- retry exhaustion cannot generate a replacement record or fall back;
+- checkpoint truncation, trailing bytes, impossible phase/outbox combinations,
+  duplicate cache keys, and over-budget data fail closed.
+
+Security review points in the draft:
+
+- Verify that all public-record temporary copies are wiped consistently without
+  accidentally wiping returned dispatch buffers.
+- Verify that adopting a clone never aliases/wipes the live binding or current
+  message root.
+- Verify checkpoint restore has no secret-copy leaks on every throw path.
+- Verify replay comparisons are constant-time where secrecy matters; exact
+  public-frame comparisons need determinism more than secrecy.
+- Verify `Date.now()` values and `now + retry` cannot cross the safe-integer/u64
+  boundary.
+- Reconcile `MAX_ACTIVE_RECEIVE_KEYS = 256` with transport admission and
+  incomplete-transfer cleanup so a hostile peer cannot exhaust the encrypted
+  row.
+
+### New scheduled-cover core: implemented and focused tests pass
+
+New files:
+
+- `src/handlers/coverScheduler.ts`
+- `src/handlers/coverScheduler.test.ts`
+
+The core deliberately has no store, DB, DOM, or WebRTC dependency. Public
+surface:
+
+```ts
+new CoverScheduler({
+  schedule,
+  clock,
+  laneFactory,
+  makeDummy,
+  maxTimerDriftMs?,
+  onStatusChange?,
+  onJobResult?,
+  onJobInterrupted?,
+})
+
+scheduler.start()
+scheduler.stop()
+scheduler.suspend(reason?)
+scheduler.resume()
+scheduler.enqueue(job)
+scheduler.cancel(jobId)
+scheduler.complete(jobId)
+scheduler.getStatus()
+scheduler.getQueuedJobIds()
+```
+
+Important scheduler semantics already covered by 6 passing tests:
+
+- validates `C × F × D` geometry, max 16 lanes, and at least 25 ms slot spacing;
+- derives cycles from an absolute phase offset;
+- staggers `C × F` cells deterministically within each epoch;
+- selects one queued control/real job per lane for a whole cycle;
+- prioritizes cancel, then control, then real jobs;
+- producers are lazy (`nextCell(slot)`), avoiding a multi-gigabyte frame matrix;
+- declared job size must fit `F × D`;
+- pre-admission cancel removes the job;
+- admitted cancel uses `cancelCell` then leaves a dummy tail;
+- completion leaves a dummy tail;
+- backpressure/send failure/missed deadlines degrade without a catch-up burst;
+- an unsent exact producer cell is retained for retry rather than regenerated;
+- suspension closes only at the boundary and resume targets a future cycle.
+
+The scheduler is only the clock/admission core. The following production pieces
+do not exist yet:
+
+- authenticated fixed-size dummy/CANCEL/terminal-receipt cover-cell codec;
+- a `CoverRuntime` WebRTC adapter;
+- neutral/constant-shape lane labels and `RTCDataChannel` lifecycle;
+- integration into `handleOpenChannel`, `handleSendMessage`,
+  receipt processing, cancellation, and disconnect cleanup;
+- browser visibility/freeze/pagehide/offline hooks;
+- packet-trace and direct-versus-TURN validation;
+- UI status reporting;
+- tests proving exactly `C × F × D` 65,490-byte cells on every edge.
+
+### Room policy and signaling state
+
+`src/roomPolicy.ts`/tests now use wire version 4 and enforce:
+
+- maximum 16 cover lanes;
+- minimum 25 ms between individual scheduled slots;
+- existing room-wide cadence/lane/frame/duration validation.
+
+Do not assume this means scheduled rooms connect. `src/index.ts` still contains:
+
+```ts
+if (policy.coverMode !== "immediate")
+  throw new Error("Scheduled-cover room connections are not wired yet");
+```
+
+Keep that fail-closed guard until all send/receive/receipt/cancel/suspension
+paths actually use the scheduler. Removing it early would falsely advertise
+cover while the existing path bursts and closes channels.
+
+Other protocol-version work still required:
+
+- `src/utils/protocolVersion.test.ts` still explicitly expects `3`.
+- Numerous comments/error strings say protocol v3. Some are historical domain
+  names (for example receipt-token v1) and must not be mechanically renamed;
+  others describe the live frame and should be updated after wiring.
+- `src/handlers/handleWebSocketMessage.ts` now expects protocol version 4 in
+  parsed messages, but close-reason strings still say v3.
+- Check the sibling signaling server's accepted version contract before the
+  browser E2E. No server v4 change was made in this session.
+- The authenticated room policy KAT almost certainly needs recalculation after
+  the wire-version byte change; run `bun test src/roomPolicy.test.ts`.
+- Confirm the full canonical room policy is carried by the invite/site path.
+  This session did not edit `p2party.com`.
+
+### Public `createSession()` is currently inconsistent and must be repaired
+
+`src/session.ts` exposes protocol version 4 because it reads the global
+constant, but:
+
+- `SESSION_SNAPSHOT_VERSION` is still 3;
+- suite-tag constant names still end in `_V3`;
+- snapshots contain only the Double Ratchet;
+- the constructor still accepts only a ratchet state/module;
+- `encrypt()` does not pass a PQ message context to `sealChunk`;
+- `decrypt()` does not pass a PQ epoch resolver;
+- `createSession()` captures the handshake's PQ root/binding and immediately
+  wipes them instead of transferring ownership into the session;
+- there is no public control-exchange surface for sparse healing.
+
+Do not paper over this by changing only comments/version numbers. A correct v4
+session snapshot must include the PQ state and active combined receive keys,
+and restoration must reject v3 snapshots. Decide a store-free control API for
+custom transports, for example explicit `prepareHealing()` /
+`acceptControlFrame()` plus exact pending-control retrieval, or an injected
+persistent control transport. The API must make the persist-before-send
+boundary possible for non-browser consumers. Continue to support Node/Bun and
+custom native shells without Redux, DB, DOM, or WebRTC.
+
+### Current verification: exact commands and failures
+
+Last known fully green pre-v4 baseline at commit
+`fb57b1e6d39b0ee25c4dd7815d20c402a02e2bf3`:
+
+```text
+npm run check
+333 pass / 0 fail / 12,142 expects
+npm run typecheck clean
+bun run examples/standalone-e2ee.ts -> OK
+```
+
+Diagnostics run immediately before writing this handoff:
+
+```sh
+npm run typecheck
+```
+
+Result: exit 2, with the eight `pqHealingRuntime.ts` errors listed above.
+
+Focused command:
+
+```sh
+bun test \
+  src/cryptography/pqHealing.test.ts \
+  src/cryptography/pqHealingFrame.test.ts \
+  src/cryptography/pqMessageKey.test.ts \
+  src/handlers/messageChunkCrypto.test.ts \
+  src/handlers/chunkFrame.test.ts \
+  src/handlers/coverScheduler.test.ts \
+  src/db/ratchetWrap.test.ts \
+  src/db/db.worker.test.ts \
+  src/db/src/getDB.test.ts
+```
+
+Result:
+
+```text
+78 pass
+8 fail
+534 expect() calls
+```
+
+All eight failures are in `messageChunkCrypto.test.ts`:
+
+1. two-chunk round trip returns `ok: false`;
+2. explicit v4 PQ epoch round trip returns `ok: false`;
+3. good frame after corrupted-frame rollback returns `ok: false`;
+4. AEAD-authentic/bad-Merkle case does not advance;
+5. reconcile re-seal returns `ok: false`;
+6. injected receive-persistence failure is not reached because decrypt did not
+   authenticate;
+7. restored active multi-chunk key case returns `ok: false`;
+8. real-first completion never reports the first real cell complete.
+
+The common symptom is exactly what an old C/WASM parser produces when TS sends
+the new 69-byte header/AAD. Rebuild the WASM before investigating higher-level
+ratchet logic. If failures remain after a retained rebuild, verify these exact
+offsets on both sides:
+
+```text
+AAD clear prefix: bytes [0, 57)
+nonce:            bytes [57, 69)
+ciphertext:       bytes [69, 65490)
+```
+
+`git diff --check` was clean before the handoff append. No full `bun test`,
+`npm run check`, standalone example, browser crypto, or full WebRTC run has
+passed on this WIP tree. Do not record a green checkpoint until they do.
+
+### Precise continuation plan
+
+Execute in this order; each step has a local gate.
+
+#### 0. Safety and inventory
+
+```sh
+cd /Users/deliberative/Desktop/@p2party/p2party-js
+git status --short --branch
+git stash list
+git rev-parse HEAD
+git rev-parse master
+```
+
+Confirm branch and both stashes. Read this section plus
+`docs/protocol-v4-pq-cover-architecture.md`. Do not switch branches or touch
+Postgres.
+
+#### 1. Make the store-free PQ runtime compile and prove it independently
+
+Fix the exact generic/null errors described above. Add
+`pqHealingRuntime.test.ts` with the durable-boundary, replay, retry, restore,
+wipe, and all-suite matrix. Do not add Redux/DB/WebRTC imports to the class.
+
+Gate:
+
+```sh
+npm run typecheck
+bun test src/handlers/pqHealingRuntime.test.ts \
+  src/cryptography/pqHealing.test.ts \
+  src/cryptography/pqHealingFrame.test.ts \
+  src/cryptography/pqMessageKey.test.ts
+```
+
+#### 2. Rebuild the native v4 receive artifact and recover the crypto tests
+
+```sh
+npm run prebuild
+bun test src/utils/constants.test.ts \
+  src/handlers/chunkFrame.test.ts \
+  src/cryptography/pqMessageKey.test.ts \
+  src/cryptography/pqHealingFrame.test.ts \
+  src/handlers/messageChunkCrypto.test.ts
+npm run typecheck
+```
+
+Keep the correctly regenerated artifacts. Verify the C/TS constant-agreement
+test and SRI/provenance update. If `libcrypto.js` cannot instantiate under Bun,
+fix the explicit `wasmBinary` loader/environment path rather than restoring the
+old v3 WASM.
+
+#### 3. Install the PQ runtime atomically during every WebRTC handshake
+
+In `runHandshake`:
+
+1. derive stable role as already done;
+2. create `SparsePqHealingState` from `result.pqHealing`, selected `pqMode`,
+   `state.rootSuite`, and the role;
+3. install a candidate serializer before
+   `persistAndActivateClaimedRatchetState`;
+4. persist ratchet plus initial PQ checkpoint in the same row;
+5. in the synchronous activation callback, install both `epc.ratchetState` and
+   `epc.pqHealingState`, then open the gate;
+6. wipe/destroy every untransferred PQ root/binding/runtime on all failure and
+   stale-lease paths;
+7. make disconnect teardown destroy both ratchets, active keys, outbox/replay
+   caches, timers, and waiter gates.
+
+Add focused handshake tests proving persistence receives non-null edge state
+and no PQ secret survives an injected persistence/open-gate failure.
+
+#### 4. Make DR messages actually use and persist the PQ epoch
+
+1. Add typed PQ runtime/context fields to `IRTCPeerConnection`.
+2. Send path: wait for the PQ traffic gate, step the DR durably, obtain the
+   current context, and pass it to every `sealChunk`.
+3. Receive path: parse epoch first, resolve through PQ state, and pass the
+   resolver into `decryptMessageChunk`.
+4. Alias `epc.messageKeyCache` to the PQ runtime's separate active receive-key
+   map, or clone/adopt it as one edge candidate.
+5. Remove the current insertion of a combined key into
+   `candidate.skipped`.
+6. Extend `mutateRatchetDurably` so the exact staged active-key map is included
+   in the encrypted edge checkpoint before plaintext/cache publication.
+7. On complete/cancel, durably remove the active combined key and only then
+   wipe the RAM copy.
+8. Count one application message per logical DR step, never per chunk or
+   retransmit.
+
+Gate with first-chunk/cache-hit, restart-mid-message, persistence-failure,
+wrong-epoch-before-clone, and concurrent send/receive/PQ-lock tests.
+
+#### 5. Add the live sparse-healing orchestrator
+
+Wrap the store-free state with a WebRTC owner that:
+
+- serializes all transitions through `withEdgeCryptoMutationLock`;
+- clones PQ state, mutates/authenticates, persists ratchet plus candidate edge
+  state, adopts, then dispatches exact bytes;
+- routes `FRAME_TYPE_PQ_CONTROL` only on authenticated transport/cover lanes;
+- blocks new application admission during any non-idle phase;
+- waits for real message channels to become quiescent before local initiation;
+- starts a due exchange at 64 logical messages or 24 hours only when the local
+  role owns the turn;
+- retransmits the persisted exact frame every 5 seconds;
+- persists retry metadata;
+- after 8 failed attempts, fails/reconnects the authenticated edge rather than
+  generating a replacement or falling back;
+- uses the main DataChannel in immediate mode;
+- enqueues a control job into scheduled cover mode;
+- handles exact duplicate OFFER/ADVANCE with exact cached responses;
+- treats different bytes in the same authenticated counter/epoch slot as a
+  fatal fork.
+
+Add an in-memory two-peer fault-injection E2E that drops each flight and injects
+storage failure at every boundary.
+
+#### 6. Build the authenticated cover-cell codec
+
+Before WebRTC integration, define/test one exact 65,490-byte
+`FRAME_TYPE_COVER` cell for dummy, CANCEL, and terminal receipt/control
+subtypes. It must be directional, suite/edge/epoch bound, padded, and AEAD
+authenticated. Do not send unauthenticated random bytes as dummy cells. Do not
+reuse the 65-byte immediate receipt on a scheduled lane.
+
+The receiver must be able to distinguish subtypes only after authentication.
+Bind cancel/receipt to the transfer identity and root so a cell from another
+lane/room/edge cannot terminate work.
+
+#### 7. Add the WebRTC cover adapter without weakening immediate mode
+
+Create a `CoverRuntime` around `CoverScheduler`:
+
+- derive the absolute phase from authenticated room policy/hash;
+- open exactly the configured lanes at every boundary on every peer edge;
+- give dummy and real lanes constant-shape labels/lifecycle;
+- enforce 65,490 bytes at the adapter boundary;
+- use `bufferedAmount`/`bufferedamountlow` without late bursts;
+- close only at the fixed cycle boundary;
+- prohibit WebSocket payload fallback;
+- surface `starting|active|degraded|suspended|stopped`;
+- attach/detach browser visibility, freeze, pagehide, online/offline listeners;
+- skip missed epochs and resume only in a future cycle.
+
+Preserve the product's per-message-channel UX by assigning one admitted
+message to one scheduled lane for the whole cycle. A dummy lane should use a
+plausible same-shape random root label; a real lane can use its existing
+Merkle-root label because labels are peer-visible but not signaling-server or
+network-observer plaintext. Validate this assumption against actual SCTP/SDP
+behavior.
+
+#### 8. Refactor send, receive, receipt, completion, and cancel as one unit
+
+Immediate mode stays as it is, except for mandatory PQ combination.
+
+Scheduled mode:
+
+- `handleSendMessage` creates a lazy cover job instead of calling
+  `sendChunks()` in a burst;
+- each scheduled slot loads/stages/seals at most one chunk;
+- declared chunk count must fit `F × D`, otherwise fail before admission;
+- reconcile work is scheduled, not burst;
+- a terminal receipt is queued in a reverse scheduled control slot;
+- normal completion does not close early or emit an extra immediate receipt;
+- `cancelMessage` calls scheduler cancellation for every active peer job,
+  updates local UI/data, sends CANCEL in the next slot, and does not use
+  `disconnectFromChannelLabel` as the wire signal;
+- receive-side channel close in scheduled mode never means remote cancel;
+- tails remain dummy through the boundary;
+- disconnect cleanup differentiates real message lanes from cover lanes.
+
+Only after all these paths are tested should `connect()` stop rejecting
+`coverMode: "scheduled"`.
+
+#### 9. Repair the public session API and snapshots
+
+Bump the session snapshot format to 4 and include:
+
+- authenticated suite/binding;
+- PQ machine/root/epoch/turn/counters;
+- pending exact control state if exposed;
+- active combined receive keys;
+- DR state.
+
+Make `.encrypt()`/`.decrypt()` always use the PQ context at epoch zero and
+after healing. Add a store-free sparse-healing API with an explicit
+persist-before-send contract. Verify source and installed-package Node ESM,
+CJS, Bun, and browser examples. Continue wiping X25519/PQ/DR secrets on every
+failure path.
+
+#### 10. Protocol-wide cleanup and exact verification
+
+Update tests/comments/version contracts intentionally, including
+`src/utils/protocolVersion.test.ts`. Recalculate room-policy KATs. Check the
+server and frontend version handling. Do not mechanically rename historical
+v3 receipt/KDF domains unless the protocol design explicitly requires a new
+domain.
+
+Run continuously:
+
+```sh
+bun test
+npm run typecheck
+bun run examples/standalone-e2ee.ts
+git diff --check
+git stash list
+```
+
+Final source gate:
+
+```sh
+npm run check
+```
+
+Then run a real packet-timed browser E2E:
+
+- immediate room, both directions and responder-first;
+- scheduled room idle for multiple cycles;
+- scheduled message/cancel/complete with identical lane lifetime;
+- large file exactly at capacity and one cell above capacity;
+- browser suspension and future-boundary resume;
+- PQ OFFER/ADVANCE/ACK with a dropped flight and exact retry;
+- n=3 full mesh;
+- direct and TURN captures;
+- zero WebSocket payload fallback.
+
+Do not claim packet-trace indistinguishability from equal application cells
+alone; SCTP/DTLS fragmentation, congestion, retransmission, and channel events
+must be measured.
+
+#### 11. Version, package, frontend, and merge only after green
+
+This feature is a new incompatible protocol release; use a new package version
+(the prior user direction was “new version for these things”; `0.13.0` is the
+natural next candidate unless the maintainer chooses otherwise).
+
+After all source/browser gates:
+
+```sh
+npm run predist
+npm run build:package
+npm run build:worker
+npm pack
+```
+
+Install the exact tarball in `p2party.com`, update its verifier/provenance and
+self-hosted WASM, expose room-wide cover selection/status and the standalone
+session demo, then run frontend lint/typecheck/build/tests and exact-artifact
+WebRTC E2E. Keep the retro hacker/cat brand and AGPL frontend license.
+
+Commit on the feature branch. Verify both stashes. Fast-forward local `master`
+only after the exact-artifact gates pass, using a compare-and-swap update rather
+than branch switching if the no-checkout constraint remains. Production deploy
+and CDN/npm publication still require the maintainer's deployment credentials
+and explicit release action.
+
+### Honest current claim boundary
+
+At this checkpoint:
+
+- canonical sparse-PQ state-machine, ACK, snapshot primitives, fixed control
+  cells, v4 message-key combiner, v4 source wire geometry, encrypted edge-field
+  wrapping, and the store-free scheduled clock/admission core exist;
+- live WebRTC sparse healing does not exist;
+- live scheduled dummy lanes do not exist;
+- messages do not yet use the derived PQ root;
+- the standalone session does not yet use or persist PQ state;
+- `connect()` still rejects scheduled cover;
+- current typecheck and message crypto tests are red;
+- no protocol-v4 tarball, browser result, deployment, paper result, L2, or P2BT
+  implementation should be claimed.
+
+The likely paper-worthy systems finding remains conditional on finishing and
+measuring the complete composition: fixed-size application cells can absorb
+PQ/ratchet control overhead and allow real/control/cancel traffic to substitute
+for already-scheduled dummy slots at zero **marginal scheduled
+application-cell** cost. Never call the cryptography or network cost universally
+“free,” and never claim anonymity or packet-trace indistinguishability without
+the L2b and capture/classifier evidence.

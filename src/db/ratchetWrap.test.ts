@@ -35,7 +35,7 @@ const eq = (a: ArrayBuffer, b: ArrayBuffer) =>
   Buffer.from(new Uint8Array(a)).equals(Buffer.from(new Uint8Array(b)));
 
 const sampleSession = (): RatchetSession => ({
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v3",
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
   roomId: "room-1",
   peerPublicKey: "aa".repeat(32),
   peerId: "peer-abc-123",
@@ -49,6 +49,7 @@ const sampleSession = (): RatchetSession => ({
   Nr: 1,
   PN: 2,
   skippedMessageKeys: [{ dhPub: rnd(32), n: 0, messageKey: rnd(32) }],
+  edgeCryptoState: rnd(6_144),
   updatedAt: 111,
 });
 
@@ -148,7 +149,7 @@ describe("wrap / unwrap RatchetSession", () => {
     expect(w.Nr).toBe(1);
     expect(w.PN).toBe(2);
     expect(w.roomId).toBe("room-1");
-    expect(w.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v3");
+    expect(w.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v4");
     expect(w.peerPublicKey).toBe("aa".repeat(32));
     expect(w.updatedAt).toBe(111);
     expect(w.skippedMessageKeys[0].n).toBe(0);
@@ -161,6 +162,11 @@ describe("wrap / unwrap RatchetSession", () => {
         s.skippedMessageKeys[0].messageKey,
       ),
     ).toBe(false); // skipped messageKey wrapped
+    expect(
+      w.edgeCryptoState !== null &&
+        s.edgeCryptoState !== null &&
+        eq(w.edgeCryptoState, s.edgeCryptoState),
+    ).toBe(false); // variable-length PQ/KEM checkpoint wrapped
 
     const u = await unwrapRatchetSession(w, key);
     expect(eq(u.rootKey, s.rootKey)).toBe(true);
@@ -176,6 +182,11 @@ describe("wrap / unwrap RatchetSession", () => {
       ),
     ).toBe(true);
     expect(u.skippedMessageKeys[0].n).toBe(0);
+    expect(
+      u.edgeCryptoState !== null &&
+        s.edgeCryptoState !== null &&
+        eq(u.edgeCryptoState, s.edgeCryptoState),
+    ).toBe(true);
     expect(u.peerId).toBe("peer-abc-123");
   });
 
@@ -224,6 +235,7 @@ describe("wrap / unwrap RatchetSession", () => {
         })),
       },
       { ...wrapped, sendingChainKey: null },
+      { ...wrapped, edgeCryptoState: null },
     ];
 
     for (const mutation of mutations)
@@ -263,6 +275,15 @@ describe("wrap / unwrap RatchetSession", () => {
     await expect(
       unwrapRatchetSession(
         { ...sameMetadataRewrap, rootKey: first.rootKey },
+        key,
+      ),
+    ).rejects.toThrow("record ID mismatch");
+    await expect(
+      unwrapRatchetSession(
+        {
+          ...sameMetadataRewrap,
+          edgeCryptoState: first.edgeCryptoState,
+        },
         key,
       ),
     ).rejects.toThrow("record ID mismatch");

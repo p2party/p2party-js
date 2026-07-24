@@ -67,15 +67,14 @@ hkdf_sha512_expand(uint8_t *out, const unsigned int out_len,
                    const uint8_t *info, const unsigned int info_len)
 {
   /* libsodium's expand takes ctx (= our info) then the prk LAST. */
-  return crypto_kdf_hkdf_sha512_expand(out, (size_t)out_len,
-                                       (const char *)info, (size_t)info_len,
-                                       prk);
+  return crypto_kdf_hkdf_sha512_expand(out, (size_t)out_len, (const char *)info,
+                                       (size_t)info_len, prk);
 }
 
 /* ---------------- Symmetric AEAD (message-key path) ---------------- */
 
 /* out = ciphertext || Poly1305 tag (out_len == data_len + ABYTES).
- * The caller carries the fresh nonce in the v3 chunk header. */
+ * The caller carries the fresh nonce in the v4 chunk header. */
 int
 encrypt_chachapoly_symmetric(
     uint8_t *out, const uint8_t *data, const unsigned int data_len,
@@ -91,9 +90,10 @@ encrypt_chachapoly_symmetric(
 }
 
 /* Inverse of encrypt_chachapoly_symmetric via libsodium's own AEAD decrypt:
- * in = ciphertext || Poly1305 tag (in_len == out_len + ABYTES), out = plaintext.
- * libsodium verifies the tag in constant time and writes NO plaintext on auth
- * failure. Returns 0 on success, -1 on authentication failure. */
+ * in = ciphertext || Poly1305 tag (in_len == out_len + ABYTES), out =
+ * plaintext. libsodium verifies the tag in constant time and writes NO
+ * plaintext on auth failure. Returns 0 on success, -1 on authentication
+ * failure. */
 int
 decrypt_chachapoly_symmetric(
     uint8_t *out, const uint8_t *in, const unsigned int in_len,
@@ -108,32 +108,31 @@ decrypt_chachapoly_symmetric(
   return 0;
 }
 
-/* ---------------- v3 receive path (no signature) ----------------
- * Frame: [type(1) | DH_pub(32) | N(8) | PN(8) | PQ_EPOCH(1) | nonce(12) | ciphertext||tag]
- * Symmetric-decrypt under message_key with AAD = merkle_root || N || PN, then
- * verify the Merkle proof, derive the leaf receipt, and return it in the
- * decrypted buffer. */
+/* ---------------- v4 receive path (no signature) ----------------
+ * Frame:
+ *   [type(1) | DH_pub(32) | N(8) | PN(8) | pqEpoch(8) | nonce(12)
+ *    | ciphertext||tag]
+ * Symmetric-decrypt under message_key with AAD =
+ *   merkle_root || type || DH_pub || N || PN || pqEpoch.
+ * The clear header excluding its random nonce is therefore authenticated
+ * byte-for-byte, matching messageChunkCrypto.ts. Then verify the Merkle proof,
+ * derive the leaf receipt, and return it in the decrypted buffer. */
 int
 receive_message_with_key(
     uint8_t decrypted[DECRYPTED_LEN], const uint8_t message[MESSAGE_LEN],
     const uint8_t merkle_root[crypto_hash_sha512_BYTES],
     const uint8_t message_key[crypto_aead_chacha20poly1305_ietf_KEYBYTES])
 {
-  const uint8_t *n_ptr = message + FRAME_TYPE_LEN + RATCHET_DHPUB_LEN;
-  const uint8_t *pn_ptr = n_ptr + RATCHET_N_LEN;
-
-  uint8_t aad[crypto_hash_sha512_BYTES + RATCHET_N_LEN + RATCHET_PN_LEN];
+  uint8_t aad[crypto_hash_sha512_BYTES + CHUNK_AAD_HEADER_LEN];
   memcpy(aad, merkle_root, crypto_hash_sha512_BYTES);
-  memcpy(aad + crypto_hash_sha512_BYTES, n_ptr, RATCHET_N_LEN);
-  memcpy(aad + crypto_hash_sha512_BYTES + RATCHET_N_LEN, pn_ptr,
-         RATCHET_PN_LEN);
+  memcpy(aad + crypto_hash_sha512_BYTES, message, CHUNK_AAD_HEADER_LEN);
 
   /* Nonce = the fresh, random 12-byte per-chunk nonce carried in the CLEARTEXT
-   * frame header (right after PQ_EPOCH, before the ciphertext). Receiver-derivable
-   * because it is literally on the wire, metadata-safe because it is random (not an
-   * index), and birthday-safe within a per-message key. NPUBBYTES == RATCHET_NONCE_LEN
-   * (both 12). */
-  const uint8_t *nonce = pn_ptr + RATCHET_PN_LEN + PQ_EPOCH_LEN;
+   * frame header (right after pqEpoch, before the ciphertext).
+   * Receiver-derivable because it is literally on the wire, metadata-safe
+   * because it is random (not an index), and birthday-safe within a
+   * per-message key. NPUBBYTES == RATCHET_NONCE_LEN (both 12). */
+  const uint8_t *nonce = message + CHUNK_AAD_HEADER_LEN;
 
   unsigned long long DATA_LEN = DECRYPTED_LEN;
   int d = crypto_aead_chacha20poly1305_ietf_decrypt(
@@ -143,7 +142,8 @@ receive_message_with_key(
       aad, sizeof aad, nonce, message_key);
   if (d != 0) return -2;
 
-  /* Verify the authenticated plaintext's Merkle proof and derive its receipt. */
+  /* Verify the authenticated plaintext's Merkle proof and derive its receipt.
+   */
   uint32_t proofLen = ((uint32_t)decrypted[METADATA_LEN] << 24)
                       | ((uint32_t)decrypted[METADATA_LEN + 1] << 16)
                       | ((uint32_t)decrypted[METADATA_LEN + 2] << 8)

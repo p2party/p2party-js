@@ -39,7 +39,7 @@ const eq = (a: ArrayBuffer, b: ArrayBuffer) =>
   Buffer.from(new Uint8Array(a)).equals(Buffer.from(new Uint8Array(b)));
 
 const sampleSession = (): RatchetSession => ({
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v3",
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
   roomId: "room-1",
   peerPublicKey: "aa".repeat(32),
   peerId: "peer-abc-123",
@@ -53,6 +53,7 @@ const sampleSession = (): RatchetSession => ({
   Nr: 1,
   PN: 2,
   skippedMessageKeys: [{ dhPub: rnd(32), n: 0, messageKey: rnd(32) }],
+  edgeCryptoState: rnd(6_144),
   updatedAt: 111,
 });
 
@@ -162,9 +163,14 @@ describe("db.worker ratchetSessions wiring", () => {
     expect(got.Ns).toBe(3);
     expect(got.Nr).toBe(1);
     expect(got.PN).toBe(2);
+    expect(
+      got.edgeCryptoState !== null &&
+        s.edgeCryptoState !== null &&
+        eq(got.edgeCryptoState, s.edgeCryptoState),
+    ).toBe(true);
     expect(got.peerId).toBe("peer-abc-123");
     expect(got.roomId).toBe("room-1");
-    expect(got.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v3");
+    expect(got.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v4");
   });
 
   test("KEY SECURITY ASSERTION: the raw stored row in `ratchetSessions` is ciphertext, not plaintext", async () => {
@@ -194,6 +200,11 @@ describe("db.worker ratchetSessions wiring", () => {
         s.skippedMessageKeys[0].messageKey,
       ),
     ).toBe(false);
+    expect(
+      raw.edgeCryptoState !== null &&
+        s.edgeCryptoState !== null &&
+        eq(raw.edgeCryptoState, s.edgeCryptoState),
+    ).toBe(false);
     // Public / counter fields pass through unwrapped — stored plaintext.
     expect(eq(raw.dhSelfPub, s.dhSelfPub)).toBe(true);
     expect(
@@ -202,7 +213,7 @@ describe("db.worker ratchetSessions wiring", () => {
     expect(raw.receivingChainKey).toBe(null);
     expect(raw.Ns).toBe(3);
     expect(raw.roomId).toBe("room-1");
-    expect(raw.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v3");
+    expect(raw.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v4");
     expect(raw.peerPublicKey).toBe("aa".repeat(32));
   });
 

@@ -130,7 +130,7 @@ export type CreateSessionOptions = {
 } & SessionAuth;
 
 export interface EncryptedSessionMessage {
-  protocolVersion: 3;
+  protocolVersion: 4;
   /** The message Merkle root; authenticated as AEAD additional data. */
   root: Uint8Array;
   /** Uniform protocol-v3 chunk frames. */
@@ -138,7 +138,7 @@ export interface EncryptedSessionMessage {
 }
 
 export interface P2PartySession {
-  readonly protocolVersion: 3;
+  readonly protocolVersion: 4;
   readonly pqMode: RoomPqMode;
   /** True for either role after a successful handshake; false after destroy. */
   readonly canEncrypt: boolean;
@@ -960,6 +960,8 @@ export const createSession = async (
   const localFingerprint = copyBytes(options.channel.localFingerprint);
   const remoteFingerprint = copyBytes(options.channel.remoteFingerprint);
   let rootSecret: Uint8Array | null = null;
+  let pqHealingRoot: Uint8Array | null = null;
+  let pqHealingBinding: Uint8Array | null = null;
   let state: RatchetState | null = null;
   try {
     const module = await loadSessionCrypto(options.crypto);
@@ -1002,6 +1004,8 @@ export const createSession = async (
     );
     state = result.state;
     rootSecret = result.secret;
+    pqHealingRoot = result.pqHealing.rootKey;
+    pqHealingBinding = result.pqHealing.binding;
     const session = new Session(state, module);
     state = null;
     return session;
@@ -1009,6 +1013,8 @@ export const createSession = async (
     identitySecret.fill(0);
     pin?.fill(0);
     rootSecret?.fill(0);
+    pqHealingRoot?.fill(0);
+    pqHealingBinding?.fill(0);
     if (state) wipeRatchet(state);
   }
 };

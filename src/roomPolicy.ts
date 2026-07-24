@@ -52,7 +52,7 @@ export const rootSuiteToRoomPqMode = (suite: RatchetRootSuite): RoomPqMode => {
 export interface RoomPolicyV1 {
   version: 1;
   revision: number;
-  wireVersion: 3;
+  wireVersion: 4;
   authMode: RoomAuthMode;
   pqMode: RoomPqMode;
   rendezvousMode: RoomRendezvousMode;
@@ -68,8 +68,11 @@ export const ROOM_POLICY_V1_HASH_LEN = 32;
 
 export const MIN_COVER_CADENCE_MS = 1_000;
 export const MAX_COVER_CADENCE_MS = 3_600_000;
-export const MAX_COVER_LANES = 64;
+// With one outbound and one inbound lane set plus cycle rollover, 16 lanes can
+// transiently consume 64 SCTP streams—the existing per-edge channel budget.
+export const MAX_COVER_LANES = 16;
 export const MAX_COVER_FRAMES_PER_CELL = 1_024;
+export const MIN_COVER_SLOT_MS = 25;
 
 const MAGIC = new Uint8Array([0x50, 0x32, 0x52, 0x50]); // "P2RP"
 const POLICY_FORMAT_VERSION = 1;
@@ -245,6 +248,14 @@ export const validateRoomPolicyV1 = (policy: RoomPolicyV1): void => {
     throw new Error(
       "roomPolicy: scheduled cover frames per cell are out of range",
     );
+  if (
+    policy.coverCadenceMs /
+      (policy.coverLanes * policy.coverFramesPerCell) <
+    MIN_COVER_SLOT_MS
+  )
+    throw new Error(
+      "roomPolicy: scheduled cover slots are below the transport timer granularity",
+    );
   if (policy.coverDurationEpochs < 1)
     throw new Error(
       "roomPolicy: scheduled cover duration epochs are out of range",
@@ -304,7 +315,7 @@ export const decodeRoomPolicyV1 = (encoded: Uint8Array): RoomPolicyV1 => {
   );
   const policy: RoomPolicyV1 = {
     version: encoded[4] as 1,
-    wireVersion: encoded[5] as 3,
+    wireVersion: encoded[5] as 4,
     authMode: byteToAuthMode(encoded[6]),
     pqMode: byteToPqMode(encoded[7]),
     rendezvousMode: byteToRendezvousMode(encoded[8]),
@@ -356,7 +367,7 @@ export const hashRoomPolicyV1 = async (
 export const DEFAULT_ROOM_POLICY_V1: Readonly<RoomPolicyV1> = Object.freeze({
   version: 1,
   revision: 0,
-  wireVersion: 3,
+  wireVersion: 4,
   authMode: "nopin",
   pqMode: "hybrid-mlkem768",
   rendezvousMode: "legacy-signaling",

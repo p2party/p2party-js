@@ -14,7 +14,7 @@ const signal = (
   fromPeerId: peerId,
   fromPeerPublicKey: peerPublicKey,
   labels: ["main"],
-  protocolVersion: 3,
+  protocolVersion: 4,
 });
 
 describe("accepted connection signaling", () => {

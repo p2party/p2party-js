@@ -1750,6 +1750,8 @@ const wipeWorkerRatchetSecrets = (session: RatchetSession): void => {
   new Uint8Array(session.dhSelfSec).fill(0);
   for (const skipped of session.skippedMessageKeys)
     new Uint8Array(skipped.messageKey).fill(0);
+  if (session.edgeCryptoState)
+    new Uint8Array(session.edgeCryptoState).fill(0);
 };
 
 async function fnGetRatchetSession(

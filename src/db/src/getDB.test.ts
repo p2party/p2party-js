@@ -22,7 +22,8 @@ afterEach(() => {
 const LEGACY_VERSION = 17;
 
 // Simulates a real user's pre-existing v17 database, including the unsafe
-// content-hash-keyed outbound staging store. v18 must discard only newChunks.
+// content-hash-keyed outbound staging store. v18 changed newChunks; v19 also
+// invalidates only legacy crypto/transient wire state for the protocol-v4 break.
 function openLegacyDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(dbName, LEGACY_VERSION);
@@ -65,9 +66,9 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
   });
 }
 
-describe("getDB — v17 -> v18 outbound transfer identity migration", () => {
-  test("dbVersion is bumped to exactly 18", () => {
-    expect(dbVersion).toBe(18);
+describe("getDB — v17 -> v19 protocol-v4 migration", () => {
+  test("dbVersion is bumped to exactly 19", () => {
+    expect(dbVersion).toBe(19);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -115,8 +116,9 @@ describe("getDB — v17 -> v18 outbound transfer identity migration", () => {
     const stored = await db.get("chunks", ["deadbeef", 0]);
     expect(stored).toEqual(legacyChunk);
 
-    // Outbound staging is transient and is the ONLY store recreated: v17 rows
-    // cannot be assigned an unambiguous random transfer identity.
+    // Outbound staging is transient and recreated: v17 rows cannot be assigned
+    // an unambiguous random transfer identity. V19 additionally clears legacy
+    // ratchet/send-ciphertext rows (empty in this v17 fixture).
     expect(await db.count("newChunks")).toBe(0);
     const outboundTx = db.transaction("newChunks");
     const outbound = outboundTx.objectStore("newChunks");
@@ -144,7 +146,7 @@ describe("getDB — v17 -> v18 outbound transfer identity migration", () => {
     expect(value).toEqual(fakeKey);
   });
 
-  test("opening at v18 fresh creates the complete schema", async () => {
+  test("opening at v19 fresh creates the complete schema", async () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 

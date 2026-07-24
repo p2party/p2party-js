@@ -20,21 +20,45 @@ const unsigned int PROOF_LEN
       48
           * (crypto_hash_sha512_BYTES
              + 1); // ceil(log2(tree)) <= 48 * (hash + position)
-/* Frozen v3 authenticated-plaintext profile. Byte-match
- * CHUNK_PLAINTEXT_LEN in src/utils/constants.ts. The 62-byte ratchet header and
- * 16-byte AEAD tag produce a uniform 65,490-byte wire cell. */
-#define CHUNK_PLAINTEXT_LEN 65412U
+/* Protocol-v4 authenticated-plaintext profile. The u64 PQ epoch adds seven
+ * clear-header bytes relative to v3; padding pays for them so the complete
+ * wire cell remains exactly 65,490 bytes. Byte-matched to constants.ts. */
+#define CHUNK_PLAINTEXT_LEN 65405U
 const unsigned int DECRYPTED_LEN = CHUNK_PLAINTEXT_LEN;
 const unsigned int CHUNK_LEN = DECRYPTED_LEN - METADATA_LEN - PROOF_LEN;
 
-/* protocol-v3 wire framing. Byte-matched to src/utils/constants.ts
- * (FRAME_TYPE_*, PQ_TAG_LEN). A mismatch mis-routes / mis-slices frames
- * silently; src/utils/constants.test.ts asserts C == TS. */
+/* Protocol-v4 wire framing, byte-matched to src/utils/constants.ts. */
+#define PROTOCOL_VERSION 4U
 #define FRAME_TYPE_LEN 1U
 #define FRAME_TYPE_HANDSHAKE 1U
 #define FRAME_TYPE_CHUNK 2U
 #define FRAME_TYPE_RECEIPT 3U
+#define FRAME_TYPE_COVER 4U
+#define FRAME_TYPE_PQ_CONTROL 5U
 #define PQ_TAG_LEN 1U
+
+/* v4 large-cell clear header:
+ * type(1) | dh-or-control-id(32) | N(8) | PN(8) | pqEpoch(8) | nonce(12).
+ * CHUNK_AAD_HEADER_LEN excludes the nonce and is authenticated byte-for-byte.
+ */
+#define RATCHET_DHPUB_LEN 32U
+#define RATCHET_N_LEN 8U
+#define RATCHET_PN_LEN 8U
+#define PQ_EPOCH_LEN 8U
+#define RATCHET_NONCE_LEN 12U
+#define CHUNK_AAD_HEADER_LEN                                                   \
+  (FRAME_TYPE_LEN + RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN         \
+   + PQ_EPOCH_LEN) /* 57 */
+#define CHUNK_HEADER_LEN                                                       \
+  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN           \
+   + RATCHET_NONCE_LEN)                                   /* 68 */
+#define MESSAGE_START (FRAME_TYPE_LEN + CHUNK_HEADER_LEN) /* 69 */
+#define WIRE_CHUNK_FRAME_LEN 65490U
+_Static_assert(
+    MESSAGE_START + CHUNK_PLAINTEXT_LEN
+            + crypto_aead_chacha20poly1305_ietf_ABYTES
+        == WIRE_CHUNK_FRAME_LEN,
+    "protocol-v4 chunk cell geometry must remain exactly 65,490 bytes");
 
 typedef struct
 {

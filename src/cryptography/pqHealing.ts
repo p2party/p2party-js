@@ -31,11 +31,14 @@ import type { LibCrypto } from "./libcrypto";
 export const PQ_HEALING_BINDING_BYTES = 32;
 export const PQ_HEALING_ROOT_BYTES = 32;
 export const PQ_HEALING_RECORD_HEADER_BYTES = 64;
+export const PQ_HEALING_ACK_BYTES = 64;
+export const PQ_HEALING_SNAPSHOT_FORMAT_VERSION = 1;
 
 const MAGIC = new Uint8Array([0x50, 0x32, 0x51, 0x48]); // "P2QH"
 const FORMAT_VERSION = 1;
 const OFFER_TYPE = 1;
 const ADVANCE_TYPE = 2;
+const ACK_TYPE = 3;
 const RESERVED_FLAGS = 0;
 const KDF_DOMAIN = new TextEncoder().encode("p2party/pq-healing/root/v1\u0000");
 const MAX_U64 = (1n << 64n) - 1n;
@@ -49,6 +52,8 @@ const BINDING_OFFSET = 8;
 const COUNTER_OFFSET = 40;
 const FROM_EPOCH_OFFSET = 48;
 const TO_EPOCH_OFFSET = 56;
+const ACK_EPOCH_OFFSET = 48;
+const ACK_RESERVED_OFFSET = 56;
 
 export type PqHealingTurn = "local" | "remote";
 
@@ -88,11 +93,6 @@ export class PqHealingError extends Error {
 
 export interface PqHealingAdvanceAcknowledgement {
   /**
-   * Integration-facing typed value, NOT a wire encoding. ACK wire encoding
-   * and authentication remain integration-owned: the transport must define
-   * one canonical byte representation, authenticate it under `epoch`, and
-   * only then pass the decoded value to this state machine.
-   *
    * The newly committed epoch. The transport acknowledgement must be
    * authenticated under this epoch, proving that the offerer decapsulated.
    */
@@ -146,6 +146,70 @@ export interface PqHealingMachineOptions<P extends MlKemParameterSet> {
   readonly epoch?: bigint;
   readonly localCounter?: bigint;
   readonly remoteCounter?: bigint;
+}
+
+export interface PqHealingRestoreOptions<P extends MlKemParameterSet> {
+  readonly module: LibCrypto;
+  readonly backend: MlKemBackend<P>;
+  readonly suite: Readonly<MlKemSuiteDescriptor<P>>;
+  /** Authenticated expected edge binding; snapshots from another edge fail. */
+  readonly binding: Uint8Array;
+}
+
+export type PqHealingSnapshotPhase =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "outbound-offer-prepared" | "outbound-offer-dispatched";
+      readonly offer: Uint8Array;
+      readonly secretKey: Uint8Array;
+    }
+  | {
+      readonly kind: "inbound-offer";
+      readonly offer: Uint8Array;
+    }
+  | {
+      readonly kind: "outbound-advance-prepared";
+      readonly advance: Uint8Array;
+      readonly nextRoot: Uint8Array;
+    }
+  | {
+      readonly kind: "outbound-advance-awaiting-ack";
+      readonly advance: Uint8Array;
+    }
+  | {
+      readonly kind: "inbound-advance-prepared";
+      readonly advance: Uint8Array;
+      readonly secretKey: Uint8Array;
+      readonly nextRoot: Uint8Array;
+    }
+  | {
+      readonly kind: "inbound-advance-awaiting-ack-dispatch";
+      readonly advance: Uint8Array;
+    };
+
+/**
+ * Owned, plaintext checkpoint of the complete store-free PQ machine.
+ *
+ * Durable integration normally checkpoints only phases whose corresponding
+ * sealed outbox frame is committed in the same transaction. The two
+ * `*-prepared` phases are intentionally representable for clone/rollback and
+ * fault-injection tests, but are transaction-local and must never be persisted
+ * alone or dispatched after restoration without the exact sealed frame.
+ */
+export interface PqHealingSnapshot<
+  P extends MlKemParameterSet = MlKemParameterSet,
+> {
+  readonly formatVersion: typeof PQ_HEALING_SNAPSHOT_FORMAT_VERSION;
+  readonly parameterSet: P;
+  readonly binding: Uint8Array;
+  readonly rootKey: Uint8Array;
+  readonly epoch: bigint;
+  readonly localCounter: bigint;
+  readonly remoteCounter: bigint;
+  readonly nextOfferer: PqHealingTurn;
+  readonly phase: PqHealingSnapshotPhase;
+  readonly lastInboundOffer: Uint8Array | null;
+  readonly lastInboundAdvance: Uint8Array | null;
 }
 
 interface DecodedHeader {
@@ -300,6 +364,45 @@ const requireAcknowledgement = (
   return { epoch, advanceCounter };
 };
 
+const requirePlainRecord = (
+  value: unknown,
+  name: string,
+  expectedKeys: readonly string[],
+): Record<string, unknown> => {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    return fail("invalid-record", `${name} must be a plain record`);
+
+  const record = value as Record<PropertyKey, unknown>;
+  const keys = Reflect.ownKeys(record);
+  if (
+    keys.length !== expectedKeys.length ||
+    expectedKeys.some((key) => !keys.includes(key))
+  )
+    return fail(
+      "invalid-record",
+      `${name} does not contain exactly its canonical fields`,
+    );
+
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      !descriptor.enumerable
+    )
+      fail(
+        "invalid-record",
+        `${name}.${key} must be an enumerable data property`,
+      );
+  }
+  return record as Record<string, unknown>;
+};
+
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
   if (left.length !== right.length) return false;
   let difference = 0;
@@ -389,6 +492,86 @@ export const getPqHealingRecordLengths = (
   return {
     offer: offerLength(suite),
     advance: advanceLength(suite),
+  };
+};
+
+/**
+ * Encode the sole canonical PQ acknowledgement representation:
+ *
+ * `magic(4) | version(1) | type(1) | suite(1) | flags(1) | binding(32) |
+ * advanceCounter(u64 BE) | epoch(u64 BE) | reserved(u64=0)`.
+ */
+export const encodePqHealingAck = (
+  acknowledgement: unknown,
+  suite: Readonly<MlKemSuiteDescriptor>,
+  binding: Uint8Array,
+): Uint8Array => {
+  assertCanonicalSuite(suite);
+  requireBytes(binding, "binding", PQ_HEALING_BINDING_BYTES);
+  const ack = requireAcknowledgement(acknowledgement);
+  const record = new Uint8Array(PQ_HEALING_ACK_BYTES);
+  record.set(MAGIC, MAGIC_OFFSET);
+  record[VERSION_OFFSET] = FORMAT_VERSION;
+  record[TYPE_OFFSET] = ACK_TYPE;
+  record[SUITE_OFFSET] = parameterSetToTag(suite.parameterSet);
+  record[FLAGS_OFFSET] = RESERVED_FLAGS;
+  record.set(binding, BINDING_OFFSET);
+  const view = new DataView(
+    record.buffer,
+    record.byteOffset,
+    record.byteLength,
+  );
+  view.setBigUint64(COUNTER_OFFSET, ack.advanceCounter, false);
+  view.setBigUint64(ACK_EPOCH_OFFSET, ack.epoch, false);
+  // ACK_RESERVED_OFFSET is already canonical zero from Uint8Array allocation.
+  return record;
+};
+
+/** Decode and validate an exact, edge- and suite-bound 64-byte ACK. */
+export const decodePqHealingAck = (
+  record: Uint8Array,
+  suite: Readonly<MlKemSuiteDescriptor>,
+  binding: Uint8Array,
+): PqHealingAdvanceAcknowledgement => {
+  assertCanonicalSuite(suite);
+  requireBytes(binding, "binding", PQ_HEALING_BINDING_BYTES);
+  requireBytes(record, "ACK", PQ_HEALING_ACK_BYTES);
+  if (!bytesEqual(record.subarray(MAGIC_OFFSET, VERSION_OFFSET), MAGIC))
+    fail("invalid-record", "ACK magic is invalid");
+  if (record[VERSION_OFFSET] !== FORMAT_VERSION)
+    fail("invalid-record", "ACK version is unsupported");
+  if (record[TYPE_OFFSET] !== ACK_TYPE)
+    fail("invalid-record", "ACK type is unexpected");
+  if (record[FLAGS_OFFSET] !== RESERVED_FLAGS)
+    fail("invalid-record", "ACK reserved flags must be zero");
+
+  const recordParameterSet = tagToParameterSet(record[SUITE_OFFSET]);
+  if (recordParameterSet !== suite.parameterSet)
+    fail(
+      "suite-mismatch",
+      "ACK suite differs from the authenticated room suite",
+    );
+  if (
+    !bytesEqual(
+      record.subarray(
+        BINDING_OFFSET,
+        BINDING_OFFSET + PQ_HEALING_BINDING_BYTES,
+      ),
+      binding,
+    )
+  )
+    fail("binding-mismatch", "ACK belongs to a different authenticated edge");
+
+  const view = new DataView(
+    record.buffer,
+    record.byteOffset,
+    record.byteLength,
+  );
+  if (view.getBigUint64(ACK_RESERVED_OFFSET, false) !== 0n)
+    fail("invalid-record", "ACK reserved bytes must be zero");
+  return {
+    advanceCounter: view.getBigUint64(COUNTER_OFFSET, false),
+    epoch: view.getBigUint64(ACK_EPOCH_OFFSET, false),
   };
 };
 
@@ -680,6 +863,484 @@ const sameAdvanceSlot = (
   left.fromEpoch === right.fromEpoch &&
   left.toEpoch === right.toEpoch;
 
+const makeOwnedKeyPair = (
+  publicKey: Uint8Array,
+  secretKey: Uint8Array,
+): MlKemKeyPair => {
+  const ownedPublicKey = Uint8Array.from(publicKey);
+  const ownedSecretKey = Uint8Array.from(secretKey);
+  let destroyed = false;
+  return {
+    publicKey: ownedPublicKey,
+    secretKey: ownedSecretKey,
+    get destroyed(): boolean {
+      return destroyed;
+    },
+    destroy(): void {
+      if (destroyed) return;
+      ownedSecretKey.fill(0);
+      destroyed = true;
+    },
+  };
+};
+
+const snapshotPhase = (phase: InternalPhase): PqHealingSnapshotPhase => {
+  switch (phase.kind) {
+    case "idle":
+      return { kind: "idle" };
+    case "outbound-offer":
+      return {
+        kind: phase.dispatched
+          ? "outbound-offer-dispatched"
+          : "outbound-offer-prepared",
+        offer: Uint8Array.from(phase.offer.bytes),
+        secretKey: Uint8Array.from(phase.keyPair.secretKey),
+      };
+    case "inbound-offer":
+      return {
+        kind: "inbound-offer",
+        offer: Uint8Array.from(phase.offer.bytes),
+      };
+    case "outbound-advance-prepared":
+      return {
+        kind: "outbound-advance-prepared",
+        advance: Uint8Array.from(phase.advance.bytes),
+        nextRoot: Uint8Array.from(phase.nextRoot),
+      };
+    case "outbound-advance-awaiting-ack":
+      return {
+        kind: "outbound-advance-awaiting-ack",
+        advance: Uint8Array.from(phase.advance.bytes),
+      };
+    case "inbound-advance-prepared":
+      return {
+        kind: "inbound-advance-prepared",
+        advance: Uint8Array.from(phase.advance.bytes),
+        secretKey: Uint8Array.from(phase.keyPair.secretKey),
+        nextRoot: Uint8Array.from(phase.nextRoot),
+      };
+    case "inbound-advance-awaiting-ack-dispatch":
+      return {
+        kind: "inbound-advance-awaiting-ack-dispatch",
+        advance: Uint8Array.from(phase.advance.bytes),
+      };
+  }
+};
+
+interface ValidatedPqHealingSnapshot {
+  readonly rootKey: Uint8Array;
+  readonly epoch: bigint;
+  readonly localCounter: bigint;
+  readonly remoteCounter: bigint;
+  readonly nextOfferer: PqHealingTurn;
+  readonly phase: InternalPhase;
+  readonly lastInboundOffer: DecodedOffer | null;
+  readonly lastInboundAdvance: DecodedAdvance | null;
+}
+
+const requireSnapshotU64 = (value: unknown, name: string): bigint => {
+  if (typeof value !== "bigint")
+    return fail("invalid-record", `${name} must be a bigint`);
+  requireU64(value, name);
+  return value;
+};
+
+const readSnapshotPhaseKind = (value: unknown): string => {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    return fail("invalid-record", "snapshot.phase must be a plain record");
+  const descriptor = Object.getOwnPropertyDescriptor(value, "kind");
+  if (
+    descriptor === undefined ||
+    !("value" in descriptor) ||
+    !descriptor.enumerable ||
+    typeof descriptor.value !== "string"
+  )
+    return fail(
+      "invalid-record",
+      "snapshot.phase.kind must be an enumerable string data property",
+    );
+  return descriptor.value;
+};
+
+const decodeSnapshotPhase = (
+  value: unknown,
+  suite: Readonly<MlKemSuiteDescriptor>,
+  binding: Uint8Array,
+): InternalPhase => {
+  const kind = readSnapshotPhaseKind(value);
+  switch (kind) {
+    case "idle":
+      requirePlainRecord(value, "snapshot.phase", ["kind"]);
+      return { kind: "idle" };
+    case "outbound-offer-prepared":
+    case "outbound-offer-dispatched": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "offer",
+        "secretKey",
+      ]);
+      const offer = decodeOffer(
+        requireBytes(record.offer, "snapshot.phase.offer", offerLength(suite)),
+        suite,
+        binding,
+      );
+      const secretKey = requireBytes(
+        record.secretKey,
+        "snapshot.phase.secretKey",
+        suite.secretKeyBytes,
+      );
+      return {
+        kind: "outbound-offer",
+        dispatched: kind === "outbound-offer-dispatched",
+        offer,
+        keyPair: makeOwnedKeyPair(offer.publicKey, secretKey),
+      };
+    }
+    case "inbound-offer": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "offer",
+      ]);
+      return {
+        kind: "inbound-offer",
+        offer: decodeOffer(
+          requireBytes(
+            record.offer,
+            "snapshot.phase.offer",
+            offerLength(suite),
+          ),
+          suite,
+          binding,
+        ),
+      };
+    }
+    case "outbound-advance-prepared": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "advance",
+        "nextRoot",
+      ]);
+      const advance = decodeAdvance(
+        requireBytes(
+          record.advance,
+          "snapshot.phase.advance",
+          advanceLength(suite),
+        ),
+        suite,
+        binding,
+      );
+      return {
+        kind: "outbound-advance-prepared",
+        offer: advance.offer,
+        advance,
+        nextRoot: Uint8Array.from(
+          requireBytes(
+            record.nextRoot,
+            "snapshot.phase.nextRoot",
+            PQ_HEALING_ROOT_BYTES,
+          ),
+        ),
+      };
+    }
+    case "outbound-advance-awaiting-ack": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "advance",
+      ]);
+      const advance = decodeAdvance(
+        requireBytes(
+          record.advance,
+          "snapshot.phase.advance",
+          advanceLength(suite),
+        ),
+        suite,
+        binding,
+      );
+      return {
+        kind: "outbound-advance-awaiting-ack",
+        offer: advance.offer,
+        advance,
+      };
+    }
+    case "inbound-advance-prepared": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "advance",
+        "secretKey",
+        "nextRoot",
+      ]);
+      const advance = decodeAdvance(
+        requireBytes(
+          record.advance,
+          "snapshot.phase.advance",
+          advanceLength(suite),
+        ),
+        suite,
+        binding,
+      );
+      const secretKey = requireBytes(
+        record.secretKey,
+        "snapshot.phase.secretKey",
+        suite.secretKeyBytes,
+      );
+      const nextRoot = Uint8Array.from(
+        requireBytes(
+          record.nextRoot,
+          "snapshot.phase.nextRoot",
+          PQ_HEALING_ROOT_BYTES,
+        ),
+      );
+      return {
+        kind: "inbound-advance-prepared",
+        offer: advance.offer,
+        advance,
+        keyPair: makeOwnedKeyPair(advance.offer.publicKey, secretKey),
+        nextRoot,
+      };
+    }
+    case "inbound-advance-awaiting-ack-dispatch": {
+      const record = requirePlainRecord(value, "snapshot.phase", [
+        "kind",
+        "advance",
+      ]);
+      return {
+        kind: "inbound-advance-awaiting-ack-dispatch",
+        advance: decodeAdvance(
+          requireBytes(
+            record.advance,
+            "snapshot.phase.advance",
+            advanceLength(suite),
+          ),
+          suite,
+          binding,
+        ),
+      };
+    }
+    default:
+      return fail("invalid-record", "snapshot phase is unknown");
+  }
+};
+
+const snapshotInvariant = (condition: boolean, message: string): void => {
+  if (!condition) fail("invalid-record", `snapshot ${message}`);
+};
+
+const validateSnapshotState = (state: ValidatedPqHealingSnapshot): void => {
+  const {
+    epoch,
+    localCounter,
+    remoteCounter,
+    nextOfferer,
+    phase,
+    lastInboundOffer,
+    lastInboundAdvance,
+  } = state;
+
+  if (lastInboundOffer !== null) {
+    snapshotInvariant(
+      lastInboundOffer.toEpoch <= epoch,
+      "last inbound OFFER is from a future epoch",
+    );
+    snapshotInvariant(
+      lastInboundOffer.senderCounter < remoteCounter,
+      "last inbound OFFER counter was not consumed",
+    );
+  }
+  if (lastInboundAdvance !== null) {
+    snapshotInvariant(
+      lastInboundAdvance.toEpoch <= epoch,
+      "last inbound ADVANCE is from a future epoch",
+    );
+    snapshotInvariant(
+      lastInboundAdvance.senderCounter < remoteCounter,
+      "last inbound ADVANCE counter was not consumed",
+    );
+  }
+
+  switch (phase.kind) {
+    case "idle":
+      return;
+    case "outbound-offer":
+      snapshotInvariant(
+        nextOfferer === "local" &&
+          phase.offer.senderCounter === localCounter &&
+          phase.offer.fromEpoch === epoch,
+        "outbound OFFER does not match the current turn/counter/epoch",
+      );
+      return;
+    case "inbound-offer":
+      snapshotInvariant(
+        nextOfferer === "remote" &&
+          phase.offer.senderCounter === remoteCounter &&
+          phase.offer.fromEpoch === epoch,
+        "inbound OFFER does not match the current turn/counter/epoch",
+      );
+      return;
+    case "outbound-advance-prepared":
+      snapshotInvariant(
+        nextOfferer === "remote" &&
+          phase.advance.senderCounter === localCounter &&
+          phase.offer.senderCounter === remoteCounter &&
+          phase.advance.fromEpoch === epoch,
+        "prepared outbound ADVANCE does not match current state",
+      );
+      return;
+    case "outbound-advance-awaiting-ack":
+      snapshotInvariant(
+        nextOfferer === "local" &&
+          phase.advance.senderCounter + 1n === localCounter &&
+          phase.offer.senderCounter + 1n === remoteCounter &&
+          phase.advance.toEpoch === epoch,
+        "outbound ADVANCE awaiting ACK does not match committed state",
+      );
+      snapshotInvariant(
+        lastInboundOffer !== null &&
+          bytesEqual(lastInboundOffer.bytes, phase.offer.bytes),
+        "outbound ADVANCE is missing its exact inbound OFFER replay record",
+      );
+      return;
+    case "inbound-advance-prepared":
+      snapshotInvariant(
+        nextOfferer === "local" &&
+          phase.advance.senderCounter === remoteCounter &&
+          phase.offer.senderCounter === localCounter &&
+          phase.advance.fromEpoch === epoch,
+        "prepared inbound ADVANCE does not match current state",
+      );
+      return;
+    case "inbound-advance-awaiting-ack-dispatch":
+      snapshotInvariant(
+        nextOfferer === "remote" &&
+          phase.advance.senderCounter + 1n === remoteCounter &&
+          phase.advance.offer.senderCounter + 1n === localCounter &&
+          phase.advance.toEpoch === epoch,
+        "inbound ADVANCE awaiting ACK dispatch does not match committed state",
+      );
+      snapshotInvariant(
+        lastInboundAdvance !== null &&
+          bytesEqual(lastInboundAdvance.bytes, phase.advance.bytes),
+        "pending ACK is missing its exact inbound ADVANCE replay record",
+      );
+      return;
+  }
+};
+
+const decodePqHealingSnapshot = <P extends MlKemParameterSet>(
+  value: unknown,
+  options: PqHealingRestoreOptions<P>,
+): ValidatedPqHealingSnapshot => {
+  assertSameSuite(options.suite, options.backend.suite);
+  requireBytes(options.binding, "binding", PQ_HEALING_BINDING_BYTES);
+  const record = requirePlainRecord(value, "snapshot", [
+    "formatVersion",
+    "parameterSet",
+    "binding",
+    "rootKey",
+    "epoch",
+    "localCounter",
+    "remoteCounter",
+    "nextOfferer",
+    "phase",
+    "lastInboundOffer",
+    "lastInboundAdvance",
+  ]);
+  if (record.formatVersion !== PQ_HEALING_SNAPSHOT_FORMAT_VERSION)
+    fail("invalid-record", "snapshot format version is unsupported");
+  if (record.parameterSet !== options.suite.parameterSet)
+    fail(
+      "suite-mismatch",
+      "snapshot suite differs from the authenticated room suite",
+    );
+  const snapshotBinding = requireBytes(
+    record.binding,
+    "snapshot.binding",
+    PQ_HEALING_BINDING_BYTES,
+  );
+  if (!bytesEqual(snapshotBinding, options.binding))
+    fail(
+      "binding-mismatch",
+      "snapshot belongs to a different authenticated edge",
+    );
+  const snapshotRootKey = requireBytes(
+    record.rootKey,
+    "snapshot.rootKey",
+    PQ_HEALING_ROOT_BYTES,
+  );
+  const epoch = requireSnapshotU64(record.epoch, "snapshot.epoch");
+  const localCounter = requireSnapshotU64(
+    record.localCounter,
+    "snapshot.localCounter",
+  );
+  const remoteCounter = requireSnapshotU64(
+    record.remoteCounter,
+    "snapshot.remoteCounter",
+  );
+  if (record.nextOfferer !== "local" && record.nextOfferer !== "remote") {
+    return fail(
+      "invalid-record",
+      "snapshot.nextOfferer must be local or remote",
+    );
+  }
+
+  const rootKey = Uint8Array.from(snapshotRootKey);
+  let phase: InternalPhase | undefined;
+  try {
+    phase = decodeSnapshotPhase(record.phase, options.suite, options.binding);
+    const lastInboundOffer =
+      record.lastInboundOffer === null
+        ? null
+        : decodeOffer(
+            requireBytes(
+              record.lastInboundOffer,
+              "snapshot.lastInboundOffer",
+              offerLength(options.suite),
+            ),
+            options.suite,
+            options.binding,
+          );
+    const lastInboundAdvance =
+      record.lastInboundAdvance === null
+        ? null
+        : decodeAdvance(
+            requireBytes(
+              record.lastInboundAdvance,
+              "snapshot.lastInboundAdvance",
+              advanceLength(options.suite),
+            ),
+            options.suite,
+            options.binding,
+          );
+    const state: ValidatedPqHealingSnapshot = {
+      rootKey,
+      epoch,
+      localCounter,
+      remoteCounter,
+      nextOfferer: record.nextOfferer,
+      phase,
+      lastInboundOffer,
+      lastInboundAdvance,
+    };
+    validateSnapshotState(state);
+    return state;
+  } catch (error) {
+    rootKey.fill(0);
+    if (phase !== undefined) {
+      if (phase.kind === "outbound-offer") phase.keyPair.destroy();
+      if (phase.kind === "outbound-advance-prepared") phase.nextRoot.fill(0);
+      if (phase.kind === "inbound-advance-prepared") {
+        phase.keyPair.destroy();
+        phase.nextRoot.fill(0);
+      }
+    }
+    throw error;
+  }
+};
+
 /**
  * One directional-turn PQ healing machine for a single authenticated peer
  * edge. A room mesh owns one instance per edge; a room-wide policy supplies
@@ -728,6 +1389,38 @@ export class PqHealingMachine<P extends MlKemParameterSet> {
     this.#nextOfferer = options.nextOfferer;
   }
 
+  static restore<Q extends MlKemParameterSet>(
+    snapshot: unknown,
+    options: PqHealingRestoreOptions<Q>,
+  ): PqHealingMachine<Q> {
+    const state = decodePqHealingSnapshot(snapshot, options);
+    try {
+      const machine = new PqHealingMachine<Q>({
+        ...options,
+        rootKey: state.rootKey,
+        epoch: state.epoch,
+        localCounter: state.localCounter,
+        remoteCounter: state.remoteCounter,
+        nextOfferer: state.nextOfferer,
+      });
+      machine.#phase = state.phase;
+      machine.#lastInboundOffer = state.lastInboundOffer;
+      machine.#lastInboundAdvance = state.lastInboundAdvance;
+      state.rootKey.fill(0);
+      return machine;
+    } catch (error) {
+      state.rootKey.fill(0);
+      if (state.phase.kind === "outbound-offer") state.phase.keyPair.destroy();
+      if (state.phase.kind === "outbound-advance-prepared")
+        state.phase.nextRoot.fill(0);
+      if (state.phase.kind === "inbound-advance-prepared") {
+        state.phase.keyPair.destroy();
+        state.phase.nextRoot.fill(0);
+      }
+      throw error;
+    }
+  }
+
   get suite(): Readonly<MlKemSuiteDescriptor<P>> {
     return this.#suite;
   }
@@ -769,6 +1462,85 @@ export class PqHealingMachine<P extends MlKemParameterSet> {
   copyRootKey(): Uint8Array {
     this.#assertActive();
     return Uint8Array.from(this.#rootKey);
+  }
+
+  /**
+   * Deep-copy the complete checkpoint, including pending ML-KEM secret keys.
+   * See `PqHealingSnapshot`: prepared phases are transaction-local snapshots.
+   */
+  snapshot(): PqHealingSnapshot<P> {
+    this.#assertSynchronous();
+    return {
+      formatVersion: PQ_HEALING_SNAPSHOT_FORMAT_VERSION,
+      parameterSet: this.#suite.parameterSet,
+      binding: Uint8Array.from(this.#binding),
+      rootKey: Uint8Array.from(this.#rootKey),
+      epoch: this.#epoch,
+      localCounter: this.#localCounter,
+      remoteCounter: this.#remoteCounter,
+      nextOfferer: this.#nextOfferer,
+      phase: snapshotPhase(this.#phase),
+      lastInboundOffer:
+        this.#lastInboundOffer === null
+          ? null
+          : Uint8Array.from(this.#lastInboundOffer.bytes),
+      lastInboundAdvance:
+        this.#lastInboundAdvance === null
+          ? null
+          : Uint8Array.from(this.#lastInboundAdvance.bytes),
+    };
+  }
+
+  /** Deep-clone this machine into independently owned secret buffers. */
+  clone(): PqHealingMachine<P> {
+    const snapshot = this.snapshot();
+    try {
+      return PqHealingMachine.restore(snapshot, {
+        module: this.#module,
+        backend: this.#backend,
+        suite: this.#suite,
+        binding: this.#binding,
+      });
+    } finally {
+      wipePqHealingSnapshot(snapshot);
+    }
+  }
+
+  /**
+   * Consume an independently authenticated successor. Superseded live secrets
+   * are wiped and `next` becomes destroyed without wiping the moved secrets.
+   */
+  adopt(next: PqHealingMachine<P>): void {
+    this.#assertSynchronous();
+    next.#assertSynchronous();
+    if (next === this)
+      fail("invalid-state", "cannot adopt a machine into itself");
+    if (
+      this.#suite.parameterSet !== next.#suite.parameterSet ||
+      !bytesEqual(this.#binding, next.#binding)
+    )
+      fail(
+        "invalid-state",
+        "cannot adopt a machine from another suite or authenticated edge",
+      );
+
+    this.#wipePhaseSecrets(this.#phase);
+    this.#rootKey.fill(0);
+    this.#rootKey = next.#rootKey;
+    this.#epoch = next.#epoch;
+    this.#localCounter = next.#localCounter;
+    this.#remoteCounter = next.#remoteCounter;
+    this.#nextOfferer = next.#nextOfferer;
+    this.#phase = next.#phase;
+    this.#lastInboundOffer = next.#lastInboundOffer;
+    this.#lastInboundAdvance = next.#lastInboundAdvance;
+
+    next.#rootKey = new Uint8Array(PQ_HEALING_ROOT_BYTES);
+    next.#binding.fill(0);
+    next.#phase = { kind: "idle" };
+    next.#lastInboundOffer = null;
+    next.#lastInboundAdvance = null;
+    next.#destroyed = true;
   }
 
   /**
@@ -1194,3 +1966,62 @@ export class PqHealingMachine<P extends MlKemParameterSet> {
     }
   }
 }
+
+/** Store-free checkpoint helper with an owned result. */
+export const snapshotPqHealing = <P extends MlKemParameterSet>(
+  machine: PqHealingMachine<P>,
+): PqHealingSnapshot<P> => machine.snapshot();
+
+/** Restore only after validating suite, binding, records, and phase invariants. */
+export const restorePqHealing = <P extends MlKemParameterSet>(
+  snapshot: unknown,
+  options: PqHealingRestoreOptions<P>,
+): PqHealingMachine<P> => PqHealingMachine.restore(snapshot, options);
+
+/** Deep-clone for mutate/persist/adopt transaction flows. */
+export const clonePqHealing = <P extends MlKemParameterSet>(
+  machine: PqHealingMachine<P>,
+): PqHealingMachine<P> => machine.clone();
+
+/** Consume `next` as the independently authenticated successor of `live`. */
+export const adoptPqHealing = <P extends MlKemParameterSet>(
+  live: PqHealingMachine<P>,
+  next: PqHealingMachine<P>,
+): void => live.adopt(next);
+
+/**
+ * Wipe every byte buffer owned by a plaintext checkpoint, including the PQ
+ * root, pending KEM secret key/candidate root, binding, and public records.
+ */
+export const wipePqHealingSnapshot = (snapshot: PqHealingSnapshot): void => {
+  snapshot.binding.fill(0);
+  snapshot.rootKey.fill(0);
+  snapshot.lastInboundOffer?.fill(0);
+  snapshot.lastInboundAdvance?.fill(0);
+  const phase = snapshot.phase;
+  switch (phase.kind) {
+    case "idle":
+      return;
+    case "outbound-offer-prepared":
+    case "outbound-offer-dispatched":
+      phase.offer.fill(0);
+      phase.secretKey.fill(0);
+      return;
+    case "inbound-offer":
+      phase.offer.fill(0);
+      return;
+    case "outbound-advance-prepared":
+      phase.advance.fill(0);
+      phase.nextRoot.fill(0);
+      return;
+    case "outbound-advance-awaiting-ack":
+    case "inbound-advance-awaiting-ack-dispatch":
+      phase.advance.fill(0);
+      return;
+    case "inbound-advance-prepared":
+      phase.advance.fill(0);
+      phase.secretKey.fill(0);
+      phase.nextRoot.fill(0);
+      return;
+  }
+};

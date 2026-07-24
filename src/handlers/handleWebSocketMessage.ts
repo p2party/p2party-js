@@ -1,6 +1,7 @@
 import { isUUID, isHexadecimal } from "class-validator";
 
 import { handleChallenge } from "./handleChallenge";
+import { establishSignaledConnection } from "./connectionSignal";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
@@ -103,12 +104,7 @@ const handleWebSocketMessage = async (
 
         // Protocol v3 has no reconnect bearer shortcut: every WebSocket proves
         // the Ed25519 identity against a fresh server nonce.
-        await handleChallenge(
-          keyPair,
-          message.peerId,
-          message.challenge,
-          api,
-        );
+        await handleChallenge(keyPair, message.peerId, message.challenge, api);
 
         break;
       }
@@ -401,7 +397,8 @@ const handleWebSocketMessage = async (
       }
 
       case "connection": {
-        const { keyPair } = api.getState() as State;
+        const { keyPair, rooms } = api.getState() as State;
+        const roomIndex = rooms.findIndex((room) => room.id === message.roomId);
         if (
           isProtocolVersionCompatible(message.protocolVersion) &&
           isUUID(keyPair.peerId) &&
@@ -412,32 +409,46 @@ const handleWebSocketMessage = async (
           keyPair.challenge.length === 64 &&
           isUUID(message.fromPeerId) &&
           isCanonicalEd25519Identity(message.fromPeerPublicKey) &&
+          message.fromPeerId !== keyPair.peerId &&
+          message.fromPeerPublicKey !== keyPair.publicKey &&
           isUUID(message.roomId) &&
+          roomIndex > -1 &&
           areBoundedDataChannelLabels(message.labels)
         ) {
-          api.dispatch(
-            setPeer({
-              roomId: message.roomId,
-              peerId: message.fromPeerId,
-              peerPublicKey: message.fromPeerPublicKey,
-            }),
+          const blacklisted = await getDBPeerIsBlacklisted(
+            message.fromPeerId,
+            message.fromPeerPublicKey,
           );
+          if (blacklisted) break;
 
-          const CHANNELS_LEN = message.labels.length;
-          for (let i = 0; i < CHANNELS_LEN; i++) {
-            api.dispatch(
-              setChannel({
-                roomId: message.roomId,
-                label: message.labels[i],
-                peerId: message.fromPeerId,
-              }),
+          if (rooms[roomIndex].onlyConnectWithKnownAddresses) {
+            const known = await getDBAddressBookEntry(
+              message.fromPeerId,
+              message.fromPeerPublicKey,
             );
-
-            console.log(
-              `Connected with ${keyPair.peerId} on websocket channel ${message.labels[i]}`,
-            );
+            if (!known) break;
           }
 
+          await establishSignaledConnection(
+            message,
+            rooms[roomIndex].rtcConfig,
+            {
+              recordPeer: (peer) => {
+                api.dispatch(setPeer(peer));
+              },
+              recordChannel: (channel) => {
+                api.dispatch(setChannel(channel));
+                console.log(
+                  `Connected with ${keyPair.peerId} on websocket channel ${channel.label}`,
+                );
+              },
+              ensureConnection: async (params) => {
+                await api.dispatch(
+                  webrtcApi.endpoints.connectWithPeer.initiate(params),
+                );
+              },
+            },
+          );
         } else if (!isProtocolVersionCompatible(message.protocolVersion)) {
           console.error(
             `Rejecting peer ${message.fromPeerId}: incompatible protocol ` +

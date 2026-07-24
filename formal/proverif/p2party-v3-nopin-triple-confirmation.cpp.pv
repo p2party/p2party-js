@@ -1,0 +1,838 @@
+(***********************************************************************
+ * p2party protocol-v3 no-PIN bootstrap: symbolic research scaffold
+ *
+ * This file MUST be preprocessed with exactly one of:
+ *   -DPROFILE_BASELINE
+ *   -DPROFILE_THREAT
+ *
+ * Target syntax: ProVerif 2.04 (also intended to parse with 2.05).
+ * Status: scaffold only. No successful ProVerif run is recorded here.
+ *
+ * See README.md before interpreting any query or result.
+ ***********************************************************************)
+
+#if !defined(PROFILE_BASELINE) && !defined(PROFILE_THREAT)
+#error Define exactly one of PROFILE_BASELINE or PROFILE_THREAT
+#endif
+
+#if defined(PROFILE_BASELINE) && defined(PROFILE_THREAT)
+#error PROFILE_BASELINE and PROFILE_THREAT are mutually exclusive
+#endif
+
+(* ------------------------------------------------------------------ *)
+(* Public network and principal names                                  *)
+(* ------------------------------------------------------------------ *)
+
+free network: channel.
+
+type client.
+const alice: client.
+const bob: client.
+
+(* The authenticated WebRTC/DTLS channel input is abstracted as one
+   session-fresh, public value shared by the two honest role instances.
+   It is not a secret. *)
+type binding.
+
+(* The concrete profile accepts exactly ML-KEM-768. The other public
+   constants let the adversary construct wrong-suite terms; the role
+   parsers below match only suite_mlkem768. *)
+type suite.
+const suite_mlkem512: suite.
+const suite_mlkem768: suite.
+const suite_mlkem1024: suite.
+
+type sid.
+
+(* ------------------------------------------------------------------ *)
+(* Symbolic X25519 and interactive 3DH                                 *)
+(* ------------------------------------------------------------------ *)
+
+type dhscalar.
+type dhpoint.
+
+fun dh_public(dhscalar): dhpoint.
+fun dh_shared(dhscalar, dhpoint): dhpoint.
+
+equation forall x: dhscalar, y: dhscalar;
+  dh_shared(x, dh_public(y)) = dh_shared(y, dh_public(x)).
+
+type threedhsecret.
+
+(* Ordered as:
+     DH(IK_I, EK_R) || DH(EK_I, IK_R) || DH(EK_I, EK_R). *)
+fun mix_3dh(dhpoint, dhpoint, dhpoint): threedhsecret.
+
+(* ------------------------------------------------------------------ *)
+(* Pinned Ed25519 anchor / X25519 cross-signature abstraction          *)
+(* ------------------------------------------------------------------ *)
+
+type sigsecret.
+type sigpublic.
+type credential.
+
+fun sig_public(sigsecret): sigpublic.
+fun issue_x25519_credential(sigsecret, dhpoint): credential.
+fun check_x25519_credential(sigpublic, dhpoint, credential): bool
+reduc forall sk: sigsecret, xpk: dhpoint;
+  check_x25519_credential(
+    sig_public(sk),
+    xpk,
+    issue_x25519_credential(sk, xpk)
+  ) = true.
+
+(* ------------------------------------------------------------------ *)
+(* Idealized exact-suite ML-KEM                                        *)
+(* ------------------------------------------------------------------ *)
+
+type kemprivate.
+type kempublic.
+type kemshared.
+type kemciphertext.
+
+fun kem_public(kemprivate): kempublic.
+fun kem_encapsulate(kempublic, kemshared): kemciphertext.
+fun kem_decapsulate(kemprivate, kemciphertext): kemshared
+reduc forall sk: kemprivate, ss: kemshared;
+  kem_decapsulate(sk, kem_encapsulate(kem_public(sk), ss)) = ss.
+
+(* ------------------------------------------------------------------ *)
+(* Hybrid root and triple-confirmation transcript                      *)
+(* ------------------------------------------------------------------ *)
+
+type hybridinput.
+type rootkey.
+
+(* IMPORTANT: these are perfect symbolic constructors, not a robust-
+   combiner theorem for the HKDF composition used by the implementation. *)
+fun hybrid_extract(threedhsecret, kemshared): hybridinput.
+fun hybrid_expand(
+  hybridinput,
+  suite,
+  binding,
+  dhpoint,
+  credential,
+  dhpoint,
+  credential,
+  kempublic,
+  kemciphertext
+): rootkey.
+
+type hellotranscript.
+
+(* Role ordering is canonical: initiator fields precede responder fields.
+   The no-PIN all-zero CPace fields and role-unused KEM fields are modeled
+   by distinct hello_i/hello_r constructors below, rather than byte arrays. *)
+fun hello_transcript(
+  suite,
+  binding,
+  sid,
+  sid,
+  dhpoint,
+  dhpoint,
+  dhpoint,
+  credential,
+  dhpoint,
+  credential,
+  kempublic,
+  kemciphertext
+): hellotranscript [data].
+
+type kcinput.
+type proof.
+
+(* Distinct constructors model the three explicit implementation role
+   domain separators. *)
+fun kc_responder(hellotranscript, dhpoint): kcinput [data].
+fun kc_initiator(
+  hellotranscript,
+  dhpoint,
+  dhpoint,
+  proof
+): kcinput [data].
+fun kc_finish(
+  hellotranscript,
+  dhpoint,
+  dhpoint,
+  proof,
+  proof
+): kcinput [data].
+
+fun mac(rootkey, kcinput): proof.
+
+type sessionfacts.
+fun completed_session(
+  hellotranscript,
+  dhpoint,
+  dhpoint,
+  proof,
+  proof
+): sessionfacts [data].
+
+(* ------------------------------------------------------------------ *)
+(* Public wire constructors                                            *)
+(* ------------------------------------------------------------------ *)
+
+(* The distinct constructors capture the current canonical role shape:
+   initiator HELLO has an ML-KEM public key; responder HELLO has only the
+   corresponding ciphertext. All members are attacker-visible. *)
+fun hello_i(
+  suite,
+  sid,
+  dhpoint,
+  dhpoint,
+  credential,
+  kempublic
+): bitstring [data].
+
+fun hello_r(
+  suite,
+  sid,
+  dhpoint,
+  dhpoint,
+  credential,
+  kemciphertext
+): bitstring [data].
+
+fun confirm_r(dhpoint, proof): bitstring [data].
+fun confirm_i(dhpoint, proof): bitstring [data].
+fun finish_r(proof): bitstring [data].
+
+(* ------------------------------------------------------------------ *)
+(* Events                                                              *)
+(* ------------------------------------------------------------------ *)
+
+event root_i(client, client, hellotranscript, rootkey).
+event root_r(client, client, hellotranscript, rootkey).
+
+event mac_r_sent(
+  client,
+  client,
+  hellotranscript,
+  rootkey,
+  dhpoint,
+  proof
+).
+
+event mac_i_sent(client, client, sessionfacts, rootkey).
+event responder_verified_at_i(client, client, sessionfacts, rootkey).
+event initiator_verified_at_r(client, client, sessionfacts, rootkey).
+event finish_sent_r(client, client, sessionfacts, rootkey, proof).
+event accept_i(client, client, sessionfacts, rootkey, proof).
+event accept_r(client, client, sessionfacts, rootkey, proof).
+
+(* Compromise/broken-assumption events exist only in PROFILE_THREAT. *)
+event compromise_x25519(client).
+event compromise_ed25519(client).
+event break_dh(dhpoint).
+event break_kem(kempublic).
+
+(* ------------------------------------------------------------------ *)
+(* Baseline queries: no leak or break oracle is present                *)
+(* ------------------------------------------------------------------ *)
+
+#ifdef PROFILE_BASELINE
+
+(* Root secrecy at either directional acceptance point. *)
+query i, r: client, s: sessionfacts, k: rootkey, f: proof;
+  event(accept_i(i, r, s, k, f)) && attacker(k) ==> false.
+
+query i, r: client, s: sessionfacts, k: rootkey, f: proof;
+  event(accept_r(r, i, s, k, f)) && attacker(k) ==> false.
+
+(* Injective directional agreement over the exact root, HELLO transcript,
+   ratchet DH keys, and chained mac_R/mac_I/mac_F values. *)
+query i, r: client, h: hellotranscript, k: rootkey,
+      dh_r, dh_i: dhpoint, mac_r, mac_i, mac_f: proof;
+  inj-event(accept_i(
+    i,
+    r,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k,
+    mac_f
+  ))
+  ==>
+  inj-event(finish_sent_r(
+    r,
+    i,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k,
+    mac_f
+  )).
+
+query i, r: client, h: hellotranscript, k: rootkey,
+      dh_r, dh_i: dhpoint, mac_r, mac_i, mac_f: proof;
+  inj-event(accept_r(
+    r,
+    i,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k,
+    mac_f
+  ))
+  ==>
+  inj-event(mac_i_sent(
+    i,
+    r,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k
+  )).
+
+(* Exact root/transcript agreement, stated separately for easier traces. *)
+query i, r: client, h: hellotranscript, k: rootkey,
+      dh_r, dh_i: dhpoint, mac_r, mac_i, mac_f: proof;
+  event(accept_i(
+    i,
+    r,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k,
+    mac_f
+  ))
+  ==> event(root_r(r, i, h, k)).
+
+query i, r: client, h: hellotranscript, k: rootkey,
+      dh_r, dh_i: dhpoint, mac_r, mac_i, mac_f: proof;
+  event(accept_r(
+    r,
+    i,
+    completed_session(h, dh_r, dh_i, mac_r, mac_i),
+    k,
+    mac_f
+  ))
+  ==> event(root_i(i, r, h, k)).
+
+(* Reachability guards: a vacuous correspondence is not useful. ProVerif
+   should report these events reachable, not prove their absence. *)
+query i, r: client, s: sessionfacts, k: rootkey, f: proof;
+  event(accept_i(i, r, s, k, f)).
+
+query i, r: client, s: sessionfacts, k: rootkey, f: proof;
+  event(accept_r(r, i, s, k, f)).
+
+#endif
+
+(* ------------------------------------------------------------------ *)
+(* Threat queries: explicit static compromise and HNDL boundaries      *)
+(* ------------------------------------------------------------------ *)
+
+#ifdef PROFILE_THREAT
+
+(* Necessary-condition secrecy query for initiator acceptance.
+
+   A root leak must be explained by:
+   - compromise of the peer X25519 or Ed25519 credential key before
+     acceptance (active peer impersonation);
+   - a pre-accept classical DH break (also enables impersonation); or
+   - both DH and KEM assumptions eventually breaking.
+
+   In particular, compromise of the local initiator static key is NOT an
+   exception. That omission is the modeled KCI check. A DH break only
+   after acceptance is also insufficient unless KEM breaks: the HNDL
+   check. *)
+query i, r: client, s: sessionfacts, k: rootkey, f: proof,
+      broken_point: dhpoint, broken_pk: kempublic,
+      t_accept, t_peer, t_dh: time;
+  event(accept_i(i, r, s, k, f))@t_accept && attacker(k)
+  ==>
+    (event(compromise_x25519(r))@t_peer && t_peer < t_accept)
+  || (event(compromise_ed25519(r))@t_peer && t_peer < t_accept)
+  || (event(break_dh(broken_point))@t_dh && t_dh < t_accept)
+  || (event(break_dh(broken_point)) && event(break_kem(broken_pk))).
+
+(* Symmetric necessary-condition query for responder acceptance. Again,
+   local responder compromise is intentionally not an exception. *)
+query i, r: client, s: sessionfacts, k: rootkey, f: proof,
+      broken_point: dhpoint, broken_pk: kempublic,
+      t_accept, t_peer, t_dh: time;
+  event(accept_r(r, i, s, k, f))@t_accept && attacker(k)
+  ==>
+    (event(compromise_x25519(i))@t_peer && t_peer < t_accept)
+  || (event(compromise_ed25519(i))@t_peer && t_peer < t_accept)
+  || (event(break_dh(broken_point))@t_dh && t_dh < t_accept)
+  || (event(break_dh(broken_point)) && event(break_kem(broken_pk))).
+
+(* Compromise-aware authentication correspondences. Local static-key
+   compromise is deliberately absent from each exception, so a proof
+   would imply the intended KCI direction in this symbolic model. *)
+query i, r: client, s: sessionfacts, k: rootkey, f: proof,
+      broken_point: dhpoint, t_accept, t_peer, t_dh: time;
+  event(accept_i(i, r, s, k, f))@t_accept
+  ==>
+     event(finish_sent_r(r, i, s, k, f))
+  || (event(compromise_x25519(r))@t_peer && t_peer < t_accept)
+  || (event(compromise_ed25519(r))@t_peer && t_peer < t_accept)
+  || (event(break_dh(broken_point))@t_dh && t_dh < t_accept).
+
+query i, r: client, s: sessionfacts, k: rootkey, f: proof,
+      broken_point: dhpoint, t_accept, t_peer, t_dh: time;
+  event(accept_r(r, i, s, k, f))@t_accept
+  ==>
+     event(mac_i_sent(i, r, s, k))
+  || (event(compromise_x25519(i))@t_peer && t_peer < t_accept)
+  || (event(compromise_ed25519(i))@t_peer && t_peer < t_accept)
+  || (event(break_dh(broken_point))@t_dh && t_dh < t_accept).
+
+(* Deliberately absent:
+     event(accept_r(...)) ==> event(accept_i(...))
+   A dropped FINISH can leave the responder complete while the initiator
+   waits forever. No finite acknowledgement chain establishes common
+   knowledge on a lossy transport. *)
+
+#endif
+
+(* ------------------------------------------------------------------ *)
+(* Protocol roles                                                      *)
+(* ------------------------------------------------------------------ *)
+
+let Initiator(
+  i: client,
+  r: client,
+  identity_secret_i: dhscalar,
+  identity_public_i: dhpoint,
+  credential_i: credential,
+  pinned_ed25519_r: sigpublic,
+  channel_binding: binding
+) =
+  new sid_i: sid;
+  new ephemeral_secret_i: dhscalar;
+  let ephemeral_public_i = dh_public(ephemeral_secret_i) in
+  new kem_secret_i: kemprivate;
+  let kem_public_i = kem_public(kem_secret_i) in
+
+  (* HELLO I: exact suite, fresh EK and KEM public key, pinned credential. *)
+  out(network, hello_i(
+    suite_mlkem768,
+    sid_i,
+    ephemeral_public_i,
+    identity_public_i,
+    credential_i,
+    kem_public_i
+  ));
+
+  in(network, responder_hello: bitstring);
+  let hello_r(
+    =suite_mlkem768,
+    sid_r: sid,
+    ephemeral_public_r: dhpoint,
+    identity_public_r: dhpoint,
+    credential_r: credential,
+    kem_ciphertext_r: kemciphertext
+  ) = responder_hello in
+
+  if check_x25519_credential(
+    pinned_ed25519_r,
+    identity_public_r,
+    credential_r
+  ) then
+
+  let kem_shared_i = kem_decapsulate(
+    kem_secret_i,
+    kem_ciphertext_r
+  ) in
+
+  let dh1_i = dh_shared(identity_secret_i, ephemeral_public_r) in
+  let dh2_i = dh_shared(ephemeral_secret_i, identity_public_r) in
+  let dh3_i = dh_shared(ephemeral_secret_i, ephemeral_public_r) in
+  let three_dh_i = mix_3dh(dh1_i, dh2_i, dh3_i) in
+  let hybrid_i = hybrid_extract(three_dh_i, kem_shared_i) in
+  let root_i_value = hybrid_expand(
+    hybrid_i,
+    suite_mlkem768,
+    channel_binding,
+    identity_public_i,
+    credential_i,
+    identity_public_r,
+    credential_r,
+    kem_public_i,
+    kem_ciphertext_r
+  ) in
+
+  let hello_t = hello_transcript(
+    suite_mlkem768,
+    channel_binding,
+    sid_i,
+    sid_r,
+    ephemeral_public_i,
+    ephemeral_public_r,
+    identity_public_i,
+    credential_i,
+    identity_public_r,
+    credential_r,
+    kem_public_i,
+    kem_ciphertext_r
+  ) in
+  event root_i(i, r, hello_t, root_i_value);
+
+  (* Receive mac_R and provisionally create the initiator ratchet key.
+     As in the implementation, mac_I binds the exact received mac_R and
+     is sent before the separate local equality check of mac_R. *)
+  in(network, responder_confirmation: bitstring);
+  let confirm_r(
+    ratchet_public_r: dhpoint,
+    mac_r_value: proof
+  ) = responder_confirmation in
+
+  new ratchet_secret_i: dhscalar;
+  let ratchet_public_i = dh_public(ratchet_secret_i) in
+  let mac_i_value = mac(
+    root_i_value,
+    kc_initiator(
+      hello_t,
+      ratchet_public_r,
+      ratchet_public_i,
+      mac_r_value
+    )
+  ) in
+  let session_i = completed_session(
+    hello_t,
+    ratchet_public_r,
+    ratchet_public_i,
+    mac_r_value,
+    mac_i_value
+  ) in
+  event mac_i_sent(i, r, session_i, root_i_value);
+  out(network, confirm_i(ratchet_public_i, mac_i_value));
+
+  if mac_r_value = mac(
+    root_i_value,
+    kc_responder(hello_t, ratchet_public_r)
+  ) then
+  event responder_verified_at_i(i, r, session_i, root_i_value);
+
+  (* The initiator establishes only after validating mac_F, which chains
+     both earlier confirmation proofs. *)
+  in(network, responder_finish: bitstring);
+  let finish_r(mac_f_value: proof) = responder_finish in
+  if mac_f_value = mac(
+    root_i_value,
+    kc_finish(
+      hello_t,
+      ratchet_public_r,
+      ratchet_public_i,
+      mac_r_value,
+      mac_i_value
+    )
+  ) then
+  event accept_i(i, r, session_i, root_i_value, mac_f_value).
+
+
+let Responder(
+  r: client,
+  i: client,
+  identity_secret_r: dhscalar,
+  identity_public_r: dhpoint,
+  credential_r: credential,
+  pinned_ed25519_i: sigpublic,
+  channel_binding: binding
+) =
+  in(network, initiator_hello: bitstring);
+  let hello_i(
+    =suite_mlkem768,
+    sid_i: sid,
+    ephemeral_public_i: dhpoint,
+    identity_public_i: dhpoint,
+    credential_i: credential,
+    kem_public_i: kempublic
+  ) = initiator_hello in
+
+  if check_x25519_credential(
+    pinned_ed25519_i,
+    identity_public_i,
+    credential_i
+  ) then
+
+  new sid_r: sid;
+  new ephemeral_secret_r: dhscalar;
+  let ephemeral_public_r = dh_public(ephemeral_secret_r) in
+  new kem_shared_r: kemshared;
+  let kem_ciphertext_r = kem_encapsulate(kem_public_i, kem_shared_r) in
+
+  out(network, hello_r(
+    suite_mlkem768,
+    sid_r,
+    ephemeral_public_r,
+    identity_public_r,
+    credential_r,
+    kem_ciphertext_r
+  ));
+
+  let dh1_r = dh_shared(ephemeral_secret_r, identity_public_i) in
+  let dh2_r = dh_shared(identity_secret_r, ephemeral_public_i) in
+  let dh3_r = dh_shared(ephemeral_secret_r, ephemeral_public_i) in
+  let three_dh_r = mix_3dh(dh1_r, dh2_r, dh3_r) in
+  let hybrid_r = hybrid_extract(three_dh_r, kem_shared_r) in
+  let root_r_value = hybrid_expand(
+    hybrid_r,
+    suite_mlkem768,
+    channel_binding,
+    identity_public_i,
+    credential_i,
+    identity_public_r,
+    credential_r,
+    kem_public_i,
+    kem_ciphertext_r
+  ) in
+
+  let hello_t = hello_transcript(
+    suite_mlkem768,
+    channel_binding,
+    sid_i,
+    sid_r,
+    ephemeral_public_i,
+    ephemeral_public_r,
+    identity_public_i,
+    credential_i,
+    identity_public_r,
+    credential_r,
+    kem_public_i,
+    kem_ciphertext_r
+  ) in
+  event root_r(r, i, hello_t, root_r_value);
+
+  (* R2: responder publishes its ratchet key and mac_R. *)
+  new ratchet_secret_r: dhscalar;
+  let ratchet_public_r = dh_public(ratchet_secret_r) in
+  let mac_r_value = mac(
+    root_r_value,
+    kc_responder(hello_t, ratchet_public_r)
+  ) in
+  event mac_r_sent(
+    r,
+    i,
+    hello_t,
+    root_r_value,
+    ratchet_public_r,
+    mac_r_value
+  );
+  out(network, confirm_r(ratchet_public_r, mac_r_value));
+
+  in(network, initiator_confirmation: bitstring);
+  let confirm_i(
+    ratchet_public_i: dhpoint,
+    mac_i_value: proof
+  ) = initiator_confirmation in
+
+  if mac_i_value = mac(
+    root_r_value,
+    kc_initiator(
+      hello_t,
+      ratchet_public_r,
+      ratchet_public_i,
+      mac_r_value
+    )
+  ) then
+
+  let session_r = completed_session(
+    hello_t,
+    ratchet_public_r,
+    ratchet_public_i,
+    mac_r_value,
+    mac_i_value
+  ) in
+  event initiator_verified_at_r(r, i, session_r, root_r_value);
+
+  (* R3: mac_F chains mac_R and mac_I. Sending is not delivery. *)
+  let mac_f_value = mac(
+    root_r_value,
+    kc_finish(
+      hello_t,
+      ratchet_public_r,
+      ratchet_public_i,
+      mac_r_value,
+      mac_i_value
+    )
+  ) in
+  event finish_sent_r(r, i, session_r, root_r_value, mac_f_value);
+  out(network, finish_r(mac_f_value));
+  event accept_r(r, i, session_r, root_r_value, mac_f_value).
+
+
+(* One fresh, public channel binding per honest pairwise attempt. Both role
+   directions are launched under replication in the main process. *)
+let SessionPair(
+  i: client,
+  r: client,
+  identity_secret_i: dhscalar,
+  identity_public_i: dhpoint,
+  credential_i: credential,
+  pinned_ed25519_i: sigpublic,
+  identity_secret_r: dhscalar,
+  identity_public_r: dhpoint,
+  credential_r: credential,
+  pinned_ed25519_r: sigpublic
+) =
+  new channel_binding: binding;
+  out(network, channel_binding);
+  (
+    Initiator(
+      i,
+      r,
+      identity_secret_i,
+      identity_public_i,
+      credential_i,
+      pinned_ed25519_r,
+      channel_binding
+    )
+  |
+    Responder(
+      r,
+      i,
+      identity_secret_r,
+      identity_public_r,
+      credential_r,
+      pinned_ed25519_i,
+      channel_binding
+    )
+  ).
+
+(* ------------------------------------------------------------------ *)
+(* Threat-profile compromise oracles                                   *)
+(* ------------------------------------------------------------------ *)
+
+#ifdef PROFILE_THREAT
+
+free leak_alice_x25519: channel.
+free leak_bob_x25519: channel.
+free leak_alice_ed25519: channel.
+free leak_bob_ed25519: channel.
+free break_dh_control: channel.
+free break_kem_control: channel.
+
+let RevealX25519(
+  who: client,
+  key: dhscalar,
+  control: channel
+) =
+  in(control, trigger: bitstring);
+  event compromise_x25519(who);
+  out(network, key).
+
+let RevealEd25519(
+  who: client,
+  key: sigsecret,
+  control: channel
+) =
+  in(control, trigger: bitstring);
+  event compromise_ed25519(who);
+  out(network, key).
+
+(* Private destructors are exposed only through attacker-triggered
+   oracles, making the break event explicit in compromise-aware queries. *)
+fun discrete_log(dhpoint): dhscalar
+reduc forall sk: dhscalar;
+  discrete_log(dh_public(sk)) = sk [private].
+
+fun inverse_kem_public(kempublic): kemprivate
+reduc forall sk: kemprivate;
+  inverse_kem_public(kem_public(sk)) = sk [private].
+
+let BreakDhAssumption() =
+  in(break_dh_control, public_point: dhpoint);
+  let recovered_scalar = discrete_log(public_point) in
+  event break_dh(public_point);
+  out(network, recovered_scalar).
+
+let BreakKemAssumption() =
+  in(break_kem_control, public_key: kempublic);
+  let recovered_private = inverse_kem_public(public_key) in
+  event break_kem(public_key);
+  out(network, recovered_private).
+
+#endif
+
+(* ------------------------------------------------------------------ *)
+(* Main: two principals, both directions, unbounded concurrent sessions *)
+(* ------------------------------------------------------------------ *)
+
+let Main() =
+  new identity_secret_alice: dhscalar;
+  let identity_public_alice = dh_public(identity_secret_alice) in
+  new ed25519_secret_alice: sigsecret;
+  let ed25519_public_alice = sig_public(ed25519_secret_alice) in
+  let credential_alice = issue_x25519_credential(
+    ed25519_secret_alice,
+    identity_public_alice
+  ) in
+
+  new identity_secret_bob: dhscalar;
+  let identity_public_bob = dh_public(identity_secret_bob) in
+  new ed25519_secret_bob: sigsecret;
+  let ed25519_public_bob = sig_public(ed25519_secret_bob) in
+  let credential_bob = issue_x25519_credential(
+    ed25519_secret_bob,
+    identity_public_bob
+  ) in
+
+  (* Public credentials; each role still receives the peer Ed25519 key as
+     a pinned parameter rather than trusting an attacker-selected key. *)
+  out(network, (
+    alice,
+    ed25519_public_alice,
+    identity_public_alice,
+    credential_alice
+  ));
+  out(network, (
+    bob,
+    ed25519_public_bob,
+    identity_public_bob,
+    credential_bob
+  ));
+
+  (
+    ! SessionPair(
+      alice,
+      bob,
+      identity_secret_alice,
+      identity_public_alice,
+      credential_alice,
+      ed25519_public_alice,
+      identity_secret_bob,
+      identity_public_bob,
+      credential_bob,
+      ed25519_public_bob
+    )
+  |
+    ! SessionPair(
+      bob,
+      alice,
+      identity_secret_bob,
+      identity_public_bob,
+      credential_bob,
+      ed25519_public_bob,
+      identity_secret_alice,
+      identity_public_alice,
+      credential_alice,
+      ed25519_public_alice
+    )
+#ifdef PROFILE_THREAT
+  |
+    RevealX25519(
+      alice,
+      identity_secret_alice,
+      leak_alice_x25519
+    )
+  |
+    RevealX25519(
+      bob,
+      identity_secret_bob,
+      leak_bob_x25519
+    )
+  |
+    RevealEd25519(
+      alice,
+      ed25519_secret_alice,
+      leak_alice_ed25519
+    )
+  |
+    RevealEd25519(
+      bob,
+      ed25519_secret_bob,
+      leak_bob_ed25519
+    )
+  |
+    ! BreakDhAssumption()
+  |
+    ! BreakKemAssumption()
+#endif
+  ).
+
+process Main()

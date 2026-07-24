@@ -56,6 +56,7 @@ import {
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import {
   FRAME_TYPE_CHUNK,
+  FRAME_TYPE_COVER,
   FRAME_TYPE_HANDSHAKE,
   FRAME_TYPE_PQ_CONTROL,
   FRAME_TYPE_RECEIPT,
@@ -386,14 +387,22 @@ export const handleOpenChannel = async (
               epc.withPeerId,
               transportGateLease,
             );
-          deleteIncompleteReceive = isRemoteCancelClose(
-            receiveProgress,
-            epc.withPeerId,
-            authenticatedTransportStillAlive,
-          );
+          // In scheduled-cover mode a lane closes at every fixed cycle
+          // boundary regardless of transfer state, so a channel close is NEVER
+          // the cancel signal — an explicit encrypted CANCEL cover cell is.
+          // Only an immediate-mode live-edge close means remote cancel.
+          deleteIncompleteReceive =
+            epc.coverRuntime === undefined &&
+            isRemoteCancelClose(
+              receiveProgress,
+              epc.withPeerId,
+              authenticatedTransportStillAlive,
+            );
           // An authenticated key may have advanced before the first storage
-          // write. A live-edge close still cancels that zero-byte transfer.
+          // write. A live-edge close still cancels that zero-byte transfer —
+          // but only in immediate mode, where a close IS the cancel signal.
           if (
+            epc.coverRuntime === undefined &&
             !receiveProgress &&
             authenticatedTransportStillAlive &&
             epc.messageKeyByMerkleRoot?.has(merkleRootHex)
@@ -576,6 +585,24 @@ export const handleOpenChannel = async (
         return;
       }
       void handleInboundPqControlFrame(epc, roomId, data);
+      return;
+    }
+
+    // protocol-v4 scheduled cover cells (dummy / CANCEL / scheduled receipt)
+    // ride the peer's cover lanes. The CoverRuntime authenticates each cell
+    // before its subtype exists and dispatches CANCEL/receipt bound to the
+    // transfer root; an unauthentic cell is dropped. Only present on scheduled
+    // room edges.
+    if (
+      classified.type === FRAME_TYPE_COVER &&
+      data.length === WIRE_CHUNK_FRAME_LEN &&
+      epc.coverRuntime
+    ) {
+      if (!isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease)) {
+        console.error("Rejected cover cell before peer authentication");
+        return;
+      }
+      epc.coverRuntime.processInboundCoverCell(data);
       return;
     }
 

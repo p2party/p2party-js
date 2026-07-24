@@ -121,6 +121,7 @@ export class CoverRuntime {
   #inboundHighestCounter: bigint | null = null;
   readonly #inboundSeenCounters = new Set<bigint>();
   static readonly #REPLAY_WINDOW = 1024n;
+  readonly #jobSettledCallbacks = new Map<string, () => void>();
   #environmentAttached = false;
   #destroyed = false;
   #lastStatus: CoverSchedulerStatus = "stopped";
@@ -152,9 +153,38 @@ export class CoverRuntime {
         this.#lastStatus = change.status;
         options.onStatusChange?.(change);
       },
-      onJobResult: options.onJobResult,
+      onJobResult: (result) => {
+        const callback = this.#jobSettledCallbacks.get(result.jobId);
+        if (callback) {
+          this.#jobSettledCallbacks.delete(result.jobId);
+          callback();
+        }
+        options.onJobResult?.(result);
+      },
       onJobInterrupted: options.onJobInterrupted,
     });
+  }
+
+  /** Total cells one lane emits over a full cycle: F × D. */
+  cellsPerLanePerCycle(): number {
+    return (
+      this.#options.schedule.coverFramesPerCell *
+      this.#options.schedule.coverDurationEpochs
+    );
+  }
+
+  /**
+   * Fire a one-shot callback when the given job settles (completed, cancelled,
+   * or failed). Used to re-arm a long control backlog across cycles.
+   */
+  onJobSettled(jobId: string, callback: () => void): void {
+    this.#assertLive();
+    this.#jobSettledCallbacks.set(jobId, callback);
+  }
+
+  /** A constant-shape lane label with a fresh random root (dummy/control). */
+  randomLaneLabel(): string {
+    return this.#syncDummyLaneLabel();
   }
 
   /** starting | active | degraded | suspended | stopped */

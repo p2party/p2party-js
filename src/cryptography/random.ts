@@ -1,3 +1,25 @@
+const randomWord = new Uint32Array(1);
+
+/**
+ * Supply Emscripten/libsodium with one Web Crypto backed unsigned word.
+ *
+ * Passing this callback explicitly keeps the generated glue independent of
+ * CommonJS `require("crypto")`, which is unavailable in Node ESM. Browsers,
+ * workers, Node 20+, and Bun all expose the same Web Crypto boundary.
+ */
+export const secureRandomUint32 = (): number => {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.getRandomValues !== "function")
+    throw new Error("Web Crypto secure randomness is unavailable");
+
+  try {
+    cryptoApi.getRandomValues(randomWord);
+    return randomWord[0] >>> 0;
+  } finally {
+    randomWord[0] = 0;
+  }
+};
+
 /**
  * Fill any Uint8Array — including a view into WebAssembly.Memory — without
  * handing its backing buffer to WebCrypto.
@@ -14,7 +36,10 @@
 export const fillRandomBytesInto = (
   destination: Uint8Array,
   fill: (temporary: Uint8Array) => void = (temporary) => {
-    globalThis.crypto.getRandomValues(temporary);
+    const cryptoApi = globalThis.crypto;
+    if (typeof cryptoApi?.getRandomValues !== "function")
+      throw new Error("Web Crypto secure randomness is unavailable");
+    cryptoApi.getRandomValues(temporary);
   },
 ): void => {
   if (!(destination instanceof Uint8Array))

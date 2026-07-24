@@ -2,6 +2,8 @@
 
 export interface LibCrypto extends EmscriptenModule {
   wasmMemory: WebAssembly.Memory;
+  /** Web Crypto backed entropy callback supplied by the JavaScript loader. */
+  getRandomValue?(): number;
 
   _crypto_init(): number;
 

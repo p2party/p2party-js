@@ -213,7 +213,11 @@ const validateCryptoProvenance = (provenance, wasmBytes) => {
     fail("crypto provenance has an incorrect WASM SRI");
 };
 
-const validateBundle = (relativePath, expectedIntegrity) => {
+const validateBundle = (
+  relativePath,
+  expectedIntegrity,
+  expectedPublicNames = [],
+) => {
   const source = readFileSync(requireFile(relativePath), "utf8");
   if (!source.includes(packageJson.version))
     fail(
@@ -236,9 +240,13 @@ const validateBundle = (relativePath, expectedIntegrity) => {
     "_mlkem1024_decaps",
   ])
     if (!source.includes(name)) fail(`${relativePath} is missing ${name}`);
+  for (const name of expectedPublicNames)
+    if (!source.includes(name))
+      fail(`${relativePath} is missing public API ${name}`);
 };
 
 const validateSessionSurface = async () => {
+  const wasmBinary = readFileSync(requireFile("lib/libcrypto.wasm"));
   const esm = await import(
     `${pathToFileURL(requireFile("lib/session.mjs")).href}?release=${Date.now()}`
   );
@@ -255,6 +263,23 @@ const validateSessionSurface = async () => {
     ])
       if (typeof module[name] !== "function")
         fail(`${format} session export is missing ${name}`);
+
+  for (const [format, module] of [
+    ["ESM", esm],
+    ["CommonJS", cjs],
+  ]) {
+    const identity = await module.generateSessionIdentity({ wasmBinary });
+    if (
+      identity.ed25519PublicKey?.byteLength !== 32 ||
+      identity.ed25519SecretKey?.byteLength !== 64 ||
+      identity.x25519PublicKey?.byteLength !== 32 ||
+      identity.x25519SecretKey?.byteLength !== 32 ||
+      identity.x25519CrossSignature?.byteLength !== 64
+    )
+      fail(`${format} session identity smoke returned malformed key material`);
+    identity.ed25519SecretKey.fill(0);
+    identity.x25519SecretKey.fill(0);
+  }
 };
 
 const validatePackList = (packResult) => {
@@ -264,6 +289,10 @@ const validatePackList = (packResult) => {
     "README.md",
     "LICENSE.md",
     "THIRD_PARTY_NOTICES.md",
+    "docs/getting-started.md",
+    "docs/session-api.md",
+    "docs/protocol-v3-security.md",
+    "examples/standalone-e2ee.ts",
     "lib/index.js",
     "lib/index.mjs",
     "lib/index.min.js",
@@ -300,6 +329,8 @@ const runtimeArtifacts = [
 try {
   mkdirSync(stageLib, { recursive: true });
   mkdirSync(packedRoot, { recursive: true });
+  mkdirSync(path.join(stageRoot, "docs"), { recursive: true });
+  mkdirSync(path.join(stageRoot, "examples"), { recursive: true });
 
   const mlkemSourceRoot = path.join(
     projectRoot,
@@ -419,19 +450,30 @@ try {
       path.join(stageRoot, fileName),
     );
 
+  for (const fileName of [
+    "getting-started.md",
+    "session-api.md",
+    "protocol-v3-security.md",
+  ])
+    copyFileSync(
+      path.join(projectRoot, "docs", fileName),
+      path.join(stageRoot, "docs", fileName),
+    );
+
+  copyFileSync(
+    path.join(projectRoot, "examples", "standalone-e2ee.ts"),
+    path.join(stageRoot, "examples", "standalone-e2ee.ts"),
+  );
+
   for (const target of exportedTargets(packageJson.exports)) {
     if (!target.startsWith("./"))
       fail(`package export is not relative: ${target}`);
     requireFile(target.slice(2));
   }
 
-  for (const bundle of [
-    "lib/index.js",
-    "lib/index.mjs",
-    "lib/index.min.js",
-    "lib/session.js",
-    "lib/session.mjs",
-  ])
+  for (const bundle of ["lib/index.js", "lib/index.mjs", "lib/index.min.js"])
+    validateBundle(bundle, expectedIntegrity, ["setWasmSourceUrl"]);
+  for (const bundle of ["lib/session.js", "lib/session.mjs"])
     validateBundle(bundle, expectedIntegrity);
   await validateSessionSurface();
 

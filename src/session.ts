@@ -1,5 +1,6 @@
 import libcrypto from "./cryptography/libcrypto";
 import { wasmLoader } from "./cryptography/wasmLoader";
+import { secureRandomUint32 } from "./cryptography/random";
 import { newKeyPair } from "./cryptography/ed25519";
 import { newX25519KeyPair, x25519Dh } from "./cryptography/x25519";
 import {
@@ -85,6 +86,7 @@ const SESSION_WASM_PAGES = 32;
 const SESSION_METADATA_NAME = "p2party-session";
 
 export type { HandshakeTransport };
+export type { RoomPqMode } from "./roomPolicy";
 
 export interface LocalSessionIdentity {
   ed25519PublicKey: Uint8Array;
@@ -210,6 +212,7 @@ const loadSessionCrypto = async (
     return (await libcrypto({
       wasmBinary: exactArrayBuffer(options.wasmBinary),
       wasmMemory,
+      getRandomValue: secureRandomUint32,
     })) as LibCrypto;
   }
   return (await wasmLoader(wasmMemory)) as LibCrypto;

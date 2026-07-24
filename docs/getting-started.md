@@ -191,6 +191,11 @@ The 0.12 package exports:
 - `p2party/session` — store-free ESM/CJS session API with declarations;
 - `p2party/libcrypto.wasm` — the exact compiled cryptographic module;
 - `p2party/libcrypto.provenance.json` — source/toolchain/digest provenance;
+- `p2party/docs/getting-started.md`, `p2party/docs/session-api.md`, and
+  `p2party/docs/protocol-v3-security.md` — installed developer and threat-model
+  documentation;
+- `p2party/examples/standalone-e2ee.ts` — a runnable source-checkout and
+  installed-package session example;
 - `p2party/THIRD_PARTY_NOTICES.md`; and
 - `p2party/package.json`.
 

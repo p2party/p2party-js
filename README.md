@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://p2party.com">
+    <img src="docs/assets/p2party-cat.svg" width="180" alt="p2party cat logo">
+  </a>
+</p>
+
 # p2party
 
 Protocol-v3 end-to-end encryption and reliable file transfer over a WebRTC
@@ -323,6 +329,11 @@ and snapshot restore, is
 ```sh
 bun run examples/standalone-e2ee.ts
 ```
+
+The same source is included in the package as
+`p2party/examples/standalone-e2ee.ts`. It detects whether it is running from a
+source checkout or an installed package and uses the corresponding public
+session build and release-matched WASM.
 
 ## Local, self-hosted, or release-pinned WASM
 

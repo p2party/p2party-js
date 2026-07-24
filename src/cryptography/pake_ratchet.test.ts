@@ -44,6 +44,13 @@ beforeAll(async () => {
   })) as unknown as LibCrypto;
 });
 
+describe("configured libsodium runtime", () => {
+  test("initialization is complete and idempotent", () => {
+    expect(mod._crypto_init()).toBe(0);
+    expect(mod._crypto_init()).toBe(0);
+  });
+});
+
 describe("Ristretto255 (CPace primitives)", () => {
   // libsodium test/default/core_ristretto255.{c,exp}: from_hash KAT[0].
   test("from_hash known-answer", () => {

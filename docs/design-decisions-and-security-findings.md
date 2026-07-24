@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-p2party is a browser-based, peer-to-peer WebRTC mesh for end-to-end-encrypted message and file transfer. Signaling runs over WebSockets; payloads run over WebRTC data channels (each logical message over its own ephemeral channel). Its distinguishing thesis is **offensive cryptography**: rather than only protecting *content*, the transport actively shapes traffic to reduce metadata leakage — message size, chunk count, real-vs-decoy split, and chunk boundaries. Historical protocol-v2 frames were exactly 64 KiB; the current protocol-v3 chunk frame is 65,490 bytes (`62`-byte header + `65,412`-byte authenticated plaintext + `16`-byte tag), with active-transfer random fill/decoys and 65-byte tagged receipt frames carrying a 64-byte true-or-random token. Timing cover is a researched room policy, not a shipped property. The client is AGPL-3.0 (`p2party-js`); the website (`p2party.com`) and signaling server (`p2party-server`) are being opened alongside it.
+p2party is a browser-based, peer-to-peer WebRTC mesh for end-to-end-encrypted message and file transfer. Signaling runs over WebSockets; payloads run over WebRTC data channels (each logical message over its own ephemeral channel). Its distinguishing thesis is **offensive cryptography**: rather than only protecting *content*, the transport actively shapes traffic to reduce metadata leakage — message size, chunk count, real-vs-decoy split, and chunk boundaries. Historical protocol-v2 frames were exactly 64 KiB; the current protocol-v3 chunk frame is 65,490 bytes (`62`-byte header + `65,412`-byte authenticated plaintext + `16`-byte tag), with active-transfer random fill/decoys and 65-byte tagged receipt frames carrying a 64-byte true-or-random token. Timing cover is a researched room policy, not a shipped property. The SDK (`p2party-js`) and signaling server (`p2party-server`) use Apache-2.0; the website (`p2party.com`) uses AGPL-3.0-only.
 
 ### Current protocol-v3 implementation checkpoint (2026-07-23)
 
@@ -238,7 +238,7 @@ Format: **Decision / Context / Rationale / Status**. Grouped by area.
 
 **ADR-B8 — Remove the CHAIN 41 Single Member P.C. (I.K.E.) legal entity from the website** — Footer + privacy + terms neutralized to "the operator of p2party"; address / G.E.MI. / VAT dropped; contact email replaced with a placeholder. Part of preparing the stack to go open source. — `1cf715e`. *(Leaves GDPR docs temporarily without a named controller — see §6.)*
 
-**ADR-B9 — Open-source the whole stack; TURN is off-the-shelf coturn** — Client `p2party-js` (public, AGPL-3.0), website `github.com/p2party/p2party.com`, signaling server `github.com/p2party/p2party-server`. STUN + signaling + TURN(coturn) on EU/Hetzner. AGPL-vs-other licensing for website/server repos + LICENSE files not yet decided.
+**ADR-B9 — Open-source the whole stack; TURN is off-the-shelf coturn** — SDK `p2party-js` and signaling server `p2party-server` are Apache-2.0; website `p2party.com` is AGPL-3.0-only. STUN + signaling + TURN(coturn) run on EU/Hetzner.
 
 ---
 

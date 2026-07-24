@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../../libsodium/src/libsodium/include/sodium/crypto_hash_sha512.h"
+#include <sodium.h>
 
 int
 get_merkle_root(const unsigned int LEAVES_LEN,

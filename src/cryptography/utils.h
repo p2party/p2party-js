@@ -2,7 +2,7 @@
 #define utils_H
 
 #include "merkle.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_aead_chacha20poly1305.h"
+#include <sodium.h>
 
 const unsigned int MESSAGE_LEN = 64 * 1024;
 const unsigned int NAME_LEN = 256;
@@ -80,8 +80,9 @@ int serialize_metadata(uint8_t out[METADATA_LEN], uint64_t schemaVersion,
 
 Metadata deserialize_metadata(const uint8_t in[METADATA_LEN]);
 
-/* Streaming SHA-512 (see utils.c) — the state is a heap crypto_hash_sha512_state
- * (208 bytes) allocated by JS. Plain SHA-512, no domain separation. */
+/* Streaming SHA-512 (see utils.c) — the state is a heap
+ * crypto_hash_sha512_state (208 bytes) allocated by JS. Plain SHA-512, no
+ * domain separation. */
 int sha512_init(crypto_hash_sha512_state *state);
 int sha512_update(crypto_hash_sha512_state *state, const uint8_t *in,
                   const unsigned int in_len);

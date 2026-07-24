@@ -525,6 +525,8 @@ Repository state at handoff:
 - Branch: `feat/pace-ratchet-protocol-v3` (keep this branch name despite the
   protocol-v4 wire break)
 - Starting/previous HEAD: `fb57b1e6d39b0ee25c4dd7815d20c402a02e2bf3`
+- Protocol-v4 WIP implementation checkpoint:
+  `4df71ab` (`wip: checkpoint protocol v4 PQ healing and cover cores`)
 - Local `master` was also
   `fb57b1e6d39b0ee25c4dd7815d20c402a02e2bf3` before the WIP checkpoint commit.
 - Package version is still `0.12.0`; no protocol-v4 tarball was built or

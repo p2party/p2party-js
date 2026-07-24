@@ -1,123 +1,128 @@
-import { promises as fs, readFileSync } from "fs";
-import * as path from "path";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import {
-  S3Client,
-  ListObjectsV2Command,
-  DeleteObjectsCommand,
+  HeadObjectCommand,
   PutObjectCommand,
+  S3Client,
 } from "@aws-sdk/client-s3";
 import pkg from "../package.json" with { type: "json" };
 
+const requiredEnvironment = (name) => {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+};
+
+const bucket = requiredEnvironment("AWS_S3_BUCKET");
+const region = requiredEnvironment("AWS_S3_REGION");
+const endpoint = process.env.AWS_S3_ENDPOINT?.trim();
+const accessKeyId = process.env.AWS_S3_ACCESS_KEY?.trim();
+const secretAccessKey = process.env.AWS_S3_SECRET_KEY?.trim();
+if (Boolean(accessKeyId) !== Boolean(secretAccessKey))
+  throw new Error(
+    "AWS_S3_ACCESS_KEY and AWS_S3_SECRET_KEY must either both be set or both be omitted",
+  );
+
+const forcePathStyleValue = process.env.AWS_S3_FORCE_PATH_STYLE?.trim();
+if (
+  forcePathStyleValue !== undefined &&
+  forcePathStyleValue !== "true" &&
+  forcePathStyleValue !== "false"
+)
+  throw new Error("AWS_S3_FORCE_PATH_STYLE must be true or false");
+
 const client = new S3Client({
-  region: process.env.AWS_S3_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_S3_ACCESS_KEY,
-    secretAccessKey: process.env.AWS_S3_SECRET_KEY,
-  },
+  region,
+  ...(endpoint ? { endpoint } : {}),
+  forcePathStyle: forcePathStyleValue === "true",
+  ...(accessKeyId && secretAccessKey
+    ? { credentials: { accessKeyId, secretAccessKey } }
+    : {}),
 });
 
-console.log("Updating " + process.env.AWS_S3_BUCKET);
+const assets = [
+  {
+    source: path.join("lib", "p2party.min.js.gz"),
+    keyName: "p2party.min.js",
+    contentType: "application/javascript",
+    contentEncoding: "gzip",
+  },
+  {
+    source: path.join("lib", "db.worker.js.gz"),
+    keyName: "db.worker.js",
+    contentType: "application/javascript",
+    contentEncoding: "gzip",
+  },
+  {
+    source: path.join("lib", "libcrypto.wasm"),
+    keyName: "libcrypto.wasm",
+    contentType: "application/wasm",
+  },
+];
 
-// Recursive getFiles
-async function getDirFiles(dir) {
-  const dirents = await fs.readdir(dir, { withFileTypes: true });
-  const files = await Promise.all(
-    dirents.map((d) => {
-      const res = path.resolve(dir, d.name);
-      return d.isDirectory() ? getDirFiles(res) : res;
-    }),
-  );
-  return Array.prototype.concat(...files);
-}
+const isNotFound = (error) =>
+  error?.name === "NotFound" ||
+  error?.name === "NoSuchKey" ||
+  error?.$metadata?.httpStatusCode === 404;
 
-async function getAllObjectsFromS3Bucket() {
-  const listcommand = new ListObjectsV2Command({
-    Bucket: process.env.AWS_S3_BUCKET,
-  });
-
-  const files = [];
+const headObject = async (key) => {
   try {
-    let isTruncated = true;
-    while (isTruncated) {
-      const { Contents, IsTruncated, NextContinuationToken } =
-        await client.send(listcommand);
-      if (!Contents) return [];
-
-      for (const obj of Contents) {
-        if (obj.Key?.includes("@" + pkg.version)) files.push({ Key: obj.Key });
-      }
-      isTruncated = IsTruncated;
-      listcommand.input.ContinuationToken = NextContinuationToken;
-    }
-    return files;
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-const existingFiles = await getAllObjectsFromS3Bucket();
-
-if (existingFiles && existingFiles.length > 0) {
-  const command = new DeleteObjectsCommand({
-    Bucket: process.env.AWS_S3_BUCKET,
-    Delete: { Objects: existingFiles },
-  });
-  try {
-    const { Deleted } = await client.send(command);
-    console.log(
-      `Successfully deleted ${Deleted.length} objects from S3 bucket.`,
+    return await client.send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      }),
     );
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
   }
-}
+};
 
-const buildDir = "lib";
-const files = await getDirFiles(buildDir);
+const assertSameObject = (key, head, sha256) => {
+  const storedSha256 = head?.Metadata?.sha256;
+  if (storedSha256 !== sha256)
+    throw new Error(
+      `refusing to replace immutable CDN object ${key}: existing SHA-256 is ${storedSha256 ?? "missing"}, release SHA-256 is ${sha256}`,
+    );
+};
 
-for (const filePath of files) {
-  const base = path.basename(filePath);
-
-  // Upload only .min.js.gz, .worker.js.gz, and raw .wasm
-  // Note: we intentionally skip .wasm.gz — uploading gzipped WASM with
-  // Content-Encoding: gzip to the same key as the raw file can break
-  // Subresource Integrity checks if the CDN doesn't handle decompression
-  // transparently. Let the CDN's automatic compression handle it instead.
-  const isJsGz = base.endsWith(".min.js.gz") || base.endsWith(".js.gz");
-  const isWasm = base.endsWith(".wasm") && !base.endsWith(".wasm.gz");
-
-  if (!(isJsGz || isWasm)) continue;
-
-  // Key: strip the .gz extension for gzipped JS assets
-  const keyFileName = isJsGz ? base.replace(/\.gz$/, "") : base;
-
-  // Content-Type
-  const contentType = isWasm ? "application/wasm" : "application/javascript";
-
-  // Only set Content-Encoding for gzipped JS assets
-  const maybeContentEncoding = isJsGz ? { ContentEncoding: "gzip" } : {};
-
-  const putcommand = new PutObjectCommand({
-    Bucket: process.env.AWS_S3_BUCKET,
-    Key: path.posix.join("@" + pkg.version, keyFileName), // posix for S3 keys
-    Body: readFileSync(filePath),
-    CacheControl: "no-cache",
-    ContentType: contentType,
-    ...maybeContentEncoding,
-
-    // (Note: CORS should be configured at bucket level; Metadata below is harmless but not used as headers)
-    Metadata: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET",
-    },
-  });
+for (const asset of assets) {
+  const body = await readFile(asset.source);
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const key = path.posix.join(`@${pkg.version}`, asset.keyName);
+  const existing = await headObject(key);
+  if (existing) {
+    assertSameObject(key, existing, sha256);
+    console.log(`Already published ${key} (${sha256})`);
+    continue;
+  }
 
   try {
-    console.log("Uploading " + filePath + " -> " + keyFileName);
-    await client.send(putcommand);
-  } catch (err) {
-    console.error(err);
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        CacheControl: "public, max-age=31536000, immutable",
+        ContentType: asset.contentType,
+        ...(asset.contentEncoding
+          ? { ContentEncoding: asset.contentEncoding }
+          : {}),
+        Metadata: { sha256 },
+        IfNoneMatch: "*",
+      }),
+    );
+    console.log(`Published ${asset.source} -> ${key} (${sha256})`);
+  } catch (error) {
+    if (error?.$metadata?.httpStatusCode !== 412) throw error;
+    const racedObject = await headObject(key);
+    if (!racedObject) throw error;
+    assertSameObject(key, racedObject, sha256);
+    console.log(`Already published concurrently ${key} (${sha256})`);
   }
 }
 
-console.log("Successfully uploaded assets");
+console.log(`Published immutable CDN assets for p2party ${pkg.version}`);

@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -27,6 +28,12 @@ const expectedEmscriptenVersion = "6.0.2";
 const expectedLibsodiumCommit = "2ce4d906a68eae82b27b4867f3d4172ec508cb27";
 const expectedLibsodiumTree = "2dabe17c708edd7334e3316b5094b753859395d9";
 const expectedMlkemNativeCommit = "0ba906cb14b1c241476134d7403a811b382ca498";
+const expectedMlkemNativeSourceTreeSha256 =
+  "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
+const expectedMlkemWrapperSha256 =
+  "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072";
+const expectedRoomWordlistSha256 =
+  "531238ede7be78f5fd444b3a4452b023f408f0146aa82bd9fe03aad902b3ff8e";
 const releaseRoot = mkdtempSync(
   path.join(realpathSync(tmpdir()), "p2party-release-"),
 );
@@ -58,6 +65,30 @@ const sha = (algorithm, bytes) =>
 
 const sri = (bytes) =>
   `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
+
+const listFiles = (root, current = root) =>
+  readdirSync(current, { withFileTypes: true })
+    .flatMap((entry) => {
+      const absolutePath = path.join(current, entry.name);
+      return entry.isDirectory()
+        ? listFiles(root, absolutePath)
+        : [path.relative(root, absolutePath).split(path.sep).join("/")];
+    })
+    .sort();
+
+const digestFiles = (root, relativePaths) => {
+  const hash = createHash("sha256");
+  for (const relativePath of relativePaths) {
+    const bytes = readFileSync(path.join(root, relativePath));
+    const byteLength = Buffer.alloc(8);
+    byteLength.writeBigUInt64BE(BigInt(bytes.byteLength));
+    hash.update(relativePath);
+    hash.update(Buffer.from([0]));
+    hash.update(byteLength);
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+};
 
 const fail = (message) => {
   throw new Error(`release validation failed: ${message}`);
@@ -141,6 +172,16 @@ const validateCryptoProvenance = (provenance, wasmBytes) => {
   if (provenance.sources?.mlkemNative?.commit !== expectedMlkemNativeCommit)
     fail("crypto provenance has an unexpected mlkem-native commit");
   if (
+    provenance.sources?.mlkemNative?.sourceTreeSha256 !==
+    expectedMlkemNativeSourceTreeSha256
+  )
+    fail("crypto provenance has an unexpected mlkem-native source-tree digest");
+  if (
+    provenance.sources?.mlkemNative?.wrapperSha256 !==
+    expectedMlkemWrapperSha256
+  )
+    fail("crypto provenance has an unexpected ML-KEM wrapper digest");
+  if (
     JSON.stringify(provenance.sources?.mlkemNative?.parameterSets) !==
     JSON.stringify([512, 768, 1024])
   )
@@ -180,7 +221,7 @@ const validateBundle = (relativePath, expectedIntegrity) => {
     );
   if (!source.includes(expectedIntegrity))
     fail(`${relativePath} does not embed the current WASM SRI`);
-  for (const staleVersion of ["0.9.1", "0.9.2"])
+  for (const staleVersion of ["0.9.0", "0.9.1", "0.9.2", "0.10.0", "0.11.0"])
     if (source.includes(`cdn.p2party.com/@${staleVersion}/libcrypto.wasm`))
       fail(`${relativePath} embeds stale CDN version ${staleVersion}`);
   for (const name of [
@@ -218,8 +259,11 @@ const validateSessionSurface = async () => {
 
 const validatePackList = (packResult) => {
   const paths = new Set(packResult.files.map(({ path: filePath }) => filePath));
-  for (const required of [
+  const required = [
     "package.json",
+    "README.md",
+    "LICENSE.md",
+    "THIRD_PARTY_NOTICES.md",
     "lib/index.js",
     "lib/index.mjs",
     "lib/index.min.js",
@@ -230,18 +274,15 @@ const validatePackList = (packResult) => {
     "lib/db.worker.js",
     "lib/libcrypto.wasm",
     "lib/libcrypto.provenance.json",
-  ])
-    if (!paths.has(required)) fail(`tarball is missing ${required}`);
+  ];
+  for (const requiredPath of required)
+    if (!paths.has(requiredPath)) fail(`tarball is missing ${requiredPath}`);
 
+  const exactFiles = new Set(required);
   for (const filePath of paths) {
-    if (filePath.endsWith(".map"))
-      fail(`tarball unexpectedly contains source map ${filePath}`);
-    if (filePath.endsWith(".gz"))
-      fail(`tarball unexpectedly contains CDN gzip artifact ${filePath}`);
-    if (filePath.endsWith(".integrity"))
-      fail(
-        `tarball unexpectedly contains stale integrity artifact ${filePath}`,
-      );
+    if (exactFiles.has(filePath)) continue;
+    if (/^lib\/.+\.d\.ts$/u.test(filePath)) continue;
+    fail(`tarball unexpectedly contains ${filePath}`);
   }
 };
 
@@ -259,6 +300,39 @@ const runtimeArtifacts = [
 try {
   mkdirSync(stageLib, { recursive: true });
   mkdirSync(packedRoot, { recursive: true });
+
+  const mlkemSourceRoot = path.join(
+    projectRoot,
+    "src",
+    "cryptography",
+    "vendor",
+    "mlkem-native",
+    "mlkem",
+  );
+  if (
+    digestFiles(mlkemSourceRoot, listFiles(mlkemSourceRoot)) !==
+    expectedMlkemNativeSourceTreeSha256
+  )
+    fail("the vendored mlkem-native source tree does not match its pin");
+  const mlkemBuildRoot = path.join(projectRoot, "src", "cryptography");
+  const mlkemWrapperFiles = [512, 768, 1024]
+    .flatMap((parameterSet) => [
+      `mlkem${parameterSet}.c`,
+      `mlkem${parameterSet}.h`,
+    ])
+    .sort();
+  if (
+    digestFiles(mlkemBuildRoot, mlkemWrapperFiles) !==
+    expectedMlkemWrapperSha256
+  )
+    fail("the p2party ML-KEM wrappers do not match their pin");
+  if (
+    sha(
+      "sha256",
+      readFileSync(path.join(projectRoot, "src", "utils", "wordlist.json")),
+    ) !== expectedRoomWordlistSha256
+  )
+    fail("the BIP39 English room wordlist does not match its pin");
 
   const nodeMajor = Number.parseInt(process.versions.node, 10);
   if (nodeMajor !== expectedNodeMajor)
@@ -334,7 +408,12 @@ try {
 
   await validateWasmGlue(sourceWasm);
 
-  for (const fileName of ["package.json", "README.md", "LICENSE.md"])
+  for (const fileName of [
+    "package.json",
+    "README.md",
+    "LICENSE.md",
+    "THIRD_PARTY_NOTICES.md",
+  ])
     copyFileSync(
       path.join(projectRoot, fileName),
       path.join(stageRoot, fileName),

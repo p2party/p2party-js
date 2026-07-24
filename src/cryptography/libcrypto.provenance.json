@@ -11,18 +11,13 @@
     "mlkemNative": {
       "release": "v1.2.0",
       "commit": "0ba906cb14b1c241476134d7403a811b382ca498",
+      "sourceTreeSha256": "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6",
+      "wrapperSha256": "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072",
       "backend": "portable-c",
-      "parameterSets": [
-        512,
-        768,
-        1024
-      ],
+      "parameterSets": [512, 768, 1024],
       "multilevel": {
         "shared": 768,
-        "noShared": [
-          512,
-          1024
-        ]
+        "noShared": [512, 1024]
       }
     }
   },

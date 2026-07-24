@@ -4,7 +4,7 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.11.0] — 2026-07-24
+## [0.12.0] — 2026-07-24
 
 ### Added
 
@@ -38,6 +38,20 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
   valid last packet can still leave the sender complete while the receiver
   waits; this is an availability/common-knowledge boundary, not key disclosure.
 
+### Release engineering
+
+- npm and `package-lock.json` are now the release dependency authority. Package
+  exports and files are allowlisted, direct source-tree publishing is refused,
+  and tagged npm releases carry provenance.
+- Pull requests build the pinned cryptographic source before running checks.
+  Tagged releases publish immutable versioned CDN objects, fetch the public
+  WASM back, and verify its exact bytes, SHA-256, and SRI before npm publication.
+- Release validation now pins and hashes the vendored mlkem-native source tree
+  and p2party wrappers, packages the provenance manifest and third-party
+  notices, and rejects unexpected tarball entries.
+- Added security, contribution, conduct, and attribution metadata for public
+  development.
+
 ## [0.10.0] — 2026-07-23
 
 Protocol v3 is an intentional wire break. Versionless, legacy, and downgraded
@@ -64,7 +78,7 @@ peers fail closed.
   provenance manifest.
 - The SDK is now licensed under Apache-2.0.
 
-### Planned for 0.11.0
+### Not included in 0.10.0
 
 Scheduled timing cover, sparse post-quantum ratchet healing, server-blind
 rendezvous, and the private BitTorrent extension are next-version work, not
@@ -201,6 +215,7 @@ Protocol-v2 security hardening and the reliable-transfer foundation.
   count uniformity; and per-message transfer telemetry (total/real chunk counts,
   retransmits).
 
+[0.12.0]: https://github.com/p2party/p2party-js/releases/tag/v0.12.0
 [0.10.0]: https://github.com/p2party/p2party-js/releases/tag/v0.10.0
 [0.9.2]: https://github.com/p2party/p2party-js/releases/tag/v0.9.2
 [0.9.1]: https://github.com/p2party/p2party-js/releases/tag/v0.9.1

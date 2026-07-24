@@ -125,7 +125,7 @@ const rootConfigs = [
   {
     input: rootInput,
     plugins: rootPlugins,
-    external: ["module", "@reduxjs", "class-validator"],
+    external: ["module", "@reduxjs/toolkit", "class-validator"],
     output: [
       {
         file: path.join(dir, "index.mjs"),

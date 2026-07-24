@@ -956,11 +956,10 @@ export const createSession = async (
   const channelId = copyBytes(options.channel.channelId);
   const localFingerprint = copyBytes(options.channel.localFingerprint);
   const remoteFingerprint = copyBytes(options.channel.remoteFingerprint);
-  let module: LibCrypto | null = null;
   let rootSecret: Uint8Array | null = null;
   let state: RatchetState | null = null;
   try {
-    module = await loadSessionCrypto(options.crypto);
+    const module = await loadSessionCrypto(options.crypto);
     await validateLocalIdentityCryptographically(
       {
         ed25519PublicKey: identityEd25519Public,

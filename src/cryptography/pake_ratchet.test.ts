@@ -7,7 +7,6 @@ import { hkdfSync } from "node:crypto";
 // globalThis.window in a couple of spots; alias it (mirrors utils.test.ts).
 (globalThis as unknown as { window: typeof globalThis }).window = globalThis;
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 import libcrypto from "./libcrypto";
 import type { LibCrypto } from "./libcrypto";
 

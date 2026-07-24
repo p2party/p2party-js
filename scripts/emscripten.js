@@ -9,6 +9,10 @@ const { methodsPath, libsodiumRepositoryPath } = require("./paths");
 const LIBSODIUM_COMMIT = "2ce4d906a68eae82b27b4867f3d4172ec508cb27";
 const LIBSODIUM_TREE = "2dabe17c708edd7334e3316b5094b753859395d9";
 const MLKEM_NATIVE_COMMIT = "0ba906cb14b1c241476134d7403a811b382ca498";
+const MLKEM_NATIVE_SOURCE_TREE_SHA256 =
+  "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
+const MLKEM_WRAPPER_SHA256 =
+  "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072";
 
 const buildPath = path.join(process.cwd(), "src", "cryptography");
 const finalJsPath = path.join(buildPath, "libcrypto.js");
@@ -42,6 +46,12 @@ const mlkemIncludePath = path.join(
   "mlkem-native",
   "mlkem",
 );
+const mlkemWrapperFiles = [512, 768, 1024]
+  .flatMap((parameterSet) => [
+    `mlkem${parameterSet}.c`,
+    `mlkem${parameterSet}.h`,
+  ])
+  .sort();
 const typesPath = path.join(process.cwd(), "scripts", "libcrypto.d.ts");
 const types = fs.readFileSync(typesPath);
 const buildMode =
@@ -73,6 +83,31 @@ const assertEqual = (actual, expected, description) => {
 
 const sha = (algorithm, bytes, encoding = "hex") =>
   crypto.createHash(algorithm).update(bytes).digest(encoding);
+
+const listFiles = (root, current = root) =>
+  fs
+    .readdirSync(current, { withFileTypes: true })
+    .flatMap((entry) => {
+      const absolutePath = path.join(current, entry.name);
+      return entry.isDirectory()
+        ? listFiles(root, absolutePath)
+        : [path.relative(root, absolutePath).split(path.sep).join("/")];
+    })
+    .sort();
+
+const digestFiles = (root, relativePaths) => {
+  const hash = crypto.createHash("sha256");
+  for (const relativePath of relativePaths) {
+    const bytes = fs.readFileSync(path.join(root, relativePath));
+    const byteLength = Buffer.alloc(8);
+    byteLength.writeBigUInt64BE(BigInt(bytes.byteLength));
+    hash.update(relativePath);
+    hash.update(Buffer.from([0]));
+    hash.update(byteLength);
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+};
 
 const exportedFunctions = [
   "_malloc",
@@ -217,6 +252,22 @@ const emccArgs = [
 ];
 
 try {
+  const mlkemSourceTreeSha256 = digestFiles(
+    mlkemIncludePath,
+    listFiles(mlkemIncludePath),
+  );
+  const mlkemWrapperSha256 = digestFiles(buildPath, mlkemWrapperFiles);
+  assertEqual(
+    mlkemSourceTreeSha256,
+    MLKEM_NATIVE_SOURCE_TREE_SHA256,
+    "mlkem-native vendored source tree SHA-256",
+  );
+  assertEqual(
+    mlkemWrapperSha256,
+    MLKEM_WRAPPER_SHA256,
+    "p2party ML-KEM wrapper SHA-256",
+  );
+
   const resolvedCommit = capture("git", [
     "-C",
     libsodiumRepositoryPath,
@@ -320,6 +371,8 @@ try {
       mlkemNative: {
         release: "v1.2.0",
         commit: MLKEM_NATIVE_COMMIT,
+        sourceTreeSha256: mlkemSourceTreeSha256,
+        wrapperSha256: mlkemWrapperSha256,
         backend: "portable-c",
         parameterSets: [512, 768, 1024],
         multilevel: {

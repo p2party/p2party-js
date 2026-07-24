@@ -177,7 +177,7 @@ describe("verifyDtlsFingerprints", () => {
       localDescription: { sdp: sdpWith(localFp) },
       remoteDescription: { sdp: sdpWith(remoteFp) },
       getStats: async () =>
-        new Map<string, any>([
+        new Map<string, Record<string, string>>([
           [
             "T",
             {
@@ -225,7 +225,7 @@ describe("verifyDtlsFingerprints", () => {
       localDescription: { sdp: sdpWith(fpHex) },
       remoteDescription: { sdp: sdpWith(fpHex) },
       getStats: async () =>
-        new Map<string, any>([
+        new Map<string, Record<string, string>>([
           [
             "T",
             {
@@ -263,16 +263,15 @@ const linkedTransports = (): [HandshakeTransport, HandshakeTransport] => {
     (): Promise<Uint8Array> => {
       if (q.length > 0) return Promise.resolve(q.shift()!);
       return new Promise((resolve, reject) => {
-        let waiter: (value: Uint8Array) => void;
+        const waiter = (value: Uint8Array): void => {
+          clearTimeout(timer);
+          resolve(value);
+        };
         const timer = setTimeout(() => {
           const index = w.indexOf(waiter);
           if (index >= 0) w.splice(index, 1);
           reject(new Error("test handshake transport timed out"));
         }, 250);
-        waiter = (value: Uint8Array): void => {
-          clearTimeout(timer);
-          resolve(value);
-        };
         w.push(waiter);
       });
     };

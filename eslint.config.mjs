@@ -3,13 +3,11 @@ import pluginJs from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default [
-  { languageOptions: { globals: globals.browser } },
   {
     ignores: [
       "lib/*",
       "node_modules/*",
       "wasm/*",
-      "scripts/*",
       "coverage/*",
       "eslint.config.mjs",
       "rollup.config.ts",
@@ -18,25 +16,28 @@ export default [
       "src/cryptography/libcrypto.js",
     ],
   },
+  { languageOptions: { globals: globals.browser } },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
-  ...tseslint.configs.strictTypeChecked,
-  ...tseslint.configs.stylisticTypeChecked,
   {
-    languageOptions: {
-      parserOptions: {
-        project: true,
-      },
-    },
-  },
-  // eslintPluginPrettierRecommended,
-  {
-    files: ["**/*.js"],
+    files: ["scripts/**/*.{js,mjs}"],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: { globals: globals.node },
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
   },
   {
     rules: {
       "@typescript-eslint/no-empty-function": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+        },
+      ],
     },
   },
 ];

@@ -1758,3 +1758,79 @@ CLAIM BOUNDARY of this browser run (be precise):
 - It does NOT test scheduled-cover lanes (still unwired behind the
   `connect()` guard) and does NOT measure packet-trace indistinguishability
   (no SCTP/DTLS capture). Those remain open per the claim boundary.
+
+## SESSION 2026-07-24 (finish v4) — SCHEDULED COVER WIRED, GUARD REMOVED, BROWSER-VERIFIED
+
+The remaining v4 work (live scheduled cover lanes) is DONE and verified over
+real WebRTC. `master` still unchanged at `fb57b1e`; both stashes intact.
+
+### Implementation (commit `ebe03b1`)
+
+- New `src/handlers/coverEdge.ts`: `installCoverEdge` builds + starts a
+  per-edge `CoverRuntime` after `runHandshake` on a `coverMode:"scheduled"`
+  room. Its `openLaneChannel` creates real `RTCDataChannel`s via
+  `epc.createDataChannel`, tracked in a NEW `epc.coverChannels` set kept
+  SEPARATE from `messageChannels` (so continuous cover lanes never block
+  healing quiescence or the message-channel budget). `enqueueScheduledSend`
+  builds the lazy `buildScheduledSendJob`; `onScheduledReceipt` settles the
+  local send via `markTransferComplete`; `onRemoteCancel` → `abortTransfer`.
+- Scheduled mode has NO per-message channels. `handleSendMessage` branches on
+  `policy.coverMode === "scheduled"`: `sendScheduled` steps the ratchet once
+  (`ratchetEncryptDurably`, PQ context captured), then enqueues a job whose
+  `sealSlotCell` stages+seals ONE chunk per slot (`makeScheduledSlotSealer`,
+  mirroring `sendChunks`). Real chunk cells, PQ control, dummy cover, and a
+  terminal receipt all substitute into the fixed C×F×D schedule.
+- `handleOpenChannel` receive path: incoming non-main lanes on a cover edge go
+  to `coverChannels`; every cell routes by type byte (chunk → receive,
+  `FRAME_TYPE_COVER` → `CoverRuntime.processInboundCoverCell`,
+  `FRAME_TYPE_PQ_CONTROL` → orchestrator — now also on cover lanes); a
+  cover-lane `onclose` is a cycle boundary, never a cancel, and retires a
+  completed receive key. `handleMessageQueueing` emits a terminal scheduled
+  receipt on completion instead of an immediate 65-byte receipt.
+- Disconnect teardown closes all cover lanes.
+- **Production bug fixed (found by the browser test):** `CoverRuntime` used
+  `maxTimerDriftMs = 0`, so any real-browser `setTimeout` jitter instantly
+  suspended cover. It now derives a tolerance of just under one slot spacing.
+- **`src/index.ts` connect() guard against `coverMode:"scheduled"` REMOVED.**
+  (Private rendezvous is still guarded — future work.)
+
+New tests: `src/handlers/coverEdge.test.ts` (install, dummy-cell authenticate,
+F×D admission, immediate-mode no-op). Full source gate green:
+`npm run check` — lint, format, typecheck, 417 tests / 0 fail, standalone
+example.
+
+### Real-WebRTC scheduled-cover browser verification (n=2 edge)
+
+Drove the ACTUAL `CoverRuntime` over real `RTCDataChannel`s in headless
+Chromium (harness in `scratchpad/webrtc-e2e/{entry-cover.ts,cover.mjs}`),
+schedule C=2, F=3, D=1 (6 cells/cycle):
+
+```text
+A cover status: starting → active (stays active; drift no longer suspends)
+A opened 14 real RTCDataChannel lanes, sent 41 cells over real SCTP
+B authenticated 40 inbound dummy cover cells over real WebRTC lanes
+B dispatched 1 real receipt-subtype substituted cover cell
+B decrypted 1 real message chunk (FRAME_TYPE_CHUNK) BYTE-EXACT
+   (ok=true, advanced=true) — a real DR+PQ-combined chunk sealed on the
+   sender, substituted into a cover slot, decrypted exact on the receiver
+SCHEDULED-COVER REAL-WebRTC LANE TEST PASSED
+```
+
+This proves, over real WebRTC: fixed-schedule cover lanes open/send/close,
+authenticated dummy cover cells flow continuously, and a real ratchet+PQ
+message chunk substitutes into a slot and decrypts byte-exact — the core
+scheduled-cover guarantee. (Headless Chromium reports the page hidden, which
+CORRECTLY makes the runtime refuse cover; the test stubs visibility to run the
+schedule.)
+
+### v4 status now
+
+- Immediate mode: production sparse PQ healing — DONE + browser-verified
+  (n=2/3/4 mesh).
+- Scheduled mode: live cover lanes + real message substitution — DONE +
+  real-WebRTC browser-verified (n=2 edge; cover is strictly per-edge, so n>2
+  is n independent identical edges).
+- `connect()` no longer rejects scheduled cover.
+- REMAINING (not v4-blocking): full-app-stack scheduled E2E through the
+  Redux/DB frontend + Step 11 packaging (tarball, frontend cover UI, merge,
+  deploy — needs maintainer credentials); private rendezvous (L2); P2BT.

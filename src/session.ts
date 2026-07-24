@@ -31,6 +31,7 @@ import {
 } from "./handlers/handshakeCore";
 import { decryptMessageChunk, sealChunk } from "./handlers/messageChunkCrypto";
 import { parseChunkFrameHeader } from "./handlers/chunkFrame";
+import { SparsePqHealingState } from "./handlers/pqHealingRuntime";
 import { hashMerkleLeafWasm } from "./utils/leafHash";
 import {
   CHUNK_LEN,
@@ -57,22 +58,31 @@ import type {
 import type { RoomPqMode } from "./roomPolicy";
 import type { RatchetRootSuite } from "./utils/constants";
 
-// Format version 3 has a dedicated suite-provenance byte. Suite tag 3
-// invalidates pre-draft-21 CPace roots and names interactive 3DH accurately.
-const SESSION_SNAPSHOT_VERSION = 3;
-const SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3 = 3;
-const SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3 = 4;
-const SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3 = 5;
+// Format version 4 is the protocol-v4 break: the snapshot carries the sparse
+// PQ machine/root/epoch/turn/counters plus its active combined receive keys
+// (inside the appended P2EDGE4 checkpoint) alongside the Double Ratchet. A v3
+// snapshot is rejected outright. Suite tags are unchanged provenance codes.
+const SESSION_SNAPSHOT_VERSION = 4;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21 = 3;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21 = 4;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21 = 5;
 const SESSION_MAGIC = new Uint8Array([
   0x50, 0x32, 0x50, 0x53, 0x45, 0x53, 0x53, 0x00,
 ]); // "P2PSESS\0"
 const SNAPSHOT_FLAG_SENDING_CHAIN = 1 << 0;
 const SNAPSHOT_FLAG_RECEIVING_CHAIN = 1 << 1;
 const SNAPSHOT_FLAG_REMOTE_DH = 1 << 2;
+// The v4 snapshot always carries an edge PQ checkpoint and records the stable
+// role so restore rebuilds the runtime with the correct control-frame
+// direction.
+const SNAPSHOT_FLAG_INITIATOR = 1 << 3;
 const SNAPSHOT_KNOWN_FLAGS =
   SNAPSHOT_FLAG_SENDING_CHAIN |
   SNAPSHOT_FLAG_RECEIVING_CHAIN |
-  SNAPSHOT_FLAG_REMOTE_DH;
+  SNAPSHOT_FLAG_REMOTE_DH |
+  SNAPSHOT_FLAG_INITIATOR;
+const SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES = 4;
+const SNAPSHOT_MAX_PQ_CHECKPOINT_BYTES = 256 * 1024;
 const SNAPSHOT_FIXED_PREFIX_LEN =
   SESSION_MAGIC.length +
   4 + // snapshot version, protocol version, flags, root suite
@@ -137,16 +147,44 @@ export interface EncryptedSessionMessage {
   frames: Uint8Array[];
 }
 
+/**
+ * One exact sealed sparse-PQ control cell to dispatch after the caller has
+ * persisted the mutated session, plus whether a durable write is required
+ * before sending (false for an exact duplicate response).
+ */
+export interface SessionControlOutput {
+  readonly frame: Uint8Array | null;
+  readonly requiresPersistBeforeSend: boolean;
+}
+
 export interface P2PartySession {
   readonly protocolVersion: 4;
   readonly pqMode: RoomPqMode;
   /** True for either role after a successful handshake; false after destroy. */
   readonly canEncrypt: boolean;
+  /** Current authenticated PQ epoch; 0 before any healing exchange. */
+  readonly pqEpoch: bigint;
+  /** True while a sparse-PQ healing exchange blocks application traffic. */
+  readonly healingInProgress: boolean;
   encrypt(plaintext: Uint8Array): Promise<EncryptedSessionMessage>;
   decrypt(message: EncryptedSessionMessage): Promise<Uint8Array>;
   /**
-   * Plaintext secret snapshot. Store only under authenticated encryption with
-   * rollback protection; never send this blob to the peer.
+   * Store-free sparse-PQ healing for custom transports. Contract: after any of
+   * these returns a frame, the caller MUST persist `serialize()` BEFORE
+   * sending that frame, so a crash cannot fork the OFFER/ADVANCE/ACK sequence.
+   *
+   * `prepareHealing` starts a due local exchange (returns null when not due or
+   * not this side's turn). `acceptControlFrame` processes an inbound OFFER,
+   * ADVANCE, or ACK and returns the exact response to send. `pendingControl`
+   * returns the exact frame to retransmit for a dropped flight.
+   */
+  prepareHealing(): Promise<SessionControlOutput>;
+  acceptControlFrame(frame: Uint8Array): Promise<SessionControlOutput>;
+  pendingControl(): Promise<Uint8Array | null>;
+  /**
+   * Plaintext secret snapshot (Double Ratchet + PQ machine/root/epoch/turn/
+   * counters + active combined receive keys). Store only under authenticated
+   * encryption with rollback protection; never send this blob to the peer.
    */
   serialize(): Promise<Uint8Array>;
   destroy(): Promise<void>;
@@ -490,12 +528,21 @@ class Session implements P2PartySession {
   readonly protocolVersion = PROTOCOL_VERSION;
   readonly #module: LibCrypto;
   readonly #mutex = new AsyncMutex();
+  readonly #amInitiator: boolean;
   #state: RatchetState;
+  #pq: SparsePqHealingState;
   #destroyed = false;
 
-  constructor(state: RatchetState, module: LibCrypto) {
+  constructor(
+    state: RatchetState,
+    module: LibCrypto,
+    pq: SparsePqHealingState,
+    amInitiator: boolean,
+  ) {
     this.#state = state;
     this.#module = module;
+    this.#pq = pq;
+    this.#amInitiator = amInitiator;
   }
 
   get pqMode(): RoomPqMode {
@@ -503,7 +550,20 @@ class Session implements P2PartySession {
   }
 
   get canEncrypt(): boolean {
-    return !this.#destroyed && this.#state.sendingChainKey !== null;
+    return (
+      !this.#destroyed &&
+      this.#state.sendingChainKey !== null &&
+      !this.#pq.trafficBlocked
+    );
+  }
+
+  get pqEpoch(): bigint {
+    this.#assertLive();
+    return this.#pq.epoch;
+  }
+
+  get healingInProgress(): boolean {
+    return !this.#destroyed && this.#pq.trafficBlocked;
   }
 
   #assertLive(): void {
@@ -517,15 +577,23 @@ class Session implements P2PartySession {
       let prepared: PreparedMessage | null = null;
       let next: RatchetState | null = null;
       let messageKey: Uint8Array | null = null;
+      let pqContext: ReturnType<
+        SparsePqHealingState["currentMessageContext"]
+      > | null = null;
       let committed = false;
       try {
         this.#assertLive();
+        if (this.#pq.trafficBlocked)
+          throw new Error("session: sparse-PQ healing is in progress");
         if (!this.#state.sendingChainKey)
           throw new Error("ratchet: no sending chain");
         prepared = await prepareMessage(ownedPlaintext, this.#module);
         next = cloneRatchet(this.#state);
         const encrypted = ratchetEncrypt(next, this.#module);
         messageKey = encrypted.messageKey;
+        // Always combine against the current PQ epoch (zero before healing,
+        // then each successive epoch after ACK).
+        pqContext = this.#pq.currentMessageContext();
         const frames = prepared.plaintexts.map((chunk) =>
           sealChunk(
             messageKey!,
@@ -533,9 +601,11 @@ class Session implements P2PartySession {
             chunk,
             prepared!.root,
             this.#module,
+            pqContext!,
           ),
         );
         adoptRatchet(this.#state, next);
+        this.#pq.noteApplicationMessage();
         committed = true;
         return {
           protocolVersion: PROTOCOL_VERSION,
@@ -583,7 +653,10 @@ class Session implements P2PartySession {
       }
 
       const next = cloneRatchet(this.#state);
-      const messageKeyCache = new Map<string, Uint8Array>();
+      // A logical message's already-combined keys stay in the runtime's active
+      // receive-key collection so they persist in the snapshot; a staged copy
+      // is committed only on success.
+      const stagedCache = new Map(this.#pq.activeReceiveKeys);
       const decryptedBuffers: Uint8Array[] = [];
       let committed = false;
       try {
@@ -592,9 +665,10 @@ class Session implements P2PartySession {
           const result = decryptMessageChunk(
             next,
             frame,
-            messageKeyCache,
+            stagedCache,
             root,
             this.#module,
+            (epoch: bigint) => this.#pq.resolveMessageContext(epoch),
           );
           if (!result.ok || !result.decrypted)
             throw new Error("session: encrypted frame authentication failed");
@@ -610,22 +684,66 @@ class Session implements P2PartySession {
 
         const plaintext = await validateAndJoinRecords(records);
         adoptRatchet(this.#state, next);
+        // Publish the staged active receive keys and count one application
+        // message. A single logical session message is one DR step.
+        this.#adoptActiveReceiveKeys(stagedCache);
+        this.#pq.noteApplicationMessage();
         committed = true;
         return plaintext;
       } finally {
         root.fill(0);
         for (const decrypted of decryptedBuffers) decrypted.fill(0);
-        for (const key of messageKeyCache.values()) key.fill(0);
-        messageKeyCache.clear();
-        if (!committed) wipeRatchet(next);
+        if (!committed) {
+          for (const [key, value] of stagedCache)
+            if (!this.#pq.activeReceiveKeys.has(key)) value.fill(0);
+          wipeRatchet(next);
+        }
       }
+    });
+  }
+
+  #adoptActiveReceiveKeys(staged: Map<string, Uint8Array>): void {
+    const live = this.#pq.activeReceiveKeys;
+    for (const [key, value] of staged)
+      if (!live.has(key)) live.set(key, value);
+  }
+
+  async prepareHealing(): Promise<SessionControlOutput> {
+    return this.#mutex.runExclusive(async () => {
+      this.#assertLive();
+      if (!this.#pq.healingDue()) return NO_CONTROL;
+      const frame = await this.#pq.prepareHealingOffer();
+      this.#pq.markPendingDispatched();
+      return { frame, requiresPersistBeforeSend: true };
+    });
+  }
+
+  async acceptControlFrame(frame: Uint8Array): Promise<SessionControlOutput> {
+    requireBytes(frame, "control frame", WIRE_CHUNK_FRAME_LEN);
+    const owned = copyBytes(frame);
+    return this.#mutex.runExclusive(async () => {
+      this.#assertLive();
+      const result = await this.#pq.acceptControlFrame(owned);
+      if (result.changed && result.dispatch && this.#pq.pendingRetryAt !== null)
+        this.#pq.markPendingDispatched();
+      return {
+        frame: result.dispatch,
+        requiresPersistBeforeSend: result.changed,
+      };
+    });
+  }
+
+  async pendingControl(): Promise<Uint8Array | null> {
+    return this.#mutex.runExclusive(async () => {
+      this.#assertLive();
+      return this.#pq.copyPendingFrame();
     });
   }
 
   async serialize(): Promise<Uint8Array> {
     return this.#mutex.runExclusive(async () => {
       this.#assertLive();
-      return encodeSessionSnapshot(this.#state);
+      return encodeSessionSnapshot(this.#state, this.#pq, this.#amInitiator);
     });
   }
 
@@ -633,10 +751,16 @@ class Session implements P2PartySession {
     await this.#mutex.runExclusive(async () => {
       if (this.#destroyed) return;
       wipeRatchet(this.#state);
+      this.#pq.destroy();
       this.#destroyed = true;
     });
   }
 }
+
+const NO_CONTROL: SessionControlOutput = {
+  frame: null,
+  requiresPersistBeforeSend: false,
+};
 
 const validateSnapshotState = (state: RatchetState): void => {
   requireBytes(state.rootKey, "snapshot.rootKey", 32);
@@ -670,32 +794,47 @@ const writeU64 = (view: DataView, offset: number, value: number): number => {
 
 const snapshotSuiteTag = (suite: RatchetRootSuite): number => {
   if (suite === RATCHET_ROOT_SUITE_MLKEM768)
-    return SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3;
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21;
   if (suite === RATCHET_ROOT_SUITE_MLKEM512)
-    return SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3;
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21;
   if (suite === RATCHET_ROOT_SUITE_MLKEM1024)
-    return SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3;
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21;
   throw new Error("snapshot: unsupported root suite");
 };
 
 const snapshotTagRootSuite = (tag: number): RatchetRootSuite => {
-  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3)
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21)
     return RATCHET_ROOT_SUITE_MLKEM768;
-  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3)
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21)
     return RATCHET_ROOT_SUITE_MLKEM512;
-  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3)
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21)
     return RATCHET_ROOT_SUITE_MLKEM1024;
   throw new Error("snapshot: unsupported root suite");
 };
 
-const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
+const encodeSessionSnapshot = (
+  state: RatchetState,
+  pq: SparsePqHealingState,
+  amInitiator: boolean,
+): Uint8Array => {
   validateSnapshotState(state);
   const serialized = serializeRatchet(state);
+  // The PQ checkpoint carries the machine/root/epoch/turn/counters, exact
+  // outbox, replay/ACK caches, and active combined receive keys.
+  const pqCheckpoint = pq.serialize();
+  if (
+    pqCheckpoint.length === 0 ||
+    pqCheckpoint.length > SNAPSHOT_MAX_PQ_CHECKPOINT_BYTES
+  ) {
+    pqCheckpoint.fill(0);
+    throw new Error("snapshot: PQ checkpoint length is invalid");
+  }
   try {
     const flags =
       (serialized.sendingChainKey ? SNAPSHOT_FLAG_SENDING_CHAIN : 0) |
       (serialized.receivingChainKey ? SNAPSHOT_FLAG_RECEIVING_CHAIN : 0) |
-      (serialized.dhRemotePub ? SNAPSHOT_FLAG_REMOTE_DH : 0);
+      (serialized.dhRemotePub ? SNAPSHOT_FLAG_REMOTE_DH : 0) |
+      (amInitiator ? SNAPSHOT_FLAG_INITIATOR : 0);
     const optionalKeyCount =
       Number(Boolean(serialized.sendingChainKey)) +
       Number(Boolean(serialized.receivingChainKey)) +
@@ -703,7 +842,9 @@ const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
     const output = new Uint8Array(
       SNAPSHOT_FIXED_PREFIX_LEN +
         optionalKeyCount * 32 +
-        serialized.skippedMessageKeys.length * SNAPSHOT_SKIPPED_ENTRY_LEN,
+        serialized.skippedMessageKeys.length * SNAPSHOT_SKIPPED_ENTRY_LEN +
+        SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES +
+        pqCheckpoint.length,
     );
     const view = new DataView(output.buffer);
     let offset = 0;
@@ -749,8 +890,13 @@ const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
       output.set(new Uint8Array(skipped.messageKey), offset);
       offset += 32;
     }
+    view.setUint32(offset, pqCheckpoint.length, false);
+    offset += SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES;
+    output.set(pqCheckpoint, offset);
+    offset += pqCheckpoint.length;
     return output;
   } finally {
+    pqCheckpoint.fill(0);
     new Uint8Array(serialized.rootKey).fill(0);
     if (serialized.sendingChainKey)
       new Uint8Array(serialized.sendingChainKey).fill(0);
@@ -762,7 +908,15 @@ const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
   }
 };
 
-const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
+interface DecodedSessionSnapshot {
+  readonly state: RatchetState;
+  readonly pqCheckpoint: Uint8Array;
+  readonly amInitiator: boolean;
+}
+
+const decodeSessionSnapshot = (
+  snapshot: Uint8Array,
+): DecodedSessionSnapshot => {
   requireBytes(snapshot, "snapshot");
   const bytes = copyBytes(snapshot);
   let offset = 0;
@@ -838,9 +992,12 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
       throw new Error("snapshot: too many skipped message keys");
     if (dhRemotePub === null && skippedCount > 0)
       throw new Error("snapshot: skipped keys require a remote DH key");
-    const expectedRemaining = skippedCount * SNAPSHOT_SKIPPED_ENTRY_LEN;
-    if (bytes.length - offset !== expectedRemaining)
-      throw new Error("snapshot: truncated input or trailing bytes");
+    const skippedRemaining = skippedCount * SNAPSHOT_SKIPPED_ENTRY_LEN;
+    if (
+      bytes.length - offset <
+      skippedRemaining + SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES
+    )
+      throw new Error("snapshot: truncated input");
 
     const skippedMessageKeys: RatchetSessionSecrets["skippedMessageKeys"] = [];
     const seen = new Set<string>();
@@ -862,7 +1019,22 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
         })(),
       });
     }
-    if (offset !== bytes.length) throw new Error("snapshot: trailing bytes");
+
+    const pqCheckpointLength = new DataView(
+      bytes.buffer,
+      bytes.byteOffset + offset,
+      SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES,
+    ).getUint32(0, false);
+    offset += SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES;
+    if (
+      pqCheckpointLength === 0 ||
+      pqCheckpointLength > SNAPSHOT_MAX_PQ_CHECKPOINT_BYTES
+    )
+      throw new Error("snapshot: PQ checkpoint length is invalid");
+    if (bytes.length - offset !== pqCheckpointLength)
+      throw new Error("snapshot: truncated input or trailing bytes");
+    const pqCheckpoint = take(pqCheckpointLength).slice();
+    ownedSecretCopies.push(pqCheckpoint);
 
     const state = deserializeRatchet({
       rootSuite,
@@ -878,7 +1050,11 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
       skippedMessageKeys,
     });
     ownershipTransferred = true;
-    return state;
+    return {
+      state,
+      pqCheckpoint,
+      amInitiator: (flags & SNAPSHOT_FLAG_INITIATOR) !== 0,
+    };
   } finally {
     bytes.fill(0);
     if (!ownershipTransferred)
@@ -963,6 +1139,7 @@ export const createSession = async (
   let pqHealingRoot: Uint8Array | null = null;
   let pqHealingBinding: Uint8Array | null = null;
   let state: RatchetState | null = null;
+  let pq: SparsePqHealingState | null = null;
   try {
     const module = await loadSessionCrypto(options.crypto);
     await validateLocalIdentityCryptographically(
@@ -1006,8 +1183,20 @@ export const createSession = async (
     rootSecret = result.secret;
     pqHealingRoot = result.pqHealing.rootKey;
     pqHealingBinding = result.pqHealing.binding;
-    const session = new Session(state, module);
+    // Consume the PQ bootstrap into the session-owned runtime; the constructor
+    // copies the root/binding, so the loose buffers are wiped in finally.
+    pq = new SparsePqHealingState({
+      module,
+      pqMode,
+      rootSuite: state.rootSuite,
+      binding: pqHealingBinding,
+      rootKey: pqHealingRoot,
+      nextOfferer: result.pqHealing.nextOfferer,
+      amInitiator: initiator,
+    });
+    const session = new Session(state, module, pq, initiator);
     state = null;
+    pq = null;
     return session;
   } finally {
     identitySecret.fill(0);
@@ -1016,6 +1205,7 @@ export const createSession = async (
     pqHealingRoot?.fill(0);
     pqHealingBinding?.fill(0);
     if (state) wipeRatchet(state);
+    pq?.destroy();
   }
 };
 
@@ -1023,12 +1213,41 @@ export const restoreSession = async (
   snapshot: Uint8Array,
   crypto?: SessionCryptoOptions,
 ): Promise<P2PartySession> => {
-  const state = decodeSessionSnapshot(snapshot);
+  const decoded = decodeSessionSnapshot(snapshot);
+  let pq: SparsePqHealingState | null = null;
   try {
     const module = await loadSessionCrypto(crypto);
-    return new Session(state, module);
+    // Rebuild the PQ runtime from the appended checkpoint. The whole snapshot
+    // is the caller's authenticated-at-rest unit, so the expected binding is
+    // read from the checkpoint itself; restore still validates that the
+    // internal binding, suite, and direction are self-consistent.
+    const expectedBinding = SparsePqHealingState.readCheckpointBinding(
+      decoded.pqCheckpoint,
+    );
+    try {
+      pq = SparsePqHealingState.restore(decoded.pqCheckpoint, {
+        module,
+        pqMode: rootSuiteToRoomPqMode(decoded.state.rootSuite),
+        rootSuite: decoded.state.rootSuite,
+        binding: expectedBinding,
+        amInitiator: decoded.amInitiator,
+      });
+    } finally {
+      expectedBinding.fill(0);
+    }
+    const session = new Session(
+      decoded.state,
+      module,
+      pq,
+      decoded.amInitiator,
+    );
+    pq = null;
+    return session;
   } catch (error) {
-    wipeRatchet(state);
+    wipeRatchet(decoded.state);
+    pq?.destroy();
     throw error;
+  } finally {
+    decoded.pqCheckpoint.fill(0);
   }
 };

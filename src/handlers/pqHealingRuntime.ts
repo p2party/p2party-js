@@ -1012,6 +1012,23 @@ export class SparsePqHealingState {
     }
   }
 
+  /**
+   * Read the public edge binding out of a checkpoint without instantiating the
+   * runtime. A store-free consumer that keeps the whole checkpoint under
+   * authenticated encryption (rather than a separate binding) uses this to
+   * supply the expected binding to `restore`. The binding layout is fixed:
+   * magic(8) | version(1) | suite(1) | direction(1) | reserved(1) |
+   * lastHealedAt(8) | messagesSinceHealing(8) | binding(32).
+   */
+  static readCheckpointBinding(bytes: Uint8Array): Uint8Array {
+    requireBytes(bytes, "checkpoint");
+    const bindingOffset =
+      EDGE_MAGIC.length + 1 + 1 + 1 + 1 + 8 + 8;
+    if (bytes.length < bindingOffset + 32)
+      return fail("checkpoint is too short to contain a binding");
+    return bytes.slice(bindingOffset, bindingOffset + 32);
+  }
+
   static restore(
     bytes: Uint8Array,
     options: RestoreSparsePqHealingOptions,

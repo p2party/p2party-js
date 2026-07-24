@@ -280,13 +280,14 @@ describe("public store-free session API", () => {
     const { alice, bob } = await createPair();
     const snapshot = await alice.serialize();
 
-    // "P2PSESS\0" occupies bytes 0..7; format v3 and root-suite byte 3 reject
-    // pre-draft-21 CPace / pre-interactive-3DH roots.
-    expect(snapshot[8]).toBe(3);
+    // "P2PSESS\0" occupies bytes 0..7; format v4 (the protocol-v4 break) and
+    // root-suite byte 3 reject pre-draft-21 CPace / pre-interactive-3DH roots.
+    // A v3 snapshot is rejected outright.
+    expect(snapshot[8]).toBe(4);
     expect(snapshot[11]).toBe(3);
 
     const preHybrid = Uint8Array.from(snapshot);
-    preHybrid[8] = 2;
+    preHybrid[8] = 3;
     await expect(restoreSession(preHybrid, cryptoOptions)).rejects.toThrow(
       "unsupported snapshot version",
     );
@@ -567,5 +568,133 @@ describe("public store-free session API", () => {
     } finally {
       wipeIdentity(identity);
     }
+  });
+});
+
+// Drive the store-free healing handshake between two sessions with the
+// persist-before-send contract: whenever a call returns a frame, snapshot
+// before delivering it. Returns nothing; both sessions advance in place.
+const runSessionHealing = async (
+  offerer: P2PartySession,
+  accepter: P2PartySession,
+): Promise<void> => {
+  const offer = await offerer.prepareHealing();
+  expect(offer.requiresPersistBeforeSend).toBe(true);
+  if (!offer.frame) throw new Error("expected an OFFER frame");
+  await offerer.serialize(); // persist-before-send
+
+  const advance = await accepter.acceptControlFrame(offer.frame);
+  expect(advance.requiresPersistBeforeSend).toBe(true);
+  if (!advance.frame) throw new Error("expected an ADVANCE frame");
+  await accepter.serialize();
+
+  const ack = await offerer.acceptControlFrame(advance.frame);
+  expect(ack.requiresPersistBeforeSend).toBe(true);
+  if (!ack.frame) throw new Error("expected an ACK frame");
+  await offerer.serialize();
+
+  const settled = await accepter.acceptControlFrame(ack.frame);
+  expect(settled.frame).toBeNull();
+  await accepter.serialize();
+};
+
+describe("public store-free session sparse-PQ healing", () => {
+  test("prepareHealing is not due before the message/time threshold", async () => {
+    const { alice, bob } = await createPair();
+    expect(alice.pqEpoch).toBe(0n);
+    expect(bob.pqEpoch).toBe(0n);
+    expect(alice.healingInProgress).toBe(false);
+    const early = await alice.prepareHealing();
+    expect(early.frame).toBeNull();
+    expect(early.requiresPersistBeforeSend).toBe(false);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("a healing exchange advances both sessions to a shared epoch and messages keep round-tripping", async () => {
+    const { alice, bob } = await createPair();
+
+    // Reach the message threshold so the initiator's exchange is due.
+    for (let index = 0; index < 64; index += 1)
+      await bob.decrypt(await alice.encrypt(patternedBytes(97, index)));
+
+    await runSessionHealing(alice, bob);
+    expect(alice.pqEpoch).toBe(1n);
+    expect(bob.pqEpoch).toBe(1n);
+    expect(alice.healingInProgress).toBe(false);
+    expect(bob.healingInProgress).toBe(false);
+
+    // Messages under the new epoch still decrypt, both directions.
+    const afterHeal = patternedBytes(CHUNK_LEN + 3, 200);
+    expectBytes(await bob.decrypt(await alice.encrypt(afterHeal)), afterHeal);
+    const reply = patternedBytes(321, 201);
+    expectBytes(await alice.decrypt(await bob.encrypt(reply)), reply);
+
+    // A snapshot taken after healing restores at the new epoch and keeps
+    // decrypting messages sealed under it.
+    const snapshot = await bob.serialize();
+    const restoredBob = await restoreSession(snapshot, cryptoOptions);
+    expect(restoredBob.pqEpoch).toBe(1n);
+    const postRestore = patternedBytes(CHUNK_LEN + 9, 202);
+    expectBytes(
+      await restoredBob.decrypt(await alice.encrypt(postRestore)),
+      postRestore,
+    );
+    snapshot.fill(0);
+    await Promise.all([
+      alice.destroy(),
+      bob.destroy(),
+      restoredBob.destroy(),
+    ]);
+  });
+
+  test("encrypt is blocked while a healing exchange is mid-flight", async () => {
+    const { alice, bob } = await createPair();
+    for (let index = 0; index < 64; index += 1)
+      await bob.decrypt(await alice.encrypt(patternedBytes(64, index)));
+
+    const offer = await alice.prepareHealing();
+    if (!offer.frame) throw new Error("expected an OFFER frame");
+    expect(alice.healingInProgress).toBe(true);
+    expect(alice.canEncrypt).toBe(false);
+    await expect(alice.encrypt(patternedBytes(10))).rejects.toThrow(
+      "healing is in progress",
+    );
+
+    // Completing the exchange re-opens application traffic.
+    const advance = await bob.acceptControlFrame(offer.frame);
+    if (!advance.frame) throw new Error("expected ADVANCE");
+    const ack = await alice.acceptControlFrame(advance.frame);
+    if (!ack.frame) throw new Error("expected ACK");
+    await bob.acceptControlFrame(ack.frame);
+    expect(alice.healingInProgress).toBe(false);
+    expect(alice.canEncrypt).toBe(true);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("a dropped ACK is answered from the duplicate cache without a new write", async () => {
+    const { alice, bob } = await createPair();
+    for (let index = 0; index < 64; index += 1)
+      await bob.decrypt(await alice.encrypt(patternedBytes(48, index)));
+
+    const offer = await alice.prepareHealing();
+    if (!offer.frame) throw new Error("expected OFFER");
+    const advance = await bob.acceptControlFrame(offer.frame);
+    if (!advance.frame) throw new Error("expected ADVANCE");
+    const ack = await alice.acceptControlFrame(advance.frame);
+    if (!ack.frame) throw new Error("expected ACK");
+    expect(alice.pqEpoch).toBe(1n);
+
+    // The ACK is lost; bob retransmits the exact ADVANCE (its pending control),
+    // and alice re-answers the exact ACK without persisting again.
+    const pending = await bob.pendingControl();
+    if (!pending) throw new Error("expected a pending ADVANCE");
+    expectBytes(pending, advance.frame);
+    const duplicateAck = await alice.acceptControlFrame(pending);
+    expect(duplicateAck.requiresPersistBeforeSend).toBe(false);
+    if (!duplicateAck.frame) throw new Error("expected duplicate ACK");
+    expectBytes(duplicateAck.frame, ack.frame);
+    await bob.acceptControlFrame(duplicateAck.frame);
+    expect(bob.pqEpoch).toBe(1n);
+    await Promise.all([alice.destroy(), bob.destroy()]);
   });
 });

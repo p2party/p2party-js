@@ -1,5 +1,7 @@
 import { zeroFree } from "../utils/zeroFree";
 
+import { fillRandomBytesInto } from "./random";
+
 import type { LibCrypto } from "./libcrypto";
 
 export type MlKemParameterSet = 512 | 768 | 1024;
@@ -379,7 +381,7 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
       );
 
       const coins = heapView(module, coinsPtr, suite.keyPairRandomBytes);
-      globalThis.crypto.getRandomValues(coins);
+      fillRandomBytesInto(coins);
 
       const result = this.#exports.keypair(
         publicKeyPtr,
@@ -445,7 +447,7 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
 
       heapView(module, publicKeyPtr, suite.publicKeyBytes).set(publicKey);
       const coins = heapView(module, coinsPtr, suite.encapsRandomBytes);
-      globalThis.crypto.getRandomValues(coins);
+      fillRandomBytesInto(coins);
 
       const result = this.#exports.encaps(
         ciphertextPtr,

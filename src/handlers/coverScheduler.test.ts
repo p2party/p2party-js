@@ -277,6 +277,7 @@ describe("store-free scheduled cover core", () => {
           rejectFirstReal = false;
           return false;
         }
+        return undefined;
       },
     );
     scheduler.enqueue(job("retry", "real", [0x44]));

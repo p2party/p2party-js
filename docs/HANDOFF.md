@@ -1485,3 +1485,52 @@ Gate result: full `bun test` 369 pass / 0 fail / 12,626 expects;
   scheduled cover; no tarball/browser/deploy claims.
 - Next: continuation plan step 3 (install the PQ runtime atomically in
   `runHandshake`), then step 4 (PQ epoch on the DR message paths).
+
+### Steps 3–4 done — PQ runtime installed by the handshake; messages use the epoch
+
+Commits: `0f0850b` (step 3), `f5e9dad` (step 4).
+
+Step 3 (atomic handshake install):
+
+- `createHandshakePqRuntime` consumes the handshake PQ bootstrap (wipes the
+  root/binding buffers on every path); `persistAndActivateEdgeCrypto`
+  installs the candidate serializer BEFORE the initial row write, persists
+  ratchet + initial `P2EDGE4` checkpoint in one row, then synchronously
+  installs `epc.ratchetState` + `epc.pqHealingState` + aliases
+  `epc.messageKeyCache = runtime.activeReceiveKeys` after the lease/gate
+  checks. Failure removes the hook, rolls the seed row back, and
+  runHandshake's finally destroys the untransferred runtime. Disconnect
+  teardown destroys the runtime and clears the hook.
+- Tests: first persisted row carries a byte-exact-reproducible non-null
+  checkpoint; injected persistence/open-gate failures install nothing; a
+  replacement handshake destroys/wipes the previous edge crypto.
+
+Step 4 (PQ epoch on the message paths):
+
+- Send: `sendWithReconcile` waits on the runtime traffic gate (bounded
+  poll until the step-5 orchestrator lands), `ratchetEncryptDurably`
+  returns an OWNED `pqContext` captured inside the edge transaction and
+  counts one application message per logical DR step (commit hook); every
+  `sealChunk` (initial/retransmit/rebind) gets the context; wiped with the
+  message key.
+- Receive: epoch parsed first and resolved through the runtime before any
+  clone; cache identity `(dhPub, N, pqEpoch)`; combined keys live ONLY in
+  `runtime.activeReceiveKeys`, persisted via the new
+  `stageEdgeCryptoState` staged-serializer override in
+  `mutateRatchetDurably` (same row as the ratchet successor, before RAM
+  publication); `candidate.skipped` insertion removed on the runtime path
+  (kept only for runtime-free bootstrap/test edges);
+  `forgetReceiveMessageKeyDurably` retires from the staged checkpoint
+  before wiping RAM; anti-DoS cache bound enforced pre-decrypt so the
+  staged map never exceeds the 256-key checkpoint budget.
+- Tests: checkpoint-carried keys (restored row + restored runtime decrypt
+  the rest of a message with NO re-combination), unknown-epoch rejection
+  before mutation/persistence, persistence-failure containment, durable
+  retirement idempotence, concurrent send/receive under one lock.
+
+Gate: full `bun test` 379 pass / 0 fail; typecheck clean; standalone
+example OK; both master stashes intact.
+
+Remaining after step 4: live healing orchestrator (5), cover codec (6),
+CoverRuntime (7), scheduled transfer refactor (8), session API v4 (9),
+cleanup + full verification (10), version/package/frontend (11).

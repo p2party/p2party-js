@@ -6,6 +6,7 @@ import {
 import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
 import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
+import { releaseScheduledReceipts } from "../../handlers/coverTransfer";
 import { rejectRatchetGate } from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
@@ -66,6 +67,13 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       wipeRatchet(connection.ratchetState);
       connection.ratchetState = undefined;
     }
+    // Stop scheduled cover first: its timers and lane channels must not fire
+    // against a torn-down edge, and any queued scheduled receipts are wiped.
+    if (connection.coverRuntime) {
+      connection.coverRuntime.destroy();
+      connection.coverRuntime = undefined;
+    }
+    releaseScheduledReceipts(connection);
     // Destroy the sparse-PQ runtime with the ratchet: its machine, message
     // root, sealed outbox, replay/ACK caches, and active combined receive keys
     // are all wiped by destroy(). The edge serializer hook dies with it so a

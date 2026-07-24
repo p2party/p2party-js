@@ -1,6 +1,7 @@
 import type { LibCrypto } from "../../cryptography/libcrypto";
 import type { RatchetState } from "../../cryptography/ratchet";
 import type { RatchetGateLease } from "../../handlers/ratchetGate";
+import type { CoverRuntime } from "../../handlers/coverRuntime";
 import type { SparsePqHealingState } from "../../handlers/pqHealingRuntime";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
@@ -44,6 +45,12 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
    * checkpoint) is durable; destroyed with it on teardown/replacement.
    */
   pqHealingState?: SparsePqHealingState;
+  /**
+   * Protocol-v4 scheduled-cover runtime, present ONLY on edges of rooms whose
+   * authenticated policy selects `coverMode: "scheduled"`. Its presence is the
+   * scheduled-mode signal for the send/receive/receipt/cancel paths.
+   */
+  coverRuntime?: CoverRuntime;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

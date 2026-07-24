@@ -1534,3 +1534,35 @@ example OK; both master stashes intact.
 Remaining after step 4: live healing orchestrator (5), cover codec (6),
 CoverRuntime (7), scheduled transfer refactor (8), session API v4 (9),
 cleanup + full verification (10), version/package/frontend (11).
+
+### Step 5 done — live WebRTC sparse-healing orchestrator
+
+Commit: `d5d2ad9`.
+
+- New `src/handlers/pqHealingOrchestrator.ts` (WeakMap per connection):
+  due-time initiation (64 msgs/24 h, local turn only, quiescent boundary
+  only — zero live message channels + drained inbound edge queue via new
+  `hasQueuedEdgeReceiveWork`/`waitForEdgeReceiveQuiescence` exports),
+  durable 5 s × 8 exact-frame retransmission, inbound OFFER/ADVANCE/ACK.
+- Transition discipline: clone → mutate/authenticate → persist unchanged
+  ratchet + candidate `P2EDGE4` checkpoint in ONE row
+  (`persistClaimedRatchetState` gained an edge-serializer override) →
+  adopt → dispatch, all inside `withEdgeCryptoMutationLock`. Adoption
+  re-aliases `epc.messageKeyCache` (adopt() moves the map object).
+- Duplicates answered from the persisted cache with NO write; storage
+  failures are transient (`PqPersistenceError`) and recovered by exact
+  retransmit; retry exhaustion + forks fail the authenticated edge
+  (close → normal reconnect/fresh handshake; never a fallback).
+- `FRAME_TYPE_PQ_CONTROL` routed ONLY on the authenticated main channel
+  behind the open ratchet gate (full unstripped 65,490-byte cell);
+  orchestrator installed right after `runHandshake`, destroyed first in
+  disconnect teardown; send admission consults
+  `isPqApplicationTrafficBlocked` (machine phase + inbound gate).
+- Two-peer in-memory E2E (9 tests): full exchange persist-before-send,
+  quiescence gating, all three dropped flights byte-exact, storage
+  failure at all four durable boundaries, exhaustion, fork, checkpoint
+  restore. Full suite: 388 pass / 0 fail; typecheck clean; stashes intact.
+
+Production sparse PQ healing (continuation plan steps 1–5) is COMPLETE for
+immediate mode. Remaining: cover codec (6), CoverRuntime (7), scheduled
+transfer refactor (8), session API v4 (9), cleanup/verification (10–11).

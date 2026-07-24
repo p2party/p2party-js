@@ -298,6 +298,31 @@ box-removal surface: D2=B spec **§6**.
   followed by the frontend/server OSS and production verification. Do not infer that
   scheduled cover, sparse PQ healing, L2 rendezvous, or P2BT has shipped.
 
+## ROOT-VERIFIED RELEASE + LICENSE CHECKPOINT (2026-07-23)
+
+- Release hardening is committed as `3c96270`. The build extracts exact stable
+  libsodium commit `2ce4d906a68eae82b27b4867f3d4172ec508cb27` / tree
+  `2dabe17c708edd7334e3316b5094b753859395d9` with read-only `git archive`, runs
+  the supported configured static build, uses public sodium APIs plus checked
+  `sodium_init`, and disables LTO. The custom RNG and private Argon2 ABI are gone.
+- The final post-license local package is `p2party-0.10.0.tgz`, SHA-256
+  `88b408db271304b70042e59c42d69111a598c0ad81b0c8325cc129eaec8a3092`.
+  Its WASM is 177,858 bytes, SHA-256
+  `ac8251be4ffcb66c5b01510cc81e3a2ae160b30bb54c15c13a84bf183eeff6e6`,
+  with SRI
+  `sha384-N/YT0GhVKVBWk5TRotqM0Hu+fos8xRq+AyFnRmqFQgQMyVm8edPWIZiSIDqqcG87`.
+  The release script validates the WASM/glue exports, provenance, package export
+  graph, store-free session ESM/CJS surfaces, tar contents, and archived bytes.
+- Root reran `bun test` (**277/0**, 11,856 assertions), `npm run typecheck`, and
+  `bun run examples/standalone-e2ee.ts`; all passed. Both master stashes remain
+  intact.
+- Final license split: `p2party-js` and `p2party-server` are Apache-2.0;
+  `p2party.com` remains AGPL-3.0-only. Both Apache `LICENSE.md` files are verbatim
+  copies of the canonical apache.org text. Server license commit: `4ab3c82`.
+- This clears the prior libsodium release blocker. It does **not** establish
+  frontend installation, browser/WebRTC T5, production deployment, scheduled
+  cover, sparse PQ healing, L2 rendezvous, or P2BT; those remain separate gates.
+
 ## Methodology + where the record lives
 - Subagent-driven: one implementer per task + a focused adversarial review for
   security-critical crypto. The review keeps catching REAL bugs before ship (gate

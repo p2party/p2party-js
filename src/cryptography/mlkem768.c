@@ -6,12 +6,18 @@
 /*
  * mlkem-native v1.2.0, pinned in vendor/mlkem-native/UPSTREAM.md.
  *
+ * This is one member of a three-parameter-set build. Every member enables
+ * MLK_CONFIG_MULTILEVEL_BUILD. This compilation unit owns the one shared
+ * implementation; the ML-KEM-512 and ML-KEM-1024 units use NO_SHARED.
+ *
  * WebCrypto supplies the entropy to the caller-facing TypeScript layer. Keep
  * the randomized upstream API out of the binary so there is no second RNG
  * path, and select the portable C backend because the target is WebAssembly.
  */
 #define MLK_CONFIG_PARAMETER_SET 768
-#define MLK_CONFIG_NAMESPACE_PREFIX p2party_mlkem768
+#define MLK_CONFIG_NAMESPACE_PREFIX p2party_mlkem
+#define MLK_CONFIG_MULTILEVEL_BUILD
+#define MLK_CONFIG_MULTILEVEL_WITH_SHARED
 #define MLK_CONFIG_NO_RANDOMIZED_API
 #define MLK_CONFIG_NO_SUPERCOP
 #define MLK_CONFIG_NO_ASM

@@ -14,19 +14,21 @@ import {
 import { verifyIdentityCrossSig } from "../cryptography/identityCrossSig";
 import { hkdfExpand, hkdfExtract } from "../cryptography/hkdf";
 import {
-  createMlKem768Backend,
-  ML_KEM_768_CIPHERTEXT_BYTES,
-  ML_KEM_768_PUBLIC_KEY_BYTES,
-  type MlKem768Decapsulation,
-  type MlKem768Encapsulation,
-  type MlKem768KeyPair,
+  createMlKemBackend,
+  getMlKemSuite,
+  type MlKemDecapsulation,
+  type MlKemEncapsulation,
+  type MlKemKeyPair,
+  type MlKemSuiteDescriptor,
 } from "../cryptography/mlkem";
+import { roomPqModeToParameterSet, roomPqModeToRootSuite } from "../roomPolicy";
 import { zeroFree } from "../utils/zeroFree";
 import { PQ_TAG } from "../utils/constants";
 import { concatUint8Arrays, uint8ArraysAreEqual } from "../utils/uint8array";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetState } from "../cryptography/ratchet";
+import type { RoomPqMode } from "../roomPolicy";
 
 export interface ChannelInputParams {
   channelId: Uint8Array;
@@ -34,7 +36,16 @@ export interface ChannelInputParams {
   ikResponder: Uint8Array;
   fpInitiator: Uint8Array;
   fpResponder: Uint8Array;
+  /** Defaults to the 0.10 ML-KEM-768 suite for source compatibility. */
+  pqMode?: RoomPqMode;
 }
+
+const pqTranscriptTag = (mode: RoomPqMode): Uint8Array => {
+  if (mode === "hybrid-mlkem768") return PQ_TAG;
+  if (mode === "hybrid-mlkem512") return new Uint8Array([0x02]);
+  if (mode === "hybrid-mlkem1024") return new Uint8Array([0x03]);
+  throw new Error("handshake: unsupported room PQ mode");
+};
 
 /**
  * CPace channel-input transcript (spec §5): CI = channel-id ‖ IK_a ‖ IK_b ‖
@@ -50,13 +61,14 @@ export interface ChannelInputParams {
  * while assembling the CPace transcript.
  */
 export const buildChannelInput = (p: ChannelInputParams): Uint8Array => {
+  const pqTag = pqTranscriptTag(p.pqMode ?? "hybrid-mlkem768");
   const parts = [
     p.channelId,
     p.ikInitiator,
     p.ikResponder,
     p.fpInitiator,
     p.fpResponder,
-    PQ_TAG,
+    pqTag,
   ];
 
   let len = 0;
@@ -77,20 +89,23 @@ export const buildChannelInput = (p: ChannelInputParams): Uint8Array => {
 // Internal handshake sub-frame tags (inside the FRAME_TYPE_HANDSHAKE payload).
 const HS_STEP_HELLO = 0x01;
 const HS_STEP_CONFIRM = 0x02;
+const HS_STEP_FINISH = 0x03;
 // Key-confirmation domain separator (local to the handshake; only ever hashed
 // into the MAC input, never on the wire outside it).
-const HS_KC_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hs-kc-transcript-v3",
-);
-// The two confirmation flights intentionally authenticate different fixed
-// inputs. The responder must send before it can know the initiator's ratchet
-// public key, while the initiator's confirmation binds both initial ratchet
-// keys. Explicit role/domain labels prevent reflection despite that asymmetry.
+const HS_KC_DOMAIN = new TextEncoder().encode("p2party-v3-hs-kc-transcript-v3");
+// The three chained confirmation flights authenticate progressively stronger
+// inputs. The responder must send before it knows the initiator's ratchet key;
+// the initiator proof binds that key plus the responder proof; the final
+// responder proof binds both earlier proofs. Explicit role/domain labels
+// prevent reflection despite the asymmetric sequence.
 const HS_KC_RESPONDER_DOMAIN = new TextEncoder().encode(
   "p2party-v3-hs-kc-responder-v3",
 );
 const HS_KC_INITIATOR_DOMAIN = new TextEncoder().encode(
   "p2party-v3-hs-kc-initiator-ratchet-dh-v3",
+);
+const HS_KC_RESPONDER_FINISH_DOMAIN = new TextEncoder().encode(
+  "p2party-v3-hs-kc-responder-finish-v3",
 );
 // Both authentication modes prove possession of the cross-signed X25519
 // identity through interactive triple-DH. PIN mode ADDS CPace; it must never
@@ -99,12 +114,15 @@ const HS_KC_INITIATOR_DOMAIN = new TextEncoder().encode(
 // domains make the two fixed-order combiners unambiguous:
 //   no-PIN: 3DH || ML-KEM
 //   PIN:    CPace-ISK || 3DH || ML-KEM
-const HS_HYBRID_KDF_NOPIN_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hybrid-root-3dh-ml-kem-768-v3",
-);
-const HS_HYBRID_KDF_PIN_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hybrid-root-cpace21-3dh-ml-kem-768-v3",
-);
+const hybridKdfDomain = (
+  mode: "pin" | "nopin",
+  parameterSet: 512 | 768 | 1024,
+): Uint8Array =>
+  new TextEncoder().encode(
+    mode === "pin"
+      ? `p2party-v3-hybrid-root-cpace21-3dh-ml-kem-${String(parameterSet)}-v3`
+      : `p2party-v3-hybrid-root-3dh-ml-kem-${String(parameterSet)}-v3`,
+  );
 const HS_HYBRID_KDF_SALT = new Uint8Array(64);
 // CPace generator session-id (D1). The generator G = deriveGenerator(pin, sid,
 // CI) must be byte-identical on both legs, so both must feed the SAME sid. We
@@ -137,12 +155,28 @@ const HELLO_Y_OFF = HELLO_EK_OFF + EK_LEN;
 const HELLO_X25519_ID_PUB_OFF = HELLO_Y_OFF + Y_LEN;
 const HELLO_IDENTITY_SIG_OFF = HELLO_X25519_ID_PUB_OFF + X25519_ID_PUB_LEN;
 const HELLO_ML_KEM_PUBLIC_KEY_OFF = HELLO_IDENTITY_SIG_OFF + IDENTITY_SIG_LEN;
-const HELLO_ML_KEM_CIPHERTEXT_OFF =
-  HELLO_ML_KEM_PUBLIC_KEY_OFF + ML_KEM_768_PUBLIC_KEY_BYTES;
-const HELLO_LEN = HELLO_ML_KEM_CIPHERTEXT_OFF + ML_KEM_768_CIPHERTEXT_BYTES;
 const CONFIRM_LEN = 1 + DH_LEN + MAC_LEN;
+const FINISH_LEN = 1 + MAC_LEN;
 
-export type HandshakeStep = 1 | 2;
+interface HelloLayout {
+  suite: Readonly<MlKemSuiteDescriptor>;
+  publicKeyOffset: number;
+  ciphertextOffset: number;
+  length: number;
+}
+
+const helloLayout = (pqMode: RoomPqMode): HelloLayout => {
+  const suite = getMlKemSuite(roomPqModeToParameterSet(pqMode));
+  const ciphertextOffset = HELLO_ML_KEM_PUBLIC_KEY_OFF + suite.publicKeyBytes;
+  return {
+    suite,
+    publicKeyOffset: HELLO_ML_KEM_PUBLIC_KEY_OFF,
+    ciphertextOffset,
+    length: ciphertextOffset + suite.ciphertextBytes,
+  };
+};
+
+export type HandshakeStep = 1 | 2 | 3;
 
 /**
  * Fail-closed pre-auth framing check used before a payload enters the handshake
@@ -152,10 +186,14 @@ export type HandshakeStep = 1 | 2;
 export const isHandshakePayloadForStep = (
   payload: Uint8Array,
   step: HandshakeStep,
+  pqMode: RoomPqMode = "hybrid-mlkem768",
 ): boolean =>
   step === HS_STEP_HELLO
-    ? payload.length === HELLO_LEN && payload[0] === HS_STEP_HELLO
-    : payload.length === CONFIRM_LEN && payload[0] === HS_STEP_CONFIRM;
+    ? payload.length === helloLayout(pqMode).length &&
+      payload[0] === HS_STEP_HELLO
+    : step === HS_STEP_CONFIRM
+      ? payload.length === CONFIRM_LEN && payload[0] === HS_STEP_CONFIRM
+      : payload.length === FINISH_LEN && payload[0] === HS_STEP_FINISH;
 
 export interface HandshakeTransport {
   send(bytes: Uint8Array): void | Promise<void>;
@@ -164,6 +202,8 @@ export interface HandshakeTransport {
 
 export interface HandshakeCoreParams {
   mode: "pin" | "nopin";
+  /** Exact preselected suite; omission selects the documented 768 default. */
+  pqMode?: RoomPqMode;
   pin: Uint8Array | null;
   channelInput: Uint8Array;
   amInitiator: boolean;
@@ -212,14 +252,17 @@ const hmacSha512 = (
 
 // HELLO   = [HS_STEP_HELLO ‖ sid(32) ‖ EK(32) ‖ Y(32) ‖
 //            X25519_id_pub(32) ‖ crossSig(64) ‖
-//            mlKemPublicKey(1184) ‖ mlKemCiphertext(1088)]
+//            mlKemPublicKey(suite.pkBytes) ‖
+//            mlKemCiphertext(suite.ctBytes)]
 // Initiator: public key is fresh and ciphertext is all zero.
 // Responder: public key is all zero and ciphertext encapsulates to the
 // initiator's key. The unused fixed-width field MUST be canonical all-zero.
 // CONFIRM = [HS_STEP_CONFIRM ‖ dhPub(32) ‖ mac(64)]
+// FINISH  = [HS_STEP_FINISH ‖ mac(64)]
 // Both roles publish their actual initial ratchet DH public key.
 // Both fixed size, one FRAME_TYPE_HANDSHAKE frame each.
 const packHello = (
+  layout: HelloLayout,
   sid: Uint8Array,
   ek: Uint8Array,
   y: Uint8Array,
@@ -228,15 +271,15 @@ const packHello = (
   mlKemPublicKey: Uint8Array,
   mlKemCiphertext: Uint8Array,
 ): Uint8Array => {
-  const out = new Uint8Array(HELLO_LEN);
+  const out = new Uint8Array(layout.length);
   out[0] = HS_STEP_HELLO;
   out.set(sid, HELLO_SID_OFF);
   out.set(ek, HELLO_EK_OFF);
   out.set(y, HELLO_Y_OFF);
   out.set(x25519Pub, HELLO_X25519_ID_PUB_OFF);
   out.set(crossSig, HELLO_IDENTITY_SIG_OFF);
-  out.set(mlKemPublicKey, HELLO_ML_KEM_PUBLIC_KEY_OFF);
-  out.set(mlKemCiphertext, HELLO_ML_KEM_CIPHERTEXT_OFF);
+  out.set(mlKemPublicKey, layout.publicKeyOffset);
+  out.set(mlKemCiphertext, layout.ciphertextOffset);
   return out;
 };
 
@@ -254,8 +297,16 @@ const packConfirm = (dhPub: Uint8Array, mac: Uint8Array): Uint8Array => {
   return out;
 };
 
+const packFinish = (mac: Uint8Array): Uint8Array => {
+  const out = new Uint8Array(FINISH_LEN);
+  out[0] = HS_STEP_FINISH;
+  out.set(mac, 1);
+  return out;
+};
+
 /**
- * Two-round handshake core (spec §5), decoupled from RTCDataChannel so it is
+ * Three-flight key-confirmed handshake core (spec §5), decoupled from
+ * RTCDataChannel so it is
  * unit-testable with two linked in-memory transports:
  *   R1  initiator sends HELLO {sid, EK, Y, ML-KEM pk}; responder encapsulates,
  *       replies with HELLO {sid, EK, Y, ML-KEM ct}; both derive the 32-byte
@@ -263,24 +314,28 @@ const packConfirm = (dhPub: Uint8Array, mac: Uint8Array): Uint8Array => {
  *       CPace-ISK || interactive-3DH || ML-KEM (PIN).
  *   R2  responder initRatchet(false,null) → dhPubR and sends
  *       CONFIRM{dhPubR, mac_R}; initiator seeds against dhPubR and sends
- *       CONFIRM{dhPubI, mac_I}. After verifying mac_I, responder performs the
- *       receive-side DH step without consuming a message key, opening both its
- *       receiving and sending chains before return.
+ *       CONFIRM{dhPubI, mac_I}, where mac_I commits to the received mac_R.
+ *   R3  after verifying mac_I and priming both ratchet chains, responder sends
+ *       FINISH{mac_F}, which commits to both earlier confirmation MACs.
+ *       Initiator returns only after verifying mac_F.
  *
- * ML-KEM-768 is mandatory: this function constructs its backend itself and
- * fails before sending if the WASM exports are missing. There is deliberately
- * no classical fallback or negotiation bit. Both MACs cover the full ordered
- * HELLO transcript and dhPubR under distinct role domains; mac_I additionally
- * covers dhPubI. A swapped cert/key, altered KEM field, ratchet-key tamper, or
- * wrong PIN makes key confirmation fail (or is rejected as malformed).
+ * The room-selected ML-KEM suite is mandatory: this function constructs that
+ * exact backend itself and fails before sending if its WASM exports are
+ * missing. There is deliberately no classical fallback or negotiation bit.
+ * The three chained MACs cover the full ordered HELLO transcript and dhPubR
+ * under distinct role domains; mac_I additionally covers dhPubI + mac_R, and
+ * mac_F covers both earlier proofs. A swapped cert/key, altered KEM field,
+ * ratchet-key tamper, or wrong PIN makes key confirmation fail (or is rejected
+ * as malformed).
  * Persistence + gate-open happen ONLY in runHandshake, after this resolves, so
  * a throw here leaves nothing persisted.
  *
- * NOTE on the R2 ordering: the initiator publishes its mac_I BEFORE verifying
- * mac_R. The provisional initiator ratchet is needed to publish dhPubI and is
- * wiped if mac_R fails. Sending first guarantees the responder's recv() is
- * always satisfied — otherwise a wrong-PIN initiator would abort before sending
- * and deadlock the responder's recv().
+ * NOTE on the R2 ordering: the initiator publishes its mac_I BEFORE separately
+ * checking mac_R so a wrong-root peer still receives a terminal proof instead
+ * of hanging forever. This is safe because mac_I itself authenticates the exact
+ * mac_R bytes the initiator received: changing mac_R makes the responder reject
+ * mac_I. A valid responder FINISH is therefore required before the initiator
+ * can return an established state.
  */
 export const performHandshakeCore = async (
   transport: HandshakeTransport,
@@ -289,6 +344,7 @@ export const performHandshakeCore = async (
 ): Promise<{ state: RatchetState; secret: Uint8Array }> => {
   const {
     mode,
+    pqMode = "hybrid-mlkem768",
     pin,
     channelInput,
     amInitiator,
@@ -298,22 +354,25 @@ export const performHandshakeCore = async (
     peerIdentityEd25519Pub,
   } = params;
 
-  // Mandatory suite construction is deliberately first. A module built without
-  // ML-KEM cannot enter or emit any v3 handshake traffic.
-  const mlKem = createMlKem768Backend(module);
+  // The authenticated room policy selects one exact suite before any traffic.
+  // Suite construction is deliberately first: a module missing those precise
+  // exports cannot enter or emit a handshake, and no fallback is attempted.
+  const layout = helloLayout(pqMode);
+  const mlKem = createMlKemBackend(module, layout.suite);
+  const rootSuite = roomPqModeToRootSuite(pqMode);
 
   // R1: build our HELLO. Ephemeral X25519 EK is always generated and always
-    // enters interactive 3DH, including PIN rooms: CPace proves PIN knowledge
-    // while 3DH independently proves possession of the presented cross-signed
-    // identity.
+  // enters interactive 3DH, including PIN rooms: CPace proves PIN knowledge
+  // while 3DH independently proves possession of the presented cross-signed
+  // identity.
   const sidSelf = crypto.getRandomValues(new Uint8Array(SID_LEN));
   const ek = x25519Keypair(module);
   let cpaceY: Uint8Array = new Uint8Array(Y_LEN); // zeros in no-PIN
   let cpaceScalar: Uint8Array | null = null; // our secret CPace scalar y
-  const mlKemPublicKeySelf = new Uint8Array(ML_KEM_768_PUBLIC_KEY_BYTES);
-  const mlKemCiphertextSelf = new Uint8Array(ML_KEM_768_CIPHERTEXT_BYTES);
-  let mlKemKeyPair: MlKem768KeyPair | null = null;
-  let mlKemShared: MlKem768Encapsulation | MlKem768Decapsulation | null = null;
+  const mlKemPublicKeySelf = new Uint8Array(layout.suite.publicKeyBytes);
+  const mlKemCiphertextSelf = new Uint8Array(layout.suite.ciphertextBytes);
+  let mlKemKeyPair: MlKemKeyPair | null = null;
+  let mlKemShared: MlKemEncapsulation | MlKemDecapsulation | null = null;
   let identitySecret: Uint8Array | undefined;
   let pakeSecret: Uint8Array | undefined;
   let hybridIkm: Uint8Array | undefined;
@@ -344,6 +403,7 @@ export const performHandshakeCore = async (
 
   const buildHello = (): Uint8Array =>
     packHello(
+      layout,
       sidSelf,
       ek.publicKey,
       cpaceY,
@@ -376,7 +436,7 @@ export const performHandshakeCore = async (
     }
 
     // Parse peer HELLO. Fail closed on any malformed/short/mis-tagged frame.
-    if (peerHello.length !== HELLO_LEN || peerHello[0] !== HS_STEP_HELLO)
+    if (peerHello.length !== layout.length || peerHello[0] !== HS_STEP_HELLO)
       throw new Error("Malformed handshake HELLO");
     const sidPeer = peerHello.subarray(HELLO_SID_OFF, HELLO_SID_OFF + SID_LEN);
     const ekPeer = peerHello.subarray(HELLO_EK_OFF, HELLO_EK_OFF + EK_LEN);
@@ -390,12 +450,12 @@ export const performHandshakeCore = async (
       HELLO_IDENTITY_SIG_OFF + IDENTITY_SIG_LEN,
     );
     const mlKemPublicKeyPeer = peerHello.subarray(
-      HELLO_ML_KEM_PUBLIC_KEY_OFF,
-      HELLO_ML_KEM_PUBLIC_KEY_OFF + ML_KEM_768_PUBLIC_KEY_BYTES,
+      layout.publicKeyOffset,
+      layout.publicKeyOffset + layout.suite.publicKeyBytes,
     );
     const mlKemCiphertextPeer = peerHello.subarray(
-      HELLO_ML_KEM_CIPHERTEXT_OFF,
-      HELLO_ML_KEM_CIPHERTEXT_OFF + ML_KEM_768_CIPHERTEXT_BYTES,
+      layout.ciphertextOffset,
+      layout.ciphertextOffset + layout.suite.ciphertextBytes,
     );
 
     // Canonical fixed fields make the role and mandatory suite unambiguous.
@@ -538,10 +598,7 @@ export const performHandshakeCore = async (
     // binds identity possession, CPace policy, DTLS, and key confirmation.
     // Separate mode/version domains prevent the variable-length IKM layouts
     // from ever being interpreted as one another.
-    const hybridDomain =
-      mode === "pin"
-        ? HS_HYBRID_KDF_PIN_DOMAIN
-        : HS_HYBRID_KDF_NOPIN_DOMAIN;
+    const hybridDomain = hybridKdfDomain(mode, layout.suite.parameterSet);
     hybridIkm = await concatUint8Arrays(
       mode === "pin"
         ? [pakeSecret!, identitySecret, mlKemShared.sharedSecret]
@@ -571,6 +628,7 @@ export const performHandshakeCore = async (
       roleDomain: Uint8Array,
       dhPubR: Uint8Array,
       dhPubI?: Uint8Array,
+      priorProofs: Uint8Array[] = [],
     ): Promise<Uint8Array> =>
       concatUint8Arrays([
         HS_KC_DOMAIN,
@@ -591,45 +649,68 @@ export const performHandshakeCore = async (
         mlKemCiphertextR,
         dhPubR,
         ...(dhPubI ? [dhPubI] : []),
+        ...priorProofs,
         channelInput,
       ]);
 
-    // R2 — DH-ratchet exchange + bidirectional key confirmation.
+    // R2/R3 — DH-ratchet exchange + chained triple confirmation:
+    //   mac_R
+    //   mac_I = MAC(... || mac_R)
+    //   mac_F = MAC(... || mac_R || mac_I)
+    // The chaining makes a modification of either earlier proof poison every
+    // later proof rather than permitting one endpoint to accept independently.
     if (!amInitiator) {
       // Responder: seed the ratchet, publish its DH pub, MAC the transcript.
-      ratchetState = initRatchet(secret, false, null, module);
+      ratchetState = initRatchet(secret, false, null, module, rootSuite);
       const dhPubR = ratchetState.dhSelfPub;
       const confirmationInputR = await buildConfirmationInput(
         HS_KC_RESPONDER_DOMAIN,
         dhPubR,
       );
       const macR = hmacSha512(secret, confirmationInputR, module);
-      await transport.send(packConfirm(dhPubR, macR));
-      macR.fill(0);
+      try {
+        await transport.send(packConfirm(dhPubR, macR));
+        const peerConfirm = await transport.recv();
+        if (
+          peerConfirm.length !== CONFIRM_LEN ||
+          peerConfirm[0] !== HS_STEP_CONFIRM
+        )
+          throw new Error("Malformed handshake CONFIRM");
+        const dhPubI = Uint8Array.from(peerConfirm.subarray(1, 1 + DH_LEN));
+        const macI = peerConfirm.subarray(1 + DH_LEN, 1 + DH_LEN + MAC_LEN);
+        const confirmationInputI = await buildConfirmationInput(
+          HS_KC_INITIATOR_DOMAIN,
+          dhPubR,
+          dhPubI,
+          [macR],
+        );
+        const expectI = hmacSha512(secret, confirmationInputI, module);
+        const initiatorConfirmed = await uint8ArraysAreEqual(macI, expectI);
+        expectI.fill(0);
+        if (!initiatorConfirmed)
+          throw new Error("Handshake key-confirmation failed");
+        primeResponderRatchet(ratchetState, dhPubI, module);
 
-      const peerConfirm = await transport.recv();
-      if (
-        peerConfirm.length !== CONFIRM_LEN ||
-        peerConfirm[0] !== HS_STEP_CONFIRM
-      )
-        throw new Error("Malformed handshake CONFIRM");
-      const dhPubI = Uint8Array.from(peerConfirm.subarray(1, 1 + DH_LEN));
-      const macI = peerConfirm.subarray(1 + DH_LEN, 1 + DH_LEN + MAC_LEN);
-      const confirmationInputI = await buildConfirmationInput(
-        HS_KC_INITIATOR_DOMAIN,
-        dhPubR,
-        dhPubI,
-      );
-      const expectI = hmacSha512(secret, confirmationInputI, module);
-      const initiatorConfirmed = await uint8ArraysAreEqual(macI, expectI);
-      expectI.fill(0);
-      if (!initiatorConfirmed)
-        throw new Error("Handshake key-confirmation failed");
-      primeResponderRatchet(ratchetState, dhPubI, module);
+        const finishInput = await buildConfirmationInput(
+          HS_KC_RESPONDER_FINISH_DOMAIN,
+          dhPubR,
+          dhPubI,
+          [macR, macI],
+        );
+        const macFinish = hmacSha512(secret, finishInput, module);
+        try {
+          await transport.send(packFinish(macFinish));
+        } finally {
+          macFinish.fill(0);
+        }
+      } finally {
+        macR.fill(0);
+      }
     } else {
       // Initiator: wait for dhPubR, provisionally seed so its actual dhPubI can
-      // be authenticated in mac_I, send it, then verify mac_R. A failure wipes
-      // the provisional ratchet in the outer finally.
+      // be authenticated in mac_I. mac_I chains the exact received mac_R; after
+      // sending it, verify mac_R and then require the responder's final proof.
+      // Any failure wipes the provisional ratchet in the outer finally.
       const peerConfirm = await transport.recv();
       if (
         peerConfirm.length !== CONFIRM_LEN ||
@@ -638,25 +719,51 @@ export const performHandshakeCore = async (
         throw new Error("Malformed handshake CONFIRM");
       const dhPubR = Uint8Array.from(peerConfirm.subarray(1, 1 + DH_LEN));
       const macR = peerConfirm.subarray(1 + DH_LEN, 1 + DH_LEN + MAC_LEN);
-      ratchetState = initRatchet(secret, true, dhPubR, module);
+      ratchetState = initRatchet(secret, true, dhPubR, module, rootSuite);
       const dhPubI = ratchetState.dhSelfPub;
       const confirmationInputI = await buildConfirmationInput(
         HS_KC_INITIATOR_DOMAIN,
         dhPubR,
         dhPubI,
+        [macR],
       );
       const macI = hmacSha512(secret, confirmationInputI, module);
-      await transport.send(packConfirm(dhPubI, macI));
-      macI.fill(0);
-      const confirmationInputR = await buildConfirmationInput(
-        HS_KC_RESPONDER_DOMAIN,
-        dhPubR,
-      );
-      const expectR = hmacSha512(secret, confirmationInputR, module);
-      const responderConfirmed = await uint8ArraysAreEqual(macR, expectR);
-      expectR.fill(0);
-      if (!responderConfirmed)
-        throw new Error("Handshake key-confirmation failed");
+      try {
+        await transport.send(packConfirm(dhPubI, macI));
+        const confirmationInputR = await buildConfirmationInput(
+          HS_KC_RESPONDER_DOMAIN,
+          dhPubR,
+        );
+        const expectR = hmacSha512(secret, confirmationInputR, module);
+        const responderConfirmed = await uint8ArraysAreEqual(macR, expectR);
+        expectR.fill(0);
+        if (!responderConfirmed)
+          throw new Error("Handshake key-confirmation failed");
+
+        const peerFinish = await transport.recv();
+        if (
+          peerFinish.length !== FINISH_LEN ||
+          peerFinish[0] !== HS_STEP_FINISH
+        )
+          throw new Error("Malformed handshake FINISH");
+        const finish = peerFinish.subarray(1, 1 + MAC_LEN);
+        const finishInput = await buildConfirmationInput(
+          HS_KC_RESPONDER_FINISH_DOMAIN,
+          dhPubR,
+          dhPubI,
+          [macR, macI],
+        );
+        const expectFinish = hmacSha512(secret, finishInput, module);
+        const responderFinished = await uint8ArraysAreEqual(
+          finish,
+          expectFinish,
+        );
+        expectFinish.fill(0);
+        if (!responderFinished)
+          throw new Error("Handshake final confirmation failed");
+      } finally {
+        macI.fill(0);
+      }
     }
 
     if (!ratchetState)

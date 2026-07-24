@@ -112,9 +112,15 @@ const validateWasmGlue = async (wasmBytes) => {
     "_encrypt_chachapoly_symmetric",
     "_decrypt_chachapoly_symmetric",
     "_receive_message_with_key",
+    "_mlkem512_keypair",
+    "_mlkem512_encaps",
+    "_mlkem512_decaps",
     "_mlkem768_keypair",
     "_mlkem768_encaps",
     "_mlkem768_decaps",
+    "_mlkem1024_keypair",
+    "_mlkem1024_encaps",
+    "_mlkem1024_decaps",
   ];
   for (const name of requiredCryptoExports)
     if (typeof cryptoModule[name] !== "function")
@@ -134,6 +140,18 @@ const validateCryptoProvenance = (provenance, wasmBytes) => {
     fail("crypto provenance does not attest a configured libsodium build");
   if (provenance.sources?.mlkemNative?.commit !== expectedMlkemNativeCommit)
     fail("crypto provenance has an unexpected mlkem-native commit");
+  if (
+    JSON.stringify(provenance.sources?.mlkemNative?.parameterSets) !==
+    JSON.stringify([512, 768, 1024])
+  )
+    fail("crypto provenance does not attest all ML-KEM parameter sets");
+  if (provenance.sources?.mlkemNative?.multilevel?.shared !== 768)
+    fail("crypto provenance has an unexpected shared ML-KEM build");
+  if (
+    JSON.stringify(provenance.sources?.mlkemNative?.multilevel?.noShared) !==
+    JSON.stringify([512, 1024])
+  )
+    fail("crypto provenance has unexpected no-shared ML-KEM builds");
   if (provenance.build?.mode !== "production")
     fail("crypto provenance is not for a production build");
   if (provenance.build?.linkTimeOptimization !== false)
@@ -166,9 +184,15 @@ const validateBundle = (relativePath, expectedIntegrity) => {
     if (source.includes(`cdn.p2party.com/@${staleVersion}/libcrypto.wasm`))
       fail(`${relativePath} embeds stale CDN version ${staleVersion}`);
   for (const name of [
+    "_mlkem512_keypair",
+    "_mlkem512_encaps",
+    "_mlkem512_decaps",
     "_mlkem768_keypair",
     "_mlkem768_encaps",
     "_mlkem768_decaps",
+    "_mlkem1024_keypair",
+    "_mlkem1024_encaps",
+    "_mlkem1024_decaps",
   ])
     if (!source.includes(name)) fail(`${relativePath} is missing ${name}`);
 };

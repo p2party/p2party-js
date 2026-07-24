@@ -1,5 +1,5 @@
 import { getDB } from "./src/getDB";
-import { MAX_SKIP_SESSION, RATCHET_ROOT_SUITE } from "../utils/constants";
+import { isRatchetRootSuite, MAX_SKIP_SESSION } from "../utils/constants";
 
 import type { RatchetSession } from "./types";
 
@@ -124,7 +124,7 @@ interface RatchetMetadata {
  */
 const validateMetadata = (s: RatchetMetadata): void => {
   const rootSuite: unknown = s.rootSuite;
-  if (rootSuite !== RATCHET_ROOT_SUITE)
+  if (!isRatchetRootSuite(rootSuite))
     throw new Error("Unsupported ratchet root suite");
   requireCanonicalString(s.roomId, "ratchet roomId");
   requireCanonicalString(s.peerPublicKey, "ratchet peerPublicKey");

@@ -119,7 +119,13 @@ export interface OpenChannelHelperParams {
 }
 
 export const handleOpenChannel = async (
-  { channel, epc, roomId, dataChannels, incoming = false }: OpenChannelHelperParams,
+  {
+    channel,
+    epc,
+    roomId,
+    dataChannels,
+    incoming = false,
+  }: OpenChannelHelperParams,
   api: BaseQueryApi,
 ): Promise<IRTCDataChannel> => {
   const { keyPair, rooms } = api.getState() as State;
@@ -219,13 +225,7 @@ export const handleOpenChannel = async (
   }
   const transportGateLease = epc.ratchetGateLease;
   const awaitAuthenticatedTransport = async (): Promise<boolean> => {
-    if (
-      !isCurrentRatchetGateLease(
-        roomId,
-        epc.withPeerId,
-        transportGateLease,
-      )
-    )
+    if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, transportGateLease))
       return false;
     await getRatchetGate(roomId, epc.withPeerId);
     return isCurrentRatchetGateLease(
@@ -242,7 +242,13 @@ export const handleOpenChannel = async (
     extChannel.label === "main" ? epc.ratchetGateLease : undefined;
   const handshakeLease: HandshakeLease | undefined =
     extChannel.label === "main"
-      ? setHandshakeChannel(roomId, epc.withPeerId, extChannel)
+      ? setHandshakeChannel(
+          roomId,
+          epc.withPeerId,
+          extChannel,
+          rooms[roomIndex]?.policy.pqMode ?? "hybrid-mlkem768",
+          isIdentityInitiator(keyPair.publicKey, epc.withPeerPublicKey),
+        )
       : undefined;
   let parsedLabel: Awaited<ReturnType<typeof decompileChannelMessageLabel>>;
   try {
@@ -253,12 +259,7 @@ export const handleOpenChannel = async (
     epc.messageChannels?.delete(extChannel);
     if (epc.mainChannel === extChannel) epc.mainChannel = undefined;
     if (handshakeLease)
-      clearHandshakeChannel(
-        roomId,
-        epc.withPeerId,
-        labelError,
-        handshakeLease,
-      );
+      clearHandshakeChannel(roomId, epc.withPeerId, labelError, handshakeLease);
     if (extChannel.readyState !== "closed") extChannel.close();
     throw labelError;
   }
@@ -277,12 +278,7 @@ export const handleOpenChannel = async (
     resourcesReleased = true;
     if (!receiveAbort.signal.aborted)
       receiveAbort.abort(new Error("Message channel processing stopped"));
-    releaseQueuedMessageFrames(
-      queue,
-      roomId,
-      epc.withPeerId,
-      drainingRef,
-    );
+    releaseQueuedMessageFrames(queue, roomId, epc.withPeerId, drainingRef);
     releaseAuxiliaryResources();
   };
   extChannel.releaseProtocolResources = releaseProtocolResources;
@@ -300,8 +296,7 @@ export const handleOpenChannel = async (
       await waitForQueuedMessageFrames(queue, drainingRef);
       if (merkleRootHex === "") return;
 
-      const cacheKey =
-        epc.messageKeyByMerkleRoot?.get(merkleRootHex);
+      const cacheKey = epc.messageKeyByMerkleRoot?.get(merkleRootHex);
       if (cacheKey && epc.messageKeyCache) {
         await forgetReceiveMessageKeyDurably(
           epc,
@@ -334,11 +329,7 @@ export const handleOpenChannel = async (
       releaseProtocolResources();
       if (
         ratchetGateLease &&
-        !isCurrentRatchetGateLease(
-          roomId,
-          epc.withPeerId,
-          ratchetGateLease,
-        )
+        !isCurrentRatchetGateLease(roomId, epc.withPeerId, ratchetGateLease)
       )
         return;
       if (handshakeLease)
@@ -442,11 +433,7 @@ export const handleOpenChannel = async (
     if (extChannel.label === "main") {
       if (
         ratchetGateLease &&
-        !isCurrentRatchetGateLease(
-          roomId,
-          epc.withPeerId,
-          ratchetGateLease,
-        )
+        !isCurrentRatchetGateLease(roomId, epc.withPeerId, ratchetGateLease)
       )
         return;
       await api.dispatch(
@@ -488,11 +475,7 @@ export const handleOpenChannel = async (
     const data = new Uint8Array(e.data as ArrayBuffer);
     if (
       extChannel.label !== "main" &&
-      !isRatchetGateOpen(
-        roomId,
-        epc.withPeerId,
-        transportGateLease,
-      )
+      !isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease)
     ) {
       console.error("Rejected application data before peer authentication");
       releaseProtocolResources();
@@ -501,21 +484,12 @@ export const handleOpenChannel = async (
     }
 
     const classified = classifyFrame(data);
-    if (
-      extChannel.label !== "main" &&
-      classified.type === FRAME_TYPE_RECEIPT
-    ) {
+    if (extChannel.label !== "main" && classified.type === FRAME_TYPE_RECEIPT) {
       const accepted = enqueueReceipt(
         classified.payload,
         receiptQueue,
         async (receipt) => {
-          if (
-            !isRatchetGateOpen(
-              roomId,
-              epc.withPeerId,
-              transportGateLease,
-            )
-          )
+          if (!isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease))
             return;
           await handleReadReceipt(
             receipt,
@@ -561,7 +535,9 @@ export const handleOpenChannel = async (
         receiveAbort.signal,
       );
       if (!accepted) {
-        console.error("Closing message DataChannel: receive queue budget exceeded");
+        console.error(
+          "Closing message DataChannel: receive queue budget exceeded",
+        );
         releaseProtocolResources();
         if (extChannel.readyState !== "closed") extChannel.close();
       }
@@ -600,11 +576,7 @@ export const handleOpenChannel = async (
   extChannel.onopen = () => {
     if (
       extChannel.label !== "main" &&
-      !isCurrentRatchetGateLease(
-        roomId,
-        epc.withPeerId,
-        transportGateLease,
-      )
+      !isCurrentRatchetGateLease(roomId, epc.withPeerId, transportGateLease)
     ) {
       releaseProtocolResources();
       if (extChannel.readyState !== "closed") extChannel.close();
@@ -634,7 +606,8 @@ export const handleOpenChannel = async (
     // ONLY on the persistent `main` channel (per-message channels carry no
     // handshake frames). Register this channel as the peer's handshake inbox,
     // build the byte-identical channel-input (CI) transcript, then fire-and-forget
-    // runHandshake — it verifies the DTLS fingerprints, runs the two-round core,
+    // runHandshake — it verifies the DTLS fingerprints, runs the
+    // triple-confirmation core,
     // and (only on success) seeds + persists the ratchet and opens the per-peer
     // gate. Any failure tears down this room-peer transport; v3 has no legacy
     // crypto fallback.
@@ -649,8 +622,6 @@ export const handleOpenChannel = async (
 
           const room = rooms[roomIndex];
           if (!room) throw new Error("Handshake room is unavailable");
-          if (room.policy.pqMode !== "hybrid-mlkem768")
-            throw new Error("Protocol v3 requires hybrid ML-KEM-768");
 
           if (room.policy.authMode === "pin") {
             pinRoom = true;
@@ -689,6 +660,7 @@ export const handleOpenChannel = async (
               : selfIdentityEd25519,
             fpInitiator: amInitiator ? selfFingerprint : peerFingerprint,
             fpResponder: amInitiator ? peerFingerprint : selfFingerprint,
+            pqMode: room.policy.pqMode,
           });
 
           handshakeStarted = true;
@@ -696,6 +668,7 @@ export const handleOpenChannel = async (
             epc,
             roomId,
             room.policy.authMode,
+            room.policy.pqMode,
             pin ?? null,
             channelInput,
             epc.receiveMessageModule,
@@ -784,9 +757,7 @@ export const handleOpenChannel = async (
               ),
             );
             if (receiptBatch.length === RECEIPT_REPLAY_BATCH_SIZE) {
-              if (
-                !(await sendReceiptFramesPaced(extChannel, receiptBatch))
-              )
+              if (!(await sendReceiptFramesPaced(extChannel, receiptBatch)))
                 return;
               receiptBatch = [];
             }

@@ -11,7 +11,19 @@
     "mlkemNative": {
       "release": "v1.2.0",
       "commit": "0ba906cb14b1c241476134d7403a811b382ca498",
-      "backend": "portable-c"
+      "backend": "portable-c",
+      "parameterSets": [
+        512,
+        768,
+        1024
+      ],
+      "multilevel": {
+        "shared": 768,
+        "noShared": [
+          512,
+          1024
+        ]
+      }
     }
   },
   "toolchain": {
@@ -24,8 +36,8 @@
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 177858,
-    "sha256": "ac8251be4ffcb66c5b01510cc81e3a2ae160b30bb54c15c13a84bf183eeff6e6",
-    "sri": "sha384-N/YT0GhVKVBWk5TRotqM0Hu+fos8xRq+AyFnRmqFQgQMyVm8edPWIZiSIDqqcG87"
+    "bytes": 208966,
+    "sha256": "73f4eee322534665ebe99aab6b1494dc2fb32d859b3f55a3c2ae6fa477043789",
+    "sri": "sha384-gHNbEQ3KIbsYpXGbpz6O62xI1CjZDVeD8FnYA//PWGAHxKDuN2pMVpQvDopV6Qcg"
   }
 }

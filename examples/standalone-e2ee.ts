@@ -28,7 +28,7 @@ const wasmBinary = wasmFile.buffer.slice(
 const cryptoOptions = { wasmBinary };
 
 // One one-way byte pipe. Two pipes form the full-duplex transport that carries
-// the two-round authenticated handshake; a network app sends these bytes over
+// the triple-confirmation authenticated handshake; a network app sends these bytes over
 // its own socket/channel instead.
 const makeLink = () => {
   const queued: Uint8Array[] = [];

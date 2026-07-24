@@ -6,10 +6,12 @@ import {
   KDF_MK_LABEL,
   MAX_SKIP,
   MAX_SKIP_SESSION,
+  RATCHET_ROOT_SUITE,
   RATCHET_DHPUB_LEN,
 } from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
+import type { RatchetRootSuite } from "../utils/constants";
 
 // HKDF `info` strings for the two ratchet chains (SSOT labels, constants.ts).
 const RK_INFO = new TextEncoder().encode(KDF_RK_LABEL);
@@ -28,6 +30,8 @@ const MK_INFO = new TextEncoder().encode(KDF_MK_LABEL);
  * skip the tail of a superseded chain).
  */
 export interface RatchetState {
+  /** Authenticated bootstrap-suite provenance; immutable for this edge. */
+  rootSuite: RatchetRootSuite;
   rootKey: Uint8Array;
   sendingChainKey: Uint8Array | null;
   receivingChainKey: Uint8Array | null;
@@ -59,6 +63,7 @@ export interface RatchetHeader {
  * `(dhPub, n)`.
  */
 export interface RatchetSessionSecrets {
+  rootSuite: RatchetRootSuite;
   rootKey: ArrayBuffer;
   sendingChainKey: ArrayBuffer | null;
   receivingChainKey: ArrayBuffer | null;
@@ -148,9 +153,11 @@ export const initRatchet = (
   amInitiator: boolean,
   remoteDhPub: Uint8Array | null,
   module: LibCrypto,
+  rootSuite: RatchetRootSuite = RATCHET_ROOT_SUITE,
 ): RatchetState => {
   const kp = x25519Keypair(module);
   const state: RatchetState = {
+    rootSuite,
     rootKey: Uint8Array.from(rootSeed),
     sendingChainKey: null,
     receivingChainKey: null,
@@ -403,6 +410,7 @@ const toBufN = (u8: Uint8Array | null): ArrayBuffer | null =>
 export const serializeRatchet = (
   state: RatchetState,
 ): RatchetSessionSecrets => ({
+  rootSuite: state.rootSuite,
   rootKey: toBuf(state.rootKey),
   sendingChainKey: toBufN(state.sendingChainKey),
   receivingChainKey: toBufN(state.receivingChainKey),
@@ -430,6 +438,7 @@ export const deserializeRatchet = (s: RatchetSessionSecrets): RatchetState => {
     skipped.set(`${toHex(dh)}:${e.n}`, new Uint8Array(e.messageKey));
   }
   return {
+    rootSuite: s.rootSuite,
     rootKey: new Uint8Array(s.rootKey),
     sendingChainKey: s.sendingChainKey
       ? new Uint8Array(s.sendingChainKey)
@@ -465,7 +474,10 @@ export const wipeRatchet = (state: RatchetState): void => {
  * The superseded live secrets are wiped before ownership moves from `next`.
  */
 export const adoptRatchet = (live: RatchetState, next: RatchetState): void => {
+  if (live.rootSuite !== next.rootSuite)
+    throw new Error("ratchet: cannot adopt a different root suite");
   wipeRatchet(live);
+  live.rootSuite = next.rootSuite;
   live.rootKey = next.rootKey;
   live.sendingChainKey = next.sendingChainKey;
   live.receivingChainKey = next.receivingChainKey;

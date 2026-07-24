@@ -6,29 +6,19 @@ import {
   wipeRatchet,
 } from "../cryptography/ratchet";
 import { deleteRatchetSession, setRatchetSession } from "../db/api";
-import {
-  MAX_SKIP_SESSION,
-  RATCHET_ROOT_SUITE,
-} from "../utils/constants";
-import {
-  decryptMessageChunk,
-  messageCacheKey,
-} from "./messageChunkCrypto";
+import { MAX_SKIP_SESSION } from "../utils/constants";
+import { decryptMessageChunk, messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { RatchetSession } from "../db/types";
-import type {
-  RatchetHeader,
-  RatchetState,
-} from "../cryptography/ratchet";
+import type { RatchetHeader, RatchetState } from "../cryptography/ratchet";
 import type { DecryptedChunk } from "./messageChunkCrypto";
 
 const wipeSerializedSession = (session: RatchetSession): void => {
   new Uint8Array(session.rootKey).fill(0);
-  if (session.sendingChainKey)
-    new Uint8Array(session.sendingChainKey).fill(0);
+  if (session.sendingChainKey) new Uint8Array(session.sendingChainKey).fill(0);
   if (session.receivingChainKey)
     new Uint8Array(session.receivingChainKey).fill(0);
   new Uint8Array(session.dhSelfSec).fill(0);
@@ -83,7 +73,9 @@ export const claimRatchetPersistence = (
   const existing = epcOwnerTokens.get(epc);
   if (existing) {
     if (edgeOwnerTokens.get(key) !== existing)
-      throw new Error("ratchet persistence: stale connection cannot reclaim edge");
+      throw new Error(
+        "ratchet persistence: stale connection cannot reclaim edge",
+      );
     return;
   }
   const token = Symbol(key);
@@ -114,7 +106,7 @@ const persistRatchetStateUnlocked = async (
 ): Promise<void> => {
   const s = serializeRatchet(state);
   const session: RatchetSession = {
-    rootSuite: RATCHET_ROOT_SUITE,
+    rootSuite: s.rootSuite,
     roomId,
     peerPublicKey,
     peerId,
@@ -144,12 +136,7 @@ export const persistRatchetState = async (
   peerId: string,
 ): Promise<void> =>
   withEdgePersistenceLock(roomId, peerPublicKey, () =>
-    persistRatchetStateUnlocked(
-      state,
-      roomId,
-      peerPublicKey,
-      peerId,
-    ),
+    persistRatchetStateUnlocked(state, roomId, peerPublicKey, peerId),
   );
 
 export const persistClaimedRatchetState = async (
@@ -157,20 +144,16 @@ export const persistClaimedRatchetState = async (
   state: RatchetState,
   roomId: string,
 ): Promise<void> =>
-  withEdgePersistenceLock(
-    roomId,
-    epc.withPeerPublicKey,
-    async () => {
-      assertCurrentPersistenceOwner(epc, roomId);
-      await persistRatchetStateUnlocked(
-        state,
-        roomId,
-        epc.withPeerPublicKey,
-        epc.withPeerId,
-      );
-      assertCurrentPersistenceOwner(epc, roomId);
-    },
-  );
+  withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
+    assertCurrentPersistenceOwner(epc, roomId);
+    await persistRatchetStateUnlocked(
+      state,
+      roomId,
+      epc.withPeerPublicKey,
+      epc.withPeerId,
+    );
+    assertCurrentPersistenceOwner(epc, roomId);
+  });
 
 type PersistInitialRatchetState = (
   state: RatchetState,
@@ -199,40 +182,31 @@ export const persistAndActivateClaimedRatchetState = async (
   persist: PersistInitialRatchetState = persistRatchetStateUnlocked,
   rollback: RollbackInitialRatchetState = deleteRatchetSession,
 ): Promise<void> =>
-  withEdgePersistenceLock(
-    roomId,
-    epc.withPeerPublicKey,
-    async () => {
+  withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
+    assertCurrentPersistenceOwner(epc, roomId);
+    let writeStarted = false;
+    try {
+      writeStarted = true;
+      await persist(state, roomId, epc.withPeerPublicKey, epc.withPeerId);
       assertCurrentPersistenceOwner(epc, roomId);
-      let writeStarted = false;
-      try {
-        writeStarted = true;
-        await persist(
-          state,
-          roomId,
-          epc.withPeerPublicKey,
-          epc.withPeerId,
-        );
-        assertCurrentPersistenceOwner(epc, roomId);
-        // Must remain synchronous: resolving the gate schedules its waiters for
-        // a later microtask, so activate can install epc.ratchetState in the
-        // same stack before any queued channel resumes.
-        activate();
-      } catch (error) {
-        if (writeStarted) {
-          try {
-            await rollback(roomId, epc.withPeerPublicKey);
-          } catch (rollbackError) {
-            throw new AggregateError(
-              [error, rollbackError],
-              "Ratchet establishment failed and persisted-seed rollback failed",
-            );
-          }
+      // Must remain synchronous: resolving the gate schedules its waiters for
+      // a later microtask, so activate can install epc.ratchetState in the
+      // same stack before any queued channel resumes.
+      activate();
+    } catch (error) {
+      if (writeStarted) {
+        try {
+          await rollback(roomId, epc.withPeerPublicKey);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "Ratchet establishment failed and persisted-seed rollback failed",
+          );
         }
-        throw error;
       }
-    },
-  );
+      throw error;
+    }
+  });
 
 export type PersistRatchetState = typeof persistRatchetState;
 
@@ -419,8 +393,7 @@ export const decryptMessageChunkDurably = async (
       candidate.skipped.set(cacheKey, durableMessageKey);
       while (candidate.skipped.size > MAX_SKIP_SESSION) {
         const oldest = candidate.skipped.keys().next().value as
-          | string
-          | undefined;
+          string | undefined;
         if (oldest === undefined) break;
         candidate.skipped.get(oldest)?.fill(0);
         candidate.skipped.delete(oldest);

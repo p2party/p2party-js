@@ -1,4 +1,5 @@
 import type { Peer } from "../reducers/roomSlice";
+import type { RatchetRootSuite } from "../utils/constants";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface UsernamedPeer extends Peer {
@@ -150,7 +151,7 @@ export interface RatchetSession {
    * Mandatory identity-possession root: interactive 3DH + ML-KEM-768 in every
    * room, with draft-21 CPace ISK additionally mixed for PIN rooms.
    */
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v3";
+  rootSuite: RatchetRootSuite;
   roomId: string;
   peerPublicKey: string;
   peerId: string;

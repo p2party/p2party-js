@@ -11,6 +11,7 @@ import {
   type HandshakeTransport,
   type P2PartySession,
 } from "./session";
+import type { RoomPqMode } from "./roomPolicy";
 import {
   CHUNK_LEN,
   PROTOCOL_VERSION,
@@ -58,6 +59,7 @@ const createPair = async (
   auth:
     | { mode?: "nopin" }
     | { mode: "pin"; alicePin: Uint8Array; bobPin: Uint8Array } = {},
+  pqMode: RoomPqMode = "hybrid-mlkem768",
 ): Promise<Pair> => {
   const [aliceIdentity, bobIdentity] = await Promise.all([
     generateSessionIdentity(cryptoOptions),
@@ -87,6 +89,7 @@ const createPair = async (
         remoteFingerprint:
           role === "initiator" ? bobFingerprint : aliceFingerprint,
       },
+      pqMode,
       crypto: cryptoOptions,
     };
     return auth.mode === "pin"
@@ -128,6 +131,28 @@ const expectBytes = (actual: Uint8Array, expected: Uint8Array): void => {
 };
 
 describe("public store-free session API", () => {
+  test("all room-selected ML-KEM suites handshake, persist provenance, and round-trip", async () => {
+    const modes: RoomPqMode[] = [
+      "hybrid-mlkem512",
+      "hybrid-mlkem768",
+      "hybrid-mlkem1024",
+    ];
+
+    for (const mode of modes) {
+      const { alice, bob } = await createPair({}, mode);
+      expect(alice.pqMode).toBe(mode);
+      expect(bob.pqMode).toBe(mode);
+      const plaintext = patternedBytes(513, mode.length);
+      expectBytes(await bob.decrypt(await alice.encrypt(plaintext)), plaintext);
+
+      const snapshot = await bob.serialize();
+      const restored = await restoreSession(snapshot, cryptoOptions);
+      expect(restored.pqMode).toBe(mode);
+      snapshot.fill(0);
+      await Promise.all([alice.destroy(), bob.destroy(), restored.destroy()]);
+    }
+  });
+
   test("no-PIN handshake + simultaneous first outbound round trip", async () => {
     const { alice, bob } = await createPair();
     expect(alice.protocolVersion).toBe(PROTOCOL_VERSION);

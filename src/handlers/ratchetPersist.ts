@@ -25,8 +25,7 @@ const wipeSerializedSession = (session: RatchetSession): void => {
   new Uint8Array(session.dhSelfSec).fill(0);
   for (const skipped of session.skippedMessageKeys)
     new Uint8Array(skipped.messageKey).fill(0);
-  if (session.edgeCryptoState)
-    new Uint8Array(session.edgeCryptoState).fill(0);
+  if (session.edgeCryptoState) new Uint8Array(session.edgeCryptoState).fill(0);
 };
 
 const persistenceKey = (roomId: string, peerPublicKey: string): string =>
@@ -127,7 +126,7 @@ const persistRatchetStateUnlocked = async (
     edgeCryptoState:
       edgeCryptoState === null
         ? null
-        : edgeCryptoState.slice().buffer as ArrayBuffer,
+        : (edgeCryptoState.slice().buffer as ArrayBuffer),
     updatedAt: Date.now(),
   };
   try {
@@ -417,7 +416,11 @@ export const ratchetEncryptDurably = async (
         };
       }
       return {
-        value: { messageKey: stepped.messageKey, header: stepped.header, pqContext },
+        value: {
+          messageKey: stepped.messageKey,
+          header: stepped.header,
+          pqContext,
+        },
         advanced: true,
         // One logical DR step == one application message toward the sparse
         // healing cadence — never one per chunk or retransmit round.

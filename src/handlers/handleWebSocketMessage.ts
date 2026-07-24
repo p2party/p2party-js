@@ -97,7 +97,7 @@ const handleWebSocketMessage = async (
       case "peerId": {
         if (!isFreshV3Challenge(message)) {
           console.error("Rejecting malformed or incompatible auth challenge");
-          ws.close(1002, "protocol-v3 auth required");
+          ws.close(1002, "protocol-v4 auth required");
           break;
         }
         const { keyPair } = api.getState() as State;
@@ -148,7 +148,7 @@ const handleWebSocketMessage = async (
       case "challenge": {
         if (!isV3ChallengeSuccess(message)) {
           console.error("Rejecting malformed or incompatible auth success");
-          ws.close(1002, "protocol-v3 auth required");
+          ws.close(1002, "protocol-v4 auth required");
           break;
         }
         api.dispatch(setChallengeId(message));

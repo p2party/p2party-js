@@ -16,6 +16,19 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 - A third chained handshake confirmation. The initiator proof commits to the
   responder proof, the responder FINISH commits to both, and the initiator
   cannot establish until FINISH verifies.
+- Compact 256-bit room capabilities (43-character unpadded base64url),
+  versioned fragment invites, strict legacy-hex normalization, and an optional
+  checksum-protected 24-word encoding of the same capability bytes.
+- An internal sparse PQ-healing state-machine core. Production nonzero epochs
+  remain gated on crash-safe persistence, authenticated control routing,
+  message-key integration, and scheduler wiring.
+
+### Fixed
+
+- Concurrent room joins now allocate every signaled WebRTC edge, restoring the
+  intended n-party full mesh rather than leaving identity-initiator edges idle.
+- WebCrypto randomness is staged through fixed `ArrayBuffer`s before entering
+  resizable WebAssembly memory, restoring compatibility with newer Chromium.
 
 ### Security
 

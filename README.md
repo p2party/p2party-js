@@ -159,9 +159,9 @@ export const useRoom = () => {
    * Previous functions
    */
 
-  const goToRandomRoom = async (replace = false) => {
-    const random = await p2party.generateRandomRoomUrl();
-    navigate("/rooms/" + random, { replace });
+  const goToRandomRoom = (replace = false) => {
+    const invite = p2party.generateRoomInvite();
+    navigate("/r#" + invite, { replace });
   };
 
   return {
@@ -174,8 +174,9 @@ The most important exported functions by p2party, with their types, are:
 
 ```typescript
 /**
- * Connects peer to a room.
- * A room URL is 64 chars long. We use the sha256 of the sha512 of random data.
+ * Connects a peer to a room. The input may be the versioned fragment invite
+ * (`v1.` + 43 unpadded base64url characters), the raw compact capability, or
+ * the legacy 64-hex migration form. All decode to the same random 256 bits.
  */
 const connect = async (
   roomUrl: string,

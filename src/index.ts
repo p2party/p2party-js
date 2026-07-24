@@ -187,10 +187,10 @@ const connect = async (
 
   // Stable descriptor codes may precede their live implementation, but the
   // public connect path must never silently claim an unwired guarantee.
+  // Scheduled cover is now wired (installCoverEdge + scheduled send/receive);
+  // private rendezvous remains future work.
   if (policy.rendezvousMode !== "legacy-signaling")
     throw new Error("Private rendezvous room connections are not wired yet");
-  if (policy.coverMode !== "immediate")
-    throw new Error("Scheduled-cover room connections are not wired yet");
 
   if (policy.authMode === "pin") {
     if (options.pin !== undefined) {

@@ -1,4 +1,5 @@
 import {
+  coverSlotSpacingMs,
   createCoverScheduler,
   type CoverClock,
   type CoverJob,
@@ -69,6 +70,12 @@ export interface CoverRuntimeOptions {
   readonly onStatusChange?: (change: CoverStatusChange) => void;
   readonly onJobResult?: (result: CoverJobResult) => void;
   readonly onJobInterrupted?: (interruption: CoverJobInterruption) => void;
+  /**
+   * Real-timer drift tolerance. Defaults to just under one slot spacing so a
+   * healthy browser's setTimeout jitter does not suspend cover; a larger slip
+   * still degrades. Deterministic (fake-clock) tests pass 0.
+   */
+  readonly maxTimerDriftMs?: number;
   /** Authenticated remote CANCEL for one transfer root (lowercase hex). */
   readonly onRemoteCancel?: (merkleRootHex: string) => void;
   /** Authenticated scheduled receipt token scoped to its transfer root. */
@@ -144,8 +151,17 @@ export class CoverRuntime {
         options.schedule.coverCadenceMs,
       ),
     };
+    // A real browser's setTimeout always fires a few ms late (more under GC or
+    // load), so a zero drift tolerance would suspend cover on the very first
+    // tick. Tolerate up to just under one slot spacing (capped): a cell late by
+    // less than a slot is still on-schedule; a larger slip degrades honestly.
+    const slotSpacing = coverSlotSpacingMs(schedule);
+    const maxTimerDriftMs =
+      options.maxTimerDriftMs ??
+      Math.max(0, Math.min(Math.floor(slotSpacing) - 1, 500));
     this.#scheduler = createCoverScheduler({
       schedule,
+      maxTimerDriftMs,
       clock: options.clock ?? realClock,
       laneFactory: (context) => this.#openLane(context),
       makeDummy: (slot) => this.#sealDummy(slot),
@@ -361,8 +377,10 @@ export class CoverRuntime {
           throw new Error(
             "coverRuntime: refusing a non-uniform cell at the lane boundary",
           );
-        if (channel.readyState !== "open")
-          throw new Error("coverRuntime: lane channel is not open");
+        // A just-created SCTP stream may not be "open" for the first slot(s) of
+        // its cycle; treat that as backpressure (cell retained for retry), not
+        // a hard failure — a thrown send would degrade the whole lane.
+        if (channel.readyState !== "open") return false;
         // Backpressure marks the slot failed/requeued; a later burst would be
         // an observable timing artifact, so the cell is simply not sent now.
         if (channel.bufferedAmount >= MAX_BUFFERED_AMOUNT) return false;

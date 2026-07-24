@@ -25,6 +25,7 @@ import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
 import { sealChunk } from "./messageChunkCrypto";
 import { getRatchetGate } from "./ratchetGate";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
+import { enqueueScheduledSend, trackScheduledSend } from "./coverEdge";
 import { ratchetEncryptDurably } from "./ratchetPersist";
 import {
   claimTransfer,
@@ -888,6 +889,165 @@ const sendWithReconcile = async (
   }
 };
 
+// Seal exactly one staged chunk into its uniform 65,490-byte cell under the
+// message's per-message key/header + PQ context. Mirrors sendChunks' per-chunk
+// staging but for a single index, so a scheduled slot can lazily produce one
+// cell without a burst.
+const makeScheduledSlotSealer =
+  (
+    transferId: string,
+    hashHex: string,
+    chunkHashes: Uint8Array,
+    merkleRoot: Uint8Array,
+    merkleRootHex: string,
+    messageKey: Uint8Array,
+    header: RatchetHeader,
+    pqContext: PqMessageKeyContext | null,
+    encryptionModule: LibCrypto,
+    merkleModule: LibCrypto,
+  ) =>
+  async (chunkIndex: number): Promise<Uint8Array | null> => {
+    const unencryptedChunk = await getDBNewChunk(transferId, chunkIndex);
+    if (!unencryptedChunk) return null;
+    const metadataArray = new Uint8Array(unencryptedChunk.metadata);
+    const metadata = deserializeMetadata(metadataArray);
+
+    const merkleProof = new Uint8Array(PROOF_LEN);
+    if (unencryptedChunk.merkleProof.byteLength === 0) {
+      merkleProof.set(
+        await getMerkleProof(
+          chunkHashes,
+          hexToUint8Array(unencryptedChunk.leafHash),
+          merkleModule,
+          PROOF_LEN,
+        ),
+      );
+    } else {
+      merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
+    }
+
+    const receiptToken =
+      unencryptedChunk.receiptToken.length === crypto_hash_sha512_BYTES * 2
+        ? unencryptedChunk.receiptToken
+        : uint8ArrayToHex(
+            await createChunkReceiptToken(
+              merkleRoot,
+              metadata.chunkIndex,
+              hexToUint8Array(unencryptedChunk.leafHash),
+            ),
+          );
+    if (
+      unencryptedChunk.merkleProof.byteLength === 0 ||
+      unencryptedChunk.merkleRoot !== merkleRootHex ||
+      unencryptedChunk.receiptToken !== receiptToken
+    ) {
+      await setDBNewChunk({
+        transferId,
+        hash: hashHex,
+        merkleRoot: merkleRootHex,
+        leafHash: unencryptedChunk.leafHash,
+        receiptToken,
+        chunkIndex,
+        data: unencryptedChunk.data,
+        metadata: unencryptedChunk.metadata,
+        merkleProof: merkleProof.buffer,
+      });
+    }
+
+    const chunk = await concatUint8Arrays([
+      metadataArray,
+      merkleProof,
+      new Uint8Array(unencryptedChunk.data),
+    ]);
+    return sealChunk(
+      messageKey,
+      header,
+      chunk,
+      merkleRoot,
+      encryptionModule,
+      pqContext ?? undefined,
+    );
+  };
+
+/**
+ * Scheduled-cover send: instead of opening a per-message DataChannel and
+ * bursting, step the ratchet once for the message and enqueue a lazy cover job
+ * on each peer edge's cover runtime. The scheduler substitutes one chunk cell
+ * per slot into the already-running cover lanes; the tail is dummy. Delivery is
+ * confirmed by the receiver's terminal scheduled receipt (markTransferComplete).
+ */
+const sendScheduled = async (
+  roomId: string,
+  channelLabel: string,
+  targets: readonly PeerSendTarget[],
+  totalChunks: number,
+  chunkHashes: Uint8Array,
+  merkleRoot: Uint8Array,
+  merkleRootHex: string,
+  transferId: string,
+  hashHex: string,
+  encryptionModule: LibCrypto,
+  merkleModule: LibCrypto,
+  signal?: AbortSignal,
+  onTransferStarted?: () => void,
+): Promise<PeerSendFanoutResult> => {
+  const outcomes: PeerDeliveryOutcome[] = [];
+  let startedTransfers = 0;
+
+  for (const target of targets) {
+    if (signal?.aborted) {
+      outcomes.push({ peerId: target.peerId, status: "skipped", reason: "cancelled" });
+      continue;
+    }
+    const epc = target.epc;
+    if (!epc || epc.connectionState !== "connected" || !epc.coverRuntime) {
+      outcomes.push({ peerId: target.peerId, status: "skipped", reason: "not-connected" });
+      continue;
+    }
+    try {
+      await waitWithTransferAbort(getRatchetGate(roomId, target.peerId), signal);
+      if (!epc.ratchetState) throw new Error("v4 scheduled send: no ratchet state");
+      await waitForPqTrafficAdmission(epc, signal);
+      const stepped = await ratchetEncryptDurably(epc, roomId, encryptionModule);
+      const channelMessageLabel = await compileChannelMessageLabel(channelLabel, merkleRootHex);
+      const sealer = makeScheduledSlotSealer(
+        transferId, hashHex, chunkHashes, merkleRoot, merkleRootHex,
+        stepped.messageKey, stepped.header, stepped.pqContext,
+        encryptionModule, merkleModule,
+      );
+      const enqueued = enqueueScheduledSend({
+        epc,
+        channelMessageLabel,
+        totalChunks,
+        sealSlotCell: sealer,
+        getAckedChunks: () => getAckedChunks(roomId, target.peerId, transferId),
+      });
+      if (!enqueued) throw new Error("v4 scheduled send: edge has no cover runtime");
+      trackScheduledSend(epc, roomId, target.peerId, merkleRootHex, transferId);
+      startedTransfers += 1;
+      onTransferStarted?.();
+      // Delivery confirmation: over reliable ordered lanes the receiver signals
+      // completion with a terminal scheduled receipt. Bound the wait.
+      const delivered = await waitForCompletion(
+        roomId, target.peerId, transferId, SCHEDULED_DELIVERY_TIMEOUT_MS, signal,
+      );
+      // The message key/context are dead once the job's cells are all sealed.
+      stepped.messageKey.fill(0);
+      stepped.pqContext?.rootKey.fill(0);
+      outcomes.push(
+        delivered
+          ? { peerId: target.peerId, status: "delivered" }
+          : { peerId: target.peerId, status: "failed", phase: "transfer", reason: new Error("scheduled delivery not confirmed") },
+      );
+    } catch (reason) {
+      outcomes.push({ peerId: target.peerId, status: "failed", phase: "transfer", reason });
+    }
+  }
+  return { outcomes, startedTransfers };
+};
+
+const SCHEDULED_DELIVERY_TIMEOUT_MS = 120_000;
+
 export const handleSendMessage = async (
   data: string | File,
   api: BaseQueryApi,
@@ -964,36 +1124,56 @@ export const handleSendMessage = async (
         }),
       );
 
-      const fanout = await runPeerSendFanout(
-        targets,
-        ({ epc }) =>
-          handleOpenChannel(
-            { channel: channelMessageLabel, epc, roomId, dataChannels },
-            api,
-          ),
-        ({ peerId, epc }, channel) =>
-          sendWithReconcile(
-            channel,
-            api,
+      const scheduledRoom =
+        rooms[roomIndex].policy.coverMode === "scheduled";
+      const fanout = scheduledRoom
+        ? await sendScheduled(
             roomId,
-            epc,
+            label,
+            targets,
             totalChunks,
             chunkHashes,
             merkleRoot,
+            merkleRootHex,
             transfer.transferId,
             hashHex,
-            peerId,
             encryptionModule,
             merkleModule,
-            peerConnections,
-            dataChannels,
             transfer.signal,
-          ),
-        transfer.signal,
-        () => {
-          wireWorkStarted = true;
-        },
-      );
+            () => {
+              wireWorkStarted = true;
+            },
+          )
+        : await runPeerSendFanout(
+            targets,
+            ({ epc }) =>
+              handleOpenChannel(
+                { channel: channelMessageLabel, epc, roomId, dataChannels },
+                api,
+              ),
+            ({ peerId, epc }, channel) =>
+              sendWithReconcile(
+                channel,
+                api,
+                roomId,
+                epc,
+                totalChunks,
+                chunkHashes,
+                merkleRoot,
+                transfer.transferId,
+                hashHex,
+                peerId,
+                encryptionModule,
+                merkleModule,
+                peerConnections,
+                dataChannels,
+                transfer.signal,
+              ),
+            transfer.signal,
+            () => {
+              wireWorkStarted = true;
+            },
+          );
       const result: SendMessageResult = {
         transferId: transfer.transferId,
         merkleRootHex,

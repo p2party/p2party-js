@@ -73,6 +73,12 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       connection.coverRuntime.destroy();
       connection.coverRuntime = undefined;
     }
+    if (connection.coverChannels) {
+      for (const lane of connection.coverChannels)
+        if (lane.readyState !== "closed") lane.close();
+      connection.coverChannels.clear();
+      connection.coverChannels = undefined;
+    }
     releaseScheduledReceipts(connection);
     // Destroy the sparse-PQ runtime with the ratchet: its machine, message
     // root, sealed outbox, replay/ACK caches, and active combined receive keys

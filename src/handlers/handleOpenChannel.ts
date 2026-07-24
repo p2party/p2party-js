@@ -31,6 +31,8 @@ import {
   handleInboundPqControlFrame,
   installPqHealingOrchestrator,
 } from "./pqHealingOrchestrator";
+import { installCoverEdge } from "./coverEdge";
+import { abortTransfer } from "./transferAbort";
 
 import webrtcApi from "../api/webrtc";
 
@@ -221,7 +223,16 @@ export const handleOpenChannel = async (
   extChannel.withPeerId = epc.withPeerId;
   extChannel.roomIds = [roomId];
   if (extChannel.label === "main") epc.mainChannel = extChannel;
-  if (extChannel.label !== "main") {
+  // In a scheduled-cover room every non-main lane IS a cover lane (real chunks,
+  // PQ control, receipts, CANCEL, and dummy cells all substitute as cells).
+  // Track those in `coverChannels`, kept separate from `messageChannels` so
+  // continuous cover lanes never block healing quiescence or the per-edge
+  // message-channel budget. Cells route below purely by their type byte.
+  const isCoverLane = extChannel.label !== "main" && epc.coverRuntime !== undefined;
+  if (isCoverLane) {
+    epc.coverChannels ??= new Set<IRTCDataChannel>();
+    epc.coverChannels.add(extChannel);
+  } else if (extChannel.label !== "main") {
     epc.messageChannels ??= new Set<IRTCDataChannel>();
     if (
       !epc.messageChannels.has(extChannel) &&
@@ -324,6 +335,30 @@ export const handleOpenChannel = async (
     // the channel (decrypt is per-frame via the ratchet), so there is nothing to
     // free here. The per-edge ratchet state + messageKey cache live on `epc` and
     // are reclaimed on peer teardown, not per per-message channel.
+
+    // A scheduled cover lane closes at EVERY fixed cycle boundary regardless of
+    // transfer state — never a cancel. Drop it from the cover set; if it
+    // carried a now-complete real message, durably retire that receive key.
+    if (isCoverLane) {
+      epc.coverChannels?.delete(extChannel);
+      releaseAuxiliaryResources();
+      await waitForQueuedMessageFrames(queue, drainingRef);
+      if (merkleRootHex !== "") {
+        try {
+          const progress = await getDBMessageData(merkleRootHex);
+          await forgetCompletedReceiveMessageKey(
+            epc,
+            roomId,
+            merkleRootHex,
+            progress,
+          );
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      releaseProtocolResources();
+      return;
+    }
 
     if (extChannel.label === "main") {
       releaseProtocolResources();
@@ -570,13 +605,13 @@ export const handleOpenChannel = async (
     }
 
     // protocol-v4 sparse-PQ control cells ride the authenticated persistent
-    // `main` channel in immediate mode (a scheduled room substitutes them into
-    // cover lanes instead). The full 65,490-byte cell — including its type
-    // byte — is the AEAD-authenticated unit, so the orchestrator receives the
-    // unstripped frame. Routing requires the open ratchet gate: control cells
-    // are meaningless before the edge is authenticated.
+    // `main` channel in immediate mode and substitute into cover lanes in a
+    // scheduled room. The full 65,490-byte cell — including its type byte — is
+    // the AEAD-authenticated unit, so the orchestrator receives the unstripped
+    // frame. Routing requires the open ratchet gate: control cells are
+    // meaningless before the edge is authenticated.
     if (
-      extChannel.label === "main" &&
+      (extChannel.label === "main" || isCoverLane) &&
       classified.type === FRAME_TYPE_PQ_CONTROL &&
       data.length === WIRE_CHUNK_FRAME_LEN
     ) {
@@ -752,6 +787,28 @@ export const handleOpenChannel = async (
               console.error(reason);
               if (extChannel.readyState !== "closed") extChannel.close();
               if (epc.connectionState !== "closed") epc.close();
+            },
+          });
+
+          // In a scheduled-cover room, start the room-phased cover runtime for
+          // this edge. It opens exactly `coverLanes` outbound lanes per cycle
+          // boundary and continuously emits authenticated dummy cells; real
+          // messages / PQ controls / receipts / CANCEL substitute into slots.
+          installCoverEdge({
+            epc,
+            roomId,
+            policy: room.policy,
+            policyHash,
+            amInitiator,
+            module: epc.receiveMessageModule,
+            onRemoteCancel: (merkleRootHex) => {
+              // An authenticated remote CANCEL cover cell aborts the local
+              // receive/send of exactly that transfer.
+              try {
+                abortTransfer(roomId, { merkleRootHex });
+              } catch (cancelError) {
+                console.error("scheduled CANCEL abort failed", cancelError);
+              }
             },
           });
           if (pinRoom)

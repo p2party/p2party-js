@@ -51,6 +51,13 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
    * scheduled-mode signal for the send/receive/receipt/cancel paths.
    */
   coverRuntime?: CoverRuntime;
+  /**
+   * Protocol-v4 scheduled-cover lanes for this edge (both the outbound lanes
+   * this peer opens and the inbound lanes the peer opens). Kept SEPARATE from
+   * `messageChannels` so continuous cover lanes never block healing quiescence
+   * or exhaust the per-edge message-channel budget; cells route purely by type.
+   */
+  coverChannels?: Set<IRTCDataChannel>;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

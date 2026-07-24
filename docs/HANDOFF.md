@@ -1709,3 +1709,52 @@ on `p2party.com/master` by mistake; it was immediately reverted
 at `1279bd3` with its original `docs/` intact and the protected
 `TextArea.tsx` untouched. Always pass `git -C <repo>` or absolute paths when
 operating on p2party-js from elsewhere.
+
+### Browser gate PARTIALLY MET — real headless-Chromium WebRTC mesh E2E (n=2, n=3, n=4)
+
+Ran a real headless-Chromium WebRTC mesh E2E of the protocol-v4 store-free
+session API. Each peer is a SEPARATE browser page with a real
+`RTCPeerConnection` + real `RTCDataChannel`s; a Node driver relays SDP/ICE
+between pages (stand-in for the signaling server). The v4 session runs over
+the real channels with the actual DTLS fingerprints parsed from each side's
+SDP bound into the CPace channel-input.
+
+Per edge, verified for real (not in-memory):
+
+- real handshake over the live DataChannel → `pc.connectionState === "connected"`
+  (real ICE/DTLS/SCTP);
+- bidirectional byte-exact MULTI-CHUNK messaging (20 KB / 9 KB payloads
+  spanning multiple 65,490-byte cells, reassembled and decrypted);
+- 64 real application messages to reach the healing threshold, then ONE
+  sparse-PQ OFFER→ADVANCE→ACK exchange driven over the channel to a shared
+  new epoch 1 on BOTH sides (persist-before-send honored each hop);
+- a post-heal message decrypts under epoch 1.
+
+Results (bundle built with `bun build --target=browser` from
+`src/session.ts`; driver uses p2party.com's playwright-core + the cached
+chromium):
+
+```text
+n=2 (1 edge)   PASS   ~3.6s
+n=3 (3 edges)  PASS   ~11.4s   full mesh
+n=4 (6 edges)  PASS   ~28.2s   full mesh
+ALL HEADLESS-CHROMIUM WebRTC E2E GATES PASSED (n=2, n=3, n=4).
+```
+
+Harness (session-scratchpad, not committed):
+`scratchpad/webrtc-e2e/{entry.ts,mesh.mjs,index.html}`.
+
+CLAIM BOUNDARY of this browser run (be precise):
+
+- This exercises the v4 CRYPTO + HANDSHAKE + SPARSE-PQ HEALING end to end in
+  a real browser over real WebRTC, across n=2 and n>2 full meshes. It drives
+  the store-free public session API (the shared crypto cores: handshakeCore,
+  ratchet, pqHealingRuntime, sealChunk/decryptMessageChunk) over a custom
+  DataChannel transport.
+- It does NOT exercise the full app's Redux/DB WebRTC stack
+  (`handleOpenChannel`/`runHandshake`/`pqHealingOrchestrator` timers + DB
+  persistence) — that path is covered by the in-process two-peer orchestrator
+  E2E and the 414 unit tests, not by this browser run.
+- It does NOT test scheduled-cover lanes (still unwired behind the
+  `connect()` guard) and does NOT measure packet-trace indistinguishability
+  (no SCTP/DTLS capture). Those remain open per the claim boundary.

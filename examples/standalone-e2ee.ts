@@ -8,18 +8,34 @@
  * Installed package:
  *   import { createSession, generateSessionIdentity, restoreSession }
  *     from "p2party/session";
+ *
+ * The packaged copy detects the missing repository source tree and exercises
+ * the installed public session entry point plus its release-matched WASM.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 
-import {
-  createSession,
-  generateSessionIdentity,
-  restoreSession,
-  type HandshakeTransport,
-} from "../src/session";
+import type { HandshakeTransport } from "../src/session";
 
+const sourceSessionUrl = new URL("../src/session.ts", import.meta.url);
+const installedSessionSpecifier: string = "p2party/session";
+const { createSession, generateSessionIdentity, restoreSession } = existsSync(
+  sourceSessionUrl,
+)
+  ? await import("../src/session")
+  : ((await import(
+      installedSessionSpecifier
+    )) as typeof import("../src/session"));
+
+const sourceWasmUrl = new URL(
+  "../src/cryptography/libcrypto.wasm",
+  import.meta.url,
+);
+const require = createRequire(import.meta.url);
 const wasmFile = readFileSync(
-  new URL("../src/cryptography/libcrypto.wasm", import.meta.url),
+  existsSync(sourceWasmUrl)
+    ? sourceWasmUrl
+    : require.resolve("p2party/libcrypto.wasm"),
 );
 const wasmBinary = wasmFile.buffer.slice(
   wasmFile.byteOffset,

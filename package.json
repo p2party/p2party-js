@@ -78,6 +78,7 @@
     "docs/getting-started.md",
     "docs/session-api.md",
     "docs/protocol-v3-security.md",
+    "docs/assets/p2party-cat.svg",
     "examples/standalone-e2ee.ts",
     "THIRD_PARTY_NOTICES.md"
   ],

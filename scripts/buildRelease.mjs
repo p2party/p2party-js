@@ -22,6 +22,7 @@ const projectRoot = path.resolve(scriptDirectory, "..");
 const packageJsonPath = path.join(projectRoot, "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const bun = process.platform === "win32" ? "bun.exe" : "bun";
 const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH ?? "0";
 const expectedNodeMajor = 24;
 const expectedEmscriptenVersion = "6.0.2";
@@ -292,6 +293,7 @@ const validatePackList = (packResult) => {
     "docs/getting-started.md",
     "docs/session-api.md",
     "docs/protocol-v3-security.md",
+    "docs/assets/p2party-cat.svg",
     "examples/standalone-e2ee.ts",
     "lib/index.js",
     "lib/index.mjs",
@@ -330,6 +332,7 @@ try {
   mkdirSync(stageLib, { recursive: true });
   mkdirSync(packedRoot, { recursive: true });
   mkdirSync(path.join(stageRoot, "docs"), { recursive: true });
+  mkdirSync(path.join(stageRoot, "docs", "assets"), { recursive: true });
   mkdirSync(path.join(stageRoot, "examples"), { recursive: true });
 
   const mlkemSourceRoot = path.join(
@@ -380,22 +383,22 @@ try {
       `Emscripten ${expectedEmscriptenVersion} is required; found ${emscriptenBanner.split("\n", 1)[0]}`,
     );
 
-  console.log("[1/6] Compile production WASM and update its pinned SRI");
+  console.log("[1/7] Compile production WASM and update its pinned SRI");
   run(npm, ["run", "--silent", "predist"], {
     env: { EM_CACHE: emscriptenCache },
   });
 
-  console.log("[2/6] Build the IndexedDB worker into a fresh staging tree");
+  console.log("[2/7] Build the IndexedDB worker into a fresh staging tree");
   run(npm, ["run", "--silent", "dist:worker"], {
     env: releaseBuildEnvironment,
   });
 
-  console.log("[3/6] Build root and store-free session packages");
+  console.log("[3/7] Build root and store-free session packages");
   run(npm, ["run", "--silent", "dist:package"], {
     env: releaseBuildEnvironment,
   });
 
-  console.log("[4/6] Copy and validate the exact WASM artifact");
+  console.log("[4/7] Copy and validate the exact WASM artifact");
   const sourceWasmPath = path.join(
     projectRoot,
     "src",
@@ -461,6 +464,11 @@ try {
     );
 
   copyFileSync(
+    path.join(projectRoot, "docs", "assets", "p2party-cat.svg"),
+    path.join(stageRoot, "docs", "assets", "p2party-cat.svg"),
+  );
+
+  copyFileSync(
     path.join(projectRoot, "examples", "standalone-e2ee.ts"),
     path.join(stageRoot, "examples", "standalone-e2ee.ts"),
   );
@@ -477,7 +485,15 @@ try {
     validateBundle(bundle, expectedIntegrity);
   await validateSessionSurface();
 
-  console.log("[5/6] Pack the validated staging tree");
+  console.log("[5/7] Run the packaged standalone session example");
+  const exampleOutput = run(bun, ["run", "examples/standalone-e2ee.ts"], {
+    cwd: stageRoot,
+    capture: true,
+  });
+  if (!/^OK\b/mu.test(exampleOutput))
+    fail("packaged standalone session example did not print OK");
+
+  console.log("[6/7] Pack the validated staging tree");
   const packJson = run(
     npm,
     ["pack", "--json", "--ignore-scripts", "--pack-destination", packedRoot],
@@ -493,7 +509,7 @@ try {
   validatePackList(packResult);
 
   console.log(
-    "[6/6] Verify archived bytes and publish the validated artifacts",
+    "[7/7] Verify archived bytes and publish the validated artifacts",
   );
   const stagedTarball = path.join(packedRoot, packResult.filename);
   const archivedWasm = execFileSync(

@@ -1626,3 +1626,86 @@ stashes intact.
   and its focused tests, THEN remove the `connect()` guard (step 8 tail);
   protocol-wide cleanup + full browser E2E (step 10); version/package/
   frontend + merge (step 11).
+
+### Step 10 done (source gate) — full `npm run check` green
+
+Commit: `f23605b` (cleanup) atop the feature commits above.
+
+- Fixed the two lint errors and formatting drift from the v4 session /
+  persistence changes.
+- Updated the WebSocket auth close-reason strings from "protocol-v3" to
+  "protocol-v4" (they describe the live auth frame, which already validates
+  and emits protocol version 4 via `isProtocolVersionCompatible` /
+  `PROTOCOL_VERSION`). The signaling server (`../server`) enforces no
+  protocol version in its ws handlers — it relays — so no server change is
+  needed for v4.
+- `protocolVersion.test.ts` and the room-policy KAT were already updated in
+  step 2.
+
+FULL SOURCE GATE (exact commands, all green):
+
+```text
+npm run check
+  -> lint            clean
+  -> format:check    clean
+  -> typecheck       clean
+  -> bun test        414 pass / 0 fail / 13,012 expects (69 files)
+  -> example         standalone-e2ee OK, sparse-PQ healing reaches epoch 1
+git diff --check    clean (only the generated libcrypto.js blank EOF line)
+git stash list      both master stashes intact
+git rev-parse master -> fb57b1e... (UNCHANGED from the pre-v4 baseline)
+```
+
+### WHAT IS DONE vs REMAINING (read before continuing)
+
+DONE and green at the source level (this session, commits `9a0f943`..`f23605b`):
+
+1. Sparse PQ healing is PRODUCTION-COMPLETE for immediate mode: runtime
+   compiles + full test matrix; v4 WASM rebuilt/retained; runtime installed
+   atomically in every WebRTC handshake; DR messages combine+persist the PQ
+   epoch; the live WebRTC orchestrator drives due-time/retry/inbound with a
+   two-peer fault-injection E2E.
+2. Scheduled timing cover CORES + SUBSTRATE: authenticated fixed cover-cell
+   codec; CoverRuntime WebRTC adapter; scheduled send job / receipts /
+   cancel helpers; inbound cover-cell routing; scheduled-close semantics;
+   teardown.
+3. Public session API v4: PQ-combined encrypt/decrypt, snapshot format 4
+   with the appended P2EDGE4 checkpoint, store-free healing control API.
+
+REMAINING (NOT done -- do not claim these):
+
+A. Live scheduled cover LANES end to end: wire `CoverRuntime.openLaneChannel`
+   to real `RTCDataChannel`s, install the CoverRuntime on scheduled-room
+   edges after `runHandshake`, and replace the immediate `sendWithReconcile`
+   burst with `buildScheduledSendJob` fed into the scheduler. Only AFTER this
+   is wired and tested may the `src/index.ts` `connect()` guard against
+   `coverMode: "scheduled"` be removed. It is deliberately still in place.
+B. Browser E2E: requires building the v4 RELEASE tarball. WARNING: `npm run
+   predist` overwrites the RETAINED DEVELOPMENT WASM (node-enabled) with the
+   production artifact (web,worker only) that CANNOT instantiate under Bun --
+   it will break `bun test` until `npm run prebuild` is re-run. Do predist
+   only as part of the full packaging pass, then restore the dev artifact
+   before running the source gate again. The frontend `p2party.com` currently
+   has `p2party@0.12.0` (protocol v3) installed; a v4 browser run needs the
+   new tarball installed there first.
+C. Step 11: `npm run predist && build:package && build:worker && npm pack`,
+   install the exact tarball in `p2party.com`, update its verifier/provenance
+   and self-hosted WASM, expose cover selection/status + the session demo,
+   run frontend lint/typecheck/build/tests + exact-artifact WebRTC E2E; then
+   fast-forward `master` (CAS, no checkout) only after every gate is green.
+   Production deploy + CDN/npm publish still need the maintainer's credentials
+   and explicit release action. Do NOT touch Postgres on :5432 or
+   `p2party.com/src/components/MessageInput/TextArea.tsx`.
+
+The package version is still `0.12.0`; the natural next incompatible release
+is `0.13.0` (maintainer's choice).
+
+### PROCESS NOTE for the next session
+
+The Bash working directory persists across tool calls. A stray `cd` into
+`p2party.com` earlier in this session caused one HANDOFF doc commit to land
+on `p2party.com/master` by mistake; it was immediately reverted
+(`git reset --mixed 1279bd3` + removing the stray file), p2party.com is back
+at `1279bd3` with its original `docs/` intact and the protected
+`TextArea.tsx` untouched. Always pass `git -C <repo>` or absolute paths when
+operating on p2party-js from elsewhere.

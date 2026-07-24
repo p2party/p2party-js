@@ -16,7 +16,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 18;
+export const dbVersion = 19;
 
 export interface RepoSchema extends DBSchema {
   addressBook: {
@@ -276,6 +276,16 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
           unique: false,
         });
         ratchetSessions.createIndex("roomId", "roomId", { unique: false });
+      }
+
+      // Protocol v4 changes the authenticated wire epoch, handshake domains,
+      // root-suite provenance, and the at-rest edge row by adding one atomic
+      // PQ/outbox checkpoint. A v3 ratchet must never be interpreted as a v4
+      // root. Both stores are cryptographic/transient state, so discard them
+      // while preserving rooms, message history, and received chunks.
+      if (oldVersion > 0 && oldVersion < 19) {
+        tx.objectStore("ratchetSessions").clear();
+        tx.objectStore("sendQueue").clear();
       }
 
       if (!db.objectStoreNames.contains("meta")) {

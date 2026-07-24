@@ -25,15 +25,15 @@ import {
   forgetReceiveMessageKeyDurably,
   ratchetEncryptDurably,
 } from "./ratchetPersist";
-import {
-  crypto_hash_sha512_BYTES,
-} from "../cryptography/interfaces";
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import {
   METADATA_LEN,
   PROOF_LEN,
   CHUNK_LEN,
   DECRYPTED_LEN,
+  RATCHET_ROOT_SUITE_MLKEM768,
 } from "../utils/constants";
+import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetState } from "../cryptography/ratchet";
@@ -135,9 +135,7 @@ const chunkOf = (decrypted: Uint8Array): Uint8Array =>
 const receiptOf = (decrypted: Uint8Array): Uint8Array =>
   decrypted.slice(METADATA_LEN, METADATA_LEN + crypto_hash_sha512_BYTES);
 
-const edge = (
-  ratchetState: RatchetState,
-): IRTCPeerConnection =>
+const edge = (ratchetState: RatchetState): IRTCPeerConnection =>
   ({
     roomId: "room-1",
     withPeerId: "peer-1",
@@ -185,6 +183,100 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     );
   });
 
+  test("v4 combines against an explicit PQ epoch, uses an epoch-bound cache identity, and rejects unknown epochs before ratchet mutation", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, datas, plaintexts } = await buildMessage(module, 1);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const classicalBefore = Uint8Array.from(messageKey);
+    const context: PqMessageKeyContext = {
+      rootKey: new Uint8Array(32).fill(0x91),
+      binding: new Uint8Array(32).fill(0x42),
+      rootSuite: RATCHET_ROOT_SUITE_MLKEM768,
+      epoch: 9n,
+    };
+    const frame = sealChunk(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+      context,
+    );
+
+    // sealChunk combines an owned copy per chunk; the caller retains the
+    // classical per-message key for streaming/retransmit.
+    expect(Buffer.from(messageKey)).toEqual(Buffer.from(classicalBefore));
+    messageKey.fill(0);
+    expect(parseChunkFrameHeader(frame).pqEpoch).toBe(9n);
+    expect(messageCacheKey(header.dhPub, header.N)).not.toBe(
+      messageCacheKey(header.dhPub, header.N, 0n),
+    );
+    expect(messageCacheKey(header.dhPub, header.N, 9n)).not.toBe(
+      messageCacheKey(header.dhPub, header.N, 10n),
+    );
+
+    const cache = new Map<string, Uint8Array>();
+    const resolver = (epoch: bigint): PqMessageKeyContext | null =>
+      epoch === context.epoch ? context : null;
+    const decrypted = decryptMessageChunk(
+      bob,
+      frame,
+      cache,
+      root,
+      module,
+      resolver,
+    );
+    expect(decrypted.ok).toBe(true);
+    expect(decrypted.stateAdvanced).toBe(true);
+    expect(Buffer.from(chunkOf(decrypted.decrypted!))).toEqual(
+      Buffer.from(datas[0]),
+    );
+    expect(cache.has(messageCacheKey(header.dhPub, header.N, 9n))).toBe(true);
+
+    const { bob: untouchedBob } = await pair();
+    const rootBefore = Uint8Array.from(untouchedBob.rootKey);
+    const unknownEpoch = Uint8Array.from(frame);
+    unknownEpoch[56] = 10; // pqEpoch u64 BE: replace low byte 9 -> 10
+    const rejected = decryptMessageChunk(
+      untouchedBob,
+      unknownEpoch,
+      new Map(),
+      root,
+      module,
+      resolver,
+    );
+    expect(rejected.ok).toBe(false);
+    expect(rejected.stateAdvanced).toBe(false);
+    expect(untouchedBob.Nr).toBe(0);
+    expect(Buffer.from(untouchedBob.rootKey)).toEqual(Buffer.from(rootBefore));
+  });
+
+  test("v4 app AAD authenticates dhPub, N, and PN clear-header bytes", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    messageKey.fill(0);
+
+    for (const offset of [1, 40, 48]) {
+      const candidate = cloneRatchet(bob);
+      const rootBefore = Uint8Array.from(candidate.rootKey);
+      const tampered = Uint8Array.from(frame);
+      tampered[offset] ^= 1;
+      const result = decryptMessageChunk(
+        candidate,
+        tampered,
+        new Map(),
+        root,
+        module,
+      );
+      expect(result.ok).toBe(false);
+      expect(result.stateAdvanced).toBe(false);
+      expect(candidate.Nr).toBe(0);
+      expect(Buffer.from(candidate.rootKey)).toEqual(Buffer.from(rootBefore));
+    }
+  });
+
   test("clone-rollback: a corrupted ciphertext byte fails the AEAD (C code -2), so the ratchet is left byte-for-byte unadvanced; a good frame then decrypts", async () => {
     const { module, alice, bob } = await pair();
     const { root, datas, plaintexts } = await buildMessage(module, 2);
@@ -199,7 +291,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(bob.dhRemotePub).toBeNull();
     expect(bob.Nr).toBe(0);
 
-    // Corrupt one ciphertext byte (past the 62-byte cleartext header).
+    // Corrupt one ciphertext byte (past the 69-byte cleartext header).
     const bad = Uint8Array.from(frames[0]);
     bad[80] ^= 0xff;
 
@@ -219,7 +311,9 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const good = decryptMessageChunk(bob, frames[0], cache, root, module);
     expect(good.ok).toBe(true);
     expect(good.stateAdvanced).toBe(true);
-    expect(Buffer.from(chunkOf(good.decrypted!))).toEqual(Buffer.from(datas[0]));
+    expect(Buffer.from(chunkOf(good.decrypted!))).toEqual(
+      Buffer.from(datas[0]),
+    );
   });
 
   test("failed receive starts with zeroed decrypt scratch and exposes no stale WASM plaintext", async () => {
@@ -322,15 +416,10 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     let stagedChain: Uint8Array | undefined;
 
     await expect(
-      ratchetEncryptDurably(
-        epc,
-        "room-1",
-        module,
-        async (candidate) => {
-          stagedChain = candidate.sendingChainKey!;
-          throw new Error("injected persistence failure");
-        },
-      ),
+      ratchetEncryptDurably(epc, "room-1", module, async (candidate) => {
+        stagedChain = candidate.sendingChainKey!;
+        throw new Error("injected persistence failure");
+      }),
     ).rejects.toThrow("injected persistence failure");
 
     expect(alice.Ns).toBe(0);
@@ -553,18 +642,8 @@ describe("messageChunkCrypto (single-call C receive)", () => {
         await firstBlocked;
       }
     };
-    const first = ratchetEncryptDurably(
-      epc,
-      "room-1",
-      module,
-      persist,
-    );
-    const second = ratchetEncryptDurably(
-      epc,
-      "room-1",
-      module,
-      persist,
-    );
+    const first = ratchetEncryptDurably(epc, "room-1", module, persist);
+    const second = ratchetEncryptDurably(epc, "room-1", module, persist);
 
     await firstStarted;
     expect(persistedNs).toEqual([1]);

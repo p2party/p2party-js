@@ -8,21 +8,6 @@
 
 #include <sodium.h>
 
-/* ---- v3 frame-layout constants (byte-matched to src/utils/constants.ts) ----
- * SSOT NOTE: Stage 5 relocates these to utils.h alongside the MESSAGE_START
- * remap and adds the C<->TS constant-agreement unit test. They live here now
- * only so receive_message_with_key compiles in isolation this stage. */
-#define FRAME_TYPE_LEN 1U
-#define RATCHET_DHPUB_LEN 32U
-#define RATCHET_N_LEN 8U
-#define RATCHET_PN_LEN 8U
-#define PQ_EPOCH_LEN 1U
-#define RATCHET_NONCE_LEN 12U
-#define CHUNK_HEADER_LEN                                                       \
-  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN           \
-   + RATCHET_NONCE_LEN)                                   /* 61 */
-#define MESSAGE_START (FRAME_TYPE_LEN + CHUNK_HEADER_LEN) /* 62 */
-
 void cpace_ristretto255_from_hash(
     uint8_t out[crypto_core_ristretto255_BYTES],
     const uint8_t hash[crypto_core_ristretto255_HASHBYTES]);

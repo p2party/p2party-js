@@ -33,11 +33,11 @@ export const PROOF_LEN =
 export const CHUNK_START =
   METADATA_LEN + // fixed
   PROOF_LEN; // Merkle proof max len of 3kb
-// The v3 profile freezes the authenticated plaintext cell at 65,412 bytes.
-// This retains the deployed v3 Merkle/OPFS geometry and yields a uniform 65,490
-// byte wire cell after the 62-byte ratchet header and 16-byte AEAD tag. Crypto
-// overhead consumes the cell budget rather than changing observer-visible size.
-export const CHUNK_PLAINTEXT_LEN = 65_412;
+// The v4 profile keeps the complete wire cell fixed at 65,490 bytes. Expanding
+// the PQ epoch from one byte to a u64 adds seven clear-header bytes, so those
+// bytes are paid for by padding: 65,405 bytes of authenticated plaintext after
+// the 69-byte clear header and before the 16-byte AEAD tag.
+export const CHUNK_PLAINTEXT_LEN = 65_405;
 export const CHUNK_LEN = CHUNK_PLAINTEXT_LEN - CHUNK_START;
 // Historical public send options require the configurable chunk payload to be
 // larger than the non-payload budget. Keep that product bound explicitly named;
@@ -45,62 +45,64 @@ export const CHUNK_LEN = CHUNK_PLAINTEXT_LEN - CHUNK_START;
 export const CHUNK_SIZE_FLOOR = MESSAGE_LEN - CHUNK_LEN;
 export const DECRYPTED_LEN = CHUNK_PLAINTEXT_LEN;
 
-// ── protocol-v3 wire framing (SSOT; byte-matched in cryptography/utils.h) ─────
-// Clean v3 break: every data-channel frame now begins with a 1-byte type tag so
+// ── protocol-v4 wire framing (SSOT; byte-matched in cryptography/utils.h) ─────
+// Clean v4 break: every data-channel frame begins with a 1-byte type tag so
 // the inbound classifier is unambiguous (replaces the old length-only 64B /
 // MESSAGE_LEN test). A mismatch here mis-routes frames silently, so the values
 // are asserted equal to the C #defines by src/utils/constants.test.ts.
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const FRAME_TYPE_LEN = 1;
 export const FRAME_TYPE_HANDSHAKE = 1;
 export const FRAME_TYPE_CHUNK = 2;
 export const FRAME_TYPE_RECEIPT = 3;
+// Both cover and sparse-PQ control records use the same 65,490-byte cell
+// geometry as application chunks. CANCEL is an encrypted cover-cell kind, not
+// a separately observable outer frame type.
+export const FRAME_TYPE_COVER = 4;
+export const FRAME_TYPE_PQ_CONTROL = 5;
 // Receipts are protocol frames, not bare SHA-512 values. Both ordinary
 // chunk acknowledgements and the terminal content-hash acknowledgement use
 // this exact tagged geometry.
 export const RECEIPT_TOKEN_LEN = crypto_hash_sha512_BYTES;
 export const WIRE_RECEIPT_FRAME_LEN = FRAME_TYPE_LEN + RECEIPT_TOKEN_LEN; // 65
-// CPace/channel-input suite marker. 0x01 means the mandatory protocol-v3
+// CPace/channel-input suite marker. 0x01 means the mandatory protocol-v4
 // classical-or-CPace + ML-KEM-768 hybrid bootstrap. It is transcript/KDF
 // context, not the KEM ciphertext and not a negotiation/fallback bit.
 export const PQ_TAG_LEN = 1;
 export const PQ_TAG = new Uint8Array([0x01]);
 
-// ── protocol-v3 CHUNK frame header (SSOT; byte-match in cryptography/utils.h when the
-// C receive path is cut over in Stage-5 task 2) ─────────────────────────────────────
-// A v3 message-chunk frame is:
-//   FRAME_TYPE_CHUNK(1) ‖ dhPub(32) ‖ N(8 BE) ‖ PN(8 BE) ‖ PQ_EPOCH(1) ‖ nonce(12) ‖ ciphertext
+// ── protocol-v4 CHUNK frame header (SSOT; byte-matched in utils.h) ────────────
+// A v4 message-chunk frame is:
+//   FRAME_TYPE_CHUNK(1) ‖ dhPub(32) ‖ N(8 BE) ‖ PN(8 BE) ‖
+//   pqEpoch(8 BE) ‖ nonce(12) ‖ ciphertext
 // The ratchet header (dhPub, N, PN) is SHARED by every chunk of a message (one ratchet
-// step per message); the 12-byte nonce is fresh + random per chunk. PQ_EPOCH=0
-// truthfully names the bootstrap epoch established by the mandatory ML-KEM
-// handshake; periodic/sparse KEM epoch advancement is not implemented here.
-// Ciphertext begins at FRAME_TYPE_LEN + CHUNK_HEADER_LEN = 62 — the v3
-// replacement for the box scheme's MESSAGE_START=96 (the send/receive swap that relocates
-// MESSAGE_START is Stage-5 task 3; these constants are additive foundation). N/PN are the
-// ratchet counters, serialized 8-byte big-endian, guarded < 2^53.
+// step per message); the 12-byte nonce is fresh + random per chunk. The epoch is
+// an unsigned u64, represented as bigint in TypeScript, so it cannot silently
+// lose precision. N/PN remain safe-integer JS numbers encoded as u64 BE.
 export const RATCHET_DHPUB_LEN = 32;
 export const RATCHET_N_LEN = 8;
 export const RATCHET_PN_LEN = 8;
-export const PQ_EPOCH_LEN = 1;
+export const PQ_EPOCH_LEN = 8;
 export const RATCHET_NONCE_LEN = 12;
+// Complete clear header authenticated as application AAD, excluding the random
+// nonce. The expected Merkle root is prepended by messageChunkCrypto.
+export const CHUNK_AAD_HEADER_LEN =
+  FRAME_TYPE_LEN +
+  RATCHET_DHPUB_LEN +
+  RATCHET_N_LEN +
+  RATCHET_PN_LEN +
+  PQ_EPOCH_LEN; // 57
 export const CHUNK_HEADER_LEN =
   RATCHET_DHPUB_LEN +
   RATCHET_N_LEN +
   RATCHET_PN_LEN +
   PQ_EPOCH_LEN +
-  RATCHET_NONCE_LEN; // 61
+  RATCHET_NONCE_LEN; // 68
 
-// v3 message-chunk ON-WIRE header length (ciphertext begins here) = the byte the
-// send path relocates to and the receive path parses from. REPLACES the box
-// scheme's BOX_MESSAGE_HEADER_LEN (96) on the wire; byte-matches
-// pake_ratchet.h MESSAGE_START and chunkFrame.ts CHUNK_FRAME_HEADER_LEN. It is
-// intentionally decoupled from the DECRYPTED_LEN sizing above (Stage-5 task 3).
-export const MESSAGE_START = FRAME_TYPE_LEN + CHUNK_HEADER_LEN; // 62
-// Full v3 chunk frame length on the wire = header(62) ‖ ciphertext(DECRYPTED_LEN)
-// ‖ AEAD tag(16) = 62 + 65412 + 16 = 65490. The receive-side frame classifier
-// keys on this exact length + the leading FRAME_TYPE_CHUNK tag (the box frame was
-// the full MESSAGE_LEN = 65536; the v3 frame is 46 bytes shorter because the
-// ratchet header replaces the larger box header).
+// Complete v4 clear header, including nonce; ciphertext begins at byte 69.
+export const MESSAGE_START = FRAME_TYPE_LEN + CHUNK_HEADER_LEN; // 69
+// Full v4 chunk frame length remains exactly 65,490 bytes:
+// 69-byte header ‖ 65,405-byte ciphertext ‖ 16-byte tag.
 export const WIRE_CHUNK_FRAME_LEN =
   MESSAGE_START + DECRYPTED_LEN + crypto_aead_chacha20poly1305_ietf_ABYTES; // 65490
 
@@ -123,16 +125,16 @@ export const CPACE_RISTRETTO255_DSI = "CPaceRistretto255";
 export const CPACE_RISTRETTO255_ISK_DSI = "CPaceRistretto255_ISK";
 
 // Persisted/snapshot provenance for the authenticated, room-policy-selected
-// protocol-v3 bootstrap suite. "3dh" is deliberate: this is interactive
+// protocol-v4 bootstrap suite. "3dh" is deliberate: this is interactive
 // triple-DH, not Signal's asynchronous X3DH prekey protocol. PIN policy adds
 // exact draft-21 CPace. The room policy fixes one suite before the handshake;
 // there is no in-band negotiation, downgrade, or classical fallback.
 export const RATCHET_ROOT_SUITE_MLKEM512 =
-  "hybrid-3dh-mlkem512-cpace21-v3" as const;
+  "hybrid-3dh-mlkem512-cpace21-v4" as const;
 export const RATCHET_ROOT_SUITE_MLKEM768 =
-  "hybrid-3dh-mlkem768-cpace21-v3" as const;
+  "hybrid-3dh-mlkem768-cpace21-v4" as const;
 export const RATCHET_ROOT_SUITE_MLKEM1024 =
-  "hybrid-3dh-mlkem1024-cpace21-v3" as const;
+  "hybrid-3dh-mlkem1024-cpace21-v4" as const;
 export const RATCHET_ROOT_SUITES = [
   RATCHET_ROOT_SUITE_MLKEM512,
   RATCHET_ROOT_SUITE_MLKEM768,
@@ -147,7 +149,7 @@ export const isRatchetRootSuite = (value: unknown): value is RatchetRootSuite =>
   typeof value === "string" &&
   (RATCHET_ROOT_SUITES as readonly string[]).includes(value);
 
-// Double Ratchet KDF domain-separation labels (protocol-v3). These are the
+// Double Ratchet KDF domain-separation labels (protocol-v4). These are the
 // `info` strings for the two HKDF-SHA512 chains of the ratchet, and are SSOT
 // constants that MUST byte-match any C-side kdf_rk/kdf_ck should one be added
 // (the ratchet state machine currently derives them in TS on the compiled

@@ -35,7 +35,7 @@ describe("canonical room policy V1", () => {
     const policy: RoomPolicyV1 = {
       version: 1,
       revision: 17,
-      wireVersion: 3,
+      wireVersion: 4,
       authMode: "pin",
       pqMode: "hybrid-mlkem768",
       rendezvousMode: "blind-meeting-point",
@@ -106,6 +106,28 @@ describe("canonical room policy V1", () => {
         coverDurationEpochs: 1,
       }),
     ).toThrow("scheduled cover cadence is out of range");
+
+    expect(() =>
+      encodeRoomPolicyV1({
+        ...DEFAULT_ROOM_POLICY_V1,
+        coverMode: "scheduled",
+        coverCadenceMs: 10_000,
+        coverLanes: 17,
+        coverFramesPerCell: 1,
+        coverDurationEpochs: 1,
+      }),
+    ).toThrow("scheduled cover lanes are out of range");
+
+    expect(() =>
+      encodeRoomPolicyV1({
+        ...DEFAULT_ROOM_POLICY_V1,
+        coverMode: "scheduled",
+        coverCadenceMs: 1_000,
+        coverLanes: 16,
+        coverFramesPerCell: 16,
+        coverDurationEpochs: 1,
+      }),
+    ).toThrow("below the transport timer granularity");
   });
 
   test("all ML-KEM parameter sets are canonical room-wide policy values", () => {
@@ -159,7 +181,7 @@ describe("canonical room policy V1", () => {
     class PolicyRecord {
       version = 1 as const;
       revision = 0;
-      wireVersion = 3 as const;
+      wireVersion = 4 as const;
       authMode = "nopin" as const;
       pqMode = "hybrid-mlkem768" as const;
       rendezvousMode = "legacy-signaling" as const;

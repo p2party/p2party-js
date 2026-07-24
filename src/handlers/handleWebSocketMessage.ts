@@ -312,7 +312,7 @@ const handleWebSocketMessage = async (
           if (!isProtocolVersionCompatible(message.protocolVersion))
             console.error(
               `Rejecting SDP from ${message.fromPeerId}: incompatible protocol ` +
-                `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
+                `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
             );
           break;
         }
@@ -361,7 +361,7 @@ const handleWebSocketMessage = async (
         ) {
           console.error(
             `Rejecting ICE from ${message.fromPeerId}: incompatible protocol ` +
-              `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
+              `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
           );
           break;
         }
@@ -449,7 +449,7 @@ const handleWebSocketMessage = async (
         } else if (!isProtocolVersionCompatible(message.protocolVersion)) {
           console.error(
             `Rejecting peer ${message.fromPeerId}: incompatible protocol ` +
-              `version ${String(message.protocolVersion)} (expected v3). No fallback.`,
+              `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
           );
         }
 

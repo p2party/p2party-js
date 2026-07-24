@@ -1,4 +1,4 @@
-// Store-free protocol-v3 handshake primitives for standalone and WebRTC callers.
+// Store-free protocol-v4 handshake primitives for standalone and WebRTC callers.
 import {
   deriveGenerator,
   cpaceStart,
@@ -84,7 +84,7 @@ export const buildChannelInput = (p: ChannelInputParams): Uint8Array => {
   return ci;
 };
 
-// ── protocol-v3 handshake core (spec §5) ─────────────────────────────────────
+// ── protocol-v4 handshake core (spec §5) ─────────────────────────────────────
 
 // Internal handshake sub-frame tags (inside the FRAME_TYPE_HANDSHAKE payload).
 const HS_STEP_HELLO = 0x01;
@@ -92,25 +92,25 @@ const HS_STEP_CONFIRM = 0x02;
 const HS_STEP_FINISH = 0x03;
 // Key-confirmation domain separator (local to the handshake; only ever hashed
 // into the MAC input, never on the wire outside it).
-const HS_KC_DOMAIN = new TextEncoder().encode("p2party-v3-hs-kc-transcript-v3");
+const HS_KC_DOMAIN = new TextEncoder().encode("p2party-v4-hs-kc-transcript-v4");
 // The three chained confirmation flights authenticate progressively stronger
 // inputs. The responder must send before it knows the initiator's ratchet key;
 // the initiator proof binds that key plus the responder proof; the final
 // responder proof binds both earlier proofs. Explicit role/domain labels
 // prevent reflection despite the asymmetric sequence.
 const HS_KC_RESPONDER_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hs-kc-responder-v3",
+  "p2party-v4-hs-kc-responder-v4",
 );
 const HS_KC_INITIATOR_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hs-kc-initiator-ratchet-dh-v3",
+  "p2party-v4-hs-kc-initiator-ratchet-dh-v4",
 );
 const HS_KC_RESPONDER_FINISH_DOMAIN = new TextEncoder().encode(
-  "p2party-v3-hs-kc-responder-finish-v3",
+  "p2party-v4-hs-kc-responder-finish-v4",
 );
 // Both authentication modes prove possession of the cross-signed X25519
 // identity through interactive triple-DH. PIN mode ADDS CPace; it must never
 // substitute CPace for identity possession, because a static X25519 pub +
-// Ed25519 cross-signature is a replayable certificate. Distinct v3 suite
+// Ed25519 cross-signature is a replayable certificate. Distinct v4 suite
 // domains make the two fixed-order combiners unambiguous:
 //   no-PIN: 3DH || ML-KEM
 //   PIN:    CPace-ISK || 3DH || ML-KEM
@@ -120,10 +120,19 @@ const hybridKdfDomain = (
 ): Uint8Array =>
   new TextEncoder().encode(
     mode === "pin"
-      ? `p2party-v3-hybrid-root-cpace21-3dh-ml-kem-${String(parameterSet)}-v3`
-      : `p2party-v3-hybrid-root-3dh-ml-kem-${String(parameterSet)}-v3`,
+      ? `p2party-v4-hybrid-root-cpace21-3dh-ml-kem-${String(parameterSet)}-v4`
+      : `p2party-v4-hybrid-root-3dh-ml-kem-${String(parameterSet)}-v4`,
   );
 const HS_HYBRID_KDF_SALT = new Uint8Array(64);
+const PQ_HEALING_ROOT_SALT = new TextEncoder().encode(
+  "p2party-v4-pq-healing-extract-v1",
+);
+const PQ_HEALING_ROOT_INFO = new TextEncoder().encode(
+  "p2party-v4-pq-healing-root-v1",
+);
+const PQ_HEALING_BINDING_DOMAIN = new TextEncoder().encode(
+  "p2party-v4-pq-healing-binding-v1\u0000",
+);
 // CPace generator session-id (D1). The generator G = deriveGenerator(pin, sid,
 // CI) must be byte-identical on both legs, so both must feed the SAME sid. We
 // bind the INITIATOR's sid: it is the one value both legs can agree on without a
@@ -211,6 +220,15 @@ export interface HandshakeCoreParams {
   selfIdentityX25519Pub: Uint8Array;
   selfIdentityCrossSignature: Uint8Array;
   peerIdentityEd25519Pub: Uint8Array;
+}
+
+export interface PqHealingBootstrap {
+  /** Secret root dedicated to sparse post-quantum healing. Caller-owned. */
+  rootKey: Uint8Array;
+  /** Non-secret transcript/edge binding shared by both authenticated peers. */
+  binding: Uint8Array;
+  /** Stable Ed25519 role ordering chooses the first OFFER turn. */
+  nextOfferer: "local" | "remote";
 }
 
 // HMAC-SHA512(key, msg) via the Stage-1 export (HKDF-Extract == HMAC with the
@@ -341,7 +359,11 @@ export const performHandshakeCore = async (
   transport: HandshakeTransport,
   params: HandshakeCoreParams,
   module: LibCrypto,
-): Promise<{ state: RatchetState; secret: Uint8Array }> => {
+): Promise<{
+  state: RatchetState;
+  secret: Uint8Array;
+  pqHealing: PqHealingBootstrap;
+}> => {
   const {
     mode,
     pqMode = "hybrid-mlkem768",
@@ -378,6 +400,9 @@ export const performHandshakeCore = async (
   let hybridIkm: Uint8Array | undefined;
   let hybridPrk: Uint8Array | undefined;
   let secret: Uint8Array | undefined;
+  let pqHealingPrk: Uint8Array | undefined;
+  let pqHealingRoot: Uint8Array | undefined;
+  let pqHealingBinding: Uint8Array | undefined;
   // Owned here until the success return transfers it to the caller. In
   // particular, the responder must create its DH ratchet before it can publish
   // dhPubR, so a bad/missing initiator confirmation must explicitly erase that
@@ -617,6 +642,48 @@ export const performHandshakeCore = async (
     ]);
     secret = hkdfExpand(hybridPrk, hybridInfo, 32, module);
 
+    // Protocol v4 derives a separate sparse-healing root and a public,
+    // session-unique edge binding. The binding commits to the authenticated
+    // room/channel input plus both ordered HELLO flights; it is not a secret.
+    // The root is domain-separated from the Double-Ratchet seed even though
+    // both ultimately rely on the same hybrid handshake master.
+    const pqBindingInput = await concatUint8Arrays([
+      PQ_HEALING_BINDING_DOMAIN,
+      channelInput,
+      sidI,
+      sidR,
+      ekI,
+      ekR,
+      x25519IdentityPubI,
+      x25519IdentityCrossSigI,
+      x25519IdentityPubR,
+      x25519IdentityCrossSigR,
+      mlKemPublicKeyI,
+      mlKemCiphertextR,
+    ]);
+    try {
+      pqHealingBinding = new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          pqBindingInput.slice().buffer as ArrayBuffer,
+        ),
+      );
+    } finally {
+      pqBindingInput.fill(0);
+    }
+    pqHealingPrk = hkdfExtract(PQ_HEALING_ROOT_SALT, secret, module);
+    const pqRootInfo = await concatUint8Arrays([
+      PQ_HEALING_ROOT_INFO,
+      pqHealingBinding,
+    ]);
+    try {
+      pqHealingRoot = hkdfExpand(pqHealingPrk, pqRootInfo, 32, module);
+    } finally {
+      pqRootInfo.fill(0);
+      pqHealingPrk.fill(0);
+      pqHealingPrk = undefined;
+    }
+
     // Wipe the component secrets immediately after the hybrid root exists.
     identitySecret.fill(0);
     pakeSecret?.fill(0);
@@ -768,12 +835,27 @@ export const performHandshakeCore = async (
 
     if (!ratchetState)
       throw new Error("Handshake ratchet initialization failed");
+    if (!pqHealingRoot || !pqHealingBinding)
+      throw new Error("Handshake PQ-healing bootstrap failed");
     const establishedState = ratchetState;
     ratchetState = null; // ownership transfers to the successful caller
-    return { state: establishedState, secret };
+    const establishedPqHealing: PqHealingBootstrap = {
+      rootKey: pqHealingRoot,
+      binding: pqHealingBinding,
+      nextOfferer: amInitiator ? "local" : "remote",
+    };
+    pqHealingRoot = undefined;
+    pqHealingBinding = undefined;
+    return {
+      state: establishedState,
+      secret,
+      pqHealing: establishedPqHealing,
+    };
   } catch (err) {
     // Fail closed: wipe the root secret on any failure so nothing usable lingers.
     secret?.fill(0);
+    pqHealingRoot?.fill(0);
+    pqHealingBinding?.fill(0);
     throw err;
   } finally {
     // Ephemeral/component secrets are never needed past derivation; wipe on
@@ -786,6 +868,9 @@ export const performHandshakeCore = async (
     pakeSecret?.fill(0);
     hybridIkm?.fill(0);
     hybridPrk?.fill(0);
+    pqHealingPrk?.fill(0);
+    pqHealingRoot?.fill(0);
+    pqHealingBinding?.fill(0);
     mlKemShared?.destroy();
     mlKemKeyPair?.destroy();
     if (ratchetState) wipeRatchet(ratchetState);

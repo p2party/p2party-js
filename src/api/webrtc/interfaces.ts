@@ -32,6 +32,11 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   messageKeyByMerkleRoot?: Map<string, string>;
   /** All configured non-main channels, including connecting channels. */
   messageChannels?: Set<IRTCDataChannel>;
+  /**
+   * Protocol-v4 atomic edge checkpoint hook. The PQ runtime installs this
+   * store-free serializer before the initial ratchet row is committed.
+   */
+  serializeEdgeCryptoState?: () => Uint8Array;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

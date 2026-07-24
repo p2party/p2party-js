@@ -169,6 +169,17 @@ export interface RatchetSession {
     n: number;
     messageKey: ArrayBuffer;
   }>; // capped at MAX_SKIP_SESSION (total, evict-oldest) by the ratchet layer (Stage 2)
+  /**
+   * Protocol-v4 edge checkpoint. The plaintext API value is a bounded,
+   * canonical snapshot containing the sparse-PQ machine, exact sealed control
+   * outbox/replay cache, and epoch-bound active receive keys. ratchetWrap wraps
+   * this whole blob as one variable-length secret field before it reaches disk.
+   *
+   * `null` exists only for store-free/legacy test fixtures. A live v4 edge
+   * always persists a non-null checkpoint in the same row as the Double
+   * Ratchet, so the two ratchets cannot cross a crash boundary independently.
+   */
+  edgeCryptoState: ArrayBuffer | null;
   updatedAt: number;
 }
 

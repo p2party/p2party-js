@@ -24,6 +24,8 @@ const wipeSerializedSession = (session: RatchetSession): void => {
   new Uint8Array(session.dhSelfSec).fill(0);
   for (const skipped of session.skippedMessageKeys)
     new Uint8Array(skipped.messageKey).fill(0);
+  if (session.edgeCryptoState)
+    new Uint8Array(session.edgeCryptoState).fill(0);
 };
 
 const persistenceKey = (roomId: string, peerPublicKey: string): string =>
@@ -103,6 +105,7 @@ const persistRatchetStateUnlocked = async (
   roomId: string,
   peerPublicKey: string,
   peerId: string,
+  edgeCryptoState: Uint8Array | null = null,
 ): Promise<void> => {
   const s = serializeRatchet(state);
   const session: RatchetSession = {
@@ -120,6 +123,10 @@ const persistRatchetStateUnlocked = async (
     Nr: s.Nr,
     PN: s.PN,
     skippedMessageKeys: s.skippedMessageKeys,
+    edgeCryptoState:
+      edgeCryptoState === null
+        ? null
+        : edgeCryptoState.slice().buffer as ArrayBuffer,
     updatedAt: Date.now(),
   };
   try {
@@ -146,12 +153,18 @@ export const persistClaimedRatchetState = async (
 ): Promise<void> =>
   withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
     assertCurrentPersistenceOwner(epc, roomId);
-    await persistRatchetStateUnlocked(
-      state,
-      roomId,
-      epc.withPeerPublicKey,
-      epc.withPeerId,
-    );
+    const edgeCryptoState = epc.serializeEdgeCryptoState?.() ?? null;
+    try {
+      await persistRatchetStateUnlocked(
+        state,
+        roomId,
+        epc.withPeerPublicKey,
+        epc.withPeerId,
+        edgeCryptoState,
+      );
+    } finally {
+      edgeCryptoState?.fill(0);
+    }
     assertCurrentPersistenceOwner(epc, roomId);
   });
 
@@ -160,6 +173,7 @@ type PersistInitialRatchetState = (
   roomId: string,
   peerPublicKey: string,
   peerId: string,
+  edgeCryptoState?: Uint8Array | null,
 ) => Promise<void>;
 
 type RollbackInitialRatchetState = (
@@ -185,9 +199,16 @@ export const persistAndActivateClaimedRatchetState = async (
   withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
     assertCurrentPersistenceOwner(epc, roomId);
     let writeStarted = false;
+    const edgeCryptoState = epc.serializeEdgeCryptoState?.() ?? null;
     try {
       writeStarted = true;
-      await persist(state, roomId, epc.withPeerPublicKey, epc.withPeerId);
+      await persist(
+        state,
+        roomId,
+        epc.withPeerPublicKey,
+        epc.withPeerId,
+        edgeCryptoState,
+      );
       assertCurrentPersistenceOwner(epc, roomId);
       // Must remain synchronous: resolving the gate schedules its waiters for
       // a later microtask, so activate can install epc.ratchetState in the
@@ -206,6 +227,8 @@ export const persistAndActivateClaimedRatchetState = async (
         }
       }
       throw error;
+    } finally {
+      edgeCryptoState?.fill(0);
     }
   });
 
@@ -217,7 +240,7 @@ export type PersistRatchetState = typeof persistRatchetState;
 // of order. Keep the queue outside Redux/DB and key it by the live transport.
 const ratchetMutationTails = new WeakMap<IRTCPeerConnection, Promise<void>>();
 
-const withRatchetMutationLock = async <T>(
+export const withEdgeCryptoMutationLock = async <T>(
   epc: IRTCPeerConnection,
   mutation: () => Promise<T>,
 ): Promise<T> => {
@@ -266,7 +289,7 @@ const mutateRatchetDurably = async <T>(
   stage: (candidate: RatchetState) => StagedRatchetMutation<T>,
   persist: PersistRatchetState,
 ): Promise<T> =>
-  withRatchetMutationLock(epc, async () => {
+  withEdgeCryptoMutationLock(epc, async () => {
     const live = epc.ratchetState;
     if (!live) throw new Error("ratchet persistence: no live ratchet state");
 
@@ -284,12 +307,19 @@ const mutateRatchetDurably = async <T>(
               assertCurrentPersistenceOwner(epc, roomId);
               if (epc.ratchetState !== live)
                 throw new Error("ratchet persistence: live state changed");
-              await persistRatchetStateUnlocked(
-                candidate,
-                roomId,
-                epc.withPeerPublicKey,
-                epc.withPeerId,
-              );
+              const edgeCryptoState =
+                epc.serializeEdgeCryptoState?.() ?? null;
+              try {
+                await persistRatchetStateUnlocked(
+                  candidate,
+                  roomId,
+                  epc.withPeerPublicKey,
+                  epc.withPeerId,
+                  edgeCryptoState,
+                );
+              } finally {
+                edgeCryptoState?.fill(0);
+              }
               assertCurrentPersistenceOwner(epc, roomId);
             },
           );

@@ -99,7 +99,7 @@ describe("disconnectFromPeer room isolation", () => {
     const skipped = new Uint8Array(32).fill(5);
     const cached = new Uint8Array(32).fill(6);
     target.value.ratchetState = {
-      rootSuite: "hybrid-3dh-mlkem768-cpace21-v3",
+      rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
       rootKey,
       sendingChainKey,
       receivingChainKey,

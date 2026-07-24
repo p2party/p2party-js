@@ -20,7 +20,7 @@ const connection = (
   }) as unknown as IRTCPeerConnection;
 
 const state = (): RatchetState => ({
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v3",
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
   rootKey: new Uint8Array(32),
   sendingChainKey: null,
   receivingChainKey: null,

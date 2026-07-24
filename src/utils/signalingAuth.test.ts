@@ -14,7 +14,7 @@ describe("protocol-v3 signaling authentication contract", () => {
       type: "peerId",
       peerId,
       challenge: "ab".repeat(32),
-      protocolVersion: 3,
+      protocolVersion: 4,
       message: "sign this nonce",
     };
     expect(isFreshV3Challenge(valid)).toBe(true);
@@ -31,7 +31,7 @@ describe("protocol-v3 signaling authentication contract", () => {
     const valid = {
       type: "challenge",
       challengeId,
-      protocolVersion: 3,
+      protocolVersion: 4,
     };
     expect(isV3ChallengeSuccess(valid)).toBe(true);
     expect(

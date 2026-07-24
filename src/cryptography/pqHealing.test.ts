@@ -1,13 +1,22 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
+  adoptPqHealing,
+  clonePqHealing,
+  decodePqHealingAck,
+  encodePqHealingAck,
   getPqHealingRecordLengths,
   inspectPqHealingRecord,
   PqHealingError,
   PqHealingMachine,
+  PQ_HEALING_ACK_BYTES,
   PQ_HEALING_BINDING_BYTES,
   PQ_HEALING_ROOT_BYTES,
+  restorePqHealing,
+  snapshotPqHealing,
+  wipePqHealingSnapshot,
   type PqHealingAdvanceAcknowledgement,
+  type PqHealingPhase,
 } from "./pqHealing";
 import {
   ML_KEM_512_SUITE,
@@ -143,6 +152,33 @@ const makeMachine = (
     rootKey: root(),
     nextOfferer,
   });
+
+const restoreMachine = (
+  snapshot: unknown,
+  backend: FakeMlKem512Backend,
+  edgeBinding = binding(),
+): PqHealingMachine<512> =>
+  restorePqHealing(snapshot, {
+    module,
+    backend,
+    suite: ML_KEM_512_SUITE,
+    binding: edgeBinding,
+  });
+
+const expectSnapshotRoundTrip = (
+  machine: PqHealingMachine<512>,
+  backend: FakeMlKem512Backend,
+  expectedPhase: PqHealingPhase,
+): void => {
+  const snapshot = snapshotPqHealing(machine);
+  const restored = restoreMachine(snapshot, backend);
+  const restoredSnapshot = snapshotPqHealing(restored);
+  expect(restored.phase).toBe(expectedPhase);
+  expect(restoredSnapshot).toEqual(snapshot);
+  wipePqHealingSnapshot(restoredSnapshot);
+  restored.destroy();
+  wipePqHealingSnapshot(snapshot);
+};
 
 const completeExchange = async (
   offerer: PqHealingMachine<512>,
@@ -482,6 +518,244 @@ describe("sparse PQ healing", () => {
       "invalid-record",
     );
     expect(responder.phase).toBe("outbound-advance-awaiting-ack");
+  });
+
+  test("ACK has one exact 64-byte suite/edge-bound encoding", async () => {
+    const acknowledgement = {
+      epoch: 0x0102_0304_0506_0708n,
+      advanceCounter: 0x1112_1314_1516_1718n,
+    };
+    const encoded = encodePqHealingAck(
+      acknowledgement,
+      ML_KEM_512_SUITE,
+      binding(),
+    );
+    expect(encoded).toHaveLength(PQ_HEALING_ACK_BYTES);
+    expect(Buffer.from(encoded.subarray(0, 4)).toString("ascii")).toBe("P2QH");
+    expect(encoded[4]).toBe(1);
+    expect(encoded[5]).toBe(3);
+    expect(encoded[6]).toBe(2);
+    expect(encoded[7]).toBe(0);
+    const view = new DataView(
+      encoded.buffer,
+      encoded.byteOffset,
+      encoded.byteLength,
+    );
+    expect(view.getBigUint64(40, false)).toBe(acknowledgement.advanceCounter);
+    expect(view.getBigUint64(48, false)).toBe(acknowledgement.epoch);
+    expect(view.getBigUint64(56, false)).toBe(0n);
+    expect(decodePqHealingAck(encoded, ML_KEM_512_SUITE, binding())).toEqual(
+      acknowledgement,
+    );
+
+    await expectCode(
+      () =>
+        decodePqHealingAck(
+          encoded.subarray(0, encoded.length - 1),
+          ML_KEM_512_SUITE,
+          binding(),
+        ),
+      "invalid-record",
+    );
+    await expectCode(
+      () => decodePqHealingAck(encoded, ML_KEM_768_SUITE, binding()),
+      "suite-mismatch",
+    );
+    await expectCode(
+      () =>
+        decodePqHealingAck(
+          encoded,
+          ML_KEM_512_SUITE,
+          new Uint8Array(PQ_HEALING_BINDING_BYTES).fill(0x43),
+        ),
+      "binding-mismatch",
+    );
+    for (const offset of [0, 4, 5, 7, 63]) {
+      const corrupted = Uint8Array.from(encoded);
+      corrupted[offset] ^= 1;
+      await expectCode(
+        () => decodePqHealingAck(corrupted, ML_KEM_512_SUITE, binding()),
+        "invalid-record",
+      );
+    }
+  });
+
+  test("snapshot/restore preserves every phase and exact replay record", async () => {
+    const offererBackend = new FakeMlKem512Backend();
+    const responderBackend = new FakeMlKem512Backend();
+    const offerer = makeMachine(offererBackend, "local");
+    const responder = makeMachine(responderBackend, "remote");
+
+    expectSnapshotRoundTrip(offerer, offererBackend, "idle");
+
+    const offer = await offerer.prepareOffer();
+    expectSnapshotRoundTrip(offerer, offererBackend, "outbound-offer-prepared");
+    offerer.markOfferDispatched();
+    expectSnapshotRoundTrip(
+      offerer,
+      offererBackend,
+      "outbound-offer-dispatched",
+    );
+
+    responder.acceptAuthenticatedOffer(offer);
+    expectSnapshotRoundTrip(responder, responderBackend, "inbound-offer");
+    const advance = await responder.prepareAdvance();
+    expectSnapshotRoundTrip(
+      responder,
+      responderBackend,
+      "outbound-advance-prepared",
+    );
+    responder.commitPreparedAdvance();
+    expectSnapshotRoundTrip(
+      responder,
+      responderBackend,
+      "outbound-advance-awaiting-ack",
+    );
+
+    await offerer.acceptAuthenticatedAdvance(advance);
+    expectSnapshotRoundTrip(
+      offerer,
+      offererBackend,
+      "inbound-advance-prepared",
+    );
+    const acknowledgement = offerer.commitAcceptedAdvance();
+    expectSnapshotRoundTrip(
+      offerer,
+      offererBackend,
+      "inbound-advance-awaiting-ack-dispatch",
+    );
+    offerer.markAdvanceAcknowledgementDispatched(acknowledgement);
+    responder.acceptAuthenticatedAdvanceAcknowledgement(acknowledgement);
+    expectSnapshotRoundTrip(offerer, offererBackend, "idle");
+    expectSnapshotRoundTrip(responder, responderBackend, "idle");
+  });
+
+  test("restored pending OFFER retains an independent usable ML-KEM secret", async () => {
+    const offererBackend = new FakeMlKem512Backend();
+    const offerer = makeMachine(offererBackend, "local");
+    const offer = await offerer.prepareOffer();
+    const snapshot = snapshotPqHealing(offerer);
+    const snapshotPhase = snapshot.phase;
+    if (
+      snapshotPhase.kind !== "outbound-offer-prepared" &&
+      snapshotPhase.kind !== "outbound-offer-dispatched"
+    )
+      throw new Error("expected pending OFFER snapshot");
+    const savedSecret = Uint8Array.from(snapshotPhase.secretKey);
+    const restored = restoreMachine(snapshot, offererBackend);
+    wipePqHealingSnapshot(snapshot);
+    offerer.destroy();
+
+    restored.markOfferDispatched();
+    const responder = makeMachine(new FakeMlKem512Backend(), "remote");
+    responder.acceptAuthenticatedOffer(offer);
+    const advance = await responder.prepareAdvance();
+    await restored.acceptAuthenticatedAdvance(advance);
+    expect(restored.phase).toBe("inbound-advance-prepared");
+    expect(savedSecret.some((byte) => byte !== 0)).toBe(true);
+    savedSecret.fill(0);
+    restored.destroy();
+    responder.destroy();
+  });
+
+  test("snapshot validation rejects extra fields, wrong provenance, and impossible phase state", async () => {
+    const backend = new FakeMlKem512Backend();
+    const machine = makeMachine(backend, "local");
+    await machine.prepareOffer();
+    const snapshot = snapshotPqHealing(machine);
+
+    await expectCode(
+      () => restoreMachine({ ...snapshot, extra: true }, backend),
+      "invalid-record",
+    );
+    await expectCode(
+      () => restoreMachine({ ...snapshot, parameterSet: 768 }, backend),
+      "suite-mismatch",
+    );
+    await expectCode(
+      () =>
+        restoreMachine(
+          snapshot,
+          backend,
+          new Uint8Array(PQ_HEALING_BINDING_BYTES).fill(0x43),
+        ),
+      "binding-mismatch",
+    );
+    await expectCode(
+      () =>
+        restoreMachine(
+          { ...snapshot, localCounter: snapshot.localCounter + 1n },
+          backend,
+        ),
+      "invalid-record",
+    );
+
+    const pendingPhase = snapshot.phase;
+    if (
+      pendingPhase.kind !== "outbound-offer-prepared" &&
+      pendingPhase.kind !== "outbound-offer-dispatched"
+    )
+      throw new Error("expected outbound OFFER snapshot");
+    await expectCode(
+      () =>
+        restoreMachine(
+          {
+            ...snapshot,
+            phase: {
+              ...pendingPhase,
+              secretKey: pendingPhase.secretKey.subarray(1),
+            },
+          },
+          backend,
+        ),
+      "invalid-record",
+    );
+    const corruptedOffer = Uint8Array.from(pendingPhase.offer);
+    corruptedOffer[8] ^= 1;
+    await expectCode(
+      () =>
+        restoreMachine(
+          {
+            ...snapshot,
+            phase: { ...pendingPhase, offer: corruptedOffer },
+          },
+          backend,
+        ),
+      "binding-mismatch",
+    );
+    wipePqHealingSnapshot(snapshot);
+    machine.destroy();
+  });
+
+  test("clone/adopt consumes the successor and wipe clears snapshot secrets without aliasing live state", async () => {
+    const backend = new FakeMlKem512Backend();
+    const live = makeMachine(backend, "local");
+    const candidate = clonePqHealing(live);
+    const offer = await candidate.prepareOffer();
+    adoptPqHealing(live, candidate);
+    expect(candidate.phase).toBe("destroyed");
+    expect(live.phase).toBe("outbound-offer-prepared");
+    expectBytesEqual(live.copyPendingOutboundRecord(), offer);
+
+    const snapshot = snapshotPqHealing(live);
+    const liveRoot = live.copyRootKey();
+    wipePqHealingSnapshot(snapshot);
+    expect(snapshot.rootKey.every((byte) => byte === 0)).toBe(true);
+    expect(snapshot.binding.every((byte) => byte === 0)).toBe(true);
+    if (
+      snapshot.phase.kind !== "outbound-offer-prepared" &&
+      snapshot.phase.kind !== "outbound-offer-dispatched"
+    )
+      throw new Error("expected outbound OFFER snapshot");
+    expect(snapshot.phase.secretKey.every((byte) => byte === 0)).toBe(true);
+    expectBytesEqual(live.copyRootKey(), liveRoot);
+
+    live.destroy();
+    expect(
+      backend.generatedSecretKeys.every((secret) =>
+        secret.every((byte) => byte === 0),
+      ),
+    ).toBe(true);
   });
 
   test("u64 exhaustion fails closed before key generation", async () => {

@@ -14,12 +14,14 @@ type OwnedBytes = Uint8Array<ArrayBuffer>;
 // iv||ciphertext form used by the identity records. The version is also
 // authenticated in the AAD; keeping it in the envelope makes unknown formats
 // reject before WebCrypto sees attacker-controlled layout.
-export const RATCHET_WRAP_VERSION = 1;
+export const RATCHET_WRAP_VERSION = 2;
 const RATCHET_WRAP_MAGIC = Uint8Array.of(0x50, 0x32, 0x52, 0x57); // "P2RW"
 const RATCHET_WRAP_HEADER_BYTES =
   RATCHET_WRAP_MAGIC.byteLength + 1 + RATCHET_RECORD_ID_BYTES + GCM_IV_BYTES;
+/** Bounded canonical v4 PQ/outbox/active-key checkpoint (plaintext bytes). */
+export const MAX_EDGE_CRYPTO_STATE_BYTES = 256 * 1024;
 const RATCHET_AAD_DOMAIN = new TextEncoder().encode(
-  "p2party-ratchet-at-rest-aad-v1",
+  "p2party-edge-crypto-at-rest-aad-v2",
 );
 const MAX_AAD_STRING_BYTES = 1 << 20;
 
@@ -29,6 +31,7 @@ const enum RatchetSecretField {
   ReceivingChainKey = 3,
   DhSelfSecret = 4,
   SkippedMessageKey = 5,
+  EdgeCryptoState = 6,
 }
 
 const copyBuffer = (value: ArrayBuffer): ArrayBuffer => value.slice(0);
@@ -115,6 +118,7 @@ interface RatchetMetadata {
   updatedAt: number;
   sendingChainKey: ArrayBuffer | null;
   receivingChainKey: ArrayBuffer | null;
+  edgeCryptoState: ArrayBuffer | null;
 }
 
 /**
@@ -147,6 +151,20 @@ const validateMetadata = (s: RatchetMetadata): void => {
     requireBuffer(skipped.dhPub, `ratchet skipped[${String(index)}].dhPub`, 32);
     requireSafeUint(skipped.n, `ratchet skipped[${String(index)}].n`);
   });
+  if (s.edgeCryptoState !== null) {
+    const checkpoint = requireBuffer(
+      s.edgeCryptoState,
+      "ratchet edge crypto state",
+    );
+    if (
+      checkpoint.byteLength < 1 ||
+      checkpoint.byteLength >
+        MAX_EDGE_CRYPTO_STATE_BYTES +
+          RATCHET_WRAP_HEADER_BYTES +
+          GCM_TAG_BYTES
+    )
+      throw new Error("ratchet edge crypto state length is invalid");
+  }
 };
 
 const cloneSession = (s: RatchetSession): RatchetSession => ({
@@ -190,6 +208,12 @@ const cloneSession = (s: RatchetSession): RatchetSession => ({
       ),
     }));
   })(),
+  edgeCryptoState:
+    s.edgeCryptoState === null
+      ? null
+      : copyBuffer(
+          requireBuffer(s.edgeCryptoState, "ratchet edge crypto state"),
+        ),
   updatedAt: s.updatedAt,
 });
 
@@ -200,6 +224,7 @@ const wipeSessionSecrets = (s: RatchetSession): void => {
   new Uint8Array(s.dhSelfSec).fill(0);
   for (const skipped of s.skippedMessageKeys)
     new Uint8Array(skipped.messageKey).fill(0);
+  if (s.edgeCryptoState) new Uint8Array(s.edgeCryptoState).fill(0);
 };
 
 const canonicalRatchetAad = (
@@ -214,7 +239,8 @@ const canonicalRatchetAad = (
   const flags =
     (s.sendingChainKey === null ? 0 : 1) |
     (s.receivingChainKey === null ? 0 : 2) |
-    (s.dhRemotePub === null ? 0 : 4);
+    (s.dhRemotePub === null ? 0 : 4) |
+    (s.edgeCryptoState === null ? 0 : 8);
   const parts: OwnedBytes[] = [
     lengthPrefixed(RATCHET_AAD_DOMAIN),
     Uint8Array.of(RATCHET_WRAP_VERSION, field),
@@ -245,9 +271,25 @@ const canonicalRatchetAad = (
   return concatBytes(parts);
 };
 
-const ratchetEnvelopeRecordId = (blob: ArrayBuffer): OwnedBytes => {
+const ratchetEnvelopeRecordId = (
+  blob: ArrayBuffer,
+  expectedPlaintextBytes: number | null = 32,
+): OwnedBytes => {
   const view = new Uint8Array(blob);
-  if (view.byteLength !== RATCHET_WRAP_HEADER_BYTES + 32 + GCM_TAG_BYTES)
+  const minimumLength = RATCHET_WRAP_HEADER_BYTES + 1 + GCM_TAG_BYTES;
+  const maximumLength =
+    RATCHET_WRAP_HEADER_BYTES +
+    MAX_EDGE_CRYPTO_STATE_BYTES +
+    GCM_TAG_BYTES;
+  if (
+    (expectedPlaintextBytes === null &&
+      (view.byteLength < minimumLength || view.byteLength > maximumLength)) ||
+    (expectedPlaintextBytes !== null &&
+      view.byteLength !==
+        RATCHET_WRAP_HEADER_BYTES +
+          expectedPlaintextBytes +
+          GCM_TAG_BYTES)
+  )
     throw new Error("Unsupported or malformed ratchet wrap envelope");
   for (let i = 0; i < RATCHET_WRAP_MAGIC.byteLength; i++) {
     if (view[i] !== RATCHET_WRAP_MAGIC[i])
@@ -268,8 +310,19 @@ const wrapRatchetField = async (
   plaintext: ArrayBuffer,
   aad: OwnedBytes,
   recordId: OwnedBytes,
+  expectedPlaintextBytes: number | null = 32,
 ): Promise<ArrayBuffer> => {
-  requireBuffer(plaintext, "ratchet secret", 32);
+  requireBuffer(
+    plaintext,
+    "ratchet secret",
+    expectedPlaintextBytes === null ? undefined : expectedPlaintextBytes,
+  );
+  if (
+    expectedPlaintextBytes === null &&
+    (plaintext.byteLength < 1 ||
+      plaintext.byteLength > MAX_EDGE_CRYPTO_STATE_BYTES)
+  )
+    throw new Error("ratchet variable secret length is invalid");
   if (recordId.byteLength !== RATCHET_RECORD_ID_BYTES)
     throw new Error("ratchet wrap: invalid record ID");
   const iv = crypto.getRandomValues(new Uint8Array(GCM_IV_BYTES));
@@ -297,9 +350,13 @@ const unwrapRatchetField = async (
   envelope: ArrayBuffer,
   aad: OwnedBytes,
   expectedRecordId: OwnedBytes,
+  expectedPlaintextBytes: number | null = 32,
 ): Promise<ArrayBuffer> => {
   requireBuffer(envelope, "ratchet wrapped secret");
-  const recordId = ratchetEnvelopeRecordId(envelope);
+  const recordId = ratchetEnvelopeRecordId(
+    envelope,
+    expectedPlaintextBytes,
+  );
   if (!equalBytes(recordId, expectedRecordId))
     throw new Error("Ratchet wrap record ID mismatch");
   const view = new Uint8Array(envelope);
@@ -316,7 +373,13 @@ const unwrapRatchetField = async (
     key,
     view.subarray(RATCHET_WRAP_HEADER_BYTES),
   );
-  if (plaintext.byteLength !== 32) {
+  if (
+    (expectedPlaintextBytes !== null &&
+      plaintext.byteLength !== expectedPlaintextBytes) ||
+    (expectedPlaintextBytes === null &&
+      (plaintext.byteLength < 1 ||
+        plaintext.byteLength > MAX_EDGE_CRYPTO_STATE_BYTES))
+  ) {
     new Uint8Array(plaintext).fill(0);
     throw new Error("Ratchet wrapped secret has an invalid plaintext length");
   }
@@ -344,6 +407,14 @@ const ratchetEnvelopeFingerprint = async (
     )
       throw new Error("Ratchet wrap record ID mismatch");
   }
+  if (
+    s.edgeCryptoState !== null &&
+    !equalBytes(
+      ratchetEnvelopeRecordId(s.edgeCryptoState, null),
+      recordId,
+    )
+  )
+    throw new Error("Ratchet wrap record ID mismatch");
   const parts: OwnedBytes[] = [
     canonicalRatchetAad(s, RatchetSecretField.RootKey, recordId),
     lengthPrefixed(new Uint8Array(s.rootKey)),
@@ -359,6 +430,13 @@ const ratchetEnvelopeFingerprint = async (
   ];
   for (const skipped of s.skippedMessageKeys)
     parts.push(lengthPrefixed(new Uint8Array(skipped.messageKey)));
+  parts.push(
+    lengthPrefixed(
+      s.edgeCryptoState
+        ? new Uint8Array(s.edgeCryptoState)
+        : new Uint8Array(),
+    ),
+  );
   const encoded = concatBytes(parts);
   try {
     return new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
@@ -531,6 +609,14 @@ export async function wrapRatchetSession(
       32,
     ),
   );
+  if (snapshot.edgeCryptoState) {
+    requireBuffer(snapshot.edgeCryptoState, "ratchet edge crypto state");
+    if (
+      snapshot.edgeCryptoState.byteLength < 1 ||
+      snapshot.edgeCryptoState.byteLength > MAX_EDGE_CRYPTO_STATE_BYTES
+    )
+      throw new Error("ratchet edge crypto state length is invalid");
+  }
 
   try {
     const recordId = crypto.getRandomValues(
@@ -591,6 +677,19 @@ export async function wrapRatchetSession(
         ),
       });
     }
+    const edgeCryptoState = snapshot.edgeCryptoState
+      ? await wrapRatchetField(
+          key,
+          snapshot.edgeCryptoState,
+          canonicalRatchetAad(
+            snapshot,
+            RatchetSecretField.EdgeCryptoState,
+            recordId,
+          ),
+          recordId,
+          null,
+        )
+      : null;
     return {
       ...snapshot,
       rootKey,
@@ -598,6 +697,7 @@ export async function wrapRatchetSession(
       receivingChainKey,
       dhSelfSec,
       skippedMessageKeys,
+      edgeCryptoState,
     };
   } finally {
     wipeSessionSecrets(snapshot);
@@ -676,6 +776,20 @@ export async function unwrapRatchetSession(
         messageKey,
       });
     }
+    const edgeCryptoState = snapshot.edgeCryptoState
+      ? await unwrapRatchetField(
+          key,
+          snapshot.edgeCryptoState,
+          canonicalRatchetAad(
+            snapshot,
+            RatchetSecretField.EdgeCryptoState,
+            recordId,
+          ),
+          recordId,
+          null,
+        )
+      : null;
+    if (edgeCryptoState) plaintexts.push(edgeCryptoState);
 
     // A guard observes only after every AEAD has authenticated, so an attacker
     // cannot poison its high-water mark with unauthenticated metadata.
@@ -688,6 +802,7 @@ export async function unwrapRatchetSession(
       receivingChainKey,
       dhSelfSec,
       skippedMessageKeys,
+      edgeCryptoState,
     };
   } catch (error) {
     for (const plaintext of plaintexts) new Uint8Array(plaintext).fill(0);

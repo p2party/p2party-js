@@ -7,11 +7,15 @@ import {
 import { packChunkFrameHeader, parseChunkFrameHeader } from "./chunkFrame";
 import { zeroFree } from "../utils/zeroFree";
 import {
-  RATCHET_N_LEN,
-  RATCHET_PN_LEN,
+  CHUNK_AAD_HEADER_LEN,
   MESSAGE_LEN,
   DECRYPTED_LEN,
 } from "../utils/constants";
+import {
+  combinePqMessageKey,
+  PQ_MESSAGE_KEY_BINDING_BYTES,
+  PQ_MESSAGE_KEY_ROOT_BYTES,
+} from "../cryptography/pqMessageKey";
 import {
   crypto_aead_chacha20poly1305_ietf_KEYBYTES,
   crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
@@ -21,8 +25,9 @@ import {
 
 import type { RatchetState, RatchetHeader } from "../cryptography/ratchet";
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 
-// ── Stage-5 task 3: per-message-ratchet + per-chunk-AEAD message-chunk crypto ────
+// ── v4 per-message ratchet + PQ key combiner + per-chunk AEAD ────────────────
 //
 // THE key subtlety (design §"per-MESSAGE, not per-chunk"): `ratchetEncrypt` /
 // `ratchetDecrypt` MUTATE and advance the ratchet ONCE per call. A logical
@@ -30,9 +35,9 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 // resulting `messageKey` is reused (from a caller-owned cache on receive) for
 // every chunk of that message. Each chunk gets a fresh random 12-byte nonce.
 //
-// AEAD: symmetric ChaCha20-Poly1305-IETF under the message key. AAD = the
-// per-message `merkleRoot(64) ‖ N(8 BE) ‖ PN(8 BE)`. N/PN come from the ratchet
-// header, so the AAD is the same for every chunk of a message.
+// AEAD: symmetric ChaCha20-Poly1305-IETF under the combined message key. AAD =
+// `merkleRoot(64) ‖ type(1) ‖ dhPub(32) ‖ N(8) ‖ PN(8) ‖ pqEpoch(8)`.
+// The complete clear header excluding the fresh random nonce is authenticated.
 //
 // SEND builds the AAD + seals in TS (`buildAad`/`aeadSeal`/`sealChunk`). RECEIVE
 // is done ENTIRELY in one C call: `decryptMessageChunk` derives the per-message
@@ -45,31 +50,46 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 const AEAD_KEY_LEN = crypto_aead_chacha20poly1305_ietf_KEYBYTES; // 32
 const AEAD_NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
 const AEAD_TAG_LEN = crypto_aead_chacha20poly1305_ietf_ABYTES; // 16
-const AAD_LEN = crypto_hash_sha512_BYTES + RATCHET_N_LEN + RATCHET_PN_LEN; // 80
+const AAD_LEN = crypto_hash_sha512_BYTES + CHUNK_AAD_HEADER_LEN; // 121
+const MAX_U64 = (1n << 64n) - 1n;
 
 const toHex = (u8: Uint8Array): string =>
   Array.from(u8, (b) => b.toString(16).padStart(2, "0")).join("");
 
 /**
- * Per-message key-cache key. Keyed by `(dhPub, N)` — the pair that uniquely
- * identifies a ratchet message; every chunk of that message shares it. Exported
- * so the caller can evict a completed message's key deterministically.
+ * Per-message key-cache key. Production passes the parsed epoch explicitly and
+ * gets an epoch-bound `(dhPub,N,epoch)` identity. Omitting the epoch preserves
+ * the legacy low-level `dhPub:N` identity for raw/bootstrap tests only; this is
+ * needed while those tests still round-trip keys through RatchetState.skipped,
+ * whose historical serializer understands exactly that two-field shape.
  */
-export const messageCacheKey = (dhPub: Uint8Array, N: number): string =>
-  `${toHex(dhPub)}:${N}`;
+export const messageCacheKey = (
+  dhPub: Uint8Array,
+  N: number,
+  pqEpoch?: bigint,
+): string => {
+  const prefix = `${toHex(dhPub)}:${N}`;
+  if (pqEpoch === undefined) return prefix;
+  if (typeof pqEpoch !== "bigint" || pqEpoch < 0n || pqEpoch > MAX_U64)
+    throw new Error("messageChunkCrypto: PQ epoch out of u64 range");
+  return `${prefix}:${pqEpoch.toString(10)}`;
+};
 
-// AAD = merkleRoot(64) ‖ N(8 BE) ‖ PN(8 BE). Big-endian to match the on-wire
-// header bytes the C `receive_message_with_key` memcpy's straight into its AAD.
+// AAD = merkleRoot || the exact on-wire clear header excluding its nonce.
+// Copying the serialized bytes (rather than re-encoding fields) makes TS/C
+// parity structural: C memcpy's the same prefix from the received frame.
 const buildAad = (
   merkleRoot: Uint8Array,
-  N: number,
-  PN: number,
+  frameHeader: Uint8Array,
 ): Uint8Array => {
+  if (frameHeader.length < CHUNK_AAD_HEADER_LEN)
+    throw new Error("messageChunkCrypto: incomplete chunk frame header");
   const aad = new Uint8Array(AAD_LEN);
   aad.set(merkleRoot, 0);
-  const dv = new DataView(aad.buffer);
-  dv.setBigUint64(crypto_hash_sha512_BYTES, BigInt(N), false);
-  dv.setBigUint64(crypto_hash_sha512_BYTES + RATCHET_N_LEN, BigInt(PN), false);
+  aad.set(
+    frameHeader.subarray(0, CHUNK_AAD_HEADER_LEN),
+    crypto_hash_sha512_BYTES,
+  );
   return aad;
 };
 
@@ -173,11 +193,7 @@ const receiveWithKey = (
   // The C signature reads a full MESSAGE_LEN buffer; the wire frame is shorter
   // (WIRE_CHUNK_FRAME_LEN) so zero the tail, then copy the frame in.
   const msg = new Uint8Array(module.wasmMemory.buffer, msgPtr, MESSAGE_LEN);
-  const dec = new Uint8Array(
-    module.wasmMemory.buffer,
-    decPtr,
-    DECRYPTED_LEN,
-  );
+  const dec = new Uint8Array(module.wasmMemory.buffer, decPtr, DECRYPTED_LEN);
   msg.fill(0);
   // malloc may return a region containing a previous plaintext. Initialize the
   // output before C runs, then copy it into JS only after full AEAD + Merkle
@@ -213,12 +229,12 @@ const receiveWithKey = (
 };
 
 /**
- * Seal ONE chunk under an already-derived per-message `messageKey` + `header`:
- * fresh random nonce, AEAD over `merkleRoot ‖ N ‖ PN`, framed as
- * `packChunkFrameHeader(header, nonce) ‖ ciphertext`. Does NOT touch the ratchet
- * (the caller stepped it ONCE via `ratchetEncrypt` for the whole message) and
- * does NOT wipe `messageKey` (the caller owns its lifecycle — it must stay live
- * across a big-file's streamed chunks AND across selective-retransmit rounds).
+ * Seal ONE chunk under an already-derived classical `messageKey` + `header`.
+ * With a PQ context, an owned copy of the classical key is consumed by the v4
+ * combiner and the resulting key is wiped after this one AEAD operation. The
+ * caller's classical key remains live across streamed chunks/retransmit rounds.
+ * The low-level context-free default emits bootstrap epoch zero and uses the
+ * raw classical key for backwards-compatible tests only.
  *
  * This is the streaming/reconcile-friendly primitive the live send path uses: it
  * seals chunks one-at-a-time as they are read from IndexedDB, so a multi-GB
@@ -233,17 +249,35 @@ export const sealChunk = (
   chunk: Uint8Array,
   merkleRoot: Uint8Array,
   module: LibCrypto,
+  pqContext?: PqMessageKeyContext,
 ): Uint8Array => {
   if (merkleRoot.length !== crypto_hash_sha512_BYTES)
     throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
-  const aad = buildAad(merkleRoot, header.N, header.PN);
   const nonce = randomNonce(); // fresh + random per chunk
-  const ciphertext = aeadSeal(module, messageKey, nonce, chunk, aad);
-  const frameHeader = packChunkFrameHeader(header, nonce);
-  const frame = new Uint8Array(frameHeader.length + ciphertext.length);
-  frame.set(frameHeader, 0);
-  frame.set(ciphertext, frameHeader.length);
-  return frame;
+  const frameHeader = packChunkFrameHeader(
+    header,
+    nonce,
+    pqContext?.epoch ?? 0n,
+  );
+  const aad = buildAad(merkleRoot, frameHeader);
+  let combinedKey: Uint8Array | null = null;
+  try {
+    const aeadKey = pqContext
+      ? (combinedKey = combinePqMessageKey(
+          Uint8Array.from(messageKey),
+          pqContext,
+          header,
+          module,
+        ))
+      : messageKey;
+    const ciphertext = aeadSeal(module, aeadKey, nonce, chunk, aad);
+    const frame = new Uint8Array(frameHeader.length + ciphertext.length);
+    frame.set(frameHeader, 0);
+    frame.set(ciphertext, frameHeader.length);
+    return frame;
+  } finally {
+    combinedKey?.fill(0);
+  }
 };
 
 export interface DecryptedChunk {
@@ -260,15 +294,36 @@ export interface DecryptedChunk {
 }
 
 /**
+ * Resolve an authenticated, currently acceptable PQ epoch. Returning null
+ * rejects unknown/stale/future epochs before a Double-Ratchet clone is touched.
+ */
+export type PqMessageKeyContextResolver = (
+  epoch: bigint,
+) => PqMessageKeyContext | null;
+
+const resolvedContextMatches = (
+  context: PqMessageKeyContext,
+  epoch: bigint,
+  rootSuite: RatchetState["rootSuite"],
+): boolean =>
+  context.epoch === epoch &&
+  context.rootSuite === rootSuite &&
+  context.rootKey instanceof Uint8Array &&
+  context.rootKey.length === PQ_MESSAGE_KEY_ROOT_BYTES &&
+  context.binding instanceof Uint8Array &&
+  context.binding.length === PQ_MESSAGE_KEY_BINDING_BYTES;
+
+/**
  * RECEIVE one chunk frame: derive the per-message key off the ratchet (in TS —
  * the ratchet state is a TS object), then do ALL the crypto in ONE C call
  * (`receiveWithKey` → `_receive_message_with_key`: decrypt + leaf-hash + Merkle +
  * receipt, in place).
  *
- * The `cache` (caller-owned, keyed by `messageCacheKey(dhPub, N)`) holds the
- * per-message key. On a HIT — chunk 2..n, out-of-order, or a duplicate — the key
- * is reused WITHOUT touching the ratchet. On a MISS the key is derived under the
- * clone-rollback contract and cached.
+ * The production `cache` is caller-owned and keyed by
+ * `messageCacheKey(dhPub,N,pqEpoch)`. It stores already-combined active receive
+ * keys separately from classical skipped keys. On a HIT the key is reused
+ * without touching the ratchet. On a MISS, the resolver must authorize the
+ * epoch before the classical key is derived on a clone and combined.
  *
  * Clone-rollback (MANDATORY — `ratchetDecrypt` mutates BEFORE the AEAD
  * authenticates, so a replayed/old-chain header could otherwise fire a spurious
@@ -289,12 +344,36 @@ export const decryptMessageChunk = (
   cache: Map<string, Uint8Array>,
   merkleRoot: Uint8Array,
   module: LibCrypto,
+  pqContextResolver?: PqMessageKeyContextResolver,
 ): DecryptedChunk => {
   if (merkleRoot.length !== crypto_hash_sha512_BYTES)
     throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
 
-  const { header } = parseChunkFrameHeader(frame); // ratchet header + cache key
-  const cacheK = messageCacheKey(header.dhPub, header.N);
+  const { header, pqEpoch } = parseChunkFrameHeader(frame);
+
+  let pqContext: PqMessageKeyContext | null = null;
+  if (pqContextResolver) {
+    try {
+      pqContext = pqContextResolver(pqEpoch);
+    } catch {
+      return { decrypted: null, ok: false, stateAdvanced: false };
+    }
+    if (
+      !pqContext ||
+      !resolvedContextMatches(pqContext, pqEpoch, state.rootSuite)
+    )
+      return { decrypted: null, ok: false, stateAdvanced: false };
+  } else if (pqEpoch !== 0n) {
+    // Context-free operation is a bootstrap-only low-level compatibility path.
+    // Never interpret a nonzero wire epoch as a raw classical key.
+    return { decrypted: null, ok: false, stateAdvanced: false };
+  }
+
+  const cacheK = messageCacheKey(
+    header.dhPub,
+    header.N,
+    pqContextResolver ? pqEpoch : undefined,
+  );
 
   // HIT — reuse the per-message key; the ratchet is NOT touched.
   const cached = cache.get(cacheK);
@@ -317,9 +396,12 @@ export const decryptMessageChunk = (
   let messageKey: Uint8Array;
   try {
     messageKey = deriveOnClone(clone, header, module);
+    if (pqContext)
+      messageKey = combinePqMessageKey(messageKey, pqContext, header, module);
   } catch {
-    // ratchetDecrypt rejected the header (e.g. a stale-chain replay) — drop; the
-    // live state is untouched (deriveOnClone already wiped the clone).
+    // Header rejection or combiner/context failure only touched the clone.
+    // combinePqMessageKey consumes its classical input even when it throws.
+    wipeRatchet(clone);
     return { decrypted: null, ok: false, stateAdvanced: false };
   }
 

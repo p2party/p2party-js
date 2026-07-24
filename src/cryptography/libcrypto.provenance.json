@@ -32,14 +32,14 @@
     "emscripten": "emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.2-git"
   },
   "build": {
-    "mode": "production",
+    "mode": "development",
     "linkTimeOptimization": false,
     "publicSodiumApi": true
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 208966,
-    "sha256": "73f4eee322534665ebe99aab6b1494dc2fb32d859b3f55a3c2ae6fa477043789",
-    "sri": "sha384-gHNbEQ3KIbsYpXGbpz6O62xI1CjZDVeD8FnYA//PWGAHxKDuN2pMVpQvDopV6Qcg"
+    "bytes": 1682423,
+    "sha256": "26df0bec6d2e09c96fa29c2906edd09e7f04faf38d929f2e4c2815ad36d8d5e6",
+    "sri": "sha384-NmQ1poWzKrx2t9UJsT0KQZnD96PdRsf1SZQv4c4y9SM7A7yqRjf46sZeWDIE6m3M"
   }
 }

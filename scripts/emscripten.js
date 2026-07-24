@@ -171,7 +171,11 @@ const emccArgs = [
   "-s",
   "CHECK_NULL_WRITES=1",
   "-s",
-  "ENVIRONMENT=web,worker",
+  // The development verification artifact must also instantiate under
+  // Bun/Node unit tests; the shipped production artifact stays web-only.
+  buildMode === "production"
+    ? "ENVIRONMENT=web,worker"
+    : "ENVIRONMENT=web,worker,node",
   "-s",
   "INVOKE_RUN=0",
   "-s",

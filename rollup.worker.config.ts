@@ -1,16 +1,17 @@
+import path from "path";
 import typescript from "@rollup/plugin-typescript";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import terser from "@rollup/plugin-terser";
 
 const isDist = process.env.NODE_ENV === "production";
-const dir = "lib";
+const dir = process.env.P2PARTY_OUTPUT_DIR ?? "lib";
 
 export default {
   input: "src/db/db.worker.ts",
   output: {
-    file: "lib/db.worker.js",
+    file: path.join(dir, "db.worker.js"),
     format: "es",
-    sourcemap: true,
+    sourcemap: !isDist,
   },
   plugins: [
     nodeResolve({
@@ -18,10 +19,10 @@ export default {
     }),
 
     typescript({
-      sourceMap: true,
+      sourceMap: !isDist,
       inlineSources: false,
       declaration: true,
-      declarationMap: true,
+      declarationMap: !isDist,
       outDir: `${dir}`,
     }),
 

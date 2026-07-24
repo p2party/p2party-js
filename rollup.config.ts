@@ -8,13 +8,14 @@ import typescript from "@rollup/plugin-typescript";
 import replace from "@rollup/plugin-replace";
 import analyzer from "rollup-plugin-analyzer";
 
-const dir = "lib";
+const dir = process.env.P2PARTY_OUTPUT_DIR ?? "lib";
 const rootInput = "src/index.ts";
 const sessionInput = "src/session.ts";
 const packageJson = JSON.parse(fs.readFileSync("package.json", "utf-8"));
 
 const isDist = process.env.NODE_ENV === "production";
 const isSessionOnly = process.env.P2PARTY_ROLLUP_TARGET === "session";
+const shouldAnalyze = process.env.P2PARTY_ANALYZE !== "false";
 
 const createPlugins = (includeIndexedDbWorker) => {
   const values = {
@@ -50,10 +51,10 @@ const createPlugins = (includeIndexedDbWorker) => {
     }),
 
     typescript({
-      sourceMap: true,
+      sourceMap: !isDist,
       inlineSources: false,
       declaration: true,
-      declarationMap: true,
+      declarationMap: !isDist,
       exclude: ["playwright*", "rollup*"],
       outDir: `${dir}`,
     }),
@@ -64,7 +65,7 @@ const createPlugins = (includeIndexedDbWorker) => {
         toplevel: true,
       }),
 
-    analyzer(),
+    shouldAnalyze && analyzer(),
   ];
 };
 
@@ -74,20 +75,20 @@ const sessionConfig = {
   external: ["module"],
   output: [
     {
-      file: `lib${path.sep}session.mjs`,
+      file: path.join(dir, "session.mjs"),
       format: "es",
       esModule: true,
       interop: "esModule",
       exports: "named",
-      sourcemap: true,
+      sourcemap: !isDist,
     },
     {
-      file: `lib${path.sep}session.js`,
+      file: path.join(dir, "session.js"),
       format: "cjs",
       esModule: false,
       interop: "auto",
       exports: "named",
-      sourcemap: true,
+      sourcemap: !isDist,
     },
   ],
 };
@@ -110,12 +111,12 @@ const rootConfigs = [
     ],
     output: {
       name: "p2party",
-      file: `lib${path.sep}index.min.js`,
+      file: path.join(dir, "index.min.js"),
       format: "umd",
       esModule: false,
       interop: "default",
       extend: true,
-      sourcemap: true,
+      sourcemap: !isDist,
       exports: "named",
     },
   },
@@ -127,19 +128,19 @@ const rootConfigs = [
     external: ["module", "@reduxjs", "class-validator"],
     output: [
       {
-        file: `lib${path.sep}index.mjs`,
+        file: path.join(dir, "index.mjs"),
         esModule: true,
         interop: "esModule",
         exports: "named",
-        sourcemap: true,
+        sourcemap: !isDist,
       },
       {
-        file: `lib${path.sep}index.js`,
+        file: path.join(dir, "index.js"),
         format: "cjs",
         esModule: false,
         interop: "auto",
         exports: "named",
-        sourcemap: true,
+        sourcemap: !isDist,
       },
     ],
   },

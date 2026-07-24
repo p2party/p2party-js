@@ -3,6 +3,8 @@
 export interface LibCrypto extends EmscriptenModule {
   wasmMemory: WebAssembly.Memory;
 
+  _crypto_init(): number;
+
   _keypair(
     public_key: number, // Uint8Array,
     secret_key: number, // Uint8Array
@@ -129,12 +131,7 @@ export interface LibCrypto extends EmscriptenModule {
   // ML-KEM-768 (FIPS 203), deterministic entry points. JavaScript supplies
   // cryptographically secure coins; zero is success, negative is failure.
   _mlkem768_keypair(pk: number, sk: number, coins64: number): number;
-  _mlkem768_encaps(
-    ct: number,
-    ss: number,
-    pk: number,
-    coins32: number,
-  ): number;
+  _mlkem768_encaps(ct: number, ss: number, pk: number, coins32: number): number;
   _mlkem768_decaps(ss: number, ct: number, sk: number): number;
 }
 

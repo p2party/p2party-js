@@ -4,12 +4,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "../../libsodium/src/libsodium/include/sodium/crypto_aead_chacha20poly1305.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_hash_sha512.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_pwhash_argon2id.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_sign_ed25519.h"
-
-int random_bytes(const unsigned int SIZE, uint8_t array[SIZE]);
+#include <sodium.h>
 
 int random_number_in_range(const int MIN, const int MAX);
 

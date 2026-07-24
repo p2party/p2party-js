@@ -6,13 +6,7 @@
 
 #include "utils.h"
 
-#include "../../libsodium/src/libsodium/include/sodium/crypto_core_ristretto255.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_scalarmult_ristretto255.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_scalarmult_curve25519.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_auth_hmacsha512.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_aead_chacha20poly1305.h"
-#include "../../libsodium/src/libsodium/include/sodium/crypto_kdf_hkdf_sha512.h"
-#include "../../libsodium/src/libsodium/include/sodium/randombytes.h"
+#include <sodium.h>
 
 /* ---- v3 frame-layout constants (byte-matched to src/utils/constants.ts) ----
  * SSOT NOTE: Stage 5 relocates these to utils.h alongside the MESSAGE_START
@@ -24,9 +18,9 @@
 #define RATCHET_PN_LEN 8U
 #define PQ_EPOCH_LEN 1U
 #define RATCHET_NONCE_LEN 12U
-#define CHUNK_HEADER_LEN                                                     \
-  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN          \
-   + RATCHET_NONCE_LEN) /* 61 */
+#define CHUNK_HEADER_LEN                                                       \
+  (RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN + PQ_EPOCH_LEN           \
+   + RATCHET_NONCE_LEN)                                   /* 61 */
 #define MESSAGE_START (FRAME_TYPE_LEN + CHUNK_HEADER_LEN) /* 62 */
 
 void cpace_ristretto255_from_hash(

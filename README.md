@@ -473,7 +473,7 @@ and [Rollup](https://github.com/rollup/rollup) will generate the UMD, ESM and CJ
 
 ## License
 
-The source code is licensed under the terms of the Affero General Public License version 3.0 (see [LICENSE](LICENSE)).
+The source code is licensed under the [Apache License 2.0](LICENSE.md).
 
 ## Copyright
 

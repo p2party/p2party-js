@@ -109,22 +109,57 @@ export const handleReceiveMessage = async (
     console.error("v3 receive: no ratchet state for peer");
     return dropped();
   }
-  if (!epc.messageKeyCache) epc.messageKeyCache = new Map<string, Uint8Array>();
+  // v4: the per-edge cache IS the PQ runtime's active combined receive-key
+  // collection (aliased at handshake activation) so every persisted edge
+  // checkpoint carries it. The bare-Map fallback serves runtime-free
+  // bootstrap/unit-test edges only.
+  if (!epc.messageKeyCache)
+    epc.messageKeyCache =
+      epc.pqHealingState?.activeReceiveKeys ??
+      new Map<string, Uint8Array>();
   const cache = epc.messageKeyCache;
 
-  // The per-message cache key (dhPub, N). It stays live through channel drain:
-  // the real cell can complete storage before later valid cover cells arrive.
+  // The per-message cache key (dhPub, N, pqEpoch). It stays live through
+  // channel drain: the real cell can complete storage before later valid cover
+  // cells arrive. Production identity is epoch-bound; the two-field form is
+  // the runtime-free bootstrap path.
   let cacheKey: string | undefined;
   try {
-    const { header } = parseChunkFrameHeader(frame);
-    cacheKey = messageCacheKey(header.dhPub, header.N);
+    const { header, pqEpoch } = parseChunkFrameHeader(frame);
+    cacheKey = messageCacheKey(
+      header.dhPub,
+      header.N,
+      epc.pqHealingState ? pqEpoch : undefined,
+    );
   } catch {
     return dropped();
   }
 
+  // Anti-DoS backstop: a normally closed complete message is retired after its
+  // queue drains, but a peer could pin keys with never-completing messages.
+  // Bound the per-edge cache BEFORE the durable decrypt (oldest first, Map
+  // insertion order) so the staged active-key map can never exceed the
+  // encrypted edge checkpoint's key budget.
+  const MESSAGE_KEY_CACHE_MAX = 256;
+  if (cache.size >= MESSAGE_KEY_CACHE_MAX) {
+    for (const k of cache.keys()) {
+      if (cache.size < MESSAGE_KEY_CACHE_MAX) break;
+      cache.get(k)?.fill(0);
+      cache.delete(k);
+      if (epc.messageKeyByMerkleRoot) {
+        for (const [root, mappedKey] of epc.messageKeyByMerkleRoot) {
+          if (mappedKey === k) epc.messageKeyByMerkleRoot.delete(root);
+        }
+      }
+    }
+  }
+
   // 1) Derive/decrypt against a staged clone, then persist and adopt the
   //    authenticated successor before exposing any plaintext. The per-edge lock
-  //    also serializes concurrent send/receive ratchet transitions.
+  //    also serializes concurrent send/receive/PQ ratchet transitions. With a
+  //    PQ runtime the staged combined key is persisted inside the encrypted
+  //    edge checkpoint (same row as the ratchet successor), never in the
+  //    classical skipped map.
   let decrypted: Uint8Array | null;
   let ok: boolean;
   try {
@@ -142,23 +177,6 @@ export const handleReceiveMessage = async (
   } catch (error) {
     console.error("Could not durably decrypt message", error);
     return dropped();
-  }
-
-  // Anti-DoS backstop: a normally closed complete message is retired after its
-  // queue drains, but a peer could pin keys with never-completing messages.
-  // Bound the per-edge cache, evicting oldest first (Map insertion order).
-  const MESSAGE_KEY_CACHE_MAX = 256;
-  if (cache.size > MESSAGE_KEY_CACHE_MAX) {
-    for (const k of cache.keys()) {
-      if (cache.size <= MESSAGE_KEY_CACHE_MAX) break;
-      cache.get(k)?.fill(0);
-      cache.delete(k);
-      if (epc.messageKeyByMerkleRoot) {
-        for (const [root, mappedKey] of epc.messageKeyByMerkleRoot) {
-          if (mappedKey === k) epc.messageKeyByMerkleRoot.delete(root);
-        }
-      }
-    }
   }
 
   // 2) A drop (AEAD auth OR Merkle proof failed inside the C call, or a stale-chain

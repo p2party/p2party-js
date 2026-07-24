@@ -57,6 +57,7 @@ import type {
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -69,12 +70,16 @@ import type { State } from "../store";
 
 const sendChunks = async (
   channel: IRTCDataChannel,
-  // protocol-v3: the message key + header derived ONCE for the whole message by
-  // the caller (`ratchetEncrypt`). Every chunk of the message — across the initial
-  // pass AND every selective-retransmit round — is sealed under this same key with
-  // a FRESH random nonce (streaming-safe; no per-message frame cache needed).
+  // v4: the CLASSICAL message key + header derived ONCE for the whole message
+  // by the caller (`ratchetEncryptDurably`). Every chunk of the message —
+  // across the initial pass AND every selective-retransmit round — is sealed
+  // under this same key with a FRESH random nonce (streaming-safe; no
+  // per-message frame cache needed). `pqContext` is the caller-owned copy of
+  // the PQ message context captured with the step; sealChunk combines it with
+  // an owned per-chunk copy of the classical key.
   messageKey: Uint8Array,
   header: RatchetHeader,
+  pqContext: PqMessageKeyContext | null,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
@@ -221,7 +226,14 @@ const sendChunks = async (
 
     let message: Uint8Array;
     try {
-      message = sealChunk(messageKey, header, chunk, merkleRoot, encryptionModule);
+      message = sealChunk(
+        messageKey,
+        header,
+        chunk,
+        merkleRoot,
+        encryptionModule,
+        pqContext ?? undefined,
+      );
     } catch (error) {
       throw new Error("Could not seal outbound message chunk", {
         cause: error,
@@ -318,6 +330,12 @@ interface TransferCipher {
   epc: IRTCPeerConnection;
   messageKey: Uint8Array;
   header: RatchetHeader;
+  /**
+   * OWNED copy of the PQ message context captured in the same edge
+   * transaction as the ratchet step (v4). Null only on runtime-free
+   * bootstrap/test edges. Wiped with the message key.
+   */
+  pqContext?: PqMessageKeyContext | null;
 }
 
 /**
@@ -351,7 +369,35 @@ type DurableRatchetStep = (
   epc: IRTCPeerConnection,
   roomId: string,
   module: LibCrypto,
-) => Promise<{ messageKey: Uint8Array; header: RatchetHeader }>;
+) => Promise<{
+  messageKey: Uint8Array;
+  header: RatchetHeader;
+  pqContext: PqMessageKeyContext | null;
+}>;
+
+// v4: the sparse-PQ orchestrator blocks application sends during a healing
+// exchange. Until the live orchestrator lands, poll the runtime's traffic
+// gate with a bound comfortably above the exchange's worst-case retry window
+// (8 attempts × 5 s).
+const PQ_ADMISSION_POLL_MS = 25;
+const PQ_ADMISSION_TIMEOUT_MS = 60_000;
+
+const waitForPqTrafficAdmission = async (
+  epc: IRTCPeerConnection,
+  signal?: AbortSignal,
+): Promise<void> => {
+  const pq = epc.pqHealingState;
+  if (!pq) return; // runtime-free bootstrap/test edge: classical epoch zero
+  const deadline = Date.now() + PQ_ADMISSION_TIMEOUT_MS;
+  while (pq.trafficBlocked) {
+    throwIfTransferAborted(signal);
+    if (Date.now() > deadline)
+      throw new Error(
+        "v4 send: sparse-PQ healing did not settle before the send timeout",
+      );
+    await new Promise((resolve) => setTimeout(resolve, PQ_ADMISSION_POLL_MS));
+  }
+};
 
 /**
  * Bind an in-flight message to the active cryptographic transport.
@@ -387,13 +433,16 @@ export const bindTransferCipherToConnection = async (
   const stepped = await ratchetStep(nextEpc, roomId, module);
   if (signal?.aborted) {
     stepped.messageKey.fill(0);
+    stepped.pqContext?.rootKey.fill(0);
     throwIfTransferAborted(signal);
   }
   transfer.messageKey.fill(0);
+  transfer.pqContext?.rootKey.fill(0);
   return {
     epc: nextEpc,
     messageKey: stepped.messageKey,
     header: stepped.header,
+    pqContext: stepped.pqContext,
   };
 };
 
@@ -649,12 +698,18 @@ const sendWithReconcile = async (
   if (!epc.ratchetState)
     throw new Error("v3 send: no ratchet state for peer");
 
+  // v4: never step the ratchet into a healing exchange — wait for the sparse-PQ
+  // traffic gate before deriving the message key/context.
+  await waitForPqTrafficAdmission(epc, signal);
+
   // Stage one ratchet step for the whole message, persist its successor, then
   // adopt it in memory. No frame is built or sent until durability succeeds.
   // The per-edge transaction lock also prevents concurrent sends from deriving
-  // the same message key or persisting snapshots out of order.
+  // the same message key or persisting snapshots out of order, and captures
+  // the PQ message context atomically with the step.
   let messageKey: Uint8Array;
   let header: RatchetHeader;
+  let pqContext: PqMessageKeyContext | null;
   try {
     const stepped = await ratchetEncryptDurably(
       epc,
@@ -663,10 +718,12 @@ const sendWithReconcile = async (
     );
     if (signal?.aborted) {
       stepped.messageKey.fill(0);
+      stepped.pqContext?.rootKey.fill(0);
       throwIfTransferAborted(signal);
     }
     messageKey = stepped.messageKey;
     header = stepped.header;
+    pqContext = stepped.pqContext;
   } catch (error) {
     throw new Error("v3 send: durable ratchet advance failed", {
       cause: error,
@@ -698,6 +755,7 @@ const sendWithReconcile = async (
       currentChannel,
       messageKey,
       header,
+      pqContext,
       chunksLen,
       chunkHashes,
       merkleRoot,
@@ -773,6 +831,7 @@ const sendWithReconcile = async (
         currentEpc = rebound.epc;
         messageKey = rebound.messageKey;
         header = rebound.header;
+        pqContext = rebound.pqContext ?? null;
         currentChannel = resumed.channel;
         retries = 0; // fresh retransmit budget for the resumed transfer
 
@@ -789,12 +848,14 @@ const sendWithReconcile = async (
       }
 
       // Reconcile: resend only the reals the receiver hasn't acked yet. Same
-      // message key + header (the ratchet is NOT re-stepped); a fresh nonce per
-      // re-seal keeps it safe and the receiver's cached key still opens it.
+      // message key + header + PQ context (the ratchet is NOT re-stepped); a
+      // fresh nonce per re-seal keeps it safe and the receiver's cached key
+      // still opens it.
       await sendChunks(
         currentChannel,
         messageKey,
         header,
+        pqContext,
         chunksLen,
         chunkHashes,
         merkleRoot,
@@ -818,9 +879,11 @@ const sendWithReconcile = async (
   try {
     await runWithTerminalChannelClose(() => currentChannel, runTransfer);
   } finally {
-    // The message key is dead once every retransmit round for this message is
-    // done (or given up) — wipe it. The ratchet has already advanced past it.
+    // The message key + owned PQ context copy are dead once every retransmit
+    // round for this message is done (or given up) — wipe them. The ratchet
+    // has already advanced past the key.
     messageKey.fill(0);
+    pqContext?.rootKey.fill(0);
     clearTransfer(roomId, peerId, transferId);
   }
 };

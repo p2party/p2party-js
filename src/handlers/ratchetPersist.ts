@@ -12,6 +12,7 @@ import { parseChunkFrameHeader } from "./chunkFrame";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
+import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetSession } from "../db/types";
 import type { RatchetHeader, RatchetState } from "../cryptography/ratchet";
 import type { DecryptedChunk } from "./messageChunkCrypto";
@@ -141,9 +142,16 @@ export const persistRatchetState = async (
   roomId: string,
   peerPublicKey: string,
   peerId: string,
+  edgeCryptoState: Uint8Array | null = null,
 ): Promise<void> =>
   withEdgePersistenceLock(roomId, peerPublicKey, () =>
-    persistRatchetStateUnlocked(state, roomId, peerPublicKey, peerId),
+    persistRatchetStateUnlocked(
+      state,
+      roomId,
+      peerPublicKey,
+      peerId,
+      edgeCryptoState,
+    ),
   );
 
 export const persistClaimedRatchetState = async (
@@ -266,6 +274,14 @@ interface StagedRatchetMutation<T> {
   value: T;
   /** True only when `candidate` contains a successor that must be durable. */
   advanced: boolean;
+  /**
+   * Serialize the STAGED encrypted edge checkpoint (for example the PQ runtime
+   * with the staged active receive-key map) for this durable write. When
+   * absent, the connection's live `serializeEdgeCryptoState` hook is used.
+   * This is what lets a staged active-key mutation become durable in the same
+   * row/transaction as the ratchet successor, before the RAM cache publishes.
+   */
+  stageEdgeCryptoState?: () => Uint8Array;
   /** Publish non-ratchet side state (for example the message-key cache). */
   commit?: () => void;
   /** Erase staged side state if persistence/adoption cannot complete. */
@@ -299,6 +315,7 @@ const mutateRatchetDurably = async <T>(
     try {
       staged = stage(candidate);
       if (staged.advanced) {
+        const stagedEdgeSerializer = staged.stageEdgeCryptoState;
         if (persist === persistRatchetState) {
           await withEdgePersistenceLock(
             roomId,
@@ -308,7 +325,9 @@ const mutateRatchetDurably = async <T>(
               if (epc.ratchetState !== live)
                 throw new Error("ratchet persistence: live state changed");
               const edgeCryptoState =
-                epc.serializeEdgeCryptoState?.() ?? null;
+                stagedEdgeSerializer?.() ??
+                epc.serializeEdgeCryptoState?.() ??
+                null;
               try {
                 await persistRatchetStateUnlocked(
                   candidate,
@@ -324,12 +343,21 @@ const mutateRatchetDurably = async <T>(
             },
           );
         } else {
-          await persist(
-            candidate,
-            roomId,
-            epc.withPeerPublicKey,
-            epc.withPeerId,
-          );
+          const edgeCryptoState =
+            stagedEdgeSerializer?.() ??
+            epc.serializeEdgeCryptoState?.() ??
+            null;
+          try {
+            await persist(
+              candidate,
+              roomId,
+              epc.withPeerPublicKey,
+              epc.withPeerId,
+              edgeCryptoState,
+            );
+          } finally {
+            edgeCryptoState?.fill(0);
+          }
         }
 
         // A connection teardown/handshake replacement must not let an old async
@@ -354,23 +382,48 @@ const mutateRatchetDurably = async <T>(
 
 /**
  * Advance the sending chain exactly once, durably, before its key/header can be
- * used to build a frame. The returned message key remains caller-owned.
+ * used to build a frame. The returned message key remains caller-owned, as is
+ * the returned OWNED copy of the current PQ message context (null only on the
+ * bootstrap/test path with no installed PQ runtime). Capturing the context and
+ * counting the application message happen inside the same edge transaction as
+ * the ratchet step, so a concurrent PQ healing transition cannot interleave.
  */
 export const ratchetEncryptDurably = async (
   epc: IRTCPeerConnection,
   roomId: string,
   module: LibCrypto,
   persist: PersistRatchetState = persistRatchetState,
-): Promise<{ messageKey: Uint8Array; header: RatchetHeader }> =>
+): Promise<{
+  messageKey: Uint8Array;
+  header: RatchetHeader;
+  pqContext: PqMessageKeyContext | null;
+}> =>
   mutateRatchetDurably(
     epc,
     roomId,
     (candidate) => {
       const stepped = ratchetEncrypt(candidate, module);
+      const pq = epc.pqHealingState;
+      let pqContext: PqMessageKeyContext | null = null;
+      if (pq) {
+        const live = pq.currentMessageContext();
+        pqContext = {
+          rootKey: Uint8Array.from(live.rootKey),
+          binding: Uint8Array.from(live.binding),
+          rootSuite: live.rootSuite,
+          epoch: live.epoch,
+        };
+      }
       return {
-        value: stepped,
+        value: { messageKey: stepped.messageKey, header: stepped.header, pqContext },
         advanced: true,
-        rollback: () => stepped.messageKey.fill(0),
+        // One logical DR step == one application message toward the sparse
+        // healing cadence — never one per chunk or retransmit round.
+        commit: () => epc.pqHealingState?.noteApplicationMessage(),
+        rollback: () => {
+          stepped.messageKey.fill(0);
+          pqContext?.rootKey.fill(0);
+        },
       };
     },
     persist,
@@ -395,8 +448,13 @@ export const decryptMessageChunkDurably = async (
     epc,
     roomId,
     (candidate) => {
-      const { header } = parseChunkFrameHeader(frame);
-      const cacheKey = messageCacheKey(header.dhPub, header.N);
+      const pq = epc.pqHealingState;
+      const { header, pqEpoch } = parseChunkFrameHeader(frame);
+      const cacheKey = messageCacheKey(
+        header.dhPub,
+        header.N,
+        pq ? pqEpoch : undefined,
+      );
       const stagedCache = new Map(cache);
       const decrypted = decryptMessageChunk(
         candidate,
@@ -404,6 +462,10 @@ export const decryptMessageChunkDurably = async (
         stagedCache,
         merkleRoot,
         module,
+        pq
+          ? (epoch: bigint): PqMessageKeyContext | null =>
+              pq.resolveMessageContext(epoch)
+          : undefined,
       );
 
       if (!decrypted.stateAdvanced)
@@ -415,11 +477,33 @@ export const decryptMessageChunkDurably = async (
         throw new Error("ratchet persistence: invalid staged receive cache");
       }
 
-      // A logical message spans many independently delivered chunks. Retain an
-      // independently owned copy in the persisted skipped-key map until the
+      if (pq) {
+        // v4: the staged key is ALREADY PQ-combined. It lives exclusively in
+        // the epoch-bound active receive-key collection, persisted inside the
+        // encrypted edge checkpoint in the same row as the ratchet successor.
+        // It must never enter `candidate.skipped` — a restore would either
+        // combine it a second time or misparse it as a classical skipped key.
+        return {
+          value: decrypted,
+          advanced: true,
+          stageEdgeCryptoState: () => pq.serialize(stagedCache),
+          commit: () => {
+            cache.set(cacheKey, stagedMessageKey);
+            // One authenticated DR receive step == one application message
+            // toward the sparse healing cadence.
+            pq.noteApplicationMessage();
+          },
+          rollback: () => {
+            stagedMessageKey.fill(0);
+            decrypted.decrypted?.fill(0);
+          },
+        };
+      }
+
+      // Bootstrap/low-level path (no PQ runtime, classical keys only): retain
+      // an independently owned copy in the persisted skipped-key map until the
       // authoritative chunk manifest completes. A restored state can therefore
-      // rebuild the RAM cache and decrypt the remaining chunks; the live WebRTC
-      // path must still load getRatchetSession on reconnect to use that ability.
+      // rebuild the RAM cache and decrypt the remaining chunks.
       const durableMessageKey = Uint8Array.from(stagedMessageKey);
       candidate.skipped.set(cacheKey, durableMessageKey);
       while (candidate.skipped.size > MAX_SKIP_SESSION) {
@@ -460,6 +544,25 @@ export const forgetReceiveMessageKeyDurably = async (
     epc,
     roomId,
     (candidate) => {
+      const pq = epc.pqHealingState;
+      if (pq) {
+        // v4: retire the combined key from the STAGED active-key collection so
+        // its removal is durable in the encrypted edge checkpoint before the
+        // RAM copy is wiped. The classical skipped map never held it.
+        if (!cache.has(cacheKey)) return { value: undefined, advanced: false };
+        const stagedCache = new Map(cache);
+        stagedCache.delete(cacheKey);
+        return {
+          value: undefined,
+          advanced: true,
+          stageEdgeCryptoState: () => pq.serialize(stagedCache),
+          commit: () => {
+            cache.get(cacheKey)?.fill(0);
+            cache.delete(cacheKey);
+          },
+        };
+      }
+
       const durableMessageKey = candidate.skipped.get(cacheKey);
       if (durableMessageKey) {
         candidate.skipped.delete(cacheKey);

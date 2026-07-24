@@ -2,6 +2,7 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import { handleChallenge } from "./handleChallenge";
 import { establishSignaledConnection } from "./connectionSignal";
+import { mergePeerRosterDelta } from "./peerRosterDelta";
 
 import webrtcApi from "../api/webrtc";
 import signalingServerApi from "../api/signalingServerApi";
@@ -9,7 +10,6 @@ import signalingServerApi from "../api/signalingServerApi";
 import {
   setRoom,
   setPeer,
-  deletePeer,
   setChannel,
   defaultRTCConfig,
 } from "../reducers/roomSlice";
@@ -216,17 +216,15 @@ const handleWebSocketMessage = async (
         const roomIndex = rooms.findIndex((r) => r.id === message.roomId);
 
         if (roomIndex > -1) {
-          const serverPeerIds = new Set(
-            message.peers
-              .filter((peer) => isUUID(peer.id))
-              .map((peer) => peer.id),
+          // The server emits one accepted peer at a time. These are deltas,
+          // never authoritative snapshots: an absent member is not a leave.
+          const mergedPeers = mergePeerRosterDelta(
+            rooms[roomIndex].peers,
+            message.peers,
+            keyPair,
           );
-          for (const peer of rooms[roomIndex].peers) {
-            if (!serverPeerIds.has(peer.peerId))
-              api.dispatch(
-                deletePeer({ roomId: message.roomId, peerId: peer.peerId }),
-              );
-          }
+          for (const peer of mergedPeers)
+            api.dispatch(setPeer({ roomId: message.roomId, ...peer }));
 
           const len = message.peers.length;
           if (len === 0) {
@@ -267,13 +265,12 @@ const handleWebSocketMessage = async (
             )
               continue;
 
-            api.dispatch(
-              setPeer({
-                roomId: message.roomId,
-                peerId: message.peers[i].id,
-                peerPublicKey: message.peers[i].publicKey,
-              }),
+            const accepted = mergedPeers.some(
+              (peer) =>
+                peer.peerId === message.peers[i].id &&
+                peer.peerPublicKey === message.peers[i].publicKey,
             );
+            if (!accepted) continue;
 
             const blacklisted = await getDBPeerIsBlacklisted(
               message.peers[i].id,

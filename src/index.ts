@@ -10,7 +10,6 @@ import {
   restoreSession,
 } from "./session";
 import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
-import { generateRandomRoomUrl } from "./cryptography/utils";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 
 import {
@@ -64,6 +63,18 @@ import {
   putRoomPin,
 } from "./roomPinVault";
 import { clearPinAttempts } from "./roomPinAttempts";
+import {
+  decodeRoomCapability,
+  decodeRoomCapabilityBase64Url,
+  decodeRoomCapabilityWords,
+  decodeRoomInviteFragment,
+  encodeRoomCapabilityBase64Url,
+  encodeRoomCapabilityWords,
+  encodeRoomInviteFragment,
+  generateRoomCapability,
+  normalizeRoomCapability,
+  ROOM_INVITE_WORDLIST_ID,
+} from "./roomInvite";
 
 import signalingServerApi from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
@@ -143,7 +154,7 @@ const connect = async (
   },
   options: ConnectRoomOptions = {},
 ) => {
-  if (roomUrl.length !== 64) throw new Error("Invalid room url length");
+  roomUrl = normalizeRoomCapability(roomUrl);
   if (options === null || typeof options !== "object" || Array.isArray(options))
     throw new Error("Invalid room connection options");
 
@@ -242,7 +253,7 @@ const connectToSignalingServer = async (
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
-  if (roomUrl.length !== 64) throw new Error("Invalid room url length");
+  roomUrl = normalizeRoomCapability(roomUrl);
 
   const { signalingServer, rooms, commonState } = store.getState();
 
@@ -309,43 +320,48 @@ const onlyAllowConnectionsFromAddressBook = async (
   roomUrl: string,
   onlyAllow: boolean,
 ) => {
-  if (roomUrl.length === 64) {
-    const { rooms } = store.getState();
-    const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  let canonicalRoomUrl: string;
+  try {
+    canonicalRoomUrl = normalizeRoomCapability(roomUrl);
+  } catch {
+    return;
+  }
+  roomUrl = canonicalRoomUrl;
+  const { rooms } = store.getState();
+  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
 
-    if (
-      roomIndex > -1 &&
-      !rooms[roomIndex].onlyConnectWithKnownAddresses &&
-      onlyAllow &&
-      rooms[roomIndex].peers.length > 0
-    ) {
-      const peersLen = rooms[roomIndex].peers.length;
-      for (let i = 0; i < peersLen; i++) {
-        const address = await getDBAddressBookEntry(
-          rooms[roomIndex].peers[i].peerId,
-          rooms[roomIndex].peers[i].peerPublicKey,
+  if (
+    roomIndex > -1 &&
+    !rooms[roomIndex].onlyConnectWithKnownAddresses &&
+    onlyAllow &&
+    rooms[roomIndex].peers.length > 0
+  ) {
+    const peersLen = rooms[roomIndex].peers.length;
+    for (let i = 0; i < peersLen; i++) {
+      const address = await getDBAddressBookEntry(
+        rooms[roomIndex].peers[i].peerId,
+        rooms[roomIndex].peers[i].peerPublicKey,
+      );
+
+      if (!address) {
+        await dispatch(
+          webrtcApi.endpoints.disconnectFromPeer.initiate({
+            peerId: rooms[roomIndex].peers[i].peerId,
+            roomId: rooms[roomIndex].id,
+            alsoDeleteData: false,
+          }),
         );
-
-        if (!address) {
-          await dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({
-              peerId: rooms[roomIndex].peers[i].peerId,
-              roomId: rooms[roomIndex].id,
-              alsoDeleteData: false,
-            }),
-          );
-        }
       }
     }
-
-    dispatch(
-      setRoom({
-        url: roomIndex > -1 ? rooms[roomIndex].url : roomUrl,
-        id: roomIndex > -1 ? rooms[roomIndex].id : "",
-        onlyConnectWithKnownPeers: onlyAllow,
-      }),
-    );
   }
+
+  dispatch(
+    setRoom({
+      url: roomIndex > -1 ? rooms[roomIndex].url : roomUrl,
+      id: roomIndex > -1 ? rooms[roomIndex].id : "",
+      onlyConnectWithKnownPeers: onlyAllow,
+    }),
+  );
 };
 
 const deletePeerFromAddressBook = async (
@@ -893,6 +909,7 @@ const purgeIdentity = async () => {
 };
 
 const purgeRoom = async (roomUrl: string) => {
+  roomUrl = normalizeRoomCapability(roomUrl);
   deleteRoomPin(roomUrl);
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
@@ -926,17 +943,10 @@ const purge = async () => {
 };
 
 const newRoomUrl = async () => {
-  const randomString = await generateRandomRoomUrl(256);
-  const random = new TextEncoder().encode(randomString);
-  const firstHashArray = await window.crypto.subtle.digest("SHA-512", random);
-  const secondHashArray = await window.crypto.subtle.digest(
-    "SHA-256",
-    firstHashArray,
-  );
-  const hash = new Uint8Array(secondHashArray);
-
-  return uint8ArrayToHex(hash);
+  return encodeRoomCapabilityBase64Url(generateRoomCapability());
 };
+
+const newRoomInvite = () => encodeRoomInviteFragment(generateRoomCapability());
 
 export const p2party = {
   store,
@@ -975,6 +985,17 @@ export const p2party = {
   purgeRoom,
   purge,
   generateRandomRoomUrl: newRoomUrl,
+  generateRoomInvite: newRoomInvite,
+  generateRoomCapability,
+  encodeRoomCapabilityBase64Url,
+  decodeRoomCapabilityBase64Url,
+  decodeRoomCapability,
+  normalizeRoomCapability,
+  encodeRoomInviteFragment,
+  decodeRoomInviteFragment,
+  encodeRoomCapabilityWords,
+  decodeRoomCapabilityWords,
+  ROOM_INVITE_WORDLIST_ID,
   sign,
   verify,
   createSession,

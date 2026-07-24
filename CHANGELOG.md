@@ -4,6 +4,38 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.0] — 2026-07-23
+
+Protocol v3 is an intentional wire break. Versionless, legacy, and downgraded
+peers fail closed.
+
+### Added
+
+- Mandatory X25519 interactive 3DH plus ML-KEM-768 bootstrap for every peer
+  edge; PIN rooms additionally authenticate with CPace.
+- Per-peer Double Ratchet message encryption, wrapped persistent ratchet state,
+  DTLS fingerprint binding, exact tagged receipts, and room/peer-scoped
+  transport ownership.
+- Store-free `p2party/session` exports: `createSession`, `restoreSession`, and
+  `generateSessionIdentity`, usable outside browsers.
+- Per-message transfer handles with cancellation and per-peer mesh delivery
+  outcomes.
+
+### Changed
+
+- Outbound transfers now have independent random identities, including
+  concurrent sends of identical content.
+- The WASM release uses an exact stable libsodium source commit through its
+  configured build, public APIs, checked initialization, no LTO, and a packaged
+  provenance manifest.
+- The SDK is now licensed under Apache-2.0.
+
+### Not included
+
+Scheduled timing cover, sparse post-quantum ratchet healing, server-blind
+rendezvous, and the private BitTorrent extension remain research directions,
+not shipped properties.
+
 ## [0.9.2] — 2026-07-21
 
 Receive-side storage for files is re-architected so a received file's bytes live
@@ -135,5 +167,7 @@ Protocol-v2 security hardening and the reliable-transfer foundation.
   count uniformity; and per-message transfer telemetry (total/real chunk counts,
   retransmits).
 
+[0.10.0]: https://github.com/p2party/p2party-js/releases/tag/v0.10.0
+[0.9.2]: https://github.com/p2party/p2party-js/releases/tag/v0.9.2
 [0.9.1]: https://github.com/p2party/p2party-js/releases/tag/v0.9.1
 [0.9.0]: https://github.com/p2party/p2party-js/releases/tag/v0.9.0

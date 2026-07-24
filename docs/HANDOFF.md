@@ -1566,3 +1566,63 @@ Commit: `d5d2ad9`.
 Production sparse PQ healing (continuation plan steps 1–5) is COMPLETE for
 immediate mode. Remaining: cover codec (6), CoverRuntime (7), scheduled
 transfer refactor (8), session API v4 (9), cleanup/verification (10–11).
+
+### Steps 6–9 done — cover cores, scheduled substrate, and the v4 session API
+
+Commits: `2b68911` (cover-cell codec), `a02f579` (CoverRuntime),
+`257e93f` (scheduled transfer substrate), `f1a3a92` (session API v4).
+
+Step 6 — `src/cryptography/coverCell.ts`: one exact 65,490-byte
+`FRAME_TYPE_COVER` cell (dummy / CANCEL / receipt) keyed from the current
+epoch's PQ message root, domain-separated by suite/binding/direction/epoch;
+subtype inside the ciphertext; CANCEL/receipt bound to the transfer root.
+
+Step 7 — `src/handlers/coverRuntime.ts`: wraps CoverScheduler with the live
+transport surface — absolute phase from the policy hash, exact lanes per
+boundary, constant-shape labels, 65,490-byte enforcement, bufferedAmount
+backpressure, boundary-only close, no WS fallback, sliding-window inbound
+replay guard tolerating cross-lane reorder, browser
+visibility/pagehide/freeze/offline suspend + future-cycle resume + surfaced
+status.
+
+Step 8 — `src/handlers/coverTransfer.ts`: `buildScheduledSendJob` (one
+staged chunk per slot, F×D admission, un-acked-once then dummy tail),
+per-edge scheduled receipt queue drained by a re-arming control job,
+`cancelScheduledTransfer` routing to the scheduler; `handleOpenChannel`
+routes inbound `FRAME_TYPE_COVER` to the runtime and a scheduled-mode
+channel close is NEVER a remote cancel; disconnect teardown destroys the
+CoverRuntime and wipes queued receipts.
+**The `connect()` guard against `coverMode: "scheduled"` is intentionally
+KEPT** — the live lane-channel wiring (CoverRuntime creating real
+RTCDataChannels, feeding message chunks through the scheduler instead of the
+immediate `sendWithReconcile`) and its browser E2E are NOT done; removing it
+early would falsely advertise cover.
+
+Step 9 — `src/session.ts`: the store-free Session owns a
+`SparsePqHealingState`; encrypt/decrypt use the PQ epoch and block during
+healing; snapshot format bumped to 4 (rejects v3) with the appended P2EDGE4
+checkpoint; a store-free `prepareHealing`/`acceptControlFrame`/
+`pendingControl` control API with an explicit persist-before-send contract;
+the standalone example drives a healing exchange to epoch 1.
+
+Gate after step 9: `bun test` 414 pass / 0 fail; `npm run typecheck` clean;
+`bun run examples/standalone-e2ee.ts` OK (reaches PQ epoch 1); both master
+stashes intact.
+
+### Honest claim boundary after steps 1–9
+
+- COMPLETE and tested: production sparse-PQ healing in immediate mode
+  (handshake install → PQ-combined messages → live WebRTC orchestrator),
+  the v4 wire/WASM, the scheduled-cover CORES (scheduler, authenticated
+  cover-cell codec, CoverRuntime adapter), the scheduled-transfer SUBSTRATE
+  (send job, receipts, cancel, inbound routing, close semantics), and the
+  v4 public session API + snapshot with store-free healing.
+- NOT yet wired/claimed: live scheduled cover lanes end to end
+  (CoverRuntime installation on scheduled edges + real RTCDataChannel lane
+  wiring + scheduled send replacing the immediate path); `connect()` still
+  rejects scheduled cover; no protocol-v4 tarball, browser E2E result,
+  deployment, or paper result.
+- Remaining continuation-plan work: finish the live scheduled lane wiring
+  and its focused tests, THEN remove the `connect()` guard (step 8 tail);
+  protocol-wide cleanup + full browser E2E (step 10); version/package/
+  frontend + merge (step 11).

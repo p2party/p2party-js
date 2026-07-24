@@ -1834,3 +1834,56 @@ schedule.)
 - REMAINING (not v4-blocking): full-app-stack scheduled E2E through the
   Redux/DB frontend + Step 11 packaging (tarball, frontend cover UI, merge,
   deploy — needs maintainer credentials); private rendezvous (L2); P2BT.
+
+## SESSION 2026-07-25 — FULL APP-STACK BROWSER E2E (Redux + IndexedDB + WebRTC)
+
+Closed the honest last-mile gap: a real headless-Chromium E2E driving the
+ACTUAL `p2party` public API (Redux store + IndexedDB DB worker + WebRTC),
+not the store-free primitives. `master` still `fb57b1e`; stashes intact; no
+tracked source changed (harness lives in `scratchpad/appstack/`).
+
+### Harness (scratchpad, not committed)
+
+- `relay.ts` — a minimal Bun WebSocket signaling relay implementing just
+  enough of the protocol (publickey query → peerId challenge → accept →
+  roomId → peers roster → route description/candidate/connection by
+  toPeerId). Replaces the Postgres-backed server so no DB is touched.
+- `app-entry.ts` — bundles the real `src/index.ts` `p2party` API; wires the
+  DB worker via `process.env.INDEXEDDB_WORKER_JS` (from `npm run build:worker`
+  → `lib/db.worker.js`, injected by `worker-inject.js`); serves the exact dev
+  WASM whose SRI matches the pin in `wasmLoader.ts`.
+- `app-driver.mjs` — two browser pages each run the full stack: `connect()` →
+  signaling verify + mutual peer discovery → `sendMessage()` (which internally
+  waits for the PACE + Double-Ratchet handshake) → `readMessage()` on the peer,
+  asserting byte-exact.
+
+### Results — ALL THREE ROOM MODES PASS (n=2 edge, full stack)
+
+```text
+immediate room  (Redux/DB/WebRTC): delivered=1, message BYTE-EXACT (532 chars)
+PIN room        (Redux/DB/WebRTC): delivered=1, message BYTE-EXACT — PIN auth
+                                    (CPace-in-handshake) works end to end
+scheduled-cover (Redux/DB/WebRTC): delivered=1, message BYTE-EXACT through the
+                                    scheduled cover lanes + IndexedDB persistence
+ALL FULL-APP-STACK BROWSER E2E SCENARIOS PASSED (immediate, PIN, scheduled).
+```
+
+This exercises the ENTIRE app path in a real browser: `connect` → Redux
+store → signaling → `connectWithPeer` → real RTCPeerConnection →
+`handleOpenChannel`/`runHandshake` (PACE + Double Ratchet, PIN CPace when
+selected) → `handleSendMessage` (immediate `sendWithReconcile` OR scheduled
+`sendScheduled` → `coverEdge`) → IndexedDB DB worker persistence →
+`handleReceiveMessage` → `readMessage`. So the Redux/DB app-stack glue that
+was previously only Node-unit-tested is now real-browser verified for all
+three modes.
+
+### Verification status is now comprehensive
+
+- Immediate sparse PQ healing: real-WebRTC mesh n=2/3/4 (session API) + full
+  app-stack n=2.
+- Scheduled cover: real-WebRTC lane transport (CoverRuntime) + full app-stack
+  n=2 delivery.
+- PIN rooms: full app-stack n=2 (answers a maintainer question — they work).
+- Still open: n>2 through the FULL app stack (only the session/CoverRuntime
+  layers were tested at n=3/4; app-stack was n=2), packet-trace capture, and
+  Step 11 packaging/frontend/deploy.

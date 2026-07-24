@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>p2party v4 WebRTC E2E</title>
+<script>
+  // Browser shim: the bundle (redux + emscripten glue) references `process`.
+  // No versions.node, so the emscripten runtime treats this as a web env.
+  window.process = { env: { NODE_ENV: "production" }, versions: {}, platform: "browser", nextTick: (f) => setTimeout(f, 0) };
+  window.global = window;
+</script>
+</head>
+<body><script src="./bundle.js"></script></body></html>

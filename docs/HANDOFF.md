@@ -1887,3 +1887,90 @@ three modes.
 - Still open: n>2 through the FULL app stack (only the session/CoverRuntime
   layers were tested at n=3/4; app-stack was n=2), packet-trace capture, and
   Step 11 packaging/frontend/deploy.
+
+## ═══════════ RESUME HERE — 2026-07-25 (read this first) ═══════════
+
+Protocol **v4 is implemented, verified over real WebRTC, versioned (0.13.0),
+and committed** on branch `feat/pace-ratchet-protocol-v3`. `master` is still
+`fb57b1e` (untouched); both maintainer stashes intact. Never
+stash/reset/checkout/clean/rebase; never touch Postgres :5432 or
+`p2party.com/src/components/MessageInput/TextArea.tsx` (untracked WIP).
+
+### Repo state
+
+- `p2party-js`: branch `feat/pace-ratchet-protocol-v3`, HEAD is the docs
+  commit for this section. Package **0.13.0**. Full gate green
+  (`npm run check`: lint, format, typecheck, tests, standalone example).
+  `master` = `fb57b1e`. Stashes: `56e87ba`, `a407fad` (both intact).
+- `p2party.com`: `master` = the frontend-deps commit atop `1279bd3`. Still
+  vendors `p2party@0.12.0` (v3). Only untracked file is the protected
+  `TextArea.tsx`.
+
+### What is DONE + verified this arc (commits `9a0f943`..HEAD)
+
+1. **Sparse PQ healing (immediate)** — runtime, atomic handshake install,
+   PQ-epoch on every DR message, live WebRTC orchestrator. Real-WebRTC mesh
+   verified at **n=2/3/4** and in the full app stack (n=2).
+2. **Scheduled timing cover** — cover-cell codec, `CoverRuntime`, `coverEdge`
+   install, `sendScheduled`, per-type receive routing; `connect()` guard
+   REMOVED. Real-WebRTC lanes + real chunk byte-exact verified; full app stack
+   (n=2) delivers byte-exact. Found+fixed a prod bug: `CoverRuntime`
+   `maxTimerDriftMs` was 0 → real-timer jitter suspended cover; now ~one slot.
+3. **Public session API v4** — `pqEpoch`/`healingInProgress`, PQ-combined
+   encrypt/decrypt, snapshot format 4, store-free healing control API.
+4. **0.13.0** version bump + CHANGELOG; deps refreshed (TS held at 5.9, Vite 8
+   / react-router downgrade declined with reasons — see the deps commit).
+5. **Full app-stack browser E2E** (Redux + IndexedDB DB worker + WebRTC) via a
+   Bun signaling relay: immediate, **PIN**, scheduled all byte-exact.
+   Harnesses preserved in `docs/e2e/` (scratchpad was ephemeral) — see
+   `docs/e2e/README.md` to re-run.
+
+### NOT done / open (pick up here)
+
+**A. Ship v4 to the frontend (Step 11) — the big remaining piece.**
+   - `npm run predist && build:package && build:worker && npm pack` in
+     p2party-js → a `p2party-0.13.0.tgz`. WARNING: `predist` overwrites the
+     dev WASM the tests need; re-run `npm run prebuild` after, or do packaging
+     as its own pass. Then `npm run check` on the restored dev artifact.
+   - Vendor the 0.13.0 tgz into `p2party.com` (replacing 0.12.0), update its
+     self-hosted WASM + SRI, and do the frontend v4 wiring below.
+   - Fast-forward `master` (CAS, no checkout) only after every gate is green.
+     Deploy/CDN/npm publish need the maintainer's credentials + explicit action.
+
+**B. One-line library gap that blocks the v4 cover-status UI (do first, cheap):**
+   `handleOpenChannel.ts` calls `installCoverEdge` WITHOUT an `onStatusChange`
+   hook, and nothing stores the `CoverSchedulerStatus`. Add an `onStatusChange`
+   that dispatches the cover status into the room slice so the frontend can
+   show `starting|active|degraded|suspended` and honor "never claim cover
+   during a browser gap." (`coverEdge.ts` already accepts `onStatusChange`.)
+
+**C. Frontend UI/UX (full audit in `docs/e2e/frontend-audit-report.md`, 49
+   findings). Verdict: NOT yet intuitive — nearly every failure mode is
+   invisible.** Top real bugs (all in `p2party.com`):
+   1. Handshake/PIN failure is a black box (`connect()` resolves at signaling;
+      wrong PIN / throttle / policy-mismatch all → eternal "Waiting for
+      peers…"). Surface per-peer handshake state + throttle countdown.
+   2. **Data-loss bug**: address-book delete is a confirmed silent no-op —
+      `AddressBookAlert.tsx:56` passes `peerId` into the `username` arg slot;
+      `BlacklistAlert.tsx` shares a splice-in-place bug. Clean quick win.
+   3. File Open/Download silently no-ops on failure (`MessageDropdown.tsx:74`).
+   4. The flagship privacy telemetry (`chunksReceivedReal/Total`, `retransmits`
+      from `readMessage`) is exposed by the library but shown NOWHERE.
+   5. Enter-to-send violated; "hold to record" is tap-to-toggle (hot-mic);
+      drag-drop overlay coded but never rendered.
+   - v3 wiring gaps: `resolveRoomInvite` drops policy `specified`; `isVerified`
+     never consumed; no mnemonic backup/restore UI.
+   - v4 UI (greenfield, gated on the 0.13.0 tgz): `v4.ts` protocol module,
+     cover-mode selector + status pill (needs B first), invites carrying the
+     full policy (else scheduled joins hard-fail the handshake), `session-lab`
+     showing epoch/healing. PIN needs NO new UI.
+
+**D. Broader roadmap (decided, unbuilt):** L2 blind rendezvous (D5), P2BT (D6);
+   deferred docs/blog/paper capstone. See `protocol-evolution-decision-log.md`.
+
+### Honest claim boundary
+
+Real-WebRTC verified: immediate PQ healing (n=2/3/4), scheduled cover lanes +
+real chunk, full app stack (immediate/PIN/scheduled, n=2). NOT verified:
+full-app-stack at n>2, packet-trace indistinguishability (no SCTP/DTLS
+capture), production deploy. Do not claim those.

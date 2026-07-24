@@ -27,6 +27,10 @@ import {
   isRatchetGateOpen,
   rejectRatchetGate,
 } from "./ratchetGate";
+import {
+  handleInboundPqControlFrame,
+  installPqHealingOrchestrator,
+} from "./pqHealingOrchestrator";
 
 import webrtcApi from "../api/webrtc";
 
@@ -53,6 +57,7 @@ import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import {
   FRAME_TYPE_CHUNK,
   FRAME_TYPE_HANDSHAKE,
+  FRAME_TYPE_PQ_CONTROL,
   FRAME_TYPE_RECEIPT,
   WIRE_CHUNK_FRAME_LEN,
 } from "../utils/constants";
@@ -555,6 +560,25 @@ export const handleOpenChannel = async (
       return;
     }
 
+    // protocol-v4 sparse-PQ control cells ride the authenticated persistent
+    // `main` channel in immediate mode (a scheduled room substitutes them into
+    // cover lanes instead). The full 65,490-byte cell — including its type
+    // byte — is the AEAD-authenticated unit, so the orchestrator receives the
+    // unstripped frame. Routing requires the open ratchet gate: control cells
+    // are meaningless before the edge is authenticated.
+    if (
+      extChannel.label === "main" &&
+      classified.type === FRAME_TYPE_PQ_CONTROL &&
+      data.length === WIRE_CHUNK_FRAME_LEN
+    ) {
+      if (!isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease)) {
+        console.error("Rejected PQ control cell before peer authentication");
+        return;
+      }
+      void handleInboundPqControlFrame(epc, roomId, data);
+      return;
+    }
+
     // protocol-v3 handshake frames ride the persistent `main` channel only and
     // carry a leading 1-byte FRAME_TYPE_HANDSHAKE tag. Per-message channels
     // never carry these.
@@ -685,6 +709,24 @@ export const handleOpenChannel = async (
             handshakeLease,
             ratchetGateLease,
           );
+
+          // The handshake installed epc.pqHealingState; give it its live
+          // WebRTC owner. In immediate mode control cells use this main
+          // channel; retry exhaustion or a forked control slot fails the
+          // authenticated edge (close → the normal reconnect machinery runs a
+          // fresh hybrid handshake — never an epoch/suite fallback).
+          installPqHealingOrchestrator(epc, roomId, {
+            sendControlFrame: (frame) => {
+              if (extChannel.readyState !== "open") return false;
+              extChannel.send(frame.buffer as ArrayBuffer);
+              return true;
+            },
+            failEdge: (reason) => {
+              console.error(reason);
+              if (extChannel.readyState !== "closed") extChannel.close();
+              if (epc.connectionState !== "closed") epc.close();
+            },
+          });
           if (pinRoom)
             await clearPinAttempts(roomId, epc.withPeerPublicKey).catch(
               (clearError) => {

@@ -5,6 +5,7 @@ import {
 } from "../../reducers/roomSlice";
 import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
+import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
 import { rejectRatchetGate } from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
@@ -68,7 +69,9 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     // Destroy the sparse-PQ runtime with the ratchet: its machine, message
     // root, sealed outbox, replay/ACK caches, and active combined receive keys
     // are all wiped by destroy(). The edge serializer hook dies with it so a
-    // late persistence call cannot serialize a destroyed runtime.
+    // late persistence call cannot serialize a destroyed runtime. The
+    // orchestrator's timers and admission gate die first.
+    destroyPqHealingOrchestrator(connection);
     if (connection.pqHealingState) {
       connection.pqHealingState.destroy();
       connection.pqHealingState = undefined;

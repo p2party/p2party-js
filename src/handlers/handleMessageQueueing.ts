@@ -45,6 +45,34 @@ const k32 = (u8: Uint8Array) => {
 
 const processingLocks = new Map<string, Promise<void>>();
 const queuedBytesByEdge = new Map<string, number>();
+
+/**
+ * True while this room/peer edge still has queued inbound chunk frames or an
+ * in-flight frame handler. The sparse-PQ orchestrator drains to quiescence
+ * before an epoch transition so old-epoch first-chunks are not orphaned.
+ */
+export const hasQueuedEdgeReceiveWork = (
+  roomId: string,
+  peerId: string,
+): boolean => {
+  const key = edgeQueueKey(roomId, peerId);
+  return (
+    (queuedBytesByEdge.get(key) ?? 0) > 0 || processingLocks.has(key)
+  );
+};
+
+export const waitForEdgeReceiveQuiescence = async (
+  roomId: string,
+  peerId: string,
+): Promise<void> => {
+  const key = edgeQueueKey(roomId, peerId);
+  for (;;) {
+    const inFlight = processingLocks.get(key);
+    if (!inFlight && (queuedBytesByEdge.get(key) ?? 0) === 0) return;
+    if (inFlight) await inFlight.catch(() => undefined);
+    else await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 const queuedBytesByChannel = new WeakMap<Uint8Array[], number>();
 const queuedReceiptsByEdge = new Map<string, number>();
 

@@ -4,6 +4,27 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.0] — 2026-07-24
+
+### Added
+
+- Authenticated room-wide ML-KEM-512, ML-KEM-768 (default), and ML-KEM-1024
+  bootstrap profiles. The selected suite is fixed before the handshake and
+  bound into framing, channel input, root KDF domains, confirmation proofs,
+  ratchet persistence, and standalone snapshots; there is no negotiation,
+  inference from length, downgrade, or classical fallback.
+- A third chained handshake confirmation. The initiator proof commits to the
+  responder proof, the responder FINISH commits to both, and the initiator
+  cannot establish until FINISH verifies.
+
+### Security
+
+- Tampering either of the first two key-confirmation proofs now prevents both
+  endpoints from completing. A tampered final FINISH is rejected by the
+  initiator. As with every finite handshake over a lossy transport, dropping a
+  valid last packet can still leave the sender complete while the receiver
+  waits; this is an availability/common-knowledge boundary, not key disclosure.
+
 ## [0.10.0] — 2026-07-23
 
 Protocol v3 is an intentional wire break. Versionless, legacy, and downgraded
@@ -30,11 +51,11 @@ peers fail closed.
   provenance manifest.
 - The SDK is now licensed under Apache-2.0.
 
-### Not included
+### Planned for 0.11.0
 
 Scheduled timing cover, sparse post-quantum ratchet healing, server-blind
-rendezvous, and the private BitTorrent extension remain research directions,
-not shipped properties.
+rendezvous, and the private BitTorrent extension are next-version work, not
+0.10.0 shipped properties.
 
 ## [0.9.2] — 2026-07-21
 

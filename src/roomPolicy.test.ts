@@ -87,7 +87,7 @@ describe("canonical room policy V1", () => {
     const classicalV3 = Uint8Array.from(encoded);
     classicalV3[7] = 0;
     expect(() => decodeRoomPolicyV1(classicalV3)).toThrow(
-      "v3 requires hybrid ML-KEM-768",
+      "v3 requires a hybrid ML-KEM suite",
     );
 
     const noncanonicalImmediate = Uint8Array.from(encoded);
@@ -106,6 +106,24 @@ describe("canonical room policy V1", () => {
         coverDurationEpochs: 1,
       }),
     ).toThrow("scheduled cover cadence is out of range");
+  });
+
+  test("all ML-KEM parameter sets are canonical room-wide policy values", () => {
+    const modes = [
+      ["hybrid-mlkem768", 1],
+      ["hybrid-mlkem512", 2],
+      ["hybrid-mlkem1024", 3],
+    ] as const;
+
+    for (const [pqMode, tag] of modes) {
+      const policy: RoomPolicyV1 = {
+        ...DEFAULT_ROOM_POLICY_V1,
+        pqMode,
+      };
+      const encoded = encodeRoomPolicyV1(policy);
+      expect(encoded[7]).toBe(tag);
+      expect(decodeRoomPolicyV1(encoded)).toEqual(policy);
+    }
   });
 
   test("PIN bytes cannot be silently included in a policy object", () => {

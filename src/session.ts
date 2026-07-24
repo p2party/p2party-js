@@ -38,8 +38,12 @@ import {
   METADATA_LEN,
   PROOF_LEN,
   PROTOCOL_VERSION,
+  RATCHET_ROOT_SUITE_MLKEM512,
+  RATCHET_ROOT_SUITE_MLKEM768,
+  RATCHET_ROOT_SUITE_MLKEM1024,
   WIRE_CHUNK_FRAME_LEN,
 } from "./utils/constants";
+import { rootSuiteToRoomPqMode } from "./roomPolicy";
 import { deserializeMetadata, serializeMetadata } from "./utils/metadata";
 import { MessageType } from "./utils/messageTypes";
 import { AsyncMutex } from "./utils/mutex";
@@ -49,11 +53,15 @@ import type {
   RatchetSessionSecrets,
   RatchetState,
 } from "./cryptography/ratchet";
+import type { RoomPqMode } from "./roomPolicy";
+import type { RatchetRootSuite } from "./utils/constants";
 
 // Format version 3 has a dedicated suite-provenance byte. Suite tag 3
 // invalidates pre-draft-21 CPace roots and names interactive 3DH accurately.
 const SESSION_SNAPSHOT_VERSION = 3;
 const SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3 = 3;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3 = 4;
+const SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3 = 5;
 const SESSION_MAGIC = new Uint8Array([
   0x50, 0x32, 0x50, 0x53, 0x45, 0x53, 0x53, 0x00,
 ]); // "P2PSESS\0"
@@ -114,6 +122,8 @@ export type CreateSessionOptions = {
   /** Externally pinned (or explicitly TOFU-accepted) peer Ed25519 identity. */
   peerIdentityEd25519PublicKey: Uint8Array;
   channel: SessionChannelBinding;
+  /** Exact suite chosen out-of-band for both peers; defaults to ML-KEM-768. */
+  pqMode?: RoomPqMode;
   crypto?: SessionCryptoOptions;
 } & SessionAuth;
 
@@ -127,6 +137,7 @@ export interface EncryptedSessionMessage {
 
 export interface P2PartySession {
   readonly protocolVersion: 3;
+  readonly pqMode: RoomPqMode;
   /** True for either role after a successful handshake; false after destroy. */
   readonly canEncrypt: boolean;
   encrypt(plaintext: Uint8Array): Promise<EncryptedSessionMessage>;
@@ -237,11 +248,7 @@ const validateLocalIdentityCryptographically = async (
   // public key corresponding to the supplied secret.
   const basePoint = new Uint8Array(crypto_scalarmult_curve25519_BYTES);
   basePoint[0] = 9;
-  const derivedPublic = x25519Dh(
-    identity.x25519SecretKey,
-    basePoint,
-    module,
-  );
+  const derivedPublic = x25519Dh(identity.x25519SecretKey, basePoint, module);
   try {
     if (!bytesEqual(derivedPublic, identity.x25519PublicKey))
       throw new Error("identity X25519 public and secret keys do not match");
@@ -488,6 +495,10 @@ class Session implements P2PartySession {
     this.#module = module;
   }
 
+  get pqMode(): RoomPqMode {
+    return rootSuiteToRoomPqMode(this.#state.rootSuite);
+  }
+
   get canEncrypt(): boolean {
     return !this.#destroyed && this.#state.sendingChainKey !== null;
   }
@@ -654,6 +665,26 @@ const writeU64 = (view: DataView, offset: number, value: number): number => {
   return offset + 8;
 };
 
+const snapshotSuiteTag = (suite: RatchetRootSuite): number => {
+  if (suite === RATCHET_ROOT_SUITE_MLKEM768)
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3;
+  if (suite === RATCHET_ROOT_SUITE_MLKEM512)
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3;
+  if (suite === RATCHET_ROOT_SUITE_MLKEM1024)
+    return SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3;
+  throw new Error("snapshot: unsupported root suite");
+};
+
+const snapshotTagRootSuite = (tag: number): RatchetRootSuite => {
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3)
+    return RATCHET_ROOT_SUITE_MLKEM768;
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21_V3)
+    return RATCHET_ROOT_SUITE_MLKEM512;
+  if (tag === SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21_V3)
+    return RATCHET_ROOT_SUITE_MLKEM1024;
+  throw new Error("snapshot: unsupported root suite");
+};
+
 const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
   validateSnapshotState(state);
   const serialized = serializeRatchet(state);
@@ -678,7 +709,7 @@ const encodeSessionSnapshot = (state: RatchetState): Uint8Array => {
     output[offset++] = SESSION_SNAPSHOT_VERSION;
     output[offset++] = PROTOCOL_VERSION;
     output[offset++] = flags;
-    output[offset++] = SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3;
+    output[offset++] = snapshotSuiteTag(serialized.rootSuite);
     offset = writeU64(view, offset, serialized.Ns);
     offset = writeU64(view, offset, serialized.Nr);
     offset = writeU64(view, offset, serialized.PN);
@@ -777,8 +808,7 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
     const flags = take(1)[0];
     if ((flags & ~SNAPSHOT_KNOWN_FLAGS) !== 0)
       throw new Error("snapshot: unknown flags");
-    if (take(1)[0] !== SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21_V3)
-      throw new Error("snapshot: unsupported root suite");
+    const rootSuite = snapshotTagRootSuite(take(1)[0]);
 
     const Ns = readU64();
     const Nr = readU64();
@@ -790,8 +820,7 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
       flags & SNAPSHOT_FLAG_RECEIVING_CHAIN ? takeBuffer(32, true) : null;
     const dhSelfPub = takeBuffer(32);
     const dhSelfSec = takeBuffer(32, true);
-    const dhRemotePub =
-      flags & SNAPSHOT_FLAG_REMOTE_DH ? takeBuffer(32) : null;
+    const dhRemotePub = flags & SNAPSHOT_FLAG_REMOTE_DH ? takeBuffer(32) : null;
     if ((sendingChainKey || receivingChainKey) && dhRemotePub === null)
       throw new Error("snapshot: chain state requires a remote DH key");
     if (offset + 2 > bytes.length)
@@ -833,6 +862,7 @@ const decodeSessionSnapshot = (snapshot: Uint8Array): RatchetState => {
     if (offset !== bytes.length) throw new Error("snapshot: trailing bytes");
 
     const state = deserializeRatchet({
+      rootSuite,
       rootKey,
       sendingChainKey,
       receivingChainKey,
@@ -890,10 +920,20 @@ export const createSession = async (
   const runtimeAuth = options as {
     mode?: unknown;
     pin?: unknown;
+    pqMode?: unknown;
   };
   if (runtimeAuth.mode !== "pin" && runtimeAuth.mode !== "nopin")
     throw new Error("mode must be pin or nopin");
   const mode = runtimeAuth.mode;
+  const pqMode = runtimeAuth.pqMode ?? "hybrid-mlkem768";
+  if (
+    pqMode !== "hybrid-mlkem512" &&
+    pqMode !== "hybrid-mlkem768" &&
+    pqMode !== "hybrid-mlkem1024"
+  )
+    throw new Error(
+      "pqMode must select ML-KEM-512, ML-KEM-768, or ML-KEM-1024",
+    );
   let pin: Uint8Array | null = null;
   if (mode === "pin") {
     requireBytes(runtimeAuth.pin, "pin");
@@ -941,11 +981,13 @@ export const createSession = async (
         : identityEd25519Public,
       fpInitiator: initiator ? localFingerprint : remoteFingerprint,
       fpResponder: initiator ? remoteFingerprint : localFingerprint,
+      pqMode,
     });
     const result = await performHandshakeCore(
       options.transport,
       {
         mode,
+        pqMode,
         pin,
         channelInput,
         amInitiator: initiator,

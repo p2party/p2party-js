@@ -6,8 +6,12 @@ import { x25519Keypair } from "../cryptography/x25519";
 import { newKeyPair } from "../cryptography/ed25519";
 import { crossSignIdentityX25519 } from "../cryptography/identityCrossSig";
 import {
+  ML_KEM_512_CIPHERTEXT_BYTES,
+  ML_KEM_512_PUBLIC_KEY_BYTES,
   ML_KEM_768_CIPHERTEXT_BYTES,
   ML_KEM_768_PUBLIC_KEY_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
 } from "../cryptography/mlkem";
 import {
   ratchetDecrypt,
@@ -66,13 +70,23 @@ beforeAll(async () => {
 const CHANNEL_ID = new TextEncoder().encode("main"); // 4 bytes
 const HS_STEP_HELLO = 0x01;
 const HS_STEP_CONFIRM = 0x02;
+const HS_STEP_FINISH = 0x03;
 const HELLO_CLASSICAL_FIELDS_LEN = 1 + 32 + 32 + 32 + 32 + 64;
 const HELLO_ML_KEM_PUBLIC_KEY_OFF = HELLO_CLASSICAL_FIELDS_LEN;
 const HELLO_ML_KEM_CIPHERTEXT_OFF =
   HELLO_ML_KEM_PUBLIC_KEY_OFF + ML_KEM_768_PUBLIC_KEY_BYTES;
 const HELLO_PAYLOAD_LEN =
   HELLO_ML_KEM_CIPHERTEXT_OFF + ML_KEM_768_CIPHERTEXT_BYTES;
+const HELLO_512_PAYLOAD_LEN =
+  HELLO_CLASSICAL_FIELDS_LEN +
+  ML_KEM_512_PUBLIC_KEY_BYTES +
+  ML_KEM_512_CIPHERTEXT_BYTES;
+const HELLO_1024_PAYLOAD_LEN =
+  HELLO_CLASSICAL_FIELDS_LEN +
+  ML_KEM_1024_PUBLIC_KEY_BYTES +
+  ML_KEM_1024_CIPHERTEXT_BYTES;
 const CONFIRM_PAYLOAD_LEN = 1 + 32 + 64;
+const FINISH_PAYLOAD_LEN = 1 + 64;
 
 describe("buildChannelInput (CI)", () => {
   test("concatenates channelId ‖ IK_a ‖ IK_b ‖ fp_a ‖ fp_b ‖ PQ_TAG", () => {
@@ -112,6 +126,23 @@ describe("buildChannelInput (CI)", () => {
       fpResponder: new Uint8Array(32).fill(3),
     });
     expect([...one]).not.toEqual([...swapped]);
+  });
+
+  test("the exact room-selected ML-KEM suite has a distinct transcript tag", () => {
+    const common = {
+      channelId: CHANNEL_ID,
+      ikInitiator: new Uint8Array(32).fill(1),
+      ikResponder: new Uint8Array(32).fill(2),
+      fpInitiator: new Uint8Array(32).fill(3),
+      fpResponder: new Uint8Array(32).fill(4),
+    };
+    const tags = [
+      buildChannelInput({ ...common, pqMode: "hybrid-mlkem512" }).at(-1),
+      buildChannelInput({ ...common, pqMode: "hybrid-mlkem768" }).at(-1),
+      buildChannelInput({ ...common, pqMode: "hybrid-mlkem1024" }).at(-1),
+    ];
+    expect(tags).toEqual([2, 1, 3]);
+    expect(new Set(tags).size).toBe(3);
   });
 });
 
@@ -229,10 +260,22 @@ const linkedTransports = (): [HandshakeTransport, HandshakeTransport] => {
   const waitersB: ((v: Uint8Array) => void)[] = [];
   const recv =
     (q: Uint8Array[], w: ((v: Uint8Array) => void)[]) =>
-    (): Promise<Uint8Array> =>
-      q.length > 0
-        ? Promise.resolve(q.shift()!)
-        : new Promise((res) => w.push(res));
+    (): Promise<Uint8Array> => {
+      if (q.length > 0) return Promise.resolve(q.shift()!);
+      return new Promise((resolve, reject) => {
+        let waiter: (value: Uint8Array) => void;
+        const timer = setTimeout(() => {
+          const index = w.indexOf(waiter);
+          if (index >= 0) w.splice(index, 1);
+          reject(new Error("test handshake transport timed out"));
+        }, 250);
+        waiter = (value: Uint8Array): void => {
+          clearTimeout(timer);
+          resolve(value);
+        };
+        w.push(waiter);
+      });
+    };
   const send =
     (q: Uint8Array[], w: ((v: Uint8Array) => void)[]) =>
     (b: Uint8Array): void => {
@@ -424,6 +467,134 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     expect(sB.receivingChainKey).not.toBeNull();
   });
 
+  test("honest establishment uses HELLO plus three chained confirmation flights", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
+      module,
+      new Uint8Array(160).fill(0x71),
+    );
+    const sentByInitiator: number[] = [];
+    const sentByResponder: number[] = [];
+    const capture = (
+      transport: HandshakeTransport,
+      tags: number[],
+    ): HandshakeTransport => ({
+      recv: transport.recv,
+      send(bytes): void {
+        tags.push(bytes[0]);
+        transport.send(bytes);
+      },
+    });
+
+    const [initiator, responder] = await Promise.all([
+      performHandshakeCore(
+        capture(initiatorTransport, sentByInitiator),
+        initiatorParams,
+        module,
+      ),
+      performHandshakeCore(
+        capture(responderTransport, sentByResponder),
+        responderParams,
+        module,
+      ),
+    ]);
+
+    expect(sentByInitiator).toEqual([HS_STEP_HELLO, HS_STEP_CONFIRM]);
+    expect(sentByResponder).toEqual([
+      HS_STEP_HELLO,
+      HS_STEP_CONFIRM,
+      HS_STEP_FINISH,
+    ]);
+    wipeRatchet(initiator.state);
+    wipeRatchet(responder.state);
+    initiator.secret.fill(0);
+    responder.secret.fill(0);
+  });
+
+  test("tampering responder confirmation poisons initiator confirmation so both reject", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
+      module,
+      new Uint8Array(160).fill(0x72),
+    );
+    let tampered = false;
+    const tamperingResponderTransport: HandshakeTransport = {
+      recv: responderTransport.recv,
+      send(bytes): void {
+        const forwarded = Uint8Array.from(bytes);
+        if (
+          !tampered &&
+          forwarded.length === CONFIRM_PAYLOAD_LEN &&
+          forwarded[0] === HS_STEP_CONFIRM
+        ) {
+          forwarded[forwarded.length - 1] ^= 0x80;
+          tampered = true;
+        }
+        responderTransport.send(forwarded);
+      },
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(initiatorTransport, initiatorParams, module),
+      performHandshakeCore(
+        tamperingResponderTransport,
+        responderParams,
+        module,
+      ),
+    ]);
+    expect(tampered).toBe(true);
+    expect(results.map((result) => result.status)).toEqual([
+      "rejected",
+      "rejected",
+    ]);
+  });
+
+  test("initiator rejects a tampered third FINISH proof", async () => {
+    const module = await loadTestModule();
+    const [initiatorTransport, responderTransport] = linkedTransports();
+    const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
+      module,
+      new Uint8Array(160).fill(0x73),
+    );
+    let tampered = false;
+    const tamperingResponderTransport: HandshakeTransport = {
+      recv: responderTransport.recv,
+      send(bytes): void {
+        const forwarded = Uint8Array.from(bytes);
+        if (
+          !tampered &&
+          forwarded.length === FINISH_PAYLOAD_LEN &&
+          forwarded[0] === HS_STEP_FINISH
+        ) {
+          forwarded[forwarded.length - 1] ^= 0x80;
+          tampered = true;
+        }
+        responderTransport.send(forwarded);
+      },
+    };
+
+    const results = await Promise.allSettled([
+      performHandshakeCore(initiatorTransport, initiatorParams, module),
+      performHandshakeCore(
+        tamperingResponderTransport,
+        responderParams,
+        module,
+      ),
+    ]);
+    expect(tampered).toBe(true);
+    expect(results[0].status).toBe("rejected");
+    expect(String((results[0] as PromiseRejectedResult).reason)).toMatch(
+      /final confirmation/i,
+    );
+    expect(results[1].status).toBe("fulfilled");
+    if (results[1].status === "fulfilled") {
+      wipeRatchet(results[1].value.state);
+      results[1].value.secret.fill(0);
+    }
+  });
+
   test("responder can encrypt first immediately after handshake return", async () => {
     const module = await loadTestModule();
     const { initiator, responder } = await establishNoPinHandshake(
@@ -475,7 +646,7 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     );
   });
 
-  test("tampered initiator ratchet DH public key fails responder key confirmation", async () => {
+  test("tampered initiator ratchet DH public key prevents both endpoints from completing", async () => {
     const module = await loadTestModule();
     const [initiatorTransport, responderTransport] = linkedTransports();
     const [initiatorParams, responderParams] = await makeNoPinHandshakeParams(
@@ -511,17 +682,11 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
     ]);
 
     expect(changedInitiatorDhPub).toBe(true);
+    expect(results[0].status).toBe("rejected");
     expect(results[1].status).toBe("rejected");
     expect(String((results[1] as PromiseRejectedResult).reason)).toMatch(
       /key-confirmation/i,
     );
-
-    // The final initiator flight has no acknowledgment in this two-round
-    // protocol, so that leg may already have returned. Clean up if it did.
-    if (results[0].status === "fulfilled") {
-      wipeRatchet(results[0].value.state);
-      results[0].value.secret.fill(0);
-    }
   });
 
   test("PIN mode: matching PINs agree; a wrong PIN fails key-confirmation", async () => {
@@ -970,6 +1135,125 @@ describe("performHandshakeCore (root agreement over a mock channel)", () => {
 });
 
 describe("runHandshake wiring (inbox + channel registry)", () => {
+  test("pre-auth framing uses the exact room suite and rejects cross-suite lengths", () => {
+    const suites = [
+      ["hybrid-mlkem512", HELLO_512_PAYLOAD_LEN],
+      ["hybrid-mlkem768", HELLO_PAYLOAD_LEN],
+      ["hybrid-mlkem1024", HELLO_1024_PAYLOAD_LEN],
+    ] as const;
+
+    for (const [pqMode, expectedLength] of suites) {
+      const roomId = `room-${pqMode}`;
+      const peerId = `peer-${pqMode}`;
+      const lease = setHandshakeChannel(
+        roomId,
+        peerId,
+        { send: () => {} },
+        pqMode,
+      );
+      const hello = new Uint8Array(expectedLength);
+      hello[0] = HS_STEP_HELLO;
+      expect(deliverHandshakeFrame(roomId, peerId, hello, lease)).toBe(true);
+      clearHandshakeChannel(roomId, peerId, undefined, lease);
+    }
+
+    const mismatchLease = setHandshakeChannel(
+      "room-suite-mismatch",
+      "peer-suite-mismatch",
+      { send: () => {} },
+      "hybrid-mlkem512",
+    );
+    const wrongHello = new Uint8Array(HELLO_1024_PAYLOAD_LEN);
+    wrongHello[0] = HS_STEP_HELLO;
+    expect(
+      deliverHandshakeFrame(
+        "room-suite-mismatch",
+        "peer-suite-mismatch",
+        wrongHello,
+        mismatchLease,
+      ),
+    ).toBe(false);
+  });
+
+  test("only the initiator inbox admits the ordered third FINISH flight", () => {
+    const hello = new Uint8Array(HELLO_PAYLOAD_LEN);
+    hello[0] = HS_STEP_HELLO;
+    const confirm = new Uint8Array(CONFIRM_PAYLOAD_LEN);
+    confirm[0] = HS_STEP_CONFIRM;
+    const finish = new Uint8Array(FINISH_PAYLOAD_LEN);
+    finish[0] = HS_STEP_FINISH;
+
+    const initiatorLease = setHandshakeChannel(
+      "room-finish-i",
+      "peer-finish-i",
+      { send: () => {} },
+      "hybrid-mlkem768",
+      true,
+    );
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-i",
+        "peer-finish-i",
+        hello,
+        initiatorLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-i",
+        "peer-finish-i",
+        confirm,
+        initiatorLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-i",
+        "peer-finish-i",
+        finish,
+        initiatorLease,
+      ),
+    ).toBe(true);
+    clearHandshakeChannel(
+      "room-finish-i",
+      "peer-finish-i",
+      undefined,
+      initiatorLease,
+    );
+
+    const responderLease = setHandshakeChannel(
+      "room-finish-r",
+      "peer-finish-r",
+      { send: () => {} },
+      "hybrid-mlkem768",
+      false,
+    );
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-r",
+        "peer-finish-r",
+        hello,
+        responderLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-r",
+        "peer-finish-r",
+        confirm,
+        responderLease,
+      ),
+    ).toBe(true);
+    expect(
+      deliverHandshakeFrame(
+        "room-finish-r",
+        "peer-finish-r",
+        finish,
+        responderLease,
+      ),
+    ).toBe(false);
+  });
+
   test("deliverHandshakeFrame feeds frames the runHandshake transport recvs", () => {
     // Registry/inbox smoke test: a frame delivered before recv is buffered.
     // 0x01 is the internal HS_STEP_HELLO sub-frame tag.
@@ -1016,26 +1300,14 @@ describe("runHandshake wiring (inbox + channel registry)", () => {
     const confirm = new Uint8Array(1 + 32 + 64);
     confirm[0] = 2;
     expect(
-      deliverHandshakeFrame(
-        "room-bounds",
-        "peer-bounds",
-        confirm,
-        lease,
-      ),
+      deliverHandshakeFrame("room-bounds", "peer-bounds", confirm, lease),
     ).toBe(false);
 
-    const orderedLease = setHandshakeChannel(
-      "room-bounds",
-      "peer-bounds",
-      { send: () => {} },
-    );
+    const orderedLease = setHandshakeChannel("room-bounds", "peer-bounds", {
+      send: () => {},
+    });
     expect(
-      deliverHandshakeFrame(
-        "room-bounds",
-        "peer-bounds",
-        hello,
-        orderedLease,
-      ),
+      deliverHandshakeFrame("room-bounds", "peer-bounds", hello, orderedLease),
     ).toBe(true);
     expect(
       deliverHandshakeFrame(

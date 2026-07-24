@@ -175,8 +175,6 @@ const connect = async (
 
   // Stable descriptor codes may precede their live implementation, but the
   // public connect path must never silently claim an unwired guarantee.
-  if (policy.pqMode !== "hybrid-mlkem768")
-    throw new Error("Protocol v3 requires hybrid ML-KEM-768");
   if (policy.rendezvousMode !== "legacy-signaling")
     throw new Error("Private rendezvous room connections are not wired yet");
   if (policy.coverMode !== "immediate")
@@ -436,13 +434,7 @@ const sendMessage = (
     transferId,
     done,
     cancel: () =>
-      cancelMessage(
-        roomId,
-        toChannel,
-        undefined,
-        undefined,
-        transferId,
-      ),
+      cancelMessage(roomId, toChannel, undefined, undefined, transferId),
   };
 };
 
@@ -746,12 +738,12 @@ const cancelMessage = async (
             (message) => message.transferId === transferId,
           )
         : merkleRoot
-        ? rooms[roomIndex].messages.findIndex(
-            (message) => message.merkleRootHex === merkleRootHex,
-          )
-        : rooms[roomIndex].messages.findIndex(
-            (message) => message.sha512Hex === hashHex,
-          )
+          ? rooms[roomIndex].messages.findIndex(
+              (message) => message.merkleRootHex === merkleRootHex,
+            )
+          : rooms[roomIndex].messages.findIndex(
+              (message) => message.sha512Hex === hashHex,
+            )
       : -1;
 
   if (

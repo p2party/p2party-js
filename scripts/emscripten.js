@@ -33,8 +33,10 @@ const libsodiumArchivePath = path.join(
   "lib",
   "libsodium.a",
 );
-const mlkem768Path = path.join(buildPath, "mlkem768.c");
-const mlkem768IncludePath = path.join(
+const mlkemPaths = [512, 768, 1024].map((parameterSet) =>
+  path.join(buildPath, `mlkem${parameterSet}.c`),
+);
+const mlkemIncludePath = path.join(
   buildPath,
   "vendor",
   "mlkem-native",
@@ -98,9 +100,15 @@ const exportedFunctions = [
   "_encrypt_chachapoly_symmetric",
   "_decrypt_chachapoly_symmetric",
   "_receive_message_with_key",
+  "_mlkem512_keypair",
+  "_mlkem512_encaps",
+  "_mlkem512_decaps",
   "_mlkem768_keypair",
   "_mlkem768_encaps",
   "_mlkem768_decaps",
+  "_mlkem1024_keypair",
+  "_mlkem1024_encaps",
+  "_mlkem1024_decaps",
 ];
 
 const emccArgs = [
@@ -200,11 +208,11 @@ const emccArgs = [
   "-s",
   "EXPORT_NAME=libcrypto",
   `-I${libsodiumIncludePath}`,
-  `-I${mlkem768IncludePath}`,
+  `-I${mlkemIncludePath}`,
   "-o",
   stagedJsPath,
   methodsPath,
-  mlkem768Path,
+  ...mlkemPaths,
   libsodiumArchivePath,
 ];
 
@@ -313,6 +321,11 @@ try {
         release: "v1.2.0",
         commit: MLKEM_NATIVE_COMMIT,
         backend: "portable-c",
+        parameterSets: [512, 768, 1024],
+        multilevel: {
+          shared: 768,
+          noShared: [512, 1024],
+        },
       },
     },
     toolchain: {

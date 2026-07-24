@@ -128,11 +128,23 @@ export interface LibCrypto extends EmscriptenModule {
     message_key: number,
   ): number;
 
-  // ML-KEM-768 (FIPS 203), deterministic entry points. JavaScript supplies
-  // cryptographically secure coins; zero is success, negative is failure.
+  // ML-KEM (FIPS 203), deterministic entry points for all standardized
+  // parameter sets. JavaScript supplies cryptographically secure coins;
+  // zero is success and a negative value is failure.
+  _mlkem512_keypair(pk: number, sk: number, coins64: number): number;
+  _mlkem512_encaps(ct: number, ss: number, pk: number, coins32: number): number;
+  _mlkem512_decaps(ss: number, ct: number, sk: number): number;
   _mlkem768_keypair(pk: number, sk: number, coins64: number): number;
   _mlkem768_encaps(ct: number, ss: number, pk: number, coins32: number): number;
   _mlkem768_decaps(ss: number, ct: number, sk: number): number;
+  _mlkem1024_keypair(pk: number, sk: number, coins64: number): number;
+  _mlkem1024_encaps(
+    ct: number,
+    ss: number,
+    pk: number,
+    coins32: number,
+  ): number;
+  _mlkem1024_decaps(ss: number, ct: number, sk: number): number;
 }
 
 declare const libcrypto: EmscriptenModuleFactory<LibCrypto>;

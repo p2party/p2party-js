@@ -23,6 +23,7 @@ import {
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetState } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { RoomPqMode } from "../roomPolicy";
 import type {
   IRTCPeerConnection,
   IRTCDataChannel,
@@ -136,6 +137,9 @@ export const verifyDtlsFingerprints = async (
 // transport.recv() awaits them, buffering any that arrive before a recv.
 interface Inbox {
   lease: HandshakeLease;
+  pqMode: RoomPqMode;
+  /** Only the initiator receives the responder's third FINISH flight. */
+  expectFinish: boolean;
   channel: IRTCDataChannel | { send: (b: ArrayBuffer | Uint8Array) => void };
   queue: Uint8Array[];
   nextStep: HandshakeStep | null;
@@ -160,6 +164,8 @@ export const setHandshakeChannel = (
   roomId: string,
   peerId: string,
   channel: IRTCDataChannel | { send: (b: ArrayBuffer | Uint8Array) => void },
+  pqMode: RoomPqMode = "hybrid-mlkem768",
+  expectFinish = false,
 ): HandshakeLease => {
   const key = inboxKey(roomId, peerId);
   const previous = inboxes.get(key);
@@ -170,6 +176,8 @@ export const setHandshakeChannel = (
   const lease: HandshakeLease = { token: Symbol("handshake-inbox") };
   inboxes.set(key, {
     lease,
+    pqMode,
+    expectFinish,
     channel,
     queue: [],
     nextStep: 1,
@@ -202,7 +210,7 @@ export const deliverHandshakeFrame = (
   if (!inbox || inbox.lease !== lease) return false;
   if (
     inbox.nextStep === null ||
-    !isHandshakePayloadForStep(payload, inbox.nextStep)
+    !isHandshakePayloadForStep(payload, inbox.nextStep, inbox.pqMode)
   ) {
     clearHandshakeChannel(
       roomId,
@@ -212,7 +220,12 @@ export const deliverHandshakeFrame = (
     );
     return false;
   }
-  inbox.nextStep = inbox.nextStep === 1 ? 2 : null;
+  inbox.nextStep =
+    inbox.nextStep === 1
+      ? 2
+      : inbox.nextStep === 2 && inbox.expectFinish
+        ? 3
+        : null;
   const next = inbox.waiters.shift();
   if (next) next.resolve(payload);
   else inbox.queue.push(payload);
@@ -277,7 +290,8 @@ const transportForPeer = (
 
 /**
  * Orchestrates the handshake on the persistent `main` channel (spec §5): verifies
- * the DTLS fingerprints (getStats vs SDP), runs the two-round core, then — ONLY
+ * the DTLS fingerprints (getStats vs SDP), runs the triple-confirmation core,
+ * then — ONLY
  * on success — seeds + persists the (wrapped) ratchet, sets epc.ratchetState /
  * epc.session, and opens the per-peer gate. Any failure (fingerprint mismatch,
  * CPace/interactive-3DH error, key-confirmation mismatch, a bad/short frame,
@@ -289,6 +303,7 @@ export const runHandshake = async (
   epc: IRTCPeerConnection,
   roomId: string,
   mode: "pin" | "nopin",
+  pqMode: RoomPqMode,
   pin: Uint8Array | null,
   channelInput: Uint8Array,
   module: LibCrypto,
@@ -308,10 +323,7 @@ export const runHandshake = async (
     // secret + pub + cross-sig from IndexedDB, and pin the peer's Ed25519 pub as
     // the anchor the in-band peer X25519 pub must be cross-signed by.
     const { publicKey } = store.getState().keyPair;
-    const amInitiator = isIdentityInitiator(
-      publicKey,
-      epc.withPeerPublicKey,
-    );
+    const amInitiator = isIdentityInitiator(publicKey, epc.withPeerPublicKey);
     const identity = await getIdentityX25519();
     if (!identity) throw new Error("X25519 identity not provisioned");
     idSelfSec = new Uint8Array(identity.secret);
@@ -319,15 +331,12 @@ export const runHandshake = async (
     const selfIdentityCrossSignature = new Uint8Array(identity.crossSig);
     const peerIdentityEd25519Pub = hexToUint8Array(epc.withPeerPublicKey);
 
-    const transport = transportForPeer(
-      roomId,
-      epc.withPeerId,
-      handshakeLease,
-    );
+    const transport = transportForPeer(roomId, epc.withPeerId, handshakeLease);
     const result = await performHandshakeCore(
       transport,
       {
         mode,
+        pqMode,
         pin,
         channelInput,
         amInitiator,
@@ -348,23 +357,18 @@ export const runHandshake = async (
     // handshake seed. The stable-edge persistence lock makes this seed land
     // after any old write already in flight.
     claimRatchetPersistence(epc, roomId);
-    await persistAndActivateClaimedRatchetState(
-      epc,
-      state,
-      roomId,
-      () => {
-        if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
-          throw new Error(
-            "Handshake transport lease was replaced during persistence",
-          );
-        if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
-          throw new Error("Handshake transport gate is already settled");
+    await persistAndActivateClaimedRatchetState(epc, state, roomId, () => {
+      if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
+        throw new Error(
+          "Handshake transport lease was replaced during persistence",
+        );
+      if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
+        throw new Error("Handshake transport gate is already settled");
 
-        if (epc.ratchetState) wipeRatchet(epc.ratchetState);
-        epc.ratchetState = state!;
-        state = null; // ownership transferred to the live connection
-      },
-    );
+      if (epc.ratchetState) wipeRatchet(epc.ratchetState);
+      epc.ratchetState = state!;
+      state = null; // ownership transferred to the live connection
+    });
   } catch (err) {
     rejectRatchetGate(roomId, epc.withPeerId, err, gateLease);
     throw err;

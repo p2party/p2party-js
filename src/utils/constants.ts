@@ -59,8 +59,7 @@ export const FRAME_TYPE_RECEIPT = 3;
 // chunk acknowledgements and the terminal content-hash acknowledgement use
 // this exact tagged geometry.
 export const RECEIPT_TOKEN_LEN = crypto_hash_sha512_BYTES;
-export const WIRE_RECEIPT_FRAME_LEN =
-  FRAME_TYPE_LEN + RECEIPT_TOKEN_LEN; // 65
+export const WIRE_RECEIPT_FRAME_LEN = FRAME_TYPE_LEN + RECEIPT_TOKEN_LEN; // 65
 // CPace/channel-input suite marker. 0x01 means the mandatory protocol-v3
 // classical-or-CPace + ML-KEM-768 hybrid bootstrap. It is transcript/KDF
 // context, not the KEM ciphertext and not a negotiation/fallback bit.
@@ -123,11 +122,30 @@ export const IDENTITY_CROSS_SIGN_DOMAIN_BYTES = new TextEncoder().encode(
 export const CPACE_RISTRETTO255_DSI = "CPaceRistretto255";
 export const CPACE_RISTRETTO255_ISK_DSI = "CPaceRistretto255_ISK";
 
-// Persisted/snapshot provenance for the one protocol-v3 bootstrap suite. The
-// "3dh" name is deliberate: this is interactive triple-DH, not Signal's
-// asynchronous X3DH prekey protocol. PIN policy adds exact draft-21 CPace.
-export const RATCHET_ROOT_SUITE =
+// Persisted/snapshot provenance for the authenticated, room-policy-selected
+// protocol-v3 bootstrap suite. "3dh" is deliberate: this is interactive
+// triple-DH, not Signal's asynchronous X3DH prekey protocol. PIN policy adds
+// exact draft-21 CPace. The room policy fixes one suite before the handshake;
+// there is no in-band negotiation, downgrade, or classical fallback.
+export const RATCHET_ROOT_SUITE_MLKEM512 =
+  "hybrid-3dh-mlkem512-cpace21-v3" as const;
+export const RATCHET_ROOT_SUITE_MLKEM768 =
   "hybrid-3dh-mlkem768-cpace21-v3" as const;
+export const RATCHET_ROOT_SUITE_MLKEM1024 =
+  "hybrid-3dh-mlkem1024-cpace21-v3" as const;
+export const RATCHET_ROOT_SUITES = [
+  RATCHET_ROOT_SUITE_MLKEM512,
+  RATCHET_ROOT_SUITE_MLKEM768,
+  RATCHET_ROOT_SUITE_MLKEM1024,
+] as const;
+export type RatchetRootSuite = (typeof RATCHET_ROOT_SUITES)[number];
+
+/** Backward source alias for the 0.10 default suite. */
+export const RATCHET_ROOT_SUITE = RATCHET_ROOT_SUITE_MLKEM768;
+
+export const isRatchetRootSuite = (value: unknown): value is RatchetRootSuite =>
+  typeof value === "string" &&
+  (RATCHET_ROOT_SUITES as readonly string[]).includes(value);
 
 // Double Ratchet KDF domain-separation labels (protocol-v3). These are the
 // `info` strings for the two HKDF-SHA512 chains of the ratchet, and are SSOT

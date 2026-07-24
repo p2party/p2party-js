@@ -1,4 +1,11 @@
-import { PROTOCOL_VERSION } from "./utils/constants";
+import {
+  PROTOCOL_VERSION,
+  RATCHET_ROOT_SUITE_MLKEM512,
+  RATCHET_ROOT_SUITE_MLKEM768,
+  RATCHET_ROOT_SUITE_MLKEM1024,
+} from "./utils/constants";
+
+import type { RatchetRootSuite } from "./utils/constants";
 
 /**
  * Canonical, non-secret room policy descriptor.
@@ -8,10 +15,39 @@ import { PROTOCOL_VERSION } from "./utils/constants";
  * exclusively in the transient roomPinVault module.
  */
 export type RoomAuthMode = "nopin" | "pin";
-export type RoomPqMode = "hybrid-mlkem768";
+/**
+ * The room creator fixes one authenticated hybrid bootstrap suite for every
+ * edge in the room. Peers never negotiate, downgrade, or fall back: a policy
+ * mismatch changes the transcript and makes the handshake fail closed.
+ */
+export type RoomPqMode =
+  "hybrid-mlkem512" | "hybrid-mlkem768" | "hybrid-mlkem1024";
 export type RoomRendezvousMode =
   "legacy-signaling" | "opaque-token" | "blind-meeting-point";
 export type RoomCoverMode = "immediate" | "scheduled";
+
+export const roomPqModeToParameterSet = (
+  mode: RoomPqMode,
+): 512 | 768 | 1024 => {
+  if (mode === "hybrid-mlkem512") return 512;
+  if (mode === "hybrid-mlkem768") return 768;
+  if (mode === "hybrid-mlkem1024") return 1024;
+  throw new Error("roomPolicy: unsupported PQ mode");
+};
+
+export const roomPqModeToRootSuite = (mode: RoomPqMode): RatchetRootSuite => {
+  if (mode === "hybrid-mlkem512") return RATCHET_ROOT_SUITE_MLKEM512;
+  if (mode === "hybrid-mlkem768") return RATCHET_ROOT_SUITE_MLKEM768;
+  if (mode === "hybrid-mlkem1024") return RATCHET_ROOT_SUITE_MLKEM1024;
+  throw new Error("roomPolicy: unsupported PQ mode");
+};
+
+export const rootSuiteToRoomPqMode = (suite: RatchetRootSuite): RoomPqMode => {
+  if (suite === RATCHET_ROOT_SUITE_MLKEM512) return "hybrid-mlkem512";
+  if (suite === RATCHET_ROOT_SUITE_MLKEM768) return "hybrid-mlkem768";
+  if (suite === RATCHET_ROOT_SUITE_MLKEM1024) return "hybrid-mlkem1024";
+  throw new Error("roomPolicy: unsupported ratchet root suite");
+};
 
 export interface RoomPolicyV1 {
   version: 1;
@@ -62,6 +98,8 @@ const AUTH_MODE_TO_BYTE: Record<RoomAuthMode, number> = {
 };
 const PQ_MODE_TO_BYTE: Record<RoomPqMode, number> = {
   "hybrid-mlkem768": 1,
+  "hybrid-mlkem512": 2,
+  "hybrid-mlkem1024": 3,
 };
 const RENDEZVOUS_MODE_TO_BYTE: Record<RoomRendezvousMode, number> = {
   "legacy-signaling": 0,
@@ -81,8 +119,10 @@ const byteToAuthMode = (value: number): RoomAuthMode => {
 
 const byteToPqMode = (value: number): RoomPqMode => {
   if (value === 1) return "hybrid-mlkem768";
+  if (value === 2) return "hybrid-mlkem512";
+  if (value === 3) return "hybrid-mlkem1024";
   if (value === 0)
-    throw new Error("roomPolicy: v3 requires hybrid ML-KEM-768");
+    throw new Error("roomPolicy: v3 requires a hybrid ML-KEM suite");
   throw new Error("roomPolicy: unsupported PQ mode");
 };
 

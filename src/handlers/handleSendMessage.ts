@@ -330,6 +330,22 @@ export const closeTransferChannel = (channel: IRTCDataChannel): void => {
   if (channel.readyState !== "closed") channel.close();
 };
 
+/**
+ * Own the one normal terminal close for a message-scoped channel. Receipt
+ * handling only records authenticated completion; sendWithReconcile reaches
+ * this boundary after its send/reconcile work settles.
+ */
+export const runWithTerminalChannelClose = async <T>(
+  currentChannel: () => IRTCDataChannel,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await operation();
+  } finally {
+    closeTransferChannel(currentChannel());
+  }
+};
+
 type WaitForRatchetGate = (roomId: string, peerId: string) => Promise<void>;
 type DurableRatchetStep = (
   epc: IRTCPeerConnection,
@@ -659,7 +675,7 @@ const sendWithReconcile = async (
 
   let currentChannel = channel;
   let currentEpc = epc;
-  try {
+  const runTransfer = async (): Promise<void> => {
     // The per-message channel label is a pure function of the message, so the dead
     // channel's own label is exactly what we re-open on reconnect.
     const channelMessageLabel = channel.label;
@@ -798,12 +814,10 @@ const sendWithReconcile = async (
     }
     if (!completed)
       throw new Error("Message transfer ended without receiver confirmation");
+  };
+  try {
+    await runWithTerminalChannelClose(() => currentChannel, runTransfer);
   } finally {
-    // Completion, cancellation, timeout, and retry exhaustion are all terminal
-    // for this message-scoped SCTP stream. Closing here also prevents a channel
-    // cancelled while still connecting from opening later and consuming the
-    // per-edge channel budget indefinitely.
-    closeTransferChannel(currentChannel);
     // The message key is dead once every retransmit round for this message is
     // done (or given up) — wipe it. The ratchet has already advanced past it.
     messageKey.fill(0);

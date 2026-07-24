@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import { loadTestModule } from "../cryptography/testModule";
 import {
@@ -8,12 +8,18 @@ import {
 } from "../cryptography/ratchet";
 import { getMerkleRoot, getMerkleProof } from "../cryptography/merkle";
 import { hashMerkleLeafWasm } from "../utils/leafHash";
+import { serializeMetadata } from "../utils/metadata";
+import { MessageType } from "../utils/messageTypes";
+import { uint8ArrayToHex } from "../utils/uint8array";
 import { parseChunkFrameHeader } from "./chunkFrame";
+import { handleReceiveMessage } from "./handleReceiveMessage";
+import { sendReceiveFrameReceipt } from "./handleMessageQueueing";
 import {
   sealChunk,
   decryptMessageChunk,
   messageCacheKey,
 } from "./messageChunkCrypto";
+import { forgetCompletedReceiveMessageKey } from "./receiveMessageKeyLifetime";
 import {
   decryptMessageChunkDurably,
   forgetReceiveMessageKeyDurably,
@@ -31,7 +37,10 @@ import {
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetState } from "../cryptography/ratchet";
-import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
+import type {
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "../api/webrtc/interfaces";
 
 const rand = (n: number): Uint8Array => {
   const u = new Uint8Array(n);
@@ -75,6 +84,50 @@ const buildMessage = async (module: LibCrypto, K: number) => {
     plaintexts.push(pt);
   }
   return { root, datas, plaintexts };
+};
+
+const buildRealFirstCoverMessage = async (module: LibCrypto) => {
+  const datas = Array.from({ length: 3 }, () => rand(CHUNK_LEN));
+  const leaves = new Uint8Array(3 * crypto_hash_sha512_BYTES);
+  datas.forEach((data, index) =>
+    leaves.set(
+      hashMerkleLeafWasm(data, module),
+      index * crypto_hash_sha512_BYTES,
+    ),
+  );
+  const root = await getMerkleRoot(leaves, module);
+  const messageHash = rand(crypto_hash_sha512_BYTES);
+  const plaintexts: Uint8Array[] = [];
+
+  for (let index = 0; index < datas.length; index++) {
+    const proof = await getMerkleProof(
+      leaves,
+      hashMerkleLeafWasm(datas[index], module),
+      module,
+      PROOF_LEN,
+    );
+    const plaintext = new Uint8Array(DECRYPTED_LEN);
+    plaintext.set(
+      serializeMetadata({
+        schemaVersion: 1,
+        messageType: MessageType.Text,
+        hash: messageHash,
+        totalSize: 4,
+        date: new Date(1),
+        name: "",
+        // Cell zero is the real four-byte payload. Cells one and two are valid
+        // authenticated/Merkle-rooted cover slots with an empty real range.
+        chunkStartIndex: 0,
+        chunkEndIndex: index === 0 ? 4 : 0,
+        chunkIndex: index,
+      }),
+    );
+    plaintext.set(proof, METADATA_LEN);
+    plaintext.set(datas[index], METADATA_LEN + PROOF_LEN);
+    plaintexts.push(plaintext);
+  }
+
+  return { root, plaintexts };
 };
 
 const chunkOf = (decrypted: Uint8Array): Uint8Array =>
@@ -375,6 +428,109 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     );
     expect(restored.skipped.has(cacheKey)).toBe(false);
     expect(restoredCache.has(cacheKey)).toBe(false);
+  });
+
+  test("real-first completion accepts two late valid cover cells, emits one receipt per frame, then retires once on drained close", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildRealFirstCoverMessage(module);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const frames = plaintexts.map((plaintext) =>
+      sealChunk(messageKey, header, plaintext, root, module),
+    );
+    messageKey.fill(0);
+
+    const epc = edge(bob);
+    epc.messageKeyCache = new Map<string, Uint8Array>();
+    const cacheKey = messageCacheKey(header.dhPub, header.N);
+    const merkleRootHex = uint8ArrayToHex(root);
+    const persist = async () => {};
+    const sentReceipts: ArrayBuffer[] = [];
+    const receiptChannel = {
+      readyState: "open",
+      send: (frame: ArrayBuffer) => sentReceipts.push(frame),
+    } as unknown as IRTCDataChannel;
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    let stored = false;
+
+    try {
+      const results = [];
+      for (const frame of frames) {
+        const result = await handleReceiveMessage(
+          frame,
+          "room-1",
+          "chat",
+          epc,
+          root,
+          module,
+          undefined,
+          {
+            persistRatchetState: persist,
+            storeReceiveChunk: async () => {
+              if (stored)
+                throw new Error("cover cell must not reach durable storage");
+              stored = true;
+              return { stored: true, savedSize: 4, complete: true };
+            },
+          },
+        );
+        results.push(result);
+        expect(sendReceiveFrameReceipt(result, receiptChannel)).toBe(true);
+      }
+
+      expect(results.map((result) => result.receivedFullSize)).toEqual([
+        true,
+        false,
+        false,
+      ]);
+      expect(results.map((result) => result.chunkIndex)).toEqual([0, -1, -1]);
+      expect(sentReceipts).toHaveLength(3);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(bob.Nr).toBe(1);
+      expect(epc.messageKeyCache.has(cacheKey)).toBe(true);
+      expect(epc.messageKeyByMerkleRoot?.get(merkleRootHex)).toBe(cacheKey);
+
+      const cachedMessageKey = epc.messageKeyCache.get(cacheKey)!;
+      let forgetCalls = 0;
+      const forget = async (
+        target: IRTCPeerConnection,
+        roomId: string,
+        cache: Map<string, Uint8Array>,
+        key: string,
+      ): Promise<void> => {
+        forgetCalls += 1;
+        await forgetReceiveMessageKeyDurably(
+          target,
+          roomId,
+          cache,
+          key,
+          persist,
+        );
+      };
+      expect(
+        await forgetCompletedReceiveMessageKey(
+          epc,
+          "room-1",
+          merkleRootHex,
+          { savedSize: 4, totalSize: 4 },
+          forget,
+        ),
+      ).toBe(true);
+      expect(
+        await forgetCompletedReceiveMessageKey(
+          epc,
+          "room-1",
+          merkleRootHex,
+          { savedSize: 4, totalSize: 4 },
+          forget,
+        ),
+      ).toBe(false);
+      expect(forgetCalls).toBe(1);
+      expect(cachedMessageKey.every((byte) => byte === 0)).toBe(true);
+      expect(epc.messageKeyCache.has(cacheKey)).toBe(false);
+      expect(bob.skipped.has(cacheKey)).toBe(false);
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   test("concurrent sends serialize into distinct durable ratchet steps", async () => {

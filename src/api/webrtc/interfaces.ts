@@ -24,8 +24,9 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   // protocol-v3 receive: per-EDGE per-message key cache (Stage-5 task 3). Keyed by
   // messageCacheKey(dhPub, N); the first-arriving chunk of a message derives +
   // caches its key (one ratchet step), every later chunk of that message reuses
-  // it, and the entry is evicted when the message completes. Lives on the edge
-  // (not per per-message channel) because the ratchet it derives from is per-edge.
+  // it, and the entry is evicted after a complete channel's queued frames drain
+  // (or immediately on cancel). Lives on the edge (not per-message channel)
+  // because the ratchet it derives from is per-edge.
   messageKeyCache?: Map<string, Uint8Array>;
   /** Maps a live transfer root to its `(dhPub,N)` receive-cache key for cancel cleanup. */
   messageKeyByMerkleRoot?: Map<string, string>;

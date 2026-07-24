@@ -8,19 +8,15 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import { messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
-import {
-  decryptMessageChunkDurably,
-  forgetReceiveMessageKeyDurably,
-} from "./ratchetPersist";
+import { decryptMessageChunkDurably } from "./ratchetPersist";
+import { bindReceiveMessageKey } from "./receiveMessageKeyLifetime";
 
 import { storeReceiveChunk as persistReceiveChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
-import type {
-  ReceiveChunk,
-  ReceiveChunkStoreResult,
-} from "../db/types";
+import type { ReceiveChunk, ReceiveChunkStoreResult } from "../db/types";
+import type { PersistRatchetState } from "./ratchetPersist";
 
 export interface ReceiveMessageResult {
   date: Date;
@@ -55,6 +51,13 @@ const dropped = (): ReceiveMessageResult => ({
 type ReceiveChunkStore = (
   chunk: ReceiveChunk,
 ) => Promise<ReceiveChunkStoreResult>;
+
+export interface ReceiveMessageDependencies {
+  /** Test/fault-injection seam; production uses the ratchet worker database. */
+  persistRatchetState?: PersistRatchetState;
+  /** Test/fault-injection seam; production uses the receive-chunk worker. */
+  storeReceiveChunk?: ReceiveChunkStore;
+}
 
 /**
  * Worker storage is the durability boundary for a receipt. A failed write must
@@ -97,6 +100,7 @@ export const handleReceiveMessage = async (
   merkleRoot: Uint8Array,
   module: LibCrypto,
   signal?: AbortSignal,
+  dependencies: ReceiveMessageDependencies = {},
 ): Promise<ReceiveMessageResult> => {
   if (signal?.aborted) return dropped();
   if (!epc.ratchetState) {
@@ -108,8 +112,8 @@ export const handleReceiveMessage = async (
   if (!epc.messageKeyCache) epc.messageKeyCache = new Map<string, Uint8Array>();
   const cache = epc.messageKeyCache;
 
-  // The per-message cache key (dhPub, N) — used to evict the key when the message
-  // completes so a peer can't pin keys with never-completing messages.
+  // The per-message cache key (dhPub, N). It stays live through channel drain:
+  // the real cell can complete storage before later valid cover cells arrive.
   let cacheKey: string | undefined;
   try {
     const { header } = parseChunkFrameHeader(frame);
@@ -131,6 +135,7 @@ export const handleReceiveMessage = async (
       cache,
       merkleRoot,
       module,
+      dependencies.persistRatchetState,
     );
     decrypted = d.decrypted;
     ok = d.ok;
@@ -139,9 +144,9 @@ export const handleReceiveMessage = async (
     return dropped();
   }
 
-  // Anti-DoS backstop: a completing message evicts its own key below, but a peer
-  // could pin keys with never-completing messages. Bound the per-edge cache,
-  // evicting oldest first (a Map preserves insertion order).
+  // Anti-DoS backstop: a normally closed complete message is retired after its
+  // queue drains, but a peer could pin keys with never-completing messages.
+  // Bound the per-edge cache, evicting oldest first (Map insertion order).
   const MESSAGE_KEY_CACHE_MAX = 256;
   if (cache.size > MESSAGE_KEY_CACHE_MAX) {
     for (const k of cache.keys()) {
@@ -164,8 +169,7 @@ export const handleReceiveMessage = async (
   }
 
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
-  epc.messageKeyByMerkleRoot ??= new Map<string, string>();
-  epc.messageKeyByMerkleRoot.set(merkleRootHex, cacheKey);
+  bindReceiveMessageKey(epc, merkleRootHex, cacheKey);
 
   try {
     // Cancellation waits for this handler to quiesce before retiring the
@@ -256,6 +260,7 @@ export const handleReceiveMessage = async (
           metadata.messageType === MessageType.Text ? "indexeddb" : "opfs",
       },
       realChunk,
+      dependencies.storeReceiveChunk,
     );
     if (!progress) {
       receiptToken.fill(0);
@@ -273,15 +278,6 @@ export const handleReceiveMessage = async (
     // remains incomplete; a duplicate after a crash may safely re-emit the
     // idempotent terminal receipt for an already-durable complete message.
     const receivedFullSize = progress.complete;
-    if (receivedFullSize && cacheKey) {
-      await forgetReceiveMessageKeyDurably(
-        epc,
-        roomId,
-        cache,
-        cacheKey,
-      );
-      epc.messageKeyByMerkleRoot.delete(merkleRootHex);
-    }
 
     return {
       date: metadata.date,

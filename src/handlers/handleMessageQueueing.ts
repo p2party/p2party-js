@@ -1,4 +1,7 @@
-import { handleReceiveMessage } from "./handleReceiveMessage";
+import {
+  handleReceiveMessage,
+  type ReceiveMessageResult,
+} from "./handleReceiveMessage";
 import {
   getRatchetGate,
   isCurrentRatchetGateLease,
@@ -245,6 +248,34 @@ export const enqueueReceipt = (
   return true;
 };
 
+type PerFrameReceiptResult = Pick<
+  ReceiveMessageResult,
+  "chunkHash" | "chunkIndex" | "chunkSize" | "totalSize"
+>;
+
+/**
+ * Emit exactly one receipt-shaped frame for every inbound chunk frame. Real
+ * cells use their rooted token; cover/dropped cells use an unlinkable random
+ * token so an observer cannot infer which slot carried bytes.
+ */
+export const sendReceiveFrameReceipt = (
+  result: PerFrameReceiptResult,
+  channel: IRTCDataChannel | undefined,
+): boolean => {
+  if (
+    result.totalSize > 0 &&
+    result.chunkHash.length === crypto_hash_sha512_BYTES &&
+    result.chunkIndex > -1 &&
+    result.chunkSize > 0
+  )
+    return channel ? sendReceiptFrame(channel, result.chunkHash) : false;
+
+  if (channel?.readyState !== "open") return false;
+  const decoyReceipt = new Uint8Array(crypto_hash_sha512_BYTES);
+  crypto.getRandomValues(decoyReceipt);
+  return sendReceiptFrame(channel, decoyReceipt);
+};
+
 const processMessage = async (
   data: Uint8Array,
   api: BaseQueryApi,
@@ -277,6 +308,15 @@ const processMessage = async (
       )
         return { receivedFullSize: false };
 
+      const receiveResult = await handleReceiveMessage(
+        data,
+        roomId,
+        channelLabel,
+        epc,
+        merkleRoot,
+        receiveMessageModule,
+        signal,
+      );
       const {
         date,
         chunkSize,
@@ -286,39 +326,12 @@ const processMessage = async (
         totalSize,
         messageType,
         filename,
-        chunkHash,
         messageHash,
-      } = await handleReceiveMessage(
-        data,
-        roomId,
-        channelLabel,
-        epc,
-        merkleRoot,
-        receiveMessageModule,
-        signal,
-      );
+      } = receiveResult;
 
       if (signal?.aborted) return { receivedFullSize: false };
 
-      if (
-        totalSize > 0 &&
-        chunkHash.length === crypto_hash_sha512_BYTES &&
-        chunkIndex > -1 &&
-        chunkSize > 0
-      ) {
-        if (extChannel) sendReceiptFrame(extChannel, chunkHash);
-      } else if (extChannel?.readyState === "open") {
-        // Emit one uniform tagged receipt for every non-real frame (decoys or
-        // crypto-failed) so the reverse receipt count equals
-        // the forward frame count — a DTLS-record observer can no longer
-        // subtract to recover the real chunk count. A fresh random token
-        // matches no newChunk on the sender (handleReadReceipt is a no-op for
-        // it) and is sent over the data channel only, to avoid junk relay
-        // metadata.
-        const decoyReceipt = new Uint8Array(crypto_hash_sha512_BYTES);
-        crypto.getRandomValues(decoyReceipt);
-        sendReceiptFrame(extChannel, decoyReceipt);
-      }
+      sendReceiveFrameReceipt(receiveResult, extChannel);
 
       const hashHex = uint8ArrayToHex(messageHash);
 

@@ -1,9 +1,7 @@
-import webrtcApi from "../api/webrtc";
-
 import { getDBNewChunkByReceipt } from "../db/api";
 
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
-import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
+import { uint8ArrayToHex } from "../utils/uint8array";
 import { markChunkAcked, markTransferComplete } from "./reconcile";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -72,18 +70,6 @@ export const handleReadReceipt = async (
           transferId,
           newlyAccepted: false,
         };
-
-      const messageHash = hexToUint8Array(hashHex);
-      await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-          roomId: room.id,
-          peerId, //: channel.withPeerId,
-          label: channel, //.label,
-          messageHash,
-          alsoDeleteData: false,
-          alsoSendFinishedMessage: false,
-        }),
-      );
 
       return {
         kind: "peer-complete",

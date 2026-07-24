@@ -33,6 +33,7 @@ type BindTransferCipherToConnection =
 let bindTransferCipherToConnection: BindTransferCipherToConnection;
 let isAuthenticatedPeerCancel: typeof import("./handleSendMessage")["isAuthenticatedPeerCancel"];
 let closeTransferChannel: typeof import("./handleSendMessage")["closeTransferChannel"];
+let runWithTerminalChannelClose: typeof import("./handleSendMessage")["runWithTerminalChannelClose"];
 let runPeerSendFanout: typeof import("./handleSendMessage")["runPeerSendFanout"];
 let shouldDeleteLocalMessageAfterFailure: typeof import("./handleSendMessage")["shouldDeleteLocalMessageAfterFailure"];
 
@@ -46,6 +47,7 @@ beforeAll(async () => {
     closeTransferChannel,
     isAuthenticatedPeerCancel,
     runPeerSendFanout,
+    runWithTerminalChannelClose,
     shouldDeleteLocalMessageAfterFailure,
   } = await import("./handleSendMessage"));
 });
@@ -69,6 +71,33 @@ describe("per-message DataChannel close semantics", () => {
     closeTransferChannel(channel);
 
     expect(events).toEqual(["release", "close", "release"]);
+  });
+
+  test("the normal terminal runner owns exactly one physical channel close", async () => {
+    let releaseCalls = 0;
+    let closeCalls = 0;
+    let readyState = "open";
+    const channel = {
+      get readyState() {
+        return readyState;
+      },
+      releaseProtocolResources: () => {
+        releaseCalls += 1;
+      },
+      close: () => {
+        closeCalls += 1;
+        readyState = "closed";
+      },
+    } as unknown as IRTCDataChannel;
+
+    const result = await runWithTerminalChannelClose(
+      () => channel,
+      async () => "confirmed",
+    );
+
+    expect(result).toBe("confirmed");
+    expect(releaseCalls).toBe(1);
+    expect(closeCalls).toBe(1);
   });
 
   test("same connected authenticated PC means peer cancel", () => {

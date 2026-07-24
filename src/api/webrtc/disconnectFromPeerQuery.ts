@@ -65,6 +65,15 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       wipeRatchet(connection.ratchetState);
       connection.ratchetState = undefined;
     }
+    // Destroy the sparse-PQ runtime with the ratchet: its machine, message
+    // root, sealed outbox, replay/ACK caches, and active combined receive keys
+    // are all wiped by destroy(). The edge serializer hook dies with it so a
+    // late persistence call cannot serialize a destroyed runtime.
+    if (connection.pqHealingState) {
+      connection.pqHealingState.destroy();
+      connection.pqHealingState = undefined;
+    }
+    connection.serializeEdgeCryptoState = undefined;
     if (connection.messageKeyCache) {
       for (const messageKey of connection.messageKeyCache.values())
         messageKey.fill(0);

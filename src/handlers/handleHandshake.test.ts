@@ -48,12 +48,16 @@ const _lsMem: Record<string, string> = {};
 } as Storage;
 
 type HS = typeof import("./handleHandshake");
+type RP = typeof import("./ratchetPersist");
 let parseFingerprintFromSdp: HS["parseFingerprintFromSdp"];
 let verifyDtlsFingerprints: HS["verifyDtlsFingerprints"];
 let setHandshakeChannel: HS["setHandshakeChannel"];
 let clearHandshakeChannel: HS["clearHandshakeChannel"];
 let deliverHandshakeFrame: HS["deliverHandshakeFrame"];
 let runHandshake: HS["runHandshake"];
+let createHandshakePqRuntime: HS["createHandshakePqRuntime"];
+let persistAndActivateEdgeCrypto: HS["persistAndActivateEdgeCrypto"];
+let claimRatchetPersistence: RP["claimRatchetPersistence"];
 
 beforeAll(async () => {
   const m = await import("./handleHandshake");
@@ -64,7 +68,10 @@ beforeAll(async () => {
     clearHandshakeChannel,
     deliverHandshakeFrame,
     runHandshake,
+    createHandshakePqRuntime,
+    persistAndActivateEdgeCrypto,
   } = m);
+  ({ claimRatchetPersistence } = await import("./ratchetPersist"));
 });
 
 const CHANNEL_ID = new TextEncoder().encode("main"); // 4 bytes
@@ -1370,5 +1377,231 @@ describe("runHandshake wiring (inbox + channel registry)", () => {
         freshLease,
       ),
     ).toBe(true);
+  });
+});
+
+describe("atomic edge-crypto activation (ratchet + initial PQ checkpoint)", () => {
+  const EDGE_MAGIC = [0x50, 0x32, 0x45, 0x44, 0x47, 0x45, 0x34, 0x00];
+
+  const fakeEpc = (peerId: string, peerPublicKey: string): IRTCPeerConnection =>
+    ({
+      withPeerId: peerId,
+      withPeerPublicKey: peerPublicKey,
+    }) as unknown as IRTCPeerConnection;
+
+  test("the very first persisted row carries a non-null PQ edge checkpoint and installs both states", async () => {
+    const module = await loadTestModule();
+    const { initiator } = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(7),
+    );
+    initiator.secret.fill(0);
+
+    const bootstrapRoot = initiator.pqHealing.rootKey;
+    const bootstrapBinding = initiator.pqHealing.binding;
+    const runtime = createHandshakePqRuntime(
+      module,
+      "hybrid-mlkem768",
+      initiator.state.rootSuite,
+      true,
+      initiator.pqHealing,
+    );
+    // The bootstrap buffers are consumed: the runtime is the only holder now.
+    expect(bootstrapRoot.every((byte) => byte === 0)).toBe(true);
+    expect(bootstrapBinding.every((byte) => byte === 0)).toBe(true);
+
+    const epc = fakeEpc("pq-peer-a", "aa".repeat(32));
+    claimRatchetPersistence(epc, "pq-room-a");
+    let persistedEdge: Uint8Array | null = null;
+    let beforeInstallRan = false;
+    await persistAndActivateEdgeCrypto(
+      epc,
+      "pq-room-a",
+      { state: initiator.state, pqRuntime: runtime },
+      () => {
+        beforeInstallRan = true;
+        expect(epc.ratchetState).toBeUndefined();
+        expect(epc.pqHealingState).toBeUndefined();
+      },
+      async (_state, _roomId, _peerPublicKey, _peerId, edgeCryptoState) => {
+        expect(edgeCryptoState).toBeInstanceOf(Uint8Array);
+        persistedEdge = Uint8Array.from(edgeCryptoState!);
+      },
+      async () => {
+        throw new Error("rollback must not run on the success path");
+      },
+    );
+
+    expect(beforeInstallRan).toBe(true);
+    expect(epc.ratchetState).toBe(initiator.state);
+    expect(epc.pqHealingState).toBe(runtime);
+    expect(persistedEdge).not.toBeNull();
+    expect(Array.from(persistedEdge!.subarray(0, 8))).toEqual(EDGE_MAGIC);
+    // The installed hook serializes the SAME live runtime the row was
+    // committed with, byte-exactly.
+    expect(Buffer.from(epc.serializeEdgeCryptoState!())).toEqual(
+      Buffer.from(persistedEdge!),
+    );
+
+    epc.pqHealingState!.destroy();
+    wipeRatchet(epc.ratchetState!);
+  });
+
+  test("an injected persistence failure installs nothing and leaves no live PQ secret", async () => {
+    const module = await loadTestModule();
+    const { responder } = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(8),
+    );
+    responder.secret.fill(0);
+    const runtime = createHandshakePqRuntime(
+      module,
+      "hybrid-mlkem768",
+      responder.state.rootSuite,
+      false,
+      responder.pqHealing,
+    );
+
+    const epc = fakeEpc("pq-peer-b", "bb".repeat(32));
+    claimRatchetPersistence(epc, "pq-room-b");
+    let rollbackCalls = 0;
+    await expect(
+      persistAndActivateEdgeCrypto(
+        epc,
+        "pq-room-b",
+        { state: responder.state, pqRuntime: runtime },
+        () => {
+          throw new Error("beforeInstall must not run when the write fails");
+        },
+        async () => {
+          throw new Error("injected persistence failure");
+        },
+        async () => {
+          rollbackCalls += 1;
+        },
+      ),
+    ).rejects.toThrow(/injected persistence failure/);
+
+    expect(rollbackCalls).toBe(1);
+    expect(epc.ratchetState).toBeUndefined();
+    expect(epc.pqHealingState).toBeUndefined();
+    expect(epc.serializeEdgeCryptoState).toBeUndefined();
+
+    // Ownership stayed with the caller; runHandshake's finally destroys it,
+    // after which no serializable PQ state exists anywhere.
+    runtime.destroy();
+    expect(() => runtime.serialize()).toThrow(/destroyed/);
+    wipeRatchet(responder.state);
+  });
+
+  test("an open-gate failure after a successful write rolls the seed row back and installs nothing", async () => {
+    const module = await loadTestModule();
+    const { initiator } = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(9),
+    );
+    initiator.secret.fill(0);
+    const runtime = createHandshakePqRuntime(
+      module,
+      "hybrid-mlkem768",
+      initiator.state.rootSuite,
+      true,
+      initiator.pqHealing,
+    );
+
+    const epc = fakeEpc("pq-peer-c", "cc".repeat(32));
+    claimRatchetPersistence(epc, "pq-room-c");
+    let writes = 0;
+    let rollbackCalls = 0;
+    await expect(
+      persistAndActivateEdgeCrypto(
+        epc,
+        "pq-room-c",
+        { state: initiator.state, pqRuntime: runtime },
+        () => {
+          throw new Error("Handshake transport gate is already settled");
+        },
+        async () => {
+          writes += 1;
+        },
+        async () => {
+          rollbackCalls += 1;
+        },
+      ),
+    ).rejects.toThrow(/already settled/);
+
+    expect(writes).toBe(1);
+    expect(rollbackCalls).toBe(1);
+    expect(epc.ratchetState).toBeUndefined();
+    expect(epc.pqHealingState).toBeUndefined();
+    expect(epc.serializeEdgeCryptoState).toBeUndefined();
+
+    runtime.destroy();
+    wipeRatchet(initiator.state);
+  });
+
+  test("a replacement handshake destroys the previous runtime and wipes the previous ratchet", async () => {
+    const module = await loadTestModule();
+    const epc = fakeEpc("pq-peer-d", "dd".repeat(32));
+    claimRatchetPersistence(epc, "pq-room-d");
+    const persistNothing = async (): Promise<void> => {};
+    const rollbackNothing = async (): Promise<void> => {};
+
+    const first = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(10),
+    );
+    first.initiator.secret.fill(0);
+    first.responder.secret.fill(0);
+    const firstRuntime = createHandshakePqRuntime(
+      module,
+      "hybrid-mlkem768",
+      first.initiator.state.rootSuite,
+      true,
+      first.initiator.pqHealing,
+    );
+    await persistAndActivateEdgeCrypto(
+      epc,
+      "pq-room-d",
+      { state: first.initiator.state, pqRuntime: firstRuntime },
+      () => {},
+      persistNothing,
+      rollbackNothing,
+    );
+    const firstRootKey = first.initiator.state.rootKey;
+    expect(firstRootKey.some((byte) => byte !== 0)).toBe(true);
+
+    const second = await establishNoPinHandshake(
+      module,
+      new Uint8Array(160).fill(11),
+    );
+    second.initiator.secret.fill(0);
+    second.responder.secret.fill(0);
+    const secondRuntime = createHandshakePqRuntime(
+      module,
+      "hybrid-mlkem768",
+      second.initiator.state.rootSuite,
+      true,
+      second.initiator.pqHealing,
+    );
+    await persistAndActivateEdgeCrypto(
+      epc,
+      "pq-room-d",
+      { state: second.initiator.state, pqRuntime: secondRuntime },
+      () => {},
+      persistNothing,
+      rollbackNothing,
+    );
+
+    expect(epc.ratchetState).toBe(second.initiator.state);
+    expect(epc.pqHealingState).toBe(secondRuntime);
+    // The replaced runtime is destroyed and the replaced ratchet is wiped.
+    expect(() => firstRuntime.serialize()).toThrow(/destroyed/);
+    expect(firstRootKey.every((byte) => byte === 0)).toBe(true);
+
+    epc.pqHealingState!.destroy();
+    wipeRatchet(epc.ratchetState!);
+    first.responder.state && wipeRatchet(first.responder.state);
+    second.responder.state && wipeRatchet(second.responder.state);
   });
 });

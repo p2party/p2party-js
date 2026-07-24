@@ -9,7 +9,10 @@ import {
 import {
   claimRatchetPersistence,
   persistAndActivateClaimedRatchetState,
+  type PersistInitialRatchetState,
+  type RollbackInitialRatchetState,
 } from "./ratchetPersist";
+import { SparsePqHealingState } from "./pqHealingRuntime";
 import { FRAME_TYPE_HANDSHAKE } from "../utils/constants";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { isIdentityInitiator } from "../utils/identityRole";
@@ -18,9 +21,11 @@ import {
   performHandshakeCore,
   type HandshakeStep,
   type HandshakeTransport,
+  type PqHealingBootstrap,
 } from "./handshakeCore";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { RatchetRootSuite } from "../utils/constants";
 import type { RatchetState } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
 import type { RoomPqMode } from "../roomPolicy";
@@ -288,15 +293,96 @@ const transportForPeer = (
 };
 
 /**
+ * Consume the handshake's PQ-healing bootstrap into a live store-free runtime.
+ * The constructor copies the root/binding, so the caller-owned bootstrap
+ * buffers are wiped on every exit — including a failed construction — leaving
+ * the returned runtime as the only holder of the derived PQ root.
+ */
+export const createHandshakePqRuntime = (
+  module: LibCrypto,
+  pqMode: RoomPqMode,
+  rootSuite: RatchetRootSuite,
+  amInitiator: boolean,
+  bootstrap: PqHealingBootstrap,
+): SparsePqHealingState => {
+  try {
+    return new SparsePqHealingState({
+      module,
+      pqMode,
+      rootSuite,
+      binding: bootstrap.binding,
+      rootKey: bootstrap.rootKey,
+      nextOfferer: bootstrap.nextOfferer,
+      amInitiator,
+    });
+  } finally {
+    bootstrap.rootKey.fill(0);
+    bootstrap.binding.fill(0);
+  }
+};
+
+export interface EdgeCryptoCandidate {
+  readonly state: RatchetState;
+  readonly pqRuntime: SparsePqHealingState;
+}
+
+/**
+ * Atomically persist the handshake-established Double Ratchet together with
+ * the initial sparse-PQ checkpoint in ONE stable-edge row, then synchronously
+ * install both on the live connection. The candidate serializer hook is
+ * installed before the row is written, so even the very first persisted row
+ * carries a non-null encrypted edge state. `beforeInstall` runs inside the
+ * synchronous activation (lease/gate checks); if it — or persistence — throws,
+ * the hook is removed, the seed row is rolled back by the persistence layer,
+ * nothing is installed, and ownership of both candidates stays with the
+ * caller (which must wipe/destroy them). Ownership transfers to `epc` only
+ * when this resolves.
+ */
+export const persistAndActivateEdgeCrypto = async (
+  epc: IRTCPeerConnection,
+  roomId: string,
+  candidate: EdgeCryptoCandidate,
+  beforeInstall: () => void,
+  persist?: PersistInitialRatchetState,
+  rollback?: RollbackInitialRatchetState,
+): Promise<void> => {
+  const serializer = (): Uint8Array => candidate.pqRuntime.serialize();
+  epc.serializeEdgeCryptoState = serializer;
+  try {
+    await persistAndActivateClaimedRatchetState(
+      epc,
+      candidate.state,
+      roomId,
+      () => {
+        beforeInstall();
+        if (epc.ratchetState) wipeRatchet(epc.ratchetState);
+        epc.ratchetState = candidate.state;
+        epc.pqHealingState?.destroy();
+        epc.pqHealingState = candidate.pqRuntime;
+      },
+      persist,
+      rollback,
+    );
+  } catch (error) {
+    if (epc.serializeEdgeCryptoState === serializer)
+      epc.serializeEdgeCryptoState = undefined;
+    throw error;
+  }
+};
+
+/**
  * Orchestrates the handshake on the persistent `main` channel (spec §5): verifies
  * the DTLS fingerprints (getStats vs SDP), runs the triple-confirmation core,
  * then — ONLY
- * on success — seeds + persists the (wrapped) ratchet, sets epc.ratchetState /
- * epc.session, and opens the per-peer gate. Any failure (fingerprint mismatch,
+ * on success — seeds + persists the (wrapped) ratchet together with the
+ * initial sparse-PQ checkpoint in one row, sets epc.ratchetState /
+ * epc.pqHealingState, and opens the per-peer gate. Any failure (fingerprint
+ * mismatch,
  * CPace/interactive-3DH error, key-confirmation mismatch, a bad/short frame,
  * a transport or
  * persistence error) rejects the gate and re-throws, having persisted NOTHING —
- * the caller tears the channel down.
+ * the caller tears the channel down. No PQ root, binding, or runtime survives
+ * a failure path outside this function.
  */
 export const runHandshake = async (
   epc: IRTCPeerConnection,
@@ -314,6 +400,7 @@ export const runHandshake = async (
   let idSelfSec: Uint8Array | null = null;
   let secret: Uint8Array | null = null;
   let state: RatchetState | null = null;
+  let pqRuntime: SparsePqHealingState | null = null;
   try {
     await verifyDtlsFingerprints(epc);
 
@@ -348,6 +435,15 @@ export const runHandshake = async (
     );
     state = result.state;
     secret = result.secret;
+    // Consume the PQ bootstrap immediately: after this line the runtime is the
+    // only holder of the healing root, and the outer finally owns its fate.
+    pqRuntime = createHandshakePqRuntime(
+      module,
+      pqMode,
+      state.rootSuite,
+      amInitiator,
+      result.pqHealing,
+    );
 
     if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
       throw new Error("Handshake transport lease is stale");
@@ -356,27 +452,32 @@ export const runHandshake = async (
     // handshake seed. The stable-edge persistence lock makes this seed land
     // after any old write already in flight.
     claimRatchetPersistence(epc, roomId);
-    await persistAndActivateClaimedRatchetState(epc, state, roomId, () => {
-      if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
-        throw new Error(
-          "Handshake transport lease was replaced during persistence",
-        );
-      if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
-        throw new Error("Handshake transport gate is already settled");
-
-      if (epc.ratchetState) wipeRatchet(epc.ratchetState);
-      epc.ratchetState = state!;
-      state = null; // ownership transferred to the live connection
-    });
+    await persistAndActivateEdgeCrypto(
+      epc,
+      roomId,
+      { state, pqRuntime },
+      () => {
+        if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
+          throw new Error(
+            "Handshake transport lease was replaced during persistence",
+          );
+        if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
+          throw new Error("Handshake transport gate is already settled");
+      },
+    );
+    // Ownership of both candidates transferred to the live connection.
+    state = null;
+    pqRuntime = null;
   } catch (err) {
     rejectRatchetGate(roomId, epc.withPeerId, err, gateLease);
     throw err;
   } finally {
     // Wipe the loose root-secret copy and unwrapped long-term X25519 identity
-    // secret on every exit.
+    // secret on every exit; destroy an untransferred PQ runtime with them.
     secret?.fill(0);
     idSelfSec?.fill(0);
     if (state) wipeRatchet(state);
+    pqRuntime?.destroy();
     clearHandshakeChannel(
       roomId,
       epc.withPeerId,

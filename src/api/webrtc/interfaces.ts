@@ -1,6 +1,7 @@
 import type { LibCrypto } from "../../cryptography/libcrypto";
 import type { RatchetState } from "../../cryptography/ratchet";
 import type { RatchetGateLease } from "../../handlers/ratchetGate";
+import type { SparsePqHealingState } from "../../handlers/pqHealingRuntime";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
   /** The room this transport belongs to. A room/peer pair owns one PC. */
@@ -37,6 +38,12 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
    * store-free serializer before the initial ratchet row is committed.
    */
   serializeEdgeCryptoState?: () => Uint8Array;
+  /**
+   * Protocol-v4 live sparse-PQ runtime for this authenticated edge. Installed
+   * synchronously with `ratchetState` after the initial row (ratchet + PQ
+   * checkpoint) is durable; destroyed with it on teardown/replacement.
+   */
+  pqHealingState?: SparsePqHealingState;
 }
 
 export interface IRTCDataChannel extends RTCDataChannel {

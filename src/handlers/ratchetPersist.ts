@@ -168,7 +168,7 @@ export const persistClaimedRatchetState = async (
     assertCurrentPersistenceOwner(epc, roomId);
   });
 
-type PersistInitialRatchetState = (
+export type PersistInitialRatchetState = (
   state: RatchetState,
   roomId: string,
   peerPublicKey: string,
@@ -176,7 +176,7 @@ type PersistInitialRatchetState = (
   edgeCryptoState?: Uint8Array | null,
 ) => Promise<void>;
 
-type RollbackInitialRatchetState = (
+export type RollbackInitialRatchetState = (
   roomId: string,
   peerPublicKey: string,
 ) => Promise<void>;

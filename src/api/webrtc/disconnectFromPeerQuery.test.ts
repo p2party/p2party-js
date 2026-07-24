@@ -113,6 +113,13 @@ describe("disconnectFromPeer room isolation", () => {
     };
     target.value.messageKeyCache = new Map([["cached", cached]]);
     target.value.messageKeyByMerkleRoot = new Map([["root", "cached"]]);
+    let pqDestroyed = 0;
+    target.value.pqHealingState = {
+      destroy: () => {
+        pqDestroyed += 1;
+      },
+    } as unknown as NonNullable<IRTCPeerConnection["pqHealingState"]>;
+    target.value.serializeEdgeCryptoState = () => new Uint8Array(1);
 
     await webrtcDisconnectPeerQuery(
       {
@@ -138,5 +145,8 @@ describe("disconnectFromPeer room isolation", () => {
     expect(target.value.ratchetState).toBeUndefined();
     expect(target.value.messageKeyCache).toBeUndefined();
     expect(target.value.messageKeyByMerkleRoot).toBeUndefined();
+    expect(pqDestroyed).toBe(1);
+    expect(target.value.pqHealingState).toBeUndefined();
+    expect(target.value.serializeEdgeCryptoState).toBeUndefined();
   });
 });

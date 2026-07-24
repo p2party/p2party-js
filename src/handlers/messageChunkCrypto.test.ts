@@ -33,6 +33,7 @@ import {
   DECRYPTED_LEN,
   RATCHET_ROOT_SUITE_MLKEM768,
 } from "../utils/constants";
+import { SparsePqHealingState } from "./pqHealingRuntime";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
@@ -655,5 +656,444 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(alice.Ns).toBe(2);
     a.messageKey.fill(0);
     b.messageKey.fill(0);
+  });
+});
+
+describe("v4 durable PQ-combined receive/send paths", () => {
+  const pqRuntime = (
+    module: LibCrypto,
+    amInitiator: boolean,
+  ): SparsePqHealingState =>
+    new SparsePqHealingState({
+      module,
+      pqMode: "hybrid-mlkem768",
+      rootSuite: RATCHET_ROOT_SUITE_MLKEM768,
+      binding: new Uint8Array(32).fill(0x42),
+      rootKey: new Uint8Array(32).fill(0x19),
+      nextOfferer: amInitiator ? "local" : "remote",
+      amInitiator,
+      now: 1_000,
+    });
+
+  const restorePqRuntime = (
+    module: LibCrypto,
+    bytes: Uint8Array,
+    amInitiator: boolean,
+  ): SparsePqHealingState =>
+    SparsePqHealingState.restore(bytes, {
+      module,
+      pqMode: "hybrid-mlkem768",
+      rootSuite: RATCHET_ROOT_SUITE_MLKEM768,
+      binding: new Uint8Array(32).fill(0x42),
+      amInitiator,
+    });
+
+  const pqEdge = (
+    state: RatchetState,
+    runtime: SparsePqHealingState,
+  ): IRTCPeerConnection => {
+    const epc = edge(state);
+    epc.pqHealingState = runtime;
+    epc.messageKeyCache = runtime.activeReceiveKeys;
+    return epc;
+  };
+
+  type EdgeCapture = Uint8Array | null;
+  const capturingPersist = (captures: EdgeCapture[]) =>
+    async (
+      _state: RatchetState,
+      _roomId: string,
+      _peerPublicKey: string,
+      _peerId: string,
+      edgeCryptoState?: Uint8Array | null,
+    ): Promise<void> => {
+      captures.push(
+        edgeCryptoState ? Uint8Array.from(edgeCryptoState) : null,
+      );
+    };
+
+  test("durable receive persists the combined key in the edge checkpoint, never in the skipped map", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, datas, plaintexts } = await buildMessage(module, 2);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    // The sender's durable step captures an OWNED context copy atomically and
+    // counts exactly one application message.
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    expect(stepped.pqContext).not.toBeNull();
+    expect(stepped.pqContext!.epoch).toBe(0n);
+    expect(stepped.pqContext!.rootSuite).toBe(RATCHET_ROOT_SUITE_MLKEM768);
+    expect(stepped.pqContext!.rootKey).not.toBe(
+      runtimeA.currentMessageContext().rootKey,
+    );
+    expect(Buffer.from(stepped.pqContext!.rootKey)).toEqual(
+      Buffer.from(runtimeA.currentMessageContext().rootKey),
+    );
+    expect(runtimeA.messagesSinceHealing).toBe(1);
+
+    const frames = plaintexts.map((plaintext) =>
+      sealChunk(
+        stepped.messageKey,
+        stepped.header,
+        plaintext,
+        root,
+        module,
+        stepped.pqContext!,
+      ),
+    );
+    expect(parseChunkFrameHeader(frames[0]).pqEpoch).toBe(0n);
+    const epochKey = messageCacheKey(
+      stepped.header.dhPub,
+      stepped.header.N,
+      0n,
+    );
+
+    const captures: EdgeCapture[] = [];
+    const d0 = await decryptMessageChunkDurably(
+      epcB,
+      "room-1",
+      frames[0],
+      epcB.messageKeyCache!,
+      root,
+      module,
+      capturingPersist(captures),
+    );
+    expect(d0.ok).toBe(true);
+    expect(d0.stateAdvanced).toBe(true);
+    expect(Buffer.from(chunkOf(d0.decrypted!))).toEqual(Buffer.from(datas[0]));
+    // The combined key never touches the classical skipped map …
+    expect(bob.skipped.size).toBe(0);
+    // … it is durable inside the STAGED edge checkpoint written in the same
+    // row as the ratchet successor.
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).not.toBeNull();
+    const restoredFromRow = restorePqRuntime(module, captures[0]!, false);
+    expect(restoredFromRow.activeReceiveKeys.has(epochKey)).toBe(true);
+    restoredFromRow.destroy();
+    // The live cache (the runtime's active map) published after persistence.
+    expect(runtimeB.activeReceiveKeys.has(epochKey)).toBe(true);
+    expect(runtimeB.messagesSinceHealing).toBe(1);
+
+    // Second chunk rides the epoch-bound cached key without persistence.
+    const d1 = await decryptMessageChunkDurably(
+      epcB,
+      "room-1",
+      frames[1],
+      epcB.messageKeyCache!,
+      root,
+      module,
+      capturingPersist(captures),
+    );
+    expect(d1.ok).toBe(true);
+    expect(d1.stateAdvanced).toBe(false);
+    expect(captures).toHaveLength(1);
+    expect(bob.Nr).toBe(1);
+    runtimeA.destroy();
+    runtimeB.destroy();
+  });
+
+  test("restart-mid-message: a restored checkpoint decrypts remaining chunks without re-combining", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, datas, plaintexts } = await buildMessage(module, 2);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    const frames = plaintexts.map((plaintext) =>
+      sealChunk(
+        stepped.messageKey,
+        stepped.header,
+        plaintext,
+        root,
+        module,
+        stepped.pqContext!,
+      ),
+    );
+
+    const first = await decryptMessageChunkDurably(
+      epcB,
+      "room-1",
+      frames[0],
+      epcB.messageKeyCache!,
+      root,
+      module,
+      persistNoop,
+    );
+    expect(first.ok).toBe(true);
+
+    // Reload: restore the persisted ratchet AND the persisted edge checkpoint.
+    const restoredState = cloneRatchet(bob);
+    const restoredRuntime = restorePqRuntime(
+      module,
+      runtimeB.serialize(),
+      false,
+    );
+    const epochKey = messageCacheKey(
+      stepped.header.dhPub,
+      stepped.header.N,
+      0n,
+    );
+    expect(restoredRuntime.activeReceiveKeys.has(epochKey)).toBe(true);
+    const epcB2 = pqEdge(restoredState, restoredRuntime);
+
+    const second = await decryptMessageChunkDurably(
+      epcB2,
+      "room-1",
+      frames[1],
+      epcB2.messageKeyCache!,
+      root,
+      module,
+      persistNoop,
+    );
+    // A cache HIT on the restored ALREADY-combined key: correct plaintext with
+    // no second ratchet step and no second combination.
+    expect(second.ok).toBe(true);
+    expect(second.stateAdvanced).toBe(false);
+    expect(Buffer.from(chunkOf(second.decrypted!))).toEqual(
+      Buffer.from(datas[1]),
+    );
+    expect(restoredState.Nr).toBe(bob.Nr);
+    runtimeA.destroy();
+    runtimeB.destroy();
+    restoredRuntime.destroy();
+  });
+
+  test("an unknown epoch is rejected before any ratchet mutation or persistence", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    const frame = sealChunk(
+      stepped.messageKey,
+      stepped.header,
+      plaintexts[0],
+      root,
+      module,
+      stepped.pqContext!,
+    );
+    const unknownEpoch = Uint8Array.from(frame);
+    unknownEpoch[56] = 1; // pqEpoch u64 BE low byte: 0 -> 1
+
+    const captures: EdgeCapture[] = [];
+    const rejected = await decryptMessageChunkDurably(
+      epcB,
+      "room-1",
+      unknownEpoch,
+      epcB.messageKeyCache!,
+      root,
+      module,
+      capturingPersist(captures),
+    );
+    expect(rejected.ok).toBe(false);
+    expect(rejected.stateAdvanced).toBe(false);
+    expect(bob.Nr).toBe(0);
+    expect(captures).toHaveLength(0);
+    expect(runtimeB.activeReceiveKeys.size).toBe(0);
+    expect(runtimeB.messagesSinceHealing).toBe(0);
+    runtimeA.destroy();
+    runtimeB.destroy();
+  });
+
+  test("failed receive persistence keeps the combined key out of the cache, checkpoint, and live ratchet", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    const frame = sealChunk(
+      stepped.messageKey,
+      stepped.header,
+      plaintexts[0],
+      root,
+      module,
+      stepped.pqContext!,
+    );
+
+    await expect(
+      decryptMessageChunkDurably(
+        epcB,
+        "room-1",
+        frame,
+        epcB.messageKeyCache!,
+        root,
+        module,
+        async () => {
+          throw new Error("injected persistence failure");
+        },
+      ),
+    ).rejects.toThrow("injected persistence failure");
+
+    expect(bob.Nr).toBe(0);
+    expect(runtimeB.activeReceiveKeys.size).toBe(0);
+    expect(runtimeB.messagesSinceHealing).toBe(0);
+    const restored = restorePqRuntime(module, runtimeB.serialize(), false);
+    expect(restored.activeReceiveKeys.size).toBe(0);
+    restored.destroy();
+    runtimeA.destroy();
+    runtimeB.destroy();
+  });
+
+  test("durable retirement removes the key from the checkpoint before wiping the RAM copy", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    const frame = sealChunk(
+      stepped.messageKey,
+      stepped.header,
+      plaintexts[0],
+      root,
+      module,
+      stepped.pqContext!,
+    );
+    const epochKey = messageCacheKey(
+      stepped.header.dhPub,
+      stepped.header.N,
+      0n,
+    );
+
+    const received = await decryptMessageChunkDurably(
+      epcB,
+      "room-1",
+      frame,
+      epcB.messageKeyCache!,
+      root,
+      module,
+      persistNoop,
+    );
+    expect(received.ok).toBe(true);
+    const ramCopy = runtimeB.activeReceiveKeys.get(epochKey);
+    expect(ramCopy).toBeDefined();
+
+    const captures: EdgeCapture[] = [];
+    await forgetReceiveMessageKeyDurably(
+      epcB,
+      "room-1",
+      epcB.messageKeyCache!,
+      epochKey,
+      capturingPersist(captures),
+    );
+    expect(captures).toHaveLength(1);
+    const restored = restorePqRuntime(module, captures[0]!, false);
+    expect(restored.activeReceiveKeys.has(epochKey)).toBe(false);
+    restored.destroy();
+    expect(runtimeB.activeReceiveKeys.has(epochKey)).toBe(false);
+    expect(ramCopy!.every((byte) => byte === 0)).toBe(true);
+    // Classical skipped map was never involved.
+    expect(bob.skipped.size).toBe(0);
+
+    // Retirement is idempotent and does not write again for a missing key.
+    await forgetReceiveMessageKeyDurably(
+      epcB,
+      "room-1",
+      epcB.messageKeyCache!,
+      epochKey,
+      capturingPersist(captures),
+    );
+    expect(captures).toHaveLength(1);
+    runtimeA.destroy();
+    runtimeB.destroy();
+  });
+
+  test("concurrent send and receive serialize under one edge lock with a consistent checkpoint", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+    const frame = sealChunk(
+      stepped.messageKey,
+      stepped.header,
+      plaintexts[0],
+      root,
+      module,
+      stepped.pqContext!,
+    );
+    const epochKey = messageCacheKey(
+      stepped.header.dhPub,
+      stepped.header.N,
+      0n,
+    );
+
+    const [received, bobStep] = await Promise.all([
+      decryptMessageChunkDurably(
+        epcB,
+        "room-1",
+        frame,
+        epcB.messageKeyCache!,
+        root,
+        module,
+        persistNoop,
+      ),
+      ratchetEncryptDurably(epcB, "room-1", module, persistNoop),
+    ]);
+    expect(received.ok).toBe(true);
+    expect(bobStep.pqContext).not.toBeNull();
+    expect(bob.Nr).toBe(1);
+    expect(bob.Ns).toBe(1);
+    // Both transitions counted, and the final checkpoint carries the key.
+    expect(runtimeB.messagesSinceHealing).toBe(2);
+    const finalRestore = restorePqRuntime(module, runtimeB.serialize(), false);
+    expect(finalRestore.activeReceiveKeys.has(epochKey)).toBe(true);
+    finalRestore.destroy();
+    bobStep.messageKey.fill(0);
+    bobStep.pqContext?.rootKey.fill(0);
+    runtimeA.destroy();
+    runtimeB.destroy();
   });
 });

@@ -359,6 +359,10 @@ export const persistAndActivateEdgeCrypto = async (
         epc.ratchetState = candidate.state;
         epc.pqHealingState?.destroy();
         epc.pqHealingState = candidate.pqRuntime;
+        // The per-edge message-key cache IS the runtime's active combined
+        // receive-key collection, so every later persisted edge checkpoint
+        // carries the exact keys the receive path is using.
+        epc.messageKeyCache = candidate.pqRuntime.activeReceiveKeys;
       },
       persist,
       rollback,

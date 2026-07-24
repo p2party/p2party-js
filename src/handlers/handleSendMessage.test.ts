@@ -260,7 +260,11 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
       },
       async () => {
         stepCalls++;
-        return { messageKey: new Uint8Array(32), header: header(2) };
+        return {
+          messageKey: new Uint8Array(32),
+          header: header(2),
+          pqContext: null,
+        };
       },
     );
 
@@ -289,7 +293,7 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
         events.push(
           `step:${roomId}:${String(epc === replacement)}`,
         );
-        return { messageKey: newKey, header: header(2) };
+        return { messageKey: newKey, header: header(2), pqContext: null };
       },
     );
 
@@ -317,7 +321,11 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
         async () => {},
         async () => {
           stepCalled = true;
-          return { messageKey: new Uint8Array(32), header: header(2) };
+          return {
+            messageKey: new Uint8Array(32),
+            header: header(2),
+            pqContext: null,
+          };
         },
       ),
     ).rejects.toThrow("replacement connection has no ratchet state");

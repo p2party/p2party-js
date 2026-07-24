@@ -4,6 +4,54 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.13.0] — 2026-07-25
+
+Protocol **v4**: a clean, incompatible wire/session break (v3 peers and
+persisted v3 crypto rows are not resumed). Adds sparse post-quantum healing
+and room-wide scheduled timing cover.
+
+### Added
+
+- **Sparse PQ healing (immediate mode).** An authenticated 64-bit PQ epoch is
+  carried in every uniform 65,490-byte cell and mixed into the message AEAD
+  AAD. A store-free sparse-PQ state machine performs standard ML-KEM
+  OFFER/ADVANCE/ACK exchanges; a live WebRTC orchestrator drives due-time
+  initiation (64 messages / 24 h, stable-role turn, quiescent boundary),
+  exact-frame retransmission (5 s × 8), and fail-closed fork/exhaustion
+  handling. Combined message keys live in an epoch-bound active receive-key
+  collection persisted in one atomic encrypted edge checkpoint alongside the
+  Double Ratchet.
+- **Scheduled timing cover.** An authenticated room policy opens exactly
+  `coverLanes` fixed-schedule lanes per edge, each emitting `coverFramesPerCell`
+  authenticated 65,490-byte cells per epoch for `coverDurationEpochs`, closing
+  only at cycle boundaries. Real message chunks, PQ control, receipts, and an
+  encrypted CANCEL substitute into scheduled slots; dummy cover cells fill the
+  rest. Absolute room-phased cycles derived from the policy hash; browser
+  visibility/freeze/pagehide/offline suspend cover and resume only at a future
+  boundary. Surfaced status (`starting|active|degraded|suspended|stopped`) so a
+  browser-imposed gap is never claimed as cover.
+- **Public session API v4.** `pqEpoch` / `healingInProgress`, PQ-combined
+  `encrypt`/`decrypt`, snapshot format 4 (rejects v3) carrying the PQ machine +
+  active receive keys, and a store-free `prepareHealing`/`acceptControlFrame`/
+  `pendingControl` control surface with an explicit persist-before-send
+  contract.
+
+### Changed
+
+- `PROTOCOL_VERSION` is now `4`; the public epoch is an authenticated u64 (was
+  a fixed reserved zero byte). `CHUNK_PLAINTEXT_LEN` drops from 65,412 to
+  65,405 bytes (the seven epoch bytes consume padding); the outer cell stays
+  exactly 65,490 bytes. Room-policy encoding/hash KATs updated for the v4
+  wire-version byte.
+
+### Verified
+
+- Full source gate green (lint, format, typecheck, tests, standalone example).
+- Real headless-Chromium E2E: immediate sparse-PQ mesh at n=2/3/4; scheduled
+  cover lanes over real WebRTC; and a full app-stack run (Redux + IndexedDB +
+  WebRTC) delivering byte-exact messages in immediate, PIN, and scheduled
+  rooms.
+
 ## [0.12.0] — 2026-07-24
 
 ### Added

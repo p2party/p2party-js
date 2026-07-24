@@ -88,11 +88,11 @@ export class PqHealingError extends Error {
 
 export interface PqHealingAdvanceAcknowledgement {
   /**
-   * Integration-facing typed value, not a wire encoding. The transport must
-   * define one canonical byte representation and authenticate it under
-   * `epoch` before passing the decoded value to this state machine.
-   */
-  /**
+   * Integration-facing typed value, NOT a wire encoding. ACK wire encoding
+   * and authentication remain integration-owned: the transport must define
+   * one canonical byte representation, authenticate it under `epoch`, and
+   * only then pass the decoded value to this state machine.
+   *
    * The newly committed epoch. The transport acknowledgement must be
    * authenticated under this epoch, proving that the offerer decapsulated.
    */
@@ -247,7 +247,7 @@ const requireIncrementableU64 = (value: bigint, name: string): void => {
 };
 
 const requireAcknowledgement = (
-  value: PqHealingAdvanceAcknowledgement,
+  value: unknown,
 ): PqHealingAdvanceAcknowledgement => {
   if (
     value === null ||
@@ -255,8 +255,12 @@ const requireAcknowledgement = (
     Array.isArray(value) ||
     Object.getPrototypeOf(value) !== Object.prototype
   )
-    fail("invalid-record", "advance acknowledgement must be a plain record");
-  const keys = Reflect.ownKeys(value);
+    return fail(
+      "invalid-record",
+      "advance acknowledgement must be a plain record",
+    );
+  const record = value as Record<PropertyKey, unknown>;
+  const keys = Reflect.ownKeys(record);
   if (
     keys.length !== 2 ||
     !keys.includes("epoch") ||
@@ -266,21 +270,34 @@ const requireAcknowledgement = (
       "invalid-record",
       "advance acknowledgement must contain only epoch and advanceCounter",
     );
-  for (const field of ["epoch", "advanceCounter"] as const) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, field);
-    if (
-      descriptor === undefined ||
-      !("value" in descriptor) ||
-      !descriptor.enumerable
-    )
-      fail(
-        "invalid-record",
-        "advance acknowledgement fields must be enumerable data properties",
-      );
-  }
-  requireU64(value.epoch, "advance acknowledgement epoch");
-  requireU64(value.advanceCounter, "advance acknowledgement counter");
-  return value;
+  const epochDescriptor = Object.getOwnPropertyDescriptor(record, "epoch");
+  const counterDescriptor = Object.getOwnPropertyDescriptor(
+    record,
+    "advanceCounter",
+  );
+  if (
+    epochDescriptor === undefined ||
+    counterDescriptor === undefined ||
+    !("value" in epochDescriptor) ||
+    !("value" in counterDescriptor) ||
+    !epochDescriptor.enumerable ||
+    !counterDescriptor.enumerable
+  )
+    return fail(
+      "invalid-record",
+      "advance acknowledgement fields must be enumerable data properties",
+    );
+
+  const epoch: unknown = epochDescriptor.value;
+  const advanceCounter: unknown = counterDescriptor.value;
+  if (typeof epoch !== "bigint" || typeof advanceCounter !== "bigint")
+    return fail(
+      "invalid-record",
+      "advance acknowledgement fields must be bigint values",
+    );
+  requireU64(epoch, "advance acknowledgement epoch");
+  requireU64(advanceCounter, "advance acknowledgement counter");
+  return { epoch, advanceCounter };
 };
 
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
@@ -954,9 +971,7 @@ export class PqHealingMachine<P extends MlKemParameterSet> {
    * the new epoch has been received. Exact epoch/counter binding prevents an
    * unrelated transport receipt from unlocking the next OFFER.
    */
-  acceptAuthenticatedAdvanceAcknowledgement(
-    acknowledgement: PqHealingAdvanceAcknowledgement,
-  ): void {
+  acceptAuthenticatedAdvanceAcknowledgement(acknowledgement: unknown): void {
     this.#assertSynchronous();
     const canonicalAcknowledgement = requireAcknowledgement(acknowledgement);
     const phase = this.#phase;
@@ -1061,9 +1076,7 @@ export class PqHealingMachine<P extends MlKemParameterSet> {
    * Integration should persist that fact or retain a transport receipt cache
    * so an exact ADVANCE replay can be answered without rolling state back.
    */
-  markAdvanceAcknowledgementDispatched(
-    acknowledgement: PqHealingAdvanceAcknowledgement,
-  ): void {
+  markAdvanceAcknowledgementDispatched(acknowledgement: unknown): void {
     this.#assertSynchronous();
     const canonicalAcknowledgement = requireAcknowledgement(acknowledgement);
     const phase = this.#phase;

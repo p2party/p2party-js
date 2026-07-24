@@ -426,7 +426,15 @@ describe("sparse PQ healing", () => {
     responder.commitPreparedAdvance();
 
     await expectCode(
-      () => responder.acceptAuthenticatedAdvanceAcknowledgement(null as never),
+      () => responder.acceptAuthenticatedAdvanceAcknowledgement(null),
+      "invalid-record",
+    );
+    await expectCode(
+      () =>
+        responder.acceptAuthenticatedAdvanceAcknowledgement({
+          epoch: "1",
+          advanceCounter: 0n,
+        }),
       "invalid-record",
     );
     await expectCode(
@@ -435,7 +443,7 @@ describe("sparse PQ healing", () => {
           epoch: 1n,
           advanceCounter: 0n,
           extra: true,
-        } as never),
+        }),
       "invalid-record",
     );
     await expectCode(
@@ -445,6 +453,33 @@ describe("sparse PQ healing", () => {
           advanceCounter: 0n,
         }),
       "overflow",
+    );
+    await expectCode(
+      () =>
+        responder.acceptAuthenticatedAdvanceAcknowledgement({
+          epoch: 1n,
+          advanceCounter: -1n,
+        }),
+      "overflow",
+    );
+    await expectCode(
+      () =>
+        responder.acceptAuthenticatedAdvanceAcknowledgement(
+          Object.defineProperties(
+            {},
+            {
+              epoch: {
+                enumerable: true,
+                get: () => 1n,
+              },
+              advanceCounter: {
+                enumerable: true,
+                value: 0n,
+              },
+            },
+          ),
+        ),
+      "invalid-record",
     );
     expect(responder.phase).toBe("outbound-advance-awaiting-ack");
   });

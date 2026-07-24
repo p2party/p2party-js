@@ -158,10 +158,12 @@ export const persistClaimedRatchetState = async (
   epc: IRTCPeerConnection,
   state: RatchetState,
   roomId: string,
+  edgeCryptoStateOverride?: () => Uint8Array,
 ): Promise<void> =>
   withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
     assertCurrentPersistenceOwner(epc, roomId);
-    const edgeCryptoState = epc.serializeEdgeCryptoState?.() ?? null;
+    const edgeCryptoState =
+      edgeCryptoStateOverride?.() ?? epc.serializeEdgeCryptoState?.() ?? null;
     try {
       await persistRatchetStateUnlocked(
         state,

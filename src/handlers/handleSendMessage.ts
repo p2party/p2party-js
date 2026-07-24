@@ -24,6 +24,7 @@ import { deleteMessage, incrementMessageStats } from "../reducers/roomSlice";
 import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
 import { sealChunk } from "./messageChunkCrypto";
 import { getRatchetGate } from "./ratchetGate";
+import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
 import { ratchetEncryptDurably } from "./ratchetPersist";
 import {
   claimTransfer,
@@ -376,9 +377,9 @@ type DurableRatchetStep = (
 }>;
 
 // v4: the sparse-PQ orchestrator blocks application sends during a healing
-// exchange. Until the live orchestrator lands, poll the runtime's traffic
-// gate with a bound comfortably above the exchange's worst-case retry window
-// (8 attempts × 5 s).
+// exchange (its own machine phase plus the inbound-control gate). Poll the
+// admission check with a bound comfortably above the exchange's worst-case
+// retry window (8 attempts × 5 s).
 const PQ_ADMISSION_POLL_MS = 25;
 const PQ_ADMISSION_TIMEOUT_MS = 60_000;
 
@@ -386,10 +387,9 @@ const waitForPqTrafficAdmission = async (
   epc: IRTCPeerConnection,
   signal?: AbortSignal,
 ): Promise<void> => {
-  const pq = epc.pqHealingState;
-  if (!pq) return; // runtime-free bootstrap/test edge: classical epoch zero
+  if (!epc.pqHealingState) return; // runtime-free bootstrap/test edge
   const deadline = Date.now() + PQ_ADMISSION_TIMEOUT_MS;
-  while (pq.trafficBlocked) {
+  while (isPqApplicationTrafficBlocked(epc)) {
     throwIfTransferAborted(signal);
     if (Date.now() > deadline)
       throw new Error(

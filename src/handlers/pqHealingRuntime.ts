@@ -5,6 +5,7 @@ import {
   inspectPqHealingRecord,
   wipePqHealingSnapshot,
   PQ_HEALING_ACK_BYTES,
+  type PqHealingPhase,
   type PqHealingSnapshot,
   type PqHealingSnapshotPhase,
   type PqHealingTurn,
@@ -51,6 +52,7 @@ const MAX_U64 = (1n << 64n) - 1n;
 const MAX_EDGE_STATE_BYTES = 256 * 1024;
 const MAX_ACTIVE_RECEIVE_KEYS = Math.min(MAX_SKIP_SESSION, 256);
 const MAX_CACHE_KEY_BYTES = 160;
+const CANONICAL_CACHE_KEY = /^[0-9a-f]{64}:[0-9]+:[0-9]+$/;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -485,6 +487,8 @@ const writeActiveKeys = (
   );
   writer.u16(canonical.length);
   for (const [cacheKey, messageKey] of canonical) {
+    if (!CANONICAL_CACHE_KEY.test(cacheKey))
+      fail("active receive cache key is non-canonical");
     const encodedKey = textEncoder.encode(cacheKey);
     if (encodedKey.length === 0 || encodedKey.length > MAX_CACHE_KEY_BYTES)
       fail("active receive cache key length is invalid");
@@ -514,7 +518,7 @@ const readActiveKeys = (reader: ByteReader): Map<string, Uint8Array> => {
       }
       if (
         key.length === 0 ||
-        !/^[0-9a-f]{64}:[0-9]+:[0-9]+$/.test(key) ||
+        !CANONICAL_CACHE_KEY.test(key) ||
         result.has(key)
       )
         fail("checkpoint active receive cache key is non-canonical");
@@ -563,7 +567,7 @@ export class SparsePqHealingState {
   readonly #outboundDirection: PqControlDirection;
   readonly #inboundDirection: PqControlDirection;
 
-  #machine: PqHealingMachine;
+  #machine: PqHealingMachine<MlKemParameterSet>;
   #messageRoot: Uint8Array;
   #outbox: PqHealingOutbox | null = null;
   #lastInboundOfferFrame: Uint8Array | null = null;
@@ -620,7 +624,7 @@ export class SparsePqHealingState {
     return this.#machine.epoch;
   }
 
-  get phase(): ReturnType<PqHealingMachine["phase"]> {
+  get phase(): PqHealingPhase {
     return this.#machine.phase;
   }
 
@@ -699,13 +703,15 @@ export class SparsePqHealingState {
 
   markPendingDispatched(now = Date.now()): void {
     this.#assertLive();
-    if (!this.#outbox) fail("there is no PQ control outbox");
+    const outbox = this.#outbox;
+    if (!outbox) return fail("there is no PQ control outbox");
     requireSafeUint(now, "dispatch clock");
-    if (this.#outbox.attempts >= PQ_HEAL_MAX_RETRIES)
+    if (outbox.attempts >= PQ_HEAL_MAX_RETRIES)
       fail("PQ control retry budget is exhausted");
     this.#outbox = {
-      ...this.#outbox,
-      attempts: this.#outbox.attempts + 1,
+      kind: outbox.kind,
+      frame: outbox.frame,
+      attempts: outbox.attempts + 1,
       nextRetryAt: now + PQ_HEAL_RETRY_MS,
     };
   }
@@ -783,8 +789,9 @@ export class SparsePqHealingState {
       });
 
       if (record.length === PQ_HEALING_ACK_BYTES) {
-        if (this.#outbox?.kind !== "advance")
-          fail("unexpected PQ ADVANCE acknowledgement");
+        const outbox = this.#outbox;
+        if (outbox?.kind !== "advance")
+          return fail("unexpected PQ ADVANCE acknowledgement");
         const acknowledgement = decodePqHealingAck(
           record,
           this.#suite,
@@ -793,8 +800,9 @@ export class SparsePqHealingState {
         this.#machine.acceptAuthenticatedAdvanceAcknowledgement(
           acknowledgement,
         );
-        this.#outbox.frame.fill(0);
+        outbox.frame.fill(0);
         this.#outbox = null;
+        this.#clearDuplicateCache();
         this.#messagesSinceHealing = 0;
         this.#lastHealedAt = now;
         this.#refreshMessageRoot();
@@ -837,8 +845,9 @@ export class SparsePqHealingState {
         return { dispatch: sealedAdvance, changed: true };
       }
 
-      if (this.#outbox?.kind !== "offer")
-        fail("unexpected PQ ADVANCE without a persisted OFFER");
+      const offerOutbox = this.#outbox;
+      if (offerOutbox?.kind !== "offer")
+        return fail("unexpected PQ ADVANCE without a persisted OFFER");
       await this.#machine.acceptAuthenticatedAdvance(record);
       const acknowledgement = this.#machine.commitAcceptedAdvance();
       const ackRecord = encodePqHealingAck(
@@ -858,7 +867,7 @@ export class SparsePqHealingState {
           record: ackRecord,
         });
         this.#machine.markAdvanceAcknowledgementDispatched(acknowledgement);
-        this.#outbox.frame.fill(0);
+        offerOutbox.frame.fill(0);
         this.#outbox = null;
         this.#lastInboundAdvanceFrame?.fill(0);
         this.#lastInboundAdvanceFrame = Uint8Array.from(frame);
@@ -1011,7 +1020,7 @@ export class SparsePqHealingState {
     requireBytes(options.binding, "expected edge binding", 32);
     const reader = new ByteReader(bytes);
     let snapshot: PqHealingSnapshot | null = null;
-    let machine: PqHealingMachine | null = null;
+    let machine: PqHealingMachine<MlKemParameterSet> | null = null;
     let restored: SparsePqHealingState | null = null;
     let activeKeys: Map<string, Uint8Array> | null = null;
     let outbox: PqHealingOutbox | null = null;

@@ -2,11 +2,12 @@
 
 Living handoff so any agent (Claude or Codex) can take over. Branch:
 **`feat/pace-ratchet-protocol-v3`**. The **97/0** suite and clean typecheck below are
-historical Stage-4 checkpoints, not results for the current uncommitted tree; see the
-late-session truth checkpoint near the end. No current all-suite result is asserted here.
-Test runner: `bun test`. Package `p2party@0.9.2` (v3 release target **0.10.0**).
+historical Stage-4 checkpoints; see the dated checkpoints near the end for current
+results and remaining gates. Test runner: `bun test`. Current v3 package/release
+candidate: **`p2party@0.12.0`**.
 
 ## GIT SAFETY (read first)
+
 - There are **2 pre-existing user stashes** on `master` — `stash@{0}` (WIP "Disconnect
   from all rooms…") and `stash@{1}` (WIP "Persisting messages and identity"). **NEVER**
   `git stash`/`reset`/`checkout <branch>`/`clean`/`rebase`. Only `git add <files>` +
@@ -14,12 +15,14 @@ Test runner: `bun test`. Package `p2party@0.9.2` (v3 release target **0.10.0**).
 - Stay INSIDE the `@p2party` repos (this repo, plus the frontend + server siblings).
 
 ## Definition of done (in force)
+
 Verify like a real user in **headless Chromium against the local stack** (Playwright),
 then commit + **merge to master**. SSOT for constants in `src/utils/constants.ts`,
 byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USER runs
 `npm run predist && npm run uploadcdn` (needs their AWS creds — an agent cannot).
 
 ## DONE
+
 - **Stages 1–3 (historical checkpoint)**: WASM crypto
   (Ristretto255/X25519/HKDF/AEAD; those small callers then used a 2-MiB cap),
   pure TS crypto units (cpace/x3dh/ratchet/hkdf), IndexedDB `ratchetSessions` + `meta`
@@ -37,8 +40,8 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
   - Random X25519 identity, **WebCrypto-wrapped in IndexedDB** (`meta` store key
     `"identityX25519"`, reuses Stage-3 wrap) — NOT plaintext localStorage. api:
     `db/api.ts` get/set/deleteIdentityX25519; worker: `db/db.worker.ts` fn*.
-  - **Domain-separated cross-signature** `IDENTITY_CROSS_SIGN_DOMAIN_BYTES =
-    `"p2party-x25519-idsig-v1"` (`src/cryptography/identityCrossSig.ts`) — closes
+  - **Domain-separated cross-signature:** `IDENTITY_CROSS_SIGN_DOMAIN_BYTES` is
+    `"p2party-x25519-idsig-v1"` (`src/cryptography/identityCrossSig.ts`). This closes
     **SECURITY-1**: a bare `sign(x25519pub, ed25519sec)` collides with the
     login-challenge signing oracle (`handleChallenge` signs a raw 32B server nonce),
     letting a malicious server forge a cross-sig. Regression-tested.
@@ -55,6 +58,7 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
   `docs/protocol-evolution-decision-log.md`.
 
 ## Stage 4 Task 5 — review APPROVED (Stage 4 COMPLETE)
+
 - The Task 5 review confirmed the make-or-break check: the CI IS built **role-aware**
   (`fpInitiator = amInitiator ? localFp : remoteFp`; `ik` likewise) so both peers
   produce a byte-identical CI; fingerprints are raw bytes (SDP case-immune); onmessage
@@ -68,13 +72,20 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
   verifiable in the Stage-7 headless-Chromium E2E (fail-safe either way).
 
 ## SESSION 2026-07-23 (late) — standalone use, browser E2E, Redux coupling
+
 - **BROWSER E2E PASSED (headless Chromium, no WebRTC):** message crypto 11/11, AND the **FULL standalone protocol 5/5** — real `performHandshakeCore` over in-memory transports + bidirectional byte-exact messaging + tampered-cross-sig rejection. Self-driven via playwright `chromium.launch` (Playwright MCP wanted the missing Chrome channel). Crypto is now browser-proven.
 - **`examples/standalone-e2ee.ts` (NEW, verified `bun run` with no browser-global shim)** — E2EE-library-style demo (`const alice`/`const bob`, real handshake over two in-memory links = simulated channels, encrypt/decrypt both ways). The reference for using the machinery without WebRTC, and the exact flow `createSession()` should wrap.
 - **KEY PARAM FACT:** `performHandshakeCore`'s `idSelfSec` = the **X25519 identity SECRET** (interactive 3DH), NOT Ed25519; the Ed25519 key only cross-signs the X25519 pub + is the pinned anchor (`peerIdentityEd25519Pub`). Copy `handleHandshake.test.ts:215-263`.
 - **PRE-SPLIT REDUX/db COUPLING finding:** `handleHandshake.ts` imported `../store` + `../db/api`, and `runHandshake` read `store.getState().keyPair` + persisted via db, so importing `performHandshakeCore` dragged in Redux + a db Worker + localStorage. The core functions themselves used neither dependency, making a module split the enabling refactor for a clean standalone `createSession()` + smaller consumer bundles.
 - **REDUX/db DECOUPLING COMPLETE:** `handshakeCore.ts` now owns `performHandshakeCore` / `buildChannelInput` / `HandshakeTransport` and imports only crypto + byte utilities. `handleHandshake.ts` retains Redux, DB persistence, DTLS/WebRTC transport, and ratchet gates. `messageChunkCrypto.ts` and `ratchet.ts` are confirmed store-free. The standalone example no longer needs `_env.ts`; the remaining crypto random calls it exercises use `globalThis.crypto`.
 
-## Stage 5 STATUS (2026-07-23)
+## Historical Stage 5 STATUS (2026-07-23; superseded by the 0.12 checkpoint)
+
+This section preserves the state that the next session was originally asked to
+read. It is not a current task list: the store-free session API, T4 removal, and
+packaged frontend integration described as pending here have since landed. The
+fresh exact-0.12 full-WebRTC T5 run is still pending.
+
 - ✅ T1 `a9712e0` (frame codec+constants), ✅ T2 `90a7191` (C reads cleartext nonce), ✅ T3-core `293ce4c`+`2776f1a` (messageChunkCrypto, per-message cache + clone-rollback, **libsodium** decrypt), ✅ **T3-wiring `39ce532` — DONE but UNVERIFIED (E2E pending)**: live send/receive swapped onto the ratchet, `MESSAGE_START` 96→62 decoupled from `DECRYPTED_LEN` (zero Merkle/OPFS ripple), box left dead, 103/0, typecheck clean.
 - **Top E2E risks to check (report: `.superpowers/sdd/task-s5t3-wiring-report.md`):** (1) responder-sends-first — `ratchetEncrypt` throws "no sending chain" until the responder receives once (graceful no-op now); (2) reconcile re-seals under the cached key with a fresh nonce (not "resend identical"); (3) WS relay drops v3 chunks (ratchet is per-data-channel-edge) → relay fallback disabled for v3.
 - ✅ **T4-partial `98d6daa`** — removed box TS wrapper (`chacha20poly1305.ts`) + deprecated `p2party.encrypt`/`.decrypt` public API. typecheck clean, 103/0. Safe unit-verifiable slice; did NOT rebuild WASM.
@@ -89,15 +100,20 @@ byte-matched in `src/cryptography/utils.h`. KISS/DRY, TDD. WASM deploy = the USE
 - **DX (user ask):** `generateKeyPair` now aliases `newKeyPair` (`d744f6b`, industry-standard). `verify(message, signature, publicKey)` arg order differs from the common `(sig, msg, pk)` — noted, not changed.
 - **Standalone session API — DECIDED direction (needs a design pass before build):** user chose a designed `p2party.createSession({identitySecretKey, peerPublicKey, initiator}) → .encrypt(bytes):Uint8Array[] / .decrypt(frame) / .serialize()/restoreSession()`. NOT a thin wrap — two protocol blockers found: (1) `initRatchet` uses a RANDOM ratchet keypair (not seed-derived, `ratchet.ts`), so the initiator needs the responder's ratchet pub via an EXCHANGE → createSession needs a mini-handshake (X3DH from the X25519 identity keys = the protocol-v3 handshake minus transport) to derive the shared root + swap ratchet pubs; (2) `merkleRoot` is AAD, NOT in the frame (threaded in from `handleMessageQueueing`), so the session must convey the root itself (embed a per-message header frame, or return `{root, frames}`). Security-sensitive → brainstorm/spec first, verify against the browser harness AND ideally the full E2E. Browser crypto harness (scratchpad: bundle.js/index.html/libcrypto.wasm + `chromium.launch` self-drive) is reusable to validate it.
 - **Deferred Ed25519→WebCrypto wrap: the AES-GCM wrap key is NON-EXTRACTABLE** (per user) — use `crypto.subtle.wrapKey`/`unwrapKey` (or encrypt/decrypt), never `exportKey`, mirroring the Stage-3 X25519 store.
-- **T5** = headless-Chromium E2E vs local stack (frontend installs `file:../p2party-js/p2party-0.9.2.tgz`, a packed tarball — must rebuild+repack+reinstall the v3 branch first; `p2party.com/e2e/run.mjs` is the harness; Postgres already runs on :5432, DO NOT disturb — server may use SQLite) = the gate that makes T3-wiring + T4 trustworthy → merge to master.
+- **T5** = headless-Chromium E2E vs local stack using the exact installed release
+  artifact (`p2party.com/e2e/run.mjs` is the historical harness; Postgres already
+  runs on :5432, DO NOT disturb). The frontend now installs the verified local
+  `p2party-0.12.0.tgz`; a fresh exact-0.12 full-WebRTC run remains the merge gate.
 
 ## Historical Stage 5 reference (superseded; do not use as current instructions)
+
 **READ FIRST: `docs/stage5-message-crypto-swap-design.md`** — the precise swap design,
 incl. the **per-message-ratchet + messageKey-cache subtlety** (the #1 bug to avoid:
 `ratchetDecrypt` is per-message, not per-chunk — call it once + cache the key), the
 clone-rollback-dedup contract, the 62-byte frame layout, and a landable-green task
 decomposition. Plan (older, amend per Q4): `docs/superpowers/plans/2026-07-22-pace-ratchet-protocol-v3.md`;
 box-removal surface: D2=B spec **§6**.
+
 1. **Swap message crypto to the ratchet AEAD** (the ratchet is seeded by the handshake
    but NOT yet used for messages):
    - `handleSendMessage.ts:256` `_encrypt_chachapoly_asymmetric` → `_encrypt_chachapoly_symmetric`
@@ -133,6 +149,7 @@ box-removal surface: D2=B spec **§6**.
    on `main` through `classifyFrame`. Raw untagged 64-byte receipts are rejected.
 
 ## THEN (historical plan; superseded where noted)
+
 - **Stage 6 is no longer accurately described by the old hardcoded-`nopin` note.**
   Current room policy selects `pin`/`nopin`; durable PIN backoff is per stable identity
   within a room, with a soft room-wide in-memory aggregate. See the late checkpoint.
@@ -141,6 +158,7 @@ box-removal surface: D2=B spec **§6**.
   definition of done** — then merge to master.
 
 ## RESEARCH / PAPER / L2 threads (active alongside the core; claims remain unshipped)
+
 - **COVER POLICY DECIDED (D3, 2026-07-23):** preserve one ephemeral
   DataChannel per logical message for isolated cancel/progress/backpressure/retry/
   cleanup. In the current immediate runtime, closing that message channel while the
@@ -190,14 +208,16 @@ box-removal surface: D2=B spec **§6**.
 - User wants **ONE combined SOTA-edge contribution**, not two forced novelties. Strong
   L2 server-blind rendezvous is now part of that combined target, not a deferred
   OPRF-only Phase 1. A common opaque or OPRF-derived token is only L1 because equality
-  still clusters co-members. The working L2 construction is a short-TTL,
-  **Talek-style anytrust private rendezvous log**: a 256-bit fragment capability,
-  rotating presence IDs, private writes + PIR reads across independently operated
-  replicas, fixed-size encrypted SDP/ICE inbox records, and stable identities revealed
-  only inside the authenticated peer handshake. Talek is prior art/substrate, not a
-  drop-in: dynamic multi-writer presence, hidden subslot allocation/collisions, expiry,
-  equivocation auditing, and WebRTC handoff are p2party-specific work. A human PIN stays
-  separate from the capability so public records do not become an offline PIN oracle.
+  still clusters co-members. The working L2 construction is a short-TTL anytrust
+  service over independently operated replicas: a 256-bit fragment capability,
+  rotating presence IDs, **DPF/Riposte-style private point writes plus batched IT-PIR
+  reads** for the dynamic presence board, fixed-size encrypted SDP/ICE inbox records,
+  and stable identities revealed only inside the authenticated peer handshake. Talek
+  remains a comparator and may fit the later pairwise single-writer inbox/log after
+  rendezvous; it is not the dynamic multi-writer presence primitive. Hidden subslot
+  allocation/collisions, expiry, equivocation auditing, and WebRTC handoff are
+  p2party-specific work. A human PIN stays separate from the capability so public
+  records do not become an offline PIN oracle.
   L2a hides the application room graph; L2b additionally needs noncolluding ingress/TURN
   or an anonymity network to hide source IP and timing. Service-wide real/fake accesses
   are required for a timing claim; room cover begins too late to hide rendezvous.
@@ -208,10 +228,11 @@ box-removal surface: D2=B spec **§6**.
   mesh; only signaling is star-shaped.
 - **BitTorrent means an actual protocol extension**, not merely borrowing its DHT or
   running unchanged BitTorrent over p2party. The research direction is a fail-closed
-  private-swarm mode: capability/private-L2 discovery; an X25519 + ML-KEM-768 outer
-  session; conventional HAVE/request/piece/cancel semantics carried in fixed
-  authenticated cells; a swarm-wide fixed rate class; no legacy tracker/DHT/PEX/LSD or
-  plaintext downgrade; and useful-byte accounting that never rewards dummy traffic.
+  private-swarm mode: capability/private-L2 discovery; an X25519 + exact
+  swarm-policy-selected ML-KEM-512/768/1024 outer session; conventional
+  HAVE/request/piece/cancel semantics carried in fixed authenticated cells; a
+  swarm-wide fixed rate class; no legacy tracker/DHT/PEX/LSD or plaintext downgrade;
+  and useful-byte accounting that never rewards dummy traffic.
   Preserve BitTorrent's sparse bounded-neighbor topology—do not import room full-mesh
   cover into a large swarm. Content/piece semantics can interoperate, but strong-private
   wire/discovery cannot interoperate with legacy peers. I2P already combines deployed
@@ -222,26 +243,30 @@ box-removal surface: D2=B spec **§6**.
   `createSession()` transport-neutrality/evaluation target unless a real BEP-shaped
   implementation produces a separate result.
   Strong carriers are WebRTC/DTLS or TLS/QUIC with exporter binding: the current
-  2,465-byte hybrid HELLO is fingerprintable if exposed on raw TCP, which would
-  require published OKE/Kemeleon or a weaker claim. Do not copy chat's
+  suite-specific 1,761/2,465/3,329-byte hybrid HELLO is fingerprintable if exposed on
+  raw TCP, which would require published OKE/Kemeleon or a weaker claim. Do not copy
+  chat's
   per-message physical DataChannel mapping into torrents; P2BT multiplexes
   logical transfers over a long-lived sparse-neighbor connection. One current
   cell/10 s is only ~49.5 kbit/s/link (~48 h/GiB from one source), so bulk cover
   needs a predeclared rate profile/bulk epoch, not cadence alone.
-- Deferred capstone: awesome READMEs (p2party-js, p2party.com, server), the blog series,
-  a LaTeX paper.
+- Capstone status: the repository README/DX passes and five-part blog series have
+  landed. The LaTeX paper, production deployment, and final visual/browser gate remain.
 
-## LATE-SESSION CURRENT-TREE TRUTH (2026-07-23; root verification pending)
+## LATE-SESSION TREE TRUTH (started 2026-07-23; updated by checkpoints below)
 
-- **One mandatory protocol-v3 suite.** Interactive X25519 3DH possession proof runs
-  in every room; `pin` additionally runs draft-21 CPace and contributes its ISK.
-  ML-KEM-768 is mandatory in both policies, producing `3DH ‖ ML-KEM` or
-  `CPace-ISK ‖ 3DH ‖ ML-KEM`, with no classical fallback. This is neither Signal
-  X3DH (no prekey bundles) nor X-Wing (a specific hybrid-KEM combiner). Persisted
-  sessions accept only `rootSuite = "hybrid-3dh-mlkem768-cpace21-v3"`.
+- **One exact mandatory protocol-v3 profile per room.** Interactive X25519 3DH
+  possession proof runs in every room; `pin` additionally runs draft-21 CPace and
+  contributes its ISK. The authenticated room policy selects exactly one of
+  ML-KEM-512/768/1024 (768 is the default), producing `3DH ‖ ML-KEM` or
+  `CPace-ISK ‖ 3DH ‖ ML-KEM`, with no negotiation or classical fallback. This is
+  neither Signal X3DH (no prekey bundles) nor X-Wing (a specific hybrid-KEM
+  combiner). Persisted sessions accept the matching
+  `hybrid-3dh-mlkem{512,768,1024}-cpace21-v3` provenance only.
 - **Provenance tags have distinct scopes.** Wire protocol is `3`; standalone snapshot
-  format is `3` with root-suite byte `3`; handshake channel input carries
-  `PQ_TAG=0x01`. Do not conflate the snapshot suite byte with the handshake PQ tag.
+  format is `3` with root-suite bytes `4/3/5` for ML-KEM-512/768/1024; handshake
+  channel input carries suite tags `0x02/0x01/0x03`. Do not conflate the snapshot
+  suite byte with the handshake suite tag.
 - **Ownership is leased.** Ratchet gates and handshake inboxes are separate
   `(roomId, transient peerId)` registries with opaque attempt leases. The gate opens
   only after handshake plus durable persistence. Stable identity alias exclusion and
@@ -323,7 +348,120 @@ box-removal surface: D2=B spec **§6**.
   frontend installation, browser/WebRTC T5, production deployment, scheduled
   cover, sparse PQ healing, L2 rendezvous, or P2BT; those remain separate gates.
 
+## 0.11.0 CORE CHECKPOINT (2026-07-24; production integration still pending)
+
+- Commit `6e13d81` adds exact room-selected FIPS 203 ML-KEM-512/768/1024
+  bootstrap profiles with no negotiation, length inference, downgrade, or
+  classical fallback. ML-KEM-768 keeps the existing suite/tag assignments and
+  remains the default. Suite-specific KDF domains, persisted ratchet provenance,
+  standalone snapshots, and room policy all reject cross-suite state.
+- The handshake now has three chained cryptographic proofs:
+  responder `mac_R`, initiator `mac_I` over `mac_R` and both initial ratchet
+  keys, and responder `FINISH/mac_F` over both earlier proofs. The initiator
+  establishes only after validating FINISH. An already-open RTCDataChannel is
+  not that acknowledgement: it proves the earlier DTLS/SCTP transport, and
+  `RTCDataChannel.send()` exposes no peer-verified application-MAC receipt.
+  Responder completion still cannot prove final-packet delivery; that unavoidable
+  lossy-transport edge is availability/state synchronization, not key disclosure.
+- Commit `a426490` lands the internal sparse PQ-healing state-machine core:
+  exact-suite OFFER/ADVANCE records, full transcript binding, u64
+  epochs/counters, alternating turns, replay/fork/gap rejection, prepared/commit/
+  acknowledgement phases, traffic gating, and secret wiping. It is **not yet a
+  shipped nonzero PQ epoch**. Production still needs canonical authenticated ACK
+  bytes, encrypted crash-safe checkpoint/restore, exact sealed-record
+  retransmission, message-key combination, and WebRTC/cover-scheduler wiring.
+- The formal scaffold is committed as `64dea1e`. It models the exact no-PIN
+  ML-KEM-768/3DH/triple-confirmation transcript and preprocesses in baseline
+  and compromise/HNDL profiles. ProVerif is not installed locally, so this is
+  a model scaffold—not a solver result or proof claim.
+- The formal baseline remains honest: PQXDH has substantially stronger published
+  ProVerif/CryptoVerif assurance. The p2party model must cover this exact
+  interactive no-PIN transcript and triple-confirmation boundary; it must not
+  claim to prove PIN/CPace, Double Ratchet, sparse healing, deniability, or the
+  whole browser/network stack until separate models exist.
+- Current-Chromium entropy staging is fixed in `372735f`: WebCrypto fills a
+  fixed ordinary buffer, copies into WASM, then wipes the temporary. Exact
+  installed 0.11.0 passed Chromium 149 no-PIN delivery in both role
+  directions (including responder-first), 5 MiB cancellation plus edge reuse,
+  and a deterministic 450,000-byte file in nine 65,490-byte WebRTC frames with
+  zero WebSocket payload fallback.
+- Commits `9167400` and `eeccc41` close two independent concurrent-join mesh
+  bugs: an accepted `connection` delta now allocates the missing local
+  transport, and one-peer `peers` deltas are merged rather than misread as
+  authoritative snapshots. The exact-artifact n=3 rerun remains the live T5
+  gate; do not infer it passed from unit coverage.
+- Root verification after `eeccc41`: `bun test` passed **327/0** with 12,106
+  assertions, `npm run typecheck` was clean, and
+  `bun run examples/standalone-e2ee.ts` printed `OK`. Transactional
+  `release:pack` produced a 106-file `p2party-0.11.0.tgz`, SHA-256
+  `a0de7a8b76f2e415193d86a095baa0d4df003f57c4095f9d4199ffcb4c175599`;
+  its 208,966-byte WASM remains SHA-256
+  `73f4eee322534665ebe99aab6b1494dc2fb32d859b3f55a3c2ae6fa477043789`.
+- `p2party-server` commits `0b24196` and `7a6e098` make the current SQLite
+  bootstrap Prisma-correct and reproducible from the real migration chain,
+  remove dead contradictory adapters, and add relation/type smoke coverage.
+  Server verification is 13/0 with clean typecheck/format. Historical
+  `prisma/dev.db` blobs must still be removed by a fresh public history or an
+  explicitly authorized history rewrite before publishing the repository.
+
+## 0.12.0 RELEASE-CANDIDATE + GITHUB DX CHECKPOINT (2026-07-24)
+
+- Protocol-v3 public release work through commit `8dbb90e` is committed on
+  `feat/pace-ratchet-protocol-v3`. `p2party/session` is the supported
+  store/DB/DOM/WebRTC-free entry point for Node, Bun, native shells, tests, and
+  custom transports. The GitHub README now starts from an integration chooser
+  under the canonical p2party cat logo and includes copyable browser-mesh,
+  room-invite, PIN/exact-suite, send/cancel/read, custom-transport,
+  serialize/restore, and self-hosted-WASM paths. The package exports and
+  includes the byte-identical cat asset, `docs/getting-started.md`,
+  `docs/session-api.md`, `docs/protocol-v3-security.md`, and the runnable
+  `examples/standalone-e2ee.ts`.
+- A release-candidate audit caught a real Node ESM defect: successful import did
+  not imply usable cryptography because Emscripten's RNG fallback attempted
+  CommonJS `require("crypto")`. Commit `5db2502` supplies explicit WebCrypto
+  entropy to the module in browsers, workers, Node, and Bun. The release builder
+  now performs actual packaged identity generation through both Node ESM and
+  CommonJS. Commit `8dbb90e` additionally runs the complete packaged standalone
+  handshake/encrypt/decrypt/serialize/restore example as a release gate. The
+  browser root also exposes `setWasmSourceUrl()` for an exact self-hosted
+  artifact while retaining the build-pinned SRI check.
+- Two independent final-state `release:pack` runs produced the same 113-file
+  `p2party-0.12.0.tgz`: SHA-256
+  `761279e61908c7cacb7d6e016c0feb2445ed4a26ab141b29d2bca0690749a4e2`
+  and SHA-512
+  `8709571263cdd864fcb40ea6b18dda23f82e35c150ecaad1d6ebcf242eea46c8c22b319b5c23909774521ad323775b5aa528f75b9acc06be151df26d2367621c`.
+  Its 208,966-byte WASM is SHA-256
+  `73f4eee322534665ebe99aab6b1494dc2fb32d859b3f55a3c2ae6fa477043789`
+  with SRI
+  `sha384-gHNbEQ3KIbsYpXGbpz6O62xI1CjZDVeD8FnYA//PWGAHxKDuN2pMVpQvDopV6Qcg`.
+  Generated crypto provenance remained clean. `npm run check` passed with
+  **333/0**, 12,142 assertions, clean lint/format/typecheck, and standalone
+  `OK`; the exact installed tarball's Node ESM identity-generation smoke
+  returned Ed25519/X25519 secret sizes `64/32`.
+- `p2party.com` commits `530a2a1`, `60b5091`, and `1279bd3` install and verify
+  that exact tarball, serve a byte-identical self-hosted WASM, and wire the root
+  loader to it before crypto use. The dependency verifier checks lock
+  integrity, tar SHA-256, embedded provenance, and public-WASM identity.
+  Frontend lint, formatting, typecheck, build, audit, and **16/0** tests with
+  74 assertions passed. The installed package's standalone example also prints
+  `OK`. The five-part protocol-v3 “road to today” series is published at
+  `/blog` and `/blog/:slug`, with source-commit anchors and explicit
+  shipped/gated/research boundaries. The only frontend worktree item is the
+  protected pre-existing untracked
+  `src/components/MessageInput/TextArea.tsx`.
+- `p2party-server` is Apache-2.0 and its current OSS-preparation checkpoint
+  `b42f770e7a536a27b84d1442486ccd682aecac21` passes **15/0**, typecheck, and
+  formatting. Public histories still need a fresh/squashed publication using
+  `@p2party.com` identities; no history rewrite was performed.
+- **Do not overclaim this checkpoint.** The npm tag/CDN publication, production
+  deployment, and a fresh exact-0.12 full-WebRTC T5 run remain pending. The
+  final docs pass did not substitute another browser runner when the designated
+  browser controller was unavailable. Scheduled cover, production sparse-PQ
+  healing, L2 rendezvous, and P2BT remain gated/research work exactly as stated
+  in the public security boundary. Both master stashes remain intact.
+
 ## Methodology + where the record lives
+
 - Subagent-driven: one implementer per task + a focused adversarial review for
   security-critical crypto. The review keeps catching REAL bugs before ship (gate
   unhandled-rejection, DTLS fail-open, the SECURITY-1 cross-sig oracle in the SPEC, the

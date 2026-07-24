@@ -11,6 +11,7 @@ import {
 } from "./session";
 import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
+import { setWasmSourceUrl } from "./cryptography/wasmLoader";
 
 import {
   deleteDBAddressBookEntry,
@@ -1001,6 +1002,7 @@ export const p2party = {
   createSession,
   restoreSession,
   generateSessionIdentity,
+  setWasmSourceUrl,
   DEFAULT_ROOM_POLICY_V1,
   encodeRoomPolicyV1,
   decodeRoomPolicyV1,
@@ -1065,7 +1067,12 @@ export type {
   WebSocketMessageError,
 };
 
-export { createSession, restoreSession, generateSessionIdentity };
+export {
+  createSession,
+  restoreSession,
+  generateSessionIdentity,
+  setWasmSourceUrl,
+};
 
 export {
   DEFAULT_ROOM_POLICY_V1,

@@ -49,8 +49,19 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
+Until the `v0.12.0` tag publishes the registry and immutable CDN artifacts,
+install the reproducible release candidate from this checkout:
+
 ```sh
-npm install p2party
+npm ci
+npm run release:pack
+npm install ./p2party-0.12.0.tgz
+```
+
+After the tagged release:
+
+```sh
+npm install p2party@0.12.0
 ```
 
 ## Choose your integration
@@ -63,9 +74,9 @@ npm install p2party
 
 Deeper guides:
 
-- [Getting started](https://github.com/p2party/p2party-js/blob/master/docs/getting-started.md)
-- [Store-free session API](https://github.com/p2party/p2party-js/blob/master/docs/session-api.md)
-- [Protocol-v3 security boundary](https://github.com/p2party/p2party-js/blob/master/docs/protocol-v3-security.md)
+- [Getting started](docs/getting-started.md)
+- [Store-free session API](docs/session-api.md)
+- [Protocol-v3 security boundary](docs/protocol-v3-security.md)
 
 ## Browser mesh
 
@@ -307,17 +318,29 @@ Ed25519 signing secret.
 
 The complete two-peer transport example, including simultaneous first messages
 and snapshot restore, is
-[`examples/standalone-e2ee.ts`](https://github.com/p2party/p2party-js/blob/master/examples/standalone-e2ee.ts):
+[`examples/standalone-e2ee.ts`](examples/standalone-e2ee.ts):
 
 ```sh
 bun run examples/standalone-e2ee.ts
 ```
 
-## Local or release-pinned WASM
+## Local, self-hosted, or release-pinned WASM
 
 The browser root always fetches the exact versioned CDN WASM with a build-pinned
-SHA-384 SRI value. `p2party/session` additionally accepts local bytes, which is
-the recommended Node, Bun, offline, and self-hosted path:
+SHA-384 SRI value by default. A self-hosted browser app can point it at the
+same release bytes before calling `connect()`:
+
+```ts
+import p2party from "p2party";
+
+p2party.setWasmSourceUrl(
+  new URL("/vendor/p2party-0.12.0/libcrypto.wasm", window.location.href),
+);
+```
+
+The SRI check remains active, so a URL serving different bytes fails closed.
+`p2party/session` additionally accepts local bytes, which is the recommended
+Node, Bun, offline, and native path:
 
 ```ts
 import { readFile } from "node:fs/promises";
@@ -335,7 +358,9 @@ const identity = await generateSessionIdentity({ wasmBinary });
 The package also exports `p2party/libcrypto.provenance.json`. JavaScript and
 WASM are one release unit; do not pair 0.12 code with an older module. Omitting
 `wasmBinary` makes the session loader use the same immutable versioned CDN
-artifact as the browser root.
+artifact as the browser root. The release gate executes packaged identity
+generation through both Node ESM and CommonJS, so non-browser entropy is tested
+at runtime rather than inferred from successful imports.
 
 ## Development
 
@@ -363,12 +388,9 @@ then publish the npm tarball with provenance.
 
 ## Security and licensing
 
-Report vulnerabilities privately according to
-[SECURITY.md](https://github.com/p2party/p2party-js/blob/master/SECURITY.md).
-Contributions are covered by
-[CONTRIBUTING.md](https://github.com/p2party/p2party-js/blob/master/CONTRIBUTING.md)
-and the
-[Code of Conduct](https://github.com/p2party/p2party-js/blob/master/CODE_OF_CONDUCT.md).
+Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 p2party is licensed under [Apache-2.0](LICENSE.md). Vendored and bundled
 components retain their own terms; see

@@ -14,10 +14,13 @@ import {
   restoreSession,
   type CreateSessionOptions,
   type EncryptedSessionMessage,
+  type GenerateSessionIdentityOptions,
   type GeneratedSessionIdentity,
   type HandshakeTransport,
   type LocalSessionIdentity,
   type P2PartySession,
+  type RoomPqMode,
+  type SessionAuth,
   type SessionChannelBinding,
   type SessionCryptoOptions,
 } from "p2party/session";
@@ -133,7 +136,7 @@ bobIdentity.x25519SecretKey.fill(0);
 ```
 
 The repository version is
-[`examples/standalone-e2ee.ts`](https://github.com/p2party/p2party-js/blob/master/examples/standalone-e2ee.ts)
+[`examples/standalone-e2ee.ts`](../examples/standalone-e2ee.ts)
 and runs with:
 
 ```sh
@@ -171,17 +174,86 @@ its normal message transport. p2party intentionally does not prescribe an
 outer CBOR/JSON/stream framing; preserve `protocolVersion`, `root`, frame
 ordering, and every frame byte exactly.
 
+### A binary envelope header
+
+Do not pass `EncryptedSessionMessage` through naïve JSON: `Uint8Array` values
+do not round-trip as bytes. One compact message-delimited codec is a 73-byte
+header followed by the fixed-size frames:
+
+```ts
+import type { EncryptedSessionMessage } from "p2party/session";
+
+const MAGIC = Uint8Array.of(0x50, 0x32, 0x50, 0x45); // "P2PE"
+const ROOT_BYTES = 64;
+const FRAME_BYTES = 65_490;
+const HEADER_BYTES = MAGIC.length + 1 + ROOT_BYTES + 4;
+
+export const encodeEnvelopeHeader = (
+  message: EncryptedSessionMessage,
+): Uint8Array => {
+  if (message.protocolVersion !== 3) throw new Error("unsupported protocol");
+  if (message.root.length !== ROOT_BYTES) throw new Error("invalid root");
+  if (message.frames.length < 1 || message.frames.length > 0xffff_ffff)
+    throw new Error("invalid frame count");
+  if (message.frames.some((frame) => frame.length !== FRAME_BYTES))
+    throw new Error("invalid frame length");
+
+  const header = new Uint8Array(HEADER_BYTES);
+  header.set(MAGIC, 0);
+  header[MAGIC.length] = message.protocolVersion;
+  header.set(message.root, MAGIC.length + 1);
+  new DataView(header.buffer).setUint32(
+    MAGIC.length + 1 + ROOT_BYTES,
+    message.frames.length,
+    false,
+  );
+  return header;
+};
+
+export const decodeEnvelopeHeader = (
+  header: Uint8Array,
+  maxFrames: number,
+): { root: Uint8Array; frameCount: number } => {
+  if (header.length !== HEADER_BYTES) throw new Error("invalid header length");
+  if (MAGIC.some((byte, index) => header[index] !== byte))
+    throw new Error("invalid envelope magic");
+  if (header[MAGIC.length] !== 3) throw new Error("unsupported protocol");
+
+  const frameCount = new DataView(
+    header.buffer,
+    header.byteOffset,
+    header.byteLength,
+  ).getUint32(MAGIC.length + 1 + ROOT_BYTES, false);
+  if (frameCount < 1 || frameCount > maxFrames)
+    throw new Error("frame count exceeds policy");
+
+  return {
+    root: header.slice(MAGIC.length + 1, MAGIC.length + 1 + ROOT_BYTES),
+    frameCount,
+  };
+};
+```
+
+Send the header as one record, then each frame as one record. The receiver
+must set `maxFrames` from its own message-size policy, require exactly
+`frameCount` records of exactly 65,490 bytes, reject surplus or missing
+records, and then call
+`session.decrypt({ protocolVersion: 3, root, frames })`. A TCP adapter still
+needs an authenticated record type or length prefix around the header and
+frames. This codec preserves bytes; it does not hide the number or timing of
+records.
+
 ## Identity and channel binding
 
 `generateSessionIdentity()` returns:
 
 ```ts
 interface GeneratedSessionIdentity {
-  ed25519PublicKey: Uint8Array;
-  ed25519SecretKey: Uint8Array;
-  x25519PublicKey: Uint8Array;
-  x25519SecretKey: Uint8Array;
-  x25519CrossSignature: Uint8Array;
+  ed25519PublicKey: Uint8Array; // 32 bytes
+  ed25519SecretKey: Uint8Array; // 64 bytes
+  x25519PublicKey: Uint8Array; // 32 bytes
+  x25519SecretKey: Uint8Array; // 32 bytes
+  x25519CrossSignature: Uint8Array; // 64 bytes
 }
 ```
 
@@ -196,6 +268,25 @@ X25519 secret. Persist both secret keys with an OS keystore or equivalent, and
 pin the peer's Ed25519 public key through a trusted directory, QR exchange, or
 an explicit trust-on-first-use policy. Merely receiving that key over the same
 untrusted connection is not authentication.
+
+To migrate an existing Ed25519 identity, provide its matching 32-byte public
+key and 64-byte secret key. p2party validates their consistency, generates a
+fresh dedicated X25519 identity, and cross-signs it:
+
+```ts
+const identity = await generateSessionIdentity({
+  wasmBinary,
+  ed25519KeyPair: {
+    publicKey: existingEd25519PublicKey,
+    secretKey: existingEd25519SecretKey,
+  },
+});
+```
+
+Imported local identities are also checked before session creation: the
+X25519 public and secret keys must match, and the 64-byte cross-signature must
+verify under the 32-byte Ed25519 public key. The peer Ed25519 key supplied to
+`createSession()` is exactly 32 bytes.
 
 `SessionChannelBinding` contains:
 

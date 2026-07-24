@@ -9,10 +9,19 @@ p2party has two entry points:
   cryptography. Use it with Node, Bun, a native shell, tests, or your own
   transport and storage.
 
-Install the package with the repository's dependency authority:
+Until `v0.12.0` publishes the registry and CDN artifacts, build and install the
+reproducible release candidate from a source checkout:
 
 ```sh
-npm install p2party
+npm ci
+npm run release:pack
+npm install ./p2party-0.12.0.tgz
+```
+
+After the tagged release:
+
+```sh
+npm install p2party@0.12.0
 ```
 
 ## Browser room mesh
@@ -196,9 +205,20 @@ never pair 0.12 JavaScript with an older WASM. The release workflow publishes
 the immutable CDN object, fetches it back, verifies its bytes, SHA-256, and SRI,
 and only then publishes npm.
 
-The root API does not expose a custom WASM URL/bytes option. Offline,
-self-hosted, Node, and Bun applications should use `p2party/session` and pass
-the exported bytes:
+The browser root can use a self-hosted copy of the exact release bytes. Set its
+URL before `connect()` or any cryptographic operation; the build-pinned SRI
+still applies:
+
+```ts
+import p2party from "p2party";
+
+p2party.setWasmSourceUrl(
+  new URL("/vendor/p2party-0.12.0/libcrypto.wasm", window.location.href),
+);
+```
+
+Offline, Node, and Bun applications should use `p2party/session` and pass the
+exported bytes:
 
 ```ts
 import { readFile } from "node:fs/promises";

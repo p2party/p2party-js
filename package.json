@@ -58,6 +58,10 @@
     },
     "./libcrypto.wasm": "./lib/libcrypto.wasm",
     "./libcrypto.provenance.json": "./lib/libcrypto.provenance.json",
+    "./docs/getting-started.md": "./docs/getting-started.md",
+    "./docs/session-api.md": "./docs/session-api.md",
+    "./docs/protocol-v3-security.md": "./docs/protocol-v3-security.md",
+    "./examples/standalone-e2ee.ts": "./examples/standalone-e2ee.ts",
     "./THIRD_PARTY_NOTICES.md": "./THIRD_PARTY_NOTICES.md",
     "./package.json": "./package.json"
   },
@@ -71,6 +75,10 @@
     "lib/session.mjs",
     "lib/libcrypto.wasm",
     "lib/libcrypto.provenance.json",
+    "docs/getting-started.md",
+    "docs/session-api.md",
+    "docs/protocol-v3-security.md",
+    "examples/standalone-e2ee.ts",
     "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
@@ -86,8 +94,8 @@
     "dist:map": "rm -rf lib/*.map lib/**/*.map",
     "dist": "npm-run-all -s dist:worker dist:package copy:wasm",
     "release:pack": "node scripts/buildRelease.mjs",
-    "format": "bun prettier --write '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v3-security.md}' 'src/cryptography/{mnemonic.ts,pake_ratchet.test.ts,wasmLoader.ts}' 'src/handlers/{handleHandshake.ts,handleHandshake.test.ts,ratchetPersist.ts}' src/session.ts && clang-format -i src/cryptography/mlkem*.[ch]",
-    "format:check": "bun prettier --check '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v3-security.md}' 'src/cryptography/{mnemonic.ts,pake_ratchet.test.ts,wasmLoader.ts}' 'src/handlers/{handleHandshake.ts,handleHandshake.test.ts,ratchetPersist.ts}' src/session.ts && clang-format --dry-run --Werror src/cryptography/mlkem*.[ch]",
+    "format": "bun prettier --write '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v3-security.md}' 'src/cryptography/{mnemonic.ts,pake_ratchet.test.ts,random.ts,testModule.ts,wasmLoader.ts}' 'src/handlers/{handleHandshake.ts,handleHandshake.test.ts,ratchetPersist.ts}' src/index.ts src/session.ts && clang-format -i src/cryptography/mlkem*.[ch]",
+    "format:check": "bun prettier --check '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v3-security.md}' 'src/cryptography/{mnemonic.ts,pake_ratchet.test.ts,random.ts,testModule.ts,wasmLoader.ts}' 'src/handlers/{handleHandshake.ts,handleHandshake.test.ts,ratchetPersist.ts}' src/index.ts src/session.ts && clang-format --dry-run --Werror src/cryptography/mlkem*.[ch]",
     "lint": "eslint .",
     "test": "bun test",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",

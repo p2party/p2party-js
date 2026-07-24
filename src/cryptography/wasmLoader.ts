@@ -31,7 +31,7 @@ export const wasmLoader = async (wasmMemory: WebAssembly.Memory) => {
   wasmLoadStarted = true;
   const resp = await fetch(wasmUrl, {
     integrity:
-      "sha384-gHNbEQ3KIbsYpXGbpz6O62xI1CjZDVeD8FnYA//PWGAHxKDuN2pMVpQvDopV6Qcg",
+      "sha384-NmQ1poWzKrx2t9UJsT0KQZnD96PdRsf1SZQv4c4y9SM7A7yqRjf46sZeWDIE6m3M",
   });
   if (!resp.ok)
     throw new Error(

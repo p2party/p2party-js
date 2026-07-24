@@ -21,13 +21,13 @@ describe("canonical room policy V1", () => {
     const encoded = encodeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1);
     expect(encoded.length).toBe(ROOM_POLICY_V1_ENCODED_LEN);
     expect(hex(encoded)).toBe(
-      "5032525001030001000000000000000000000000000000000000000000000000",
+      "5032525001040001000000000000000000000000000000000000000000000000",
     );
 
     const hash = await hashRoomPolicyV1(DEFAULT_ROOM_POLICY_V1);
     expect(hash.length).toBe(ROOM_POLICY_V1_HASH_LEN);
     expect(hex(hash)).toBe(
-      "36c2d01051b69f270ac93f971a97ffe7911e87f313e6ffeab739bc4970f9c501",
+      "9b0bf1033f93ae9b1b57f3771ca146ae13709c49d2d975d83a0adf2c311221fd",
     );
   });
 

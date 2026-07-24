@@ -5,10 +5,10 @@ import { isProtocolVersionCompatible } from "./protocolVersion";
 
 describe("isProtocolVersionCompatible", () => {
   test("accepts only the exact current protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(3);
+    expect(PROTOCOL_VERSION).toBe(4);
     expect(isProtocolVersionCompatible(PROTOCOL_VERSION)).toBe(true);
-    expect(isProtocolVersionCompatible(2)).toBe(false);
-    expect(isProtocolVersionCompatible(4)).toBe(false);
+    expect(isProtocolVersionCompatible(3)).toBe(false);
+    expect(isProtocolVersionCompatible(5)).toBe(false);
   });
 
   test("rejects missing and malformed versions without fallback", () => {

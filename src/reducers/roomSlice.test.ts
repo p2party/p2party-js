@@ -277,4 +277,39 @@ describe("per-peer handshake status", () => {
     state = roomReducer(state, deletePeer({ roomId, peerId }));
     expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
   });
+
+  test("a failed handshake survives the peer teardown that follows it", () => {
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "a".repeat(63) + "b", id: roomId }),
+    );
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId,
+        status: "failed",
+        reason: "pin-mismatch",
+      }),
+    );
+    // The library tears the edge down immediately after a failed handshake;
+    // the reason must remain so the UI can explain the missing peer.
+    state = roomReducer(state, deletePeer({ roomId, peerId }));
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toEqual({
+      status: "failed",
+      reason: "pin-mismatch",
+      retryAfter: undefined,
+    });
+
+    // A fresh attempt replaces it.
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({ roomId, peerId, status: "authenticating" }),
+    );
+    expect(state[0].handshakeStatusByPeer?.[peerId]?.status).toBe(
+      "authenticating",
+    );
+    state = roomReducer(state, deletePeer({ roomId, peerId }));
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
+  });
 });

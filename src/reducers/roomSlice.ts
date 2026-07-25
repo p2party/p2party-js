@@ -401,8 +401,16 @@ const roomSlice = createSlice({
         if (peerIndex > -1) state[i].peers.splice(peerIndex, 1);
         const coverStatusByPeer = state[i].coverStatusByPeer;
         if (coverStatusByPeer) delete coverStatusByPeer[action.payload.peerId];
+        // A FAILED handshake must outlive the peer it describes: the edge is
+        // torn down immediately after the failure, and dropping the reason
+        // here would leave a UI with a vanished peer and no explanation —
+        // exactly the silent-failure case this state exists to remove. A
+        // later authenticating/authenticated report overwrites it.
         const handshakeStatusByPeer = state[i].handshakeStatusByPeer;
-        if (handshakeStatusByPeer)
+        if (
+          handshakeStatusByPeer &&
+          handshakeStatusByPeer[action.payload.peerId]?.status !== "failed"
+        )
           delete handshakeStatusByPeer[action.payload.peerId];
       }
     },

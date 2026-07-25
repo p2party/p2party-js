@@ -36,6 +36,7 @@ let closeTransferChannel: typeof import("./handleSendMessage")["closeTransferCha
 let runWithTerminalChannelClose: typeof import("./handleSendMessage")["runWithTerminalChannelClose"];
 let runPeerSendFanout: typeof import("./handleSendMessage")["runPeerSendFanout"];
 let shouldDeleteLocalMessageAfterFailure: typeof import("./handleSendMessage")["shouldDeleteLocalMessageAfterFailure"];
+let waitForReceiptWindow: typeof import("./handleSendMessage")["waitForReceiptWindow"];
 
 beforeAll(async () => {
   // Enter the store/API cycle through its normal application root. Importing
@@ -49,6 +50,7 @@ beforeAll(async () => {
     runPeerSendFanout,
     runWithTerminalChannelClose,
     shouldDeleteLocalMessageAfterFailure,
+    waitForReceiptWindow,
   } = await import("./handleSendMessage"));
 });
 
@@ -332,5 +334,87 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
 
     expect(stepCalled).toBe(false);
     expect(oldKey.every((byte) => byte === 5)).toBe(true);
+  });
+});
+
+describe("sender receipt-window flow control", () => {
+  const params = (over: Record<string, unknown>) => ({
+    windowSize: 4,
+    stallTimeoutMs: 200,
+    pollMs: 5,
+    isOpen: () => true,
+    inFlight: () => 0,
+    ...over,
+  });
+
+  test("does not wait while in-flight is below the window", async () => {
+    const start = Date.now();
+    await waitForReceiptWindow(params({ inFlight: () => 3 }));
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  test("waits until receipts shrink the in-flight below the window", async () => {
+    let acked = 0;
+    setTimeout(() => {
+      acked = 3;
+    }, 40);
+    const start = Date.now();
+    await waitForReceiptWindow(params({ inFlight: () => 6 - acked }));
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(30);
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  test("unblocks after the stall timeout when no receipt progress occurs", async () => {
+    const start = Date.now();
+    await waitForReceiptWindow(params({ inFlight: () => 10, stallTimeoutMs: 60 }));
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(55);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  test("receipt progress that stays over the window keeps waiting, resetting the stall clock", async () => {
+    let inFlight = 12;
+    const timer = setInterval(() => {
+      inFlight -= 1;
+    }, 20);
+    try {
+      const start = Date.now();
+      await waitForReceiptWindow(
+        params({ inFlight: () => inFlight, stallTimeoutMs: 100 }),
+      );
+      // 12 → 3 takes ~180 ms of steady progress; a non-resetting stall clock
+      // would have bailed at ~100 ms with in-flight still over the window.
+      expect(inFlight).toBeLessThanOrEqual(4);
+      expect(Date.now() - start).toBeGreaterThanOrEqual(120);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  test("stops waiting once the channel is no longer open", async () => {
+    let open = true;
+    setTimeout(() => {
+      open = false;
+    }, 30);
+    const start = Date.now();
+    await waitForReceiptWindow(
+      params({ inFlight: () => 10, isOpen: () => open }),
+    );
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(25);
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  test("an aborted transfer signal rejects the wait", async () => {
+    const controller = new AbortController();
+    setTimeout(() => {
+      controller.abort(new Error("cancelled"));
+    }, 30);
+    await expect(
+      waitForReceiptWindow(
+        params({ inFlight: () => 10, signal: controller.signal }),
+      ),
+    ).rejects.toThrow();
   });
 });

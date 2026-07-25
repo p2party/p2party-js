@@ -21,7 +21,13 @@ import {
 } from "../utils/channelLabel";
 import { waitForOpen } from "../utils/waitForOpen";
 import { deleteMessage, incrementMessageStats } from "../reducers/roomSlice";
-import { clearTransfer, waitForCompletion, getAckedChunks } from "./reconcile";
+import {
+  clearTransfer,
+  waitForCompletion,
+  getAckedChunks,
+  getAckedChunkCount,
+} from "./reconcile";
+import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { sealChunk } from "./messageChunkCrypto";
 import { getRatchetGate } from "./ratchetGate";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
@@ -64,11 +70,52 @@ import type { RatchetHeader } from "../cryptography/ratchet";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
-// export const wait = (milliseconds: number) => {
-//   return new Promise((resolve) => {
-//     setTimeout(resolve, milliseconds);
-//   });
-// };
+// Sender-side flow control beyond SCTP. The receiver enqueues at most
+// MAX_QUEUED_FRAMES_PER_CHANNEL frames before its budget CLOSES the channel —
+// that budget is a DoS guard, not backpressure — and SCTP pacing alone lets a
+// fast link outrun the receiver's decrypt+store drain (a 16 MiB send on
+// localhost deterministically trips the budget). Cap sent-but-unreceipted REAL
+// frames at half the receiver's budget; decoy receipts do not resolve to
+// staged chunks on the sender, so the window counts reals only (decoy-heavy
+// messages are small minChunks sends that cannot overflow the budget).
+export const SEND_RECEIPT_WINDOW = MAX_QUEUED_FRAMES_PER_CHANNEL / 2;
+// After this long without any receipt progress the window unblocks and the
+// legacy behavior (receiver budget + reconcile retransmit) is the backstop,
+// so this flow control can never introduce a new deadlock.
+export const SEND_WINDOW_STALL_MS = 10_000;
+
+export interface ReceiptWindowParams {
+  readonly windowSize: number;
+  readonly stallTimeoutMs: number;
+  readonly pollMs: number;
+  readonly isOpen: () => boolean;
+  readonly inFlight: () => number;
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * Resolve once in-flight drops below the window, the channel leaves "open",
+ * or receipt progress stalls for stallTimeoutMs. Any receipt progress while
+ * still over the window resets the stall clock. Throws only on transfer abort.
+ */
+export const waitForReceiptWindow = async (
+  params: ReceiptWindowParams,
+): Promise<void> => {
+  let lastInFlight = params.inFlight();
+  let lastProgressAt = Date.now();
+  while (params.isOpen() && params.inFlight() >= params.windowSize) {
+    throwIfTransferAborted(params.signal);
+    const inFlight = params.inFlight();
+    if (inFlight < lastInFlight) {
+      lastInFlight = inFlight;
+      lastProgressAt = Date.now();
+    }
+    if (Date.now() - lastProgressAt >= params.stallTimeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, params.pollMs));
+    throwIfTransferAborted(params.signal);
+  }
+  throwIfTransferAborted(params.signal);
+};
 
 const sendChunks = async (
   channel: IRTCDataChannel,
@@ -93,11 +140,19 @@ const sendChunks = async (
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
   // real chunks — skip decoys and already-acked reals.
   reconcileAcked?: Set<number>,
+  // Live count of receipted chunks for this transfer edge; enables the
+  // sender-side receipt window. Absent → legacy SCTP-only pacing.
+  getAckedRealCount?: () => number,
 ) => {
   throwIfTransferAborted(signal);
   const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
   if (merkleRootHex !== uint8ArrayToHex(merkleRoot))
     throw new Error("Outbound channel label does not match its Merkle root");
+
+  // Receipts landing during this pass shrink the window; acks that predate the
+  // pass (resume replays) must not count against frames sent in this pass.
+  const ackedAtPassStart = getAckedRealCount?.() ?? 0;
+  let sentRealThisPass = 0;
 
   const indexes = Array.from({ length: chunksLen }, (_, i) => i);
   const indexesRandomized = fisherYatesShuffle(indexes);
@@ -119,14 +174,30 @@ const sendChunks = async (
     )
       throw new Error("Outbound chunk index does not match its staging key");
 
-    // Reconcile: resend only un-acked REAL chunks. Real-vs-decoy is read from
-    // the chunk's own metadata (SSOT) — a decoy has chunkEnd − chunkStart >
-    // totalSize. Decoys are cover and never resent; acked reals are skipped.
+    // Real-vs-decoy is read from the chunk's own metadata (SSOT) — a decoy has
+    // chunkEnd − chunkStart > totalSize.
+    const isRealChunk =
+      metadata.chunkEndIndex > metadata.chunkStartIndex &&
+      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
+    // Reconcile: resend only un-acked REAL chunks. Decoys are cover and never
+    // resent; acked reals are skipped.
     if (reconcileAcked !== undefined) {
-      const isReal =
-        metadata.chunkEndIndex > metadata.chunkStartIndex &&
-        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
-      if (!isReal || reconcileAcked.has(metadata.chunkIndex)) continue;
+      if (!isRealChunk || reconcileAcked.has(metadata.chunkIndex)) continue;
+    }
+
+    // Hold real frames inside the receipt window so a fast link cannot outrun
+    // the receiver's decrypt+store drain into its queue-budget channel close.
+    if (isRealChunk && getAckedRealCount) {
+      await waitForReceiptWindow({
+        windowSize: SEND_RECEIPT_WINDOW,
+        stallTimeoutMs: SEND_WINDOW_STALL_MS,
+        pollMs: CHANNEL_OPEN_POLL_MS,
+        isOpen: () => (channel.readyState as string) === "open",
+        inFlight: () =>
+          sentRealThisPass -
+          Math.max(0, getAckedRealCount() - ackedAtPassStart),
+        signal,
+      });
     }
 
     const merkleProof = new Uint8Array(PROOF_LEN);
@@ -245,6 +316,7 @@ const sendChunks = async (
     throwIfTransferAborted(signal);
     try {
       channel.send(message.buffer as ArrayBuffer);
+      if (isRealChunk) sentRealThisPass++;
     } catch (error) {
       // The channel can close between the readyState check and send(). Return to
       // the reconcile loop so it can reopen/rekey instead of rejecting the whole
@@ -751,7 +823,8 @@ const sendWithReconcile = async (
       throw new Error("Message DataChannel did not open before send timeout");
     throwIfTransferAborted(signal);
 
-    // Initial pass: all chunks (real + decoy).
+    // Initial pass: all chunks (real + decoy), real frames held inside the
+    // receipt window so the receiver's drain sets the pace on fast links.
     await sendChunks(
       currentChannel,
       messageKey,
@@ -765,6 +838,8 @@ const sendWithReconcile = async (
       encryptionModule,
       merkleModule,
       signal,
+      undefined,
+      () => getAckedChunkCount(roomId, peerId, transferId),
     );
 
     let retries = 0;
@@ -866,6 +941,7 @@ const sendWithReconcile = async (
         merkleModule,
         signal,
         getAckedChunks(roomId, peerId, transferId),
+        () => getAckedChunkCount(roomId, peerId, transferId),
       );
       retries++;
 

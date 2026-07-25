@@ -40,7 +40,10 @@ import {
   setChannel,
   setConnectingToPeers,
   setPeerCoverStatus,
+  setPeerHandshakeStatus,
 } from "../reducers/roomSlice";
+
+import type { PeerHandshakeFailureReason } from "../reducers/roomSlice";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -48,6 +51,7 @@ import {
   deleteReceiveTransfer,
   getDBAllChunkLeafHashes,
   getDBMessageData,
+  getPinAttemptState,
 } from "../db/api";
 
 import { hexToUint8Array } from "../utils/uint8array";
@@ -716,6 +720,13 @@ export const handleOpenChannel = async (
         let pin: Uint8Array | undefined;
         let pinRoom = false;
         let handshakeStarted = false;
+        api.dispatch(
+          setPeerHandshakeStatus({
+            roomId,
+            peerId: epc.withPeerId,
+            status: "authenticating",
+          }),
+        );
         try {
           if (!ratchetGateLease || !handshakeLease)
             throw new Error("Main channel has no transport ownership lease");
@@ -774,6 +785,13 @@ export const handleOpenChannel = async (
             epc.receiveMessageModule,
             handshakeLease,
             ratchetGateLease,
+          );
+          api.dispatch(
+            setPeerHandshakeStatus({
+              roomId,
+              peerId: epc.withPeerId,
+              status: "authenticated",
+            }),
           );
 
           // The handshake installed epc.pqHealingState; give it its live
@@ -854,6 +872,46 @@ export const handleOpenChannel = async (
               },
             );
           }
+          // Surface WHY the edge failed so a UI never shows an eternal
+          // waiting state: throttle carries its retry deadline; a failed
+          // confirmation is a wrong PIN (or differing policy) on a PIN room
+          // and can only be a policy/transcript mismatch on a nopin room.
+          let failureReason: PeerHandshakeFailureReason = "transport";
+          let retryAfter: number | undefined;
+          const throttleMatch = /throttled until (\S+)/.exec(
+            handshakeError.message,
+          );
+          if (throttleMatch) {
+            failureReason = "pin-throttled";
+            const parsed = Date.parse(throttleMatch[1]);
+            if (Number.isFinite(parsed)) retryAfter = parsed;
+          } else if (
+            handshakeStarted &&
+            /key-confirmation/i.test(handshakeError.message)
+          ) {
+            failureReason = pinRoom ? "pin-mismatch" : "policy";
+            if (pinRoom) {
+              try {
+                const attemptState = await getPinAttemptState(
+                  roomId,
+                  epc.withPeerPublicKey,
+                );
+                if (attemptState && attemptState.retryAfter > Date.now())
+                  retryAfter = attemptState.retryAfter;
+              } catch {
+                // Backoff state is advisory; the failure reason still lands.
+              }
+            }
+          }
+          api.dispatch(
+            setPeerHandshakeStatus({
+              roomId,
+              peerId: epc.withPeerId,
+              status: "failed",
+              reason: failureReason,
+              retryAfter,
+            }),
+          );
           if (ratchetGateLease)
             rejectRatchetGate(
               roomId,

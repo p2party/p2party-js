@@ -20,6 +20,7 @@ const {
   deleteRoom,
   setMessage,
   setPeerCoverStatus,
+  setPeerHandshakeStatus,
   setRoom,
   setRoomPolicy,
 } = await import("./roomSlice");
@@ -225,5 +226,55 @@ describe("per-peer scheduled-cover status", () => {
     );
     state = roomReducer(state, deletePeer({ roomId, peerId }));
     expect(state[0].coverStatusByPeer?.[peerId]).toBeUndefined();
+  });
+});
+
+describe("per-peer handshake status", () => {
+  const roomId = "00000000-0000-4000-8000-0000000000dd";
+  const peerId = "00000000-0000-4000-8000-0000000000ee";
+
+  test("authenticating → failed with reason and retry deadline", () => {
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "9".repeat(64), id: roomId }),
+    );
+    expect(state[0].handshakeStatusByPeer).toBeUndefined();
+
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({ roomId, peerId, status: "authenticating" }),
+    );
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toEqual({
+      status: "authenticating",
+      reason: undefined,
+      retryAfter: undefined,
+    });
+
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId,
+        status: "failed",
+        reason: "pin-throttled",
+        retryAfter: 1_753_500_000_000,
+      }),
+    );
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toEqual({
+      status: "failed",
+      reason: "pin-throttled",
+      retryAfter: 1_753_500_000_000,
+    });
+
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({ roomId, peerId, status: "authenticated" }),
+    );
+    expect(state[0].handshakeStatusByPeer?.[peerId]?.status).toBe(
+      "authenticated",
+    );
+
+    state = roomReducer(state, deletePeer({ roomId, peerId }));
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
   });
 });

@@ -146,6 +146,30 @@ export interface SetPeerCoverStatusArgs {
   status: CoverSchedulerStatus;
 }
 
+/**
+ * Why the authenticated edge is not (yet) up. "pin-mismatch" also covers a
+ * differing room policy on a PIN room — the confirmation transcript cannot
+ * distinguish them; "policy" is a nopin-room confirmation failure, which can
+ * only be a policy/transcript mismatch.
+ */
+export type PeerHandshakeFailureReason =
+  | "pin-mismatch"
+  | "pin-throttled"
+  | "policy"
+  | "transport";
+
+export interface PeerHandshakeStatus {
+  status: "authenticating" | "authenticated" | "failed";
+  reason?: PeerHandshakeFailureReason;
+  /** Absolute epoch ms after which a throttled PIN retry may succeed. */
+  retryAfter?: number;
+}
+
+export interface SetPeerHandshakeStatusArgs extends PeerHandshakeStatus {
+  roomId: string;
+  peerId: string;
+}
+
 export interface Room extends SetRoomArgs {
   policy: RoomPolicyV1;
   connectingToPeers: boolean;
@@ -163,6 +187,13 @@ export interface Room extends SetRoomArgs {
    * browser gap ("suspended") or teardown ("stopped") is always visible.
    */
   coverStatusByPeer?: Record<string, CoverSchedulerStatus>;
+  /**
+   * Live authenticated-handshake state per peer edge (peerId → status), so a
+   * UI can distinguish "still authenticating" from "PIN did not match" from
+   * "PIN retries throttled until T" instead of showing an eternal
+   * waiting-for-peers state.
+   */
+  handshakeStatusByPeer?: Record<string, PeerHandshakeStatus>;
 }
 
 export const defaultRTCConfig = {
@@ -370,6 +401,9 @@ const roomSlice = createSlice({
         if (peerIndex > -1) state[i].peers.splice(peerIndex, 1);
         const coverStatusByPeer = state[i].coverStatusByPeer;
         if (coverStatusByPeer) delete coverStatusByPeer[action.payload.peerId];
+        const handshakeStatusByPeer = state[i].handshakeStatusByPeer;
+        if (handshakeStatusByPeer)
+          delete handshakeStatusByPeer[action.payload.peerId];
       }
     },
 
@@ -385,6 +419,21 @@ const roomSlice = createSlice({
         const room = state[roomIndex];
         room.coverStatusByPeer ??= {};
         room.coverStatusByPeer[peerId] = status;
+      }
+    },
+
+    setPeerHandshakeStatus: (
+      state,
+      action: PayloadAction<SetPeerHandshakeStatusArgs>,
+    ) => {
+      const { roomId, peerId, status, reason, retryAfter } = action.payload;
+
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+
+      if (roomIndex > -1) {
+        const room = state[roomIndex];
+        room.handshakeStatusByPeer ??= {};
+        room.handshakeStatusByPeer[peerId] = { status, reason, retryAfter };
       }
     },
 
@@ -793,6 +842,7 @@ export const {
   setOnlyConnectWithKnownPeers,
   setPeer,
   setPeerCoverStatus,
+  setPeerHandshakeStatus,
   setChannel,
   setIceServers,
   setMessage,

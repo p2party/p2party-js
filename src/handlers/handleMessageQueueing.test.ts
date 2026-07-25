@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  shouldSendImmediateTerminalReceipt,
   createReceiptProcessingQueue,
   enqueue,
   enqueueReceipt,
@@ -266,5 +267,26 @@ describe("receipt processing queue", () => {
 
     releaseQueuedReceipts(first);
     releaseQueuedReceipts(second);
+  });
+});
+
+describe("terminal receipt emission", () => {
+  test("immediate mode sends the terminal receipt as a frame", () => {
+    expect(shouldSendImmediateTerminalReceipt(undefined)).toBe(true);
+    expect(shouldSendImmediateTerminalReceipt({})).toBe(true);
+  });
+
+  test("scheduled mode never emits an immediate terminal receipt", () => {
+    // The scheduled terminal receipt is queued as a cover cell instead. An
+    // immediate 65-byte frame here would be an off-schedule packet emitted at
+    // the exact moment a real transfer completed — perfectly correlated with
+    // the event the cover schedule exists to conceal, and a different size
+    // from the 65,490-byte cells around it.
+    const withCover = {
+      coverRuntime: {} as unknown as NonNullable<
+        Parameters<typeof shouldSendImmediateTerminalReceipt>[0]
+      >["coverRuntime"],
+    };
+    expect(shouldSendImmediateTerminalReceipt(withCover)).toBe(false);
   });
 });

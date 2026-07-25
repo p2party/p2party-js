@@ -6,14 +6,15 @@
 
 # p2party
 
-Protocol-v3 end-to-end encryption and reliable file transfer over a WebRTC
+Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC
 room mesh.
 
 [![npm](https://img.shields.io/npm/v/p2party)](https://www.npmjs.com/package/p2party)
 [![license](https://img.shields.io/npm/l/p2party)](LICENSE.md)
 
-> Status: protocol v3 is an intentional wire break. The current code has not
-> completed an independent third-party security audit.
+> Status: protocol v4 is an intentional wire break — v3 peers and persisted v3
+> crypto rows are not resumed. The current code has not completed an
+> independent third-party security audit.
 
 ## What is shipped
 
@@ -26,7 +27,7 @@ room mesh.
   cryptographic handshake. An `RTCDataChannel` becoming `open` establishes the
   transport; it is not a substitute for that confirmation.
 - Per-peer Double Ratchet state protects messages after the handshake.
-- Message data travels in fixed 65,490-byte protocol-v3 frames. Cryptographic
+- Message data travels in fixed 65,490-byte protocol-v4 frames. Cryptographic
   overhead is absorbed inside that fixed cell budget; randomized padding and
   decoy slots can hide a message's exact payload length within its transfer.
 - Each outbound message has its own transfer identity and data channel, a
@@ -41,13 +42,17 @@ room mesh.
   signaling, `window`, or `localStorage`.
 
 Immediate delivery over the existing signaling rendezvous is the shipped
-default. The room-policy schema also describes scheduled timing cover and
-opaque/blind meeting points, but the public `connect()` path rejects those
-modes because their transport wiring is not complete. An internal sparse
-post-quantum healing state-machine core is implemented and tested; production
-crash-safe persistence, authenticated control routing, message-key integration,
-and scheduler wiring remain gated. The private BitTorrent extension is likewise
-a research direction, not a shipped property.
+default. Scheduled timing cover is also wired as of 0.13.0: a room policy may
+pin a cadence, lane count, and frames per cell, and every edge in the room then
+emits fixed-size cells on that schedule whether or not there is data to send.
+Sparse post-quantum healing (the OFFER/ADVANCE/ACK epoch exchange) is likewise
+live on the mesh path, with persistence before dispatch and application traffic
+blocked while an epoch is in flight.
+
+The public `connect()` path still rejects opaque and blind meeting points —
+any `rendezvousMode` other than `legacy-signaling` — because that transport is
+not wired. The private BitTorrent extension remains a research direction, not a
+shipped property.
 
 The current signaling operator can observe room membership, peer identities,
 network metadata, and timing. Fixed message cells and in-transfer decoys do not
@@ -55,19 +60,39 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
-Until the `v0.12.0` tag publishes the registry and immutable CDN artifacts,
-install the reproducible release candidate from this checkout:
+Once the tagged release is on the registry:
+
+```sh
+npm install p2party
+```
+
+Until then, build the reproducible release candidate from this checkout. The
+release build is deliberately strict — it reproduces the pinned WASM and fails
+rather than emit an artifact it cannot attest — so it requires an exact
+toolchain:
+
+| Requirement | Version                                                      |
+| ----------- | ------------------------------------------------------------ |
+| Node        | 24.x (exact major)                                           |
+| npm         | 11.6.2                                                       |
+| Emscripten  | 6.0.2, with `emsdk` on `PATH`                                |
+| Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
+
+```sh
+git submodule update --init --recursive
+npm ci
+npm run release:pack
+npm install "./p2party-$(node -p "require('./package.json').version").tgz"
+```
+
+The same toolchain is needed to work on the library itself: the compiled
+`src/cryptography/libcrypto.wasm` is not checked in, and the test suite loads it
+from disk, so build it once before the first test run.
 
 ```sh
 npm ci
-npm run release:pack
-npm install ./p2party-0.12.0.tgz
-```
-
-After the tagged release:
-
-```sh
-npm install p2party@0.12.0
+npm run build          # compiles libcrypto.wasm via Emscripten, then bundles
+bun test               # the suite runs under bun, not npm
 ```
 
 ## Choose your integration
@@ -82,7 +107,12 @@ Deeper guides:
 
 - [Getting started](docs/getting-started.md)
 - [Store-free session API](docs/session-api.md)
-- [Protocol-v3 security boundary](docs/protocol-v3-security.md)
+- [Protocol-v4 security boundary](docs/protocol-v4-security.md)
+- [References](docs/references.md) — the standards, papers, and open-source
+  projects p2party is built from and built on
+- [Related work and prior art](docs/paper-prior-art-and-related-work.md) — the
+  full research treatment, with a per-claim novelty assessment
+- [Roadmap](ROADMAP.md) — what is next, and which open problems it depends on
 
 ## Browser mesh
 
@@ -115,7 +145,7 @@ console.log("joined", room.id);
 ```
 
 An open RTCDataChannel means its DTLS/SCTP transport is ready. It is not the
-protocol-v3 acknowledgement: p2party next runs its authenticated HELLO plus
+protocol-v4 acknowledgement: p2party next runs its authenticated HELLO plus
 three chained confirmation flights over the main channel. Message receipts are
 a third, delivery-level acknowledgement.
 
@@ -345,7 +375,7 @@ same release bytes before calling `connect()`:
 import p2party from "p2party";
 
 p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.12.0/libcrypto.wasm", window.location.href),
+  new URL("/vendor/p2party-0.13.0/libcrypto.wasm", window.location.href),
 );
 ```
 

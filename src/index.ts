@@ -124,6 +124,9 @@ import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
 import type { KeyPair } from "./reducers/keyPairSlice";
 import type { RoomPolicyV1 } from "./roomPolicy";
 import type { SendMessageResult } from "./handlers/handleSendMessage";
+// Exported so consumers can narrow the rejection of `MessageTransferHandle.done`
+// and read its per-peer outcomes, rather than matching on an error message.
+import { MessageDeliveryError } from "./handlers/handleSendMessage";
 
 // const originalClose = RTCDataChannel.prototype.close;
 // RTCDataChannel.prototype.close = function () {
@@ -419,8 +422,24 @@ const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
 export interface MessageTransferHandle {
   readonly transferId: string;
   /**
-   * Resolves only after every started peer send/reconciliation and cleanup
-   * settles, preserving the ordered per-peer delivery outcomes.
+   * Settles only after every started peer send/reconciliation and cleanup
+   * finishes, preserving the ordered per-peer delivery outcomes.
+   *
+   * This promise REJECTS when no peer took delivery — for example every edge
+   * failed, or the transfer was cancelled. The rejection is a
+   * {@link MessageDeliveryError}, whose `result.outcomes` carries the same
+   * per-peer detail a resolved value would have, and whose `errors` holds the
+   * underlying per-peer failures. Always attach a catch:
+   *
+   * ```ts
+   * const handle = p2party.sendMessage(data, "chat", roomId);
+   * try {
+   *   const result = await handle.done;
+   * } catch (error) {
+   *   if (error instanceof p2party.MessageDeliveryError)
+   *     console.table(error.result.outcomes);
+   * }
+   * ```
    */
   readonly done: Promise<SendMessageResult | undefined>;
   /** Cancels exactly this logical send, even before hashing/WASM setup finishes. */
@@ -1032,6 +1051,7 @@ export const p2party = {
   MAX_COVER_FRAMES_PER_CELL,
   MIN_COVER_SLOT_MS,
   validateRoomPolicyV1,
+  MessageDeliveryError,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   // 100%-full cells make identical content roots deterministic. Keep at least
   // 1% RNG padding as the fresh wire/storage transfer namespace; this is not a
@@ -1086,6 +1106,7 @@ export {
   restoreSession,
   generateSessionIdentity,
   setWasmSourceUrl,
+  MessageDeliveryError,
 };
 
 export {

@@ -1,27 +1,29 @@
-# Getting started with p2party 0.12
+# Getting started with p2party 0.13
 
 p2party has two entry points:
 
 - `p2party` owns the browser room mesh: signaling, WebRTC, Redux state,
-  IndexedDB, OPFS when available, the protocol-v3 handshake, and message
+  IndexedDB, OPFS when available, the protocol-v4 handshake, and message
   transfer.
-- `p2party/session` owns only the protocol-v3 handshake and message
+- `p2party/session` owns only the protocol-v4 handshake and message
   cryptography. Use it with Node, Bun, a native shell, tests, or your own
   transport and storage.
 
-Until `v0.12.0` publishes the registry and CDN artifacts, build and install the
-reproducible release candidate from a source checkout:
+Once the tagged release is on the registry:
 
 ```sh
-npm ci
-npm run release:pack
-npm install ./p2party-0.12.0.tgz
+npm install p2party
 ```
 
-After the tagged release:
+Until then, build the reproducible release candidate from a source checkout.
+This needs the exact release toolchain (Node 24.x, npm 11.6.2, Emscripten
+6.0.2, pinned submodules) — see the [README](../README.md#install):
 
 ```sh
-npm install p2party@0.12.0
+git submodule update --init --recursive
+npm ci
+npm run release:pack
+npm install "./p2party-$(node -p "require('./package.json').version").tgz"
 ```
 
 ## Browser room mesh
@@ -62,7 +64,7 @@ message hub. A room with `n` participants therefore has up to `n(n - 1) / 2`
 peer edges.
 
 `connect()` resolving does not by itself mean that every peer edge has
-completed protocol-v3 authentication. The library gates message cryptography on
+completed protocol-v4 authentication. The library gates message cryptography on
 the authenticated handshake. A UI should render peer and message state from
 the exported store rather than treating `connect()` as a global room-ready
 event.
@@ -126,9 +128,11 @@ bytes are deliberately absent from the public policy, Redux, persistent room
 records, and logs. PIN mode adds CPace authentication to the identity and
 ML-KEM handshake; it does not replace identity possession.
 
-The policy schema can encode `scheduled` cover and private rendezvous modes,
-but the public 0.12 `connect()` path rejects those modes because their live
-transport wiring is not complete.
+Scheduled timing cover is wired as of 0.13: a policy may pin `coverMode:
+"scheduled"` with a cadence, lane count, and frames per cell, and every edge in
+the room then emits fixed-size cells on that schedule whether or not data is
+queued. Private rendezvous modes are still rejected by `connect()` because
+their live transport wiring is not complete.
 
 ## Send, cancel, and read
 
@@ -185,14 +189,14 @@ content-hash lookup for concurrent identical sends.
 
 ## Package artifacts and WASM
 
-The 0.12 package exports:
+The 0.13 package exports:
 
 - `p2party` — browser ESM/CJS root with declarations;
 - `p2party/session` — store-free ESM/CJS session API with declarations;
 - `p2party/libcrypto.wasm` — the exact compiled cryptographic module;
 - `p2party/libcrypto.provenance.json` — source/toolchain/digest provenance;
 - `p2party/docs/getting-started.md`, `p2party/docs/session-api.md`, and
-  `p2party/docs/protocol-v3-security.md` — installed developer and threat-model
+  `p2party/docs/protocol-v4-security.md` — installed developer and threat-model
   documentation;
 - `p2party/examples/standalone-e2ee.ts` — a runnable source-checkout and
   installed-package session example;
@@ -204,9 +208,9 @@ The root bundle embeds the worker source; normal package consumers do not
 construct its URL.
 
 The browser root loads
-`https://cdn.p2party.com/@0.12.0/libcrypto.wasm` with a build-pinned SHA-384
+`https://cdn.p2party.com/@0.13.0/libcrypto.wasm` with a build-pinned SHA-384
 Subresource Integrity value. JavaScript and WASM versions are one release unit:
-never pair 0.12 JavaScript with an older WASM. The release workflow publishes
+never pair 0.13 JavaScript with an older WASM. The release workflow publishes
 the immutable CDN object, fetches it back, verifies its bytes, SHA-256, and SRI,
 and only then publishes npm.
 
@@ -218,7 +222,7 @@ still applies:
 import p2party from "p2party";
 
 p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.12.0/libcrypto.wasm", window.location.href),
+  new URL("/vendor/p2party-0.13.0/libcrypto.wasm", window.location.href),
 );
 ```
 
@@ -241,11 +245,11 @@ In a browser application using only `p2party/session`, fetch a pinned local
 asset and pass its `ArrayBuffer` in the same field:
 
 ```ts
-const response = await fetch("/vendor/p2party-0.12.0/libcrypto.wasm");
+const response = await fetch("/vendor/p2party-0.13.0/libcrypto.wasm");
 if (!response.ok) throw new Error(`WASM fetch failed: ${response.status}`);
 const cryptoOptions = { wasmBinary: await response.arrayBuffer() };
 ```
 
 See [Store-free session API](session-api.md) for the transport and snapshot
-contract and [Protocol-v3 security](protocol-v3-security.md) before deciding
+contract and [Protocol-v4 security](protocol-v4-security.md) before deciding
 what metadata your deployment exposes.

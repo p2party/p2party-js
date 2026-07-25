@@ -1,6 +1,6 @@
 # Store-free session API
 
-`p2party/session` exposes protocol-v3 without Redux, IndexedDB, OPFS, WebRTC,
+`p2party/session` exposes protocol-v4 without Redux, IndexedDB, OPFS, WebRTC,
 signaling, `window`, or `localStorage`. It still requires WebCrypto,
 WebAssembly, secure identity storage, and a transport supplied by the
 application.
@@ -12,6 +12,8 @@ import {
   createSession,
   generateSessionIdentity,
   restoreSession,
+  PROTOCOL_VERSION,
+  WIRE_CHUNK_FRAME_LEN,
   type CreateSessionOptions,
   type EncryptedSessionMessage,
   type GenerateSessionIdentityOptions,
@@ -22,6 +24,7 @@ import {
   type RoomPqMode,
   type SessionAuth,
   type SessionChannelBinding,
+  type SessionControlOutput,
   type SessionCryptoOptions,
 } from "p2party/session";
 ```
@@ -183,15 +186,18 @@ header followed by the fixed-size frames:
 ```ts
 import type { EncryptedSessionMessage } from "p2party/session";
 
+import { PROTOCOL_VERSION, WIRE_CHUNK_FRAME_LEN } from "p2party/session";
+
 const MAGIC = Uint8Array.of(0x50, 0x32, 0x50, 0x45); // "P2PE"
 const ROOT_BYTES = 64;
-const FRAME_BYTES = 65_490;
+const FRAME_BYTES = WIRE_CHUNK_FRAME_LEN; // 65,490
 const HEADER_BYTES = MAGIC.length + 1 + ROOT_BYTES + 4;
 
 export const encodeEnvelopeHeader = (
   message: EncryptedSessionMessage,
 ): Uint8Array => {
-  if (message.protocolVersion !== 3) throw new Error("unsupported protocol");
+  if (message.protocolVersion !== PROTOCOL_VERSION)
+    throw new Error("unsupported protocol");
   if (message.root.length !== ROOT_BYTES) throw new Error("invalid root");
   if (message.frames.length < 1 || message.frames.length > 0xffff_ffff)
     throw new Error("invalid frame count");
@@ -217,7 +223,8 @@ export const decodeEnvelopeHeader = (
   if (header.length !== HEADER_BYTES) throw new Error("invalid header length");
   if (MAGIC.some((byte, index) => header[index] !== byte))
     throw new Error("invalid envelope magic");
-  if (header[MAGIC.length] !== 3) throw new Error("unsupported protocol");
+  if (header[MAGIC.length] !== PROTOCOL_VERSION)
+    throw new Error("unsupported protocol");
 
   const frameCount = new DataView(
     header.buffer,
@@ -238,7 +245,8 @@ Send the header as one record, then each frame as one record. The receiver
 must set `maxFrames` from its own message-size policy, require exactly
 `frameCount` records of exactly 65,490 bytes, reject surplus or missing
 records, and then call
-`session.decrypt({ protocolVersion: 3, root, frames })`. A TCP adapter still
+`session.decrypt({ protocolVersion: PROTOCOL_VERSION, root, frames })`. A TCP
+adapter still
 needs an authenticated record type or length prefix around the header and
 frames. This codec preserves bytes; it does not hide the number or timing of
 records.
@@ -339,21 +347,77 @@ to downgrade.
 A live session exposes:
 
 ```ts
+interface SessionControlOutput {
+  readonly frame: Uint8Array | null;
+  readonly requiresPersistBeforeSend: boolean;
+}
+
 interface P2PartySession {
-  readonly protocolVersion: 3;
+  readonly protocolVersion: 4;
   readonly pqMode: "hybrid-mlkem512" | "hybrid-mlkem768" | "hybrid-mlkem1024";
   readonly canEncrypt: boolean;
+  /** Current authenticated PQ epoch; 0 before any healing exchange. */
+  readonly pqEpoch: bigint;
+  /** True while a sparse-PQ healing exchange blocks application traffic. */
+  readonly healingInProgress: boolean;
   encrypt(plaintext: Uint8Array): Promise<EncryptedSessionMessage>;
   decrypt(message: EncryptedSessionMessage): Promise<Uint8Array>;
+  prepareHealing(): Promise<SessionControlOutput>;
+  acceptControlFrame(frame: Uint8Array): Promise<SessionControlOutput>;
+  pendingControl(): Promise<Uint8Array | null>;
   serialize(): Promise<Uint8Array>;
   destroy(): Promise<void>;
 }
 ```
 
 Each encrypted envelope has one authenticated Merkle root and one or more
-uniform protocol-v3 frames. Either role may send first, and simultaneous first
+uniform protocol-v4 frames. Either role may send first, and simultaneous first
 messages are supported. Ratchet state advances transactionally: a failed
 decrypt does not commit the candidate receive state.
+
+## Sparse post-quantum healing
+
+The bootstrap ML-KEM exchange protects the initial root. Healing periodically
+re-runs it so a later post-quantum compromise cannot unwind an old session.
+The session owns the state machine; the caller owns scheduling and transport.
+
+Control frames are the same 65,490-byte size as chunk frames, so the outer
+framing MUST record which kind a record is — the session will reject a control
+frame handed to `decrypt()` and vice versa.
+
+**The persist-before-send contract.** Whenever any of the three methods returns
+a `frame` with `requiresPersistBeforeSend`, persist `serialize()` _before_
+putting that frame on the wire. Sending first and crashing before the write
+forks the OFFER/ADVANCE/ACK sequence: the peer advances to an epoch this side
+has no record of, and every later message fails to decrypt.
+
+```ts
+const emit = async (output: SessionControlOutput) => {
+  if (!output.frame) return;
+  // Order matters. Never move the send above the write.
+  if (output.requiresPersistBeforeSend)
+    await storeSnapshot(await session.serialize());
+  await transport.sendControlFrame(output.frame);
+};
+
+// Inbound: route by your own record type, not by frame length.
+await emit(await session.acceptControlFrame(frame));
+
+// Outbound cadence — the caller decides. `prepareHealing()` returns a null
+// frame when an exchange is not due or it is not this side's turn, so calling
+// it on a timer or every N messages is safe and idempotent.
+await emit(await session.prepareHealing());
+
+// Retransmit a dropped flight without mutating state.
+const retry = await session.pendingControl();
+if (retry) await transport.sendControlFrame(retry);
+```
+
+While `healingInProgress` is true the session blocks application traffic:
+`encrypt()` **throws** `session: sparse-PQ healing is in progress` rather than
+queueing. An exchange is normally brief, so check `healingInProgress` before
+offering a send, and treat the throw as retryable rather than as a lost
+message.
 
 `serialize()` waits for in-flight encryption and returns the current ratchet as
 a plaintext secret blob. Before persistence:
@@ -389,5 +453,5 @@ Supplying bytes is the reproducible, offline-safe path. Resolve the exported
 release. When `wasmBinary` is omitted, the loader fetches the immutable
 versioned p2party CDN artifact and checks the build-pinned SHA-384 SRI.
 
-See [Protocol-v3 security](protocol-v3-security.md) for the exact claims and
+See [Protocol-v4 security](protocol-v4-security.md) for the exact claims and
 non-claims of the session this API constructs.

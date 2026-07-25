@@ -49,3 +49,10 @@ out/
 .docusaurus/
 .serverless/
 .dynamodb/
+
+# Internal working notes: agent handoffs, design specs, and live defect
+# triage lists. Kept on disk, never published — they are addressed to
+# maintainers, go stale immediately, and name unfixed issues.
+docs/HANDOFF.md
+docs/superpowers/
+docs/e2e/frontend-audit-report.md

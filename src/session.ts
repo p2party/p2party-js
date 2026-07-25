@@ -98,6 +98,15 @@ const SESSION_METADATA_NAME = "p2party-session";
 export type { HandshakeTransport };
 export type { RoomPqMode } from "./roomPolicy";
 
+/**
+ * The wire constants a caller needs to build its own outer framing. The
+ * session hands back opaque fixed-size frames and expects the same back, so an
+ * adapter has to length-check and version-check records itself; re-exporting
+ * these keeps it from hardcoding values that a wire break would silently
+ * invalidate.
+ */
+export { PROTOCOL_VERSION, WIRE_CHUNK_FRAME_LEN };
+
 export interface LocalSessionIdentity {
   ed25519PublicKey: Uint8Array;
   x25519PublicKey: Uint8Array;

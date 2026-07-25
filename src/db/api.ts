@@ -36,11 +36,51 @@ worker.onmessage = (e: MessageEvent) => {
   else p.resolve(result);
 };
 
+/**
+ * A pending entry is only ever drained by a reply carrying its id, so anything
+ * that kills the worker — a module-load failure, a structured-clone failure
+ * posting a large chunk, an OOM — would otherwise leave every in-flight call
+ * unsettled forever. Callers await these, so the transfer or handshake waiting
+ * on one would hang silently rather than fail.
+ */
+const rejectAllPending = (reason: Error): void => {
+  const inFlight = [...pending.values()];
+  pending.clear();
+  for (const p of inFlight) p.reject(reason);
+};
+
+worker.onerror = (event) => {
+  rejectAllPending(
+    new Error(
+      `p2party: the database worker failed: ${
+        (event as ErrorEvent).message || "unknown error"
+      }`,
+    ),
+  );
+};
+
+worker.onmessageerror = () => {
+  rejectAllPending(
+    new Error("p2party: a database worker message could not be deserialized"),
+  );
+};
+
 function callWorker<M extends WorkerMessages["method"]>(
   method: M,
   ...args: Extract<WorkerMessages, { method: M }>["args"]
 ): Promise<import("./types").WorkerMethodReturnTypes[M]> {
   return new Promise((resolve, reject) => {
+    // An empty bundle builds a worker that never replies, so the call would
+    // hang rather than fail. Say why instead of stalling the caller.
+    if (workerSrc.length === 0) {
+      reject(
+        new Error(
+          `p2party: cannot run "${method}" — the database worker bundle is ` +
+            "missing (INDEXEDDB_WORKER_JS was not inlined at build time).",
+        ),
+      );
+      return;
+    }
     const id = ++msgId;
     pending.set(id, {
       resolve: resolve as (value: unknown) => void,
@@ -70,10 +110,27 @@ export const deleteDBAddressBookEntry = (
   peerPublicKey?: string,
 ) => callWorker("deleteDBAddressBookEntry", username, peerId, peerPublicKey);
 
-export const getDBPeerIsBlacklisted = (
+/**
+ * Fails CLOSED. This is the sole admission gate on every connection path, and
+ * an indeterminate answer must never be reported as "not blacklisted" — that
+ * would let a storage fault silently readmit every blocked peer. The denial is
+ * scoped to the one peer being checked, so a transient fault cannot lock the
+ * whole room out.
+ */
+export const getDBPeerIsBlacklisted = async (
   peerId?: string,
   peerPublicKey?: string,
-) => callWorker("getDBPeerIsBlacklisted", peerId, peerPublicKey);
+): Promise<boolean> => {
+  try {
+    return await callWorker("getDBPeerIsBlacklisted", peerId, peerPublicKey);
+  } catch (error) {
+    console.error(
+      "p2party: blacklist lookup failed; treating this peer as blocked",
+      error,
+    );
+    return true;
+  }
+};
 
 export const getAllDBBlacklisted = () => callWorker("getAllDBBlacklisted");
 

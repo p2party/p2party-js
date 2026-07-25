@@ -187,8 +187,12 @@ async function fnGetDBPeerIsBlackisted(
   if (peerId && peerId.length < 10 && !peerPublicKey) return false;
   if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return false;
 
+  // Deliberately unguarded: `false` is also the legitimate "not blacklisted"
+  // answer, so swallowing a storage fault here would be indistinguishable from
+  // a clean miss and would silently admit a blocked peer. Let the rejection
+  // reach db/api.ts, which turns it into a fail-closed answer for this peer.
+  const db = await getDB();
   try {
-    const db = await getDB();
     const tx = db.transaction("blacklist", "readonly");
     const index = peerId
       ? tx.objectStore("blacklist").index("peerId")
@@ -198,10 +202,9 @@ async function fnGetDBPeerIsBlackisted(
       : await index.get(peerPublicKey ?? "");
     await tx.done;
 
-    db.close();
     return peer ? true : false;
-  } catch {
-    return false;
+  } finally {
+    db.close();
   }
 }
 
@@ -247,7 +250,11 @@ async function fnSetDBPeerInBlacklist(
     await tx.done;
     db.close();
   } catch (error) {
+    // Reject rather than resolve: a caller that blacklists a peer and is told
+    // it succeeded will disconnect them and show them as blocked, while the
+    // block survives only until reload.
     console.error(error);
+    throw error;
   }
 }
 

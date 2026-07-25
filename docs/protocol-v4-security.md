@@ -1,10 +1,10 @@
-# Protocol-v3 security boundary
+# Protocol-v4 security boundary
 
-This document states what p2party 0.12's code path does, what observers still
+This document states what p2party 0.13's code path does, what observers still
 learn, and which adjacent mechanisms are not production properties. It is a
 developer threat-model summary, not an independent audit or a formal proof.
 
-Protocol v3 is a clean wire break. Missing, malformed, older, and mismatched
+Protocol v4 is a clean wire break. Missing, malformed, older, and mismatched
 wire versions fail closed; there is no legacy cryptographic fallback.
 
 ## What establishes a peer edge
@@ -14,7 +14,7 @@ There are three different acknowledgements in the system:
 1. An `RTCDataChannel` becoming `open` means the DTLS/SCTP transport and that
    channel are ready. An in-band channel may have completed its DCEP OPEN/ACK,
    but this is not p2party identity or key confirmation.
-2. The protocol-v3 handshake runs over the open main channel. After HELLO,
+2. The protocol-v4 handshake runs over the open main channel. After HELLO,
    responder CONFIRM, initiator CONFIRM, and responder FINISH, the peers have
    authenticated the same hybrid root and initial ratchet keys.
 3. Authenticated 65-byte receipt frames acknowledge message chunks and final
@@ -56,9 +56,13 @@ candidate receive state, and skipped-key storage is bounded.
 Each chunk frame is exactly 65,490 bytes:
 
 ```text
-type(1) || DH public key(32) || N(8) || PN(8) || PQ epoch(1) ||
-nonce(12) || encrypted fixed plaintext cell(65,412) || AEAD tag(16)
+type(1) || DH public key(32) || N(8) || PN(8) || PQ epoch(8) ||
+nonce(12) || encrypted fixed plaintext cell(65,405) || AEAD tag(16)
 ```
+
+The 69-byte clear header is authenticated as AAD, excluding the fresh random
+nonce. The PQ epoch is an unsigned 64-bit counter — widened from v3's single
+byte so the sparse post-quantum healing epoch cannot wrap.
 
 The fixed frame geometry absorbs the ratchet and AEAD overhead into the cell
 budget. Random padding and decoy slots can hide the exact payload length within
@@ -124,15 +128,16 @@ receives its normalized value. A fragment is not a server-blind meeting point.
 
 ## Shipped, implemented core, and research
 
-| Status                                        | Exact boundary in 0.12                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shipped public path                           | Full WebRTC room mesh; protocol-v3 hybrid 3DH + exact room-fixed ML-KEM-512/768/1024 bootstrap; optional CPace PIN rooms; chained triple confirmation; per-edge Double Ratchet; fixed message cells and in-transfer decoys; per-message channels; authenticated receipts, cancellation, selective retransmission, reconnect resume; compact/fragment/word invites; store-free `createSession()`/`restoreSession()` API. |
-| Implemented/tested core, not production-wired | Sparse post-quantum healing state machine. Production still needs crash-safe persistence, authenticated control-frame routing, message-key integration, nonzero epoch emission/acceptance, and scheduling. The room-policy codec also represents scheduled cover and private rendezvous modes, but public `connect()` rejects them.                                                                                     |
-| Research/design direction                     | Room-wide scheduled timing cover; opaque/server-blind rendezvous and blind meeting points; a private BitTorrent-compatible swarm extension; multi-device/group-state designs beyond independent pairwise mesh edges; and machine-checked formal analysis comparable in scope to PQXDH work.                                                                                                                             |
+| Status                    | Exact boundary in 0.13                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shipped public path       | Full WebRTC room mesh; protocol-v4 hybrid 3DH + exact room-fixed ML-KEM-512/768/1024 bootstrap; optional CPace PIN rooms; chained triple confirmation; per-edge Double Ratchet; fixed message cells and in-transfer decoys; per-message channels; authenticated receipts, cancellation, selective retransmission, reconnect resume; compact/fragment/word invites; store-free `createSession()`/`restoreSession()` API. |
+| Shipped, newer            | Sparse post-quantum healing (OFFER/ADVANCE/ACK epoch exchange) with persist-before-dispatch and application traffic blocked while an epoch is in flight. Room-wide scheduled timing cover: policy-pinned cadence, lanes, and frames per cell, emitted whether or not data is queued.                                                                                                                                    |
+| Research/design direction | Opaque/server-blind rendezvous and blind meeting points; a private BitTorrent-compatible swarm extension; multi-device/group-state designs beyond independent pairwise mesh edges; and machine-checked formal analysis comparable in scope to PQXDH work.                                                                                                                                                               |
 
-Do not advertise an implemented-core row as a deployed guarantee. In
-particular, all shipped chunk headers currently identify the bootstrap PQ epoch;
-sparse PQ healing does not yet refresh live production message roots.
+Scheduled cover is a room-wide property: it hides _when_ a peer has something
+to say only for as long as every edge in the room keeps emitting on the
+schedule. It does not hide room membership from the signaling operator, and it
+does not apply to rooms whose policy selects immediate delivery.
 
 ## Deployment obligations
 

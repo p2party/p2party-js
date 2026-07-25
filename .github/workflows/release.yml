@@ -68,6 +68,22 @@ jobs:
       - name: Verify source and standalone API
         run: npm run check
 
+      # release:pack stages the production build into a temp tree and never
+      # populates ./lib, but uploadcdn reads lib/index.min.js, lib/db.worker.js,
+      # and lib/libcrypto.wasm. Unpack the tarball that was just validated
+      # rather than rebuilding: the browser fetches the CDN WASM under a
+      # build-pinned SRI, so CDN bytes that differ from the published bytes
+      # would fail integrity on every load.
+      - name: Stage the validated tarball for CDN upload
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          rm -rf .release-stage && mkdir -p .release-stage lib
+          tar -xzf "p2party-${version}.tgz" -C .release-stage
+          for asset in index.min.js db.worker.js libcrypto.wasm libcrypto.provenance.json; do
+            cp ".release-stage/package/lib/${asset}" "lib/${asset}"
+          done
+
       - name: Publish immutable CDN assets
         run: npm run uploadcdn
         env:

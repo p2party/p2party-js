@@ -56,3 +56,6 @@ out/
 docs/HANDOFF.md
 docs/superpowers/
 docs/e2e/frontend-audit-report.md
+
+# Release-tarball unpack dir used by the CDN upload step in CI.
+.release-stage/

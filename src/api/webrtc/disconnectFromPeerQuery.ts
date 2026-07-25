@@ -7,6 +7,7 @@ import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
 import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
 import { releaseScheduledReceipts } from "../../handlers/coverTransfer";
+import { teardownCoverEdge } from "../../handlers/coverEdge";
 import { rejectRatchetGate } from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
@@ -69,16 +70,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     }
     // Stop scheduled cover first: its timers and lane channels must not fire
     // against a torn-down edge, and any queued scheduled receipts are wiped.
-    if (connection.coverRuntime) {
-      connection.coverRuntime.destroy();
-      connection.coverRuntime = undefined;
-    }
-    if (connection.coverChannels) {
-      for (const lane of connection.coverChannels)
-        if (lane.readyState !== "closed") lane.close();
-      connection.coverChannels.clear();
-      connection.coverChannels = undefined;
-    }
+    teardownCoverEdge(connection);
     releaseScheduledReceipts(connection);
     // Destroy the sparse-PQ runtime with the ratchet: its machine, message
     // root, sealed outbox, replay/ACK caches, and active combined receive keys

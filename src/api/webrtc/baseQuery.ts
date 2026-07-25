@@ -1,5 +1,6 @@
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
+import { teardownCoverEdge } from "../../handlers/coverEdge";
 
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
@@ -123,20 +124,8 @@ const webrtcBaseQuery: BaseQueryFn<
         return { data: undefined };
       }
 
-      // Stop scheduled cover before replacing a dead edge, exactly as the
-      // disconnect path does: destroy() fires the terminal "stopped" status
-      // (so coverStatusByPeer never claims cover on a replaced edge) and
-      // detaches the runtime's timers/listeners from the stale connection.
-      if (epc.coverRuntime) {
-        epc.coverRuntime.destroy();
-        epc.coverRuntime = undefined;
-      }
-      if (epc.coverChannels) {
-        for (const lane of epc.coverChannels)
-          if (lane.readyState !== "closed") lane.close();
-        epc.coverChannels.clear();
-        epc.coverChannels = undefined;
-      }
+      // A replaced edge must stop claiming cover, same as a disconnected one.
+      teardownCoverEdge(epc);
       clearConnectionHandlers(epc);
       if (epc.connectionState !== "closed") epc.close();
       peerConnections.splice(connectionIndex, 1);

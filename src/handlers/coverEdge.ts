@@ -41,6 +41,26 @@ export interface InstallCoverEdgeOptions {
 }
 
 /**
+ * Stop scheduled cover on an edge and release its lanes.
+ *
+ * destroy() emits the terminal "stopped" status, so any observer of
+ * rooms[].coverStatusByPeer stops claiming cover for this edge. Safe to call
+ * on an edge that never had a runtime.
+ */
+export const teardownCoverEdge = (epc: IRTCPeerConnection): void => {
+  if (epc.coverRuntime) {
+    epc.coverRuntime.destroy();
+    epc.coverRuntime = undefined;
+  }
+  if (epc.coverChannels) {
+    for (const lane of epc.coverChannels)
+      if (lane.readyState !== "closed") lane.close();
+    epc.coverChannels.clear();
+    epc.coverChannels = undefined;
+  }
+};
+
+/**
  * Construct and START the scheduled-cover runtime for one authenticated edge.
  * Called after `runHandshake` on a `coverMode: "scheduled"` room. Idempotent
  * per connection: a replacement handshake destroys the previous runtime first.
@@ -48,10 +68,7 @@ export interface InstallCoverEdgeOptions {
 export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
   const { epc, roomId, policy } = options;
   if (policy.coverMode !== "scheduled") return;
-  if (epc.coverRuntime) {
-    epc.coverRuntime.destroy();
-    epc.coverRuntime = undefined;
-  }
+  teardownCoverEdge(epc);
   epc.coverChannels ??= new Set<IRTCDataChannel>();
 
   const runtime = new CoverRuntime({

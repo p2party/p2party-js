@@ -48,6 +48,14 @@ export const getAckedChunks = (
   transferId: string,
 ): Set<number> => new Set(edge(roomId, peerId, transferId).acked);
 
+// Live size of the acked set, polled by the sender's receipt window without
+// copying the set on every tick.
+export const getAckedChunkCount = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+): number => edge(roomId, peerId, transferId).acked.size;
+
 export const markTransferComplete = (
   roomId: string,
   peerId: string,

@@ -77,6 +77,16 @@ export const waitForEdgeReceiveQuiescence = async (
 const queuedBytesByChannel = new WeakMap<Uint8Array[], number>();
 const queuedReceiptsByEdge = new Map<string, number>();
 
+/**
+ * A terminal receipt may ride an immediate frame only in immediate mode. In a
+ * scheduled-cover room acknowledgement substitutes into a reverse cover slot,
+ * so an immediate frame here would be an unscheduled emission correlated with
+ * message completion.
+ */
+export const shouldSendImmediateTerminalReceipt = (
+  epc?: Pick<IRTCPeerConnection, "coverRuntime">,
+): boolean => epc?.coverRuntime === undefined;
+
 export const MAX_QUEUED_FRAMES_PER_CHANNEL = 64;
 export const MAX_QUEUED_BYTES_PER_EDGE = 16 * 1024 * 1024;
 export const MAX_QUEUED_RECEIPTS_PER_CHANNEL = 2_048;
@@ -396,7 +406,14 @@ const processMessage = async (
           }),
         );
 
-        if (extChannel) sendReceiptFrame(extChannel, messageHash);
+        // Scheduled mode already queued the terminal receipt as a cover cell
+        // above; emitting this immediate 65-byte frame as well would put an
+        // off-schedule, distinctively sized packet on the wire at the exact
+        // instant a real transfer completed — correlated with the event the
+        // cover schedule exists to hide. (It was also inert: the sender never
+        // attaches a message handler to the cover lane it arrives on.)
+        if (shouldSendImmediateTerminalReceipt(epc) && extChannel)
+          sendReceiptFrame(extChannel, messageHash);
       } else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
         api.dispatch(
           setMessage({

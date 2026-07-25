@@ -11,6 +11,7 @@ import {
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { State } from "../store";
 import type { RoomPolicyV1 } from "../roomPolicy";
+import type { CoverSchedulerStatus } from "../handlers/coverScheduler";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
@@ -139,6 +140,12 @@ export interface SetCanOnlyConnectWithKnownPeers {
   onlyConnectWithKnownPeers: boolean;
 }
 
+export interface SetPeerCoverStatusArgs {
+  roomId: string;
+  peerId: string;
+  status: CoverSchedulerStatus;
+}
+
 export interface Room extends SetRoomArgs {
   policy: RoomPolicyV1;
   connectingToPeers: boolean;
@@ -149,6 +156,13 @@ export interface Room extends SetRoomArgs {
   peers: Peer[];
   channels: Channel[];
   messages: Message[];
+  /**
+   * protocol-v4: live scheduled-cover status per authenticated peer edge
+   * (peerId → status). Absent means no cover claim may ever be made for that
+   * edge — only an explicit "active" from the runtime is a cover claim, so a
+   * browser gap ("suspended") or teardown ("stopped") is always visible.
+   */
+  coverStatusByPeer?: Record<string, CoverSchedulerStatus>;
 }
 
 export const defaultRTCConfig = {
@@ -354,6 +368,23 @@ const roomSlice = createSlice({
         );
 
         if (peerIndex > -1) state[i].peers.splice(peerIndex, 1);
+        const coverStatusByPeer = state[i].coverStatusByPeer;
+        if (coverStatusByPeer) delete coverStatusByPeer[action.payload.peerId];
+      }
+    },
+
+    setPeerCoverStatus: (
+      state,
+      action: PayloadAction<SetPeerCoverStatusArgs>,
+    ) => {
+      const { roomId, peerId, status } = action.payload;
+
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+
+      if (roomIndex > -1) {
+        const room = state[roomIndex];
+        room.coverStatusByPeer ??= {};
+        room.coverStatusByPeer[peerId] = status;
       }
     },
 
@@ -761,6 +792,7 @@ export const {
   setConnectionRelay,
   setOnlyConnectWithKnownPeers,
   setPeer,
+  setPeerCoverStatus,
   setChannel,
   setIceServers,
   setMessage,

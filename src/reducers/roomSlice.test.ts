@@ -14,8 +14,15 @@ import {
   length: 0,
 } as Storage;
 
-const { default: roomReducer, deleteRoom, setMessage, setRoom, setRoomPolicy } =
-  await import("./roomSlice");
+const {
+  default: roomReducer,
+  deletePeer,
+  deleteRoom,
+  setMessage,
+  setPeerCoverStatus,
+  setRoom,
+  setRoomPolicy,
+} = await import("./roomSlice");
 
 describe("room policy reducer boundary", () => {
   test("new rooms receive the mandatory hybrid-v3 default", () => {
@@ -158,5 +165,65 @@ describe("room policy reducer boundary", () => {
       "11".repeat(32),
       "22".repeat(32),
     ]);
+  });
+});
+
+describe("per-peer scheduled-cover status", () => {
+  const roomId = "00000000-0000-4000-8000-0000000000aa";
+  const peerId = "00000000-0000-4000-8000-0000000000bb";
+
+  test("status transitions are stored per peer, including stopped", () => {
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "f".repeat(64), id: roomId }),
+    );
+    expect(state[0].coverStatusByPeer).toBeUndefined();
+
+    state = roomReducer(
+      state,
+      setPeerCoverStatus({ roomId, peerId, status: "starting" }),
+    );
+    expect(state[0].coverStatusByPeer).toEqual({ [peerId]: "starting" });
+
+    state = roomReducer(
+      state,
+      setPeerCoverStatus({ roomId, peerId, status: "active" }),
+    );
+    state = roomReducer(
+      state,
+      setPeerCoverStatus({ roomId, peerId, status: "suspended" }),
+    );
+    expect(state[0].coverStatusByPeer).toEqual({ [peerId]: "suspended" });
+
+    // A runtime teardown reports "stopped" explicitly: the UI must be able to
+    // distinguish "cover halted" from "never scheduled" (absent).
+    state = roomReducer(
+      state,
+      setPeerCoverStatus({ roomId, peerId, status: "stopped" }),
+    );
+    expect(state[0].coverStatusByPeer).toEqual({ [peerId]: "stopped" });
+  });
+
+  test("unknown room is a no-op and peer deletion clears the entry", () => {
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "f".repeat(64), id: roomId }),
+    );
+    const untouched = roomReducer(
+      state,
+      setPeerCoverStatus({
+        roomId: "00000000-0000-4000-8000-0000000000cc",
+        peerId,
+        status: "active",
+      }),
+    );
+    expect(untouched).toBe(state);
+
+    state = roomReducer(
+      state,
+      setPeerCoverStatus({ roomId, peerId, status: "active" }),
+    );
+    state = roomReducer(state, deletePeer({ roomId, peerId }));
+    expect(state[0].coverStatusByPeer?.[peerId]).toBeUndefined();
   });
 });

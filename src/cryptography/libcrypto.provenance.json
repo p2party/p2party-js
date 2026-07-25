@@ -39,7 +39,7 @@
   "artifact": {
     "file": "libcrypto.wasm",
     "bytes": 1682423,
-    "sha256": "cad75f08e68975770cc0e6700f44019b0b3a6ce32f901f173e8d7232a14b14e3",
-    "sri": "sha384-d6RrH+fyYpmjDZVar49/ryVqmAe9xx/wyxxZezh71ZsnyYgj3fbpgBKvnQeXoEU3"
+    "sha256": "f20c5c78ef13935986b26bec063003019b6df223e26d9673220d524dea2569fc",
+    "sri": "sha384-LTjsD3B5tg+TpqZ0RLXVPtRKFOPyMcagEh4p3lTpX2tSuzFWSxMvjrYoVfXmsBFR"
   }
 }

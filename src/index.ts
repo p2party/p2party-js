@@ -41,6 +41,7 @@ import {
   CHUNK_LEN,
   CHUNK_SIZE_FLOOR,
   PROTOCOL_VERSION,
+  WIRE_CHUNK_FRAME_LEN,
 } from "./utils/constants";
 import {
   abortAllTransfers,
@@ -51,11 +52,17 @@ import {
 } from "./handlers/transferAbort";
 import {
   DEFAULT_ROOM_POLICY_V1,
+  MIN_COVER_CADENCE_MS,
+  MAX_COVER_CADENCE_MS,
+  MAX_COVER_LANES,
+  MAX_COVER_FRAMES_PER_CELL,
+  MIN_COVER_SLOT_MS,
   canonicalizeRoomPolicyV1,
   decodeRoomPolicyV1,
   encodeRoomPolicyV1,
   hashRoomPolicyV1,
   roomPoliciesEqualV1,
+  validateRoomPolicyV1,
 } from "./roomPolicy";
 import {
   clearRoomPins,
@@ -1018,6 +1025,13 @@ export const p2party = {
   MIN_CHUNKS: 1,
   MIN_CHUNK_SIZE: CHUNK_SIZE_FLOOR + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
+  WIRE_CHUNK_FRAME_LEN,
+  MIN_COVER_CADENCE_MS,
+  MAX_COVER_CADENCE_MS,
+  MAX_COVER_LANES,
+  MAX_COVER_FRAMES_PER_CELL,
+  MIN_COVER_SLOT_MS,
+  validateRoomPolicyV1,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   // 100%-full cells make identical content roots deterministic. Keep at least
   // 1% RNG padding as the fresh wire/storage transfer namespace; this is not a
@@ -1081,6 +1095,19 @@ export {
   encodeRoomPolicyV1,
   hashRoomPolicyV1,
   roomPoliciesEqualV1,
+};
+
+// The bounds a scheduled cover schedule must satisfy, and the exact wire size
+// of one cell. Consumers building a policy UI need these to validate before
+// they construct a policy; re-declaring them downstream drifts silently.
+export {
+  MIN_COVER_CADENCE_MS,
+  MAX_COVER_CADENCE_MS,
+  MAX_COVER_LANES,
+  MAX_COVER_FRAMES_PER_CELL,
+  MIN_COVER_SLOT_MS,
+  validateRoomPolicyV1,
+  WIRE_CHUNK_FRAME_LEN,
 };
 
 export type {

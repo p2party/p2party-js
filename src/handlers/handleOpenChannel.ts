@@ -36,7 +36,11 @@ import { abortTransfer } from "./transferAbort";
 
 import webrtcApi from "../api/webrtc";
 
-import { setChannel, setConnectingToPeers } from "../reducers/roomSlice";
+import {
+  setChannel,
+  setConnectingToPeers,
+  setPeerCoverStatus,
+} from "../reducers/roomSlice";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -801,6 +805,19 @@ export const handleOpenChannel = async (
             policyHash,
             amInitiator,
             module: epc.receiveMessageModule,
+            onStatusChange: ({ status }) => {
+              // Surface starting|active|degraded|suspended|stopped so a UI can
+              // show live cover state and never claim cover during a browser
+              // gap. Fires on every transition including the terminal
+              // "stopped" from edge teardown/reinstall.
+              api.dispatch(
+                setPeerCoverStatus({
+                  roomId,
+                  peerId: epc.withPeerId,
+                  status,
+                }),
+              );
+            },
             onRemoteCancel: (merkleRootHex) => {
               // An authenticated remote CANCEL cover cell aborts the local
               // receive/send of exactly that transfer.

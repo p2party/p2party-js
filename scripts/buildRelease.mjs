@@ -226,9 +226,20 @@ const validateBundle = (
     );
   if (!source.includes(expectedIntegrity))
     fail(`${relativePath} does not embed the current WASM SRI`);
-  for (const staleVersion of ["0.9.0", "0.9.1", "0.9.2", "0.10.0", "0.11.0"])
-    if (source.includes(`cdn.p2party.com/@${staleVersion}/libcrypto.wasm`))
-      fail(`${relativePath} embeds stale CDN version ${staleVersion}`);
+  // The bundle builds its CDN URL by interpolating the version constant, so a
+  // hardcoded version should never appear. Reject any CDN reference that names
+  // a literal version other than this release's — a denylist of known-old
+  // versions cannot do this job, since it stops protecting the moment a
+  // release forgets to extend it.
+  for (const [, cdnVersion] of source.matchAll(
+    /cdn\.p2party\.com\/@([^/"'`\s]+)\/libcrypto\.wasm/g,
+  )) {
+    if (cdnVersion.includes("${")) continue; // interpolated; covered above
+    if (cdnVersion !== packageJson.version)
+      fail(
+        `${relativePath} hardcodes CDN version ${cdnVersion}, expected ${packageJson.version}`,
+      );
+  }
   for (const name of [
     "_mlkem512_keypair",
     "_mlkem512_encaps",

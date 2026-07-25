@@ -12,6 +12,8 @@ export default [
       // Preserved browser E2E harnesses (docs/e2e/): run manually per
       // docs/e2e/README.md, not part of the shipped library surface.
       "docs/*",
+      // Local session-history scratch space, not project source.
+      ".remember/*",
       "eslint.config.mjs",
       "rollup.config.ts",
       "rollup.worker.config.ts",

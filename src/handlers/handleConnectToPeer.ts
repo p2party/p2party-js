@@ -5,6 +5,7 @@ import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
+import { repairIceTransportAfterCandidateFailure } from "../api/webrtc/iceRepair";
 import {
   findRoomIdentityAliases,
   findRoomPeerConnection,
@@ -264,6 +265,19 @@ export const handleConnectToPeer = async (
 
   epc.onconnectionstatechange = async () => {
     if (epc.connectionState === "disconnected") {
+      // Try to repair before giving up. "disconnected" is usually a transient
+      // ICE failure -- a NAT binding expiring on an idle edge, a network
+      // change -- and an ICE restart is the standard recovery. Tearing the
+      // edge down was the only response, so a room that had been quiet for a
+      // few minutes reported "not-connected" on the next send while the peer
+      // was still listed in the roster and the UI still said two peers.
+      //
+      // The teardown below stays as the fallback: if the restart does not get
+      // us back to connected within the grace period, the edge really is gone.
+      await repairIceTransportAfterCandidateFailure(epc, () => undefined).catch(
+        () => undefined,
+      );
+
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       disconnectTimeout = setTimeout(() => {
         if (epc.connectionState !== "disconnected") return;

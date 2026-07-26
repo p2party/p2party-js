@@ -20,12 +20,14 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
 - Every peer in a room connects to every other present peer through WebRTC;
   the signaling service is not the message hub.
 - Every peer edge performs authenticated interactive 3DH plus an
-  authenticated, room-fixed ML-KEM-512, ML-KEM-768 (default), or ML-KEM-1024
-  bootstrap. PIN rooms additionally authenticate with CPace.
+  authenticated, room-fixed [ML-KEM](https://csrc.nist.gov/pubs/fips/203/final)-512,
+  ML-KEM-768 (default), or ML-KEM-1024 bootstrap. PIN rooms additionally
+  authenticate with [CPace](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-cpace-21).
 - Three chained key-confirmation messages complete the application-layer
   cryptographic handshake. An `RTCDataChannel` becoming `open` establishes the
   transport; it is not a substitute for that confirmation.
-- Per-peer Double Ratchet state protects messages after the handshake.
+- Per-peer [Double Ratchet](https://signal.org/docs/specifications/doubleratchet/)
+  state protects messages after the handshake.
 - Message data travels in fixed 65,490-byte protocol-v4 frames. Cryptographic
   overhead is absorbed inside that fixed cell budget; randomized padding and
   decoy slots can hide a message's exact payload length within its transfer.
@@ -36,9 +38,12 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   Browser builds use IndexedDB and, where available, OPFS for disk-backed large
   file receipt.
 - Room capabilities have a compact 43-character base64url form, a versioned
-  fragment invite, and an optional checksum-protected 24-word representation.
-- `p2party/session` exposes the cryptography without Redux, IndexedDB, WebRTC,
-  signaling, `window`, or `localStorage`.
+  fragment invite, and an optional checksum-protected 24-word
+  [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)
+  representation.
+- `p2party/session` exposes the cryptography without
+  [Redux](https://redux-toolkit.js.org/), IndexedDB, WebRTC, signaling,
+  `window`, or `localStorage`.
 
 Immediate delivery over the existing signaling rendezvous is the shipped
 default. Scheduled timing cover is also wired as of 0.14.0: a room policy may
@@ -191,38 +196,123 @@ an application cell, a decoy and a post-quantum healing record indistinguishable
 by size. Byte layouts, the handshake ladder and the healing exchange are in
 [docs/wire-format.md](docs/wire-format.md).
 
-## Room invites
+## What a room invite looks like
 
-Generate one 256-bit room capability and derive each human-facing form from the
-same bytes:
+One 256-bit capability, three presentations of the same bytes. Whoever holds it
+can join the room, so it is the secret — treat it like one:
+
+```text
+compact   Mg10fDvjVDzXkuboBnfjuNWc26i35rYsjJHKpS7D58s          43 chars
+fragment  v1.Mg10fDvjVDzXkuboBnfjuNWc26i35rYsjJHKpS7D58s      46 chars
+words     craft hill business jelly crystal bunker furnace fresh trend
+          crisp wedding immune flush horse people wolf renew good caught
+          next fancy giggle palace huge                        24 words
+```
+
+In a URL the fragment goes after `#`, which keeps it out of the request line,
+out of `Referer`, and out of ordinary server logs:
+
+```text
+https://p2party.com/#v1.Mg10fDvjVDzXkuboBnfjuNWc26i35rYsjJHKpS7D58s
+```
+
+All three decode to identical bytes, so peers can mix forms — one pastes a
+link, another reads the words aloud over a phone call:
 
 ```ts
 const capability = p2party.generateRoomCapability();
+
 const compact = p2party.encodeRoomCapabilityBase64Url(capability); // 43 chars
 const fragment = p2party.encodeRoomInviteFragment(capability); // v1.<compact>
 const words = await p2party.encodeRoomCapabilityWords(capability); // 24 words
 
-await p2party.connect(fragment);
-
 const fromWords = await p2party.decodeRoomCapabilityWords(words);
-const sameCompact = p2party.encodeRoomCapabilityBase64Url(fromWords);
-console.assert(sameCompact === compact);
+console.assert(p2party.encodeRoomCapabilityBase64Url(fromWords) === compact);
+
+await p2party.connect(fragment);
 ```
 
-`generateRoomInvite()` is the versioned-fragment shortcut. Put it after `#` in
-an HTTPS URL to keep it out of ordinary HTTP requests. The shipped
-`legacy-signaling` route still sends the normalized capability to signaling;
-the fragment alone is not server-blind rendezvous.
+`generateRoomInvite()` is the one-liner for the fragment form. The word list is
+[BIP-39 English](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)
+and is checksum-protected — it encodes the same 256 bits, it is not a
+lower-entropy password. The shipped `legacy-signaling` route still sends the
+normalized capability to the signaling service, so a fragment is not
+server-blind rendezvous.
 
-## PIN and exact ML-KEM room policy
+## PIN rooms
 
-Room policy is immutable after the room is created locally, every peer must use
-the same policy and the same PIN bytes, and the ML-KEM suite is fixed before the
-handshake — there is no in-band negotiation, downgrade, or classical fallback.
-PIN mode adds CPace on top of identity authentication; it does not replace it.
+A capability alone authenticates whoever _received the link_. If the link leaks
+— a forwarded chat, a screenshot, a shared clipboard — the holder joins. A PIN
+adds a second factor over a separate channel: peers must also prove they know
+the same short secret, using [CPace](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-cpace-21),
+a balanced PAKE, so the PIN itself never crosses the wire and a wrong PIN fails
+the handshake instead of leaking a guess oracle.
 
-The worked example, including how the PIN buffer is wiped, is in
-[docs/getting-started.md](docs/getting-started.md#pin-room-with-an-exact-ml-kem-suite).
+PIN mode is **in addition to** identity authentication, never instead of it:
+
+```ts
+import p2party, { type RoomPolicyV1 } from "p2party";
+
+const policy = {
+  ...p2party.DEFAULT_ROOM_POLICY_V1,
+  authMode: "pin",
+  pqMode: "hybrid-mlkem1024", // 512 | 768 (default) | 1024, fixed up front
+} satisfies RoomPolicyV1;
+
+// Both peers need these exact bytes, carried out of band — spoken aloud,
+// not sent through the same channel as the invite.
+const pin = new TextEncoder().encode("correct horse battery staple");
+
+try {
+  await p2party.connect(invite, undefined, undefined, { policy, pin });
+} finally {
+  pin.fill(0); // connect() copied it into the in-memory room vault.
+}
+```
+
+Room policy is immutable once the room is created locally, and every peer must
+present the same policy and the same PIN bytes. The ML-KEM suite is fixed
+before the handshake runs — there is no in-band negotiation, no downgrade, and
+no classical fallback, so a mismatched peer fails closed rather than quietly
+agreeing on something weaker.
+
+PIN bytes are deliberately absent from the public policy, from Redux, from
+persisted room records and from logs. Wipe your copy when the room is up.
+
+## Scheduled cover traffic
+
+Encryption hides what you say. It does not hide _that_ you said something —
+an observer still sees a burst of frames the moment you press send. Scheduled
+cover replaces that pattern with a constant one: every edge in the room emits
+fixed-size cells on a fixed cadence whether or not there is anything to send,
+and real chunks are substituted into slots that were going to be sent anyway.
+
+```ts
+const policy = {
+  ...p2party.DEFAULT_ROOM_POLICY_V1,
+  coverMode: "scheduled",
+  coverCadenceMs: 10_000, // one cycle every 10s
+  coverLanes: 2, // parallel schedules per edge
+  coverFramesPerCell: 1, // 65,490-byte frames per slot
+  coverDurationEpochs: 360,
+} satisfies RoomPolicyV1;
+
+p2party.validateRoomPolicyV1(policy); // throws before you build a room on it
+```
+
+The bounds are exported — `MIN_COVER_CADENCE_MS`, `MAX_COVER_CADENCE_MS`,
+`MAX_COVER_LANES`, `MAX_COVER_FRAMES_PER_CELL`, `MIN_COVER_SLOT_MS` — so a
+policy UI validates against the library instead of re-declaring limits that
+drift.
+
+Cover is a **room-wide** property: it hides timing only for as long as every
+edge keeps emitting on schedule, and it costs bandwidth continuously. It has
+been measured on loopback, not across a real network path, and fixed cells over
+a fixed cadence are not by themselves traffic-analysis resistance — see
+[The Last Hop Attack](https://doi.org/10.56553/popets-2025-0067) for how loop
+cover over fixed cascades fails, and the
+[security boundary](docs/protocol-v4-security.md) for what is actually claimed.
+Immediate delivery remains the default.
 
 ## Send, cancel, and read
 
@@ -253,37 +343,123 @@ import { generateSessionIdentity } from "p2party/session";
 const identity = await generateSessionIdentity();
 ```
 
-Two peers, end to end. Each side needs the other's Ed25519 public key and a
-pair of byte pipes — `send` and `recv` over your socket, pipe, queue, or
-anything else that delivers whole messages in order:
+### Two peers, both sides
+
+Alice and Bob each generate a long-term identity, exchange Ed25519 public keys
+out of band, agree on a channel binding, and hand the session two byte pipes.
+Nothing below is elided — this is the whole setup:
 
 ```ts
-import { createSession } from "p2party/session";
+import { createSession, generateSessionIdentity } from "p2party/session";
 
-const alice = await createSession({
-  role: "initiator",
-  identity: aliceIdentity,
-  peerIdentityEd25519PublicKey: bobPublicKey,
-  channel: binding,
-  transport: { send, recv },
-  mode: "nopin",
-});
+// 1. Long-term identities. Persist these; they are who each peer *is*.
+const aliceIdentity = await generateSessionIdentity();
+const bobIdentity = await generateSessionIdentity();
 
-const sealed = await alice.encrypt(new TextEncoder().encode("hello bob"));
-const opened = await bob.decrypt(sealed);
+// 2. Trust. Each side must already know the other's Ed25519 public key —
+//    pinned from a previous session, read off a QR code, or explicitly
+//    TOFU-accepted. The session never decides this for you.
+const alicePublicKey = aliceIdentity.ed25519PublicKey;
+const bobPublicKey = bobIdentity.ed25519PublicKey;
+
+// 3. Channel binding, identical on both sides but with the fingerprints
+//    swapped. Bound into the handshake transcript so a relay cannot sit in
+//    the middle and swap sides.
+const channelId = crypto.getRandomValues(new Uint8Array(16));
+const aliceFingerprint = crypto.getRandomValues(new Uint8Array(32));
+const bobFingerprint = crypto.getRandomValues(new Uint8Array(32));
+
+// 4. Two one-way pipes. Replace these with your socket, WebSocket, pipe or
+//    queue — anything that delivers whole messages, in order.
+const aliceToBob = makeLink();
+const bobToAlice = makeLink();
+
+// 5. Handshake. Both sides run concurrently: the flights are interactive, so
+//    awaiting one before starting the other deadlocks.
+const [alice, bob] = await Promise.all([
+  createSession({
+    role: "initiator",
+    identity: aliceIdentity,
+    peerIdentityEd25519PublicKey: bobPublicKey,
+    channel: {
+      channelId,
+      localFingerprint: aliceFingerprint,
+      remoteFingerprint: bobFingerprint,
+    },
+    transport: { send: aliceToBob.send, recv: bobToAlice.recv },
+    mode: "nopin",
+  }),
+  createSession({
+    role: "responder",
+    identity: bobIdentity,
+    peerIdentityEd25519PublicKey: alicePublicKey,
+    channel: {
+      channelId,
+      localFingerprint: bobFingerprint,
+      remoteFingerprint: aliceFingerprint,
+    },
+    transport: { send: bobToAlice.send, recv: aliceToBob.recv },
+    mode: "nopin",
+  }),
+]);
 ```
 
-`createSession()` runs the full handshake — 3DH ⊕ ML-KEM, Ed25519 cross-signed
-identities, three chained confirmations — and resolves with a live Double
-Ratchet. `encrypt()` returns uniform fixed-size frames; `decrypt()` takes them
-back. `serialize()` hands you a snapshot and `restoreSession()` resumes the
-same ratchet in a new process.
+For a PIN-authenticated session, both sides pass `mode: "pin"` with identical
+`pin` bytes instead — the same CPace step the browser mesh uses.
 
-Run the complete two-party script, healing exchange included:
+### What goes over the wire
+
+```ts
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+const sealed = await alice.encrypt(encoder.encode("hello bob"));
+
+// sealed.protocolVersion === 4
+// sealed.root   -> 32-byte Merkle root, authenticated as AEAD additional data
+// sealed.frames -> [Uint8Array(65490)]  one uniform cell; a 9-byte message and
+//                  a 60 KiB message produce byte-identical frame sizes.
+//                  Each frame is:
+//                    type(1) | DH pubkey(32) | N(8) | PN(8) | PQ epoch(8) |
+//                    nonce(12) | ciphertext(65405) | Poly1305 tag(16)
+//                  Only the 69-byte header is readable; it is authenticated,
+//                  not secret. Everything else is indistinguishable from
+//                  random to anyone without the message key.
+
+// Hand sealed.frames to your transport verbatim. It must delimit records
+// itself — the session returns opaque bytes, not a framed stream.
+const opened = await bob.decrypt(sealed);
+console.log(decoder.decode(opened)); // "hello bob"
+
+// Either side may speak first, and simultaneous first sends are fine: the
+// handshake primes both ratchet directions.
+const reply = await bob.encrypt(encoder.encode("hi alice"));
+console.log(decoder.decode(await alice.decrypt(reply))); // "hi alice"
+```
+
+Each logical message consumes one ratchet step. Replays and tampered frames are
+rejected; out-of-order arrival is tolerated within a bounded skipped-key window.
+
+### Suspend and resume
+
+```ts
+const snapshot = await alice.serialize(); // plaintext secret — encrypt at rest
+await alice.destroy();
+
+const restored = await restoreSession(snapshot);
+// Same ratchet, same counters. Bob notices nothing.
+console.log(decoder.decode(await restored.decrypt(await bob.encrypt(msg))));
+```
+
+Run the complete two-party script — including the sparse post-quantum healing
+exchange — from a checkout:
 
 ```sh
 bun run examples/standalone-e2ee.ts
 ```
+
+[`examples/standalone-e2ee.ts`](examples/standalone-e2ee.ts) is also shipped
+inside the package, and includes the `makeLink()` helper used above.
 
 Four things stay yours, because no library can decide them for you:
 
@@ -299,6 +475,117 @@ binding from whatever your transport authenticates — a TLS exporter, a session
 id, or random bytes both sides agree on out of band. The full contract, the
 envelope codec and the sparse-PQ healing hooks are in
 [docs/session-api.md](docs/session-api.md).
+
+## Running the operations one at a time
+
+`joinRoom()` and `createSession()` are the batteries-included paths. Every step
+they take is also a public call, so you can drive the protocol yourself.
+
+**Identity, signing, and recovery phrases.** Keys are Ed25519; the recovery
+phrase is BIP-39, so a wallet-style backup flow works without a second library:
+
+```ts
+const mnemonic = await p2party.generateMnemonic(256); // 24 words
+const keyPair = await p2party.keyPairFromMnemonic(mnemonic); // deterministic
+const fresh = await p2party.newKeyPair(); // or just random
+
+const signature = await p2party.sign(bytes, keyPair.secretKey);
+const ok = await p2party.verify(bytes, signature, keyPair.publicKey);
+```
+
+**Room policy as data.** A policy is a value you can encode, hash, compare and
+validate before anything touches the network — useful for showing two peers
+that they really are about to join the same room:
+
+```ts
+const encoded = p2party.encodeRoomPolicyV1(policy); // canonical bytes
+const digest = await p2party.hashRoomPolicyV1(policy); // stable identifier
+const same = p2party.roomPoliciesEqualV1(mine, theirs);
+p2party.validateRoomPolicyV1(policy); // throws with the offending field
+```
+
+**The ratchet, step by step.** A `P2PartySession` exposes each operation
+individually rather than only a send/receive loop:
+
+| Call                                         | What it does                                               |
+| -------------------------------------------- | ---------------------------------------------------------- |
+| `encrypt` / `decrypt`                        | One ratchet step per logical message                       |
+| `serialize` / `restoreSession`               | Snapshot and resume the exact ratchet state                |
+| `prepareHealing`                             | Start a post-quantum epoch when one is due                 |
+| `acceptControlFrame`                         | Process an inbound OFFER / ADVANCE / ACK, return the reply |
+| `pendingControl`                             | Re-emit the exact frame for a dropped flight               |
+| `pqEpoch`, `healingInProgress`, `canEncrypt` | Inspect live state                                         |
+| `destroy`                                    | Wipe key material                                          |
+
+Driving healing yourself has one hard rule: whenever a call returns a frame,
+`serialize()` **before** you send it. A crash between sending and persisting
+forks the OFFER/ADVANCE/ACK sequence and the epoch fails closed.
+
+The lower-level primitives — X25519, HKDF-SHA512, ML-KEM, CPace, the Merkle
+tree, the raw ratchet — are deliberately _not_ exported. They are easy to
+combine into something that looks right and is not, and the whole point of the
+package is that the combination has been done once, carefully. If you need
+those, use [libsodium](https://github.com/jedisct1/libsodium) and
+[mlkem-native](https://github.com/pq-code-package/mlkem-native) directly, which
+is what this package compiles.
+
+## No build step: a script tag and the CDN
+
+Every release publishes its browser bundle, its database worker and its
+cryptographic module as immutable, versioned CDN objects. The version is in the
+path, so a URL names exactly one build and is safe to cache forever. Drop the
+script in and `window.p2party` is there — no npm, no bundler, no build:
+
+```html
+<!doctype html>
+<meta charset="utf-8" />
+<title>p2party in one file</title>
+
+<script
+  src="https://cdn.p2party.com/@0.14.0/p2party.min.js"
+  integrity="sha384-opIVtS4CL1uMUDzj37ypEPeSSzCqM1tFW3WAXd7X7Po/PsE/FL9DmlzYMrEJFjr8"
+  crossorigin="anonymous"
+></script>
+
+<script type="module">
+  // The bundle embeds its worker and fetches its own WASM from the same
+  // versioned path, under a build-pinned SHA-384 SRI.
+  const invite = p2party.generateRoomInvite();
+  location.hash = invite; // share this URL; anyone holding it can join
+
+  const room = await p2party.joinRoom(location.hash.slice(1) || invite);
+
+  p2party.onMessage(room.id, ({ message }) => {
+    document.body.append(
+      Object.assign(document.createElement("p"), {
+        textContent: message,
+      }),
+    );
+  });
+
+  await p2party.waitForPeers(room.id);
+  await p2party.sendMessage("hello from a script tag", "chat", room.id).done;
+</script>
+```
+
+Open that file in two tabs, paste the first tab's URL into the second, and they
+connect directly to each other.
+
+The three published objects:
+
+```text
+https://cdn.p2party.com/@0.14.0/p2party.min.js     UMD bundle -> window.p2party
+https://cdn.p2party.com/@0.14.0/db.worker.js       IndexedDB/OPFS worker
+https://cdn.p2party.com/@0.14.0/libcrypto.wasm     the cryptographic module
+```
+
+The `integrity` value above is this release's bundle, and the release build
+fails if the README and the built artifact ever disagree — so it is safe to
+copy verbatim. The worker, if you host it yourself, is
+`sha384-xpC0axO9Z2Q/XvKvps45jwZ7ldG9jgXx1b5rcSv24+rCiM5qhox6jqlBaIStbzoa`.
+
+The WASM is integrity-checked whether or not you pin the script: that hash is
+compiled into the bundle and cannot be turned off.
 
 ## Local, self-hosted, or release-pinned WASM
 
@@ -392,6 +679,41 @@ produces `p2party-<version>.tgz`. Direct source-tree publication is refused.
 Tagged releases publish immutable CDN objects first, fetch the public WASM back
 and compare its exact bytes, SHA-256, and SRI to the validated build, and only
 then publish the npm tarball with provenance.
+
+## Built on
+
+Cryptography, compiled into the shipped `libcrypto.wasm`:
+
+| Component                                                                                     | Provides                                                         |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| [libsodium](https://github.com/jedisct1/libsodium)                                            | X25519, Ed25519, ChaCha20-Poly1305, BLAKE2b, HKDF-SHA512, Argon2 |
+| [mlkem-native](https://github.com/pq-code-package/mlkem-native)                               | ML-KEM-512/768/1024                                              |
+| [Emscripten](https://emscripten.org/)                                                         | Compiles both to the pinned WebAssembly module                   |
+| [Redux Toolkit](https://redux-toolkit.js.org/)                                                | The browser root's state store                                   |
+| [BIP-39 wordlist](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md) | The 24-word capability and recovery-phrase encoding              |
+
+Standards the wire format implements:
+
+| Standard                                                                                                          | Where it appears                                |
+| ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)                                                             | ML-KEM bootstrap and healing epochs             |
+| [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html)                                                           | ChaCha20-Poly1305 for every chunk frame         |
+| [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html)                                                           | HKDF root and chain-key derivation              |
+| [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748.html)                                                           | X25519 for 3DH and the ratchet DH turns         |
+| [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032.html)                                                           | Ed25519 identities and cross-signatures         |
+| [draft-irtf-cfrg-cpace-21](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-cpace-21)                        | The PIN-room balanced PAKE                      |
+| [RFC 8831](https://datatracker.ietf.org/doc/html/rfc8831) / [8832](https://datatracker.ietf.org/doc/html/rfc8832) | WebRTC data channels                            |
+| [RFC 8122](https://datatracker.ietf.org/doc/html/rfc8122)                                                         | SDP DTLS fingerprints bound into the transcript |
+| [RFC 9794](https://www.rfc-editor.org/rfc/rfc9794.html)                                                           | PQ/T hybrid terminology                         |
+
+The design follows the [Double Ratchet](https://signal.org/docs/specifications/doubleratchet/)
+and [X3DH](https://signal.org/docs/specifications/x3dh/) specifications, and
+sparse post-quantum healing is directly inspired by Signal's
+[SPQR](https://signal.org/blog/spqr/) — a different construction, not a
+reimplementation, and not independently analysed. Full citations, the papers
+behind the design, and comparable projects are in
+[docs/references.md](docs/references.md); what is deliberately still open is in
+the [roadmap](ROADMAP.md).
 
 ## Security and licensing
 

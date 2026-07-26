@@ -24,10 +24,6 @@ Shipped and running in the browser mesh as of 0.14.0:
 
 ## Near term
 
-**Move production signaling to protocol v4.** 0.14.0 is on the registry with
-its immutable CDN WASM object; the deployed signaling service is the remaining
-piece before the public site runs the shipped protocol end to end.
-
 **Close the verification gaps.** Three properties are implemented and believed
 correct but not yet demonstrated end to end: PIN backoff escalation under
 repeated wrong PINs, packet-trace indistinguishability at n > 2, and cover
@@ -51,6 +47,12 @@ mnemonic backup and restore flow is the missing piece.
 Each of these is a real open problem, paired with the prior work that would
 have to be answered.
 
+None of them is a known vulnerability. They are properties p2party does not
+claim, and research it would have to do before claiming them. The metadata the
+shipped design does expose to the signaling operator is stated plainly in the
+[security boundary](docs/protocol-v4-security.md) rather than listed here as
+though it were a defect.
+
 **Server-blind rendezvous.** The largest remaining metadata leak: today's
 signaling operator sees the normalized room capability, membership, and
 timing, so the `opaque` and `blind` rendezvous modes exist in the policy codec
@@ -60,11 +62,25 @@ onion rendezvous protocol, plus deciding whether Oblivious HTTP (RFC 9458) and
 Privacy Pass (RFC 9576) can carry the introduction without reintroducing a
 trusted observer.
 
-**Byte-uniform decoy slots.** Scheduled cover currently hides _when_ a peer
-speaks, but a decoy slot carrying a KEM ciphertext is distinguishable from
-uniform random bytes to anyone who looks. Kemeleon and the obfuscated-KEM line
-of work (Günther–Rosenberg–Stebila–Veitch) are the route to decoys that are
-indistinguishable from random, which is what the design actually needs.
+**Byte-uniform KEM encodings, if a wire layer ever exposes them.** ML-KEM
+public keys and ciphertexts are not uniform random bytes, and a distinguisher
+that can read the raw encoding separates KEM material from padding.
+[Kemeleon](https://eprint.iacr.org/2024/1086), introduced in Günther, Stebila
+and Veitch's _Obfuscated Key Exchange_, is the mapping that fixes it.
+
+This entry previously overstated it. Kemeleon is prior art we have to cite,
+not a bug we currently have. Every KEM record p2party sends today travels inside
+an authenticated fixed-size application cell and then inside DTLS, so an
+observer at or before DTLS/TURN — the adversary this project actually claims —
+sees AEAD ciphertext, not ML-KEM coefficients. Applying a raw-byte uniformity
+test at that position is a layer error; see the adjudication in
+[docs/paper-prior-art-and-related-work.md](docs/paper-prior-art-and-related-work.md).
+
+It starts to matter the moment a wire layer carries KEM material outside the
+encrypted envelope, which server-blind rendezvous needs almost by definition:
+an introduction has to be readable before a session exists to encrypt it.
+Packet traces confirming that no KEM bytes appear outside the envelope are the
+check that keeps this entry closed.
 
 **Cover traffic that survives analysis.** Fixed cells and a fixed cadence are
 the easy half. _The Last Hop Attack_ (PoPETs 2025) shows how loop cover over
@@ -74,7 +90,7 @@ before scheduled cover is described as traffic-analysis resistance rather than
 as timing cover.
 
 **Group state beyond a pairwise mesh.** An n-party room is currently n(n−1)/2
-independent pairwise sessions, which is simple and robust but scales
+independent pairwise sessions, which is simple and hard to break but scales
 quadratically and gives no group-level forward secrecy. MLS (RFC 9420, and
 `ts-mls` for a browser implementation) is the obvious comparison; Signal's
 _Call to Action_ on quantum-safe private groups is the post-quantum framing.

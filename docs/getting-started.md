@@ -17,7 +17,7 @@ npm install p2party
 
 Until then, build the reproducible release candidate from a source checkout.
 This needs the exact release toolchain (Node 24.x, npm 11.6.2, Emscripten
-6.0.2, pinned submodules) — see the [README](../README.md#install):
+6.0.3, pinned submodules) — see the [README](../README.md#install):
 
 ```sh
 git submodule update --init --recursive

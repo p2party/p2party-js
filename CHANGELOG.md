@@ -4,6 +4,39 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.0] — 2026-07-26
+
+Developer experience, plus an Emscripten toolchain bump. No wire change: v4
+peers on 0.13.0 and 0.14.0 interoperate.
+
+### Added
+
+- `joinRoom()` and `waitForRoom()`. Learning a room's id previously required
+  hand-rolling a store subscription with a mutable `unsubscribe` binding, a
+  synchronous re-check for the already-joined case, and no timeout — thirteen
+  lines for one string. `waitForRoom()` owns that wait, with a timeout and an
+  `AbortSignal`; `joinRoom()` is `connect()` plus the wait.
+- `setDebugLogging(boolean)`, and the `p2party:debug` localStorage key.
+
+### Changed
+
+- Diagnostic logging is off by default. 34 `console.log` calls across the
+  signaling, WebRTC and middleware paths filled an embedding application's
+  console — `[roomListenerMiddleware] setRoom: {...}` on every room change —
+  with no way to silence them. They are retained but gated; errors and
+  warnings are unaffected.
+- The Emscripten pin moves 6.0.2 → 6.0.3, so `libcrypto.wasm` and its SRI
+  change. CI and the release workflow move with it.
+- `MessageDeliveryError` is exported, and `handle.done`'s rejection is
+  documented where callers meet it.
+
+### Fixed
+
+- The room listener effect no longer leaks an unhandled promise rejection into
+  the host application when IndexedDB is unavailable.
+- `scripts/buildRelease.mjs` still packaged `docs/protocol-v3-security.md`,
+  renamed in 0.13.0 — the release build failed at the copy step.
+
 ## [0.13.0] — 2026-07-25
 
 Protocol **v4**: a clean, incompatible wire/session break (v3 peers and

@@ -71,7 +71,7 @@ npm install p2party@0.13.0
 >
 > Until 0.13.0 is on the registry, build the tarball from a checkout:
 > [Building from source](CONTRIBUTING.md#building-from-source). That path needs
-> an exact toolchain (Node 24, Emscripten 6.0.2, pinned submodules), because the
+> an exact toolchain (Node 24, Emscripten 6.0.3, pinned submodules), because the
 > release build reproduces the pinned WASM and refuses to emit an artifact it
 > cannot attest.
 
@@ -525,7 +525,7 @@ at runtime rather than inferred from successful imports.
 ## Development
 
 The reproducible release toolchain is Node 24.11.1, npm 11.6.2, Bun 1.3.14,
-Emscripten 6.0.2, and the repository's pinned libsodium source object. npm and
+Emscripten 6.0.3, and the repository's pinned libsodium source object. npm and
 `package-lock.json` are the dependency authority; Bun is the test runner.
 
 ```sh

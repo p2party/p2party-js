@@ -5,7 +5,7 @@ Contributions and adversarial review are welcome.
 ## Development setup
 
 Use a fresh recursive clone and the pinned release toolchain: Node 24.11.1, npm
-11.6.2, Bun 1.3.14, and Emscripten 6.0.2. npm and `package-lock.json` are the
+11.6.2, Bun 1.3.14, and Emscripten 6.0.3. npm and `package-lock.json` are the
 dependency authority; Bun is the test runner.
 
 ```sh
@@ -27,7 +27,7 @@ than emit an artifact it cannot attest, so the toolchain is exact:
 | ----------- | ------------------------------------------------------------ |
 | Node        | 24.x (exact major)                                           |
 | npm         | 11.6.2                                                       |
-| Emscripten  | 6.0.2, with `emsdk` on `PATH`                                |
+| Emscripten  | 6.0.3, with `emsdk` on `PATH`                                |
 | Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
 
 ```sh

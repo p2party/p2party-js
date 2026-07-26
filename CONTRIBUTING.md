@@ -17,6 +17,34 @@ npm run predist
 npm run check
 ```
 
+## Building from source
+
+Needed until 0.13.0 is on the registry, and whenever you change the
+cryptography. The release build reproduces the pinned WASM and fails rather
+than emit an artifact it cannot attest, so the toolchain is exact:
+
+| Requirement | Version                                                      |
+| ----------- | ------------------------------------------------------------ |
+| Node        | 24.x (exact major)                                           |
+| npm         | 11.6.2                                                       |
+| Emscripten  | 6.0.2, with `emsdk` on `PATH`                                |
+| Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
+
+```sh
+git submodule update --init --recursive
+npm ci
+npm run release:pack
+npm install "./p2party-$(node -p "require('./package.json').version").tgz"
+```
+
+`src/cryptography/libcrypto.wasm` is not checked in and the test suite loads it
+from disk, so build it once before the first test run:
+
+```sh
+npm run build          # compiles libcrypto.wasm via Emscripten, then bundles
+bun test               # the suite runs under bun, not npm
+```
+
 Use only synthetic identities, room capabilities, PINs, snapshots, and files.
 Do not use production signaling/CDN credentials, TURN secrets, user data, or
 live room secrets in tests or reports.

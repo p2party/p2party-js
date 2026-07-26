@@ -59,3 +59,9 @@ docs/e2e/frontend-audit-report.md
 
 # Release-tarball unpack dir used by the CDN upload step in CI.
 .release-stage/
+
+# bun is used only as the test runner and to invoke prettier; npm and
+# package-lock.json are authoritative here (CI runs `npm ci`). A second
+# lockfile would silently diverge from it.
+bun.lock
+bun.lockb

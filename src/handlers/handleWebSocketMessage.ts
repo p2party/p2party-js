@@ -1,3 +1,4 @@
+import { debugLog } from "../utils/debug";
 import { isUUID, isHexadecimal } from "class-validator";
 
 import { handleChallenge } from "./handleChallenge";
@@ -59,7 +60,7 @@ const handleWebSocketMessage = async (
       return;
     }
 
-    // console.log(event.data);
+    // debugLog(event.data);
 
     const serialized = String(event.data);
     if (serialized.length > MAX_SIGNALING_MESSAGE_CHARS) {
@@ -207,7 +208,7 @@ const handleWebSocketMessage = async (
           console.error("Rejecting incompatible or malformed peer roster");
           break;
         }
-        console.log("[handleWebSocketMessage] Received peers response:", {
+        debugLog("[handleWebSocketMessage] Received peers response:", {
           roomId: message.roomId,
           peersCount: message.peers.length,
           peers: message.peers,
@@ -435,7 +436,7 @@ const handleWebSocketMessage = async (
               },
               recordChannel: (channel) => {
                 api.dispatch(setChannel(channel));
-                console.log(
+                debugLog(
                   `Connected with ${keyPair.peerId} on websocket channel ${channel.label}`,
                 );
               },

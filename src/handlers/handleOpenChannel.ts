@@ -1,3 +1,4 @@
+import { debugLog } from "../utils/debug";
 import { handleReadReceipt } from "./handleReadReceipt";
 import {
   createReceiptProcessingQueue,
@@ -333,11 +334,11 @@ export const handleOpenChannel = async (
     extChannel.cancelReceiveTransfer = cancelReceiveTransfer;
 
   // extChannel.onclosing = () => {
-  //   console.log(`Channel with label ${extChannel.label} is closing.`);
+  //   debugLog(`Channel with label ${extChannel.label} is closing.`);
   // };
 
   extChannel.onclose = async () => {
-    console.log(`Channel with label ${extChannel.label} has closed.`);
+    debugLog(`Channel with label ${extChannel.label} has closed.`);
 
     // protocol-v3: the receive path no longer pre-allocates box wasm scratch on
     // the channel (decrypt is per-frame via the ratchet), so there is nothing to
@@ -398,7 +399,7 @@ export const handleOpenChannel = async (
         lastReconnectAttempt.set(roomId, now);
         api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
       } else {
-        console.log(
+        debugLog(
           `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
         );
       }
@@ -532,7 +533,7 @@ export const handleOpenChannel = async (
       lastReconnectAttempt.set(roomId, now);
       api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
     } else {
-      console.log(
+      debugLog(
         `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
       );
     }
@@ -686,7 +687,7 @@ export const handleOpenChannel = async (
       if (extChannel.readyState !== "closed") extChannel.close();
       return;
     }
-    console.log(
+    debugLog(
       `Channel with label "${extChannel.label}" and client ${epc.withPeerId} is open.`,
     );
 

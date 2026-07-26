@@ -731,7 +731,7 @@ const roomSlice = createSlice({
           state[roomIndex].messages[messageIndex].savedSize = totalSize;
         }
         // else {
-        //   console.log("HEre");
+        //   debugLog("HEre");
         // }
       }
     },

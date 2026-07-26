@@ -561,9 +561,14 @@ individually rather than only a send/receive loop:
 | `pqEpoch`, `healingInProgress`, `canEncrypt` | Inspect live state                                         |
 | `destroy`                                    | Wipe key material                                          |
 
-**Driving the ratchet by hand.** Nothing turns the ratchet on a timer. Each
-`encrypt()` advances it one step, and post-quantum healing runs only when you
-ask. A complete exchange, both sides, from a live session:
+**Driving the ratchet by hand.** This is a `p2party/session` concern only. The
+browser root installs a healing orchestrator on every peer edge as its channel
+opens and drives exchanges on a timer, so a `p2party` room needs none of the
+code below. `p2party/session` owns no transport and therefore no scheduler,
+which is why it hands you the steps instead.
+
+Each `encrypt()` advances the ratchet one step either way. A complete healing
+exchange, both sides:
 
 ```ts
 // The ratchet advances per message, and you can watch it do so.

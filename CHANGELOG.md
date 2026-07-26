@@ -4,6 +4,28 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.3] — 2026-07-27
+
+### Added
+
+- `getTransferAcks(roomId, transferId)`. Live outbound progress for one logical
+  send: for every peer edge, how many chunks that peer has receipted so far and
+  whether the transfer completed. Pair it with the message row's `totalChunks`
+  for a percentage.
+
+  The sender already knew this -- every receipt lands in the have-set that
+  drives selective retransmit -- but nothing outside the module could read it,
+  so a UI could say "sending" and then show nothing at all until the transfer
+  settled. On a large file that is a progress bar's worth of silence.
+
+  The counts are real chunks, not frames: a decoy receipt does not resolve to a
+  staged chunk on the sender, so cover traffic never inflates the number. Wire
+  totals including cover remain derivable as `totalChunks * WIRE_CHUNK_FRAME_LEN`.
+
+  Derived from the same state selective retransmit uses, so it cannot drift
+  from what the sender believes was delivered. Read-only and defensively
+  copied; polling it never affects the transfer.
+
 ## [0.14.2] — 2026-07-26
 
 ### Added

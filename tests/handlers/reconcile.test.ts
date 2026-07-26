@@ -7,6 +7,7 @@ import {
   isTransferComplete,
   clearTransfer,
   getPeerTransferOutcome,
+  getTransferAcks,
   waitForCompletion,
 } from "../../src/handlers/reconcile";
 
@@ -87,5 +88,48 @@ describe("reconcile state (selective retransmit / resume)", () => {
     ).toBe(false);
     expect(Date.now() - start).toBeLessThan(500);
     clearTransfer("r", "p4", "h");
+  });
+
+  test("getTransferAcks reports every peer edge of one transfer", () => {
+    for (const peer of ["alice", "bob"]) clearTransfer("room1", peer, "t1");
+    clearTransfer("room1", "alice", "t2");
+    clearTransfer("room2", "alice", "t1");
+
+    markChunkAcked("room1", "alice", "t1", 0);
+    markChunkAcked("room1", "alice", "t1", 1);
+    markChunkAcked("room1", "bob", "t1", 5);
+    markTransferComplete("room1", "bob", "t1");
+    // Same room, different send; and same send, different room. Neither may
+    // leak into the answer -- a transfer ID is only unique with its room.
+    markChunkAcked("room1", "alice", "t2", 9);
+    markChunkAcked("room2", "alice", "t1", 9);
+
+    const acks = getTransferAcks("room1", "t1");
+    expect(acks.length).toBe(2);
+    const byPeer = Object.fromEntries(acks.map((a) => [a.peerId, a]));
+    expect(byPeer.alice.ackedChunks).toBe(2);
+    expect(byPeer.alice.complete).toBe(false);
+    expect(byPeer.bob.ackedChunks).toBe(1);
+    expect(byPeer.bob.complete).toBe(true);
+
+    for (const peer of ["alice", "bob"]) clearTransfer("room1", peer, "t1");
+    clearTransfer("room1", "alice", "t2");
+    clearTransfer("room2", "alice", "t1");
+    expect(getTransferAcks("room1", "t1")).toEqual([]);
+  });
+
+  test("a peer id containing the separator cannot forge another edge", () => {
+    // The key is roomId\u0000peerId\u0000transferId, so a peer id carrying a
+    // NUL could otherwise split the key and be mis-attributed.
+    clearTransfer("r", "evil\u0000t9", "t1");
+    clearTransfer("r", "plain", "t1");
+    markChunkAcked("r", "evil\u0000t9", "t1", 0);
+    markChunkAcked("r", "plain", "t1", 0);
+
+    const acks = getTransferAcks("r", "t1");
+    expect(acks.map((a) => a.peerId).sort()).toEqual(["evil\u0000t9", "plain"]);
+
+    clearTransfer("r", "evil\u0000t9", "t1");
+    clearTransfer("r", "plain", "t1");
   });
 });

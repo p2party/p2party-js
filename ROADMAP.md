@@ -10,7 +10,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Shipped and running in the browser mesh as of 0.14.2:
+Shipped and running in the browser mesh as of 0.14.3:
 
 - protocol v4 — hybrid interactive 3DH ⊕ ML-KEM bootstrap, Ed25519-pinned
   identities, three chained confirmation flights, per-edge Double Ratchet;
@@ -62,6 +62,36 @@ onion rendezvous protocol, plus deciding whether Oblivious HTTP (RFC 9458) and
 Privacy Pass (RFC 9576) can carry the introduction without reintroducing a
 trusted observer.
 
+This one has a written architecture ahead of the others:
+[the L2 blind-rendezvous spec](spec/spec-architecture-l2-blind-rendezvous.md)
+covers the presence board, pairwise inboxes, tiers, and release gates, and
+[the annotated bibliography](docs/rendezvous-prior-art.md) collects the
+verified prior art behind it. Neither is an implementation, and the spec's own
+gates keep `blind-meeting-point` disabled until they are met.
+
+**Finding peers across independently operated servers.** A room today lives on
+exactly one signaling service. Federating discovery is what makes self-hosting
+useful to anyone but the host, and it is also the precondition for the
+strongest privacy tier: read privacy against a single malicious server is
+achievable, write privacy against one is not, so trust-splitting needs a second
+operator who is not us. The prior art here is mostly cautionary — Matrix
+replicates full room state to every participating homeserver, Nostr relays
+receive each client's interest graph in plaintext, and libp2p's rendezvous
+protocol registers under plaintext namespaces — so the open question is how to
+cross a server boundary without turning each additional server into another
+observer. Binding rooms to boards rather than users to home servers appears to
+avoid a server-to-server protocol entirely; whether that survives contact with
+abuse control and availability is unproven.
+
+**Censorship resistance for the rendezvous path.** Distinct from blindness: an
+adversary who cannot read the board can still stop clients from reaching it,
+and a design that requires contacting several servers fails closed when they
+are blocked. The work is multi-route board access, resistance to active
+probing, and enough board diversity that no single jurisdiction or CDN is the
+blocking target. Snowflake (USENIX Security 2024) is the deployed precedent
+worth studying closely, since it already does broker-mediated WebRTC
+circumvention at scale.
+
 **Byte-uniform KEM encodings, if a wire layer ever exposes them.** ML-KEM
 public keys and ciphertexts are not uniform random bytes, and a distinguisher
 that can read the raw encoding separates KEM material from padding.
@@ -92,8 +122,12 @@ as timing cover.
 **Group state beyond a pairwise mesh.** An n-party room is currently n(n−1)/2
 independent pairwise sessions, which is simple and hard to break but scales
 quadratically and gives no group-level forward secrecy. MLS (RFC 9420, and
-`ts-mls` for a browser implementation) is the obvious comparison; Signal's
-_Call to Action_ on quantum-safe private groups is the post-quantum framing.
+`ts-mls` for a browser implementation) is the obvious comparison; the
+post-quantum framing is Connell et al., _A Quantum-Safe Private Group System
+for Signal from Key Re-Randomizable Signatures_
+([ePrint 2026/453](https://eprint.iacr.org/2026/453), preprint, presented at
+Real World Crypto 2026), which rebuilds the Signal Private Group System on
+ML-DSA-based re-randomizable signatures.
 
 **Formal analysis.** The handshake is interactive, adds CPace and transport
 binding, and uses its own domain-separated combiner — so none of the existing

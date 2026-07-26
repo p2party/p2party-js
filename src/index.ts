@@ -12,6 +12,7 @@ import {
 import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 import { setWasmSourceUrl } from "./cryptography/wasmLoader";
+import { setDebugLogging } from "./utils/debug";
 
 import {
   deleteDBAddressBookEntry,
@@ -257,6 +258,115 @@ const connect = async (
       ),
     );
   }
+};
+
+export interface WaitForRoomOptions {
+  /** Reject if the signaling service has not assigned an id in this long. */
+  timeoutMs?: number;
+  /** Cancel the wait, e.g. because the user navigated away. */
+  signal?: AbortSignal;
+}
+
+const DEFAULT_ROOM_TIMEOUT_MS = 30_000;
+
+/**
+ * Resolve once the signaling service has assigned this room its id.
+ *
+ * `connect()` returns as soon as the join has been *started*; the id arrives
+ * later, on a `roomId` frame. Without this, every caller has to hand-roll the
+ * same store subscription — a mutable `unsubscribe` binding, an `inspect()`
+ * that must also be called once synchronously in case the room is already
+ * there, and no timeout — which is a lot of ceremony to learn one string.
+ *
+ * Resolves immediately when the room is already known.
+ */
+const waitForRoom = async (
+  roomUrl: string,
+  options: WaitForRoomOptions = {},
+): Promise<Room> => {
+  const normalized = normalizeRoomCapability(roomUrl);
+  const { timeoutMs = DEFAULT_ROOM_TIMEOUT_MS, signal } = options;
+
+  const current = (): Room | undefined => {
+    const candidate = roomSelector(store.getState()).find(
+      (item) => item.url === normalized,
+    );
+    return candidate?.id ? candidate : undefined;
+  };
+
+  const alreadyJoined = current();
+  if (alreadyJoined) return alreadyJoined;
+  if (signal?.aborted)
+    throw new Error("Waiting for the room was aborted before it started");
+
+  return await new Promise<Room>((resolve, reject) => {
+    // Every exit path runs this exactly once, so a resolved wait cannot leave a
+    // store subscription or a timer behind.
+    let settled = false;
+    let unsubscribe = () => {};
+    const timer = setTimeout(() => {
+      finish(() => {
+        reject(
+          new Error(
+            `The signaling service did not assign a room id within ${String(timeoutMs)}ms. ` +
+              "The socket may be connected but not yet verified, or the room may be unreachable.",
+          ),
+        );
+      });
+    }, timeoutMs);
+
+    const onAbort = () => {
+      finish(() => {
+        reject(new Error("Waiting for the room was aborted"));
+      });
+    };
+
+    function finish(settle: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      unsubscribe();
+      settle();
+    }
+
+    const inspect = () => {
+      const room = current();
+      if (room)
+        finish(() => {
+          resolve(room);
+        });
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    unsubscribe = store.subscribe(inspect);
+    // The room can already have arrived between the check above and the
+    // subscription being installed.
+    inspect();
+  });
+};
+
+/**
+ * Join a room and resolve once it has an id, in one call.
+ *
+ * This is `connect()` followed by `waitForRoom()`, which is what essentially
+ * every browser caller wants:
+ *
+ * ```ts
+ * const invite = p2party.generateRoomInvite();
+ * const room = await p2party.joinRoom(invite);
+ * console.log("joined", room.id);
+ * ```
+ */
+const joinRoom = async (
+  roomUrl: string,
+  signalingServerUrl?: string,
+  rtcConfig?: RTCConfiguration,
+  options: ConnectRoomOptions & WaitForRoomOptions = {},
+): Promise<Room> => {
+  const { timeoutMs, signal, ...connectOptions } = options;
+  await connect(roomUrl, signalingServerUrl, rtcConfig, connectOptions);
+  return await waitForRoom(roomUrl, { timeoutMs, signal });
 };
 
 const connectToSignalingServer = async (
@@ -1052,6 +1162,9 @@ export const p2party = {
   MIN_COVER_SLOT_MS,
   validateRoomPolicyV1,
   MessageDeliveryError,
+  joinRoom,
+  waitForRoom,
+  setDebugLogging,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   // 100%-full cells make identical content roots deterministic. Keep at least
   // 1% RNG padding as the fresh wire/storage transfer namespace; this is not a
@@ -1107,6 +1220,9 @@ export {
   generateSessionIdentity,
   setWasmSourceUrl,
   MessageDeliveryError,
+  joinRoom,
+  waitForRoom,
+  setDebugLogging,
 };
 
 export {

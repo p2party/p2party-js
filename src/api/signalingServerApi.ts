@@ -1,3 +1,4 @@
+import { debugLog } from "../utils/debug";
 import { createApi } from "@reduxjs/toolkit/query";
 import { isUUID, isHexadecimal } from "class-validator";
 
@@ -72,11 +73,11 @@ const waitForSocketConnection = (
       callback();
     } else {
       attempts += 1;
-      console.log(`Waiting for connection... Attempt ${String(attempts)}`);
+      debugLog(`Waiting for connection... Attempt ${String(attempts)}`);
 
       if (attempts >= maxAttempts) {
         clearInterval(checkConnection);
-        console.log(
+        debugLog(
           "WebSocket failed to connect after multiple attempts, closing...",
         );
 
@@ -100,7 +101,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
     signalingServer.isConnected ||
     signalingServer.isEstablishingConnection
   ) {
-    console.log("WebSocket already connected");
+    debugLog("WebSocket already connected");
 
     return { data: undefined };
   } else {
@@ -222,7 +223,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
       const socket = ws;
       try {
         socket.onopen = () => {
-          console.log("WebSocket connected to:", fullUrl);
+          debugLog("WebSocket connected to:", fullUrl);
           api.dispatch(signalingServerActions.connectionEstablished());
 
           resolve({ data: undefined });
@@ -257,7 +258,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           }
 
           api.dispatch(signalingServerActions.disconnect());
-          console.log("WebSocket disconnected");
+          debugLog("WebSocket disconnected");
           resolve({ data: undefined });
         };
       } catch (error) {
@@ -267,7 +268,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
       // Cleanup function to close the WebSocket when the query is unsubscribed
       return () => {
         if (ws) {
-          console.log("Cleaning up WebSocket connection...");
+          debugLog("Cleaning up WebSocket connection...");
           ws.removeEventListener("message", () => {});
           ws.removeEventListener("open", () => {});
           ws.removeEventListener("close", () => {});
@@ -304,7 +305,7 @@ const websocketDisconnectQuery: BaseQueryFn<undefined, undefined> = (
 
     ws = null;
 
-    console.log("WebSocket manually disconnected");
+    debugLog("WebSocket manually disconnected");
   }
 
   api.dispatch(signalingServerActions.disconnect());
@@ -358,7 +359,7 @@ const websocketConnectWithPeerQuery: BaseQueryFn<
     ) {
       api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
       api.dispatch(setChannel({ roomId, label: "main", peerId }));
-      console.log(`Connected with ${keyPair.peerId} on channel main`);
+      debugLog(`Connected with ${keyPair.peerId} on channel main`);
 
       waitForSocketConnection(ws, () => {
         ws?.send(

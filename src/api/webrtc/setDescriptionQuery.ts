@@ -1,3 +1,4 @@
+import { debugLog } from "../../utils/debug";
 import signalingServerApi from "../signalingServerApi";
 
 import { getRoomPeerMutex } from "./negotiationLock";
@@ -116,7 +117,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     if (offerCollision && isPolite) {
       try {
         await epc.setLocalDescription({ type: "rollback" });
-        console.log(`Polite peer rolled back local description for ${peerId}`);
+        debugLog(`Polite peer rolled back local description for ${peerId}`);
       } catch (e) {
         console.error(`Failed to rollback for ${peerId}:`, e);
       }

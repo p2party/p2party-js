@@ -33,29 +33,24 @@ Worker, and IndexedDB. OPFS is optional; the receive path falls back to
 IndexedDB when it is unavailable.
 
 ```ts
-import p2party, { type Room } from "p2party";
+import p2party from "p2party";
 
 const invite = p2party.generateRoomInvite();
-const roomContext = p2party.normalizeRoomCapability(invite);
-
-await p2party.connect(invite);
-
-// connect() starts the join. Observe the store for the signaling-assigned ID.
-const room = await new Promise<Room>((resolve) => {
-  let unsubscribe = () => {};
-  const inspect = () => {
-    const candidate = p2party
-      .roomSelector(p2party.store.getState())
-      .find((item) => item.url === roomContext);
-    if (!candidate?.id) return;
-    unsubscribe();
-    resolve(candidate);
-  };
-  unsubscribe = p2party.store.subscribe(inspect);
-  inspect();
-});
+const room = await p2party.joinRoom(invite);
 
 console.log("joined room", room.id);
+```
+
+`joinRoom()` is `connect()` plus a wait for the signaling service to assign the
+room its id. Use the two separately when you want to render a joining state, or
+when you need a deadline or cancellation:
+
+```ts
+await p2party.connect(invite);
+const room = await p2party.waitForRoom(invite, {
+  timeoutMs: 10_000,
+  signal: controller.signal,
+});
 ```
 
 Every peer that joins the same room is connected to every other present peer.

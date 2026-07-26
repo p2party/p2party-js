@@ -1,3 +1,4 @@
+import { debugLog } from "../utils/debug";
 import { handleOpenChannel } from "./handleOpenChannel";
 
 import { fisherYatesShuffle } from "../cryptography/utils";
@@ -287,7 +288,7 @@ const sendChunks = async (
     }
 
     if ((channel.readyState as string) !== "open") {
-      console.log(
+      debugLog(
         "Cannot send message because channel is " +
           channel.readyState +
           " and bufferedAmount is " +

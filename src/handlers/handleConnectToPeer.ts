@@ -1,3 +1,4 @@
+import { debugLog } from "../utils/debug";
 import { isUUID } from "class-validator";
 
 import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
@@ -153,7 +154,7 @@ export const handleConnectToPeer = async (
   epc.onnegotiationneeded = async () => {
     // Don't start a new negotiation if we're already making an offer or not in stable state
     if (epc.makingOffer || epc.signalingState !== "stable") {
-      console.log(
+      debugLog(
         `Skipping negotiation with ${peerId} - already making offer: ${String(epc.makingOffer)}, state: ${epc.signalingState}`,
       );
       return;
@@ -178,7 +179,7 @@ export const handleConnectToPeer = async (
           }),
         );
 
-        console.log(
+        debugLog(
           `Negotiation was needed with ${peerId} and you sent a description ${epc.localDescription.type}.`,
         );
       }
@@ -238,24 +239,24 @@ export const handleConnectToPeer = async (
 
       if (now - lastIceRestartTime > ICE_RESTART_DEBOUNCE_MS) {
         lastIceRestartTime = now;
-        console.log(`ICE ${epc.iceConnectionState} with ${peerId}, restarting`);
+        debugLog(`ICE ${epc.iceConnectionState} with ${peerId}, restarting`);
         epc.restartIce();
       }
     }
 
-    console.log(
+    debugLog(
       `ICE candidate connection state with ${peerId} is ${epc.iceConnectionState}.`,
     );
   };
 
   epc.onicegatheringstatechange = () => {
-    console.log(
+    debugLog(
       `ICE gathering state with ${peerId} is ${epc.iceGatheringState}.`,
     );
   };
 
   epc.onsignalingstatechange = async () => {
-    console.log(`Signaling state with ${peerId} is ${epc.signalingState}.`);
+    debugLog(`Signaling state with ${peerId} is ${epc.signalingState}.`);
 
     if (epc.signalingState === "stable" && epc.remoteDescription)
       await handleQueuedIceCandidates(epc);
@@ -316,7 +317,7 @@ export const handleConnectToPeer = async (
       if (epc.connectionState === "connected") {
         api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
-        console.log(
+        debugLog(
           `RTC Connection status with peer ${peerId} is ${epc.connectionState}.`,
         );
 

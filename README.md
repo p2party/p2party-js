@@ -9,8 +9,7 @@
 Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC
 room mesh.
 
-[![npm](https://img.shields.io/npm/v/p2party)](https://www.npmjs.com/package/p2party)
-[![license](https://img.shields.io/npm/l/p2party)](LICENSE.md)
+Apache-2.0 · [LICENSE.md](LICENSE.md)
 
 > Status: protocol v4 is an intentional wire break — v3 peers and persisted v3
 > crypto rows are not resumed. The current code has not completed an
@@ -60,39 +59,68 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
-Once the tagged release is on the registry:
-
 ```sh
-npm install p2party
+npm install p2party@0.13.0
 ```
 
-Until then, build the reproducible release candidate from this checkout. The
-release build is deliberately strict — it reproduces the pinned WASM and fails
-rather than emit an artifact it cannot attest — so it requires an exact
-toolchain:
+> **Not published yet — and do not drop the version.** `npm install p2party`
+> currently _succeeds_ and installs `0.8.0`, an older AGPL-3.0 line with no
+> `p2party/session` export. Everything in these docs is 0.13.0, protocol v4,
+> Apache-2.0. Pinning the version makes npm fail with `No matching version`
+> instead of silently giving you the wrong library under the wrong licence.
+>
+> Until 0.13.0 is on the registry, build the tarball from a checkout:
+> [Building from source](CONTRIBUTING.md#building-from-source). That path needs
+> an exact toolchain (Node 24, Emscripten 6.0.2, pinned submodules), because the
+> release build reproduces the pinned WASM and refuses to emit an artifact it
+> cannot attest.
 
-| Requirement | Version                                                      |
-| ----------- | ------------------------------------------------------------ |
-| Node        | 24.x (exact major)                                           |
-| npm         | 11.6.2                                                       |
-| Emscripten  | 6.0.2, with `emsdk` on `PATH`                                |
-| Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
+## Send a message between two browsers
 
-```sh
-git submodule update --init --recursive
-npm ci
-npm run release:pack
-npm install "./p2party-$(node -p "require('./package.json').version").tgz"
+The whole thing, end to end. Open this page in two tabs with the same URL
+fragment and they will find each other.
+
+```ts
+import p2party from "p2party";
+
+// One 256-bit capability. Share the invite; anyone holding it can join.
+const invite = p2party.generateRoomInvite();
+const room = await p2party.joinRoom(invite);
+
+// Wait for someone else to arrive, then send.
+const handle = p2party.sendMessage("hello", "chat", room.id);
+try {
+  const result = await handle.done;
+  console.table(result?.outcomes);
+} catch (error) {
+  // `done` REJECTS when no peer took delivery. With a single tab open and
+  // nobody else in the room, this is the expected result, not a bug.
+  if (error instanceof p2party.MessageDeliveryError)
+    console.table(error.result.outcomes);
+}
 ```
 
-The same toolchain is needed to work on the library itself: the compiled
-`src/cryptography/libcrypto.wasm` is not checked in, and the test suite loads it
-from disk, so build it once before the first test run.
+`joinRoom` resolves once the signaling service has assigned the room its id. It
+rejects on a timeout rather than waiting forever, and takes an `AbortSignal` if
+the user navigates away:
 
-```sh
-npm ci
-npm run build          # compiles libcrypto.wasm via Emscripten, then bundles
-bun test               # the suite runs under bun, not npm
+```ts
+const room = await p2party.joinRoom(invite, undefined, undefined, {
+  timeoutMs: 10_000,
+  signal: controller.signal,
+});
+```
+
+Reading an inbound message needs its Merkle root, which arrives on the room's
+`messages` state:
+
+```ts
+const rooms = p2party.roomSelector(p2party.store.getState());
+const latest = rooms.find((r) => r.id === room.id)?.messages.at(-1);
+if (latest) {
+  const opened = await p2party.readMessage(latest.merkleRootHex);
+  console.log(opened.message);
+}
 ```
 
 ## Choose your integration
@@ -116,33 +144,24 @@ Deeper guides:
 
 ## Browser mesh
 
-The browser root connects every peer present in the same room to every other
-peer. `connect()` starts the join; observe the exported store for the
-signaling-assigned room ID.
+Every peer present in the same room connects to every other peer. The signaling
+service coordinates discovery and WebRTC setup; it is not the message hub. A
+room with `n` participants therefore has up to `n(n - 1) / 2` peer edges.
+
+`joinRoom()` covers the common case. The two steps underneath it are separate
+when you need them — `connect()` starts the join and returns immediately,
+`waitForRoom()` resolves once the id arrives:
 
 ```ts
-import p2party, { type Room } from "p2party";
-
-const invite = p2party.generateRoomInvite();
-const roomContext = p2party.normalizeRoomCapability(invite);
 await p2party.connect(invite);
-
-const room = await new Promise<Room>((resolve) => {
-  let unsubscribe = () => {};
-  const inspect = () => {
-    const candidate = p2party
-      .roomSelector(p2party.store.getState())
-      .find((item) => item.url === roomContext);
-    if (!candidate?.id) return;
-    unsubscribe();
-    resolve(candidate);
-  };
-  unsubscribe = p2party.store.subscribe(inspect);
-  inspect();
-});
-
-console.log("joined", room.id);
+// ...render a joining state, wire up other listeners...
+const room = await p2party.waitForRoom(invite, { timeoutMs: 10_000 });
 ```
+
+`joinRoom()` resolving does not mean every peer edge has finished its
+handshake. The library gates message cryptography on that separately, so render
+peer and message state from the exported store rather than treating the room as
+ready for everything at once.
 
 An open RTCDataChannel means its DTLS/SCTP transport is ready. It is not the
 protocol-v4 acknowledgement: p2party next runs its authenticated HELLO plus

@@ -111,14 +111,19 @@ const assertSameObject = async (key, head, compressedSha256, asset) => {
   const published = await client.send(
     new GetObjectCommand({ Bucket: bucket, Key: key }),
   );
-  // The SDK transparently decodes Content-Encoding, so this is the artifact.
-  const publishedBytes = Buffer.from(
-    await published.Body.transformToByteArray(),
+  // The SDK hands back the stored bytes without applying Content-Encoding, so
+  // a gzip object arrives compressed. Detect it by magic number rather than by
+  // trusting the header or the SDK's behaviour, and compare what a browser
+  // would actually run.
+  const decoded = (bytes) =>
+    bytes.length > 1 && bytes[0] === 0x1f && bytes[1] === 0x8b
+      ? gunzipSync(bytes)
+      : bytes;
+
+  const publishedBytes = decoded(
+    Buffer.from(await published.Body.transformToByteArray()),
   );
-  const localBytes =
-    asset.contentEncoding === "gzip"
-      ? gunzipSync(await readFile(asset.source))
-      : await readFile(asset.source);
+  const localBytes = decoded(await readFile(asset.source));
 
   if (!publishedBytes.equals(localBytes))
     throw new Error(

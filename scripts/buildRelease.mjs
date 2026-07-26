@@ -25,7 +25,7 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const bun = process.platform === "win32" ? "bun.exe" : "bun";
 const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH ?? "0";
 const expectedNodeMajor = 24;
-const expectedEmscriptenVersion = "6.0.2";
+const expectedEmscriptenVersion = "6.0.3";
 const expectedLibsodiumCommit = "2ce4d906a68eae82b27b4867f3d4172ec508cb27";
 const expectedLibsodiumTree = "2dabe17c708edd7334e3316b5094b753859395d9";
 const expectedMlkemNativeCommit = "0ba906cb14b1c241476134d7403a811b382ca498";
@@ -303,7 +303,8 @@ const validatePackList = (packResult) => {
     "THIRD_PARTY_NOTICES.md",
     "docs/getting-started.md",
     "docs/session-api.md",
-    "docs/protocol-v3-security.md",
+    "docs/protocol-v4-security.md",
+    "docs/references.md",
     "docs/assets/p2party-cat.svg",
     "examples/standalone-e2ee.ts",
     "lib/index.js",
@@ -467,7 +468,8 @@ try {
   for (const fileName of [
     "getting-started.md",
     "session-api.md",
-    "protocol-v3-security.md",
+    "protocol-v4-security.md",
+    "references.md",
   ])
     copyFileSync(
       path.join(projectRoot, "docs", fileName),

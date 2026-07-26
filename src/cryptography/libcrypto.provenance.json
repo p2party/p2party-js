@@ -29,17 +29,17 @@
     }
   },
   "toolchain": {
-    "emscripten": "emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.2-git"
+    "emscripten": "emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.3-git"
   },
   "build": {
-    "mode": "development",
+    "mode": "production",
     "linkTimeOptimization": false,
     "publicSodiumApi": true
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 1682423,
-    "sha256": "ad490e85a15b3aa38c33ed50431d2a2abbeb52b57d8d9f18ad68b8749cbef1bc",
-    "sri": "sha384-nr4WXh0se4XcwvcdCa5OsyGUtzUKi2LEDASssgZrjnjBsb7/tLU+VkJpmyRwa/U8"
+    "bytes": 209081,
+    "sha256": "7eea31157e69ac61f3a512b624d5c210296302fd289fc2b65c63ecc31a056267",
+    "sri": "sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP"
   }
 }

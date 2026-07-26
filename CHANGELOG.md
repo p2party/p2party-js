@@ -4,6 +4,37 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.1] — 2026-07-26
+
+Cross-browser and release-integrity fixes. No wire change: 0.14.0 and 0.14.1
+peers interoperate.
+
+### Fixed
+
+- **p2party could not connect at all in Firefox.** The post-connect DTLS check
+  reads the live certificate from `getStats()` and fails closed when it cannot
+  confirm it. Firefox implements neither the `transport` stat nor `certificate`
+  rows, so every peer edge aborted with a fingerprint mismatch that was really
+  a browser unable to answer the question. A browser reporting no certificate
+  statistics now proceeds with a warning; where the browser can answer, a
+  disagreement is still fatal.
+- A peer edge that entered `disconnected` was torn down after eight seconds
+  with no attempt to repair it, so a room quiet for a few minutes failed the
+  next send with `not-connected` while the roster still listed the peer. The
+  edge now attempts an ICE restart first.
+- Redux logged a non-serializable-state warning on every send and every ICE
+  candidate. RTK Query echoes a mutation's arguments — live `RTCDataChannel`
+  and `RTCIceCandidate` handles — back on each action; both API slices are now
+  exempt from that check while application reducers stay checked.
+- The CDN immutability guard compared gzip bytes, which embed an MTIME, so
+  re-running a published tag reported a violation that had not happened. It now
+  compares decoded content.
+- Crypto provenance recorded the raw `emcc --version` banner, which differs by
+  install method (`6.0.3-git` from Homebrew, `6.0.3 (<commit>)` from emsdk) for
+  the same compiler and byte-identical WASM. It records the semantic version,
+  so any Emscripten 6.0.3 reproduces the artifact and the provenance.
+- The failure log said "protocol-v3 handshake failed" on protocol v4.
+
 ## [0.14.0] — 2026-07-26
 
 Developer experience, plus an Emscripten toolchain bump. No wire change: v4

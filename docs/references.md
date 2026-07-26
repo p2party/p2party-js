@@ -152,6 +152,6 @@ third-party security audit. Cite the implementation:
 @software{p2party,
   title  = {p2party: protocol-v4 end-to-end encryption over a WebRTC room mesh},
   url    = {https://github.com/p2party/p2party-js},
-  note   = {Version 0.14.0}
+  note   = {Version 0.14.1}
 }
 ```

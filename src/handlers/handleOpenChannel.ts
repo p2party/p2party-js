@@ -927,7 +927,7 @@ export const handleOpenChannel = async (
               handshakeError,
               handshakeLease,
             );
-          console.error("protocol-v3 handshake failed:", handshakeError);
+          console.error("protocol-v4 handshake failed:", handshakeError);
           if (extChannel.readyState !== "closed") extChannel.close();
           if (epc.connectionState !== "closed") epc.close();
         } finally {

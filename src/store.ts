@@ -21,7 +21,27 @@ export const store = configureStore({
     [webrtcApi.reducerPath]: webrtcApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware().concat([
+    getDefaultMiddleware({
+      // sendMessage returns its MessageDeliveryError rather than throwing it,
+      // because a thrown queryFn error is serialized to a plain object and the
+      // documented `error instanceof MessageDeliveryError` check can never be
+      // true. Keeping the instance is the point, and an Error instance is by
+      // definition not serializable, so RTK Query's own cache entries for
+      // these endpoints are exempt from the check.
+      //
+      // Scoped to the two API slices: application state stays checked, so a
+      // genuine non-serializable value in a room or key-pair reducer is still
+      // reported.
+      serializableCheck: {
+        ignoredPaths: [
+          `${webrtcApi.reducerPath}.mutations`,
+          `${webrtcApi.reducerPath}.queries`,
+          `${signalingServerApi.reducerPath}.mutations`,
+          `${signalingServerApi.reducerPath}.queries`,
+        ],
+        ignoredActionPaths: ["payload", "error", "meta.baseQueryMeta"],
+      },
+    }).concat([
       signalingServerApi.middleware,
       webrtcApi.middleware,
       roomListenerMiddleware.middleware,

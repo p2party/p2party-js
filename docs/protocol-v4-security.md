@@ -1,6 +1,6 @@
 # Protocol-v4 security boundary
 
-This document states what p2party 0.13's code path does, what observers still
+This document states what p2party 0.14's code path does, what observers still
 learn, and which adjacent mechanisms are not production properties. It is a
 developer threat-model summary, not an independent audit or a formal proof.
 
@@ -128,7 +128,7 @@ receives its normalized value. A fragment is not a server-blind meeting point.
 
 ## Shipped, implemented core, and research
 
-| Status                    | Exact boundary in 0.13                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Status                    | Exact boundary in 0.14                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Shipped public path       | Full WebRTC room mesh; protocol-v4 hybrid 3DH + exact room-fixed ML-KEM-512/768/1024 bootstrap; optional CPace PIN rooms; chained triple confirmation; per-edge Double Ratchet; fixed message cells and in-transfer decoys; per-message channels; authenticated receipts, cancellation, selective retransmission, reconnect resume; compact/fragment/word invites; store-free `createSession()`/`restoreSession()` API. |
 | Shipped, newer            | Sparse post-quantum healing (OFFER/ADVANCE/ACK epoch exchange) with persist-before-dispatch and application traffic blocked while an epoch is in flight. Room-wide scheduled timing cover: policy-pinned cadence, lanes, and frames per cell, emitted whether or not data is queued.                                                                                                                                    |

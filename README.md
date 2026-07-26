@@ -41,7 +41,7 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   signaling, `window`, or `localStorage`.
 
 Immediate delivery over the existing signaling rendezvous is the shipped
-default. Scheduled timing cover is also wired as of 0.13.0: a room policy may
+default. Scheduled timing cover is also wired as of 0.14.0: a room policy may
 pin a cadence, lane count, and frames per cell, and every edge in the room then
 emits fixed-size cells on that schedule whether or not there is data to send.
 Sparse post-quantum healing (the OFFER/ADVANCE/ACK epoch exchange) is likewise
@@ -60,25 +60,37 @@ by themselves provide continuous traffic-analysis resistance.
 ## Install
 
 ```sh
-npm install p2party@0.13.0
+npm install p2party
 ```
 
-> **Not published yet — and do not drop the version.** `npm install p2party`
-> currently _succeeds_ and installs `0.8.0`, an older AGPL-3.0 line with no
-> `p2party/session` export. Everything in these docs is 0.13.0, protocol v4,
-> Apache-2.0. Pinning the version makes npm fail with `No matching version`
-> instead of silently giving you the wrong library under the wrong licence.
->
-> Until 0.13.0 is on the registry, build the tarball from a checkout:
-> [Building from source](CONTRIBUTING.md#building-from-source). That path needs
-> an exact toolchain (Node 24, Emscripten 6.0.3, pinned submodules), because the
-> release build reproduces the pinned WASM and refuses to emit an artifact it
-> cannot attest.
+That is the whole setup. The package ships its own WebAssembly cryptography and
+its own database worker; there is no build step, no postinstall, and no native
+dependency to compile.
+
+Releases are published with npm provenance, so you can check that the tarball
+was built by the tagged GitHub Actions run rather than uploaded by hand:
+
+```sh
+npm audit signatures
+```
+
+To build the artifact yourself instead, see
+[Building from source](CONTRIBUTING.md#building-from-source). That path needs an
+exact toolchain (Node 24, Emscripten 6.0.3, pinned submodules), because the
+release build reproduces the pinned WASM and refuses to emit an artifact it
+cannot attest.
 
 ## Send a message between two browsers
 
-The whole thing, end to end. Open this page in two tabs with the same URL
-fragment and they will find each other.
+A complete working page is in
+[`examples/browser-mesh/`](examples/browser-mesh/) — serve it, open it twice,
+paste the invite from the first tab into the second tab's URL fragment:
+
+```sh
+bunx vite examples/browser-mesh
+```
+
+The part that matters is short:
 
 ```ts
 import p2party from "p2party";
@@ -87,17 +99,14 @@ import p2party from "p2party";
 const invite = p2party.generateRoomInvite();
 const room = await p2party.joinRoom(invite);
 
-// Wait for someone else to arrive, then send.
-const handle = p2party.sendMessage("hello", "chat", room.id);
-try {
-  const result = await handle.done;
-  console.table(result?.outcomes);
-} catch (error) {
-  // `done` REJECTS when no peer took delivery. With a single tab open and
-  // nobody else in the room, this is the expected result, not a bug.
-  if (error instanceof p2party.MessageDeliveryError)
-    console.table(error.result.outcomes);
-}
+// Fires once per fully-arrived message, already decoded.
+p2party.onMessage(room.id, ({ message }) => {
+  console.log("received", message);
+});
+
+// A room id does not mean anyone can receive yet.
+await p2party.waitForPeers(room.id);
+await p2party.sendMessage("hello", "chat", room.id).done;
 ```
 
 `joinRoom` resolves once the signaling service has assigned the room its id. It
@@ -125,22 +134,29 @@ if (latest) {
 
 ## Choose your integration
 
-| Goal                                 | Entry point                                     | p2party owns                                                                                  | Application owns                                                   |
-| ------------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Browser room mesh                    | `p2party`                                       | Signaling, full-mesh WebRTC, Redux state, IndexedDB/OPFS, handshake, ratchet, transfer/resume | Room capability and policy, UI, optional PIN                       |
-| Node, Bun, native, or custom network | `p2party/session`                               | Handshake, ratchet, uniform encrypted envelopes, snapshots                                    | Reliable message transport, peer-key trust, storage, outer framing |
-| Offline or pinned cryptography       | `p2party/session` plus `p2party/libcrypto.wasm` | Exact release-built cryptographic module                                                      | Loading and passing the pinned bytes                               |
+**`p2party`** — the browser room mesh. It owns signaling, full-mesh WebRTC,
+Redux state, IndexedDB/OPFS, the handshake, the ratchet, and transfer with
+resume. You own the room capability and policy, the UI, and the optional PIN.
+
+**`p2party/session`** — the cryptography alone, for Node, Bun, native shells or
+a custom network. It owns the handshake, the ratchet, uniform encrypted
+envelopes and snapshots. **You own the transport**, including message-delimited
+framing, peer-key trust and storage — see
+[docs/session-api.md](docs/session-api.md).
+
+**`p2party/session` + `p2party/libcrypto.wasm`** — the same, with the exact
+release-built cryptographic module loaded from bytes you supply, for offline or
+integrity-pinned deployments.
 
 Deeper guides:
 
-- [Getting started](docs/getting-started.md)
-- [Store-free session API](docs/session-api.md)
-- [Protocol-v4 security boundary](docs/protocol-v4-security.md)
-- [References](docs/references.md) — the standards, papers, and open-source
-  projects p2party is built from and built on
-- [Related work and prior art](docs/paper-prior-art-and-related-work.md) — the
-  full research treatment, with a per-claim novelty assessment
-- [Roadmap](ROADMAP.md) — what is next, and which open problems it depends on
+- [Getting started](docs/getting-started.md) — the browser tutorial
+- [Wire format](docs/wire-format.md) — frame layouts and the handshake ladder
+- [Store-free session API](docs/session-api.md) — the `p2party/session` contract
+- [Protocol-v4 security boundary](docs/protocol-v4-security.md) — what is and
+  is not a guarantee
+- [References](docs/references.md) — standards, papers and related projects
+- [Roadmap](ROADMAP.md) — what is next, and the open problems it depends on
 
 ## Browser mesh
 
@@ -170,103 +186,10 @@ a third, delivery-level acknowledgement.
 
 ## Wire format
 
-Every byte below is derived from [`src/utils/constants.ts`](src/utils/constants.ts),
-which is the single source of truth and is byte-matched in `utils.h`.
-
-### Outer frame types
-
-One tag byte leads every frame on a data channel.
-
-| Tag | Name         | Size on the wire | Carries                         |
-| --- | ------------ | ---------------- | ------------------------------- |
-| 1   | `HANDSHAKE`  | step-dependent   | HELLO, CONFIRM, FINISH          |
-| 2   | `CHUNK`      | 65,490 B         | one fixed application cell      |
-| 3   | `RECEIPT`    | 65 B             | SHA-512 acknowledgement token   |
-| 4   | `COVER`      | 65,490 B         | a scheduled cell, real or decoy |
-| 5   | `PQ_CONTROL` | 65,490 B         | sparse-PQ OFFER / ADVANCE / ACK |
-
-Tags 2, 4, and 5 are deliberately identical in size. An observer cannot tell an
-application cell from a decoy or from a healing exchange by looking at the wire.
-
-### Chunk frame — 65,490 bytes
-
-```text
- 0        1                     33      41      49        57         69                        65,474    65,490
- +--------+---------------------+-------+-------+---------+----------+-------------------------+---------+
- | type=2 | ratchet dhPub (32)  | N (8) | PN(8) | pqEpoch | nonce    | ciphertext (65,405)     | tag(16) |
- |  (1)   |                     |  BE   |  BE   |  (8) BE |   (12)   |                         |         |
- +--------+---------------------+-------+-------+---------+----------+-------------------------+---------+
- |<------------------ AAD: 57 bytes ------------------->|          |
- |<------------------- clear header: 69 bytes ---------------------->|
-```
-
-- The 57-byte AAD is authenticated but excludes the fresh random nonce.
-- `pqEpoch` is an unsigned 64-bit counter. v3 used a single byte; v4 widened it
-  so the sparse-PQ healing epoch cannot wrap.
-- The plaintext cell is always 65,405 bytes, so at most **61,912 bytes** are
-  caller payload; the remainder is metadata, the Merkle proof, and padding.
-- ChaCha20-Poly1305 supplies the 16-byte tag.
-
-### Receipt frame — 65 bytes
-
-```text
- 0        1                                                          65
- +--------+-----------------------------------------------------------+
- | type=3 | SHA-512 receipt token (64)                                 |
- +--------+-----------------------------------------------------------+
-```
-
-Both per-chunk acknowledgements and the terminal content-hash acknowledgement
-use this exact geometry, so a completion is not distinguishable by size.
-
-### Handshake ladder
-
-```text
-initiator                                                     responder
-    |                                                              |
-    |-- HELLO    = tag ‖ sid(32) ‖ EK(32) ‖ Y(32) ‖ idX25519(32)   |
-    |             ‖ crossSig(64) ‖ mlkemPub(pk) ‖ mlkemCt(0…)  --> |
-    |                                                              |
-    | <-- HELLO  = same layout; pub all-zero, ct encapsulates ----- |
-    |                                                              |
-    | <-- CONFIRM = tag ‖ dhPub(32) ‖ mac(64) --------------------- |
-    |-- CONFIRM  = tag ‖ dhPub(32) ‖ mac(64) --------------------> |
-    | <-- FINISH  = tag ‖ mac(64) --------------------------------- |
-    |                                                              |
-  established                                                 established
-```
-
-The unused fixed-width KEM field must be canonical all-zero — a non-zero
-spelling poisons the transcript rather than being ignored. The initiator is
-established only after verifying FINISH; the responder after sending it.
-
-### Sparse post-quantum healing
-
-```text
-    A                                                    B
-    |-- OFFER   (new ML-KEM public key, epoch e+1) ---->  |
-    | <-- ADVANCE (echoes the complete OFFER, + ct) ----- |
-    |-- ACK     (confirms the epoch is live) ---------->  |
-```
-
-An ADVANCE embeds the entire OFFER it answers, so a fork is byte-detectable
-rather than something both sides have to reconcile. Each side persists its
-mutated state **before** dispatching, and application traffic is blocked while
-an epoch is in flight.
-
-### Room policy — 32 bytes
-
-A room's policy is a fixed 32-byte record (magic `"P2RP"`) that pins the ML-KEM
-suite, PIN mode, rendezvous mode, and the cover schedule. It is immutable after
-first contact and hashed into the handshake transcript, so two peers that
-disagree about it fail to authenticate rather than negotiating. Its canonical
-base64url spelling is 43 characters — the same codec as the room capability,
-which rejects non-canonical spellings so the final sextet's unused bits cannot
-carry a watermark.
-
-Scheduled cover has a hard floor: `cadence / (lanes × frames) >= 25 ms`.
-Validate a schedule with `p2party.validateRoomPolicyV1()` before building a
-policy rather than discovering the rejection at connect time.
+Fixed 65,490-byte cells, a 65-byte receipt frame, and outer frame tags that make
+an application cell, a decoy and a post-quantum healing record indistinguishable
+by size. Byte layouts, the handshake ladder and the healing exchange are in
+[docs/wire-format.md](docs/wire-format.md).
 
 ## Room invites
 
@@ -293,196 +216,50 @@ the fragment alone is not server-blind rendezvous.
 
 ## PIN and exact ML-KEM room policy
 
-The room fixes exactly one hybrid suite before the handshake. Every peer
-supplies the same immutable policy and PIN; there is no suite negotiation,
-downgrade, or classical fallback.
+Room policy is immutable after the room is created locally, every peer must use
+the same policy and the same PIN bytes, and the ML-KEM suite is fixed before the
+handshake — there is no in-band negotiation, downgrade, or classical fallback.
+PIN mode adds CPace on top of identity authentication; it does not replace it.
 
-```ts
-import p2party, { type RoomPolicyV1 } from "p2party";
-
-const invite = p2party.generateRoomInvite();
-const policy = {
-  ...p2party.DEFAULT_ROOM_POLICY_V1,
-  authMode: "pin",
-  pqMode: "hybrid-mlkem1024",
-} satisfies RoomPolicyV1;
-const pin = new TextEncoder().encode("replace with a room secret");
-
-try {
-  await p2party.connect(invite, undefined, undefined, { policy, pin });
-} finally {
-  // connect() copied it into the in-memory room PIN vault.
-  pin.fill(0);
-}
-```
-
-Supported values are `hybrid-mlkem512`, `hybrid-mlkem768` (default), and
-`hybrid-mlkem1024`. PIN bytes never enter room policy, Redux, persistent room
-records, or logs.
+The worked example, including how the PIN buffer is wiped, is in
+[docs/getting-started.md](docs/getting-started.md#pin-room-with-an-exact-ml-kem-suite).
 
 ## Send, cancel, and read
 
-`sendMessage()` returns a handle immediately. Its `done` promise settles after
-all started peer sends and cleanup and contains ordered per-peer outcomes.
+`sendMessage()` returns a `MessageTransferHandle`, not a promise: `transferId`
+identifies this logical send, `cancel()` works even during hashing and channel
+setup, and `done` settles after every started peer send and cleanup.
 
-```ts
-const handle = p2party.sendMessage("hello room", "chat", room.id);
-console.log(handle.transferId);
-
-// Attach this to a cancel button; it works during hashing/channel setup too.
-const cancelButton =
-  document.querySelector<HTMLButtonElement>("#cancel-transfer");
-cancelButton?.addEventListener("click", () => void handle.cancel());
-
-const result = await handle.done;
-if (result) {
-  console.table(result.outcomes);
-  const opened = await p2party.readMessage(result.merkleRootHex);
-  console.log(opened.message, opened.percentage);
-}
-```
-
-For received messages, read identifiers from room state. Pass
-`materialize = false` to inspect completed file metadata without assembling its
-Blob:
-
-```ts
-const current = p2party
-  .roomSelector(p2party.store.getState())
-  .find((candidate) => candidate.id === room.id);
-const received = current?.messages.at(-1);
-
-if (received) {
-  const metadata = await p2party.readMessage(
-    received.merkleRootHex,
-    received.sha512Hex,
-    false,
-  );
-  console.log(metadata.filename, metadata.size);
-}
-```
+`done` **rejects** when no peer took delivery — an empty room, or a cancel.
+Both are ordinary outcomes. The rejection is a `MessageDeliveryError` whose
+`result.outcomes` carries the same per-peer detail a resolved value would, so
+handle it rather than treating it as a crash. The quickstart above shows the
+shape; [docs/getting-started.md](docs/getting-started.md#send-cancel-and-read)
+covers reading inbound messages and the metadata-only read that avoids
+materializing large files.
 
 ## Store-free session API
 
-This Node/Bun example supplies a custom, reliable, ordered, message-delimited
-transport and restores a ratchet snapshot. Replace the in-memory pipes with
-your network adapter.
+`p2party/session` is the same cryptography without Redux, IndexedDB, WebRTC,
+signaling, `window` or `localStorage` — for Node, Bun, a native shell, or your
+own transport.
 
-```ts
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import {
-  createSession,
-  generateSessionIdentity,
-  restoreSession,
-  type HandshakeTransport,
-} from "p2party/session";
+You own the parts the browser root would otherwise own: reliable
+message-delimited transport for handshake flights, peer-key trust, storage of
+the ratchet snapshot under authenticated encryption with rollback protection,
+and the outer framing around each `EncryptedSessionMessage`. That last one is
+the usual surprise — the session hands back opaque fixed-size frames and
+expects the same back, so an adapter has to length- and version-check records
+itself.
 
-const require = createRequire(import.meta.url);
-const wasmBinary = Uint8Array.from(
-  await readFile(require.resolve("p2party/libcrypto.wasm")),
-);
-const cryptoOptions = { wasmBinary };
-
-const makePipe = (): HandshakeTransport => {
-  const queued: Uint8Array[] = [];
-  const waiters: Array<(bytes: Uint8Array) => void> = [];
-  return {
-    send(bytes): void {
-      const owned = Uint8Array.from(bytes);
-      const waiter = waiters.shift();
-      if (waiter) waiter(owned);
-      else queued.push(owned);
-    },
-    recv(): Promise<Uint8Array> {
-      const bytes = queued.shift();
-      return bytes
-        ? Promise.resolve(bytes)
-        : new Promise((resolve) => waiters.push(resolve));
-    },
-  };
-};
-
-const [aliceIdentity, bobIdentity] = await Promise.all([
-  generateSessionIdentity(cryptoOptions),
-  generateSessionIdentity(cryptoOptions),
-]);
-const aliceToBob = makePipe();
-const bobToAlice = makePipe();
-const channelId = globalThis.crypto.getRandomValues(new Uint8Array(16));
-const aliceFingerprint = globalThis.crypto.getRandomValues(new Uint8Array(32));
-const bobFingerprint = globalThis.crypto.getRandomValues(new Uint8Array(32));
-
-const [alice, bob] = await Promise.all([
-  createSession({
-    role: "initiator",
-    identity: aliceIdentity,
-    peerIdentityEd25519PublicKey: bobIdentity.ed25519PublicKey,
-    channel: {
-      channelId,
-      localFingerprint: aliceFingerprint,
-      remoteFingerprint: bobFingerprint,
-    },
-    transport: { send: aliceToBob.send, recv: bobToAlice.recv },
-    mode: "nopin",
-    pqMode: "hybrid-mlkem768",
-    crypto: cryptoOptions,
-  }),
-  createSession({
-    role: "responder",
-    identity: bobIdentity,
-    peerIdentityEd25519PublicKey: aliceIdentity.ed25519PublicKey,
-    channel: {
-      channelId,
-      localFingerprint: bobFingerprint,
-      remoteFingerprint: aliceFingerprint,
-    },
-    transport: { send: bobToAlice.send, recv: aliceToBob.recv },
-    mode: "nopin",
-    pqMode: "hybrid-mlkem768",
-    crypto: cryptoOptions,
-  }),
-]);
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-console.log(
-  decoder.decode(await bob.decrypt(await alice.encrypt(encoder.encode("hi")))),
-);
-
-// Plaintext secret: encrypt at rest and add rollback protection before storage.
-const snapshot = await alice.serialize();
-await alice.destroy();
-const restoredAlice = await restoreSession(snapshot, cryptoOptions);
-snapshot.fill(0);
-
-const reply = await bob.encrypt(encoder.encode("after restore"));
-console.log(decoder.decode(await restoredAlice.decrypt(reply)));
-
-await Promise.all([restoredAlice.destroy(), bob.destroy()]);
-aliceIdentity.ed25519SecretKey.fill(0);
-aliceIdentity.x25519SecretKey.fill(0);
-bobIdentity.ed25519SecretKey.fill(0);
-bobIdentity.x25519SecretKey.fill(0);
-```
-
-In production, pin or explicitly TOFU-accept the peer's Ed25519 key and derive
-the 32-byte endpoint fingerprints from the authenticated transport. The
-`identity.x25519SecretKey` field is the X25519 identity-DH secret, never the
-Ed25519 signing secret.
-
-The complete two-peer transport example, including simultaneous first messages
-and snapshot restore, is
+The contract, a runnable two-party example, the envelope codec and the
+sparse-PQ healing hooks are in
+[docs/session-api.md](docs/session-api.md). A working script lives at
 [`examples/standalone-e2ee.ts`](examples/standalone-e2ee.ts):
 
 ```sh
 bun run examples/standalone-e2ee.ts
 ```
-
-The same source is included in the package as
-`p2party/examples/standalone-e2ee.ts`. It detects whether it is running from a
-source checkout or an installed package and uses the corresponding public
-session build and release-matched WASM.
 
 ## Local, self-hosted, or release-pinned WASM
 
@@ -494,7 +271,7 @@ same release bytes before calling `connect()`:
 import p2party from "p2party";
 
 p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.13.0/libcrypto.wasm", window.location.href),
+  new URL("/vendor/p2party-0.14.0/libcrypto.wasm", window.location.href),
 );
 ```
 

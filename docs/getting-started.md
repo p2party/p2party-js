@@ -1,4 +1,4 @@
-# Getting started with p2party 0.13
+# Getting started with p2party 0.14
 
 p2party has two entry points:
 
@@ -9,22 +9,8 @@ p2party has two entry points:
   cryptography. Use it with Node, Bun, a native shell, tests, or your own
   transport and storage.
 
-Once the tagged release is on the registry:
-
-```sh
-npm install p2party
-```
-
-Until then, build the reproducible release candidate from a source checkout.
-This needs the exact release toolchain (Node 24.x, npm 11.6.2, Emscripten
-6.0.3, pinned submodules) — see the [README](../README.md#install):
-
-```sh
-git submodule update --init --recursive
-npm ci
-npm run release:pack
-npm install "./p2party-$(node -p "require('./package.json').version").tgz"
-```
+Install is in the [README](../README.md#install). This guide assumes you have
+the package and picks up from there.
 
 ## Browser room mesh
 
@@ -123,7 +109,7 @@ bytes are deliberately absent from the public policy, Redux, persistent room
 records, and logs. PIN mode adds CPace authentication to the identity and
 ML-KEM handshake; it does not replace identity possession.
 
-Scheduled timing cover is wired as of 0.13: a policy may pin `coverMode:
+Scheduled timing cover is wired as of 0.14: a policy may pin `coverMode:
 "scheduled"` with a cadence, lane count, and frames per cell, and every edge in
 the room then emits fixed-size cells on that schedule whether or not data is
 queued. Private rendezvous modes are still rejected by `connect()` because
@@ -142,12 +128,18 @@ console.log("transfer", handle.transferId);
 // Wire this to a cancel button. It also works during hashing/channel setup.
 const cancel = () => handle.cancel();
 
-const result = await handle.done;
-if (result) {
-  console.table(result.outcomes);
+try {
+  const result = await handle.done;
+  console.table(result?.outcomes);
 
-  const opened = await p2party.readMessage(result.merkleRootHex);
+  const opened = await p2party.readMessage(result!.merkleRootHex);
   console.log(opened.message, opened.percentage);
+} catch (error) {
+  // `done` REJECTS when no peer took delivery — an empty room, or a cancel.
+  // Both are ordinary outcomes, not bugs. The error carries the same per-peer
+  // detail a resolved value would have.
+  if (error instanceof p2party.MessageDeliveryError)
+    console.table(error.result.outcomes);
 }
 
 void cancel; // Remove when a UI event uses it.
@@ -184,7 +176,7 @@ content-hash lookup for concurrent identical sends.
 
 ## Package artifacts and WASM
 
-The 0.13 package exports:
+The 0.14 package exports:
 
 - `p2party` — browser ESM/CJS root with declarations;
 - `p2party/session` — store-free ESM/CJS session API with declarations;
@@ -202,49 +194,10 @@ The tarball also contains the UMD browser build and generated database worker.
 The root bundle embeds the worker source; normal package consumers do not
 construct its URL.
 
-The browser root loads
-`https://cdn.p2party.com/@0.13.0/libcrypto.wasm` with a build-pinned SHA-384
-Subresource Integrity value. JavaScript and WASM versions are one release unit:
-never pair 0.13 JavaScript with an older WASM. The release workflow publishes
-the immutable CDN object, fetches it back, verifies its bytes, SHA-256, and SRI,
-and only then publishes npm.
+The browser root fetches the exact versioned CDN WASM under a build-pinned
+SHA-384 Subresource Integrity value. JavaScript and WASM are one release unit —
+never pair 0.14 JavaScript with an older WASM.
 
-The browser root can use a self-hosted copy of the exact release bytes. Set its
-URL before `connect()` or any cryptographic operation; the build-pinned SRI
-still applies:
-
-```ts
-import p2party from "p2party";
-
-p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.13.0/libcrypto.wasm", window.location.href),
-);
-```
-
-Offline, Node, and Bun applications should use `p2party/session` and pass the
-exported bytes:
-
-```ts
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-const wasmBinary = Uint8Array.from(
-  await readFile(require.resolve("p2party/libcrypto.wasm")),
-);
-
-const cryptoOptions = { wasmBinary };
-```
-
-In a browser application using only `p2party/session`, fetch a pinned local
-asset and pass its `ArrayBuffer` in the same field:
-
-```ts
-const response = await fetch("/vendor/p2party-0.13.0/libcrypto.wasm");
-if (!response.ok) throw new Error(`WASM fetch failed: ${response.status}`);
-const cryptoOptions = { wasmBinary: await response.arrayBuffer() };
-```
-
-See [Store-free session API](session-api.md) for the transport and snapshot
-contract and [Protocol-v4 security](protocol-v4-security.md) before deciding
-what metadata your deployment exposes.
+Self-hosting those bytes, and passing them directly to `p2party/session`, are
+both covered in the
+[README](../README.md#local-self-hosted-or-release-pinned-wasm).

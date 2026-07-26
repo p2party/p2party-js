@@ -1,4 +1,7 @@
-import { handleSendMessage } from "../../handlers/handleSendMessage";
+import {
+  handleSendMessage,
+  MessageDeliveryError,
+} from "../../handlers/handleSendMessage";
 
 import { wasmLoader } from "../../cryptography/wasmLoader";
 import cryptoMemory from "../../cryptography/memory";
@@ -57,7 +60,21 @@ const webrtcMessageQuery: BaseQueryFn<
     cryptoMemory.getMerkleProofMemory(totalChunks),
   );
 
-  const result = await handleSendMessage(
+  // MessageDeliveryError must be RETURNED, not thrown. RTK Query serializes an
+  // error that escapes a queryFn — the caller then receives a plain object, so
+  // `instanceof MessageDeliveryError` is false and `.result` with its per-peer
+  // outcomes is gone. Returning it as a rejected value carries the instance
+  // through `unwrap()` intact, which is what MessageTransferHandle.done
+  // documents and what the README tells callers to check.
+  try {
+    return { data: await sendOrThrow() };
+  } catch (error) {
+    if (error instanceof MessageDeliveryError) return { error };
+    throw error;
+  }
+
+  async function sendOrThrow() {
+    return await handleSendMessage(
     data,
     api,
     label,
@@ -75,8 +92,7 @@ const webrtcMessageQuery: BaseQueryFn<
     effectivePercentageFilledChunk,
     metadataSchemaVersion,
   );
-
-  return { data: result };
+  }
 };
 
 export default webrtcMessageQuery;

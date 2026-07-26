@@ -10,7 +10,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Shipped and running in the browser mesh as of 0.13.0:
+Shipped and running in the browser mesh as of 0.14.0:
 
 - protocol v4 — hybrid interactive 3DH ⊕ ML-KEM bootstrap, Ed25519-pinned
   identities, three chained confirmation flights, per-edge Double Ratchet;
@@ -24,9 +24,9 @@ Shipped and running in the browser mesh as of 0.13.0:
 
 ## Near term
 
-**Ship 0.13.0 properly.** Publish the npm package and the immutable CDN WASM
-object, and move the production signaling deployment to protocol v4. Until
-that lands, the only supported install is a source build.
+**Move production signaling to protocol v4.** 0.14.0 is on the registry with
+its immutable CDN WASM object; the deployed signaling service is the remaining
+piece before the public site runs the shipped protocol end to end.
 
 **Close the verification gaps.** Three properties are implemented and believed
 correct but not yet demonstrated end to end: PIN backoff escalation under

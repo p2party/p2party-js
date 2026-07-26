@@ -1,6 +1,6 @@
 {
   "name": "p2party",
-  "description": "Protocol-v3 E2EE and reliable file transfer over WebRTC room meshes",
+  "description": "Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC room mesh",
   "version": "0.14.0",
   "repository": {
     "type": "git",
@@ -34,8 +34,14 @@
   "keywords": [
     "webrtc",
     "p2p",
+    "e2ee",
+    "end-to-end-encryption",
+    "post-quantum",
+    "ml-kem",
+    "double-ratchet",
     "file-sharing",
     "cryptography",
+    "mesh",
     "typescript"
   ],
   "homepage": "https://github.com/p2party/p2party-js#readme",
@@ -64,7 +70,8 @@
     "./examples/standalone-e2ee.ts": "./examples/standalone-e2ee.ts",
     "./THIRD_PARTY_NOTICES.md": "./THIRD_PARTY_NOTICES.md",
     "./package.json": "./package.json",
-    "./docs/references.md": "./docs/references.md"
+    "./docs/references.md": "./docs/references.md",
+    "./docs/wire-format.md": "./docs/wire-format.md"
   },
   "files": [
     "lib/**/*.d.ts",
@@ -79,6 +86,7 @@
     "docs/getting-started.md",
     "docs/session-api.md",
     "docs/protocol-v4-security.md",
+    "docs/wire-format.md",
     "docs/references.md",
     "docs/assets/p2party-cat.svg",
     "examples/standalone-e2ee.ts",

@@ -16,7 +16,19 @@ peers on 0.13.0 and 0.14.0 interoperate.
   synchronous re-check for the already-joined case, and no timeout — thirteen
   lines for one string. `waitForRoom()` owns that wait, with a timeout and an
   `AbortSignal`; `joinRoom()` is `connect()` plus the wait.
+- `waitForPeers()`. Resolves once the room has authenticated peer edges — not
+  merely present ones. Waiting for a peer to _appear_ is the bug callers
+  actually wrote: a peer is in the room a beat before its protocol-v4
+  handshake completes, and a send in that window is skipped as
+  unauthenticated, so the message silently goes nowhere. Takes a peer `count`,
+  a timeout, and an `AbortSignal`; on timeout it reports how many peers did
+  authenticate.
+- `onMessage()`. Fires once per fully-arrived message with the payload already
+  decoded, replacing a manual `store.subscribe` diff against
+  `room.messages` plus a `readMessage()` call. A throwing handler is isolated.
 - `setDebugLogging(boolean)`, and the `p2party:debug` localStorage key.
+- `examples/browser-mesh/` — a runnable two-tab page, and `docs/wire-format.md`,
+  moved out of the README.
 
 ### Changed
 
@@ -29,9 +41,25 @@ peers on 0.13.0 and 0.14.0 interoperate.
   change. CI and the release workflow move with it.
 - `MessageDeliveryError` is exported, and `handle.done`'s rejection is
   documented where callers meet it.
+- Install is `npm install p2party`, with `npm audit signatures` for checking
+  release provenance.
 
 ### Fixed
 
+- `error instanceof MessageDeliveryError` on a rejected `handle.done` could
+  never be true, which is the check the docs told callers to write. RTK Query
+  serializes an error thrown from a `queryFn` into a plain object, discarding
+  the prototype and the `result` field carrying the per-peer outcomes;
+  `sendMessageQuery` now returns `{ error }` so the instance survives.
+- The release build no longer ships documentation naming a version other than
+  the one being released. The check derives its flag set from the CHANGELOG's
+  own release headings and scans every tracked Markdown file, exempting only
+  the files whose purpose is recording history. The previous allowlist omitted
+  `ROADMAP.md`, which had drifted to `0.13.0`.
+- `getDBPeerIsBlacklisted()` fails closed. A worker error resolved it to
+  `false` — "not blacklisted" — so a database fault silently readmitted a
+  blocked peer. Worker `error`/`messageerror` events now reject every pending
+  call instead of leaving them hanging forever.
 - The room listener effect no longer leaks an unhandled promise rejection into
   the host application when IndexedDB is unavailable.
 - `scripts/buildRelease.mjs` still packaged `docs/protocol-v3-security.md`,

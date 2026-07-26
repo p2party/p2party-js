@@ -46,7 +46,7 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   `window`, or `localStorage`.
 
 Immediate delivery over the existing signaling rendezvous is the shipped
-default. Scheduled timing cover is also wired as of 0.14.1: a room policy may
+default. Scheduled timing cover is also wired as of 0.14.2: a room policy may
 pin a cadence, lane count, and frames per cell, and every edge in the room then
 emits fixed-size cells on that schedule whether or not there is data to send.
 Sparse post-quantum healing (the OFFER/ADVANCE/ACK epoch exchange) is likewise
@@ -633,8 +633,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.1/p2party.min.js"
-  integrity="sha384-qoibStilVTBvKFmPiKma5X42R9V57ibjV4pfKyYbPrY/Q/5l1Js1r4Ye6wi1ZUHf"
+  src="https://cdn.p2party.com/@0.14.2/p2party.min.js"
+  integrity="sha384-KJLIhsZkQzkYg1lyk57oAacQBR3DeWHX92Ksv9QTO9tUJVw1pxUNHI9e2nIcacgZ"
   crossorigin="anonymous"
 ></script>
 
@@ -665,15 +665,15 @@ connect directly to each other.
 The three published objects:
 
 ```text
-https://cdn.p2party.com/@0.14.1/p2party.min.js     UMD bundle -> window.p2party
-https://cdn.p2party.com/@0.14.1/db.worker.js       IndexedDB/OPFS worker
-https://cdn.p2party.com/@0.14.1/libcrypto.wasm     the cryptographic module
+https://cdn.p2party.com/@0.14.2/p2party.min.js     UMD bundle -> window.p2party
+https://cdn.p2party.com/@0.14.2/db.worker.js       IndexedDB/OPFS worker
+https://cdn.p2party.com/@0.14.2/libcrypto.wasm     the cryptographic module
 ```
 
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`sha384-xpC0axO9Z2Q/XvKvps45jwZ7ldG9jgXx1b5rcSv24+rCiM5qhox6jqlBaIStbzoa`.
+`sha384-qWbMGmyz8mCS/hgbn0jEf4Fo73iXiy6w+H/NfO6ymxKwzldUeHSxolNZtSZfV1nf`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.
@@ -688,7 +688,7 @@ same release bytes before calling `connect()`:
 import p2party from "p2party";
 
 p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.14.1/libcrypto.wasm", window.location.href),
+  new URL("/vendor/p2party-0.14.2/libcrypto.wasm", window.location.href),
 );
 ```
 
@@ -701,8 +701,8 @@ object. The path carries the version, so a URL always names exactly one build
 and is safe to cache forever:
 
 ```sh
-curl -O https://cdn.p2party.com/@0.14.1/libcrypto.wasm
-curl -O https://cdn.p2party.com/@0.14.1/libcrypto.provenance.json
+curl -O https://cdn.p2party.com/@0.14.2/libcrypto.wasm
+curl -O https://cdn.p2party.com/@0.14.2/libcrypto.provenance.json
 ```
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
@@ -713,7 +713,7 @@ shasum -a 256 libcrypto.wasm
 openssl dgst -sha384 -binary libcrypto.wasm | openssl base64 -A
 ```
 
-For 0.14.1 those are
+For 0.14.2 those are
 `7eea31157e69ac61f3a512b624d5c210296302fd289fc2b65c63ecc31a056267` and
 `sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP`.
 They are the same bytes npm ships — the release workflow uploads the CDN object

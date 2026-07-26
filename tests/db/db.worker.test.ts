@@ -24,9 +24,11 @@ import { getDB } from "../../src/db/src/getDB";
 import { MAX_MESSAGE_SIZE } from "../../src/utils/constants";
 
 import type {
+  MessageData,
   RatchetSession,
   ReceiveChunk,
   ReceiveChunkStoreResult,
+  RoomStats,
 } from "../../src/db/types";
 
 beforeEach(() => {
@@ -796,5 +798,78 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
     const del = await callWorker("deleteIdentityEd25519", []);
     expect(del.error).toBeUndefined();
     expect((await callWorker("getIdentityEd25519", [])).result).toBeUndefined();
+  });
+});
+
+describe("getDBRoomStats", () => {
+  const roomId = "11111111-1111-4111-8111-111111111111";
+  const peerA = "aaaaaaaa-1111-4111-8111-111111111111";
+  const peerB = "bbbbbbbb-1111-4111-8111-111111111111";
+
+  const message = (over: Partial<MessageData>): MessageData => ({
+    roomId,
+    timestamp: 1,
+    fromPeerId: peerA,
+    channelLabel: "c",
+    hash: "h",
+    merkleRoot: "m",
+    filename: "f",
+    messageType: 1,
+    savedSize: 0,
+    totalSize: 0,
+    ...over,
+  });
+
+  const seed = async (rows: MessageData[]) => {
+    const db = await getDB();
+    const tx = db.transaction("messageData", "readwrite");
+    await Promise.all(
+      rows.map((row, index) =>
+        tx.store.put({ ...row, hash: `h${index}`, merkleRoot: `m${index}` }),
+      ),
+    );
+    await tx.done;
+    db.close();
+  };
+
+  test("splits sent from received by transferId, not by peer id", async () => {
+    // transferId is written only on rows this device sent, which is the only
+    // discriminator available without knowing our own peer id.
+    await seed([
+      message({ transferId: "t1", totalSize: 1000, savedSize: 1000 }),
+      message({ transferId: "t2", totalSize: 500, savedSize: 500 }),
+      message({ fromPeerId: peerA, totalSize: 300, savedSize: 300 }),
+      message({ fromPeerId: peerB, totalSize: 200, savedSize: 200 }),
+    ]);
+
+    const { result } = await callWorker("getDBRoomStats", [roomId]);
+    const stats = result as RoomStats;
+
+    expect(stats.messagesSent).toBe(2);
+    expect(stats.messagesReceived).toBe(2);
+    expect(stats.bytesSent).toBe(1500);
+    expect(stats.bytesReceived).toBe(500);
+    expect(stats.bytesTotal).toBe(2000);
+    expect(stats.messageCount).toBe(4);
+    // Only peers we received from; our own sends are not "historical peers".
+    expect([...stats.peerIds].sort()).toEqual([peerA, peerB].sort());
+  });
+
+  test("a partially received message counts what arrived, not what was promised", async () => {
+    // Otherwise an abandoned 10 GiB transfer would report 10 GiB received.
+    await seed([message({ fromPeerId: peerA, totalSize: 10_000, savedSize: 40 })]);
+
+    const { result } = await callWorker("getDBRoomStats", [roomId]);
+    expect((result as RoomStats).bytesReceived).toBe(40);
+  });
+
+  test("a room with no messages reports zeroes rather than failing", async () => {
+    const { result } = await callWorker("getDBRoomStats", [
+      "99999999-9999-4999-8999-999999999999",
+    ]);
+    const stats = result as RoomStats;
+    expect(stats.messageCount).toBe(0);
+    expect(stats.bytesTotal).toBe(0);
+    expect(stats.peerIds).toEqual([]);
   });
 });

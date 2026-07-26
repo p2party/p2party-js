@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC room mesh",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/p2party/p2party-js.git"

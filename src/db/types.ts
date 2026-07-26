@@ -27,6 +27,26 @@ export interface UniqueRoom {
   updatedAt: number;
 }
 
+/**
+ * Aggregate history for one saved room, computed inside the database worker.
+ *
+ * Sizes are logical message bytes, not wire bytes: p2party pads everything to
+ * uniform 65,490-byte cells, so what actually crossed the network is always
+ * larger and is a property of the padding policy rather than of the
+ * conversation. Reporting the padded figure would describe the cover traffic,
+ * not what the user sent.
+ */
+export interface RoomStats {
+  messageCount: number;
+  messagesSent: number;
+  messagesReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+  bytesTotal: number;
+  /** Distinct peers this device has received from, ever. */
+  peerIds: string[];
+}
+
 export interface MessageData {
   /** Sender-only random logical-send identity; absent on received/legacy rows. */
   transferId?: string;
@@ -281,6 +301,11 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getDBRoomStats";
+      args: [roomId: string];
+    }
+  | {
+      id: number;
       method: "setDBRoomMessageData";
       args: [
         roomId: string,
@@ -502,6 +527,7 @@ export interface WorkerMethodReturnTypes {
   deleteDBPeerFromBlacklist: undefined;
   getDBMessageData: MessageData | undefined;
   getDBRoomMessageData: MessageData[];
+  getDBRoomStats: RoomStats;
   getDBChunk: ArrayBuffer | undefined;
   existsDBChunk: boolean;
   getDBNewChunk: NewChunk | undefined;

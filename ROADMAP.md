@@ -10,7 +10,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Shipped and running in the browser mesh as of 0.14.1:
+Shipped and running in the browser mesh as of 0.14.2:
 
 - protocol v4 — hybrid interactive 3DH ⊕ ML-KEM bootstrap, Ed25519-pinned
   identities, three chained confirmation flights, per-edge Double Ratchet;

@@ -98,12 +98,35 @@ export const verifyDtlsFingerprints = async (
   // matching is done against the forEach key, falling back to report.id.
   let localCertId: string | undefined;
   let remoteCertId: string | undefined;
+  let reportsCertificates = false;
   stats.forEach((report: RTCStatEntry) => {
     if (report.type === "transport") {
       localCertId = report.localCertificateId ?? localCertId;
       remoteCertId = report.remoteCertificateId ?? remoteCertId;
     }
+    if (report.type === "certificate") reportsCertificates = true;
   });
+
+  // Firefox implements neither the `transport` stat nor `certificate` rows, so
+  // this check cannot run there at all. Treating that as a mismatch failed
+  // every handshake and made the library unusable in Firefox, which is not a
+  // security win: it is the difference between "this browser cannot answer"
+  // and "this browser gave the wrong answer".
+  //
+  // What survives without it: both SDP fingerprints are already authenticated
+  // inside the handshake transcript, so an attacker who rewrites SDP still
+  // produces a transcript both peers reject. What is lost is the narrower
+  // tripwire below — catching a DTLS transport that terminates on a different
+  // certificate than the SDP advertised. Where the browser can answer, a
+  // disagreement is still fatal.
+  if (!reportsCertificates && localCertId === undefined) {
+    console.warn(
+      "p2party: this browser does not report WebRTC certificate statistics, " +
+        "so the post-connect DTLS certificate check cannot run. The SDP " +
+        "fingerprints remain bound into the authenticated handshake transcript.",
+    );
+    return;
+  }
 
   const certificateFingerprint = (id: string | undefined): string | null => {
     if (!id) return null;

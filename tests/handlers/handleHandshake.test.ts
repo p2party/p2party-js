@@ -1606,3 +1606,70 @@ describe("atomic edge-crypto activation (ratchet + initial PQ checkpoint)", () =
     if (second.responder.state) wipeRatchet(second.responder.state);
   });
 });
+
+describe("verifyDtlsFingerprints across browser stat support", () => {
+  const fpHex =
+    "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:" +
+    "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
+  const otherHex =
+    "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:" +
+    "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00";
+  const sdpWith = (fp: string) => `v=0\r\na=fingerprint:sha-256 ${fp}\r\n`;
+
+  const epcWithStats = (rows: [string, Record<string, string>][]) =>
+    ({
+      localDescription: { sdp: sdpWith(fpHex) },
+      remoteDescription: { sdp: sdpWith(fpHex) },
+      getStats: async () => new Map(rows),
+    }) as unknown as IRTCPeerConnection;
+
+  // Firefox implements neither the transport stat nor certificate rows, so the
+  // live-certificate check has nothing to read. Failing closed there rejected
+  // every handshake and made the library unusable in that browser, while
+  // catching no attacker: rewritten SDP still breaks the transcript.
+  test("a browser that reports no certificate statistics is allowed through", async () => {
+    const firefoxLike = epcWithStats([
+      ["CP", { type: "candidate-pair", state: "succeeded" }],
+      ["DC", { type: "data-channel", state: "open" }],
+    ]);
+    await verifyDtlsFingerprints(firefoxLike);
+  });
+
+  // Where the browser can answer, a disagreement is still fatal.
+  test("a browser that reports a mismatching certificate still fails closed", async () => {
+    const chromiumLike = epcWithStats([
+      [
+        "T",
+        {
+          type: "transport",
+          localCertificateId: "LC",
+          remoteCertificateId: "RC",
+        },
+      ],
+      ["LC", { type: "certificate", fingerprint: otherHex }],
+      ["RC", { type: "certificate", fingerprint: fpHex }],
+    ]);
+    await expect(verifyDtlsFingerprints(chromiumLike)).rejects.toThrow(
+      /local certificate/u,
+    );
+  });
+
+  // A transport stat naming a certificate that is absent is a truncated or
+  // tampered report, not a browser that cannot answer.
+  test("a certificate id that resolves to nothing still fails closed", async () => {
+    const truncated = epcWithStats([
+      [
+        "T",
+        {
+          type: "transport",
+          localCertificateId: "LC",
+          remoteCertificateId: "RC",
+        },
+      ],
+      ["RC", { type: "certificate", fingerprint: fpHex }],
+    ]);
+    await expect(verifyDtlsFingerprints(truncated)).rejects.toThrow(
+      /local certificate/u,
+    );
+  });
+});

@@ -238,28 +238,67 @@ shape; [docs/getting-started.md](docs/getting-started.md#send-cancel-and-read)
 covers reading inbound messages and the metadata-only read that avoids
 materializing large files.
 
-## Store-free session API
+## Cryptography without WebRTC
 
-`p2party/session` is the same cryptography without Redux, IndexedDB, WebRTC,
-signaling, `window` or `localStorage` — for Node, Bun, a native shell, or your
-own transport.
+`p2party/session` is the same protocol-v4 cryptography with no Redux, no
+IndexedDB, no WebRTC, no signaling, no `window` and no `localStorage` — for
+Node, Bun, a native shell, a CLI, or any transport you already have.
 
-You own the parts the browser root would otherwise own: reliable
-message-delimited transport for handshake flights, peer-key trust, storage of
-the ratchet snapshot under authenticated encryption with rollback protection,
-and the outer framing around each `EncryptedSessionMessage`. That last one is
-the usual surprise — the session hands back opaque fixed-size frames and
-expects the same back, so an adapter has to length- and version-check records
-itself.
+Nothing to configure. The WASM loads from the installed package, so this runs
+offline:
 
-The contract, a runnable two-party example, the envelope codec and the
-sparse-PQ healing hooks are in
-[docs/session-api.md](docs/session-api.md). A working script lives at
-[`examples/standalone-e2ee.ts`](examples/standalone-e2ee.ts):
+```ts
+import { generateSessionIdentity } from "p2party/session";
+
+const identity = await generateSessionIdentity();
+```
+
+Two peers, end to end. Each side needs the other's Ed25519 public key and a
+pair of byte pipes — `send` and `recv` over your socket, pipe, queue, or
+anything else that delivers whole messages in order:
+
+```ts
+import { createSession } from "p2party/session";
+
+const alice = await createSession({
+  role: "initiator",
+  identity: aliceIdentity,
+  peerIdentityEd25519PublicKey: bobPublicKey,
+  channel: binding,
+  transport: { send, recv },
+  mode: "nopin",
+});
+
+const sealed = await alice.encrypt(new TextEncoder().encode("hello bob"));
+const opened = await bob.decrypt(sealed);
+```
+
+`createSession()` runs the full handshake — 3DH ⊕ ML-KEM, Ed25519 cross-signed
+identities, three chained confirmations — and resolves with a live Double
+Ratchet. `encrypt()` returns uniform fixed-size frames; `decrypt()` takes them
+back. `serialize()` hands you a snapshot and `restoreSession()` resumes the
+same ratchet in a new process.
+
+Run the complete two-party script, healing exchange included:
 
 ```sh
 bun run examples/standalone-e2ee.ts
 ```
+
+Four things stay yours, because no library can decide them for you:
+
+| You own               | Because                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| Peer-key trust        | `peerIdentityEd25519PublicKey` must be pinned or explicitly TOFU-accepted; the session never guesses |
+| Message framing       | `encrypt()` returns opaque frames — your transport must delimit and length-check records itself      |
+| Snapshot storage      | `serialize()` is plaintext secret material: encrypt at rest, and protect against rollback            |
+| The `channel` binding | A channel id and two endpoint fingerprints, bound into the transcript so a relay cannot swap sides   |
+
+Outside WebRTC there are no DTLS fingerprints to bind, so derive the channel
+binding from whatever your transport authenticates — a TLS exporter, a session
+id, or random bytes both sides agree on out of band. The full contract, the
+envelope codec and the sparse-PQ healing hooks are in
+[docs/session-api.md](docs/session-api.md).
 
 ## Local, self-hosted, or release-pinned WASM
 
@@ -276,28 +315,59 @@ p2party.setWasmSourceUrl(
 ```
 
 The SRI check remains active, so a URL serving different bytes fails closed.
-`p2party/session` additionally accepts local bytes, which is the recommended
-Node, Bun, offline, and native path:
+
+### Download the WASM from the CDN
+
+Every release publishes its cryptographic module as an immutable, versioned
+object. The path carries the version, so a URL always names exactly one build
+and is safe to cache forever:
+
+```sh
+curl -O https://cdn.p2party.com/@0.14.0/libcrypto.wasm
+curl -O https://cdn.p2party.com/@0.14.0/libcrypto.provenance.json
+```
+
+Check what you downloaded before you serve it. The SHA-256 and the SRI value
+are both recorded in the provenance file that sits next to it:
+
+```sh
+shasum -a 256 libcrypto.wasm
+openssl dgst -sha384 -binary libcrypto.wasm | openssl base64 -A
+```
+
+For 0.14.0 those are
+`7eea31157e69ac61f3a512b624d5c210296302fd289fc2b65c63ecc31a056267` and
+`sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP`.
+They are the same bytes npm ships — the release workflow uploads the CDN object
+from the very tarball it publishes, then re-downloads and compares before
+`npm publish` runs, so the two can never diverge.
+
+Serve the file yourself and point the browser root at it with
+`setWasmSourceUrl()` above, or hand the bytes straight to `p2party/session`.
+
+On Node and Bun, `p2party/session` needs none of this: it reads the WASM from
+the installed package and checks it against the same pinned SHA-384, so an
+offline or air-gapped install works with no configuration and no network call.
+Supply `wasmBinary` only to override that — bytes you host, embed, or verify
+yourself:
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { generateSessionIdentity } from "p2party/session";
 
-const require = createRequire(import.meta.url);
-const wasmBinary = Uint8Array.from(
-  await readFile(require.resolve("p2party/libcrypto.wasm")),
-);
-
+const wasmBinary = await readFile("/opt/p2party/libcrypto.wasm");
 const identity = await generateSessionIdentity({ wasmBinary });
 ```
 
-The package also exports `p2party/libcrypto.provenance.json`. JavaScript and
-WASM are one release unit; do not pair 0.12 code with an older module. Omitting
-`wasmBinary` makes the session loader use the same immutable versioned CDN
-artifact as the browser root. The release gate executes packaged identity
-generation through both Node ESM and CommonJS, so non-browser entropy is tested
-at runtime rather than inferred from successful imports.
+The package also exports `p2party/libcrypto.provenance.json`, recording the
+libsodium and mlkem-native commits, the Emscripten release, and the artifact's
+digests. JavaScript and WASM are one release unit; never pair this release's
+JavaScript with an older module.
+
+The release gate runs packaged identity generation through both Node ESM and
+CommonJS, once with explicit bytes and once with no arguments at all — the
+second pass with `fetch` stubbed to throw, so a silent CDN fallback fails the
+release rather than surfacing later as a broken offline install.
 
 ## Development
 

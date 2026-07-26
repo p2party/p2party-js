@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import {
+  GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
 import pkg from "../package.json" with { type: "json" };
+
+const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 const requiredEnvironment = (name) => {
   const value = process.env[name]?.trim();
@@ -89,12 +93,39 @@ const headObject = async (key) => {
   }
 };
 
-const assertSameObject = (key, head, sha256) => {
-  const storedSha256 = head?.Metadata?.sha256;
-  if (storedSha256 !== sha256)
+/**
+ * Confirm a republish carries the same artifact, comparing what the browser
+ * would actually execute rather than the bytes we happen to have stored.
+ *
+ * The stored form is gzip, and a gzip stream embeds an MTIME in its header, so
+ * two runs over byte-identical input produce different gzip bytes. Comparing
+ * the compressed hash therefore reported a mismatch on every re-run of an
+ * already-published tag -- an immutability violation that had not happened.
+ *
+ * Fetching and decoding the object costs one GET per asset and answers the
+ * question that matters: is the published artifact the one this build made?
+ */
+const assertSameObject = async (key, head, compressedSha256, asset) => {
+  if (head?.Metadata?.sha256 === compressedSha256) return "identical bytes";
+
+  const published = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+  );
+  // The SDK transparently decodes Content-Encoding, so this is the artifact.
+  const publishedBytes = Buffer.from(
+    await published.Body.transformToByteArray(),
+  );
+  const localBytes =
+    asset.contentEncoding === "gzip"
+      ? gunzipSync(await readFile(asset.source))
+      : await readFile(asset.source);
+
+  if (!publishedBytes.equals(localBytes))
     throw new Error(
-      `refusing to replace immutable CDN object ${key}: existing SHA-256 is ${storedSha256 ?? "missing"}, release SHA-256 is ${sha256}`,
+      `refusing to replace immutable CDN object ${key}: published content is ` +
+        `${sha256Hex(publishedBytes)}, this release builds ${sha256Hex(localBytes)}`,
     );
+  return "identical content, different compression";
 };
 
 for (const asset of assets) {
@@ -103,8 +134,8 @@ for (const asset of assets) {
   const key = path.posix.join(`@${pkg.version}`, asset.keyName);
   const existing = await headObject(key);
   if (existing) {
-    assertSameObject(key, existing, sha256);
-    console.log(`Already published ${key} (${sha256})`);
+    const how = await assertSameObject(key, existing, sha256, asset);
+    console.log(`Already published ${key} (${how})`);
     continue;
   }
 
@@ -128,8 +159,8 @@ for (const asset of assets) {
     if (error?.$metadata?.httpStatusCode !== 412) throw error;
     const racedObject = await headObject(key);
     if (!racedObject) throw error;
-    assertSameObject(key, racedObject, sha256);
-    console.log(`Already published concurrently ${key} (${sha256})`);
+    const how = await assertSameObject(key, racedObject, sha256, asset);
+    console.log(`Already published concurrently ${key} (${how})`);
   }
 }
 

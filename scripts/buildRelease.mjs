@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -295,17 +296,34 @@ const validateDocumentedVersions = () => {
  * Both digests are over the decoded bytes, which is what SRI compares — the
  * CDN stores these objects gzipped and serves them with Content-Encoding.
  */
-const validateDocumentedIntegrity = () => {
-  const readme = readFileSync(path.join(projectRoot, "README.md"), "utf8");
-  for (const [label, staged] of [
-    ["browser bundle", "lib/index.min.js"],
-    ["database worker", "lib/db.worker.js"],
-  ]) {
-    const expected = sri(readFileSync(requireFile(staged)));
-    if (!readme.includes(expected))
-      fail(
-        `README does not document the ${label} SRI for this build (expected ${expected} for ${staged})`,
-      );
+const syncDocumentedIntegrity = () => {
+  const readmePath = path.join(projectRoot, "README.md");
+  let readme = readFileSync(readmePath, "utf8");
+  const before = readme;
+
+  const bundleSri = sri(readFileSync(requireFile("lib/index.min.js")));
+  const workerSri = sri(readFileSync(requireFile("lib/db.worker.js")));
+
+  // The README hands readers a <script integrity="..."> tag to paste, and a
+  // stale hash there is worse than none: the browser blocks the script, so
+  // every copy of that snippet breaks the moment a release changes the bundle.
+  //
+  // Rewritten rather than merely checked, the same way updateWasmIntegrity
+  // rewrites the pinned WASM SRI. Failing the build instead just meant a
+  // manual copy-paste on every bundle change, which is the kind of step that
+  // eventually gets skipped.
+  readme = readme.replace(
+    /integrity="sha384-[A-Za-z0-9+/=]+"/u,
+    `integrity="${bundleSri}"`,
+  );
+  readme = readme.replace(/`sha384-[A-Za-z0-9+/=]+`\./u, `\`${workerSri}\`.`);
+
+  if (!readme.includes(bundleSri))
+    fail("README has no <script integrity> tag to keep in sync");
+
+  if (readme !== before) {
+    writeFileSync(readmePath, readme);
+    console.log(`Updated README SRI -> ${bundleSri}`);
   }
 };
 
@@ -625,7 +643,7 @@ try {
   for (const bundle of ["lib/session.js", "lib/session.mjs"])
     validateBundle(bundle, expectedIntegrity);
   await validateSessionSurface();
-  validateDocumentedIntegrity();
+  syncDocumentedIntegrity();
 
   console.log("[5/7] Run the packaged standalone session example");
   const exampleOutput = run(bun, ["run", "examples/standalone-e2ee.ts"], {

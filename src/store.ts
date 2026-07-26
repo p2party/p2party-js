@@ -39,7 +39,17 @@ export const store = configureStore({
           `${signalingServerApi.reducerPath}.mutations`,
           `${signalingServerApi.reducerPath}.queries`,
         ],
-        ignoredActionPaths: ["payload", "error", "meta.baseQueryMeta"],
+        // RTK Query echoes the mutation's arguments back on every
+        // pending/fulfilled action, and those arguments are live WebRTC
+        // objects: an RTCDataChannel for a send, an RTCIceCandidate for a
+        // signal. They are handles, not data, and there is nothing to
+        // serialize about them.
+        ignoredActionPaths: [
+          "payload",
+          "error",
+          "meta.arg.originalArgs",
+          "meta.baseQueryMeta",
+        ],
       },
     }).concat([
       signalingServerApi.middleware,

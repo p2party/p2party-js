@@ -97,6 +97,48 @@ export const isTransferComplete = (
   transferId: string,
 ): boolean => edges.get(key(roomId, peerId, transferId))?.complete ?? false;
 
+export interface TransferAck {
+  readonly peerId: string;
+  /**
+   * Distinct chunks this peer has receipted so far, counting decoys: a receipt
+   * is emitted per inbound frame, and the padding is what makes every frame
+   * indistinguishable, so excluding it would report a fraction of a denominator
+   * that includes it.
+   */
+  readonly ackedChunks: number;
+  readonly complete: boolean;
+}
+
+/**
+ * Live outbound progress for one logical send, per peer.
+ *
+ * The sender already knows this -- every receipt lands in the have-set above --
+ * but nothing outside this module could read it, so a UI could say "sending"
+ * and then nothing at all until the transfer settled. On a large file that is
+ * a progress bar's worth of silence.
+ *
+ * Derived from the same state selective retransmit uses, so it cannot drift
+ * from what the sender actually believes was delivered. Read-only and
+ * defensively copied; polling it never affects the transfer.
+ */
+export const getTransferAcks = (
+  roomId: string,
+  transferId: string,
+): TransferAck[] => {
+  const prefix = `${roomId}\u0000`;
+  const suffix = `\u0000${transferId}`;
+  const acks: TransferAck[] = [];
+  for (const [edgeKey, state] of edges) {
+    if (!edgeKey.startsWith(prefix) || !edgeKey.endsWith(suffix)) continue;
+    acks.push({
+      peerId: edgeKey.slice(prefix.length, edgeKey.length - suffix.length),
+      ackedChunks: state.acked.size,
+      complete: state.complete,
+    });
+  }
+  return acks;
+};
+
 export const clearTransfer = (
   roomId: string,
   peerId: string,

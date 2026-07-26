@@ -131,6 +131,7 @@ import type {
 import type { KeyPair } from "./reducers/keyPairSlice";
 import type { RoomPolicyV1 } from "./roomPolicy";
 import type { SendMessageResult } from "./handlers/handleSendMessage";
+import { getTransferAcks } from "./handlers/reconcile";
 // Exported so consumers can narrow the rejection of `MessageTransferHandle.done`
 // and read its per-peer outcomes, rather than matching on an error message.
 import { MessageDeliveryError } from "./handlers/handleSendMessage";
@@ -1264,6 +1265,10 @@ export const p2party = {
   // openChannel,
   sendMessage,
   readMessage,
+  // Live outbound progress for one logical send: per peer, how many chunks
+  // that peer has receipted so far. Pair it with the message row's totalChunks
+  // for a percentage. Empty once the transfer is cleaned up.
+  getTransferAcks,
   // Read-only diagnostic: how many outbound chunks are held for one random
   // transfer ID. 0 after completion/abandonment. Content hashes are deliberately
   // not accepted because identical concurrent sends are independent.
@@ -1404,6 +1409,8 @@ export {
   validateRoomPolicyV1,
   WIRE_CHUNK_FRAME_LEN,
 };
+
+export type { TransferAck } from "./handlers/reconcile";
 
 export type {
   RoomAuthMode,

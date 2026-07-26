@@ -1,8 +1,8 @@
 ---
 title: L2 Server-Blind N-Party Rendezvous Architecture
-version: 0.1-proposed
+version: 0.2-proposed
 date_created: 2026-07-24
-last_updated: 2026-07-24
+last_updated: 2026-07-27
 owner: p2party maintainers
 tags:
   - architecture
@@ -30,6 +30,24 @@ policy values that the public `connect()` path rejects. As observed on
 bundle, so even the branch's fragment invite integration was not yet a
 production L2 property.
 
+Version 0.2 adds four things that 0.1 either forbade or did not consider, and
+each is a deliberate change rather than a clarification. A **single-replica
+L1.5 tier** now exists, so the architecture can run on one operator while
+naming precisely the property it therefore lacks; SEC-001 is unchanged as the
+bar for the L2a *label*. **Replica endpoints may be embedded in the invite**,
+so self-hosted and federated rooms work without a registry, at the stated cost
+that a room-unique replica set is itself a fingerprint and drops the room one
+tier. **Board groups** separate private-write sharing from replication, which
+0.1 conflated: under 0.1 every replica was a single point of failure, so an
+architecture built for censorship resistance could be disabled by taking one
+server offline. **Censorship resistance** itself becomes an explicit,
+separately labelled property under SEC-019 and Phase 9, on the principle that
+an adversary who cannot read the board can still stop anyone from reaching it,
+and that this is a transport problem the cryptography does not address.
+Phase 0 also gains measured figures — signaling record sizes,
+DPF cost by board size, delta-stream bandwidth, and the import-cycle count —
+that replace several earlier assumptions.
+
 ## 1. Purpose & Scope
 
 ### 1.1 Purpose
@@ -43,9 +61,17 @@ WebRTC edge, application payloads remain peer-to-peer.
 
 This specification covers:
 
-- fragment-only room invitations;
+- fragment-only room invitations, optionally carrying the room's replica
+  endpoints so a room can name self-hosted boards without a registry;
 - an authenticated, versioned room policy;
 - an epoch-based private presence board;
+- a single-replica L1.5 tier that runs the same wire protocol on one operator
+  and states plainly which property it does not provide;
+- board groups: private-write sharing *within* a group and replication
+  *across* groups, so replica failure or blocking is survivable;
+- censorship resistance of the control plane — multi-route board access,
+  probing resistance, and enumeration resistance — as a property measured and
+  labelled separately from graph blindness;
 - private pairwise signaling inboxes;
 - deterministic WebRTC offerer selection;
 - `n - 1` independently authenticated sessions per room member;
@@ -76,6 +102,7 @@ This specification covers:
 | DPF                   | Distributed Point Function; clients split a private point operation into shares sent to separate replicas.                                                                                                                                                                                      |
 | IT-PIR                | Information-Theoretic Private Information Retrieval; a client reads an index without any one non-colluding replica learning that index.                                                                                                                                                         |
 | L1                    | An opaque-address mode that may hide the room input but still exposes a common co-membership handle. L1 is not server-blind.                                                                                                                                                                    |
+| L1.5                  | Single-replica blind board. No common co-membership handle survives an epoch, reads are private by construction, and content and identities are blinded — but the one replica observes which position each source address writes. Strictly stronger than L1, strictly weaker than L2a.          |
 | L2a                   | Protocol-level target and identifier privacy: under the declared anytrust and cohort-schedule model, one replica cannot derive the room, stable peers, roster, or edges from private-query application data. Source-IP and timing inference remain separately visible unless L2b controls them. |
 | L2b                   | L2a plus network unlinkability against source-IP, timing, ingress, and co-operated TURN correlation.                                                                                                                                                                                            |
 | Presence board        | A short-lived fixed-capacity data structure used for private room-member discovery.                                                                                                                                                                                                             |
@@ -132,6 +159,31 @@ canonicalPolicy)` may key local room state; rotating epoch/edge handles may
 - **SEC-001**: The production L2a deployment shall use at least two replicas
   controlled by operationally independent entities. Two processes, accounts,
   or regions under one operator do not satisfy this requirement.
+- **SEC-001a**: A single-replica deployment shall be permitted, shall run the
+  identical wire protocol, and shall label itself **L1.5** — never L2a. The
+  reason the literature gives for this split is not a policy preference: read
+  privacy against one malicious replica is achievable by construction, and
+  write privacy against one replica is not, short of a TEE or single-server
+  computational PIR whose cost this specification rejects for the browser. An
+  L1.5 client shall therefore satisfy every requirement in this section except
+  SEC-003 (no private-write construction is available with one replica), and
+  shall in addition:
+  - obtain read privacy by construction, by fetching an epoch snapshot and
+    thereafter the identical append-only delta stream every other client
+    fetches. It shall not request an individual position, and it shall not use
+    tag-prefix bucketing, which spends anonymity linearly per poll and
+    exponentially across epochs (see the measured figures in Phase 0);
+  - emit the profile's fixed real-or-dummy write lanes, so the observable
+    write count does not reveal peer degree;
+  - surface the tier to the application as a read-only property, and refuse to
+    present any L2a-labelled UI string;
+  - state in user-facing documentation that the operator observes the source
+    address, the timing of every poll and write, and which board position was
+    written — and that raising `k` is what removes the last of those.
+- **SEC-001b**: Moving between tiers shall be an explicit configuration change
+  in the invite's replica set. A client shall never silently downgrade from a
+  multi-replica room to a single replica because replicas are unreachable;
+  that path is an availability error under SEC-010 and AC-005.
 - **SEC-002**: No one replica shall receive a room capability, room-derived
   common token, stable peer identity, explicit application-layer
   sender/recipient identifier, roster, raw SDP, raw ICE candidate, or DTLS
@@ -177,7 +229,23 @@ canonicalPolicy)` may key local room state; rotating epoch/edge handles may
 - **SEC-012**: Admission and abuse controls shall not introduce a stable
   application identity. Candidate mechanisms include unlinkable, rate-limited
   anonymous tokens such as Privacy Pass; an OPRF may support admission but
-  shall not become the rendezvous address.
+  shall not become the rendezvous address. Selection guidance: keyed-verification
+  credentials (ARC, `draft-ietf-privacypass-arc-crypto`) fit the single-replica
+  tier because issuer and verifier coincide and one issuance yields N mutually
+  unlinkable presentations; publicly verifiable Blind RSA tokens (RFC 9578 type
+  0x0002) fit board groups, because a replica must verify a token it did not
+  issue without contacting the issuer. Neither token type carries metadata, so
+  any room or epoch binding lives in the redemption context, not the token.
+- **SEC-012a**: Token issuance may be gated by payment, including
+  cryptocurrency, provided the payment channel cannot be linked to token
+  redemption. The unlinkability requirement is the whole of the design
+  constraint: a blind-signature issuance in the Chaum lineage satisfies it,
+  while any scheme where the issuer records a per-purchaser token serial, or
+  where an on-chain transaction is observable at redemption time, does not and
+  shall not ship. Payment introduces a second observer — the payment rail —
+  whose view shall be documented alongside the replica's. A deployment shall
+  keep a payment-free issuance path, so that inability to pay is never
+  equivalent to inability to establish a private room.
 - **SEC-013**: The implementation shall wipe expired epoch secrets and
   decrypted signaling records as soon as the application no longer needs them.
 - **SEC-014**: Room policy mismatch, replica-set mismatch, suite mismatch, or
@@ -197,6 +265,47 @@ canonicalPolicy)` may key local room state; rotating epoch/edge handles may
 - **SEC-018**: Clients shall prefetch/cache public profiles and replica
   descriptors independently of room activity. A profile fetch triggered only
   by one room join shall not qualify for the L2 label.
+- **SEC-019**: Censorship resistance is a distinct property from graph
+  blindness and shall be specified, measured, and labelled separately. A
+  network adversary who cannot read the board can still prevent it from being
+  reached, and an architecture whose privacy story depends on contacting
+  several replicas fails closed — correctly — when they are blocked. The
+  following are therefore requirements of the transport, not of the
+  cryptography:
+  - **SEC-019a**: A `ReplicaDescriptorV1` shall be able to name more than one
+    way to reach the same board — direct HTTPS, an Oblivious HTTP relay, a
+    CDN-fronted origin, or a browser-proxy transport in the manner of
+    Snowflake, which is a deployed WebRTC circumvention system and therefore
+    an unusually natural fit for a WebRTC application. Reaching a board by a
+    different route shall not change the record bytes, the schedule, or the
+    tier.
+  - **SEC-019b**: Board endpoints shall be resistant to active probing. A
+    censor that can confirm an endpoint speaks this protocol can block it by
+    address, which makes every other measure moot. Responses to unauthenticated
+    or malformed requests shall be indistinguishable from those of an unrelated
+    service, and admission tokens under SEC-012 are the intended gate. The
+    obfuscated-key-exchange literature is the reference for what "probing
+    resistance" has to mean formally; it shall not be asserted from the absence
+    of an obvious banner.
+  - **SEC-019c**: The fixed record sizes and fixed cadence required by SEC-005
+    and SEC-006 for anonymity also produce a distinctive traffic shape. Where
+    that shape is itself a blocking signature, the profile shall say so. A
+    uniform pattern unique to this protocol is good for the anonymity claim and
+    bad for the blocking claim, and the specification shall not pretend one
+    setting optimises both.
+  - **SEC-019d**: Blocking resistance shall not be claimed on the basis of
+    replica count alone. Two replicas in one jurisdiction, one CDN, or one
+    autonomous system are one blocking target; the profile shall record the
+    jurisdictional and network diversity of each board group, and the
+    measurement in §6.3 shall report reachability from censored vantage points
+    rather than from the maintainers' network.
+  - **SEC-019e**: Enumeration resistance is the reason embedded endpoints
+    (§4.1) exist alongside registered profiles. A small registry is the easiest
+    thing in this architecture to block: a censor need only collect the
+    published profile list. Permitting rooms to name self-hosted boards means
+    the set of reachable boards is not enumerable from any one document, at the
+    cost in cohort anonymity that §4.1 states. Deployments shall choose
+    knowingly between the two and shall not describe either as strictly better.
 
 ### 3.3 Metadata boundary
 
@@ -214,6 +323,14 @@ canonicalPolicy)` may key local room state; rotating epoch/edge handles may
   access schedule required to make L2's graph-blindness claim.
 - **CON-005**: The room-wide message-cover cadence is a separate authenticated
   policy field. It must not be inferred from the L2 query cadence.
+- **CON-006**: Censorship resistance under SEC-019 concerns reachability of the
+  rendezvous control plane only. It does not conceal that a user runs p2party
+  from an adversary with endpoint access, does not protect the WebRTC data
+  plane once peers connect directly, and does not survive an adversary willing
+  to block whole transports — CDNs, WebRTC, or UDP — rather than one service.
+  Where a deployment's blocking resistance rests on a shared circumvention
+  network, its capacity and health are an external dependency, and blocking
+  that network blocks p2party with it.
 
 ### 3.4 Engineering guidelines
 
@@ -304,15 +421,30 @@ type RendezvousProfileV1 = {
   maxSignalingFragmentsPerEdge: number;
 };
 
+type BoardGroupV1 = {
+  // Private-write shares are split WITHIN a group: privacy holds while one
+  // replica in the group is honest. A group of one is the L1.5 tier.
+  replicas: readonly ReplicaDescriptorV1[];
+  requiredWriteShares: number; // === replicas.length in the initial profile
+  requiredReadShares: number; // === replicas.length in the initial profile
+};
+
 type ReplicaSetProfileV1 = {
   profileVersion: 1;
   profileId: number;
   revision: number;
-  replicas: readonly ReplicaDescriptorV1[];
+  // Records are REPLICATED ACROSS groups: any one reachable group is
+  // sufficient to assemble a room, which is what makes replica failure and
+  // regional blocking survivable. Replication and share-splitting are
+  // deliberately on different axes; conflating them makes every replica a
+  // single point of failure.
+  groups: readonly BoardGroupV1[];
   contactAllReplicasEveryLane: true;
-  requiredWriteShares: number;
-  requiredReadShares: number;
-  maxColludingReplicas: number;
+  maxColludingReplicasPerGroup: number;
+  // A room is L2a only if EVERY group has >= 2 independently operated
+  // replicas. One group of one replica is L1.5 regardless of group count:
+  // replication buys availability, never write privacy.
+  tier: "L1.5" | "L2a";
 };
 ```
 
@@ -325,12 +457,50 @@ produce one byte representation per object. The policy/profile hashes are
 included in the existing room channel context. Free-form profile or algorithm
 strings are not permitted on the wire.
 
-The room policy references rendezvous and replica-set profiles by registered ID
-and content hash; it cannot embed an arbitrary room-specific replica list. The
-initial full-anytrust profile contacts every replica on every scheduled lane,
-sets both required share counts to `replicas.length`, and states
-`maxColludingReplicas = replicas.length - 1`. Any threshold construction with
-different privacy or availability semantics requires a new reviewed profile.
+The room policy references the rendezvous profile by registered ID and content
+hash. The replica set may either be referenced the same way or, for
+self-hosted and federated rooms, embedded directly in the invite as a list of
+board hostnames.
+
+Embedding is a deliberate, bounded exception to SEC-015, and it costs
+something real: a replica set unique to one room *is itself* a room
+fingerprint, which is exactly the common handle this architecture exists to
+remove. The rule that keeps both properties honest is therefore:
+
+- a room whose replica set matches a registered profile — one shared by a
+  measured anonymity cohort of many rooms — may carry the tier its group
+  structure earns;
+- a room with a novel replica set is functional, self-hosted, and federated,
+  but never earns L2a whatever its group structure, because a board selection
+  unique to one room distinguishes that room from every cohort member. Such a
+  room is labelled L1.5 and shall additionally disclose that its replica set is
+  itself an identifying feature. L1.5 is the floor: a novel set does not demote
+  a room below it, since the properties L1.5 names — no surviving common
+  handle, private reads, blinded content and identities — do not depend on
+  cohort membership.
+
+This preserves self-hosting and interoperability, which no registry-only
+design can offer, without letting a room-unique endpoint list be presented as
+cohort-anonymous.
+
+An embedded descriptor shall carry the board's Ed25519 public key, not only its
+hostname. A blind replica does not hold the room capability and therefore
+cannot authenticate its responses with anything capability-derived: what binds
+a response to a particular board is the signed epoch commitment of SEC-017, and
+verifying that signature requires the board's key. Relying on WebPKI alone
+would make a mis-issued certificate or a hijacked name sufficient to serve a
+forked view, which is the precise failure SEC-017 exists to catch. Verified
+encoding budget (Phase 0): capability plus two hostname-only descriptors is a
+128-character URL — a version-8 QR code at medium error correction and a single
+SMS segment — and adding the two 32-byte keys brings it to roughly 213
+characters, a version-10 QR code. The larger code is the correct trade.
+Registered profiles carry the same keys by reference rather than by value.
+
+The initial full-anytrust profile contacts every replica of every group on
+every scheduled lane, sets both required share counts within a group to that
+group's `replicas.length`, and states `maxColludingReplicasPerGroup =
+replicas.length - 1`. Any threshold construction with different privacy or
+availability semantics requires a new reviewed profile.
 
 The initial L2 runtime accepts only `messageCover.mode === "immediate"`.
 `scheduled-future` reserves the room-wide authenticated direction but remains
@@ -369,10 +539,22 @@ type PresencePlaintextV1 = {
 ```
 
 The client derives a fixed candidate set of bucket/subslot indexes from the
-room capability, epoch, and profile. It privately writes one candidate and
-privately reads the entire candidate set. Candidate selection, collision
-recovery, and capacity are profile parameters, not hidden implementation
-defaults.
+room capability, epoch, profile, **and the identifier of the board group being
+written to**. It privately writes one candidate and privately reads the entire
+candidate set. Candidate selection, collision recovery, and capacity are
+profile parameters, not hidden implementation defaults.
+
+Per-group derivation is load-bearing, not tidiness. A record replicated across
+groups at the same index would give any two groups that compare notes an
+immediate equality handle — the same common co-membership handle this whole
+architecture exists to remove, reintroduced by the availability mechanism. The
+exposure is worst exactly where the design is weakest: at L1.5 the write
+position is visible to the single replica of each group, so identical indexes
+across two groups would let two operators confirm they host the same room
+without any other information. Distinct per-group derivation means a colluding
+pair must break the underlying construction rather than compare integers.
+Record ciphertexts shall likewise be encrypted per group, so that byte equality
+does not reconstruct the same handle the index derivation just removed.
 
 The bootstrap inbox handle is a receive-only meeting point inside the
 capability-encrypted presence record; it is not a pairwise inbox seed. Every
@@ -559,6 +741,19 @@ including CPace for PIN-required rooms.
 - **AC-005**: Given one unavailable replica, when a room requires the full
   anytrust profile, then the client reports an explicit L2 availability failure
   and does not reveal the target to the remaining replica through a fallback.
+- **AC-005a**: Given a room whose profile defines two board groups, when every
+  replica of one group is unreachable or blocked, then the room still assembles
+  through the surviving group, no share is ever reassembled for a partial
+  group, and the tier label is unchanged.
+- **AC-005c**: Given a board reachable directly, through an OHTTP relay, and
+  through a fronted or proxied route, when the same record is written over each
+  route, then the bytes, sizes, and schedule observed at the replica are
+  identical, and an unauthenticated probe of the endpoint receives a response
+  indistinguishable from that of an unrelated service.
+- **AC-005b**: Given an L1.5 room, when the client polls the board, then it
+  fetches the epoch snapshot and the common delta stream only, never an
+  individual position; and the exposed tier property reads `L1.5` while no
+  L2a-labelled string is reachable in the UI.
 - **AC-006**: Given simultaneous writers that collide, when the next permitted
   retry epoch arrives, then clients recover using the profile-defined alternate
   slots without emitting extra demand-shaped requests.
@@ -634,7 +829,10 @@ Every research or release candidate shall report:
 - dummy-to-real control-plane traffic ratio;
 - classifier AUC or equivalent inference metric;
 - direct/TURN differences and L2a/L2b residuals;
-- behavior under one malicious, one unavailable, and colluding replicas.
+- behavior under one malicious, one unavailable, and colluding replicas;
+- reachability per board group from censored vantage points, the jurisdiction
+  and autonomous-system diversity of each group, and the accuracy of a flow
+  classifier trained to recognise the profile's traffic shape.
 
 ## 7. Rationale & Context
 
@@ -772,9 +970,18 @@ an unpadded variable tail or silently switch to legacy forwarding.
 
 ### 9.4 Replica failure
 
-If the required replica set cannot answer, the client presents an L2
-availability error. It may retry on the public schedule. It does not send the
-room token to the available server.
+If a replica within a group cannot answer, that whole group is unusable: the
+private-write shares are meaningless without every share, and the client shall
+not reassemble the write for the surviving replica, which would hand it the
+target position it was split to hide.
+
+If another group is reachable, the room proceeds there, because records are
+replicated across groups. This is the case the design is for — one operator
+seized, blocked, or offline, and the room continues. If no group is reachable,
+the client presents an L2 availability error and may retry on the public
+schedule. It never falls back to a smaller group, a different replica set, or
+legacy signaling, and it never sends the room token to whatever server happens
+to be available.
 
 ### 9.5 PIN room
 
@@ -821,6 +1028,59 @@ Implementation is conformant only when:
 
 **Gate:** accepted wire-format draft, dependency audit, test vectors, and
 quantitative prototype budget.
+
+**Measured inputs (2026-07-27).** The following were measured or derived from
+primary sources rather than assumed, and they narrow several Phase-0 choices.
+They are prototype-budget figures, not release evidence.
+
+- *Real signaling sizes*, from a headless Chromium data-channel-only offer with
+  trickle ICE: offer SDP 458 characters, answer 457, ICE candidates 128–150
+  (TURN relay 150–170), 4 candidates per side without TURN. The existing
+  `MAX_SDP_CHARS` of 256 KiB is a denial-of-service ceiling roughly 573× the
+  typical size and is not sizing guidance. A 1 KiB `signalingRecordBytes` holds
+  any single record with padding slack; 2 KiB holds an offer plus its bundled
+  candidates.
+- *DPF write cost* scales off a cliff with board size. Using the BGI16
+  construction at 128-bit security, per-write replica cost is roughly 4–30 ms
+  per core at 2^16 slots, 60–140 ms at 2^20, and 1–2 s at 2^24. Set
+  `presenceBucketSlots` at or below 2^16 and rotate epochs rather than growing
+  the board. Client key generation is sub-millisecond and keys are 0.5–1.5 KB,
+  so the browser is not the constraint; the replica is.
+- *DPF implementation path*: every surveyed C DPF library depends on hardware
+  AES, which WASM does not expose. Instantiating the PRG with ChaCha20 avoids
+  this, and libsodium already provides it inside the pinned `libcrypto.wasm`.
+  This is approximately 400–600 lines of new reviewed C compiled for both the
+  browser and the replica, not a second toolchain — but it is new
+  cryptographic code and SEC-011 applies to it in full.
+- *SEC-003 has an architectural cost that must be decided in Phase 0*:
+  preventing one malformed share from corrupting the board requires either
+  Express-style SNIP auditing, which needs a replica-to-replica channel within
+  a group, or a verifiable DPF at roughly double the evaluation cost. A
+  replica-to-replica channel is a real weakening of the "replicas share
+  nothing" story and shall be stated explicitly wherever the tier is
+  described.
+- *L1.5 read privacy is bandwidth-feasible only via delta streams*. Naive
+  whole-board download costs 1.02 MB per poll at 10^3 live 1 KiB cells and
+  102 MB at 10^5 — viable only at the smallest size. An epoch snapshot plus a
+  common append-only delta stream costs 1–5 KiB/s even at 10^4 cells and keeps
+  read privacy by construction, because every client fetches identical bytes.
+- *Tag-prefix bucketing is rejected as a bandwidth knob.* With b bits of
+  prefix and P concurrently active pairs, a replica intersects rotating bucket
+  sequences and uniquely links a pair after ceil(log2(P)/b) epochs: at b=4 and
+  P=10^4 that is 4 epochs, i.e. 20 minutes at 5-minute epochs. Bucketing does
+  not shrink the anonymity set, it schedules its collapse.
+- *Trickle ICE does not survive a polled board.* Per-candidate posting turns
+  each candidate into a separately timed write. Blind mode shall wait for
+  `icegatheringstatechange === "complete"` and post one complete-SDP record per
+  direction, which also makes `signalingWriteLanesPerEpoch` constant per edge.
+- *Invite encoding budget*: see §4.1. Two embedded hostname descriptors fit a
+  128-character URL, QR version 8-M, single SMS segment.
+- *Integration blocker, measured with `madge`*: the SDK currently has 62
+  elementary import cycles, not the ~11 the roadmap states. The store, the RTK
+  Query layer, and the handlers are mutually entangled such that no board
+  client can reuse `handleConnectToPeer` without importing the WebSocket API.
+  Extracting `RendezvousTransport` per GUD-006 is therefore a prerequisite to
+  Phase 1 rather than a cleanup that can follow it.
 
 ### Phase 1 — Store-free client core and simulator
 
@@ -929,10 +1189,36 @@ the exact deployed artifacts.
 **Gate:** only a separately reviewed and measured deployment may display an
 `L2b` label.
 
+### Phase 9 — Blocking resistance
+
+- Implement multi-route replica descriptors per SEC-019a so one board is
+  reachable directly, through an OHTTP relay, and through at least one
+  fronted or proxied route, with identical record bytes on every route.
+- Add probing resistance per SEC-019b and obtain review of it as a formal
+  property rather than as an absence of banners.
+- Record jurisdictional, CDN, and autonomous-system diversity per board group,
+  and measure reachability from censored vantage points rather than from the
+  maintainers' network.
+- Quantify the tension in SEC-019c: report what the fixed-size, fixed-cadence
+  traffic shape looks like to a flow classifier trained to find it, and state
+  the settings at which the anonymity claim and the blocking claim disagree.
+- Decide and document the registry-versus-embedded trade-off of SEC-019e for
+  the reference deployment.
+
+**Gate:** a blocking-resistance claim requires reachability measurements from
+real censored networks, a reviewed probing-resistance argument, and a published
+statement of which transports, if blocked wholesale, take p2party with them. No
+such claim may rest on replica count alone.
+
 ## 12. Related Specifications / Further Reading
 
 - [Protocol evolution decision log](../docs/protocol-evolution-decision-log.md)
 - [Prior art and related work](../docs/paper-prior-art-and-related-work.md)
+- [Rendezvous and federation prior art](../docs/rendezvous-prior-art.md) — the
+  link-verified annotated bibliography for this specification, including the
+  private-write/private-read literature, the deployed federation systems and
+  their documented metadata failures, the traffic-analysis evaluation bar, and
+  the blind-signature payment lineage behind SEC-012a
 - [Protocol-v3 security boundary](../docs/protocol-v3-security.md)
 - [Riposte: Anonymous Messaging at Scale](https://eprint.iacr.org/2015/824)
 - [Talek: Private Group Messaging with Hidden Access Patterns](https://eprint.iacr.org/2020/066)

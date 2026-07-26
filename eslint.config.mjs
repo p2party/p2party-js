@@ -17,7 +17,13 @@ export default [
       "eslint.config.mjs",
       "rollup.config.ts",
       "rollup.worker.config.ts",
-      "emsdk",
+      // Emscripten SDK checkouts. The release workflow caches the SDK into
+      // ./emsdk-cache inside the workspace, and emsdk ships its own
+      // eslint.config.mjs — `eslint .` then loads that config instead of this
+      // one and dies on its unresolvable @eslint/eslintrc import. A bare
+      // "emsdk" only matched a file of that exact name, so it never applied.
+      "emsdk/**",
+      "emsdk-cache/**",
       "src/cryptography/libcrypto.js",
     ],
   },

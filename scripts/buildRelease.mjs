@@ -287,6 +287,28 @@ const validateDocumentedVersions = () => {
   }
 };
 
+/**
+ * The README hands readers a `<script integrity="...">` tag to paste. A stale
+ * hash there is worse than none: the browser blocks the script outright, so
+ * every copy of that snippet breaks the moment a release changes the bundle.
+ *
+ * Both digests are over the decoded bytes, which is what SRI compares — the
+ * CDN stores these objects gzipped and serves them with Content-Encoding.
+ */
+const validateDocumentedIntegrity = () => {
+  const readme = readFileSync(path.join(projectRoot, "README.md"), "utf8");
+  for (const [label, staged] of [
+    ["browser bundle", "lib/index.min.js"],
+    ["database worker", "lib/db.worker.js"],
+  ]) {
+    const expected = sri(readFileSync(requireFile(staged)));
+    if (!readme.includes(expected))
+      fail(
+        `README does not document the ${label} SRI for this build (expected ${expected} for ${staged})`,
+      );
+  }
+};
+
 const validateBundle = (
   relativePath,
   expectedIntegrity,
@@ -603,6 +625,7 @@ try {
   for (const bundle of ["lib/session.js", "lib/session.mjs"])
     validateBundle(bundle, expectedIntegrity);
   await validateSessionSurface();
+  validateDocumentedIntegrity();
 
   console.log("[5/7] Run the packaged standalone session example");
   const exampleOutput = run(bun, ["run", "examples/standalone-e2ee.ts"], {

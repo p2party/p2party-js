@@ -19,8 +19,8 @@ npm run check
 
 ## Building from source
 
-Needed until 0.13.0 is on the registry, and whenever you change the
-cryptography. The release build reproduces the pinned WASM and fails rather
+Needed whenever you change the cryptography, and whenever you want to
+reproduce the published artifact yourself. The release build reproduces the pinned WASM and fails rather
 than emit an artifact it cannot attest, so the toolchain is exact:
 
 | Requirement | Version                                                      |

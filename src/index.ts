@@ -369,6 +369,152 @@ const joinRoom = async (
   return await waitForRoom(roomUrl, { timeoutMs, signal });
 };
 
+export interface WaitForPeersOptions extends WaitForRoomOptions {
+  /** Resolve once this many peers have completed the handshake. Default 1. */
+  count?: number;
+}
+
+/**
+ * Resolve once `count` peers in the room have finished authenticating.
+ *
+ * A room having an id says nothing about whether anyone can receive a message:
+ * `sendMessage` to a room with no authenticated peer rejects. Callers were
+ * writing their own store subscription and peer-count poll to bridge that gap.
+ */
+const waitForPeers = async (
+  roomId: string,
+  options: WaitForPeersOptions = {},
+): Promise<Peer[]> => {
+  const { count = 1, timeoutMs = DEFAULT_ROOM_TIMEOUT_MS, signal } = options;
+
+  const ready = (): Peer[] | undefined => {
+    const room = roomSelector(store.getState()).find(
+      (candidate) => candidate.id === roomId,
+    );
+    if (!room) return undefined;
+    // A peer with a recorded handshake status counts only when authenticated;
+    // rooms that predate the status map fall back to presence.
+    const statuses = room.handshakeStatusByPeer;
+    const authenticated = statuses
+      ? room.peers.filter(
+          (peer) => statuses[peer.peerId]?.status === "authenticated",
+        )
+      : room.peers;
+    return authenticated.length >= count ? authenticated : undefined;
+  };
+
+  const already = ready();
+  if (already) return already;
+  if (signal?.aborted)
+    throw new Error("Waiting for peers was aborted before it started");
+
+  return await new Promise<Peer[]>((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const timer = setTimeout(() => {
+      finish(() => {
+        reject(
+          new Error(
+            `Only ${String(ready()?.length ?? 0)} of ${String(count)} peer(s) authenticated within ${String(timeoutMs)}ms`,
+          ),
+        );
+      });
+    }, timeoutMs);
+    const onAbort = () => {
+      finish(() => {
+        reject(new Error("Waiting for peers was aborted"));
+      });
+    };
+    function finish(settle: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      unsubscribe();
+      settle();
+    }
+    const inspect = () => {
+      const peers = ready();
+      if (peers)
+        finish(() => {
+          resolve(peers);
+        });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    unsubscribe = store.subscribe(inspect);
+    inspect();
+  });
+};
+
+export interface InboundMessage {
+  readonly roomId: string;
+  readonly fromPeerId: string;
+  readonly merkleRootHex: string;
+  readonly filename: string;
+  readonly size: number;
+  /** Text for a text message; a Blob for a completed file. */
+  readonly message: string | Blob;
+}
+
+/**
+ * Call `handler` once for each message that finishes arriving in a room.
+ *
+ * Without this, every application reimplements the same loop: subscribe to the
+ * store, diff the room's `messages` array against what it saw last time, skip
+ * anything still in flight, and call `readMessage` to decode. Returns an
+ * unsubscribe function.
+ *
+ * Handler errors are caught and logged rather than allowed to escape into the
+ * store's notify loop, where they would break unrelated subscribers.
+ */
+const onMessage = (
+  roomId: string,
+  handler: (message: InboundMessage) => void,
+): (() => void) => {
+  const delivered = new Set<string>();
+
+  const inspect = () => {
+    const room = roomSelector(store.getState()).find(
+      (candidate) => candidate.id === roomId,
+    );
+    if (!room) return;
+
+    for (const message of room.messages) {
+      const key = message.merkleRootHex;
+      if (!key || delivered.has(key)) continue;
+      // Only once every byte has landed; a partial read would hand the caller
+      // a truncated file and no way to tell.
+      if (!(message.totalSize > 0 && message.savedSize >= message.totalSize))
+        continue;
+      delivered.add(key);
+
+      void readMessage(key, message.sha512Hex)
+        .then((opened) => {
+          try {
+            handler({
+              roomId,
+              fromPeerId: message.fromPeerId,
+              merkleRootHex: key,
+              filename: opened.filename,
+              size: opened.size,
+              message: opened.message,
+            });
+          } catch (error) {
+            console.error("p2party: onMessage handler threw", error);
+          }
+        })
+        .catch((error: unknown) => {
+          delivered.delete(key);
+          console.error("p2party: could not read message", key, error);
+        });
+    }
+  };
+
+  const unsubscribe = store.subscribe(inspect);
+  inspect();
+  return unsubscribe;
+};
+
 const connectToSignalingServer = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
@@ -1164,6 +1310,8 @@ export const p2party = {
   MessageDeliveryError,
   joinRoom,
   waitForRoom,
+  waitForPeers,
+  onMessage,
   setDebugLogging,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   // 100%-full cells make identical content roots deterministic. Keep at least
@@ -1222,6 +1370,8 @@ export {
   MessageDeliveryError,
   joinRoom,
   waitForRoom,
+  waitForPeers,
+  onMessage,
   setDebugLogging,
 };
 

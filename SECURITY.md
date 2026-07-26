@@ -23,9 +23,9 @@ fix to reach supported clients before publishing details.
 
 ## Supported version
 
-Protocol v3 on the default branch and the newest published protocol-v3 npm
-release are supported. Older wire protocols are rejected rather than
-negotiated.
+Protocol v4 on the default branch, and the newest published protocol-v4 release.
+Older wire protocols are rejected rather than negotiated: v4 does not resume v3
+peers or persisted v3 crypto rows.
 
 ## Cryptographic scope
 
@@ -34,13 +34,13 @@ the authenticated handshake, message ratchet, chunk protocol, and persistent
 client state. It has not completed an independent third-party security audit;
 avoid claims to the contrary.
 
-The currently shipped connection path uses immediate delivery and the legacy
-signaling rendezvous. Its operator can observe room membership, identity public
-keys, peer IDs, IP/network metadata, timing, and TURN use. Scheduled timing
-cover, server-blind rendezvous, and the private BitTorrent extension are not
-currently wired public guarantees. A sparse post-quantum healing state-machine
-core is implemented and tested, but its production persistence, authenticated
-control routing, message-key integration, and scheduler wiring remain gated.
+What is and is not a shipped guarantee is stated in one place —
+[docs/protocol-v4-security.md](docs/protocol-v4-security.md) — and deliberately
+not repeated here, because two copies of that boundary drift and the stale one
+is the one somebody reads. Read it before treating any property as deployed.
 
-An `RTCDataChannel` becoming open proves transport readiness, not completion of
-the protocol-v3 identity and key-confirmation transcript.
+Two limits are worth restating because they are the ones most often assumed
+away: the legacy signaling operator can observe room membership, identity
+public keys, peer IDs, network metadata and timing; and an `RTCDataChannel`
+becoming open proves transport readiness, not completion of the protocol-v4
+identity and key-confirmation transcript.

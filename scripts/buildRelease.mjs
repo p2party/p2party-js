@@ -214,6 +214,77 @@ const validateCryptoProvenance = (provenance, wasmBytes) => {
     fail("crypto provenance has an incorrect WASM SRI");
 };
 
+/**
+ * Documentation must never name a version other than this release's.
+ *
+ * Every doc that prints an install command, a CDN path or a vendored directory
+ * hardcodes the version, and each release they silently keep pointing at the
+ * previous one — a reader then installs, or self-hosts, the wrong artifact. The
+ * version in package.json is the single source of truth; this makes shipping a
+ * doc that disagrees with it a release failure rather than a later bug report.
+ */
+const validateDocumentedVersions = () => {
+  const current = packageJson.version;
+
+  // Scanning for a bare \d+\.\d+\.\d+ is unusable here: the docs also pin Node
+  // 24.11.1, Bun 1.3.14, Emscripten 6.0.3 and a dozen dependency versions.
+  // Instead, take the set of versions this project has ever released — the
+  // CHANGELOG headings — and treat any of them except the current one as a
+  // stale reference. That cannot fire on a toolchain pin, and it needs no
+  // maintenance: a version becomes checkable the moment it is released.
+  const released = new Set(
+    [
+      ...readFileSync(path.join(projectRoot, "CHANGELOG.md"), "utf8").matchAll(
+        /^## \[(\d+\.\d+\.\d+)\]/gm,
+      ),
+    ].map(([, version]) => version),
+  );
+  released.delete(current);
+  if (released.size === 0) return;
+
+  const stale = new RegExp(
+    `(?<![\\d.])(${[...released].map((v) => v.replaceAll(".", "\\.")).join("|")})(?![\\d.])`,
+    "g",
+  );
+
+  // Scan every tracked Markdown file rather than an allowlist: a doc added
+  // next release is then covered without anyone remembering to register it,
+  // which is exactly how ROADMAP.md drifted to a stale version unnoticed.
+  //
+  // The exemptions are the files whose purpose is to record history, where
+  // naming an old version is correct and rewriting it would be a lie:
+  // CHANGELOG.md and the two decision logs. Vendored and submodule trees carry
+  // upstream's versions, not ours.
+  const documentation = execFileSync(
+    "git",
+    [
+      "ls-files",
+      "*.md",
+      ":!:CHANGELOG.md",
+      ":!:docs/design-decisions-and-security-findings.md",
+      ":!:docs/protocol-evolution-decision-log.md",
+      ":!:libsodium/**",
+      ":!:src/cryptography/vendor/**",
+    ],
+    { cwd: projectRoot, encoding: "utf8" },
+  )
+    .split("\n")
+    .filter(Boolean);
+
+  for (const relativePath of documentation) {
+    const absolute = path.join(projectRoot, relativePath);
+    if (!existsSync(absolute)) continue;
+    readFileSync(absolute, "utf8")
+      .split("\n")
+      .forEach((line, index) => {
+        for (const [version] of line.matchAll(stale))
+          fail(
+            `${relativePath}:${index + 1} names released version ${version}, but this release is ${current} — ${line.trim()}`,
+          );
+      });
+  }
+};
+
 const validateBundle = (
   relativePath,
   expectedIntegrity,
@@ -305,6 +376,7 @@ const validatePackList = (packResult) => {
     "docs/session-api.md",
     "docs/protocol-v4-security.md",
     "docs/references.md",
+    "docs/wire-format.md",
     "docs/assets/p2party-cat.svg",
     "examples/standalone-e2ee.ts",
     "lib/index.js",
@@ -395,6 +467,8 @@ try {
       `Emscripten ${expectedEmscriptenVersion} is required; found ${emscriptenBanner.split("\n", 1)[0]}`,
     );
 
+  validateDocumentedVersions();
+
   console.log("[1/7] Compile production WASM and update its pinned SRI");
   run(npm, ["run", "--silent", "predist"], {
     env: { EM_CACHE: emscriptenCache },
@@ -465,12 +539,14 @@ try {
       path.join(stageRoot, fileName),
     );
 
-  for (const fileName of [
-    "getting-started.md",
-    "session-api.md",
-    "protocol-v4-security.md",
-    "references.md",
-  ])
+  // Derived from package.json `files` rather than restated: a hand-kept second
+  // list desynced once already, when a doc rename left protocol-v3-security.md
+  // here and every release died at this copy.
+  const packagedDocs = packageJson.files
+    .filter((entry) => entry.startsWith("docs/") && entry.endsWith(".md"))
+    .map((entry) => entry.slice("docs/".length));
+
+  for (const fileName of packagedDocs)
     copyFileSync(
       path.join(projectRoot, "docs", fileName),
       path.join(stageRoot, "docs", fileName),

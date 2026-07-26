@@ -29,6 +29,15 @@ const createPlugins = (includeIndexedDbWorker) => {
         }
       : {}),
     "process.env.P2PARTY_VERSION": JSON.stringify(packageJson.version),
+    // The browser root has no filesystem, so its WASM always comes from the
+    // network under SRI. Folding this to "false" lets terser drop the Node
+    // local-read branch entirely, which keeps `import("node:fs/promises")` out
+    // of the browser bundle — terser constant-folds indirect specifiers back
+    // into literals, and a downstream Vite/webpack build would then try to
+    // resolve a node: builtin it can never satisfy.
+    "process.env.P2PARTY_LOCAL_WASM": JSON.stringify(
+      includeIndexedDbWorker ? "false" : "true",
+    ),
     "process.env.NODE_ENV": isDist
       ? JSON.stringify("production")
       : JSON.stringify("development"),

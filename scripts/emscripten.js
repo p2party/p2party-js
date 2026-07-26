@@ -361,7 +361,26 @@ try {
       throw new Error(`Missing generated artifact: ${generatedPath}`);
 
   const wasmBytes = fs.readFileSync(stagedWasmPath);
-  const emscriptenVersion = capture("emcc", ["--version"]).split("\n", 1)[0];
+
+  // Record the semantic version, not emcc's banner line.
+  //
+  // That banner varies by how Emscripten was installed even when the compiler
+  // is the same release: Homebrew builds from source and stamps "6.0.3-git",
+  // while emsdk ships the tagged build and stamps "6.0.3 (<commit>)". Both
+  // produce a byte-identical libcrypto.wasm. Committing the raw banner made
+  // this file un-reproducible for anyone whose install method differed from
+  // whoever last generated it — the release CI failed exactly this way, on a
+  // cosmetic string, while the artifact it attests was identical.
+  //
+  // The digests below are what make the build verifiable; pinning the exact
+  // release line is what makes them re-derivable. Anyone with any Emscripten
+  // 6.0.3 can now reproduce both the WASM and this file.
+  const emscriptenBanner = capture("emcc", ["--version"]).split("\n", 1)[0];
+  const emscriptenVersion = /\b(\d+\.\d+\.\d+)\b/.exec(emscriptenBanner)?.[1];
+  if (!emscriptenVersion)
+    throw new Error(
+      `Could not parse an Emscripten version from: ${emscriptenBanner}`,
+    );
   const provenance = {
     schemaVersion: 1,
     sources: {

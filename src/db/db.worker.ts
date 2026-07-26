@@ -29,6 +29,7 @@ import type {
   BlacklistedPeer,
   UsernamedPeer,
   UniqueRoom,
+  RoomStats,
   NewChunk,
   NewChunkSelector,
   RatchetSession,
@@ -406,6 +407,55 @@ async function fnGetDBMessageData(
 
     return undefined;
   }
+}
+
+/**
+ * Aggregate one room's transfer history without shipping it anywhere.
+ *
+ * The alternative is handing every MessageData row to the main thread so the
+ * UI can sum a few numbers, which for a room with thousands of messages means
+ * serialising thousands of objects across the worker boundary on every render
+ * of a list. The index is here; the arithmetic belongs here too.
+ *
+ * `transferId` is written only on rows this device sent, so it is also the
+ * sent/received discriminator -- there is no need to know our own peer id.
+ */
+async function fnGetDBRoomStats(roomId: string): Promise<RoomStats> {
+  const db = await getDB();
+  const messages = await db.getAllFromIndex("messageData", "roomId", roomId);
+  db.close();
+
+  const peerIds = new Set<string>();
+  let bytesSent = 0;
+  let bytesReceived = 0;
+  let messagesSent = 0;
+  let messagesReceived = 0;
+
+  for (const message of messages) {
+    // totalSize is the logical message size; savedSize is how much of it has
+    // landed. A cancelled or in-flight receive must not inflate the total.
+    const sent = message.transferId !== undefined;
+    const bytes = sent ? message.totalSize : message.savedSize;
+
+    if (sent) {
+      bytesSent += bytes;
+      messagesSent += 1;
+    } else {
+      bytesReceived += bytes;
+      messagesReceived += 1;
+      if (message.fromPeerId.length > 0) peerIds.add(message.fromPeerId);
+    }
+  }
+
+  return {
+    messageCount: messages.length,
+    messagesSent,
+    messagesReceived,
+    bytesSent,
+    bytesReceived,
+    bytesTotal: bytesSent + bytesReceived,
+    peerIds: [...peerIds],
+  };
 }
 
 async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
@@ -2432,6 +2482,9 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "getDBRoomMessageData":
         result = await fnGetDBRoomMessageData(...message.args);
+        break;
+      case "getDBRoomStats":
+        result = await fnGetDBRoomStats(...message.args);
         break;
       case "setDBRoomMessageData":
         await fnSetDBRoomMessageData(...message.args);

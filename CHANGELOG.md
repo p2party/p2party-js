@@ -4,6 +4,23 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.2] — 2026-07-26
+
+### Added
+
+- `getRoomStats(roomId)`. Aggregate history for one saved room: message counts
+  split into sent and received, byte totals for each direction, and the
+  distinct peers this device has received from. The arithmetic runs inside the
+  database worker rather than shipping every `MessageData` row to the main
+  thread so a UI can sum a few numbers, which for a busy room means serialising
+  thousands of objects across the worker boundary on every render.
+
+  Sizes are logical message bytes, not wire bytes. p2party pads everything to
+  uniform 65,490-byte cells, so what crossed the network is always larger and
+  is a property of the padding policy rather than of the conversation.
+  A partially received message counts what arrived, not what was promised, so
+  an abandoned transfer cannot inflate the total.
+
 ## [0.14.1] — 2026-07-26
 
 Cross-browser and release-integrity fixes. No wire change: 0.14.0 and 0.14.1

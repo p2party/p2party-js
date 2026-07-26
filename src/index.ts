@@ -22,6 +22,7 @@ import {
   getReceiveFile,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
+  getDBRoomStats,
   deleteIdentityEd25519,
   deleteIdentityX25519,
   getDBAddressBookEntry,
@@ -121,7 +122,12 @@ import type {
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
-import type { BlacklistedPeer, UsernamedPeer, UniqueRoom } from "./db/types";
+import type {
+  BlacklistedPeer,
+  UsernamedPeer,
+  UniqueRoom,
+  RoomStats,
+} from "./db/types";
 import type { KeyPair } from "./reducers/keyPairSlice";
 import type { RoomPolicyV1 } from "./roomPolicy";
 import type { SendMessageResult } from "./handlers/handleSendMessage";
@@ -1254,6 +1260,7 @@ export const p2party = {
   getPeerIsBlacklisted: getDBPeerIsBlacklisted,
   removePeerFromBlacklist: deleteDBPeerFromBlacklist,
   getAllExistingRooms: getAllDBUniqueRooms,
+  getRoomStats: getDBRoomStats,
   // openChannel,
   sendMessage,
   readMessage,
@@ -1348,6 +1355,7 @@ export type {
   UsernamedPeer,
   BlacklistedPeer,
   UniqueRoom,
+  RoomStats,
   SignalingState,
   KeyPair,
   RoomPolicyV1,

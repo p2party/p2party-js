@@ -156,6 +156,9 @@ export const getDBMessageData = (merkleRootHex?: string, hashHex?: string) =>
 export const getDBRoomMessageData = (roomId: string) =>
   callWorker("getDBRoomMessageData", roomId);
 
+export const getDBRoomStats = (roomId: string) =>
+  callWorker("getDBRoomStats", roomId);
+
 export const setDBRoomMessageData = (
   roomId: string,
   merkleRootHex: string,

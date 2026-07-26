@@ -65,3 +65,8 @@ docs/e2e/frontend-audit-report.md
 # lockfile would silently diverge from it.
 bun.lock
 bun.lockb
+
+# Emscripten SDK checkouts inside the workspace (the release workflow
+# caches into ./emsdk-cache). Tools that walk the tree must not see them.
+emsdk/
+emsdk-cache/

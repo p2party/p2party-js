@@ -119,6 +119,9 @@ rejects on a timeout rather than waiting forever, and takes an `AbortSignal` if
 the user navigates away:
 
 ```ts
+const controller = new AbortController();
+// controller.abort() on unmount, route change, or a Cancel button.
+
 const room = await p2party.joinRoom(invite, undefined, undefined, {
   timeoutMs: 10_000,
   signal: controller.signal,
@@ -345,6 +348,33 @@ const identity = await generateSessionIdentity();
 
 ### Two peers, both sides
 
+The session needs one thing from you: a transport. `send` hands off a message,
+`recv` resolves with the next one. Whole messages, in order, no partial reads —
+a WebSocket, a TCP socket with length prefixes, or a queue all qualify. An
+in-memory pipe is enough to run both peers in one process:
+
+```ts
+// One one-way pipe. Two of these make a full-duplex transport.
+const makeLink = () => {
+  const queued: Uint8Array[] = [];
+  const waiters: Array<(bytes: Uint8Array) => void> = [];
+  return {
+    send(bytes: Uint8Array) {
+      const owned = Uint8Array.from(bytes); // copy: the caller reuses buffers
+      const waiter = waiters.shift();
+      if (waiter) waiter(owned);
+      else queued.push(owned);
+    },
+    recv(): Promise<Uint8Array> {
+      const bytes = queued.shift();
+      return bytes
+        ? Promise.resolve(bytes)
+        : new Promise((resolve) => waiters.push(resolve));
+    },
+  };
+};
+```
+
 Alice and Bob each generate a long-term identity, exchange Ed25519 public keys
 out of band, agree on a channel binding, and hand the session two byte pipes.
 Nothing below is elided — this is the whole setup:
@@ -443,12 +473,18 @@ rejected; out-of-order arrival is tolerated within a bounded skipped-key window.
 ### Suspend and resume
 
 ```ts
+import { restoreSession } from "p2party/session";
+
 const snapshot = await alice.serialize(); // plaintext secret — encrypt at rest
 await alice.destroy();
 
 const restored = await restoreSession(snapshot);
+
 // Same ratchet, same counters. Bob notices nothing.
-console.log(decoder.decode(await restored.decrypt(await bob.encrypt(msg))));
+const later = await bob.encrypt(encoder.encode("still there?"));
+console.log(decoder.decode(await restored.decrypt(later))); // "still there?"
+
+snapshot.fill(0);
 ```
 
 Run the complete two-party script — including the sparse post-quantum healing
@@ -489,6 +525,7 @@ const mnemonic = await p2party.generateMnemonic(256); // 24 words
 const keyPair = await p2party.keyPairFromMnemonic(mnemonic); // deterministic
 const fresh = await p2party.newKeyPair(); // or just random
 
+const bytes = new TextEncoder().encode("anything you want attributable");
 const signature = await p2party.sign(bytes, keyPair.secretKey);
 const ok = await p2party.verify(bytes, signature, keyPair.publicKey);
 ```
@@ -498,10 +535,17 @@ validate before anything touches the network — useful for showing two peers
 that they really are about to join the same room:
 
 ```ts
+const policy = { ...p2party.DEFAULT_ROOM_POLICY_V1 } satisfies RoomPolicyV1;
+
 const encoded = p2party.encodeRoomPolicyV1(policy); // canonical bytes
 const digest = await p2party.hashRoomPolicyV1(policy); // stable identifier
-const same = p2party.roomPoliciesEqualV1(mine, theirs);
 p2party.validateRoomPolicyV1(policy); // throws with the offending field
+
+// Peers fail closed on a policy mismatch, so compare before you connect and
+// you can say *which* setting differs instead of surfacing a failed handshake.
+// `encoded` here stands in for the canonical bytes the other peer sent you.
+const theirs = p2party.decodeRoomPolicyV1(encoded);
+const agreed = p2party.roomPoliciesEqualV1(policy, theirs);
 ```
 
 **The ratchet, step by step.** A `P2PartySession` exposes each operation
@@ -517,9 +561,51 @@ individually rather than only a send/receive loop:
 | `pqEpoch`, `healingInProgress`, `canEncrypt` | Inspect live state                                         |
 | `destroy`                                    | Wipe key material                                          |
 
-Driving healing yourself has one hard rule: whenever a call returns a frame,
-`serialize()` **before** you send it. A crash between sending and persisting
-forks the OFFER/ADVANCE/ACK sequence and the epoch fails closed.
+**Driving the ratchet by hand.** Nothing turns the ratchet on a timer. Each
+`encrypt()` advances it one step, and post-quantum healing runs only when you
+ask. A complete exchange, both sides, from a live session:
+
+```ts
+// The ratchet advances per message, and you can watch it do so.
+console.log(alice.pqEpoch); // 0n before any healing exchange
+
+// Healing is due after 64 messages or 24 hours, and only on your turn.
+// prepareHealing() returns { frame: null } when it is neither.
+const offer = await alice.prepareHealing();
+
+if (offer.frame) {
+  // THE RULE: persist before the frame leaves. A crash after sending but
+  // before persisting loses the ephemeral KEM secret, and the two sides then
+  // disagree about the epoch. That is a dead session, not a slow one.
+  await alice.serialize();
+  const advance = await bob.acceptControlFrame(offer.frame); // OFFER  -> ADVANCE
+
+  await bob.serialize();
+  const ack = await alice.acceptControlFrame(advance.frame!); // ADVANCE -> ACK
+
+  await alice.serialize();
+  await bob.acceptControlFrame(ack.frame!); // ACK -> done
+
+  console.log(alice.pqEpoch, bob.pqEpoch); // 1n 1n
+}
+
+// If a flight is dropped, re-send the exact same bytes. Do not call
+// prepareHealing() again — fresh randomness forks the exchange.
+const retry = await alice.pendingControl();
+if (retry) transport.send(retry);
+```
+
+`healingInProgress` is true while an exchange is open, and application traffic
+is blocked until it closes. That is deliberate: a message encrypted under an
+ambiguous epoch is worse than a message delayed by one round trip.
+
+Every `serialize()` above sits **before** its send, and that ordering is the
+whole contract. `requiresPersistBeforeSend` on the returned
+`SessionControlOutput` tells you when a durable write is genuinely required, so
+you can skip the disk hit on an exact duplicate response.
+
+[`examples/standalone-e2ee.ts`](examples/standalone-e2ee.ts) runs this end to
+end, including the 64 messages that make an exchange due.
 
 The lower-level primitives — X25519, HKDF-SHA512, ML-KEM, CPace, the Merkle
 tree, the raw ratchet — are deliberately _not_ exported. They are easy to

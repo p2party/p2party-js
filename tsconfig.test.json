@@ -3,8 +3,11 @@
   "compilerOptions": {
     "types": ["bun", "@types/node", "@reduxjs/toolkit", "immer"],
     "noUnusedLocals": false,
-    "noEmit": true
+    "noEmit": true,
+    // Tests live in tests/, outside the package rootDir of src/. This config
+    // only typechecks, so widening the root emits nothing.
+    "rootDir": "."
   },
-  "include": ["src/**/*.test.ts", "src/**/*.spec.ts"],
+  "include": ["tests/**/*.test.ts", "tests/**/*.spec.ts"],
   "exclude": ["node_modules"]
 }

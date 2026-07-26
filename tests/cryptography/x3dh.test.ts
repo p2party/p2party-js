@@ -1,0 +1,90 @@
+import { describe, expect, test } from "bun:test";
+
+import { loadTestModule } from "../../src/cryptography/testModule";
+import { x25519Keypair } from "../../src/cryptography/x25519";
+import { deriveInteractive3dhSecret } from "../../src/cryptography/x3dh";
+
+describe("x3dh", () => {
+  test("initiator and responder derive the same 32-byte secret", async () => {
+    const module = await loadTestModule();
+
+    const IKa = x25519Keypair(module);
+    const IKb = x25519Keypair(module);
+    const EKa = x25519Keypair(module);
+    const EKb = x25519Keypair(module);
+
+    const sa = deriveInteractive3dhSecret(
+      IKa.secretKey,
+      IKb.publicKey,
+      EKa.secretKey,
+      EKb.publicKey,
+      true,
+      module,
+    );
+    const sb = deriveInteractive3dhSecret(
+      IKb.secretKey,
+      IKa.publicKey,
+      EKb.secretKey,
+      EKa.publicKey,
+      false,
+      module,
+    );
+
+    expect(sa.length).toBe(32);
+    expect(Buffer.from(sa)).toEqual(Buffer.from(sb));
+  });
+
+  test("a substituted peer identity breaks agreement", async () => {
+    const module = await loadTestModule();
+    const IKa = x25519Keypair(module);
+    const IKb = x25519Keypair(module);
+    const IKevil = x25519Keypair(module);
+    const EKa = x25519Keypair(module);
+    const EKb = x25519Keypair(module);
+
+    const sa = deriveInteractive3dhSecret(
+      IKa.secretKey,
+      IKevil.publicKey,
+      EKa.secretKey,
+      EKb.publicKey,
+      true,
+      module,
+    );
+    const sb = deriveInteractive3dhSecret(
+      IKb.secretKey,
+      IKa.publicKey,
+      EKb.secretKey,
+      EKa.publicKey,
+      false,
+      module,
+    );
+    expect(Buffer.from(sa)).not.toEqual(Buffer.from(sb));
+  });
+
+  test("a substituted initiator identity breaks agreement", async () => {
+    const module = await loadTestModule();
+    const IKa = x25519Keypair(module);
+    const IKb = x25519Keypair(module);
+    const IKevil = x25519Keypair(module);
+    const EKa = x25519Keypair(module);
+    const EKb = x25519Keypair(module);
+
+    const sa = deriveInteractive3dhSecret(
+      IKevil.secretKey,
+      IKb.publicKey,
+      EKa.secretKey,
+      EKb.publicKey,
+      true,
+      module,
+    );
+    const sb = deriveInteractive3dhSecret(
+      IKb.secretKey,
+      IKa.publicKey,
+      EKb.secretKey,
+      EKa.publicKey,
+      false,
+      module,
+    );
+    expect(Buffer.from(sa)).not.toEqual(Buffer.from(sb));
+  });
+});

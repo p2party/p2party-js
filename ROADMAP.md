@@ -34,9 +34,13 @@ README until a harness demonstrates them.
 This is the single most valuable thing that could happen to the project, and
 no amount of internal testing substitutes for it.
 
-**Untangle the module graph.** Roughly eleven import cycles remain between the
-store, the RTK Query layer, and the handlers. They are latent initialization-
-order hazards, not current bugs.
+**Untangle the module graph.** 62 elementary import cycles remain between the
+store, the RTK Query layer, and the handlers, measured with `madge` on
+2026-07-27; an earlier estimate of "roughly eleven" counted clusters rather
+than cycles. They are latent initialization-order hazards, not current bugs —
+but they are also what stands between the SDK and a second rendezvous
+transport, since no board client can reuse the peer-connection handlers without
+importing the WebSocket API.
 
 **Identity backup and restore.** Long-term Ed25519/X25519 identities currently
 live only in browser storage. Losing the profile loses the identity. A
@@ -80,8 +84,10 @@ receive each client's interest graph in plaintext, and libp2p's rendezvous
 protocol registers under plaintext namespaces — so the open question is how to
 cross a server boundary without turning each additional server into another
 observer. Binding rooms to boards rather than users to home servers appears to
-avoid a server-to-server protocol entirely; whether that survives contact with
-abuse control and availability is unproven.
+avoid a server-to-server protocol entirely — unless robust private writes are
+audited in the manner of Express, which needs a replica-to-replica channel
+inside a board group. Whether that avoidance survives contact with abuse
+control and availability is unproven.
 
 **Censorship resistance for the rendezvous path.** Distinct from blindness: an
 adversary who cannot read the board can still stop clients from reaching it,

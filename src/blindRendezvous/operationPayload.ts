@@ -429,6 +429,13 @@ const validatePresence = async (
       operation.expiresAfterWindow
   )
     fail("presence validity interval is not contained by its outer operation");
+  checkedAdd(
+    checkedAdd(
+      presence.core.receiverKeyValidThroughLogicalWindow,
+      BigInt(context.roomPolicy.protocolLimits.receiverKeyOverlapWindows),
+    ),
+    BigInt(context.roomPolicy.protocolLimits.maxClockSkewWindows),
+  );
 
   const { transcriptHash } = await presenceTranscript(
     operation,

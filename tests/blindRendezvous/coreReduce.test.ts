@@ -7,11 +7,13 @@ import {
 } from "../../src/blindRendezvous/derivations";
 import {
   captureActivePairOperationCandidate,
+  captureHistoricalPairPresenceEvidence,
   coreReduce,
   decodeCoreRoomStateV1,
   encodeCoreRoomStateV1,
   mergeOperationCandidateSets as mergeOperationSets,
   snapshotActivePairOperationCandidate,
+  snapshotHistoricalPairPresenceEvidence,
   validateAndIdentifyOperationCandidate as validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
@@ -21,11 +23,15 @@ import {
   operationPaddingFor,
   operationPayloadClassFor,
   operationValidationContextAt,
+  requiredRoomRetentionWindows,
   signOperation,
   validateOperation,
   validateOperationStructure,
 } from "../../src/blindRendezvous/operation";
-import { encodePresenceV1 } from "../../src/blindRendezvous/operationPayload";
+import {
+  decodePresenceV1,
+  encodePresenceV1,
+} from "../../src/blindRendezvous/operationPayload";
 import {
   encodePairStepEnvelopeV1,
   pairCiphertextAndTagTargetBytesV1,
@@ -34,6 +40,7 @@ import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV
 
 import type { OuterValidatedIdentifiedOperationV1 as ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
 import type { ActivePairOperationCandidateV1 } from "../../src/blindRendezvous/coreReduce";
+import type { VerifiedHistoricalPairPresenceEvidenceV1 } from "../../src/blindRendezvous/coreReduce";
 import type {
   AuthenticatedRoomOperationV1,
   OperationKindV1,
@@ -167,6 +174,23 @@ const buildOperation = async (
   validateAndIdentifyOperation(
     await buildSignedOperation(options, validationContext),
     validationContext,
+  );
+
+const pairStepPayload = (
+  pairRoutingTag: Uint8Array,
+  nonce = new Uint8Array(24).fill(0x05),
+): Uint8Array =>
+  encodePairStepEnvelopeV1(
+    {
+      version: 1,
+      pairRoutingTag,
+      bootstrapHeader: null,
+      nonce,
+      pairCiphertextAndTag: new Uint8Array(
+        pairCiphertextAndTagTargetBytesV1(0, false),
+      ),
+    },
+    0,
   );
 
 const coreReduceOuter = async (
@@ -450,21 +474,9 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
       signer: otherAuthor,
     });
     const pairRoutingTag = new Uint8Array(32).fill(0x04);
-    const pairPayload = encodePairStepEnvelopeV1(
-      {
-        version: 1,
-        pairRoutingTag,
-        bootstrapHeader: null,
-        nonce: new Uint8Array(24).fill(0x05),
-        pairCiphertextAndTag: new Uint8Array(
-          pairCiphertextAndTagTargetBytesV1(0, false),
-        ),
-      },
-      0,
-    );
     const pairStep = await buildOperation({
       kind: "PAIR_STEP",
-      payload: pairPayload,
+      payload: pairStepPayload(pairRoutingTag),
       signer: otherAuthor,
       authorSequence: 1n,
       previousAuthorOperationId: remote.operationId,
@@ -589,6 +601,124 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
     await expect(
       captureActivePairOperationCandidate(pairCandidate, state),
     ).rejects.toThrow("mutated after reduction");
+  });
+
+  test("captures historical pair-presence evidence only from an observed Core fact", async () => {
+    const operations = await buildChain();
+    const presenceCandidate = operations[2];
+    const state = await coreReduceOuter(
+      operations,
+      roomPolicy,
+      REFERENCE_WINDOW,
+    );
+
+    const evidence = await captureHistoricalPairPresenceEvidence(
+      presenceCandidate,
+      state,
+    );
+    const snapshot = snapshotHistoricalPairPresenceEvidence(evidence);
+    const presence = decodePresenceV1(presenceCandidate.operation.fixedPayload);
+    expect(snapshot.presenceOperationId).toEqual(presenceCandidate.operationId);
+    expect(snapshot.exactPresenceOperationBytes).toEqual(
+      encodeOperation(presenceCandidate.operation),
+    );
+    expect(snapshot.retainThroughLogicalWindow).toBe(
+      presence.core.receiverKeyValidThroughLogicalWindow +
+        BigInt(roomPolicy.protocolLimits.receiverKeyOverlapWindows) +
+        BigInt(roomPolicy.protocolLimits.maxClockSkewWindows),
+    );
+    expect(snapshot.authorChainPrefix).toHaveLength(1);
+    expect(snapshot.provedAtLogicalWindow).toBe(REFERENCE_WINDOW);
+
+    const spread = {
+      ...evidence,
+    } as unknown as VerifiedHistoricalPairPresenceEvidenceV1;
+    expect(() => snapshotHistoricalPairPresenceEvidence(spread)).toThrow(
+      "live result of captureHistoricalPairPresenceEvidence",
+    );
+    snapshot.exactPresenceOperationBytes.fill(0);
+    snapshot.authorChainPrefix[0].exactOperationBytes.fill(0);
+    const fresh = snapshotHistoricalPairPresenceEvidence(evidence);
+    expect(fresh.exactPresenceOperationBytes).toEqual(
+      encodeOperation(presenceCandidate.operation),
+    );
+
+    const persistedState = await decodeCoreRoomStateV1(
+      await encodeCoreRoomStateV1(state),
+    );
+    await expect(
+      captureHistoricalPairPresenceEvidence(presenceCandidate, persistedState),
+    ).rejects.toThrow("live result of coreReduce");
+    await expect(
+      captureHistoricalPairPresenceEvidence(
+        operations[operations.length - 1],
+        state,
+      ),
+    ).rejects.toThrow("not observed");
+  });
+
+  test("restart revalidation recovers an active pair with an expired exact author prefix", async () => {
+    const prefix = await buildOperation({
+      payload: Uint8Array.of(0x31),
+      signer: otherAuthor,
+      expiresAfterWindow: REFERENCE_WINDOW + 5n,
+    });
+    const pairRoutingTag = new Uint8Array(32).fill(0x32);
+    const pair = await buildOperation({
+      kind: "PAIR_STEP",
+      payload: pairStepPayload(pairRoutingTag, new Uint8Array(24).fill(0x33)),
+      signer: otherAuthor,
+      authorSequence: 1n,
+      previousAuthorOperationId: prefix.operationId,
+      expiresAfterWindow: REFERENCE_WINDOW + 1_000n,
+      semanticSlot: await pairSemanticSlot(pairRoutingTag),
+    });
+    const persistedBytes = [
+      encodeOperation(prefix.operation),
+      encodeOperation(pair.operation),
+    ];
+
+    const restoredReferenceWindow = REFERENCE_WINDOW + 11n;
+    const restoredContext = operationValidationContextAt(
+      context,
+      restoredReferenceWindow,
+    );
+    const restored = await Promise.all(
+      persistedBytes.map((bytes) =>
+        validateAndIdentifyOperation(decodeOperation(bytes), restoredContext),
+      ),
+    );
+    const restoredState = await coreReduce(restored, restoredContext);
+    expect(restoredState.observedPresences).toHaveLength(0);
+    expect(restoredState.activePairOuterOperationIds).toEqual([
+      restored[1].operationId,
+    ]);
+    const restoredActive = await captureActivePairOperationCandidate(
+      restored[1],
+      restoredState,
+    );
+    expect(
+      snapshotActivePairOperationCandidate(
+        restoredActive,
+      ).authorChainPrefix.map(
+        (member) => decodeOperation(member.exactOperationBytes).authorSequence,
+      ),
+    ).toEqual([0n, 1n]);
+
+    const evidenceHorizon =
+      REFERENCE_WINDOW +
+      requiredRoomRetentionWindows(roomPolicy) +
+      BigInt(roomPolicy.protocolLimits.maxClockSkewWindows);
+    const beyondEvidence = operationValidationContextAt(
+      context,
+      evidenceHorizon + 1n,
+    );
+    await expect(
+      validateAndIdentifyOperation(
+        decodeOperation(persistedBytes[1]),
+        beyondEvidence,
+      ),
+    ).rejects.toThrow("beyond its retained-evidence horizon");
   });
 
   test("omission changes the observed frontier, not the derivation", async () => {

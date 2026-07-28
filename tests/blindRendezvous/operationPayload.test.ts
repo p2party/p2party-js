@@ -450,6 +450,21 @@ describe("PRESENCE intrinsic and deferred ownership validation", () => {
     ).rejects.toThrow("validity interval");
   });
 
+  test("rejects a presence whose required historical receiver-key horizon overflows", async () => {
+    const maximumWindow = 0xffffffffffffffffn;
+    const nearMaximumContext = await validationContext(
+      capabilityPolicy,
+      maximumWindow - 10n,
+    );
+    const fixture = await buildPresence(nearMaximumContext, {
+      logicalWindow: maximumWindow - 10n,
+      expiresAfterWindow: maximumWindow,
+    });
+    await expect(
+      validateOperation(fixture.operation, nearMaximumContext),
+    ).rejects.toThrow("checked unsigned-64 addition overflowed");
+  });
+
   test("closes capability/authority permit modes and verifies the pinned signer", async () => {
     const capabilityWithPermit = await buildPresence(capabilityContext, {
       includePermit: true,

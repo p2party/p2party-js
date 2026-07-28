@@ -107,6 +107,11 @@ interface ReducedRoomStateSnapshot {
     string,
     ActivePairReductionSnapshot
   >;
+  /** Exact currently observed PRESENCE provenance, keyed by OperationId hex. */
+  readonly observedPresenceOperations: ReadonlyMap<
+    string,
+    ObservedPresenceReductionSnapshot
+  >;
 }
 
 interface PairAuthorChainPrefixSnapshot {
@@ -123,6 +128,13 @@ interface ActivePairReductionSnapshot {
    * made the PAIR_STEP eligible for CoreReduce. These bytes are later retained
    * by the pair ledger so a newly delivered fork can stall only this edge.
    */
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixSnapshot[];
+}
+
+interface ObservedPresenceReductionSnapshot {
+  readonly operationId: Uint8Array;
+  readonly operationBytes: Uint8Array;
+  readonly retainThroughLogicalWindow: bigint;
   readonly authorChainPrefix: readonly PairAuthorChainPrefixSnapshot[];
 }
 
@@ -175,6 +187,50 @@ interface PrivateActivePairOperationCandidateSnapshot {
 const activePairOperationCandidates = new WeakMap<
   object,
   PrivateActivePairOperationCandidateSnapshot
+>();
+
+declare const verifiedHistoricalPairPresenceBrand: unique symbol;
+
+/**
+ * Process-local proof that one exact signed PRESENCE was an observed roster
+ * fact in a genuine CoreReduce result. Generic author-prefix evidence cannot
+ * instantiate this capability.
+ */
+export interface VerifiedHistoricalPairPresenceEvidenceV1 {
+  readonly [verifiedHistoricalPairPresenceBrand]: true;
+}
+
+/** Exact durable record defined by Section 4.9. */
+export interface HistoricalPairPresenceEvidenceV1 {
+  readonly exactPresenceOperationBytes: Uint8Array;
+  readonly presenceOperationId: Uint8Array;
+  readonly retainThroughLogicalWindow: bigint;
+}
+
+export interface VerifiedHistoricalPairPresenceSnapshotV1 extends HistoricalPairPresenceEvidenceV1 {
+  readonly operation: AuthenticatedRoomOperationV1;
+  readonly presence: PresenceV1;
+  readonly provedAtLogicalWindow: bigint;
+  readonly roomContextId: Uint8Array;
+  readonly roomPolicy: RoomPolicyV4;
+  readonly exactCoreStateBytes: Uint8Array;
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixEvidenceV1[];
+}
+
+interface PrivateHistoricalPairPresenceSnapshot {
+  readonly operationBytes: Uint8Array;
+  readonly operationId: Uint8Array;
+  readonly retainThroughLogicalWindow: bigint;
+  readonly provedAtLogicalWindow: bigint;
+  readonly roomContextId: Uint8Array;
+  readonly roomPolicyBytes: Uint8Array;
+  readonly coreStateBytes: Uint8Array;
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixSnapshot[];
+}
+
+const verifiedHistoricalPairPresences = new WeakMap<
+  object,
+  PrivateHistoricalPairPresenceSnapshot
 >();
 
 /** One outer-authenticated candidate together with its private candidate ID. */
@@ -288,6 +344,39 @@ const reducerSnapshotFor = (value: unknown): ReducerOperationSnapshot => {
   return { source, ...snapshot };
 };
 
+const verifiedReducedRoomStateSnapshotFor = async (
+  roomState: CoreRoomStateV1,
+): Promise<{
+  readonly snapshot: ReducedRoomStateSnapshot;
+  readonly state: CoreRoomStateV1;
+}> => {
+  const snapshot =
+    typeof roomState === "object" && roomState !== null
+      ? reducedRoomStates.get(roomState)
+      : undefined;
+  if (snapshot === undefined)
+    throw new Error(
+      "coreReduce: pair evidence requires a live result of coreReduce",
+    );
+
+  let exposedStateBytes: Uint8Array;
+  try {
+    exposedStateBytes = await encodeCoreRoomStateV1(roomState);
+  } catch {
+    throw new Error(
+      "coreReduce: reduced room state was mutated after reduction",
+    );
+  }
+  if (!bytesEqual(exposedStateBytes, snapshot.stateBytes))
+    throw new Error(
+      "coreReduce: reduced room state was mutated after reduction",
+    );
+  return {
+    snapshot,
+    state: decodeCoreRoomStateCanonical(snapshot.stateBytes),
+  };
+};
+
 /**
  * Capture one active, provenance-checked PAIR_STEP ingress.
  *
@@ -307,27 +396,8 @@ export const captureActivePairOperationCandidate = async (
   roomState: CoreRoomStateV1,
 ): Promise<ActivePairOperationCandidateV1> => {
   const candidateSnapshot = reducerSnapshotFor(candidate);
-  const roomStateSnapshot =
-    typeof roomState === "object" && roomState !== null
-      ? reducedRoomStates.get(roomState)
-      : undefined;
-  if (roomStateSnapshot === undefined)
-    throw new Error(
-      "coreReduce: pair opening requires a live result of coreReduce",
-    );
-
-  let exposedStateBytes: Uint8Array;
-  try {
-    exposedStateBytes = await encodeCoreRoomStateV1(roomState);
-  } catch {
-    throw new Error(
-      "coreReduce: reduced room state was mutated after reduction",
-    );
-  }
-  if (!bytesEqual(exposedStateBytes, roomStateSnapshot.stateBytes))
-    throw new Error(
-      "coreReduce: reduced room state was mutated after reduction",
-    );
+  const verifiedState = await verifiedReducedRoomStateSnapshotFor(roomState);
+  const roomStateSnapshot = verifiedState.snapshot;
 
   if (
     !bytesEqual(
@@ -356,16 +426,13 @@ export const captureActivePairOperationCandidate = async (
   if (candidateSnapshot.pairEnvelope === null)
     throw new Error("coreReduce: validated candidate is not a PAIR_STEP");
 
-  const privateState = decodeCoreRoomStateCanonical(
-    roomStateSnapshot.stateBytes,
-  );
   const handle = Object.freeze({} as ActivePairOperationCandidateV1);
   activePairOperationCandidates.set(handle, {
     operationBytes: Uint8Array.from(active.operationBytes),
     operationId: Uint8Array.from(active.operationId),
     roomContextId: Uint8Array.from(roomStateSnapshot.roomContextId),
     roomPolicyBytes: Uint8Array.from(roomStateSnapshot.roomPolicyBytes),
-    referenceWindow: privateState.referenceWindow,
+    referenceWindow: verifiedState.state.referenceWindow,
     evidenceValidThroughWindow: active.evidenceValidThroughWindow,
     coreStateBytes: Uint8Array.from(roomStateSnapshot.stateBytes),
     authorChainPrefix: active.authorChainPrefix.map((member) => ({
@@ -410,6 +477,110 @@ export const snapshotActivePairOperationCandidate = (
     roomPolicy: decodeRoomPolicyV4(snapshot.roomPolicyBytes),
     referenceWindow: snapshot.referenceWindow,
     evidenceValidThroughWindow: snapshot.evidenceValidThroughWindow,
+    exactCoreStateBytes: Uint8Array.from(snapshot.coreStateBytes),
+    authorChainPrefix: snapshot.authorChainPrefix.map((member) => ({
+      operationId: Uint8Array.from(member.operationId),
+      exactOperationBytes: Uint8Array.from(member.operationBytes),
+    })),
+  };
+};
+
+/**
+ * Capture one current roster fact for bounded pair-private use after that
+ * presence leaves the live roster.
+ *
+ * Restore repeats operation validation and CoreReduce at the historical
+ * decision window before calling this constructor. Exact signed bytes alone,
+ * a decoded CoreRoomState, or generic author-prefix evidence are insufficient.
+ */
+export const captureHistoricalPairPresenceEvidence = async (
+  candidate: OuterValidatedIdentifiedOperationV1,
+  roomState: CoreRoomStateV1,
+): Promise<VerifiedHistoricalPairPresenceEvidenceV1> => {
+  const candidateSnapshot = reducerSnapshotFor(candidate);
+  const verifiedState = await verifiedReducedRoomStateSnapshotFor(roomState);
+  const roomStateSnapshot = verifiedState.snapshot;
+
+  if (
+    !bytesEqual(
+      candidateSnapshot.roomContextId,
+      roomStateSnapshot.roomContextId,
+    ) ||
+    !bytesEqual(
+      candidateSnapshot.roomPolicyBytes,
+      roomStateSnapshot.roomPolicyBytes,
+    )
+  )
+    throw new Error(
+      "coreReduce: historical presence belongs to another reduced room or policy",
+    );
+  const observed = roomStateSnapshot.observedPresenceOperations.get(
+    hex(candidateSnapshot.operationId),
+  );
+  if (
+    observed === undefined ||
+    !bytesEqual(observed.operationId, candidateSnapshot.operationId) ||
+    !bytesEqual(observed.operationBytes, candidateSnapshot.operationBytes)
+  )
+    throw new Error(
+      "coreReduce: historical presence source is not observed in the supplied room state",
+    );
+  if (candidateSnapshot.operation.kind !== "PRESENCE")
+    throw new Error(
+      "coreReduce: historical pair presence requires a PRESENCE operation",
+    );
+
+  const handle = Object.freeze({} as VerifiedHistoricalPairPresenceEvidenceV1);
+  verifiedHistoricalPairPresences.set(handle, {
+    operationBytes: Uint8Array.from(observed.operationBytes),
+    operationId: Uint8Array.from(observed.operationId),
+    retainThroughLogicalWindow: observed.retainThroughLogicalWindow,
+    provedAtLogicalWindow: verifiedState.state.referenceWindow,
+    roomContextId: Uint8Array.from(roomStateSnapshot.roomContextId),
+    roomPolicyBytes: Uint8Array.from(roomStateSnapshot.roomPolicyBytes),
+    coreStateBytes: Uint8Array.from(roomStateSnapshot.stateBytes),
+    authorChainPrefix: observed.authorChainPrefix.map((member) => ({
+      operationId: Uint8Array.from(member.operationId),
+      operationBytes: Uint8Array.from(member.operationBytes),
+    })),
+  });
+  return handle;
+};
+
+/**
+ * Return owned bytes from a genuine historical-presence capability.
+ *
+ * Downstream admission code accepts the opaque capability and calls this
+ * accessor itself. The structural result is suitable for persistence only; it
+ * cannot be passed back as proof after restart without validation and
+ * CoreReduce reconstructing a new capability.
+ */
+export const snapshotHistoricalPairPresenceEvidence = (
+  evidence: VerifiedHistoricalPairPresenceEvidenceV1,
+): VerifiedHistoricalPairPresenceSnapshotV1 => {
+  const snapshot =
+    typeof evidence === "object" && evidence !== null
+      ? verifiedHistoricalPairPresences.get(evidence)
+      : undefined;
+  if (snapshot === undefined)
+    throw new Error(
+      "coreReduce: historical presence must be a live result of captureHistoricalPairPresenceEvidence",
+    );
+
+  const operation = decodeOperation(snapshot.operationBytes);
+  if (operation.kind !== "PRESENCE")
+    throw new Error(
+      "coreReduce: captured historical presence lost its operation kind",
+    );
+  return {
+    exactPresenceOperationBytes: Uint8Array.from(snapshot.operationBytes),
+    presenceOperationId: Uint8Array.from(snapshot.operationId),
+    retainThroughLogicalWindow: snapshot.retainThroughLogicalWindow,
+    operation,
+    presence: decodePresenceV1(operation.fixedPayload),
+    provedAtLogicalWindow: snapshot.provedAtLogicalWindow,
+    roomContextId: Uint8Array.from(snapshot.roomContextId),
+    roomPolicy: decodeRoomPolicyV4(snapshot.roomPolicyBytes),
     exactCoreStateBytes: Uint8Array.from(snapshot.coreStateBytes),
     authorChainPrefix: snapshot.authorChainPrefix.map((member) => ({
       operationId: Uint8Array.from(member.operationId),
@@ -893,6 +1064,18 @@ const exactAuthorChainPrefixThrough = (
     );
   return prefix;
 };
+
+const historicalPresenceRetainThrough = (
+  presence: PresenceV1,
+  roomPolicy: RoomPolicyV4,
+): bigint =>
+  checkedAddU64(
+    checkedAddU64(
+      presence.core.receiverKeyValidThroughLogicalWindow,
+      BigInt(roomPolicy.protocolLimits.receiverKeyOverlapWindows),
+    ),
+    BigInt(roomPolicy.protocolLimits.maxClockSkewWindows),
+  );
 
 const activePayloadCandidatesAt = (
   entries: readonly PayloadValidatedReducerSnapshot[],
@@ -1603,6 +1786,9 @@ export const coreReduce = async (
   // in its one schema-defined order and has no duplicate canonical values.
   const stateBytes = await encodeCoreRoomStateV1(state);
   const reducedState = decodeCoreRoomStateCanonical(stateBytes);
+  const observedPresenceIds = new Set(
+    observedPresences.map((fact) => hex(fact.presenceOperationId)),
+  );
   reducedRoomStates.set(reducedState, {
     stateBytes: Uint8Array.from(stateBytes),
     roomContextId: Uint8Array.from(roomContextIdBytes),
@@ -1618,6 +1804,40 @@ export const coreReduce = async (
                 operationId: Uint8Array.from(entry.operationId),
                 operationBytes: Uint8Array.from(entry.operationBytes),
                 evidenceValidThroughWindow: entry.evidenceValidThroughWindow,
+                authorChainPrefix: exactAuthorChainPrefixThrough(
+                  entry,
+                  payloadValidatedByAuthorWindow,
+                  provenChainMembers,
+                ),
+              },
+            ] as const,
+        ),
+    ),
+    observedPresenceOperations: new Map(
+      active
+        .filter(
+          (
+            entry,
+          ): entry is PayloadValidatedReducerSnapshot & {
+            readonly payload: {
+              readonly kind: "PRESENCE";
+              readonly value: PresenceV1;
+            };
+          } =>
+            entry.payload.kind === "PRESENCE" &&
+            observedPresenceIds.has(hex(entry.operationId)),
+        )
+        .map(
+          (entry) =>
+            [
+              hex(entry.operationId),
+              {
+                operationId: Uint8Array.from(entry.operationId),
+                operationBytes: Uint8Array.from(entry.operationBytes),
+                retainThroughLogicalWindow: historicalPresenceRetainThrough(
+                  entry.payload.value,
+                  roomPolicy,
+                ),
                 authorChainPrefix: exactAuthorChainPrefixThrough(
                   entry,
                   payloadValidatedByAuthorWindow,

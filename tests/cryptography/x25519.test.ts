@@ -184,6 +184,52 @@ describe("x25519", () => {
     expect(fake.freed).toHaveLength(0);
   });
 
+  test("rejects proxied DH inputs before allocating", () => {
+    const fake = makeFakeX25519Module();
+    const exact = new Uint8Array(32);
+    const proxied = (): Uint8Array =>
+      new Proxy(new Uint8Array(32), {
+        get(): never {
+          throw new Error("hostile proxy surface must not run");
+        },
+      });
+
+    expect(() => x25519Dh(proxied(), exact, fake.module)).toThrow(
+      "secretKey must be a Uint8Array",
+    );
+    expect(() => x25519Dh(exact, proxied(), fake.module)).toThrow(
+      "publicKey must be a Uint8Array",
+    );
+    expect(fake.allocations).toHaveLength(0);
+    expect(fake.freed).toHaveLength(0);
+  });
+
+  test("uses intrinsic DH bytes despite shadowed length and iteration", () => {
+    const shadow = (byte: number, claimedLength: number): Uint8Array => {
+      const bytes = new Uint8Array(32).fill(byte);
+      Object.defineProperty(bytes, "length", { value: claimedLength });
+      Object.defineProperty(bytes, Symbol.iterator, {
+        value: (): never => {
+          throw new Error("hostile iterator must not run");
+        },
+      });
+      return bytes;
+    };
+    const fake = makeFakeX25519Module();
+
+    expect(x25519Dh(shadow(0x44, 0), shadow(0x55, 1_000), fake.module)).toEqual(
+      new Uint8Array(32).fill(0x33),
+    );
+    expect(fake.dhInputs).toEqual([
+      {
+        secretKey: new Uint8Array(32).fill(0x44),
+        publicKey: new Uint8Array(32).fill(0x55),
+      },
+    ]);
+    expect(fake.allocations.map(({ length }) => length)).toEqual([32, 32, 32]);
+    expect(fake.live.size).toBe(0);
+  });
+
   test("snapshots wasm-backed inputs before malloc can grow their memory", () => {
     const fake = makeFakeX25519Module({ growAllocationAt: 1 });
     const originalBuffer = fake.module.wasmMemory.buffer;

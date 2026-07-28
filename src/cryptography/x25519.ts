@@ -1,6 +1,7 @@
 import memory from "./memory";
 import { wasmLoader } from "./wasmLoader";
 
+import { snapshotByteInput } from "./byteInput";
 import {
   crypto_scalarmult_curve25519_BYTES,
   crypto_scalarmult_curve25519_SCALARBYTES,
@@ -19,19 +20,6 @@ const RFC7748_X25519_BASE_POINT = (() => {
   basePoint[0] = 9;
   return basePoint;
 })();
-
-const requireExactBytes: (
-  value: unknown,
-  name: string,
-  expectedLength: number,
-) => asserts value is Uint8Array = (value, name, expectedLength) => {
-  if (!(value instanceof Uint8Array))
-    throw new TypeError(`${name} must be a Uint8Array`);
-  if (value.length !== expectedLength)
-    throw new RangeError(
-      `${name} must be exactly ${String(expectedLength)} bytes`,
-    );
-};
 
 const checkedMalloc = (
   module: LibCrypto,
@@ -109,43 +97,29 @@ export const x25519Dh = (
   publicKey: Uint8Array,
   module: LibCrypto,
 ): Uint8Array => {
-  requireExactBytes(
-    secretKey,
-    "secretKey",
-    crypto_scalarmult_curve25519_SCALARBYTES,
-  );
-  requireExactBytes(publicKey, "publicKey", crypto_scalarmult_curve25519_BYTES);
+  const privateSecretKey = snapshotByteInput(secretKey, "secretKey", {
+    exactLength: crypto_scalarmult_curve25519_SCALARBYTES,
+  });
 
   // Snapshot before `_malloc`: growing this same module's memory can detach
   // caller views that point into its previous ArrayBuffer.
-  const privatePublicKey = Uint8Array.from(publicKey);
-  const privateSecretKey = Uint8Array.from(secretKey);
   let shPtr: number | undefined;
   let skPtr: number | undefined;
   let pkPtr: number | undefined;
   try {
+    const privatePublicKey = snapshotByteInput(publicKey, "publicKey", {
+      exactLength: crypto_scalarmult_curve25519_BYTES,
+    });
     shPtr = checkedMalloc(
       module,
       crypto_scalarmult_curve25519_BYTES,
       "x25519_dh",
     );
-    skPtr = checkedMalloc(
-      module,
-      crypto_scalarmult_curve25519_SCALARBYTES,
-      "x25519_dh",
-    );
-    pkPtr = checkedMalloc(
-      module,
-      crypto_scalarmult_curve25519_BYTES,
-      "x25519_dh",
-    );
+    skPtr = checkedMalloc(module, privateSecretKey.length, "x25519_dh");
+    pkPtr = checkedMalloc(module, privatePublicKey.length, "x25519_dh");
 
-    heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES).set(
-      privateSecretKey,
-    );
-    heapView(module, pkPtr, crypto_scalarmult_curve25519_BYTES).set(
-      privatePublicKey,
-    );
+    heapView(module, skPtr, privateSecretKey.length).set(privateSecretKey);
+    heapView(module, pkPtr, privatePublicKey.length).set(privatePublicKey);
 
     if (module._x25519_dh(shPtr, skPtr, pkPtr) !== 0)
       throw new Error("x25519_dh failed (identity point)");
@@ -163,10 +137,7 @@ export const x25519Dh = (
       } finally {
         try {
           if (skPtr !== undefined)
-            zeroFree(
-              module,
-              heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES),
-            );
+            zeroFree(module, heapView(module, skPtr, privateSecretKey.length));
         } finally {
           if (pkPtr !== undefined) module._free(pkPtr);
         }

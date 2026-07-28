@@ -33,7 +33,7 @@ const expectedMlkemNativeCommit = "0ba906cb14b1c241476134d7403a811b382ca498";
 const expectedMlkemNativeSourceTreeSha256 =
   "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
 const expectedMlkemWrapperSha256 =
-  "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072";
+  "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d";
 const expectedRoomWordlistSha256 =
   "531238ede7be78f5fd444b3a4452b023f408f0146aa82bd9fe03aad902b3ff8e";
 const releaseRoot = mkdtempSync(
@@ -154,6 +154,8 @@ const validateWasmGlue = async (wasmBytes) => {
     "_mlkem1024_keypair",
     "_mlkem1024_encaps",
     "_mlkem1024_decaps",
+    "_fips202_shake256",
+    "_fips202_sha3_256",
   ];
   for (const name of requiredCryptoExports)
     if (typeof cryptoModule[name] !== "function")
@@ -380,6 +382,8 @@ const validateBundle = (
     "_mlkem1024_keypair",
     "_mlkem1024_encaps",
     "_mlkem1024_decaps",
+    "_fips202_shake256",
+    "_fips202_sha3_256",
   ])
     if (!source.includes(name)) fail(`${relativePath} is missing ${name}`);
   for (const name of expectedPublicNames)

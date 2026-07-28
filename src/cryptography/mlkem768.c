@@ -49,6 +49,73 @@ _Static_assert(MLKEM768_CIPHERTEXTBYTES == P2PARTY_MLKEM768_CIPHERTEXTBYTES,
 _Static_assert(MLKEM_BYTES == P2PARTY_MLKEM768_BYTES,
                "ML-KEM shared-secret size mismatch");
 
+/*
+ * Include the internal FIPS 202 declarations while the shared ML-KEM
+ * namespace is configured. The single-compilation-unit source below undefines
+ * those macros after emitting their implementation, so these public wrappers
+ * must be defined first.
+ */
+#include "./vendor/mlkem-native/mlkem/src/fips202/fips202.h"
+_Static_assert(SHA3_256_HASHBYTES == P2PARTY_FIPS202_SHA3_256_BYTES,
+               "SHA3-256 output size mismatch");
+#ifdef MLK_MAX_BUFFER_SIZE
+_Static_assert(MLK_MAX_BUFFER_SIZE == P2PARTY_FIPS202_MAX_BUFFER_BYTES,
+               "FIPS 202 proof-bound mismatch");
+#endif
+
+static int
+p2party_regions_overlap(const uint8_t *left, size_t left_len,
+                        const uint8_t *right, size_t right_len)
+{
+  uintptr_t left_address;
+  uintptr_t right_address;
+
+  if (left_len == 0 || right_len == 0) return 0;
+  left_address = (uintptr_t)left;
+  right_address = (uintptr_t)right;
+  if (left_address <= right_address)
+    return right_address - left_address < left_len;
+  return left_address - right_address < right_len;
+}
+
+int
+fips202_shake256(uint8_t *out, int out_len, const uint8_t *input, int input_len)
+{
+  size_t output_length;
+  size_t input_length;
+
+  if (out == NULL || input == NULL) return -1;
+  if (out_len < 0 || input_len < 0) return -1;
+  output_length = (size_t)out_len;
+  input_length = (size_t)input_len;
+  if (output_length > P2PARTY_FIPS202_MAX_BUFFER_BYTES
+      || input_length > P2PARTY_FIPS202_MAX_BUFFER_BYTES)
+    return -1;
+  if (p2party_regions_overlap(out, output_length, input, input_length))
+    return -1;
+
+  mlk_shake256(out, output_length, input, input_length);
+  return 0;
+}
+
+int
+fips202_sha3_256(uint8_t out[P2PARTY_FIPS202_SHA3_256_BYTES],
+                 const uint8_t *input, int input_len)
+{
+  size_t input_length;
+
+  if (out == NULL || input == NULL) return -1;
+  if (input_len < 0) return -1;
+  input_length = (size_t)input_len;
+  if (input_length > P2PARTY_FIPS202_MAX_BUFFER_BYTES) return -1;
+  if (p2party_regions_overlap(out, P2PARTY_FIPS202_SHA3_256_BYTES, input,
+                              input_length))
+    return -1;
+
+  mlk_sha3_256(out, input, input_length);
+  return 0;
+}
+
 #include "./vendor/mlkem-native/mlkem/mlkem_native.c"
 
 int

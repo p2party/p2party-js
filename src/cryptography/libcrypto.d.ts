@@ -165,6 +165,16 @@ export interface LibCrypto extends EmscriptenModule {
     coins32: number,
   ): number;
   _mlkem1024_decaps(ss: number, ct: number, sk: number): number;
+
+  // P2Party-owned one-shot FIPS 202 boundary backed by the implementation
+  // already compiled into the shared ML-KEM-768 unit.
+  _fips202_shake256(
+    out: number,
+    out_len: number,
+    input: number,
+    input_len: number,
+  ): number;
+  _fips202_sha3_256(out: number, input: number, input_len: number): number;
 }
 
 declare const libcrypto: EmscriptenModuleFactory<LibCrypto>;

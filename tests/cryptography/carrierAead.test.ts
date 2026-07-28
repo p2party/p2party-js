@@ -157,6 +157,51 @@ describe("authentication failures return null, never a plaintext", () => {
     ).toThrow("nonce must be exactly 24 bytes");
   });
 
+  test("legacy validation rejects proxies and ignores shadowed typed-array surfaces", () => {
+    const proxiedKey = new Proxy(new Uint8Array(32), {
+      getPrototypeOf(): never {
+        throw new Error("hostile getPrototypeOf must not run");
+      },
+    });
+    expect(() =>
+      xchacha20poly1305Seal(proxiedKey, nonce, aad, plaintext, module),
+    ).toThrow(CarrierAeadError);
+
+    const shortKey = new Uint8Array(31);
+    Object.defineProperty(shortKey, "length", { value: 32 });
+    expect(() =>
+      xchacha20poly1305Seal(shortKey, nonce, aad, plaintext, module),
+    ).toThrow(CarrierAeadError);
+
+    const shadow = (value: Uint8Array): Uint8Array => {
+      Object.defineProperty(value, "length", { value: 0 });
+      Object.defineProperty(value, Symbol.iterator, {
+        value: (): never => {
+          throw new Error("hostile iterator must not run");
+        },
+      });
+      return value;
+    };
+    const shadowedKey = shadow(Uint8Array.from(key));
+    const shadowedNonce = shadow(Uint8Array.from(nonce));
+    const sealed = xchacha20poly1305Seal(
+      shadowedKey,
+      shadowedNonce,
+      aad,
+      plaintext,
+      module,
+    );
+    const opened = xchacha20poly1305Open(
+      shadowedKey,
+      shadowedNonce,
+      aad,
+      shadow(Uint8Array.from(sealed)),
+      module,
+    );
+    expect(opened).not.toBeNull();
+    expect(hex(opened!)).toBe(hex(plaintext));
+  });
+
   test("a distinct nonce under one key yields distinct ciphertext", () => {
     const first = xchacha20poly1305Seal(key, nonce, aad, plaintext, module);
     const second = xchacha20poly1305Seal(

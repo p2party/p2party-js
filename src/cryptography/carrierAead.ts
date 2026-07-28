@@ -1,9 +1,13 @@
 import {
-  crypto_aead_xchacha20poly1305_ietf_ABYTES,
   crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
   crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
 } from "./interfaces";
-import { zeroFree } from "../utils/zeroFree";
+import {
+  xchacha20Poly1305Open,
+  xchacha20Poly1305Seal,
+} from "./xchacha20poly1305";
+import { snapshotByteInput } from "./byteInput";
+import { WasmAeadError } from "./aeadWasm";
 
 import type { LibCrypto } from "./libcrypto";
 
@@ -11,10 +15,10 @@ import type { LibCrypto } from "./libcrypto";
  * XChaCha20-Poly1305 as required by the blind-rendezvous delivery profile's
  * `carrierAeadSuite = 1` (`draft-irtf-cfrg-xchacha-03`).
  *
- * The construction comes from the pinned libsodium build; this file only moves
- * bytes across the WASM boundary and zeroizes the key and plaintext staging
- * buffers afterwards. It implements no cryptography, which is what SEC-002 and
- * SEC-019 require of application code.
+ * The construction comes from the pinned libsodium build. The reusable
+ * XChaCha adapter owns the hardened WASM boundary; this compatibility wrapper
+ * preserves the established carrier call shape and errors. Application code
+ * implements no cryptography, which is what SEC-002 and SEC-019 require.
  */
 
 export class CarrierAeadError extends Error {
@@ -30,10 +34,18 @@ const requireLength = (
   value: Uint8Array,
   expected: number,
 ): Uint8Array => {
-  if (!(value instanceof Uint8Array) || value.length !== expected)
+  let snapshot: Uint8Array | undefined;
+  try {
+    snapshot = snapshotByteInput(value, `carrierAead: ${name}`, {
+      exactLength: expected,
+    });
+  } catch {
     throw new CarrierAeadError(
       `${name} must be exactly ${String(expected)} bytes`,
     );
+  } finally {
+    snapshot?.fill(0);
+  }
   return value;
 };
 
@@ -47,61 +59,15 @@ export const xchacha20poly1305Seal = (
   requireLength("key", key, crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
   requireLength("nonce", nonce, crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
 
-  const outputLength =
-    plaintext.length + crypto_aead_xchacha20poly1305_ietf_ABYTES;
-  // A zero-length malloc is undefined; allocate one byte for an empty AAD.
-  const aadAllocLength = Math.max(associatedData.length, 1);
-  const plaintextAllocLength = Math.max(plaintext.length, 1);
-
-  const keyPtr = module._malloc(key.length);
-  const noncePtr = module._malloc(nonce.length);
-  const aadPtr = module._malloc(aadAllocLength);
-  const plaintextPtr = module._malloc(plaintextAllocLength);
-  const outputPtr = module._malloc(outputLength);
-
   try {
-    new Uint8Array(module.wasmMemory.buffer, keyPtr, key.length).set(key);
-    new Uint8Array(module.wasmMemory.buffer, noncePtr, nonce.length).set(nonce);
-    new Uint8Array(module.wasmMemory.buffer, aadPtr, associatedData.length).set(
-      associatedData,
-    );
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      plaintextPtr,
-      plaintext.length,
-    ).set(plaintext);
-
-    const result = module._carrier_aead_xchacha20poly1305_encrypt(
-      outputPtr,
-      plaintextPtr,
-      plaintext.length,
-      keyPtr,
-      noncePtr,
-      aadPtr,
-      associatedData.length,
-    );
-    if (result !== 0)
+    return xchacha20Poly1305Seal(module, key, nonce, plaintext, associatedData);
+  } catch (cause) {
+    // Key/nonce validation above preserves the existing CarrierAeadError
+    // contract. Keep new caller-input type/range failures precise, while
+    // translating allocation or primitive failures to the legacy message.
+    if (cause instanceof WasmAeadError)
       throw new CarrierAeadError("XChaCha20-Poly1305 encryption failed");
-
-    return Uint8Array.from(
-      new Uint8Array(module.wasmMemory.buffer, outputPtr, outputLength),
-    );
-  } finally {
-    zeroFree(
-      module,
-      new Uint8Array(module.wasmMemory.buffer, keyPtr, key.length),
-    );
-    module._free(noncePtr);
-    module._free(aadPtr);
-    zeroFree(
-      module,
-      new Uint8Array(
-        module.wasmMemory.buffer,
-        plaintextPtr,
-        plaintextAllocLength,
-      ),
-    );
-    module._free(outputPtr);
+    throw cause;
   }
 };
 
@@ -121,57 +87,12 @@ export const xchacha20poly1305Open = (
 ): Uint8Array | null => {
   requireLength("key", key, crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
   requireLength("nonce", nonce, crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-  if (ciphertextAndTag.length < crypto_aead_xchacha20poly1305_ietf_ABYTES)
-    return null;
 
-  const outputLength =
-    ciphertextAndTag.length - crypto_aead_xchacha20poly1305_ietf_ABYTES;
-  const aadAllocLength = Math.max(associatedData.length, 1);
-  const outputAllocLength = Math.max(outputLength, 1);
-
-  const keyPtr = module._malloc(key.length);
-  const noncePtr = module._malloc(nonce.length);
-  const aadPtr = module._malloc(aadAllocLength);
-  const ciphertextPtr = module._malloc(ciphertextAndTag.length);
-  const outputPtr = module._malloc(outputAllocLength);
-
-  try {
-    new Uint8Array(module.wasmMemory.buffer, keyPtr, key.length).set(key);
-    new Uint8Array(module.wasmMemory.buffer, noncePtr, nonce.length).set(nonce);
-    new Uint8Array(module.wasmMemory.buffer, aadPtr, associatedData.length).set(
-      associatedData,
-    );
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      ciphertextPtr,
-      ciphertextAndTag.length,
-    ).set(ciphertextAndTag);
-
-    const result = module._carrier_aead_xchacha20poly1305_decrypt(
-      outputPtr,
-      ciphertextPtr,
-      ciphertextAndTag.length,
-      keyPtr,
-      noncePtr,
-      aadPtr,
-      associatedData.length,
-    );
-    if (result !== 0) return null;
-
-    return Uint8Array.from(
-      new Uint8Array(module.wasmMemory.buffer, outputPtr, outputLength),
-    );
-  } finally {
-    zeroFree(
-      module,
-      new Uint8Array(module.wasmMemory.buffer, keyPtr, key.length),
-    );
-    module._free(noncePtr);
-    module._free(aadPtr);
-    module._free(ciphertextPtr);
-    zeroFree(
-      module,
-      new Uint8Array(module.wasmMemory.buffer, outputPtr, outputAllocLength),
-    );
-  }
+  return xchacha20Poly1305Open(
+    module,
+    key,
+    nonce,
+    ciphertextAndTag,
+    associatedData,
+  );
 };

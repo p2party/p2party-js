@@ -11,6 +11,8 @@ import {
 } from "../../src/cryptography/mlkem";
 import { loadTestModule } from "../../src/cryptography/testModule";
 
+import type { LibCrypto } from "../../src/cryptography/libcrypto";
+
 const hexToBytes = (hex: string): Uint8Array =>
   Uint8Array.from(Buffer.from(hex, "hex"));
 
@@ -124,6 +126,148 @@ const getRawWasmFunction = (
   return candidate as RawWasmFunction;
 };
 
+interface FreedAllocation {
+  readonly pointer: number;
+  readonly bytes: Uint8Array;
+}
+
+interface FakeMlKemModule {
+  readonly module: LibCrypto;
+  readonly allocations: Array<{ pointer: number; length: number }>;
+  readonly freed: FreedAllocation[];
+  readonly live: Map<number, number>;
+  readonly keyPairSeeds: Uint8Array[];
+  readonly encapsulationInputs: Array<{
+    publicKey: Uint8Array;
+    randomness: Uint8Array;
+  }>;
+  readonly decapsulationInputs: Array<{
+    ciphertext: Uint8Array;
+    secretKey: Uint8Array;
+  }>;
+}
+
+const makeFakeMlKem768Module = (options?: {
+  readonly failAllocationAt?: number;
+  readonly growAllocationAt?: number;
+  readonly keyPairResult?: number;
+  readonly encapsulationResult?: number;
+  readonly decapsulationResult?: number;
+}): FakeMlKemModule => {
+  const suite = ML_KEM_768_SUITE;
+  const wasmMemory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+  const allocations: Array<{ pointer: number; length: number }> = [];
+  const freed: FreedAllocation[] = [];
+  const live = new Map<number, number>();
+  const keyPairSeeds: Uint8Array[] = [];
+  const encapsulationInputs: Array<{
+    publicKey: Uint8Array;
+    randomness: Uint8Array;
+  }> = [];
+  const decapsulationInputs: Array<{
+    ciphertext: Uint8Array;
+    secretKey: Uint8Array;
+  }> = [];
+  let nextPointer = 64;
+  let allocationCount = 0;
+
+  const view = (pointer: number, length: number): Uint8Array =>
+    new Uint8Array(wasmMemory.buffer, pointer, length);
+
+  const module = {
+    wasmMemory,
+    _malloc(length: number): number {
+      allocationCount += 1;
+      if (allocationCount === options?.failAllocationAt) return 0;
+      if (allocationCount === options?.growAllocationAt) wasmMemory.grow(1);
+
+      const pointer = nextPointer;
+      nextPointer += length + 16;
+      allocations.push({ pointer, length });
+      live.set(pointer, length);
+      view(pointer, length).fill(0xa5);
+      return pointer;
+    },
+    _free(pointer: number): void {
+      const length = live.get(pointer);
+      if (length === undefined)
+        throw new Error(`test double: invalid free at ${String(pointer)}`);
+      freed.push({ pointer, bytes: Uint8Array.from(view(pointer, length)) });
+      live.delete(pointer);
+    },
+    _mlkem768_keypair(
+      publicKeyPointer: number,
+      secretKeyPointer: number,
+      seedPointer: number,
+    ): number {
+      const seed = Uint8Array.from(view(seedPointer, suite.keyPairRandomBytes));
+      keyPairSeeds.push(seed);
+      view(publicKeyPointer, suite.publicKeyBytes).fill(seed[0] ^ 0x11);
+      view(secretKeyPointer, suite.secretKeyBytes).fill(seed[1] ^ 0x22);
+      return options?.keyPairResult ?? 0;
+    },
+    _mlkem768_encaps(
+      ciphertextPointer: number,
+      sharedSecretPointer: number,
+      publicKeyPointer: number,
+      randomnessPointer: number,
+    ): number {
+      const publicKey = Uint8Array.from(
+        view(publicKeyPointer, suite.publicKeyBytes),
+      );
+      const randomness = Uint8Array.from(
+        view(randomnessPointer, suite.encapsRandomBytes),
+      );
+      encapsulationInputs.push({ publicKey, randomness });
+      view(ciphertextPointer, suite.ciphertextBytes).fill(
+        publicKey[0] ^ randomness[0],
+      );
+      view(sharedSecretPointer, suite.sharedSecretBytes).fill(
+        randomness[0] ^ 0x44,
+      );
+      return options?.encapsulationResult ?? 0;
+    },
+    _mlkem768_decaps(
+      sharedSecretPointer: number,
+      ciphertextPointer: number,
+      secretKeyPointer: number,
+    ): number {
+      const ciphertext = Uint8Array.from(
+        view(ciphertextPointer, suite.ciphertextBytes),
+      );
+      const secretKey = Uint8Array.from(
+        view(secretKeyPointer, suite.secretKeyBytes),
+      );
+      decapsulationInputs.push({ ciphertext, secretKey });
+      view(sharedSecretPointer, suite.sharedSecretBytes).fill(
+        ciphertext[0] ^ secretKey[0],
+      );
+      return options?.decapsulationResult ?? 0;
+    },
+  } as unknown as LibCrypto;
+
+  return {
+    module,
+    allocations,
+    freed,
+    live,
+    keyPairSeeds,
+    encapsulationInputs,
+    decapsulationInputs,
+  };
+};
+
+const expectAllZero = (bytes: Uint8Array): void => {
+  expect(bytes.every((byte) => byte === 0)).toBe(true);
+};
+
+const freedBytesAt = (fake: FakeMlKemModule, pointer: number): Uint8Array => {
+  const allocation = fake.freed.find((entry) => entry.pointer === pointer);
+  if (allocation === undefined)
+    throw new Error(`test double: pointer ${String(pointer)} was not freed`);
+  return allocation.bytes;
+};
+
 for (const { suite, expected, acvp } of SUITE_CASES) {
   describe(`${suite.standardName} WASM backend`, () => {
     test("carries the exact FIPS 203 sizes", () => {
@@ -179,6 +323,42 @@ for (const { suite, expected, acvp } of SUITE_CASES) {
         module._free(secretKeyPtr);
         module._free(coinsPtr);
       }
+    });
+
+    test("deterministic surface matches ACVP key generation and repeatable encapsulation", async () => {
+      const seed = new Uint8Array(suite.keyPairRandomBytes);
+      seed.set(hexToBytes(acvp.d), 0);
+      seed.set(hexToBytes(acvp.z), 32);
+      const seedBefore = Uint8Array.from(seed);
+      const randomness = new Uint8Array(suite.encapsRandomBytes).fill(0x42);
+      const randomnessBefore = Uint8Array.from(randomness);
+      const backend = createMlKemBackend(await loadTestModule(), suite);
+      const keyPair = await backend.deriveKeyPair(seed);
+      const first = await backend.encapsulateDeterministically(
+        keyPair.publicKey,
+        randomness,
+      );
+      const second = await backend.encapsulateDeterministically(
+        keyPair.publicKey,
+        randomness,
+      );
+      const decapsulated = await backend.decapsulate(
+        first.ciphertext,
+        keyPair.secretKey,
+      );
+
+      expect(await sha256Hex(keyPair.publicKey)).toBe(acvp.publicKeySha256);
+      expect(await sha256Hex(keyPair.secretKey)).toBe(acvp.secretKeySha256);
+      expectBytesEqual(first.ciphertext, second.ciphertext);
+      expectBytesEqual(first.sharedSecret, second.sharedSecret);
+      expectBytesEqual(decapsulated.sharedSecret, first.sharedSecret);
+      expectBytesEqual(seed, seedBefore);
+      expectBytesEqual(randomness, randomnessBefore);
+
+      decapsulated.destroy();
+      second.destroy();
+      first.destroy();
+      keyPair.destroy();
     });
 
     test("key generation, encapsulation, and decapsulation round trip", async () => {
@@ -345,3 +525,345 @@ for (const { suite, expected, acvp } of SUITE_CASES) {
     });
   });
 }
+
+describe("deterministic ML-KEM WASM ownership boundary", () => {
+  const suite = ML_KEM_768_SUITE;
+
+  test("uses caller-supplied seed and randomness without consulting Web Crypto", async () => {
+    const fake = makeFakeMlKem768Module();
+    const backend = createMlKemBackend(fake.module, suite);
+    const seed = Uint8Array.from(
+      { length: suite.keyPairRandomBytes },
+      (_, index) => index,
+    );
+    const publicKey = new Uint8Array(suite.publicKeyBytes).fill(0x53);
+    const randomness = new Uint8Array(suite.encapsRandomBytes).fill(0x64);
+    const seedBefore = Uint8Array.from(seed);
+    const publicKeyBefore = Uint8Array.from(publicKey);
+    const randomnessBefore = Uint8Array.from(randomness);
+    const cryptoApi = globalThis.crypto;
+    const originalGetRandomValues = cryptoApi.getRandomValues;
+    let keyPairPromise: ReturnType<typeof backend.deriveKeyPair>;
+    let encapsulationPromise: ReturnType<
+      typeof backend.encapsulateDeterministically
+    >;
+
+    expect(
+      Reflect.set(cryptoApi, "getRandomValues", () => {
+        throw new Error("deterministic ML-KEM unexpectedly requested entropy");
+      }),
+    ).toBe(true);
+    try {
+      // Both async-compatible methods execute their WASM work synchronously,
+      // so the global poison is restored before this test yields.
+      keyPairPromise = backend.deriveKeyPair(seed);
+      encapsulationPromise = backend.encapsulateDeterministically(
+        publicKey,
+        randomness,
+      );
+    } finally {
+      expect(
+        Reflect.set(cryptoApi, "getRandomValues", originalGetRandomValues),
+      ).toBe(true);
+    }
+
+    const keyPair = await keyPairPromise;
+    const encapsulation = await encapsulationPromise;
+    expect(fake.keyPairSeeds).toEqual([seedBefore]);
+    expect(fake.encapsulationInputs).toEqual([
+      { publicKey: publicKeyBefore, randomness: randomnessBefore },
+    ]);
+    expectBytesEqual(seed, seedBefore);
+    expectBytesEqual(publicKey, publicKeyBefore);
+    expectBytesEqual(randomness, randomnessBefore);
+    expect(fake.live.size).toBe(0);
+
+    encapsulation.destroy();
+    keyPair.destroy();
+  });
+
+  test("rejects wrong types and non-exact deterministic inputs before allocating", async () => {
+    const fake = makeFakeMlKem768Module();
+    const backend = createMlKemBackend(fake.module, suite);
+    const publicKey = new Uint8Array(suite.publicKeyBytes);
+    const randomness = new Uint8Array(suite.encapsRandomBytes);
+    const proxiedBytes = (length: number): Uint8Array =>
+      new Proxy(new Uint8Array(length), {
+        get(): never {
+          throw new Error("hostile proxy surface must not run");
+        },
+      });
+
+    await expect(
+      backend.deriveKeyPair("seed" as unknown as Uint8Array),
+    ).rejects.toThrow("key-generation seed must be a Uint8Array");
+    await expect(
+      backend.deriveKeyPair(new Uint8Array(suite.keyPairRandomBytes - 1)),
+    ).rejects.toThrow(
+      `key-generation seed must be exactly ${String(suite.keyPairRandomBytes)} bytes`,
+    );
+    await expect(
+      backend.deriveKeyPair(new Uint8Array(suite.keyPairRandomBytes + 1)),
+    ).rejects.toThrow(
+      `key-generation seed must be exactly ${String(suite.keyPairRandomBytes)} bytes`,
+    );
+    await expect(
+      backend.encapsulateDeterministically(
+        new Uint8Array(suite.publicKeyBytes - 1),
+        randomness,
+      ),
+    ).rejects.toThrow(
+      `public key must be exactly ${String(suite.publicKeyBytes)} bytes`,
+    );
+    await expect(
+      backend.encapsulateDeterministically(
+        publicKey,
+        "randomness" as unknown as Uint8Array,
+      ),
+    ).rejects.toThrow("encapsulation randomness must be a Uint8Array");
+    await expect(
+      backend.encapsulateDeterministically(
+        publicKey,
+        new Uint8Array(suite.encapsRandomBytes + 1),
+      ),
+    ).rejects.toThrow(
+      `encapsulation randomness must be exactly ${String(suite.encapsRandomBytes)} bytes`,
+    );
+    await expect(
+      backend.deriveKeyPair(proxiedBytes(suite.keyPairRandomBytes)),
+    ).rejects.toThrow("key-generation seed must be a Uint8Array");
+    await expect(
+      backend.encapsulate(proxiedBytes(suite.publicKeyBytes)),
+    ).rejects.toThrow("public key must be a Uint8Array");
+    await expect(
+      backend.encapsulateDeterministically(
+        publicKey,
+        proxiedBytes(suite.encapsRandomBytes),
+      ),
+    ).rejects.toThrow("encapsulation randomness must be a Uint8Array");
+    await expect(
+      backend.decapsulate(
+        proxiedBytes(suite.ciphertextBytes),
+        new Uint8Array(suite.secretKeyBytes),
+      ),
+    ).rejects.toThrow("ciphertext must be a Uint8Array");
+    await expect(
+      backend.decapsulate(
+        new Uint8Array(suite.ciphertextBytes),
+        proxiedBytes(suite.secretKeyBytes),
+      ),
+    ).rejects.toThrow("secret key must be a Uint8Array");
+
+    expect(fake.allocations).toHaveLength(0);
+    expect(fake.freed).toHaveLength(0);
+  });
+
+  test("uses intrinsic bytes despite shadowed length and iteration", async () => {
+    const shadow = (bytes: Uint8Array, claimedLength = 0): Uint8Array => {
+      const shadowed = Uint8Array.from(bytes);
+      Object.defineProperty(shadowed, "length", { value: claimedLength });
+      Object.defineProperty(shadowed, Symbol.iterator, {
+        value: (): never => {
+          throw new Error("hostile iterator must not run");
+        },
+      });
+      return shadowed;
+    };
+    const fake = makeFakeMlKem768Module();
+    const backend = createMlKemBackend(fake.module, suite);
+    const seed = Uint8Array.from(
+      { length: suite.keyPairRandomBytes },
+      (_, index) => index,
+    );
+    const publicKey = new Uint8Array(suite.publicKeyBytes).fill(0x42);
+    const randomness = new Uint8Array(suite.encapsRandomBytes).fill(0x43);
+    const ciphertext = new Uint8Array(suite.ciphertextBytes).fill(0x54);
+    const secretKey = new Uint8Array(suite.secretKeyBytes).fill(0x65);
+
+    const keyPair = await backend.deriveKeyPair(shadow(seed, 1_000));
+    const random = await backend.encapsulate(shadow(publicKey));
+    const deterministic = await backend.encapsulateDeterministically(
+      shadow(publicKey, 1_000),
+      shadow(randomness),
+    );
+    const decapsulation = await backend.decapsulate(
+      shadow(ciphertext),
+      shadow(secretKey, 1_000),
+    );
+
+    expect(fake.keyPairSeeds).toEqual([seed]);
+    expect(fake.encapsulationInputs[0]?.publicKey).toEqual(publicKey);
+    expect(fake.encapsulationInputs[1]).toEqual({ publicKey, randomness });
+    expect(fake.decapsulationInputs).toEqual([{ ciphertext, secretKey }]);
+    expect(fake.live.size).toBe(0);
+
+    decapsulation.destroy();
+    deterministic.destroy();
+    random.destroy();
+    keyPair.destroy();
+  });
+
+  test("snapshots every borrowed input before malloc can grow WASM memory", async () => {
+    const keyPairFake = makeFakeMlKem768Module({ growAllocationAt: 1 });
+    const keyPairBuffer = keyPairFake.module.wasmMemory.buffer;
+    const seed = new Uint8Array(
+      keyPairBuffer,
+      50_000,
+      suite.keyPairRandomBytes,
+    );
+    seed.fill(0x31);
+    const expectedSeed = Uint8Array.from(seed);
+    const keyPair = await createMlKemBackend(
+      keyPairFake.module,
+      suite,
+    ).deriveKeyPair(seed);
+
+    expect(keyPairFake.module.wasmMemory.buffer).not.toBe(keyPairBuffer);
+    expect(keyPairFake.keyPairSeeds).toEqual([expectedSeed]);
+    expectAllZero(
+      freedBytesAt(keyPairFake, keyPairFake.allocations[1].pointer),
+    );
+    expectAllZero(
+      freedBytesAt(keyPairFake, keyPairFake.allocations[2].pointer),
+    );
+    expect(keyPairFake.live.size).toBe(0);
+    keyPair.destroy();
+
+    const encapsFake = makeFakeMlKem768Module({ growAllocationAt: 1 });
+    const encapsBuffer = encapsFake.module.wasmMemory.buffer;
+    const publicKey = new Uint8Array(
+      encapsBuffer,
+      48_000,
+      suite.publicKeyBytes,
+    );
+    const randomness = new Uint8Array(
+      encapsBuffer,
+      50_000,
+      suite.encapsRandomBytes,
+    );
+    publicKey.fill(0x42);
+    randomness.fill(0x43);
+    const expectedPublicKey = Uint8Array.from(publicKey);
+    const expectedRandomness = Uint8Array.from(randomness);
+    const encapsulation = await createMlKemBackend(
+      encapsFake.module,
+      suite,
+    ).encapsulateDeterministically(publicKey, randomness);
+
+    expect(encapsFake.module.wasmMemory.buffer).not.toBe(encapsBuffer);
+    expect(encapsFake.encapsulationInputs).toEqual([
+      {
+        publicKey: expectedPublicKey,
+        randomness: expectedRandomness,
+      },
+    ]);
+    expectAllZero(freedBytesAt(encapsFake, encapsFake.allocations[1].pointer));
+    expectAllZero(freedBytesAt(encapsFake, encapsFake.allocations[3].pointer));
+    expect(encapsFake.live.size).toBe(0);
+    encapsulation.destroy();
+
+    const decapsFake = makeFakeMlKem768Module({ growAllocationAt: 1 });
+    const decapsBuffer = decapsFake.module.wasmMemory.buffer;
+    const ciphertext = new Uint8Array(
+      decapsBuffer,
+      44_000,
+      suite.ciphertextBytes,
+    );
+    const secretKey = new Uint8Array(
+      decapsBuffer,
+      48_000,
+      suite.secretKeyBytes,
+    );
+    ciphertext.fill(0x54);
+    secretKey.fill(0x65);
+    const expectedCiphertext = Uint8Array.from(ciphertext);
+    const expectedSecretKey = Uint8Array.from(secretKey);
+    const decapsulation = await createMlKemBackend(
+      decapsFake.module,
+      suite,
+    ).decapsulate(ciphertext, secretKey);
+
+    expect(decapsFake.module.wasmMemory.buffer).not.toBe(decapsBuffer);
+    expect(decapsFake.decapsulationInputs).toEqual([
+      {
+        ciphertext: expectedCiphertext,
+        secretKey: expectedSecretKey,
+      },
+    ]);
+    expectAllZero(freedBytesAt(decapsFake, decapsFake.allocations[0].pointer));
+    expectAllZero(freedBytesAt(decapsFake, decapsFake.allocations[2].pointer));
+    expect(decapsFake.live.size).toBe(0);
+    decapsulation.destroy();
+  });
+
+  test("cleans all prior allocations when a later malloc fails", async () => {
+    const keyPairFake = makeFakeMlKem768Module({ failAllocationAt: 3 });
+    await expect(
+      createMlKemBackend(keyPairFake.module, suite).deriveKeyPair(
+        new Uint8Array(suite.keyPairRandomBytes).fill(0x31),
+      ),
+    ).rejects.toThrow("failed to allocate key-generation seed");
+    expectAllZero(
+      freedBytesAt(keyPairFake, keyPairFake.allocations[1].pointer),
+    );
+    expect(keyPairFake.live.size).toBe(0);
+
+    const encapsFake = makeFakeMlKem768Module({ failAllocationAt: 4 });
+    await expect(
+      createMlKemBackend(encapsFake.module, suite).encapsulateDeterministically(
+        new Uint8Array(suite.publicKeyBytes).fill(0x42),
+        new Uint8Array(suite.encapsRandomBytes).fill(0x43),
+      ),
+    ).rejects.toThrow("failed to allocate encapsulation randomness");
+    expectAllZero(freedBytesAt(encapsFake, encapsFake.allocations[1].pointer));
+    expect(encapsFake.live.size).toBe(0);
+
+    const decapsFake = makeFakeMlKem768Module({ failAllocationAt: 3 });
+    await expect(
+      createMlKemBackend(decapsFake.module, suite).decapsulate(
+        new Uint8Array(suite.ciphertextBytes).fill(0x54),
+        new Uint8Array(suite.secretKeyBytes).fill(0x65),
+      ),
+    ).rejects.toThrow("failed to allocate secret key");
+    expectAllZero(freedBytesAt(decapsFake, decapsFake.allocations[0].pointer));
+    expect(decapsFake.live.size).toBe(0);
+  });
+
+  test("zero-frees every secret scratch when a primitive rejects", async () => {
+    const keyPairFake = makeFakeMlKem768Module({ keyPairResult: -7 });
+    await expect(
+      createMlKemBackend(keyPairFake.module, suite).deriveKeyPair(
+        new Uint8Array(suite.keyPairRandomBytes).fill(0x31),
+      ),
+    ).rejects.toThrow("key generation failed (-7)");
+    expectAllZero(
+      freedBytesAt(keyPairFake, keyPairFake.allocations[1].pointer),
+    );
+    expectAllZero(
+      freedBytesAt(keyPairFake, keyPairFake.allocations[2].pointer),
+    );
+    expect(keyPairFake.live.size).toBe(0);
+
+    const encapsFake = makeFakeMlKem768Module({ encapsulationResult: -8 });
+    await expect(
+      createMlKemBackend(encapsFake.module, suite).encapsulateDeterministically(
+        new Uint8Array(suite.publicKeyBytes).fill(0x42),
+        new Uint8Array(suite.encapsRandomBytes).fill(0x43),
+      ),
+    ).rejects.toThrow("encapsulation failed (-8)");
+    expectAllZero(freedBytesAt(encapsFake, encapsFake.allocations[1].pointer));
+    expectAllZero(freedBytesAt(encapsFake, encapsFake.allocations[3].pointer));
+    expect(encapsFake.live.size).toBe(0);
+
+    const decapsFake = makeFakeMlKem768Module({ decapsulationResult: -9 });
+    await expect(
+      createMlKemBackend(decapsFake.module, suite).decapsulate(
+        new Uint8Array(suite.ciphertextBytes).fill(0x54),
+        new Uint8Array(suite.secretKeyBytes).fill(0x65),
+      ),
+    ).rejects.toThrow("decapsulation failed (-9)");
+    expectAllZero(freedBytesAt(decapsFake, decapsFake.allocations[0].pointer));
+    expectAllZero(freedBytesAt(decapsFake, decapsFake.allocations[2].pointer));
+    expect(decapsFake.live.size).toBe(0);
+  });
+});

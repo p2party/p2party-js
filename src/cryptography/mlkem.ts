@@ -1,5 +1,6 @@
 import { zeroFree } from "../utils/zeroFree";
 
+import { snapshotByteInput } from "./byteInput";
 import { fillRandomBytesInto } from "./random";
 
 import type { LibCrypto } from "./libcrypto";
@@ -211,24 +212,34 @@ export interface MlKemBackend<P extends MlKemParameterSet = MlKemParameterSet> {
   ): Promise<MlKemDecapsulation>;
 }
 
+/**
+ * Real-WASM ML-KEM backend with the explicit deterministic inputs required by
+ * composed, version-pinned KEMs. The ordinary backend remains the narrower
+ * seam used by protocol state machines and test doubles.
+ */
+export interface DeterministicMlKemBackend<
+  P extends MlKemParameterSet = MlKemParameterSet,
+> extends MlKemBackend<P> {
+  /**
+   * FIPS 203 KeyGen_internal with the caller-supplied 64-byte d || z seed.
+   * The seed is borrowed; this method snapshots but never wipes caller bytes.
+   */
+  deriveKeyPair(seed: Uint8Array): Promise<MlKemKeyPair>;
+  /**
+   * FIPS 203 Encaps_internal with caller-supplied 32-byte randomness.
+   * Inputs are borrowed; this method snapshots but never wipes caller bytes.
+   */
+  encapsulateDeterministically(
+    publicKey: Uint8Array,
+    randomness: Uint8Array,
+  ): Promise<MlKemEncapsulation>;
+}
+
 /** Compatibility aliases for the currently shipped ML-KEM-768 handshake. */
 export type MlKem768KeyPair = MlKemKeyPair;
 export type MlKem768Encapsulation = MlKemEncapsulation;
 export type MlKem768Decapsulation = MlKemDecapsulation;
 export type MlKem768Backend = MlKemBackend<768>;
-
-const requireExactBytes: (
-  value: unknown,
-  name: string,
-  expectedLength: number,
-) => asserts value is Uint8Array = (value, name, expectedLength) => {
-  if (!(value instanceof Uint8Array))
-    throw new TypeError(`${name} must be a Uint8Array`);
-  if (value.length !== expectedLength)
-    throw new RangeError(
-      `${name} must be exactly ${String(expectedLength)} bytes`,
-    );
-};
 
 const checkedMalloc = (
   module: LibCrypto,
@@ -341,7 +352,9 @@ const requireMlKemExports = (
   };
 };
 
-class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
+class WasmMlKemBackend<
+  P extends MlKemParameterSet,
+> implements DeterministicMlKemBackend<P> {
   readonly #module: LibCrypto;
   readonly #exports: SelectedMlKemExports;
   readonly suite: Readonly<MlKemSuiteDescriptor<P>>;
@@ -353,12 +366,40 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
   }
 
   async generateKeyPair(): Promise<MlKemKeyPair> {
-    await Promise.resolve();
+    const suite = this.suite;
+    const privateSeed = new Uint8Array(suite.keyPairRandomBytes);
+
+    try {
+      fillRandomBytesInto(privateSeed);
+      return this.#deriveKeyPair(privateSeed);
+    } finally {
+      privateSeed.fill(0);
+    }
+  }
+
+  async deriveKeyPair(seed: Uint8Array): Promise<MlKemKeyPair> {
+    const suite = this.suite;
+    const privateSeed = snapshotByteInput(
+      seed,
+      `${suite.standardName} key-generation seed`,
+      { exactLength: suite.keyPairRandomBytes },
+    );
+
+    // Snapshot before any allocation: `_malloc` may grow and detach a caller
+    // view backed by this module's WebAssembly.Memory.
+    try {
+      return this.#deriveKeyPair(privateSeed);
+    } finally {
+      privateSeed.fill(0);
+    }
+  }
+
+  #deriveKeyPair(privateSeed: Uint8Array): MlKemKeyPair {
     const module = this.#module;
     const suite = this.suite;
     let publicKeyPtr: number | undefined;
     let secretKeyPtr: number | undefined;
-    let coinsPtr: number | undefined;
+    let seedPtr: number | undefined;
 
     try {
       publicKeyPtr = checkedMalloc(
@@ -373,21 +414,16 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
         suite.secretKeyBytes,
         "secret key",
       );
-      coinsPtr = checkedMalloc(
+      seedPtr = checkedMalloc(
         module,
         suite,
-        suite.keyPairRandomBytes,
-        "key-generation randomness",
+        privateSeed.length,
+        "key-generation seed",
       );
 
-      const coins = heapView(module, coinsPtr, suite.keyPairRandomBytes);
-      fillRandomBytesInto(coins);
+      heapView(module, seedPtr, privateSeed.length).set(privateSeed);
 
-      const result = this.#exports.keypair(
-        publicKeyPtr,
-        secretKeyPtr,
-        coinsPtr,
-      );
+      const result = this.#exports.keypair(publicKeyPtr, secretKeyPtr, seedPtr);
       if (result !== 0)
         throw new Error(
           `${suite.standardName} key generation failed (${String(result)})`,
@@ -398,26 +434,70 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
         Uint8Array.from(heapView(module, secretKeyPtr, suite.secretKeyBytes)),
       );
     } finally {
-      publicFree(module, publicKeyPtr);
-      secretFree(module, secretKeyPtr, suite.secretKeyBytes);
-      secretFree(module, coinsPtr, suite.keyPairRandomBytes);
+      try {
+        publicFree(module, publicKeyPtr);
+      } finally {
+        try {
+          secretFree(module, secretKeyPtr, suite.secretKeyBytes);
+        } finally {
+          secretFree(module, seedPtr, privateSeed.length);
+        }
+      }
     }
   }
 
   async encapsulate(publicKey: Uint8Array): Promise<MlKemEncapsulation> {
-    await Promise.resolve();
-    const module = this.#module;
     const suite = this.suite;
-    requireExactBytes(
+    const privatePublicKey = snapshotByteInput(
       publicKey,
       `${suite.standardName} public key`,
-      suite.publicKeyBytes,
+      { exactLength: suite.publicKeyBytes },
     );
 
+    const privateRandomness = new Uint8Array(suite.encapsRandomBytes);
+    try {
+      fillRandomBytesInto(privateRandomness);
+      return this.#encapsulate(privatePublicKey, privateRandomness);
+    } finally {
+      privateRandomness.fill(0);
+    }
+  }
+
+  async encapsulateDeterministically(
+    publicKey: Uint8Array,
+    randomness: Uint8Array,
+  ): Promise<MlKemEncapsulation> {
+    const suite = this.suite;
+    const privatePublicKey = snapshotByteInput(
+      publicKey,
+      `${suite.standardName} public key`,
+      { exactLength: suite.publicKeyBytes },
+    );
+    const privateRandomness = snapshotByteInput(
+      randomness,
+      `${suite.standardName} encapsulation randomness`,
+      { exactLength: suite.encapsRandomBytes },
+    );
+
+    // Snapshot both borrowed inputs before `_malloc` can detach views into the
+    // module's current memory buffer.
+    try {
+      return this.#encapsulate(privatePublicKey, privateRandomness);
+    } finally {
+      privateRandomness.fill(0);
+    }
+  }
+
+  #encapsulate(
+    privatePublicKey: Uint8Array,
+    privateRandomness: Uint8Array,
+  ): MlKemEncapsulation {
+    const module = this.#module;
+    const suite = this.suite;
     let ciphertextPtr: number | undefined;
     let sharedSecretPtr: number | undefined;
     let publicKeyPtr: number | undefined;
-    let coinsPtr: number | undefined;
+    let randomnessPtr: number | undefined;
 
     try {
       ciphertextPtr = checkedMalloc(
@@ -435,25 +515,28 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
       publicKeyPtr = checkedMalloc(
         module,
         suite,
-        suite.publicKeyBytes,
+        privatePublicKey.length,
         "public key",
       );
-      coinsPtr = checkedMalloc(
+      randomnessPtr = checkedMalloc(
         module,
         suite,
-        suite.encapsRandomBytes,
+        privateRandomness.length,
         "encapsulation randomness",
       );
 
-      heapView(module, publicKeyPtr, suite.publicKeyBytes).set(publicKey);
-      const coins = heapView(module, coinsPtr, suite.encapsRandomBytes);
-      fillRandomBytesInto(coins);
+      heapView(module, publicKeyPtr, privatePublicKey.length).set(
+        privatePublicKey,
+      );
+      heapView(module, randomnessPtr, privateRandomness.length).set(
+        privateRandomness,
+      );
 
       const result = this.#exports.encaps(
         ciphertextPtr,
         sharedSecretPtr,
         publicKeyPtr,
-        coinsPtr,
+        randomnessPtr,
       );
       if (result !== 0)
         throw new Error(
@@ -467,10 +550,19 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
         ),
       );
     } finally {
-      publicFree(module, ciphertextPtr);
-      secretFree(module, sharedSecretPtr, suite.sharedSecretBytes);
-      publicFree(module, publicKeyPtr);
-      secretFree(module, coinsPtr, suite.encapsRandomBytes);
+      try {
+        publicFree(module, ciphertextPtr);
+      } finally {
+        try {
+          secretFree(module, sharedSecretPtr, suite.sharedSecretBytes);
+        } finally {
+          try {
+            publicFree(module, publicKeyPtr);
+          } finally {
+            secretFree(module, randomnessPtr, privateRandomness.length);
+          }
+        }
+      }
     }
   }
 
@@ -478,20 +570,31 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
     ciphertext: Uint8Array,
     secretKey: Uint8Array,
   ): Promise<MlKemDecapsulation> {
-    await Promise.resolve();
-    const module = this.#module;
     const suite = this.suite;
-    requireExactBytes(
+    const privateCiphertext = snapshotByteInput(
       ciphertext,
       `${suite.standardName} ciphertext`,
-      suite.ciphertextBytes,
+      { exactLength: suite.ciphertextBytes },
     );
-    requireExactBytes(
+    const privateSecretKey = snapshotByteInput(
       secretKey,
       `${suite.standardName} secret key`,
-      suite.secretKeyBytes,
+      { exactLength: suite.secretKeyBytes },
     );
 
+    try {
+      return this.#decapsulate(privateCiphertext, privateSecretKey);
+    } finally {
+      privateSecretKey.fill(0);
+    }
+  }
+
+  #decapsulate(
+    privateCiphertext: Uint8Array,
+    privateSecretKey: Uint8Array,
+  ): MlKemDecapsulation {
+    const module = this.#module;
+    const suite = this.suite;
     let sharedSecretPtr: number | undefined;
     let ciphertextPtr: number | undefined;
     let secretKeyPtr: number | undefined;
@@ -506,18 +609,22 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
       ciphertextPtr = checkedMalloc(
         module,
         suite,
-        suite.ciphertextBytes,
+        privateCiphertext.length,
         "ciphertext",
       );
       secretKeyPtr = checkedMalloc(
         module,
         suite,
-        suite.secretKeyBytes,
+        privateSecretKey.length,
         "secret key",
       );
 
-      heapView(module, ciphertextPtr, suite.ciphertextBytes).set(ciphertext);
-      heapView(module, secretKeyPtr, suite.secretKeyBytes).set(secretKey);
+      heapView(module, ciphertextPtr, privateCiphertext.length).set(
+        privateCiphertext,
+      );
+      heapView(module, secretKeyPtr, privateSecretKey.length).set(
+        privateSecretKey,
+      );
 
       const result = this.#exports.decaps(
         sharedSecretPtr,
@@ -535,9 +642,15 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
         ),
       );
     } finally {
-      secretFree(module, sharedSecretPtr, suite.sharedSecretBytes);
-      publicFree(module, ciphertextPtr);
-      secretFree(module, secretKeyPtr, suite.secretKeyBytes);
+      try {
+        secretFree(module, sharedSecretPtr, suite.sharedSecretBytes);
+      } finally {
+        try {
+          publicFree(module, ciphertextPtr);
+        } finally {
+          secretFree(module, secretKeyPtr, privateSecretKey.length);
+        }
+      }
     }
   }
 }
@@ -545,7 +658,7 @@ class WasmMlKemBackend<P extends MlKemParameterSet> implements MlKemBackend<P> {
 export const createMlKemBackend = <P extends MlKemParameterSet>(
   module: LibCrypto,
   suite: Readonly<MlKemSuiteDescriptor<P>>,
-): MlKemBackend<P> => {
+): DeterministicMlKemBackend<P> => {
   const canonicalSuite = getMlKemSuite(suite.parameterSet);
   if (suite !== canonicalSuite)
     throw new TypeError(

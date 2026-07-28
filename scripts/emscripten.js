@@ -12,7 +12,7 @@ const MLKEM_NATIVE_COMMIT = "0ba906cb14b1c241476134d7403a811b382ca498";
 const MLKEM_NATIVE_SOURCE_TREE_SHA256 =
   "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
 const MLKEM_WRAPPER_SHA256 =
-  "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072";
+  "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d";
 
 const buildPath = path.join(process.cwd(), "src", "cryptography");
 const finalJsPath = path.join(buildPath, "libcrypto.js");
@@ -146,6 +146,8 @@ const exportedFunctions = [
   "_mlkem1024_keypair",
   "_mlkem1024_encaps",
   "_mlkem1024_decaps",
+  "_fips202_shake256",
+  "_fips202_sha3_256",
 ];
 
 const emccArgs = [

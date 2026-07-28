@@ -12,7 +12,7 @@
       "release": "v1.2.0",
       "commit": "0ba906cb14b1c241476134d7403a811b382ca498",
       "sourceTreeSha256": "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6",
-      "wrapperSha256": "181160a16f22e30eafc85d7be7a3be47be41026da14b0488f120ededc36ea072",
+      "wrapperSha256": "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d",
       "backend": "portable-c",
       "parameterSets": [
         512,
@@ -38,8 +38,8 @@
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 210504,
-    "sha256": "8e1ef6a853be326dbc41cb42dde4d7ebe9042ec2550cedadd1e02a757c01b91e",
-    "sri": "sha384-5bfyPJcX2JVKEJA8MK+YuBYDFu6VMg8Jphdt30CQBqHI8NIQSMwP1advvY5iuzXE"
+    "bytes": 211367,
+    "sha256": "d40f62bbf0ebe17453962e1c5795629e17a6dc4e4fbf774201f061539363d66a",
+    "sri": "sha384-xhO/aA9PVAK17BjqHHo25MVhidxGD4R8Ny6WIRQJx3Zw78ZQ8WpZVEUJR6pIQYZv"
   }
 }

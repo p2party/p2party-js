@@ -2,9 +2,9 @@
 
 Written 2026-07-28 for the next agent and updated after local branch
 reconciliation. The production-correctness baseline is on each repository's
-local `master`; the non-pair payload/Core-reducer increment described below is
-the current local `p2party-js` Phase-0 checkpoint. Nothing is pushed; no PR
-exists.
+local `master`; the pair-plaintext/admission-semantics increment described
+below extends the current local `p2party-js` Phase-0 checkpoint. Nothing is
+pushed; no PR exists.
 
 ## Continuation after this handoff
 
@@ -20,9 +20,10 @@ ordering:
 - `derivations.ts` now owns the exact `StableIdentityCommitment`,
   `LocalPeerIdDigest`, and `LocalPeerId` equations, with room-separation and
   length-failure tests.
-- Section 4.8 now has an explicit `AdmissionEvaluationInputV1`, versioned pair
-  and decision leases, an exact lease constructor/minimum, and a validated
-  atomic authority-admission view. Do not implement a caller-supplied
+- Section 4.8 now has module-private `VerifiedAdmissionContextV1` and
+  `TrustedAdmissionSnapshotV1` provenance, versioned pair/decision leases, an
+  exact lease constructor/minimum, and a validated atomic authority-admission
+  view. Do not reintroduce a caller-assembled admission input or a supplied
   `authorityAdmissionAvailable` boolean.
 - The post-v0.4 roadmap places optional proof-of-work only at room-blind
   Blind-RSA token issuance. It is Sybil-costing, not personhood, membership,
@@ -49,15 +50,18 @@ ordering:
   dynamic viewport plus all four safe-area insets cover Chrome Android, iOS
   Safari geometry, and Capacitor's single-inset-owner configuration.
 
-Non-pair payload reduction is no longer pending: the working tree contains
-closed codecs and intrinsic validation for `PRESENCE`, `LEAVE`, descriptor-only
-`STORE_HINT`, and `ADMISSION_REVOKE`, plus pair-private `AdmissionGrantV1`
-validation and deterministic Core facts. This does **not** close the complete
-operation boundary. `PairPlaintextV1` and its body union are absent, nonempty
-`STORE_HINT` routes fail closed until the route-family registry/parser is
-frozen, and the sole admission/view/custody kernel is still absent. Therefore a
-`PAIR_STEP` in `activeOperationIds` is outer-authenticated only and the current
-state is not yet the specification's complete pair/admission result.
+The working tree now also contains the proposed `PairPlaintextV1` codec and all
+ten body variants, schema-derived class/padding rules, room-selected v4
+handshake framing, partial independent pair vectors, and a semantic-only
+admission-policy/lease module. This still does **not** close the complete pair
+or admission boundary: HPKE/pair AEAD, one-use routing-tag state, exact
+predecessor/state validation, trusted snapshot/custody/provenance constructors,
+answer-to-offer/adapter/fingerprint validation, `Admit()`, atomic persistence,
+and the pre-SDP effectful gate are absent.
+Nonempty `STORE_HINT` routes also fail closed until the route-family
+registry/parser is frozen. Therefore a `PAIR_STEP` in
+`activePairOuterOperationIds` remains outer-authenticated only, not an admitted
+edge.
 
 Verification commands for the current tree:
 
@@ -70,15 +74,15 @@ bun test tests
 ```
 
 Verification after the final review edits:
-`bun test tests/blindRendezvous` — 228 pass, 0 fail, 14 files; `bun test tests`
-— 800 pass, 0 fail, 105 files. Both TypeScript configurations, ESLint, and
-`git diff --check` also pass.
+`bun test tests/blindRendezvous` — 259 pass, 0 fail, 17 files; `bun test tests`
+— 834 pass, 0 fail, 109 files. Both TypeScript configurations, targeted ESLint,
+and `git diff --check` also pass.
 
 ## Repositories and branches
 
 | Repo             | Path                                | Branch   | Local state                                                                  |
 | ---------------- | ----------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `master` | WebRTC/TURN baseline and current non-pair/Core Phase-0 checkpoint merged locally |
+| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `master` | WebRTC/TURN baseline plus current pair/admission Phase-0 checkpoint, local only   |
 | `p2party-server` | `~/Desktop/@p2party/p2party-server` | `master` | TURN endpoint issuance merged; 1 commit ahead of `origin/master`             |
 | `p2party.com`    | `~/Desktop/@p2party/p2party.com`    | `master` | Frontend fixes already present; 2 commits ahead of `origin/master`           |
 
@@ -121,12 +125,14 @@ do not stage it unless the maintainer explicitly reverses that decision.
 | Module                | Owns                                                                                                                       |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds.            |
-| `schemas.ts`          | Descriptors for implemented room operations, non-pair payloads, store objects, and canonical Core state/faults.            |
+| `schemas.ts`          | Descriptors for implemented room operations, pair/non-pair payloads, store objects, and canonical Core state/faults.       |
 | `projections.ts`      | Generated key tables and enum projections. No hand-maintained duplicate remains.                                           |
-| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/operation/carrier identifiers.                                                 |
+| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/pair/operation/carrier identifiers and transcript inputs.                     |
 | `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, `DEFAULT_BLIND_POLICY_V4_0`.                                                   |
 | `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, the two typed errors.                                        |
 | `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and exact suite-1 class targets.                                               |
+| `pairPlaintext.ts`    | Closed ten-body codec, minimal class/zero padding, initial slots, candidate shape/order, and v4 framing validation.        |
+| `admissionPolicy.ts`  | Internal semantic-only frontend/authority policy order and bootstrap/stable-edge lease arithmetic.                        |
 | `operation.ts`        | Operation codec/signatures, process-private room-validation context, active/candidate outer gates, pair-slot binding.      |
 | `operationPayload.ts` | Closed non-pair codecs and intrinsic validation for grant/revoke, presence/permit, leave, and descriptor-only store hints. |
 | `coreReduce.ts`       | Provenance-checked candidate ingress, payload reduction, dependency-evidence fixed point, canonical Core state/faults.     |
@@ -149,10 +155,17 @@ The current Phase-0 checkpoint closes these specific boundaries:
   canonical presence, leave, descriptor-only store, revocation, capacity, and
   fault projections;
 - future custody cannot fault current Core state, and historical evidence is
-  inert except when a current valid dependency requires it.
+  inert except when a current valid dependency requires it;
+- pair plaintext/body bytes, three class targets, minimal zero padding,
+  initial slots, room-selected v4 frame geometry, transport-candidate order,
+  and pair transcript derivations execute with partial independent KATs; and
+- frontend/authority policy precedence, revocation/fault selection, invalid
+  grant mapping, and lease arithmetic execute only as explicitly untrusted
+  semantics pending the protected admission constructors.
 
 These are component-level facts, not a frozen v0.4 release registry or deployed
-protocol.
+protocol. The pair KATs are partial and do not satisfy AC-035's independent
+every-body vector gate.
 
 ### `p2party-js/src/cryptography/`
 
@@ -249,15 +262,17 @@ not exercise blind rendezvous.
 
 ## Suggested next steps, in dependency order
 
-1. **Freeze the remaining Phase-0 bytes.** Add the canonical
-   `PairPlaintextV1`/closed body union and vectors; freeze the
+1. **Freeze the remaining Phase-0 bytes.** Complete the independent
+   every-pair-body vectors and external review for the proposed
+   `PairPlaintextV1` codec; freeze the
    content-addressed route-family registry/parsers (derived `RouteId` ordering
    itself is now executable and vector-tested); freeze the
    authority-view/custody persistence shapes; then freeze the store HTTP
    profiles/allocation artifacts and release compatibility hash.
-2. **Implement the edge-local pair/admission boundary.** Open pair AEAD, prove
-   plaintext minimality/sequence/predecessor/body/one-use routing tag, and route
-   the result through one pure `Admit()` over a trusted atomic snapshot before
+2. **Implement the edge-local pair/admission boundary.** Pin a reviewed RFC
+   9180 hybrid-HPKE implementation, implement pair AEAD/one-use routing tags and
+   exact state-owned predecessor checks, then route the already codec-validated
+   plaintext through one pure `Admit()` over a trusted atomic snapshot before
    SDP/ICE promotion.
 3. **Connect the existing presence/revocation Core facts to admission and the
    pre-SDP identity gate.** Stable ownership remains a pair-private or trusted

@@ -11,18 +11,20 @@ checkable. This document records what executes, not what is claimed.
 
 ## What exists
 
-All of it in `p2party-js/src/blindRendezvous/`, none of it exported from the
-package barrel:
+The blind-specific modules are in `p2party-js/src/blindRendezvous/`, none
+exported from the package barrel:
 
 | Module                | Owns                                                                                                            |
 | --------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
-| `schemas.ts`          | Descriptors for implemented room operations, non-pair payloads, store objects, and canonical Core state/faults. |
+| `schemas.ts`          | Descriptors for implemented room operations, pair/non-pair payloads, store objects, and canonical Core facts.   |
 | `projections.ts`      | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
-| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, and the room/stable-peer/operation/carrier identifiers.                  |
+| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/pair/operation/carrier identifiers, and pair transcript inputs.    |
 | `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
 | `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, and the two typed errors.                         |
 | `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and the three exact suite-1 class targets.                          |
+| `pairPlaintext.ts`    | Closed ten-body pair codec, minimal class/padding, initial slots, candidate shape/order, and v4-frame gates.    |
+| `admissionPolicy.ts`  | Internal semantic-only frontend/authority policy order and bootstrap/stable-edge lease arithmetic.             |
 | `operation.ts`        | Operation codec/signatures, process-private room context, active/candidate outer validation, pair-slot binding. |
 | `operationPayload.ts` | Closed non-pair codecs and intrinsic validation for grant/revoke, presence/permit, leave, and store hints.      |
 | `coreReduce.ts`       | Provenance-checked candidate ingress, payload reduction, historical dependency evidence, canonical Core state.  |
@@ -30,6 +32,10 @@ package barrel:
 | `publicWindow.ts`     | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
 | `storeDescriptor.ts`  | Store/route identity, timeless authenticity and explicit-time activation, scopes, chain-start equivocation.     |
 | `normativeKernel.ts`  | Registry shape validators, now consuming the generated projections.                                             |
+
+The shared protocol-v4 frame-length/tag geometry lives in
+`src/handlers/handshakeFrame.ts`; both `pairPlaintext.ts` and the existing
+semantic/cryptographic parser in `handshakeCore.ts` consume it.
 
 Two of the specification's own published constants were re-derived rather than
 trusted, and both match exactly:
@@ -71,19 +77,34 @@ frozen or released protocol surface:
   bytes remain unable to change current Core state;
 - store descriptor/route validation split into timeless authenticity and
   explicit-time activation, with private snapshots and cheap lease/shape checks
-  before signature work.
+  before signature work;
+- the proposed `PairPlaintextV1` schema and all ten body variants, exact
+  `2919/4017/69553` targets, unique zero padding, minimal class selection,
+  initial pair-slot shapes, derived transport-candidate ordering, room-selected
+  v4 handshake geometry, pair/identity/transcript derivations, and partial
+  standalone-reference KATs;
+- an explicitly untrusted semantic admission helper that fixes local
+  blacklist/address-book/authority precedence, revocation/fault selection,
+  grant denial mapping, and decision-lease horizons. It is not `Admit()` and
+  cannot construct a trusted snapshot, custody view, provenance brand, or
+  outbound authorization.
 
 Tests cover canonical round trips and vectors, mutable-input races,
 process-private provenance, delivery permutation/duplication, author
 fork/quota precedence, semantic forks, cross-window dependency evidence,
 store-generation forks, revocation ordering, and near-`u64` evidence overflow.
 This is executable component evidence only. It does not freeze the whole Phase-0
-registry, implement the pair plaintext/admission boundary, provide store wire
-interoperability, or constitute a conformance claim.
+registry, implement HPKE/pair AEAD or the trusted admission/pre-SDP boundary,
+provide store wire interoperability, or constitute a conformance claim. The
+independent pair vectors are deliberately partial: AC-035 still requires
+deterministic independent vectors for every pair-step body before a freeze.
+Answer-to-offer candidate matching, adapter-registry validation, and strict
+SHA-256 SDP fingerprint parsing are also state/integration gates, not
+implemented by the intrinsic candidate shape/order checks.
 
-Verification for this snapshot: `bun test tests/blindRendezvous` — 228 pass,
-0 fail, 14 files; `bun test tests` — 800 pass, 0 fail, 105 files. Both
-TypeScript configurations, ESLint, and `git diff --check` also pass.
+Verification for this snapshot: `bun test tests/blindRendezvous` — 259 pass,
+0 fail, 17 files; `bun test tests` — 834 pass, 0 fail, 109 files. Both
+TypeScript configurations, targeted ESLint, and `git diff --check` also pass.
 
 ## Blockers
 
@@ -207,21 +228,36 @@ claiming the still-absent pair protocol:
   private `WeakMap`. Object spread, structured clone, and post-validation
   typed-array mutation are rejected before reduction.
 
+The pair-plaintext continuation then fixed two review findings before this
+checkpoint:
+
+- v4 HELLO framing is validated against the immutable room-selected PQ mode,
+  rather than accepted when it matches any registered ML-KEM length; and
+- the canonical outer prebinding/binding, flight-slot, and bootstrap-info
+  constructors reject broad-enum values that cannot exist in the protocol.
+
+One reported tuple-ordering defect was refuted: Section 4.10 makes the
+lexicographically lower presence-operation ID the rendezvous initiator, and
+Section 4.11 orders the tuple `[initiator, responder]`, so strict ascending
+order is required. The partial Python-reference pair KATs do not satisfy the
+remaining AC-035 every-body vector gate and are not described as a freeze.
+
 ## What is deliberately not implemented
 
-- **Pair plaintext and edge-local pair validation.** `PairStepEnvelopeV1`
-  framing is outer-authenticated, but `PairPlaintextV1` and its closed body union
-  have no codec. The implementation does not open pair AEAD or prove plaintext
-  minimal class, pair sequence/predecessor, body discriminator, identity
-  transcript, or one-use routing tag. A `PAIR_STEP` in
-  `activePairOuterOperationIds` therefore remains an outer Core fact, not an
-  admitted edge.
-- **The admission kernel and trusted authority snapshot.** The grant codec and
-  its pair-private canonical authority checks now exist, but the one pure
-  `Admit()` function, `FrontendRoomControlsV1` evaluation, decision/pair
-  leases, atomic authority-revocation view, and custody constructor do not. No
-  caller-supplied availability boolean may become a security decision, and no
-  SDP/ICE promotion is gated by this code yet.
+- **Pair cryptography and edge-local state.** `PairPlaintextV1` now has a
+  proposed codec, but there is no RFC 9180 hybrid HPKE implementation, pair
+  AEAD seal/open, one-use routing-tag key schedule, exact predecessor-ID/state
+  transition, answer-to-offer/adapter/fingerprint validation, durable fork
+  ledger, or persist-before-publish outbox. A
+  `PAIR_STEP` in `activePairOuterOperationIds` therefore remains an outer Core
+  fact, not an admitted edge.
+- **The trusted admission kernel and authority snapshot.** The semantic policy
+  order and lease arithmetic execute, but `VerifyAdmissionContext`,
+  `CaptureTrustedAdmissionSnapshot`, protected authority custody/view
+  construction, private provenance brands, `Admit()`, atomic persistence and
+  action recheck wrappers do not. The semantic helper's caller-supplied
+  structural inputs are explicitly not authorization. No SDP/ICE promotion is
+  gated by this code yet.
 - **Nonempty `STORE_HINT` routes.** Descriptor-only hints validate and reduce to
   source facts. Any nonempty route sequence fails closed because the
   content-addressed route-family registry/parsers are absent. Derived

@@ -32,6 +32,8 @@ import {
   union,
   varBytes,
 } from "./canonicalSchema";
+import { MAX_HANDSHAKE_PAYLOAD_LENGTH } from "../handlers/handshakeFrame";
+import { WIRE_CHUNK_FRAME_LEN } from "../utils/constants";
 
 import type { FieldDescriptor, TypeDescriptor } from "./canonicalSchema";
 
@@ -50,6 +52,24 @@ export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 = 1120;
 
 /** Sections 4.9/4.11 suite-1 ML-KEM-768 + X25519 public-key width. */
 export const RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1 = 1216;
+
+/** Section 4.11: every currently defined pair step has zero or one dependency. */
+export const MAX_PAIR_DEPENDENCIES_V1 = 1;
+
+/**
+ * The largest unique pair-padding suffix.
+ *
+ * An established class-1 plaintext is minimal only when its empty-padding
+ * encoding is at least 4,018 bytes. Its target is 69,553 bytes, so the largest
+ * possible canonical suffix is 69,553 - 4,018 = 65,535 bytes.
+ */
+export const MAX_PAIR_PADDING_BYTES_V1 = 0xffff;
+
+/** Section 4.12 permits one through three transport candidates. */
+export const MAX_PAIR_TRANSPORT_CANDIDATES_V1 = 3;
+
+export const MAX_PAIR_WEBRTC_SDP_BYTES_V1 = 32_768;
+export const MAX_PAIR_LOCAL_CANDIDATE_BYTES_V1 = 2_048;
 
 /** Section 4.2 bounds one encrypted store hint to 255 exact routes. */
 export const MAX_STORE_HINT_ROUTES_V1 = 0xff;
@@ -832,6 +852,407 @@ export const admissionGrantUnsignedV1Schema = record(
 export const admissionGrantV1Schema = record("AdmissionGrantV1", [
   ...admissionGrantFields,
   { name: "authoritySignature", type: bytes64 },
+]);
+
+/* ------------------------------------------------------------------ *
+ * Sections 4.11–4.13 — pair plaintext, identity, and transport bodies
+ * ------------------------------------------------------------------ */
+
+export const pairStepKindV1Schema = enumOf("PairStepKindV1", [
+  "IDENTITY_HELLO",
+  "IDENTITY_ACCEPT",
+  "TRANSPORT_OFFER",
+  "TRANSPORT_ANSWER",
+  "V4_HANDSHAKE",
+  "PQ_CONTROL",
+  "QUIESCE_PROPOSE",
+  "QUIESCE_ACK",
+  "HEAL_COMPLETE",
+  "PAIR_CHECKPOINT",
+]);
+
+export const pairAttemptModeV1Schema = enumOf("PairAttemptModeV1", [
+  "planner",
+  "explicit",
+]);
+
+export const pairBootstrapRecipientKindV1Schema = enumOf(
+  "PairBootstrapRecipientKindV1",
+  ["presence", "hello-response"],
+);
+
+export const pairTransportCandidateKindV1Schema = enumOf(
+  "PairTransportCandidateKindV1",
+  ["webrtc-complete", "operation-carrier", "registered-local-link"],
+);
+
+export const stableIdentityBundleV1Schema = record("StableIdentityBundleV1", [
+  { name: "ed25519PublicKey", type: bytes32 },
+  { name: "x25519PublicKey", type: bytes32 },
+  { name: "x25519CrossSignature", type: bytes64 },
+]);
+
+const pairIdentityHelloFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "attemptMode", type: pairAttemptModeV1Schema },
+  { name: "senderIdentity", type: stableIdentityBundleV1Schema },
+  { name: "senderPresenceCommitment", type: bytes32 },
+  { name: "senderAdmissionGrant", type: optional(admissionGrantV1Schema) },
+  {
+    name: "responseHybridKemPublicKey",
+    type: fixedBytes(RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1),
+  },
+];
+
+export const pairIdentityHelloUnsignedV1Schema = record(
+  "PairIdentityHelloUnsignedV1",
+  pairIdentityHelloFields,
+);
+
+export const pairIdentityHelloV1Schema = record("PairIdentityHelloV1", [
+  ...pairIdentityHelloFields,
+  { name: "identityTranscriptSignature", type: bytes64 },
+]);
+
+const pairIdentityAcceptFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "responderIdentity", type: stableIdentityBundleV1Schema },
+  { name: "responderPresenceCommitment", type: bytes32 },
+  { name: "responderAdmissionGrant", type: optional(admissionGrantV1Schema) },
+];
+
+export const pairIdentityAcceptUnsignedV1Schema = record(
+  "PairIdentityAcceptUnsignedV1",
+  pairIdentityAcceptFields,
+);
+
+export const pairIdentityAcceptV1Schema = record("PairIdentityAcceptV1", [
+  ...pairIdentityAcceptFields,
+  { name: "identityTranscriptSignature", type: bytes64 },
+]);
+
+const stableEdgeAttemptClaimFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "stableEdgeId", type: bytes32 },
+  { name: "pairEdgeId", type: bytes32 },
+  { name: "confirmedPairTranscriptId", type: bytes32 },
+  { name: "claimantStableEd25519PublicKey", type: bytes32 },
+  { name: "claimNotBeforeLogicalWindow", type: u64 },
+  { name: "claimNotAfterLogicalWindow", type: u64 },
+];
+
+export const stableEdgeAttemptClaimUnsignedV1Schema = record(
+  "StableEdgeAttemptClaimUnsignedV1",
+  stableEdgeAttemptClaimFields,
+);
+
+export const stableEdgeAttemptClaimV1Schema = record(
+  "StableEdgeAttemptClaimV1",
+  [
+    ...stableEdgeAttemptClaimFields,
+    { name: "claimantSignature", type: bytes64 },
+  ],
+);
+
+const pairTransportWebrtcCandidateV1Schema = record(
+  "PairTransportWebrtcCandidateV1",
+  [
+    { name: "version", type: u8 },
+    { name: "kind", type: pairTransportCandidateKindV1Schema },
+    {
+      name: "exactSdpUtf8",
+      type: varBytes(MAX_PAIR_WEBRTC_SDP_BYTES_V1),
+    },
+  ],
+);
+
+const pairTransportOperationCarrierCandidateV1Schema = record(
+  "PairTransportOperationCarrierCandidateV1",
+  [
+    { name: "version", type: u8 },
+    { name: "kind", type: pairTransportCandidateKindV1Schema },
+  ],
+);
+
+const pairTransportRegisteredLocalCandidateV1Schema = record(
+  "PairTransportRegisteredLocalCandidateV1",
+  [
+    { name: "version", type: u8 },
+    { name: "kind", type: pairTransportCandidateKindV1Schema },
+    { name: "adapterProtocolId", type: u16 },
+    {
+      name: "fixedCanonicalCandidate",
+      type: varBytes(MAX_PAIR_LOCAL_CANDIDATE_BYTES_V1),
+    },
+  ],
+);
+
+export const pairTransportCandidateV1Schema = union(
+  "PairTransportCandidateV1",
+  "kind",
+  [
+    {
+      tag: "webrtc-complete",
+      type: pairTransportWebrtcCandidateV1Schema,
+    },
+    {
+      tag: "operation-carrier",
+      type: pairTransportOperationCarrierCandidateV1Schema,
+    },
+    {
+      tag: "registered-local-link",
+      type: pairTransportRegisteredLocalCandidateV1Schema,
+    },
+  ],
+);
+
+export const pairTransportOfferV1Schema = record("PairTransportOfferV1", [
+  { name: "version", type: u8 },
+  { name: "initiatorStableEdgeClaim", type: stableEdgeAttemptClaimV1Schema },
+  {
+    name: "candidates",
+    type: array(
+      pairTransportCandidateV1Schema,
+      MAX_PAIR_TRANSPORT_CANDIDATES_V1,
+      "sequence",
+    ),
+  },
+]);
+
+export const pairTransportAnswerV1Schema = record("PairTransportAnswerV1", [
+  { name: "version", type: u8 },
+  { name: "responderStableEdgeClaim", type: stableEdgeAttemptClaimV1Schema },
+  { name: "selectedOfferCandidateId", type: bytes32 },
+  { name: "answer", type: pairTransportCandidateV1Schema },
+]);
+
+export const quiesceProposeV1Schema = record("QuiesceProposeV1", [
+  { name: "version", type: u8 },
+  { name: "pqEpoch", type: u64 },
+]);
+
+export const quiesceAckV1Schema = record("QuiesceAckV1", [
+  { name: "version", type: u8 },
+  { name: "pqEpoch", type: u64 },
+]);
+
+export const healCompleteV1Schema = record("HealCompleteV1", [
+  { name: "version", type: u8 },
+  { name: "newPqEpoch", type: u64 },
+]);
+
+export const pairCheckpointV1Schema = record("PairCheckpointV1", [
+  { name: "version", type: u8 },
+  { name: "pqEpoch", type: u64 },
+]);
+
+const pairStepBodyVariant = (
+  name: string,
+  value: TypeDescriptor,
+): TypeDescriptor =>
+  record(name, [
+    { name: "kind", type: pairStepKindV1Schema },
+    { name: "value", type: value },
+  ]);
+
+export const pairStepBodyV1Schema = union("PairStepBodyV1", "kind", [
+  {
+    tag: "IDENTITY_HELLO",
+    type: pairStepBodyVariant(
+      "PairStepIdentityHelloBodyV1",
+      pairIdentityHelloV1Schema,
+    ),
+  },
+  {
+    tag: "IDENTITY_ACCEPT",
+    type: pairStepBodyVariant(
+      "PairStepIdentityAcceptBodyV1",
+      pairIdentityAcceptV1Schema,
+    ),
+  },
+  {
+    tag: "TRANSPORT_OFFER",
+    type: pairStepBodyVariant(
+      "PairStepTransportOfferBodyV1",
+      pairTransportOfferV1Schema,
+    ),
+  },
+  {
+    tag: "TRANSPORT_ANSWER",
+    type: pairStepBodyVariant(
+      "PairStepTransportAnswerBodyV1",
+      pairTransportAnswerV1Schema,
+    ),
+  },
+  {
+    tag: "V4_HANDSHAKE",
+    type: pairStepBodyVariant(
+      "PairStepV4HandshakeBodyV1",
+      varBytes(MAX_HANDSHAKE_PAYLOAD_LENGTH),
+    ),
+  },
+  {
+    tag: "PQ_CONTROL",
+    type: pairStepBodyVariant(
+      "PairStepPqControlBodyV1",
+      fixedBytes(WIRE_CHUNK_FRAME_LEN),
+    ),
+  },
+  {
+    tag: "QUIESCE_PROPOSE",
+    type: pairStepBodyVariant(
+      "PairStepQuiesceProposeBodyV1",
+      quiesceProposeV1Schema,
+    ),
+  },
+  {
+    tag: "QUIESCE_ACK",
+    type: pairStepBodyVariant("PairStepQuiesceAckBodyV1", quiesceAckV1Schema),
+  },
+  {
+    tag: "HEAL_COMPLETE",
+    type: pairStepBodyVariant(
+      "PairStepHealCompleteBodyV1",
+      healCompleteV1Schema,
+    ),
+  },
+  {
+    tag: "PAIR_CHECKPOINT",
+    type: pairStepBodyVariant(
+      "PairStepCheckpointBodyV1",
+      pairCheckpointV1Schema,
+    ),
+  },
+]);
+
+const pairPlaintextFields = (
+  body: TypeDescriptor,
+): readonly FieldDescriptor[] => [
+  { name: "version", type: u8 },
+  { name: "kind", type: pairStepKindV1Schema },
+  { name: "pairEdgeId", type: bytes32 },
+  {
+    name: "endpointPresenceOperationIds",
+    type: array(bytes32, 2, "sequence"),
+  },
+  { name: "direction", type: u8 },
+  { name: "pairSequence", type: u64 },
+  { name: "previousPairOperationId", type: optional(bytes32) },
+  {
+    name: "pairDependencies",
+    type: array(bytes32, MAX_PAIR_DEPENDENCIES_V1),
+  },
+  { name: "body", type: body },
+  { name: "pairPadding", type: varBytes(MAX_PAIR_PADDING_BYTES_V1) },
+];
+
+export const pairPlaintextV1Schema = record(
+  "PairPlaintextV1",
+  pairPlaintextFields(pairStepBodyV1Schema),
+);
+
+const pairIdentityUnsignedBodyV1Schema = union(
+  "PairIdentityUnsignedBodyV1",
+  "kind",
+  [
+    {
+      tag: "IDENTITY_HELLO",
+      type: pairStepBodyVariant(
+        "PairIdentityUnsignedHelloBodyV1",
+        pairIdentityHelloUnsignedV1Schema,
+      ),
+    },
+    {
+      tag: "IDENTITY_ACCEPT",
+      type: pairStepBodyVariant(
+        "PairIdentityUnsignedAcceptBodyV1",
+        pairIdentityAcceptUnsignedV1Schema,
+      ),
+    },
+  ],
+);
+
+export const pairIdentityUnsignedProjectionV1Schema = record(
+  "PairIdentityUnsignedProjectionV1",
+  pairPlaintextFields(pairIdentityUnsignedBodyV1Schema),
+);
+
+export const pairOuterPrebindingV1Schema = record("PairOuterPrebindingV1", [
+  { name: "version", type: u8 },
+  { name: "roomContextConfirmation", type: bytes32 },
+  { name: "policyHash", type: bytes32 },
+  { name: "logicalWindow", type: u64 },
+  { name: "expiresAfterWindow", type: u64 },
+  { name: "lifetime", type: operationLifetimeV1Schema },
+  { name: "authorEpochEd25519Key", type: bytes32 },
+  { name: "authorSequence", type: u64 },
+  { name: "previousAuthorOperationId", type: optional(bytes32) },
+  { name: "kind", type: operationKindV1Schema },
+  {
+    name: "dependencies",
+    type: array(bytes32, MAX_PAIR_DEPENDENCIES_V1),
+  },
+  { name: "operationPayloadClass", type: u8 },
+  { name: "bootstrapHeaderHash", type: bytes32 },
+  { name: "nonce", type: optional(fixedBytes(24)) },
+]);
+
+export const pairOuterBindingV1Schema = record("PairOuterBindingV1", [
+  { name: "prebinding", type: pairOuterPrebindingV1Schema },
+  { name: "pairRoutingTag", type: bytes32 },
+  { name: "semanticSlot", type: bytes32 },
+]);
+
+export const pairFlightSlotV1Schema = record("PairFlightSlotV1", [
+  { name: "kind", type: pairStepKindV1Schema },
+  { name: "direction", type: u8 },
+  { name: "pairSequence", type: u64 },
+]);
+
+const pairBootstrapPresenceRecipientV1Schema = record(
+  "PairBootstrapPresenceRecipientV1",
+  [
+    { name: "kind", type: pairBootstrapRecipientKindV1Schema },
+    { name: "presenceOperationId", type: bytes32 },
+  ],
+);
+
+const pairBootstrapHelloResponseRecipientV1Schema = record(
+  "PairBootstrapHelloResponseRecipientV1",
+  [
+    { name: "kind", type: pairBootstrapRecipientKindV1Schema },
+    { name: "helloOperationId", type: bytes32 },
+  ],
+);
+
+export const pairBootstrapRecipientBindingV1Schema = union(
+  "PairBootstrapRecipientBindingV1",
+  "kind",
+  [
+    {
+      tag: "presence",
+      type: pairBootstrapPresenceRecipientV1Schema,
+    },
+    {
+      tag: "hello-response",
+      type: pairBootstrapHelloResponseRecipientV1Schema,
+    },
+  ],
+);
+
+export const pairBootstrapInfoV1Schema = record("PairBootstrapInfoV1", [
+  { name: "version", type: u8 },
+  { name: "pairBootstrapSuite", type: u8 },
+  { name: "roomContextConfirmation", type: bytes32 },
+  { name: "policyHash", type: bytes32 },
+  { name: "stepKind", type: pairStepKindV1Schema },
+  { name: "logicalWindow", type: u64 },
+  { name: "expiresAfterWindow", type: u64 },
+  { name: "authorEpochEd25519Key", type: bytes32 },
+  { name: "authorSequence", type: u64 },
+  { name: "previousAuthorOperationId", type: optional(bytes32) },
+  { name: "operationPayloadClass", type: u8 },
+  { name: "recipientBinding", type: pairBootstrapRecipientBindingV1Schema },
 ]);
 
 const admissionRevokeFields: readonly FieldDescriptor[] = [

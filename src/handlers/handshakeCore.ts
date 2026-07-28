@@ -25,10 +25,24 @@ import { roomPqModeToParameterSet, roomPqModeToRootSuite } from "../roomPolicy";
 import { zeroFree } from "../utils/zeroFree";
 import { PQ_TAG } from "../utils/constants";
 import { concatUint8Arrays, uint8ArraysAreEqual } from "../utils/uint8array";
+import {
+  HANDSHAKE_STEP,
+  handshakePayloadLengthForStep,
+  isHandshakePayloadForStep,
+} from "./handshakeFrame";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RatchetState } from "../cryptography/ratchet";
 import type { RoomPqMode } from "../roomPolicy";
+
+export {
+  HANDSHAKE_PAYLOAD_LENGTHS,
+  HANDSHAKE_STEP,
+  MAX_HANDSHAKE_PAYLOAD_LENGTH,
+  handshakePayloadLengthForStep,
+  isHandshakePayloadForStep,
+} from "./handshakeFrame";
+export type { HandshakeStep } from "./handshakeFrame";
 
 export interface ChannelInputParams {
   channelId: Uint8Array;
@@ -86,10 +100,6 @@ export const buildChannelInput = (p: ChannelInputParams): Uint8Array => {
 
 // ── protocol-v4 handshake core (spec §5) ─────────────────────────────────────
 
-// Internal handshake sub-frame tags (inside the FRAME_TYPE_HANDSHAKE payload).
-const HS_STEP_HELLO = 0x01;
-const HS_STEP_CONFIRM = 0x02;
-const HS_STEP_FINISH = 0x03;
 // Key-confirmation domain separator (local to the handshake; only ever hashed
 // into the MAC input, never on the wire outside it).
 const HS_KC_DOMAIN = new TextEncoder().encode("p2party-v4-hs-kc-transcript-v4");
@@ -164,8 +174,8 @@ const HELLO_Y_OFF = HELLO_EK_OFF + EK_LEN;
 const HELLO_X25519_ID_PUB_OFF = HELLO_Y_OFF + Y_LEN;
 const HELLO_IDENTITY_SIG_OFF = HELLO_X25519_ID_PUB_OFF + X25519_ID_PUB_LEN;
 const HELLO_ML_KEM_PUBLIC_KEY_OFF = HELLO_IDENTITY_SIG_OFF + IDENTITY_SIG_LEN;
-const CONFIRM_LEN = 1 + DH_LEN + MAC_LEN;
-const FINISH_LEN = 1 + MAC_LEN;
+const CONFIRM_LEN = handshakePayloadLengthForStep(HANDSHAKE_STEP.CONFIRM);
+const FINISH_LEN = handshakePayloadLengthForStep(HANDSHAKE_STEP.FINISH);
 
 interface HelloLayout {
   suite: Readonly<MlKemSuiteDescriptor>;
@@ -181,28 +191,9 @@ const helloLayout = (pqMode: RoomPqMode): HelloLayout => {
     suite,
     publicKeyOffset: HELLO_ML_KEM_PUBLIC_KEY_OFF,
     ciphertextOffset,
-    length: ciphertextOffset + suite.ciphertextBytes,
+    length: handshakePayloadLengthForStep(HANDSHAKE_STEP.HELLO, pqMode),
   };
 };
-
-export type HandshakeStep = 1 | 2 | 3;
-
-/**
- * Fail-closed pre-auth framing check used before a payload enters the handshake
- * inbox. This keeps attacker-controlled frames bounded before the crypto core
- * consumes them; the core repeats the same checks when parsing.
- */
-export const isHandshakePayloadForStep = (
-  payload: Uint8Array,
-  step: HandshakeStep,
-  pqMode: RoomPqMode = "hybrid-mlkem768",
-): boolean =>
-  step === HS_STEP_HELLO
-    ? payload.length === helloLayout(pqMode).length &&
-      payload[0] === HS_STEP_HELLO
-    : step === HS_STEP_CONFIRM
-      ? payload.length === CONFIRM_LEN && payload[0] === HS_STEP_CONFIRM
-      : payload.length === FINISH_LEN && payload[0] === HS_STEP_FINISH;
 
 export interface HandshakeTransport {
   send(bytes: Uint8Array): void | Promise<void>;
@@ -290,7 +281,7 @@ const packHello = (
   mlKemCiphertext: Uint8Array,
 ): Uint8Array => {
   const out = new Uint8Array(layout.length);
-  out[0] = HS_STEP_HELLO;
+  out[0] = HANDSHAKE_STEP.HELLO;
   out.set(sid, HELLO_SID_OFF);
   out.set(ek, HELLO_EK_OFF);
   out.set(y, HELLO_Y_OFF);
@@ -309,7 +300,7 @@ const allZero = (bytes: Uint8Array): boolean => {
 
 const packConfirm = (dhPub: Uint8Array, mac: Uint8Array): Uint8Array => {
   const out = new Uint8Array(CONFIRM_LEN);
-  out[0] = HS_STEP_CONFIRM;
+  out[0] = HANDSHAKE_STEP.CONFIRM;
   out.set(dhPub, 1);
   out.set(mac, 1 + DH_LEN);
   return out;
@@ -317,7 +308,7 @@ const packConfirm = (dhPub: Uint8Array, mac: Uint8Array): Uint8Array => {
 
 const packFinish = (mac: Uint8Array): Uint8Array => {
   const out = new Uint8Array(FINISH_LEN);
-  out[0] = HS_STEP_FINISH;
+  out[0] = HANDSHAKE_STEP.FINISH;
   out.set(mac, 1);
   return out;
 };
@@ -461,7 +452,7 @@ export const performHandshakeCore = async (
     }
 
     // Parse peer HELLO. Fail closed on any malformed/short/mis-tagged frame.
-    if (peerHello.length !== layout.length || peerHello[0] !== HS_STEP_HELLO)
+    if (!isHandshakePayloadForStep(peerHello, HANDSHAKE_STEP.HELLO, pqMode))
       throw new Error("Malformed handshake HELLO");
     const sidPeer = peerHello.subarray(HELLO_SID_OFF, HELLO_SID_OFF + SID_LEN);
     const ekPeer = peerHello.subarray(HELLO_EK_OFF, HELLO_EK_OFF + EK_LEN);
@@ -739,8 +730,11 @@ export const performHandshakeCore = async (
         await transport.send(packConfirm(dhPubR, macR));
         const peerConfirm = await transport.recv();
         if (
-          peerConfirm.length !== CONFIRM_LEN ||
-          peerConfirm[0] !== HS_STEP_CONFIRM
+          !isHandshakePayloadForStep(
+            peerConfirm,
+            HANDSHAKE_STEP.CONFIRM,
+            pqMode,
+          )
         )
           throw new Error("Malformed handshake CONFIRM");
         const dhPubI = Uint8Array.from(peerConfirm.subarray(1, 1 + DH_LEN));
@@ -780,8 +774,7 @@ export const performHandshakeCore = async (
       // Any failure wipes the provisional ratchet in the outer finally.
       const peerConfirm = await transport.recv();
       if (
-        peerConfirm.length !== CONFIRM_LEN ||
-        peerConfirm[0] !== HS_STEP_CONFIRM
+        !isHandshakePayloadForStep(peerConfirm, HANDSHAKE_STEP.CONFIRM, pqMode)
       )
         throw new Error("Malformed handshake CONFIRM");
       const dhPubR = Uint8Array.from(peerConfirm.subarray(1, 1 + DH_LEN));
@@ -809,8 +802,7 @@ export const performHandshakeCore = async (
 
         const peerFinish = await transport.recv();
         if (
-          peerFinish.length !== FINISH_LEN ||
-          peerFinish[0] !== HS_STEP_FINISH
+          !isHandshakePayloadForStep(peerFinish, HANDSHAKE_STEP.FINISH, pqMode)
         )
           throw new Error("Malformed handshake FINISH");
         const finish = peerFinish.subarray(1, 1 + MAC_LEN);

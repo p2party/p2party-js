@@ -43,9 +43,26 @@ import {
   kernelEntrypointV1Schema,
   operationKindV1Schema,
   operationLifetimeV1Schema,
+  pairAttemptModeV1Schema,
   pairBootstrapHeaderV1Schema,
+  pairBootstrapInfoV1Schema,
+  pairBootstrapRecipientKindV1Schema,
+  pairFlightSlotV1Schema,
+  pairIdentityAcceptUnsignedV1Schema,
+  pairIdentityAcceptV1Schema,
+  pairIdentityHelloUnsignedV1Schema,
+  pairIdentityHelloV1Schema,
+  pairIdentityUnsignedProjectionV1Schema,
+  pairOuterBindingV1Schema,
+  pairOuterPrebindingV1Schema,
+  pairPlaintextV1Schema,
+  pairStepKindV1Schema,
+  pairTransportAnswerV1Schema,
+  pairTransportCandidateKindV1Schema,
+  pairTransportOfferV1Schema,
   pairStepEnvelopeV1Schema,
   roomPolicyV4Schema,
+  stableIdentityBundleV1Schema,
 } from "./schemas";
 
 import type { TypeDescriptor } from "./canonicalSchema";
@@ -113,6 +130,31 @@ export const PAIR_BOOTSTRAP_HEADER_V1_KEYS = keySet(
   pairBootstrapHeaderV1Schema,
 );
 export const PAIR_STEP_ENVELOPE_V1_KEYS = keySet(pairStepEnvelopeV1Schema);
+export const PAIR_PLAINTEXT_V1_KEYS = keySet(pairPlaintextV1Schema);
+export const PAIR_IDENTITY_UNSIGNED_PROJECTION_V1_KEYS = keySet(
+  pairIdentityUnsignedProjectionV1Schema,
+);
+export const STABLE_IDENTITY_BUNDLE_V1_KEYS = keySet(
+  stableIdentityBundleV1Schema,
+);
+export const PAIR_IDENTITY_HELLO_UNSIGNED_V1_KEYS = keySet(
+  pairIdentityHelloUnsignedV1Schema,
+);
+export const PAIR_IDENTITY_HELLO_V1_KEYS = keySet(pairIdentityHelloV1Schema);
+export const PAIR_IDENTITY_ACCEPT_UNSIGNED_V1_KEYS = keySet(
+  pairIdentityAcceptUnsignedV1Schema,
+);
+export const PAIR_IDENTITY_ACCEPT_V1_KEYS = keySet(pairIdentityAcceptV1Schema);
+export const PAIR_OUTER_PREBINDING_V1_KEYS = keySet(
+  pairOuterPrebindingV1Schema,
+);
+export const PAIR_OUTER_BINDING_V1_KEYS = keySet(pairOuterBindingV1Schema);
+export const PAIR_FLIGHT_SLOT_V1_KEYS = keySet(pairFlightSlotV1Schema);
+export const PAIR_BOOTSTRAP_INFO_V1_KEYS = keySet(pairBootstrapInfoV1Schema);
+export const PAIR_TRANSPORT_OFFER_V1_KEYS = keySet(pairTransportOfferV1Schema);
+export const PAIR_TRANSPORT_ANSWER_V1_KEYS = keySet(
+  pairTransportAnswerV1Schema,
+);
 export const CARRIER_ENVELOPE_V1_KEYS = keySet(carrierEnvelopeV1Schema);
 
 /* Closed enumerations.
@@ -140,6 +182,14 @@ export const FORMAL_PROOF_RESULTS_ORDER = ordered(
 );
 export const OPERATION_KINDS_ORDER = ordered(operationKindV1Schema);
 export const OPERATION_LIFETIMES_ORDER = ordered(operationLifetimeV1Schema);
+export const PAIR_STEP_KINDS_ORDER = ordered(pairStepKindV1Schema);
+export const PAIR_ATTEMPT_MODES_ORDER = ordered(pairAttemptModeV1Schema);
+export const PAIR_BOOTSTRAP_RECIPIENT_KINDS_ORDER = ordered(
+  pairBootstrapRecipientKindV1Schema,
+);
+export const PAIR_TRANSPORT_CANDIDATE_KINDS_ORDER = ordered(
+  pairTransportCandidateKindV1Schema,
+);
 
 export const CLAIM_EVALUATION_STATES: ReadonlySet<string> = new Set(
   CLAIM_EVALUATION_STATES_ORDER,
@@ -161,4 +211,16 @@ export const OPERATION_KINDS: ReadonlySet<string> = new Set(
 );
 export const OPERATION_LIFETIMES: ReadonlySet<string> = new Set(
   OPERATION_LIFETIMES_ORDER,
+);
+export const PAIR_STEP_KINDS: ReadonlySet<string> = new Set(
+  PAIR_STEP_KINDS_ORDER,
+);
+export const PAIR_ATTEMPT_MODES: ReadonlySet<string> = new Set(
+  PAIR_ATTEMPT_MODES_ORDER,
+);
+export const PAIR_BOOTSTRAP_RECIPIENT_KINDS: ReadonlySet<string> = new Set(
+  PAIR_BOOTSTRAP_RECIPIENT_KINDS_ORDER,
+);
+export const PAIR_TRANSPORT_CANDIDATE_KINDS: ReadonlySet<string> = new Set(
+  PAIR_TRANSPORT_CANDIDATE_KINDS_ORDER,
 );

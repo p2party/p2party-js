@@ -16,7 +16,11 @@
  * v0.4 release artifact yet.
  */
 
-import { encodeCanonical } from "./canonicalSchema";
+import {
+  bytesEqual,
+  decodeCanonicalStrict,
+  encodeCanonical,
+} from "./canonicalSchema";
 import {
   admissionGrantUnsignedV1Schema,
   admissionGrantV1Schema,
@@ -35,10 +39,16 @@ import {
   kernelModuleSemanticsSchema,
   kernelSourceTreeSchema,
   operationIdSetSchema,
+  pairIdentityUnsignedProjectionV1Schema,
+  pairOuterBindingV1Schema,
+  pairOuterPrebindingV1Schema,
+  pairStepKindV1Schema,
+  pairTransportCandidateV1Schema,
   presencePermitUnsignedV1Schema,
   presenceProofTranscriptV1Schema,
   resolvedAssumptionSetSchema,
   roomPolicyV4Schema,
+  stableEdgeAttemptClaimUnsignedV1Schema,
 } from "./schemas";
 
 import type { TypeDescriptor } from "./canonicalSchema";
@@ -474,6 +484,386 @@ export const pairSemanticSlot = async (
   hashWithDomain(
     "p2party/pair-slot/v1",
     requireBytes("pairRoutingTag", pairRoutingTag, 32),
+  );
+
+/* ------------------------------------------------------------------ *
+ * Sections 4.10–4.12 — pair identity, binding, and transport transcripts
+ * ------------------------------------------------------------------ */
+
+const compareBytes = (left: Uint8Array, right: Uint8Array): number => {
+  const shared = Math.min(left.length, right.length);
+  for (let index = 0; index < shared; index++) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.length - right.length;
+};
+
+type PairOuterPrebindingSnapshot = {
+  readonly version: number;
+  readonly logicalWindow: bigint;
+  readonly expiresAfterWindow: bigint;
+  readonly lifetime: string;
+  readonly authorSequence: bigint;
+  readonly previousAuthorOperationId: Uint8Array | null;
+  readonly kind: string;
+  readonly dependencies: readonly Uint8Array[];
+  readonly operationPayloadClass: number;
+  readonly bootstrapHeaderHash: Uint8Array;
+  readonly nonce: Uint8Array | null;
+};
+
+type PairOuterBindingSnapshot = {
+  readonly prebinding: PairOuterPrebindingSnapshot;
+  readonly pairRoutingTag: Uint8Array;
+  readonly semanticSlot: Uint8Array;
+};
+
+const isAllZero = (bytes: Uint8Array): boolean => {
+  let aggregate = 0;
+  for (const byte of bytes) aggregate |= byte;
+  return aggregate === 0;
+};
+
+const snapshotPairOuterPrebinding = (
+  value: unknown,
+): {
+  readonly value: PairOuterPrebindingSnapshot;
+  readonly bytes: Uint8Array;
+} => {
+  const bytes = canonical(pairOuterPrebindingV1Schema, value);
+  const snapshot = decodeCanonicalStrict(
+    pairOuterPrebindingV1Schema,
+    bytes,
+  ) as PairOuterPrebindingSnapshot;
+  if (snapshot.version !== 1) fail("unsupported PairOuterPrebindingV1 version");
+  if (snapshot.lifetime !== "PAIR_CAUSAL")
+    fail("pair outer prebinding lifetime must be PAIR_CAUSAL");
+  if (snapshot.kind !== "PAIR_STEP")
+    fail("pair outer prebinding kind must be PAIR_STEP");
+  if (snapshot.dependencies.length !== 0)
+    fail("pair outer prebinding dependencies must be empty");
+  if (
+    snapshot.operationPayloadClass !== 0 &&
+    snapshot.operationPayloadClass !== 1
+  )
+    fail("pair outer prebinding payload class must be 0 or 1");
+  if (snapshot.logicalWindow > snapshot.expiresAfterWindow)
+    fail("pair outer prebinding expires before its logical window");
+  if (
+    (snapshot.authorSequence === 0n) !==
+    (snapshot.previousAuthorOperationId === null)
+  )
+    fail("pair outer prebinding has an invalid author predecessor");
+  if (snapshot.nonce === null) {
+    if (snapshot.operationPayloadClass !== 0)
+      fail("pair bootstrap prebinding must use payload class 0");
+  } else if (!isAllZero(snapshot.bootstrapHeaderHash)) {
+    fail("established pair prebinding must use ZERO32 bootstrapHeaderHash");
+  }
+  return { value: snapshot, bytes };
+};
+
+const snapshotPairOuterBinding = (value: unknown): PairOuterBindingSnapshot => {
+  const bytes = canonical(pairOuterBindingV1Schema, value);
+  const binding = decodeCanonicalStrict(
+    pairOuterBindingV1Schema,
+    bytes,
+  ) as PairOuterBindingSnapshot;
+  snapshotPairOuterPrebinding(binding.prebinding);
+  return binding;
+};
+
+const validatePairOuterBindingSemanticSlot = async (
+  binding: PairOuterBindingSnapshot,
+): Promise<void> => {
+  const expected = await pairSemanticSlot(binding.pairRoutingTag);
+  if (!bytesEqual(expected, binding.semanticSlot))
+    fail("pair outer binding semantic slot does not match its routing tag");
+};
+
+/** The schema-owned one-byte registry value for a pair-step kind. */
+export const pairStepKindByte = (kind: string): Uint8Array => {
+  const encoded = canonical(pairStepKindV1Schema, kind);
+  if (encoded.length !== 1) fail("PairStepKindByte must encode to one byte");
+  return encoded;
+};
+
+/**
+ * `PairEdgeId = H("p2party/pair-edge/v1" || RoomContextId ||
+ *   Sort2(PresenceOperationIdA, PresenceOperationIdB))`
+ */
+export const pairEdgeId = async (
+  roomContextIdBytes: Uint8Array,
+  firstPresenceOperationId: Uint8Array,
+  secondPresenceOperationId: Uint8Array,
+): Promise<Uint8Array> => {
+  const room = requireBytes("RoomContextId", roomContextIdBytes, 32);
+  const first = requireBytes(
+    "firstPresenceOperationId",
+    firstPresenceOperationId,
+    32,
+  );
+  const second = requireBytes(
+    "secondPresenceOperationId",
+    secondPresenceOperationId,
+    32,
+  );
+  if (compareBytes(first, second) === 0)
+    fail("pair presences must be distinct");
+  const [low, high] =
+    compareBytes(first, second) < 0 ? [first, second] : [second, first];
+  return hashWithDomain("p2party/pair-edge/v1", room, low, high);
+};
+
+/**
+ * `StableEdgeId = H("p2party/stable-edge/v1" || RoomContextId ||
+ *   Sort2(stableEd25519PublicKeyA, stableEd25519PublicKeyB))`
+ */
+export const stableEdgeId = async (
+  roomContextIdBytes: Uint8Array,
+  firstStableEd25519PublicKey: Uint8Array,
+  secondStableEd25519PublicKey: Uint8Array,
+): Promise<Uint8Array> => {
+  const room = requireBytes("RoomContextId", roomContextIdBytes, 32);
+  const first = requireBytes(
+    "firstStableEd25519PublicKey",
+    firstStableEd25519PublicKey,
+    32,
+  );
+  const second = requireBytes(
+    "secondStableEd25519PublicKey",
+    secondStableEd25519PublicKey,
+    32,
+  );
+  if (compareBytes(first, second) === 0)
+    fail("stable-edge identities must be distinct");
+  const [low, high] =
+    compareBytes(first, second) < 0 ? [first, second] : [second, first];
+  return hashWithDomain("p2party/stable-edge/v1", room, low, high);
+};
+
+/** Hash the exact canonical transport candidate used as its ordering key. */
+export const transportOfferCandidateId = async (
+  candidate: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/transport-offer-candidate/v1",
+    canonical(pairTransportCandidateV1Schema, candidate),
+  );
+
+/**
+ * Construct the one complete pair-AAD binding. The prebinding is snapshotted
+ * before the asynchronous semantic-slot derivation.
+ */
+export const bindPairOuter = async (
+  prebinding: unknown,
+  pairRoutingTag: Uint8Array,
+): Promise<{
+  readonly prebinding: unknown;
+  readonly pairRoutingTag: Uint8Array;
+  readonly semanticSlot: Uint8Array;
+}> => {
+  const privatePrebinding = snapshotPairOuterPrebinding(prebinding).value;
+  const privateTag = Uint8Array.from(
+    requireBytes("pairRoutingTag", pairRoutingTag, 32),
+  );
+  const binding = {
+    prebinding: privatePrebinding,
+    pairRoutingTag: privateTag,
+    semanticSlot: await pairSemanticSlot(privateTag),
+  };
+  canonical(pairOuterBindingV1Schema, binding);
+  return binding;
+};
+
+/** `"p2party/pair-aad/v1" || Canonical(PairOuterBindingV1)`. */
+export const pairAad = async (binding: unknown): Promise<Uint8Array> => {
+  const snapshot = snapshotPairOuterBinding(binding);
+  await validatePairOuterBindingSemanticSlot(snapshot);
+  return concatBytes(
+    domain("p2party/pair-aad/v1"),
+    canonical(pairOuterBindingV1Schema, snapshot),
+  );
+};
+
+const pairIdentityTranscriptInputs = (
+  binding: unknown,
+  unsignedProjection: unknown,
+): {
+  readonly bindingBytes: Uint8Array;
+  readonly binding: PairOuterBindingSnapshot;
+  readonly projectionBytes: Uint8Array;
+  readonly kind: "IDENTITY_HELLO" | "IDENTITY_ACCEPT";
+} => {
+  const privateBinding = snapshotPairOuterBinding(binding);
+  const bindingBytes = canonical(pairOuterBindingV1Schema, privateBinding);
+  const projectionBytes = canonical(
+    pairIdentityUnsignedProjectionV1Schema,
+    unsignedProjection,
+  );
+  const privateProjection = decodeCanonicalStrict(
+    pairIdentityUnsignedProjectionV1Schema,
+    projectionBytes,
+  ) as {
+    readonly kind: unknown;
+    readonly body: { readonly kind: unknown };
+  };
+  if (
+    (privateProjection.kind !== "IDENTITY_HELLO" &&
+      privateProjection.kind !== "IDENTITY_ACCEPT") ||
+    privateProjection.kind !== privateProjection.body.kind
+  )
+    fail("pair identity projection kind and body discriminator disagree");
+  return {
+    binding: privateBinding,
+    bindingBytes,
+    projectionBytes,
+    kind: privateProjection.kind,
+  };
+};
+
+const pairIdentitySignatureHashFromInputs = async (inputs: {
+  readonly bindingBytes: Uint8Array;
+  readonly projectionBytes: Uint8Array;
+}): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/pair-identity-transcript/v1",
+    inputs.bindingBytes,
+    inputs.projectionBytes,
+  );
+
+/**
+ * Hash the exact outer binding and unsigned pair-identity plaintext
+ * projection. No field other than the nested identity signature is omitted.
+ */
+export const pairIdentitySignatureHash = async (
+  binding: unknown,
+  unsignedProjection: unknown,
+): Promise<Uint8Array> => {
+  const inputs = pairIdentityTranscriptInputs(binding, unsignedProjection);
+  await validatePairOuterBindingSemanticSlot(inputs.binding);
+  return pairIdentitySignatureHashFromInputs(inputs);
+};
+
+/**
+ * Stable-identity Ed25519 message for HELLO or ACCEPT.
+ *
+ * The kind byte remains outside the hash so this transcript cannot collide
+ * with an existing API that signs a bare 32-byte challenge.
+ */
+export const pairIdentitySignedMessage = async (
+  binding: unknown,
+  unsignedProjection: unknown,
+): Promise<Uint8Array> => {
+  const inputs = pairIdentityTranscriptInputs(binding, unsignedProjection);
+  await validatePairOuterBindingSemanticSlot(inputs.binding);
+  return concatBytes(
+    domain("p2party/pair-identity-signature/v1"),
+    pairStepKindByte(inputs.kind),
+    await pairIdentitySignatureHashFromInputs(inputs),
+  );
+};
+
+/** Exact operation-ID transcript for the confirmed two-flight identity gate. */
+export const confirmedPairTranscriptId = async (
+  helloOperationId: Uint8Array,
+  acceptOperationId: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/confirmed-pair-transcript/v1",
+    requireBytes("HelloOperationId", helloOperationId, 32),
+    requireBytes("AcceptOperationId", acceptOperationId, 32),
+  );
+
+/**
+ * Stable-edge attempt claim signature transcript.
+ *
+ * The unsigned descriptor is shared with the signed schema, so adding or
+ * reordering a claim field cannot silently leave the signature projection.
+ */
+export const stableEdgeAttemptClaimSignedMessage = async (
+  unsignedClaim: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/stable-edge-attempt-claim-signature/v1"),
+    await sha256(
+      canonical(stableEdgeAttemptClaimUnsignedV1Schema, unsignedClaim),
+    ),
+  );
+
+/** Exact offer/answer operation-ID negotiation transcript. */
+export const transportNegotiationTranscriptId = async (
+  offerOperationId: Uint8Array,
+  answerOperationId: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/transport-negotiation-transcript/v1",
+    requireBytes("TransportOfferOperationId", offerOperationId, 32),
+    requireBytes("TransportAnswerOperationId", answerOperationId, 32),
+  );
+
+/**
+ * Stable-key-ordered endpoint binding for the mandatory operation carrier.
+ *
+ * `endpointSessionRole` is 0 for the stable-key-ordered v4 initiator and 1
+ * for the responder; it is deliberately not a rendezvous direction.
+ */
+export const operationCarrierTransportBinding = async (
+  roomContextIdBytes: Uint8Array,
+  stableEdgeIdBytes: Uint8Array,
+  confirmedPairTranscriptIdBytes: Uint8Array,
+  transportNegotiationTranscriptIdBytes: Uint8Array,
+  endpointSessionRole: 0 | 1,
+  endpointStableEd25519PublicKey: Uint8Array,
+): Promise<Uint8Array> => {
+  if (endpointSessionRole !== 0 && endpointSessionRole !== 1)
+    fail("endpointSessionRole must be 0 or 1");
+  return hashWithDomain(
+    "p2party/operation-carrier-transport-binding/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("StableEdgeId", stableEdgeIdBytes, 32),
+    requireBytes(
+      "ConfirmedPairTranscriptId",
+      confirmedPairTranscriptIdBytes,
+      32,
+    ),
+    requireBytes(
+      "TransportNegotiationTranscriptId",
+      transportNegotiationTranscriptIdBytes,
+      32,
+    ),
+    byteOf(endpointSessionRole),
+    requireBytes(
+      "endpointStableEd25519PublicKey",
+      endpointStableEd25519PublicKey,
+      32,
+    ),
+  );
+};
+
+/**
+ * Handoff identifier shared by WebRTC and non-WebRTC v4 transports.
+ */
+export const rendezvousChannelId = async (
+  roomContextIdBytes: Uint8Array,
+  pairEdgeIdBytes: Uint8Array,
+  confirmedPairTranscriptIdBytes: Uint8Array,
+  transportNegotiationTranscriptIdBytes: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/rendezvous-channel/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("PairEdgeId", pairEdgeIdBytes, 32),
+    requireBytes(
+      "ConfirmedPairTranscriptId",
+      confirmedPairTranscriptIdBytes,
+      32,
+    ),
+    requireBytes(
+      "TransportNegotiationTranscriptId",
+      transportNegotiationTranscriptIdBytes,
+      32,
+    ),
   );
 
 /* ------------------------------------------------------------------ *

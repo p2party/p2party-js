@@ -23,9 +23,27 @@ import {
   KERNEL_MODULE_KEYS,
   OPERATION_KINDS_ORDER,
   OPERATION_LIFETIMES_ORDER,
+  PAIR_ATTEMPT_MODES_ORDER,
   PAIR_BOOTSTRAP_HEADER_V1_KEYS,
+  PAIR_BOOTSTRAP_INFO_V1_KEYS,
+  PAIR_BOOTSTRAP_RECIPIENT_KINDS_ORDER,
+  PAIR_FLIGHT_SLOT_V1_KEYS,
+  PAIR_IDENTITY_ACCEPT_UNSIGNED_V1_KEYS,
+  PAIR_IDENTITY_ACCEPT_V1_KEYS,
+  PAIR_IDENTITY_HELLO_UNSIGNED_V1_KEYS,
+  PAIR_IDENTITY_HELLO_V1_KEYS,
+  PAIR_IDENTITY_UNSIGNED_PROJECTION_V1_KEYS,
+  PAIR_OUTER_BINDING_V1_KEYS,
+  PAIR_OUTER_PREBINDING_V1_KEYS,
+  PAIR_PLAINTEXT_V1_KEYS,
+  PAIR_STEP_KINDS,
+  PAIR_STEP_KINDS_ORDER,
   PAIR_STEP_ENVELOPE_V1_KEYS,
+  PAIR_TRANSPORT_ANSWER_V1_KEYS,
+  PAIR_TRANSPORT_CANDIDATE_KINDS_ORDER,
+  PAIR_TRANSPORT_OFFER_V1_KEYS,
   ROOM_POLICY_V4_KEYS,
+  STABLE_IDENTITY_BUNDLE_V1_KEYS,
 } from "../../src/blindRendezvous/projections";
 import {
   KERNEL_ENTRYPOINT_IDS,
@@ -36,8 +54,21 @@ import {
   authenticatedRoomOperationV1Schema,
   claimDefinitionV1Schema,
   pairBootstrapHeaderV1Schema,
+  pairBootstrapInfoV1Schema,
+  pairFlightSlotV1Schema,
+  pairIdentityAcceptUnsignedV1Schema,
+  pairIdentityAcceptV1Schema,
+  pairIdentityHelloUnsignedV1Schema,
+  pairIdentityHelloV1Schema,
+  pairIdentityUnsignedProjectionV1Schema,
+  pairOuterBindingV1Schema,
+  pairOuterPrebindingV1Schema,
+  pairPlaintextV1Schema,
   pairStepEnvelopeV1Schema,
+  pairTransportAnswerV1Schema,
+  pairTransportOfferV1Schema,
   roomPolicyV4Schema,
+  stableIdentityBundleV1Schema,
 } from "../../src/blindRendezvous/schemas";
 
 const asSortedArray = (value: ReadonlySet<string>): string[] =>
@@ -72,6 +103,29 @@ describe("validator tables are generated from the schema", () => {
     expect(asSortedArray(PAIR_STEP_ENVELOPE_V1_KEYS)).toEqual(
       [...recordFieldNames(pairStepEnvelopeV1Schema)].sort(),
     );
+    const pairRecords = [
+      [PAIR_PLAINTEXT_V1_KEYS, pairPlaintextV1Schema],
+      [
+        PAIR_IDENTITY_UNSIGNED_PROJECTION_V1_KEYS,
+        pairIdentityUnsignedProjectionV1Schema,
+      ],
+      [STABLE_IDENTITY_BUNDLE_V1_KEYS, stableIdentityBundleV1Schema],
+      [PAIR_IDENTITY_HELLO_UNSIGNED_V1_KEYS, pairIdentityHelloUnsignedV1Schema],
+      [PAIR_IDENTITY_HELLO_V1_KEYS, pairIdentityHelloV1Schema],
+      [
+        PAIR_IDENTITY_ACCEPT_UNSIGNED_V1_KEYS,
+        pairIdentityAcceptUnsignedV1Schema,
+      ],
+      [PAIR_IDENTITY_ACCEPT_V1_KEYS, pairIdentityAcceptV1Schema],
+      [PAIR_OUTER_PREBINDING_V1_KEYS, pairOuterPrebindingV1Schema],
+      [PAIR_OUTER_BINDING_V1_KEYS, pairOuterBindingV1Schema],
+      [PAIR_FLIGHT_SLOT_V1_KEYS, pairFlightSlotV1Schema],
+      [PAIR_BOOTSTRAP_INFO_V1_KEYS, pairBootstrapInfoV1Schema],
+      [PAIR_TRANSPORT_OFFER_V1_KEYS, pairTransportOfferV1Schema],
+      [PAIR_TRANSPORT_ANSWER_V1_KEYS, pairTransportAnswerV1Schema],
+    ] as const;
+    for (const [keys, schema] of pairRecords)
+      expect(asSortedArray(keys)).toEqual([...recordFieldNames(schema)].sort());
   });
 
   test("closed union variants project their own exact key sets", () => {
@@ -125,6 +179,32 @@ describe("closed enumerations keep their wire order", () => {
       "GRANT_HORIZON",
       "PAIR_CAUSAL",
     ]);
+  });
+
+  test("pair registries retain their protocol-visible wire order", () => {
+    expect(PAIR_STEP_KINDS_ORDER).toEqual([
+      "IDENTITY_HELLO",
+      "IDENTITY_ACCEPT",
+      "TRANSPORT_OFFER",
+      "TRANSPORT_ANSWER",
+      "V4_HANDSHAKE",
+      "PQ_CONTROL",
+      "QUIESCE_PROPOSE",
+      "QUIESCE_ACK",
+      "HEAL_COMPLETE",
+      "PAIR_CHECKPOINT",
+    ]);
+    expect(PAIR_ATTEMPT_MODES_ORDER).toEqual(["planner", "explicit"]);
+    expect(PAIR_BOOTSTRAP_RECIPIENT_KINDS_ORDER).toEqual([
+      "presence",
+      "hello-response",
+    ]);
+    expect(PAIR_TRANSPORT_CANDIDATE_KINDS_ORDER).toEqual([
+      "webrtc-complete",
+      "operation-carrier",
+      "registered-local-link",
+    ]);
+    expect(PAIR_STEP_KINDS.size).toBe(PAIR_STEP_KINDS_ORDER.length);
   });
 
   test("membership sets and ordered projections agree", () => {

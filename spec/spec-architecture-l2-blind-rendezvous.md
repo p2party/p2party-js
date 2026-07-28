@@ -9243,6 +9243,51 @@ type PairBootstrapInfoV1 = {
 };
 ```
 
+The proposed Phase-0 inner codec fixes the previously implicit byte choices as
+follows. `PairPlaintextV1` uses declaration order. `version`, `kind`, and
+`direction` are one byte (`direction` is restricted to `0x00 | 0x01`);
+`pairSequence` is unsigned 64-bit big-endian; all optional fields use the
+closed one-byte presence tag. `endpointPresenceOperationIds` is a sequence with an
+unsigned-16 count that must equal two. `pairDependencies` is a sorted,
+duplicate-free sequence with an unsigned-16 count and a closed maximum of one:
+every v1 flight has either no cross-direction dependency or exactly one.
+
+`PairStepBodyV1` uses a one-byte closed-union tag in `PairStepKindByte` order.
+As in the canonical union codec, the selected variant then encodes its declared
+`kind` enum field before `value`; the plaintext `kind`, union tag, and body
+`kind` must all agree. The body byte fields are:
+
+- `V4_HANDSHAKE.value`: unsigned-32 length plus at most 3,329 bytes. Before
+  pair-state mutation it must be exactly one existing protocol-v4 frame:
+  HELLO tag `0x01` with length 1,761, 2,465, or 3,329 for the room-selected
+  ML-KEM-512/768/1024 suite respectively; CONFIRM tag `0x02` with length 97;
+  or FINISH tag `0x03` with length 65. These values are derived by the neutral
+  `handshakeFrame` geometry consumed by `handshakeCore`; that shared geometry
+  is the byte-length/tag SSOT, while `handshakeCore` remains the semantic and
+  cryptographic parser. Every pair-plaintext validation/encode/decode boundary
+  receives the immutable room-selected `RoomPqMode`; it has no default and
+  must not accept a HELLO merely because its length belongs to another
+  registered room suite.
+- `PQ_CONTROL.value`: exactly 65,490 bytes with no additional length prefix,
+  preserving the complete existing `WIRE_CHUNK_FRAME_LEN` frame byte-for-byte.
+- WebRTC SDP and registered-local-link candidate bytes: unsigned-32 length,
+  respectively 1..32,768 and 1..2,048 bytes. A v1 offer carries one to three
+  candidates in derived-`TransportOfferCandidateId` order; the sequence count
+  is unsigned 16-bit.
+- All keys, commitments, hashes, signatures, KEM keys, and operation IDs use
+  their declared fixed widths. Every other declared `bigint` is unsigned
+  64-bit big-endian, `adapterProtocolId` is unsigned 16-bit, and every version,
+  suite, attempt-mode, candidate-kind, and body-kind enum is one byte.
+
+`pairPadding` is unsigned-32-length-prefixed bytes and is restricted to the
+all-zero string. Its schema maximum is 65,535 bytes, derived rather than
+chosen: an established class-1 plaintext is minimal only when its empty-padding
+encoding is at least `4,017 + 1 = 4,018` bytes, so its largest required suffix
+is `69,553 - 4,018 = 65,535`. The validator encodes the same plaintext with
+empty padding, selects the smallest legal target, and requires the supplied
+suffix to be exactly the remaining length. Thus the descriptor bound is not a
+second target table.
+
 The canonical `PairStepEnvelopeV1` field order is exactly the declaration
 order above. `version` and `suiteId` are unsigned 8-bit values,
 `pairRoutingTag` is fixed 32 bytes, each optional uses one closed

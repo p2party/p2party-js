@@ -7,7 +7,7 @@
  * HelloRoot only inside an opaque process-local result.
  *
  * The only next-state transition consumes the open into an opaque admission
- * context while leaving HelloRoot in this module's private custody.
+ * claim while leaving HelloRoot in this module's private custody.
  * Pair-ledger persistence, ACCEPT construction, and any release of HelloRoot
  * remain deliberately out of scope. This module is absent from the package
  * barrel.
@@ -87,7 +87,7 @@ import type { RoomPolicyV4 } from "./roomPolicyV4";
 const U64_MAX = 0xffffffffffffffffn;
 
 declare const verifiedIdentityHelloOpenBrand: unique symbol;
-declare const verifiedAdmissionContextBrand: unique symbol;
+declare const identityHelloAdmissionClaimBrand: unique symbol;
 
 /** Opaque authenticated HELLO result. HelloRoot is never structurally exposed. */
 export interface VerifiedIdentityHelloOpenV1 {
@@ -95,17 +95,18 @@ export interface VerifiedIdentityHelloOpenV1 {
 }
 
 /**
- * Process-local result of the HELLO-responder admission-context transition.
+ * Process-local claim on one authenticated HELLO and its root custody.
  *
- * This source-level export exists only for internal module composition and is
- * absent from the package barrel. It has no decoder or structural
- * constructor. In particular, it never exposes HelloRoot.
+ * This is deliberately not `VerifiedAdmissionContextV1`: that fact may only
+ * be minted after the admission boundary has atomically captured and
+ * correlated every trusted state fence. This internal type is absent from the
+ * package barrel and never exposes HelloRoot.
  */
-export interface VerifiedAdmissionContextV1 {
-  readonly [verifiedAdmissionContextBrand]: true;
+export interface IdentityHelloAdmissionClaimV1 {
+  readonly [identityHelloAdmissionClaimBrand]: true;
 }
 
-export interface VerifiedAdmissionContextSnapshotV1 {
+export interface IdentityHelloAdmissionClaimSnapshotV1 {
   readonly version: 1;
   readonly roomContextId: Uint8Array;
   readonly decisionRole: "hello-responder";
@@ -212,11 +213,11 @@ interface AuthenticatedHelloFacts {
 
 const verifiedStates = new WeakMap<object, PrivateVerifiedIdentityHelloOpen>();
 const genuineVerifiedOpens = new WeakSet<object>();
-const admissionContextStates = new WeakMap<
+const admissionClaimStates = new WeakMap<
   object,
   PrivateVerifiedIdentityHelloOpen
 >();
-const genuineAdmissionContexts = new WeakSet<object>();
+const genuineAdmissionClaims = new WeakSet<object>();
 
 const requireVerifiedState = (
   value: VerifiedIdentityHelloOpenV1,
@@ -229,17 +230,17 @@ const requireVerifiedState = (
   return state;
 };
 
-const requireAdmissionContextState = (
-  value: VerifiedAdmissionContextV1,
+const requireAdmissionClaimState = (
+  value: IdentityHelloAdmissionClaimV1,
 ): PrivateVerifiedIdentityHelloOpen => {
   if (typeof value !== "object" || value === null)
     return invalidAdmissionInput(
-      "admission context must be a genuine live process-local handle",
+      "admission claim must be a genuine live process-local handle",
     );
-  const state = admissionContextStates.get(value);
+  const state = admissionClaimStates.get(value);
   if (state === undefined)
     return invalidAdmissionInput(
-      "admission context must be a genuine live process-local handle",
+      "admission claim must be a genuine live process-local handle",
     );
   return state;
 };
@@ -281,9 +282,9 @@ const copyVerifiedSnapshot = (
   receiverKeyRecordRevision: state.receiverKeyRecordRevision,
 });
 
-const copyAdmissionContextSnapshot = (
+const copyAdmissionClaimSnapshot = (
   state: PrivateVerifiedIdentityHelloOpen,
-): VerifiedAdmissionContextSnapshotV1 => {
+): IdentityHelloAdmissionClaimSnapshotV1 => {
   const opened = copyVerifiedSnapshot(state);
   const { plaintext, activeCandidate, remotePresenceEvidence } = opened;
   if (
@@ -787,15 +788,15 @@ export const snapshotVerifiedIdentityHelloOpenV1 = (
   copyVerifiedSnapshot(requireVerifiedState(value));
 
 /**
- * Consume one authenticated HELLO into the only admission-context handle.
+ * Consume one authenticated HELLO into the only admission-claim handle.
  *
  * The transition is synchronous and moves, rather than copies, the private
  * state. The old handle becomes unusable before control returns, and no root
  * bytes cross the API.
  */
-export const promoteVerifiedIdentityHelloOpenForAdmissionV1 = (
+export const takeVerifiedIdentityHelloOpenForAdmissionV1 = (
   value: VerifiedIdentityHelloOpenV1,
-): VerifiedAdmissionContextV1 => {
+): IdentityHelloAdmissionClaimV1 => {
   if (typeof value !== "object" || value === null)
     return invalidAdmissionInput(
       "verified HELLO must be a genuine live process-local handle",
@@ -806,37 +807,45 @@ export const promoteVerifiedIdentityHelloOpenForAdmissionV1 = (
       "verified HELLO must be a genuine live process-local handle",
     );
 
-  // Recheck all non-secret projection invariants before transferring custody.
-  copyAdmissionContextSnapshot(state);
-  const context = Object.freeze({}) as VerifiedAdmissionContextV1;
-  genuineAdmissionContexts.add(context);
-  admissionContextStates.set(context, state);
+  /*
+   * Spend the source before any projection work. If an internal invariant has
+   * somehow changed, the root is wiped and the spent handle cannot be retried.
+   */
   verifiedStates.delete(value);
-  return context;
+  try {
+    copyAdmissionClaimSnapshot(state);
+    const claim = Object.freeze({}) as IdentityHelloAdmissionClaimV1;
+    genuineAdmissionClaims.add(claim);
+    admissionClaimStates.set(claim, state);
+    return claim;
+  } catch (error) {
+    state.helloRoot.fill(0);
+    throw error;
+  }
 };
 
-/** Return a fresh deeply owned admission projection containing no HelloRoot. */
-export const snapshotVerifiedAdmissionContextV1 = (
-  value: VerifiedAdmissionContextV1,
-): VerifiedAdmissionContextSnapshotV1 =>
-  copyAdmissionContextSnapshot(requireAdmissionContextState(value));
+/** @internal Fresh deeply owned claim projection containing no HelloRoot. */
+export const snapshotIdentityHelloAdmissionClaimV1 = (
+  value: IdentityHelloAdmissionClaimV1,
+): IdentityHelloAdmissionClaimSnapshotV1 =>
+  copyAdmissionClaimSnapshot(requireAdmissionClaimState(value));
 
-/** Wipe the retained HelloRoot. Idempotent for a genuine context handle. */
-export const destroyVerifiedAdmissionContextV1 = (
-  value: VerifiedAdmissionContextV1,
+/** Wipe the retained HelloRoot. Idempotent for a genuine claim handle. */
+export const destroyIdentityHelloAdmissionClaimV1 = (
+  value: IdentityHelloAdmissionClaimV1,
 ): void => {
   if (
     typeof value !== "object" ||
     value === null ||
-    !genuineAdmissionContexts.has(value)
+    !genuineAdmissionClaims.has(value)
   )
     return invalidAdmissionInput(
-      "admission context must be a genuine process-local handle",
+      "admission claim must be a genuine process-local handle",
     );
-  const state = admissionContextStates.get(value);
+  const state = admissionClaimStates.get(value);
   if (state === undefined) return;
   state.helloRoot.fill(0);
-  admissionContextStates.delete(value);
+  admissionClaimStates.delete(value);
 };
 
 /** Wipe the retained HelloRoot. Idempotent for a genuine handle. */

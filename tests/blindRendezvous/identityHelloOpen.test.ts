@@ -25,12 +25,12 @@ import {
   stableIdentityCommitment,
 } from "../../src/blindRendezvous/derivations";
 import {
-  destroyVerifiedAdmissionContextV1,
+  destroyIdentityHelloAdmissionClaimV1,
   destroyVerifiedIdentityHelloOpenV1,
   openReservedIdentityHelloV1,
-  promoteVerifiedIdentityHelloOpenForAdmissionV1,
-  snapshotVerifiedAdmissionContextV1,
+  snapshotIdentityHelloAdmissionClaimV1,
   snapshotVerifiedIdentityHelloOpenV1,
+  takeVerifiedIdentityHelloOpenForAdmissionV1,
 } from "../../src/blindRendezvous/identityHelloOpen";
 import {
   createExpectedIdentityHelloTrialV1,
@@ -79,7 +79,7 @@ import type {
   OperationValidationContext,
   UnsignedRoomOperationV1,
 } from "../../src/blindRendezvous/operation";
-import type { VerifiedAdmissionContextV1 } from "../../src/blindRendezvous/identityHelloOpen";
+import type { IdentityHelloAdmissionClaimV1 } from "../../src/blindRendezvous/identityHelloOpen";
 import type {
   AdmissionGrantV1,
   PresenceCoreV1,
@@ -154,7 +154,7 @@ const trackedOpens = new Set<
     { kind: "opened" }
   >["value"]
 >();
-const trackedAdmissionContexts = new Set<VerifiedAdmissionContextV1>();
+const trackedAdmissionClaims = new Set<IdentityHelloAdmissionClaimV1>();
 let fixtureOrdinal = 0;
 
 const trackSecret = (value: Uint8Array): Uint8Array => {
@@ -163,9 +163,9 @@ const trackSecret = (value: Uint8Array): Uint8Array => {
 };
 
 afterEach(() => {
-  for (const context of trackedAdmissionContexts)
-    destroyVerifiedAdmissionContextV1(context);
-  trackedAdmissionContexts.clear();
+  for (const claim of trackedAdmissionClaims)
+    destroyIdentityHelloAdmissionClaimV1(claim);
+  trackedAdmissionClaims.clear();
   for (const opened of trackedOpens) destroyVerifiedIdentityHelloOpenV1(opened);
   trackedOpens.clear();
   for (const trial of trackedTrials) destroyExpectedIdentityHelloTrialV1(trial);
@@ -885,7 +885,7 @@ describe("reservation-gated identity HELLO open", () => {
     );
   });
 
-  test("moves an authenticated HELLO exactly once into an opaque root-custody admission context", async () => {
+  test("moves an authenticated HELLO exactly once into an opaque root-custody admission claim", async () => {
     const fixture = await buildHelloFixture({
       carriedGrantNotAfter: HELLO_WINDOW + 9n,
       pairLifetimeWindows: 23,
@@ -894,17 +894,27 @@ describe("reservation-gated identity HELLO open", () => {
     expect(result.kind).toBe("opened");
     if (result.kind !== "opened") return;
 
-    const context = promoteVerifiedIdentityHelloOpenForAdmissionV1(
-      result.value,
+    let proxyReads = 0;
+    const proxy = new Proxy(result.value, {
+      get() {
+        proxyReads++;
+        throw new Error("proxy surface must not be read");
+      },
+    });
+    expect(() => takeVerifiedIdentityHelloOpenForAdmissionV1(proxy)).toThrow(
+      AdmissionInputError,
     );
-    trackedAdmissionContexts.add(context);
-    expect(Reflect.ownKeys(context)).toEqual([]);
+    expect(proxyReads).toBe(0);
+
+    const claim = takeVerifiedIdentityHelloOpenForAdmissionV1(result.value);
+    trackedAdmissionClaims.add(claim);
+    expect(Reflect.ownKeys(claim)).toEqual([]);
     expect(() => snapshotVerifiedIdentityHelloOpenV1(result.value)).toThrow(
       "genuine live process-local handle",
     );
     let secondPromotionError: unknown;
     try {
-      promoteVerifiedIdentityHelloOpenForAdmissionV1(result.value);
+      takeVerifiedIdentityHelloOpenForAdmissionV1(result.value);
     } catch (error) {
       secondPromotionError = error;
     }
@@ -913,7 +923,7 @@ describe("reservation-gated identity HELLO open", () => {
       "invalid-admission-kernel-input",
     );
 
-    const snapshot = snapshotVerifiedAdmissionContextV1(context);
+    const snapshot = snapshotIdentityHelloAdmissionClaimV1(claim);
     expect(snapshot).toMatchObject({
       version: 1,
       decisionRole: "hello-responder",
@@ -953,7 +963,7 @@ describe("reservation-gated identity HELLO open", () => {
     snapshot.operationId.fill(0);
     snapshot.stableEd25519PublicKey.fill(0);
     snapshot.optionalGrant?.authoritySignature.fill(0);
-    const fresh = snapshotVerifiedAdmissionContextV1(context);
+    const fresh = snapshotIdentityHelloAdmissionClaimV1(claim);
     expectBytesEqual(fresh.operationId, fixture.pair.operationId);
     expectBytesEqual(
       fresh.stableEd25519PublicKey,
@@ -963,14 +973,16 @@ describe("reservation-gated identity HELLO open", () => {
       fresh.optionalGrant?.authoritySignature.some((byte) => byte !== 0),
     ).toBe(true);
 
-    const spread = { ...(context as object) };
+    const spread = { ...(claim as object) };
     expect(() =>
-      snapshotVerifiedAdmissionContextV1(spread as VerifiedAdmissionContextV1),
+      snapshotIdentityHelloAdmissionClaimV1(
+        spread as IdentityHelloAdmissionClaimV1,
+      ),
     ).toThrow("genuine live process-local handle");
 
-    destroyVerifiedAdmissionContextV1(context);
-    destroyVerifiedAdmissionContextV1(context);
-    expect(() => snapshotVerifiedAdmissionContextV1(context)).toThrow(
+    destroyIdentityHelloAdmissionClaimV1(claim);
+    destroyIdentityHelloAdmissionClaimV1(claim);
+    expect(() => snapshotIdentityHelloAdmissionClaimV1(claim)).toThrow(
       "genuine live process-local handle",
     );
   });
@@ -1243,6 +1255,10 @@ describe("reservation-gated identity HELLO open", () => {
     expect(source).toContain("roomRoot.fill(0)");
     expect(source).toContain("openedRoot?.fill(0)");
     expect(source).toContain("state.helloRoot.fill(0)");
+    expect(source.indexOf("verifiedStates.delete(value)")).toBeLessThan(
+      source.indexOf("copyAdmissionClaimSnapshot(state)"),
+    );
+    expect(source).not.toContain("export interface VerifiedAdmissionContextV1");
     expect(source.indexOf("openedRoot = opened.bootstrapRoot")).toBeLessThan(
       source.indexOf("if (authenticatedFacts === undefined)"),
     );

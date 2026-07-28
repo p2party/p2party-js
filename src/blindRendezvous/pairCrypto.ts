@@ -81,10 +81,23 @@ const BOOTSTRAP_TAG_EXPORTER_BYTES = PAIR_BOOTSTRAP_SUITE_V1.routingTagBytes;
 const BOOTSTRAP_ROOT_EXPORTER_BYTES = 32;
 
 export class PairCryptoError extends Error {
-  override readonly name = "PairCryptoError";
+  override readonly name: string = "PairCryptoError";
 
   constructor(message: string) {
     super(`pairCrypto: ${message}`);
+  }
+}
+
+/**
+ * A bootstrap plaintext authenticated under one HPKE info value but carrying
+ * another identity-flight kind. Recipients may classify this exact
+ * peer-authenticated protocol fault without parsing an error message.
+ */
+export class PairBootstrapPlaintextKindError extends PairCryptoError {
+  override readonly name = "PairBootstrapPlaintextKindError";
+
+  constructor() {
+    super("bootstrap plaintext kind does not match HPKE info");
   }
 }
 
@@ -255,7 +268,7 @@ const assertBootstrapPlaintextKind = (
   info: PairBootstrapInfoV1,
 ): void => {
   if (plaintext.kind !== info.stepKind)
-    fail("bootstrap plaintext kind does not match HPKE info");
+    throw new PairBootstrapPlaintextKindError();
 };
 
 const assertEstablishedPrebinding = (

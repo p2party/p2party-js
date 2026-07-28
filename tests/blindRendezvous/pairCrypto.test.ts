@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { encodeCanonical } from "../../src/blindRendezvous/canonicalSchema";
 import {
+  PairBootstrapPlaintextKindError,
   openPairBootstrapV1,
   openPairStepV1,
   sealPairBootstrapV1,
@@ -520,6 +521,25 @@ const sealHello = async (): Promise<{
 };
 
 describe("pair bootstrap HPKE", () => {
+  test("uses a typed error for an identity kind that disagrees with HPKE info", async () => {
+    const keyPair = await generateHpkeRecipientKeyPair(module);
+    try {
+      await expect(
+        sealPairBootstrapV1({
+          module,
+          recipientHybridKemPublicKey: keyPair.publicKey,
+          psk: filled(0x60),
+          bootstrapInfo: bootstrapInfo(),
+          outerFields: bootstrapOuter(),
+          roomPqMode: ROOM_PQ_MODE,
+          createSignedPlaintext: acceptPlaintext,
+        }),
+      ).rejects.toBeInstanceOf(PairBootstrapPlaintextKindError);
+    } finally {
+      keyPair.destroy();
+    }
+  });
+
   test("opens independent pinned HELLO and ACCEPT known answers", async () => {
     const encapsulatedKey = fromBase64(
       BOOTSTRAP_KAT.source.encapsulatedKeyBase64,

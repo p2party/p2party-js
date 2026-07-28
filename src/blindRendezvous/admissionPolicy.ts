@@ -2,17 +2,24 @@
  * Internal, pure Section 4.8 admission-policy semantics.
  *
  * This module deliberately does not implement `Admit()`, trusted snapshot or
- * custody capture, provenance brands, pair opening/binding, persistence,
- * serialization, outbound-intent atomicity, or the pre-SDP runtime gate. Its
- * structural inputs are useful only after a future trusted constructor has
- * obtained the same facts atomically. Nothing here may turn a caller-supplied
- * authority availability bit, digest, or revocation list into trusted state.
+ * custody capture, provenance brands, pair opening/binding, effectful
+ * persistence, outbound-intent atomicity, or the pre-SDP runtime gate. Its
+ * canonical codecs only preserve already-validated structural values; decoding
+ * bytes does not make a lease trusted or current. Structural inputs are useful
+ * only after a future trusted constructor has obtained the same facts
+ * atomically. Nothing here may turn a caller-supplied authority availability
+ * bit, digest, or revocation list into trusted state.
  *
  * The helpers do own the deterministic policy order and lease arithmetic once
  * those facts are available. This file is not exported from the package barrel.
  */
 
-import { bytesEqual } from "./canonicalSchema";
+import {
+  bytesEqual,
+  decodeCanonicalStrict,
+  encodeCanonical,
+} from "./canonicalSchema";
+import { snapshotByteInput } from "../cryptography/byteInput";
 import {
   admissionGrantId,
   stableIdentityCommitment as deriveStableIdentityCommitment,
@@ -24,14 +31,62 @@ import {
   validateAdmissionGrantV1,
 } from "./operationPayload";
 import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
+import {
+  bootstrapAdmissionDecisionLeaseV1Schema,
+  frontendRoomControlsV1Schema,
+  MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1,
+  pairAttemptLeaseV1Schema,
+} from "./schemas";
 
+import type { ByteInputConstraints } from "../cryptography/byteInput";
+import type { TypeDescriptor } from "./canonicalSchema";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { CoreFaultV1, CoreRevocationFloorV1 } from "./coreReduce";
 import type { AdmissionGrantV1 } from "./operationPayload";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
 
 const U64_MAX = 0xffffffffffffffffn;
-const MAX_LOCAL_SET_ENTRIES = 0xffff;
+const BYTES32_LENGTH = 32;
+
+const FRONTEND_ROOM_CONTROLS_MAX_ENCODED_BYTES_V1 =
+  1 +
+  8 +
+  1 +
+  3 * (2 + MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1 * BYTES32_LENGTH);
+
+const PAIR_ATTEMPT_LEASE_ENCODED_BYTES_V1 = encodeCanonical(
+  pairAttemptLeaseV1Schema,
+  {
+    version: 1,
+    helloOperationId: new Uint8Array(BYTES32_LENGTH),
+    pairEdgeId: new Uint8Array(BYTES32_LENGTH),
+    endpointPresenceOperationIds: [
+      new Uint8Array(BYTES32_LENGTH),
+      new Uint8Array(BYTES32_LENGTH),
+    ],
+    attemptMode: "planner",
+    helloLogicalWindow: 0n,
+    validThroughLogicalWindow: 0n,
+  },
+).length;
+
+const BOOTSTRAP_ADMISSION_DECISION_LEASE_MAX_ENCODED_BYTES_V1 = encodeCanonical(
+  bootstrapAdmissionDecisionLeaseV1Schema,
+  {
+    version: 1,
+    roomContextId: new Uint8Array(BYTES32_LENGTH),
+    stableEd25519PublicKey: new Uint8Array(BYTES32_LENGTH),
+    stableIdentityCommitment: new Uint8Array(BYTES32_LENGTH),
+    grantId: new Uint8Array(BYTES32_LENGTH),
+    grantGeneration: U64_MAX,
+    localPolicyGeneration: U64_MAX,
+    authorityAdmissionStateDigest: new Uint8Array(BYTES32_LENGTH),
+    admittedPresenceOperationId: new Uint8Array(BYTES32_LENGTH),
+    admittedIdentityOperationId: new Uint8Array(BYTES32_LENGTH),
+    decidedAtLogicalWindow: U64_MAX,
+    validThroughLogicalWindow: U64_MAX,
+  },
+).length;
 
 export type CanonicalBytes32SetV1 = readonly Uint8Array[];
 
@@ -206,6 +261,40 @@ const fail = (message: string): never => {
   throw new AdmissionPolicySemanticError(message);
 };
 
+const encodeValidatedCanonical = <Value>(
+  descriptor: TypeDescriptor,
+  value: unknown,
+  validateAndCopy: (candidate: unknown) => Value,
+): Uint8Array => {
+  try {
+    return encodeCanonical(descriptor, validateAndCopy(value));
+  } catch (cause) {
+    if (cause instanceof AdmissionPolicySemanticError) throw cause;
+    if (cause instanceof Error) return fail(cause.message);
+    return fail("canonical encoding failed");
+  }
+};
+
+const decodeValidatedCanonical = <Value>(
+  descriptor: TypeDescriptor,
+  bytes: Uint8Array,
+  label: string,
+  constraints: ByteInputConstraints,
+  validateAndCopy: (candidate: unknown) => Value,
+): Value => {
+  let ownedBytes: Uint8Array | null = null;
+  try {
+    ownedBytes = snapshotByteInput(bytes, label, constraints);
+    return validateAndCopy(decodeCanonicalStrict(descriptor, ownedBytes));
+  } catch (cause) {
+    if (cause instanceof AdmissionPolicySemanticError) throw cause;
+    if (cause instanceof Error) return fail(cause.message);
+    return fail("canonical decoding failed");
+  } finally {
+    ownedBytes?.fill(0);
+  }
+};
+
 const requireU64 = (name: string, value: unknown): bigint => {
   if (typeof value !== "bigint" || value < 0n || value > U64_MAX)
     return fail(`${name} must be an unsigned 64-bit integer`);
@@ -264,7 +353,7 @@ const copyCanonicalBytes32Set = (
 ): CanonicalBytes32SetV1 => {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype)
     return fail(`${name} must be a dense array`);
-  if (value.length > MAX_LOCAL_SET_ENTRIES)
+  if (value.length > MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1)
     return fail(`${name} exceeds the local collection bound`);
 
   const result: Uint8Array[] = [];
@@ -324,6 +413,29 @@ export const validateAndCopyFrontendRoomControlsV1 = (
     ),
   };
 };
+
+/** Canonical bytes for one already-local frontend policy snapshot. */
+export const encodeFrontendRoomControlsV1 = (value: unknown): Uint8Array =>
+  encodeValidatedCanonical(
+    frontendRoomControlsV1Schema,
+    value,
+    validateAndCopyFrontendRoomControlsV1,
+  );
+
+/**
+ * Restore an owned structural snapshot. This does not establish frontend
+ * provenance or make the policy generation current.
+ */
+export const decodeFrontendRoomControlsV1 = (
+  bytes: Uint8Array,
+): FrontendRoomControlsV1 =>
+  decodeValidatedCanonical(
+    frontendRoomControlsV1Schema,
+    bytes,
+    "encoded FrontendRoomControlsV1",
+    { maximumLength: FRONTEND_ROOM_CONTROLS_MAX_ENCODED_BYTES_V1 },
+    validateAndCopyFrontendRoomControlsV1,
+  );
 
 /** Membership over an already validated canonical byte set. */
 export const canonicalBytes32SetHas = (
@@ -890,6 +1002,151 @@ export const validateAndCopyPairAttemptLeaseV1 = (
     validThroughLogicalWindow,
   };
 };
+
+/** Canonical durable bytes for one structurally valid pair-attempt lease. */
+export const encodePairAttemptLeaseV1 = (value: unknown): Uint8Array =>
+  encodeValidatedCanonical(
+    pairAttemptLeaseV1Schema,
+    value,
+    validateAndCopyPairAttemptLeaseV1,
+  );
+
+/**
+ * Restore an owned structural pair-attempt lease. Callers must still bind it
+ * to the fresh trusted pair state before treating it as authority to act.
+ */
+export const decodePairAttemptLeaseV1 = (
+  bytes: Uint8Array,
+): PairAttemptLeaseV1 =>
+  decodeValidatedCanonical(
+    pairAttemptLeaseV1Schema,
+    bytes,
+    "encoded PairAttemptLeaseV1",
+    { exactLength: PAIR_ATTEMPT_LEASE_ENCODED_BYTES_V1 },
+    validateAndCopyPairAttemptLeaseV1,
+  );
+
+export const validateAndCopyBootstrapAdmissionDecisionLeaseV1 = (
+  value: unknown,
+): BootstrapAdmissionDecisionLeaseV1 => {
+  const fields = [
+    "version",
+    "roomContextId",
+    "stableEd25519PublicKey",
+    "stableIdentityCommitment",
+    "grantId",
+    "grantGeneration",
+    "localPolicyGeneration",
+    "authorityAdmissionStateDigest",
+    "admittedPresenceOperationId",
+    "admittedIdentityOperationId",
+    "decidedAtLogicalWindow",
+    "validThroughLogicalWindow",
+  ] as const;
+  if (!hasExactOwnDataFields(value, fields))
+    return fail(
+      "BootstrapAdmissionDecisionLeaseV1 must contain exactly its declared fields",
+    );
+  if (value.version !== 1)
+    return fail("unsupported BootstrapAdmissionDecisionLeaseV1 version");
+
+  const hasGrantId = value.grantId !== null;
+  const hasGrantGeneration = value.grantGeneration !== null;
+  const hasAuthorityDigest = value.authorityAdmissionStateDigest !== null;
+  if (hasGrantId !== hasGrantGeneration || hasGrantId !== hasAuthorityDigest)
+    return fail(
+      "BootstrapAdmissionDecisionLeaseV1 authority bindings must be all present or all absent",
+    );
+
+  const decidedAtLogicalWindow = requireU64(
+    "BootstrapAdmissionDecisionLeaseV1.decidedAtLogicalWindow",
+    value.decidedAtLogicalWindow,
+  );
+  const validThroughLogicalWindow = requireU64(
+    "BootstrapAdmissionDecisionLeaseV1.validThroughLogicalWindow",
+    value.validThroughLogicalWindow,
+  );
+  if (decidedAtLogicalWindow > validThroughLogicalWindow)
+    return fail("BootstrapAdmissionDecisionLeaseV1 has an impossible interval");
+
+  return {
+    version: 1,
+    roomContextId: copyBytes32(
+      "BootstrapAdmissionDecisionLeaseV1.roomContextId",
+      value.roomContextId,
+    ),
+    stableEd25519PublicKey: copyBytes32(
+      "BootstrapAdmissionDecisionLeaseV1.stableEd25519PublicKey",
+      value.stableEd25519PublicKey,
+    ),
+    stableIdentityCommitment: copyBytes32(
+      "BootstrapAdmissionDecisionLeaseV1.stableIdentityCommitment",
+      value.stableIdentityCommitment,
+    ),
+    grantId:
+      value.grantId === null
+        ? null
+        : copyBytes32(
+            "BootstrapAdmissionDecisionLeaseV1.grantId",
+            value.grantId,
+          ),
+    grantGeneration:
+      value.grantGeneration === null
+        ? null
+        : requireU64(
+            "BootstrapAdmissionDecisionLeaseV1.grantGeneration",
+            value.grantGeneration,
+          ),
+    localPolicyGeneration: requireU64(
+      "BootstrapAdmissionDecisionLeaseV1.localPolicyGeneration",
+      value.localPolicyGeneration,
+    ),
+    authorityAdmissionStateDigest:
+      value.authorityAdmissionStateDigest === null
+        ? null
+        : copyBytes32(
+            "BootstrapAdmissionDecisionLeaseV1.authorityAdmissionStateDigest",
+            value.authorityAdmissionStateDigest,
+          ),
+    admittedPresenceOperationId: copyBytes32(
+      "BootstrapAdmissionDecisionLeaseV1.admittedPresenceOperationId",
+      value.admittedPresenceOperationId,
+    ),
+    admittedIdentityOperationId: copyBytes32(
+      "BootstrapAdmissionDecisionLeaseV1.admittedIdentityOperationId",
+      value.admittedIdentityOperationId,
+    ),
+    decidedAtLogicalWindow,
+    validThroughLogicalWindow,
+  };
+};
+
+/** Canonical durable bytes for one bootstrap admission decision lease. */
+export const encodeBootstrapAdmissionDecisionLeaseV1 = (
+  value: unknown,
+): Uint8Array =>
+  encodeValidatedCanonical(
+    bootstrapAdmissionDecisionLeaseV1Schema,
+    value,
+    validateAndCopyBootstrapAdmissionDecisionLeaseV1,
+  );
+
+/**
+ * Restore an owned structural bootstrap lease. The decoded record is not a
+ * trusted admission decision until its bindings and freshness are rechecked.
+ */
+export const decodeBootstrapAdmissionDecisionLeaseV1 = (
+  bytes: Uint8Array,
+): BootstrapAdmissionDecisionLeaseV1 =>
+  decodeValidatedCanonical(
+    bootstrapAdmissionDecisionLeaseV1Schema,
+    bytes,
+    "encoded BootstrapAdmissionDecisionLeaseV1",
+    {
+      maximumLength: BOOTSTRAP_ADMISSION_DECISION_LEASE_MAX_ENCODED_BYTES_V1,
+    },
+    validateAndCopyBootstrapAdmissionDecisionLeaseV1,
+  );
 
 const copyAllowedPolicy = (
   policy: AllowedPeerAdmissionPolicyV1,

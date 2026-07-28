@@ -80,6 +80,9 @@ export const MAX_PAIR_LOCAL_CANDIDATE_BYTES_V1 = 2_048;
 /** Section 4.2 bounds one encrypted store hint to 255 exact routes. */
 export const MAX_STORE_HINT_ROUTES_V1 = 0xff;
 
+/** Section 4.8 bounds each frontend-owned canonical identity set. */
+export const MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1 = 0xffff;
+
 /**
  * Leaves one 16-bit collection slot for the canonical quota+1 physical proof.
  */
@@ -843,6 +846,41 @@ export const storeRouteV1Schema = record("StoreRouteV1", [
  * Sections 4.8/4.9 — admission, presence, leave, and store hints
  * ------------------------------------------------------------------ */
 
+export const canonicalBytes32SetV1Schema = array(
+  bytes32,
+  MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1,
+);
+
+export const frontendRoomControlsV1Schema = record("FrontendRoomControlsV1", [
+  { name: "version", type: u8 },
+  { name: "policyGeneration", type: u64 },
+  { name: "onlyConnectWithKnownPeers", type: bool },
+  { name: "allowedStableIdentityKeys", type: canonicalBytes32SetV1Schema },
+  { name: "deniedStableIdentityKeys", type: canonicalBytes32SetV1Schema },
+  {
+    name: "deniedRoomIdentityCommitments",
+    type: canonicalBytes32SetV1Schema,
+  },
+]);
+
+export const bootstrapAdmissionDecisionLeaseV1Schema = record(
+  "BootstrapAdmissionDecisionLeaseV1",
+  [
+    { name: "version", type: u8 },
+    { name: "roomContextId", type: bytes32 },
+    { name: "stableEd25519PublicKey", type: bytes32 },
+    { name: "stableIdentityCommitment", type: bytes32 },
+    { name: "grantId", type: optional(bytes32) },
+    { name: "grantGeneration", type: optional(u64) },
+    { name: "localPolicyGeneration", type: u64 },
+    { name: "authorityAdmissionStateDigest", type: optional(bytes32) },
+    { name: "admittedPresenceOperationId", type: bytes32 },
+    { name: "admittedIdentityOperationId", type: bytes32 },
+    { name: "decidedAtLogicalWindow", type: u64 },
+    { name: "validThroughLogicalWindow", type: u64 },
+  ],
+);
+
 const admissionGrantFields: readonly FieldDescriptor[] = [
   { name: "version", type: u8 },
   { name: "roomContextId", type: bytes32 },
@@ -883,6 +921,19 @@ export const pairStepKindV1Schema = enumOf("PairStepKindV1", [
 export const pairAttemptModeV1Schema = enumOf("PairAttemptModeV1", [
   "planner",
   "explicit",
+]);
+
+export const pairAttemptLeaseV1Schema = record("PairAttemptLeaseV1", [
+  { name: "version", type: u8 },
+  { name: "helloOperationId", type: bytes32 },
+  { name: "pairEdgeId", type: bytes32 },
+  {
+    name: "endpointPresenceOperationIds",
+    type: array(bytes32, 2, "sequence"),
+  },
+  { name: "attemptMode", type: pairAttemptModeV1Schema },
+  { name: "helloLogicalWindow", type: u64 },
+  { name: "validThroughLogicalWindow", type: u64 },
 ]);
 
 export const pairBootstrapRecipientKindV1Schema = enumOf(

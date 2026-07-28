@@ -13,6 +13,7 @@ import {
   decodeCanonicalStrict,
   encodeCanonical,
 } from "./canonicalSchema";
+import { snapshotByteInput } from "../cryptography/byteInput";
 import { base64urlNoPad, base64urlNoPadDecode } from "./derivations";
 import {
   OPERATION_PAYLOAD_CLASS_BYTES,
@@ -24,6 +25,21 @@ import type { TypeDescriptor } from "./canonicalSchema";
 
 const U64_MAX = 0xffffffffffffffffn;
 const U32_MAX = 0xffffffff;
+const PAIR_OPEN_BUDGET_SNAPSHOT_BYTES = encodeCanonical(
+  pairOpenBudgetSnapshotV1Schema,
+  {
+    version: 1,
+    coordinate: {
+      localRoomId: "A".repeat(43),
+      localPresenceOperationId: new Uint8Array(32),
+      budgetLogicalWindow: U64_MAX,
+    },
+    budgetRevision: U64_MAX,
+    reservedTrialCount: U32_MAX,
+    reservedEnvelopeBytes: U64_MAX,
+    saturated: true,
+  },
+).length;
 
 export interface PairOpenBudgetCoordinateV1 {
   readonly localRoomId: string;
@@ -319,3 +335,27 @@ export const reducePairOpenBudgetV1 = (
 export const validatePairOpenBudgetSnapshotV1 = (
   value: unknown,
 ): PairOpenBudgetSnapshotV1 => ownSnapshot(value);
+
+/** Canonical durable bytes after complete structural and reachability checks. */
+export const encodePairOpenBudgetSnapshotV1 = (value: unknown): Uint8Array =>
+  encodeCanonical(pairOpenBudgetSnapshotV1Schema, ownSnapshot(value));
+
+/** Strictly restore and own one canonical durable budget row. */
+export const decodePairOpenBudgetSnapshotV1 = (
+  bytes: Uint8Array,
+): PairOpenBudgetSnapshotV1 => {
+  try {
+    const ownedBytes = snapshotByteInput(
+      bytes,
+      "pairOpenBudget: encoded snapshot",
+      { exactLength: PAIR_OPEN_BUDGET_SNAPSHOT_BYTES },
+    );
+    return ownSnapshot(
+      decodeCanonicalStrict(pairOpenBudgetSnapshotV1Schema, ownedBytes),
+    );
+  } catch (cause) {
+    if (cause instanceof PairOpenBudgetError) throw cause;
+    if (cause instanceof Error) return fail(cause.message);
+    return fail("encoded snapshot validation failed");
+  }
+};

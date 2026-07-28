@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  decodePairOpenBudgetSnapshotV1,
+  encodePairOpenBudgetSnapshotV1,
   reducePairOpenBudgetV1,
   validatePairOpenBudgetSnapshotV1,
 } from "../../src/blindRendezvous/pairOpenBudget";
@@ -191,6 +193,21 @@ describe("durable pair-open work budget", () => {
     expect(validated.coordinate.localPresenceOperationId).toEqual(
       LOCAL_PRESENCE_ID,
     );
+  });
+
+  test("round-trips only exact canonical durable bytes", () => {
+    const prepared = prepare(null);
+    const encoded = encodePairOpenBudgetSnapshotV1(prepared);
+    const restored = decodePairOpenBudgetSnapshotV1(encoded);
+    expect(restored).toEqual(prepared);
+
+    encoded.fill(0xff);
+    expect(restored).toEqual(prepared);
+    expect(() =>
+      decodePairOpenBudgetSnapshotV1(
+        Uint8Array.from([...encodePairOpenBudgetSnapshotV1(prepared), 0]),
+      ),
+    ).toThrow("must be exactly");
   });
 
   test("rejects malformed IDs, versions, limits, and revision overflow", () => {

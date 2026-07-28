@@ -23,6 +23,7 @@ import {
   fixedBytes,
   optional,
   record,
+  recordFields,
   text,
   u16,
   u32,
@@ -633,4 +634,75 @@ export const kernelModuleSemanticsEntrySchema = record(
 export const kernelModuleSemanticsSchema = array(
   kernelModuleSemanticsEntrySchema,
   KERNEL_ENTRYPOINT_IDS.length,
+);
+
+/* ------------------------------------------------------------------ *
+ * Section 4.3 — public windows, buckets, chunks, and checkpoints
+ * ------------------------------------------------------------------ */
+
+/** No room-derived value appears here: every room in a profile shares it. */
+export const publicBucketV1Schema = record("PublicBucketV1", [
+  { name: "deliveryProfileHash", type: bytes32 },
+  { name: "ingressWindow", type: u64 },
+  { name: "sizeClass", type: u8 },
+]);
+
+export const publicChunkBodyV1Schema = record("PublicChunkBodyV1", [
+  { name: "version", type: u8 },
+  { name: "bucket", type: publicBucketV1Schema },
+  { name: "chunkIndex", type: u64 },
+  { name: "previousChunkHash", type: bytes32 },
+  {
+    name: "fixedObjects",
+    // Sequence order is the object index within the chunk, so it is
+    // positional and must not be reordered into sorted order.
+    type: array(varBytes(1 << 20), 0xffff, "sequence"),
+  },
+]);
+
+export const publicChunkV1Schema = record("PublicChunkV1", [
+  ...recordFields(publicChunkBodyV1Schema),
+  { name: "storeSignature", type: bytes64 },
+]);
+
+export const publicStoreCheckpointBodyV1Schema = record(
+  "PublicStoreCheckpointBodyV1",
+  [
+    { name: "version", type: u8 },
+    { name: "storeId", type: bytes32 },
+    { name: "descriptorHash", type: bytes32 },
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "ingressWindow", type: u64 },
+    { name: "chainStartIngressWindow", type: u64 },
+    { name: "previousCheckpointHash", type: bytes32 },
+    { name: "finalizedChunkCount", type: u32 },
+    { name: "finalizedChunkRoot", type: bytes32 },
+  ],
+);
+
+export const publicStoreCheckpointV1Schema = record("PublicStoreCheckpointV1", [
+  ...recordFields(publicStoreCheckpointBodyV1Schema),
+  { name: "storeSignature", type: bytes64 },
+]);
+
+export const publicCheckpointChunkLeafV1Schema = record(
+  "PublicCheckpointChunkLeafV1",
+  [
+    { name: "sizeClass", type: u8 },
+    { name: "chunkIndex", type: u64 },
+    { name: "publicChunkHash", type: bytes32 },
+  ],
+);
+
+export const publicCheckpointChunkInclusionProofV1Schema = record(
+  "PublicCheckpointChunkInclusionProofV1",
+  [
+    { name: "version", type: u8 },
+    { name: "checkpointHash", type: bytes32 },
+    { name: "leaf", type: publicCheckpointChunkLeafV1Schema },
+    { name: "leafIndex", type: u32 },
+    // The audit path is ordered from the leaf upward; sorting it would
+    // destroy the path.
+    { name: "siblingHashes", type: array(bytes32, 0xff, "sequence") },
+  ],
 );

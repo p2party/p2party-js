@@ -724,6 +724,21 @@ export const recordFieldNames = (
   return descriptor.fields.map((field) => field.name);
 };
 
+/**
+ * The complete field list of a record descriptor.
+ *
+ * A signed wire type is its body plus a signature, so it reuses the body's
+ * fields rather than restating them — the signature transcript is exactly the
+ * body encoding, and a divergence between the two lists would be silent.
+ */
+export const recordFields = (
+  descriptor: TypeDescriptor,
+): readonly FieldDescriptor[] => {
+  if (descriptor.kind !== "record")
+    fail(descriptorName(descriptor), "is not a record descriptor");
+  return descriptor.fields;
+};
+
 /** The descriptor of one named field of a record descriptor. */
 export const recordFieldType = (
   descriptor: TypeDescriptor,

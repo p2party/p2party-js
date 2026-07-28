@@ -1,7 +1,9 @@
 # Handoff: blind rendezvous + live fixes
 
-Written 2026-07-28 for the next agent. Everything below is verified state, not
-plan. Nothing is pushed; no PR exists.
+Written 2026-07-28 for the next agent and updated after local branch
+reconciliation. Everything below is verified state, not plan. The relevant
+work is now on each repository's local `master`. Nothing is pushed; no PR
+exists.
 
 ## Continuation after this handoff
 
@@ -47,19 +49,15 @@ bun test tests # 629 pass, 0 fail, 85 files
 
 ## Repositories and branches
 
-| Repo             | Path                                | Branch                          | State                                        |
-| ---------------- | ----------------------------------- | ------------------------------- | -------------------------------------------- |
-| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `feat/blind-rendezvous-phase-0` | 14 commits ahead of `master`                 |
-| `p2party-server` | `~/Desktop/@p2party/p2party-server` | `fix/enable-turn-relay`         | 1 commit ahead of `master`                   |
-| `p2party.com`    | `~/Desktop/@p2party/p2party.com`    | `master`                        | 2 commits on `master` (`158de8a`, `3e21f60`) |
+| Repo             | Path                                | Branch   | Local state                                                               |
+| ---------------- | ----------------------------------- | -------- | ------------------------------------------------------------------------- |
+| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `master` | Blind-rendezvous Phase 0, WebRTC repair, and TURN-consumption work merged |
+| `p2party-server` | `~/Desktop/@p2party/p2party-server` | `master` | TURN endpoint issuance merged; 1 commit ahead of `origin/master`          |
+| `p2party.com`    | `~/Desktop/@p2party/p2party.com`    | `master` | Frontend fixes already present; 2 commits ahead of `origin/master`        |
 
-The frontend commits went to `master` because that matches the repo's own recent
-history. Moving them to a branch is safe (nothing is pushed) if a PR is wanted.
-
-**Do not touch these uncommitted files in `p2party-js` — they are the human's:**
-
-- `spec/spec-architecture-l2-blind-rendezvous.md` (modified, `last_updated: 2026-07-28`)
-- `docs/rendezvous-prior-art.md` (untracked, deliberately untracked by `b2c147f`)
+`docs/rendezvous-prior-art.md` remains an intentionally untracked local
+research shelf. Its bytes are identical to the version removed by `b2c147f`;
+do not stage it unless the maintainer explicitly reverses that decision.
 
 ## Non-negotiable rules carried from the original brief
 

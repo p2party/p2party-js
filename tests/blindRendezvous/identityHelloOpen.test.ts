@@ -25,8 +25,11 @@ import {
   stableIdentityCommitment,
 } from "../../src/blindRendezvous/derivations";
 import {
+  destroyVerifiedAdmissionContextV1,
   destroyVerifiedIdentityHelloOpenV1,
   openReservedIdentityHelloV1,
+  promoteVerifiedIdentityHelloOpenForAdmissionV1,
+  snapshotVerifiedAdmissionContextV1,
   snapshotVerifiedIdentityHelloOpenV1,
 } from "../../src/blindRendezvous/identityHelloOpen";
 import {
@@ -58,6 +61,7 @@ import {
 import { encodePairStepEnvelopeV1 } from "../../src/blindRendezvous/pairStepEnvelope";
 import { copyBlindDefaultPolicy } from "../../src/blindRendezvous/roomPolicyV4";
 import { decodeRoomPolicyV1 } from "../../src/roomPolicy";
+import { AdmissionInputError } from "../../src/blindRendezvous/admissionInput";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
@@ -75,6 +79,7 @@ import type {
   OperationValidationContext,
   UnsignedRoomOperationV1,
 } from "../../src/blindRendezvous/operation";
+import type { VerifiedAdmissionContextV1 } from "../../src/blindRendezvous/identityHelloOpen";
 import type {
   AdmissionGrantV1,
   PresenceCoreV1,
@@ -149,6 +154,7 @@ const trackedOpens = new Set<
     { kind: "opened" }
   >["value"]
 >();
+const trackedAdmissionContexts = new Set<VerifiedAdmissionContextV1>();
 let fixtureOrdinal = 0;
 
 const trackSecret = (value: Uint8Array): Uint8Array => {
@@ -157,6 +163,9 @@ const trackSecret = (value: Uint8Array): Uint8Array => {
 };
 
 afterEach(() => {
+  for (const context of trackedAdmissionContexts)
+    destroyVerifiedAdmissionContextV1(context);
+  trackedAdmissionContexts.clear();
   for (const opened of trackedOpens) destroyVerifiedIdentityHelloOpenV1(opened);
   trackedOpens.clear();
   for (const trial of trackedTrials) destroyExpectedIdentityHelloTrialV1(trial);
@@ -872,6 +881,96 @@ describe("reservation-gated identity HELLO open", () => {
     destroyVerifiedIdentityHelloOpenV1(result.value);
     destroyVerifiedIdentityHelloOpenV1(result.value);
     expect(() => snapshotVerifiedIdentityHelloOpenV1(result.value)).toThrow(
+      "genuine live process-local handle",
+    );
+  });
+
+  test("moves an authenticated HELLO exactly once into an opaque root-custody admission context", async () => {
+    const fixture = await buildHelloFixture({
+      carriedGrantNotAfter: HELLO_WINDOW + 9n,
+      pairLifetimeWindows: 23,
+    });
+    const result = await openFresh(fixture);
+    expect(result.kind).toBe("opened");
+    if (result.kind !== "opened") return;
+
+    const context = promoteVerifiedIdentityHelloOpenForAdmissionV1(
+      result.value,
+    );
+    trackedAdmissionContexts.add(context);
+    expect(Reflect.ownKeys(context)).toEqual([]);
+    expect(() => snapshotVerifiedIdentityHelloOpenV1(result.value)).toThrow(
+      "genuine live process-local handle",
+    );
+    let secondPromotionError: unknown;
+    try {
+      promoteVerifiedIdentityHelloOpenForAdmissionV1(result.value);
+    } catch (error) {
+      secondPromotionError = error;
+    }
+    expect(secondPromotionError).toBeInstanceOf(AdmissionInputError);
+    expect((secondPromotionError as AdmissionInputError).code).toBe(
+      "invalid-admission-kernel-input",
+    );
+
+    const snapshot = snapshotVerifiedAdmissionContextV1(context);
+    expect(snapshot).toMatchObject({
+      version: 1,
+      decisionRole: "hello-responder",
+      kind: "IDENTITY_HELLO",
+      logicalWindow: HELLO_WINDOW,
+      direction: 0,
+      pairSequence: 0n,
+      previousPairOperationId: null,
+      pairDependencies: [],
+    });
+    expectBytesEqual(snapshot.operationId, fixture.pair.operationId);
+    expectBytesEqual(snapshot.roomContextId, fixture.context.roomContextId);
+    expectBytesEqual(
+      snapshot.stableEd25519PublicKey,
+      fixture.remote.stablePublicKey,
+    );
+    expectBytesEqual(
+      snapshot.claimedStableIdentityCommitment,
+      fixture.remote.stableCommitment,
+    );
+    expectBytesEqual(
+      snapshot.admittedPresenceOperationId,
+      fixture.remote.identified.operationId,
+    );
+    expectBytesEqual(
+      snapshot.basePairAttemptLease.helloOperationId,
+      fixture.pair.operationId,
+    );
+    expect(snapshot.basePairAttemptLease.validThroughLogicalWindow).toBe(
+      HELLO_WINDOW + 23n,
+    );
+    expect(snapshot.optionalGrant?.notAfterLogicalWindow).toBe(
+      HELLO_WINDOW + 9n,
+    );
+    expect(containsSecretField(snapshot)).toBe(false);
+
+    snapshot.operationId.fill(0);
+    snapshot.stableEd25519PublicKey.fill(0);
+    snapshot.optionalGrant?.authoritySignature.fill(0);
+    const fresh = snapshotVerifiedAdmissionContextV1(context);
+    expectBytesEqual(fresh.operationId, fixture.pair.operationId);
+    expectBytesEqual(
+      fresh.stableEd25519PublicKey,
+      fixture.remote.stablePublicKey,
+    );
+    expect(
+      fresh.optionalGrant?.authoritySignature.some((byte) => byte !== 0),
+    ).toBe(true);
+
+    const spread = { ...(context as object) };
+    expect(() =>
+      snapshotVerifiedAdmissionContextV1(spread as VerifiedAdmissionContextV1),
+    ).toThrow("genuine live process-local handle");
+
+    destroyVerifiedAdmissionContextV1(context);
+    destroyVerifiedAdmissionContextV1(context);
+    expect(() => snapshotVerifiedAdmissionContextV1(context)).toThrow(
       "genuine live process-local handle",
     );
   });

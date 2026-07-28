@@ -6,9 +6,11 @@
  * provenance, authenticates the complete HELLO identity bundle, and retains
  * HelloRoot only inside an opaque process-local result.
  *
- * Admission, pair-ledger persistence, ACCEPT construction, and any release of
- * HelloRoot remain deliberately out of scope. This module is absent from the
- * package barrel.
+ * The only next-state transition consumes the open into an opaque admission
+ * context while leaving HelloRoot in this module's private custody.
+ * Pair-ledger persistence, ACCEPT construction, and any release of HelloRoot
+ * remain deliberately out of scope. This module is absent from the package
+ * barrel.
  */
 
 import {
@@ -50,6 +52,7 @@ import {
   AdmissionPolicySemanticError,
   validateAndCopyPairAttemptLeaseV1,
 } from "./admissionPolicy";
+import { invalidAdmissionInput } from "./admissionInput";
 import { decodeRoomPolicyV1 } from "../roomPolicy";
 import { verify } from "../cryptography/ed25519";
 import {
@@ -71,6 +74,7 @@ import type {
   ConsumedExpectedIdentityHelloTrialV1,
 } from "./identityHelloTrial";
 import type { PairAttemptLeaseV1 } from "./admissionPolicy";
+import type { AdmissionGrantV1 } from "./operationPayload";
 import type {
   PairOuterBindingV1,
   PairOuterPrebindingV1,
@@ -83,10 +87,45 @@ import type { RoomPolicyV4 } from "./roomPolicyV4";
 const U64_MAX = 0xffffffffffffffffn;
 
 declare const verifiedIdentityHelloOpenBrand: unique symbol;
+declare const verifiedAdmissionContextBrand: unique symbol;
 
 /** Opaque authenticated HELLO result. HelloRoot is never structurally exposed. */
 export interface VerifiedIdentityHelloOpenV1 {
   readonly [verifiedIdentityHelloOpenBrand]: true;
+}
+
+/**
+ * Process-local result of the HELLO-responder admission-context transition.
+ *
+ * This source-level export exists only for internal module composition and is
+ * absent from the package barrel. It has no decoder or structural
+ * constructor. In particular, it never exposes HelloRoot.
+ */
+export interface VerifiedAdmissionContextV1 {
+  readonly [verifiedAdmissionContextBrand]: true;
+}
+
+export interface VerifiedAdmissionContextSnapshotV1 {
+  readonly version: 1;
+  readonly roomContextId: Uint8Array;
+  readonly decisionRole: "hello-responder";
+  readonly operationId: Uint8Array;
+  readonly kind: "IDENTITY_HELLO";
+  readonly logicalWindow: bigint;
+  readonly validThroughLogicalWindow: bigint;
+  readonly pairEdgeId: Uint8Array;
+  readonly endpointPresenceOperationIds: readonly [Uint8Array, Uint8Array];
+  readonly direction: 0;
+  readonly pairSequence: 0n;
+  readonly previousPairOperationId: null;
+  readonly pairDependencies: readonly [];
+  readonly stableEd25519PublicKey: Uint8Array;
+  readonly claimedStableIdentityCommitment: Uint8Array;
+  readonly optionalGrant: AdmissionGrantV1 | null;
+  readonly pairIdentitySignatureHash: Uint8Array;
+  readonly admittedPresenceOperationId: Uint8Array;
+  readonly admittedPresenceEvidenceRetainThroughLogicalWindow: bigint;
+  readonly basePairAttemptLease: PairAttemptLeaseV1;
 }
 
 export interface VerifiedIdentityHelloOpenSnapshotV1 {
@@ -173,6 +212,11 @@ interface AuthenticatedHelloFacts {
 
 const verifiedStates = new WeakMap<object, PrivateVerifiedIdentityHelloOpen>();
 const genuineVerifiedOpens = new WeakSet<object>();
+const admissionContextStates = new WeakMap<
+  object,
+  PrivateVerifiedIdentityHelloOpen
+>();
+const genuineAdmissionContexts = new WeakSet<object>();
 
 const requireVerifiedState = (
   value: VerifiedIdentityHelloOpenV1,
@@ -182,6 +226,21 @@ const requireVerifiedState = (
   const state = verifiedStates.get(value);
   if (state === undefined)
     return fail("verified HELLO must be a genuine live process-local handle");
+  return state;
+};
+
+const requireAdmissionContextState = (
+  value: VerifiedAdmissionContextV1,
+): PrivateVerifiedIdentityHelloOpen => {
+  if (typeof value !== "object" || value === null)
+    return invalidAdmissionInput(
+      "admission context must be a genuine live process-local handle",
+    );
+  const state = admissionContextStates.get(value);
+  if (state === undefined)
+    return invalidAdmissionInput(
+      "admission context must be a genuine live process-local handle",
+    );
   return state;
 };
 
@@ -221,6 +280,98 @@ const copyVerifiedSnapshot = (
   trialOrdinal: state.trialOrdinal,
   receiverKeyRecordRevision: state.receiverKeyRecordRevision,
 });
+
+const copyAdmissionContextSnapshot = (
+  state: PrivateVerifiedIdentityHelloOpen,
+): VerifiedAdmissionContextSnapshotV1 => {
+  const opened = copyVerifiedSnapshot(state);
+  const { plaintext, activeCandidate, remotePresenceEvidence } = opened;
+  if (
+    plaintext.kind !== "IDENTITY_HELLO" ||
+    plaintext.body.kind !== "IDENTITY_HELLO" ||
+    plaintext.direction !== 0 ||
+    plaintext.pairSequence !== 0n ||
+    plaintext.previousPairOperationId !== null ||
+    plaintext.pairDependencies.length !== 0 ||
+    !bytesEqual(opened.helloOperationId, activeCandidate.operationId) ||
+    !bytesEqual(
+      opened.basePairAttemptLease.helloOperationId,
+      opened.helloOperationId,
+    ) ||
+    !bytesEqual(opened.basePairAttemptLease.pairEdgeId, plaintext.pairEdgeId) ||
+    !bytesEqual(
+      opened.basePairAttemptLease.endpointPresenceOperationIds[0],
+      plaintext.endpointPresenceOperationIds[0],
+    ) ||
+    !bytesEqual(
+      opened.basePairAttemptLease.endpointPresenceOperationIds[1],
+      plaintext.endpointPresenceOperationIds[1],
+    ) ||
+    opened.basePairAttemptLease.helloLogicalWindow !==
+      activeCandidate.operation.logicalWindow ||
+    activeCandidate.operation.logicalWindow >
+      activeCandidate.operation.expiresAfterWindow ||
+    !bytesEqual(
+      remotePresenceEvidence.presenceOperationId,
+      plaintext.endpointPresenceOperationIds[0],
+    )
+  )
+    return invalidAdmissionInput(
+      "authenticated HELLO provenance changed before admission",
+    );
+
+  const hello = plaintext.body.value;
+  return {
+    version: 1,
+    roomContextId: Uint8Array.from(activeCandidate.roomContextId),
+    decisionRole: "hello-responder",
+    operationId: Uint8Array.from(opened.helloOperationId),
+    kind: "IDENTITY_HELLO",
+    logicalWindow: activeCandidate.operation.logicalWindow,
+    validThroughLogicalWindow: activeCandidate.operation.expiresAfterWindow,
+    pairEdgeId: Uint8Array.from(plaintext.pairEdgeId),
+    endpointPresenceOperationIds: [
+      Uint8Array.from(plaintext.endpointPresenceOperationIds[0]),
+      Uint8Array.from(plaintext.endpointPresenceOperationIds[1]),
+    ],
+    direction: 0,
+    pairSequence: 0n,
+    previousPairOperationId: null,
+    pairDependencies: [],
+    stableEd25519PublicKey: Uint8Array.from(
+      hello.senderIdentity.ed25519PublicKey,
+    ),
+    claimedStableIdentityCommitment: Uint8Array.from(
+      hello.senderPresenceCommitment,
+    ),
+    optionalGrant:
+      hello.senderAdmissionGrant === null
+        ? null
+        : {
+            ...hello.senderAdmissionGrant,
+            roomContextId: Uint8Array.from(
+              hello.senderAdmissionGrant.roomContextId,
+            ),
+            stableEd25519PublicKey: Uint8Array.from(
+              hello.senderAdmissionGrant.stableEd25519PublicKey,
+            ),
+            authoritySignature: Uint8Array.from(
+              hello.senderAdmissionGrant.authoritySignature,
+            ),
+          },
+    pairIdentitySignatureHash: Uint8Array.from(
+      opened.pairIdentitySignatureHash,
+    ),
+    admittedPresenceOperationId: Uint8Array.from(
+      remotePresenceEvidence.presenceOperationId,
+    ),
+    admittedPresenceEvidenceRetainThroughLogicalWindow:
+      remotePresenceEvidence.retainThroughLogicalWindow,
+    basePairAttemptLease: validateAndCopyPairAttemptLeaseV1(
+      opened.basePairAttemptLease,
+    ),
+  };
+};
 
 const assertInternalEvidenceSnapshot = async (
   evidence: VerifiedHistoricalPairPresenceSnapshotV1,
@@ -634,6 +785,59 @@ export const snapshotVerifiedIdentityHelloOpenV1 = (
   value: VerifiedIdentityHelloOpenV1,
 ): VerifiedIdentityHelloOpenSnapshotV1 =>
   copyVerifiedSnapshot(requireVerifiedState(value));
+
+/**
+ * Consume one authenticated HELLO into the only admission-context handle.
+ *
+ * The transition is synchronous and moves, rather than copies, the private
+ * state. The old handle becomes unusable before control returns, and no root
+ * bytes cross the API.
+ */
+export const promoteVerifiedIdentityHelloOpenForAdmissionV1 = (
+  value: VerifiedIdentityHelloOpenV1,
+): VerifiedAdmissionContextV1 => {
+  if (typeof value !== "object" || value === null)
+    return invalidAdmissionInput(
+      "verified HELLO must be a genuine live process-local handle",
+    );
+  const state = verifiedStates.get(value);
+  if (state === undefined)
+    return invalidAdmissionInput(
+      "verified HELLO must be a genuine live process-local handle",
+    );
+
+  // Recheck all non-secret projection invariants before transferring custody.
+  copyAdmissionContextSnapshot(state);
+  const context = Object.freeze({}) as VerifiedAdmissionContextV1;
+  genuineAdmissionContexts.add(context);
+  admissionContextStates.set(context, state);
+  verifiedStates.delete(value);
+  return context;
+};
+
+/** Return a fresh deeply owned admission projection containing no HelloRoot. */
+export const snapshotVerifiedAdmissionContextV1 = (
+  value: VerifiedAdmissionContextV1,
+): VerifiedAdmissionContextSnapshotV1 =>
+  copyAdmissionContextSnapshot(requireAdmissionContextState(value));
+
+/** Wipe the retained HelloRoot. Idempotent for a genuine context handle. */
+export const destroyVerifiedAdmissionContextV1 = (
+  value: VerifiedAdmissionContextV1,
+): void => {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !genuineAdmissionContexts.has(value)
+  )
+    return invalidAdmissionInput(
+      "admission context must be a genuine process-local handle",
+    );
+  const state = admissionContextStates.get(value);
+  if (state === undefined) return;
+  state.helloRoot.fill(0);
+  admissionContextStates.delete(value);
+};
 
 /** Wipe the retained HelloRoot. Idempotent for a genuine handle. */
 export const destroyVerifiedIdentityHelloOpenV1 = (

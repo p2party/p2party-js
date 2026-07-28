@@ -75,14 +75,18 @@ them v0.4". No release-registry hash has been computed or published.
 `p2party-server` has no append, allocation, chunk, or checkpoint endpoint; its
 only entrypoint is the legacy WebSocket signaling server.
 
-The client half of Section 4.3 now exists (`publicWindow.ts`), so a store's
-geometry, slot mapping, chunk and checkpoint hashing, and inclusion proofs are
-all verifiable. What is still missing on the server side is the Section 4.6
-HTTP route family and the Section 4.2 `StoreDescriptorV1` that every
-descriptor-bound predicate joins against — and the exact request/response
-target lengths, status enum bytes, and signature transcripts those routes need
+The client can now verify a store end to end short of the wire protocol: its
+identity and routes (Section 4.2), its window geometry and slot mapping, its
+chunk and checkpoint hashing, RFC 9162 inclusion proofs, structural checkpoint
+validity, chain succession, and both chain-start and same-window equivocation
+(Section 4.3).
+
+What remains is the Section 4.6 HTTP route family itself — and its exact
+request/response target lengths, status enum bytes, and signature transcripts
 are Phase-0 freeze items (B2). Writing them now would mean inventing the exact
-bytes that the freeze exists to fix.
+bytes the freeze exists to fix. The scheme-1 Privacy Pass allocation path
+(Section 4.3.12) is likewise unimplemented: it needs the frozen allocation
+registry, including the RFC 9578 token bytes and issuance vectors.
 
 ### B4 — `p2party.com` cannot reach any of this
 
@@ -134,10 +138,9 @@ author. Each fix has a regression test.
 - **Claim evaluation.** `normativeKernel.ts` validates artifact _shape_ only. It
   runs no predicate, verifies no evidence, and exposes no positive-wording
   authorizer. Kernel module 8 does not exist.
-- **Descriptor-bound checkpoint predicates.** `StructurallyValidCheckpoint`,
-  the complete `ChainValidSuccessor`, and the three fault proofs need
-  `StoreDescriptorV1` from Section 4.2. `publicWindow.ts` implements only the
-  parts that need no descriptor and names the rest in its module docstring.
+- **Allocation and append.** Scheme-1 Privacy Pass issuance, redemption, the
+  append admission signature, and the fixed client schedule are not
+  implemented; they depend on the frozen allocation registry.
 - **Everything in Phases 2–6.** Presence, admission, the sparse planner,
   transport handoff, additive stores, L3, and the measurement/review programme
   are untouched.

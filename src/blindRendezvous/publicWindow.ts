@@ -12,16 +12,24 @@
  * validity under immutable room policy. Profiles with different cadences carry
  * the same operation without changing its validity or the reducer's result.
  *
- * Scope: this implements the geometry, the hashing, the append slot mapping,
- * and RFC 9162 inclusion verification. The descriptor-bound predicates —
- * `StructurallyValidCheckpoint`, `ChainValidSuccessor`, and the three fault
- * proofs — additionally need `StoreDescriptorV1` from Section 4.2, which is not
- * implemented yet; `checkpointsConflict` below is deliberately named for the
- * one part that needs no descriptor.
+ * Scope: geometry, hashing, the append slot mapping, RFC 9162 inclusion
+ * verification, and the descriptor-bound checkpoint predicates. The remaining
+ * Section 4.3 fault proofs are assembled from these parts by a caller that also
+ * holds the raw evidence: `checkpointsConflict` and `chainLinksSuccessor` are
+ * the descriptor-free halves, and `structurallyValidCheckpoint` supplies the
+ * descriptor join each proof requires of both of its checkpoints.
  */
 
+import { verify } from "../cryptography/ed25519";
 import { encodeCanonical } from "./canonicalSchema";
 import { concatBytes, domain, sha256 } from "./derivations";
+import {
+  descriptorChainStart,
+  descriptorHash,
+  descriptorSupportsProfile,
+  storeId,
+  validateStoreDescriptor,
+} from "./storeDescriptor";
 import {
   publicBucketV1Schema,
   publicCheckpointChunkLeafV1Schema,
@@ -30,6 +38,9 @@ import {
   publicStoreCheckpointBodyV1Schema,
   publicStoreCheckpointV1Schema,
 } from "./schemas";
+
+import type { LibCrypto } from "../cryptography/libcrypto";
+import type { StoreDescriptorV1 } from "./storeDescriptor";
 
 export interface PublicBucketV1 {
   deliveryProfileHash: Uint8Array;
@@ -678,3 +689,129 @@ export const chainLinksSuccessor = async (
 export const isChainStart = (checkpoint: PublicStoreCheckpointV1): boolean =>
   checkpoint.ingressWindow === checkpoint.chainStartIngressWindow &&
   bytesEqual(checkpoint.previousCheckpointHash, ZERO32);
+
+/**
+ * `StructurallyValidCheckpoint(descriptor, checkpoint, profile)`.
+ *
+ * Deliberately portable: it uses the descriptor embedded in the read or proof,
+ * and takes no input from local carrier authorization, catalog arrival order,
+ * or which descriptor the verifier considers "latest". Whether the frontend may
+ * *contact* that store is a separate local decision — conflating the two would
+ * make historical evidence depend on present-day policy, so a store could
+ * escape a proof by being removed from a catalog.
+ *
+ * `finalizationInstantUnixMs` is the instant the checkpoint was finalized, and
+ * the descriptor must have been valid then — not now.
+ */
+export const structurallyValidCheckpoint = async (
+  descriptor: StoreDescriptorV1,
+  checkpoint: PublicStoreCheckpointV1,
+  geometry: PublicProfileGeometry,
+  finalizationInstantUnixMs: bigint,
+  module?: LibCrypto,
+): Promise<InclusionVerdict> => {
+  const descriptorValid = await validateStoreDescriptor(
+    descriptor,
+    finalizationInstantUnixMs,
+    module,
+  );
+  if (!descriptorValid.valid) return invalid(descriptorValid.reason);
+
+  if (!bytesEqual(checkpoint.descriptorHash, await descriptorHash(descriptor)))
+    return invalid("checkpoint does not name this descriptor");
+  if (
+    !bytesEqual(
+      checkpoint.storeId,
+      await storeId(descriptor.storeIdentityEd25519Key),
+    )
+  )
+    return invalid("checkpoint does not name this descriptor's store");
+
+  if (!descriptorSupportsProfile(descriptor, checkpoint.deliveryProfileHash))
+    return invalid("descriptor does not support this delivery profile");
+
+  const chainStart = descriptorChainStart(
+    descriptor,
+    checkpoint.deliveryProfileHash,
+  );
+  if (chainStart === null)
+    return invalid("descriptor declares no chain start for this profile");
+  if (chainStart !== checkpoint.chainStartIngressWindow)
+    return invalid(
+      "checkpoint names a different chain start than the descriptor",
+    );
+  if (checkpoint.ingressWindow < chainStart)
+    return invalid("checkpoint precedes the declared chain start");
+
+  if (checkpoint.finalizedChunkCount !== profileFinalizedChunkCount(geometry))
+    return invalid("checkpoint count is not the profile-fixed chunk count");
+
+  // Only the chain start may carry a zero predecessor; a later window with
+  // ZERO32 would silently restart the chain.
+  if (
+    checkpoint.ingressWindow === chainStart &&
+    !bytesEqual(checkpoint.previousCheckpointHash, ZERO32)
+  )
+    return invalid("chain start must have a zero predecessor hash");
+  if (
+    checkpoint.ingressWindow !== chainStart &&
+    bytesEqual(checkpoint.previousCheckpointHash, ZERO32)
+  )
+    return invalid("only the chain start may have a zero predecessor hash");
+
+  // Section 4.3 defines PublicStoreCheckpointSigningHash as the signing hash
+  // itself; unlike the append receipt there is no further signature-message
+  // domain prefix, so the signature is over that hash exactly.
+  const { storeSignature, ...body } = checkpoint;
+  const verified = await verify(
+    await publicStoreCheckpointSigningHash(body),
+    storeSignature,
+    descriptor.storeIdentityEd25519Key,
+    module,
+  );
+  if (!verified) return invalid("checkpoint signature does not verify");
+
+  return { valid: true };
+};
+
+/**
+ * `ChainValidSuccessor(previous, next)`: both structurally valid under their
+ * embedded descriptors, and linked.
+ *
+ * Structural validity alone deliberately does not assert continuity — that is
+ * what makes a missing predecessor detectable rather than assumed.
+ */
+export const chainValidSuccessor = async (
+  previous: PublicStoreCheckpointV1,
+  previousDescriptor: StoreDescriptorV1,
+  previousFinalizationUnixMs: bigint,
+  next: PublicStoreCheckpointV1,
+  nextDescriptor: StoreDescriptorV1,
+  nextFinalizationUnixMs: bigint,
+  geometry: PublicProfileGeometry,
+  module?: LibCrypto,
+): Promise<InclusionVerdict> => {
+  const previousValid = await structurallyValidCheckpoint(
+    previousDescriptor,
+    previous,
+    geometry,
+    previousFinalizationUnixMs,
+    module,
+  );
+  if (!previousValid.valid)
+    return invalid(`predecessor: ${previousValid.reason}`);
+
+  const nextValid = await structurallyValidCheckpoint(
+    nextDescriptor,
+    next,
+    geometry,
+    nextFinalizationUnixMs,
+    module,
+  );
+  if (!nextValid.valid) return invalid(`successor: ${nextValid.reason}`);
+
+  if (!(await chainLinksSuccessor(previous, next)))
+    return invalid("successor does not link to this exact predecessor");
+
+  return { valid: true };
+};

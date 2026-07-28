@@ -706,3 +706,66 @@ export const publicCheckpointChunkInclusionProofV1Schema = record(
     { name: "siblingHashes", type: array(bytes32, 0xff, "sequence") },
   ],
 );
+
+/* ------------------------------------------------------------------ *
+ * Section 4.2 — store identity and routes
+ * ------------------------------------------------------------------ */
+
+export const storeCheckpointChainStartV1Schema = record(
+  "StoreCheckpointChainStartV1",
+  [
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "chainStartIngressWindow", type: u64 },
+  ],
+);
+
+const storeDescriptorFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "storeIdentityEd25519Key", type: bytes32 },
+  // Canonical RSASSA-PSS SPKI for the scheme-1 Privacy Pass issuer.
+  { name: "allocationIssuerPublicKeyDer", type: varBytes(4096) },
+  { name: "descriptorGeneration", type: u64 },
+  { name: "compatibilityHash", type: bytes32 },
+  {
+    name: "supportedDeliveryProfileHashes",
+    type: array(bytes32, 0xff),
+  },
+  // Exactly one entry per supported profile, in the same bytewise order.
+  {
+    name: "checkpointChainStarts",
+    type: array(storeCheckpointChainStartV1Schema, 0xff),
+  },
+  { name: "notBeforeUnixMs", type: u64 },
+  { name: "notAfterUnixMs", type: u64 },
+];
+
+export const storeDescriptorUnsignedV1Schema = record(
+  "StoreDescriptorUnsignedV1",
+  storeDescriptorFields,
+);
+
+export const storeDescriptorV1Schema = record("StoreDescriptorV1", [
+  ...storeDescriptorFields,
+  { name: "descriptorSignature", type: bytes64 },
+]);
+
+const storeRouteFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "storeId", type: bytes32 },
+  { name: "descriptorHash", type: bytes32 },
+  { name: "routeFamily", type: u16 },
+  { name: "opaqueLocator", type: varBytes(2048) },
+  { name: "routePublicParameters", type: varBytes(2048) },
+  { name: "notBeforeUnixMs", type: u64 },
+  { name: "notAfterUnixMs", type: u64 },
+];
+
+export const storeRouteUnsignedV1Schema = record(
+  "StoreRouteUnsignedV1",
+  storeRouteFields,
+);
+
+export const storeRouteV1Schema = record("StoreRouteV1", [
+  ...storeRouteFields,
+  { name: "routeSignature", type: bytes64 },
+]);

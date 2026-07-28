@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { newKeyPair } from "../../src/cryptography/ed25519";
 import {
+  pairSemanticSlot,
   policyHash,
   roomContextConfirmation,
   roomContextId,
@@ -9,10 +10,10 @@ import {
 import {
   coreReduceOuter,
   mergeOperationSets,
+  validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
   decodeOperation,
-  deriveOperationId,
   encodeOperation,
   operationPaddingFor,
   operationPayloadClassFor,
@@ -20,12 +21,17 @@ import {
   validateOperation,
   validateOperationStructure,
 } from "../../src/blindRendezvous/operation";
+import {
+  encodePairStepEnvelopeV1,
+  pairCiphertextAndTagTargetBytesV1,
+} from "../../src/blindRendezvous/pairStepEnvelope";
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
 
-import type { IdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
+import type { ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
 import type {
   AuthenticatedRoomOperationV1,
   OperationKindV1,
+  OperationValidationContext,
   UnsignedRoomOperationV1,
 } from "../../src/blindRendezvous/operation";
 
@@ -90,16 +96,21 @@ const unsignedOperation = (
   };
 };
 
+const buildSignedOperation = async (
+  options: BuildOptions = {},
+): Promise<AuthenticatedRoomOperationV1> => {
+  const signer = options.signer ?? author;
+  return signOperation(unsignedOperation(options), signer.secretKey);
+};
+
 const buildOperation = async (
   options: BuildOptions = {},
-): Promise<IdentifiedOperationV1> => {
-  const signer = options.signer ?? author;
-  const operation = await signOperation(
-    unsignedOperation(options),
-    signer.secretKey,
+  validationContext: OperationValidationContext = context,
+): Promise<ValidatedIdentifiedOperationV1> =>
+  validateAndIdentifyOperation(
+    await buildSignedOperation(options),
+    validationContext,
   );
-  return { operationId: await deriveOperationId(operation), operation };
-};
 
 /** Deterministic shuffle so a failure names one exact permutation seed. */
 const permute = <T>(values: readonly T[], seed: number): T[] => {
@@ -170,8 +181,8 @@ describe("canonical operation codec", () => {
     ).toThrow("must carry no outer dependencies");
 
     // LEAVE names exactly its referenced presence and nothing else.
-    const leave = await buildOperation({ kind: "LEAVE" });
-    expect(() => validateOperationStructure(leave.operation, context)).toThrow(
+    const leave = await buildSignedOperation({ kind: "LEAVE" });
+    expect(() => validateOperationStructure(leave, context)).toThrow(
       "must name exactly one outer dependency",
     );
   });
@@ -228,51 +239,52 @@ describe("canonical operation codec", () => {
   });
 
   test("enforces the author-chain predecessor rule", async () => {
-    const { operation } = await buildOperation({ authorSequence: 1n });
+    const operation = await buildSignedOperation({ authorSequence: 1n });
     expect(() => validateOperationStructure(operation, context)).toThrow(
       "must name its predecessor",
     );
 
-    const zeroWithPredecessor = await buildOperation({
+    const zeroWithPredecessor = await buildSignedOperation({
       authorSequence: 0n,
       previousAuthorOperationId: new Uint8Array(32).fill(2),
     });
     expect(() =>
-      validateOperationStructure(zeroWithPredecessor.operation, context),
+      validateOperationStructure(zeroWithPredecessor, context),
     ).toThrow("sequence zero must have a null predecessor");
   });
 
   test("rejects windows outside the policy's skew and future bounds", async () => {
-    const future = await buildOperation({
+    const future = await buildSignedOperation({
       logicalWindow: REFERENCE_WINDOW + 6n,
     });
-    expect(() => validateOperationStructure(future.operation, context)).toThrow(
+    expect(() => validateOperationStructure(future, context)).toThrow(
       "maxFutureLogicalWindows",
     );
 
-    const expired = await buildOperation({
+    const expired = await buildSignedOperation({
       logicalWindow: REFERENCE_WINDOW - 100n,
       expiresAfterWindow: REFERENCE_WINDOW - 90n,
     });
-    expect(() =>
-      validateOperationStructure(expired.operation, context),
-    ).toThrow("expired at this reference window");
+    expect(() => validateOperationStructure(expired, context)).toThrow(
+      "expired at this reference window",
+    );
   });
 
   test("rejects ADMISSION_REVOKE outside an authority-grant room", async () => {
-    const revoke = await buildOperation({
+    const revoke = await buildSignedOperation({
       kind: "ADMISSION_REVOKE",
       expiresAfterWindow: REFERENCE_WINDOW + 10n,
     });
-    expect(() => validateOperationStructure(revoke.operation, context)).toThrow(
+    expect(() => validateOperationStructure(revoke, context)).toThrow(
       "requires an authority-grant room policy",
     );
   });
 });
 
 describe("merge is associative, commutative, and idempotent", () => {
-  const identity = (entries: readonly IdentifiedOperationV1[]): string =>
-    entries.map((entry) => hex(entry.operationId)).join(",");
+  const identity = (
+    entries: readonly ValidatedIdentifiedOperationV1[],
+  ): string => entries.map((entry) => hex(entry.operationId)).join(",");
 
   test("holds for every ordering of three disjoint sets", async () => {
     const a = [await buildOperation({ payload: Uint8Array.of(1) })];
@@ -294,40 +306,67 @@ describe("merge is associative, commutative, and idempotent", () => {
     expect(merged.length).toBe(1);
   });
 
-  test("refuses two different operations claiming one operation id", async () => {
-    const first = await buildOperation({ payload: Uint8Array.of(1) });
-    const second = await buildOperation({ payload: Uint8Array.of(2) });
-    expect(() =>
-      mergeOperationSets(
-        [first],
-        [{ operationId: first.operationId, operation: second.operation }],
-      ),
-    ).toThrow("share one OperationId");
+  test("rejects object-spread and structured-cloned reducer entries", async () => {
+    const entry = await buildOperation();
+    const spread = {
+      ...entry,
+    } as unknown as ValidatedIdentifiedOperationV1;
+    const restored = structuredClone(
+      entry,
+    ) as unknown as ValidatedIdentifiedOperationV1;
+
+    expect(() => mergeOperationSets([spread], [])).toThrow(
+      "live result of validateAndIdentifyOperation",
+    );
+    expect(() => mergeOperationSets([restored], [])).toThrow(
+      "live result of validateAndIdentifyOperation",
+    );
+    await expect(
+      coreReduceOuter([restored], roomPolicy, REFERENCE_WINDOW),
+    ).rejects.toThrow("live result of validateAndIdentifyOperation");
   });
 
-  test("compares complete bytes even when a colliding entry reuses the signature", async () => {
-    const first = await buildOperation({ payload: Uint8Array.of(1) });
-    const differentBodySameSignature: AuthenticatedRoomOperationV1 = {
-      ...first.operation,
-      fixedPayload: Uint8Array.of(2),
+  test("rejects post-validation mutation of exposed typed arrays", async () => {
+    const bodyMutated = await buildOperation({
+      payload: Uint8Array.of(1),
+    });
+    bodyMutated.operation.fixedPayload[0] ^= 0xff;
+    expect(() => mergeOperationSets([bodyMutated], [])).toThrow(
+      "mutated after validation",
+    );
+
+    const idMutated = await buildOperation({ payload: Uint8Array.of(2) });
+    idMutated.operationId[0] ^= 0xff;
+    await expect(
+      coreReduceOuter([idMutated], roomPolicy, REFERENCE_WINDOW),
+    ).rejects.toThrow("mutated after validation");
+  });
+
+  test("snapshots caller operation and validation context before its first await", async () => {
+    const signed = await buildSignedOperation({
+      payload: Uint8Array.of(0x11, 0x22),
+    });
+    const expectedPayload = Uint8Array.from(signed.fixedPayload);
+    const mutableContext: OperationValidationContext = {
+      roomContextConfirmation: Uint8Array.from(context.roomContextConfirmation),
+      roomPolicy: structuredClone(roomPolicy),
+      referenceWindow: context.referenceWindow,
     };
 
-    expect(() =>
-      mergeOperationSets(
-        [first],
-        [
-          {
-            operationId: first.operationId,
-            operation: differentBodySameSignature,
-          },
-        ],
-      ),
-    ).toThrow("share one OperationId");
+    const pending = validateAndIdentifyOperation(signed, mutableContext);
+    signed.fixedPayload.fill(0xff);
+    signed.authorSignature.fill(0);
+    mutableContext.roomContextConfirmation.fill(0);
+    mutableContext.roomPolicy.sessionPolicyV1.fill(0);
+
+    const identified = await pending;
+    expect(identified.operation.fixedPayload).toEqual(expectedPayload);
+    expect(mergeOperationSets([identified], [])).toHaveLength(1);
   });
 });
 
 describe("CoreReduce is independent of delivery order and duplication", () => {
-  const buildChain = async (): Promise<IdentifiedOperationV1[]> => {
+  const buildChain = async (): Promise<ValidatedIdentifiedOperationV1[]> => {
     const first = await buildOperation({
       payload: Uint8Array.of(1),
       semanticSlot: new Uint8Array(32).fill(0x01),
@@ -343,13 +382,26 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
       signer: otherAuthor,
       semanticSlot: new Uint8Array(32).fill(0x03),
     });
+    const pairRoutingTag = new Uint8Array(32).fill(0x04);
+    const pairPayload = encodePairStepEnvelopeV1(
+      {
+        version: 1,
+        pairRoutingTag,
+        bootstrapHeader: null,
+        nonce: new Uint8Array(24).fill(0x05),
+        pairCiphertextAndTag: new Uint8Array(
+          pairCiphertextAndTagTargetBytesV1(0, false),
+        ),
+      },
+      0,
+    );
     const pairStep = await buildOperation({
       kind: "PAIR_STEP",
-      payload: Uint8Array.of(4),
+      payload: pairPayload,
       signer: otherAuthor,
       authorSequence: 1n,
       previousAuthorOperationId: remote.operationId,
-      semanticSlot: new Uint8Array(32).fill(0x04),
+      semanticSlot: await pairSemanticSlot(pairRoutingTag),
     });
     return [first, second, remote, pairStep];
   };
@@ -424,11 +476,19 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
       payload: Uint8Array.of(2),
       logicalWindow: REFERENCE_WINDOW + 3n,
     });
-    const expired = await buildOperation({
-      payload: Uint8Array.of(3),
-      logicalWindow: REFERENCE_WINDOW - 100n,
-      expiresAfterWindow: REFERENCE_WINDOW - 90n,
-    });
+    const expired = await buildOperation(
+      {
+        payload: Uint8Array.of(3),
+        logicalWindow: REFERENCE_WINDOW - 100n,
+        expiresAfterWindow: REFERENCE_WINDOW - 90n,
+      },
+      {
+        ...context,
+        // Model an operation that passed ingress validation while it was live
+        // and remained as retained author-prefix evidence.
+        referenceWindow: REFERENCE_WINDOW - 100n,
+      },
+    );
 
     const state = await coreReduceOuter(
       [live, future, expired],
@@ -481,7 +541,7 @@ describe("author fork and overquota are arrival-independent", () => {
 
   test("exceeding maxOperationsPerAuthorWindow excludes the whole window", async () => {
     const quota = roomPolicy.protocolLimits.maxOperationsPerAuthorWindow;
-    const operations: IdentifiedOperationV1[] = [];
+    const operations: ValidatedIdentifiedOperationV1[] = [];
     let previous: Uint8Array | null = null;
     for (let sequence = 0; sequence <= quota; sequence++) {
       const entry = await buildOperation({
@@ -514,10 +574,16 @@ describe("author fork and overquota are arrival-independent", () => {
         maxAuthorityCredentialLifetimeWindows: 60,
       },
     };
-    const unauthorizedAuthorityOperation = await buildOperation({
-      kind: "PRESENCE",
-      signer: author,
-    });
+    const unauthorizedAuthorityOperation = await buildOperation(
+      {
+        kind: "PRESENCE",
+        signer: author,
+      },
+      {
+        ...context,
+        roomPolicy: authorityPolicy,
+      },
+    );
 
     const state = await coreReduceOuter(
       [unauthorizedAuthorityOperation],

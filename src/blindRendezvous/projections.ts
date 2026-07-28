@@ -43,6 +43,8 @@ import {
   kernelEntrypointV1Schema,
   operationKindV1Schema,
   operationLifetimeV1Schema,
+  pairBootstrapHeaderV1Schema,
+  pairStepEnvelopeV1Schema,
   roomPolicyV4Schema,
 } from "./schemas";
 
@@ -107,6 +109,10 @@ export const DELIVERY_PROFILE_V1_KEYS = keySet(deliveryProfileV1Schema);
 export const AUTHENTICATED_ROOM_OPERATION_V1_KEYS = keySet(
   authenticatedRoomOperationV1Schema,
 );
+export const PAIR_BOOTSTRAP_HEADER_V1_KEYS = keySet(
+  pairBootstrapHeaderV1Schema,
+);
+export const PAIR_STEP_ENVELOPE_V1_KEYS = keySet(pairStepEnvelopeV1Schema);
 export const CARRIER_ENVELOPE_V1_KEYS = keySet(carrierEnvelopeV1Schema);
 
 /* Closed enumerations.

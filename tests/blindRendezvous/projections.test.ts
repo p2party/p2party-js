@@ -23,6 +23,8 @@ import {
   KERNEL_MODULE_KEYS,
   OPERATION_KINDS_ORDER,
   OPERATION_LIFETIMES_ORDER,
+  PAIR_BOOTSTRAP_HEADER_V1_KEYS,
+  PAIR_STEP_ENVELOPE_V1_KEYS,
   ROOM_POLICY_V4_KEYS,
 } from "../../src/blindRendezvous/projections";
 import {
@@ -33,6 +35,8 @@ import {
   V04_REQUIRED_FORMAL_OBLIGATION_IDS,
   authenticatedRoomOperationV1Schema,
   claimDefinitionV1Schema,
+  pairBootstrapHeaderV1Schema,
+  pairStepEnvelopeV1Schema,
   roomPolicyV4Schema,
 } from "../../src/blindRendezvous/schemas";
 
@@ -61,6 +65,12 @@ describe("validator tables are generated from the schema", () => {
     );
     expect(asSortedArray(AUTHENTICATED_ROOM_OPERATION_V1_KEYS)).toEqual(
       [...recordFieldNames(authenticatedRoomOperationV1Schema)].sort(),
+    );
+    expect(asSortedArray(PAIR_BOOTSTRAP_HEADER_V1_KEYS)).toEqual(
+      [...recordFieldNames(pairBootstrapHeaderV1Schema)].sort(),
+    );
+    expect(asSortedArray(PAIR_STEP_ENVELOPE_V1_KEYS)).toEqual(
+      [...recordFieldNames(pairStepEnvelopeV1Schema)].sort(),
     );
   });
 

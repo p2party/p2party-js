@@ -16,13 +16,19 @@ import {
   decodeCanonicalStrict,
   encodeCanonical,
 } from "./canonicalSchema";
-import { operationId, operationSignatureMessage } from "./derivations";
+import {
+  operationId,
+  operationSignatureMessage,
+  pairSemanticSlot,
+} from "./derivations";
+import { decodePairStepEnvelopeV1 } from "./pairStepEnvelope";
 import {
   OPERATION_PAYLOAD_CLASS_BYTES,
   authenticatedRoomOperationV1Schema,
 } from "./schemas";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { PairStepEnvelopeV1 } from "./pairStepEnvelope";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
 
 export type OperationKindV1 =
@@ -147,6 +153,29 @@ export interface OperationValidationContext {
   readonly referenceWindow: bigint;
 }
 
+const decodeValidatedPairEnvelope = (
+  operation: AuthenticatedRoomOperationV1,
+): PairStepEnvelopeV1 => {
+  try {
+    return decodePairStepEnvelopeV1(
+      operation.fixedPayload,
+      operation.operationPayloadClass,
+    );
+  } catch (error) {
+    const reason =
+      error instanceof Error ? error.message : "unknown pair-envelope error";
+    return fail(`PAIR_STEP payload is invalid: ${reason}`);
+  }
+};
+
+interface OperationStructuralValidationResult {
+  /**
+   * The one canonical outer pair decode, retained for the asynchronous
+   * semantic-slot check. Null means this is not a PAIR_STEP operation.
+   */
+  readonly pairEnvelope: PairStepEnvelopeV1 | null;
+}
+
 /**
  * Structural and bound validation that needs no signature check.
  *
@@ -154,10 +183,10 @@ export interface OperationValidationContext {
  * before spending an Ed25519 verification on it, which is what keeps the
  * per-author work bound in SEC-021 meaningful.
  */
-export const validateOperationStructure = (
+const validateOperationStructureInternal = (
   operation: AuthenticatedRoomOperationV1,
   context: OperationValidationContext,
-): void => {
+): OperationStructuralValidationResult => {
   // Encoding is the shape gate: unknown or missing fields, accessor-backed
   // properties, wrong widths, unsorted dependencies, and unregistered enum
   // members all fail here.
@@ -190,12 +219,20 @@ export const validateOperationStructure = (
   for (const byte of operation.operationPadding) {
     if (byte !== 0) fail("operationPadding must be the all-zero suffix");
   }
-  if (
-    operation.kind !== "PAIR_STEP" &&
+  let pairEnvelope: PairStepEnvelopeV1 | null = null;
+  if (operation.kind === "PAIR_STEP") {
+    if (operation.operationPadding.length !== 0)
+      fail("PAIR_STEP operationPadding must be empty");
+    // Endpoint-independent framing only. Pair AEAD and plaintext minimality
+    // remain edge-local, but every room member can prove the signed envelope
+    // consumes exactly this operation class.
+    pairEnvelope = decodeValidatedPairEnvelope(operation);
+  } else if (
     operationPayloadClassFor(operation.kind, operation.fixedPayload.length) !==
-      operation.operationPayloadClass
-  )
+    operation.operationPayloadClass
+  ) {
     fail("operation does not use its smallest permitted payload class");
+  }
 
   if (rules.dependencies === "empty" && operation.dependencies.length !== 0)
     fail(`${operation.kind} must carry no outer dependencies`);
@@ -258,6 +295,22 @@ export const validateOperationStructure = (
     )
       fail("ADMISSION_REVOKE must be authored by the pinned authority key");
   }
+
+  return { pairEnvelope };
+};
+
+/**
+ * Public cheap structural gate.
+ *
+ * Its return type intentionally remains void: the decoded pair envelope is an
+ * internal validation artifact, not a value callers may treat as trusted
+ * without the semantic-slot and author-signature checks below.
+ */
+export const validateOperationStructure = (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+): void => {
+  validateOperationStructureInternal(operation, context);
 };
 
 /** Verify the author signature over the exact domain-separated transcript. */
@@ -286,7 +339,17 @@ export const validateOperation = async (
   context: OperationValidationContext,
   module?: LibCrypto,
 ): Promise<void> => {
-  validateOperationStructure(operation, context);
+  const { pairEnvelope } = validateOperationStructureInternal(
+    operation,
+    context,
+  );
+  if (pairEnvelope !== null) {
+    const expectedSemanticSlot = await pairSemanticSlot(
+      pairEnvelope.pairRoutingTag,
+    );
+    if (!bytesEqual(operation.semanticSlot, expectedSemanticSlot))
+      fail("PAIR_STEP semanticSlot does not match pairRoutingTag");
+  }
   if (!(await verifyOperationSignature(operation, module)))
     fail("author signature does not verify");
 };

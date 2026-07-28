@@ -45,6 +45,9 @@ export const OPERATION_PAYLOAD_CLASS_BYTES: Readonly<Record<0 | 1, number>> =
 
 export const MAX_OPERATION_PAYLOAD_BYTES = OPERATION_PAYLOAD_CLASS_BYTES[1];
 
+/** Section 4.11 suite-1 bootstrap KEM ciphertext width. */
+export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 = 1120;
+
 /** Section 4.0 closes the kernel at 8 modules and 9 entrypoints. */
 export const KERNEL_MODULE_IDS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 export const KERNEL_ENTRYPOINT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -220,6 +223,32 @@ export const authenticatedRoomOperationV1Schema = record(
     { name: "authorSignature", type: bytes64 },
   ],
 );
+
+/* ------------------------------------------------------------------ *
+ * Section 4.11 — room-visible pair envelope
+ * ------------------------------------------------------------------ */
+
+export const pairBootstrapHeaderV1Schema = record("PairBootstrapHeaderV1", [
+  { name: "version", type: u8 },
+  { name: "suiteId", type: u8 },
+  {
+    name: "hybridKemCiphertext",
+    type: fixedBytes(PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1),
+  },
+]);
+
+export const pairStepEnvelopeV1Schema = record("PairStepEnvelopeV1", [
+  { name: "version", type: u8 },
+  { name: "pairRoutingTag", type: bytes32 },
+  { name: "bootstrapHeader", type: optional(pairBootstrapHeaderV1Schema) },
+  { name: "nonce", type: optional(fixedBytes(24)) },
+  // The exact class-dependent length is derived and enforced by the pair
+  // envelope validator. This descriptor supplies only the absolute wire bound.
+  {
+    name: "pairCiphertextAndTag",
+    type: varBytes(MAX_OPERATION_PAYLOAD_BYTES),
+  },
+]);
 
 /* ------------------------------------------------------------------ *
  * Section 4.5 — carrier-separated envelope

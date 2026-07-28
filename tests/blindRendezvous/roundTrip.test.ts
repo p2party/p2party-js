@@ -15,6 +15,7 @@ import {
 import {
   coreReduceOuter,
   mergeOperationSets,
+  validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
   deliveryProfileHash,
@@ -25,11 +26,9 @@ import {
 } from "../../src/blindRendezvous/derivations";
 import {
   decodeOperation,
-  deriveOperationId,
   encodeOperation,
   operationPaddingFor,
   signOperation,
-  validateOperation,
 } from "../../src/blindRendezvous/operation";
 import {
   encodeBlindRoomInviteV2Default,
@@ -38,7 +37,7 @@ import {
 } from "../../src/blindRendezvous/roomInviteV2";
 
 import type { BlindRoomInviteV2 } from "../../src/blindRendezvous/roomInviteV2";
-import type { IdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
+import type { ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 
 const hex = (value: Uint8Array): string =>
@@ -188,16 +187,12 @@ describe("a room operation survives the full carrier round trip", () => {
       hex(encodeOperation(operation)),
     );
 
-    await validateOperation(recovered, {
+    const identified = await validateAndIdentifyOperation(recovered, {
       roomContextConfirmation: confirmation,
       roomPolicy,
       referenceWindow: REFERENCE_WINDOW,
     });
 
-    const identified: IdentifiedOperationV1 = {
-      operationId: await deriveOperationId(recovered),
-      operation: recovered,
-    };
     const state = await coreReduceOuter(
       [identified],
       roomPolicy,
@@ -346,13 +341,12 @@ describe("a room operation survives the full carrier round trip", () => {
     const openedSecond = await openCarrierEnvelope(root, second, provider);
     const identify = async (
       bytes: Uint8Array,
-    ): Promise<IdentifiedOperationV1> => {
-      const decoded = decodeOperation(bytes);
-      return {
-        operationId: await deriveOperationId(decoded),
-        operation: decoded,
-      };
-    };
+    ): Promise<ValidatedIdentifiedOperationV1> =>
+      validateAndIdentifyOperation(decodeOperation(bytes), {
+        roomContextConfirmation: confirmation,
+        roomPolicy,
+        referenceWindow: REFERENCE_WINDOW,
+      });
     const merged = mergeOperationSets(
       [await identify(openedFirst!.operationBytes)],
       [await identify(openedSecond!.operationBytes)],

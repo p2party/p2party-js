@@ -21,16 +21,139 @@
 
 import { bytesEqual } from "./canonicalSchema";
 import { coreOperationSetDigest } from "./derivations";
-import { encodeOperation } from "./operation";
+import {
+  decodeOperation,
+  deriveOperationId,
+  encodeOperation,
+  validateOperation,
+} from "./operation";
+import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
 
-import type { AuthenticatedRoomOperationV1 } from "./operation";
+import type { LibCrypto } from "../cryptography/libcrypto";
+import type {
+  AuthenticatedRoomOperationV1,
+  OperationValidationContext,
+} from "./operation";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
 
-/** One validated operation together with its derived private identifier. */
-export interface IdentifiedOperationV1 {
+/*
+ * Compile-time nominal marker. It is deliberately private: consumers may
+ * receive the branded interface but cannot structurally construct it.
+ */
+declare const validatedIdentifiedOperationBrand: unique symbol;
+
+/*
+ * Runtime provenance and immutable validation snapshot. WeakMap membership is
+ * process-local and is lost across JSON, structured clone, IndexedDB, workers,
+ * and process restart. Persisted bytes must therefore be decoded and pass the
+ * one validation entrypoint again before CoreReduce accepts them.
+ */
+interface ValidatedOperationSnapshot {
+  /** Canonical signed bytes captured synchronously before the first await. */
+  readonly operationBytes: Uint8Array;
+  /** Private copy; never returned directly to a caller. */
+  readonly operationId: Uint8Array;
+  /** Private decoded copy; reducer logic consumes this, not the wrapper. */
+  readonly operation: AuthenticatedRoomOperationV1;
+}
+
+const validatedIdentifiedOperations = new WeakMap<
+  object,
+  ValidatedOperationSnapshot
+>();
+
+/** One fully validated operation together with its derived private ID. */
+export interface ValidatedIdentifiedOperationV1 {
+  readonly [validatedIdentifiedOperationBrand]: true;
   readonly operationId: Uint8Array;
   readonly operation: AuthenticatedRoomOperationV1;
 }
+
+const freezeOperationContainers = (
+  operation: AuthenticatedRoomOperationV1,
+): AuthenticatedRoomOperationV1 => {
+  Object.freeze(operation.dependencies);
+  return Object.freeze(operation);
+};
+
+/**
+ * The sole ingress from untrusted decoded bytes into the reducer domain.
+ *
+ * The caller-owned object is canonically snapshotted before the first await;
+ * all validation and ID derivation use that private copy. OperationId is
+ * derived only after complete outer validation, including PAIR_STEP slot
+ * binding and the author signature. The returned provenance brand is an
+ * in-memory trust marker, never persisted protocol state and never a
+ * substitute for revalidation after restore.
+ */
+export const validateAndIdentifyOperation = async (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<ValidatedIdentifiedOperationV1> => {
+  // Both calls are synchronous. Decoding gives validation an owned copy of
+  // every typed array before signature/slot hashing yields to another task.
+  const operationBytes = encodeOperation(operation);
+  const privateOperation = freezeOperationContainers(
+    decodeOperation(operationBytes),
+  );
+  const roomPolicyBytes = encodeRoomPolicyV4(context.roomPolicy);
+  const privateContext: OperationValidationContext = Object.freeze({
+    roomContextConfirmation: Uint8Array.from(context.roomContextConfirmation),
+    roomPolicy: decodeRoomPolicyV4(roomPolicyBytes),
+    referenceWindow: context.referenceWindow,
+  });
+
+  await validateOperation(privateOperation, privateContext, module);
+  const privateOperationId = await deriveOperationId(privateOperation);
+
+  // Expose a separate copy. Typed-array elements cannot be frozen in
+  // JavaScript, so reducer ingress compares it with the private canonical
+  // snapshot and then consumes only the private operation below.
+  const exposedOperation = freezeOperationContainers(
+    decodeOperation(operationBytes),
+  );
+  const identified = Object.freeze({
+    operationId: Uint8Array.from(privateOperationId),
+    operation: exposedOperation,
+  } as ValidatedIdentifiedOperationV1);
+  validatedIdentifiedOperations.set(identified, {
+    operationBytes,
+    operationId: Uint8Array.from(privateOperationId),
+    operation: privateOperation,
+  });
+  return identified;
+};
+
+interface ReducerOperationSnapshot extends ValidatedOperationSnapshot {
+  readonly source: ValidatedIdentifiedOperationV1;
+}
+
+const reducerSnapshotFor = (value: unknown): ReducerOperationSnapshot => {
+  const snapshot =
+    typeof value === "object" && value !== null
+      ? validatedIdentifiedOperations.get(value)
+      : undefined;
+  if (snapshot === undefined)
+    throw new Error(
+      "coreReduce: input must be a live result of validateAndIdentifyOperation",
+    );
+
+  const source = value as ValidatedIdentifiedOperationV1;
+  let exposedOperationBytes: Uint8Array;
+  try {
+    exposedOperationBytes = encodeOperation(source.operation);
+  } catch {
+    throw new Error("coreReduce: validated input was mutated after validation");
+  }
+  if (
+    !bytesEqual(source.operationId, snapshot.operationId) ||
+    !bytesEqual(exposedOperationBytes, snapshot.operationBytes)
+  )
+    throw new Error("coreReduce: validated input was mutated after validation");
+
+  return { source, ...snapshot };
+};
 
 export type CoreFaultV1 = {
   readonly kind: "author-fork-or-overquota";
@@ -93,14 +216,17 @@ const sortBytes = (values: readonly Uint8Array[]): Uint8Array[] =>
  * Associativity, commutativity, and idempotence are the properties the whole
  * convergence argument rests on, so union is deliberately keyed by the private
  * `OperationId` and nothing else — not arrival order, not carrier, not a
- * server-assigned identifier.
+ * server-assigned identifier. The canonical byte comparison remains
+ * load-bearing even though, absent a real OperationId hash collision, mutated
+ * wrappers fail the private-snapshot check before reaching it.
  */
-export const mergeOperationSets = (
-  left: readonly IdentifiedOperationV1[],
-  right: readonly IdentifiedOperationV1[],
-): IdentifiedOperationV1[] => {
-  const byId = new Map<string, IdentifiedOperationV1>();
-  for (const entry of [...left, ...right]) {
+const mergeReducerSnapshots = (
+  left: readonly ValidatedIdentifiedOperationV1[],
+  right: readonly ValidatedIdentifiedOperationV1[],
+): ReducerOperationSnapshot[] => {
+  const byId = new Map<string, ReducerOperationSnapshot>();
+  for (const value of [...left, ...right]) {
+    const entry = reducerSnapshotFor(value);
     const key = hex(entry.operationId);
     const existing = byId.get(key);
     if (existing === undefined) {
@@ -109,12 +235,7 @@ export const mergeOperationSets = (
     }
     // Two entries with one OperationId must be the same operation; the ID is a
     // hash of the complete canonical encoding.
-    if (
-      !bytesEqual(
-        encodeOperation(existing.operation),
-        encodeOperation(entry.operation),
-      )
-    )
+    if (!bytesEqual(existing.operationBytes, entry.operationBytes))
       throw new Error(
         "coreReduce: two different operations share one OperationId",
       );
@@ -123,6 +244,12 @@ export const mergeOperationSets = (
     compareBytes(a.operationId, b.operationId),
   );
 };
+
+export const mergeOperationSets = (
+  left: readonly ValidatedIdentifiedOperationV1[],
+  right: readonly ValidatedIdentifiedOperationV1[],
+): ValidatedIdentifiedOperationV1[] =>
+  mergeReducerSnapshots(left, right).map((entry) => entry.source);
 
 const authorWindowKey = (operation: AuthenticatedRoomOperationV1): string =>
   `${hex(operation.authorEpochEd25519Key)}:${operation.logicalWindow.toString()}`;
@@ -138,7 +265,7 @@ const authorWindowKey = (operation: AuthenticatedRoomOperationV1): string =>
  * excluded no matter which operation arrived first.
  */
 export const coreReduceOuter = async (
-  operations: readonly IdentifiedOperationV1[],
+  operations: readonly ValidatedIdentifiedOperationV1[],
   roomPolicy: RoomPolicyV4,
   referenceWindow: bigint,
 ): Promise<CoreOuterStateV1> => {
@@ -146,7 +273,7 @@ export const coreReduceOuter = async (
   // carrier that redelivers one operation must not be able to manufacture an
   // overquota fault against an honest author — at-least-once delivery is part
   // of the carrier contract, not evidence of misbehavior.
-  const sorted = mergeOperationSets(operations, []);
+  const sorted = mergeReducerSnapshots(operations, []);
 
   const skew = BigInt(roomPolicy.protocolLimits.maxClockSkewWindows);
   const maxPerAuthorWindow =
@@ -155,7 +282,7 @@ export const coreReduceOuter = async (
   // Group by (author key, logical window). Every distinct candidate counts
   // toward the author quota, including ones later excluded by a fault: the
   // count must not depend on which of them a client happened to receive.
-  const byAuthorWindow = new Map<string, IdentifiedOperationV1[]>();
+  const byAuthorWindow = new Map<string, ReducerOperationSnapshot[]>();
   for (const entry of sorted) {
     const key = authorWindowKey(entry.operation);
     const group = byAuthorWindow.get(key);
@@ -167,7 +294,7 @@ export const coreReduceOuter = async (
   const faultedAuthorWindows = new Set<string>();
 
   for (const [key, group] of byAuthorWindow) {
-    const bySequence = new Map<string, IdentifiedOperationV1[]>();
+    const bySequence = new Map<string, ReducerOperationSnapshot[]>();
     for (const entry of group) {
       const sequenceKey = entry.operation.authorSequence.toString();
       const slot = bySequence.get(sequenceKey);
@@ -221,9 +348,13 @@ export const coreReduceOuter = async (
 
     faults.push({
       kind: "author-fork-or-overquota",
-      authorEpochEd25519Key: group[0].operation.authorEpochEd25519Key,
+      authorEpochEd25519Key: Uint8Array.from(
+        group[0].operation.authorEpochEd25519Key,
+      ),
       logicalWindow: group[0].operation.logicalWindow,
-      proofOperationIds,
+      proofOperationIds: proofOperationIds.map((operationId) =>
+        Uint8Array.from(operationId),
+      ),
     });
   }
 
@@ -235,7 +366,7 @@ export const coreReduceOuter = async (
   for (const [key, group] of byAuthorWindow) {
     if (faultedAuthorWindows.has(key)) continue;
 
-    const bySequence = new Map<string, IdentifiedOperationV1>();
+    const bySequence = new Map<string, ReducerOperationSnapshot>();
     for (const entry of group)
       bySequence.set(entry.operation.authorSequence.toString(), entry);
 
@@ -256,7 +387,7 @@ export const coreReduceOuter = async (
     }
   }
 
-  const active: IdentifiedOperationV1[] = [];
+  const active: ReducerOperationSnapshot[] = [];
   for (const entry of sorted) {
     if (faultedAuthorWindows.has(authorWindowKey(entry.operation))) continue;
     // A gap or mislinked predecessor leaves the rest of that chain unproven.
@@ -270,16 +401,24 @@ export const coreReduceOuter = async (
     active.push(entry);
   }
 
-  const activeOperationIds = active.map((entry) => entry.operationId);
-  const activePairOuterOperationIds = active
+  const privateActiveOperationIds = active.map((entry) => entry.operationId);
+  const privateActivePairOuterOperationIds = active
     .filter((entry) => entry.operation.kind === "PAIR_STEP")
     .map((entry) => entry.operationId);
+
+  const operationsDigest = await coreOperationSetDigest(
+    privateActiveOperationIds,
+  );
 
   return {
     version: 1,
     referenceWindow,
-    activeOperationIds,
-    activePairOuterOperationIds,
+    activeOperationIds: privateActiveOperationIds.map((operationId) =>
+      Uint8Array.from(operationId),
+    ),
+    activePairOuterOperationIds: privateActivePairOuterOperationIds.map(
+      (operationId) => Uint8Array.from(operationId),
+    ),
     // Sorted by the complete canonical identifying tuple (author key, then
     // logical window), not by a nested proof ID.
     faults: faults.sort(
@@ -291,7 +430,7 @@ export const coreReduceOuter = async (
             ? 1
             : 0),
     ),
-    operationsDigest: await coreOperationSetDigest(activeOperationIds),
+    operationsDigest,
     pendingPayloadReduction: PENDING_PAYLOAD_REDUCTION,
   };
 };

@@ -7888,7 +7888,9 @@ type VerifiedAdmissionContextV1 = {
   pairIdentitySignatureHash: Bytes32;
   admittedPresenceOperationId: Bytes32;
   admittedPresenceEvidenceRetainThroughLogicalWindow: bigint;
-  pairAttemptLease: PairAttemptLeaseV1;
+  // Grant-agnostic horizon derived from authenticated pair coordinates.
+  // Only Admit may narrow and persist it.
+  basePairAttemptLease: PairAttemptLeaseV1;
   readonly [VERIFIED_ADMISSION_CONTEXT_V1]: true;
 };
 
@@ -7969,7 +7971,8 @@ type PairAdmissionDecision =
   | {
       result: "allow";
       reason: "open" | "address-book" | "authority-grant";
-      lease: BootstrapAdmissionDecisionLeaseV1;
+      bootstrapLease: BootstrapAdmissionDecisionLeaseV1;
+      pairAttemptLease: PairAttemptLeaseV1;
     }
   | {
       result: "deny";
@@ -8001,14 +8004,15 @@ type StableEdgeAdmissionDecision =
 ```
 
 `VerifyAdmissionContext` is the sole constructor for
-`VerifiedAdmissionContextV1`. It is module-private and consumes, in one edge
-transaction, the immutable room policy/context, explicit reference window and
-decision role, exact outer `AuthenticatedRoomOperationV1`, its
+`VerifiedAdmissionContextV1`. It is module-private and consumes one exact,
+atomically captured edge projection: the immutable room policy/context,
+explicit reference window and decision role, exact outer
+`AuthenticatedRoomOperationV1`, its
 `PairOuterBindingV1`, the successfully opened identity `PairPlaintextV1`, the
 exact retained `HistoricalPairPresenceEvidenceV1`, and the module-private
 current pair-attempt state. For a responder's first HELLO it derives the
-candidate `PairAttemptLeaseV1` in this transaction; for ACCEPT it loads and
-revalidates the persisted HELLO lease. It does not trust a field merely
+grant-agnostic `basePairAttemptLease`; for ACCEPT it loads and revalidates the
+persisted admitted HELLO lease. It does not trust a field merely
 because a caller named it “verified.” It:
 
 1. revalidates the closed outer and pair codecs, room-context confirmation,
@@ -8039,19 +8043,47 @@ remains an explicit platform-compromise nonclaim.
 
 `CaptureTrustedAdmissionSnapshot(transaction, initializedRoom,
 referenceWindow)` is the sole constructor for
-`TrustedAdmissionSnapshotV1`. It owns one atomic read of the immutable
-room policy/context, exact `CoreRoomStateV1`, current frontend controls,
-protected authority custody, and locally owned presence-operation set. It
-requires the core reference window and initialized room policy/context to
+`TrustedAdmissionSnapshotV1`. It owns one atomic read-only capture of the
+immutable room policy/context, exact `CoreRoomStateV1`, current frontend
+controls, protected authority custody, and locally owned presence-operation
+set. It requires the core reference window and initialized room policy/context to
 match exactly. In authority mode, a missing, ambiguous, rollback-failed, or
 saturated custody source is represented faithfully and never becomes an empty
 complete partition; in capability mode authority custody is canonically null.
 The result is ephemeral trusted state, not persisted or decoded.
 
-The public effectful boundary `EvaluateBootstrapAdmissionAndPersist` owns that
-transaction: it captures the trusted snapshot, invokes
-`VerifyAdmissionContext`, calls the pure `Admit`, and atomically persists an
-allow lease with its exact outbound intent.
+In the browser adapter, that read transaction copies every exact canonical
+projection and must reach `transaction.oncomplete` before signature, KEM,
+authority-view, or other asynchronous work begins. No cryptographic or other
+promise is awaited while an IndexedDB transaction is live.
+
+The public effectful boundary `EvaluateBootstrapAdmissionAndPersist` owns one
+logical optimistic admission transaction:
+
+```text
+atomic read-only capture
+→ transaction.oncomplete
+→ construct branded snapshot/context
+→ asynchronous verification + pure Admit + exact response preparation
+→ one atomic readwrite CAS of every captured fence
+→ persist pair-attempt lease + bootstrap lease + pair/author state
+  + exact response custody + outbox
+→ transaction.oncomplete
+→ report committed
+```
+
+This is not one continuously live IndexedDB transaction. Any exact-fence
+mismatch aborts every write, publishes no byte, discards and wipes the prepared
+mutation, and returns the closed retry/stale result that requires recapture.
+The write transaction compares, in a fixed order, the exact initialized-room
+policy/context, current Core bytes, HELLO-time historical-evidence view,
+receiver-key revision, local-presence ownership, frontend controls,
+authority-custody projection, planner/on-demand state, local identity/key
+revision, local author-chain head, pair ledger, provisional pair record, and
+bounded outbox/resource state captured by the read transaction. A digest may
+index a row but never replaces exact canonical-byte or exact-absence
+comparison. The adapter performs no cryptography while the write transaction
+is live and reports success only from `transaction.oncomplete`.
 
 One private policy kernel is the SSOT for both bootstrap and stable-edge
 decisions:
@@ -8162,18 +8194,27 @@ Admit(snapshot: TrustedAdmissionSnapshotV1,
   )
   if policy is DENY: return policy
 
+  pairAttemptValidThrough =
+    ctx.basePairAttemptLease.validThroughLogicalWindow
+  if policy.grantValidThroughLogicalWindow != null:
+    pairAttemptValidThrough = min(
+      pairAttemptValidThrough,
+      policy.grantValidThroughLogicalWindow
+    )
+  admittedPairAttemptLease =
+    ctx.basePairAttemptLease with
+      validThroughLogicalWindow = pairAttemptValidThrough
+
   leaseHorizons = [
-    ctx.pairAttemptLease.validThroughLogicalWindow,
+    admittedPairAttemptLease.validThroughLogicalWindow,
     ctx.admittedPresenceEvidenceRetainThroughLogicalWindow,
     ctx.validThroughLogicalWindow
   ]
-  if policy.grantValidThroughLogicalWindow != null:
-    append policy.grantValidThroughLogicalWindow to leaseHorizons
   validThrough = min(leaseHorizons)
   require snapshot.referenceWindow <= validThrough,
     otherwise DENY(policy-unavailable)
 
-  lease =
+  bootstrapLease =
     BootstrapAdmissionDecisionLeaseV1{
       version=1,
       roomContextId=snapshot.roomContextId,
@@ -8188,13 +8229,20 @@ Admit(snapshot: TrustedAdmissionSnapshotV1,
       decidedAtLogicalWindow=snapshot.referenceWindow,
       validThroughLogicalWindow=validThrough
     }
-  return ALLOW(policy.reason, lease)
+  return ALLOW(
+    policy.reason,
+    bootstrapLease,
+    admittedPairAttemptLease
+  )
 ```
 
 `Admit()` is pure and performs no persistence or network action. Only the
-effectful wrapper above may capture its trusted inputs or atomically persist the
-returned lease with the exact outbound intent. A failed top-level canonical
-shape, version, role/flight coordinate, transcript fact,
+effectful wrapper above may capture its trusted inputs or atomically persist
+the returned leases with the exact outbound intent.
+`EvaluateBootstrapAdmissionAndPersist` persists exactly the
+`pairAttemptLease` returned by `Admit`; no opener, caller, adapter, or later
+flight may persist or reconstruct `basePairAttemptLease`. A failed top-level
+canonical shape, version, role/flight coordinate, transcript fact,
 room-policy/context, trusted-provenance check, or impossible interval raises
 `AdmissionInputError`; the caller fails closed and emits only the same
 fixed-schedule dummy/no-response behavior as any denial. These are local
@@ -9398,20 +9446,28 @@ presence or its exact unexpired `HistoricalPairPresenceEvidenceV1` may prove
 that past fact; inert generic prefix evidence alone may not. They remain absent
 from the outer dependency list.
 
-After HELLO validation, each side persists `PairAttemptLeaseV1`. Its initial
-`validThroughLogicalWindow` is exactly the minimum of HELLO's outer expiry,
-`checkedAdd(HELLO.logicalWindow, pairControlRetentionWindows)`, and the sender
-grant's `notAfterLogicalWindow` in authority mode. When ACCEPT validates, the
-same transaction narrows it to the minimum of that value, ACCEPT's outer
+After HELLO cryptographic validation, the opener derives only a
+grant-agnostic `basePairAttemptLease`: its horizon is the minimum of HELLO's
+outer expiry and
+`checkedAdd(HELLO.logicalWindow, pairControlRetentionWindows)`. It is an
+opaque input to sole `Admit()` and is never persisted. After validating the
+sender grant and all current frontend policy, `Admit()` returns the initial
+persistable `PairAttemptLeaseV1`, narrowing that base horizon by the sender
+grant's `notAfterLogicalWindow` in authority mode. The allow transaction
+persists exactly that returned lease together with the bootstrap admission
+lease and outbound intent.
+
+When ACCEPT validates, the same logical optimistic transaction narrows the
+persisted pair-attempt lease to the minimum of its prior value, ACCEPT's outer
 expiry, and the responder grant's `notAfterLogicalWindow` in authority mode.
 It never extends. These are pair-visible immutable inputs, so both endpoints
 derive the same claim horizon; local admission-policy changes can invalidate
 use earlier but cannot rewrite it. Its `attemptMode` is copied only from the
 successfully opened and stable-identity-signed HELLO in the same atomic
 commit; replay/restore requires exact equality and no later flight can rewrite
-or infer it. ACCEPT, transport negotiation, and v4 promotion validate the exact
-dependencies, endpoint tuple, and inherited mode against that lease rather
-than requiring rotating presences to remain live during courier delay.
+or infer it. ACCEPT, transport negotiation, and v4 promotion validate the
+exact dependencies, endpoint tuple, and inherited mode against that lease
+rather than requiring rotating presences to remain live during courier delay.
 Current local deny and authority revocation are still rechecked before every
 sensitive dispatch. After promotion, PQ/checkpoint steps validate the tuple
 against the persisted confirmed stable-edge transcript, not against presence

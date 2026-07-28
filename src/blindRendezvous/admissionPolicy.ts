@@ -138,7 +138,8 @@ export type PairAdmissionDecision =
   | {
       readonly result: "allow";
       readonly reason: AdmissionAllowReason;
-      readonly lease: BootstrapAdmissionDecisionLeaseV1;
+      readonly bootstrapLease: BootstrapAdmissionDecisionLeaseV1;
+      readonly pairAttemptLease: PairAttemptLeaseV1;
     }
   | DeniedPeerAdmissionPolicyV1;
 
@@ -177,7 +178,7 @@ export interface BootstrapAdmissionLeaseSemanticInputV1 {
   readonly admittedIdentityOperationLogicalWindow: bigint;
   readonly admittedIdentityOperationValidThroughLogicalWindow: bigint;
   readonly admittedPresenceEvidenceRetainThroughLogicalWindow: bigint;
-  readonly pairAttemptLease: PairAttemptLeaseV1;
+  readonly basePairAttemptLease: PairAttemptLeaseV1;
   readonly referenceWindow: bigint;
 }
 
@@ -950,15 +951,17 @@ const copyAllowedPolicy = (
 };
 
 /**
- * Construct only the lease/result portion of bootstrap admission after a
- * future trusted wrapper has verified all pair/presence coordinates.
+ * Narrow the authenticated base pair-attempt horizon by the admitted grant,
+ * then construct both immutable bootstrap leases. A future trusted wrapper
+ * must verify every pair/presence coordinate before calling this semantic
+ * helper and must persist only this returned pair-attempt lease.
  */
 export const constructBootstrapAdmissionDecisionLease = (
   input: BootstrapAdmissionLeaseSemanticInputV1,
 ): PairAdmissionDecision => {
   const policy = copyAllowedPolicy(input.policy);
-  const pairAttemptLease = validateAndCopyPairAttemptLeaseV1(
-    input.pairAttemptLease,
+  const basePairAttemptLease = validateAndCopyPairAttemptLeaseV1(
+    input.basePairAttemptLease,
   );
   const referenceWindow = requireU64("referenceWindow", input.referenceWindow);
   const identityLogicalWindow = requireU64(
@@ -976,17 +979,25 @@ export const constructBootstrapAdmissionDecisionLease = (
   if (
     identityLogicalWindow > referenceWindow ||
     referenceWindow > identityValidThrough ||
-    pairAttemptLease.helloLogicalWindow > referenceWindow
+    basePairAttemptLease.helloLogicalWindow > referenceWindow
   )
     return fail("bootstrap lease inputs have an impossible interval");
 
+  const pairAttemptValidThroughLogicalWindow =
+    policy.grantValidThroughLogicalWindow === null ||
+    basePairAttemptLease.validThroughLogicalWindow <=
+      policy.grantValidThroughLogicalWindow
+      ? basePairAttemptLease.validThroughLogicalWindow
+      : policy.grantValidThroughLogicalWindow;
+  const pairAttemptLease: PairAttemptLeaseV1 = {
+    ...basePairAttemptLease,
+    validThroughLogicalWindow: pairAttemptValidThroughLogicalWindow,
+  };
   const horizons = [
     pairAttemptLease.validThroughLogicalWindow,
     presenceEvidenceRetainThrough,
     identityValidThrough,
   ];
-  if (policy.grantValidThroughLogicalWindow !== null)
-    horizons.push(policy.grantValidThroughLogicalWindow);
   let validThroughLogicalWindow = horizons[0];
   for (let index = 1; index < horizons.length; index++)
     if (horizons[index] < validThroughLogicalWindow)
@@ -997,7 +1008,7 @@ export const constructBootstrapAdmissionDecisionLease = (
   return {
     result: "allow",
     reason: policy.reason,
-    lease: {
+    bootstrapLease: {
       version: 1,
       roomContextId: copyBytes32("roomContextId", input.roomContextId),
       stableEd25519PublicKey: copyBytes32(
@@ -1026,6 +1037,7 @@ export const constructBootstrapAdmissionDecisionLease = (
       decidedAtLogicalWindow: referenceWindow,
       validThroughLogicalWindow,
     },
+    pairAttemptLease,
   };
 };
 

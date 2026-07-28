@@ -682,7 +682,7 @@ describe("pair and decision lease semantics", () => {
     admittedIdentityOperationLogicalWindow: 95n,
     admittedIdentityOperationValidThroughLogicalWindow: 118n,
     admittedPresenceEvidenceRetainThroughLogicalWindow: 115n,
-    pairAttemptLease: pairAttemptLease(),
+    basePairAttemptLease: pairAttemptLease(),
     referenceWindow: 100n,
     ...overrides,
   });
@@ -745,12 +745,17 @@ describe("pair and decision lease semantics", () => {
     expect(capabilityDecision.result).toBe("allow");
     if (capabilityDecision.result !== "allow")
       throw new Error("expected bootstrap allow");
-    expect(capabilityDecision.lease.validThroughLogicalWindow).toBe(115n);
-    expect(capabilityDecision.lease.decidedAtLogicalWindow).toBe(100n);
+    expect(capabilityDecision.bootstrapLease.validThroughLogicalWindow).toBe(
+      115n,
+    );
+    expect(capabilityDecision.bootstrapLease.decidedAtLogicalWindow).toBe(100n);
+    expect(capabilityDecision.pairAttemptLease.validThroughLogicalWindow).toBe(
+      120n,
+    );
 
     const pairDecision = constructBootstrapAdmissionDecisionLease(
       bootstrapInput({
-        pairAttemptLease: {
+        basePairAttemptLease: {
           ...pairAttemptLease(),
           validThroughLogicalWindow: 110n,
         },
@@ -759,7 +764,8 @@ describe("pair and decision lease semantics", () => {
     expect(pairDecision.result).toBe("allow");
     if (pairDecision.result !== "allow")
       throw new Error("expected pair-horizon bootstrap allow");
-    expect(pairDecision.lease.validThroughLogicalWindow).toBe(110n);
+    expect(pairDecision.bootstrapLease.validThroughLogicalWindow).toBe(110n);
+    expect(pairDecision.pairAttemptLease.validThroughLogicalWindow).toBe(110n);
 
     const identityDecision = constructBootstrapAdmissionDecisionLease(
       bootstrapInput({
@@ -769,7 +775,12 @@ describe("pair and decision lease semantics", () => {
     expect(identityDecision.result).toBe("allow");
     if (identityDecision.result !== "allow")
       throw new Error("expected identity-horizon bootstrap allow");
-    expect(identityDecision.lease.validThroughLogicalWindow).toBe(111n);
+    expect(identityDecision.bootstrapLease.validThroughLogicalWindow).toBe(
+      111n,
+    );
+    expect(identityDecision.pairAttemptLease.validThroughLogicalWindow).toBe(
+      120n,
+    );
 
     const authorityDecision = constructBootstrapAdmissionDecisionLease(
       bootstrapInput({ policy: authorityAllow() }),
@@ -777,8 +788,13 @@ describe("pair and decision lease semantics", () => {
     expect(authorityDecision.result).toBe("allow");
     if (authorityDecision.result !== "allow")
       throw new Error("expected authority bootstrap allow");
-    expect(authorityDecision.lease.validThroughLogicalWindow).toBe(112n);
-    expect(authorityDecision.lease.grantGeneration).toBe(9n);
+    expect(authorityDecision.bootstrapLease.validThroughLogicalWindow).toBe(
+      112n,
+    );
+    expect(authorityDecision.bootstrapLease.grantGeneration).toBe(9n);
+    expect(authorityDecision.pairAttemptLease.validThroughLogicalWindow).toBe(
+      112n,
+    );
 
     expect(
       constructBootstrapAdmissionDecisionLease(
@@ -859,21 +875,29 @@ describe("pair and decision lease semantics", () => {
     bootstrapSource.roomContextId.fill(0xff);
     bootstrapSource.stableEd25519PublicKey.fill(0xff);
     bootstrapSource.admittedPresenceOperationId.fill(0xff);
+    bootstrapSource.basePairAttemptLease.pairEdgeId.fill(0xff);
     stableSource.v4WireBinding.fill(0xff);
     stableSource.remoteStableIdentityCommitment.fill(0xff);
     policy.grantId!.fill(0xff);
     policy.authorityAdmissionStateDigest!.fill(0xff);
 
-    expect(hex(bootstrapDecision.lease.roomContextId)).toBe(hex(bytes(0x10)));
-    expect(hex(bootstrapDecision.lease.stableEd25519PublicKey)).toBe(
+    expect(hex(bootstrapDecision.bootstrapLease.roomContextId)).toBe(
+      hex(bytes(0x10)),
+    );
+    expect(hex(bootstrapDecision.bootstrapLease.stableEd25519PublicKey)).toBe(
       hex(stable.publicKey),
     );
-    expect(hex(bootstrapDecision.lease.admittedPresenceOperationId)).toBe(
-      hex(bytes(0x11)),
+    expect(
+      hex(bootstrapDecision.bootstrapLease.admittedPresenceOperationId),
+    ).toBe(hex(bytes(0x11)));
+    expect(hex(bootstrapDecision.bootstrapLease.grantId!)).toBe(
+      hex(bytes(0x05)),
     );
-    expect(hex(bootstrapDecision.lease.grantId!)).toBe(hex(bytes(0x05)));
-    expect(hex(bootstrapDecision.lease.authorityAdmissionStateDigest!)).toBe(
-      hex(bytes(0x06)),
+    expect(
+      hex(bootstrapDecision.bootstrapLease.authorityAdmissionStateDigest!),
+    ).toBe(hex(bytes(0x06)));
+    expect(hex(bootstrapDecision.pairAttemptLease.pairEdgeId)).toBe(
+      hex(bytes(0x02)),
     );
     expect(hex(stableDecision.lease.v4WireBinding)).toBe(hex(bytes(0x24)));
     expect(hex(stableDecision.lease.remoteStableIdentityCommitment)).toBe(

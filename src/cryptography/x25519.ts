@@ -14,50 +14,78 @@ export interface X25519KeyPair {
   secretKey: Uint8Array;
 }
 
-export const x25519Keypair = (module: LibCrypto): X25519KeyPair => {
-  const pkPtr = module._malloc(crypto_scalarmult_curve25519_BYTES);
-  const skPtr = module._malloc(crypto_scalarmult_curve25519_SCALARBYTES);
+const RFC7748_X25519_BASE_POINT = (() => {
+  const basePoint = new Uint8Array(crypto_scalarmult_curve25519_BYTES);
+  basePoint[0] = 9;
+  return basePoint;
+})();
 
-  const r = module._x25519_keypair(pkPtr, skPtr);
-  if (r !== 0) {
-    module._free(pkPtr);
-    zeroFree(
-      module,
-      new Uint8Array(
-        module.wasmMemory.buffer,
-        skPtr,
-        crypto_scalarmult_curve25519_SCALARBYTES,
-      ),
+const requireExactBytes: (
+  value: unknown,
+  name: string,
+  expectedLength: number,
+) => asserts value is Uint8Array = (value, name, expectedLength) => {
+  if (!(value instanceof Uint8Array))
+    throw new TypeError(`${name} must be a Uint8Array`);
+  if (value.length !== expectedLength)
+    throw new RangeError(
+      `${name} must be exactly ${String(expectedLength)} bytes`,
     );
-    throw new Error("x25519_keypair failed");
-  }
+};
 
-  const publicKey = Uint8Array.from(
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      pkPtr,
+const checkedMalloc = (
+  module: LibCrypto,
+  length: number,
+  operation: string,
+): number => {
+  const pointer = module._malloc(length);
+  if (pointer === 0) throw new Error(`${operation} failed (allocation)`);
+  return pointer;
+};
+
+const heapView = (
+  module: LibCrypto,
+  pointer: number,
+  length: number,
+): Uint8Array => new Uint8Array(module.wasmMemory.buffer, pointer, length);
+
+export const x25519Keypair = (module: LibCrypto): X25519KeyPair => {
+  let pkPtr: number | undefined;
+  let skPtr: number | undefined;
+  try {
+    pkPtr = checkedMalloc(
+      module,
       crypto_scalarmult_curve25519_BYTES,
-    ),
-  );
-  const secretKey = Uint8Array.from(
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      skPtr,
+      "x25519_keypair",
+    );
+    skPtr = checkedMalloc(
+      module,
       crypto_scalarmult_curve25519_SCALARBYTES,
-    ),
-  );
+      "x25519_keypair",
+    );
 
-  module._free(pkPtr);
-  zeroFree(
-    module,
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      skPtr,
-      crypto_scalarmult_curve25519_SCALARBYTES,
-    ),
-  );
+    if (module._x25519_keypair(pkPtr, skPtr) !== 0)
+      throw new Error("x25519_keypair failed");
 
-  return { publicKey, secretKey };
+    return {
+      publicKey: Uint8Array.from(
+        heapView(module, pkPtr, crypto_scalarmult_curve25519_BYTES),
+      ),
+      secretKey: Uint8Array.from(
+        heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES),
+      ),
+    };
+  } finally {
+    try {
+      if (skPtr !== undefined)
+        zeroFree(
+          module,
+          heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES),
+        );
+    } finally {
+      if (pkPtr !== undefined) module._free(pkPtr);
+    }
+  }
 };
 
 /**
@@ -81,52 +109,80 @@ export const x25519Dh = (
   publicKey: Uint8Array,
   module: LibCrypto,
 ): Uint8Array => {
-  const shPtr = module._malloc(crypto_scalarmult_curve25519_BYTES);
-  const skPtr = module._malloc(crypto_scalarmult_curve25519_SCALARBYTES);
-  const pkPtr = module._malloc(crypto_scalarmult_curve25519_BYTES);
-
-  new Uint8Array(
-    module.wasmMemory.buffer,
-    skPtr,
+  requireExactBytes(
+    secretKey,
+    "secretKey",
     crypto_scalarmult_curve25519_SCALARBYTES,
-  ).set(secretKey);
-  new Uint8Array(
-    module.wasmMemory.buffer,
-    pkPtr,
-    crypto_scalarmult_curve25519_BYTES,
-  ).set(publicKey);
+  );
+  requireExactBytes(publicKey, "publicKey", crypto_scalarmult_curve25519_BYTES);
 
-  const r = module._x25519_dh(shPtr, skPtr, pkPtr);
-
-  const shared =
-    r === 0
-      ? Uint8Array.from(
-          new Uint8Array(
-            module.wasmMemory.buffer,
-            shPtr,
-            crypto_scalarmult_curve25519_BYTES,
-          ),
-        )
-      : null;
-
-  zeroFree(
-    module,
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      shPtr,
+  // Snapshot before `_malloc`: growing this same module's memory can detach
+  // caller views that point into its previous ArrayBuffer.
+  const privatePublicKey = Uint8Array.from(publicKey);
+  const privateSecretKey = Uint8Array.from(secretKey);
+  let shPtr: number | undefined;
+  let skPtr: number | undefined;
+  let pkPtr: number | undefined;
+  try {
+    shPtr = checkedMalloc(
+      module,
       crypto_scalarmult_curve25519_BYTES,
-    ),
-  );
-  zeroFree(
-    module,
-    new Uint8Array(
-      module.wasmMemory.buffer,
-      skPtr,
+      "x25519_dh",
+    );
+    skPtr = checkedMalloc(
+      module,
       crypto_scalarmult_curve25519_SCALARBYTES,
-    ),
-  );
-  module._free(pkPtr);
+      "x25519_dh",
+    );
+    pkPtr = checkedMalloc(
+      module,
+      crypto_scalarmult_curve25519_BYTES,
+      "x25519_dh",
+    );
 
-  if (!shared) throw new Error("x25519_dh failed (identity point)");
-  return shared;
+    heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES).set(
+      privateSecretKey,
+    );
+    heapView(module, pkPtr, crypto_scalarmult_curve25519_BYTES).set(
+      privatePublicKey,
+    );
+
+    if (module._x25519_dh(shPtr, skPtr, pkPtr) !== 0)
+      throw new Error("x25519_dh failed (identity point)");
+    return Uint8Array.from(
+      heapView(module, shPtr, crypto_scalarmult_curve25519_BYTES),
+    );
+  } finally {
+    try {
+      try {
+        if (shPtr !== undefined)
+          zeroFree(
+            module,
+            heapView(module, shPtr, crypto_scalarmult_curve25519_BYTES),
+          );
+      } finally {
+        try {
+          if (skPtr !== undefined)
+            zeroFree(
+              module,
+              heapView(module, skPtr, crypto_scalarmult_curve25519_SCALARBYTES),
+            );
+        } finally {
+          if (pkPtr !== undefined) module._free(pkPtr);
+        }
+      }
+    } finally {
+      privateSecretKey.fill(0);
+    }
+  }
 };
+
+/**
+ * Derive an X25519 public key by scalar-multiplying the RFC 7748 u=9 base
+ * point. The canonical base point stays module-owned so callers cannot mutate
+ * protocol input shared by later derivations.
+ */
+export const x25519PublicFromSecret = (
+  secretKey: Uint8Array,
+  module: LibCrypto,
+): Uint8Array => x25519Dh(secretKey, RFC7748_X25519_BASE_POINT, module);

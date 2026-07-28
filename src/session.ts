@@ -2,7 +2,10 @@ import libcrypto from "./cryptography/libcrypto";
 import { wasmLoader } from "./cryptography/wasmLoader";
 import { secureRandomUint32 } from "./cryptography/random";
 import { newKeyPair } from "./cryptography/ed25519";
-import { newX25519KeyPair, x25519Dh } from "./cryptography/x25519";
+import {
+  newX25519KeyPair,
+  x25519PublicFromSecret,
+} from "./cryptography/x25519";
 import {
   crossSignIdentityX25519,
   verifyIdentityCrossSig,
@@ -294,11 +297,10 @@ const validateLocalIdentityCryptographically = async (
   identity: LocalSessionIdentity,
   module: LibCrypto,
 ): Promise<void> => {
-  // RFC 7748 X25519 base point (u = 9): scalar-multiplying it derives the
-  // public key corresponding to the supplied secret.
-  const basePoint = new Uint8Array(crypto_scalarmult_curve25519_BYTES);
-  basePoint[0] = 9;
-  const derivedPublic = x25519Dh(identity.x25519SecretKey, basePoint, module);
+  const derivedPublic = x25519PublicFromSecret(
+    identity.x25519SecretKey,
+    module,
+  );
   try {
     if (!bytesEqual(derivedPublic, identity.x25519PublicKey))
       throw new Error("identity X25519 public and secret keys do not match");

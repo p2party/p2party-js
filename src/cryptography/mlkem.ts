@@ -22,6 +22,8 @@ export const ML_KEM_1024_CIPHERTEXT_BYTES = 1568;
 export const ML_KEM_SHARED_SECRET_BYTES = 32;
 export const ML_KEM_KEYPAIR_RANDOM_BYTES = 64;
 export const ML_KEM_ENCAPS_RANDOM_BYTES = 32;
+const ML_KEM_PUBLIC_SEED_BYTES = 32;
+const ML_KEM_COEFFICIENT_MODULUS = 3_329;
 
 type MlKemKeyPairExport<P extends MlKemParameterSet> = `_mlkem${P}_keypair`;
 type MlKemEncapsExport<P extends MlKemParameterSet> = `_mlkem${P}_encaps`;
@@ -124,6 +126,54 @@ export const getMlKemSuite = <P extends MlKemParameterSet>(
       `unsupported ML-KEM parameter set: ${String(parameterSet)}`,
     );
   return suite as Readonly<MlKemSuiteDescriptor<P>>;
+};
+
+/**
+ * FIPS 203 Section 7.2 modulus check for one encoded encapsulation key.
+ *
+ * Each three-byte group in the encoded polynomial vector contains two
+ * little-endian 12-bit coefficients, both of which must be below q=3329.
+ * The final 32-byte public seed is unrestricted. This pure check is shared by
+ * every composed KEM so canonical ML-KEM public-key encoding has one SSOT.
+ */
+export const mlKemPublicKeyHasCanonicalEncoding = (
+  publicKey: unknown,
+  parameterSet: MlKemParameterSet,
+): boolean => {
+  const suite = getMlKemSuite(parameterSet);
+  let privatePublicKey: Uint8Array;
+  try {
+    privatePublicKey = snapshotByteInput(
+      publicKey,
+      `${suite.standardName} public key`,
+      { exactLength: suite.publicKeyBytes },
+    );
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) return false;
+    throw error;
+  }
+
+  try {
+    const encodedPolyvecBytes = suite.publicKeyBytes - ML_KEM_PUBLIC_SEED_BYTES;
+    if (encodedPolyvecBytes < 0 || encodedPolyvecBytes % 3 !== 0)
+      throw new Error(`${suite.standardName} public-key geometry is invalid`);
+
+    for (let offset = 0; offset < encodedPolyvecBytes; offset += 3) {
+      const first =
+        privatePublicKey[offset] | ((privatePublicKey[offset + 1] & 0x0f) << 8);
+      const second =
+        (privatePublicKey[offset + 1] >> 4) |
+        (privatePublicKey[offset + 2] << 4);
+      if (
+        first >= ML_KEM_COEFFICIENT_MODULUS ||
+        second >= ML_KEM_COEFFICIENT_MODULUS
+      )
+        return false;
+    }
+    return true;
+  } finally {
+    privatePublicKey.fill(0);
+  }
 };
 
 type MlKemKeyPairFunction = (

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   HybridKemInvalidCiphertextError,
+  HybridKemInvalidPublicKeyError,
   createMlKem768X25519Backend,
   MLKEM768_X25519_CIPHERTEXT_BYTES,
   MLKEM768_X25519_PUBLIC_KEY_BYTES,
@@ -9,6 +10,7 @@ import {
   MLKEM768_X25519_SEED_BYTES,
   MLKEM768_X25519_SHARED_SECRET_BYTES,
   MLKEM768_X25519_SUITE,
+  validateMlKem768X25519PublicKey,
 } from "../../src/cryptography/hybridKem";
 import { loadTestModule } from "../../src/cryptography/testModule";
 
@@ -194,6 +196,45 @@ describe("MLKEM768-X25519", () => {
     expect(MLKEM768_X25519_CIPHERTEXT_BYTES).toBe(1_120);
     expect(MLKEM768_X25519_SHARED_SECRET_BYTES).toBe(32);
     expect(MLKEM768_X25519_RANDOM_BYTES).toBe(64);
+  });
+
+  test("validates both components of a peer hybrid public key", async () => {
+    const module = await loadTestModule();
+    const backend = createMlKem768X25519Backend(module);
+    const keyPair = await backend.deriveKeyPair(
+      hexToBytes(OFFICIAL_VECTORS[0].seed),
+    );
+    const nonCanonicalMlKem = Uint8Array.from(keyPair.publicKey);
+    nonCanonicalMlKem.fill(0xff, 0, 3);
+    const lowOrderX25519 = Uint8Array.from(keyPair.publicKey);
+    lowOrderX25519.fill(0, 1_184);
+
+    expect(() =>
+      validateMlKem768X25519PublicKey(keyPair.publicKey, module),
+    ).not.toThrow();
+    expect(() =>
+      validateMlKem768X25519PublicKey(nonCanonicalMlKem, module),
+    ).toThrow(HybridKemInvalidPublicKeyError);
+    expect(() =>
+      validateMlKem768X25519PublicKey(lowOrderX25519, module),
+    ).toThrow(HybridKemInvalidPublicKeyError);
+
+    const brokenModule = new Proxy(module, {
+      get(target, property, receiver) {
+        if (property === "_x25519_dh")
+          return (): never => {
+            throw new Error("injected X25519 module failure");
+          };
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    expect(() =>
+      validateMlKem768X25519PublicKey(keyPair.publicKey, brokenModule),
+    ).toThrow("injected X25519 module failure");
+    expect(() =>
+      validateMlKem768X25519PublicKey(nonCanonicalMlKem, brokenModule),
+    ).toThrow(HybridKemInvalidPublicKeyError);
+    keyPair.destroy();
   });
 
   test("matches every pinned official keygen, encapsulation, and decapsulation vector", async () => {

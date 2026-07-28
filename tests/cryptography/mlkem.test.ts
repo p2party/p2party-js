@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   createMlKemBackend,
+  mlKemPublicKeyHasCanonicalEncoding,
   ML_KEM_1024_SUITE,
   ML_KEM_512_SUITE,
   ML_KEM_768_SUITE,
@@ -31,6 +32,13 @@ const expectBytesDifferent = (
 ): void => {
   expect(Buffer.from(actual)).not.toEqual(Buffer.from(expected));
 };
+
+const packedMlKemCoefficients = (first: number, second: number): Uint8Array =>
+  Uint8Array.of(
+    first & 0xff,
+    ((first >> 8) & 0x0f) | ((second & 0x0f) << 4),
+    (second >> 4) & 0xff,
+  );
 
 interface SuiteCase<P extends MlKemParameterSet = MlKemParameterSet> {
   readonly suite: Readonly<MlKemSuiteDescriptor<P>>;
@@ -113,6 +121,65 @@ const SUITE_CASES: readonly SuiteCase[] = [
     },
   },
 ];
+
+describe("FIPS 203 public-key encoding check", () => {
+  test("accepts generated keys and rejects modulus aliases for every parameter set", async () => {
+    const module = await loadTestModule();
+    for (const { suite, acvp } of SUITE_CASES) {
+      const keyPair = await createMlKemBackend(module, suite).deriveKeyPair(
+        hexToBytes(acvp.d + acvp.z),
+      );
+      const nonCanonical = Uint8Array.from(keyPair.publicKey);
+      nonCanonical.fill(0xff, 0, 3);
+
+      expect(
+        mlKemPublicKeyHasCanonicalEncoding(
+          keyPair.publicKey,
+          suite.parameterSet,
+        ),
+      ).toBe(true);
+      expect(
+        mlKemPublicKeyHasCanonicalEncoding(nonCanonical, suite.parameterSet),
+      ).toBe(false);
+      expect(
+        mlKemPublicKeyHasCanonicalEncoding(
+          keyPair.publicKey.subarray(1),
+          suite.parameterSet,
+        ),
+      ).toBe(false);
+      keyPair.destroy();
+    }
+  });
+
+  test("checks q-1/q in both packed halves and leaves rho unrestricted", async () => {
+    const keyPair = await createMlKemBackend(
+      await loadTestModule(),
+      ML_KEM_768_SUITE,
+    ).deriveKeyPair(hexToBytes(SUITE_CASES[1].acvp.d + SUITE_CASES[1].acvp.z));
+    const encodedPolyvecBytes = ML_KEM_768_SUITE.publicKeyBytes - 32;
+
+    for (const offset of [0, encodedPolyvecBytes - 3]) {
+      for (const [first, second, expected] of [
+        [3_328, 0, true],
+        [0, 3_328, true],
+        [3_329, 0, false],
+        [0, 3_329, false],
+      ] as const) {
+        const candidate = Uint8Array.from(keyPair.publicKey);
+        candidate.set(packedMlKemCoefficients(first, second), offset);
+        expect(
+          mlKemPublicKeyHasCanonicalEncoding(candidate, 768),
+          `${String(first)},${String(second)} at ${String(offset)}`,
+        ).toBe(expected);
+      }
+    }
+
+    const arbitraryRho = Uint8Array.from(keyPair.publicKey);
+    arbitraryRho.fill(0xff, encodedPolyvecBytes);
+    expect(mlKemPublicKeyHasCanonicalEncoding(arbitraryRho, 768)).toBe(true);
+    keyPair.destroy();
+  });
+});
 
 type RawWasmFunction = (...arguments_: number[]) => number;
 

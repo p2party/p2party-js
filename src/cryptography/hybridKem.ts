@@ -7,6 +7,7 @@ import {
   ML_KEM_KEYPAIR_RANDOM_BYTES,
   ML_KEM_768_SUITE,
   createMlKemBackend,
+  mlKemPublicKeyHasCanonicalEncoding,
 } from "./mlkem";
 import { sha3_256, shake256 } from "./fips202";
 import { crypto_scalarmult_curve25519_SCALARBYTES } from "./interfaces";
@@ -41,6 +42,9 @@ export {
 const MLKEM768_X25519_EXPANDED_SEED_BYTES =
   ML_KEM_KEYPAIR_RANDOM_BYTES + crypto_scalarmult_curve25519_SCALARBYTES;
 const MLKEM768_X25519_LABEL = Uint8Array.of(0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c);
+const PUBLIC_KEY_VALIDATION_X25519_SCALAR = new Uint8Array(
+  crypto_scalarmult_curve25519_SCALARBYTES,
+).fill(0x5a);
 
 export type MlKem768X25519KeyPair = MlKemKeyPair;
 export type MlKem768X25519Encapsulation = MlKemEncapsulation;
@@ -57,6 +61,62 @@ export class HybridKemInvalidCiphertextError extends Error {
     super("MLKEM768-X25519 rejected an invalid ciphertext");
   }
 }
+
+/**
+ * A correctly framed hybrid encapsulation key failed FIPS 203's ML-KEM
+ * modulus check or X25519 low-order-point validation.
+ */
+export class HybridKemInvalidPublicKeyError extends Error {
+  override readonly name = "HybridKemInvalidPublicKeyError";
+
+  constructor() {
+    super("MLKEM768-X25519 rejected an invalid public key");
+  }
+}
+
+/**
+ * Validate one suite-1 hybrid encapsulation key without performing a second
+ * ML-KEM encapsulation.
+ *
+ * FIPS 203 encodes two 12-bit ML-KEM coefficients in each three-byte group;
+ * every coefficient must be below q=3329. The final 32 ML-KEM bytes are rho
+ * and are unrestricted. X25519 validity is the library's ordinary
+ * all-zero-shared-secret rejection. Public inputs need no constant-time scan.
+ */
+export const validateMlKem768X25519PublicKey = (
+  publicKey: Uint8Array,
+  module: LibCrypto,
+): void => {
+  const privatePublicKey = snapshotByteInput(
+    publicKey,
+    `${MLKEM768_X25519_SUITE.standardName} public key`,
+    { exactLength: MLKEM768_X25519_SUITE.publicKeyBytes },
+  );
+
+  let validationSharedSecret: Uint8Array | undefined;
+  try {
+    if (
+      !mlKemPublicKeyHasCanonicalEncoding(
+        privatePublicKey.subarray(0, ML_KEM_768_PUBLIC_KEY_BYTES),
+        768,
+      )
+    )
+      throw new HybridKemInvalidPublicKeyError();
+
+    validationSharedSecret = x25519Dh(
+      PUBLIC_KEY_VALIDATION_X25519_SCALAR,
+      privatePublicKey.subarray(ML_KEM_768_PUBLIC_KEY_BYTES),
+      module,
+    );
+  } catch (error) {
+    if (error instanceof X25519RejectedPublicPointError)
+      throw new HybridKemInvalidPublicKeyError();
+    throw error;
+  } finally {
+    validationSharedSecret?.fill(0);
+    privatePublicKey.fill(0);
+  }
+};
 
 export interface MlKem768X25519Backend {
   readonly suite: typeof MLKEM768_X25519_SUITE;

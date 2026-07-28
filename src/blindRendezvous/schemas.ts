@@ -1351,6 +1351,38 @@ export const pairAcceptedSlotLedgerSnapshotV1Schema = record(
   ],
 );
 
+/* ------------------------------------------------------------------ *
+ * Section 4.10 — durable pair-open work budget
+ * ------------------------------------------------------------------ */
+
+export const pairOpenBudgetCoordinateV1Schema = record(
+  "PairOpenBudgetCoordinateV1",
+  [
+    { name: "localRoomId", type: text(43) },
+    { name: "localPresenceOperationId", type: bytes32 },
+    { name: "budgetLogicalWindow", type: u64 },
+  ],
+);
+
+export const pairOpenBudgetChargeV1Schema = record("PairOpenBudgetChargeV1", [
+  { name: "localRoomId", type: text(43) },
+  { name: "localPresenceOperationId", type: bytes32 },
+  { name: "capturedReferenceWindow", type: u64 },
+  { name: "completeEnvelopeBytes", type: u32 },
+]);
+
+export const pairOpenBudgetSnapshotV1Schema = record(
+  "PairOpenBudgetSnapshotV1",
+  [
+    { name: "version", type: u8 },
+    { name: "coordinate", type: pairOpenBudgetCoordinateV1Schema },
+    { name: "budgetRevision", type: u64 },
+    { name: "reservedTrialCount", type: u32 },
+    { name: "reservedEnvelopeBytes", type: u64 },
+    { name: "saturated", type: bool },
+  ],
+);
+
 const admissionRevokeFields: readonly FieldDescriptor[] = [
   { name: "version", type: u8 },
   { name: "roomContextId", type: bytes32 },

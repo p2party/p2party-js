@@ -21,7 +21,7 @@ let wasmSourcePinned = false;
  */
 const cdnRequest = {
   integrity:
-    "sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP",
+    "sha384-5bfyPJcX2JVKEJA8MK+YuBYDFu6VMg8Jphdt30CQBqHI8NIQSMwP1advvY5iuzXE",
 };
 
 /**

@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
+import { readFileSync } from "node:fs";
+
+import libcrypto from "../../src/cryptography/libcrypto";
 import {
   CARRIER_AEAD_SUITE_1_NONCE_BYTES,
   CarrierAeadUnavailableError,
+  createCarrierAeadProvider,
   buildCarrierPlaintext,
   decodeCarrierEnvelope,
   deriveCarrierObjectId,
@@ -19,6 +23,7 @@ import {
 } from "../../src/blindRendezvous/derivations";
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
 
+import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
   CarrierAeadProvider,
   CarrierEnvelopeV1,
@@ -28,65 +33,24 @@ import type { CarrierEnvelopeCoordinates } from "../../src/blindRendezvous/deriv
 const hex = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-/**
- * A test double standing in for the missing XChaCha20-Poly1305 build export.
- *
- * It is deliberately NOT an AEAD: it is a keyed stream XOR with a tag, good
- * enough to prove framing, key separation, AAD binding, and fail-closed
- * behavior, and useless as evidence about the real construction. Nothing in
- * `src/` may use it.
- */
-const stubProvider = (): CarrierAeadProvider => {
-  const keystream = (key: Uint8Array, nonce: Uint8Array, length: number) => {
-    const output = new Uint8Array(length);
-    for (let index = 0; index < length; index++)
-      output[index] =
-        key[index % key.length] ^ nonce[index % nonce.length] ^ (index & 0xff);
-    return output;
-  };
-  const tagOf = (
-    key: Uint8Array,
-    nonce: Uint8Array,
-    aad: Uint8Array,
-    body: Uint8Array,
-  ) => {
-    const tag = new Uint8Array(16);
-    for (const [source, salt] of [
-      [key, 1],
-      [nonce, 2],
-      [aad, 3],
-      [body, 5],
-    ] as const)
-      for (let index = 0; index < source.length; index++)
-        tag[index % 16] ^= source[index] ^ ((salt * (index + 1)) % 251);
-    return tag;
-  };
+// The real provider, bound to the pinned libsodium build. Its construction is
+// verified byte-for-byte against the published draft-irtf-cfrg-xchacha-03
+// vector in tests/cryptography/carrierAead.test.ts; this suite exercises the
+// framing on top of it.
+const fileBytes = readFileSync(
+  new URL("../../src/cryptography/libcrypto.wasm", import.meta.url),
+);
+const wasmBinary = new ArrayBuffer(fileBytes.byteLength);
+new Uint8Array(wasmBinary).set(fileBytes);
 
-  return {
-    suite: 1,
-    seal: async (key, nonce, aad, plaintext) => {
-      const body = plaintext.map(
-        (byte, index) => byte ^ keystream(key, nonce, plaintext.length)[index],
-      );
-      const output = new Uint8Array(body.length + 16);
-      output.set(body);
-      output.set(tagOf(key, nonce, aad, body), body.length);
-      return output;
-    },
-    open: async (key, nonce, aad, sealed) => {
-      if (sealed.length < 16) return null;
-      const body = sealed.subarray(0, sealed.length - 16);
-      const tag = sealed.subarray(sealed.length - 16);
-      const expected = tagOf(key, nonce, aad, body);
-      let difference = 0;
-      for (let index = 0; index < 16; index++)
-        difference |= tag[index] ^ expected[index];
-      if (difference !== 0) return null;
-      const stream = keystream(key, nonce, body.length);
-      return body.map((byte, index) => byte ^ stream[index]);
-    },
-  };
-};
+const PAGES = 1024;
+const cryptoModule = (await libcrypto({
+  wasmBinary,
+  wasmMemory: new WebAssembly.Memory({ initial: PAGES, maximum: PAGES }),
+})) as unknown as LibCrypto;
+
+const conformingProvider = (): CarrierAeadProvider =>
+  createCarrierAeadProvider(cryptoModule);
 
 const capability = new Uint8Array(32).fill(0x55);
 const root = await roomRoot(
@@ -104,7 +68,7 @@ const coordinates: CarrierEnvelopeCoordinates = {
 const nonce = new Uint8Array(CARRIER_AEAD_SUITE_1_NONCE_BYTES).fill(0x01);
 const operationBytes = Uint8Array.from({ length: 64 }, (_, i) => i);
 
-describe("the specified AEAD is absent and nothing substitutes for it", () => {
+describe("a build without the specified AEAD fails closed", () => {
   test("sealing and opening fail closed with a typed error", async () => {
     await expect(
       sealCarrierEnvelope(
@@ -132,7 +96,7 @@ describe("the specified AEAD is absent and nothing substitutes for it", () => {
 
   test("a provider announcing another suite is refused", async () => {
     const wrongSuite = {
-      ...stubProvider(),
+      ...conformingProvider(),
       suite: 2,
     } as unknown as CarrierAeadProvider;
     await expect(
@@ -148,7 +112,7 @@ describe("the specified AEAD is absent and nothing substitutes for it", () => {
 });
 
 describe("framing, key schedule, and identifiers", () => {
-  const provider = stubProvider();
+  const provider = conformingProvider();
 
   test("a sealed envelope round-trips and pads to the size class", async () => {
     const plaintext = buildCarrierPlaintext(operationBytes, 4096);

@@ -38,8 +38,8 @@
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 209081,
-    "sha256": "7eea31157e69ac61f3a512b624d5c210296302fd289fc2b65c63ecc31a056267",
-    "sri": "sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP"
+    "bytes": 210504,
+    "sha256": "8e1ef6a853be326dbc41cb42dde4d7ebe9042ec2550cedadd1e02a757c01b91e",
+    "sri": "sha384-5bfyPJcX2JVKEJA8MK+YuBYDFu6VMg8Jphdt30CQBqHI8NIQSMwP1advvY5iuzXE"
   }
 }

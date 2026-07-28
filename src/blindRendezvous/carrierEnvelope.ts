@@ -7,27 +7,23 @@
  * identifier. A client deduplicates the rewrapped copies by the private
  * `OperationId` after decryption — an identifier a store never sees.
  *
- * ## Unresolved dependency: the sealing primitive
+ * ## The sealing primitive
  *
  * `carrierAeadSuite = 1` is the frozen XChaCha20-Poly1305 construction from
  * `draft-irtf-cfrg-xchacha-03` with a 32-byte key, 24-byte nonce, and 16-byte
- * tag. This package's WASM module does not currently export it: it exposes
- * ChaCha20-Poly1305 IETF (12-byte nonce) and XSalsa20-Poly1305, neither of
- * which is the specified construction.
+ * tag. `createCarrierAeadProvider` binds it from the pinned libsodium build.
  *
- * Substituting a different AEAD, or composing XChaCha20 out of HChaCha20 in
- * TypeScript, is forbidden by SEC-002 and SEC-019. This module therefore owns
- * the framing, key schedule, AAD, and identifiers — all of which are fully
- * specified — and takes the AEAD as an injected provider. With no provider
- * installed, sealing and opening fail closed rather than falling back.
- *
- * Closing this gap means exposing `crypto_aead_xchacha20poly1305_ietf_*` from
- * the vendored libsodium through `src/cryptography/libcrypto.c` and rebuilding
- * the WASM artifact. That rebuild re-emits an SRI-pinned, provenance-recorded
- * binary that dependents verify, so it is a deliberate release action rather
- * than a side effect of this module.
+ * The AEAD stays an injected provider rather than a direct import for two
+ * reasons: a caller must supply an initialized WASM module anyway, and a build
+ * that lacks the export fails closed with a typed error instead of silently
+ * sealing under some other construction. Substituting a different AEAD, or
+ * composing XChaCha20 in TypeScript, remains forbidden by SEC-002 and SEC-019.
  */
 
+import {
+  xchacha20poly1305Open,
+  xchacha20poly1305Seal,
+} from "../cryptography/carrierAead";
 import {
   bytesEqual,
   decodeCanonicalStrict,
@@ -36,6 +32,7 @@ import {
 import { carrierAad, carrierKey, carrierObjectId } from "./derivations";
 import { carrierEnvelopeV1Schema, carrierPlaintextV1Schema } from "./schemas";
 
+import type { LibCrypto } from "../cryptography/libcrypto";
 import type { CarrierEnvelopeCoordinates } from "./derivations";
 
 export const CARRIER_ENVELOPE_VERSION = 1;
@@ -107,6 +104,30 @@ export class CarrierEnvelopeError extends Error {
 const fail: (message: string) => never = (message) => {
   throw new CarrierEnvelopeError(message);
 };
+
+/**
+ * The conforming `carrierAeadSuite = 1` provider, bound to an initialized
+ * cryptography module.
+ */
+export const createCarrierAeadProvider = (
+  module: LibCrypto,
+): CarrierAeadProvider => ({
+  suite: 1,
+  seal: (key, nonce, associatedData, plaintext) =>
+    Promise.resolve(
+      xchacha20poly1305Seal(key, nonce, associatedData, plaintext, module),
+    ),
+  open: (key, nonce, associatedData, ciphertextAndTag) =>
+    Promise.resolve(
+      xchacha20poly1305Open(
+        key,
+        nonce,
+        associatedData,
+        ciphertextAndTag,
+        module,
+      ),
+    ),
+});
 
 const requireProvider = (
   provider: CarrierAeadProvider | null,

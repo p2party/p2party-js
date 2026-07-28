@@ -39,22 +39,25 @@ The KDF is checked against RFC 5869 Appendix A.1 and A.3 vectors.
 
 ## Blockers
 
-### B1 — `carrierAeadSuite = 1` is not available in this build
+### B1 — cleared: `carrierAeadSuite = 1` now ships
 
 The specification freezes the carrier AEAD as XChaCha20-Poly1305
-(`draft-irtf-cfrg-xchacha-03`, 32-byte key, 24-byte nonce, 16-byte tag). The
-WASM module exports ChaCha20-Poly1305 IETF (12-byte nonce) and
-XSalsa20-Poly1305; neither is that construction. SEC-002 and SEC-019 forbid
-substituting another AEAD or composing XChaCha20 in TypeScript.
+(`draft-irtf-cfrg-xchacha-03`, 32-byte key, 24-byte nonce, 16-byte tag), which
+the WASM module did not export. It now does: `src/cryptography/carrierAead.c`
+wraps libsodium's construction from the same pinned commit the module already
+builds, and `createCarrierAeadProvider` binds it to the envelope.
 
-`carrierEnvelope.ts` therefore implements everything that is fully specified —
-framing, key schedule, AAD, identifiers, padding — and fails closed with
-`CarrierAeadUnavailableError` when no conforming provider is installed.
+The rebuilt artifact reproduces the published Appendix A.3.1 vector byte for
+byte, ciphertext and tag. `libcrypto.wasm` grew from 209,081 to 210,504 bytes
+and its SRI moved to
+`sha384-5bfyPJcX2JVKEJA8MK+YuBYDFu6VMg8Jphdt30CQBqHI8NIQSMwP1advvY5iuzXE`,
+which `wasmLoader.ts` and `libcrypto.provenance.json` record. **Any dependent
+that pins the old hash — `p2party.com` vendors this package by tarball digest —
+must re-vendor before it can load the new module.**
 
-To clear it: expose `crypto_aead_xchacha20poly1305_ietf_*` from the vendored
-libsodium through `src/cryptography/libcrypto.c` and rebuild the WASM. That
-rebuild re-emits an SRI-pinned, provenance-recorded binary that `p2party.com`
-verifies, so it is a deliberate release action, not an incidental change.
+Sealing still fails closed with `CarrierAeadUnavailableError` when a build
+supplies no conforming provider, so a future build that drops the export cannot
+silently fall back to another construction.
 
 ### B2 — Phase 0 is not frozen, so no wire interoperability follows
 

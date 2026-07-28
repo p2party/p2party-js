@@ -14,6 +14,7 @@ crypto_init_or_abort(void)
 }
 
 #include "./argon2.c"
+#include "./carrierAead.c"
 #include "./ed25519.c"
 #include "./merkle.c"
 #include "./pake_ratchet.c"

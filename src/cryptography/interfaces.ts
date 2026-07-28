@@ -20,6 +20,15 @@ export const crypto_aead_chacha20poly1305_ietf_NPUBBYTES =
   12 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_aead_chacha20poly1305_ietf_ABYTES =
   16 * Uint8Array.BYTES_PER_ELEMENT;
+// XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha-03) — the blind-rendezvous
+// carrier envelope suite. The 24-byte nonce is why the IETF ChaCha20 export
+// above cannot serve it.
+export const crypto_aead_xchacha20poly1305_ietf_KEYBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_xchacha20poly1305_ietf_NPUBBYTES =
+  24 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_xchacha20poly1305_ietf_ABYTES =
+  16 * Uint8Array.BYTES_PER_ELEMENT;
 export const crypto_pwhash_argon2id_SALTBYTES =
   16 * Uint8Array.BYTES_PER_ELEMENT;
 // Ristretto255 (CPace / PAKE) — byte sizes for the wasm exports in

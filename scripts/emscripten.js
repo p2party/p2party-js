@@ -134,6 +134,8 @@ const exportedFunctions = [
   "_hkdf_sha512_expand",
   "_encrypt_chachapoly_symmetric",
   "_decrypt_chachapoly_symmetric",
+  "_carrier_aead_xchacha20poly1305_encrypt",
+  "_carrier_aead_xchacha20poly1305_decrypt",
   "_receive_message_with_key",
   "_mlkem512_keypair",
   "_mlkem512_encaps",

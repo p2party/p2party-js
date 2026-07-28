@@ -7,6 +7,21 @@ export interface WebSocketMessagePongResponse {
   fromPeerId: string;
 }
 
+export interface WebSocketMessageLeaveRoomRequest {
+  type: "leaveRoom";
+  protocolVersion: 4;
+  fromPeerId: string;
+  roomUrl: string;
+  roomLeaveId: string;
+}
+
+export interface WebSocketMessageRoomLeftResponse {
+  type: "roomLeft";
+  protocolVersion: 4;
+  roomUrl: string;
+  roomLeaveId: string;
+}
+
 export interface WebSocketMessageChallengeRequest {
   type: "peerId";
   peerId: string;
@@ -27,32 +42,37 @@ export interface WebSocketMessageSuccessfulChallenge {
   type: "challenge";
   challengeId: string;
   protocolVersion: number;
-  username?: string;
-  credential?: string;
 }
 
 export interface WebSocketMessageRoomIdRequest {
   type: "room";
   fromPeerId: string;
   roomUrl: string;
-  protocolVersion: number;
+  /** Fresh request/response correlation nonce. Never reused across requests. */
+  roomRequestId: string;
+  protocolVersion: 4;
 }
 
 export interface TurnCredentials {
   urls: string[];
   username: string;
   credential: string;
-  /** Absent on the current server: the expiry is already inside `username`. */
-  ttl?: number;
+  /**
+   * Absolute TURN REST expiry. It must equal the timestamp prefix authenticated
+   * inside `username`; carrying it explicitly lets clients schedule refresh
+   * without interpreting an undocumented deployment convention.
+   */
+  expiresAtUnixSeconds: number;
 }
 
 export interface WebSocketMessageRoomIdResponse {
   type: "roomId";
   roomId: string;
   roomUrl: string;
+  /** Exact echo of the request's fresh `roomRequestId`. */
+  roomRequestId: string;
   turnCredentials?: TurnCredentials;
-  /** Optional only so missing/pre-v3 server responses fail closed at runtime. */
-  protocolVersion?: number;
+  protocolVersion: 4;
 }
 
 export interface WebSocketMessageDescriptionSend {

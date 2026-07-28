@@ -614,6 +614,10 @@ try {
     fail("wasmLoader.ts fallback version does not match package.json");
 
   await validateWasmGlue(sourceWasm);
+  // The README embeds digests of the freshly built staging bundles. Update the
+  // source before copying it into the package so the archived documentation
+  // and the project documentation describe the same exact artifacts.
+  syncDocumentedIntegrity();
 
   for (const fileName of [
     "package.json",
@@ -660,7 +664,6 @@ try {
   for (const bundle of ["lib/session.js", "lib/session.mjs"])
     validateBundle(bundle, expectedIntegrity);
   await validateSessionSurface();
-  syncDocumentedIntegrity();
 
   console.log("[5/7] Run the packaged standalone session example");
   const exampleOutput = run(bun, ["run", "examples/standalone-e2ee.ts"], {
@@ -703,6 +706,21 @@ try {
   );
   if (!sourceProvenanceBytes.equals(archivedProvenance))
     fail("crypto provenance changed while packing the tarball");
+  const archivedReadme = execFileSync(
+    "tar",
+    ["-xOf", stagedTarball, "package/README.md"],
+    { encoding: "utf8", maxBuffer: 1024 * 1024 },
+  );
+  const bundleSri = sri(readFileSync(path.join(stageLib, "index.min.js")));
+  const workerSri = sri(readFileSync(path.join(stageLib, "db.worker.js")));
+  if (
+    !archivedReadme.includes(
+      `src="https://cdn.p2party.com/@${packageJson.version}/p2party.min.js"`,
+    ) ||
+    !archivedReadme.includes(`integrity="${bundleSri}"`) ||
+    !archivedReadme.includes(`integrity=${workerSri}`)
+  )
+    fail("archived README does not describe the packed release artifacts");
 
   const projectLib = path.join(projectRoot, "lib");
   mkdirSync(projectLib, { recursive: true });

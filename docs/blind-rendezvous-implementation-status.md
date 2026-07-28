@@ -14,19 +14,20 @@ checkable. This document records what executes, not what is claimed.
 All of it in `p2party-js/src/blindRendezvous/`, none of it exported from the
 package barrel:
 
-| Module               | Owns                                                                                                            |
-| -------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `canonicalSchema.ts` | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
-| `schemas.ts`         | Descriptors for the Section 4.0–4.5 objects implemented so far.                                                 |
-| `projections.ts`     | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
-| `derivations.ts`     | Domain-separated hashes, HKDF-SHA-256, and the room/stable-peer/operation/carrier identifiers.                  |
-| `roomPolicyV4.ts`    | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
-| `roomInviteV2.ts`    | Closed `v1                                                                                                      | v2` invitation parsing, both v2 fragment forms, and the two typed errors. |
-| `operation.ts`       | `AuthenticatedRoomOperationV1` codec, outer validation, and Ed25519 signing/verification.                       |
-| `coreReduce.ts`      | Set union and deterministic outer-layer reduction with author fork/overquota faults.                            |
-| `carrierEnvelope.ts` | Envelope framing, key schedule, AAD, and object identity, over the shipped XChaCha20-Poly1305.                  |
-| `publicWindow.ts`    | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
-| `normativeKernel.ts` | Registry shape validators, now consuming the generated projections.                                             |
+| Module                | Owns                                                                                                            |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
+| `schemas.ts`          | Descriptors for the Section 4.0–4.5 objects implemented so far.                                                 |
+| `projections.ts`      | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
+| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, and the room/stable-peer/operation/carrier identifiers.                  |
+| `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
+| `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, and the two typed errors.                         |
+| `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and the three exact suite-1 class targets.                          |
+| `operation.ts`        | `AuthenticatedRoomOperationV1` codec, outer validation, pair-slot binding, and Ed25519 signing/verification.    |
+| `coreReduce.ts`       | Validated-operation ingress, set union, and deterministic outer reduction with author faults.                   |
+| `carrierEnvelope.ts`  | Envelope framing, key schedule, AAD, and object identity, over the shipped XChaCha20-Poly1305.                  |
+| `publicWindow.ts`     | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
+| `normativeKernel.ts`  | Registry shape validators, now consuming the generated projections.                                             |
 
 Two of the specification's own published constants were re-derived rather than
 trusted, and both match exactly:
@@ -90,7 +91,8 @@ registry, including the RFC 9578 token bytes and issuance vectors.
 
 ### B4 — `p2party.com` cannot reach any of this
 
-The frontend vendors `p2party@0.14.3` as a verified tarball, and these modules
+The local frontend release candidate vendors `p2party@0.14.4` as a verified
+tarball; the coordinated production deployment is still pending. These modules
 are deliberately absent from the package barrel. No frontend change is possible
 until the API is exported and re-vendored, which should not happen before B2.
 
@@ -135,6 +137,24 @@ a same-signature/different-body collision cannot pass as an exact duplicate.
 The same increment added the missing pinned-authority/non-revocation regression
 and made the five pending payload projections an exact test contract.
 
+A second continuation closed the room-visible pair-envelope boundary without
+claiming the still-absent pair protocol:
+
+- the envelope codec derives its 1,161-byte bootstrap and 63-byte established
+  overheads from the canonical schema rather than copying a target table;
+- the three permitted suite-1 forms derive exact ciphertext/plaintext targets
+  `2935/2919`, `4033/4017`, and `69569/69553`; class-1 bootstrap, alternate
+  header/nonce states, non-empty operation padding, and noncanonical encodings
+  fail closed;
+- `validateOperation()` recomputes the pair semantic slot from the decoded
+  routing tag and reuses that one decode for the asynchronous check;
+- `coreReduceOuter()` no longer accepts structurally fabricated
+  `{operationId, operation}` pairs. Its sole ingress snapshots the operation
+  and validation context before the first `await`, performs complete current
+  outer validation, derives the ID, and records process-local provenance in a
+  private `WeakMap`. Object spread, structured clone, and post-validation
+  typed-array mutation are rejected before reduction.
+
 ## What is deliberately not implemented
 
 - **Payload-level reduction.** `coreReduceOuter` derives the active operation
@@ -142,16 +162,19 @@ and made the five pending payload projections an exact test contract.
   `observedPresences`, `effectiveLeaveOperationIds`, `storeCatalogFacts`, and
   `revocationFloors` as pending rather than returning empty arrays that would
   read as observations. These need the Sections 4.2/4.8/4.9 nested payload
-  codecs. This is not merely mechanical: `PairStepEnvelopeV1` has no codec;
-  `STORE_HINT` orders routes by derived `RouteId`, which the current generic
-  array descriptor cannot express; and timeless store-signature validation
-  must be split from absolute route-lease evaluation before core reduction can
-  reuse it.
+  codecs. This is not merely mechanical: `PairPlaintextV1` and its closed body
+  union have no codec; `STORE_HINT` orders routes by derived `RouteId`, which
+  the current generic array descriptor cannot express; and timeless
+  store-signature validation must be split from absolute route-lease evaluation
+  before core reduction can reuse it.
 - **Closed operation validation.** `validateOperation()` currently proves the
   outer canonical frame, room/window/lifetime/class/dependency shape, and
-  Ed25519 signature. It does not yet prove nested payload canonicality,
-  semantic-slot derivation, nested intervals, leave-target validity, store
-  signatures, or authority signatures. Consequently the current
+  Ed25519 signature. For `PAIR_STEP` it additionally proves the canonical
+  envelope/class/header state and routing-tag semantic slot. It does not yet
+  open pair AEAD or prove the decrypted minimal class, pair sequence,
+  pair predecessor, body discriminator, or one-use routing tag; the other
+  operation kinds still lack their nested canonicality, interval, target,
+  store-signature, and authority-signature checks. Consequently the current
   `activeOperationIds` is an outer-framed candidate projection, not yet the
   specification's complete `OuterValidOperationSet`.
 - **Admission kernel.** Section 4.8 now names an explicit

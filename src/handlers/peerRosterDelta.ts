@@ -1,6 +1,7 @@
 import { isUUID } from "class-validator";
 
 import { isCanonicalEd25519Identity } from "../utils/identityRole";
+import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";
 
 import type { Peer } from "../reducers/roomSlice";
 import type { RoomPeer } from "../utils/interfaces";
@@ -20,6 +21,12 @@ export const mergePeerRosterDelta = (
   delta: readonly RoomPeer[],
   self: SelfPeerIdentity,
 ): Peer[] => {
+  if (
+    current.length > MAX_SIGNALING_ROOM_PEERS ||
+    delta.length > MAX_SIGNALING_ROOM_PEERS
+  )
+    throw new Error("Signaling peer roster exceeds the room edge cap");
+
   const merged = current.map((peer) => ({ ...peer }));
   const byPeerId = new Map(merged.map((peer) => [peer.peerId, peer]));
   const byPublicKey = new Map(merged.map((peer) => [peer.peerPublicKey, peer]));
@@ -37,6 +44,8 @@ export const mergePeerRosterDelta = (
 
     const existingIdentity = byPublicKey.get(candidate.publicKey);
     if (existingIdentity) continue;
+    if (merged.length >= MAX_SIGNALING_ROOM_PEERS)
+      throw new Error("Signaling peer roster exceeds the room edge cap");
 
     const peer = {
       peerId: candidate.id,

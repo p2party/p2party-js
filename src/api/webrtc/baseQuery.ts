@@ -5,7 +5,7 @@ import { teardownCoverEdge } from "../../handlers/coverEdge";
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
 import { findRoomPeerConnectionIndex } from "./roomPeer";
-import { getRoomPeerMutex } from "./negotiationLock";
+import { runRoomPeerExclusive } from "./negotiationLock";
 import { isIdentityInitiator } from "../../utils/identityRole";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -80,24 +80,14 @@ const webrtcBaseQuery: BaseQueryFn<
   RTCPeerConnectionParamsExtend,
   undefined
 > = async (
-  {
-    peerId,
-    peerPublicKey,
-    roomId,
-    rtcConfig,
-    peerConnections,
-    dataChannels,
-  },
+  { peerId, peerPublicKey, roomId, rtcConfig, peerConnections, dataChannels },
   api,
 ) => {
-  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
+  return runRoomPeerExclusive(roomId, peerId, async () => {
     const { keyPair } = api.getState() as State;
     if (peerId === keyPair.peerId)
       throw new Error("Cannot create a connection with oneself.");
-    const opensMain = isIdentityInitiator(
-      keyPair.publicKey,
-      peerPublicKey,
-    );
+    const opensMain = isIdentityInitiator(keyPair.publicKey, peerPublicKey);
 
     const blacklisted = await getDBPeerIsBlacklisted(peerId);
     if (blacklisted) return { data: undefined };

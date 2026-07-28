@@ -1,9 +1,13 @@
 import { CoverRuntime, type CoverLaneChannel } from "./coverRuntime";
 import { buildScheduledSendJob } from "./coverTransfer";
 import { markTransferComplete } from "./reconcile";
+import { registerCoverChannelUntilClose } from "./coverChannelRegistry";
 
 import type { CoverStatusChange } from "./coverScheduler";
-import type { IRTCDataChannel, IRTCPeerConnection } from "../api/webrtc/interfaces";
+import type {
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "../api/webrtc/interfaces";
 import type { RoomPolicyV1 } from "../roomPolicy";
 import type { LibCrypto } from "../cryptography/libcrypto";
 
@@ -92,10 +96,12 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
       channel.binaryType = "arraybuffer";
       channel.withPeerId = epc.withPeerId;
       channel.roomIds = [roomId];
-      epc.coverChannels!.add(channel);
-      channel.addEventListener("close", () => {
-        epc.coverChannels?.delete(channel);
-      });
+      try {
+        registerCoverChannelUntilClose(epc.coverChannels!, channel);
+      } catch (error) {
+        if (channel.readyState !== "closed") channel.close();
+        throw error;
+      }
       return {
         label: channel.label,
         get readyState() {

@@ -2,7 +2,6 @@ import { createSlice } from "@reduxjs/toolkit";
 import { isHexadecimal, isUUID } from "class-validator";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { State } from "../store";
 
 export interface KeyPair {
   peerId: string;
@@ -26,14 +25,10 @@ export interface SetPeerData {
 
 export interface SetChallengeId {
   challengeId: string;
-  username?: string;
-  credential?: string;
 }
 
 export interface SetReconnectData extends SetPeerData {
   challengeId: string;
-  username?: string;
-  credential?: string;
 }
 
 const initialState: KeyPair = {
@@ -122,5 +117,7 @@ export const {
   setChallengeId,
   resetIdentity,
 } = keyPairSlice.actions;
-export const keyPairSelector = (state: State) => state.keyPair;
+export const keyPairSelector = (state: {
+  readonly keyPair: KeyPair;
+}): KeyPair => state.keyPair;
 export default keyPairSlice.reducer;

@@ -5,20 +5,21 @@ import { isUUID } from "class-validator";
 import {
   setConnectingToPeers,
   setRoom,
+  applyRoomResponse,
   setMessage,
   deleteMessage,
-  deleteRoom,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
-
+import { signalingServerActions } from "../reducers/signalingServerSlice";
 import { hexToUint8Array } from "../utils/uint8array";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 import { encodeRoomPolicyV1 } from "../roomPolicy";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import { PROTOCOL_VERSION } from "../utils/constants";
+import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebouncer";
 
 import {
   deleteReceiveTransfer,
@@ -30,8 +31,6 @@ import {
 import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
 
-// Debounce peers requests per room to prevent rapid re-requests
-const lastPeersRequest = new Map<string, number>();
 const PEERS_REQUEST_DEBOUNCE_MS = 2000;
 
 const roomListenerMiddleware = createListenerMiddleware();
@@ -39,9 +38,11 @@ roomListenerMiddleware.startListening({
   matcher: isAnyOf(
     setConnectingToPeers,
     setRoom,
+    applyRoomResponse,
     setMessage,
     deleteMessage,
-    deleteRoom,
+    signalingServerActions.startConnecting,
+    signalingServerActions.disconnect,
   ),
   effect: async (action, listenerApi) => {
     // Guarded as a whole. This effect awaits IndexedDB through the worker, and
@@ -49,7 +50,12 @@ roomListenerMiddleware.startListening({
     // rejection in the host application — a library has no business taking a
     // page down because it could not cache a room.
     try {
-      if (setConnectingToPeers.match(action)) {
+      if (
+        signalingServerActions.startConnecting.match(action) ||
+        signalingServerActions.disconnect.match(action)
+      ) {
+        signalingPeerRequestDebouncer.resetSocketLifecycle();
+      } else if (setConnectingToPeers.match(action)) {
         const { roomId, connectingToPeers } = action.payload;
         debugLog("[roomListenerMiddleware] setConnectingToPeers:", {
           roomId,
@@ -77,23 +83,28 @@ roomListenerMiddleware.startListening({
           ) {
             // Debounce peers requests to prevent rapid re-requests
             const now = Date.now();
-            const lastRequest = lastPeersRequest.get(roomId) ?? 0;
-            if (now - lastRequest < PEERS_REQUEST_DEBOUNCE_MS) {
+            if (
+              !signalingPeerRequestDebouncer.shouldSend(
+                "join",
+                roomId,
+                PEERS_REQUEST_DEBOUNCE_MS,
+                now,
+              )
+            ) {
               debugLog(
                 "[roomListenerMiddleware] Skipping peers request - debounced",
               );
             } else {
-              lastPeersRequest.set(roomId, now);
               debugLog(
                 "[roomListenerMiddleware] Sending peers request from setConnectingToPeers",
               );
               await listenerApi.dispatch(
                 signalingServerApi.endpoints.sendMessage.initiate({
                   content: {
-                      type: "peers",
-                      fromPeerId: keyPair.peerId,
-                      roomId,
-                      protocolVersion: PROTOCOL_VERSION,
+                    type: "peers",
+                    fromPeerId: keyPair.peerId,
+                    roomId,
+                    protocolVersion: PROTOCOL_VERSION,
                   } as WebSocketMessagePeersRequest,
                 }),
               );
@@ -191,6 +202,43 @@ roomListenerMiddleware.startListening({
             );
           }
         }
+      } else if (applyRoomResponse.match(action)) {
+        const { roomUrl, roomId } = action.payload;
+        const originalRooms = (listenerApi.getOriginalState() as State).rooms;
+        const original = originalRooms.find((room) => room.url === roomUrl);
+        // A credential refresh keeps the same room identity and must not reload
+        // the room's complete message history on every rotation.
+        if (!original || original.id === roomId) return;
+
+        const current = (listenerApi.getState() as State).rooms.find(
+          (room) => room.url === roomUrl && room.id === roomId,
+        );
+        if (!current) return;
+        const encodedPolicy = encodeRoomPolicyV1(current.policy);
+        await setDBUniqueRoom(
+          roomUrl,
+          roomId,
+          encodedPolicy.slice().buffer as ArrayBuffer,
+        );
+
+        const oldMessages = await getDBRoomMessageData(roomId);
+        for (const message of oldMessages) {
+          listenerApi.dispatch(
+            setMessage({
+              roomId: message.roomId,
+              transferId: message.transferId,
+              merkleRootHex: message.merkleRoot,
+              sha512Hex: message.hash,
+              fromPeerId: message.fromPeerId,
+              filename: message.filename,
+              messageType: message.messageType,
+              chunkSize: message.savedSize,
+              totalSize: message.totalSize,
+              channelLabel: message.channelLabel,
+              timestamp: message.timestamp,
+            }),
+          );
+        }
       } else if (setMessage.match(action)) {
         const { roomId, merkleRootHex, sha512Hex, chunkSize, totalSize } =
           action.payload;
@@ -278,15 +326,6 @@ roomListenerMiddleware.startListening({
           // await deleteDBChunk(hashHex);
           await deleteDBNewChunk({ hashHex });
         }
-      } else if (deleteRoom.match(action)) {
-        const roomId = action.payload;
-
-        await listenerApi.dispatch(
-          webrtcApi.endpoints.disconnectFromRoom.initiate({
-            roomId,
-            deleteMessages: true,
-          }),
-        );
       }
     } catch (error) {
       console.error("p2party: room listener effect failed", error);

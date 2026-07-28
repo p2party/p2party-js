@@ -126,6 +126,46 @@ Putting the capability in a URL fragment keeps it out of ordinary HTTP
 requests and common access logs, but the shipped legacy signaling path still
 receives its normalized value. A fragment is not a server-blind meeting point.
 
+## Signaling and TURN correctness boundary
+
+SDK 0.14.4 makes legacy signaling state transitions correlated and bounded; it
+does not make that signaling path blind.
+
+- A room response is accepted only for the exact current socket, room
+  capability, and UUIDv4 request. A delayed response cannot configure another
+  room.
+- Caller ICE configuration and signaling-managed TURN credentials are separate
+  inputs. Managed credentials carry an absolute expiry, are applied to every
+  live room edge before an ICE restart, refresh proactively, and are removed or
+  failed closed when they expire.
+- `purgeRoom()` tears down local transports and durable state before waiting
+  for a correlated server acknowledgement. The leave is keyed by the stable
+  room capability rather than the server-assigned room UUID, so a purge racing
+  an in-flight join still revokes that membership. Matching `p2party-server`
+  0.1.1 unlinks the authenticated peer from the room before acknowledging. An
+  offline or non-acknowledging server produces
+  `RemoteRoomRevocationUnconfirmedError`; it is never reported as confirmed.
+- Signaling ingress, room rosters, live mesh edges, pending ICE, and channel
+  registries have explicit client-side bounds. Those bounds limit one client's
+  exposure; they are not server-side Sybil resistance or a global availability
+  proof.
+
+TURN is a transport relay, not a privacy proxy. The legacy REST username is
+expiry-bound but contains the client's Ed25519 public key, and the TURN
+operator can observe source addresses, allocations, timing, and byte volume.
+Neither relay use nor TLS makes the signaling operator unable to read SDP, ICE,
+room capabilities, or membership.
+
+The current challenge proves possession of the presented Ed25519 key to the
+server by signing a fresh nonce. Its transcript is not bound to a server
+identity or origin, so it does not resist a malicious server relaying another
+server's nonce as a signing oracle. The legacy service also has no
+cross-instance session-generation fence or Byzantine quorum. Consequently none
+of malicious-rendezvous blindness, two-server BFT, social-graph hiding,
+server-bound authentication, shutdown survival, or post-quantum signaling
+authentication is a property of this path. Those remain requirements of the
+versioned blind-rendezvous design.
+
 ## Shipped, implemented core, and research
 
 | Status                    | Exact boundary in 0.14                                                                                                                                                                                                                                                                                                                                                                                                  |

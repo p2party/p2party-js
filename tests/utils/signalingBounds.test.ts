@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  areCanonicalConnectionLabels,
   areBoundedDataChannelLabels,
   isBoundedDescription,
   isBoundedIceCandidate,
@@ -14,7 +15,10 @@ describe("signaling input bounds", () => {
   test("bounds SDP before it reaches RTCPeerConnection", () => {
     expect(isBoundedDescription({ type: "offer", sdp: "v=0" })).toBe(true);
     expect(
-      isBoundedDescription({ type: "offer", sdp: "x".repeat(MAX_SDP_CHARS + 1) }),
+      isBoundedDescription({
+        type: "offer",
+        sdp: "x".repeat(MAX_SDP_CHARS + 1),
+      }),
     ).toBe(false);
   });
 
@@ -39,5 +43,12 @@ describe("signaling input bounds", () => {
         "x".repeat(MAX_DATA_CHANNEL_LABEL_CHARS + 1),
       ]),
     ).toBe(false);
+  });
+
+  test("connection signaling accepts only the persistent main lane", () => {
+    expect(areCanonicalConnectionLabels(["main"])).toBe(true);
+    expect(areCanonicalConnectionLabels([])).toBe(false);
+    expect(areCanonicalConnectionLabels(["main", "other"])).toBe(false);
+    expect(areCanonicalConnectionLabels(["attacker-controlled"])).toBe(false);
   });
 });

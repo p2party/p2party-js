@@ -5,13 +5,15 @@ import { repairIceTransportAfterCandidateFailure } from "../../../src/api/webrtc
 const target = (
   connectionState: RTCPeerConnectionState,
   restartIce: () => void,
+  ensureFreshIceConfiguration?: () => Promise<boolean | void>,
 ): Pick<
   RTCPeerConnection,
   "connectionState" | "signalingState" | "restartIce"
-> => ({
+> & { ensureFreshIceConfiguration?: () => Promise<boolean | void> } => ({
   connectionState,
   signalingState: "stable",
   restartIce,
+  ensureFreshIceConfiguration,
 });
 
 describe("ICE candidate failure repair", () => {
@@ -68,5 +70,69 @@ describe("ICE candidate failure repair", () => {
     expect(result).toBe("disconnected");
     expect(restarts).toBe(1);
     expect(disconnects).toBe(1);
+  });
+
+  test("applies fresh room configuration before restart", async () => {
+    const events: string[] = [];
+    const result = await repairIceTransportAfterCandidateFailure(
+      target(
+        "connected",
+        () => {
+          events.push("restart");
+        },
+        async () => {
+          events.push("configure");
+        },
+      ),
+      () => {
+        events.push("disconnect");
+      },
+    );
+
+    expect(result).toBe("restarted");
+    expect(events).toEqual(["configure", "restart"]);
+  });
+
+  test("does not restart twice when credential rotation already restarted the room", async () => {
+    const events: string[] = [];
+    const result = await repairIceTransportAfterCandidateFailure(
+      target(
+        "connected",
+        () => {
+          events.push("duplicate-restart");
+        },
+        async () => {
+          events.push("configure-and-restart");
+          return true;
+        },
+      ),
+      () => {
+        events.push("disconnect");
+      },
+    );
+
+    expect(result).toBe("restarted");
+    expect(events).toEqual(["configure-and-restart"]);
+  });
+
+  test("a failed proof/configuration gate never restarts ICE", async () => {
+    let restarts = 0;
+    let disconnects = 0;
+    const repair = repairIceTransportAfterCandidateFailure(
+      target(
+        "connected",
+        () => {
+          restarts++;
+        },
+        () => Promise.reject(new Error("proof failed")),
+      ),
+      () => {
+        disconnects++;
+      },
+    );
+
+    await expect(repair).rejects.toThrow("proof failed");
+    expect(restarts).toBe(0);
+    expect(disconnects).toBe(0);
   });
 });

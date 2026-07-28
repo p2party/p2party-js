@@ -19,6 +19,11 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   ratchetGateLease: RatchetGateLease;
   /** Resolves once the per-transport WASM dependency is ready. */
   initialization?: Promise<void>;
+  /**
+   * Re-proves signaling and applies the latest room ICE configuration before
+   * any restart. Installed by the connection owner and shared by repair paths.
+   */
+  ensureFreshIceConfiguration?: () => Promise<boolean | void>;
   // protocol-v3: live Double-Ratchet handle (never Redux; secrets stay off the
   // store). `ratchetEstablished` is the gate the `main` channel resolves.
   ratchetState?: RatchetState;
@@ -108,6 +113,15 @@ export interface RTCSetCandidateParams {
   candidate: RTCIceCandidateInit | RTCIceCandidate;
 }
 
+export interface RTCApplyRoomConfigurationParams {
+  roomId: string;
+  rtcConfig: RTCConfiguration;
+  /** Gather a new ICE generation after every live PC accepts the config. */
+  restartIce?: boolean;
+  /** Expiry must close on failure; rollback would restore expired secrets. */
+  failurePolicy?: "rollback" | "close";
+}
+
 export interface RTCOpenChannelParams {
   roomId: string;
   channel: string | RTCDataChannel;
@@ -171,6 +185,11 @@ export interface RTCDisconnectFromPeerParams {
   roomId?: string;
   alsoDeleteData?: boolean;
 }
+
+/** Internal dependency injected into bulk teardown queries to avoid API cycles. */
+export type DisconnectPeerTransport = (
+  params: RTCDisconnectFromPeerParams,
+) => Promise<void>;
 
 export interface RTCDisconnectFromChannelLabelParams {
   roomId: string;

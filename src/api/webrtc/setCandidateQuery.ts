@@ -1,7 +1,7 @@
 import webrtcApi from ".";
 // import signalingServerApi from "../signalingServerApi";
 
-import { getRoomPeerMutex } from "./negotiationLock";
+import { runRoomPeerExclusive } from "./negotiationLock";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import {
   enqueueConnectionIceCandidate,
@@ -32,7 +32,7 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
   { peerId, roomId, candidate, peerConnections, iceCandidates },
   api,
 ) => {
-  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
+  return runRoomPeerExclusive(roomId, peerId, async () => {
     const { keyPair } = api.getState() as State;
     const candidateInit = normalizeIceCandidate(candidate);
 

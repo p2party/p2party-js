@@ -18,20 +18,24 @@ const {
   default: roomReducer,
   deletePeer,
   deleteRoom,
+  defaultRTCConfig,
   setMessage,
+  setIceServers,
+  setChannel,
+  setPeer,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
   setRoom,
   setRoomPolicy,
+  purgeAllRooms,
 } = await import("../../src/reducers/roomSlice");
+const { MAX_SIGNALING_ROOM_PEERS } =
+  await import("../../src/utils/signalingBounds");
 
 describe("room policy reducer boundary", () => {
   test("new rooms receive the mandatory hybrid-v3 default", () => {
     const roomUrl = "a".repeat(64);
-    const state = roomReducer(
-      undefined,
-      setRoom({ url: roomUrl, id: "" }),
-    );
+    const state = roomReducer(undefined, setRoom({ url: roomUrl, id: "" }));
 
     expect(state).toHaveLength(1);
     expect(state[0].policy.pqMode).toBe("hybrid-mlkem768");
@@ -130,6 +134,39 @@ describe("room policy reducer boundary", () => {
     ).toThrow("room policy is immutable after creation");
   });
 
+  test("deleting by URL targets the exact pending room when ids are still empty", () => {
+    const firstUrl = "1".repeat(64);
+    const secondUrl = "2".repeat(64);
+    let state = roomReducer(undefined, setRoom({ url: firstUrl, id: "" }));
+    state = roomReducer(state, setRoom({ url: secondUrl, id: "" }));
+
+    const next = roomReducer(state, deleteRoom(secondUrl));
+    expect(next.find((room) => room.url === firstUrl)?.signalingActive).toBe(
+      true,
+    );
+    expect(next.find((room) => room.url === secondUrl)?.signalingActive).toBe(
+      false,
+    );
+  });
+
+  test("reactivating a tombstone cannot bypass the active signaling-room bound", () => {
+    const tombstoneUrl = "e".repeat(64);
+    let state = roomReducer(undefined, setRoom({ url: tombstoneUrl, id: "" }));
+    state = roomReducer(state, deleteRoom(tombstoneUrl));
+    for (let index = 0; index < 256; index++)
+      state = roomReducer(
+        state,
+        setRoom({
+          url: (index + 1).toString(16).padStart(64, "0"),
+          id: "",
+        }),
+      );
+
+    expect(() =>
+      roomReducer(state, setRoom({ url: tombstoneUrl, id: "" })),
+    ).toThrow("cannot activate more than 256 rooms");
+  });
+
   test("concurrent identical outbound content remains two logical messages", () => {
     const roomId = "00000000-0000-4000-8000-000000000005";
     const fromPeerId = "00000000-0000-4000-8000-000000000006";
@@ -166,6 +203,194 @@ describe("room policy reducer boundary", () => {
       "11".repeat(32),
       "22".repeat(32),
     ]);
+  });
+});
+
+describe("signaling-derived room state bounds", () => {
+  test("peer and per-channel membership cannot exceed the room edge cap", () => {
+    const roomId = "00000000-0000-4000-8000-0000000000aa";
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "f".repeat(64), id: roomId }),
+    );
+
+    for (let index = 0; index <= MAX_SIGNALING_ROOM_PEERS; index += 1) {
+      const peerId = `00000000-0000-4000-8000-${index
+        .toString(16)
+        .padStart(12, "0")}`;
+      state = roomReducer(
+        state,
+        setPeer({
+          roomId,
+          peerId,
+          peerPublicKey: index.toString(16).padStart(64, "0"),
+        }),
+      );
+      state = roomReducer(state, setChannel({ roomId, peerId, label: "main" }));
+    }
+
+    expect(state[0].peers).toHaveLength(MAX_SIGNALING_ROOM_PEERS);
+    expect(state[0].channels[0].peerIds).toHaveLength(MAX_SIGNALING_ROOM_PEERS);
+  });
+
+  test("full purge removes capabilities and all retained room state", () => {
+    let state = roomReducer(
+      undefined,
+      setRoom({
+        url: "e".repeat(64),
+        id: "00000000-0000-4000-8000-0000000000ab",
+      }),
+    );
+    state = roomReducer(
+      state,
+      setPeer({
+        roomId: state[0].id,
+        peerId: "00000000-0000-4000-8000-0000000000ac",
+        peerPublicKey: "ab".repeat(32),
+      }),
+    );
+    state = roomReducer(state, deleteRoom(state[0].url));
+    expect(state).toHaveLength(1);
+    expect(state[0].url).toBe("e".repeat(64));
+
+    state = roomReducer(state, purgeAllRooms());
+    expect(state).toEqual([]);
+  });
+});
+
+describe("room ICE configuration", () => {
+  const roomId = "00000000-0000-4000-8000-000000000080";
+
+  test("an explicit reconnect RTC configuration replaces the caller baseline", () => {
+    const roomUrl = "6".repeat(64);
+    const callerConfig: RTCConfiguration = {
+      iceServers: [{ urls: "stun:caller.example:3478" }],
+      iceTransportPolicy: "all",
+    };
+    const state = roomReducer(
+      undefined,
+      setRoom({ url: roomUrl, id: roomId, rtcConfig: callerConfig }),
+    );
+    expect(
+      roomReducer(
+        state,
+        setRoom({
+          url: roomUrl,
+          id: roomId,
+          rtcConfig: structuredClone(callerConfig),
+        }),
+      )[0].callerRtcConfig,
+    ).toEqual(callerConfig);
+    const changed = roomReducer(
+      state,
+      setRoom({
+        url: roomUrl,
+        id: roomId,
+        rtcConfig: {
+          iceServers: [{ urls: "stun:different.example:3478" }],
+        },
+      }),
+    );
+    expect(changed[0].callerRtcConfig.iceServers).toEqual([
+      { urls: "stun:different.example:3478" },
+    ]);
+    expect(changed[0].rtcConfig.iceServers).toEqual([
+      { urls: "stun:different.example:3478" },
+    ]);
+  });
+
+  test("TURN refresh preserves caller RTC options and unrelated STUN", () => {
+    const callerConfig: RTCConfiguration = {
+      bundlePolicy: "max-bundle",
+      iceCandidatePoolSize: 7,
+      iceTransportPolicy: "relay",
+      iceServers: [
+        { urls: "stun:custom.example:3478" },
+        {
+          urls: ["turns:relay.example:443", "turn:old.example:3478"],
+          username: "expired",
+          credential: "expired",
+        },
+      ],
+    };
+    let state = roomReducer(
+      undefined,
+      setRoom({
+        url: "8".repeat(64),
+        id: roomId,
+        rtcConfig: callerConfig,
+      }),
+    );
+
+    state = roomReducer(
+      state,
+      setIceServers({
+        roomId,
+        iceServers: [
+          {
+            urls: ["turns:relay.example:443"],
+            username: "fresh",
+            credential: "fresh",
+          },
+        ],
+      }),
+    );
+
+    expect(state[0].rtcConfig.bundlePolicy).toBe("max-bundle");
+    expect(state[0].rtcConfig.iceCandidatePoolSize).toBe(7);
+    expect(state[0].rtcConfig.iceTransportPolicy).toBe("relay");
+    expect(state[0].rtcConfig.iceServers).toEqual([
+      { urls: "stun:custom.example:3478" },
+      {
+        urls: ["turn:old.example:3478"],
+        username: "expired",
+        credential: "expired",
+      },
+      {
+        urls: ["turns:relay.example:443"],
+        username: "fresh",
+        credential: "fresh",
+      },
+    ]);
+    expect(callerConfig.iceServers?.[1]).toEqual({
+      urls: ["turns:relay.example:443", "turn:old.example:3478"],
+      username: "expired",
+      credential: "expired",
+    });
+  });
+
+  test("TURN can populate an empty ICE list without mutating defaults", () => {
+    const defaultBefore = structuredClone(defaultRTCConfig);
+    let state = roomReducer(
+      undefined,
+      setRoom({
+        url: "7".repeat(64),
+        id: roomId,
+        rtcConfig: { iceTransportPolicy: "all" },
+      }),
+    );
+    state = roomReducer(
+      state,
+      setIceServers({
+        roomId,
+        iceServers: [
+          {
+            urls: "turn:relay.example:3478",
+            username: "fresh",
+            credential: "fresh",
+          },
+        ],
+      }),
+    );
+
+    expect(state[0].rtcConfig.iceServers).toEqual([
+      {
+        urls: "turn:relay.example:3478",
+        username: "fresh",
+        credential: "fresh",
+      },
+    ]);
+    expect(defaultRTCConfig).toEqual(defaultBefore);
   });
 });
 

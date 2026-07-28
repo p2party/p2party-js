@@ -633,8 +633,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.3/p2party.min.js"
-  integrity="sha384-dwBCnd3gj0k9HpDetSDOtYhv/CkADQs5h4mz+dI7hdYY1wWQpgvtiOGF4GUrnbqR"
+  src="https://cdn.p2party.com/@0.14.4/p2party.min.js"
+  integrity="sha384-LJgpREy2v2Walb06fJPRjCYT5jhmmxYK6GQajUDQBTS9gEC0o7n5N6WtKJnGkOlZ"
   crossorigin="anonymous"
 ></script>
 
@@ -673,7 +673,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-qWbMGmyz8mCS/hgbn0jEf4Fo73iXiy6w+H/NfO6ymxKwzldUeHSxolNZtSZfV1nf`.
+`integrity=sha384-E+7JbGdTHDmz1F5eZWzLOR7PGdIFK3qmEh+v5nQtpLhWi1ymxg47okdUkhhjB/zs`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.

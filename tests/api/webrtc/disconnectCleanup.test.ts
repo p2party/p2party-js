@@ -1,17 +1,7 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { IRTCDataChannel } from "../../../src/api/webrtc/interfaces";
-
-mock.module("./index", () => ({
-  default: {
-    endpoints: {
-      disconnectFromPeer: {
-        initiate: (value: unknown) => value,
-      },
-    },
-  },
-}));
 
 const loadQueries = async () => {
   if (!("localStorage" in globalThis)) {
@@ -79,6 +69,7 @@ describe("bulk DataChannel cleanup", () => {
         alsoDeleteDB: false,
         peerConnections: [],
         dataChannels: channels,
+        disconnectPeer: async () => undefined,
       },
       api,
       {},
@@ -99,6 +90,7 @@ describe("bulk DataChannel cleanup", () => {
         deleteMessages: false,
         peerConnections: [],
         dataChannels: channels,
+        disconnectPeer: async () => undefined,
       },
       api,
       {},
@@ -119,6 +111,7 @@ describe("bulk DataChannel cleanup", () => {
         exceptionRoomIds: ["room-b"],
         peerConnections: [],
         dataChannels: channels,
+        disconnectPeer: async () => undefined,
       },
       api,
       {},

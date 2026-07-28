@@ -1,7 +1,9 @@
 type IceRestartTarget = Pick<
   RTCPeerConnection,
   "connectionState" | "signalingState" | "restartIce"
->;
+> & {
+  ensureFreshIceConfiguration?: () => Promise<boolean | void>;
+};
 
 export type IceCandidateRepairResult = "restarted" | "disconnected";
 
@@ -20,6 +22,15 @@ export const repairIceTransportAfterCandidateFailure = async (
     (target.signalingState as string) === "closed";
 
   if (!isClosed) {
+    const alreadyRestarted = await target.ensureFreshIceConfiguration?.();
+    if (
+      (target.connectionState as string) === "closed" ||
+      (target.signalingState as string) === "closed"
+    ) {
+      await disconnect();
+      return "disconnected";
+    }
+    if (alreadyRestarted === true) return "restarted";
     try {
       target.restartIce();
       return "restarted";

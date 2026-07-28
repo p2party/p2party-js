@@ -7,11 +7,17 @@ import {
   canonicalizeRoomPolicyV1,
   roomPoliciesEqualV1,
 } from "../roomPolicy";
+import { MAX_ACTIVE_SIGNALING_ROOMS } from "../utils/constants";
+import {
+  MAX_DATA_CHANNEL_LABEL_CHARS,
+  MAX_SIGNALING_ROOM_CHANNELS,
+  MAX_SIGNALING_ROOM_PEERS,
+} from "../utils/signalingBounds";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { State } from "../store";
 import type { RoomPolicyV1 } from "../roomPolicy";
 import type { CoverSchedulerStatus } from "../handlers/coverScheduler";
+import type { TurnCredentials } from "../utils/interfaces";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
@@ -78,6 +84,30 @@ export interface SetIceServersArgs {
   iceServers: RTCIceServer[];
 }
 
+export interface ApplyRoomResponseArgs {
+  roomUrl: string;
+  roomId: string;
+  roomRequestId: string;
+  requestGeneration: number;
+  turnCredentials: TurnCredentials | null;
+}
+
+export interface ExpireRoomTurnCredentialsArgs {
+  roomUrl: string;
+  expiresAtUnixSeconds: number;
+  requestGeneration: number;
+}
+
+export interface RollbackRoomResponseArgs {
+  roomUrl: string;
+  failedRoomId: string;
+  failedRequestGeneration: number;
+  previousRoomId: string;
+  previousRequestGeneration: number;
+  previousTurnCredentials: TurnCredentials | null;
+  previousSignalingActive: boolean;
+}
+
 export interface SetMessageArgs {
   roomId: string;
   transferId?: string;
@@ -137,6 +167,7 @@ export interface DeleteChannelArgs {
 
 export interface SetCanOnlyConnectWithKnownPeers {
   roomId: string;
+  roomUrl?: string;
   onlyConnectWithKnownPeers: boolean;
 }
 
@@ -173,7 +204,16 @@ export interface Room extends SetRoomArgs {
   connectedToPeers: boolean;
   canBeConnectionRelay: boolean;
   onlyConnectWithKnownAddresses: boolean;
+  /** Caller-owned configuration. Signaling credentials never mutate it. */
+  callerRtcConfig?: RTCConfiguration;
+  /** Current signaling-owned TURN bundle, replaced atomically per response. */
+  signalingTurnCredentials?: TurnCredentials | null;
+  /** Compatibility projection derived from the two authoritative inputs. */
   rtcConfig: RTCConfiguration;
+  /** Last accepted wire-correlated response generation for this room URL. */
+  roomResponseGeneration?: number;
+  /** False after deleteRoom so retained room metadata is not auto-rejoined. */
+  signalingActive?: boolean;
   peers: Peer[];
   channels: Channel[];
   messages: Message[];
@@ -191,6 +231,14 @@ export interface Room extends SetRoomArgs {
    * waiting-for-peers state.
    */
   handshakeStatusByPeer?: Record<string, PeerHandshakeStatus>;
+}
+
+/** Fully normalized reducer state; public Room keeps new fields optional. */
+export interface ManagedRoom extends Room {
+  callerRtcConfig: RTCConfiguration;
+  signalingTurnCredentials: TurnCredentials | null;
+  roomResponseGeneration: number;
+  signalingActive: boolean;
 }
 
 export const defaultRTCConfig = {
@@ -211,7 +259,145 @@ export const defaultRTCConfig = {
   iceCandidatePoolSize: 2,
 } as RTCConfiguration;
 
-const initialState: Room[] = [];
+const iceServerUrls = (server: RTCIceServer): string[] =>
+  Array.isArray(server.urls) ? [...server.urls] : [server.urls];
+
+const cloneIceServer = (server: RTCIceServer): RTCIceServer => ({
+  ...server,
+  urls: Array.isArray(server.urls) ? [...server.urls] : server.urls,
+});
+
+export const cloneRTCConfiguration = (
+  configuration: RTCConfiguration,
+): RTCConfiguration => ({
+  ...configuration,
+  iceServers: configuration.iceServers?.map(cloneIceServer),
+  certificates: configuration.certificates
+    ? [...configuration.certificates]
+    : configuration.certificates,
+});
+
+const stringArraysEqual = (
+  left: readonly string[],
+  right: readonly string[],
+): boolean =>
+  left.length === right.length &&
+  left.every((value, index) => value === right[index]);
+
+export const rtcConfigurationsEqual = (
+  left: RTCConfiguration,
+  right: RTCConfiguration,
+): boolean => {
+  if (
+    left.bundlePolicy !== right.bundlePolicy ||
+    left.iceCandidatePoolSize !== right.iceCandidatePoolSize ||
+    left.iceTransportPolicy !== right.iceTransportPolicy ||
+    left.rtcpMuxPolicy !== right.rtcpMuxPolicy
+  )
+    return false;
+  const leftCertificates = left.certificates ?? [];
+  const rightCertificates = right.certificates ?? [];
+  if (
+    leftCertificates.length !== rightCertificates.length ||
+    leftCertificates.some(
+      (certificate, index) => certificate !== rightCertificates[index],
+    )
+  )
+    return false;
+  const leftServers = left.iceServers ?? [];
+  const rightServers = right.iceServers ?? [];
+  if (leftServers.length !== rightServers.length) return false;
+  return leftServers.every((server, index) => {
+    const other = rightServers[index];
+    if (
+      server.username !== other.username ||
+      server.credential !== other.credential
+    )
+      return false;
+    const urls = iceServerUrls(server);
+    const otherUrls = iceServerUrls(other);
+    return stringArraysEqual(urls, otherUrls);
+  });
+};
+
+/**
+ * Replace credentials only for endpoints present in an incoming ICE server.
+ *
+ * This preserves every unrelated caller-supplied STUN/TURN entry and every
+ * non-ICE RTCConfiguration option. Replacing overlapping URLs is required:
+ * TURN REST credentials expire, so retaining the first credential for a URL
+ * would make a later authenticated room join silently keep stale access.
+ */
+export const mergeIceServers = (
+  existing: readonly RTCIceServer[] | undefined,
+  incoming: readonly RTCIceServer[],
+): RTCIceServer[] => {
+  let merged = (existing ?? []).map(cloneIceServer);
+
+  for (const replacement of incoming) {
+    const replacementUrls = new Set(iceServerUrls(replacement));
+    const retained: RTCIceServer[] = [];
+
+    for (const current of merged) {
+      const currentUrls = iceServerUrls(current);
+      const remainingUrls = currentUrls.filter(
+        (url) => !replacementUrls.has(url),
+      );
+      if (remainingUrls.length === 0) continue;
+      retained.push({
+        ...current,
+        urls: Array.isArray(current.urls) ? remainingUrls : remainingUrls[0],
+      });
+    }
+
+    retained.push(cloneIceServer(replacement));
+    merged = retained;
+  }
+
+  return merged;
+};
+
+/**
+ * Derive the browser configuration from two single-source inputs.
+ *
+ * A managed URL replaces an overlapping caller URL only in this projection.
+ * Clearing the managed bundle therefore restores the caller's exact input,
+ * while rotation cannot accidentally retain an older signaling credential.
+ */
+export const deriveEffectiveRTCConfig = (
+  callerRtcConfig: RTCConfiguration,
+  signalingTurnCredentials: TurnCredentials | null,
+): RTCConfiguration => {
+  const effective = cloneRTCConfiguration(callerRtcConfig);
+  if (!signalingTurnCredentials) return effective;
+
+  const managed: RTCIceServer = {
+    urls: Array.isArray(signalingTurnCredentials.urls)
+      ? [...signalingTurnCredentials.urls]
+      : signalingTurnCredentials.urls,
+    username: signalingTurnCredentials.username,
+    credential: signalingTurnCredentials.credential,
+  };
+  effective.iceServers = mergeIceServers(effective.iceServers, [managed]);
+  return effective;
+};
+
+const freshCallerRTCConfig = (
+  rtcConfig: RTCConfiguration | undefined,
+): RTCConfiguration => cloneRTCConfiguration(rtcConfig ?? defaultRTCConfig);
+
+const updateCallerRTCConfig = (
+  room: ManagedRoom,
+  rtcConfig: RTCConfiguration,
+): void => {
+  room.callerRtcConfig = cloneRTCConfiguration(rtcConfig);
+  room.rtcConfig = deriveEffectiveRTCConfig(
+    room.callerRtcConfig,
+    room.signalingTurnCredentials,
+  );
+};
+
+const initialState: ManagedRoom[] = [];
 
 const assertRoomPolicyUnchanged = (
   current: RoomPolicyV1,
@@ -220,6 +406,53 @@ const assertRoomPolicyUnchanged = (
   const candidate = canonicalizeRoomPolicyV1(requested);
   if (!roomPoliciesEqualV1(current, candidate))
     throw new Error("roomSlice: room policy is immutable after creation");
+};
+
+const assertRoomActivationCapacity = (
+  rooms: readonly { signalingActive?: boolean }[],
+  roomIndex: number,
+): void => {
+  const transitionsToActive =
+    roomIndex === -1 || rooms[roomIndex].signalingActive === false;
+  if (
+    transitionsToActive &&
+    rooms.filter((room) => room.signalingActive !== false).length >=
+      MAX_ACTIVE_SIGNALING_ROOMS
+  )
+    throw new Error(
+      `roomSlice: cannot activate more than ${String(MAX_ACTIVE_SIGNALING_ROOMS)} rooms`,
+    );
+};
+
+const deleteMessageFromState = <T extends { id: string; messages: Message[] }>(
+  state: T[],
+  { roomId, transferId, merkleRootHex, hashHex }: DeleteMessageArgs,
+): void => {
+  if (!transferId && !merkleRootHex && !hashHex) return;
+  if (transferId && !/^[0-9a-f]{64}$/.test(transferId)) return;
+  if (merkleRootHex && merkleRootHex.length !== crypto_hash_sha512_BYTES * 2)
+    return;
+  if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
+
+  const roomIndex = state.findIndex((room) => room.id === roomId);
+  if (roomIndex === -1) return;
+
+  if (transferId) {
+    const messageIndex = state[roomIndex].messages.findIndex(
+      (message) => message.transferId === transferId,
+    );
+    if (messageIndex > -1) state[roomIndex].messages.splice(messageIndex, 1);
+  } else if (merkleRootHex) {
+    const messageIndex = state[roomIndex].messages.findIndex(
+      (message) => message.merkleRootHex === merkleRootHex,
+    );
+    if (messageIndex > -1) state[roomIndex].messages.splice(messageIndex, 1);
+  } else if (hashHex) {
+    const messageIndex = state[roomIndex].messages.findLastIndex(
+      (message) => message.sha512Hex === hashHex,
+    );
+    if (messageIndex > -1) state[roomIndex].messages.splice(messageIndex, 1);
+  }
 };
 
 const roomSlice = createSlice({
@@ -236,17 +469,28 @@ const roomSlice = createSlice({
         policy,
       } = action.payload;
 
-      if (url.length === 64 && isUUID(id)) {
-        const roomIndex = state.findIndex((r) => r.url === url || r.id === id);
+      if (/^[0-9a-f]{64}$/.test(url) && isUUID(id)) {
+        const roomIndex = state.findIndex((r) => r.url === url);
+        const collidingRoom = state.findIndex(
+          (room) => room.url !== url && room.id === id,
+        );
+        if (collidingRoom > -1) return;
+        assertRoomActivationCapacity(state, roomIndex);
 
         if (roomIndex > -1) {
+          state[roomIndex].callerRtcConfig ??= cloneRTCConfiguration(
+            state[roomIndex].rtcConfig ?? defaultRTCConfig,
+          );
+          state[roomIndex].signalingTurnCredentials ??= null;
+          state[roomIndex].roomResponseGeneration ??= 0;
           if (policy)
             assertRoomPolicyUnchanged(state[roomIndex].policy, policy);
           state[roomIndex].url = url;
           state[roomIndex].id = id;
+          state[roomIndex].signalingActive = true;
           if (canBeConnectionRelay != undefined)
             state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
-          if (rtcConfig) state[roomIndex].rtcConfig = rtcConfig;
+          if (rtcConfig) updateCallerRTCConfig(state[roomIndex], rtcConfig);
           if (onlyConnectWithKnownPeers != undefined) {
             state[roomIndex].onlyConnectWithKnownAddresses =
               onlyConnectWithKnownPeers;
@@ -256,6 +500,7 @@ const roomSlice = createSlice({
               "true";
           }
         } else {
+          const callerRtcConfig = freshCallerRTCConfig(rtcConfig);
           state.push({
             url,
             id,
@@ -266,24 +511,35 @@ const roomSlice = createSlice({
               onlyConnectWithKnownPeers ??
               localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
                 "true",
-            rtcConfig: rtcConfig ?? defaultRTCConfig,
+            callerRtcConfig,
+            signalingTurnCredentials: null,
+            rtcConfig: deriveEffectiveRTCConfig(callerRtcConfig, null),
+            roomResponseGeneration: 0,
+            signalingActive: true,
             policy: canonicalizeRoomPolicyV1(policy ?? DEFAULT_ROOM_POLICY_V1),
             peers: [],
             channels: [],
             messages: [],
           });
         }
-      } else if (url.length === 64) {
+      } else if (/^[0-9a-f]{64}$/.test(url)) {
         const roomIndex = state.findIndex((r) => r.url === url);
+        assertRoomActivationCapacity(state, roomIndex);
 
         if (roomIndex > -1) {
+          state[roomIndex].callerRtcConfig ??= cloneRTCConfiguration(
+            state[roomIndex].rtcConfig ?? defaultRTCConfig,
+          );
+          state[roomIndex].signalingTurnCredentials ??= null;
+          state[roomIndex].roomResponseGeneration ??= 0;
           if (policy)
             assertRoomPolicyUnchanged(state[roomIndex].policy, policy);
           state[roomIndex].url = url;
           state[roomIndex].id = "";
+          state[roomIndex].signalingActive = true;
           if (canBeConnectionRelay != undefined)
             state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
-          if (rtcConfig) state[roomIndex].rtcConfig = rtcConfig;
+          if (rtcConfig) updateCallerRTCConfig(state[roomIndex], rtcConfig);
           if (onlyConnectWithKnownPeers != undefined) {
             state[roomIndex].onlyConnectWithKnownAddresses =
               onlyConnectWithKnownPeers;
@@ -293,6 +549,7 @@ const roomSlice = createSlice({
               "true";
           }
         } else {
+          const callerRtcConfig = freshCallerRTCConfig(rtcConfig);
           state.push({
             url,
             id: "",
@@ -303,7 +560,11 @@ const roomSlice = createSlice({
               onlyConnectWithKnownPeers ??
               localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
                 "true",
-            rtcConfig: rtcConfig ?? defaultRTCConfig,
+            callerRtcConfig,
+            signalingTurnCredentials: null,
+            rtcConfig: deriveEffectiveRTCConfig(callerRtcConfig, null),
+            roomResponseGeneration: 0,
+            signalingActive: true,
             policy: canonicalizeRoomPolicyV1(policy ?? DEFAULT_ROOM_POLICY_V1),
             peers: [],
             channels: [],
@@ -311,6 +572,102 @@ const roomSlice = createSlice({
           });
         }
       }
+    },
+
+    applyRoomResponse: (
+      state,
+      action: PayloadAction<ApplyRoomResponseArgs>,
+    ) => {
+      const {
+        roomUrl,
+        roomId,
+        roomRequestId,
+        requestGeneration,
+        turnCredentials,
+      } = action.payload;
+      if (
+        !/^[0-9a-f]{64}$/.test(roomUrl) ||
+        !isUUID(roomId) ||
+        !isUUID(roomRequestId, 4) ||
+        !Number.isSafeInteger(requestGeneration) ||
+        requestGeneration <= 0
+      )
+        return;
+
+      const roomIndex = state.findIndex((room) => room.url === roomUrl);
+      if (roomIndex === -1) return;
+      const room = state[roomIndex];
+      if (
+        room.signalingActive === false ||
+        requestGeneration <= (room.roomResponseGeneration ?? 0) ||
+        (isUUID(room.id) && room.id !== roomId) ||
+        state.some(
+          (candidate, index) => index !== roomIndex && candidate.id === roomId,
+        )
+      )
+        return;
+
+      room.id = roomId;
+      room.signalingTurnCredentials = turnCredentials
+        ? {
+            ...turnCredentials,
+            urls: Array.isArray(turnCredentials.urls)
+              ? [...turnCredentials.urls]
+              : turnCredentials.urls,
+          }
+        : null;
+      room.rtcConfig = deriveEffectiveRTCConfig(
+        room.callerRtcConfig,
+        room.signalingTurnCredentials,
+      );
+      room.roomResponseGeneration = requestGeneration;
+    },
+
+    rollbackRoomResponse: (
+      state,
+      action: PayloadAction<RollbackRoomResponseArgs>,
+    ) => {
+      const room = state.find(
+        (candidate) => candidate.url === action.payload.roomUrl,
+      );
+      if (
+        !room ||
+        room.id !== action.payload.failedRoomId ||
+        room.roomResponseGeneration !== action.payload.failedRequestGeneration
+      )
+        return;
+      room.id = action.payload.previousRoomId;
+      room.roomResponseGeneration = action.payload.previousRequestGeneration;
+      room.signalingActive = action.payload.previousSignalingActive;
+      const previous = action.payload.previousTurnCredentials;
+      room.signalingTurnCredentials = previous
+        ? {
+            ...previous,
+            urls: [...previous.urls],
+          }
+        : null;
+      room.rtcConfig = deriveEffectiveRTCConfig(
+        room.callerRtcConfig,
+        room.signalingTurnCredentials,
+      );
+    },
+
+    expireRoomTurnCredentials: (
+      state,
+      action: PayloadAction<ExpireRoomTurnCredentialsArgs>,
+    ) => {
+      const room = state.find(
+        (candidate) => candidate.url === action.payload.roomUrl,
+      );
+      if (
+        !room ||
+        room.roomResponseGeneration !== action.payload.requestGeneration ||
+        room.signalingTurnCredentials?.expiresAtUnixSeconds !==
+          action.payload.expiresAtUnixSeconds
+      )
+        return;
+      room.signalingTurnCredentials = null;
+      room.rtcConfig = deriveEffectiveRTCConfig(room.callerRtcConfig, null);
     },
 
     setRoomPolicy: (state, action: PayloadAction<SetRoomPolicyArgs>) => {
@@ -371,10 +728,14 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const peerIndex = state[roomIndex].peers.findIndex(
-          (p) => p.peerId === peerId,
+          (peer) =>
+            peer.peerId === peerId || peer.peerPublicKey === peerPublicKey,
         );
 
-        if (peerIndex === -1)
+        if (
+          peerIndex === -1 &&
+          state[roomIndex].peers.length < MAX_SIGNALING_ROOM_PEERS
+        )
           state[roomIndex].peers.push({ peerId, peerPublicKey });
       }
     },
@@ -421,6 +782,9 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const room = state[roomIndex];
+        room.callerRtcConfig ??= cloneRTCConfiguration(
+          room.rtcConfig ?? defaultRTCConfig,
+        );
         room.coverStatusByPeer ??= {};
         room.coverStatusByPeer[peerId] = status;
       }
@@ -443,6 +807,8 @@ const roomSlice = createSlice({
 
     setChannel: (state, action: PayloadAction<SetChannelArgs>) => {
       const { roomId, label, peerId } = action.payload;
+      if (label.length === 0 || label.length > MAX_DATA_CHANNEL_LABEL_CHARS)
+        return;
 
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
@@ -456,10 +822,16 @@ const roomSlice = createSlice({
             channelIndex
           ].peerIds.findIndex((p) => p === peerId);
 
-          if (peerIndex === -1) {
+          if (
+            peerIndex === -1 &&
+            state[roomIndex].channels[channelIndex].peerIds.length <
+              MAX_SIGNALING_ROOM_PEERS
+          ) {
             state[roomIndex].channels[channelIndex].peerIds.push(peerId);
           }
-        } else {
+        } else if (
+          state[roomIndex].channels.length < MAX_SIGNALING_ROOM_CHANNELS
+        ) {
           state[roomIndex].channels.push({
             label: label,
             peerIds: [peerId],
@@ -520,26 +892,15 @@ const roomSlice = createSlice({
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
-        const iceServersLen = iceServers.length;
-        const existingIceServers =
-          state[roomIndex].rtcConfig.iceServers?.flatMap((server) =>
-            Array.isArray(server.urls) ? server.urls : [server.urls],
-          ) ?? [];
-        for (let i = 0; i < iceServersLen; i++) {
-          const urlsLen = iceServers[i].urls.length;
-          let shouldPush = false;
-          for (let j = 0; j < urlsLen; j++) {
-            if (!existingIceServers.includes(iceServers[i].urls[j])) {
-              shouldPush = true;
-
-              break;
-            }
-          }
-
-          if (shouldPush) {
-            state[roomIndex].rtcConfig.iceServers?.push(iceServers[i]);
-          }
-        }
+        const room = state[roomIndex];
+        room.callerRtcConfig.iceServers = mergeIceServers(
+          room.callerRtcConfig.iceServers,
+          iceServers,
+        );
+        room.rtcConfig = deriveEffectiveRTCConfig(
+          room.callerRtcConfig,
+          room.signalingTurnCredentials,
+        );
       }
     },
 
@@ -733,51 +1094,28 @@ const roomSlice = createSlice({
     },
 
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
-      const { roomId, transferId, merkleRootHex, hashHex } = action.payload;
+      deleteMessageFromState(state, action.payload);
+    },
 
-      if (!transferId && !merkleRootHex && !hashHex) return;
-      if (transferId && !/^[0-9a-f]{64}$/.test(transferId)) return;
-      if (
-        merkleRootHex &&
-        merkleRootHex.length !== crypto_hash_sha512_BYTES * 2
-      )
-        return;
-      if (hashHex && hashHex.length !== crypto_hash_sha512_BYTES * 2) return;
-
-      const roomIndex = state.findIndex((room) => room.id === roomId);
-      if (roomIndex === -1) return;
-
-      if (transferId) {
-        const messageIndex = state[roomIndex].messages.findIndex(
-          (m) => m.transferId === transferId,
-        );
-
-        if (messageIndex > -1)
-          state[roomIndex].messages.splice(messageIndex, 1);
-      } else if (merkleRootHex) {
-        const messageIndex = state[roomIndex].messages.findIndex(
-          (m) => m.merkleRootHex === merkleRootHex,
-        );
-
-        if (messageIndex > -1)
-          state[roomIndex].messages.splice(messageIndex, 1);
-      } else if (hashHex) {
-        const messageIndex = state[roomIndex].messages.findLastIndex(
-          (m) => m.sha512Hex === hashHex,
-        );
-
-        if (messageIndex > -1)
-          state[roomIndex].messages.splice(messageIndex, 1);
-      }
+    /** Reducer-only twin for callers that already awaited durable deletion. */
+    deleteMessageStateOnly: (
+      state,
+      action: PayloadAction<DeleteMessageArgs>,
+    ) => {
+      deleteMessageFromState(state, action.payload);
     },
 
     setOnlyConnectWithKnownPeers: (
       state,
       action: PayloadAction<SetCanOnlyConnectWithKnownPeers>,
     ) => {
-      const { roomId, onlyConnectWithKnownPeers } = action.payload;
+      const { roomId, roomUrl, onlyConnectWithKnownPeers } = action.payload;
 
-      const roomIndex = state.findIndex((r) => r.id === roomId);
+      const roomIndex = state.findIndex(
+        (room) =>
+          (roomUrl !== undefined && room.url === roomUrl) ||
+          (roomUrl === undefined && room.id === roomId),
+      );
 
       if (roomIndex > -1) {
         state[roomIndex].onlyConnectWithKnownAddresses =
@@ -792,6 +1130,7 @@ const roomSlice = createSlice({
       if (roomIndex > -1) {
         const url = state[roomIndex].url;
         const policy = state[roomIndex].policy;
+        const callerRtcConfig = freshCallerRTCConfig(undefined);
 
         state[roomIndex] = {
           url,
@@ -800,7 +1139,11 @@ const roomSlice = createSlice({
           connectedToPeers: false,
           canBeConnectionRelay: true,
           onlyConnectWithKnownAddresses: false,
-          rtcConfig: defaultRTCConfig,
+          callerRtcConfig,
+          signalingTurnCredentials: null,
+          rtcConfig: deriveEffectiveRTCConfig(callerRtcConfig, null),
+          roomResponseGeneration: 0,
+          signalingActive: false,
           // The descriptor is public room identity, not ephemeral connection
           // state. Retaining the URL while silently resetting a PIN room to
           // no-PIN would create a local downgrade on reconnect.
@@ -811,6 +1154,9 @@ const roomSlice = createSlice({
         };
       }
     },
+
+    /** Full-device purge only; ordinary room deletion keeps a safe tombstone. */
+    purgeAllRooms: () => [] as ManagedRoom[],
 
     incrementMessageStats: (
       state,
@@ -839,6 +1185,9 @@ const roomSlice = createSlice({
 
 export const {
   setRoom,
+  applyRoomResponse,
+  rollbackRoomResponse,
+  expireRoomTurnCredentials,
   setRoomPolicy,
   setConnectingToPeers,
   setConnectedToPeers,
@@ -855,7 +1204,11 @@ export const {
   deletePeer,
   deleteChannel,
   deleteMessage,
+  deleteMessageStateOnly,
   deleteRoom,
+  purgeAllRooms,
 } = roomSlice.actions;
-export const roomSelector = (state: State) => state.rooms;
+export const roomSelector = <TRoom extends Room>(state: {
+  readonly rooms: TRoom[];
+}): TRoom[] => state.rooms;
 export default roomSlice.reducer;

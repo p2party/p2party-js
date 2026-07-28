@@ -1,7 +1,6 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
-import type { State } from "../store";
 
 export interface SignalingState {
   isEstablishingConnection: boolean;
@@ -49,5 +48,7 @@ const signalingServerSlice = createSlice({
 });
 
 export const signalingServerActions = signalingServerSlice.actions;
-export const signalingServerSelector = (state: State) => state.signalingServer;
+export const signalingServerSelector = (state: {
+  readonly signalingServer: SignalingState;
+}): SignalingState => state.signalingServer;
 export default signalingServerSlice.reducer;

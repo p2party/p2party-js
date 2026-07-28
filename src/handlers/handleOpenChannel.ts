@@ -83,6 +83,10 @@ import {
   forgetCompletedReceiveMessageKey,
   forgetMappedReceiveMessageKey,
 } from "./receiveMessageKeyLifetime";
+import {
+  registerCoverChannelUntilClose,
+  unregisterCoverChannel,
+} from "./coverChannelRegistry";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -237,10 +241,23 @@ export const handleOpenChannel = async (
   // Track those in `coverChannels`, kept separate from `messageChannels` so
   // continuous cover lanes never block healing quiescence or the per-edge
   // message-channel budget. Cells route below purely by their type byte.
-  const isCoverLane = extChannel.label !== "main" && epc.coverRuntime !== undefined;
+  const isCoverLane =
+    extChannel.label !== "main" && epc.coverRuntime !== undefined;
+  let unregisterConcreteCoverChannel = (): void => {
+    unregisterCoverChannel(epc.coverChannels, dataChannels, extChannel);
+  };
   if (isCoverLane) {
     epc.coverChannels ??= new Set<IRTCDataChannel>();
-    epc.coverChannels.add(extChannel);
+    try {
+      unregisterConcreteCoverChannel = registerCoverChannelUntilClose(
+        epc.coverChannels,
+        extChannel,
+        dataChannels,
+      );
+    } catch (error) {
+      if (extChannel.readyState !== "closed") extChannel.close();
+      throw error;
+    }
   } else if (extChannel.label !== "main") {
     epc.messageChannels ??= new Set<IRTCDataChannel>();
     if (
@@ -286,6 +303,7 @@ export const handleOpenChannel = async (
     const labelError =
       error instanceof Error ? error : new Error(String(error));
     epc.messageChannels?.delete(extChannel);
+    unregisterConcreteCoverChannel();
     if (epc.mainChannel === extChannel) epc.mainChannel = undefined;
     if (handshakeLease)
       clearHandshakeChannel(roomId, epc.withPeerId, labelError, handshakeLease);
@@ -293,6 +311,11 @@ export const handleOpenChannel = async (
     throw labelError;
   }
   const { channelLabel, merkleRoot, merkleRootHex } = parsedLabel;
+  if (isCoverLane && extChannel.readyState === "closed") {
+    unregisterConcreteCoverChannel();
+    releaseQueuedReceipts(receiptQueue);
+    throw new Error("Cover DataChannel closed during label decoding");
+  }
 
   let resourcesReleased = false;
   let auxiliaryResourcesReleased = false;
@@ -301,6 +324,7 @@ export const handleOpenChannel = async (
     auxiliaryResourcesReleased = true;
     releaseQueuedReceipts(receiptQueue);
     epc.messageChannels?.delete(extChannel);
+    if (isCoverLane) unregisterConcreteCoverChannel();
   };
   const releaseProtocolResources = (): void => {
     if (resourcesReleased) return;
@@ -349,7 +373,6 @@ export const handleOpenChannel = async (
     // transfer state — never a cancel. Drop it from the cover set; if it
     // carried a now-complete real message, durably retire that receive key.
     if (isCoverLane) {
-      epc.coverChannels?.delete(extChannel);
       releaseAuxiliaryResources();
       await waitForQueuedMessageFrames(queue, drainingRef);
       if (merkleRootHex !== "") {

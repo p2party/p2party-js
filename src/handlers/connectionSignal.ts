@@ -30,6 +30,15 @@ export const establishSignaledConnection = async (
   rtcConfig: RTCConfiguration,
   effects: ConnectionSignalEffects,
 ): Promise<void> => {
+  // Admission and transport reservation happen before any roster/channel
+  // publication. A rejected edge must leave no attacker-controlled metadata.
+  await effects.ensureConnection({
+    roomId: message.roomId,
+    peerId: message.fromPeerId,
+    peerPublicKey: message.fromPeerPublicKey,
+    rtcConfig,
+  });
+
   effects.recordPeer({
     roomId: message.roomId,
     peerId: message.fromPeerId,
@@ -42,11 +51,4 @@ export const establishSignaledConnection = async (
       peerId: message.fromPeerId,
       label,
     });
-
-  await effects.ensureConnection({
-    roomId: message.roomId,
-    peerId: message.fromPeerId,
-    peerPublicKey: message.fromPeerPublicKey,
-    rtcConfig,
-  });
 };

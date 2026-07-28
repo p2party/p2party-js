@@ -1,7 +1,7 @@
 import { debugLog } from "../../utils/debug";
 import signalingServerApi from "../signalingServerApi";
 
-import { getRoomPeerMutex } from "./negotiationLock";
+import { runRoomPeerExclusive } from "./negotiationLock";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import {
   discardIceCandidatesForAttempt,
@@ -45,7 +45,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
   },
   api,
 ) => {
-  return getRoomPeerMutex(roomId, peerId).runExclusive(async () => {
+  return runRoomPeerExclusive(roomId, peerId, async () => {
     const { keyPair } = api.getState() as State;
 
     const connectionIndex = findRoomPeerConnectionIndex(

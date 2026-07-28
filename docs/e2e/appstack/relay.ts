@@ -56,7 +56,9 @@ Bun.serve<WsData, undefined>({
       pubKeyByPeer.set(ws.data.peerId, ws.data.publicKey);
       peers.set(ws.data.peerId, ws);
       // Server issues the peerId + a fresh challenge nonce.
-      const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+      const nonce = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("hex");
       send(ws, {
         type: "peerId",
         peerId: ws.data.peerId,
@@ -64,7 +66,12 @@ Bun.serve<WsData, undefined>({
         protocolVersion: PROTO,
         message: "relay challenge",
       });
-      log("open", ws.data.peerId.slice(0, 8), "pub", ws.data.publicKey.slice(0, 8));
+      log(
+        "open",
+        ws.data.peerId.slice(0, 8),
+        "pub",
+        ws.data.publicKey.slice(0, 8),
+      );
     },
     message(ws, raw) {
       if (raw === "PONG") return;
@@ -79,11 +86,22 @@ Bun.serve<WsData, undefined>({
           return;
         case "challenge": {
           // Accept without cryptographic verification (test relay).
-          send(ws, { type: "challenge", challengeId: crypto.randomUUID(), protocolVersion: PROTO });
+          send(ws, {
+            type: "challenge",
+            challengeId: crypto.randomUUID(),
+            protocolVersion: PROTO,
+          });
           return;
         }
         case "room": {
+          if (
+            msg.protocolVersion !== PROTO ||
+            typeof msg.roomUrl !== "string" ||
+            typeof msg.roomRequestId !== "string"
+          )
+            return;
           const roomUrl = String(msg.roomUrl);
+          const roomRequestId = msg.roomRequestId;
           let roomId = roomIdByUrl.get(roomUrl);
           if (!roomId) {
             roomId = crypto.randomUUID();
@@ -92,17 +110,56 @@ Bun.serve<WsData, undefined>({
           }
           ws.data.roomId = roomId;
           roomMembers.get(roomId)!.add(ws.data.peerId);
-          send(ws, { type: "roomId", roomId, roomUrl, protocolVersion: PROTO });
+          send(ws, {
+            type: "roomId",
+            roomId,
+            roomUrl,
+            roomRequestId,
+            protocolVersion: PROTO,
+          });
           // Introduce this peer to existing members and vice versa.
           for (const memberId of roomMembers.get(roomId)!) {
             pushPeers(memberId, roomId);
           }
-          log("room", roomUrl.slice(0, 8), "→", roomId.slice(0, 8), "members", roomMembers.get(roomId)!.size);
+          log(
+            "room",
+            roomUrl.slice(0, 8),
+            "→",
+            roomId.slice(0, 8),
+            "members",
+            roomMembers.get(roomId)!.size,
+          );
           return;
         }
         case "peers": {
           const roomId = String(msg.roomId);
           pushPeers(ws.data.peerId, roomId);
+          return;
+        }
+        case "leaveRoom": {
+          if (
+            msg.protocolVersion !== PROTO ||
+            typeof msg.roomUrl !== "string" ||
+            !/^[0-9a-f]{64}$/u.test(msg.roomUrl) ||
+            typeof msg.roomLeaveId !== "string" ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+              msg.roomLeaveId,
+            )
+          )
+            return;
+          const roomUrl = msg.roomUrl;
+          const roomLeaveId = msg.roomLeaveId;
+          const roomId = roomIdByUrl.get(roomUrl);
+          if (roomId) {
+            roomMembers.get(roomId)?.delete(ws.data.peerId);
+            if (ws.data.roomId === roomId) ws.data.roomId = null;
+          }
+          send(ws, {
+            type: "roomLeft",
+            roomUrl,
+            roomLeaveId,
+            protocolVersion: PROTO,
+          });
           return;
         }
         case "connection": {
@@ -150,7 +207,8 @@ Bun.serve<WsData, undefined>({
     },
     close(ws) {
       peers.delete(ws.data.peerId);
-      if (ws.data.roomId) roomMembers.get(ws.data.roomId)?.delete(ws.data.peerId);
+      if (ws.data.roomId)
+        roomMembers.get(ws.data.roomId)?.delete(ws.data.peerId);
       log("close", ws.data.peerId.slice(0, 8));
     },
   },

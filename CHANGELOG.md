@@ -4,6 +4,90 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.4] — 2026-07-28
+
+WebRTC, signaling, TURN, and terminal-purge correctness. This is still protocol
+v4 and preserves the existing room invitation UX; it does not claim the future
+blind-rendezvous threat model.
+
+### Added
+
+- Correlated room requests and room-leave acknowledgements. Every new room
+  request carries a UUIDv4 echoed by the server, so a delayed response cannot
+  configure the wrong room. `purgeRoom()` sends an exact
+  room-capability-bound `leaveRoom`/`roomLeft` exchange—even before a server
+  room UUID exists—and exports
+  `RemoteRoomRevocationUnconfirmedError` for offline or non-acknowledging
+  servers; local WebRTC, memory, and durable room state are terminal before
+  that error is reported, without rotating the socket shared by other rooms.
+- Managed TURN credential lifecycle. Room responses may carry bounded TURN
+  URLs, username, credential, and absolute expiry. Caller-provided
+  `RTCConfiguration` remains a separate source of truth; managed relay entries
+  are merged, applied to every live peer connection, proactively refreshed,
+  and removed or failed closed at expiry.
+- Explicit signaling resource budgets: the browser's per-socket ingress FIFO
+  is capped at 128 frames and 2 MiB, room rosters and live/initializing mesh
+  edges are capped at 64 peers, channel state is bounded, and unknown-peer ICE
+  lock state is released after each operation.
+
+### Changed
+
+- The coordinated protocol-v4 room wire is intentionally strict and breaking:
+  `roomRequestId`, `roomUrl`, `roomLeaveId`, and absolute TURN expiry use one
+  exact shape. There is no legacy request, response, credential, or
+  acknowledgement fallback. Existing invitation URLs and the room-join UX are
+  unchanged.
+- `connectToSignalingServer()` remains available only as a thin delegate to the
+  canonical room connection path. First joins, reconnects, and frontend
+  reconnect requests therefore share one policy/admission implementation.
+
+### Fixed
+
+- A send started while an authenticated peer edge is undergoing its bounded ICE
+  restart no longer fails immediately as `not-connected`. Immediate and
+  scheduled fanout wait through the repair window, then either use the recovered
+  edge or return the normal per-peer failure result.
+- Signaling frames are processed in arrival order instead of allowing async
+  WebSocket handlers to overlap. Exact server heartbeats are answered
+  synchronously so slow IndexedDB, SDP, or ICE work cannot create a false
+  disconnect; protocol data and malformed heartbeat lookalikes cannot use that
+  bypass.
+- Fresh socket proof now refreshes every active room, while exact-server
+  binding prevents retained capabilities from being disclosed to a different
+  rendezvous URL after a disconnect.
+- Socket attempts, joins, disconnects, room purges, identity purges, and full
+  purges are serialized so a delayed IndexedDB, proof, or WebRTC operation
+  cannot resurrect terminal state. Full purge removes room capabilities from
+  memory instead of retaining policy tombstones.
+- TURN rotation updates live `RTCPeerConnection` configuration before
+  restarting negotiated ICE, rolls back atomically on failure, scopes timers
+  and responses to their exact generation, and closes rather than continuing
+  with an expired or partially applied generation.
+- Long-lived WebRTC callbacks read the current authenticated peer identity
+  instead of sending a creation-time `peerId` on a replacement socket.
+  Unknown or inactive-room introductions, SDP, and ICE now fail closed.
+- PIN-room reconnects pass through the same persisted-policy admission path as
+  first joins; the legacy reconnect helper can no longer bypass the PIN vault
+  or reactivate an inactive room with default policy.
+- Release packaging now copies the README only after synchronizing the exact
+  bundle and worker SRI values, then verifies those values inside the packed
+  tarball.
+
+### Deployment note
+
+Confirmed remote room unlinking and room-scoped TURN configuration require the
+matching `p2party-server` 0.1.1. This is a coordinated protocol-v4 cutover:
+room request correlation, managed TURN responses, and room-leave
+acknowledgements use one mandatory wire shape with no older-server fallback.
+
+The matching server release also serializes each socket's signaling frames,
+bounds retained work, lets only an exact pong from the proved current socket
+owner bypass slow work, and rechecks exact source and target ownership after
+every awaited database/routing boundary. Same-identity fencing and membership
+ordering across different server processes remain explicit nonclaims; 0.1.1
+does not implement blind rendezvous or hide rooms, identities, or the social
+graph from the signaling operator.
+
 ## [0.14.3] — 2026-07-27
 
 ### Added

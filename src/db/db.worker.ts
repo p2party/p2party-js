@@ -608,11 +608,10 @@ async function fnGetDBNewChunkByReceipt(
     return undefined;
   const db = await getDB();
   try {
-    return await db.getFromIndex(
-      "newChunks",
-      "receiptScope",
-      [merkleRootHex, receiptTokenHex],
-    );
+    return await db.getFromIndex("newChunks", "receiptScope", [
+      merkleRootHex,
+      receiptTokenHex,
+    ]);
   } finally {
     db.close();
   }
@@ -1312,13 +1311,8 @@ async function storeReceiveChunkLocked(
   const existsDb = await getDB();
   let already: number;
   try {
-    const tx = existsDb.transaction(
-      ["chunks", "messageData"],
-      "readonly",
-    );
-    already = await tx
-      .objectStore("chunks")
-      .count([merkleRoot, chunkIndex]);
+    const tx = existsDb.transaction(["chunks", "messageData"], "readonly");
+    already = await tx.objectStore("chunks").count([merkleRoot, chunkIndex]);
     const previous = await tx
       .objectStore("messageData")
       .index("merkleRoot")
@@ -1331,10 +1325,7 @@ async function storeReceiveChunkLocked(
   if (already > 0) {
     const db = await getDB();
     try {
-      const tx = db.transaction(
-        ["chunks", "messageData"],
-        "readonly",
-      );
+      const tx = db.transaction(["chunks", "messageData"], "readonly");
       const index = tx.objectStore("chunks").index("merkleRoot");
       const records: Chunk[] = [];
       let cursor = await index.openCursor(merkleRoot);
@@ -1343,10 +1334,7 @@ async function storeReceiveChunkLocked(
         cursor = await cursor.continue();
       }
       assertManifest(
-        await tx
-          .objectStore("messageData")
-          .index("merkleRoot")
-          .get(merkleRoot),
+        await tx.objectStore("messageData").index("merkleRoot").get(merkleRoot),
       );
       const progress = validateLayout(records);
       await tx.done;
@@ -1364,10 +1352,7 @@ async function storeReceiveChunkLocked(
   // cannot change before the committing transaction below.
   const preflightDb = await getDB();
   try {
-    const tx = preflightDb.transaction(
-      ["chunks", "messageData"],
-      "readonly",
-    );
+    const tx = preflightDb.transaction(["chunks", "messageData"], "readonly");
     const records: Chunk[] = [];
     let cursor = await tx
       .objectStore("chunks")
@@ -1378,10 +1363,7 @@ async function storeReceiveChunkLocked(
       cursor = await cursor.continue();
     }
     assertManifest(
-      await tx
-        .objectStore("messageData")
-        .index("merkleRoot")
-        .get(merkleRoot),
+      await tx.objectStore("messageData").index("merkleRoot").get(merkleRoot),
     );
     validateLayout([...records, { chunkIndex, realLen }]);
     await tx.done;
@@ -1408,9 +1390,10 @@ async function storeReceiveChunkLocked(
     }
   }
 
-  const record: Chunk = storage === "opfs" && wroteToOPFS
-    ? { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash }
-    : { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash, data };
+  const record: Chunk =
+    storage === "opfs" && wroteToOPFS
+      ? { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash }
+      : { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash, data };
 
   const db = await getDB();
   try {
@@ -1770,10 +1753,7 @@ const ratchetRollbackGuard = new RatchetRollbackGuard();
 const ratchetLastWrite = new Map<string, number>();
 const ratchetWorkerLocks = new Map<string, Promise<void>>();
 
-const ratchetWorkerKey = (
-  roomId: string,
-  peerPublicKey: string,
-): string =>
+const ratchetWorkerKey = (roomId: string, peerPublicKey: string): string =>
   `${String(roomId.length)}:${roomId}${String(peerPublicKey.length)}:${peerPublicKey}`;
 
 const withRatchetWorkerLock = async <T>(
@@ -1800,15 +1780,13 @@ const withRatchetWorkerLock = async <T>(
 
 const wipeWorkerRatchetSecrets = (session: RatchetSession): void => {
   new Uint8Array(session.rootKey).fill(0);
-  if (session.sendingChainKey)
-    new Uint8Array(session.sendingChainKey).fill(0);
+  if (session.sendingChainKey) new Uint8Array(session.sendingChainKey).fill(0);
   if (session.receivingChainKey)
     new Uint8Array(session.receivingChainKey).fill(0);
   new Uint8Array(session.dhSelfSec).fill(0);
   for (const skipped of session.skippedMessageKeys)
     new Uint8Array(skipped.messageKey).fill(0);
-  if (session.edgeCryptoState)
-    new Uint8Array(session.edgeCryptoState).fill(0);
+  if (session.edgeCryptoState) new Uint8Array(session.edgeCryptoState).fill(0);
 };
 
 async function fnGetRatchetSession(
@@ -1834,10 +1812,7 @@ async function fnGetRatchetSession(
       const edge = ratchetWorkerKey(roomId, peerPublicKey);
       ratchetLastWrite.set(
         edge,
-        Math.max(
-          ratchetLastWrite.get(edge) ?? 0,
-          restored.updatedAt,
-        ),
+        Math.max(ratchetLastWrite.get(edge) ?? 0, restored.updatedAt),
       );
       return restored;
     } catch (error) {
@@ -1939,9 +1914,7 @@ async function fnGetPinAttemptState(
     return (await db.get(
       "meta",
       pinAttemptMetaId(roomId, peerIdentityEd25519),
-    )) as
-      | PinAttemptState
-      | undefined;
+    )) as PinAttemptState | undefined;
   } finally {
     db.close();
   }
@@ -1981,10 +1954,7 @@ async function fnIncrementPinAttemptState(
     const delay =
       failures < maxImmediateAttempts
         ? 0
-        : Math.min(
-            baseMs * 2 ** (failures - maxImmediateAttempts),
-            maxMs,
-          );
+        : Math.min(baseMs * 2 ** (failures - maxImmediateAttempts), maxMs);
     const next = { failures, retryAfter: now + delay };
     await store.put(next, key);
     await tx.done;
@@ -2002,10 +1972,7 @@ async function fnDeletePinAttemptState(
   const db = await getDB();
   try {
     if (peerIdentityEd25519 !== undefined) {
-      await db.delete(
-        "meta",
-        pinAttemptMetaId(roomId, peerIdentityEd25519),
-      );
+      await db.delete("meta", pinAttemptMetaId(roomId, peerIdentityEd25519));
       return;
     }
 
@@ -2039,8 +2006,7 @@ async function fnGetIdentityX25519(): Promise<IdentityX25519 | undefined> {
   let stored: StoredIdentityX25519 | undefined;
   try {
     stored = (await db.get("meta", IDENTITY_X25519_META_ID)) as
-      | StoredIdentityX25519
-      | undefined;
+      StoredIdentityX25519 | undefined;
   } finally {
     db.close();
   }
@@ -2102,8 +2068,7 @@ async function fnGetIdentityEd25519(): Promise<IdentityEd25519 | undefined> {
   let stored: StoredIdentityEd25519 | undefined;
   try {
     stored = (await db.get("meta", IDENTITY_ED25519_META_ID)) as
-      | StoredIdentityEd25519
-      | undefined;
+      StoredIdentityEd25519 | undefined;
   } finally {
     db.close();
   }
@@ -2118,9 +2083,7 @@ async function fnGetIdentityEd25519(): Promise<IdentityEd25519 | undefined> {
   return { pub: stored.pub, secret };
 }
 
-async function fnSetIdentityEd25519(
-  identity: IdentityEd25519,
-): Promise<void> {
+async function fnSetIdentityEd25519(identity: IdentityEd25519): Promise<void> {
   if (identity.pub.byteLength !== 32 || identity.secret.byteLength !== 64)
     throw new Error("Ed25519 identity has invalid key lengths");
 
@@ -2153,12 +2116,9 @@ async function fnDeleteIdentityEd25519(): Promise<void> {
 }
 
 async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
+  const db = await getDB();
   try {
-    const db = await getDB();
-    const tx = db.transaction(
-      ["uniqueRoom", "ratchetSessions"],
-      "readwrite",
-    );
+    const tx = db.transaction(["uniqueRoom", "ratchetSessions"], "readwrite");
     const store = tx.objectStore("uniqueRoom");
     const index = store.index("roomId");
     const item = await index.getKey(roomId);
@@ -2176,10 +2136,8 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
     }
 
     await tx.done;
-
+  } finally {
     db.close();
-  } catch {
-    /* empty */
   }
 }
 
@@ -2221,9 +2179,7 @@ async function fnDeleteDBChunk(
   }
 }
 
-async function fnDeleteDBNewChunk(
-  selector: NewChunkSelector,
-): Promise<void> {
+async function fnDeleteDBNewChunk(selector: NewChunkSelector): Promise<void> {
   const { transferId, merkleRootHex, hashHex, chunkIndex } = selector;
   const db = await getDB();
   try {

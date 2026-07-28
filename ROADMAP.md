@@ -2,7 +2,7 @@
 
 Direction, not a schedule. Nothing here carries a date, and anything in
 "Research directions" may turn out to be a bad idea once it is studied
-properly. What is already shipped is described in the
+properly. What the current source release contains is described in the
 [README](README.md) and bounded honestly in the
 [protocol-v4 security boundary](docs/protocol-v4-security.md).
 
@@ -10,7 +10,10 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Shipped and running in the browser mesh as of 0.14.3:
+Implemented and verified in the `0.14.4` SDK release candidate:
+
+> `0.14.4` is not a statement about the currently deployed service. The
+> coordinated SDK, signaling-server, and frontend deployment is still pending.
 
 - protocol v4 — hybrid interactive 3DH ⊕ ML-KEM bootstrap, Ed25519-pinned
   identities, three chained confirmation flights, per-edge Double Ratchet;

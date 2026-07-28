@@ -28,15 +28,33 @@ ordering:
 - The PQ successor now recommends both-required Ed25519 + ML-DSA-65 over one
   exact shared transcript and records the browser key-custody nonclaim. No
   v0.4 field or suite ID changed.
+- `PairStepEnvelopeV1` now has a schema-derived codec and exact suite-1 class
+  targets. `validateOperation()` binds its routing tag to the signed semantic
+  slot, and `coreReduceOuter()` accepts only live results of the one
+  mutation-resistant validate-and-identify ingress.
+- The current signaling path now treats caller RTC configuration and
+  signaling-managed credentials as separate sources, correlates every new room
+  response to a wire UUID, updates live peer connections before an ICE restart,
+  refreshes every active room after fresh socket proof and before credential
+  expiry, and removes expired managed credentials. The coordinated v4 cutover
+  requires that UUID in the one canonical request/response shape; there is no
+  released-server fallback. Room leave/acknowledgement uses the stable room
+  capability, so purging a join that has not received its server room UUID
+  still requires authoritative remote revocation.
+- The frontend message list is the sole scroll owner and the composer is a
+  normal row below it. Long drafts cap at roughly six lines, layout-driven
+  resizes preserve the live edge without yanking a history reader, and the
+  dynamic viewport plus all four safe-area insets cover Chrome Android, iOS
+  Safari geometry, and Capacitor's single-inset-owner configuration.
 
-Do **not** start payload reduction as a mechanical codec task. The absent
-`PairStepEnvelopeV1` codec, `STORE_HINT` ordering by derived `RouteId`, the
+Do **not** continue payload reduction as a mechanical codec task. The absent
+`PairPlaintextV1`/body codecs, `STORE_HINT` ordering by derived `RouteId`, the
 timeless-signature/absolute-lease split, and the authority-view/custody
-constructor are Phase-0 decisions. Current `activeOperationIds` is therefore
+constructor remain Phase-0 decisions. Current `activeOperationIds` is therefore
 an outer-framed candidate projection, not yet the complete specified
 `OuterValidOperationSet`. The next implementation step is to freeze those
-schema/kernel decisions and vectors; only then implement the closed nested
-decoder and `Admit()`.
+remaining schema/kernel decisions and vectors; only then implement the closed
+inner decoders and `Admit()`.
 
 Current verification after this continuation:
 
@@ -91,20 +109,21 @@ do not stage it unless the maintainer explicitly reverses that decision.
 
 ### `p2party-js/src/blindRendezvous/` (none exported from the package barrel)
 
-| Module               | Owns                                                                                                            |
-| -------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `canonicalSchema.ts` | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
-| `schemas.ts`         | Descriptors for the §4.0–4.5 objects implemented so far.                                                        |
-| `projections.ts`     | Generated key tables and enum projections. No hand-maintained duplicate remains.                                |
-| `derivations.ts`     | Domain-separated hashes, HKDF-SHA-256, room/operation/carrier identifiers.                                      |
-| `roomPolicyV4.ts`    | `RoomPolicyV4` validation, canonical codec, `DEFAULT_BLIND_POLICY_V4_0`.                                        |
-| `roomInviteV2.ts`    | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, the two typed errors.                             |
-| `operation.ts`       | `AuthenticatedRoomOperationV1` codec, outer validation, Ed25519 sign/verify.                                    |
-| `coreReduce.ts`      | Merge (set union) and deterministic outer-layer `CoreReduce`.                                                   |
-| `carrierEnvelope.ts` | Envelope framing, key schedule, AAD, object identity over XChaCha20-Poly1305.                                   |
-| `publicWindow.ts`    | Bucket/chunk/checkpoint hashing, append slot mapping, RFC 9162 inclusion, checkpoint predicates.                |
-| `storeDescriptor.ts` | Store identity, routes, carrier/route-instance scopes, chain-start equivocation.                                |
-| `normativeKernel.ts` | Registry shape validators (shape only — no predicate, no evidence, no wording authorizer).                      |
+| Module                | Owns                                                                                                            |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
+| `schemas.ts`          | Descriptors for the §4.0–4.5 objects and room-visible pair envelope implemented so far.                         |
+| `projections.ts`      | Generated key tables and enum projections. No hand-maintained duplicate remains.                                |
+| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/operation/carrier identifiers.                                      |
+| `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, `DEFAULT_BLIND_POLICY_V4_0`.                                        |
+| `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, the two typed errors.                             |
+| `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and exact suite-1 class targets.                                    |
+| `operation.ts`        | `AuthenticatedRoomOperationV1` codec, outer validation, pair-slot binding, Ed25519 sign/verify.                 |
+| `coreReduce.ts`       | Validated-operation ingress, merge, and deterministic outer-layer `CoreReduce`.                                 |
+| `carrierEnvelope.ts`  | Envelope framing, key schedule, AAD, object identity over XChaCha20-Poly1305.                                   |
+| `publicWindow.ts`     | Bucket/chunk/checkpoint hashing, append slot mapping, RFC 9162 inclusion, checkpoint predicates.                |
+| `storeDescriptor.ts`  | Store identity, routes, carrier/route-instance scopes, chain-start equivocation.                                |
+| `normativeKernel.ts`  | Registry shape validators (shape only — no predicate, no evidence, no wording authorizer).                      |
 
 ### `p2party-js/src/cryptography/`
 
@@ -118,11 +137,15 @@ recorded in `wasmLoader.ts` and `libcrypto.provenance.json`.
 - **SDK**: send admission waits for a repairing peer edge
   (`PEER_ADMISSION_WAIT_MS` in `src/utils/constants.ts`); Firefox certificate
   notice deduped to once per session.
-- **SDK + server**: TURN relay actually enabled (see below).
-- **Frontend**: chat-composer positioning across mobile browsers (which reveal
-  the keyboard by resizing the viewport) and Capacitor (which exposes native
-  keyboard/safe-area insets), plus badge/bubble clearance and the per-peer
-  send-failure reason that was hidden in two-peer rooms.
+- **SDK + server**: TURN relay enabled with correlated room responses,
+  identity/expiry-bound credentials, separate caller/managed configuration,
+  live-PC rotation, all-room reconnect refresh, proactive bounded retry, and
+  fail-closed expiry (see below).
+- **Frontend**: the input remains below the message bubbles in normal flow;
+  long drafts scroll internally; live-edge/history-reader behavior survives
+  focus, blur, and composer growth; dynamic viewport and four-sided safe-area
+  handling cover Chrome Android, iOS Safari geometry, and Capacitor. Badge
+  clearance and the formerly hidden per-peer send-failure reason remain.
 
 ## Verification commands that actually work
 
@@ -187,7 +210,8 @@ re-vendor before it can load the new module.**
    `pendingPayloadReduction` naming `observedPresences`,
    `effectiveLeaveOperationIds`, `storeCatalogFacts`, `revocationFloors`, and
    `roomCapacityState`. These need the §4.2/4.9 nested payload codecs
-   (`PresenceV1`, `LeaveV1`, `StoreHintOperationV1`, `AdmissionRevokeV1`).
+   (`PresenceV1`, `LeaveV1`, `PairPlaintextV1`, `StoreHintOperationV1`,
+   `AdmissionRevokeV1`).
    Do **not** return empty arrays for these — an empty array reads as an
    observation. That is why the pending list exists.
 2. **§4.8 `Admit()`** — one shared admission function, decision leases,
@@ -216,6 +240,16 @@ re-vendor before it can load the new module.**
 - **STUN-only ICE was the cause of peer flapping.** TURN is now wired
   end-to-end but needs `COTURN_URLS` rendered into the signaling env — it takes
   a **redeploy of the signaling service**, not just a client update.
+- **Channel selection is not yet SSOT in the frontend.** Every `useRoom()` call
+  currently owns an independent `"main"` state, while `ChannelListbox` is not
+  mounted. Today both the message list and composer therefore use the same only
+  active channel, but channel switching must move into one room-scoped source
+  before that control is enabled.
+- **Stable authority-grant expiry is deliberately not in-place in v0.4.** Stop
+  post-promotion sensitive work and begin a fresh automatic pair attempt with a
+  current grant while preserving the room/invitation UX. In-place refresh is
+  post-v0.4 roadmap priority 18 and must first freeze the exact PQ slot, replay,
+  causal-order, generation-replacement, and atomic-persistence rules.
 - The canonical encoder rejects unsorted/duplicated collections _before_
   signatures, so some invalid fixtures cannot be constructed by signing. Build
   them directly with a dummy signature and assert the validator reports them.
@@ -247,5 +281,5 @@ tree agrees with an independent implementation.
   adversarially-confirmed defects that were fixed, and the labels not earned.
 - `spec/spec-architecture-l2-blind-rendezvous.md` — the normative source.
   §11 is the phase roadmap; §5 the acceptance criteria; §10 the validation gates.
-- Commit messages on `feat/blind-rendezvous-phase-0` explain _why_ for each
-  design decision; they are the second-best entry point after this file.
+- Local `master` history explains _why_ for each incremental design decision;
+  it is the second-best entry point after this file.

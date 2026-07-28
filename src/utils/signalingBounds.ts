@@ -4,6 +4,11 @@ export const MAX_ICE_CANDIDATE_CHARS = 4096;
 export const MAX_ICE_FIELD_CHARS = 256;
 export const MAX_SIGNALING_LABELS = 64;
 export const MAX_DATA_CHANNEL_LABEL_CHARS = 193;
+/** Per-client legacy mesh edge cap; also bounds cumulative server roster state. */
+export const MAX_SIGNALING_ROOM_PEERS = 64;
+/** At most 64 active logical channels per bounded room edge. */
+export const MAX_SIGNALING_ROOM_CHANNELS =
+  MAX_SIGNALING_ROOM_PEERS * MAX_SIGNALING_LABELS;
 
 export const isBoundedDescription = (
   description: RTCSessionDescription | RTCSessionDescriptionInit,
@@ -31,7 +36,9 @@ export const isBoundedIceCandidate = (
   );
 };
 
-export const areBoundedDataChannelLabels = (labels: unknown): labels is string[] =>
+export const areBoundedDataChannelLabels = (
+  labels: unknown,
+): labels is string[] =>
   Array.isArray(labels) &&
   labels.length <= MAX_SIGNALING_LABELS &&
   labels.every(
@@ -40,3 +47,11 @@ export const areBoundedDataChannelLabels = (labels: unknown): labels is string[]
       label.length > 0 &&
       label.length <= MAX_DATA_CHANNEL_LABEL_CHARS,
   );
+
+/** Legacy connection signaling negotiates only the persistent handshake lane. */
+export const areCanonicalConnectionLabels = (
+  labels: unknown,
+): labels is ["main"] =>
+  areBoundedDataChannelLabels(labels) &&
+  labels.length === 1 &&
+  labels[0] === "main";

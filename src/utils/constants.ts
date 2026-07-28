@@ -3,6 +3,9 @@ import {
   crypto_hash_sha512_BYTES,
 } from "../cryptography/interfaces";
 
+/** One bound shared by room admission and all signaling lifecycle registries. */
+export const MAX_ACTIVE_SIGNALING_ROOMS = 256;
+
 export const MESSAGE_LEN = 64 * 1024;
 // Protocol-wide application payload ceiling. This is enforced before outbound
 // chunk planning and again after authenticated metadata is decrypted / inside

@@ -11,7 +11,7 @@ import webrtcDisconnectAllRoomsQuery from "./disconnectFromAllRoomsQuery";
 import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
-
+import { applyRoomIceConfiguration } from "./applyIceConfiguration";
 
 import type {
   IRTCPeerConnection,
@@ -28,12 +28,25 @@ import type {
   RTCDisconnectFromChannelLabelParams,
   RTCDisconnectFromPeerChannelLabelParams,
   RTCDisconnectParams,
+  RTCApplyRoomConfigurationParams,
+  DisconnectPeerTransport,
 } from "./interfaces";
+import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { SendMessageResult } from "../../handlers/handleSendMessage";
 
 const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
+
+const disconnectPeerThroughApi = (
+  api: Pick<BaseQueryApi, "dispatch">,
+): DisconnectPeerTransport => {
+  return async (params) => {
+    await api
+      .dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate(params))
+      .unwrap();
+  };
+};
 
 const webrtcApi = createApi({
   reducerPath: "webrtcApi",
@@ -87,6 +100,27 @@ const webrtcApi = createApi({
         ),
     }),
 
+    applyRoomConfiguration: builder.mutation<
+      undefined,
+      RTCApplyRoomConfigurationParams
+    >({
+      queryFn: ({
+        roomId,
+        rtcConfig,
+        restartIce = false,
+        failurePolicy = "rollback",
+      }) => {
+        applyRoomIceConfiguration(
+          peerConnections,
+          roomId,
+          rtcConfig,
+          restartIce,
+          failurePolicy,
+        );
+        return { data: undefined };
+      },
+    }),
+
     openChannel: builder.mutation<undefined, RTCOpenChannelParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcOpenChannelQuery(
@@ -119,7 +153,12 @@ const webrtcApi = createApi({
     disconnect: builder.mutation<undefined, RTCDisconnectParams>({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectQuery(
-          { ...args, peerConnections, dataChannels },
+          {
+            ...args,
+            peerConnections,
+            dataChannels,
+            disconnectPeer: disconnectPeerThroughApi(api),
+          },
           api,
           extraOptions,
         ),
@@ -131,7 +170,12 @@ const webrtcApi = createApi({
     >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectRoomQuery(
-          { ...args, peerConnections, dataChannels },
+          {
+            ...args,
+            peerConnections,
+            dataChannels,
+            disconnectPeer: disconnectPeerThroughApi(api),
+          },
           api,
           extraOptions,
         ),
@@ -143,7 +187,12 @@ const webrtcApi = createApi({
     >({
       queryFn: (args, api, extraOptions) =>
         webrtcDisconnectAllRoomsQuery(
-          { ...args, peerConnections, dataChannels },
+          {
+            ...args,
+            peerConnections,
+            dataChannels,
+            disconnectPeer: disconnectPeerThroughApi(api),
+          },
           api,
           extraOptions,
         ),

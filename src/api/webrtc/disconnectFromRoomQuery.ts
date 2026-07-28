@@ -1,27 +1,27 @@
-import { deleteMessage, deletePeer } from "../../reducers/roomSlice";
-import {
-  deleteDBUniqueRoom,
-  getAllDBUniqueRooms,
-  getDBRoomMessageData,
-} from "../../db/api";
+import { deleteMessageStateOnly, deletePeer } from "../../reducers/roomSlice";
+import { deleteRoomDataTerminal } from "./deleteRoomData";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
   RTCDisconnectFromRoomParams,
+  DisconnectPeerTransport,
 } from "./interfaces";
-import webrtcApi from ".";
 
 export interface RTCDisconnectFromRoomParamsExtension extends RTCDisconnectFromRoomParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
+  disconnectPeer: DisconnectPeerTransport;
 }
 
 const webrtcDisconnectRoomQuery: BaseQueryFn<
   RTCDisconnectFromRoomParamsExtension,
   undefined
-> = async ({ roomId, deleteMessages, peerConnections, dataChannels }, api) => {
+> = async (
+  { roomId, deleteMessages, peerConnections, dataChannels, disconnectPeer },
+  api,
+) => {
   for (let i = dataChannels.length - 1; i >= 0; i--) {
     const channel = dataChannels[i];
     if (!channel.roomIds.includes(roomId)) continue;
@@ -41,30 +41,16 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
     .filter((connection) => connection.roomId === roomId)
     .map((connection) => connection.withPeerId);
   for (const peerId of roomPeers) {
-    await api.dispatch(
-      webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
-    );
+    await disconnectPeer({ peerId, roomId });
     api.dispatch(deletePeer({ peerId, roomId }));
   }
 
-  if (deleteMessages) {
-    const rooms = await getAllDBUniqueRooms();
-    const roomIndex = rooms.findIndex((r) => r.roomId === roomId);
-
-    if (roomIndex > -1) {
-      await deleteDBUniqueRoom(roomId);
-      const messages = await getDBRoomMessageData(roomId);
-      const messagesLen = messages.length;
-      for (let j = 0; j < messagesLen; j++) {
-        api.dispatch(
-          deleteMessage({
-            roomId,
-            merkleRootHex: messages[j].merkleRoot,
-          }),
-        );
-      }
-    }
-  }
+  if (deleteMessages)
+    await deleteRoomDataTerminal(roomId, (merkleRootHex) => {
+      // Durable deletion was explicitly awaited before this reducer-only twin.
+      // No listener-owned DB task survives the terminal API boundary.
+      api.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+    });
 
   return { data: undefined };
 };

@@ -13,7 +13,7 @@ const memory = new Map<string, string>();
 };
 
 const { store, dispatch } = await import("../src/store");
-const { deleteRoom, setRoom, setPeer, setPeerHandshakeStatus } =
+const { deleteRoom, purgeAllRooms, setRoom, setPeer, setPeerHandshakeStatus } =
   await import("../src/reducers/roomSlice");
 const { DEFAULT_ROOM_POLICY_V1 } = await import("../src/roomPolicy");
 const { normalizeRoomCapability } = await import("../src/roomInvite");
@@ -121,6 +121,37 @@ describe("waitForRoom", () => {
     // The probe fires once per dispatch regardless; what matters is that the
     // resolved and rejected waits did not add permanent subscribers.
     expect(countListeners()).toBe(before);
+  });
+});
+
+describe("pending room purge", () => {
+  test("requires remote revocation even before a server room id exists", async () => {
+    seedRoom("");
+
+    let failure: unknown;
+    try {
+      await p2party.purgeRoom(ROOM_URL);
+    } catch (error) {
+      failure = error;
+    }
+
+    const failures =
+      failure instanceof AggregateError ? failure.errors : [failure];
+    expect(
+      failures.some(
+        (error) =>
+          error instanceof p2party.RemoteRoomRevocationUnconfirmedError &&
+          error.roomUrl === ROOM_URL &&
+          error.reason === "no-current-socket",
+      ),
+    ).toBe(true);
+    expect(
+      store.getState().rooms.find((room) => room.url === ROOM_URL),
+    ).toMatchObject({
+      id: "",
+      signalingActive: false,
+    });
+    dispatch(purgeAllRooms());
   });
 });
 

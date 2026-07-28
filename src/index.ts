@@ -42,7 +42,6 @@ import {
 import {
   CHUNK_LEN,
   CHUNK_SIZE_FLOOR,
-  PROTOCOL_VERSION,
   WIRE_CHUNK_FRAME_LEN,
 } from "./utils/constants";
 import {
@@ -69,6 +68,7 @@ import {
 import {
   clearRoomPins,
   deleteRoomPin,
+  getRoomPin,
   hasRoomPin,
   putRoomPin,
 } from "./roomPinVault";
@@ -86,28 +86,59 @@ import {
   ROOM_INVITE_WORDLIST_ID,
 } from "./roomInvite";
 
-import signalingServerApi from "./api/signalingServerApi";
+import signalingServerApi, {
+  requestCurrentSocketRoomLeave,
+  sendRoomRequestMessage,
+} from "./api/signalingServerApi";
 import webrtcApi from "./api/webrtc";
+import {
+  getRoomIceConfigurationMutex,
+  releaseRoomIceConfigurationMutex,
+} from "./api/webrtc/negotiationLock";
+import {
+  canonicalSignalingServerUrl,
+  selectSignalingServerUrl,
+} from "./utils/signalingServerBoundary";
 
 import { commonStateSelector } from "./reducers/commonSlice";
 import {
   roomSelector,
+  deriveEffectiveRTCConfig,
+  rtcConfigurationsEqual,
   setConnectionRelay,
   setRoom,
-  setRoomPolicy,
+  setOnlyConnectWithKnownPeers,
   deleteMessage,
   deleteRoom,
-  setConnectingToPeers,
+  purgeAllRooms,
 } from "./reducers/roomSlice";
 import { keyPairSelector, resetIdentity } from "./reducers/keyPairSlice";
-import { signalingServerSelector } from "./reducers/signalingServerSlice";
+import {
+  signalingServerActions,
+  signalingServerSelector,
+} from "./reducers/signalingServerSlice";
 import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
 import { uint8ArrayToHex } from "./utils/uint8array";
+import { signalingAttemptLifecycle } from "./utils/signalingAttemptLifecycle";
+import { signalingRoomOperationLifecycle } from "./utils/signalingRoomOperationLifecycle";
+import {
+  runIdentityPurgeSettlement,
+  runRoomPurgeSettlement,
+  runTerminalSettlement,
+} from "./utils/terminalSettlement";
+import { resolveRoomConnectAdmission } from "./utils/roomConnectAdmission";
+import { RemoteRoomRevocationUnconfirmedError } from "./utils/roomLeaveCoordinator";
 
-import type { State } from "./store";
-import type { Room, Peer, Channel, Message } from "./reducers/roomSlice";
+import type { State as InternalState } from "./store";
+import type {
+  Room,
+  Peer,
+  Channel,
+  Message,
+  SetRoomArgs,
+} from "./reducers/roomSlice";
 import type { SignalingState } from "./reducers/signalingServerSlice";
 import type { MimeType, FileExtension } from "./utils/messageTypes";
 import type {
@@ -119,6 +150,8 @@ import type {
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateSend,
   WebSocketMessageCandidateReceive,
+  WebSocketMessageLeaveRoomRequest,
+  WebSocketMessageRoomLeftResponse,
   WebSocketMessageError,
 } from "./utils/interfaces";
 import type { RoomData } from "./api/webrtc/interfaces";
@@ -135,6 +168,14 @@ import { getTransferAcks } from "./handlers/reconcile";
 // Exported so consumers can narrow the rejection of `MessageTransferHandle.done`
 // and read its per-peer outcomes, rather than matching on an error message.
 import { MessageDeliveryError } from "./handlers/handleSendMessage";
+import { requestRoomFromSignalingWithRetry } from "./handlers/requestRoom";
+import {
+  cancelRoomRequestLifecycle,
+  MAX_ACTIVE_SIGNALING_ROOMS,
+} from "./utils/roomRequestCoordinator";
+
+/** Public projection; reducer state keeps its additional fields normalized. */
+type State = Omit<InternalState, "rooms"> & { rooms: Room[] };
 
 // const originalClose = RTCDataChannel.prototype.close;
 // RTCDataChannel.prototype.close = function () {
@@ -156,115 +197,240 @@ export interface ConnectRoomOptions {
   pin?: Uint8Array;
 }
 
+type ActivateSignalingRoomArgs = Omit<SetRoomArgs, "url" | "id">;
+
+const assertCompatibleSignalingServer = (
+  requestedServerUrl: string,
+): string => {
+  const { rooms, signalingServer } = store.getState();
+  const hasActiveRooms = rooms.some((room) => room.signalingActive !== false);
+  return selectSignalingServerUrl({
+    requestedServerUrl,
+    currentServerUrl: signalingServer.serverUrl,
+    hasActiveRooms,
+    isConnected: signalingServer.isConnected,
+    isEstablishingConnection: signalingServer.isEstablishingConnection,
+  });
+};
+
+/** One admission/reactivation path for every public signaling entry point. */
+const activateSignalingRoom = async (
+  roomUrl: string,
+  args: ActivateSignalingRoomArgs = {},
+): Promise<void> => {
+  await getRoomIceConfigurationMutex(roomUrl).runExclusive(async () => {
+    const rooms = store.getState().rooms;
+    const existing = rooms.find((room) => room.url === roomUrl);
+    const transitionsToActive = !existing || existing.signalingActive === false;
+    if (
+      transitionsToActive &&
+      rooms.filter((room) => room.signalingActive !== false).length >=
+        MAX_ACTIVE_SIGNALING_ROOMS
+    )
+      throw new Error(
+        `Cannot activate more than ${String(MAX_ACTIVE_SIGNALING_ROOMS)} rooms`,
+      );
+
+    const callerConfigChanged =
+      existing !== undefined &&
+      args.rtcConfig !== undefined &&
+      !rtcConfigurationsEqual(existing.callerRtcConfig, args.rtcConfig);
+    const previousRtcConfig = existing?.rtcConfig;
+    const nextRtcConfig =
+      callerConfigChanged && existing && args.rtcConfig
+        ? deriveEffectiveRTCConfig(
+            args.rtcConfig,
+            existing.signalingTurnCredentials,
+          )
+        : undefined;
+    const appliedLiveConfiguration =
+      callerConfigChanged &&
+      existing !== undefined &&
+      isUUID(existing.id, 4) &&
+      nextRtcConfig !== undefined;
+
+    if (appliedLiveConfiguration)
+      await dispatch(
+        webrtcApi.endpoints.applyRoomConfiguration.initiate({
+          roomId: existing.id,
+          rtcConfig: nextRtcConfig,
+          restartIce: true,
+          failurePolicy: "rollback",
+        }),
+      ).unwrap();
+
+    try {
+      dispatch(
+        setRoom({
+          ...args,
+          url: roomUrl,
+          id: existing?.id ?? "",
+        }),
+      );
+      if (callerConfigChanged && args.rtcConfig) {
+        const published = store
+          .getState()
+          .rooms.find((room) => room.url === roomUrl);
+        if (
+          !published ||
+          !rtcConfigurationsEqual(published.callerRtcConfig, args.rtcConfig) ||
+          (nextRtcConfig !== undefined &&
+            !rtcConfigurationsEqual(published.rtcConfig, nextRtcConfig))
+        )
+          throw new Error("Caller RTC configuration publication was rejected");
+      }
+    } catch (error) {
+      if (appliedLiveConfiguration && existing && previousRtcConfig)
+        await dispatch(
+          webrtcApi.endpoints.applyRoomConfiguration.initiate({
+            roomId: existing.id,
+            rtcConfig: previousRtcConfig,
+            restartIce: true,
+            failurePolicy: "close",
+          }),
+        ).unwrap();
+      throw error;
+    }
+  });
+};
+
+const startSignalingConnectionInBackground = (
+  signalingServerUrl: string,
+): void => {
+  // Reserve the one global signaling-server choice synchronously. RTK starts
+  // the async base query after dispatch, so without this state transition a
+  // second room join could select another server in the same turn.
+  dispatch(signalingServerActions.startConnecting(signalingServerUrl));
+  void dispatch(
+    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl),
+  )
+    .unwrap()
+    .catch((error: unknown) => {
+      const current = store.getState().signalingServer;
+      if (
+        current.isEstablishingConnection &&
+        canonicalSignalingServerUrl(current.serverUrl) === signalingServerUrl
+      )
+        dispatch(signalingServerActions.disconnect());
+      console.warn(
+        "p2party: signaling connection attempt failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+};
+
+/**
+ * One exact-server decision after room activation.
+ *
+ * Re-reading the store here matters: connect() may await IndexedDB/PIN work
+ * while a socket finishes proof. The fresh-proof sweep can precede activation,
+ * so the newly active room must issue its own correlated request.
+ */
+const joinRoomThroughSignaling = (
+  roomUrl: string,
+  normalizedRequestedUrl: string,
+): void => {
+  const { keyPair, signalingServer } = store.getState();
+  const socketActive =
+    signalingServer.isConnected || signalingServer.isEstablishingConnection;
+
+  if (
+    signalingServer.isConnected &&
+    signalingServer.isVerified &&
+    isUUID(keyPair.peerId, 4)
+  ) {
+    void requestRoomFromSignalingWithRetry(store, roomUrl, (request) =>
+      sendRoomRequestMessage(store, request),
+    ).catch((error: unknown) => {
+      console.warn(
+        "p2party: background room join failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+    return;
+  }
+
+  if (!socketActive)
+    startSignalingConnectionInBackground(normalizedRequestedUrl);
+};
+
+const completeSignalingRoomJoin = (
+  roomUrl: string,
+  normalizedRequestedUrl: string,
+): void => {
+  if (store.getState().commonState.currentRoomUrl !== roomUrl)
+    dispatch(setCurrentRoomUrl(roomUrl));
+  joinRoomThroughSignaling(roomUrl, normalizedRequestedUrl);
+};
+
 const connect = async (
   roomUrl: string,
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
-  rtcConfig: RTCConfiguration = {
-    iceServers: [
-      {
-        // Use single STUN URL - multiple STUN servers slow down ICE gathering
-        urls: "stun:stun.p2party.com:3478",
-      },
-    ],
-    iceTransportPolicy: "all",
-    // Pre-allocate ICE candidates for faster connection setup
-    iceCandidatePoolSize: 2,
-  },
+  rtcConfig?: RTCConfiguration,
   options: ConnectRoomOptions = {},
 ) => {
   roomUrl = normalizeRoomCapability(roomUrl);
   if (options === null || typeof options !== "object" || Array.isArray(options))
     throw new Error("Invalid room connection options");
 
-  const { keyPair, signalingServer, rooms, commonState } = store.getState();
-
-  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  let persistedPolicy: RoomPolicyV1 | undefined;
-  if (roomIndex === -1) {
-    const persistedRooms = await getAllDBUniqueRooms();
-    const persisted = persistedRooms.find((room) => room.roomUrl === roomUrl);
-    if (persisted?.roomPolicy) {
-      persistedPolicy = decodeRoomPolicyV1(
-        new Uint8Array(persisted.roomPolicy),
-      );
-    }
-  }
-  if (
-    persistedPolicy &&
-    options.policy &&
-    !roomPoliciesEqualV1(persistedPolicy, options.policy)
-  )
-    throw new Error("Persisted room policy is immutable");
-  const policy = canonicalizeRoomPolicyV1(
-    options.policy ??
-      (roomIndex > -1
-        ? rooms[roomIndex].policy
-        : (persistedPolicy ?? DEFAULT_ROOM_POLICY_V1)),
-  );
-
-  // Stable descriptor codes may precede their live implementation, but the
-  // public connect path must never silently claim an unwired guarantee.
-  // Scheduled cover is now wired (installCoverEdge + scheduled send/receive);
-  // private rendezvous remains future work.
-  if (policy.rendezvousMode !== "legacy-signaling")
-    throw new Error("Private rendezvous room connections are not wired yet");
-
-  if (policy.authMode === "pin") {
-    if (options.pin !== undefined) {
-      putRoomPin(roomUrl, options.pin);
-      const existingRoomId = roomIndex > -1 ? rooms[roomIndex].id : "";
-      if (existingRoomId) await clearPinAttempts(existingRoomId);
-    } else if (!hasRoomPin(roomUrl)) {
-      throw new Error("PIN room connection requires a PIN");
-    }
-  } else {
-    if (options.pin !== undefined)
-      throw new Error("PIN must not be provided for a no-PIN room");
-    // A deliberate switch back to no-PIN must not leave the old secret alive.
-    deleteRoomPin(roomUrl);
-  }
-
-  if (roomIndex === -1) {
-    dispatch(setRoom({ url: roomUrl, id: "", rtcConfig, policy }));
-  } else {
-    dispatch(setRoomPolicy({ roomContext: roomUrl, policy }));
-  }
-
-  if (commonState.currentRoomUrl !== roomUrl)
-    dispatch(setCurrentRoomUrl(roomUrl));
-
-  if (
-    signalingServer.isConnected &&
-    signalingServer.isVerified &&
-    isUUID(keyPair.peerId)
-  ) {
+  await signalingRoomOperationLifecycle.runJoin(async () => {
+    const { rooms } = store.getState();
+    const roomIndex = rooms.findIndex((room) => room.url === roomUrl);
+    let persistedPolicy: RoomPolicyV1 | undefined;
     if (roomIndex === -1) {
-      await dispatch(
-        signalingServerApi.endpoints.sendMessage.initiate({
-          content: {
-            type: "room",
-            fromPeerId: keyPair.peerId,
-            roomUrl,
-            protocolVersion: PROTOCOL_VERSION,
-          } as WebSocketMessageRoomIdRequest,
-        }),
-      );
-    } else {
-      dispatch(
-        setConnectingToPeers({
-          roomId: rooms[roomIndex].id,
-          connectingToPeers: true,
-        }),
-      );
+      const persistedRooms = await getAllDBUniqueRooms();
+      const persisted = persistedRooms.find((room) => room.roomUrl === roomUrl);
+      if (persisted?.roomPolicy) {
+        persistedPolicy = decodeRoomPolicyV1(
+          new Uint8Array(persisted.roomPolicy),
+        );
+      }
     }
-  } else {
-    await dispatch(
-      signalingServerApi.endpoints.connectWebSocket.initiate(
-        signalingServerUrl,
-      ),
-    );
-  }
+    const policy = resolveRoomConnectAdmission({
+      existingPolicy: roomIndex > -1 ? rooms[roomIndex].policy : undefined,
+      persistedPolicy,
+      requestedPolicy: options.policy,
+      providedPin: options.pin,
+      hasTransientPin: hasRoomPin(roomUrl),
+    });
+
+    const normalizedRequestedUrl =
+      assertCompatibleSignalingServer(signalingServerUrl);
+    if (policy.authMode === "pin" && options.pin !== undefined) {
+      const existingRoomId =
+        store.getState().rooms.find((room) => room.url === roomUrl)?.id ?? "";
+      if (existingRoomId) await clearPinAttempts(existingRoomId);
+    }
+
+    await activateSignalingRoom(roomUrl, {
+      rtcConfig,
+      policy,
+    });
+
+    const previousPin = getRoomPin(roomUrl);
+    let pinChanged = false;
+    try {
+      if (policy.authMode === "pin" && options.pin !== undefined) {
+        putRoomPin(roomUrl, options.pin);
+        pinChanged = true;
+      } else if (policy.authMode === "nopin") {
+        // A deliberate switch back to no-PIN must not leave the old secret
+        // alive after the room has been activated successfully.
+        deleteRoomPin(roomUrl);
+        pinChanged = true;
+      }
+      completeSignalingRoomJoin(roomUrl, normalizedRequestedUrl);
+    } catch (error) {
+      if (pinChanged) {
+        if (previousPin) putRoomPin(roomUrl, previousPin);
+        else deleteRoomPin(roomUrl);
+      }
+      throw error;
+    } finally {
+      previousPin?.fill(0);
+    }
+  });
 };
 
 export interface WaitForRoomOptions {
@@ -527,32 +693,15 @@ const connectToSignalingServer = async (
   signalingServerUrl = "wss://signaling.p2party.com/ws",
   // signalingServerUrl = "ws://localhost:3001/ws",
 ) => {
-  roomUrl = normalizeRoomCapability(roomUrl);
-
-  const { signalingServer, rooms, commonState } = store.getState();
-
-  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  if (roomIndex === -1) dispatch(setRoom({ url: roomUrl, id: "" }));
-
-  if (commonState.currentRoomUrl !== roomUrl)
-    dispatch(setCurrentRoomUrl(roomUrl));
-
-  if (
-    signalingServer.serverUrl !== signalingServerUrl ||
-    (!signalingServer.isConnected && !signalingServer.isEstablishingConnection)
-  ) {
-    await dispatch(
-      signalingServerApi.endpoints.connectWebSocket.initiate(
-        signalingServerUrl,
-      ),
-    );
-  }
+  await connect(roomUrl, signalingServerUrl);
 };
 
 const disconnectFromSignalingServer = async () => {
-  await dispatch(
-    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
-  );
+  await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+    await dispatch(
+      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+    ).unwrap();
+  });
 };
 
 const disconnectFromPeer = async (peerId: string) => {
@@ -603,6 +752,7 @@ const onlyAllowConnectionsFromAddressBook = async (
   roomUrl = canonicalRoomUrl;
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+  if (roomIndex === -1 || rooms[roomIndex].signalingActive === false) return;
 
   if (
     roomIndex > -1 &&
@@ -630,9 +780,9 @@ const onlyAllowConnectionsFromAddressBook = async (
   }
 
   dispatch(
-    setRoom({
-      url: roomIndex > -1 ? rooms[roomIndex].url : roomUrl,
-      id: roomIndex > -1 ? rooms[roomIndex].id : "",
+    setOnlyConnectWithKnownPeers({
+      roomId: rooms[roomIndex].id,
+      roomUrl,
       onlyConnectWithKnownPeers: onlyAllow,
     }),
   );
@@ -1175,61 +1325,144 @@ const deleteMsg = async (
   }
 };
 
-const purgeIdentity = async () => {
-  abortAllTransfers();
-
-  clearRoomPins();
-  dispatch(resetIdentity());
-  // D2=B: the X25519 identity lives WebCrypto-wrapped in IndexedDB, not in the
-  // Redux/localStorage identity — clear it too so a rotated Ed25519 identity never
-  // leaves an orphaned X25519 record + cross-sig behind.
-  await deleteIdentityX25519();
-  await deleteIdentityEd25519();
-
-  const { rooms } = store.getState();
-  const roomsLen = rooms.length;
-  for (let i = 0; i < roomsLen; i++) {
-    await dispatch(
-      webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId: rooms[i].id }),
-    );
+/**
+ * Stop signaling, drain any cancelled identity bootstrap, then delete both
+ * identity roles under that same exclusive boundary. This is the one purge
+ * path so a late IndexedDB write cannot resurrect either identity.
+ */
+const stopSignalingAndDeleteIdentity = async (
+  finishWhilePurged: () => Promise<void> = async () => undefined,
+): Promise<void> => {
+  const releaseIdentityBootstrap =
+    await signalingAttemptLifecycle.cancelAndAcquireBootstrap();
+  try {
+    await runIdentityPurgeSettlement({
+      disconnectSignaling: async () => {
+        await dispatch(
+          signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+        ).unwrap();
+      },
+      clearRoomPins: () => clearRoomPins(),
+      resetIdentity: () => {
+        dispatch(resetIdentity());
+      },
+      // Authenticated transports become terminal before either IndexedDB
+      // identity deletion is awaited. A stalled database worker therefore
+      // cannot leave traffic live under already-reset identity state.
+      teardownRooms: finishWhilePurged,
+      // D2=B: clear the wrapped X25519 identity and its Ed25519 cross-signature
+      // before deleting the Ed25519 identity it authenticates.
+      deleteIdentityX25519: () => deleteIdentityX25519(),
+      deleteIdentityEd25519: () => deleteIdentityEd25519(),
+    });
+  } finally {
+    // No await between the final cancellation/state reset and releasing the
+    // purge lease: every attempt invoked during deletion remains rejected.
+    signalingAttemptLifecycle.cancelActive();
+    dispatch(signalingServerActions.disconnect());
+    releaseIdentityBootstrap();
   }
-  await dispatch(
-    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
-  );
 };
 
-const purgeRoom = async (roomUrl: string) => {
-  roomUrl = normalizeRoomCapability(roomUrl);
-  deleteRoomPin(roomUrl);
-  const { rooms } = store.getState();
-  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  if (roomIndex > -1) {
-    abortRoomTransfers(rooms[roomIndex].id);
-    if (rooms[roomIndex].id) await clearPinAttempts(rooms[roomIndex].id);
-    dispatch(deleteRoom(rooms[roomIndex].id));
-  }
+const purgeIdentity = async () => {
+  await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+    abortAllTransfers();
+    await stopSignalingAndDeleteIdentity(async () => {
+      const { rooms } = store.getState();
+      await runTerminalSettlement(
+        "One or more WebRTC rooms could not be disconnected during identity purge",
+        rooms.map(
+          (room) => async () =>
+            await dispatch(
+              webrtcApi.endpoints.disconnectFromRoom.initiate({
+                roomId: room.id,
+              }),
+            ).unwrap(),
+        ),
+      );
+    });
+  });
+};
 
-  await dispatch(
-    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
-  );
+/**
+ * Forget one room locally and request authoritative server unlinking.
+ *
+ * An offline or non-acknowledging server causes a
+ * RemoteRoomRevocationUnconfirmedError only after local state, WebRTC
+ * transports, and durable data have reached their terminal boundary. The
+ * shared signaling socket and every other room remain untouched.
+ */
+const purgeRoom = async (roomUrl: string): Promise<void> => {
+  roomUrl = normalizeRoomCapability(roomUrl);
+  await signalingRoomOperationLifecycle.runRoomTerminal(roomUrl, async () => {
+    const { rooms } = store.getState();
+    const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
+    // An unknown capability has no local or server-side membership to remove.
+    // In particular it must not tear down the socket shared by other rooms.
+    if (roomIndex === -1) return;
+
+    const removedRoom = rooms[roomIndex];
+    deleteRoomPin(roomUrl);
+    abortRoomTransfers(removedRoom.id);
+    cancelRoomRequestLifecycle(roomUrl, "room was purged");
+    // URL is the unique local room identity even while multiple pending rooms
+    // all have id=""; deleting by id could cancel the wrong room.
+    dispatch(deleteRoom(roomUrl));
+
+    const needsRemoteRevocation = removedRoom.signalingActive !== false;
+    await runRoomPurgeSettlement({
+      closeLocalTransport: async () => {
+        try {
+          await getRoomIceConfigurationMutex(roomUrl).runExclusive(async () => {
+            await dispatch(
+              webrtcApi.endpoints.disconnectFromRoom.initiate({
+                roomId: removedRoom.id,
+              }),
+            ).unwrap();
+          });
+        } finally {
+          releaseRoomIceConfigurationMutex(roomUrl);
+        }
+      },
+      startRemoteRevocation: async () => {
+        if (!needsRemoteRevocation) return;
+        await requestCurrentSocketRoomLeave(store, roomUrl);
+      },
+      deleteLocalData: async () => {
+        await dispatch(
+          webrtcApi.endpoints.disconnectFromRoom.initiate({
+            roomId: removedRoom.id,
+            deleteMessages: true,
+          }),
+        ).unwrap();
+      },
+      clearPinAttempts: async () => {
+        if (removedRoom.id) await clearPinAttempts(removedRoom.id);
+      },
+    });
+  });
 };
 
 const purge = async () => {
-  abortAllTransfers();
-
-  clearRoomPins();
-  dispatch(resetIdentity());
-  await deleteIdentityX25519(); // D2=B: clear the wrapped X25519 identity record too
-  await deleteIdentityEd25519();
-  await dispatch(
-    signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
-  );
-
-  const rooms = await getAllDBUniqueRooms();
-  const roomsLen = rooms.length;
-  for (let i = 0; i < roomsLen; i++) {
-    dispatch(deleteRoom(rooms[i].roomId));
-  }
+  await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+    abortAllTransfers();
+    await stopSignalingAndDeleteIdentity(async () => {
+      await runTerminalSettlement(
+        "Full purge did not fully settle local data",
+        [
+          async () => {
+            await dispatch(
+              webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
+            ).unwrap();
+          },
+          () => {
+            dispatch(purgeAllRooms());
+            dispatch(setCurrentRoomUrl(""));
+          },
+        ],
+      );
+    });
+  });
 };
 
 const newRoomUrl = async () => {
@@ -1320,6 +1553,7 @@ export const p2party = {
   MIN_COVER_SLOT_MS,
   validateRoomPolicyV1,
   MessageDeliveryError,
+  RemoteRoomRevocationUnconfirmedError,
   joinRoom,
   waitForRoom,
   waitForPeers,
@@ -1372,6 +1606,8 @@ export type {
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateSend,
   WebSocketMessageCandidateReceive,
+  WebSocketMessageLeaveRoomRequest,
+  WebSocketMessageRoomLeftResponse,
   WebSocketMessageError,
 };
 
@@ -1381,6 +1617,7 @@ export {
   generateSessionIdentity,
   setWasmSourceUrl,
   MessageDeliveryError,
+  RemoteRoomRevocationUnconfirmedError,
   joinRoom,
   waitForRoom,
   waitForPeers,

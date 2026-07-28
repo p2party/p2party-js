@@ -3,33 +3,42 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import {
   setKeyPair,
-  setReconnectData,
   setChallengeId,
   setPeerData,
   resetIdentity,
 } from "../reducers/keyPairSlice";
-import { setConnectingToPeers, setIceServers } from "../reducers/roomSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 
-import signalingServerApi from "../api/signalingServerApi";
-import { PROTOCOL_VERSION } from "../utils/constants";
-
-import type { State } from "../store";
-import type {
-  WebSocketMessageChallengeResponse,
-  WebSocketMessageRoomIdRequest,
-} from "../utils/interfaces";
+import { sendRoomRequestMessage } from "../api/signalingServerApi";
+import { requestAllActiveRooms } from "../handlers/requestRoom";
+import {
+  markFreshSocketProof,
+  resetRoomRequestLifecycle,
+} from "../utils/roomRequestCoordinator";
 
 const keyPairListenerMiddleware = createListenerMiddleware();
 keyPairListenerMiddleware.startListening({
   matcher: isAnyOf(
     setKeyPair,
-    setReconnectData,
     setPeerData,
     setChallengeId,
     resetIdentity,
+    signalingServerActions.disconnect,
   ),
   effect: async (action, listenerApi) => {
+    const refreshActiveRooms = async (): Promise<void> => {
+      try {
+        await requestAllActiveRooms(listenerApi, (request) =>
+          sendRoomRequestMessage(listenerApi, request),
+        );
+      } catch (error) {
+        console.warn(
+          "p2party: failed to refresh one or more active rooms",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    };
+
     if (setKeyPair.match(action)) {
       const { publicKey, secretKey } = action.payload;
 
@@ -38,83 +47,6 @@ keyPairListenerMiddleware.startListening({
         // Clean v3 migration: the secret is wrapped in IndexedDB by the
         // signaling bootstrap and remains memory-only in Redux.
         localStorage.removeItem("secretKey");
-      }
-    } else if (setReconnectData.match(action)) {
-      const {
-        peerId,
-        challenge,
-        signature,
-        challengeId,
-        username,
-        credential,
-      } = action.payload;
-
-      if (
-        isUUID(peerId) &&
-        isUUID(challengeId) &&
-        isHexadecimal(challenge) &&
-        isHexadecimal(signature) &&
-        challenge.length === 64 &&
-        // signature.length === 1024
-        signature.length === 128
-      ) {
-        listenerApi.dispatch(signalingServerActions.connectionVerified());
-
-        localStorage.setItem("peerId", peerId);
-        localStorage.setItem("challenge", challenge);
-        localStorage.setItem("signature", signature);
-        localStorage.setItem("challengeId", challengeId);
-
-        const { keyPair, rooms, commonState } = listenerApi.getState() as State;
-
-        const roomIndex =
-          commonState.currentRoomUrl.length === 64
-            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-            : -1;
-
-        if (roomIndex > -1) {
-          if (action.payload.username && action.payload.credential) {
-            listenerApi.dispatch(
-              setIceServers({
-                roomId: rooms[roomIndex].id,
-                iceServers: [
-                  {
-                    urls: [
-                      "turn:turn.p2party.com:3478?transport=udp",
-                      "turn:turn.p2party.com:3478?transport=tcp",
-                      "turns:turn.p2party.com:443?transport=tcp",
-                    ],
-                    username,
-                    credential,
-                  } as RTCIceServer,
-                ],
-              }),
-            );
-          }
-
-          if (isUUID(rooms[roomIndex].id)) {
-            listenerApi.dispatch(
-              setConnectingToPeers({
-                roomId: rooms[roomIndex].id,
-                connectingToPeers: true,
-              }),
-            );
-          }
-        } else if (
-          isUUID(keyPair.peerId) &&
-          commonState.currentRoomUrl.length === 64
-        ) {
-          await listenerApi.dispatch(
-            signalingServerApi.endpoints.sendMessage.initiate({
-              content: {
-                type: "room",
-                fromPeerId: keyPair.peerId,
-                roomUrl: commonState.currentRoomUrl,
-                protocolVersion: PROTOCOL_VERSION,
-              } as WebSocketMessageRoomIdRequest,
-            }),
-          );
-        }
       }
     } else if (setPeerData.match(action)) {
       const { peerId, challenge, signature } = action.payload;
@@ -129,93 +61,19 @@ keyPairListenerMiddleware.startListening({
         localStorage.setItem("peerId", peerId);
         localStorage.setItem("challenge", challenge);
         localStorage.setItem("signature", signature);
-
-        await listenerApi.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "challenge",
-              fromPeerId: peerId,
-              challenge,
-              signature,
-              protocolVersion: PROTOCOL_VERSION,
-            } as WebSocketMessageChallengeResponse,
-          }),
-        );
       }
     } else if (setChallengeId.match(action)) {
       const { challengeId } = action.payload;
       if (isUUID(challengeId)) {
         listenerApi.dispatch(signalingServerActions.connectionVerified());
+        markFreshSocketProof();
 
         localStorage.setItem("challengeId", challengeId);
 
-        const { keyPair, rooms, commonState } = listenerApi.getState() as State;
-
-        const roomIndex =
-          commonState.currentRoomUrl.length === 64
-            ? rooms.findIndex((r) => r.url === commonState.currentRoomUrl)
-            : -1;
-
-        if (roomIndex > -1) {
-          if (action.payload.username && action.payload.credential) {
-            listenerApi.dispatch(
-              setIceServers({
-                roomId: rooms[roomIndex].id,
-                iceServers: [
-                  {
-                    urls: [
-                      "turn:turn.p2party.com:3478?transport=udp",
-                      "turn:turn.p2party.com:3478?transport=tcp",
-                      "turns:turn.p2party.com:443?transport=tcp",
-                    ],
-                    username: action.payload.username,
-                    credential: action.payload.credential,
-                  } as RTCIceServer,
-                ],
-              }),
-            );
-          }
-
-          // Now check if we need to request room ID or connect to peers
-          if (isUUID(rooms[roomIndex].id)) {
-            listenerApi.dispatch(
-              setConnectingToPeers({
-                roomId: rooms[roomIndex].id,
-                connectingToPeers: true,
-              }),
-            );
-          } else if (
-            isUUID(keyPair.peerId) &&
-            commonState.currentRoomUrl.length === 64
-          ) {
-            await listenerApi.dispatch(
-              signalingServerApi.endpoints.sendMessage.initiate({
-                content: {
-                  type: "room",
-                  fromPeerId: keyPair.peerId,
-                  roomUrl: commonState.currentRoomUrl,
-                  protocolVersion: PROTOCOL_VERSION,
-                } as WebSocketMessageRoomIdRequest,
-              }),
-            );
-          }
-        } else if (
-          isUUID(keyPair.peerId) &&
-          commonState.currentRoomUrl.length === 64
-        ) {
-          await listenerApi.dispatch(
-            signalingServerApi.endpoints.sendMessage.initiate({
-              content: {
-                type: "room",
-                fromPeerId: keyPair.peerId,
-                roomUrl: commonState.currentRoomUrl,
-                protocolVersion: PROTOCOL_VERSION,
-              } as WebSocketMessageRoomIdRequest,
-            }),
-          );
-        }
+        await refreshActiveRooms();
       }
     } else if (resetIdentity.match(action)) {
+      resetRoomRequestLifecycle("identity reset");
       console.trace("[keyPairListenerMiddleware] resetIdentity dispatched");
       localStorage.setItem("peerId", "");
       localStorage.setItem("challengeId", "");
@@ -223,6 +81,8 @@ keyPairListenerMiddleware.startListening({
       localStorage.removeItem("secretKey");
       localStorage.setItem("challenge", "");
       localStorage.setItem("signature", "");
+    } else if (signalingServerActions.disconnect.match(action)) {
+      resetRoomRequestLifecycle();
     }
   },
 });

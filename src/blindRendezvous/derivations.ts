@@ -315,6 +315,49 @@ export const localRoomId = async (
     ),
   );
 
+/**
+ * `StableIdentityCommitment =
+ *    H("p2party/stable-identity-commitment/v1" ||
+ *      RoomContextId || stableEd25519PublicKey)`
+ *
+ * This is a room-scoped pseudonym, not key hiding: a capability holder that
+ * already knows a candidate public key can test it. The raw stable key never
+ * needs to enter a room-wide presence payload.
+ */
+export const stableIdentityCommitment = async (
+  roomContextIdBytes: Uint8Array,
+  stableEd25519PublicKey: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/stable-identity-commitment/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("stableEd25519PublicKey", stableEd25519PublicKey, 32),
+  );
+
+/**
+ * `LocalPeerIdDigest =
+ *    H("p2party/local-peer-id/v1" ||
+ *      RoomContextId || StableIdentityCommitment)`
+ */
+export const localPeerIdDigest = async (
+  roomContextIdBytes: Uint8Array,
+  stableIdentityCommitmentBytes: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/local-peer-id/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("StableIdentityCommitment", stableIdentityCommitmentBytes, 32),
+  );
+
+/** `"peer.v1." || Base64urlNoPad(LocalPeerIdDigest)` */
+export const localPeerId = async (
+  roomContextIdBytes: Uint8Array,
+  stableIdentityCommitmentBytes: Uint8Array,
+): Promise<string> =>
+  `peer.v1.${base64urlNoPad(
+    await localPeerIdDigest(roomContextIdBytes, stableIdentityCommitmentBytes),
+  )}`;
+
 /* ------------------------------------------------------------------ *
  * Section 4.4 — operation identity and semantic slots
  * ------------------------------------------------------------------ */

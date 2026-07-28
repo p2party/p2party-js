@@ -304,6 +304,26 @@ describe("merge is associative, commutative, and idempotent", () => {
       ),
     ).toThrow("share one OperationId");
   });
+
+  test("compares complete bytes even when a colliding entry reuses the signature", async () => {
+    const first = await buildOperation({ payload: Uint8Array.of(1) });
+    const differentBodySameSignature: AuthenticatedRoomOperationV1 = {
+      ...first.operation,
+      fixedPayload: Uint8Array.of(2),
+    };
+
+    expect(() =>
+      mergeOperationSets(
+        [first],
+        [
+          {
+            operationId: first.operationId,
+            operation: differentBodySameSignature,
+          },
+        ],
+      ),
+    ).toThrow("share one OperationId");
+  });
 });
 
 describe("CoreReduce is independent of delivery order and duplication", () => {
@@ -485,6 +505,37 @@ describe("author fork and overquota are arrival-independent", () => {
     expect(state.activeOperationIds.length).toBe(0);
   });
 
+  test("a non-revocation under the pinned authority faults that authority window", async () => {
+    const authorityPolicy = {
+      ...roomPolicy,
+      admissionFloor: {
+        mode: "authority-grant" as const,
+        authorityEd25519PublicKey: author.publicKey,
+        maxAuthorityCredentialLifetimeWindows: 60,
+      },
+    };
+    const unauthorizedAuthorityOperation = await buildOperation({
+      kind: "PRESENCE",
+      signer: author,
+    });
+
+    const state = await coreReduceOuter(
+      [unauthorizedAuthorityOperation],
+      authorityPolicy,
+      REFERENCE_WINDOW,
+    );
+
+    expect(state.activeOperationIds).toEqual([]);
+    expect(state.faults).toHaveLength(1);
+    expect(state.faults[0]).toMatchObject({
+      kind: "author-fork-or-overquota",
+      logicalWindow: REFERENCE_WINDOW,
+    });
+    expect(state.faults[0].proofOperationIds.map(hex)).toEqual([
+      hex(unauthorizedAuthorityOperation.operationId),
+    ]);
+  });
+
   test("a fork in one logical window does not fault the author's other window", async () => {
     const forkedA = await buildOperation({ payload: Uint8Array.of(1) });
     const forkedB = await buildOperation({ payload: Uint8Array.of(2) });
@@ -507,11 +558,15 @@ describe("author fork and overquota are arrival-independent", () => {
 
   test("payload-level reduction is named as pending, not reported as empty", async () => {
     const state = await coreReduceOuter([], roomPolicy, REFERENCE_WINDOW);
-    expect(state.pendingPayloadReduction).toContain("observedPresences");
-    expect(state.pendingPayloadReduction).toContain("storeCatalogFacts");
-    // Section 4.7 derives room capacity from the active presence count, so it
-    // is pending too; it must never come from a local storage cap.
-    expect(state.pendingPayloadReduction).toContain("roomCapacityState");
+    expect(state.pendingPayloadReduction).toEqual([
+      "observedPresences",
+      "effectiveLeaveOperationIds",
+      "storeCatalogFacts",
+      "revocationFloors",
+      // Section 4.7 derives room capacity from the active presence count, so
+      // it is pending too; it must never come from a local storage cap.
+      "roomCapacityState",
+    ]);
   });
 
   test("an author chain with a gap contributes nothing", async () => {

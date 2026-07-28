@@ -21,6 +21,7 @@
 
 import { bytesEqual } from "./canonicalSchema";
 import { coreOperationSetDigest } from "./derivations";
+import { encodeOperation } from "./operation";
 
 import type { AuthenticatedRoomOperationV1 } from "./operation";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
@@ -110,8 +111,8 @@ export const mergeOperationSets = (
     // hash of the complete canonical encoding.
     if (
       !bytesEqual(
-        existing.operation.authorSignature,
-        entry.operation.authorSignature,
+        encodeOperation(existing.operation),
+        encodeOperation(entry.operation),
       )
     )
       throw new Error(

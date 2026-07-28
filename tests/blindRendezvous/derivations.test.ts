@@ -9,12 +9,15 @@ import {
   emptySchedulerWorkloadDigest,
   hkdfSha256Expand,
   hkdfSha256Extract,
+  localPeerId,
+  localPeerIdDigest,
   localRoomId,
   policyHash,
   roomContextConfirmation,
   roomContextId,
   roomRoot,
   sha256,
+  stableIdentityCommitment,
   u16be,
   u32be,
   u64be,
@@ -207,6 +210,56 @@ describe("room identity derivations", () => {
           ]),
         ),
       ),
+    );
+  });
+
+  test("stable identity commitments and peer handles are scoped to one room", async () => {
+    const hashOfPolicy = await policyHash(DEFAULT_BLIND_POLICY_V4_0);
+    const contextId = await roomContextId(capability, hashOfPolicy);
+    const otherContextId = await roomContextId(
+      new Uint8Array(32).fill(0x22),
+      hashOfPolicy,
+    );
+    const stableKey = new Uint8Array(32).fill(0x44);
+
+    const commitment = await stableIdentityCommitment(contextId, stableKey);
+    expect(hex(commitment)).toBe(
+      hex(
+        await sha256(
+          Uint8Array.from([
+            ...domain("p2party/stable-identity-commitment/v1"),
+            ...contextId,
+            ...stableKey,
+          ]),
+        ),
+      ),
+    );
+    expect(
+      hex(await stableIdentityCommitment(otherContextId, stableKey)),
+    ).not.toBe(hex(commitment));
+
+    const digest = await localPeerIdDigest(contextId, commitment);
+    const peerId = await localPeerId(contextId, commitment);
+    expect(peerId).toBe(`peer.v1.${base64urlNoPad(digest)}`);
+    expect(base64urlNoPadDecode(peerId.slice("peer.v1.".length))).toHaveLength(
+      32,
+    );
+  });
+
+  test("stable identity derivations reject non-canonical input lengths", async () => {
+    const contextId = new Uint8Array(32);
+    const commitment = new Uint8Array(32);
+    await expect(
+      stableIdentityCommitment(new Uint8Array(31), new Uint8Array(32)),
+    ).rejects.toThrow("RoomContextId must be exactly 32 bytes");
+    await expect(
+      stableIdentityCommitment(contextId, new Uint8Array(31)),
+    ).rejects.toThrow("stableEd25519PublicKey must be exactly 32 bytes");
+    await expect(
+      localPeerIdDigest(contextId, new Uint8Array(31)),
+    ).rejects.toThrow("StableIdentityCommitment must be exactly 32 bytes");
+    await expect(localPeerId(new Uint8Array(31), commitment)).rejects.toThrow(
+      "RoomContextId must be exactly 32 bytes",
     );
   });
 });

@@ -489,17 +489,32 @@ export const snapshotActivePairOperationCandidate = (
  * Capture one current roster fact for bounded pair-private use after that
  * presence leaves the live roster.
  *
- * Restore repeats operation validation and CoreReduce at the historical
- * decision window before calling this constructor. Exact signed bytes alone,
- * a decoded CoreRoomState, or generic author-prefix evidence are insufficient.
+ * Restore repeats operation validation and CoreReduce at the exact HELLO
+ * logical window before calling this constructor. That equality is
+ * load-bearing: a capability captured before an effective LEAVE cannot prove
+ * a HELLO created at or after the leave. Exact signed bytes alone, a decoded
+ * CoreRoomState, or generic author-prefix evidence are insufficient.
  */
 export const captureHistoricalPairPresenceEvidence = async (
   candidate: OuterValidatedIdentifiedOperationV1,
   roomState: CoreRoomStateV1,
+  helloLogicalWindow: bigint,
 ): Promise<VerifiedHistoricalPairPresenceEvidenceV1> => {
   const candidateSnapshot = reducerSnapshotFor(candidate);
   const verifiedState = await verifiedReducedRoomStateSnapshotFor(roomState);
   const roomStateSnapshot = verifiedState.snapshot;
+  if (
+    typeof helloLogicalWindow !== "bigint" ||
+    helloLogicalWindow < 0n ||
+    helloLogicalWindow > 0xffffffffffffffffn
+  )
+    throw new Error(
+      "coreReduce: HELLO logical window must be an unsigned 64-bit integer",
+    );
+  if (verifiedState.state.referenceWindow !== helloLogicalWindow)
+    throw new Error(
+      "coreReduce: historical presence must be proved at the exact HELLO logical window",
+    );
 
   if (
     !bytesEqual(

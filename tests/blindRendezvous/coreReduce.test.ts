@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { newKeyPair } from "../../src/cryptography/ed25519";
 import {
+  leaveSemanticSlot,
   pairSemanticSlot,
   presenceSemanticSlot,
 } from "../../src/blindRendezvous/derivations";
@@ -30,6 +31,7 @@ import {
 } from "../../src/blindRendezvous/operation";
 import {
   decodePresenceV1,
+  encodeLeaveV1,
   encodePresenceV1,
 } from "../../src/blindRendezvous/operationPayload";
 import {
@@ -615,6 +617,7 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
     const evidence = await captureHistoricalPairPresenceEvidence(
       presenceCandidate,
       state,
+      REFERENCE_WINDOW,
     );
     const snapshot = snapshotHistoricalPairPresenceEvidence(evidence);
     const presence = decodePresenceV1(presenceCandidate.operation.fixedPayload);
@@ -642,19 +645,104 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
     expect(fresh.exactPresenceOperationBytes).toEqual(
       encodeOperation(presenceCandidate.operation),
     );
+    await expect(
+      captureHistoricalPairPresenceEvidence(
+        presenceCandidate,
+        state,
+        REFERENCE_WINDOW + 1n,
+      ),
+    ).rejects.toThrow("exact HELLO logical window");
 
     const persistedState = await decodeCoreRoomStateV1(
       await encodeCoreRoomStateV1(state),
     );
     await expect(
-      captureHistoricalPairPresenceEvidence(presenceCandidate, persistedState),
+      captureHistoricalPairPresenceEvidence(
+        presenceCandidate,
+        persistedState,
+        REFERENCE_WINDOW,
+      ),
     ).rejects.toThrow("live result of coreReduce");
     await expect(
       captureHistoricalPairPresenceEvidence(
         operations[operations.length - 1],
         state,
+        REFERENCE_WINDOW,
       ),
     ).rejects.toThrow("not observed");
+  });
+
+  test("historical presence is proved at the HELLO window so an effective leave cannot be bypassed", async () => {
+    const operations = await buildChain();
+    const presenceCandidate = operations[2];
+    const leaveWindow = REFERENCE_WINDOW + 5n;
+    const leaveValue = {
+      version: 1 as const,
+      presenceOperationId: Uint8Array.from(presenceCandidate.operationId),
+      effectiveLogicalWindow: leaveWindow,
+    };
+    const leave = await buildOperation({
+      kind: "LEAVE",
+      payload: encodeLeaveV1(leaveValue),
+      signer: otherAuthor,
+      logicalWindow: leaveWindow,
+      expiresAfterWindow: leaveWindow + 10n,
+      semanticSlot: await leaveSemanticSlot(
+        leaveValue.presenceOperationId,
+        leaveValue.effectiveLogicalWindow,
+      ),
+      dependencies: [leaveValue.presenceOperationId],
+    });
+    const retained = [presenceCandidate, leave];
+
+    const beforeLeaveWindow = leaveWindow - 1n;
+    const beforeLeave = await coreReduceOuter(
+      retained,
+      roomPolicy,
+      beforeLeaveWindow,
+    );
+    await expect(
+      captureHistoricalPairPresenceEvidence(
+        presenceCandidate,
+        beforeLeave,
+        beforeLeaveWindow,
+      ),
+    ).resolves.toBeDefined();
+
+    const atLeave = await coreReduceOuter(retained, roomPolicy, leaveWindow);
+    await expect(
+      captureHistoricalPairPresenceEvidence(
+        presenceCandidate,
+        atLeave,
+        leaveWindow,
+      ),
+    ).rejects.toThrow("not observed");
+
+    const persistedBytes = retained.map((candidate) =>
+      encodeOperation(candidate.operation),
+    );
+    for (const [helloWindow, expected] of [
+      [beforeLeaveWindow, "allow"],
+      [leaveWindow, "deny"],
+    ] as const) {
+      const restoredContext = operationValidationContextAt(
+        context,
+        helloWindow,
+      );
+      const restored = await Promise.all(
+        persistedBytes.map((bytes) =>
+          validateAndIdentifyOperation(decodeOperation(bytes), restoredContext),
+        ),
+      );
+      const restoredState = await coreReduce(restored, restoredContext);
+      const capture = captureHistoricalPairPresenceEvidence(
+        restored[0],
+        restoredState,
+        helloWindow,
+      );
+      if (expected === "allow") await expect(capture).resolves.toBeDefined();
+      else await expect(capture).rejects.toThrow("not observed");
+    }
   });
 
   test("restart revalidation recovers an active pair with an expired exact author prefix", async () => {

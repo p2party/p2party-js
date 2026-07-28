@@ -67,6 +67,10 @@ interface RTCStatEntry {
   fingerprint?: string;
 }
 
+/** Session-scoped: whether this engine reports certificate stats cannot change
+ * while the page is loaded, so the notice below is emitted at most once. */
+let certificateStatsUnsupportedReported = false;
+
 /**
  * Post-connect DTLS binding check (spec §5): the fingerprint declared in the
  * SDP (and bound into the CPace channel-input via buildChannelInput) must
@@ -120,11 +124,19 @@ export const verifyDtlsFingerprints = async (
   // certificate than the SDP advertised. Where the browser can answer, a
   // disagreement is still fatal.
   if (!reportsCertificates && localCertId === undefined) {
-    console.warn(
-      "p2party: this browser does not report WebRTC certificate statistics, " +
-        "so the post-connect DTLS certificate check cannot run. The SDP " +
-        "fingerprints remain bound into the authenticated handshake transcript.",
-    );
+    // Whether an engine implements `certificate` stats is a property of the
+    // engine, not of this peer or this handshake, so it is reported once per
+    // session. Logging per handshake meant a busy room repeated the same
+    // unactionable notice for every peer and every reconnect, which buries the
+    // errors a user actually needs to see.
+    if (!certificateStatsUnsupportedReported) {
+      certificateStatsUnsupportedReported = true;
+      console.warn(
+        "p2party: this browser does not report WebRTC certificate statistics, " +
+          "so the post-connect DTLS certificate check cannot run. The SDP " +
+          "fingerprints remain bound into the authenticated handshake transcript.",
+      );
+    }
     return;
   }
 

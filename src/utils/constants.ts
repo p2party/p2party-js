@@ -199,6 +199,11 @@ export const CHANNEL_OPEN_POLL_MS = 25;
 // MAX_RESUME_ATTEMPTS reconnects so a flapping peer can't loop forever. The
 // receiver re-emits its stored leaf-hash receipts on the new channel's onopen,
 // so the sender rebuilds its acked-set and resends ONLY the still-missing reals.
+// A "disconnected" edge is not abandoned immediately: handleConnectToPeer
+// attempts an ICE restart and defers teardown by 8000 ms. Send admission waits
+// longer than that, so a send issued during the repair is not failed while the
+// peer is still in the roster and the UI still — correctly — shows it present.
+export const PEER_ADMISSION_WAIT_MS = 12000;
 export const RECONNECT_RESUME_TIMEOUT_MS = 30000;
 export const RECONNECT_RESUME_POLL_MS = 500;
 export const MAX_RESUME_ATTEMPTS = 3;

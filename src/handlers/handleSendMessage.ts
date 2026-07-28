@@ -46,6 +46,7 @@ import {
   PROOF_LEN,
   MAX_RETRANSMITS,
   RETRANSMIT_TIMEOUT_MS,
+  PEER_ADMISSION_WAIT_MS,
   RECONNECT_RESUME_TIMEOUT_MS,
   RECONNECT_RESUME_POLL_MS,
   MAX_RESUME_ATTEMPTS,
@@ -217,8 +218,7 @@ const sendChunks = async (
     }
 
     const receiptToken =
-      unencryptedChunk.receiptToken.length ===
-      crypto_hash_sha512_BYTES * 2
+      unencryptedChunk.receiptToken.length === crypto_hash_sha512_BYTES * 2
         ? unencryptedChunk.receiptToken
         : uint8ArrayToHex(
             await createChunkReceiptToken(
@@ -281,9 +281,7 @@ const sendChunks = async (
       (channel.readyState as string) === "open" &&
       channel.bufferedAmount >= MAX_BUFFERED_AMOUNT
     ) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, CHANNEL_OPEN_POLL_MS),
-      );
+      await new Promise((resolve) => setTimeout(resolve, CHANNEL_OPEN_POLL_MS));
       throwIfTransferAborted(signal);
     }
 
@@ -339,6 +337,58 @@ const sendChunks = async (
 // so it is byte-identical across the reconnect; the receiver re-emits its stored
 // receipts on the new channel's onopen, letting the sender resend only the reals
 // still missing. Returns null if the peer does not come back in time.
+/**
+ * Resolve true when the edge is usable, false when it is beyond repair or the
+ * budget expires.
+ *
+ * `closed` and `failed` are terminal, so they resolve immediately rather than
+ * burning the whole budget. Every other state is treated as in-flight: a peer
+ * mid-ICE-restart reports `disconnected`, which is exactly the case this
+ * exists for.
+ *
+ * The listener is added with `addEventListener` because handleConnectToPeer
+ * installs the `onconnectionstatechange` *property* handler; using the
+ * property here would silently replace the reconnect logic.
+ */
+const waitForConnectedEdge = (
+  epc: IRTCPeerConnection,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> => {
+  if (epc.connectionState === "connected") return Promise.resolve(true);
+  if (epc.connectionState === "closed" || epc.connectionState === "failed")
+    return Promise.resolve(false);
+  if (signal?.aborted) return Promise.resolve(false);
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (usable: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      epc.removeEventListener("connectionstatechange", onChange);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(usable);
+    };
+    const onChange = (): void => {
+      if (epc.connectionState === "connected") settle(true);
+      else if (
+        epc.connectionState === "closed" ||
+        epc.connectionState === "failed"
+      )
+        settle(false);
+    };
+    const onAbort = (): void => {
+      settle(false);
+    };
+    const timer = setTimeout(() => {
+      settle(false);
+    }, timeoutMs);
+    epc.addEventListener("connectionstatechange", onChange);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+};
+
 const resumeChannel = async (
   api: BaseQueryApi,
   roomId: string,
@@ -497,10 +547,7 @@ export const bindTransferCipherToConnection = async (
   throwIfTransferAborted(signal);
   if (transfer.epc === nextEpc) return transfer;
 
-  await waitWithTransferAbort(
-    waitForGate(roomId, nextEpc.withPeerId),
-    signal,
-  );
+  await waitWithTransferAbort(waitForGate(roomId, nextEpc.withPeerId), signal);
   if (!nextEpc.ratchetState)
     throw new Error("v3 send: replacement connection has no ratchet state");
 
@@ -585,9 +632,8 @@ export const runPeerSendFanout = async (
   signal?: AbortSignal,
   onTransferStarted?: () => void,
 ): Promise<PeerSendFanoutResult> => {
-  const outcomes: Array<
-    PeerDeliveryOutcome | Promise<PeerDeliveryOutcome>
-  > = [];
+  const outcomes: Array<PeerDeliveryOutcome | Promise<PeerDeliveryOutcome>> =
+    [];
   let startedTransfers = 0;
 
   for (const target of targets) {
@@ -600,7 +646,12 @@ export const runPeerSendFanout = async (
       continue;
     }
 
-    if (!target.epc || target.epc.connectionState !== "connected") {
+    // A repairing edge is not a dead one: wait out the ICE-restart grace
+    // period before declaring the peer unreachable.
+    if (
+      !target.epc ||
+      !(await waitForConnectedEdge(target.epc, PEER_ADMISSION_WAIT_MS, signal))
+    ) {
       outcomes.push({
         peerId: target.peerId,
         status: "skipped",
@@ -652,10 +703,7 @@ export const runPeerSendFanout = async (
     try {
       const started = startTransfer(authenticatedTarget, channel);
       outcomes.push(
-        Promise.resolve(started).then<
-          PeerDeliveryOutcome,
-          PeerDeliveryOutcome
-        >(
+        Promise.resolve(started).then<PeerDeliveryOutcome, PeerDeliveryOutcome>(
           () => ({
             peerId: target.peerId,
             status: "delivered",
@@ -701,10 +749,8 @@ export class MessageDeliveryError extends AggregateError {
         .filter(
           (
             outcome,
-          ): outcome is Extract<
-            PeerDeliveryOutcome,
-            { status: "failed" }
-          > => outcome.status === "failed",
+          ): outcome is Extract<PeerDeliveryOutcome, { status: "failed" }> =>
+            outcome.status === "failed",
         )
         .map((outcome) => outcome.reason),
       message,
@@ -755,10 +801,7 @@ const sendWithReconcile = async (
   // This path no longer persists ciphertext. Remove any queue records left by an
   // older runtime before this channel can drain them; plaintext newChunks are the
   // sole durable resend source.
-  await deleteDBSendQueue(
-    roomSendQueueLabel(roomId, channel.label),
-    peerId,
-  );
+  await deleteDBSendQueue(roomSendQueueLabel(roomId, channel.label), peerId);
   throwIfTransferAborted(signal);
 
   // protocol-v3: do not send until the PACE + Double-Ratchet handshake has seeded
@@ -769,8 +812,7 @@ const sendWithReconcile = async (
   } catch (error) {
     throw new Error("v3 send: ratchet gate rejected", { cause: error });
   }
-  if (!epc.ratchetState)
-    throw new Error("v3 send: no ratchet state for peer");
+  if (!epc.ratchetState) throw new Error("v3 send: no ratchet state for peer");
 
   // v4: never step the ratchet into a healing exchange — wait for the sparse-PQ
   // traffic gate before deriving the message key/context.
@@ -785,11 +827,7 @@ const sendWithReconcile = async (
   let header: RatchetHeader;
   let pqContext: PqMessageKeyContext | null;
   try {
-    const stepped = await ratchetEncryptDurably(
-      epc,
-      roomId,
-      encryptionModule,
-    );
+    const stepped = await ratchetEncryptDurably(epc, roomId, encryptionModule);
     if (signal?.aborted) {
       stepped.messageKey.fill(0);
       stepped.pqContext?.rootKey.fill(0);
@@ -813,14 +851,7 @@ const sendWithReconcile = async (
 
     // Wait for the per-message channel to open before the first send, so its
     // initial frames aren't spilled to the WS relay while it is still connecting.
-    if (
-      !(await waitForOpen(
-        currentChannel,
-        undefined,
-        undefined,
-        signal,
-      ))
-    )
+    if (!(await waitForOpen(currentChannel, undefined, undefined, signal)))
       throw new Error("Message DataChannel did not open before send timeout");
     throwIfTransferAborted(signal);
 
@@ -874,12 +905,7 @@ const sendWithReconcile = async (
         // connected, that close is the peer's immediate-mode CANCEL signal.
         // Resume is reserved for a replacement PC after a transport failure.
         if (
-          isAuthenticatedPeerCancel(
-            currentEpc,
-            peerConnections,
-            roomId,
-            peerId,
-          )
+          isAuthenticatedPeerCancel(currentEpc, peerConnections, roomId, peerId)
         )
           throw new Error("Message transfer cancelled by peer");
 
@@ -1073,24 +1099,54 @@ const sendScheduled = async (
 
   for (const target of targets) {
     if (signal?.aborted) {
-      outcomes.push({ peerId: target.peerId, status: "skipped", reason: "cancelled" });
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "cancelled",
+      });
       continue;
     }
     const epc = target.epc;
-    if (!epc || epc.connectionState !== "connected" || !epc.coverRuntime) {
-      outcomes.push({ peerId: target.peerId, status: "skipped", reason: "not-connected" });
+    if (
+      !epc ||
+      !(await waitForConnectedEdge(epc, PEER_ADMISSION_WAIT_MS, signal)) ||
+      !epc.coverRuntime
+    ) {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "not-connected",
+      });
       continue;
     }
     try {
-      await waitWithTransferAbort(getRatchetGate(roomId, target.peerId), signal);
-      if (!epc.ratchetState) throw new Error("v4 scheduled send: no ratchet state");
+      await waitWithTransferAbort(
+        getRatchetGate(roomId, target.peerId),
+        signal,
+      );
+      if (!epc.ratchetState)
+        throw new Error("v4 scheduled send: no ratchet state");
       await waitForPqTrafficAdmission(epc, signal);
-      const stepped = await ratchetEncryptDurably(epc, roomId, encryptionModule);
-      const channelMessageLabel = await compileChannelMessageLabel(channelLabel, merkleRootHex);
+      const stepped = await ratchetEncryptDurably(
+        epc,
+        roomId,
+        encryptionModule,
+      );
+      const channelMessageLabel = await compileChannelMessageLabel(
+        channelLabel,
+        merkleRootHex,
+      );
       const sealer = makeScheduledSlotSealer(
-        transferId, hashHex, chunkHashes, merkleRoot, merkleRootHex,
-        stepped.messageKey, stepped.header, stepped.pqContext,
-        encryptionModule, merkleModule,
+        transferId,
+        hashHex,
+        chunkHashes,
+        merkleRoot,
+        merkleRootHex,
+        stepped.messageKey,
+        stepped.header,
+        stepped.pqContext,
+        encryptionModule,
+        merkleModule,
       );
       const enqueued = enqueueScheduledSend({
         epc,
@@ -1099,14 +1155,19 @@ const sendScheduled = async (
         sealSlotCell: sealer,
         getAckedChunks: () => getAckedChunks(roomId, target.peerId, transferId),
       });
-      if (!enqueued) throw new Error("v4 scheduled send: edge has no cover runtime");
+      if (!enqueued)
+        throw new Error("v4 scheduled send: edge has no cover runtime");
       trackScheduledSend(epc, roomId, target.peerId, merkleRootHex, transferId);
       startedTransfers += 1;
       onTransferStarted?.();
       // Delivery confirmation: over reliable ordered lanes the receiver signals
       // completion with a terminal scheduled receipt. Bound the wait.
       const delivered = await waitForCompletion(
-        roomId, target.peerId, transferId, SCHEDULED_DELIVERY_TIMEOUT_MS, signal,
+        roomId,
+        target.peerId,
+        transferId,
+        SCHEDULED_DELIVERY_TIMEOUT_MS,
+        signal,
       );
       // The message key/context are dead once the job's cells are all sealed.
       stepped.messageKey.fill(0);
@@ -1114,10 +1175,20 @@ const sendScheduled = async (
       outcomes.push(
         delivered
           ? { peerId: target.peerId, status: "delivered" }
-          : { peerId: target.peerId, status: "failed", phase: "transfer", reason: new Error("scheduled delivery not confirmed") },
+          : {
+              peerId: target.peerId,
+              status: "failed",
+              phase: "transfer",
+              reason: new Error("scheduled delivery not confirmed"),
+            },
       );
     } catch (reason) {
-      outcomes.push({ peerId: target.peerId, status: "failed", phase: "transfer", reason });
+      outcomes.push({
+        peerId: target.peerId,
+        status: "failed",
+        phase: "transfer",
+        reason,
+      });
     }
   }
   return { outcomes, startedTransfers };
@@ -1195,14 +1266,12 @@ export const handleSendMessage = async (
           peerId,
           epc: peerConnections.find(
             (candidate) =>
-              candidate.roomId === roomId &&
-              candidate.withPeerId === peerId,
+              candidate.roomId === roomId && candidate.withPeerId === peerId,
           ),
         }),
       );
 
-      const scheduledRoom =
-        rooms[roomIndex].policy.coverMode === "scheduled";
+      const scheduledRoom = rooms[roomIndex].policy.coverMode === "scheduled";
       const fanout = scheduledRoom
         ? await sendScheduled(
             roomId,

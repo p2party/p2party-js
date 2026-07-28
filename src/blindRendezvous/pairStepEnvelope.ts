@@ -19,6 +19,10 @@
 
 import { decodeCanonicalStrict, encodeCanonical } from "./canonicalSchema";
 import {
+  PAIR_BOOTSTRAP_SUITE_ID_V1,
+  PAIR_BOOTSTRAP_SUITE_V1,
+} from "./pairBootstrapSuite";
+import {
   OPERATION_PAYLOAD_CLASS_BYTES,
   PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1,
   pairStepEnvelopeV1Schema,
@@ -28,12 +32,13 @@ import type { OperationPayloadClassV1 } from "./operation";
 
 export const PAIR_STEP_ENVELOPE_VERSION_V1 = 1;
 export const PAIR_BOOTSTRAP_HEADER_VERSION_V1 = 1;
-export const PAIR_BOOTSTRAP_SUITE_ID_V1 = 1;
-export const PAIR_AEAD_TAG_BYTES_V1 = 16;
+export { PAIR_BOOTSTRAP_SUITE_ID_V1 } from "./pairBootstrapSuite";
+export const PAIR_AEAD_TAG_BYTES_V1 =
+  PAIR_BOOTSTRAP_SUITE_V1.establishedPairAead.tagBytes;
 
 export interface PairBootstrapHeaderV1 {
   version: 1;
-  suiteId: 1;
+  suiteId: typeof PAIR_BOOTSTRAP_SUITE_ID_V1;
   hybridKemCiphertext: Uint8Array;
 }
 
@@ -59,17 +64,19 @@ const fail: (message: string) => never = (message) => {
 
 const emptyCiphertextEnvelope = (bootstrap: boolean): PairStepEnvelopeV1 => ({
   version: 1,
-  pairRoutingTag: new Uint8Array(32),
+  pairRoutingTag: new Uint8Array(PAIR_BOOTSTRAP_SUITE_V1.routingTagBytes),
   bootstrapHeader: bootstrap
     ? {
         version: 1,
-        suiteId: 1,
+        suiteId: PAIR_BOOTSTRAP_SUITE_ID_V1,
         hybridKemCiphertext: new Uint8Array(
           PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1,
         ),
       }
     : null,
-  nonce: bootstrap ? null : new Uint8Array(24),
+  nonce: bootstrap
+    ? null
+    : new Uint8Array(PAIR_BOOTSTRAP_SUITE_V1.establishedPairAead.nonceBytes),
   pairCiphertextAndTag: new Uint8Array(0),
 });
 

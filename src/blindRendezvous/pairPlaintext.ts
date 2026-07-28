@@ -13,6 +13,7 @@
 
 import { decodeCanonicalStrict, encodeCanonical } from "./canonicalSchema";
 import { transportOfferCandidateId } from "./derivations";
+import { PAIR_BOOTSTRAP_SUITE_ID_V1 } from "./pairBootstrapSuite";
 import { pairPlaintextTargetBytesV1 } from "./pairStepEnvelope";
 import {
   MAX_PAIR_TRANSPORT_CANDIDATES_V1,
@@ -228,7 +229,7 @@ export type PairBootstrapRecipientBindingV1 =
 
 export interface PairBootstrapInfoV1 {
   readonly version: 1;
-  readonly pairBootstrapSuite: 1;
+  readonly pairBootstrapSuite: typeof PAIR_BOOTSTRAP_SUITE_ID_V1;
   readonly roomContextConfirmation: Uint8Array;
   readonly policyHash: Uint8Array;
   readonly stepKind: "IDENTITY_HELLO" | "IDENTITY_ACCEPT";
@@ -263,16 +264,16 @@ export const validatePairFlightSlotV1 = (value: PairFlightSlotV1): void => {
     fail("pair flight slot direction must be 0 or 1");
 };
 
-export const validatePairBootstrapInfoV1 = (
+const validatedPairBootstrapInfoBytesV1 = (
   value: PairBootstrapInfoV1,
-): void => {
+): Uint8Array => {
   const encoded = encodeCanonical(pairBootstrapInfoV1Schema, value);
   const snapshot = decodeCanonicalStrict(
     pairBootstrapInfoV1Schema,
     encoded,
   ) as PairBootstrapInfoV1;
   if (snapshot.version !== 1) fail("unsupported PairBootstrapInfoV1 version");
-  if (snapshot.pairBootstrapSuite !== 1)
+  if (snapshot.pairBootstrapSuite !== PAIR_BOOTSTRAP_SUITE_ID_V1)
     fail("unsupported pair bootstrap suite");
   if (
     snapshot.stepKind !== "IDENTITY_HELLO" &&
@@ -295,7 +296,19 @@ export const validatePairBootstrapInfoV1 = (
       snapshot.recipientBinding.kind !== "hello-response")
   )
     fail("pair bootstrap step and recipient binding disagree");
+  return encoded;
 };
+
+export const validatePairBootstrapInfoV1 = (
+  value: PairBootstrapInfoV1,
+): void => {
+  validatedPairBootstrapInfoBytesV1(value);
+};
+
+/** Canonical HPKE `info` bytes after the complete bootstrap-info gate. */
+export const encodePairBootstrapInfoV1 = (
+  value: PairBootstrapInfoV1,
+): Uint8Array => validatedPairBootstrapInfoBytesV1(value);
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 

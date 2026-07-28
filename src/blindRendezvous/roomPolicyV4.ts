@@ -21,6 +21,7 @@ import {
   MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1,
   roomPolicyV4Schema,
 } from "./schemas";
+import { PAIR_BOOTSTRAP_SUITE_ID_V1 } from "./pairBootstrapSuite";
 
 import type { RoomPolicyV1 } from "../roomPolicy";
 
@@ -49,7 +50,7 @@ export interface RoomPolicyV4 {
   sessionPolicyV1: Uint8Array;
   roomCryptoSuite: 1;
   operationCodec: 1;
-  pairBootstrapSuite: 1;
+  pairBootstrapSuite: typeof PAIR_BOOTSTRAP_SUITE_ID_V1;
   protocolLimits: RoomProtocolLimitsV1;
   admissionFloor: AdmissionFloorV4;
   maxRoomMembers: number;
@@ -88,7 +89,8 @@ export const validateRoomPolicyV4 = (policy: RoomPolicyV4): void => {
   if (policy.version !== 4) fail("unsupported policy version");
   if (policy.roomCryptoSuite !== 1) fail("unsupported room crypto suite");
   if (policy.operationCodec !== 1) fail("unsupported operation codec");
-  if (policy.pairBootstrapSuite !== 1) fail("unsupported pair bootstrap suite");
+  if (policy.pairBootstrapSuite !== PAIR_BOOTSTRAP_SUITE_ID_V1)
+    fail("unsupported pair bootstrap suite");
 
   const limits = policy.protocolLimits;
   if (limits.logicalWindowMs <= 0n) fail("logicalWindowMs must be positive");
@@ -184,7 +186,7 @@ export const DEFAULT_BLIND_POLICY_V4_0: Readonly<RoomPolicyV4> = Object.freeze({
   sessionPolicyV1: encodeRoomPolicyV1(DEFAULT_BLIND_SESSION_POLICY_V1),
   roomCryptoSuite: 1,
   operationCodec: 1,
-  pairBootstrapSuite: 1,
+  pairBootstrapSuite: PAIR_BOOTSTRAP_SUITE_ID_V1,
   protocolLimits: Object.freeze({
     logicalWindowMs: 60_000n,
     maxClockSkewWindows: 5,

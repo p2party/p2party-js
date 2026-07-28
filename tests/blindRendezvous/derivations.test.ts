@@ -7,11 +7,16 @@ import {
   byteOf,
   domain,
   emptySchedulerWorkloadDigest,
+  establishedPairRoot,
   hkdfSha256Expand,
   hkdfSha256Extract,
+  identityHelloPskId,
   localPeerId,
   localPeerIdDigest,
   localRoomId,
+  pairFlightAeadKey,
+  pairFlightRoot,
+  pairFlightSecret,
   policyHash,
   roomContextConfirmation,
   roomContextId,
@@ -21,6 +26,7 @@ import {
   u16be,
   u32be,
   u64be,
+  validatedPairRootExporterContext,
 } from "../../src/blindRendezvous/derivations";
 import {
   DEFAULT_BLIND_POLICY_V4_0,
@@ -32,6 +38,27 @@ const hex = (value: Uint8Array): string =>
 
 const fromHex = (value: string): Uint8Array =>
   Uint8Array.from(value.match(/../gu) ?? [], (pair) => parseInt(pair, 16));
+
+const filled = (value: number, length = 32): Uint8Array =>
+  new Uint8Array(length).fill(value);
+
+const shadowByteSurfaces = (
+  bytes: Uint8Array,
+  claimedLength = 0,
+): Uint8Array => {
+  Object.defineProperty(bytes, "length", { value: claimedLength });
+  Object.defineProperty(bytes, Symbol.iterator, {
+    value: (): never => {
+      throw new Error("hostile iterator must not run");
+    },
+  });
+  Object.defineProperty(bytes, "constructor", {
+    get: (): never => {
+      throw new Error("hostile constructor must not run");
+    },
+  });
+  return bytes;
+};
 
 describe("Section 3.3 primitive encodings", () => {
   test("domain strings are exact ASCII octets with no terminator", () => {
@@ -271,5 +298,170 @@ describe("closed sentinels", () => {
       hex(await sha256(domain("p2party/scheduler-workload/v1/none"))),
     );
     expect(digest.length).toBe(32);
+  });
+});
+
+describe("Section 4.11 pair derivation byte ownership", () => {
+  const checkpointSlot = {
+    kind: "PAIR_CHECKPOINT",
+    direction: 0,
+    pairSequence: 2n,
+  } as const;
+
+  test("rejects hostile proxies without invoking their traps", async () => {
+    const hostile = new Proxy(new Uint8Array(32), {
+      getPrototypeOf(): never {
+        throw new Error("hostile getPrototypeOf must not run");
+      },
+    });
+
+    await expect(identityHelloPskId(hostile, filled(0x11))).rejects.toThrow(
+      "PolicyHash must be exactly 32 bytes",
+    );
+    expect(() => pairFlightRoot(hostile, checkpointSlot)).toThrow(
+      "pair base secret must be exactly 32 bytes",
+    );
+    await expect(
+      validatedPairRootExporterContext("IDENTITY_HELLO", hostile),
+    ).rejects.toThrow("canonical pair plaintext must be a Uint8Array");
+  });
+
+  test("uses intrinsic bytes despite shadowed metadata and iteration", async () => {
+    const policy = filled(0x11);
+    const presenceOperationId = filled(0x12);
+    expect(
+      await identityHelloPskId(
+        shadowByteSurfaces(Uint8Array.from(policy)),
+        shadowByteSurfaces(Uint8Array.from(presenceOperationId), 65_536),
+      ),
+    ).toEqual(await identityHelloPskId(policy, presenceOperationId));
+
+    const helloRoot = filled(0x21);
+    const acceptRoot = filled(0x22);
+    const helloOperationId = filled(0x23);
+    const acceptOperationId = filled(0x24);
+    expect(
+      await establishedPairRoot(
+        shadowByteSurfaces(Uint8Array.from(helloRoot)),
+        shadowByteSurfaces(Uint8Array.from(acceptRoot), 31),
+        shadowByteSurfaces(Uint8Array.from(helloOperationId), 33),
+        shadowByteSurfaces(Uint8Array.from(acceptOperationId), 1_000_000),
+      ),
+    ).toEqual(
+      await establishedPairRoot(
+        helloRoot,
+        acceptRoot,
+        helloOperationId,
+        acceptOperationId,
+      ),
+    );
+
+    const baseSecret = filled(0x31);
+    expect(
+      await pairFlightRoot(
+        shadowByteSurfaces(Uint8Array.from(baseSecret), 31),
+        checkpointSlot,
+      ),
+    ).toEqual(await pairFlightRoot(baseSecret, checkpointSlot));
+
+    const plaintext = Uint8Array.of(1, 2, 3, 4);
+    expect(
+      await validatedPairRootExporterContext(
+        "IDENTITY_ACCEPT",
+        shadowByteSurfaces(Uint8Array.from(plaintext), 0),
+      ),
+    ).toEqual(
+      await validatedPairRootExporterContext("IDENTITY_ACCEPT", plaintext),
+    );
+  });
+
+  test("wipes owned secret snapshots when later validation fails", async () => {
+    const baseSecret = filled(0x41);
+    const helloRoot = filled(0x42);
+    const invalidAcceptRoot = filled(0x43, 31);
+    const operationId = filled(0x44);
+    const flightRoot = filled(0x45);
+    const flightSecret = filled(0x46);
+    const callerInputs = [
+      baseSecret,
+      helloRoot,
+      invalidAcceptRoot,
+      operationId,
+      flightRoot,
+      flightSecret,
+    ];
+    const originals = callerInputs.map((bytes) => Uint8Array.from(bytes));
+
+    const typedArrayPrototype = Object.getPrototypeOf(
+      Uint8Array.prototype,
+    ) as object;
+    const fillDescriptor = Object.getOwnPropertyDescriptor(
+      typedArrayPrototype,
+      "fill",
+    );
+    if (fillDescriptor === undefined)
+      throw new Error("Uint8Array.prototype.fill descriptor is unavailable");
+    const intrinsicFill = Uint8Array.prototype.fill;
+    const zeroFilledBuffers: Uint8Array[] = [];
+    Object.defineProperty(typedArrayPrototype, "fill", {
+      ...fillDescriptor,
+      value: function observedFill(
+        this: Uint8Array,
+        value: number,
+        start?: number,
+        end?: number,
+      ): Uint8Array {
+        const result = Reflect.apply(intrinsicFill, this, [
+          value,
+          start,
+          end,
+        ]) as Uint8Array;
+        if (value === 0) zeroFilledBuffers.push(this);
+        return result;
+      },
+    });
+
+    let establishedFailure: Promise<Uint8Array> | undefined;
+    let aeadFailure: Promise<Uint8Array> | undefined;
+    try {
+      expect(() =>
+        pairFlightRoot(baseSecret, {
+          ...checkpointSlot,
+          kind: "NOT_A_PAIR_STEP",
+        }),
+      ).toThrow("PairStepKindV1");
+      establishedFailure = establishedPairRoot(
+        helloRoot,
+        invalidAcceptRoot,
+        operationId,
+        operationId,
+      );
+      void establishedFailure.catch(() => undefined);
+      expect(() =>
+        pairFlightSecret(flightRoot, "PAIR_CHECKPOINT", {}),
+      ).toThrow();
+      aeadFailure = pairFlightAeadKey(flightSecret, {});
+      void aeadFailure.catch(() => undefined);
+    } finally {
+      Object.defineProperty(typedArrayPrototype, "fill", fillDescriptor);
+    }
+
+    if (establishedFailure === undefined || aeadFailure === undefined)
+      throw new Error("expected derivation failures were not created");
+    await expect(establishedFailure).rejects.toThrow(
+      "AcceptRoot must be exactly 32 bytes",
+    );
+    await expect(aeadFailure).rejects.toThrow();
+
+    expect(
+      zeroFilledBuffers.filter(
+        (bytes) =>
+          bytes.length === 32 &&
+          bytes.every((byte) => byte === 0) &&
+          !callerInputs.includes(bytes),
+      ).length,
+    ).toBeGreaterThanOrEqual(4);
+    for (const [index, bytes] of callerInputs.entries())
+      expect(bytes).toEqual(originals[index]);
   });
 });

@@ -22,10 +22,12 @@ import {
   encodeCanonical,
 } from "./canonicalSchema";
 import {
+  hmacSha256,
   hkdfSha256Expand,
   hkdfSha256Extract,
   sha256,
 } from "../cryptography/webCryptoSha256";
+import { snapshotByteInput } from "../cryptography/byteInput";
 import {
   admissionGrantUnsignedV1Schema,
   admissionGrantV1Schema,
@@ -44,6 +46,7 @@ import {
   kernelModuleSemanticsSchema,
   kernelSourceTreeSchema,
   operationIdSetSchema,
+  pairBootstrapHeaderV1Schema,
   pairIdentityUnsignedProjectionV1Schema,
   pairOuterBindingV1Schema,
   pairOuterPrebindingV1Schema,
@@ -59,6 +62,7 @@ import {
 import type { TypeDescriptor } from "./canonicalSchema";
 
 export {
+  hmacSha256,
   hkdfSha256Expand,
   hkdfSha256Extract,
   sha256,
@@ -209,6 +213,49 @@ const requireBytes = (
   if (!(value instanceof Uint8Array) || value.length !== length)
     fail(`${name} must be exactly ${String(length)} bytes`);
   return value;
+};
+
+/**
+ * Hardened owned snapshot for the pair-crypto derivations added in §4.11.
+ *
+ * Keep the established DerivationError contract while rejecting Proxy-backed
+ * typed arrays and ignoring shadowed length/iterator/species properties.
+ */
+const snapshotExactPairBytes = (
+  name: string,
+  value: unknown,
+  length: number,
+): Uint8Array => {
+  try {
+    return snapshotByteInput(value, `blindRendezvous derivation: ${name}`, {
+      exactLength: length,
+    });
+  } catch {
+    return fail(`${name} must be exactly ${String(length)} bytes`);
+  }
+};
+
+const snapshotPairBytes = (name: string, value: unknown): Uint8Array => {
+  try {
+    return snapshotByteInput(value, `blindRendezvous derivation: ${name}`);
+  } catch {
+    return fail(`${name} must be a Uint8Array`);
+  }
+};
+
+const wipeBytes = (...values: readonly (Uint8Array | undefined)[]): void => {
+  for (const value of values) value?.fill(0);
+};
+
+const settleAndWipe = async <T>(
+  operation: Promise<T>,
+  values: readonly (Uint8Array | undefined)[],
+): Promise<T> => {
+  try {
+    return await operation;
+  } finally {
+    wipeBytes(...values);
+  }
 };
 
 /* ------------------------------------------------------------------ *
@@ -719,6 +766,305 @@ export const confirmedPairTranscriptId = async (
     requireBytes("HelloOperationId", helloOperationId, 32),
     requireBytes("AcceptOperationId", acceptOperationId, 32),
   );
+
+/**
+ * HELLO's room- and recipient-bound HPKE PSK identifier.
+ *
+ * `H("p2party/identity-hello-psk-id/v1" || PolicyHash ||
+ *    responderPresenceOperationId)`
+ */
+export const identityHelloPskId = async (
+  policyHashBytes: Uint8Array,
+  responderPresenceOperationId: Uint8Array,
+): Promise<Uint8Array> => {
+  let privatePolicyHash: Uint8Array | undefined;
+  let privatePresenceOperationId: Uint8Array | undefined;
+  let preimage: Uint8Array | undefined;
+  try {
+    privatePolicyHash = snapshotExactPairBytes(
+      "PolicyHash",
+      policyHashBytes,
+      32,
+    );
+    privatePresenceOperationId = snapshotExactPairBytes(
+      "responderPresenceOperationId",
+      responderPresenceOperationId,
+      32,
+    );
+    preimage = concatBytes(
+      domain("p2party/identity-hello-psk-id/v1"),
+      privatePolicyHash,
+      privatePresenceOperationId,
+    );
+    return await sha256(preimage);
+  } finally {
+    wipeBytes(privatePolicyHash, privatePresenceOperationId, preimage);
+  }
+};
+
+/**
+ * ACCEPT's room- and HELLO-bound HPKE PSK identifier.
+ *
+ * `H("p2party/identity-accept-psk-id/v1" || PolicyHash ||
+ *    HelloOperationId)`
+ */
+export const identityAcceptPskId = async (
+  policyHashBytes: Uint8Array,
+  helloOperationId: Uint8Array,
+): Promise<Uint8Array> => {
+  let privatePolicyHash: Uint8Array | undefined;
+  let privateHelloOperationId: Uint8Array | undefined;
+  let preimage: Uint8Array | undefined;
+  try {
+    privatePolicyHash = snapshotExactPairBytes(
+      "PolicyHash",
+      policyHashBytes,
+      32,
+    );
+    privateHelloOperationId = snapshotExactPairBytes(
+      "HelloOperationId",
+      helloOperationId,
+      32,
+    );
+    preimage = concatBytes(
+      domain("p2party/identity-accept-psk-id/v1"),
+      privatePolicyHash,
+      privateHelloOperationId,
+    );
+    return await sha256(preimage);
+  } finally {
+    wipeBytes(privatePolicyHash, privateHelloOperationId, preimage);
+  }
+};
+
+/** Hash the exact canonical suite-1 HPKE bootstrap header. */
+export const pairBootstrapHeaderHash = async (
+  bootstrapHeader: unknown,
+): Promise<Uint8Array> => {
+  const encoded = canonical(pairBootstrapHeaderV1Schema, bootstrapHeader);
+  try {
+    return await sha256(encoded);
+  } finally {
+    encoded.fill(0);
+  }
+};
+
+/**
+ * HPKE exporter context for the one-use public bootstrap routing tag.
+ *
+ * `"p2party/bootstrap-tag/v1" || Canonical(PairOuterPrebindingV1)`
+ */
+export const pairBootstrapTagExporterContext = (
+  prebinding: unknown,
+): Uint8Array => {
+  let prebindingBytes: Uint8Array | undefined;
+  let domainBytes: Uint8Array | undefined;
+  try {
+    prebindingBytes = snapshotPairOuterPrebinding(prebinding).bytes;
+    domainBytes = domain("p2party/bootstrap-tag/v1");
+    return concatBytes(domainBytes, prebindingBytes);
+  } finally {
+    wipeBytes(domainBytes, prebindingBytes);
+  }
+};
+
+/**
+ * HPKE exporter context used only after a bootstrap plaintext authenticates
+ * and passes the complete canonical pair-plaintext validator.
+ */
+export const validatedPairRootExporterContext = async (
+  kind: "IDENTITY_HELLO" | "IDENTITY_ACCEPT",
+  canonicalPairPlaintext: Uint8Array,
+): Promise<Uint8Array> => {
+  if (kind !== "IDENTITY_HELLO" && kind !== "IDENTITY_ACCEPT")
+    fail("validated pair root kind must be IDENTITY_HELLO or IDENTITY_ACCEPT");
+  const privatePlaintext = snapshotPairBytes(
+    "canonical pair plaintext",
+    canonicalPairPlaintext,
+  );
+  const domainString =
+    kind === "IDENTITY_HELLO"
+      ? "p2party/validated-hello-root/v1"
+      : "p2party/validated-accept-root/v1";
+  let plaintextHash: Uint8Array | undefined;
+  let domainBytes: Uint8Array | undefined;
+  try {
+    plaintextHash = await sha256(privatePlaintext);
+    domainBytes = domain(domainString);
+    return concatBytes(domainBytes, plaintextHash);
+  } finally {
+    wipeBytes(privatePlaintext, plaintextHash, domainBytes);
+  }
+};
+
+/**
+ * Root shared by both endpoints after the two exact identity operation IDs
+ * and both validated HPKE bootstrap roots are known.
+ */
+export const establishedPairRoot = async (
+  helloRoot: Uint8Array,
+  acceptRoot: Uint8Array,
+  helloOperationId: Uint8Array,
+  acceptOperationId: Uint8Array,
+): Promise<Uint8Array> => {
+  let privateHelloRoot: Uint8Array | undefined;
+  let privateAcceptRoot: Uint8Array | undefined;
+  let privateHelloOperationId: Uint8Array | undefined;
+  let privateAcceptOperationId: Uint8Array | undefined;
+  let transcriptId: Uint8Array | undefined;
+  let inputKeyMaterial: Uint8Array | undefined;
+  try {
+    privateHelloRoot = snapshotExactPairBytes("HelloRoot", helloRoot, 32);
+    privateAcceptRoot = snapshotExactPairBytes("AcceptRoot", acceptRoot, 32);
+    privateHelloOperationId = snapshotExactPairBytes(
+      "HelloOperationId",
+      helloOperationId,
+      32,
+    );
+    privateAcceptOperationId = snapshotExactPairBytes(
+      "AcceptOperationId",
+      acceptOperationId,
+      32,
+    );
+    transcriptId = await confirmedPairTranscriptId(
+      privateHelloOperationId,
+      privateAcceptOperationId,
+    );
+    inputKeyMaterial = concatBytes(privateAcceptRoot, transcriptId);
+    return await hkdfSha256Extract(privateHelloRoot, inputKeyMaterial);
+  } finally {
+    wipeBytes(
+      privateHelloRoot,
+      privateAcceptRoot,
+      privateHelloOperationId,
+      privateAcceptOperationId,
+      transcriptId,
+      inputKeyMaterial,
+    );
+  }
+};
+
+/**
+ * First stage of the established-flight schedule. The slot is the complete
+ * kind/direction/sequence coordinate and no output length is implicit.
+ */
+export const pairFlightRoot = (
+  baseSecret: Uint8Array,
+  slot: {
+    readonly kind: string;
+    readonly direction: number;
+    readonly pairSequence: bigint;
+  },
+): Promise<Uint8Array> => {
+  let privateBaseSecret: Uint8Array | undefined;
+  let info: Uint8Array | undefined;
+  try {
+    privateBaseSecret = snapshotExactPairBytes(
+      "pair base secret",
+      baseSecret,
+      32,
+    );
+    info = concatBytes(
+      domain("p2party/pair-flight-root/v1"),
+      pairStepKindByte(slot.kind),
+      byteOf(slot.direction),
+      u64be(slot.pairSequence),
+    );
+    return settleAndWipe(hkdfSha256Expand(privateBaseSecret, info, 32), [
+      privateBaseSecret,
+      info,
+    ]);
+  } catch (error) {
+    wipeBytes(privateBaseSecret, info);
+    throw error;
+  }
+};
+
+/**
+ * Second stage of the established-flight schedule, binding the exact signed
+ * outer prebinding before the public routing tag exists.
+ */
+export const pairFlightSecret = (
+  flightRoot: Uint8Array,
+  kind: string,
+  prebinding: unknown,
+): Promise<Uint8Array> => {
+  let privateFlightRoot: Uint8Array | undefined;
+  let prebindingBytes: Uint8Array | undefined;
+  let info: Uint8Array | undefined;
+  try {
+    privateFlightRoot = snapshotExactPairBytes(
+      "PairFlightRoot",
+      flightRoot,
+      32,
+    );
+    const privatePrebinding = snapshotPairOuterPrebinding(prebinding);
+    prebindingBytes = privatePrebinding.bytes;
+    info = concatBytes(
+      domain("p2party/pair-flight/v1"),
+      pairStepKindByte(kind),
+      prebindingBytes,
+    );
+    return settleAndWipe(hkdfSha256Expand(privateFlightRoot, info, 32), [
+      privateFlightRoot,
+      prebindingBytes,
+      info,
+    ]);
+  } catch (error) {
+    wipeBytes(privateFlightRoot, prebindingBytes, info);
+    throw error;
+  }
+};
+
+/** `HMAC-SHA-256(PairFlightSecret, "p2party/pair-flight-tag/v1")`. */
+export const pairFlightRoutingTag = (
+  flightSecret: Uint8Array,
+): Promise<Uint8Array> => {
+  let privateFlightSecret: Uint8Array | undefined;
+  let message: Uint8Array | undefined;
+  try {
+    privateFlightSecret = snapshotExactPairBytes(
+      "PairFlightSecret",
+      flightSecret,
+      32,
+    );
+    message = domain("p2party/pair-flight-tag/v1");
+    return settleAndWipe(hmacSha256(privateFlightSecret, message), [
+      privateFlightSecret,
+      message,
+    ]);
+  } catch (error) {
+    wipeBytes(privateFlightSecret, message);
+    throw error;
+  }
+};
+
+/**
+ * Final established-flight key, bound to the complete routing-tag-derived
+ * outer binding.
+ */
+export const pairFlightAeadKey = async (
+  flightSecret: Uint8Array,
+  binding: unknown,
+): Promise<Uint8Array> => {
+  let privateFlightSecret: Uint8Array | undefined;
+  let bindingBytes: Uint8Array | undefined;
+  let info: Uint8Array | undefined;
+  try {
+    privateFlightSecret = snapshotExactPairBytes(
+      "PairFlightSecret",
+      flightSecret,
+      32,
+    );
+    const privateBinding = snapshotPairOuterBinding(binding);
+    bindingBytes = canonical(pairOuterBindingV1Schema, privateBinding);
+    info = concatBytes(domain("p2party/pair-flight-key/v1"), bindingBytes);
+    await validatePairOuterBindingSemanticSlot(privateBinding);
+    return await hkdfSha256Expand(privateFlightSecret, info, 32);
+  } finally {
+    wipeBytes(privateFlightSecret, bindingBytes, info);
+  }
+};
 
 /**
  * Stable-edge attempt claim signature transcript.

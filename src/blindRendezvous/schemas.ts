@@ -34,6 +34,7 @@ import {
 } from "./canonicalSchema";
 import { MAX_HANDSHAKE_PAYLOAD_LENGTH } from "../handlers/handshakeFrame";
 import { WIRE_CHUNK_FRAME_LEN } from "../utils/constants";
+import { PAIR_BOOTSTRAP_SUITE_V1 } from "./pairBootstrapSuite";
 
 import type { FieldDescriptor, TypeDescriptor } from "./canonicalSchema";
 
@@ -48,10 +49,12 @@ export const OPERATION_PAYLOAD_CLASS_BYTES: Readonly<Record<0 | 1, number>> =
 export const MAX_OPERATION_PAYLOAD_BYTES = OPERATION_PAYLOAD_CLASS_BYTES[1];
 
 /** Section 4.11 suite-1 bootstrap KEM ciphertext width. */
-export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 = 1120;
+export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 =
+  PAIR_BOOTSTRAP_SUITE_V1.hybridKem.ciphertextBytes;
 
 /** Sections 4.9/4.11 suite-1 ML-KEM-768 + X25519 public-key width. */
-export const RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1 = 1216;
+export const RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1 =
+  PAIR_BOOTSTRAP_SUITE_V1.hybridKem.publicKeyBytes;
 
 /** Section 4.11: every currently defined pair step has zero or one dependency. */
 export const MAX_PAIR_DEPENDENCIES_V1 = 1;

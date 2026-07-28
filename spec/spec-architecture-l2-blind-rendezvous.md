@@ -40,15 +40,17 @@ bounded model results to the exact release. Generated TypeScript, protocol
 tables, UI claim keys, and whitepaper tables are projections, not additional
 authorities. A disagreement fails the release.
 
-One ordinary server is a complete functional S1 deployment. A client may add
-further compatible servers or non-IP carriers without changing the room
-identifier, room policy, pair transcript, or existing session. Clients publish
-to and reconcile from every locally active carrier, union valid operations,
-and deterministically derive the same core room state only when every
-still-required operation reaches the named correct participants before
-retention expires and reconciliation continues. Local admission and connection
-planning remain intentional frontend projections. There is no server-to-server
-consensus or federation protocol to operate.
+The S1 deployment target and conformance package require one conforming
+store-only server; once its acceptance evidence passes, that is a complete
+functional S1 deployment. A client may add further compatible servers or
+non-IP carriers without changing the room identifier, room policy, pair
+transcript, or existing session.
+Clients publish to and reconcile from every locally active carrier, union
+valid operations, and deterministically derive the same core room state only
+when every still-required operation reaches the named correct participants
+before retention expires and reconciliation continues. Local admission and
+connection planning remain intentional frontend projections. There is no
+server-to-server consensus or federation protocol to operate.
 
 An end-user device may perform carrier work without acquiring protocol
 authority. It may expose the exact same conforming public-store interface as
@@ -69,12 +71,13 @@ room-wide full mesh. The planner is an availability accelerator, not room
 identity or convergent room state. Each accepted edge owns an independent
 protocol-v4 session and post-quantum-healing state.
 
-The reference L2 access-private profile uses a targetless append-only cohort
-log and fixed public full-chunk reads. It needs no private-write primitive:
-there is no room, recipient, mailbox, or index in a server request. This moves
-cost from cryptographic servers to cohort-wide bandwidth and client trial
-decryption. Optional OMR or PIR retrieval may accelerate the same immutable
-log only after separate review; it never becomes authoritative state.
+The reference fixed-scan construction underpinning the L2 target and access
+privacy claim uses a targetless append-only cohort log and fixed public
+full-chunk reads. It needs no private-write primitive: there is no room,
+recipient, mailbox, or index in a server request. This moves cost from
+cryptographic servers to cohort-wide bandwidth and client trial decryption.
+Optional OMR or PIR retrieval may accelerate the same immutable log only after
+separate review; it never becomes authoritative state.
 Each finalized public window additionally has one profile-wide signed
 checkpoint. Existing signed append results become bounded custody promises;
 conflicting checkpoints or a committed wrong object produce portable
@@ -345,7 +348,7 @@ specified here. The production delta is:
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Invitation              | SDK currently normalizes accepted capabilities toward legacy form; the frontend route is `/r`; query fields carry auth/PQ shorthands and the full scheduled-cover policy, while an immediate policy's revision is not portable in today's link and private-rendezvous choices are disabled.                    | Preserve version, add both closed v2 fragment forms, keep `/r`/share/QR behavior, make the complete immutable policy portable in the v2 fragment, reject v2 policy queries, and vault the capability under `LocalRoomId`.                                                                  |
 | Room IDs/API            | Join waits for a server UUID; public room/peer helpers and persistence use capability/server IDs.                                                                                                                                                                                                              | Local initialization must resolve offline; migrate every named namespace to `LocalRoomId`, `PresenceRef`, and `LocalPeerId`; expose observed members, edges, and data peers separately.                                                                                                    |
-| Admission               | Repeated local checks exist, but address-book/blacklist rows can prefer a server-scoped peer UUID when both identifiers are supplied; that UUID is stable only within the current server database/public key and the server already sees identity and signaling.                                               | Stable Ed25519 key is the primary portable policy identity; one room-scoped `Admit()` gates every sensitive path; strict proof and pair-private pre-SDP admission are new.                                                                                                                 |
+| Admission               | Repeated local checks exist, but address-book/blacklist rows can prefer a server-scoped peer UUID when both identifiers are supplied; that UUID is stable only within the current server database/public key and the server already sees identity and signaling.                                               | Stable Ed25519 key is the primary portable policy identity; one room-scoped `EvaluatePeerAdmissionPolicy()` kernel is consumed by bootstrap `Admit()` and post-promotion `ReauthorizeStableEdge()`; strict proof and pair-private pre-SDP admission are new.                               |
 | Topology/data           | The server roster causes a room-wide WebRTC mesh, and `sendMessage(room)` fans out only over directly connected channels.                                                                                                                                                                                      | Implement the bounded sparse control overlay; production-default whole-room messaging additionally requires REQ-021/AC-043.                                                                                                                                                                |
 | v4/PQ                   | Strong direct, ordered-transport session and healing implementation exists.                                                                                                                                                                                                                                    | Reuse its raw state machine; add the causal operation-backed adapter, bilateral quiescence, eventual custody, and rejection of restored older authenticated edge counters/transcripts.                                                                                                     |
 | Cover/privacy           | Fixed 65,490-byte scheduled cover exists per direct WebRTC edge.                                                                                                                                                                                                                                               | Public cohort allocation, fixed scheduled append/full-chunk reads, trial decryption, evidence, and classifier evaluation are wholly new.                                                                                                                                                   |
@@ -601,8 +604,8 @@ The censorship-resistance claim is also conditional:
 > participating path from its author to each required recipient continues to
 > accept, retain, and carry it before expiry. Each measured independent store,
 > route family, peer bridge, or physical carrier may add a delivery path. One
-> default server is a complete functional deployment but has zero
-> server-fault tolerance.
+> conforming store-only server whose S1 acceptance evidence passes is a
+> complete functional S1 deployment but has zero server-fault tolerance.
 
 Two conformance packages make the deployment boundary precise without
 inventing a server quorum:
@@ -668,9 +671,10 @@ R2-BEC is the requested two-honest-server bounded-fault delivery target only
 under those assumptions and only as the conjunction of the granular assurance
 fields and acceptance evidence. The UI and paper shall not collapse it into an
 unqualified “fully secure,” “Byzantine-fault-tolerant,” “anonymous,” or
-“uncensorable” badge. With two certified honest independent paths and `f=1`,
-the liveness theorem tolerates loss of one only while the other remains honest,
-usable, and reaches all required participants in time.
+“uncensorable” badge. With two selected assumed-honest, independently
+evidenced paths and `f=1`, the liveness theorem tolerates loss of one only
+while the other remains honest, usable, and reaches all required participants
+in time.
 “At least two honest stores” is not a generic Byzantine-consensus threshold
 against an unbounded number of faulty replicas. R2 has no votes: its exact
 locally selected/capped carrier set and fault subsets are inputs to a
@@ -937,16 +941,30 @@ automatically.
   admission, and cryptographic modules do not import DNS, URL, HTTP, TCP, UDP,
   WebSocket, WebRTC, IP address, or a concrete socket API.
 
+For every L3 requirement and gate, **hardware-in-loop** means the actual
+non-IP adapter, device, radio/media interface, driver, fragmentation, and
+custody code path running under laboratory control while every IP API is
+tripwired to fail. **Field-tested** means that same registered path was
+exercised in the physical and custody environment named by the claim and
+produced the complete measured dataset required below. A byte-injection
+harness is neither.
+
 - **REQ-015 — Normative L3 operation:** The first conforming release includes
   portable-bundle export/import and one automated non-IP contact-carrier
   integration. A byte-injection harness is required for portability tests but
-  is not enough for a practical Internet-shutdown label. With all IP
-  transports disabled, repeated
-  store-carry-forward contacts shall converge presence and complete the
-  pre-SDP identity gate, pair bootstrap, protocol-v4 handshake, and one
-  post-quantum healing cycle. This is a release gate, not a future roadmap
-  placeholder. It earns `shutdown-surviving rendezvous/control`, not
-  application messaging; the latter additionally requires REQ-021/AC-043.
+  is not enough for `non-IP-control-compatible`. A hardware-in-loop non-IP path
+  may establish that compatibility result when all-IP-disabled
+  store-carry-forward contacts converge presence and complete the pre-SDP
+  identity gate, pair bootstrap, protocol-v4 handshake, and one post-quantum
+  healing cycle. The stronger practical phrase
+  `shutdown-surviving rendezvous/control` additionally requires one deployed,
+  field-tested non-IP custody path with the Section 4.14 range, loss, energy,
+  MTU, capacity, contact-duration, human-latency, power, and physical-custody
+  evidence current for the claimed scope. The hardware-in-loop compatibility
+  result is the v0.4 release gate; shutdown-survival wording is conditional on
+  the additional field evidence rather than a future protocol version. Neither
+  result covers application messaging; that additionally requires
+  REQ-021/AC-043 on the same measured path.
 
 - **REQ-016 — Typed transport handoff:** WebRTC is one fast transport
   candidate, not a prerequisite of rendezvous. Candidate codecs are
@@ -1019,14 +1037,18 @@ automatically.
   operation, or session state.
 
 - **REQ-023 — One-server safety, additive bounded-fault delivery target:** The
-  S1 safety package is mandatory with the single shipped store. A deployment
-  may claim R2-BEC only when its one canonical
+  S1 safety package is mandatory with the single shipped store. A release or
+  explicitly scoped consented test deployment may publish an R2-BEC
+  conformance result only when its one canonical
   `R2ConformanceRecordV1` satisfies `R2Conforms`, including at least two
   assumed-honest independently operated public stores, exact global temporal
   participant coverage under every registered fault subset, and current
   retention/capacity evidence. Privacy, admission, PQ, and shutdown remain
   separately named claims rather than being folded into a “full” label. Local
-  path evidence is necessary but not sufficient for a scoped R2-BEC claim.
+  path evidence is necessary but not sufficient for a scoped R2-BEC result.
+  Runtime/UI wording never says that a live room “is BFT”; positive wording
+  says that the exact release passed participant/frontier-scoped R2-BEC
+  conformance under the named censor-action and temporal-coverage model.
   Adding a
   locally authorized carrier automatically schedules independent wrapping,
   reconciliation, and backfill; it never introduces server consensus,
@@ -1238,16 +1260,19 @@ automatically.
   Stopping a carrier affects delivery only; it never deletes or rolls back
   logical room state.
 
-- **SEC-015 — Proactive path use:** Under a censorship-resistant profile,
-  every active path is exercised at its fixed or locally declared contact
-  boundary. A secret is not sent to a new path only after another path fails.
-  Store contexts are independently wrapped; alternative routes to one context
-  replay the exact idempotent request under the fixed route cycle.
+- **SEC-015 — Proactive path use:** When evaluating the conditional
+  censorship-resilience claim in Section 1.6 under one registered blocking
+  model, every carrier/path included in that claim is exercised at its fixed
+  or locally declared contact boundary. A secret is not sent to a new path
+  only after another path fails. Store contexts are independently wrapped;
+  alternative routes to one context replay the exact idempotent request under
+  the fixed route cycle.
 
 - **SEC-016 — Honest independent-path evidence:** Operator names, hostnames,
   process counts, regions, and route counts are not independence evidence.
-  A censorship-resistance label requires measured blocking-domain diversity
-  from declared vantage points and names the events that exhaust it.
+  Any published conditional censorship-resilience wording under Section 1.6
+  requires measured blocking-domain diversity from declared vantage points
+  and names the events that exhaust it.
 
 - **SEC-017 — Unlinkable or fixed admission to stores:** Public stores enforce
   size and rate quotas without receiving room or stable application identity.
@@ -1313,14 +1338,16 @@ automatically.
 - **SEC-023 — Malicious rendezvous non-disclosure:** Store request schemas,
   allocation state, object identifiers, persistence keys, logs, metrics, and
   route protocols contain no capability-derived, room-equality,
-  stable-identity-equality, membership, co-membership, social-edge, admission,
-  or pair target value. A store may process only the public profile/window/
-  class/ordinal geometry defined here. Cryptographic blindness holds even when
-  every store colludes; resistance to correlating bearer sources, timing, and
-  cohort use is claimed only at the separately measured L2/source-metadata
-  level. A store colluding with a capability holder has the room-level view
-  already disclosed in the threat model, but still cannot decrypt another
-  admitted pair's double-sealed identity, SDP/ICE, v4, or PQ payload.
+  protocol-carried application stable-identity-equality, membership,
+  co-membership, social-edge, admission, or pair target value. A store may
+  process only the public profile/window/class/ordinal geometry defined here.
+  Cryptographic blindness holds even when every store colludes; bearer source
+  addresses, access accounts, route credentials, timing, shared host/locator
+  observations, and cohort use may still correlate requests or roles and are
+  claimed only at the separately measured L2/source-metadata level. A store
+  colluding with a capability holder has the room-level view already disclosed
+  in the threat model, but still cannot decrypt another admitted pair's
+  double-sealed identity, SDP/ICE, v4, or PQ payload.
 
 - **SEC-024 — Evidence-compiled claims fail closed:** Every positive protocol,
   product, UI, whitepaper, and publication claim resolves one
@@ -2078,8 +2105,8 @@ multi-path experiment method plus one non-negative integer
 for this aggregate. Evidence measured under another model is retained for
 audit but cannot contribute to this aggregate.
 
-`R2ConformanceRecordV1` is the sole R2-BEC claim SSOT. Every array in the
-record and its raw dataset is sorted by the complete canonical tuple,
+`R2ConformanceRecordV1` is the sole R2-BEC conformance-result SSOT. Every array
+in the record and its raw dataset is sorted by the complete canonical tuple,
 duplicate-free, and bounded by the release registry's publication limits.
 Every reference resolves exactly once. The following derivations close its
 graph and evidence namespaces:
@@ -2266,7 +2293,7 @@ non-R2 work that consumes the same fixed slot, reserve, byte, or object budget
 invalidates the record. Its resource and fair-edge digests equal the record's
 exact simulation assumptions.
 
-The release claim predicate is exactly:
+The R2-BEC conformance-result predicate is exactly:
 
 ```text
 R2Conforms(record) =
@@ -2502,10 +2529,10 @@ temporal graph and pass `R2Conforms`; independently passing local sets do not
 prove an author-to-participant path. `RoomAssuranceV4` alone is local and never
 emits a scoped R2-BEC label. Every contributing local method's
 `faultThresholdF` and `blockingModelId` must exactly equal the record values.
-These predicates express authenticated-union Byzantine fault tolerance: a
-Byzantine carrier may omit, replay, fork, or equivocate but cannot become a
-logical winner. They do not express server consensus or make an empty result a
-proof of global absence.
+These predicates express authenticated-union Byzantine safety plus registered
+bounded-fault delivery resilience: a Byzantine carrier may omit, replay, fork,
+or equivocate but cannot become a logical winner. They do not express server
+consensus or make an empty result a proof of global absence.
 
 ### 3.4 Formal obligations and refinement boundary
 
@@ -2531,7 +2558,7 @@ notation and not a replacement for implementation tests. The release's
   set, scheduler workload (including worst-case authorized valid competing
   work), profile, resource limits, and fair-edge assumptions.
 - **FPO-003 — Pre-SDP non-disclosure:** Within one current, persisted
-  `AdmissionDecisionLeaseV1`, transport disclosure in every admission mode
+  `BootstrapAdmissionDecisionLeaseV1`, transport disclosure in every admission mode
   requires a current `Admit() == allow` result and authenticated pair
   transcript. Strict modes additionally admit no HELLO before their exact
   eligibility proof passes. A frontend policy-generation change invalidates
@@ -3662,10 +3689,14 @@ type BootstrapStoreHintV1 = {
   routes: readonly StoreRouteV1[];
 };
 
+// Canonical encoding uses sequence order because the semantic order key is
+// the derived RouteId rather than the route's own encoded bytes.
+const MAX_STORE_HINT_ROUTES_V1 = 255;
+
 type StoreHintOperationV1 = {
   version: 1;
   descriptor: StoreDescriptorV1;
-  routes: readonly StoreRouteV1[];
+  routes: readonly StoreRouteV1[]; // <= MAX_STORE_HINT_ROUTES_V1
   hintExpiresAfterLogicalWindow: bigint;
 };
 
@@ -4407,6 +4438,41 @@ StoreDescriptorSignedMessage =
 StoreRouteSignedMessage =
   "p2party/store-route-signature/v1" || RouteId
 
+StoreDescriptorAuthentic(descriptor) =
+  descriptor has the one canonical StoreDescriptorV1 encoding
+  and descriptor.version == 1
+  and descriptor.notBeforeUnixMs < descriptor.notAfterUnixMs
+  and its supported-profile/chain-start projection is complete and canonical
+  and descriptorSignature verifies StoreDescriptorSignedMessage under
+      descriptor.storeIdentityEd25519Key
+
+StoreRouteAuthentic(route, descriptor) =
+  StoreDescriptorAuthentic(descriptor)
+  and route has the one canonical StoreRouteV1 encoding
+  and route.version == 1
+  and route.notBeforeUnixMs < route.notAfterUnixMs
+  and route.storeId == StoreId(descriptor)
+  and route.descriptorHash == DescriptorHash(descriptor)
+  and routeSignature verifies StoreRouteSignedMessage under
+      descriptor.storeIdentityEd25519Key
+
+StoreDescriptorActiveAt(descriptor, atUnixMs) =
+  StoreDescriptorAuthentic(descriptor)
+  and descriptor.notBeforeUnixMs <= atUnixMs < descriptor.notAfterUnixMs
+
+StoreRouteActiveAt(route, descriptor, atUnixMs) =
+  StoreRouteAuthentic(route, descriptor)
+  and route.notBeforeUnixMs <= atUnixMs < route.notAfterUnixMs
+
+RoomLogicalWindowStartUnixMs(roomPolicy, logicalWindow) =
+  checkedMultiply(logicalWindow, roomPolicy.protocolLimits.logicalWindowMs)
+
+RoomLogicalWindowEndUnixMsExclusive(roomPolicy, logicalWindow) =
+  RoomLogicalWindowStartUnixMs(
+    roomPolicy,
+    checkedAdd(logicalWindow, 1)
+  )
+
 CanonicalRouteOrigin(route) =
   the exact canonical origin returned by route.routeFamily's release-registry
   parser, or null for a registered originless route family
@@ -4461,10 +4527,14 @@ RemoteHintActivationAuthorized(store, route) =
     and RouteId(route) is in carrierPolicy.preauthorizedRemoteRouteIds
   )
 
-DiscoveredStoreCatalog(roomAccess: BlindRoomAccessV4) =
+DiscoveredStoreCatalog(
+  roomAccess: BlindRoomAccessV4,
+  capturedReferenceWindow
+) =
     valid roomAccess.bootstrapStoreHints
   ∪ explicit local additions
-  ∪ valid unexpired STORE_HINT operations
+  ∪ valid STORE_HINT source records whose logical hint lease is live at
+      capturedReferenceWindow
 
 RequiredRoomRetentionWindows(roomPolicy) =
   max(
@@ -4498,8 +4568,7 @@ RoomProfileCompatible(roomPolicy, plannerPolicy, resourcePolicy, profile) =
       bound under the profile's exact role slots and missed-opportunity bound
 
 StoreProfileCompatible(store, profile) =
-  store descriptor is signed, canonical, and within its absolute validity
-      interval
+  StoreDescriptorAuthentic(store)
   and DeliveryProfileHash(profile)
       is in store.supportedDeliveryProfileHashes
   and store.compatibilityHash ==
@@ -4598,19 +4667,24 @@ ContactAdapterCompatible(
       bounded clock-snapshot method, and
       contactContext.bearerConstraintHash all match the registry entry
 
-ActivePublicCarrierContextCandidates(room: BlindRoomAccessV4) =
+ActivePublicCarrierContextCandidates(
+  room: BlindRoomAccessV4,
+  activationAtUnixMs
+) =
   {
     { kind: "public-store", store, profile,
       carrierContextId: PublicCarrierContextId } |
       store is in ClientPublicCarrierCatalog
+      and StoreDescriptorActiveAt(store, activationAtUnixMs)
       and profile in ActiveDeliveryProfiles(room)
       and PublicCarrierContextId is not in
           room.carrierAssignments.disabledCarrierContextIds
       and profile.roomSlotsPerClient >=
           globalResourcePolicy.maxInitializedBlindRooms
       and StoreProfileCompatible(store, profile)
-      and at least one valid, unexpired route in
+      and at least one route in
           ClientPublicCarrierCatalogRoutes belongs to store,
+          satisfies StoreRouteActiveAt(route, store, activationAtUnixMs),
           has a live authorized source,
           satisfies RemoteHintActivationAuthorized(store, route),
           satisfies FrontendAllowed(store, route),
@@ -4652,13 +4726,26 @@ ActiveContactCarrierContextCandidates(room: BlindRoomAccessV4) =
           )
   }
 
-ClientPublicCarrierCatalogCandidates =
+capturedRoomReferenceWindows =
+  canonical sorted unique tuples
+    (LocalRoomId(room), roomReferenceWindow)
+  for every initialized blind room in the one client-global catalog snapshot
+
+ClientPublicCarrierCatalogCandidates(capturedRoomReferenceWindows) =
   valid release-shipped default bootstrap descriptors/routes
   ∪ explicit local additions
-  ∪ union of DiscoveredStoreCatalog(room) across initialized blind rooms
+  ∪ union of DiscoveredStoreCatalog(
+      room,
+      capturedRoomReferenceWindows[LocalRoomId(room)]
+    ) across initialized blind rooms
 
-ClientPublicCarrierCatalogAggregates =
-  AggregateByStoreId(ClientPublicCarrierCatalogCandidates) where:
+ClientPublicCarrierCatalogAggregates(
+  capturedRoomReferenceWindows,
+  activationAtUnixMs
+) =
+  AggregateByStoreId(
+    ClientPublicCarrierCatalogCandidates(capturedRoomReferenceWindows)
+  ) where:
     exactly one aggregate consumes one store-count slot;
     maximumGeneration is the maximum valid signed descriptor generation;
     retainedDescriptorState at maximumGeneration is exactly one of:
@@ -4686,19 +4773,36 @@ ClientPublicCarrierCatalogAggregates =
       descriptor-state size, so an authenticated higher generation or second
       fork hash replaces that state atomically without retaining a lower
       generation as active;
-    route candidates are exact valid signed, currently unexpired routes for
-      activeDescriptorHash having at least one live source, and are empty when
-      it is null
+    route candidates are exact routes for activeDescriptorHash satisfying
+      StoreRouteActiveAt(route, activeDescriptor, activationAtUnixMs) and
+      having at least one live source, and are empty when it is null
 
-CatalogRouteActivationUsable(storeAggregate, route) =
-  route is unexpired and has a live authorized source
+CatalogRouteActivationUsable(
+  storeAggregate,
+  route,
+  activationAtUnixMs
+) =
+  StoreDescriptorActiveAt(
+    storeAggregate.activeDescriptor,
+    activationAtUnixMs
+  )
+  and StoreRouteActiveAt(
+    route,
+    storeAggregate.activeDescriptor,
+    activationAtUnixMs
+  )
+  and route has a live authorized source
   and RemoteHintActivationAuthorized(storeAggregate, route)
   and FrontendAllowed(storeAggregate, route)
   and not FrontendDenied(storeAggregate, route)
 
-RemoteCatalogActivationRank(storeAggregate) =
+RemoteCatalogActivationRank(storeAggregate, activationAtUnixMs) =
   0 when at least one route for the aggregate satisfies
-      CatalogRouteActivationUsable
+      CatalogRouteActivationUsable(
+        storeAggregate,
+        route,
+        activationAtUnixMs
+      )
   1 otherwise // discovery-only UI evidence
 
 CatalogStoreSourceRank(storeAggregate) =
@@ -4706,10 +4810,10 @@ CatalogStoreSourceRank(storeAggregate) =
   1 otherwise when retained/pinned by an explicit local addition
   2 otherwise // remote-only or high-water-only, including expired sources
 
-CatalogStoreOrder(storeAggregate) =
+CatalogStoreOrder(storeAggregate, activationAtUnixMs) =
   (
     CatalogStoreSourceRank,
-    RemoteCatalogActivationRank,
+    RemoteCatalogActivationRank(storeAggregate, activationAtUnixMs),
     preferred store index,
     descending maximumGeneration,
     StoreId,
@@ -4721,40 +4825,56 @@ CatalogStorePinned(storeAggregate) =
   or supplies a prewarmed context
   or supplied a previously active context at the reconciliation snapshot
 
-MandatoryCatalogRoutes(storeAggregate) =
+MandatoryCatalogRoutes(storeAggregate, activationAtUnixMs) =
   every previously selected route for that aggregate that still satisfies
-    CatalogRouteActivationUsable
+    CatalogRouteActivationUsable(storeAggregate, route, activationAtUnixMs)
   ∪, when CatalogStorePinned and that set is empty but a usable route exists,
-    the first usable route in (RoutePriority, RouteId) order
+    the first route satisfying
+      CatalogRouteActivationUsable(storeAggregate, route, activationAtUnixMs)
+    in (RoutePriority, RouteId) order
 
-CatalogRouteRetentionRank(storeAggregate, route) =
-  0 when route is in MandatoryCatalogRoutes(storeAggregate)
-  1 when CatalogRouteActivationUsable(storeAggregate, route)
+CatalogRouteRetentionRank(storeAggregate, route, activationAtUnixMs) =
+  0 when route is in
+      MandatoryCatalogRoutes(storeAggregate, activationAtUnixMs)
+  1 when CatalogRouteActivationUsable(
+      storeAggregate,
+      route,
+      activationAtUnixMs
+    )
   2 otherwise // live discovery evidence only; denied/expired routes are absent
 
-CatalogRouteOrder(storeAggregate, route) =
+CatalogRouteOrder(storeAggregate, route, activationAtUnixMs) =
   (
-    CatalogRouteRetentionRank,
+    CatalogRouteRetentionRank(storeAggregate, route, activationAtUnixMs),
     zero-based ordinal within that aggregate's
       (CatalogRouteRetentionRank, RoutePriority, RouteId) route order,
-    CatalogStoreOrder(storeAggregate),
+    CatalogStoreOrder(storeAggregate, activationAtUnixMs),
     RoutePriority,
     RouteId
   )
 
-(ClientPublicCarrierCatalog, ClientPublicCarrierCatalogRoutes) =
+ReconcileClientPublicCarrierCatalog(
+  capturedRoomReferenceWindows,
+  activationAtUnixMs
+) -> (ClientPublicCarrierCatalog, ClientPublicCarrierCatalogRoutes) =
   PersistedBoundedCatalogAndRouteReconcile(
-    ClientPublicCarrierCatalogAggregates,
+    ClientPublicCarrierCatalogAggregates(
+      capturedRoomReferenceWindows,
+      activationAtUnixMs
+    ),
     stage1AtomicPinnedFootprints =
       for every CatalogStorePinned aggregate, its exact
       descriptor/high-water/fork-tombstone bytes plus
-      MandatoryCatalogRoutes and their exact bytes,
+      MandatoryCatalogRoutes(storeAggregate, activationAtUnixMs)
+      and their exact bytes,
     stage2AtomicRemoteFootprints =
-      each remaining aggregate plus its first live non-denied route in
-      CatalogRouteOrder, admitted as one indivisible footprint in
-      CatalogStoreOrder,
+      each remaining aggregate plus its first active non-denied route in
+      CatalogRouteOrder(storeAggregate, route, activationAtUnixMs), admitted
+      as one indivisible footprint in
+      CatalogStoreOrder(storeAggregate, activationAtUnixMs),
     stage3OptionalRoutes =
-      every remaining live non-denied route in CatalogRouteOrder,
+      every remaining active non-denied route in
+      CatalogRouteOrder(storeAggregate, route, activationAtUnixMs),
     caps =
       (
         globalResourcePolicy.maxPublicCatalogStores,
@@ -4763,13 +4883,15 @@ CatalogRouteOrder(storeAggregate, route) =
       )
   )
 
-ClientActiveRouteInstances(context) =
+ClientActiveRouteInstances(context, activationAtUnixMs) =
   TakeByLocalPriorityAndRouteId(
     {
       { route, routeInstanceId: PublicRouteInstanceId } |
       route is in ClientPublicCarrierCatalogRoutes
       and belongs to context.store in ClientPublicCarrierCatalog
-      and route is valid, unexpired, and has a live authorized source
+      and StoreDescriptorActiveAt(context.store, activationAtUnixMs)
+      and StoreRouteActiveAt(route, context.store, activationAtUnixMs)
+      and route has a live authorized source
       and RemoteHintActivationAuthorized(context.store, route)
       and FrontendAllowed(context.store, route)
       and not FrontendDenied(context.store, route)
@@ -4777,7 +4899,7 @@ ClientActiveRouteInstances(context) =
     globalResourcePolicy.maxRoutesPerPublicCarrierContext
   )
 
-ClientPrewarmedPublicCarrierContexts =
+ClientPrewarmedPublicCarrierContexts(activationAtUnixMs) =
   {
     { kind: "public-store", store, profile,
       carrierContextId: PublicCarrierContextId } |
@@ -4788,18 +4910,23 @@ ClientPrewarmedPublicCarrierContexts =
       and profile.roomSlotsPerClient >=
           globalResourcePolicy.maxInitializedBlindRooms
       and StoreProfileCompatible(store, profile)
-      and at least one valid, unexpired route in
+      and StoreDescriptorActiveAt(store, activationAtUnixMs)
+      and at least one route in
           ClientPublicCarrierCatalogRoutes belongs to store,
+          satisfies StoreRouteActiveAt(route, store, activationAtUnixMs),
           has a live authorized source,
           satisfies RemoteHintActivationAuthorized(store, route),
           satisfies FrontendAllowed(store, route),
           and does not satisfy FrontendDenied(store, route)
   }
 
-ClientActivePublicCarrierContextCandidates =
+ClientActivePublicCarrierContextCandidates(activationAtUnixMs) =
   UniqueByCarrierContextId(
-    ClientPrewarmedPublicCarrierContexts
-    ∪ union of ActivePublicCarrierContextCandidates(room)
+    ClientPrewarmedPublicCarrierContexts(activationAtUnixMs)
+    ∪ union of ActivePublicCarrierContextCandidates(
+        room,
+        activationAtUnixMs
+      )
         across all locally initialized rooms
   )
 
@@ -4814,13 +4941,15 @@ ClientPublicContextSourceRank(context) =
       or prewarmed by frontend policy
   1 when its only live source is a remote STORE_HINT
 
-ClientActivePublicCarrierContexts =
+ClientActivePublicCarrierContexts(activationAtUnixMs) =
   PersistedStickyReconcile(
     previousActive =
-      still-compatible, still-allowed members of the prior persisted set
+      still-compatible, still-allowed, explicitly active-at-
+        activationAtUnixMs members of the prior persisted set
       excluding explicit local removals,
     fillCandidates =
-      ClientActivePublicCarrierContextCandidates minus previousActive,
+      ClientActivePublicCarrierContextCandidates(activationAtUnixMs)
+        minus previousActive,
     fillOrder =
       (
         ClientPublicContextSourceRank,
@@ -4829,16 +4958,21 @@ ClientActivePublicCarrierContexts =
     cap = globalResourcePolicy.maxActivePublicCarrierContexts
   )
 
-RoomAdmissibleCarrierContextCandidates(room) =
+RoomAdmissibleCarrierContextCandidates(room, activationAtUnixMs) =
   {
     context |
     context is in (
       ActiveContactCarrierContextCandidates(room)
       ∪ {
           publicContext |
-          publicContext is in ActivePublicCarrierContextCandidates(room)
+          publicContext is in ActivePublicCarrierContextCandidates(
+            room,
+            activationAtUnixMs
+          )
           and publicContext.carrierContextId is in
-            CarrierContextIds(ClientActivePublicCarrierContexts)
+            CarrierContextIds(
+              ClientActivePublicCarrierContexts(activationAtUnixMs)
+            )
         }
     )
     and context.carrierContextId is not in
@@ -4851,13 +4985,16 @@ RoomCarrierSourceRank(room, context) =
       configured, explicitly local, or frontend-prewarmed public context
   1 when a public context's only live source is a remote STORE_HINT
 
-ActiveCarrierContexts(room) =
+ActiveCarrierContexts(room, activationAtUnixMs) =
   PersistedStickyRoomCarrierReconcile(
     previousActive =
       prior room-set entries whose carrierContextId is still in
-        CarrierContextIds(RoomAdmissibleCarrierContextCandidates(room)),
+        CarrierContextIds(
+          RoomAdmissibleCarrierContextCandidates(room, activationAtUnixMs)
+        ),
     fillCandidates =
-      RoomAdmissibleCarrierContextCandidates(room) minus previousActive,
+      RoomAdmissibleCarrierContextCandidates(room, activationAtUnixMs)
+        minus previousActive,
     fillOrder =
       (
         RoomCarrierSourceRank(room, context),
@@ -4866,8 +5003,10 @@ ActiveCarrierContexts(room) =
     cap = room.resourcePolicy.maxActiveCarriersPerRoom
   )
 
-ActiveStores(room) =
-  UniqueStoreIds(public-store entries in ActiveCarrierContexts(room))
+ActiveStores(room, activationAtUnixMs) =
+  UniqueStoreIds(
+    public-store entries in ActiveCarrierContexts(room, activationAtUnixMs)
+  )
 ```
 
 `U16BE` and `U32BE` above are the schema's exact unsigned big-endian
@@ -4891,8 +5030,11 @@ co-located endpoint public key fails provisioning and regenerates the store
 key. Store route locators and route credentials name only the store service;
 they are never copied from, derived from, or interpreted as endpoint transport
 candidates. This key/route separation prevents the public store protocol from
-creating a peer-equality or room-equality handle merely because roles share a
-device. Co-location remains one compromise/operator domain in assurance.
+creating a cryptographic or protocol-carried peer-equality/room-equality handle
+merely because roles share a device. A shared host, locator, route, timing
+trace, source address, account, physical observer, or device compromise may
+still correlate the roles. Co-location remains one compromise/operator domain
+in assurance.
 
 The co-located endpoint uses its store through the same authorized
 `PublicStoreOperationCarrierAdapter`, client-global scheduler, allocation,
@@ -4960,7 +5102,8 @@ another network or discovery action.
 `PublicCarrierContextId` or `ContactCarrierInstanceId` in
 `disabledCarrierContextIds` makes the context inadmissible for only that room.
 The frontend atomically persists the replacement object and recomputes
-`ActiveCarrierContexts(room)` before the next room-slot substitution or import.
+`ActiveCarrierContexts(room, activationAtUnixMs)` from a newly captured
+explicit activation time before the next room-slot substitution or import.
 This object does not authorize a globally denied route, create a scheduler, or
 alter another room. Alternate textual encodings, unknown-length identifiers,
 and legacy aliases fail before its canonical set is stored.
@@ -5073,7 +5216,8 @@ the bounded outstanding-wrap rule below, but it carries only dummies.
 eligible-but-inactive context is never reported or contacted as active.
 
 The same client-global catalog and
-`ClientActiveRouteInstances(context)` are the sole route-cycle inputs for a
+`ClientActiveRouteInstances(context, activationAtUnixMs)` are the sole
+route-cycle inputs for a
 shared public scheduler. A route learned from a valid live hint in one room is
 merely another locally authorized route to the same store/profile; it cannot
 create a room-specific cycle. Differing room resource policies never alter the
@@ -5128,6 +5272,16 @@ derived exact wrap may remain retained until terminal/expiry or explicit
 discard, but no pre-disable wrap is published and re-enabling the context
 requires the then-current generation check.
 
+Authenticity and current activation are deliberately separate predicates.
+Core reduction, historical checkpoint verification, and `STORE_HINT`
+validation call the timeless `StoreDescriptorAuthentic`/
+`StoreRouteAuthentic` predicates and then apply the exact signed-operation or
+historical interval they are validating. A network adapter calls
+`StoreDescriptorActiveAt`/`StoreRouteActiveAt` with its explicit transaction
+time before every activation or connection. No core reducer reads an ambient
+clock, and an expired route does not retroactively invalidate a signed
+historical hint or checkpoint that it covered.
+
 The descriptor signature proves possession of
 `storeIdentityEd25519Key` and signs the complete
 `StoreDescriptorSignedMessage`. Every route signature signs
@@ -5172,8 +5326,10 @@ A lower generation cannot reactivate while that entry is retained, including
 after a newer descriptor or hint expires. At the maximum generation,
 one `DescriptorHash` is active; two different valid hashes mark that generation
 forked and make the store inert until one strictly higher valid generation is
-observed. For the one active descriptor hash, independently signed unexpired
-`RouteId` values from bootstrap, local, and `STORE_HINT` sources are unioned.
+observed. For the one active descriptor hash, independently signed `RouteId`
+values from bootstrap, local, and `STORE_HINT` sources are unioned
+only in an activation projection where
+`StoreRouteActiveAt(route, descriptor, activationAtUnixMs)` holds.
 Exact historical descriptor bytes referenced by a retained checkpoint,
 receipt, or fault proof are separately charged to that store/profile's
 accountability partition through the evidence horizon; they are not replaced
@@ -6224,6 +6380,13 @@ suffix required by the selected class; any other length or byte value is
 noncanonical. Operation codec v1 fixes the signed inner length independently
 of every carrier:
 
+```text
+OPERATION_PAYLOAD_CLASS_BYTES = { 0: 4096, 1: 69632 }
+```
+
+The following table is a generated human-readable projection of
+`OPERATION_PAYLOAD_CLASS_BYTES`, never a second source of truth:
+
 | Operation payload class | `fixedPayload + operationPadding` bytes | Use                                                   |
 | ----------------------- | --------------------------------------- | ----------------------------------------------------- |
 | `0`                     | 4,096                                   | presence, leave, hints, revocations, small pair steps |
@@ -6262,21 +6425,23 @@ receiver strip and validate the unique all-zero `pairPadding`, recompute
 `operationPayloadClass`. It is impossible and forbidden to infer this
 minimality from pair ciphertext before AEAD opening. The sender starts with the
 exact `PairPlaintextV1` and empty `pairPadding`, selects that class, fills its
-unique all-zero `pairPadding`, and then fills the unique all-zero
-`operationPadding`. The companion binary schema freezes those target lengths
-and release vectors prove that the exact current 65,490-byte v4 frame plus all
-pair/operation overhead fits class 1. Carrier-specific padding is outside the
-signed operation.
+unique all-zero `pairPadding`, and encodes the envelope to consume the complete
+class with empty `operationPadding`. Section 4.11 derives those target lengths
+from the schema rather than restating them. Release vectors prove that the
+exact current 65,490-byte v4 frame plus all pair/operation overhead fits payload
+class 1. Carrier-specific padding is outside the signed operation.
 
 `logicalWindow` is `RoomLogicalWindow(roomPolicy, authorTime)`, never an
 ingress window.
 At explicit `referenceWindow`, validation requires, with checked arithmetic:
 
 ```text
-logicalWindow <= referenceWindow + maxFutureLogicalWindows
-referenceWindow <= expiresAfterWindow + maxClockSkewWindows
+logicalWindow
+  <= referenceWindow + roomPolicy.protocolLimits.maxFutureLogicalWindows
+referenceWindow
+  <= expiresAfterWindow + roomPolicy.protocolLimits.maxClockSkewWindows
 logicalWindow <= expiresAfterWindow
-dependencies.length <= maxDependenciesPerOperation
+dependencies.length <= roomPolicy.protocolLimits.maxDependenciesPerOperation
 ```
 
 An otherwise valid operation with `logicalWindow > referenceWindow` is held
@@ -6288,8 +6453,9 @@ candidate count/byte caps; there is no unbounded quarantine.
 
 For
 `WINDOW_TRANSIENT`, `expiresAfterWindow - logicalWindow` is at most
-`operationRetentionWindows`; for `PAIR_CAUSAL` it is at most
-`pairControlRetentionWindows`. `GRANT_HORIZON` is used only by
+`roomPolicy.protocolLimits.operationRetentionWindows`; for `PAIR_CAUSAL` it is
+at most `roomPolicy.protocolLimits.pairControlRetentionWindows`.
+`GRANT_HORIZON` is used only by
 `ADMISSION_REVOKE` and has the exact future-candidate-plus-credential lifetime
 defined below. Subtraction is checked without unsigned overflow.
 
@@ -6319,11 +6485,11 @@ public room policy; this deliberate stable author binding prevents an
 arbitrary relay author from suppressing a revoke by wrapping it under another
 outer key. Valid floors from nonfaulted authority windows reduce by maximum.
 An authority author-slot fork, authority-window overquota, or inability to
-retain the
-bounded authority proof/floor set instead makes authority admission fail
-closed as `policy-unavailable/overcapacity` through the credential horizon;
-the reducer may retain old grant facts for audit/recovery but admits none while
-`AuthorityAdmissionAvailable` is false.
+retain the bounded authority proof/floor set instead makes the sole derived
+authority view unavailable and authority admission fail closed as
+`policy-unavailable/overcapacity` through the credential horizon; the reducer
+may retain old grant facts for audit/recovery but admits none while that view
+has `status="unavailable"`.
 
 An author chain is valid when:
 
@@ -6343,13 +6509,15 @@ operation's exact contiguous prefix after its own semantic expiry only when:
 
 ```text
 prefix.authorSequence < descendant.authorSequence
-referenceWindow <= descendant.expiresAfterWindow + maxClockSkewWindows
+referenceWindow
+  <= descendant.expiresAfterWindow
+    + roomPolicy.protocolLimits.maxClockSkewWindows
 referenceWindow <=
   checkedAdd(
     prefix.logicalWindow,
     checkedAdd(
       RequiredRoomRetentionWindows(roomPolicy),
-      maxClockSkewWindows
+      roomPolicy.protocolLimits.maxClockSkewWindows
     )
   )
 ```
@@ -6370,28 +6538,32 @@ logical/future window, fixed class/length, and author slot are valid before
 the per-author quota and nested-payload work are applied. The reducer counts
 every such candidate for an `(authorEpochEd25519Key, logicalWindow)`. If the
 count exceeds
-`maxOperationsPerAuthorWindow`, that author/window is `overquota/forked` and
+`roomPolicy.protocolLimits.maxOperationsPerAuthorWindow`, that author/window
+is `overquota/forked` and
 all of its transient state and dependents are excluded, independent of which
 operations arrived first. Physical proof needs at most the canonical
-lexicographically lowest `maxOperationsPerAuthorWindow + 1` operation IDs;
+lexicographically lowest
+`roomPolicy.protocolLimits.maxOperationsPerAuthorWindow + 1` operation IDs;
 after overquota is proved, later candidates for that author/window are dropped
-before payload work. If that author is the policy-pinned authority,
-`AuthorityAdmissionAvailable` becomes false for every authority-gated decision
-whose reference window is no later than the checked sum of the fault window,
-`maxFutureLogicalWindows`, `maxAuthorityCredentialLifetimeWindows`, and
-`maxClockSkewWindows`. The
-persisted authority fault—not a guessed revoke value—is sufficient to deny, so
-dropping later nested payloads is safe. Once that horizon passes, all
-credentials that could have been affected have expired; a conforming authority
-still obeys its durable generation floors. An accepted pair operation whose required outer author
-slot or chain prefix later becomes forked/overquota stalls only that
-provisional or established edge and requires a fresh handshake. Durable v4
-state is never rolled back. To make that later check executable, an accepted
-pair slot's edge audit retains the exact outer author operation IDs from
-sequence zero through the accepted operation, plus any fork/overquota proof
-IDs, for the longer of that pair slot's replay and causal horizons. Those bytes
-are charged to `maxPairLedgerBytesPerRoom`; exhaustion fails the pair
-transaction before publication.
+before payload work. If that author is the policy-pinned authority, the sole
+derived authority view is unavailable for every authority-gated decision whose
+reference window is no later than the checked sum of the fault window,
+`roomPolicy.protocolLimits.maxFutureLogicalWindows`,
+`roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows`, and
+`roomPolicy.protocolLimits.maxClockSkewWindows`. The persisted authority
+fault—not a guessed revoke
+value—is sufficient to deny, so dropping later nested payloads is safe. Once
+that horizon passes, all credentials that could have been affected have
+expired; a conforming authority still obeys its durable generation floors. An
+accepted pair operation whose required outer author slot or chain prefix later
+becomes forked/overquota stalls only that provisional or established edge and
+requires a fresh handshake. Durable v4 state is never rolled back. To make
+that later check executable, an accepted pair slot's edge audit retains the
+exact outer author operation IDs from sequence zero through the accepted
+operation, plus any fork/overquota proof IDs, for the longer of that pair
+slot's replay and causal horizons. Those bytes are charged to
+`maxPairLedgerBytesPerRoom`; exhaustion fails the pair transaction before
+publication.
 
 Fork/overquota classification precedes payload reduction. If the pinned
 authority is faulted for a logical window, no `ADMISSION_REVOKE` operation from
@@ -6492,30 +6664,49 @@ STORE_HINT:
   outer.logicalWindow
     <= hintExpiresAfterLogicalWindow
     <= outer.expiresAfterWindow
-  and descriptorSignature verifies StoreDescriptorSignedMessage under
-      descriptor.storeIdentityEd25519Key
-  and routes is sorted by RouteId, duplicate-free, and within its exact
-      room-policy count/byte bounds
+  and StoreDescriptorAuthentic(descriptor)
+  and descriptor.notBeforeUnixMs
+        <= RoomLogicalWindowStartUnixMs(roomPolicy, outer.logicalWindow)
+  and RoomLogicalWindowEndUnixMsExclusive(
+        roomPolicy,
+        hintExpiresAfterLogicalWindow
+      )
+        <= descriptor.notAfterUnixMs
+  and routes has at most MAX_STORE_HINT_ROUTES_V1 entries
+  and routes is sequence-encoded, sorted by derived RouteId, duplicate-free
+  and the complete canonical StoreHintOperationV1 fits payload class 0
   and for every route:
-        route.storeId == StoreId(descriptor)
-        route.descriptorHash == DescriptorHash(descriptor)
-        routeSignature verifies StoreRouteSignedMessage under
-          descriptor.storeIdentityEd25519Key
-        route's absolute lease and registered route-family codec are valid
+        StoreRouteAuthentic(route, descriptor)
+        route.notBeforeUnixMs
+          <= RoomLogicalWindowStartUnixMs(roomPolicy, outer.logicalWindow)
+        RoomLogicalWindowEndUnixMsExclusive(
+          roomPolicy,
+          hintExpiresAfterLogicalWindow
+        )
+          <= route.notAfterUnixMs
+        the registered route-family codec accepts the exact signed route bytes
 
 ADMISSION_REVOKE:
   outer.logicalWindow
     == effectiveLogicalWindow
   checkedAdd(
-    checkedAdd(effectiveLogicalWindow, maxFutureLogicalWindows),
-    maxAuthorityCredentialLifetimeWindows
+    checkedAdd(
+      effectiveLogicalWindow,
+      roomPolicy.protocolLimits.maxFutureLogicalWindows
+    ),
+    roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows
   )
     == expiresAfterLogicalWindow
     == outer.expiresAfterWindow
 ```
 
-An admission decision lease ends no later than its presence, grant,
-revocation, local-policy, pair-attempt, and outer-operation horizons. Any
+A bootstrap admission lease ends no later than its retained presence evidence,
+grant, pair-attempt, and admitted identity-operation horizons. It is never
+required after stable-edge promotion. A stable-edge admission lease instead
+binds the confirmed stable transcript and has no presence or pair-attempt
+horizon; authority mode remains bounded by its current grant. Local policy and
+revocation do not acquire invented future horizons: their exact generation and
+decision-state digest are rechecked at every sensitive boundary. Any
 contradictory inner/outer interval is invalid rather than resolved by taking a
 locally chosen minimum.
 
@@ -7127,6 +7318,16 @@ type LocalAdmissiblePeerV1 = {
   desiredEdge: boolean;
 };
 
+declare const VERIFIED_LOCAL_PRESENCE_OWNERSHIP_V1: unique symbol;
+
+// Module-private result of matching retained local presence-operation bytes
+// to local author/private-key custody in the same projection transaction.
+type VerifiedLocalPresenceOwnershipV1 = {
+  version: 1;
+  ownedPresenceOperationIds: CanonicalBytes32SetV1;
+  readonly [VERIFIED_LOCAL_PRESENCE_OWNERSHIP_V1]: true;
+};
+
 type LocalAdmissibleStateV1 = {
   version: 1;
   referenceWindow: bigint;
@@ -7143,6 +7344,7 @@ type LocalAdmissibleStateV1 = {
 type LocalDeliveryStateV1 = {
   version: 1;
   referenceWindow: bigint;
+  activationAtUnixMs: bigint;
   carrierPolicyGeneration: bigint;
   roomCarrierAssignmentPolicyGeneration: bigint;
   activeDeliveryProfileHashes: readonly Bytes32[];
@@ -7243,12 +7445,15 @@ EdgePairAcceptedSet(edge, referenceWindow) =
     referenceWindow
   )
 
-LocalAdmissibleState(referenceWindow) =
-  Project(
-    CoreRoomState(referenceWindow),
-    FrontendRoomControlsV1,
-    ConnectionPlannerPolicyV1
+snapshot =
+  CaptureTrustedAdmissionSnapshot(
+    transaction,
+    initializedRoom,
+    referenceWindow
   )
+
+LocalAdmissibleState(referenceWindow) =
+  Project(snapshot, plannerPolicy)
 
 LocalDeliveryState(referenceWindow) =
   ProjectDelivery(
@@ -7258,6 +7463,7 @@ LocalDeliveryState(referenceWindow) =
     ClientResourcePolicyV1,
     ClientGlobalResourcePolicyV1,
     DeliveryConsistencyEvidenceV1,
+    activationAtUnixMs,
     active carrier evidence
   )
 ```
@@ -7271,6 +7477,26 @@ immutable policy, and reference window, clients derive byte-identical
 blacklists, or planner modes may produce different admissible peers and edges
 without violating core convergence. Different carrier permissions change
 `LocalDeliveryState`, not peer admissibility.
+
+`Project` is invoked only with the one `TrustedAdmissionSnapshotV1` captured
+by the local projection transaction. That snapshot contains the exact core
+state, immutable room policy/context, frontend controls (or lookup failure),
+module-private local presence ownership, and authority custody from the same
+atomic source; planner policy is its only separate local preference input.
+`Project` fails closed when any required input is absent, mismatched,
+unbranded, or over capacity. For each authority-mode commitment it calls the sole
+`DeriveAuthorityAdmissionView`; it cannot accept a caller-supplied permit
+winner, authority availability bit, revocation floor, or view. Thus
+`maxRoomMembers`, room/policy binding, local ownership, and authority custody
+are explicit inputs rather than ambient dependencies.
+
+`ProjectDelivery` captures `activationAtUnixMs` once in the same atomic input
+snapshot as `referenceWindow`. Every catalog, prewarm, active-context, and
+route-selection derivation above is a pure function of that explicit value and
+threads it into `StoreDescriptorActiveAt`/`StoreRouteActiveAt`; a “live”
+source means a retained signed hint/bootstrap/local authorization at that
+captured snapshot, never an ambient clock read. Adapters recapture and
+revalidate a new explicit time immediately before network activation.
 
 Delivery consistency has one conservative derivation. At one atomic
 `referenceWindow` snapshot, `observedDeliveryFrontierId` hashes the reference
@@ -7463,7 +7689,7 @@ type AdmissionRevokeV1 = {
   authoritySignature: Bytes64;
 };
 
-type AdmissionDecisionLeaseV1 = {
+type BootstrapAdmissionDecisionLeaseV1 = {
   version: 1;
   roomContextId: Bytes32;
   stableEd25519PublicKey: Bytes32;
@@ -7471,11 +7697,29 @@ type AdmissionDecisionLeaseV1 = {
   grantId: Bytes32 | null;
   grantGeneration: bigint | null;
   localPolicyGeneration: bigint;
-  authorityAdmissionViewDigest: Bytes32 | null;
+  authorityAdmissionStateDigest: Bytes32 | null;
   admittedPresenceOperationId: Bytes32;
   admittedIdentityOperationId: Bytes32;
   decidedAtLogicalWindow: bigint;
   validThroughLogicalWindow: bigint;
+};
+
+type StableEdgeAdmissionLeaseV1 = {
+  version: 1;
+  roomContextId: Bytes32;
+  stableEdgeId: Bytes32;
+  confirmedPairTranscriptId: Bytes32;
+  rendezvousChannelId: Bytes32;
+  v4WireBinding: Bytes32;
+  remoteStableEd25519PublicKey: Bytes32;
+  remoteStableIdentityCommitment: Bytes32;
+  grantId: Bytes32 | null;
+  grantGeneration: bigint | null;
+  localPolicyGeneration: bigint;
+  authorityAdmissionStateDigest: Bytes32 | null;
+  decidedAtLogicalWindow: bigint;
+  // Null only in capability mode. Authority mode is bounded by the grant.
+  validThroughLogicalWindow: bigint | null;
 };
 
 type PairAttemptLeaseV1 = {
@@ -7488,8 +7732,71 @@ type PairAttemptLeaseV1 = {
   validThroughLogicalWindow: bigint;
 };
 
-// A derived, validated projection of one atomic core/custody snapshot. Callers
-// cannot manufacture its availability bit independently of those inputs.
+declare const VERIFIED_ADMISSION_CONTEXT_V1: unique symbol;
+declare const TRUSTED_ADMISSION_SNAPSHOT_V1: unique symbol;
+declare const VERIFIED_AUTHORITY_VIEW_V1: unique symbol;
+declare const VERIFIED_STABLE_EDGE_CONTEXT_V1: unique symbol;
+
+// Module-private result of VerifyAdmissionContext. There is no public
+// constructor, decoder, serializer, object-spread adapter, or type assertion
+// for this local fact.
+type VerifiedAdmissionContextV1 = {
+  version: 1;
+  roomContextId: Bytes32;
+  decisionRole: "hello-responder" | "accept-initiator";
+  operationId: Bytes32;
+  kind: "IDENTITY_HELLO" | "IDENTITY_ACCEPT";
+  logicalWindow: bigint;
+  validThroughLogicalWindow: bigint;
+  pairEdgeId: Bytes32;
+  endpointPresenceOperationIds: readonly [Bytes32, Bytes32];
+  direction: 0 | 1;
+  pairSequence: bigint;
+  previousPairOperationId: Bytes32 | null;
+  pairDependencies: readonly Bytes32[];
+  stableEd25519PublicKey: Bytes32;
+  claimedStableIdentityCommitment: Bytes32;
+  optionalGrant: AdmissionGrantV1 | null;
+  pairIdentitySignatureHash: Bytes32;
+  admittedPresenceOperationId: Bytes32;
+  admittedPresenceEvidenceRetainThroughLogicalWindow: bigint;
+  pairAttemptLease: PairAttemptLeaseV1;
+  readonly [VERIFIED_ADMISSION_CONTEXT_V1]: true;
+};
+
+type AuthorityWindowFaultV1 = {
+  logicalWindow: bigint;
+  proofOperationIds: readonly Bytes32[];
+};
+
+type AuthorityCustodyProjectionV1 =
+  | {
+      status: "complete";
+      authorityCustodyStateDigest: Bytes32;
+      firstSaturatedRequiredWorkId: null;
+    }
+  | {
+      status: "saturated";
+      authorityCustodyStateDigest: Bytes32;
+      firstSaturatedRequiredWorkId: Bytes32;
+    };
+
+// The one module-private current-state snapshot used by Project, bootstrap
+// admission, and stable-edge reauthorization. There is no public constructor,
+// decoder, serializer, object-spread adapter, or type assertion for it.
+type TrustedAdmissionSnapshotV1 = {
+  version: 1;
+  roomContextId: Bytes32;
+  roomPolicy: RoomPolicyV4;
+  referenceWindow: bigint;
+  coreRoomState: CoreRoomStateV1;
+  frontendControls: FrontendRoomControlsV1 | null;
+  authorityCustody: AuthorityCustodyProjectionV1 | null;
+  localPresenceOwnership: VerifiedLocalPresenceOwnershipV1;
+  readonly [TRUSTED_ADMISSION_SNAPSHOT_V1]: true;
+};
+
+// Module-private, commitment-scoped result of the sole authority constructor.
 type VerifiedAuthorityAdmissionViewV1 = {
   version: 1;
   roomContextId: Bytes32;
@@ -7497,41 +7804,61 @@ type VerifiedAuthorityAdmissionViewV1 = {
   referenceWindow: bigint;
   status: "available" | "unavailable";
   revocationFacts: readonly CoreRevocationFloorV1[];
+  blockingAuthorityWindowFaults: readonly AuthorityWindowFaultV1[];
   unavailableThroughLogicalWindow: bigint | null;
   sourceCoreOperationsDigest: Bytes32;
   authorityCustodyStateDigest: Bytes32;
+  // Hashes only decision-relevant state. It deliberately excludes
+  // referenceWindow, the whole core digest, and unrelated authority facts.
+  authorityAdmissionStateDigest: Bytes32;
+  // Full snapshot-scoped reproducibility/drift witness.
   viewDigest: Bytes32;
+  readonly [VERIFIED_AUTHORITY_VIEW_V1]: true;
 };
 
-type AdmissionEvaluationInputV1 = {
+// Module-private result of confirming both identity flights and protocol-v4
+// promotion. It is independent of rotating presence and pair-attempt leases.
+type VerifiedStableEdgeContextV1 = {
   version: 1;
   roomContextId: Bytes32;
-  roomPolicy: RoomPolicyV4;
-  referenceWindow: bigint;
-  decisionRole: "hello-responder" | "accept-initiator";
+  stableEdgeId: Bytes32;
+  confirmedPairTranscriptId: Bytes32;
+  rendezvousChannelId: Bytes32;
+  v4WireBinding: Bytes32;
+  remoteStableEd25519PublicKey: Bytes32;
+  remoteStableIdentityCommitment: Bytes32;
+  latestAdmissionGrant: AdmissionGrantV1 | null;
+  latestAdmissionGrantCarriedAtLogicalWindow: bigint | null;
+  readonly [VERIFIED_STABLE_EDGE_CONTEXT_V1]: true;
+};
 
-  stableEd25519PublicKey: Bytes32;
-  optionalGrant: AdmissionGrantV1 | null;
-  // Null represents a failed, ambiguous, rolled-back, or unavailable lookup.
-  frontendControls: FrontendRoomControlsV1 | null;
-  // Required only in authority-grant mode; null in capability mode.
-  authorityView: VerifiedAuthorityAdmissionViewV1 | null;
-
-  admittedPresenceOperationId: Bytes32;
-  // The retained-evidence horizon, not PresenceCoreV1.validThroughLogicalWindow.
-  admittedPresenceEvidenceRetainThroughLogicalWindow: bigint;
-  // HELLO for the responder and ACCEPT for the initiator.
-  admittedIdentityOperationId: Bytes32;
-  admittedIdentityOperationLogicalWindow: bigint;
-  admittedIdentityOperationValidThroughLogicalWindow: bigint;
-  pairAttemptLease: PairAttemptLeaseV1;
+type AdmissionInputError = Error & {
+  name: "AdmissionInputError";
+  code: "invalid-admission-kernel-input";
 };
 
 type PairAdmissionDecision =
   | {
       result: "allow";
       reason: "open" | "address-book" | "authority-grant";
-      lease: AdmissionDecisionLeaseV1;
+      lease: BootstrapAdmissionDecisionLeaseV1;
+    }
+  | {
+      result: "deny";
+      reason:
+        | "blacklisted"
+        | "not-in-address-book"
+        | "missing-grant"
+        | "invalid-grant"
+        | "revoked"
+        | "policy-unavailable";
+    };
+
+type StableEdgeAdmissionDecision =
+  | {
+      result: "allow";
+      reason: "open" | "address-book" | "authority-grant";
+      lease: StableEdgeAdmissionLeaseV1;
     }
   | {
       result: "deny";
@@ -7545,102 +7872,304 @@ type PairAdmissionDecision =
     };
 ```
 
-The one admission function is:
+`VerifyAdmissionContext` is the sole constructor for
+`VerifiedAdmissionContextV1`. It is module-private and consumes, in one edge
+transaction, the immutable room policy/context, explicit reference window and
+decision role, exact outer `AuthenticatedRoomOperationV1`, its
+`PairOuterBindingV1`, the successfully opened identity `PairPlaintextV1`, the
+exact retained `HistoricalPairPresenceEvidenceV1`, and the module-private
+current pair-attempt state. For a responder's first HELLO it derives the
+candidate `PairAttemptLeaseV1` in this transaction; for ACCEPT it loads and
+revalidates the persisted HELLO lease. It does not trust a field merely
+because a caller named it “verified.” It:
+
+1. revalidates the closed outer and pair codecs, room-context confirmation,
+   `PolicyHash`, outer signature, pair AEAD result, and recomputed
+   `OperationId`;
+2. recomputes `PairEdgeId` from the room context and exact ordered endpoint
+   presence IDs;
+3. checks the decision-role tuple index, kind, direction, sequence,
+   predecessor, HELLO dependency, and exact presence-operation ID, then
+   derives/recomputes rather than accepts the pair-attempt
+   coordinates/mode/horizon;
+4. decodes and revalidates the retained presence bytes, recomputes their
+   operation ID, requires that presence to have been valid at the HELLO
+   logical window, and derives the evidence retention horizon from that record
+   rather than accepting a scalar;
+5. recomputes `StableIdentityCommitment`, the complete
+   `PairIdentitySignatureHash`, and verifies the stable Ed25519 transcript
+   signature and presence commitment; and
+6. copies the optional grant only after all of those bindings succeed.
+
+Failure produces `AdmissionInputError` and no branded value. The brand and
+constructor are not exported; raw network bytes, JSON, IndexedDB records,
+public SDK inputs, object spread, and TypeScript assertions cannot instantiate
+the type. This is a client-kernel architecture boundary, not a cryptographic
+sandbox inside one compromised JavaScript realm: code execution in the trusted
+worker/module, browser, OS, or storage transaction can bypass local policy and
+remains an explicit platform-compromise nonclaim.
+
+`CaptureTrustedAdmissionSnapshot(transaction, initializedRoom,
+referenceWindow)` is the sole constructor for
+`TrustedAdmissionSnapshotV1`. It owns one atomic read of the immutable
+room policy/context, exact `CoreRoomStateV1`, current frontend controls,
+protected authority custody, and locally owned presence-operation set. It
+requires the core reference window and initialized room policy/context to
+match exactly. In authority mode, a missing, ambiguous, rollback-failed, or
+saturated custody source is represented faithfully and never becomes an empty
+complete partition; in capability mode authority custody is canonically null.
+The result is ephemeral trusted state, not persisted or decoded.
+
+The public effectful boundary `EvaluateBootstrapAdmissionAndPersist` owns that
+transaction: it captures the trusted snapshot, invokes
+`VerifyAdmissionContext`, calls the pure `Admit`, and atomically persists an
+allow lease with its exact outbound intent.
+
+One private policy kernel is the SSOT for both bootstrap and stable-edge
+decisions:
 
 ```text
-Admit(input: AdmissionEvaluationInputV1):
-  require one closed, canonical input at input.referenceWindow
-  require input.admittedPresenceOperationId is the exact remote endpoint in
-    input.pairAttemptLease.endpointPresenceOperationIds
-  require:
-    input.decisionRole == hello-responder and
-      input.admittedIdentityOperationId ==
-        input.pairAttemptLease.helloOperationId,
-    or input.decisionRole == accept-initiator and the admitted ACCEPT has the
-      exact HELLO dependency and pair/endpoint tuple from input.pairAttemptLease
-  if input.frontendControls is null:
+EvaluatePeerAdmissionPolicy(
+  snapshot: TrustedAdmissionSnapshotV1,
+  stableEd25519PublicKey: Bytes32,
+  stableIdentityCommitment: Bytes32,
+  optionalGrant: AdmissionGrantV1 | null,
+  grantCarriedAtLogicalWindow: bigint | null
+):
+  require snapshot was created by CaptureTrustedAdmissionSnapshot
+  roomPolicy = snapshot.roomPolicy
+  referenceWindow = snapshot.referenceWindow
+  frontendControls = snapshot.frontendControls
+  if frontendControls is null:
       DENY(policy-unavailable)
 
-  stableCommitment =
-    StableIdentityCommitment(
-      input.roomContextId,
-      input.stableEd25519PublicKey
-    )
+  require StableIdentityCommitment(
+    snapshot.roomContextId,
+    stableEd25519PublicKey
+  ) == stableIdentityCommitment
 
-  if stable key or stableCommitment is locally denied:
+  if stableEd25519PublicKey is in
+       frontendControls.deniedStableIdentityKeys
+     or stableIdentityCommitment is in
+       frontendControls.deniedRoomIdentityCommitments:
       DENY(blacklisted)
 
-  if input.roomPolicy requires authority grant:
-      if input.authorityView is null:
+  if roomPolicy requires authority grant:
+      if snapshot.authorityCustody is null:
         DENY(policy-unavailable)
-      require input.authorityView.roomContextId == input.roomContextId
-      require input.authorityView.stableIdentityCommitment == stableCommitment
-      require input.authorityView.referenceWindow == input.referenceWindow
-      if the view is unavailable, malformed, stale, or not derived from the
-         current atomic core/custody snapshot:
+      authorityView =
+        DeriveAuthorityAdmissionView(snapshot, stableIdentityCommitment)
+      if authorityView.status != "available":
         DENY(policy-unavailable)
-      if input.optionalGrant is null:
+      if optionalGrant is null:
         DENY(missing-grant)
+      if grantCarriedAtLogicalWindow is null:
+        DENY(invalid-grant)
       require a valid grant for the exact room and stable key, signed by the
         pinned authority, with:
           issuedAtLogicalWindow
-            <= admittedIdentityOperationLogicalWindow
+            <= grantCarriedAtLogicalWindow
+            <= referenceWindow
           issuedAtLogicalWindow
             <= notBeforeLogicalWindow
             <= referenceWindow
             <= notAfterLogicalWindow
           notAfterLogicalWindow - issuedAtLogicalWindow
-            <= maxAuthorityCredentialLifetimeWindows
+            <=
+              roomPolicy.admissionFloor
+                .maxAuthorityCredentialLifetimeWindows
         otherwise DENY(invalid-grant)
-      require AuthorityGenerationAllowed over exactly authorityView,
+      require AuthorityGenerationAllowed(
+        optionalGrant.generation,
+        authorityView
+      ),
         otherwise DENY(revoked)
+      grantId = AdmissionGrantId(optionalGrant)
+      grantGeneration = optionalGrant.generation
+      authorityAdmissionStateDigest =
+        authorityView.authorityAdmissionStateDigest
+      grantValidThroughLogicalWindow =
+        optionalGrant.notAfterLogicalWindow
   else:
-      require input.authorityView == null
-      require input.optionalGrant == null, otherwise DENY(invalid-grant)
+      require snapshot.authorityCustody == null
+      require optionalGrant == null, otherwise DENY(invalid-grant)
+      require grantCarriedAtLogicalWindow == null,
+        otherwise DENY(invalid-grant)
+      grantId = null
+      grantGeneration = null
+      authorityAdmissionStateDigest = null
+      grantValidThroughLogicalWindow = null
 
-  if input.frontendControls.onlyConnectWithKnownPeers:
-      require the stable key in allowedStableIdentityKeys,
+  if frontendControls.onlyConnectWithKnownPeers:
+      require stableEd25519PublicKey in
+        frontendControls.allowedStableIdentityKeys,
         otherwise DENY(not-in-address-book)
 
-  validThrough =
-    min(
-      input.pairAttemptLease.validThroughLogicalWindow,
-      input.admittedPresenceEvidenceRetainThroughLogicalWindow,
-      input.admittedIdentityOperationValidThroughLogicalWindow,
-      input.optionalGrant.notAfterLogicalWindow // authority mode only
-    )
-  require input.referenceWindow <= validThrough,
+  return ALLOW_POLICY(
+    reason =
+      authority-grant if roomPolicy requires it,
+      else address-book if frontendControls.onlyConnectWithKnownPeers,
+      else open,
+    localPolicyGeneration=frontendControls.policyGeneration,
+    grantId,
+    grantGeneration,
+    authorityAdmissionStateDigest,
+    grantValidThroughLogicalWindow
+  )
+
+Admit(snapshot: TrustedAdmissionSnapshotV1,
+      ctx: VerifiedAdmissionContextV1):
+  require ctx was created by VerifyAdmissionContext
+  require ctx.roomContextId == snapshot.roomContextId
+  require ctx.logicalWindow
+    <= snapshot.referenceWindow
+    <= ctx.validThroughLogicalWindow
+
+  policy = EvaluatePeerAdmissionPolicy(
+    snapshot,
+    ctx.stableEd25519PublicKey,
+    ctx.claimedStableIdentityCommitment,
+    ctx.optionalGrant,
+    ctx.logicalWindow if ctx.optionalGrant != null else null
+  )
+  if policy is DENY: return policy
+
+  leaseHorizons = [
+    ctx.pairAttemptLease.validThroughLogicalWindow,
+    ctx.admittedPresenceEvidenceRetainThroughLogicalWindow,
+    ctx.validThroughLogicalWindow
+  ]
+  if policy.grantValidThroughLogicalWindow != null:
+    append policy.grantValidThroughLogicalWindow to leaseHorizons
+  validThrough = min(leaseHorizons)
+  require snapshot.referenceWindow <= validThrough,
     otherwise DENY(policy-unavailable)
 
   lease =
-    AdmissionDecisionLeaseV1{
+    BootstrapAdmissionDecisionLeaseV1{
       version=1,
-      roomContextId=input.roomContextId,
-      stableEd25519PublicKey=input.stableEd25519PublicKey,
-      stableIdentityCommitment=stableCommitment,
-      grantId=
-        AdmissionGrantId(input.optionalGrant) in authority mode,
-        null otherwise,
-      grantGeneration=
-        input.optionalGrant.generation in authority mode,
-        null otherwise,
-      localPolicyGeneration=input.frontendControls.policyGeneration,
-      authorityAdmissionViewDigest=
-        input.authorityView.viewDigest in authority mode,
-        null otherwise,
-      admittedPresenceOperationId=input.admittedPresenceOperationId,
-      admittedIdentityOperationId=input.admittedIdentityOperationId,
-      decidedAtLogicalWindow=input.referenceWindow,
+      roomContextId=snapshot.roomContextId,
+      stableEd25519PublicKey=ctx.stableEd25519PublicKey,
+      stableIdentityCommitment=ctx.claimedStableIdentityCommitment,
+      grantId=policy.grantId,
+      grantGeneration=policy.grantGeneration,
+      localPolicyGeneration=policy.localPolicyGeneration,
+      authorityAdmissionStateDigest=policy.authorityAdmissionStateDigest,
+      admittedPresenceOperationId=ctx.admittedPresenceOperationId,
+      admittedIdentityOperationId=ctx.operationId,
+      decidedAtLogicalWindow=snapshot.referenceWindow,
       validThroughLogicalWindow=validThrough
     }
-  persist lease
-  ALLOW(
-    authority-grant if room policy requires it,
-    else address-book if onlyConnectWithKnownPeers,
-    else open,
-    lease
-  )
+  return ALLOW(policy.reason, lease)
 ```
+
+`Admit()` is pure and performs no persistence or network action. Only the
+effectful wrapper above may capture its trusted inputs or atomically persist the
+returned lease with the exact outbound intent. A failed top-level canonical
+shape, version, role/flight coordinate, transcript fact,
+room-policy/context, trusted-provenance check, or impossible interval raises
+`AdmissionInputError`; the caller fails closed and emits only the same
+fixed-schedule dummy/no-response behavior as any denial. These are local
+kernel/provenance failures, not remotely distinguishable policy reasons.
+Missing frontend state or an absent/unavailable authority view returns
+`DENY(policy-unavailable)`. A well-framed but wrong, malformed, expired,
+wrong-room, wrong-key, future-issued, excessive-lifetime, or bad-signature
+grant returns `DENY(invalid-grant)`.
+
+`ConstructVerifiedStableEdgeContext` is the sole module-private constructor
+for `VerifiedStableEdgeContextV1`. It runs at protocol-v4 promotion from the
+endpoint's verified remote bootstrap context, matching current bootstrap
+lease, local stable identity, confirmed two-flight transcript, transport
+transcript, and authenticated protocol-v4 promotion output in one transaction.
+It recomputes `StableEdgeId`, `ConfirmedPairTranscriptId`, and
+`RendezvousChannelId`; requires the exact current
+`PqHealingMachine.binding` as `v4WireBinding`; binds the remote stable
+key/commitment and latest accepted grant plus the exact logical window that
+carried it; and requires the bootstrap coordinates and v4 stable identities to
+match. It contains no rotating-presence validity requirement. The promotion
+transaction immediately calls `ReauthorizeStableEdge` with its fresh trusted
+snapshot and atomically persists the canonical promoted-edge record, replaces
+the bootstrap lease with the first stable-edge lease, and erases provisional
+secrets; a promotion that cannot obtain that allow is not exposed to the
+application.
+
+`LoadVerifiedStableEdgeContext(transaction, stableEdgeId)` is the only other
+trusted path, needed after restart. It reads that canonical durable
+promoted-edge record inside the same stable-edge transaction, rejects a
+replaced/stalled/noncurrent record, and recomputes the room-bound
+`StableEdgeId`, `ConfirmedPairTranscriptId`, `RendezvousChannelId`, remote
+stable key/commitment, retained grant/carrier logical window, and exact current
+v4 binding before restoring the process-local brand. A symbol/nominal brand is
+never serialized, and a generic IndexedDB decoder cannot restore it.
+
+`ReauthorizeStableEdge(snapshot, stableContext)` first verifies both private
+provenance brands, exact room binding, and stable transcript, then calls the
+same `EvaluatePeerAdmissionPolicy` with the remote key/commitment, latest
+grant, and its exact carrying logical window. It has no duplicate
+allow/deny/address-book/authority order. On policy success it returns:
+
+```text
+StableEdgeAdmissionLeaseV1{
+  version=1,
+  roomContextId=snapshot.roomContextId,
+  stableEdgeId=stableContext.stableEdgeId,
+  confirmedPairTranscriptId=stableContext.confirmedPairTranscriptId,
+  rendezvousChannelId=stableContext.rendezvousChannelId,
+  v4WireBinding=stableContext.v4WireBinding,
+  remoteStableEd25519PublicKey=
+    stableContext.remoteStableEd25519PublicKey,
+  remoteStableIdentityCommitment=
+    stableContext.remoteStableIdentityCommitment,
+  grantId=policy.grantId,
+  grantGeneration=policy.grantGeneration,
+  localPolicyGeneration=policy.localPolicyGeneration,
+  authorityAdmissionStateDigest=policy.authorityAdmissionStateDigest,
+  decidedAtLogicalWindow=snapshot.referenceWindow,
+  validThroughLogicalWindow=policy.grantValidThroughLogicalWindow
+}
+```
+
+Authority mode therefore sets the finite horizon to the grant's
+`notAfterLogicalWindow`; capability mode sets it to null. Both modes bind the
+exact current frontend policy generation. Authority mode additionally binds
+`authorityAdmissionStateDigest`; that digest changes only when the
+commitment's decision-relevant revoke/fault/custody state changes, not merely
+because a reference window advances or an unrelated room operation arrives.
+
+`AuthorizeStableEdgeActionAndPersist` is the sole post-promotion effectful
+boundary. In one transaction it captures a fresh
+`TrustedAdmissionSnapshotV1`, obtains the opaque stable-edge context through
+`LoadVerifiedStableEdgeContext`, and calls `ReauthorizeStableEdge`; a stored
+lease is evidence/audit state and
+never skips this current policy call. Only then does it atomically persist the
+replacement lease and exact outbound/dispatch intent. Presence evidence,
+identity-operation expiry, and `PairAttemptLeaseV1` are not inputs after
+promotion. A current deny, policy lookup failure, authority-view
+unavailability, state-digest change that cannot be reauthorized, or expired
+grant permits no post-promotion application, reconnect, transport, or pair
+control action. In v1, authority-grant renewal is a fresh automatic pair
+attempt carrying a new grant; the frontend preserves the room/invitation UX
+but does not pretend an expired stable edge remains authorized. A future
+pair-private in-place credential-refresh step may remove that interruption
+only after its PQ slot, replay, causal, expiry, and atomic-persistence rules
+are frozen.
+
+The Phase-0 binary schema uses declaration order for the wire admission
+objects.
+Every `version`, closed enum, direction, and status tag is one unsigned byte;
+every logical window, generation, and policy generation is unsigned 64-bit;
+every named digest/key is fixed 32 bytes; and every Ed25519 signature is fixed
+64 bytes. `AdmissionGrantV1` and `AdmissionRevokeV1` each have one unsigned
+projection consisting of every declaration-order field preceding
+`authoritySignature`; their signature transcripts and `AdmissionGrantId` use
+that projection/complete signed record respectively. Optional values use one
+closed presence byte, endpoint tuples have exactly two entries, and all
+variable operation-ID/fact arrays are bounded, bytewise canonical, and
+duplicate-free. The companion schema and vectors—not TypeScript object
+property order—remain the byte SSOT. The branded contexts, snapshots, views,
+and leases are local kernel/persistence facts: they have
+versioned canonical persistence schemas where needed, but no untrusted wire
+decoder can produce their private provenance brands.
 
 Local denial wins over a grant and over the address book. A remote operation
 cannot remove a local deny. `ADMISSION_REVOKE` is accepted only when signed by
@@ -7658,10 +8187,11 @@ lease or authorization result.
 `policyGeneration` is unsigned, increases monotonically on every effective
 allow/deny/address-book/mode change, and is persisted before any newly
 permitted action. A delete, deny, migration, rollback/fork, or unavailable
-policy lookup that the current process detects invalidates outstanding decision leases before response
-construction. The shared `Admit()` compares only decoded canonical bytes from
-`CanonicalBytes32SetV1`; it never reparses an unchecked identifier string at a
-sensitive boundary.
+policy lookup that the current process detects invalidates outstanding
+admission leases before response construction. The shared
+`EvaluatePeerAdmissionPolicy()` compares
+only decoded canonical bytes from `CanonicalBytes32SetV1`; it never reparses an
+unchecked identifier string at a sensitive boundary.
 
 A whole older local snapshot can predate a private blacklist and is not
 locally detectable without an external non-rollback/synchronization anchor.
@@ -7698,12 +8228,14 @@ increments it. Among effective, unexpired revocations, the maximum
 when `generation >= floor`.
 
 One `AuthorityGenerationAllowed(generation, authorityView)` function is used
-both by authority presence projection before HELLO and by `Admit()` before
-every sensitive action. The view is already scoped to one room commitment and
-reference window by its sole constructor. Revocations are monotone deny facts:
-distinct valid floors coexist and reduce by maximum rather than forking. Exact
-duplicates are no-ops, while two differently signed operations in one
-authority author/sequence slot are still ordinary authority forks.
+by authority presence projection before HELLO and by
+`EvaluatePeerAdmissionPolicy()`, invoked through `Admit()` before promotion and
+`ReauthorizeStableEdge()` afterward. The view is already scoped to one room
+commitment and reference window by its sole constructor. Revocations are
+monotone deny facts: distinct valid floors coexist and reduce by maximum rather
+than forking. Exact duplicates are no-ops, while two differently signed
+operations in one authority author/sequence slot are still ordinary authority
+forks.
 
 ```text
 ApplicableRevocationFacts(commitment, referenceWindow) =
@@ -7734,54 +8266,124 @@ AuthorityGenerationAllowed(generation, authorityView) =
   )
 ```
 
-`DeriveAuthorityAdmissionView` is the only constructor for
-`VerifiedAuthorityAdmissionViewV1`. From one atomic snapshot it selects the
-applicable revocation facts above, derives every still-live pinned-authority
-fork/overquota horizon, incorporates any inability to retain required
-authority fault/floor custody, and hashes the exact source core/custody
-snapshot into `viewDigest`. `status="available"` requires
-`unavailableThroughLogicalWindow == null`; when status is `unavailable`, that
-field is the maximum current blocking horizon if one is known and null only
-for unavailable/missing state with no defensible horizon. Status, not nullness,
-decides availability. Missing or saturated source state produces
-`unavailable`, never an empty available view.
+`DeriveAuthorityAdmissionView(snapshot, commitment)` is the sole constructor
+for `VerifiedAuthorityAdmissionViewV1`. It accepts only a
+`TrustedAdmissionSnapshotV1` with private provenance. It reads every retained
+`CoreRevocationFloorV1` directly from `snapshot.coreRoomState`, projects every
+`author-fork-or-overquota` fault whose author is the room-policy-pinned
+authority into `AuthorityWindowFaultV1`, and consumes
+`snapshot.authorityCustody`. The trusted snapshot constructor permits
+`authorityCustody.status="complete"` only when every required authority
+operation, revocation fact, fault, predecessor, saturation witness, and
+retained horizon fits. A retained authority fork is represented in the
+projected fault set. The first known required item that did not fit produces
+`status="saturated"` and its bytewise-lowest required-work ID. A missing,
+failed, ambiguous, or rollback-detected authority source never becomes empty
+complete custody.
+
+`revocationFacts` is sorted by
+`(stableIdentityCommitment, minimumAcceptedGeneration,
+effectiveLogicalWindow, validThroughLogicalWindow, revokeOperationId)`.
+The projected authority faults are sorted by
+`(logicalWindow, canonical proofOperationIds)`, and every proof list is sorted
+and duplicate-free. The custody digest covers the complete bounded retained
+authority partition and saturation state. No caller supplies a separate
+availability boolean, revocation list, fault list, completeness bit, source
+digest, or custody digest. The derived view carries its own private provenance
+brand and has no wire or public persistence decoder. Its public digests are
+deterministic drift/audit witnesses only; an unkeyed self-hash is never treated
+as proof that omitted source facts never existed.
+
+The constructor selects
+`ApplicableRevocationFacts(commitment, snapshot.referenceWindow)` and every
+projected authority window fault for which:
 
 ```text
+fault.logicalWindow
+  <= snapshot.referenceWindow
+  <= AuthorityFaultValidThrough(snapshot.roomPolicy, fault.logicalWindow)
+```
+
+The selected faults become `blockingAuthorityWindowFaults`. The derived status
+is unavailable when that array is nonempty or custody is saturated. If custody
+is complete and selected faults are empty, status is available and
+`unavailableThroughLogicalWindow=null`. If only known selected faults block
+it, the unavailable horizon is their maximum recomputed
+`AuthorityFaultValidThrough(snapshot.roomPolicy, fault.logicalWindow)`; if
+custody is
+saturated, the horizon is null because the missing fact may have a later
+defensible horizon. Missing trusted state is handled by `Admit()` as
+`policy-unavailable`, never as an empty available view. Status, not nullness,
+decides availability.
+
+```text
+AuthorityAdmissionStateDigest =
+  H(
+    "p2party/authority-admission-state/v1" ||
+    Canonical(
+      roomContextId,
+      stableIdentityCommitment,
+      status,
+      revocationFacts,
+      blockingAuthorityWindowFaults,
+      snapshot.authorityCustody.status,
+      snapshot.authorityCustody.firstSaturatedRequiredWorkId
+    )
+  )
+
 AuthorityAdmissionViewDigest =
   H(
     "p2party/authority-admission-view/v1" ||
     Canonical(
-      VerifiedAuthorityAdmissionViewV1 without viewDigest
+      serializable fields of VerifiedAuthorityAdmissionViewV1
+      without viewDigest
     )
   )
 ```
 
-Phase 0 shall freeze this constructor, the authority-custody input projection,
-its ordering, and vectors before the admission kernel is called
-interoperable.
+The state digest deliberately omits `referenceWindow`,
+`sourceCoreOperationsDigest`, `authorityCustodyStateDigest`, and unrelated
+authority facts. Their full values remain in `viewDigest` for drift/audit
+evidence. This makes a stable-edge lease sensitive to every fact that can
+change its admission decision without invalidating it every logical window or
+when an unrelated room/authority operation arrives.
+
+The admission transaction loads the current frontend policy generation and
+constructs the snapshot/view from the same atomic source; it may not accept a
+persisted earlier view or caller projection. Before a bootstrap lease is used,
+the same wrapper reconstructs the current view and requires the exact policy
+generation, decision-state digest, coordinates, and finite horizon still to
+match, or reruns `Admit()` from its still-valid opaque bootstrap context.
+After stable promotion it instead uses
+`AuthorizeStableEdgeActionAndPersist`, which never depends on the expired
+bootstrap context. Phase 0 freezes both authority constructors, the custody
+input projection, ordering, negative vectors, and canonical digests before
+the admission kernel is called interoperable.
 
 The fact array, not a singular flattened floor, is the SSOT. Equal maximum
 generations with different effective/valid-through windows remain distinct
 and therefore yield the same answer under every delivery permutation.
 
 ```text
-AuthorityFaultValidThrough(faultWindow) =
+AuthorityFaultValidThrough(roomPolicy, faultWindow) =
+  require roomPolicy.admissionFloor.mode == "authority-grant"
   checkedAdd(
-    checkedAdd(faultWindow, maxFutureLogicalWindows),
     checkedAdd(
-      maxAuthorityCredentialLifetimeWindows,
-      maxClockSkewWindows
+      faultWindow,
+      roomPolicy.protocolLimits.maxFutureLogicalWindows
+    ),
+    checkedAdd(
+      roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows,
+      roomPolicy.protocolLimits.maxClockSkewWindows
     )
   )
 
-AuthorityAdmissionAvailable(referenceWindow) =
-  no retained pinned-authority fork, overquota, or authority-custody fault has
-  faultWindow <= referenceWindow <= AuthorityFaultValidThrough(faultWindow)
 ```
 
-Both authority presence projection and `Admit()` require
-`AuthorityAdmissionAvailable`; failure is local `policy-unavailable`, never an
-old-grant allow.
+Both authority presence projection and `Admit()` consume the sole derived view
+and require `status="available"`; failure is local `policy-unavailable`, never
+an old-grant allow. There is no second `AuthorityAdmissionAvailable`
+predicate.
 
 For canonical `GRANT_HORIZON` encoding, a revocation is immediate and exact:
 
@@ -7789,16 +8391,19 @@ For canonical `GRANT_HORIZON` encoding, a revocation is immediate and exact:
 effectiveLogicalWindow == outer.logicalWindow
 expiresAfterLogicalWindow
   == checkedAdd(
-       checkedAdd(effectiveLogicalWindow, maxFutureLogicalWindows),
-       maxAuthorityCredentialLifetimeWindows
+       checkedAdd(
+         effectiveLogicalWindow,
+         roomPolicy.protocolLimits.maxFutureLogicalWindows
+       ),
+       roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows
      )
 outer.expiresAfterWindow == expiresAfterLogicalWindow
 ```
 
-The extra `maxFutureLogicalWindows` covers an already admitted bounded-future
-presence or identity operation carrying a credential issued after the
-revocation's effective window; that credential's own maximum lifetime has
-also elapsed before the floor leaves the reconstructable set. A conforming
+The extra `roomPolicy.protocolLimits.maxFutureLogicalWindows` covers an already
+admitted bounded-future presence or identity operation carrying a credential
+issued after the revocation's effective window; that credential's own maximum
+lifetime has also elapsed before the floor leaves the reconstructable set. A conforming
 pinned authority encodes its actual current room logical window as
 `issuedAtLogicalWindow`, never pre-signs a future issuance window, durably
 remembers each commitment's generation floor, and never later issues a
@@ -7810,26 +8415,31 @@ The policy-pinned authority signs the complete prefixed message for each
 object above, never its bare 32-byte hash. Verification first enforces the
 closed canonical codec, exact room context, validity domain, and policy key.
 
-An allow result persists exactly the lease returned by `Admit()`. Its temporal
-horizon is the minimum defined above. “Presence horizon” means
+An initial allow persists exactly the bootstrap lease returned by `Admit()`.
+Its temporal horizon is the minimum defined above. “Presence horizon” means
 `HistoricalPairPresenceEvidenceV1.retainThroughLogicalWindow`, so courier
 delivery does not incorrectly require the rotating presence to remain in the
-current roster. Local policy and revocation have no invented future time
-horizon: the lease binds their exact generation/view at decision time and they
-are reloaded and rechecked before every use. A lease is evidence of the last
-allow, never an authorization cache.
+current roster. That lease gates only identity response, transport
+offer/answer, SDP/ICE, and protocol-v4 bootstrap through promotion. The stable
+lease returned by `ReauthorizeStableEdge` gates later work without extending
+or reusing the bootstrap evidence. Local policy and revocation have no
+invented future time horizon: each lease binds the exact policy generation and
+decision-state digest and the wrapper reloads/rechecks them before every use.
+A lease is evidence of the last allow, never an authorization cache.
 
-Before dispatch of
-identity response, transport offer/answer, SDP/ICE, v4 handshake, reconnect,
-admitted application/data-plane relay work, or decrypted pair control, the
-frontend atomically requires the same
-local-policy generation, matching room/key/commitment/presence/identity/pair
-coordinates, an unexpired lease, and rechecks current deny/revocation and
-authority-availability state. The successful recheck and exact outbound intent
-commit atomically. A changed or unavailable policy/view invalidates the lease.
-A later deny/revoke tears down future use, but bytes already pair-encrypted
-and published cannot be clawed back; the UI and audit log must not imply
-retroactive secrecy.
+Before dispatch of an identity response, transport offer/answer, SDP/ICE, or
+pre-promotion v4 handshake, the frontend atomically requires the matching
+unexpired bootstrap lease, local policy generation,
+room/key/commitment/presence/identity/pair coordinates, and current
+deny/revocation/authority state. Before reconnect, admitted
+application/data-plane work, or post-promotion pair control, it instead
+requires the matching stable-edge lease and stable transcript; it must not
+consult an expired presence or pair-attempt record. The successful recheck and
+exact outbound/dispatch intent commit atomically. A changed or unavailable
+policy/view invalidates the relevant lease unless the same transaction
+successfully reauthorizes it. A later deny/revoke tears down future use, but
+bytes already pair-encrypted and published cannot be clawed back; the UI and
+audit log must not imply retroactive secrecy.
 
 The stable room commitment is:
 
@@ -7986,7 +8596,7 @@ issuedAtLogicalWindow
   <= notAfterLogicalWindow
 
 notAfterLogicalWindow - issuedAtLogicalWindow
-  <= maxAuthorityCredentialLifetimeWindows
+  <= roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows
 ```
 
 and `issuedAtLogicalWindow` cannot exceed the exact logical window of the
@@ -7994,7 +8604,8 @@ credential-carrying PRESENCE, HELLO, or ACCEPT operation. A permit additionally
 must contain the presence operation's exact logical window. The issuing
 authority sets `issuedAtLogicalWindow` to its actual current room logical
 window and never pre-signs a future issuance value. Already received outer
-operations can still be at most `maxFutureLogicalWindows` ahead, which is why
+operations can still be at most
+`roomPolicy.protocolLimits.maxFutureLogicalWindows` ahead, which is why
 the revocation floor's exact retention includes that additional bound. These
 issuance and end bounds make the revocation horizon executable; interval
 length alone would not bound a far-future presigned credential.
@@ -8031,15 +8642,22 @@ does not claim indefinite discovery during a shutdown.
 `Project` assigns presence eligibility with one closed precedence rule:
 
 ```text
-if roomPolicy requires an authority permit:
+if snapshot.roomPolicy requires an authority permit:
   require the canonical valid permit winner
   eligibility = "authority-permit-proved"
-else if FrontendRoomControlsV1.onlyConnectWithKnownPeers:
+else if snapshot.frontendControls.onlyConnectWithKnownPeers:
   require one unambiguous allowed address-book key that verifies ownership
   eligibility = "local-address-book-proved"
 else:
   eligibility = "open"
 ```
+
+For every authority-mode candidate, “canonical valid permit winner” includes
+`view = DeriveAuthorityAdmissionView(snapshot,
+presence.stableIdentityCommitment)`, `view.status == "available"`, and
+`AuthorityGenerationAllowed(permit.generation, view)`. Missing custody or
+frontend state produces no strict-mode vertex; there is no fallback to open
+mode and no second authority-availability predicate.
 
 An optional address-book match in open mode does not upgrade the label or
 rank. In authority mode it never substitutes for the permit. Canonical
@@ -8054,18 +8672,18 @@ credential-reuse winner or change eligibility by implementation order.
 EligiblePresenceRank =
   if authority-permit-proved:
     H("p2party/presence-rank/authority/v1" ||
-      RoomContextId || permitSerial || U64BE(generation))
+      snapshot.roomContextId || permitSerial || U64BE(generation))
   else if local-address-book-proved:
     H("p2party/presence-rank/address-book/v1" ||
-      RoomContextId || StableIdentityCommitment)
+      snapshot.roomContextId || StableIdentityCommitment)
   else:
     H("p2party/presence-rank/open/v1" ||
-      RoomContextId || PresenceOperationId)
+      snapshot.roomContextId || PresenceOperationId)
 
 ObservedRosterHash =
   H(
     "p2party/observed-roster/v1" ||
-    U64BE(referenceWindow) ||
+    U64BE(snapshot.referenceWindow) ||
     Canonical(Sort(valid active PresenceOperationIds))
   )
 ```
@@ -8093,13 +8711,15 @@ and sets
 `Project` verifies mode-specific eligibility and applies frontend denial. It
 sorts all remaining local and remote vertices solely by
 `(EligiblePresenceRank, PresenceOperationId)` and takes the first
-`maxRoomMembers`; there is no separate or implementation-chosen eligibility
-class order. The cap includes the local vertex. The selected subset is
-deliberately local projection state, not convergent core state; arrival order
-and server choice never select it.
+`snapshot.roomPolicy.maxRoomMembers`; there is no separate or
+implementation-chosen eligibility class order. The cap includes the local
+vertex. The selected subset is deliberately local projection state, not
+convergent core state; arrival order and server choice never select it.
 
-`LocalAdmissibleStateV1.peers` contains only selected remote vertices. If
-exactly one current locally owned presence is in the selected set,
+`LocalAdmissibleStateV1.peers` contains only selected remote vertices.
+`Project` recognizes local ownership only from
+`snapshot.localPresenceOwnership.ownedPresenceOperationIds`. If exactly one
+such current locally owned presence is in the selected set,
 `localPresenceOperationId` and `localPresenceRank` contain its exact values.
 If local ownership is absent, ambiguous, forked, or outside the bounded
 selection, both fields are null, every `desiredEdge` is false, and the planner
@@ -8340,6 +8960,10 @@ type PairBootstrapHeaderV1 = {
   hybridKemCiphertext: Uint8Array; // exactly 1,120 bytes for suite 1
 };
 
+const PAIR_AEAD_TAG_BYTES_V1 = 16;
+const PAIR_BOOTSTRAP_ENVELOPE_OVERHEAD_BYTES_V1 = 1_161;
+const PAIR_ESTABLISHED_ENVELOPE_OVERHEAD_BYTES_V1 = 63;
+
 // The complete room-visible pair payload.
 type PairStepEnvelopeV1 = {
   version: 1;
@@ -8485,6 +9109,61 @@ type PairBootstrapInfoV1 = {
 };
 ```
 
+The canonical `PairStepEnvelopeV1` field order is exactly the declaration
+order above. `version` and `suiteId` are unsigned 8-bit values,
+`pairRoutingTag` is fixed 32 bytes, each optional uses one closed
+`0x00`/`0x01` presence byte, `hybridKemCiphertext` is fixed 1,120 bytes,
+`nonce` is fixed 24 bytes when present, and `pairCiphertextAndTag` uses one
+unsigned-32-bit length followed by those bytes. The two overhead constants
+include that length prefix and are derived from this schema:
+
+```text
+PAIR_BOOTSTRAP_ENVELOPE_OVERHEAD_BYTES_V1 =
+  1 version
+  + 32 routing tag
+  + 1 present tag + 1 header version + 1 suite + 1120 KEM ciphertext
+  + 1 absent nonce tag
+  + 4 ciphertext length
+  = 1161
+
+PAIR_ESTABLISHED_ENVELOPE_OVERHEAD_BYTES_V1 =
+  1 version
+  + 32 routing tag
+  + 1 absent bootstrap-header tag
+  + 1 present nonce tag + 24 nonce
+  + 4 ciphertext length
+  = 63
+```
+
+Suite 1 permits a bootstrap header only in payload class 0 and requires
+`operationPadding` to be the unique empty byte string for every `PAIR_STEP`.
+The pair ciphertext therefore consumes every remaining byte of the signed
+operation payload class:
+
+```text
+PairCiphertextAndTagBytes(class, bootstrap) =
+  OPERATION_PAYLOAD_CLASS_BYTES[class]
+  - (
+      PAIR_BOOTSTRAP_ENVELOPE_OVERHEAD_BYTES_V1
+        if bootstrap
+      else PAIR_ESTABLISHED_ENVELOPE_OVERHEAD_BYTES_V1
+    )
+
+PairPlaintextTargetBytes(class, bootstrap) =
+  PairCiphertextAndTagBytes(class, bootstrap)
+  - PAIR_AEAD_TAG_BYTES_V1
+
+suite-1 exact values:
+  class 0 bootstrap:   ciphertext+tag 2,935; plaintext 2,919
+  class 0 established: ciphertext+tag 4,033; plaintext 4,017
+  class 1 established: ciphertext+tag 69,569; plaintext 69,553
+```
+
+Class 1 with a bootstrap header is invalid. These equations, rather than
+another hand-maintained target table, are the SSOT. The Phase-0 vector set
+must derive the three values from the canonical schema and payload-class
+table and fail if either source changes without a new codec/suite.
+
 `PairStepEnvelopeV1` is the payload of a canonical `PAIR_STEP` operation. A
 capability holder sees its one-use tag, optional bootstrap header, fixed
 length, bootstrap-vs-established class, author, and timing, but not HELLO
@@ -8509,26 +9188,14 @@ the remote endpoint's declared attempt origin, not the truth of a human
 gesture; a malicious peer can request an edge, but cannot bypass the
 receiver's admission or degree policy.
 
-Pair identity credentials are closed by the immutable room mode:
-
-```text
-ModeValidPairGrant(roomPolicy, identity, commitment, grant, referenceWindow) =
-  if roomPolicy.admissionFloor.mode == "capability":
-    grant == null
-  else:
-    grant is non-null, signed by the policy-pinned authority, names the exact
-    RoomContextId and identity.ed25519PublicKey, is current at referenceWindow,
-    recomputes commitment, and passes AuthorityGenerationAllowed
-```
-
-HELLO applies this predicate to `senderIdentity`,
-`senderPresenceCommitment`, and `senderAdmissionGrant`; ACCEPT applies the same
-predicate to the responder fields. Authority mode therefore requires exactly
-one valid grant in each endpoint's identity flight, while capability mode
-requires null. A permit authorizes an encrypted presence commitment; a grant
-binds the subsequently revealed stable key. They are distinct objects but use
-one authority generation/revocation rule, and neither may be copied into the
-other room mode.
+Pair parsing verifies only the closed credential framing, pair/room
+transcript, stable identity signature, and exact identity-to-commitment
+binding. It does not authorize a grant. The sole `Admit()` function below owns
+room mode, grant presence/absence, authority signature, interval, generation,
+revocation, and frontend-policy semantics for both HELLO and ACCEPT. A permit
+authorizes an encrypted presence commitment; a grant binds the subsequently
+revealed stable key. They are distinct objects, and neither may be copied into
+the other room mode.
 
 The pair codec and `PairOperationPayloadClassFor` fix the encoded
 `PairPlaintextV1` length for each operation payload class. `pairPadding` is the
@@ -8844,18 +9511,18 @@ initiator:
 
 responder:
   open HELLO
-  → verify pair/presence binding, commitment, stable signature, and grant
+  → verify pair/presence binding, commitment, and stable signature
   → run frontend Admit()
   → if denied: generate no sensitive response
-  → if allowed: atomically persist decision lease, exact ACCEPT, and outbox
+  → if allowed: atomically persist bootstrap lease, exact ACCEPT, and outbox
 
 initiator:
   open ACCEPT
-  → verify responder commitment, identity, grant, exact dependency, and signature
+  → verify responder commitment, identity, exact dependency, and signature
   → run frontend Admit()
   → if denied: generate no SDP/ICE
   → if allowed: derive EstablishedPairRoot and atomically persist
-    decision lease, exact TRANSPORT_OFFER, and outbox
+    bootstrap lease, exact TRANSPORT_OFFER, and outbox
 
 responder:
   authenticate TRANSPORT_OFFER under EstablishedPairRoot
@@ -9764,9 +10431,9 @@ semanticDeadlineUnixMs =
   checkedMultiply(
     checkedAdd(
       semanticExpiryLogicalWindow,
-      checkedAdd(maxClockSkewWindows, 1)
+      checkedAdd(roomPolicy.protocolLimits.maxClockSkewWindows, 1)
     ),
-    logicalWindowMs
+    roomPolicy.protocolLimits.logicalWindowMs
   )
 ```
 
@@ -9779,7 +10446,7 @@ compared as deadlines.
 Selection is target-specific before any role head is chosen:
 
 ```text
-EligibleL3DueWork(target) =
+EligibleL3DueWork(target, activationAtUnixMs) =
   {
     work |
     one exact scope in target.roomScopes has
@@ -9795,7 +10462,7 @@ EligibleL3DueWork(target) =
     and work.deliveryProfileHash is in that exact active profile set
     and the referenced operation/outbox intent remains retained, required,
         and nonterminal
-    and now < work.semanticDeadlineUnixMs
+    and activationAtUnixMs < work.semanticDeadlineUnixMs
     and if target.kind == "portable-bundle":
       work.deliveryProfileHash is in target.deliveryProfileHashes
       and the adapter is installed, locally authorized, and passes
@@ -9809,7 +10476,9 @@ EligibleL3DueWork(target) =
                                    target.deliveryProfileHash)
       and target.authenticatedSessionContextId equals that current context
       and target.contactCarrierInstanceId is in
-          CarrierContextIds(ActiveCarrierContexts(room))
+          CarrierContextIds(
+            ActiveCarrierContexts(room, activationAtUnixMs)
+          )
       and target.contactCarrierInstanceId is not in
           room.carrierAssignments.disabledCarrierContextIds
       and the adapter is installed, locally authorized, and passes
@@ -10071,7 +10740,7 @@ A p2party shutdown-survival claim requires an end-to-end tested path with:
 
 1. no DNS, URL fetch, IP socket, WebSocket, WebRTC, or TURN;
 2. a pre-positioned client and room invitation;
-3. at least one real non-IP custody/contact mechanism;
+3. at least one field-tested non-IP custody/contact mechanism;
 4. enough contacts before retention to complete the required interactive
    steps; and
 5. measured delivery, loss, energy, capacity, and human/contact latency.
@@ -10192,21 +10861,30 @@ every object category. An ordinary capability link has invitation provenance
 untrusted link proves integrity, not identity provenance. PQ-authenticated
 invitation provenance therefore requires a hybrid signature by an already
 trusted inviter/authority or explicit external verification.
+“Complete matrix” means that every category has an explicit row, including
+`not-claimed`; it does not mean every category has hybrid authentication.
+“Complete hybrid-authentication coverage” is the stricter umbrella condition
+below.
 
 An umbrella “PQ-authenticated rendezvous” claim requires a complete matrix
 with no ambiguous “where relied on” escape: stable/epoch identities; room
 operations; presence permits; authority grants/revocations; pair
 HELLO/ACCEPT/key confirmation; transport offer/answer binding; store
-descriptors/routes; append/status receipts; checkpoints/chunk signatures;
-authenticated contact sessions; strict-presence proofs; pair/transport
-bindings; successor session key confirmation; migration/continuity
-statements; and every registry/publication artifact used to choose those
-suites. Every `hybrid-signed` entry verifies both components, every
+descriptors/routes; allocation-issuer identity/key; blind issuance
+request/response/token authentication; allocation leases and allocation-status
+signatures; append/status receipts; checkpoints/chunk signatures; authenticated
+contact sessions; strict-presence proofs; pair/transport bindings; successor
+session key confirmation; migration/continuity statements; and every
+registry/publication artifact used to choose those suites. Every
+`hybrid-signed` entry verifies both components, every
 transcript-bound entry reaches an exact hybrid-authenticated transcript, and
 public wording exposes every out-of-band assumption. If carrier/publication
 authentication is not covered, the registry may publish only narrower
 granular room-operation, endpoint/session, or authority-authentication claims,
-not the umbrella. One uncovered claimed object invalidates that claim.
+not the umbrella. A category may be explicitly `not-claimed`, but that forces
+the same narrower wording; in particular, retaining v0.4's classical
+Blind-RSA allocation path forbids an umbrella PQ-authenticated rendezvous
+claim. One uncovered claimed object invalidates that claim.
 
 For pair/session authentication, the common hybrid-authenticated transcript
 binds both hybrid identity public keys, every X25519 and ML-KEM public
@@ -10263,7 +10941,7 @@ never substitutes for mandatory hybrid identity authentication.
 | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Sole store unavailable or maliciously silent                 | Persist outboxes, report `single-carrier-dependent` and unavailable/partitioned; no privacy downgrade.                                                                                                                                                                                                                                                         |
 | One of several stores fails                                  | Continue fixed reconciliation with the others; do not roll state back or adapt room traffic shape.                                                                                                                                                                                                                                                             |
-| All rendezvous stores collude without the capability         | They may join bearer/timing/cohort observations but recover no protocol-level room/identity/social-edge target or pair plaintext; report only the measured L2/source-metadata claim, never network anonymity.                                                                                                                                                  |
+| All rendezvous stores collude without the capability         | They receive no deterministic protocol field encoding a room, stable application identity, social edge, target, or pair plaintext. Bearer/source/account/timing/cohort correlation remains outside that field-level guarantee; report only the measured L2/source-metadata claim, never network anonymity.                                                     |
 | Every usable path omits or is blocked                        | Preserve authenticated safety and outboxes, report partitioned/exhausted, and remove R2-BEC liveness; no empty view becomes finality.                                                                                                                                                                                                                          |
 | New compatible store explicitly added                        | Validate, persist authorization, scan, independently wrap, backfill retained operations, and emit bounded hints; no room/session rekey.                                                                                                                                                                                                                        |
 | Public cohort allocation/capacity is exhausted               | Keep the bounded outbox, roll only into already reserved future slots, and report backpressure/unavailable; never append an extra chunk or burst.                                                                                                                                                                                                              |
@@ -10290,11 +10968,12 @@ never substitutes for mandatory hybrid identity authentication.
 | Capability holder fails admission in strict mode             | It may see room-level plaintext allowed by capability semantics, but an unproved presence receives no initiator identity flight and no SDP/ICE or pair control.                                                                                                                                                                                                |
 | Capability holder fails admission in open/denylist-only mode | A selected candidate may learn the initiator's first stable identity; it receives no SDP/ICE and cannot decrypt another pair's payload. Report the weaker identity-disclosure label.                                                                                                                                                                           |
 | Authority revocation is withheld during partition            | Local deny is immediate; remote clients may honor an unexpired old grant until delivery/expiry. Do not claim instantaneous global revocation.                                                                                                                                                                                                                  |
+| Stable-edge authority grant expires                          | Stop post-promotion sensitive work and start a fresh automatic pair attempt carrying a current grant; preserve the room/invitation UX, but do not extend the old lease or reuse expired presence evidence. In-place refresh remains roadmap priority 18.                                                                                                       |
 | Sparse views differ                                          | Continue operation reconciliation and bounded attempts; preserve safe edges; no cross-room or degree-limit bypass.                                                                                                                                                                                                                                             |
 | Pair-tag/candidate budget saturates                          | Stop pair AEAD trials at the fixed count/byte cap, report `pair-control-DoS/stalled`, and retry only after the persisted next room logical-window boundary; no arrival-order winner.                                                                                                                                                                           |
 | Selected final transport fails                               | Stall that one-shot pair attempt, keep its authenticated audit, and report transport unavailable. Recovery uses fresh presences/a fresh `PairEdgeId` and selects the mandatory operation-carrier candidate; never overwrite the old answer slot or expose SDP elsewhere.                                                                                       |
 | PQ control is duplicated/reordered                           | Edge ingress ledger releases only the exact expected authenticated slot.                                                                                                                                                                                                                                                                                       |
-| PQ authenticated fork/rollback                               | Fail only that stable edge and require fresh hybrid handshake.                                                                                                                                                                                                                                                                                                 |
+| Authenticated v4 PQ-control fork/rollback                    | Fail only that stable edge and require fresh hybrid handshake.                                                                                                                                                                                                                                                                                                 |
 | Required PQ/quiescence control expires                       | Keep the application gate safe, mark the edge stalled, and require a fresh hybrid handshake; never infer an epoch transition.                                                                                                                                                                                                                                  |
 | Entire old local database snapshot is restored               | Preserve atomic crash consistency and reconcile missing room operations normally. If a restored existing edge presents an older authenticated v4 transcript/counter to an uncompromised peer with newer edge state, reject/rehandshake only that edge. Without an external monotonic anchor, claim no generic room/frontend or pre-contact rollback detection. |
 | V0.4 receives v3/PQ-successor or partial-hybrid material     | Reject before state mutation or disclosure; do not negotiate, reinterpret v0.4 bytes, import predecessor state, or fall back to classical-only authentication.                                                                                                                                                                                                 |
@@ -10378,7 +11057,9 @@ never substitutes for mandatory hybrid identity authentication.
 - **AC-007 — Frontend policy parity:** For every current signaling path that
   checks blacklist or address book, the blind store, direct peer gossip,
   portable bundle, reconnect, admitted application/data-plane relay, WebRTC,
-  and non-WebRTC paths yield the same shared `Admit()` decision. Opaque carrier
+  and non-WebRTC paths yield the same
+  `EvaluatePeerAdmissionPolicy` decision through `Admit()` before promotion or
+  `ReauthorizeStableEdge()` afterward. Opaque carrier
   carriage remains separately governed as stated in SEC-007. Deny wins, and an
   IndexedDB/worker error fails closed for only that peer. Race vectors
   change/delete `policyGeneration` after a provisional allow and before each
@@ -10388,11 +11069,15 @@ never substitutes for mandatory hybrid identity authentication.
   the exact generation and atomically binds it to its publish/dispatch intent;
   a mismatch emits no sensitive byte and invalidates the lease. Cross-path
   vectors also vary the captured reference window, admitted HELLO/ACCEPT
-  operation, retained-presence evidence horizon, pair-attempt lease, grant
-  horizon, and authority-view digest. Every allow returns the byte-identical
-  versioned decision lease with the specified minimum horizon; a stale,
-  mismatched, unavailable, or caller-fabricated authority view never becomes
-  an allow.
+  coordinates, retained-presence evidence horizon, pair-attempt lease, grant
+  horizon, trusted core/frontend/custody snapshot, authority decision-state
+  digest, and stable transcript. Equivalent inputs return byte-identical
+  versioned bootstrap or stable leases with their specified horizons. A stale,
+  mismatched, unavailable, saturated, unbranded, deserialized, or
+  caller-fabricated context/snapshot/view never becomes an allow. After stable
+  promotion, expiry of the original presence, identity operation, or
+  pair-attempt lease does not deny an otherwise current stable edge; an expired
+  authority grant does.
 
 - **AC-008 — Strict admission and rotation:** An authority-grant room rejects
   a fresh attacker key without a valid grant even if it holds the capability.
@@ -10408,7 +11093,13 @@ never substitutes for mandatory hybrid identity authentication.
   operation/fault delivery permutation and never treat missing custody as an
   empty available floor set. Authority mode combined with
   `onlyConnectWithKnownPeers=true` requires both checks and deterministically
-  reports `authority-grant` on success. Tests and UI also disclose that an
+  reports `authority-grant` on success. Role-binding vectors admit tuple index
+  0 only for HELLO-at-responder and index 1 only for ACCEPT-at-initiator;
+  wrong pair edge, endpoint tuple, direction, sequence, predecessor, HELLO
+  dependency, operation ID, room/policy binding, retained evidence, trusted
+  snapshot provenance, or core/custody source
+  raises `AdmissionInputError` or `policy-unavailable`, fails closed, and is outwardly
+  indistinguishable from the fixed denial behavior. Tests and UI also disclose that an
   open/denylist-only
   room cannot recognize a person after complete identity rotation.
 
@@ -10677,8 +11368,15 @@ pairControlRetentionWindows` and rejects the one-greater boundary; size
 - **AC-022 — L2 inference evaluation:** A preregistered target-room,
   co-membership, room-size, join/leave, and pair-activity classifier trained on
   sole-store observations does not exceed the release threshold over the
-  declared prior and cohort. Cold start, suspension, loss, and malicious
-  selective failure are separate labelled datasets.
+  declared prior and cohort. The registration fixes class base rates,
+  train/validation/test separation, minimum sample size, statistical power,
+  confidence interval method, PR-AUC, ROC-AUC, and TPR at the named low FPR
+  before traces are collected; the report publishes all of them rather than
+  selecting the friendliest metric. Cold start, suspension, loss, and
+  malicious selective failure are separate labelled datasets. Classifier
+  non-success is falsification evidence for the exact dataset/model only; it
+  is not a cryptographic proof that no other observer or classifier can infer
+  the event.
 
 - **AC-023 — Cohort honesty:** A newly added store used by only one measured
   room reports `cohortScope: "room-unique"` even if its ciphertext format is
@@ -10722,8 +11420,8 @@ pairControlRetentionWindows` and rejects the one-greater boundary; size
 PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
 
 - **AC-025 — Automated non-IP carrier:** The selected reference non-IP contact
-  adapter exchanges fragmented fixed objects on a real or hardware-backed
-  non-IP bearer under loss, duplication,
+  adapter exchanges fragmented fixed objects on a hardware-in-loop non-IP path
+  under loss, duplication,
   reordering, short contacts, interruption, and restart. Custody resumes
   without logical duplicates or room leakage outside the adapter's declared
   metadata. The same inside-one-carrier-window and
@@ -10753,7 +11451,13 @@ PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
   not incomparable raw logical-window indices, including equality/one-ms
   boundaries and restart. With all IP/browser-network tripwires active,
   the selected automated adapter also completes the full AC-024 PQ chain
-  under loss, reordering, interruption, and restart.
+  under loss, reordering, interruption, and restart. A hardware-in-loop run
+  satisfies `non-IP-control-compatible` only. The practical
+  `shutdown-surviving rendezvous/control` wording additionally requires a
+  deployed field dataset for that exact bearer/custody path measuring range,
+  delivery/loss, energy, MTU/fragmentation, usable capacity before retention,
+  contact duration, human latency, restart, power loss, and physical custody;
+  its claim scope and validity interval name those measurements.
 
 - **AC-026 — Exact PQ frame hiding:** Store and non-endpoint capability-holder
   traces contain no raw current `pqHealingFrame` header, edge-control binding,
@@ -10902,9 +11606,15 @@ PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
   class/length/envelope constraints, then post-`OpenPairStep`
   `PairOperationPayloadClassFor` selects the smallest fitting permitted class
   from authenticated unpadded pair plaintext and bootstrap-header presence.
-  Oversized values, pre-open plaintext inference, nonminimal classes, and
-  non-unique pair/operation padding all fail. Deterministic vectors cover every
-  operation kind and every pair-step body.
+  Vectors derive exact suite-1 plaintext targets `2919`, `4017`, and `69553`
+  from the schema/class table, reject class-1 bootstrap, require empty pair
+  `operationPadding`, and fail if a duplicated target table diverges.
+  `STORE_HINT` vectors sequence-encode routes in derived-`RouteId` order,
+  reject duplicate/unsorted/over-255 routes, and prove deterministic full
+  logical-window coverage by every absolute descriptor/route lease without an
+  ambient clock. Oversized values, pre-open plaintext inference, nonminimal
+  classes, and non-unique pair padding all fail. Deterministic vectors cover
+  every operation kind and every pair-step body.
 
 - **AC-036 — Strict presence gate and honest open-mode label:** Address-book
   signatures and authority permits bind the exact presence core; forgeries,
@@ -11405,8 +12115,11 @@ A conforming release publishes:
   consistency report;
 - one browser/client implementation and one single-process reference store that
   runs unchanged as a standalone service or co-hosted on an end-user device;
-- portable-bundle, one real or faithfully hardware-backed non-IP contact
-  adapter, and a separate deterministic byte harness;
+- portable-bundle, one hardware-in-loop non-IP contact adapter, and a separate
+  deterministic byte harness; a release using only
+  hardware-in-loop evidence publishes `non-IP-control-compatible`, while
+  shutdown-survival wording additionally publishes the deployed field dataset
+  required by REQ-015/AC-025;
 - state-machine/model tests and reproducible fault schedules;
 - dependency/SBOM, exact primitive versions, reproducible-build evidence, and
   external review report;
@@ -12076,7 +12789,8 @@ result. A credible paper needs:
   pair disclosure, malicious operations, admission, and convergence;
 - a working one-server/browser implementation;
 - real additive-store partitions and recovery;
-- a real non-IP adapter and blackout/contact evaluation;
+- a hardware-in-loop non-IP adapter and, for shutdown-survival wording, a
+  field-tested blackout/contact evaluation;
 - v4/PQ crash and compromise experiments;
 - public-checkpoint/custody-fault and production-scheduler refinement
   evaluation;
@@ -12182,8 +12896,9 @@ alone is not an evaluated research result.
   request class. The direct HTTP adapter remains available only when the
   global floor is disabled; it is never an SP1 fallback.
 - **L3 adapters:** canonical portable-bundle implementation and at least one
-  deployed or faithfully hardware-backed non-IP contact integration, plus a
-  deterministic byte harness.
+  hardware-in-loop non-IP contact integration, plus a
+  deterministic byte harness. A practical shutdown-survival claim additionally
+  depends on one deployed field-tested path and its current REQ-015 evidence.
 - **Sparse room data plane:** a separately versioned component satisfying
   REQ-021/AC-043 before production-default whole-room messaging. It consumes
   promoted edges and room/member projections; it does not alter the
@@ -12410,9 +13125,14 @@ response, and exports the next bundle. Repeated exchanges drive causal pair
 steps and the operation-backed protocol-v4 handshake. The human latency may be
 hours; the state machine remains the same.
 
-This demonstrates shutdown-surviving rendezvous/control and PQ maintenance.
+A release satisfying REQ-015, AC-024/025, and the Section 10.4 field-evidence
+gate may claim shutdown-surviving rendezvous/control and completion of one v4
+PQ-healing cycle (`pqState="healed-after-fresh-entropy"`) under v0.4's
+classical-authentication assumptions for this exact measured bearer/custody
+scope. This example alone demonstrates only the intended state-machine path.
 Room messages or files through the blackout are claimed only when the
-separately versioned data plane passes the non-IP branch of AC-043.
+separately versioned data plane passes the non-IP branch of AC-043 on that
+path.
 
 If the contacts cease beyond retention, liveness expires. If the physical
 carrier is searched, its observer sees a padded p2party bundle and physical
@@ -12592,8 +13312,10 @@ room invitation alone cannot discover Bob's device.
   independence.
 - Network-disabled portable and non-IP E2E tests pass through v4 and one PQ
   cycle.
-- At least one deployed or hardware-backed non-IP adapter, not only an injected
-  byte harness, supports the practical shutdown-survival label.
+- At least one hardware-in-loop non-IP adapter, not only an injected byte
+  harness, supports `non-IP-control-compatible`; only a deployed,
+  field-tested custody path with the complete REQ-015/AC-025 measurement set
+  supports practical shutdown-survival wording.
 - Contact loss/partition durations and retention exhaustions are measured.
 - UI wording names physical custody, power, route distribution, and
   observation limits.
@@ -12653,6 +13375,18 @@ not permission to ship an “L3-compatible” label before the L3 tests pass.
   operation and carrier codecs, `DEFAULT_BLIND_POLICY_V4_0`, domains, exact
   cohort capacity/finalization, size classes, retention,
   dependency/resource bounds, and assurance semantics.
+- Freeze the three formerly implicit nested boundaries explicitly:
+  `PairStepEnvelopeV1` derives its exact three ciphertext/plaintext targets
+  from the canonical schema and operation-class table; `STORE_HINT` uses
+  sequence encoding plus derived-`RouteId` ordering and deterministic
+  logical-window/Unix lease coverage; and admission freezes grants/revokes,
+  opaque bootstrap/stable subjects, one trusted current-state
+  snapshot, derived authority view/state digest, decisions, and bootstrap/
+  stable leases together with their sole constructors and negative vectors.
+- Split timeless store authenticity from explicit-time route activation in
+  every implementation and vector. No core reducer reads an ambient clock, no
+  admission caller supplies an availability boolean, and no duplicated target
+  length or route bound becomes a second SSOT.
 - Write target/room/social-graph privacy, denied-peer SDP, malicious-operation,
   scoped R2-BEC convergence/censorship, and PQ-delivery games.
 - Build a deterministic multi-client/multi-carrier model with arbitrary
@@ -12693,8 +13427,9 @@ admission/topology/v4 exist in Phases 2–3.
 
 - Add capability-sealed presence/leave, stable commitments, local address-book
   and blacklist integration, strict presence signatures/permits, optional
-  authority grants/revocations, decision leases, and one shared `Admit()`
-  implementation.
+  authority grants/revocations, bootstrap admission leases, and one shared
+  `EvaluatePeerAdmissionPolicy` implementation consumed by bootstrap
+  `Admit()`.
 - Add pair double sealing and the exact non-circular two-flight pre-SDP
   identity gate.
 - Migrate pre-auth state away from server UUIDs to room/presence/pair derived
@@ -12702,7 +13437,7 @@ admission/topology/v4 exist in Phases 2–3.
 - Fuzz every policy and storage-failure boundary.
 
 **Gate:** single-server denied-peer SDP confidentiality, identity substitution,
-grant, and current frontend-parity tests pass.
+grant, and the bootstrap/pre-SDP branch of current frontend-parity tests pass.
 
 ### Phase 3 — Sparse topology and transport handoff
 
@@ -12713,6 +13448,9 @@ grant, and current frontend-parity tests pass.
 - Generalize transport bindings and adapt the existing `HandshakeTransport`.
 - Run the fresh existing v4 handshake and promote only byte-matched identities
   and transport bindings.
+- Construct and durably reload the verified stable-edge context; route every
+  post-promotion sensitive action through `ReauthorizeStableEdge()` and the
+  shared policy kernel, with the phase-correct stable lease.
 - Expose observed members, desired/provisional edges, promoted data peers,
   `LocalPeerId`, and their distinct wait semantics.
 - In the companion data-plane workstream, implement and test REQ-021 without
@@ -12720,9 +13458,9 @@ grant, and current frontend-parity tests pass.
 - Run browser WebRTC E2E with the WebSocket constructor tripwire and no Upgrade
   endpoint.
 
-**Gate:** topology model, browser WebRTC E2E, no-roster-binding, and v4 byte/
-erasure tests, plus full AC-002 through AC-004, pass for control-plane
-conformance. AC-043 also passes before
+**Gate:** topology model, browser WebRTC E2E, no-roster-binding, v4 byte/
+erasure tests, the post-promotion branch of AC-007, and full AC-002 through
+AC-004 pass for control-plane conformance. AC-043 also passes before
 the product default or whole-room UX is switched.
 
 ### Phase 4 — Additive stores and censorship paths
@@ -12741,17 +13479,19 @@ the product default or whole-room UX is switched.
 - Run blocking-domain and metadata observer experiments.
 
 **Gate:** automatic addition, no-SSRF, partition merge, room-unique disclosure,
-local path-diversity, and exact participant/frontier-scoped R2-BEC censorship
-claims pass `R2Conforms`; AC-049 passes, and asymmetric carrier-policy clients
-never produce a scoped claim. The public-store and co-location branches of
+and local path-diversity tests pass; the exact participant/frontier-scoped
+R2-BEC conformance record passes `R2Conforms` under its registered
+censor-action model. AC-049 passes, and asymmetric carrier-policy clients
+never produce a scoped result. The public-store and co-location branches of
 AC-052 pass the identical black-box suite.
 
 ### Phase 5 — Normative L3 and eventual PQ control
 
 - Implement canonical portable-bundle streaming import/export.
-- Implement one real or faithfully hardware-backed non-IP contact adapter;
+- Implement one hardware-in-loop non-IP contact adapter;
   retain the injected harness for deterministic conformance tests, and exercise
-  the same registered contact boundary as an authenticated peer bridge.
+  the same registered contact boundary as an authenticated peer bridge. Field
+  test one deployed custody path before enabling shutdown-survival wording.
 - Add operation-backed handshake transport, causal pair ledger, v4 PQ slot
   delivery wrapper, durable republish, quiescence barrier, and rollback
   protection.
@@ -12761,10 +13501,12 @@ AC-052 pass the identical black-box suite.
 
 **Gate:** AC-024 through AC-028 and the operation-carrier/non-IP branches of
 AC-029 pass without any IP API, and AC-045 passes end to end. AC-029's
-WebRTC/DTLS branch remains a Phase 3 browser gate. Only now may v0.4 claim L3 compatibility/shutdown-survival
-for rendezvous/control within its stated physical boundary; application
-shutdown messaging still requires the AC-043 branch. The authenticated-contact,
-partition, pair-confidentiality, and bootstrap branches of AC-052 also pass.
+WebRTC/DTLS branch remains a Phase 3 browser gate. These gates permit
+`non-IP-control-compatible`; only current deployed field evidence under
+REQ-015/AC-025 permits shutdown-survival wording for rendezvous/control within
+its stated physical boundary. Application shutdown messaging still requires
+the AC-043 branch. The authenticated-contact, partition,
+pair-confidentiality, and bootstrap branches of AC-052 also pass.
 
 ### Phase 6 — Privacy, scale, and release review
 
@@ -12801,13 +13543,13 @@ claim until its own reviewed design and evidence exist.
 
 #### First hardening wave
 
-| Priority | Candidate work                                                                  | What it would strengthen                                                                                                                                        | Boundary retained                                                                                                                                           |
-| -------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1        | Complete the sparse application-data plane over the existing carrier boundary   | Extends shutdown survival from rendezvous/control to actual room messages, attachments, receipts, retries, and recovery.                                        | Reuses the operation, admission, carrier, pair-session, and assurance SSOTs; it does not turn the rendezvous log into an application queue.                 |
-| 2        | Ship and field-test real BLE/Wi-Fi Direct carriers, then LoRa/BPv7 where useful | Replaces portable-file proof-of-independence with measured blackout range, latency, loss, energy, MTU, custody, and restart behavior.                           | No bearer is called shutdown-resilient outside its measured physical and custody envelope; jamming, seizure, absent power, and absent custodians remain.    |
-| 3        | Add optional external rollback anchors                                          | Detects whole-device snapshot restoration of identity, admission, ratchet/PQ, source-volume, and assurance high-water state.                                    | Uses a hardware counter, paired witness, or privacy-safe remote anchor; operation without one remains supported but keeps the rollback nonclaim.            |
-| 4        | Add privacy-safe checkpoint witnesses and gossip                                | Makes signed store split views meet systematically and turns observed equivocation into portable room-blind conflict evidence sooner.                           | Witnesses see only public profile checkpoints. Silence, an isolated branch, global completeness, and consensus are still not proved.                        |
-| 5        | Strengthen executable refinement and reproducible assurance                     | Reduces model/implementation, build, evaluator, frontend-label, and whitepaper drift using independent implementations, reproducible builds, and richer replay. | OwlC/Sift-class refinement is the research bar; this reduces supply-chain risk but does not protect a compromised browser, OS, compiler, or signing quorum. |
+| Priority | Candidate work                                                                 | What it would strengthen                                                                                                                                                                   | Boundary retained                                                                                                                                           |
+| -------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1        | Complete the sparse application-data plane over the existing carrier boundary  | On a path that already earned shutdown-surviving control, extends that result to room messages, attachments, receipts, retries, and recovery.                                              | Reuses the operation, admission, carrier, pair-session, and assurance SSOTs; it does not turn the rendezvous log into an application queue.                 |
+| 2        | Expand field-tested BLE/Wi-Fi Direct coverage, then add LoRa/BPv7 where useful | Earns the first field-scoped shutdown result if absent, or extends existing measured coverage with more range, latency, loss, energy, MTU, custody, restart, and blocking-domain evidence. | No bearer is called shutdown-resilient outside its measured physical and custody envelope; jamming, seizure, absent power, and absent custodians remain.    |
+| 3        | Add optional external rollback anchors                                         | Detects whole-device snapshot restoration of identity, admission, ratchet/PQ, source-volume, and assurance high-water state.                                                               | Uses a hardware counter, paired witness, or privacy-safe remote anchor; operation without one remains supported but keeps the rollback nonclaim.            |
+| 4        | Add privacy-safe checkpoint witnesses and gossip                               | Makes signed store split views meet systematically and turns observed equivocation into portable room-blind conflict evidence sooner.                                                      | Witnesses see only public profile checkpoints. Silence, an isolated branch, global completeness, and consensus are still not proved.                        |
+| 5        | Strengthen executable refinement and reproducible assurance                    | Reduces model/implementation, build, evaluator, frontend-label, and whitepaper drift using independent implementations, reproducible builds, and richer replay.                            | OwlC/Sift-class refinement is the research bar; this reduces supply-chain risk but does not protect a compromised browser, OS, compiler, or signing quorum. |
 
 #### Optional privacy, censorship, and scale packages
 
@@ -12834,7 +13576,8 @@ issuance under the registered assumptions; the successful issuance request
 hash/replay row remains the sole idempotency SSOT.
 
 The descriptor prepublishes signed bounded difficulty, while
-`ClientGlobalResourcePolicyV1` supplies a lower local acceptance ceiling. A
+`ClientGlobalResourcePolicyV1` supplies an upper local acceptance ceiling and
+maximum work budget. A
 store demanding more work becomes inactive/unavailable instead of consuming
 unbounded CPU, battery, or radio time. A malicious store can waive, raise, or
 selectively reject work and network timing/source may still link issuance and
@@ -12845,20 +13588,25 @@ implementation or claim.
 
 #### Successor-version candidates
 
-| Priority | Candidate work                                                               | What it would strengthen                                                                                                                                        | Why it needs a new version                                                                                                                                                    |
-| -------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 13       | Ship the PQ-authenticated successor with continuous PQ ratcheting            | Adds hybrid-PQ authentication for identities, operations, authorities, stores, checkpoints, contact sessions, and migration, plus reviewed ongoing PQ recovery. | Requires the fresh invitation/context and complete coverage boundary in Section 4.15; v0.4 signatures, grants, transcripts, and Blind-RSA allocation cannot be relabelled.    |
-| 14       | Add single-use/expiring invitations and explicit room-capability replacement | Limits future entry after an invitation leak and supports deliberate migration into a fresh room context with selectively reauthorized peers.                   | A leaked holder cannot be made to forget old room data or keys. Safe recovery therefore creates a fresh context rather than mutating the meaning of a v2 capability.          |
-| 15       | Add PQ anonymous credentials and PQ-private allocation when mature           | Removes remaining classical authentication/linkability boundaries in anonymous admission, route distribution, and quota issuance.                               | These primitives and browser/resource profiles require separate review and cannot be inferred from ML-KEM healing or PQ signatures alone.                                     |
-| 16       | Consider explicit quorum finality only if a future product truly requires it | Could provide a closed-roster notion of committed membership, revocation, or proof of absence that R2-BEC intentionally does not offer.                         | It would require explicit membership, `n`, `f`, quorum intersection, synchrony, recovery, and metadata costs; the KISS default remains authenticated union without consensus. |
-| 17       | Consider MLS or another group data plane only if sparse pair sessions fail   | May improve large-room group-key and application-data efficiency.                                                                                               | It replaces—not layers beside—the pair data-plane SSOT under a new reviewed migration; MLS delivery metadata alone does not solve blind rendezvous.                           |
+| Priority | Candidate work                                                                         | What it would strengthen                                                                                                                                    | Why it needs a new version                                                                                                                                                                  |
+| -------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 13       | Ship granular hybrid-PQ identity/operation/session coverage and continuous PQ ratchet  | Adds hybrid-PQ authentication for the explicitly covered identities, operations, authorities, stores, checkpoints, contact sessions, and migration objects. | Requires the fresh invitation/context and Section 4.15 matrix; the umbrella rendezvous claim remains unavailable while allocation or another relied-on category is classical.               |
+| 14       | Add single-use/expiring invitations and explicit room-capability replacement           | Limits future entry after an invitation leak and supports deliberate migration into a fresh room context with selectively reauthorized peers.               | A leaked holder cannot be made to forget old room data or keys. Safe recovery therefore creates a fresh context rather than mutating the meaning of a v2 capability.                        |
+| 15       | Add PQ anonymous credentials and PQ-private allocation when mature                     | Removes remaining classical authentication/linkability boundaries in anonymous admission, route distribution, and quota issuance.                           | Only after every relied-on matrix category is hybrid-covered may the successor publish the umbrella `PQ-authenticated rendezvous` wording; primitive maturity remains separately reviewed.  |
+| 16       | Consider explicit quorum finality only if a future product truly requires it           | Could provide a closed-roster notion of committed membership, revocation, or proof of absence that R2-BEC intentionally does not offer.                     | It would require explicit membership, `n`, `f`, quorum intersection, synchrony, recovery, and metadata costs; the KISS default remains authenticated union without consensus.               |
+| 17       | Consider MLS or another group data plane only if sparse pair sessions fail             | May improve large-room group-key and application-data efficiency.                                                                                           | It replaces—not layers beside—the pair data-plane SSOT under a new reviewed migration; MLS delivery metadata alone does not solve blind rendezvous.                                         |
+| 18       | Add pair-private in-place authority-grant refresh if measured interruptions justify it | Avoids a fresh automatic pair attempt when a stable edge's finite authority grant rotates, while retaining current frontend/revocation checks.              | Requires a new established pair step with exact PQ-slot derivation, replay/causal ordering, expiry, generation replacement, and atomic persistence; v1 instead fails closed and reattempts. |
 
-The recommended order is: finish whole-room data delivery and real non-IP
-evidence; add rollback and checkpoint monitoring; deploy SP1 only if its
-measured cost is acceptable; then select retrieval/credential packages from
-observed bottlenecks. PQ authentication remains the first planned semantic
-successor. Consensus, a new group ratchet, and stronger-than-SP1 anonymity are
-research choices, not automatic milestones.
+The recommended order is: finish whole-room data delivery and field-tested
+non-IP evidence; add rollback and checkpoint monitoring; deploy SP1 only if
+its measured cost is acceptable; then select retrieval/credential packages
+from observed bottlenecks. Granular hybrid-PQ authentication remains the first
+planned semantic successor; umbrella rendezvous wording waits for complete
+hybrid coverage. Consensus, a new group ratchet, and stronger-than-SP1
+anonymity are research choices, not automatic milestones. In-place grant
+refresh is added only if measurements show that automatic fresh pair attempts
+materially interrupt authority-mode rooms; it is not allowed to become a
+second admission-policy implementation.
 
 Across every item, adapters may add carriage, measurement, monitoring, or
 acceleration but may not fork room operations, deterministic reduction,

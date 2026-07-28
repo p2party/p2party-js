@@ -10,7 +10,11 @@ import {
 } from "./mlkem";
 import { sha3_256, shake256 } from "./fips202";
 import { crypto_scalarmult_curve25519_SCALARBYTES } from "./interfaces";
-import { x25519Dh, x25519PublicFromSecret } from "./x25519";
+import {
+  X25519RejectedPublicPointError,
+  x25519Dh,
+  x25519PublicFromSecret,
+} from "./x25519";
 import {
   MLKEM768_X25519_SEED_BYTES,
   MLKEM768_X25519_SUITE,
@@ -41,6 +45,18 @@ const MLKEM768_X25519_LABEL = Uint8Array.of(0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c);
 export type MlKem768X25519KeyPair = MlKemKeyPair;
 export type MlKem768X25519Encapsulation = MlKemEncapsulation;
 export type MlKem768X25519Decapsulation = MlKemDecapsulation;
+
+/**
+ * A correctly framed peer ciphertext is not a valid ciphertext for this
+ * hybrid KEM. Infrastructure and local-key failures use their original errors.
+ */
+export class HybridKemInvalidCiphertextError extends Error {
+  override readonly name = "HybridKemInvalidCiphertextError";
+
+  constructor() {
+    super("MLKEM768-X25519 rejected an invalid ciphertext");
+  }
+}
 
 export interface MlKem768X25519Backend {
   readonly suite: typeof MLKEM768_X25519_SUITE;
@@ -333,11 +349,17 @@ class WasmMlKem768X25519Backend implements MlKem768X25519Backend {
         mlKemCiphertext,
         mlKemKeyPair.secretKey,
       );
-      x25519SharedSecret = x25519Dh(
-        x25519SecretKey,
-        x25519Ciphertext,
-        this.#module,
-      );
+      try {
+        x25519SharedSecret = x25519Dh(
+          x25519SecretKey,
+          x25519Ciphertext,
+          this.#module,
+        );
+      } catch (error) {
+        if (error instanceof X25519RejectedPublicPointError)
+          throw new HybridKemInvalidCiphertextError();
+        throw error;
+      }
       combinerInput = concatenate(
         mlKemDecapsulation.sharedSecret,
         x25519SharedSecret,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  HybridKemInvalidCiphertextError,
   createMlKem768X25519Backend,
   MLKEM768_X25519_CIPHERTEXT_BYTES,
   MLKEM768_X25519_PUBLIC_KEY_BYTES,
@@ -448,7 +449,7 @@ describe("MLKEM768-X25519", () => {
       invalidCiphertext[1_088] = lowOrderU;
       await expect(
         backend.decapsulate(invalidCiphertext, keyPair.secretKey),
-      ).rejects.toThrow("x25519_dh failed (identity point)");
+      ).rejects.toThrow(HybridKemInvalidCiphertextError);
     }
 
     encapsulation.destroy();

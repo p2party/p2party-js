@@ -15,6 +15,22 @@ export interface X25519KeyPair {
   secretKey: Uint8Array;
 }
 
+/**
+ * The peer-supplied u-coordinate produced the prohibited all-zero X25519
+ * shared secret (for example, a low-order point).
+ *
+ * This is distinct from allocation/module failures so protocol receivers can
+ * classify attacker-controlled invalid KEM input as a closed no-match without
+ * hiding cryptographic infrastructure faults.
+ */
+export class X25519RejectedPublicPointError extends Error {
+  override readonly name = "X25519RejectedPublicPointError";
+
+  constructor() {
+    super("x25519_dh failed (identity point)");
+  }
+}
+
 const RFC7748_X25519_BASE_POINT = (() => {
   const basePoint = new Uint8Array(crypto_scalarmult_curve25519_BYTES);
   basePoint[0] = 9;
@@ -122,7 +138,7 @@ export const x25519Dh = (
     heapView(module, pkPtr, privatePublicKey.length).set(privatePublicKey);
 
     if (module._x25519_dh(shPtr, skPtr, pkPtr) !== 0)
-      throw new Error("x25519_dh failed (identity point)");
+      throw new X25519RejectedPublicPointError();
     return Uint8Array.from(
       heapView(module, shPtr, crypto_scalarmult_curve25519_BYTES),
     );

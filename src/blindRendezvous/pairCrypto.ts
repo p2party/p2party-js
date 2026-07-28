@@ -58,6 +58,7 @@ import {
   xchacha20Poly1305Open,
   xchacha20Poly1305Seal,
 } from "../cryptography/xchacha20poly1305";
+import { HybridKemInvalidCiphertextError } from "../cryptography/hybridKem";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { RoomPqMode } from "../roomPolicy";
@@ -501,14 +502,24 @@ export const openPairBootstrapV1 = async (
       return null;
 
     pskId = await deriveBootstrapPskId(info.value);
-    context = await setupHpkePskRecipient({
-      module: options.module,
-      encapsulatedKey: envelope.bootstrapHeader.hybridKemCiphertext,
-      recipientSecretKey,
-      info: info.encoded,
-      psk,
-      pskId,
-    });
+    try {
+      context = await setupHpkePskRecipient({
+        module: options.module,
+        encapsulatedKey: envelope.bootstrapHeader.hybridKemCiphertext,
+        recipientSecretKey,
+        info: info.encoded,
+        psk,
+        pskId,
+      });
+    } catch (error) {
+      /*
+       * ML-KEM has implicit rejection. The hybrid X25519 component instead
+       * rejects low-order peer points explicitly. Both are attacker-controlled
+       * KEM non-matches here; allocation/module failures remain thrown.
+       */
+      if (error instanceof HybridKemInvalidCiphertextError) return null;
+      throw error;
+    }
     tagContext = pairBootstrapTagExporterContext(prebinding);
     expectedTag = await context.exportSecret(
       tagContext,

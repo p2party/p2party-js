@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { loadTestModule } from "../../src/cryptography/testModule";
 import {
+  X25519RejectedPublicPointError,
   newX25519KeyPair,
   x25519Dh,
   x25519Keypair,
@@ -306,7 +307,7 @@ describe("x25519", () => {
         new Uint8Array(32).fill(0x55),
         fake.module,
       ),
-    ).toThrow("x25519_dh failed (identity point)");
+    ).toThrow(X25519RejectedPublicPointError);
     expect(fake.freed).toHaveLength(3);
     expectAllZero(freedBytesAt(fake, fake.allocations[0].pointer));
     expectAllZero(freedBytesAt(fake, fake.allocations[1].pointer));

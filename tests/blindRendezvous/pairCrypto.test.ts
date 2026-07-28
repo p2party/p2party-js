@@ -11,6 +11,7 @@ import {
   identityAcceptPskId,
   identityHelloPskId,
   pairAad,
+  pairBootstrapHeaderHash,
   pairBootstrapTagExporterContext,
   validatedPairRootExporterContext,
 } from "../../src/blindRendezvous/derivations";
@@ -22,7 +23,9 @@ import {
 import { pairOuterPrebindingV1Schema } from "../../src/blindRendezvous/schemas";
 import { generateHpkeRecipientKeyPair } from "../../src/cryptography/hpke";
 import { loadTestModule } from "../../src/cryptography/testModule";
+import { X25519RejectedPublicPointError } from "../../src/cryptography/x25519";
 
+import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
   PairBootstrapOuterFieldsV1,
   PairBootstrapSealResultV1,
@@ -749,6 +752,76 @@ describe("pair bootstrap HPKE", () => {
     wrongCiphertext.pairCiphertextAndTag[0] ^= 1;
     expect(await open(wrongCiphertext)).toBeNull();
     expect(validations).toBe(0);
+
+    sealed.bootstrapRoot.fill(0);
+    keyPair.destroy();
+  });
+
+  test("normalizes a low-order hybrid X25519 ciphertext to a no-match", async () => {
+    const { keyPair, psk, sealed } = await sealHello();
+    const originalHeader = sealed.envelope.bootstrapHeader;
+    if (originalHeader === null)
+      throw new Error("test expected a bootstrap header");
+    const lowOrderHybridCiphertext = Uint8Array.from(
+      originalHeader.hybridKemCiphertext,
+    );
+    lowOrderHybridCiphertext.fill(0, lowOrderHybridCiphertext.length - 32);
+    const lowOrderHeader = {
+      ...originalHeader,
+      hybridKemCiphertext: lowOrderHybridCiphertext,
+    };
+    let validations = 0;
+
+    const opened = await openPairBootstrapV1({
+      module,
+      recipientHybridKemSecretKey: keyPair.secretKey,
+      psk,
+      bootstrapInfo: bootstrapInfo(),
+      prebinding: {
+        ...sealed.binding.prebinding,
+        bootstrapHeaderHash: await pairBootstrapHeaderHash(lowOrderHeader),
+      },
+      envelope: {
+        ...sealed.envelope,
+        bootstrapHeader: lowOrderHeader,
+      },
+      operationPayloadClass: 0,
+      roomPqMode: ROOM_PQ_MODE,
+      validateAuthenticatedPlaintext: () => {
+        validations++;
+      },
+    });
+
+    expect(opened).toBeNull();
+    expect(validations).toBe(0);
+    sealed.bootstrapRoot.fill(0);
+    keyPair.destroy();
+  });
+
+  test("does not normalize a local X25519/module failure as peer ciphertext", async () => {
+    const { keyPair, psk, sealed } = await sealHello();
+    const failingModule = new Proxy(module, {
+      get(target, property, receiver) {
+        if (property === "_x25519_dh") return (): number => -1;
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    }) as LibCrypto;
+
+    await expect(
+      openPairBootstrapV1({
+        module: failingModule,
+        recipientHybridKemSecretKey: keyPair.secretKey,
+        psk,
+        bootstrapInfo: bootstrapInfo(),
+        prebinding: sealed.binding.prebinding,
+        envelope: sealed.envelope,
+        operationPayloadClass: 0,
+        roomPqMode: ROOM_PQ_MODE,
+        validateAuthenticatedPlaintext: () => {
+          throw new Error("validator must not run");
+        },
+      }),
+    ).rejects.toThrow(X25519RejectedPublicPointError);
 
     sealed.bootstrapRoot.fill(0);
     keyPair.destroy();

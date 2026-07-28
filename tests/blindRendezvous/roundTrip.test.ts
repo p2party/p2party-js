@@ -13,23 +13,26 @@ import {
   sealCarrierEnvelope,
 } from "../../src/blindRendezvous/carrierEnvelope";
 import {
-  coreReduceOuter,
-  mergeOperationSets,
-  validateAndIdentifyOperation,
+  coreReduce,
+  mergeOperationCandidateSets as mergeOperationSets,
+  validateAndIdentifyOperationCandidate as validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
   deliveryProfileHash,
   policyHash,
+  presenceSemanticSlot,
   roomContextConfirmation,
   roomContextId,
   roomRoot,
 } from "../../src/blindRendezvous/derivations";
 import {
+  createOperationValidationContext,
   decodeOperation,
   encodeOperation,
   operationPaddingFor,
   signOperation,
 } from "../../src/blindRendezvous/operation";
+import { encodePresenceV1 } from "../../src/blindRendezvous/operationPayload";
 import {
   encodeBlindRoomInviteV2Default,
   parseRoomInvite,
@@ -37,7 +40,7 @@ import {
 } from "../../src/blindRendezvous/roomInviteV2";
 
 import type { BlindRoomInviteV2 } from "../../src/blindRendezvous/roomInviteV2";
-import type { ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
+import type { OuterValidatedIdentifiedOperationV1 as ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 
 const hex = (value: Uint8Array): string =>
@@ -98,6 +101,30 @@ const testProfile = {
 const REFERENCE_WINDOW = 5_000n;
 const INGRESS_WINDOW = 900n;
 
+const capabilityPresencePayload = (
+  seed: number,
+  validThroughLogicalWindow: bigint,
+): { readonly bytes: Uint8Array; readonly nonce: Uint8Array } => {
+  const filled = (length: number, tweak: number): Uint8Array =>
+    Uint8Array.from({ length }, (_, index) => (seed + tweak + index) & 0xff);
+  const nonce = filled(32, 0x20);
+  return {
+    nonce,
+    bytes: encodePresenceV1({
+      core: {
+        version: 1,
+        stableIdentityCommitment: filled(32, 0x40),
+        rendezvousHybridKemPublicKey: filled(1216, 0x60),
+        receiverKeyValidThroughLogicalWindow: validThroughLogicalWindow,
+        presenceNonce: nonce,
+        validThroughLogicalWindow,
+      },
+      stableOwnershipSignature: filled(64, 0x80),
+      authorityPermit: null,
+    }),
+  };
+};
+
 describe("a room operation survives the full carrier round trip", () => {
   test("invite to sealed object to reduced state, with real AEAD", async () => {
     // 1. One capability, one link — the same user action as today.
@@ -108,14 +135,20 @@ describe("a room operation survives the full carrier round trip", () => {
 
     // 2. Room identity is derived locally; none of it crosses a carrier.
     const policyDigest = await policyHash(roomPolicy);
-    const contextId = await roomContextId(invite.capability, policyDigest);
+    const validationContext = await createOperationValidationContext(
+      invite.capability,
+      roomPolicy,
+      REFERENCE_WINDOW,
+    );
+    const contextId = validationContext.roomContextId;
     const root = await roomRoot(invite.capability, policyDigest);
-    const confirmation = await roomContextConfirmation(contextId);
+    const confirmation = validationContext.roomContextConfirmation;
     const profileDigest = await deliveryProfileHash(testProfile);
 
     // 3. Author and sign one canonical operation.
     const author = await newKeyPair();
-    const payload = Uint8Array.from({ length: 100 }, (_, index) => index);
+    const presence = capabilityPresencePayload(0x01, REFERENCE_WINDOW + 10n);
+    const payload = presence.bytes;
     const operation = await signOperation(
       {
         version: 1,
@@ -127,7 +160,11 @@ describe("a room operation survives the full carrier round trip", () => {
         authorSequence: 0n,
         previousAuthorOperationId: null,
         kind: "PRESENCE",
-        semanticSlot: new Uint8Array(32).fill(0x5a),
+        semanticSlot: await presenceSemanticSlot(
+          author.publicKey,
+          REFERENCE_WINDOW,
+          presence.nonce,
+        ),
         dependencies: [],
         operationPayloadClass: 0,
         fixedPayload: payload,
@@ -187,17 +224,12 @@ describe("a room operation survives the full carrier round trip", () => {
       hex(encodeOperation(operation)),
     );
 
-    const identified = await validateAndIdentifyOperation(recovered, {
-      roomContextConfirmation: confirmation,
-      roomPolicy,
-      referenceWindow: REFERENCE_WINDOW,
-    });
-
-    const state = await coreReduceOuter(
-      [identified],
-      roomPolicy,
-      REFERENCE_WINDOW,
+    const identified = await validateAndIdentifyOperation(
+      recovered,
+      validationContext,
     );
+
+    const state = await coreReduce([identified], validationContext);
     expect(state.activeOperationIds.map(hex)).toEqual([
       hex(identified.operationId),
     ]);
@@ -220,7 +252,8 @@ describe("a room operation survives the full carrier round trip", () => {
     );
 
     const author = await newKeyPair();
-    const payload = Uint8Array.of(1, 2, 3);
+    const presence = capabilityPresencePayload(0x02, REFERENCE_WINDOW + 10n);
+    const payload = presence.bytes;
     const theirOperation = await signOperation(
       {
         version: 1,
@@ -232,7 +265,11 @@ describe("a room operation survives the full carrier round trip", () => {
         authorSequence: 0n,
         previousAuthorOperationId: null,
         kind: "PRESENCE",
-        semanticSlot: new Uint8Array(32).fill(0x5b),
+        semanticSlot: await presenceSemanticSlot(
+          author.publicKey,
+          REFERENCE_WINDOW,
+          presence.nonce,
+        ),
         dependencies: [],
         operationPayloadClass: 0,
         fixedPayload: payload,
@@ -273,13 +310,18 @@ describe("a room operation survives the full carrier round trip", () => {
     );
     const policyDigest = await policyHash(roomPolicy);
     const root = await roomRoot(capability, policyDigest);
-    const confirmation = await roomContextConfirmation(
-      await roomContextId(capability, policyDigest),
+    const contextId = await roomContextId(capability, policyDigest);
+    const confirmation = await roomContextConfirmation(contextId);
+    const validationContext = await createOperationValidationContext(
+      capability,
+      roomPolicy,
+      REFERENCE_WINDOW,
     );
     const profileDigest = await deliveryProfileHash(testProfile);
 
     const author = await newKeyPair();
-    const payload = Uint8Array.of(9, 9, 9);
+    const presence = capabilityPresencePayload(0x03, REFERENCE_WINDOW + 10n);
+    const payload = presence.bytes;
     const operation = await signOperation(
       {
         version: 1,
@@ -291,7 +333,11 @@ describe("a room operation survives the full carrier round trip", () => {
         authorSequence: 0n,
         previousAuthorOperationId: null,
         kind: "PRESENCE",
-        semanticSlot: new Uint8Array(32).fill(0x5c),
+        semanticSlot: await presenceSemanticSlot(
+          author.publicKey,
+          REFERENCE_WINDOW,
+          presence.nonce,
+        ),
         dependencies: [],
         operationPayloadClass: 0,
         fixedPayload: payload,
@@ -342,11 +388,7 @@ describe("a room operation survives the full carrier round trip", () => {
     const identify = async (
       bytes: Uint8Array,
     ): Promise<ValidatedIdentifiedOperationV1> =>
-      validateAndIdentifyOperation(decodeOperation(bytes), {
-        roomContextConfirmation: confirmation,
-        roomPolicy,
-        referenceWindow: REFERENCE_WINDOW,
-      });
+      validateAndIdentifyOperation(decodeOperation(bytes), validationContext);
     const merged = mergeOperationSets(
       [await identify(openedFirst!.operationBytes)],
       [await identify(openedSecond!.operationBytes)],

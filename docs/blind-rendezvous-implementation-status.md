@@ -17,16 +17,18 @@ package barrel:
 | Module                | Owns                                                                                                            |
 | --------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
-| `schemas.ts`          | Descriptors for the Section 4.0–4.5 objects implemented so far.                                                 |
+| `schemas.ts`          | Descriptors for implemented room operations, non-pair payloads, store objects, and canonical Core state/faults. |
 | `projections.ts`      | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
 | `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, and the room/stable-peer/operation/carrier identifiers.                  |
 | `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
 | `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, and the two typed errors.                         |
 | `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and the three exact suite-1 class targets.                          |
-| `operation.ts`        | `AuthenticatedRoomOperationV1` codec, outer validation, pair-slot binding, and Ed25519 signing/verification.    |
-| `coreReduce.ts`       | Validated-operation ingress, set union, and deterministic outer reduction with author faults.                   |
+| `operation.ts`        | Operation codec/signatures, process-private room context, active/candidate outer validation, pair-slot binding. |
+| `operationPayload.ts` | Closed non-pair codecs and intrinsic validation for grant/revoke, presence/permit, leave, and store hints.      |
+| `coreReduce.ts`       | Provenance-checked candidate ingress, payload reduction, historical dependency evidence, canonical Core state.  |
 | `carrierEnvelope.ts`  | Envelope framing, key schedule, AAD, and object identity, over the shipped XChaCha20-Poly1305.                  |
 | `publicWindow.ts`     | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
+| `storeDescriptor.ts`  | Store/route identity, timeless authenticity and explicit-time activation, scopes, chain-start equivocation.     |
 | `normativeKernel.ts`  | Registry shape validators, now consuming the generated projections.                                             |
 
 Two of the specification's own published constants were re-derived rather than
@@ -38,6 +40,50 @@ trusted, and both match exactly:
   `hashRoomPolicyV1`.
 
 The KDF is checked against RFC 5869 Appendix A.1 and A.3 vectors.
+
+## Current Phase-0 checkpoint
+
+The following is implemented on local `p2party-js` `master` but is not yet a
+frozen or released protocol surface:
+
+- canonical schemas, codecs, and domain-separated derivations for
+  `AdmissionGrantV1`, `AdmissionRevokeV1`, `PresenceCoreV1`,
+  `PresencePermitV1`, `PresenceV1`, `LeaveV1`, and
+  `StoreHintOperationV1`;
+- independent known-answer constants for those payloads/transcripts, generated
+  once with a standalone Python standard-library reference encoder and kept
+  hardcoded to detect protocol-visible drift;
+- closed intrinsic validation selected by the signed non-pair operation kind,
+  including capability/authority permit closure, exact intervals and semantic
+  slots, pinned authority signatures, descriptor authenticity, and a separate
+  pair-private/trusted-local presence-ownership check;
+- a process-private `OperationValidationContext` constructed from the room
+  capability and canonical policy, plus separate active-operation and bounded
+  reducer-candidate gates. Public async validation snapshots caller-owned bytes
+  before its first asynchronous boundary;
+- `CoreRoomStateV1` canonical encode/decode and deterministic reduction of
+  observed presences, effective leaves, descriptor-only store facts,
+  revocation floors, capacity, pair outer IDs, and three closed fault variants.
+  The codec requires a nonempty author proof, exact two-item semantic/store
+  proofs, and derived `RouteId` order/uniqueness over private snapshots;
+- fixed-point promotion of bounded historical presence evidence needed by a
+  current cross-window `LEAVE`, while future custody and unrelated expired
+  bytes remain unable to change current Core state;
+- store descriptor/route validation split into timeless authenticity and
+  explicit-time activation, with private snapshots and cheap lease/shape checks
+  before signature work.
+
+Tests cover canonical round trips and vectors, mutable-input races,
+process-private provenance, delivery permutation/duplication, author
+fork/quota precedence, semantic forks, cross-window dependency evidence,
+store-generation forks, revocation ordering, and near-`u64` evidence overflow.
+This is executable component evidence only. It does not freeze the whole Phase-0
+registry, implement the pair plaintext/admission boundary, provide store wire
+interoperability, or constitute a conformance claim.
+
+Verification for this snapshot: `bun test tests/blindRendezvous` — 228 pass,
+0 fail, 14 files; `bun test tests` — 800 pass, 0 fail, 105 files. Both
+TypeScript configurations, ESLint, and `git diff --check` also pass.
 
 ## Blockers
 
@@ -76,25 +122,28 @@ them v0.4". No release-registry hash has been computed or published.
 `p2party-server` has no append, allocation, chunk, or checkpoint endpoint; its
 only entrypoint is the legacy WebSocket signaling server.
 
-The client can now verify a store end to end short of the wire protocol: its
-identity and routes (Section 4.2), its window geometry and slot mapping, its
-chunk and checkpoint hashing, RFC 9162 inclusion proofs, structural checkpoint
-validity, chain succession, and both chain-start and same-window equivocation
-(Section 4.3).
+The client has reusable verification primitives, not an end-to-end store:
+canonical descriptor/route authenticity and explicit-time lease checks,
+store/carrier/route-instance identity, window geometry and slot mapping, chunk
+and checkpoint hashing, RFC 9162 inclusion proofs, structural checkpoint
+validity, chain succession, and chain-start/same-window equivocation checks.
 
 What remains is the Section 4.6 HTTP route family itself — and its exact
 request/response target lengths, status enum bytes, and signature transcripts
 are Phase-0 freeze items (B2). Writing them now would mean inventing the exact
-bytes the freeze exists to fix. The scheme-1 Privacy Pass allocation path
-(Section 4.3.12) is likewise unimplemented: it needs the frozen allocation
-registry, including the RFC 9578 token bytes and issuance vectors.
+bytes the freeze exists to fix. The content-addressed route-family
+registry/parsers are also absent, so nonempty `STORE_HINT.routes` deliberately
+fails closed. The scheme-1 Privacy Pass allocation path (Section 4.3.12) is
+likewise unimplemented: it needs the frozen allocation registry, including the
+RFC 9578 token bytes and issuance vectors.
 
 ### B4 — `p2party.com` cannot reach any of this
 
-The local frontend release candidate vendors `p2party@0.14.4` as a verified
-tarball; the coordinated production deployment is still pending. These modules
-are deliberately absent from the package barrel. No frontend change is possible
-until the API is exported and re-vendored, which should not happen before B2.
+The frontend consumes `p2party` as a hash-verified vendored tarball. These
+modules are deliberately absent from the package barrel, so the current
+production WebRTC correctness baseline cannot call them. Blind integration
+requires a reviewed public API, a new vendored artifact/hash, and coordinated
+frontend/server work; that should not be presented as interoperable before B2.
 
 ## Defects found by adversarial review and fixed
 
@@ -115,8 +164,8 @@ confirmed and fixed:
   so an author could publish sequence 5 alone and have it reduce as though
   0–4 existed;
 - `roomCapacityState` was derived from a local storage cap, which Section 4.7
-  forbids the reducer from reading; it is now listed as pending, since the
-  specification derives it from the active presence count;
+  forbids the reducer from reading; the interim reducer marked it pending, and
+  the current reducer derives it from the active presence count;
 - the authority chain accepted non-revocation operations under the pinned
   authority key;
 - the fault array sorted by a nested proof ID rather than by its canonical
@@ -130,12 +179,15 @@ counting used array entries rather than distinct operations, so a carrier
 redelivering one operation could forge an overquota fault against an honest
 author. Each fix has a regression test.
 
-A continuation review found and fixed one additional reducer defect:
-`mergeOperationSets()` compared only `authorSignature` when two entries claimed
-one `OperationId`. It now compares the complete canonical signed operation, so
-a same-signature/different-body collision cannot pass as an exact duplicate.
-The same increment added the missing pinned-authority/non-revocation regression
-and made the five pending payload projections an exact test contract.
+A continuation review found and fixed one additional reducer defect: the
+then-named `mergeOperationSets()` compared only `authorSignature` when two
+entries claimed one `OperationId`. The current
+`mergeOperationCandidateSets()` compares the complete canonical signed
+operation, so a same-signature/different-body collision cannot pass as an exact
+duplicate. That increment also added the missing
+pinned-authority/non-revocation regression. Its interim five-field pending
+payload contract has since been replaced by the concrete canonical Core
+projections described above.
 
 A second continuation closed the room-visible pair-envelope boundary without
 claiming the still-absent pair protocol:
@@ -146,51 +198,50 @@ claiming the still-absent pair protocol:
   `2935/2919`, `4033/4017`, and `69569/69553`; class-1 bootstrap, alternate
   header/nonce states, non-empty operation padding, and noncanonical encodings
   fail closed;
-- `validateOperation()` recomputes the pair semantic slot from the decoded
+- outer operation validation recomputes the pair semantic slot from the decoded
   routing tag and reuses that one decode for the asynchronous check;
-- `coreReduceOuter()` no longer accepts structurally fabricated
+- `coreReduce()` no longer accepts structurally fabricated
   `{operationId, operation}` pairs. Its sole ingress snapshots the operation
-  and validation context before the first `await`, performs complete current
+  and validation context before the first `await`, performs bounded candidate
   outer validation, derives the ID, and records process-local provenance in a
   private `WeakMap`. Object spread, structured clone, and post-validation
   typed-array mutation are rejected before reduction.
 
 ## What is deliberately not implemented
 
-- **Payload-level reduction.** `coreReduceOuter` derives the active operation
-  set, pair-step projection, faults, and `operationsDigest`. It names
-  `observedPresences`, `effectiveLeaveOperationIds`, `storeCatalogFacts`, and
-  `revocationFloors` as pending rather than returning empty arrays that would
-  read as observations. These need the Sections 4.2/4.8/4.9 nested payload
-  codecs. This is not merely mechanical: `PairPlaintextV1` and its closed body
-  union have no codec; `STORE_HINT` orders routes by derived `RouteId`, which
-  the current generic array descriptor cannot express; and timeless
-  store-signature validation must be split from absolute route-lease evaluation
-  before core reduction can reuse it.
-- **Closed operation validation.** `validateOperation()` currently proves the
-  outer canonical frame, room/window/lifetime/class/dependency shape, and
-  Ed25519 signature. For `PAIR_STEP` it additionally proves the canonical
-  envelope/class/header state and routing-tag semantic slot. It does not yet
-  open pair AEAD or prove the decrypted minimal class, pair sequence,
-  pair predecessor, body discriminator, or one-use routing tag; the other
-  operation kinds still lack their nested canonicality, interval, target,
-  store-signature, and authority-signature checks. Consequently the current
-  `activeOperationIds` is an outer-framed candidate projection, not yet the
-  specification's complete `OuterValidOperationSet`.
-- **Admission kernel.** Section 4.8 now names an explicit
-  `AdmissionEvaluationInputV1`, versioned decision/pair leases, the exact lease
-  minimum, and a validated atomic authority view. Code still waits for Phase 0
-  to freeze the grant codec and the sole authority-view/custody constructor;
-  no caller-supplied availability boolean may become a security decision.
+- **Pair plaintext and edge-local pair validation.** `PairStepEnvelopeV1`
+  framing is outer-authenticated, but `PairPlaintextV1` and its closed body union
+  have no codec. The implementation does not open pair AEAD or prove plaintext
+  minimal class, pair sequence/predecessor, body discriminator, identity
+  transcript, or one-use routing tag. A `PAIR_STEP` in
+  `activePairOuterOperationIds` therefore remains an outer Core fact, not an
+  admitted edge.
+- **The admission kernel and trusted authority snapshot.** The grant codec and
+  its pair-private canonical authority checks now exist, but the one pure
+  `Admit()` function, `FrontendRoomControlsV1` evaluation, decision/pair
+  leases, atomic authority-revocation view, and custody constructor do not. No
+  caller-supplied availability boolean may become a security decision, and no
+  SDP/ICE promotion is gated by this code yet.
+- **Nonempty `STORE_HINT` routes.** Descriptor-only hints validate and reduce to
+  source facts. Any nonempty route sequence fails closed because the
+  content-addressed route-family registry/parsers are absent. Derived
+  `RouteId` ordering is implemented and vector-tested, and store-route
+  authenticity primitives exist independently; neither is permission to accept
+  an unknown route family.
+- **Store wire profiles, allocation, and append.** The reference HTTP suffixes,
+  media types, fixed target lengths, status/signature bytes, delivery profile
+  registry, Privacy Pass issuance/redemption, append admission signature, and
+  fixed client schedule are not implemented or frozen.
+- **SDK/frontend/server integration.** The blind modules remain outside the
+  package barrel; no frontend room flow, pre-SDP gate, store transport, peer
+  store role, or backend blind endpoint consumes them. The existing WebRTC path
+  is only the proven `0.14.4` correctness baseline.
 - **Claim evaluation.** `normativeKernel.ts` validates artifact _shape_ only. It
   runs no predicate, verifies no evidence, and exposes no positive-wording
   authorizer. Kernel module 8 does not exist.
-- **Allocation and append.** Scheme-1 Privacy Pass issuance, redemption, the
-  append admission signature, and the fixed client schedule are not
-  implemented; they depend on the frozen allocation registry.
-- **Everything in Phases 2–6.** Presence, admission, the sparse planner,
-  transport handoff, additive stores, L3, and the measurement/review programme
-  are untouched.
+- **Later delivery and assurance layers.** Sparse planning, additive/multi-peer
+  stores, transport handoff, L3 adapters, shutdown-survival demonstrations, and
+  the measurement/formal/external-review programme remain future work.
 
 ## Labels this work does not earn
 

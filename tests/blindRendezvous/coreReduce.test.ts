@@ -3,37 +3,39 @@ import { describe, expect, test } from "bun:test";
 import { newKeyPair } from "../../src/cryptography/ed25519";
 import {
   pairSemanticSlot,
-  policyHash,
-  roomContextConfirmation,
-  roomContextId,
+  presenceSemanticSlot,
 } from "../../src/blindRendezvous/derivations";
 import {
-  coreReduceOuter,
-  mergeOperationSets,
-  validateAndIdentifyOperation,
+  coreReduce,
+  mergeOperationCandidateSets as mergeOperationSets,
+  validateAndIdentifyOperationCandidate as validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
   decodeOperation,
   encodeOperation,
+  createOperationValidationContext,
   operationPaddingFor,
   operationPayloadClassFor,
+  operationValidationContextAt,
   signOperation,
   validateOperation,
   validateOperationStructure,
 } from "../../src/blindRendezvous/operation";
+import { encodePresenceV1 } from "../../src/blindRendezvous/operationPayload";
 import {
   encodePairStepEnvelopeV1,
   pairCiphertextAndTagTargetBytesV1,
 } from "../../src/blindRendezvous/pairStepEnvelope";
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
 
-import type { ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
+import type { OuterValidatedIdentifiedOperationV1 as ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
 import type {
   AuthenticatedRoomOperationV1,
   OperationKindV1,
   OperationValidationContext,
   UnsignedRoomOperationV1,
 } from "../../src/blindRendezvous/operation";
+import type { RoomPolicyV4 } from "../../src/blindRendezvous/roomPolicyV4";
 
 const hex = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -42,15 +44,11 @@ const capability = new Uint8Array(32).fill(0x33);
 const roomPolicy = DEFAULT_BLIND_POLICY_V4_0;
 const REFERENCE_WINDOW = 1_000n;
 
-const confirmation = await roomContextConfirmation(
-  await roomContextId(capability, await policyHash(roomPolicy)),
-);
-
-const context = {
-  roomContextConfirmation: confirmation,
+const context = await createOperationValidationContext(
+  capability,
   roomPolicy,
-  referenceWindow: REFERENCE_WINDOW,
-};
+  REFERENCE_WINDOW,
+);
 
 const author = await newKeyPair();
 const otherAuthor = await newKeyPair();
@@ -65,30 +63,80 @@ interface BuildOptions {
   readonly semanticSlot?: Uint8Array;
   readonly dependencies?: readonly Uint8Array[];
   readonly signer?: { publicKey: Uint8Array; secretKey: Uint8Array };
+  readonly roomContextConfirmation?: Uint8Array;
 }
 
-const unsignedOperation = (
+const presencePayload = (
+  seed: Uint8Array,
+  expiresAfterWindow: bigint,
+): { readonly payload: Uint8Array; readonly nonce: Uint8Array } => {
+  const material = seed.length === 0 ? Uint8Array.of(0) : seed;
+  const expanded = (length: number, tweak: number): Uint8Array =>
+    Uint8Array.from(
+      { length },
+      (_, index) =>
+        material[index % material.length] ^ ((index + tweak) & 0xff),
+    );
+  const nonce = expanded(32, 0x31);
+  return {
+    nonce,
+    payload: encodePresenceV1({
+      core: {
+        version: 1,
+        stableIdentityCommitment: expanded(32, 0x51),
+        rendezvousHybridKemPublicKey: expanded(1216, 0x71),
+        receiverKeyValidThroughLogicalWindow: expiresAfterWindow,
+        presenceNonce: nonce,
+        validThroughLogicalWindow: expiresAfterWindow,
+      },
+      // Capability-mode core validation cannot identify the hidden stable key;
+      // address-book/pair projection verifies this fixed-width signature.
+      stableOwnershipSignature: expanded(64, 0x91),
+      authorityPermit: null,
+    }),
+  };
+};
+
+const unsignedOperation = async (
   options: BuildOptions = {},
-): UnsignedRoomOperationV1 => {
+  operationContext: OperationValidationContext = context,
+): Promise<UnsignedRoomOperationV1> => {
   const kind = options.kind ?? "PRESENCE";
-  const payload = options.payload ?? Uint8Array.of(1, 2, 3);
   const logicalWindow = options.logicalWindow ?? REFERENCE_WINDOW;
+  const expiresAfterWindow = options.expiresAfterWindow ?? logicalWindow + 10n;
+  const signer = options.signer ?? author;
+  const rawPayload = options.payload ?? Uint8Array.of(1, 2, 3);
+  const presence =
+    kind === "PRESENCE"
+      ? presencePayload(rawPayload, expiresAfterWindow)
+      : null;
+  const payload = presence?.payload ?? rawPayload;
   return {
     version: 1,
-    roomContextConfirmation: confirmation,
+    roomContextConfirmation:
+      options.roomContextConfirmation ??
+      operationContext.roomContextConfirmation,
     logicalWindow,
-    expiresAfterWindow: options.expiresAfterWindow ?? logicalWindow + 10n,
+    expiresAfterWindow,
     lifetime:
       kind === "PAIR_STEP"
         ? "PAIR_CAUSAL"
         : kind === "ADMISSION_REVOKE"
           ? "GRANT_HORIZON"
           : "WINDOW_TRANSIENT",
-    authorEpochEd25519Key: (options.signer ?? author).publicKey,
+    authorEpochEd25519Key: signer.publicKey,
     authorSequence: options.authorSequence ?? 0n,
     previousAuthorOperationId: options.previousAuthorOperationId ?? null,
     kind,
-    semanticSlot: options.semanticSlot ?? new Uint8Array(32).fill(0x77),
+    semanticSlot:
+      options.semanticSlot ??
+      (presence === null
+        ? new Uint8Array(32).fill(0x77)
+        : await presenceSemanticSlot(
+            signer.publicKey,
+            logicalWindow,
+            presence.nonce,
+          )),
     dependencies: options.dependencies ?? [],
     operationPayloadClass: 0,
     fixedPayload: payload,
@@ -98,9 +146,13 @@ const unsignedOperation = (
 
 const buildSignedOperation = async (
   options: BuildOptions = {},
+  operationContext: OperationValidationContext = context,
 ): Promise<AuthenticatedRoomOperationV1> => {
   const signer = options.signer ?? author;
-  return signOperation(unsignedOperation(options), signer.secretKey);
+  return signOperation(
+    await unsignedOperation(options, operationContext),
+    signer.secretKey,
+  );
 };
 
 const buildOperation = async (
@@ -108,8 +160,20 @@ const buildOperation = async (
   validationContext: OperationValidationContext = context,
 ): Promise<ValidatedIdentifiedOperationV1> =>
   validateAndIdentifyOperation(
-    await buildSignedOperation(options),
+    await buildSignedOperation(options, validationContext),
     validationContext,
+  );
+
+const coreReduceOuter = async (
+  operations: readonly ValidatedIdentifiedOperationV1[],
+  policy: RoomPolicyV4,
+  referenceWindow: bigint,
+): Promise<
+  ReturnType<typeof coreReduce> extends Promise<infer T> ? T : never
+> =>
+  coreReduce(
+    operations,
+    await createOperationValidationContext(capability, policy, referenceWindow),
   );
 
 /** Deterministic shuffle so a failure names one exact permutation seed. */
@@ -137,9 +201,11 @@ describe("canonical operation codec", () => {
       validateOperation(operation, context),
     ).resolves.toBeUndefined();
 
+    const tamperedPayload = Uint8Array.from(operation.fixedPayload);
+    tamperedPayload[tamperedPayload.length - 1] ^= 0xff;
     const tampered: AuthenticatedRoomOperationV1 = {
       ...operation,
-      fixedPayload: Uint8Array.of(9, 9, 9),
+      fixedPayload: tamperedPayload,
     };
     await expect(validateOperation(tampered, context)).rejects.toThrow(
       "author signature does not verify",
@@ -155,13 +221,12 @@ describe("canonical operation codec", () => {
   });
 
   test("rejects an operation confirming another room context", async () => {
-    const { operation } = await buildOperation();
-    expect(() =>
-      validateOperationStructure(operation, {
-        ...context,
-        roomContextConfirmation: new Uint8Array(32).fill(0xfe),
-      }),
-    ).toThrow("does not confirm this room context");
+    const operation = await buildSignedOperation({
+      roomContextConfirmation: new Uint8Array(32).fill(0xfe),
+    });
+    expect(() => validateOperationStructure(operation, context)).toThrow(
+      "does not confirm this room context",
+    );
   });
 
   test("enforces the closed kind, lifetime, and dependency table", async () => {
@@ -347,15 +412,15 @@ describe("merge is associative, commutative, and idempotent", () => {
       payload: Uint8Array.of(0x11, 0x22),
     });
     const expectedPayload = Uint8Array.from(signed.fixedPayload);
-    const mutableContext: OperationValidationContext = {
-      roomContextConfirmation: Uint8Array.from(context.roomContextConfirmation),
-      roomPolicy: structuredClone(roomPolicy),
-      referenceWindow: context.referenceWindow,
-    };
+    const mutableContext = operationValidationContextAt(
+      context,
+      context.referenceWindow,
+    );
 
     const pending = validateAndIdentifyOperation(signed, mutableContext);
     signed.fixedPayload.fill(0xff);
     signed.authorSignature.fill(0);
+    mutableContext.roomContextId.fill(0);
     mutableContext.roomContextConfirmation.fill(0);
     mutableContext.roomPolicy.sessionPolicyV1.fill(0);
 
@@ -369,18 +434,15 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
   const buildChain = async (): Promise<ValidatedIdentifiedOperationV1[]> => {
     const first = await buildOperation({
       payload: Uint8Array.of(1),
-      semanticSlot: new Uint8Array(32).fill(0x01),
     });
     const second = await buildOperation({
       payload: Uint8Array.of(2),
       authorSequence: 1n,
       previousAuthorOperationId: first.operationId,
-      semanticSlot: new Uint8Array(32).fill(0x02),
     });
     const remote = await buildOperation({
       payload: Uint8Array.of(3),
       signer: otherAuthor,
-      semanticSlot: new Uint8Array(32).fill(0x03),
     });
     const pairRoutingTag = new Uint8Array(32).fill(0x04);
     const pairPayload = encodePairStepEnvelopeV1(
@@ -482,12 +544,7 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
         logicalWindow: REFERENCE_WINDOW - 100n,
         expiresAfterWindow: REFERENCE_WINDOW - 90n,
       },
-      {
-        ...context,
-        // Model an operation that passed ingress validation while it was live
-        // and remained as retained author-prefix evidence.
-        referenceWindow: REFERENCE_WINDOW - 100n,
-      },
+      operationValidationContextAt(context, REFERENCE_WINDOW - 100n),
     );
 
     const state = await coreReduceOuter(
@@ -530,8 +587,11 @@ describe("author fork and overquota are arrival-independent", () => {
         REFERENCE_WINDOW,
       );
       expect(state.faults.length).toBe(1);
-      expect(state.faults[0].kind).toBe("author-fork-or-overquota");
-      expect(state.faults[0].proofOperationIds.length).toBe(2);
+      const fault = state.faults[0];
+      expect(fault.kind).toBe("author-fork-or-overquota");
+      if (fault.kind !== "author-fork-or-overquota")
+        throw new Error("unexpected fault kind");
+      expect(fault.proofOperationIds.length).toBe(2);
       // The forked author contributes nothing; the honest author is unaffected.
       expect(state.activeOperationIds.map(hex)).toEqual([
         hex(honest.operationId),
@@ -561,8 +621,48 @@ describe("author fork and overquota are arrival-independent", () => {
     );
     expect(state.faults.length).toBe(1);
     // Physical proof needs only the lowest quota+1 IDs.
-    expect(state.faults[0].proofOperationIds.length).toBe(quota + 1);
+    const fault = state.faults[0];
+    if (fault.kind !== "author-fork-or-overquota")
+      throw new Error("unexpected fault kind");
+    expect(fault.proofOperationIds.length).toBe(quota + 1);
     expect(state.activeOperationIds.length).toBe(0);
+  });
+
+  test("overquota proof takes precedence over a simultaneous author-slot fork", async () => {
+    const quota = roomPolicy.protocolLimits.maxOperationsPerAuthorWindow;
+    const operations: ValidatedIdentifiedOperationV1[] = [];
+    let previous: Uint8Array | null = null;
+    for (let sequence = 0; sequence <= quota; sequence++) {
+      const entry = await buildOperation({
+        payload: Uint8Array.of(sequence),
+        authorSequence: BigInt(sequence),
+        previousAuthorOperationId: previous,
+      });
+      previous = entry.operationId;
+      operations.push(entry);
+    }
+    const forkedSequenceZero = await buildOperation({
+      payload: Uint8Array.of(0xff),
+      authorSequence: 0n,
+      previousAuthorOperationId: null,
+    });
+    const combined = [...operations, forkedSequenceZero];
+
+    const state = await coreReduceOuter(
+      permute(combined, 11),
+      roomPolicy,
+      REFERENCE_WINDOW,
+    );
+    expect(state.faults).toHaveLength(1);
+    const fault = state.faults[0];
+    if (fault.kind !== "author-fork-or-overquota")
+      throw new Error("unexpected fault kind");
+    expect(fault.proofOperationIds.map(hex)).toEqual(
+      combined
+        .map((entry) => hex(entry.operationId))
+        .sort()
+        .slice(0, quota + 1),
+    );
   });
 
   test("a non-revocation under the pinned authority faults that authority window", async () => {
@@ -574,15 +674,31 @@ describe("author fork and overquota are arrival-independent", () => {
         maxAuthorityCredentialLifetimeWindows: 60,
       },
     };
+    const pairRoutingTag = new Uint8Array(32).fill(0xa7);
+    const pairPayload = encodePairStepEnvelopeV1(
+      {
+        version: 1,
+        pairRoutingTag,
+        bootstrapHeader: null,
+        nonce: new Uint8Array(24).fill(0xa8),
+        pairCiphertextAndTag: new Uint8Array(
+          pairCiphertextAndTagTargetBytesV1(0, false),
+        ),
+      },
+      0,
+    );
     const unauthorizedAuthorityOperation = await buildOperation(
       {
-        kind: "PRESENCE",
+        kind: "PAIR_STEP",
+        payload: pairPayload,
+        semanticSlot: await pairSemanticSlot(pairRoutingTag),
         signer: author,
       },
-      {
-        ...context,
-        roomPolicy: authorityPolicy,
-      },
+      await createOperationValidationContext(
+        capability,
+        authorityPolicy,
+        REFERENCE_WINDOW,
+      ),
     );
 
     const state = await coreReduceOuter(
@@ -597,7 +713,10 @@ describe("author fork and overquota are arrival-independent", () => {
       kind: "author-fork-or-overquota",
       logicalWindow: REFERENCE_WINDOW,
     });
-    expect(state.faults[0].proofOperationIds.map(hex)).toEqual([
+    const fault = state.faults[0];
+    if (fault.kind !== "author-fork-or-overquota")
+      throw new Error("unexpected fault kind");
+    expect(fault.proofOperationIds.map(hex)).toEqual([
       hex(unauthorizedAuthorityOperation.operationId),
     ]);
   });
@@ -622,17 +741,13 @@ describe("author fork and overquota are arrival-independent", () => {
     ]);
   });
 
-  test("payload-level reduction is named as pending, not reported as empty", async () => {
+  test("an empty validated set reduces to exact empty payload facts", async () => {
     const state = await coreReduceOuter([], roomPolicy, REFERENCE_WINDOW);
-    expect(state.pendingPayloadReduction).toEqual([
-      "observedPresences",
-      "effectiveLeaveOperationIds",
-      "storeCatalogFacts",
-      "revocationFloors",
-      // Section 4.7 derives room capacity from the active presence count, so
-      // it is pending too; it must never come from a local storage cap.
-      "roomCapacityState",
-    ]);
+    expect(state.observedPresences).toEqual([]);
+    expect(state.effectiveLeaveOperationIds).toEqual([]);
+    expect(state.storeCatalogFacts).toEqual([]);
+    expect(state.revocationFloors).toEqual([]);
+    expect(state.roomCapacityState).toBe("within-policy");
   });
 
   test("an author chain with a gap contributes nothing", async () => {
@@ -700,7 +815,11 @@ describe("author fork and overquota are arrival-independent", () => {
       REFERENCE_WINDOW,
     );
     expect(state.faults.length).toBe(2);
-    const keys = state.faults.map((fault) => hex(fault.authorEpochEd25519Key));
+    const keys = state.faults.map((fault) => {
+      if (fault.kind !== "author-fork-or-overquota")
+        throw new Error("unexpected fault kind");
+      return hex(fault.authorEpochEd25519Key);
+    });
     expect([...keys]).toEqual([...keys].sort());
   });
 });

@@ -9,8 +9,12 @@ import {
   publicCarrierContextId,
   publicRouteInstanceId,
   routeId,
+  storeDescriptorActiveAt,
+  storeDescriptorAuthentic,
   storeDescriptorSignedMessage,
   storeId,
+  storeRouteActiveAt,
+  storeRouteAuthentic,
   storeRouteSignedMessage,
   validateStoreDescriptor,
   validateStoreRoute,
@@ -134,6 +138,43 @@ describe("descriptor validation", () => {
     expect((await validateStoreDescriptor(descriptor, NOW)).valid).toBe(true);
   });
 
+  test("separates timeless authenticity from explicit-time activation", async () => {
+    expect((await storeDescriptorAuthentic(descriptor)).valid).toBe(true);
+
+    expect(
+      (
+        await storeDescriptorActiveAt(
+          descriptor,
+          descriptor.notBeforeUnixMs - 1n,
+        )
+      ).valid,
+    ).toBe(false);
+    expect(
+      (await storeDescriptorActiveAt(descriptor, descriptor.notAfterUnixMs))
+        .valid,
+    ).toBe(false);
+
+    // Lease expiry never rewrites whether the signed descriptor is authentic.
+    expect((await storeDescriptorAuthentic(descriptor)).valid).toBe(true);
+  });
+
+  test("active-at uses one private descriptor snapshot", async () => {
+    const mutable: StoreDescriptorV1 = {
+      ...descriptor,
+      descriptorSignature: Uint8Array.from(descriptor.descriptorSignature),
+    };
+    const writable = mutable as {
+      notAfterUnixMs: bigint;
+      descriptorSignature: Uint8Array;
+    };
+
+    const pending = storeDescriptorActiveAt(mutable, NOW);
+    writable.notAfterUnixMs = NOW;
+    writable.descriptorSignature.fill(0);
+
+    expect(await pending).toEqual({ valid: true });
+  });
+
   test("rejects a descriptor outside its validity interval", async () => {
     const before = await validateStoreDescriptor(
       descriptor,
@@ -146,6 +187,17 @@ describe("descriptor validation", () => {
       descriptor.notAfterUnixMs,
     );
     expect(atEnd.valid).toBe(false);
+  });
+
+  test("rejects a non-u64 descriptor activation instant before cryptography", async () => {
+    const verdict = await storeDescriptorActiveAt(
+      descriptor,
+      Number.NaN as unknown as bigint,
+    );
+    expect(verdict).toEqual({
+      valid: false,
+      reason: "activation instant must be an unsigned 64-bit integer",
+    });
   });
 
   test("rejects a signature made by another key", async () => {
@@ -227,6 +279,97 @@ describe("route validation binds a route to its exact store and descriptor", () 
     expect((await validateStoreRoute(route, descriptor, NOW)).valid).toBe(true);
   });
 
+  test("separates timeless authenticity from explicit-time activation", async () => {
+    expect((await storeRouteAuthentic(route, descriptor)).valid).toBe(true);
+    expect(
+      (await storeRouteActiveAt(route, descriptor, route.notAfterUnixMs)).valid,
+    ).toBe(false);
+
+    // Route expiry never rewrites the signed route's authenticity.
+    expect((await storeRouteAuthentic(route, descriptor)).valid).toBe(true);
+  });
+
+  test("snapshots the route and descriptor before authentication yields", async () => {
+    const mutableRoute: StoreRouteV1 = {
+      ...route,
+      routeSignature: Uint8Array.from(route.routeSignature),
+    };
+    const mutableDescriptor: StoreDescriptorV1 = {
+      ...descriptor,
+      descriptorSignature: Uint8Array.from(descriptor.descriptorSignature),
+    };
+
+    const pending = storeRouteAuthentic(mutableRoute, mutableDescriptor);
+    mutableRoute.routeSignature.fill(0);
+    mutableDescriptor.descriptorSignature.fill(0);
+
+    expect(await pending).toEqual({ valid: true });
+  });
+
+  test("active-at applies the lease from its one private route snapshot", async () => {
+    const mutableRoute: StoreRouteV1 = {
+      ...route,
+      routeSignature: Uint8Array.from(route.routeSignature),
+    };
+    const writable = mutableRoute as {
+      notAfterUnixMs: bigint;
+      routeSignature: Uint8Array;
+    };
+
+    const pending = storeRouteActiveAt(mutableRoute, descriptor, NOW);
+    writable.notAfterUnixMs = NOW;
+    writable.routeSignature.fill(0);
+
+    expect((await pending).valid).toBe(true);
+  });
+
+  test("rejects cheap route failures before descriptor signature work", async () => {
+    const forgedDescriptor = await signDescriptor(
+      unsignedDescriptor,
+      otherStore,
+    );
+
+    const emptyLease: StoreRouteV1 = {
+      ...route,
+      notAfterUnixMs: route.notBeforeUnixMs,
+    };
+    const semanticVerdict = await storeRouteAuthentic(
+      emptyLease,
+      forgedDescriptor,
+    );
+    expect(semanticVerdict).toEqual({
+      valid: false,
+      reason: "route lease is empty",
+    });
+
+    const noncanonical: StoreRouteV1 = {
+      ...route,
+      storeId: new Uint8Array(31),
+    };
+    const canonicalVerdict = await storeRouteAuthentic(
+      noncanonical,
+      forgedDescriptor,
+    );
+    expect(canonicalVerdict.valid).toBe(false);
+    if (canonicalVerdict.valid) throw new Error("unreachable");
+    expect(canonicalVerdict.reason).toContain("storeId");
+    expect(canonicalVerdict.reason).not.toContain("descriptor signature");
+  });
+
+  test("route authenticity includes descriptor authenticity", async () => {
+    // The descriptor body is unchanged, so this route still has the exact
+    // StoreId/DescriptorHash cross-binding and its own valid store signature.
+    // Only the descriptor signature is forged.
+    const forgedDescriptor = await signDescriptor(
+      unsignedDescriptor,
+      otherStore,
+    );
+    const verdict = await storeRouteAuthentic(route, forgedDescriptor);
+    expect(verdict.valid).toBe(false);
+    if (verdict.valid) throw new Error("unreachable");
+    expect(verdict.reason).toContain("descriptor signature does not verify");
+  });
+
   test("rejects a route lifted onto another descriptor generation", async () => {
     const rotated = await signDescriptor({
       ...unsignedDescriptor,
@@ -254,6 +397,18 @@ describe("route validation binds a route to its exact store and descriptor", () 
       (await validateStoreRoute(route, descriptor, route.notBeforeUnixMs - 1n))
         .valid,
     ).toBe(false);
+  });
+
+  test("rejects a non-u64 route activation instant before cryptography", async () => {
+    const verdict = await storeRouteActiveAt(
+      route,
+      descriptor,
+      Number.NaN as unknown as bigint,
+    );
+    expect(verdict).toEqual({
+      valid: false,
+      reason: "activation instant must be an unsigned 64-bit integer",
+    });
   });
 
   test("rejects a mutated locator", async () => {
@@ -345,6 +500,60 @@ describe("chain-start equivocation is permanent for a store and profile", () => 
     expect(
       (await chainStartConflict(descriptor, other, firstProfile)).conflicting,
     ).toBe(true);
+  });
+
+  test("conflict evidence authenticates and owns both descriptors before yielding", async () => {
+    const other = await signDescriptor({
+      ...unsignedDescriptor,
+      descriptorGeneration: 9n,
+      checkpointChainStarts: [
+        { deliveryProfileHash: firstProfile, chainStartIngressWindow: 101n },
+        { deliveryProfileHash: secondProfile, chainStartIngressWindow: 200n },
+      ],
+    });
+    const mutableFirst: StoreDescriptorV1 = {
+      ...descriptor,
+      storeIdentityEd25519Key: Uint8Array.from(
+        descriptor.storeIdentityEd25519Key,
+      ),
+      descriptorSignature: Uint8Array.from(descriptor.descriptorSignature),
+    };
+    const mutableSecond: StoreDescriptorV1 = {
+      ...other,
+      storeIdentityEd25519Key: Uint8Array.from(other.storeIdentityEd25519Key),
+      descriptorSignature: Uint8Array.from(other.descriptorSignature),
+    };
+    const mutableProfile = Uint8Array.from(firstProfile);
+
+    const pending = chainStartConflict(
+      mutableFirst,
+      mutableSecond,
+      mutableProfile,
+    );
+    mutableFirst.storeIdentityEd25519Key.fill(0);
+    mutableSecond.storeIdentityEd25519Key.fill(0xff);
+    mutableFirst.descriptorSignature.fill(0);
+    mutableSecond.descriptorSignature.fill(0);
+    mutableProfile.fill(0xee);
+
+    const result = await pending;
+    expect(result.conflicting).toBe(true);
+    if (!result.conflicting) throw new Error("unreachable");
+    expect(result.canonicalOrder[0]).not.toBe(mutableFirst);
+    expect(result.canonicalOrder[1]).not.toBe(mutableSecond);
+    expect(
+      hex(await storeId(result.canonicalOrder[0].storeIdentityEd25519Key)),
+    ).toBe(
+      hex(await storeId(result.canonicalOrder[1].storeIdentityEd25519Key)),
+    );
+
+    const forged = {
+      ...other,
+      descriptorSignature: bytes(0xff, 64),
+    };
+    expect(
+      (await chainStartConflict(descriptor, forged, firstProfile)).conflicting,
+    ).toBe(false);
   });
 
   test("an unchanged start, another store, or another profile does not conflict", async () => {

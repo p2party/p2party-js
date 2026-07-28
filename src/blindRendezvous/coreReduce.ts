@@ -9,38 +9,63 @@
  * reason two honest clients with the same delivered set derive byte-identical
  * state no matter which carrier delivered what, in which order.
  *
- * Scope: this module implements the outer layer — author-chain and quota
- * faults, the active operation set, the pair-step projection, and
- * `operationsDigest`. The payload-level facts of `CoreRoomStateV1`
- * (`observedPresences`, `effectiveLeaveOperationIds`, `storeCatalogFacts`,
- * `revocationFloors`) require the Section 4.2/4.9 nested payload codecs, which
- * are not implemented yet; `coreReduceOuter` therefore returns exactly the
- * facts it can derive and names the rest as pending rather than emitting an
- * empty array that would read as "no presences observed".
+ * The reducer consumes only process-private results of the validation ingress.
+ * It integrates payload facts only after arrival-independent author
+ * fork/quota classification, then applies semantic-slot/dependency rules and
+ * emits the exact CoreRoomStateV1 projections. Frontend admission, route
+ * activation, planner preference, and pair plaintext remain outside this
+ * room-wide state.
  */
 
-import { bytesEqual } from "./canonicalSchema";
-import { coreOperationSetDigest } from "./derivations";
+import {
+  bytesEqual,
+  decodeCanonicalStrict,
+  encodeCanonical,
+} from "./canonicalSchema";
+import {
+  coreOperationSetDigest,
+  presenceSemanticSlot,
+  roomContextConfirmation,
+} from "./derivations";
 import {
   decodeOperation,
   deriveOperationId,
   encodeOperation,
-  validateOperation,
+  requiredRoomRetentionWindows,
+  snapshotOperationValidationContext,
+  validateOperationCandidateOuter,
 } from "./operation";
+import {
+  OperationPayloadValidationError,
+  decodeAndValidateNonPairOperationPayload,
+  decodePresenceV1,
+  decodeStoreHintOperationV1,
+  encodePresenceV1,
+  encodeStoreHintOperationV1,
+} from "./operationPayload";
 import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
+import { coreFaultV1Schema, coreRoomStateV1Schema } from "./schemas";
+import { descriptorHash, routeId, storeId } from "./storeDescriptor";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type {
   AuthenticatedRoomOperationV1,
+  DecodedOperationPayloadV1,
   OperationValidationContext,
 } from "./operation";
-import type { RoomPolicyV4 } from "./roomPolicyV4";
+import type {
+  AdmissionRevokeV1,
+  PresenceV1,
+  StoreHintOperationV1,
+} from "./operationPayload";
+import type { PairStepEnvelopeV1 } from "./pairStepEnvelope";
+import type { StoreDescriptorV1, StoreRouteV1 } from "./storeDescriptor";
 
 /*
  * Compile-time nominal marker. It is deliberately private: consumers may
  * receive the branded interface but cannot structurally construct it.
  */
-declare const validatedIdentifiedOperationBrand: unique symbol;
+declare const outerValidatedIdentifiedOperationBrand: unique symbol;
 
 /*
  * Runtime provenance and immutable validation snapshot. WeakMap membership is
@@ -55,16 +80,24 @@ interface ValidatedOperationSnapshot {
   readonly operationId: Uint8Array;
   /** Private decoded copy; reducer logic consumes this, not the wrapper. */
   readonly operation: AuthenticatedRoomOperationV1;
+  /** Canonical pair framing, or null until non-pair payload reduction. */
+  readonly pairEnvelope: PairStepEnvelopeV1 | null;
+  /** Exact initialized-room binding used at validation ingress. */
+  readonly roomContextId: Uint8Array;
+  readonly roomContextConfirmation: Uint8Array;
+  readonly roomPolicyBytes: Uint8Array;
+  /** Checked, inclusive inert-evidence horizon for this exact candidate. */
+  readonly evidenceValidThroughWindow: bigint;
 }
 
-const validatedIdentifiedOperations = new WeakMap<
+const outerValidatedIdentifiedOperations = new WeakMap<
   object,
   ValidatedOperationSnapshot
 >();
 
-/** One fully validated operation together with its derived private ID. */
-export interface ValidatedIdentifiedOperationV1 {
-  readonly [validatedIdentifiedOperationBrand]: true;
+/** One outer-authenticated candidate together with its private candidate ID. */
+export interface OuterValidatedIdentifiedOperationV1 {
+  readonly [outerValidatedIdentifiedOperationBrand]: true;
   readonly operationId: Uint8Array;
   readonly operation: AuthenticatedRoomOperationV1;
 }
@@ -82,29 +115,36 @@ const freezeOperationContainers = (
  * The caller-owned object is canonically snapshotted before the first await;
  * all validation and ID derivation use that private copy. OperationId is
  * derived only after complete outer validation, including PAIR_STEP slot
- * binding and the author signature. The returned provenance brand is an
- * in-memory trust marker, never persisted protocol state and never a
- * substitute for revalidation after restore.
+ * binding and the author signature. Non-pair nested signature work is
+ * deliberately deferred until CoreReduce has classified author quota/forks.
+ * The returned provenance brand is process-local and never persisted.
  */
-export const validateAndIdentifyOperation = async (
+export const validateAndIdentifyOperationCandidate = async (
   operation: AuthenticatedRoomOperationV1,
   context: OperationValidationContext,
   module?: LibCrypto,
-): Promise<ValidatedIdentifiedOperationV1> => {
+): Promise<OuterValidatedIdentifiedOperationV1> => {
   // Both calls are synchronous. Decoding gives validation an owned copy of
   // every typed array before signature/slot hashing yields to another task.
   const operationBytes = encodeOperation(operation);
   const privateOperation = freezeOperationContainers(
     decodeOperation(operationBytes),
   );
-  const roomPolicyBytes = encodeRoomPolicyV4(context.roomPolicy);
-  const privateContext: OperationValidationContext = Object.freeze({
-    roomContextConfirmation: Uint8Array.from(context.roomContextConfirmation),
-    roomPolicy: decodeRoomPolicyV4(roomPolicyBytes),
-    referenceWindow: context.referenceWindow,
-  });
+  const privateContext = snapshotOperationValidationContext(context);
+  const roomPolicyBytes = encodeRoomPolicyV4(privateContext.roomPolicy);
 
-  await validateOperation(privateOperation, privateContext, module);
+  const pairEnvelope = await validateOperationCandidateOuter(
+    privateOperation,
+    privateContext,
+    module,
+  );
+  const evidenceValidThroughWindow = checkedAddU64(
+    checkedAddU64(
+      privateOperation.logicalWindow,
+      requiredRoomRetentionWindows(privateContext.roomPolicy),
+    ),
+    BigInt(privateContext.roomPolicy.protocolLimits.maxClockSkewWindows),
+  );
   const privateOperationId = await deriveOperationId(privateOperation);
 
   // Expose a separate copy. Typed-array elements cannot be frozen in
@@ -116,30 +156,41 @@ export const validateAndIdentifyOperation = async (
   const identified = Object.freeze({
     operationId: Uint8Array.from(privateOperationId),
     operation: exposedOperation,
-  } as ValidatedIdentifiedOperationV1);
-  validatedIdentifiedOperations.set(identified, {
+  } as OuterValidatedIdentifiedOperationV1);
+  outerValidatedIdentifiedOperations.set(identified, {
     operationBytes,
     operationId: Uint8Array.from(privateOperationId),
     operation: privateOperation,
+    pairEnvelope,
+    roomContextId: Uint8Array.from(privateContext.roomContextId),
+    roomContextConfirmation: Uint8Array.from(
+      privateContext.roomContextConfirmation,
+    ),
+    roomPolicyBytes,
+    evidenceValidThroughWindow,
   });
   return identified;
 };
 
 interface ReducerOperationSnapshot extends ValidatedOperationSnapshot {
-  readonly source: ValidatedIdentifiedOperationV1;
+  readonly source: OuterValidatedIdentifiedOperationV1;
+}
+
+interface PayloadValidatedReducerSnapshot extends ReducerOperationSnapshot {
+  readonly payload: DecodedOperationPayloadV1;
 }
 
 const reducerSnapshotFor = (value: unknown): ReducerOperationSnapshot => {
   const snapshot =
     typeof value === "object" && value !== null
-      ? validatedIdentifiedOperations.get(value)
+      ? outerValidatedIdentifiedOperations.get(value)
       : undefined;
   if (snapshot === undefined)
     throw new Error(
-      "coreReduce: input must be a live result of validateAndIdentifyOperation",
+      "coreReduce: input must be a live result of validateAndIdentifyOperationCandidate",
     );
 
-  const source = value as ValidatedIdentifiedOperationV1;
+  const source = value as OuterValidatedIdentifiedOperationV1;
   let exposedOperationBytes: Uint8Array;
   try {
     exposedOperationBytes = encodeOperation(source.operation);
@@ -155,43 +206,74 @@ const reducerSnapshotFor = (value: unknown): ReducerOperationSnapshot => {
   return { source, ...snapshot };
 };
 
-export type CoreFaultV1 = {
-  readonly kind: "author-fork-or-overquota";
+export type CoreFaultV1 =
+  | {
+      readonly kind: "author-fork-or-overquota";
+      readonly authorEpochEd25519Key: Uint8Array;
+      readonly logicalWindow: bigint;
+      readonly proofOperationIds: readonly Uint8Array[];
+    }
+  | {
+      readonly kind: "presence-or-leave-fork";
+      readonly semanticSlot: Uint8Array;
+      readonly proofOperationIds: readonly Uint8Array[];
+    }
+  | {
+      readonly kind: "store-generation-fork";
+      readonly storeId: Uint8Array;
+      readonly descriptorGeneration: bigint;
+      readonly descriptorHashes: readonly [Uint8Array, Uint8Array];
+    };
+
+export interface CorePresenceFactV1 {
+  readonly presenceOperationId: Uint8Array;
   readonly authorEpochEd25519Key: Uint8Array;
   readonly logicalWindow: bigint;
-  readonly proofOperationIds: readonly Uint8Array[];
-};
+  readonly presence: PresenceV1;
+}
 
-export interface CoreOuterStateV1 {
+export interface CoreStoreFactV1 {
+  readonly storeId: Uint8Array;
+  readonly descriptorGeneration: bigint;
+  readonly descriptorHash: Uint8Array;
+  readonly sourceOperationId: Uint8Array;
+  readonly descriptor: StoreDescriptorV1;
+  readonly routes: readonly StoreRouteV1[];
+  readonly hintValidThroughLogicalWindow: bigint;
+}
+
+export interface CoreRevocationFloorV1 {
+  readonly stableIdentityCommitment: Uint8Array;
+  readonly minimumAcceptedGeneration: bigint;
+  readonly effectiveLogicalWindow: bigint;
+  readonly validThroughLogicalWindow: bigint;
+  readonly revokeOperationId: Uint8Array;
+}
+
+export interface CoreRoomStateV1 {
   readonly version: 1;
   readonly referenceWindow: bigint;
+  readonly roomCapacityState: "within-policy" | "overcapacity";
   readonly activeOperationIds: readonly Uint8Array[];
+  readonly observedPresences: readonly CorePresenceFactV1[];
+  readonly effectiveLeaveOperationIds: readonly Uint8Array[];
+  readonly storeCatalogFacts: readonly CoreStoreFactV1[];
+  readonly revocationFloors: readonly CoreRevocationFloorV1[];
   readonly activePairOuterOperationIds: readonly Uint8Array[];
   readonly faults: readonly CoreFaultV1[];
   readonly operationsDigest: Uint8Array;
-  /**
-   * Payload-level reduction that this increment does not perform. A caller
-   * must not present the absence of these facts as an observation.
-   */
-  readonly pendingPayloadReduction: readonly (
-    | "observedPresences"
-    | "effectiveLeaveOperationIds"
-    | "storeCatalogFacts"
-    | "revocationFloors"
-    | "roomCapacityState"
-  )[];
 }
 
-const PENDING_PAYLOAD_REDUCTION = Object.freeze([
-  "observedPresences",
-  "effectiveLeaveOperationIds",
-  "storeCatalogFacts",
-  "revocationFloors",
-  // Section 4.7 defines this over the active presence count against immutable
-  // maxRoomMembers, so it cannot be derived before presence reduction — and it
-  // must never be derived from a local storage cap, which is a delivery fact.
-  "roomCapacityState",
-] as const);
+const coreFaultKindOrder = (() => {
+  if (coreFaultV1Schema.kind !== "union")
+    throw new Error("coreReduce: CoreFaultV1 schema must remain a union");
+  return new Map(
+    coreFaultV1Schema.variants.map((variant, index) => [
+      variant.tag as CoreFaultV1["kind"],
+      index,
+    ]),
+  );
+})();
 
 const compareBytes = (left: Uint8Array, right: Uint8Array): number => {
   const shared = Math.min(left.length, right.length);
@@ -210,6 +292,98 @@ const hex = (bytes: Uint8Array): string => {
 const sortBytes = (values: readonly Uint8Array[]): Uint8Array[] =>
   [...values].sort(compareBytes);
 
+const decodeCoreRoomStateCanonical = (bytes: Uint8Array): CoreRoomStateV1 =>
+  decodeCanonicalStrict(coreRoomStateV1Schema, bytes) as CoreRoomStateV1;
+
+/**
+ * Canonical rules the generic schema cannot express live here: fixed
+ * cardinality for fault proofs and RouteId order for sequence-encoded routes.
+ * Keeping this beside the exported Core codec prevents a second notion of
+ * canonical Core bytes.
+ */
+const validateCoreRoomStateCanonicalSemantics = async (
+  state: CoreRoomStateV1,
+): Promise<void> => {
+  if (state.version !== 1)
+    throw new Error("coreReduce: unsupported CoreRoomStateV1 version");
+  for (const fault of state.faults) {
+    if (
+      fault.kind === "author-fork-or-overquota" &&
+      fault.proofOperationIds.length === 0
+    )
+      throw new Error(
+        "coreReduce: author fault requires at least one proof operation",
+      );
+    if (
+      fault.kind === "presence-or-leave-fork" &&
+      fault.proofOperationIds.length !== 2
+    )
+      throw new Error(
+        "coreReduce: semantic fault requires exactly two proof operations",
+      );
+    if (
+      fault.kind === "store-generation-fork" &&
+      fault.descriptorHashes.length !== 2
+    )
+      throw new Error(
+        "coreReduce: store fault requires exactly two descriptor hashes",
+      );
+  }
+
+  for (const fact of state.storeCatalogFacts) {
+    const routeIds = await Promise.all(fact.routes.map(routeId));
+    for (let index = 1; index < routeIds.length; index++) {
+      const order = compareBytes(routeIds[index - 1], routeIds[index]);
+      if (order > 0)
+        throw new Error(
+          "coreReduce: store fact routes must be sorted by RouteId",
+        );
+      if (order === 0)
+        throw new Error(
+          "coreReduce: store fact routes must be duplicate-free by RouteId",
+        );
+    }
+  }
+};
+
+/** The unique canonical encoding of a reduced room state. */
+export const encodeCoreRoomStateV1 = async (
+  state: CoreRoomStateV1,
+): Promise<Uint8Array> => {
+  // Encode and decode synchronously before the first await so subsequent route
+  // hashing sees one private snapshot even if the caller mutates its object.
+  const encoded = encodeCanonical(coreRoomStateV1Schema, state);
+  const snapshot = decodeCoreRoomStateCanonical(encoded);
+  await validateCoreRoomStateCanonicalSemantics(snapshot);
+  return encoded;
+};
+
+/** Strictly decode one canonical reduced room state. */
+export const decodeCoreRoomStateV1 = async (
+  bytes: Uint8Array,
+): Promise<CoreRoomStateV1> => {
+  // The strict decoder may return byte views, so first detach caller storage.
+  const snapshot = decodeCoreRoomStateCanonical(Uint8Array.from(bytes));
+  await validateCoreRoomStateCanonicalSemantics(snapshot);
+  return snapshot;
+};
+
+const checkedAddU64 = (left: bigint, right: bigint): bigint => {
+  const sum = left + right;
+  if (left < 0n || right < 0n || sum > 0xffffffffffffffffn)
+    throw new Error("coreReduce: checked unsigned-64 addition overflowed");
+  return sum;
+};
+
+const outerActiveAt = (
+  operation: AuthenticatedRoomOperationV1,
+  referenceWindow: bigint,
+  skew: bigint,
+): boolean =>
+  operation.logicalWindow <= referenceWindow &&
+  (referenceWindow <= operation.expiresAfterWindow ||
+    referenceWindow - operation.expiresAfterWindow <= skew);
+
 /**
  * Set union with an exact-duplicate no-op.
  *
@@ -221,8 +395,8 @@ const sortBytes = (values: readonly Uint8Array[]): Uint8Array[] =>
  * wrappers fail the private-snapshot check before reaching it.
  */
 const mergeReducerSnapshots = (
-  left: readonly ValidatedIdentifiedOperationV1[],
-  right: readonly ValidatedIdentifiedOperationV1[],
+  left: readonly OuterValidatedIdentifiedOperationV1[],
+  right: readonly OuterValidatedIdentifiedOperationV1[],
 ): ReducerOperationSnapshot[] => {
   const byId = new Map<string, ReducerOperationSnapshot>();
   for (const value of [...left, ...right]) {
@@ -245,55 +419,36 @@ const mergeReducerSnapshots = (
   );
 };
 
-export const mergeOperationSets = (
-  left: readonly ValidatedIdentifiedOperationV1[],
-  right: readonly ValidatedIdentifiedOperationV1[],
-): ValidatedIdentifiedOperationV1[] =>
+export const mergeOperationCandidateSets = (
+  left: readonly OuterValidatedIdentifiedOperationV1[],
+  right: readonly OuterValidatedIdentifiedOperationV1[],
+): OuterValidatedIdentifiedOperationV1[] =>
   mergeReducerSnapshots(left, right).map((entry) => entry.source);
 
 const authorWindowKey = (operation: AuthenticatedRoomOperationV1): string =>
   `${hex(operation.authorEpochEd25519Key)}:${operation.logicalWindow.toString()}`;
 
-/**
- * `CoreReduce` over the outer layer.
- *
- * Every decision below is a function of the operation bytes and the explicit
- * reference window. In particular, fork and overquota classification precedes
- * any payload work and is arrival-independent: an author that occupies one
- * `(key, window, sequence)` slot with two different byte strings, or that
- * exceeds `maxOperationsPerAuthorWindow` candidates, has its whole window
- * excluded no matter which operation arrived first.
- */
-export const coreReduceOuter = async (
-  operations: readonly ValidatedIdentifiedOperationV1[],
-  roomPolicy: RoomPolicyV4,
-  referenceWindow: bigint,
-): Promise<CoreOuterStateV1> => {
-  // Deduplicate first. The author quota counts *distinct* candidates, so a
-  // carrier that redelivers one operation must not be able to manufacture an
-  // overquota fault against an honest author — at-least-once delivery is part
-  // of the carrier contract, not evidence of misbehavior.
-  const sorted = mergeReducerSnapshots(operations, []);
+interface AuthorWindowClassification {
+  readonly faults: CoreFaultV1[];
+  readonly faultedAuthorWindows: ReadonlySet<string>;
+}
 
-  const skew = BigInt(roomPolicy.protocolLimits.maxClockSkewWindows);
+/**
+ * One deterministic author fault classifier shared by current and
+ * dependency-evidence groups. Nested payload bytes are intentionally absent
+ * from this decision.
+ */
+const classifyAuthorWindows = (
+  byAuthorWindow: ReadonlyMap<string, readonly ReducerOperationSnapshot[]>,
+  roomPolicy: OperationValidationContext["roomPolicy"],
+): AuthorWindowClassification => {
   const maxPerAuthorWindow =
     roomPolicy.protocolLimits.maxOperationsPerAuthorWindow;
-
-  // Group by (author key, logical window). Every distinct candidate counts
-  // toward the author quota, including ones later excluded by a fault: the
-  // count must not depend on which of them a client happened to receive.
-  const byAuthorWindow = new Map<string, ReducerOperationSnapshot[]>();
-  for (const entry of sorted) {
-    const key = authorWindowKey(entry.operation);
-    const group = byAuthorWindow.get(key);
-    if (group === undefined) byAuthorWindow.set(key, [entry]);
-    else group.push(entry);
-  }
-
   const faults: CoreFaultV1[] = [];
   const faultedAuthorWindows = new Set<string>();
 
   for (const [key, group] of byAuthorWindow) {
+    if (group.length === 0) continue;
     const bySequence = new Map<string, ReducerOperationSnapshot[]>();
     for (const entry of group) {
       const sequenceKey = entry.operation.authorSequence.toString();
@@ -302,20 +457,27 @@ export const coreReduceOuter = async (
       else slot.push(entry);
     }
 
-    const forkProofs: Uint8Array[] = [];
-    for (const slot of bySequence.values()) {
-      if (slot.length > 1) {
-        // A fixed-size proof suffices: the two bytewise-lowest IDs in the slot.
-        const ids = sortBytes(slot.map((entry) => entry.operationId));
-        forkProofs.push(ids[0], ids[1]);
-      }
+    const forkProofs: {
+      readonly sequence: bigint;
+      readonly operationIds: readonly [Uint8Array, Uint8Array];
+    }[] = [];
+    for (const [sequence, slot] of bySequence) {
+      if (slot.length < 2) continue;
+      const ids = sortBytes(slot.map((entry) => entry.operationId));
+      forkProofs.push({
+        sequence: BigInt(sequence),
+        operationIds: [ids[0], ids[1]],
+      });
     }
+    forkProofs.sort((left, right) =>
+      left.sequence < right.sequence
+        ? -1
+        : left.sequence > right.sequence
+          ? 1
+          : 0,
+    );
 
     const overquota = group.length > maxPerAuthorWindow;
-
-    // The pinned authority is the one stable author binding, and its chain may
-    // contain only revocations. Anything else under that key is a fault, so a
-    // capability holder cannot dilute or displace authority slots.
     const authorityFloor = roomPolicy.admissionFloor;
     const authoredByAuthority =
       authorityFloor.mode === "authority-grant" &&
@@ -331,20 +493,25 @@ export const coreReduceOuter = async (
       continue;
 
     faultedAuthorWindows.add(key);
-    const proofOperationIds =
-      forkProofs.length > 0
-        ? sortBytes(forkProofs)
-        : nonRevocationInAuthorityChain
-          ? sortBytes(
-              group
-                .filter((entry) => entry.operation.kind !== "ADMISSION_REVOKE")
-                .map((entry) => entry.operationId),
-            ).slice(0, 1)
-          : // Physical proof of overquota needs only the lowest quota+1 IDs.
-            sortBytes(group.map((entry) => entry.operationId)).slice(
-              0,
-              maxPerAuthorWindow + 1,
-            );
+    /*
+     * Exact combined-fault proof precedence:
+     *   1. overquota: canonical lowest quota+1 IDs;
+     *   2. fork: lowest sequence's two lowest IDs;
+     *   3. authority-chain violation: lowest offending ID.
+     * This both freezes byte output and keeps every proof within its u16 bound.
+     */
+    const proofOperationIds = overquota
+      ? sortBytes(group.map((entry) => entry.operationId)).slice(
+          0,
+          maxPerAuthorWindow + 1,
+        )
+      : forkProofs.length > 0
+        ? sortBytes(forkProofs[0].operationIds)
+        : sortBytes(
+            group
+              .filter((entry) => entry.operation.kind !== "ADMISSION_REVOKE")
+              .map((entry) => entry.operationId),
+          ).slice(0, 1);
 
     faults.push({
       kind: "author-fork-or-overquota",
@@ -358,15 +525,70 @@ export const coreReduceOuter = async (
     });
   }
 
-  // An operation is eligible only when its author chain is proven contiguous
-  // back to sequence zero of its window, each link naming its exact
-  // predecessor. Without this, an author could publish sequence 5 alone and
-  // have it reduce as though 0..4 existed.
-  const provenChainMembers = new Set<string>();
+  return { faults, faultedAuthorWindows };
+};
+
+const validatePayloadsInAuthorWindows = async (
+  byAuthorWindow: ReadonlyMap<string, readonly ReducerOperationSnapshot[]>,
+  faultedAuthorWindows: ReadonlySet<string>,
+  roomContextId: Uint8Array,
+  roomPolicy: OperationValidationContext["roomPolicy"],
+  module?: LibCrypto,
+): Promise<PayloadValidatedReducerSnapshot[]> => {
+  const payloadValidated: PayloadValidatedReducerSnapshot[] = [];
   for (const [key, group] of byAuthorWindow) {
     if (faultedAuthorWindows.has(key)) continue;
+    for (const entry of group) {
+      let payload: DecodedOperationPayloadV1;
+      if (entry.operation.kind === "PAIR_STEP") {
+        if (entry.pairEnvelope === null)
+          throw new Error(
+            "coreReduce: outer-validated PAIR_STEP lost its envelope",
+          );
+        payload = { kind: "PAIR_STEP", value: entry.pairEnvelope };
+      } else {
+        if (entry.pairEnvelope !== null)
+          throw new Error(
+            "coreReduce: non-pair candidate carried a pair envelope",
+          );
+        try {
+          payload = await decodeAndValidateNonPairOperationPayload(
+            entry.operation,
+            { roomContextId, roomPolicy },
+            module,
+          );
+        } catch (error) {
+          if (error instanceof OperationPayloadValidationError) continue;
+          throw error;
+        }
+      }
+      payloadValidated.push({ ...entry, payload });
+    }
+  }
+  return payloadValidated.sort((left, right) =>
+    compareBytes(left.operationId, right.operationId),
+  );
+};
 
-    const bySequence = new Map<string, ReducerOperationSnapshot>();
+const payloadsByAuthorWindow = (
+  entries: readonly PayloadValidatedReducerSnapshot[],
+): Map<string, PayloadValidatedReducerSnapshot[]> => {
+  const groups = new Map<string, PayloadValidatedReducerSnapshot[]>();
+  for (const entry of entries) {
+    const key = authorWindowKey(entry.operation);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [entry]);
+    else group.push(entry);
+  }
+  return groups;
+};
+
+const proveAuthorChains = (
+  groups: ReadonlyMap<string, readonly PayloadValidatedReducerSnapshot[]>,
+  provenChainMembers: Set<string> = new Set<string>(),
+): Set<string> => {
+  for (const group of groups.values()) {
+    const bySequence = new Map<string, PayloadValidatedReducerSnapshot>();
     for (const entry of group)
       bySequence.set(entry.operation.authorSequence.toString(), entry);
 
@@ -386,20 +608,504 @@ export const coreReduceOuter = async (
       expectedPredecessor = entry.operationId;
     }
   }
+  return provenChainMembers;
+};
 
-  const active: ReducerOperationSnapshot[] = [];
+const activePayloadCandidatesAt = (
+  entries: readonly PayloadValidatedReducerSnapshot[],
+  provenChainMembers: ReadonlySet<string>,
+  referenceWindow: bigint,
+  skew: bigint,
+): PayloadValidatedReducerSnapshot[] =>
+  entries.filter(
+    (entry) =>
+      provenChainMembers.has(hex(entry.operationId)) &&
+      outerActiveAt(entry.operation, referenceWindow, skew),
+  );
+
+/**
+ * Exact deterministic `CoreReduce`.
+ *
+ * Every decision is a function of privately snapshotted operation bytes and
+ * one immutable room context/reference window. Fork and overquota
+ * classification precedes payload reduction and is arrival-independent.
+ */
+export const coreReduce = async (
+  operations: readonly OuterValidatedIdentifiedOperationV1[],
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<CoreRoomStateV1> => {
+  // Snapshot every caller-owned container synchronously before the first
+  // await. A caller cannot change set membership while confirmation hashing
+  // yields to WebCrypto.
+  const operationInputs = [...operations];
+  const privateContext = snapshotOperationValidationContext(context);
+  const roomContextIdBytes = Uint8Array.from(privateContext.roomContextId);
+  const confirmationBytes = Uint8Array.from(
+    privateContext.roomContextConfirmation,
+  );
+  const roomPolicyBytes = encodeRoomPolicyV4(privateContext.roomPolicy);
+  const roomPolicy = decodeRoomPolicyV4(roomPolicyBytes);
+  const referenceWindow = privateContext.referenceWindow;
+  if (
+    !bytesEqual(
+      await roomContextConfirmation(roomContextIdBytes),
+      confirmationBytes,
+    )
+  )
+    throw new Error(
+      "coreReduce: context has an inconsistent RoomContextId confirmation",
+    );
+
+  // Deduplicate first. The author quota counts *distinct* candidates, so a
+  // carrier that redelivers one operation must not be able to manufacture an
+  // overquota fault against an honest author — at-least-once delivery is part
+  // of the carrier contract, not evidence of misbehavior.
+  const sorted = mergeReducerSnapshots(operationInputs, []);
   for (const entry of sorted) {
-    if (faultedAuthorWindows.has(authorWindowKey(entry.operation))) continue;
-    // A gap or mislinked predecessor leaves the rest of that chain unproven.
-    if (!provenChainMembers.has(hex(entry.operationId))) continue;
-    // Future operations are held in a bounded candidate partition and cannot
-    // affect core state until a later reference window admits them.
-    if (entry.operation.logicalWindow > referenceWindow) continue;
-    // Semantic expiry: retained bytes may still serve as author-prefix
-    // evidence, but the operation contributes no active state.
-    if (referenceWindow > entry.operation.expiresAfterWindow + skew) continue;
-    active.push(entry);
+    if (
+      !bytesEqual(entry.roomContextId, roomContextIdBytes) ||
+      !bytesEqual(entry.roomContextConfirmation, confirmationBytes) ||
+      !bytesEqual(entry.roomPolicyBytes, roomPolicyBytes)
+    )
+      throw new Error(
+        "coreReduce: validated operation belongs to another room or policy",
+      );
   }
+
+  const skew = BigInt(roomPolicy.protocolLimits.maxClockSkewWindows);
+  /*
+   * Future custody cannot affect current core state. Expired operations enter
+   * the author partition only as bounded prefix evidence for a currently live
+   * later sequence, or as retained pinned-authority fault evidence through the
+   * exact credential horizon.
+   */
+  const rawByAuthorWindow = new Map<string, ReducerOperationSnapshot[]>();
+  for (const entry of sorted) {
+    if (entry.operation.logicalWindow > referenceWindow) continue;
+    const key = authorWindowKey(entry.operation);
+    const group = rawByAuthorWindow.get(key);
+    if (group === undefined) rawByAuthorWindow.set(key, [entry]);
+    else group.push(entry);
+  }
+
+  const byAuthorWindow = new Map<string, ReducerOperationSnapshot[]>();
+  for (const [key, group] of rawByAuthorWindow) {
+    const live = group.filter((entry) =>
+      outerActiveAt(entry.operation, referenceWindow, skew),
+    );
+    let maximumLiveSequence: bigint | null = null;
+    for (const entry of live)
+      if (
+        maximumLiveSequence === null ||
+        entry.operation.authorSequence > maximumLiveSequence
+      )
+        maximumLiveSequence = entry.operation.authorSequence;
+
+    const authority = roomPolicy.admissionFloor;
+    const authoredByAuthority =
+      authority.mode === "authority-grant" &&
+      bytesEqual(
+        group[0].operation.authorEpochEd25519Key,
+        authority.authorityEd25519PublicKey,
+      );
+    const authorityFaultHorizon =
+      authority.mode === "authority-grant"
+        ? checkedAddU64(
+            checkedAddU64(
+              checkedAddU64(
+                group[0].operation.logicalWindow,
+                BigInt(roomPolicy.protocolLimits.maxFutureLogicalWindows),
+              ),
+              BigInt(authority.maxAuthorityCredentialLifetimeWindows),
+            ),
+            skew,
+          )
+        : null;
+
+    const current = group.filter((entry) => {
+      if (outerActiveAt(entry.operation, referenceWindow, skew)) return true;
+      if (
+        maximumLiveSequence !== null &&
+        entry.operation.authorSequence <= maximumLiveSequence &&
+        referenceWindow <= entry.evidenceValidThroughWindow
+      )
+        return true;
+      return (
+        authoredByAuthority &&
+        authorityFaultHorizon !== null &&
+        referenceWindow <= authorityFaultHorizon
+      );
+    });
+    if (current.length !== 0) byAuthorWindow.set(key, current);
+  }
+
+  // Every distinct current outer candidate counts toward author quota,
+  // including one whose nested payload will fail below.
+  const initialAuthorClassification = classifyAuthorWindows(
+    byAuthorWindow,
+    roomPolicy,
+  );
+  let faults: CoreFaultV1[] = [...initialAuthorClassification.faults];
+  let faultedAuthorWindows = new Set(
+    initialAuthorClassification.faultedAuthorWindows,
+  );
+
+  /*
+   * Only now perform nested payload work. Faulted/overquota author windows are
+   * excluded without verifying a permit, revoke, descriptor, or route
+   * signature, which bounds attacker-selected expensive work per author.
+   */
+  let payloadValidated = await validatePayloadsInAuthorWindows(
+    byAuthorWindow,
+    faultedAuthorWindows,
+    roomContextIdBytes,
+    roomPolicy,
+    module,
+  );
+
+  let payloadValidatedByAuthorWindow = payloadsByAuthorWindow(payloadValidated);
+
+  // An operation is eligible only when its author chain is proven contiguous
+  // back to sequence zero of its window, each link naming its exact
+  // predecessor. Without this, an author could publish sequence 5 alone and
+  // have it reduce as though 0..4 existed.
+  let provenChainMembers = proveAuthorChains(payloadValidatedByAuthorWindow);
+
+  let candidateActive = activePayloadCandidatesAt(
+    payloadValidated,
+    provenChainMembers,
+    referenceWindow,
+    skew,
+  );
+
+  /*
+   * A live, intrinsically valid LEAVE may depend on a presence from another
+   * author window whose outer lifetime has ended. Promote the exact referenced
+   * presence's complete semantic slot plus the prefixes needed to prove those
+   * branches, then rerun the same author/payload/chain pipeline. Invalid LEAVE
+   * payloads never enter `candidateActive`, so they cannot make unrelated
+   * historical evidence affect current state.
+   *
+   * The loop is monotone over the finite validated candidate set. It matters
+   * only when adding one dependency prefix proves another already-present
+   * LEAVE chain; ordinary cases complete in one pass.
+   */
+  const sortedByOperationId = new Map(
+    sorted.map((entry) => [hex(entry.operationId), entry] as const),
+  );
+  const requestedPresenceSlots = new Set<string>();
+  const canonicalHistoricalPresenceCandidates = new Map<string, boolean>();
+  const isCanonicalHistoricalPresenceCandidate = async (
+    entry: ReducerOperationSnapshot,
+  ): Promise<boolean> => {
+    const id = hex(entry.operationId);
+    const cached = canonicalHistoricalPresenceCandidates.get(id);
+    if (cached !== undefined) return cached;
+
+    let valid = false;
+    if (
+      entry.operation.kind === "PRESENCE" &&
+      referenceWindow <= entry.evidenceValidThroughWindow
+    ) {
+      try {
+        const presence = decodePresenceV1(entry.operation.fixedPayload);
+        valid =
+          presence.core.version === 1 &&
+          entry.operation.logicalWindow <=
+            presence.core.validThroughLogicalWindow &&
+          presence.core.validThroughLogicalWindow <=
+            presence.core.receiverKeyValidThroughLogicalWindow &&
+          presence.core.receiverKeyValidThroughLogicalWindow <=
+            entry.operation.expiresAfterWindow &&
+          bytesEqual(
+            entry.operation.semanticSlot,
+            await presenceSemanticSlot(
+              entry.operation.authorEpochEd25519Key,
+              entry.operation.logicalWindow,
+              presence.core.presenceNonce,
+            ),
+          );
+      } catch {
+        valid = false;
+      }
+    }
+    canonicalHistoricalPresenceCandidates.set(id, valid);
+    return valid;
+  };
+  for (;;) {
+    let learnedSlot = false;
+    for (const entry of candidateActive) {
+      if (entry.payload.kind !== "LEAVE") continue;
+      const referenced = sortedByOperationId.get(
+        hex(entry.payload.value.presenceOperationId),
+      );
+      if (
+        referenced === undefined ||
+        referenced.operation.kind !== "PRESENCE" ||
+        !bytesEqual(
+          entry.operation.authorEpochEd25519Key,
+          referenced.operation.authorEpochEd25519Key,
+        ) ||
+        referenced.operation.logicalWindow > referenceWindow ||
+        referenceWindow > referenced.evidenceValidThroughWindow
+      )
+        continue;
+      let referencedPresence: PresenceV1;
+      try {
+        referencedPresence = decodePresenceV1(
+          referenced.operation.fixedPayload,
+        );
+      } catch {
+        continue;
+      }
+      if (
+        referenced.operation.logicalWindow >
+          entry.payload.value.effectiveLogicalWindow ||
+        entry.payload.value.effectiveLogicalWindow >
+          referencedPresence.core.validThroughLogicalWindow ||
+        entry.operation.expiresAfterWindow <
+          referencedPresence.core.validThroughLogicalWindow ||
+        referencedPresence.core.validThroughLogicalWindow >
+          referencedPresence.core.receiverKeyValidThroughLogicalWindow ||
+        referencedPresence.core.receiverKeyValidThroughLogicalWindow >
+          referenced.operation.expiresAfterWindow ||
+        !bytesEqual(
+          referenced.operation.semanticSlot,
+          await presenceSemanticSlot(
+            referenced.operation.authorEpochEd25519Key,
+            referenced.operation.logicalWindow,
+            referencedPresence.core.presenceNonce,
+          ),
+        )
+      )
+        continue;
+      const slot = hex(referenced.operation.semanticSlot);
+      if (!requestedPresenceSlots.has(slot)) {
+        requestedPresenceSlots.add(slot);
+        learnedSlot = true;
+      }
+    }
+
+    let addedCandidate = false;
+    for (const [key, group] of rawByAuthorWindow) {
+      const direct: ReducerOperationSnapshot[] = [];
+      for (const entry of group) {
+        if (
+          entry.operation.kind === "PRESENCE" &&
+          requestedPresenceSlots.has(hex(entry.operation.semanticSlot)) &&
+          (await isCanonicalHistoricalPresenceCandidate(entry))
+        )
+          direct.push(entry);
+      }
+      if (direct.length === 0) continue;
+
+      let maximumDirectSequence = direct[0].operation.authorSequence;
+      for (const entry of direct)
+        if (entry.operation.authorSequence > maximumDirectSequence)
+          maximumDirectSequence = entry.operation.authorSequence;
+      const directOperationIds = new Set(
+        direct.map((entry) => hex(entry.operationId)),
+      );
+
+      const existing = byAuthorWindow.get(key) ?? [];
+      const byId = new Map(
+        existing.map((entry) => [hex(entry.operationId), entry] as const),
+      );
+      for (const entry of group) {
+        const id = hex(entry.operationId);
+        const isDirect = directOperationIds.has(id);
+        const isRequiredPrefix =
+          entry.operation.authorSequence <= maximumDirectSequence;
+        if (
+          !isDirect &&
+          (!isRequiredPrefix ||
+            referenceWindow > entry.evidenceValidThroughWindow)
+        )
+          continue;
+        if (!byId.has(id)) {
+          byId.set(id, entry);
+          addedCandidate = true;
+        }
+      }
+      byAuthorWindow.set(
+        key,
+        [...byId.values()].sort((left, right) =>
+          compareBytes(left.operationId, right.operationId),
+        ),
+      );
+    }
+
+    if (!addedCandidate) {
+      if (!learnedSlot) break;
+      // A newly learned slot may already have been fully present in the
+      // current groups; one more scan proves the fixed point.
+      continue;
+    }
+
+    const classification = classifyAuthorWindows(byAuthorWindow, roomPolicy);
+    faults = [...classification.faults];
+    faultedAuthorWindows = new Set(classification.faultedAuthorWindows);
+    payloadValidated = await validatePayloadsInAuthorWindows(
+      byAuthorWindow,
+      faultedAuthorWindows,
+      roomContextIdBytes,
+      roomPolicy,
+      module,
+    );
+    payloadValidatedByAuthorWindow = payloadsByAuthorWindow(payloadValidated);
+    provenChainMembers = proveAuthorChains(payloadValidatedByAuthorWindow);
+    candidateActive = activePayloadCandidatesAt(
+      payloadValidated,
+      provenChainMembers,
+      referenceWindow,
+      skew,
+    );
+  }
+
+  const semanticForkedOperationIds = new Set<string>();
+  const recordSemanticSlotForks = (
+    groups: ReadonlyMap<string, readonly PayloadValidatedReducerSnapshot[]>,
+  ): void => {
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const operationIds = sortBytes(group.map((entry) => entry.operationId));
+      for (const operationId of operationIds)
+        semanticForkedOperationIds.add(hex(operationId));
+      faults.push({
+        kind: "presence-or-leave-fork",
+        semanticSlot: Uint8Array.from(group[0].operation.semanticSlot),
+        proofOperationIds: operationIds
+          .slice(0, 2)
+          .map((operationId) => Uint8Array.from(operationId)),
+      });
+    }
+  };
+
+  /*
+   * Presence subjects fork before leaves are evaluated. Include current roster
+   * candidates and exact presences referenced by a current LEAVE; unrelated
+   * expired prefix evidence cannot manufacture a current semantic fault.
+   */
+  const candidateActiveIds = new Set(
+    candidateActive.map((entry) => hex(entry.operationId)),
+  );
+  const byOperationId = new Map(
+    payloadValidated.map((entry) => [hex(entry.operationId), entry] as const),
+  );
+  /*
+   * Prequalify exact LEAVE dependencies before they can make an otherwise
+   * inert historical presence slot relevant to semantic-fork detection. The
+   * fork result itself is necessarily checked later, after those slots have
+   * been grouped.
+   */
+  const prequalifiedLeaveDependencies = new Map<
+    string,
+    PayloadValidatedReducerSnapshot
+  >();
+  const referencedPresenceSlots = new Set<string>();
+  for (const entry of candidateActive) {
+    if (entry.payload.kind !== "LEAVE") continue;
+    const referenced = byOperationId.get(
+      hex(entry.payload.value.presenceOperationId),
+    );
+    if (
+      referenced === undefined ||
+      referenced.payload.kind !== "PRESENCE" ||
+      !provenChainMembers.has(hex(referenced.operationId)) ||
+      !bytesEqual(
+        entry.operation.authorEpochEd25519Key,
+        referenced.operation.authorEpochEd25519Key,
+      ) ||
+      referenced.operation.logicalWindow >
+        entry.payload.value.effectiveLogicalWindow ||
+      entry.payload.value.effectiveLogicalWindow >
+        referenced.payload.value.core.validThroughLogicalWindow ||
+      entry.operation.expiresAfterWindow <
+        referenced.payload.value.core.validThroughLogicalWindow
+    )
+      continue;
+    prequalifiedLeaveDependencies.set(hex(entry.operationId), referenced);
+    referencedPresenceSlots.add(hex(referenced.operation.semanticSlot));
+  }
+
+  const byPresenceSlot = new Map<string, PayloadValidatedReducerSnapshot[]>();
+  for (const entry of payloadValidated) {
+    if (
+      entry.payload.kind !== "PRESENCE" ||
+      !provenChainMembers.has(hex(entry.operationId)) ||
+      (!candidateActiveIds.has(hex(entry.operationId)) &&
+        !referencedPresenceSlots.has(hex(entry.operation.semanticSlot)))
+    )
+      continue;
+    const key = hex(entry.operation.semanticSlot);
+    const group = byPresenceSlot.get(key);
+    if (group === undefined) byPresenceSlot.set(key, [entry]);
+    else group.push(entry);
+  }
+  recordSemanticSlotForks(byPresenceSlot);
+
+  /*
+   * Resolve LEAVE's exact dependency before grouping leave semantic slots. A
+   * missing, wrong-kind, wrong-author, invalid-at-effective, or forked
+   * presence suspends only that leave and cannot poison a valid leave slot.
+   */
+  const validLeaveIds = new Set<string>();
+  const byLeaveSlot = new Map<string, PayloadValidatedReducerSnapshot[]>();
+  for (const entry of candidateActive) {
+    if (entry.payload.kind !== "LEAVE") continue;
+    const referenced = prequalifiedLeaveDependencies.get(
+      hex(entry.operationId),
+    );
+    if (
+      referenced === undefined ||
+      semanticForkedOperationIds.has(hex(referenced.operationId))
+    )
+      continue;
+    validLeaveIds.add(hex(entry.operationId));
+    const slot = hex(entry.operation.semanticSlot);
+    const group = byLeaveSlot.get(slot);
+    if (group === undefined) byLeaveSlot.set(slot, [entry]);
+    else group.push(entry);
+  }
+  recordSemanticSlotForks(byLeaveSlot);
+
+  /*
+   * A semantic-forked operation cannot remain the author-chain proof for a
+   * later sequence. Propagate exclusion through that same contiguous chain;
+   * explicit LEAVE dependencies were handled above.
+   */
+  for (const group of payloadValidatedByAuthorWindow.values()) {
+    let forkedPrefixSeen = false;
+    const ordered = [...group].sort((left, right) =>
+      left.operation.authorSequence < right.operation.authorSequence
+        ? -1
+        : left.operation.authorSequence > right.operation.authorSequence
+          ? 1
+          : 0,
+    );
+    for (const entry of ordered) {
+      const id = hex(entry.operationId);
+      if (semanticForkedOperationIds.has(id)) forkedPrefixSeen = true;
+      else if (forkedPrefixSeen) semanticForkedOperationIds.add(id);
+    }
+  }
+
+  const active: PayloadValidatedReducerSnapshot[] = candidateActive
+    .filter((entry) => {
+      const id = hex(entry.operationId);
+      if (semanticForkedOperationIds.has(id)) return false;
+      if (entry.payload.kind !== "LEAVE") return true;
+      const referenced = byOperationId.get(
+        hex(entry.payload.value.presenceOperationId),
+      );
+      return (
+        validLeaveIds.has(id) &&
+        referenced !== undefined &&
+        !semanticForkedOperationIds.has(hex(referenced.operationId))
+      );
+    })
+    .sort((left, right) => compareBytes(left.operationId, right.operationId));
 
   const privateActiveOperationIds = active.map((entry) => entry.operationId);
   const privateActivePairOuterOperationIds = active
@@ -410,27 +1116,207 @@ export const coreReduceOuter = async (
     privateActiveOperationIds,
   );
 
-  return {
+  const effectiveLeaveEntries = active.filter(
+    (entry) =>
+      entry.payload.kind === "LEAVE" &&
+      entry.payload.value.effectiveLogicalWindow <= referenceWindow,
+  );
+  const leftPresenceOperationIds = new Set(
+    effectiveLeaveEntries.map((entry) => {
+      if (entry.payload.kind !== "LEAVE")
+        throw new Error("coreReduce: impossible LEAVE narrowing failure");
+      return hex(entry.payload.value.presenceOperationId);
+    }),
+  );
+
+  const observedPresences: CorePresenceFactV1[] = [];
+  for (const entry of active) {
+    if (entry.payload.kind !== "PRESENCE") continue;
+    if (
+      referenceWindow > entry.payload.value.core.validThroughLogicalWindow ||
+      leftPresenceOperationIds.has(hex(entry.operationId))
+    )
+      continue;
+    observedPresences.push({
+      presenceOperationId: Uint8Array.from(entry.operationId),
+      authorEpochEd25519Key: Uint8Array.from(
+        entry.operation.authorEpochEd25519Key,
+      ),
+      logicalWindow: entry.operation.logicalWindow,
+      presence: decodePresenceV1(encodePresenceV1(entry.payload.value)),
+    });
+  }
+
+  const storeCatalogFacts: CoreStoreFactV1[] = [];
+  for (const entry of active) {
+    if (entry.payload.kind !== "STORE_HINT") continue;
+    const hint: StoreHintOperationV1 = entry.payload.value;
+    if (referenceWindow > hint.hintExpiresAfterLogicalWindow) continue;
+    const hintCopy = decodeStoreHintOperationV1(
+      encodeStoreHintOperationV1(hint),
+    );
+    storeCatalogFacts.push({
+      storeId: await storeId(hint.descriptor.storeIdentityEd25519Key),
+      descriptorGeneration: hint.descriptor.descriptorGeneration,
+      descriptorHash: await descriptorHash(hint.descriptor),
+      sourceOperationId: Uint8Array.from(entry.operationId),
+      descriptor: hintCopy.descriptor,
+      routes: hintCopy.routes,
+      hintValidThroughLogicalWindow: hint.hintExpiresAfterLogicalWindow,
+    });
+  }
+  storeCatalogFacts.sort(
+    (left, right) =>
+      compareBytes(left.storeId, right.storeId) ||
+      (left.descriptorGeneration < right.descriptorGeneration
+        ? -1
+        : left.descriptorGeneration > right.descriptorGeneration
+          ? 1
+          : 0) ||
+      compareBytes(left.descriptorHash, right.descriptorHash) ||
+      compareBytes(left.sourceOperationId, right.sourceOperationId),
+  );
+
+  /*
+   * Only the greatest live generation for one store can activate. Preserve
+   * every exact source fact, but emit one deterministic fault when that
+   * generation has multiple descriptor hashes.
+   */
+  const storeFactsById = new Map<string, CoreStoreFactV1[]>();
+  for (const fact of storeCatalogFacts) {
+    const key = hex(fact.storeId);
+    const group = storeFactsById.get(key);
+    if (group === undefined) storeFactsById.set(key, [fact]);
+    else group.push(fact);
+  }
+  for (const group of storeFactsById.values()) {
+    let maximumGeneration = group[0].descriptorGeneration;
+    for (const fact of group)
+      if (fact.descriptorGeneration > maximumGeneration)
+        maximumGeneration = fact.descriptorGeneration;
+    const hashesByHex = new Map<string, Uint8Array>();
+    for (const fact of group) {
+      if (fact.descriptorGeneration !== maximumGeneration) continue;
+      hashesByHex.set(hex(fact.descriptorHash), fact.descriptorHash);
+    }
+    if (hashesByHex.size < 2) continue;
+    const hashes = sortBytes([...hashesByHex.values()]);
+    faults.push({
+      kind: "store-generation-fork",
+      storeId: Uint8Array.from(group[0].storeId),
+      descriptorGeneration: maximumGeneration,
+      descriptorHashes: [
+        Uint8Array.from(hashes[0]),
+        Uint8Array.from(hashes[1]),
+      ],
+    });
+  }
+
+  const revocationFloors: CoreRevocationFloorV1[] = [];
+  for (const entry of active) {
+    if (entry.payload.kind !== "ADMISSION_REVOKE") continue;
+    const revoke: AdmissionRevokeV1 = entry.payload.value;
+    if (
+      revoke.effectiveLogicalWindow > referenceWindow ||
+      referenceWindow > revoke.expiresAfterLogicalWindow
+    )
+      continue;
+    revocationFloors.push({
+      stableIdentityCommitment: Uint8Array.from(
+        revoke.stableIdentityCommitment,
+      ),
+      minimumAcceptedGeneration: revoke.minimumAcceptedGeneration,
+      effectiveLogicalWindow: revoke.effectiveLogicalWindow,
+      validThroughLogicalWindow: revoke.expiresAfterLogicalWindow,
+      revokeOperationId: Uint8Array.from(entry.operationId),
+    });
+  }
+  revocationFloors.sort(
+    (left, right) =>
+      compareBytes(
+        left.stableIdentityCommitment,
+        right.stableIdentityCommitment,
+      ) ||
+      (left.minimumAcceptedGeneration < right.minimumAcceptedGeneration
+        ? -1
+        : left.minimumAcceptedGeneration > right.minimumAcceptedGeneration
+          ? 1
+          : 0) ||
+      (left.effectiveLogicalWindow < right.effectiveLogicalWindow
+        ? -1
+        : left.effectiveLogicalWindow > right.effectiveLogicalWindow
+          ? 1
+          : 0) ||
+      (left.validThroughLogicalWindow < right.validThroughLogicalWindow
+        ? -1
+        : left.validThroughLogicalWindow > right.validThroughLogicalWindow
+          ? 1
+          : 0) ||
+      compareBytes(left.revokeOperationId, right.revokeOperationId),
+  );
+
+  faults.sort((left, right) => {
+    const leftKindOrder = coreFaultKindOrder.get(left.kind);
+    const rightKindOrder = coreFaultKindOrder.get(right.kind);
+    if (leftKindOrder === undefined || rightKindOrder === undefined)
+      throw new Error("coreReduce: fault kind is absent from its schema");
+    const kindOrder = leftKindOrder - rightKindOrder;
+    if (kindOrder !== 0) return kindOrder;
+    if (
+      left.kind === "author-fork-or-overquota" &&
+      right.kind === "author-fork-or-overquota"
+    )
+      return (
+        compareBytes(left.authorEpochEd25519Key, right.authorEpochEd25519Key) ||
+        (left.logicalWindow < right.logicalWindow
+          ? -1
+          : left.logicalWindow > right.logicalWindow
+            ? 1
+            : 0)
+      );
+    if (
+      left.kind === "presence-or-leave-fork" &&
+      right.kind === "presence-or-leave-fork"
+    )
+      return compareBytes(left.semanticSlot, right.semanticSlot);
+    if (
+      left.kind === "store-generation-fork" &&
+      right.kind === "store-generation-fork"
+    )
+      return (
+        compareBytes(left.storeId, right.storeId) ||
+        (left.descriptorGeneration < right.descriptorGeneration
+          ? -1
+          : left.descriptorGeneration > right.descriptorGeneration
+            ? 1
+            : 0)
+      );
+    throw new Error("coreReduce: impossible fault-kind comparison");
+  });
+
+  const state: CoreRoomStateV1 = {
     version: 1,
     referenceWindow,
+    roomCapacityState:
+      observedPresences.length > roomPolicy.maxRoomMembers
+        ? "overcapacity"
+        : "within-policy",
     activeOperationIds: privateActiveOperationIds.map((operationId) =>
       Uint8Array.from(operationId),
     ),
+    observedPresences,
+    effectiveLeaveOperationIds: effectiveLeaveEntries.map((entry) =>
+      Uint8Array.from(entry.operationId),
+    ),
+    storeCatalogFacts,
+    revocationFloors,
     activePairOuterOperationIds: privateActivePairOuterOperationIds.map(
       (operationId) => Uint8Array.from(operationId),
     ),
-    // Sorted by the complete canonical identifying tuple (author key, then
-    // logical window), not by a nested proof ID.
-    faults: faults.sort(
-      (a, b) =>
-        compareBytes(a.authorEpochEd25519Key, b.authorEpochEd25519Key) ||
-        (a.logicalWindow < b.logicalWindow
-          ? -1
-          : a.logicalWindow > b.logicalWindow
-            ? 1
-            : 0),
-    ),
+    faults,
     operationsDigest,
-    pendingPayloadReduction: PENDING_PAYLOAD_REDUCTION,
   };
+  // The output codec is a final executable assertion that every projection is
+  // in its one schema-defined order and has no duplicate canonical values.
+  return decodeCoreRoomStateCanonical(await encodeCoreRoomStateV1(state));
 };

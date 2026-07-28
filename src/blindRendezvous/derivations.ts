@@ -18,6 +18,9 @@
 
 import { encodeCanonical } from "./canonicalSchema";
 import {
+  admissionGrantUnsignedV1Schema,
+  admissionGrantV1Schema,
+  admissionRevokeUnsignedV1Schema,
   authenticatedRoomOperationUnsignedV1Schema,
   authenticatedRoomOperationV1Schema,
   carrierEnvelopeV1Schema,
@@ -32,6 +35,8 @@ import {
   kernelModuleSemanticsSchema,
   kernelSourceTreeSchema,
   operationIdSetSchema,
+  presencePermitUnsignedV1Schema,
+  presenceProofTranscriptV1Schema,
   resolvedAssumptionSetSchema,
   roomPolicyV4Schema,
 } from "./schemas";
@@ -469,6 +474,84 @@ export const pairSemanticSlot = async (
   hashWithDomain(
     "p2party/pair-slot/v1",
     requireBytes("pairRoutingTag", pairRoutingTag, 32),
+  );
+
+/* ------------------------------------------------------------------ *
+ * Sections 4.8/4.9 — admission and presence transcripts
+ * ------------------------------------------------------------------ */
+
+/**
+ * `PresenceProofTranscriptHash =
+ *   H("p2party/presence-proof/v1" || Canonical(PresenceProofTranscript))`
+ */
+export const presenceProofTranscriptHash = async (
+  transcript: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/presence-proof/v1",
+    canonical(presenceProofTranscriptV1Schema, transcript),
+  );
+
+/**
+ * `PresenceOwnershipSignedMessage =
+ *   "p2party/presence-ownership-signature/v1" ||
+ *   PresenceProofTranscriptHash`
+ */
+export const presenceOwnershipSignedMessage = (
+  transcriptHash: Uint8Array,
+): Uint8Array =>
+  concatBytes(
+    domain("p2party/presence-ownership-signature/v1"),
+    requireBytes("PresenceProofTranscriptHash", transcriptHash, 32),
+  );
+
+/**
+ * `PresencePermitSignedMessage =
+ *   "p2party/presence-permit-signature/v1" ||
+ *   H(Canonical(PresencePermitV1 without authoritySignature))`
+ */
+export const presencePermitSignedMessage = async (
+  unsignedPermit: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/presence-permit-signature/v1"),
+    await sha256(canonical(presencePermitUnsignedV1Schema, unsignedPermit)),
+  );
+
+/**
+ * `AdmissionGrantId =
+ *   H("p2party/admission-grant/v1" || Canonical(AdmissionGrantV1))`
+ */
+export const admissionGrantId = async (grant: unknown): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/admission-grant/v1",
+    canonical(admissionGrantV1Schema, grant),
+  );
+
+/**
+ * `AdmissionGrantSignedMessage =
+ *   "p2party/admission-grant-signature/v1" ||
+ *   H(Canonical(AdmissionGrantV1 without authoritySignature))`
+ */
+export const admissionGrantSignedMessage = async (
+  unsignedGrant: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/admission-grant-signature/v1"),
+    await sha256(canonical(admissionGrantUnsignedV1Schema, unsignedGrant)),
+  );
+
+/**
+ * `AdmissionRevokeSignedMessage =
+ *   "p2party/admission-revoke-signature/v1" ||
+ *   H(Canonical(AdmissionRevokeV1 without authoritySignature))`
+ */
+export const admissionRevokeSignedMessage = async (
+  unsignedRevoke: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/admission-revoke-signature/v1"),
+    await sha256(canonical(admissionRevokeUnsignedV1Schema, unsignedRevoke)),
   );
 
 /* ------------------------------------------------------------------ *

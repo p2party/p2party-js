@@ -17,7 +17,7 @@
  */
 
 import { verify } from "../cryptography/ed25519";
-import { encodeCanonical } from "./canonicalSchema";
+import { decodeCanonicalStrict, encodeCanonical } from "./canonicalSchema";
 import { concatBytes, domain, sha256 } from "./derivations";
 import {
   storeDescriptorUnsignedV1Schema,
@@ -27,6 +27,8 @@ import {
 } from "./schemas";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
+
+const U64_MAX = 0xffffffffffffffffn;
 
 export interface StoreCheckpointChainStartV1 {
   deliveryProfileHash: Uint8Array;
@@ -69,6 +71,9 @@ export class StoreDescriptorError extends Error {
 const fail: (message: string) => never = (message) => {
   throw new StoreDescriptorError(message);
 };
+
+const isUnsignedU64 = (value: unknown): value is bigint =>
+  typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
   if (left.length !== right.length) return false;
@@ -196,7 +201,50 @@ export const publicRouteInstanceId = async (
 export type StoreValidity =
   { readonly valid: true } | { readonly valid: false; readonly reason: string };
 
-const invalid = (reason: string): StoreValidity => ({ valid: false, reason });
+type InvalidStoreValidity = Extract<StoreValidity, { readonly valid: false }>;
+
+const invalid = (reason: string): InvalidStoreValidity => ({
+  valid: false,
+  reason,
+});
+
+type ValidationSnapshot<T> =
+  { readonly valid: true; readonly value: T } | InvalidStoreValidity;
+
+const snapshotStoreDescriptor = (
+  descriptor: StoreDescriptorV1,
+): ValidationSnapshot<StoreDescriptorV1> => {
+  try {
+    const bytes = encodeCanonical(storeDescriptorV1Schema, descriptor);
+    return {
+      valid: true,
+      value: decodeCanonicalStrict(
+        storeDescriptorV1Schema,
+        bytes,
+      ) as StoreDescriptorV1,
+    };
+  } catch (error) {
+    return invalid(
+      error instanceof Error ? error.message : "descriptor is not canonical",
+    );
+  }
+};
+
+const snapshotStoreRoute = (
+  route: StoreRouteV1,
+): ValidationSnapshot<StoreRouteV1> => {
+  try {
+    const bytes = encodeCanonical(storeRouteV1Schema, route);
+    return {
+      valid: true,
+      value: decodeCanonicalStrict(storeRouteV1Schema, bytes) as StoreRouteV1,
+    };
+  } catch (error) {
+    return invalid(
+      error instanceof Error ? error.message : "route is not canonical",
+    );
+  }
+};
 
 const isSortedUnique = (values: readonly Uint8Array[]): boolean => {
   for (let index = 1; index < values.length; index++)
@@ -205,35 +253,18 @@ const isSortedUnique = (values: readonly Uint8Array[]): boolean => {
 };
 
 /**
- * Structural and signature validation of a descriptor.
+ * Validate one private, canonically decoded descriptor snapshot.
  *
- * `atUnixMs` is explicit rather than read from the clock: historical evidence
- * must be verifiable against the instant it described, and a descriptor that
- * has since expired does not retroactively invalidate a checkpoint it was valid
- * for.
+ * No caller-owned object reaches an await through this helper.
  */
-export const validateStoreDescriptor = async (
+const storeDescriptorAuthenticOwned = async (
   descriptor: StoreDescriptorV1,
-  atUnixMs: bigint,
   module?: LibCrypto,
 ): Promise<StoreValidity> => {
-  try {
-    encodeCanonical(storeDescriptorV1Schema, descriptor);
-  } catch (error) {
-    return invalid(
-      error instanceof Error ? error.message : "descriptor is not canonical",
-    );
-  }
-
   if (descriptor.version !== 1)
     return invalid("unsupported descriptor version");
   if (descriptor.notAfterUnixMs <= descriptor.notBeforeUnixMs)
     return invalid("descriptor validity interval is empty");
-  if (
-    atUnixMs < descriptor.notBeforeUnixMs ||
-    atUnixMs >= descriptor.notAfterUnixMs
-  )
-    return invalid("descriptor is not valid at this instant");
 
   if (descriptor.supportedDeliveryProfileHashes.length === 0)
     return invalid("descriptor supports no delivery profile");
@@ -273,31 +304,105 @@ export const validateStoreDescriptor = async (
 };
 
 /**
- * Validate a route against the descriptor it claims to belong to.
+ * `StoreDescriptorAuthentic(descriptor)`.
  *
- * The route's own signature is made with the store's identity key, so a route
- * lifted from another store or another descriptor generation fails here rather
- * than becoming an unauthorized path to this one.
+ * This predicate is deliberately timeless. It proves that the descriptor has
+ * one canonical encoding, a non-empty signed lease, a complete profile/chain
+ * projection, and a valid store-identity signature. Historical verification
+ * and core reduction must not make this answer depend on the wall clock.
  */
-export const validateStoreRoute = async (
-  route: StoreRouteV1,
+export const storeDescriptorAuthentic = async (
+  descriptor: StoreDescriptorV1,
+  module?: LibCrypto,
+): Promise<StoreValidity> => {
+  const snapshot = snapshotStoreDescriptor(descriptor);
+  if (!snapshot.valid) return snapshot;
+  return storeDescriptorAuthenticOwned(snapshot.value, module);
+};
+
+/**
+ * `StoreDescriptorActiveAt(descriptor, atUnixMs)`.
+ *
+ * Network adapters use an explicit transaction instant. The cheap half-open
+ * lease check precedes signature verification.
+ */
+export const storeDescriptorActiveAt = async (
   descriptor: StoreDescriptorV1,
   atUnixMs: bigint,
   module?: LibCrypto,
 ): Promise<StoreValidity> => {
-  try {
-    encodeCanonical(storeRouteV1Schema, route);
-  } catch (error) {
-    return invalid(
-      error instanceof Error ? error.message : "route is not canonical",
-    );
-  }
+  const snapshot = snapshotStoreDescriptor(descriptor);
+  if (!snapshot.valid) return snapshot;
 
+  if (!isUnsignedU64(atUnixMs))
+    return invalid("activation instant must be an unsigned 64-bit integer");
+  if (
+    atUnixMs < snapshot.value.notBeforeUnixMs ||
+    atUnixMs >= snapshot.value.notAfterUnixMs
+  )
+    return invalid("descriptor is not valid at this instant");
+  return storeDescriptorAuthenticOwned(snapshot.value, module);
+};
+
+const storeRouteSemanticallyValidOwned = (
+  route: StoreRouteV1,
+): StoreValidity => {
   if (route.version !== 1) return invalid("unsupported route version");
   if (route.notAfterUnixMs <= route.notBeforeUnixMs)
     return invalid("route lease is empty");
-  if (atUnixMs < route.notBeforeUnixMs || atUnixMs >= route.notAfterUnixMs)
-    return invalid("route lease does not cover this instant");
+  return { valid: true };
+};
+
+interface StoreRouteValidationSnapshot {
+  readonly valid: true;
+  readonly route: StoreRouteV1;
+  readonly descriptor: StoreDescriptorV1;
+}
+
+/**
+ * Snapshot the smaller, attacker-controlled route before even reading the
+ * descriptor. Its canonical and cheap semantic checks reject bad work before
+ * descriptor hashing or signature verification can begin.
+ */
+const snapshotStoreRouteValidation = (
+  route: StoreRouteV1,
+  descriptor: StoreDescriptorV1,
+): StoreRouteValidationSnapshot | InvalidStoreValidity => {
+  const routeSnapshot = snapshotStoreRoute(route);
+  if (!routeSnapshot.valid) return routeSnapshot;
+
+  const routeSemantic = storeRouteSemanticallyValidOwned(routeSnapshot.value);
+  if (!routeSemantic.valid) return routeSemantic;
+
+  const descriptorSnapshot = snapshotStoreDescriptor(descriptor);
+  if (!descriptorSnapshot.valid)
+    return invalid(`descriptor: ${descriptorSnapshot.reason}`);
+
+  return {
+    valid: true,
+    route: routeSnapshot.value,
+    descriptor: descriptorSnapshot.value,
+  };
+};
+
+/**
+ * Authenticate private, canonically decoded validation snapshots.
+ *
+ * The route has already passed its cheap semantic checks before this helper is
+ * entered, so descriptor signature work cannot be induced by a malformed
+ * route.
+ */
+const storeRouteAuthenticOwned = async (
+  route: StoreRouteV1,
+  descriptor: StoreDescriptorV1,
+  module?: LibCrypto,
+): Promise<StoreValidity> => {
+  const descriptorAuthentic = await storeDescriptorAuthenticOwned(
+    descriptor,
+    module,
+  );
+  if (!descriptorAuthentic.valid)
+    return invalid(`descriptor: ${descriptorAuthentic.reason}`);
 
   if (
     !bytesEqual(
@@ -318,6 +423,65 @@ export const validateStoreRoute = async (
   if (!verified) return invalid("route signature does not verify");
   return { valid: true };
 };
+
+/**
+ * `StoreRouteAuthentic(route, descriptor)`.
+ *
+ * Descriptor authenticity is part of this predicate. The route signature is
+ * made with that descriptor's store identity key, so a route lifted from
+ * another store or descriptor generation cannot become an authorized path.
+ */
+export const storeRouteAuthentic = async (
+  route: StoreRouteV1,
+  descriptor: StoreDescriptorV1,
+  module?: LibCrypto,
+): Promise<StoreValidity> => {
+  const snapshot = snapshotStoreRouteValidation(route, descriptor);
+  if (!snapshot.valid) return snapshot;
+  return storeRouteAuthenticOwned(snapshot.route, snapshot.descriptor, module);
+};
+
+/**
+ * `StoreRouteActiveAt(route, descriptor, atUnixMs)`.
+ *
+ * This checks the route's own half-open lease before timeless route and
+ * descriptor authenticity. Callers that also require the descriptor itself to
+ * be active at the same instant must check `storeDescriptorActiveAt` as the
+ * specification requires for that operation.
+ */
+export const storeRouteActiveAt = async (
+  route: StoreRouteV1,
+  descriptor: StoreDescriptorV1,
+  atUnixMs: bigint,
+  module?: LibCrypto,
+): Promise<StoreValidity> => {
+  const snapshot = snapshotStoreRouteValidation(route, descriptor);
+  if (!snapshot.valid) return snapshot;
+
+  if (!isUnsignedU64(atUnixMs))
+    return invalid("activation instant must be an unsigned 64-bit integer");
+  if (
+    atUnixMs < snapshot.route.notBeforeUnixMs ||
+    atUnixMs >= snapshot.route.notAfterUnixMs
+  )
+    return invalid("route lease does not cover this instant");
+  return storeRouteAuthenticOwned(snapshot.route, snapshot.descriptor, module);
+};
+
+/**
+ * Compatibility wrapper for callers that validate descriptor activation.
+ *
+ * New timeless protocol checks should call `storeDescriptorAuthentic`
+ * directly.
+ */
+export const validateStoreDescriptor = storeDescriptorActiveAt;
+
+/**
+ * Compatibility wrapper for callers that validate route activation.
+ *
+ * New timeless protocol checks should call `storeRouteAuthentic` directly.
+ */
+export const validateStoreRoute = storeRouteActiveAt;
 
 /** Whether a descriptor serves a given delivery profile. */
 export const descriptorSupportsProfile = (
@@ -353,6 +517,7 @@ export const chainStartConflict = async (
   first: StoreDescriptorV1,
   second: StoreDescriptorV1,
   deliveryProfileHash: Uint8Array,
+  module?: LibCrypto,
 ): Promise<
   | { readonly conflicting: false }
   | {
@@ -360,32 +525,63 @@ export const chainStartConflict = async (
       readonly canonicalOrder: readonly [StoreDescriptorV1, StoreDescriptorV1];
     }
 > => {
+  /*
+   * Own all caller-controlled bytes before the first asynchronous hash or
+   * signature operation. A conflict is permanent evidence, so returning a
+   * caller-mutated descriptor or accepting an unsigned shape would be unsafe.
+   */
+  const firstSnapshot = snapshotStoreDescriptor(first);
+  const secondSnapshot = snapshotStoreDescriptor(second);
+  if (!firstSnapshot.valid || !secondSnapshot.valid)
+    return { conflicting: false };
+  if (
+    !(deliveryProfileHash instanceof Uint8Array) ||
+    deliveryProfileHash.length !== 32
+  )
+    return { conflicting: false };
+  const privateFirst = firstSnapshot.value;
+  const privateSecond = secondSnapshot.value;
+  const privateDeliveryProfileHash = Uint8Array.from(deliveryProfileHash);
+
   const [firstStore, secondStore] = await Promise.all([
-    storeId(first.storeIdentityEd25519Key),
-    storeId(second.storeIdentityEd25519Key),
+    storeId(privateFirst.storeIdentityEd25519Key),
+    storeId(privateSecond.storeIdentityEd25519Key),
   ]);
   if (!bytesEqual(firstStore, secondStore)) return { conflicting: false };
 
   if (
-    !descriptorSupportsProfile(first, deliveryProfileHash) ||
-    !descriptorSupportsProfile(second, deliveryProfileHash)
+    !descriptorSupportsProfile(privateFirst, privateDeliveryProfileHash) ||
+    !descriptorSupportsProfile(privateSecond, privateDeliveryProfileHash)
   )
     return { conflicting: false };
 
-  const firstStart = descriptorChainStart(first, deliveryProfileHash);
-  const secondStart = descriptorChainStart(second, deliveryProfileHash);
+  const firstStart = descriptorChainStart(
+    privateFirst,
+    privateDeliveryProfileHash,
+  );
+  const secondStart = descriptorChainStart(
+    privateSecond,
+    privateDeliveryProfileHash,
+  );
   if (firstStart === null || secondStart === null || firstStart === secondStart)
     return { conflicting: false };
 
+  const [firstAuthentic, secondAuthentic] = await Promise.all([
+    storeDescriptorAuthenticOwned(privateFirst, module),
+    storeDescriptorAuthenticOwned(privateSecond, module),
+  ]);
+  if (!firstAuthentic.valid || !secondAuthentic.valid)
+    return { conflicting: false };
+
   const [firstHash, secondHash] = await Promise.all([
-    descriptorHash(first),
-    descriptorHash(second),
+    descriptorHash(privateFirst),
+    descriptorHash(privateSecond),
   ]);
   return {
     conflicting: true,
     canonicalOrder:
       compareBytes(firstHash, secondHash) < 0
-        ? [first, second]
-        : [second, first],
+        ? [privateFirst, privateSecond]
+        : [privateSecond, privateFirst],
   };
 };

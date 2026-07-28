@@ -20,14 +20,21 @@ import {
   operationId,
   operationSignatureMessage,
   pairSemanticSlot,
+  policyHash,
+  roomContextConfirmation,
+  roomContextId,
 } from "./derivations";
+import { decodeAndValidateNonPairOperationPayload } from "./operationPayload";
 import { decodePairStepEnvelopeV1 } from "./pairStepEnvelope";
+import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
 import {
   OPERATION_PAYLOAD_CLASS_BYTES,
+  authenticatedRoomOperationUnsignedV1Schema,
   authenticatedRoomOperationV1Schema,
 } from "./schemas";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { DecodedNonPairOperationPayloadV1 } from "./operationPayload";
 import type { PairStepEnvelopeV1 } from "./pairStepEnvelope";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
 
@@ -120,8 +127,36 @@ const OPERATION_KIND_RULES: Readonly<
 
 const checkedAdd = (left: bigint, right: bigint): bigint => {
   const sum = left + right;
-  if (sum > 0xffffffffffffffffn) fail("checked addition overflowed");
+  if (left < 0n || right < 0n || sum > 0xffffffffffffffffn)
+    fail("checked addition overflowed");
   return sum;
+};
+
+/**
+ * Longest period for which exact signed bytes can still be needed as inert
+ * author/dependency evidence.
+ *
+ * A LEAVE can be created at the end of a presence's transient lifetime and
+ * itself remain transient for one full retention interval, hence the checked
+ * two-interval dependency bound. Pair-causal and authority horizons may be
+ * longer and share this one SSOT.
+ */
+export const requiredRoomRetentionWindows = (
+  roomPolicy: RoomPolicyV4,
+): bigint => {
+  const limits = roomPolicy.protocolLimits;
+  const dependencyEvidenceWindows =
+    BigInt(limits.operationRetentionWindows) * 2n;
+  const pairWindows = BigInt(limits.pairControlRetentionWindows);
+  const authorityWindows =
+    roomPolicy.admissionFloor.mode === "authority-grant"
+      ? BigInt(limits.maxFutureLogicalWindows) +
+        BigInt(roomPolicy.admissionFloor.maxAuthorityCredentialLifetimeWindows)
+      : 0n;
+  return [dependencyEvidenceWindows, pairWindows, authorityWindows].reduce(
+    (maximum, value) => (value > maximum ? value : maximum),
+    0n,
+  );
 };
 
 /**
@@ -145,13 +180,181 @@ export const operationPayloadClassFor = (
   );
 };
 
+declare const operationValidationContextBrand: unique symbol;
+
+/**
+ * A process-local proof that one exact capability and one exact policy were
+ * used to derive this room context.
+ *
+ * The brand is backed by a private WeakMap, not by a caller-constructible
+ * property. This prevents a caller from pairing a real RoomContextId with a
+ * different policy and thereby changing admission semantics.
+ */
 export interface OperationValidationContext {
+  readonly [operationValidationContextBrand]: true;
+  /** Canonical local `RoomContextId`; never supplied by a carrier. */
+  readonly roomContextId: Uint8Array;
   /** `RoomContextConfirmation` derived from the local room context. */
   readonly roomContextConfirmation: Uint8Array;
   readonly roomPolicy: RoomPolicyV4;
   /** The explicit reference window; never ambient wall-clock time. */
   readonly referenceWindow: bigint;
 }
+
+interface PrivateOperationValidationContext {
+  readonly roomContextId: Uint8Array;
+  readonly roomContextConfirmation: Uint8Array;
+  readonly roomPolicy: RoomPolicyV4;
+  readonly roomPolicyBytes: Uint8Array;
+  readonly referenceWindow: bigint;
+}
+
+const operationValidationContexts = new WeakMap<
+  object,
+  PrivateOperationValidationContext
+>();
+
+const requireReferenceWindow = (referenceWindow: bigint): void => {
+  if (
+    typeof referenceWindow !== "bigint" ||
+    referenceWindow < 0n ||
+    referenceWindow > 0xffffffffffffffffn
+  )
+    fail("referenceWindow must be an unsigned 64-bit integer");
+};
+
+const exposeOperationValidationContext = (
+  privateContext: PrivateOperationValidationContext,
+): OperationValidationContext => {
+  const exposed = Object.freeze({
+    roomContextId: Uint8Array.from(privateContext.roomContextId),
+    roomContextConfirmation: Uint8Array.from(
+      privateContext.roomContextConfirmation,
+    ),
+    roomPolicy: decodeRoomPolicyV4(privateContext.roomPolicyBytes),
+    referenceWindow: privateContext.referenceWindow,
+  } as OperationValidationContext);
+  operationValidationContexts.set(exposed, {
+    roomContextId: Uint8Array.from(privateContext.roomContextId),
+    roomContextConfirmation: Uint8Array.from(
+      privateContext.roomContextConfirmation,
+    ),
+    roomPolicy: decodeRoomPolicyV4(privateContext.roomPolicyBytes),
+    roomPolicyBytes: Uint8Array.from(privateContext.roomPolicyBytes),
+    referenceWindow: privateContext.referenceWindow,
+  });
+  return exposed;
+};
+
+const privateOperationValidationContextFor = (
+  context: OperationValidationContext,
+): PrivateOperationValidationContext => {
+  const stored =
+    typeof context === "object" && context !== null
+      ? operationValidationContexts.get(context)
+      : undefined;
+  if (stored === undefined)
+    fail(
+      "validation context must be created by createOperationValidationContext",
+    );
+
+  let exposedPolicyBytes: Uint8Array;
+  try {
+    exposedPolicyBytes = encodeRoomPolicyV4(context.roomPolicy);
+  } catch {
+    fail("validation context was mutated after initialization");
+  }
+  if (
+    !bytesEqual(context.roomContextId, stored.roomContextId) ||
+    !bytesEqual(
+      context.roomContextConfirmation,
+      stored.roomContextConfirmation,
+    ) ||
+    !bytesEqual(exposedPolicyBytes, stored.roomPolicyBytes) ||
+    context.referenceWindow !== stored.referenceWindow
+  )
+    fail("validation context was mutated after initialization");
+
+  return {
+    roomContextId: Uint8Array.from(stored.roomContextId),
+    roomContextConfirmation: Uint8Array.from(stored.roomContextConfirmation),
+    roomPolicy: decodeRoomPolicyV4(stored.roomPolicyBytes),
+    roomPolicyBytes: Uint8Array.from(stored.roomPolicyBytes),
+    referenceWindow: stored.referenceWindow,
+  };
+};
+
+/**
+ * Initialize the sole trusted operation-validation context from room secret
+ * material. Neither the capability nor PolicyHash is retained or exposed.
+ */
+export const createOperationValidationContext = async (
+  capability: Uint8Array,
+  roomPolicy: RoomPolicyV4,
+  referenceWindow: bigint,
+): Promise<OperationValidationContext> => {
+  const privateCapability = Uint8Array.from(capability);
+  if (privateCapability.length !== 32)
+    fail("room capability must be exactly 32 bytes");
+  requireReferenceWindow(referenceWindow);
+  const roomPolicyBytes = encodeRoomPolicyV4(roomPolicy);
+  const privatePolicy = decodeRoomPolicyV4(roomPolicyBytes);
+  const policyDigest = await policyHash(privatePolicy);
+  const contextId = await roomContextId(privateCapability, policyDigest);
+  const confirmation = await roomContextConfirmation(contextId);
+  return exposeOperationValidationContext({
+    roomContextId: contextId,
+    roomContextConfirmation: confirmation,
+    roomPolicy: privatePolicy,
+    roomPolicyBytes,
+    referenceWindow,
+  });
+};
+
+/**
+ * Rebind an initialized room to an explicit reference window without needing
+ * to expose or reload its capability.
+ */
+export const operationValidationContextAt = (
+  context: OperationValidationContext,
+  referenceWindow: bigint,
+): OperationValidationContext => {
+  requireReferenceWindow(referenceWindow);
+  const stored = privateOperationValidationContextFor(context);
+  return exposeOperationValidationContext({
+    ...stored,
+    referenceWindow,
+  });
+};
+
+/** Return an independently owned, still-branded copy for an async boundary. */
+export const snapshotOperationValidationContext = (
+  context: OperationValidationContext,
+): OperationValidationContext =>
+  exposeOperationValidationContext(
+    privateOperationValidationContextFor(context),
+  );
+
+const snapshotValidationInputs = (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+): {
+  readonly operation: AuthenticatedRoomOperationV1;
+  readonly context: OperationValidationContext;
+} => {
+  const operationBytes = encodeCanonical(
+    authenticatedRoomOperationV1Schema,
+    operation,
+  );
+  const privateContext = privateOperationValidationContextFor(context);
+  return {
+    operation: decodeCanonicalStrict(
+      authenticatedRoomOperationV1Schema,
+      operationBytes,
+    ) as AuthenticatedRoomOperationV1,
+    context: exposeOperationValidationContext(privateContext),
+  };
+};
 
 const decodeValidatedPairEnvelope = (
   operation: AuthenticatedRoomOperationV1,
@@ -176,6 +379,8 @@ interface OperationStructuralValidationResult {
   readonly pairEnvelope: PairStepEnvelopeV1 | null;
 }
 
+type OperationReferenceMode = "active-or-future" | "candidate-evidence";
+
 /**
  * Structural and bound validation that needs no signature check.
  *
@@ -186,6 +391,7 @@ interface OperationStructuralValidationResult {
 const validateOperationStructureInternal = (
   operation: AuthenticatedRoomOperationV1,
   context: OperationValidationContext,
+  referenceMode: OperationReferenceMode,
 ): OperationStructuralValidationResult => {
   // Encoding is the shape gate: unknown or missing fields, accessor-backed
   // properties, wrong widths, unsorted dependencies, and unregistered enum
@@ -248,12 +454,33 @@ const validateOperationStructureInternal = (
 
   const skew = BigInt(limits.maxClockSkewWindows);
   const future = BigInt(limits.maxFutureLogicalWindows);
-  if (operation.logicalWindow > checkedAdd(context.referenceWindow, future))
+  if (
+    operation.logicalWindow > context.referenceWindow &&
+    operation.logicalWindow - context.referenceWindow > future
+  )
     fail("operation is further in the future than maxFutureLogicalWindows");
-  if (context.referenceWindow > checkedAdd(operation.expiresAfterWindow, skew))
-    fail("operation is expired at this reference window");
   if (operation.logicalWindow > operation.expiresAfterWindow)
     fail("operation expires before its logical window");
+
+  const expiredBeyondSkew =
+    context.referenceWindow > operation.expiresAfterWindow &&
+    context.referenceWindow - operation.expiresAfterWindow > skew;
+  if (referenceMode === "active-or-future" && expiredBeyondSkew)
+    fail("operation is expired at this reference window");
+  if (referenceMode === "candidate-evidence") {
+    // Compute this for every candidate, not only an already-expired one. An
+    // overflow is candidate-local invalidity at ingress and can never abort a
+    // later room reduction containing unrelated honest operations.
+    const evidenceValidThrough = checkedAdd(
+      checkedAdd(
+        operation.logicalWindow,
+        requiredRoomRetentionWindows(context.roomPolicy),
+      ),
+      skew,
+    );
+    if (context.referenceWindow > evidenceValidThrough)
+      fail("operation is beyond its retained-evidence horizon");
+  }
 
   const lifetimeSpan = operation.expiresAfterWindow - operation.logicalWindow;
   if (
@@ -287,6 +514,12 @@ const validateOperationStructureInternal = (
     const floor = context.roomPolicy.admissionFloor;
     if (floor.mode !== "authority-grant")
       fail("ADMISSION_REVOKE requires an authority-grant room policy");
+    const expectedExpiry = checkedAdd(
+      checkedAdd(operation.logicalWindow, future),
+      BigInt(floor.maxAuthorityCredentialLifetimeWindows),
+    );
+    if (operation.expiresAfterWindow !== expectedExpiry)
+      fail("ADMISSION_REVOKE outer expiry must use its exact grant horizon");
     if (
       !bytesEqual(
         operation.authorEpochEd25519Key,
@@ -310,7 +543,11 @@ export const validateOperationStructure = (
   operation: AuthenticatedRoomOperationV1,
   context: OperationValidationContext,
 ): void => {
-  validateOperationStructureInternal(operation, context);
+  validateOperationStructureInternal(
+    operation,
+    snapshotOperationValidationContext(context),
+    "active-or-future",
+  );
 };
 
 /** Verify the author signature over the exact domain-separated transcript. */
@@ -319,30 +556,42 @@ export const verifyOperationSignature = async (
   module?: LibCrypto,
 ): Promise<boolean> => {
   const { authorSignature, ...unsigned } = operation;
-  return verify(
-    operationSignatureMessage(unsigned),
-    authorSignature,
-    operation.authorEpochEd25519Key,
-    module,
-  );
+  const signature = Uint8Array.from(authorSignature);
+  const publicKey = Uint8Array.from(operation.authorEpochEd25519Key);
+  const message = operationSignatureMessage(unsigned);
+  return verify(message, signature, publicKey, module);
 };
 
+export type DecodedOperationPayloadV1 =
+  | DecodedNonPairOperationPayloadV1
+  | { readonly kind: "PAIR_STEP"; readonly value: PairStepEnvelopeV1 };
+
 /**
- * Full outer validation: structure, bounds, then signature.
+ * Validate the room-wide outer candidate without non-pair payload work.
  *
- * Order matters — an operation that fails a bound never reaches the
- * verification, and an operation that fails verification never reaches any
- * set, roster, admission view, catalog, or pair ledger (SEC-003).
+ * CoreReduce uses this stage to count authenticated candidates and classify an
+ * entire author/window as forked or overquota before spending work on nested
+ * authority/store signatures. The returned pair envelope is already part of
+ * endpoint-independent outer framing; null means the signed kind is non-pair.
  */
-export const validateOperation = async (
+const validateOperationOuterOwned = async (
   operation: AuthenticatedRoomOperationV1,
   context: OperationValidationContext,
+  referenceMode: OperationReferenceMode,
   module?: LibCrypto,
-): Promise<void> => {
+): Promise<PairStepEnvelopeV1 | null> => {
   const { pairEnvelope } = validateOperationStructureInternal(
     operation,
     context,
+    referenceMode,
   );
+
+  const derivedConfirmation = await roomContextConfirmation(
+    context.roomContextId,
+  );
+  if (!bytesEqual(derivedConfirmation, context.roomContextConfirmation))
+    fail("validation context has an inconsistent RoomContextId confirmation");
+
   if (pairEnvelope !== null) {
     const expectedSemanticSlot = await pairSemanticSlot(
       pairEnvelope.pairRoutingTag,
@@ -352,6 +601,84 @@ export const validateOperation = async (
   }
   if (!(await verifyOperationSignature(operation, module)))
     fail("author signature does not verify");
+  return pairEnvelope;
+};
+
+export const validateOperationOuter = async (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<PairStepEnvelopeV1 | null> => {
+  const snapshot = snapshotValidationInputs(operation, context);
+  return validateOperationOuterOwned(
+    snapshot.operation,
+    snapshot.context,
+    "active-or-future",
+    module,
+  );
+};
+
+/**
+ * Authenticate a bounded reducer candidate.
+ *
+ * Unlike `validateOperationOuter`, this accepts exact outer-expired bytes only
+ * through the policy-derived inert evidence horizon. It still performs no
+ * nested payload signature work, so author quota/fork classification remains
+ * the first expensive-work boundary.
+ */
+export const validateOperationCandidateOuter = async (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<PairStepEnvelopeV1 | null> => {
+  const snapshot = snapshotValidationInputs(operation, context);
+  return validateOperationOuterOwned(
+    snapshot.operation,
+    snapshot.context,
+    "candidate-evidence",
+    module,
+  );
+};
+
+/**
+ * Full intrinsic validation: authenticated outer candidate followed by the
+ * one nested payload codec selected by its signed kind.
+ *
+ * LEAVE's referenced-presence rule remains set-dependent and is completed by
+ * CoreReduce after the dependency is available.
+ */
+export const validateOperationAndDecodePayload = async (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<DecodedOperationPayloadV1> => {
+  const snapshot = snapshotValidationInputs(operation, context);
+  const pairEnvelope = await validateOperationOuterOwned(
+    snapshot.operation,
+    snapshot.context,
+    "active-or-future",
+    module,
+  );
+
+  if (pairEnvelope !== null) return { kind: "PAIR_STEP", value: pairEnvelope };
+
+  return decodeAndValidateNonPairOperationPayload(
+    snapshot.operation,
+    {
+      roomContextId: snapshot.context.roomContextId,
+      roomPolicy: snapshot.context.roomPolicy,
+    },
+    module,
+  );
+};
+
+/** Validate an operation without exposing its decoded payload artifact. */
+export const validateOperation = async (
+  operation: AuthenticatedRoomOperationV1,
+  context: OperationValidationContext,
+  module?: LibCrypto,
+): Promise<void> => {
+  await validateOperationAndDecodePayload(operation, context, module);
 };
 
 /** Sign an operation over the exact transcript and return the signed form. */
@@ -359,14 +686,24 @@ export const signOperation = async (
   unsigned: UnsignedRoomOperationV1,
   authorSecretKey: Uint8Array,
   module?: LibCrypto,
-): Promise<AuthenticatedRoomOperationV1> => ({
-  ...unsigned,
-  authorSignature: await sign(
-    operationSignatureMessage(unsigned),
-    authorSecretKey,
-    module,
-  ),
-});
+): Promise<AuthenticatedRoomOperationV1> => {
+  const unsignedBytes = encodeCanonical(
+    authenticatedRoomOperationUnsignedV1Schema,
+    unsigned,
+  );
+  const privateUnsigned = decodeCanonicalStrict(
+    authenticatedRoomOperationUnsignedV1Schema,
+    unsignedBytes,
+  ) as UnsignedRoomOperationV1;
+  return {
+    ...privateUnsigned,
+    authorSignature: await sign(
+      operationSignatureMessage(privateUnsigned),
+      Uint8Array.from(authorSecretKey),
+      module,
+    ),
+  };
+};
 
 /** The unique canonical encoding of a signed operation. */
 export const encodeOperation = (

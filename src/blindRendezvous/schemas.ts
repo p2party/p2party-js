@@ -48,6 +48,17 @@ export const MAX_OPERATION_PAYLOAD_BYTES = OPERATION_PAYLOAD_CLASS_BYTES[1];
 /** Section 4.11 suite-1 bootstrap KEM ciphertext width. */
 export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 = 1120;
 
+/** Sections 4.9/4.11 suite-1 ML-KEM-768 + X25519 public-key width. */
+export const RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1 = 1216;
+
+/** Section 4.2 bounds one encrypted store hint to 255 exact routes. */
+export const MAX_STORE_HINT_ROUTES_V1 = 0xff;
+
+/**
+ * Leaves one 16-bit collection slot for the canonical quota+1 physical proof.
+ */
+export const MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1 = 0xfffe;
+
 /** Section 4.0 closes the kernel at 8 modules and 9 entrypoints. */
 export const KERNEL_MODULE_IDS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 export const KERNEL_ENTRYPOINT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -797,4 +808,246 @@ export const storeRouteUnsignedV1Schema = record(
 export const storeRouteV1Schema = record("StoreRouteV1", [
   ...storeRouteFields,
   { name: "routeSignature", type: bytes64 },
+]);
+
+/* ------------------------------------------------------------------ *
+ * Sections 4.8/4.9 — admission, presence, leave, and store hints
+ * ------------------------------------------------------------------ */
+
+const admissionGrantFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "roomContextId", type: bytes32 },
+  { name: "stableEd25519PublicKey", type: bytes32 },
+  { name: "generation", type: u64 },
+  { name: "issuedAtLogicalWindow", type: u64 },
+  { name: "notBeforeLogicalWindow", type: u64 },
+  { name: "notAfterLogicalWindow", type: u64 },
+];
+
+export const admissionGrantUnsignedV1Schema = record(
+  "AdmissionGrantUnsignedV1",
+  admissionGrantFields,
+);
+
+export const admissionGrantV1Schema = record("AdmissionGrantV1", [
+  ...admissionGrantFields,
+  { name: "authoritySignature", type: bytes64 },
+]);
+
+const admissionRevokeFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "roomContextId", type: bytes32 },
+  { name: "stableIdentityCommitment", type: bytes32 },
+  { name: "minimumAcceptedGeneration", type: u64 },
+  { name: "effectiveLogicalWindow", type: u64 },
+  { name: "expiresAfterLogicalWindow", type: u64 },
+];
+
+export const admissionRevokeUnsignedV1Schema = record(
+  "AdmissionRevokeUnsignedV1",
+  admissionRevokeFields,
+);
+
+export const admissionRevokeV1Schema = record("AdmissionRevokeV1", [
+  ...admissionRevokeFields,
+  { name: "authoritySignature", type: bytes64 },
+]);
+
+export const presenceCoreV1Schema = record("PresenceCoreV1", [
+  { name: "version", type: u8 },
+  { name: "stableIdentityCommitment", type: bytes32 },
+  {
+    name: "rendezvousHybridKemPublicKey",
+    type: fixedBytes(RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1),
+  },
+  { name: "receiverKeyValidThroughLogicalWindow", type: u64 },
+  { name: "presenceNonce", type: bytes32 },
+  { name: "validThroughLogicalWindow", type: u64 },
+]);
+
+const presencePermitFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "roomContextId", type: bytes32 },
+  { name: "presenceProofTranscriptHash", type: bytes32 },
+  { name: "permitSerial", type: bytes32 },
+  { name: "generation", type: u64 },
+  { name: "issuedAtLogicalWindow", type: u64 },
+  { name: "notBeforeLogicalWindow", type: u64 },
+  { name: "notAfterLogicalWindow", type: u64 },
+];
+
+export const presencePermitUnsignedV1Schema = record(
+  "PresencePermitUnsignedV1",
+  presencePermitFields,
+);
+
+export const presencePermitV1Schema = record("PresencePermitV1", [
+  ...presencePermitFields,
+  { name: "authoritySignature", type: bytes64 },
+]);
+
+export const presenceV1Schema = record("PresenceV1", [
+  { name: "core", type: presenceCoreV1Schema },
+  { name: "stableOwnershipSignature", type: bytes64 },
+  { name: "authorityPermit", type: optional(presencePermitV1Schema) },
+]);
+
+/**
+ * Canonical input to `PresenceProofTranscriptHash`.
+ *
+ * The declaration order is protocol-visible. Keeping it in the schema SSOT
+ * prevents an implementation from silently reordering the outer bindings.
+ */
+export const presenceProofTranscriptV1Schema = record(
+  "PresenceProofTranscriptV1",
+  [
+    { name: "roomContextId", type: bytes32 },
+    { name: "policyHash", type: bytes32 },
+    { name: "logicalWindow", type: u64 },
+    { name: "authorEpochEd25519Key", type: bytes32 },
+    { name: "core", type: presenceCoreV1Schema },
+  ],
+);
+
+export const leaveV1Schema = record("LeaveV1", [
+  { name: "version", type: u8 },
+  { name: "presenceOperationId", type: bytes32 },
+  { name: "effectiveLogicalWindow", type: u64 },
+]);
+
+export const storeHintOperationV1Schema = record("StoreHintOperationV1", [
+  { name: "version", type: u8 },
+  { name: "descriptor", type: storeDescriptorV1Schema },
+  // RouteId, not route bytes, is the semantic order key. The payload
+  // validator derives and checks that order after this sequence decode.
+  {
+    name: "routes",
+    type: array(storeRouteV1Schema, MAX_STORE_HINT_ROUTES_V1, "sequence"),
+  },
+  { name: "hintExpiresAfterLogicalWindow", type: u64 },
+]);
+
+/* ------------------------------------------------------------------ *
+ * Section 4.7 — canonical core-reduction output
+ * ------------------------------------------------------------------ */
+
+export const corePresenceFactV1Schema = record("CorePresenceFactV1", [
+  { name: "presenceOperationId", type: bytes32 },
+  { name: "authorEpochEd25519Key", type: bytes32 },
+  { name: "logicalWindow", type: u64 },
+  { name: "presence", type: presenceV1Schema },
+]);
+
+/*
+ * Field order follows the canonical identifying tuple, not the interface's
+ * prose order. This makes the generic sorted-unique array codec the comparator
+ * SSOT for store facts.
+ */
+export const coreStoreFactV1Schema = record("CoreStoreFactV1", [
+  { name: "storeId", type: bytes32 },
+  { name: "descriptorGeneration", type: u64 },
+  { name: "descriptorHash", type: bytes32 },
+  { name: "sourceOperationId", type: bytes32 },
+  { name: "descriptor", type: storeDescriptorV1Schema },
+  {
+    name: "routes",
+    type: array(storeRouteV1Schema, MAX_STORE_HINT_ROUTES_V1, "sequence"),
+  },
+  { name: "hintValidThroughLogicalWindow", type: u64 },
+]);
+
+export const coreRevocationFloorV1Schema = record("CoreRevocationFloorV1", [
+  { name: "stableIdentityCommitment", type: bytes32 },
+  { name: "minimumAcceptedGeneration", type: u64 },
+  { name: "effectiveLogicalWindow", type: u64 },
+  { name: "validThroughLogicalWindow", type: u64 },
+  { name: "revokeOperationId", type: bytes32 },
+]);
+
+const coreAuthorFaultV1Schema = record("CoreAuthorFaultV1", [
+  {
+    name: "kind",
+    type: enumOf("CoreAuthorFaultKindV1", ["author-fork-or-overquota"]),
+  },
+  { name: "authorEpochEd25519Key", type: bytes32 },
+  { name: "logicalWindow", type: u64 },
+  { name: "proofOperationIds", type: array(bytes32, MAX_REGISTRY_ENTRIES) },
+]);
+
+const corePresenceOrLeaveFaultV1Schema = record("CorePresenceOrLeaveFaultV1", [
+  {
+    name: "kind",
+    type: enumOf("CorePresenceOrLeaveFaultKindV1", ["presence-or-leave-fork"]),
+  },
+  { name: "semanticSlot", type: bytes32 },
+  { name: "proofOperationIds", type: array(bytes32, 2) },
+]);
+
+const coreStoreGenerationFaultV1Schema = record("CoreStoreGenerationFaultV1", [
+  {
+    name: "kind",
+    type: enumOf("CoreStoreGenerationFaultKindV1", ["store-generation-fork"]),
+  },
+  { name: "storeId", type: bytes32 },
+  { name: "descriptorGeneration", type: u64 },
+  { name: "descriptorHashes", type: array(bytes32, 2) },
+]);
+
+/**
+ * Variant order is the canonical fault order and therefore protocol-visible.
+ * Reducer sorting derives its order from this descriptor.
+ */
+export const coreFaultV1Schema = union("CoreFaultV1", "kind", [
+  {
+    tag: "author-fork-or-overquota",
+    type: coreAuthorFaultV1Schema,
+  },
+  {
+    tag: "presence-or-leave-fork",
+    type: corePresenceOrLeaveFaultV1Schema,
+  },
+  {
+    tag: "store-generation-fork",
+    type: coreStoreGenerationFaultV1Schema,
+  },
+]);
+
+export const roomCapacityStateV1Schema = enumOf("RoomCapacityStateV1", [
+  "within-policy",
+  "overcapacity",
+]);
+
+export const coreRoomStateV1Schema = record("CoreRoomStateV1", [
+  { name: "version", type: u8 },
+  { name: "referenceWindow", type: u64 },
+  { name: "roomCapacityState", type: roomCapacityStateV1Schema },
+  {
+    name: "activeOperationIds",
+    type: array(bytes32, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "observedPresences",
+    type: array(corePresenceFactV1Schema, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "effectiveLeaveOperationIds",
+    type: array(bytes32, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "storeCatalogFacts",
+    type: array(coreStoreFactV1Schema, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "revocationFloors",
+    type: array(coreRevocationFloorV1Schema, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "activePairOuterOperationIds",
+    type: array(bytes32, MAX_REGISTRY_ENTRIES),
+  },
+  {
+    name: "faults",
+    type: array(coreFaultV1Schema, MAX_REGISTRY_ENTRIES),
+  },
+  { name: "operationsDigest", type: bytes32 },
 ]);

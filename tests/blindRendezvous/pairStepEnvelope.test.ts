@@ -1,13 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import { newKeyPair } from "../../src/cryptography/ed25519";
+import { pairSemanticSlot } from "../../src/blindRendezvous/derivations";
 import {
-  pairSemanticSlot,
-  policyHash,
-  roomContextConfirmation,
-  roomContextId,
-} from "../../src/blindRendezvous/derivations";
-import {
+  createOperationValidationContext,
   operationPaddingFor,
   signOperation,
   validateOperation,
@@ -60,9 +56,12 @@ const validEnvelope = (
 
 const capability = new Uint8Array(32).fill(0x53);
 const roomPolicy = DEFAULT_BLIND_POLICY_V4_0;
-const confirmation = await roomContextConfirmation(
-  await roomContextId(capability, await policyHash(roomPolicy)),
+const operationValidationContext = await createOperationValidationContext(
+  capability,
+  roomPolicy,
+  700n,
 );
+const confirmation = operationValidationContext.roomContextConfirmation;
 const author = await newKeyPair();
 const fixedPairPayload = encodePairStepEnvelopeV1(validEnvelope(0, false), 0);
 const pairSlot = await pairSemanticSlot(routingTag);
@@ -82,12 +81,6 @@ const unsignedPairOperation = {
   fixedPayload: fixedPairPayload,
   operationPadding: new Uint8Array(0),
 };
-const operationValidationContext = {
-  roomContextConfirmation: confirmation,
-  roomPolicy,
-  referenceWindow: 700n,
-};
-
 describe("PairStepEnvelopeV1 derived class vectors", () => {
   test("derives framing overhead and all three suite-1 targets from the schema", () => {
     expect(PAIR_BOOTSTRAP_ENVELOPE_OVERHEAD_BYTES_V1).toBe(1_161);

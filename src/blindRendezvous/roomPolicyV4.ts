@@ -17,7 +17,10 @@ import {
   decodeCanonicalStrict,
   encodeCanonical,
 } from "./canonicalSchema";
-import { roomPolicyV4Schema } from "./schemas";
+import {
+  MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1,
+  roomPolicyV4Schema,
+} from "./schemas";
 
 import type { RoomPolicyV1 } from "../roomPolicy";
 
@@ -108,6 +111,10 @@ export const validateRoomPolicyV4 = (policy: RoomPolicyV4): void => {
     fail("maxDependenciesPerOperation must be at least one");
   if (limits.maxOperationsPerAuthorWindow < 1)
     fail("maxOperationsPerAuthorWindow must be at least one");
+  if (limits.maxOperationsPerAuthorWindow > MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1)
+    fail(
+      "maxOperationsPerAuthorWindow exceeds the canonical quota-proof bound",
+    );
   if (policy.maxRoomMembers < 2) fail("maxRoomMembers must be at least two");
 
   // The nested policy is the SSOT for PIN/PQ/cover; only its rendezvous mode

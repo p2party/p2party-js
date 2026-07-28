@@ -3183,7 +3183,7 @@ checkedAdd(operationRetentionWindows, receiverKeyOverlapWindows)
   <= pairControlRetentionWindows
 0 <= maxFutureLogicalWindows <= maxClockSkewWindows
 maxDependenciesPerOperation >= 1
-maxOperationsPerAuthorWindow >= 1
+1 <= maxOperationsPerAuthorWindow <= 65534
 2 <= maxRoomMembers
 
 deliveryWindowMs > 0
@@ -4538,7 +4538,10 @@ DiscoveredStoreCatalog(
 
 RequiredRoomRetentionWindows(roomPolicy) =
   max(
-    roomPolicy.protocolLimits.operationRetentionWindows,
+    checkedMultiply(
+      2,
+      roomPolicy.protocolLimits.operationRetentionWindows
+    ),
     roomPolicy.protocolLimits.pairControlRetentionWindows,
     if roomPolicy.admissionFloor.mode == "authority-grant"
       then checkedAdd(
@@ -4547,6 +4550,10 @@ RequiredRoomRetentionWindows(roomPolicy) =
       )
       else 0
   )
+
+// The doubled transient term is inert dependency custody, not authorization
+// or semantic lifetime. A presence can be referenced by a full-lifetime LEAVE
+// created at the end of that presence's own transient interval.
 
 RoomProfileCompatible(roomPolicy, plannerPolicy, resourcePolicy, profile) =
   profile passes every DeliveryProfileV1 structural/capacity equation
@@ -6431,9 +6438,21 @@ from the schema rather than restating them. Release vectors prove that the
 exact current 65,490-byte v4 frame plus all pair/operation overhead fits payload
 class 1. Carrier-specific padding is outside the signed operation.
 
+Operation validation never accepts a caller-assembled
+`(RoomContextId, RoomContextConfirmation, RoomPolicyV4)` tuple. The sole local
+constructor snapshots the 32-byte capability and canonical policy, derives
+`PolicyHash`, `RoomContextId`, and `RoomContextConfirmation`, and returns a
+process-private initialized-room context. Rebinding that context to another
+explicit reference window preserves the same private room/policy provenance.
+Object spread, structured clone, persistence, a changed exposed byte array, or
+combining a genuine room ID with another policy does not recreate that
+provenance. This is an implementation trust boundary inside the client kernel,
+not protection after arbitrary code execution in that kernel.
+
 `logicalWindow` is `RoomLogicalWindow(roomPolicy, authorTime)`, never an
 ingress window.
-At explicit `referenceWindow`, validation requires, with checked arithmetic:
+At an explicit `referenceWindow`, active-or-future classification requires,
+with checked arithmetic:
 
 ```text
 logicalWindow
@@ -6443,6 +6462,30 @@ referenceWindow
 logicalWindow <= expiresAfterWindow
 dependencies.length <= roomPolicy.protocolLimits.maxDependenciesPerOperation
 ```
+
+Outer authentication and reference classification are separate executable
+stages. Canonical shape, room confirmation, class, lifetime, author-chain
+fields, semantic-slot framing, and the outer signature are timeless. A newly
+received or restored operation may receive the process-private reducer-
+candidate provenance after its outer lifetime only when:
+
+```text
+referenceWindow <=
+  checkedAdd(
+    operation.logicalWindow,
+    checkedAdd(
+      RequiredRoomRetentionWindows(roomPolicy),
+      roomPolicy.protocolLimits.maxClockSkewWindows
+    )
+  )
+```
+
+That evidence horizon is checked for every reducer candidate before it enters
+the room set, including a currently active candidate. Arithmetic overflow
+rejects only that candidate; it cannot abort reduction of other candidates.
+An outer-expired candidate is inert unless the deterministic rules below need
+it as exact author-prefix, dependency, or pinned-authority fault evidence. It
+never becomes active merely because its signature still verifies.
 
 An otherwise valid operation with `logicalWindow > referenceWindow` is held
 only in the bounded future-candidate partition. It cannot affect
@@ -6457,7 +6500,10 @@ For
 at most `roomPolicy.protocolLimits.pairControlRetentionWindows`.
 `GRANT_HORIZON` is used only by
 `ADMISSION_REVOKE` and has the exact future-candidate-plus-credential lifetime
-defined below. Subtraction is checked without unsigned overflow.
+defined below. Its outer expiry is checked at the outer/candidate gate before
+the operation may contribute to author quota or fork classification; nested
+validation then binds the same value to the authority-signed revoke payload.
+Subtraction is checked without unsigned overflow.
 
 ```text
 RoomContextConfirmation =
@@ -6532,6 +6578,37 @@ horizon even when no descendant has arrived yet. This permits first delivery
 of a live long-horizon pair control after a shorter transient prefix without
 resurrecting that prefix.
 
+Candidate selection for a relevant author/window includes every retained
+candidate whose sequence is _less than or equal to_ the maximum relevant
+sequence. Equality is load-bearing: a short-expiry byte-different branch in
+the same author slot as a live branch is still author-fork evidence. Using
+only `< maximumSequence` would let the live branch escape the fork after its
+sibling's outer expiry.
+
+A live, intrinsically valid `LEAVE` may also require an exact `PRESENCE` from
+another logical window after that presence's outer lifetime. The reducer
+promotes, as inert dependency evidence, the exact referenced presence, every
+retained candidate in its `PresenceSemanticSlot`, and the same-window prefixes
+needed to prove each branch. It first rejects a missing reference, wrong outer
+kind, wrong author key, noncanonical presence payload, mismatched derived
+presence semantic slot, presence not valid at the LEAVE effective window, or a
+LEAVE whose outer expiry does not cover the presence's remaining roster
+lifetime;
+intrinsically invalid or chain-unproven LEAVE payloads cannot promote
+unrelated historical evidence. Before any would-be sibling or its author
+prefixes enter historical author classification, that sibling must itself
+canonically decode as `PRESENCE`, have its core validity interval contained by
+its outer interval, remain inside the evidence horizon, and reproduce its
+declared semantic slot from its outer author key/window and decoded nonce.
+Copying another presence's declared slot therefore promotes nothing. The
+promoted operations are reauthenticated from exact signed bytes, remain inside
+`RequiredRoomRetentionWindows(roomPolicy)`, and participate only in
+author/dependency/semantic-fork proof. They do not re-enter
+`activeOperationIds` or the roster. Dependency discovery and author/payload/
+chain validation iterate monotonically to a fixed point over the already
+bounded candidate set; no network fetch or arrival order occurs inside
+`CoreReduce`.
+
 For author quota, a _non-quota candidate_ is a distinct, canonically decoded,
 room-opened operation whose outer signature, room confirmation, author key,
 logical/future window, fixed class/length, and author slot are valid before
@@ -6545,7 +6622,18 @@ operations arrived first. Physical proof needs at most the canonical
 lexicographically lowest
 `roomPolicy.protocolLimits.maxOperationsPerAuthorWindow + 1` operation IDs;
 after overquota is proved, later candidates for that author/window are dropped
-before payload work. If that author is the policy-pinned authority, the sole
+before payload work. One author/window emits at most one fault, with this
+canonical proof precedence:
+
+1. if overquota, the bytewise-lowest `maxOperationsPerAuthorWindow + 1`
+   operation IDs;
+2. otherwise, if any sequence slot forks, the bytewise-lowest two operation
+   IDs at the numerically lowest forked sequence; or
+3. otherwise, for an authority chain containing a non-`ADMISSION_REVOKE`
+   operation, the bytewise-lowest offending operation ID.
+
+Thus simultaneous violations cannot change output according to discovery or
+validation order. If that author is the policy-pinned authority, the sole
 derived authority view is unavailable for every authority-gated decision whose
 reference window is no later than the checked sum of the fault window,
 `roomPolicy.protocolLimits.maxFutureLogicalWindows`,
@@ -6659,6 +6747,8 @@ LEAVE:
         has the same authorEpochEd25519Key as this LEAVE,
         is named by the sole outer dependency, and
         is valid at effectiveLogicalWindow
+  and outer.expiresAfterWindow
+        >= referencedPresence.core.validThroughLogicalWindow
 
 STORE_HINT:
   outer.logicalWindow
@@ -7249,10 +7339,10 @@ Formally:
 
 ```ts
 type CoreStoreFactV1 = {
-  sourceOperationId: Bytes32;
   storeId: Bytes32;
   descriptorGeneration: bigint;
   descriptorHash: Bytes32;
+  sourceOperationId: Bytes32;
   descriptor: StoreDescriptorV1;
   // Exact routes carried by this one STORE_HINT source; never a flattened
   // cross-lease union.
@@ -7268,11 +7358,11 @@ type CorePresenceFactV1 = {
 };
 
 type CoreRevocationFloorV1 = {
-  revokeOperationId: Bytes32;
   stableIdentityCommitment: Bytes32;
   minimumAcceptedGeneration: bigint;
   effectiveLogicalWindow: bigint;
   validThroughLogicalWindow: bigint;
+  revokeOperationId: Bytes32;
 };
 
 type CoreFaultV1 =
@@ -7308,6 +7398,36 @@ type CoreRoomStateV1 = {
   faults: readonly CoreFaultV1[];
   operationsDigest: Bytes32;
 };
+```
+
+The canonical schema registry, not TypeScript object insertion order, is the
+SSOT for these bytes. In particular, `CoreStoreFactV1` encodes its identifying
+tuple first as `(storeId, descriptorGeneration, descriptorHash,
+sourceOperationId)`, and `CoreRevocationFloorV1` encodes
+`(stableIdentityCommitment, minimumAcceptedGeneration,
+effectiveLogicalWindow, validThroughLogicalWindow, revokeOperationId)`.
+Top-level Core arrays are sorted and duplicate-free by their complete canonical
+item encoding. Because the identifying fields lead those encodings, this is
+equivalent to bytewise operation-ID order for operation-ID and presence
+arrays, the tuples above for store and revocation facts, and the following
+fault order:
+
+1. `author-fork-or-overquota`, by
+   `(authorEpochEd25519Key, logicalWindow)`;
+2. `presence-or-leave-fork`, by `semanticSlot`; and
+3. `store-generation-fork`, by `(storeId, descriptorGeneration)`.
+
+For a semantic-slot fork, `proofOperationIds` is the bytewise-lowest two
+distinct operation IDs. For a maximum-generation store fork,
+`descriptorHashes` is the bytewise-lowest two distinct descriptor hashes.
+Each store fact's nested `routes` remains sequence-encoded but must be strictly
+sorted and duplicate-free by derived `RouteId`; both Core encode and strict
+decode enforce that asynchronous derivation over a private byte snapshot.
+The author-fault proof selection is the precedence rule in Section 4.4.
+Changing any variant, field, or order requires a new core-state version and
+new independent known-answer vectors.
+
+```ts
 
 type LocalAdmissiblePeerV1 = {
   localPeerId: string; // canonical "peer.v1." handle
@@ -7590,12 +7710,20 @@ Conflict rules are:
 | Invalid room AEAD, signature, context, codec, or bound                          | Drop as untrusted garbage before state mutation.                                                                                                                                                                                                                                                                                                                                                                               |
 | Same authenticated author sequence slot, different operations                   | Mark that author forked for the logical window and exclude its dependent state. For the pinned authority, every revoke carried by that faulted/overquota authority window is excluded before floor reduction; record the fault and make authority admission unavailable through the complete affected horizon. Revokes from other nonfaulted windows still reduce normally.                                                    |
 | Same authenticated pair-control slot, different authenticated pair operation ID | Fail only that stable pair edge, even if the plaintext is byte-equal.                                                                                                                                                                                                                                                                                                                                                          |
-| Distinct operation IDs in the same `PRESENCE`/`LEAVE` semantic slot             | Mark that semantic subject forked and exclude it and its dependents, even when decoded payloads are byte-equal; exact duplicates already have one `OperationId`, so no representative is selected.                                                                                                                                                                                                                             |
-| `STORE_HINT` values for the same `(StoreId, descriptorGeneration)`              | Equal `DescriptorHash` values retain one canonical per-source fact, route subset, and hint lease; delivery unions only currently live sources. Different current-live hashes retain all live branches plus one core fault and make that projection inert. The client-global catalog also persists the canonical two-hash fork proof and requires a strictly higher singleton generation before that observer reuses the store. |
+| Distinct operation IDs in the same `PRESENCE`/`LEAVE` semantic slot             | While at least two branches are current or promoted as exact dependency evidence, mark that semantic subject forked and exclude both branches, every operation with an explicit dependency on either branch, and every later operation in either branch's same author/window chain. This applies even when decoded payloads are byte-equal; exact duplicates already have one `OperationId`, so no representative is selected. |
+| `STORE_HINT` values for the same `(StoreId, descriptorGeneration)`              | Retain every live per-source fact at every generation. Equal `DescriptorHash` values preserve each exact source route subset and hint lease; delivery unions only currently live sources. At the greatest live generation, different current-live hashes retain all live branches plus one core fault and make that generation's projection inert. The client-global catalog also persists the canonical two-hash fork proof and requires a strictly higher singleton generation before that observer reuses the store. |
 | Distinct valid `ADMISSION_REVOKE` values                                        | Retain every canonical fact and compute the applicable commitment floor by maximum generation at the queried reference window; never pick or flatten one tombstone by arrival order.                                                                                                                                                                                                                                           |
 | Missing bounded dependency                                                      | Buffer only the dependent operation within room-policy dependency/window limits and local resource bytes.                                                                                                                                                                                                                                                                                                                      |
 | Operation after semantic expiry                                                 | Ignore for derived state; keep only bounded replay evidence if required.                                                                                                                                                                                                                                                                                                                                                       |
 | Store omission or stale frontier                                                | Continue union from other paths and report availability/consistency degradation.                                                                                                                                                                                                                                                                                                                                               |
+
+Core semantic faults are reference-window facts, not unbounded tombstones. A
+presence/leave fault disappears from a later `CoreRoomStateV1` after fewer than
+two branches remain current or are promoted for a current dependency; an old
+branch never becomes active merely because its sibling expired. The
+client-global store-generation fork tombstone is deliberately different:
+once observed, it persists until a strictly higher singleton generation, as
+specified above.
 
 The abstract grow-only set contains every successfully validated operation
 inside its semantic horizon. It is never truncated to manufacture a
@@ -8699,8 +8827,14 @@ state.” Each exact valid `PRESENCE` is a separate fact. A valid `LEAVE`
 deactivates only its exact `presenceOperationId` at its
 `effectiveLogicalWindow`; because v1 requires that value to equal the LEAVE
 outer logical window, it is never applied earlier. Thus
-`P1 → P2 → LEAVE(P1)` leaves P2 active. The reducer excludes expired, left,
-forked, and malformed presences from `observedPresences`, which therefore
+`P1 → P2 → LEAVE(P1)` leaves P2 active. Multiple otherwise-valid LEAVEs for
+the same presence at different effective windows are redundant facts, not a
+fork: each has a different semantic slot, and the earliest effective one
+already makes that exact presence inactive. A valid LEAVE's outer expiry covers
+the referenced presence's complete remaining `validThroughLogicalWindow`, so
+the presence cannot reappear when the LEAVE expires. The reducer excludes
+expired, left, forked, and malformed presences from `observedPresences`, which
+therefore
 contains active facts only in canonical operation-ID order. Leave IDs and
 faults remain in their dedicated arrays; historical UI state is outside this
 core projection. The reducer never reads a local denylist, address book, or
@@ -11130,7 +11264,10 @@ never substitutes for mandatory hybrid identity authentication.
   Desired graphs are byte-identical only when local frontend/planner facts also
   match. A presence authored in window `x` and an exact same-author-key LEAVE
   in its own chain in window `x+1` reduces correctly when the presence remains
-  valid there; delayed delivery never resurrects it.
+  valid there. This must also hold when the LEAVE is first delivered after
+  restart and after the presence's outer lifetime, using only retained,
+  reauthenticated dependency evidence; delayed delivery never resurrects the
+  presence.
 
 - **AC-012 — No complete-roster key binding:** Adding a late valid presence
   does not invalidate or rekey an authenticated stable edge between two
@@ -11248,7 +11385,9 @@ never substitutes for mandatory hybrid identity authentication.
   same-payload/different-operation presence and leave forks,
   semantic-slot conflicts, and author overquota all have permutation tests.
   Independent implementations byte-match every domain-separated non-pair
-  semantic-slot formula. A pinned-authority quota-plus-one set whose
+  semantic-slot formula and the canonical `CoreRoomStateV1` encoding, beginning
+  with the empty-state known-answer vector and extending to every fault
+  variant before release. A pinned-authority quota-plus-one set whose
   highest-floor revoke is last in every permutation never admits an old grant;
   it deterministically reports authority policy unavailable. Equal-generation
   revocations with unequal effective/valid-through windows remain distinct and
@@ -11314,7 +11453,12 @@ never substitutes for mandatory hybrid identity authentication.
   reappear, and prefix evidence is deleted only after its exact
   maximum-descendant-plus-skew boundary. A delayed HELLO at the last receiver
   overlap window uses exact historical presence evidence after roster expiry
-  and never resurrects that roster vertex. Profile validation accepts
+  and never resurrects that roster vertex. A first-delivered cross-window
+  LEAVE after restart likewise promotes the exact referenced presence's full
+  semantic slot and required author prefixes only through the checked room
+  evidence horizon; a sibling branch still proves the same semantic fork, a
+  missing branch is never fetched inside reduction, and none of that evidence
+  re-enters the roster. Profile validation accepts
   `operationRetentionWindows + receiverKeyOverlapWindows ==
 pairControlRetentionWindows` and rejects the one-greater boundary; size
   class `255`/`UINT32_MAX` ordinal geometry encodes, and plus one rejects.

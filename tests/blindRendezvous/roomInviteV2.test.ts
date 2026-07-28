@@ -133,6 +133,26 @@ describe("v2 fragment grammar", () => {
       encodeRoomPolicyV4(DEFAULT_BLIND_POLICY_V4_0).length,
     ).toBeLessThanOrEqual(MAX_INVITE_POLICY_BYTES);
   });
+
+  test("the author quota leaves one canonical u16 slot for quota-plus-one proof", () => {
+    const atProofBound = {
+      ...DEFAULT_BLIND_POLICY_V4_0,
+      protocolLimits: {
+        ...DEFAULT_BLIND_POLICY_V4_0.protocolLimits,
+        maxOperationsPerAuthorWindow: 0xfffe,
+      },
+    };
+    expect(() => encodeRoomPolicyV4(atProofBound)).not.toThrow();
+    expect(() =>
+      encodeRoomPolicyV4({
+        ...atProofBound,
+        protocolLimits: {
+          ...atProofBound.protocolLimits,
+          maxOperationsPerAuthorWindow: 0xffff,
+        },
+      }),
+    ).toThrow("canonical quota-proof bound");
+  });
 });
 
 describe("cross-version safety", () => {

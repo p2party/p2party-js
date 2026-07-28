@@ -43,6 +43,7 @@ import {
   encodePresenceV1,
   encodeStoreHintOperationV1,
 } from "./operationPayload";
+import { decodePairStepEnvelopeV1 } from "./pairStepEnvelope";
 import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
 import { coreFaultV1Schema, coreRoomStateV1Schema } from "./schemas";
 import { descriptorHash, routeId, storeId } from "./storeDescriptor";
@@ -59,6 +60,7 @@ import type {
   StoreHintOperationV1,
 } from "./operationPayload";
 import type { PairStepEnvelopeV1 } from "./pairStepEnvelope";
+import type { RoomPolicyV4 } from "./roomPolicyV4";
 import type { StoreDescriptorV1, StoreRouteV1 } from "./storeDescriptor";
 
 /*
@@ -93,6 +95,86 @@ interface ValidatedOperationSnapshot {
 const outerValidatedIdentifiedOperations = new WeakMap<
   object,
   ValidatedOperationSnapshot
+>();
+
+interface ReducedRoomStateSnapshot {
+  /** Canonical state bytes captured before the result is exposed. */
+  readonly stateBytes: Uint8Array;
+  readonly roomContextId: Uint8Array;
+  readonly roomPolicyBytes: Uint8Array;
+  /** Exact active PAIR_STEP provenance, keyed by OperationId hex. */
+  readonly activePairOperations: ReadonlyMap<
+    string,
+    ActivePairReductionSnapshot
+  >;
+}
+
+interface PairAuthorChainPrefixSnapshot {
+  readonly operationId: Uint8Array;
+  readonly operationBytes: Uint8Array;
+}
+
+interface ActivePairReductionSnapshot {
+  readonly operationId: Uint8Array;
+  readonly operationBytes: Uint8Array;
+  readonly evidenceValidThroughWindow: bigint;
+  /**
+   * Exact authenticated sequence-zero-through-candidate author prefix that
+   * made the PAIR_STEP eligible for CoreReduce. These bytes are later retained
+   * by the pair ledger so a newly delivered fork can stall only this edge.
+   */
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixSnapshot[];
+}
+
+/*
+ * A decoded or persisted CoreRoomStateV1 is data, not trusted provenance.
+ * Pair opening accepts only the live result of coreReduce(), after verifying
+ * that neither the exposed state nor its selected candidate was mutated.
+ */
+const reducedRoomStates = new WeakMap<object, ReducedRoomStateSnapshot>();
+
+declare const activePairOperationCandidateBrand: unique symbol;
+
+/**
+ * Process-local proof that one exact PAIR_STEP was active in one genuine
+ * CoreReduce result. It intentionally exposes no structural fields.
+ */
+export interface ActivePairOperationCandidateV1 {
+  readonly [activePairOperationCandidateBrand]: true;
+}
+
+export interface PairAuthorChainPrefixEvidenceV1 {
+  readonly operationId: Uint8Array;
+  readonly exactOperationBytes: Uint8Array;
+}
+
+export interface ActivePairOperationCandidateSnapshotV1 {
+  readonly exactOperationBytes: Uint8Array;
+  readonly operationId: Uint8Array;
+  readonly operation: AuthenticatedRoomOperationV1;
+  readonly envelope: PairStepEnvelopeV1;
+  readonly roomContextId: Uint8Array;
+  readonly roomPolicy: RoomPolicyV4;
+  readonly referenceWindow: bigint;
+  readonly evidenceValidThroughWindow: bigint;
+  readonly exactCoreStateBytes: Uint8Array;
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixEvidenceV1[];
+}
+
+interface PrivateActivePairOperationCandidateSnapshot {
+  readonly operationBytes: Uint8Array;
+  readonly operationId: Uint8Array;
+  readonly roomContextId: Uint8Array;
+  readonly roomPolicyBytes: Uint8Array;
+  readonly referenceWindow: bigint;
+  readonly evidenceValidThroughWindow: bigint;
+  readonly coreStateBytes: Uint8Array;
+  readonly authorChainPrefix: readonly PairAuthorChainPrefixSnapshot[];
+}
+
+const activePairOperationCandidates = new WeakMap<
+  object,
+  PrivateActivePairOperationCandidateSnapshot
 >();
 
 /** One outer-authenticated candidate together with its private candidate ID. */
@@ -204,6 +286,136 @@ const reducerSnapshotFor = (value: unknown): ReducerOperationSnapshot => {
     throw new Error("coreReduce: validated input was mutated after validation");
 
   return { source, ...snapshot };
+};
+
+/**
+ * Capture one active, provenance-checked PAIR_STEP ingress.
+ *
+ * This is the only bridge from room-wide outer validation into pair opening.
+ * It requires both the candidate and the room state to be live results of
+ * their private validation/reduction entrypoints and rechecks their canonical
+ * bytes on every call. Persisted bytes must therefore pass validation and
+ * CoreReduce again after restart; a merely outer-valid future, forked,
+ * overquota, expired, or dependency-inert candidate cannot spend pair-open
+ * work or reach admission.
+ *
+ * The returned value is an opaque process-local capability. Pair-kernel code
+ * accepts that capability, never a caller-assembled snapshot or prebinding.
+ */
+export const captureActivePairOperationCandidate = async (
+  candidate: OuterValidatedIdentifiedOperationV1,
+  roomState: CoreRoomStateV1,
+): Promise<ActivePairOperationCandidateV1> => {
+  const candidateSnapshot = reducerSnapshotFor(candidate);
+  const roomStateSnapshot =
+    typeof roomState === "object" && roomState !== null
+      ? reducedRoomStates.get(roomState)
+      : undefined;
+  if (roomStateSnapshot === undefined)
+    throw new Error(
+      "coreReduce: pair opening requires a live result of coreReduce",
+    );
+
+  let exposedStateBytes: Uint8Array;
+  try {
+    exposedStateBytes = await encodeCoreRoomStateV1(roomState);
+  } catch {
+    throw new Error(
+      "coreReduce: reduced room state was mutated after reduction",
+    );
+  }
+  if (!bytesEqual(exposedStateBytes, roomStateSnapshot.stateBytes))
+    throw new Error(
+      "coreReduce: reduced room state was mutated after reduction",
+    );
+
+  if (
+    !bytesEqual(
+      candidateSnapshot.roomContextId,
+      roomStateSnapshot.roomContextId,
+    ) ||
+    !bytesEqual(
+      candidateSnapshot.roomPolicyBytes,
+      roomStateSnapshot.roomPolicyBytes,
+    )
+  )
+    throw new Error(
+      "coreReduce: pair candidate belongs to another reduced room or policy",
+    );
+  const active = roomStateSnapshot.activePairOperations.get(
+    hex(candidateSnapshot.operationId),
+  );
+  if (
+    active === undefined ||
+    !bytesEqual(active.operationId, candidateSnapshot.operationId) ||
+    !bytesEqual(active.operationBytes, candidateSnapshot.operationBytes)
+  )
+    throw new Error(
+      "coreReduce: pair candidate is not active in the supplied room state",
+    );
+  if (candidateSnapshot.pairEnvelope === null)
+    throw new Error("coreReduce: validated candidate is not a PAIR_STEP");
+
+  const privateState = decodeCoreRoomStateCanonical(
+    roomStateSnapshot.stateBytes,
+  );
+  const handle = Object.freeze({} as ActivePairOperationCandidateV1);
+  activePairOperationCandidates.set(handle, {
+    operationBytes: Uint8Array.from(active.operationBytes),
+    operationId: Uint8Array.from(active.operationId),
+    roomContextId: Uint8Array.from(roomStateSnapshot.roomContextId),
+    roomPolicyBytes: Uint8Array.from(roomStateSnapshot.roomPolicyBytes),
+    referenceWindow: privateState.referenceWindow,
+    evidenceValidThroughWindow: active.evidenceValidThroughWindow,
+    coreStateBytes: Uint8Array.from(roomStateSnapshot.stateBytes),
+    authorChainPrefix: active.authorChainPrefix.map((member) => ({
+      operationId: Uint8Array.from(member.operationId),
+      operationBytes: Uint8Array.from(member.operationBytes),
+    })),
+  });
+  return handle;
+};
+
+/**
+ * Take an owned pair-kernel snapshot from a genuine active-operation handle.
+ *
+ * The returned bytes are data, not provenance: downstream state machines must
+ * continue accepting the opaque `ActivePairOperationCandidateV1` and call this
+ * accessor themselves. Exact Core bytes are included for the later durable
+ * compare-and-swap that prevents an asynchronous open from committing against
+ * a superseded room view.
+ */
+export const snapshotActivePairOperationCandidate = (
+  candidate: ActivePairOperationCandidateV1,
+): ActivePairOperationCandidateSnapshotV1 => {
+  const snapshot =
+    typeof candidate === "object" && candidate !== null
+      ? activePairOperationCandidates.get(candidate)
+      : undefined;
+  if (snapshot === undefined)
+    throw new Error(
+      "coreReduce: pair candidate must be a live result of captureActivePairOperationCandidate",
+    );
+
+  const operation = decodeOperation(snapshot.operationBytes);
+  return {
+    exactOperationBytes: Uint8Array.from(snapshot.operationBytes),
+    operationId: Uint8Array.from(snapshot.operationId),
+    operation,
+    envelope: decodePairStepEnvelopeV1(
+      operation.fixedPayload,
+      operation.operationPayloadClass,
+    ),
+    roomContextId: Uint8Array.from(snapshot.roomContextId),
+    roomPolicy: decodeRoomPolicyV4(snapshot.roomPolicyBytes),
+    referenceWindow: snapshot.referenceWindow,
+    evidenceValidThroughWindow: snapshot.evidenceValidThroughWindow,
+    exactCoreStateBytes: Uint8Array.from(snapshot.coreStateBytes),
+    authorChainPrefix: snapshot.authorChainPrefix.map((member) => ({
+      operationId: Uint8Array.from(member.operationId),
+      exactOperationBytes: Uint8Array.from(member.operationBytes),
+    })),
+  };
 };
 
 export type CoreFaultV1 =
@@ -609,6 +821,77 @@ const proveAuthorChains = (
     }
   }
   return provenChainMembers;
+};
+
+/**
+ * Recover the exact authenticated prefix that made one active pair candidate
+ * chain-proven. This is derived from the reducer's sole author-window
+ * partition; the pair layer never reconstructs or guesses it from public
+ * state projections.
+ */
+const exactAuthorChainPrefixThrough = (
+  candidate: PayloadValidatedReducerSnapshot,
+  groups: ReadonlyMap<string, readonly PayloadValidatedReducerSnapshot[]>,
+  provenChainMembers: ReadonlySet<string>,
+): PairAuthorChainPrefixSnapshot[] => {
+  const group = groups.get(authorWindowKey(candidate.operation));
+  if (group === undefined)
+    throw new Error(
+      "coreReduce: active pair candidate lost its author-window evidence",
+    );
+
+  const ordered = [...group]
+    .filter(
+      (entry) =>
+        entry.operation.authorSequence <= candidate.operation.authorSequence,
+    )
+    .sort((left, right) =>
+      left.operation.authorSequence < right.operation.authorSequence
+        ? -1
+        : left.operation.authorSequence > right.operation.authorSequence
+          ? 1
+          : compareBytes(left.operationId, right.operationId),
+    );
+
+  const prefix: PairAuthorChainPrefixSnapshot[] = [];
+  let expectedSequence = 0n;
+  let expectedPredecessor: Uint8Array | null = null;
+  for (const entry of ordered) {
+    if (
+      entry.operation.authorSequence !== expectedSequence ||
+      !provenChainMembers.has(hex(entry.operationId))
+    )
+      throw new Error(
+        "coreReduce: active pair candidate has an incomplete author prefix",
+      );
+    const declaredPredecessor = entry.operation.previousAuthorOperationId;
+    if (
+      (expectedPredecessor === null && declaredPredecessor !== null) ||
+      (expectedPredecessor !== null &&
+        (declaredPredecessor === null ||
+          !bytesEqual(declaredPredecessor, expectedPredecessor)))
+    )
+      throw new Error(
+        "coreReduce: active pair candidate has an inconsistent author prefix",
+      );
+
+    prefix.push({
+      operationId: Uint8Array.from(entry.operationId),
+      operationBytes: Uint8Array.from(entry.operationBytes),
+    });
+    expectedPredecessor = entry.operationId;
+    expectedSequence += 1n;
+  }
+
+  if (
+    prefix.length === 0 ||
+    expectedSequence !== candidate.operation.authorSequence + 1n ||
+    !bytesEqual(prefix[prefix.length - 1].operationId, candidate.operationId)
+  )
+    throw new Error(
+      "coreReduce: active pair candidate author prefix does not end at candidate",
+    );
+  return prefix;
 };
 
 const activePayloadCandidatesAt = (
@@ -1318,5 +1601,32 @@ export const coreReduce = async (
   };
   // The output codec is a final executable assertion that every projection is
   // in its one schema-defined order and has no duplicate canonical values.
-  return decodeCoreRoomStateCanonical(await encodeCoreRoomStateV1(state));
+  const stateBytes = await encodeCoreRoomStateV1(state);
+  const reducedState = decodeCoreRoomStateCanonical(stateBytes);
+  reducedRoomStates.set(reducedState, {
+    stateBytes: Uint8Array.from(stateBytes),
+    roomContextId: Uint8Array.from(roomContextIdBytes),
+    roomPolicyBytes: Uint8Array.from(roomPolicyBytes),
+    activePairOperations: new Map(
+      active
+        .filter((entry) => entry.operation.kind === "PAIR_STEP")
+        .map(
+          (entry) =>
+            [
+              hex(entry.operationId),
+              {
+                operationId: Uint8Array.from(entry.operationId),
+                operationBytes: Uint8Array.from(entry.operationBytes),
+                evidenceValidThroughWindow: entry.evidenceValidThroughWindow,
+                authorChainPrefix: exactAuthorChainPrefixThrough(
+                  entry,
+                  payloadValidatedByAuthorWindow,
+                  provenChainMembers,
+                ),
+              },
+            ] as const,
+        ),
+    ),
+  });
+  return reducedState;
 };

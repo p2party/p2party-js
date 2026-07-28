@@ -6,8 +6,12 @@ import {
   presenceSemanticSlot,
 } from "../../src/blindRendezvous/derivations";
 import {
+  captureActivePairOperationCandidate,
   coreReduce,
+  decodeCoreRoomStateV1,
+  encodeCoreRoomStateV1,
   mergeOperationCandidateSets as mergeOperationSets,
+  snapshotActivePairOperationCandidate,
   validateAndIdentifyOperationCandidate as validateAndIdentifyOperation,
 } from "../../src/blindRendezvous/coreReduce";
 import {
@@ -29,6 +33,7 @@ import {
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
 
 import type { OuterValidatedIdentifiedOperationV1 as ValidatedIdentifiedOperationV1 } from "../../src/blindRendezvous/coreReduce";
+import type { ActivePairOperationCandidateV1 } from "../../src/blindRendezvous/coreReduce";
 import type {
   AuthenticatedRoomOperationV1,
   OperationKindV1,
@@ -507,6 +512,83 @@ describe("CoreReduce is independent of delivery order and duplication", () => {
     expect(state.activeOperationIds.map(hex)).toContain(
       hex(state.activePairOuterOperationIds[0]),
     );
+  });
+
+  test("only a live CoreReduce result can capture one opaque active pair candidate", async () => {
+    const operations = await buildChain();
+    const pairCandidate = operations[operations.length - 1];
+    const state = await coreReduceOuter(
+      operations,
+      roomPolicy,
+      REFERENCE_WINDOW,
+    );
+
+    const activeCandidate = await captureActivePairOperationCandidate(
+      pairCandidate,
+      state,
+    );
+    const snapshot = snapshotActivePairOperationCandidate(activeCandidate);
+    expect(snapshot.operationId).toEqual(pairCandidate.operationId);
+    expect(snapshot.operation.kind).toBe("PAIR_STEP");
+    expect(snapshot.referenceWindow).toBe(REFERENCE_WINDOW);
+    expect(
+      snapshot.authorChainPrefix.map((member) => member.operationId),
+    ).toEqual([operations[2].operationId, pairCandidate.operationId]);
+    expect(
+      snapshot.authorChainPrefix.map(
+        (member) => decodeOperation(member.exactOperationBytes).authorSequence,
+      ),
+    ).toEqual([0n, 1n]);
+    expect(
+      decodeOperation(
+        snapshot.authorChainPrefix[snapshot.authorChainPrefix.length - 1]
+          .exactOperationBytes,
+      ).fixedPayload,
+    ).toEqual(pairCandidate.operation.fixedPayload);
+
+    const spread = {
+      ...activeCandidate,
+    } as unknown as ActivePairOperationCandidateV1;
+    const cloned = structuredClone(
+      activeCandidate,
+    ) as unknown as ActivePairOperationCandidateV1;
+    expect(() => snapshotActivePairOperationCandidate(spread)).toThrow(
+      "live result of captureActivePairOperationCandidate",
+    );
+    expect(() => snapshotActivePairOperationCandidate(cloned)).toThrow(
+      "live result of captureActivePairOperationCandidate",
+    );
+
+    snapshot.exactOperationBytes.fill(0);
+    snapshot.authorChainPrefix[0].exactOperationBytes.fill(0);
+    const freshSnapshot = snapshotActivePairOperationCandidate(activeCandidate);
+    expect(freshSnapshot.exactOperationBytes).toEqual(
+      encodeOperation(pairCandidate.operation),
+    );
+    expect(freshSnapshot.authorChainPrefix[0].exactOperationBytes).toEqual(
+      encodeOperation(operations[2].operation),
+    );
+
+    const persistedState = await decodeCoreRoomStateV1(
+      await encodeCoreRoomStateV1(state),
+    );
+    await expect(
+      captureActivePairOperationCandidate(pairCandidate, persistedState),
+    ).rejects.toThrow("live result of coreReduce");
+
+    const stateWithoutPair = await coreReduceOuter(
+      operations.slice(0, -1),
+      roomPolicy,
+      REFERENCE_WINDOW,
+    );
+    await expect(
+      captureActivePairOperationCandidate(pairCandidate, stateWithoutPair),
+    ).rejects.toThrow("not active in the supplied room state");
+
+    state.activePairOuterOperationIds[0][0] ^= 0xff;
+    await expect(
+      captureActivePairOperationCandidate(pairCandidate, state),
+    ).rejects.toThrow("mutated after reduction");
   });
 
   test("omission changes the observed frontier, not the derivation", async () => {

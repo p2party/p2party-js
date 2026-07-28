@@ -316,10 +316,27 @@ const syncDocumentedIntegrity = () => {
     /integrity="sha384-[A-Za-z0-9+/=]+"/u,
     `integrity="${bundleSri}"`,
   );
-  readme = readme.replace(/`sha384-[A-Za-z0-9+/=]+`\./u, `\`${workerSri}\`.`);
+  // The src and the integrity are only correct as a pair: a pinned hash names
+  // one build, so the version in that URL is rewritten here too rather than by
+  // hand. Every other CDN reference in the README is version-free on purpose.
+  readme = readme.replace(
+    /src="https:\/\/cdn\.p2party\.com\/@[^"/]+\/p2party\.min\.js"/u,
+    `src="https://cdn.p2party.com/@${packageJson.version}/p2party.min.js"`,
+  );
+  // Anchored on the integrity= prefix rather than "first backticked sha384
+  // followed by a period", which silently rewrote whichever such line came
+  // first in the document.
+  readme = readme.replace(
+    /`integrity=sha384-[A-Za-z0-9+/=]+`/u,
+    `\`integrity=${workerSri}\``,
+  );
 
   if (!readme.includes(bundleSri))
     fail("README has no <script integrity> tag to keep in sync");
+  if (!readme.includes(workerSri))
+    fail("README has no worker integrity value to keep in sync");
+  if (!readme.includes(`@${packageJson.version}/p2party.min.js`))
+    fail("README has no versioned bundle src to keep in sync");
 
   if (readme !== before) {
     writeFileSync(readmePath, readme);

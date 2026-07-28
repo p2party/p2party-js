@@ -665,15 +665,15 @@ connect directly to each other.
 The three published objects:
 
 ```text
-https://cdn.p2party.com/@0.14.3/p2party.min.js     UMD bundle -> window.p2party
-https://cdn.p2party.com/@0.14.3/db.worker.js       IndexedDB/OPFS worker
-https://cdn.p2party.com/@0.14.3/libcrypto.wasm     the cryptographic module
+https://cdn.p2party.com/@<version>/p2party.min.js  UMD bundle -> window.p2party
+https://cdn.p2party.com/@<version>/db.worker.js    IndexedDB/OPFS worker
+https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 ```
 
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`sha384-qWbMGmyz8mCS/hgbn0jEf4Fo73iXiy6w+H/NfO6ymxKwzldUeHSxolNZtSZfV1nf`.
+`integrity=sha384-qWbMGmyz8mCS/hgbn0jEf4Fo73iXiy6w+H/NfO6ymxKwzldUeHSxolNZtSZfV1nf`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.
@@ -688,7 +688,7 @@ same release bytes before calling `connect()`:
 import p2party from "p2party";
 
 p2party.setWasmSourceUrl(
-  new URL("/vendor/p2party-0.14.3/libcrypto.wasm", window.location.href),
+  new URL("/vendor/p2party/libcrypto.wasm", window.location.href),
 );
 ```
 
@@ -701,8 +701,9 @@ object. The path carries the version, so a URL always names exactly one build
 and is safe to cache forever:
 
 ```sh
-curl -O https://cdn.p2party.com/@0.14.3/libcrypto.wasm
-curl -O https://cdn.p2party.com/@0.14.3/libcrypto.provenance.json
+VERSION=$(npm view p2party version)   # or `npm pkg get version` in your project
+curl -O "https://cdn.p2party.com/@$VERSION/libcrypto.wasm"
+curl -O "https://cdn.p2party.com/@$VERSION/libcrypto.provenance.json"
 ```
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
@@ -713,12 +714,11 @@ shasum -a 256 libcrypto.wasm
 openssl dgst -sha384 -binary libcrypto.wasm | openssl base64 -A
 ```
 
-For 0.14.3 those are
-`7eea31157e69ac61f3a512b624d5c210296302fd289fc2b65c63ecc31a056267` and
-`sha384-pBMyUqQ3KBztxgeJMgDFZeohfj9QlAFNwt4/gRlqT0vlZ2kbkKxv+q5DwbZOBuUP`.
-They are the same bytes npm ships — the release workflow uploads the CDN object
-from the very tarball it publishes, then re-downloads and compares before
-`npm publish` runs, so the two can never diverge.
+Compare them against `libcrypto.provenance.json`, which records the same
+`sha256` and `sri` for the bytes beside it. Those are also the bytes npm ships:
+the release workflow uploads the CDN object from the very tarball it publishes,
+then re-downloads and compares before `npm publish` runs, so the two can never
+diverge.
 
 Serve the file yourself and point the browser root at it with
 `setWasmSourceUrl()` above, or hand the bytes straight to `p2party/session`.

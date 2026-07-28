@@ -14,18 +14,19 @@ checkable. This document records what executes, not what is claimed.
 All of it in `p2party-js/src/blindRendezvous/`, none of it exported from the
 package barrel:
 
-| Module                | Owns                                                                                                 |
-| --------------------- | ---------------------------------------------------------------------------------------------------- |
-| `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
-| `schemas.ts`          | Descriptors for the Section 4.0–4.5 objects implemented so far.                                       |
-| `projections.ts`      | Generated key tables and enum projections; no hand-maintained duplicate remains.                      |
-| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, and the room/operation/carrier identifiers.                    |
-| `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                          |
-| `roomInviteV2.ts`     | Closed `v1 | v2` invitation parsing, both v2 fragment forms, and the two typed errors.                |
-| `operation.ts`        | `AuthenticatedRoomOperationV1` codec, outer validation, and Ed25519 signing/verification.             |
-| `coreReduce.ts`       | Set union and deterministic outer-layer reduction with author fork/overquota faults.                  |
-| `carrierEnvelope.ts`  | Envelope framing, key schedule, AAD, and object identity — behind an injected AEAD provider.          |
-| `normativeKernel.ts`  | Registry shape validators, now consuming the generated projections.                                   |
+| Module               | Owns                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `canonicalSchema.ts` | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
+| `schemas.ts`         | Descriptors for the Section 4.0–4.5 objects implemented so far.                                                 |
+| `projections.ts`     | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
+| `derivations.ts`     | Domain-separated hashes, HKDF-SHA-256, and the room/operation/carrier identifiers.                              |
+| `roomPolicyV4.ts`    | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
+| `roomInviteV2.ts`    | Closed `v1                                                                                                      | v2` invitation parsing, both v2 fragment forms, and the two typed errors. |
+| `operation.ts`       | `AuthenticatedRoomOperationV1` codec, outer validation, and Ed25519 signing/verification.                       |
+| `coreReduce.ts`      | Set union and deterministic outer-layer reduction with author fork/overquota faults.                            |
+| `carrierEnvelope.ts` | Envelope framing, key schedule, AAD, and object identity, over the shipped XChaCha20-Poly1305.                  |
+| `publicWindow.ts`    | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
+| `normativeKernel.ts` | Registry shape validators, now consuming the generated projections.                                             |
 
 Two of the specification's own published constants were re-derived rather than
 trusted, and both match exactly:
@@ -61,7 +62,7 @@ silently fall back to another construction.
 
 ### B2 — Phase 0 is not frozen, so no wire interoperability follows
 
-Integer widths in `schemas.ts` are this artifact's *proposal* for the Phase-0
+Integer widths in `schemas.ts` are this artifact's _proposal_ for the Phase-0
 freeze. Section 4.1 is explicit that until the binary schema, executable
 kernel, claim/formal registries, HTTP protocol, default profile/planner/
 resource values, allocation scheme, and compatibility hash are frozen and
@@ -72,10 +73,16 @@ them v0.4". No release-registry hash has been computed or published.
 ### B3 — the store wire protocol is not implemented anywhere
 
 `p2party-server` has no append, allocation, chunk, or checkpoint endpoint; its
-only entrypoint is the legacy WebSocket signaling server. Implementing the
-Section 4.6 HTTP route family requires the Section 4.3 public-window, bucket,
-slot, and checkpoint objects to be frozen first (B2). Writing them now would
-mean inventing the exact bytes that Phase 0 exists to fix.
+only entrypoint is the legacy WebSocket signaling server.
+
+The client half of Section 4.3 now exists (`publicWindow.ts`), so a store's
+geometry, slot mapping, chunk and checkpoint hashing, and inclusion proofs are
+all verifiable. What is still missing on the server side is the Section 4.6
+HTTP route family and the Section 4.2 `StoreDescriptorV1` that every
+descriptor-bound predicate joins against — and the exact request/response
+target lengths, status enum bytes, and signature transcripts those routes need
+are Phase-0 freeze items (B2). Writing them now would mean inventing the exact
+bytes that the freeze exists to fix.
 
 ### B4 — `p2party.com` cannot reach any of this
 
@@ -124,9 +131,13 @@ author. Each fix has a regression test.
   `observedPresences`, `effectiveLeaveOperationIds`, `storeCatalogFacts`, and
   `revocationFloors` as pending rather than returning empty arrays that would
   read as observations. These need the Section 4.2/4.9 nested payload codecs.
-- **Claim evaluation.** `normativeKernel.ts` validates artifact *shape* only. It
+- **Claim evaluation.** `normativeKernel.ts` validates artifact _shape_ only. It
   runs no predicate, verifies no evidence, and exposes no positive-wording
   authorizer. Kernel module 8 does not exist.
+- **Descriptor-bound checkpoint predicates.** `StructurallyValidCheckpoint`,
+  the complete `ChainValidSuccessor`, and the three fault proofs need
+  `StoreDescriptorV1` from Section 4.2. `publicWindow.ts` implements only the
+  parts that need no descriptor and names the rest in its module docstring.
 - **Everything in Phases 2–6.** Presence, admission, the sparse planner,
   transport handoff, additive stores, L3, and the measurement/review programme
   are untouched.

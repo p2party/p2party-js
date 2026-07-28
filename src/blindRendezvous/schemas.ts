@@ -48,6 +48,9 @@ export const OPERATION_PAYLOAD_CLASS_BYTES: Readonly<Record<0 | 1, number>> =
 
 export const MAX_OPERATION_PAYLOAD_BYTES = OPERATION_PAYLOAD_CLASS_BYTES[1];
 
+/** Absolute profile bound for one carried signed room operation. */
+export const MAX_CARRIED_ROOM_OPERATION_BYTES_V1 = 1 << 20;
+
 /** Section 4.11 suite-1 bootstrap KEM ciphertext width. */
 export const PAIR_BOOTSTRAP_KEM_CIPHERTEXT_BYTES_V1 =
   PAIR_BOOTSTRAP_SUITE_V1.hybridKem.ciphertextBytes;
@@ -299,7 +302,10 @@ export const carrierEnvelopeV1Schema = record("CarrierEnvelopeV1", [
 ]);
 
 export const carrierPlaintextV1Schema = record("CarrierPlaintextV1", [
-  { name: "operationBytes", type: varBytes(1 << 20) },
+  {
+    name: "operationBytes",
+    type: varBytes(MAX_CARRIED_ROOM_OPERATION_BYTES_V1),
+  },
   { name: "carrierPadding", type: varBytes(1 << 20) },
 ]);
 
@@ -1257,6 +1263,93 @@ export const pairBootstrapInfoV1Schema = record("PairBootstrapInfoV1", [
   { name: "operationPayloadClass", type: u8 },
   { name: "recipientBinding", type: pairBootstrapRecipientBindingV1Schema },
 ]);
+
+/* ------------------------------------------------------------------ *
+ * Section 4.11 — durable accepted pair-slot audit
+ * ------------------------------------------------------------------ */
+
+export const pairAcceptedSlotCoordinateV1Schema = record(
+  "PairAcceptedSlotCoordinateV1",
+  [
+    { name: "pairEdgeId", type: bytes32 },
+    {
+      name: "endpointPresenceOperationIds",
+      type: array(bytes32, 2),
+    },
+    { name: "direction", type: u8 },
+    { name: "pairSequence", type: u64 },
+  ],
+);
+
+export const pairAuthorChainPrefixEvidenceV1Schema = record(
+  "PairAuthorChainPrefixEvidenceV1",
+  [
+    { name: "operationId", type: bytes32 },
+    {
+      name: "exactOperationBytes",
+      type: varBytes(MAX_CARRIED_ROOM_OPERATION_BYTES_V1),
+    },
+  ],
+);
+
+const pairSlotAcceptanceFields: readonly FieldDescriptor[] = [
+  { name: "coordinate", type: pairAcceptedSlotCoordinateV1Schema },
+  { name: "kind", type: pairStepKindV1Schema },
+  { name: "acceptedOperationId", type: bytes32 },
+  {
+    name: "exactOperationBytes",
+    type: varBytes(MAX_CARRIED_ROOM_OPERATION_BYTES_V1),
+  },
+  { name: "acceptedLogicalWindow", type: u64 },
+  { name: "retainThroughLogicalWindow", type: u64 },
+  { name: "routingTag", type: bytes32 },
+  {
+    name: "authorChainPrefix",
+    type: array(
+      pairAuthorChainPrefixEvidenceV1Schema,
+      MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1,
+      "sequence",
+    ),
+  },
+  {
+    name: "cachedExactResponse",
+    type: optional(varBytes(MAX_CARRIED_ROOM_OPERATION_BYTES_V1)),
+  },
+];
+
+/**
+ * Canonical post-authentication input. Its descriptor is shared by the live
+ * transition and durable entry so neither path can drift in field order or
+ * bounds.
+ */
+export const pairSlotAcceptanceCandidateV1Schema = record(
+  "PairSlotAcceptanceCandidateV1",
+  pairSlotAcceptanceFields,
+);
+
+export const pairAcceptedSlotEntryV1Schema = record("PairAcceptedSlotEntryV1", [
+  { name: "version", type: u8 },
+  ...pairSlotAcceptanceFields,
+  {
+    name: "forkProofOperationIds",
+    type: optional(array(bytes32, 2)),
+  },
+]);
+
+export const pairAcceptedSlotLedgerSnapshotV1Schema = record(
+  "PairAcceptedSlotLedgerSnapshotV1",
+  [
+    { name: "version", type: u8 },
+    {
+      name: "entries",
+      type: array(
+        pairAcceptedSlotEntryV1Schema,
+        MAX_REGISTRY_ENTRIES,
+        "sequence",
+      ),
+    },
+  ],
+);
 
 const admissionRevokeFields: readonly FieldDescriptor[] = [
   { name: "version", type: u8 },

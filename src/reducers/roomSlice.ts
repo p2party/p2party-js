@@ -153,10 +153,7 @@ export interface SetPeerCoverStatusArgs {
  * only be a policy/transcript mismatch.
  */
 export type PeerHandshakeFailureReason =
-  | "pin-mismatch"
-  | "pin-throttled"
-  | "policy"
-  | "transport";
+  "pin-mismatch" | "pin-throttled" | "policy" | "transport";
 
 export interface PeerHandshakeStatus {
   status: "authenticating" | "authenticated" | "failed";
@@ -202,13 +199,12 @@ export const defaultRTCConfig = {
       // Use single STUN URL - multiple STUN servers slow down ICE gathering
       urls: "stun:stun.p2party.com:3478",
     },
-    // TURN server requires credentials from signaling server via TURN REST API
-    // Add TURN server entry with valid credentials when available:
-    // {
-    //   urls: ["turn:turn.p2party.com:3478", "turns:turn.p2party.com:443?transport=tcp"],
-    //   username: "REDACTED_RETIRED_TURN_USER",
-    //   credential: "REDACTED_RETIRED_TURN_USER",
-    // },
+    // No TURN entry here on purpose: relay credentials are short-lived and
+    // bound to this client's identity, so they cannot be a static default.
+    // The signaling server issues them with the room response and
+    // handleWebSocketMessage merges them into this config. Without a
+    // configured relay the client stays STUN-only, which cannot traverse
+    // symmetric or carrier-grade NAT.
   ],
   iceTransportPolicy: "all",
   // Pre-allocate ICE candidates for faster connection setup

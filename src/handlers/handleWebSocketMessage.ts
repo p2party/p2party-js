@@ -119,20 +119,39 @@ const handleWebSocketMessage = async (
           console.error("Rejecting incompatible or malformed room response");
           break;
         }
-        // Build rtcConfig with TURN credentials if provided by server
+        // A relay is what lets two peers behind symmetric or carrier-grade NAT
+        // reach each other at all; without one the edge simply fails to
+        // connect, or flaps as soon as its direct path stops working.
+        //
+        // The signaling server chooses the relay, and a relay only ever sees
+        // DTLS-encrypted frames, so this is not a new disclosure. What is
+        // still refused is anything that is not a relay URI: an arbitrary
+        // string here would be handed straight to the browser's ICE stack.
         let rtcConfig: RTCConfiguration | undefined;
-        if (message.turnCredentials) {
-          rtcConfig = {
-            ...defaultRTCConfig,
-            iceServers: [
-              ...(defaultRTCConfig.iceServers ?? []),
-              {
-                urls: message.turnCredentials.urls,
-                username: message.turnCredentials.username,
-                credential: message.turnCredentials.credential,
-              },
-            ],
-          };
+        const turn = message.turnCredentials;
+        if (turn) {
+          const urls = (Array.isArray(turn.urls) ? turn.urls : []).filter(
+            (url) => typeof url === "string" && /^turns?:[^\s]+$/u.test(url),
+          );
+          if (
+            urls.length > 0 &&
+            typeof turn.username === "string" &&
+            turn.username.length > 0 &&
+            typeof turn.credential === "string" &&
+            turn.credential.length > 0
+          ) {
+            rtcConfig = {
+              ...defaultRTCConfig,
+              iceServers: [
+                ...(defaultRTCConfig.iceServers ?? []),
+                {
+                  urls,
+                  username: turn.username,
+                  credential: turn.credential,
+                },
+              ],
+            };
+          }
         }
 
         api.dispatch(

@@ -42,7 +42,8 @@ export interface TurnCredentials {
   urls: string[];
   username: string;
   credential: string;
-  ttl: number;
+  /** Absent on the current server: the expiry is already inside `username`. */
+  ttl?: number;
 }
 
 export interface WebSocketMessageRoomIdResponse {

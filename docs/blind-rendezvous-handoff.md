@@ -52,9 +52,10 @@ ordering:
 
 The working tree now also contains the proposed `PairPlaintextV1` codec and all
 ten body variants, schema-derived class/padding rules, room-selected v4
-handshake framing, partial independent pair vectors, and a semantic-only
-admission-policy/lease module. This still does **not** close the complete pair
-or admission boundary: HPKE/pair AEAD, one-use routing-tag state, exact
+handshake framing, independently generated known-answer vectors for every
+pair body and legal envelope form, and a semantic-only admission-policy/lease
+module. This still does **not** close the complete pair or admission boundary:
+HPKE/pair AEAD, one-use routing-tag state, exact
 predecessor/state validation, trusted snapshot/custody/provenance constructors,
 answer-to-offer/adapter/fingerprint validation, `Admit()`, atomic persistence,
 and the pre-SDP effectful gate are absent.
@@ -69,13 +70,14 @@ Verification commands for the current tree:
 bunx tsc --noEmit -p tsconfig.json
 bunx tsc --noEmit -p tsconfig.test.json
 bunx eslint <touched TypeScript files>
+python3 tests/blindRendezvous/reference/pair_plaintext_vectors.py
 bun test tests/blindRendezvous
 bun test tests
 ```
 
 Verification after the final review edits:
-`bun test tests/blindRendezvous` — 259 pass, 0 fail, 17 files; `bun test tests`
-— 834 pass, 0 fail, 109 files. Both TypeScript configurations, targeted ESLint,
+`bun test tests/blindRendezvous` — 263 pass, 0 fail, 17 files; `bun test tests`
+— 838 pass, 0 fail, 109 files. Both TypeScript configurations, targeted ESLint,
 and `git diff --check` also pass.
 
 ## Repositories and branches
@@ -158,14 +160,17 @@ The current Phase-0 checkpoint closes these specific boundaries:
   inert except when a current valid dependency requires it;
 - pair plaintext/body bytes, three class targets, minimal zero padding,
   initial slots, room-selected v4 frame geometry, transport-candidate order,
-  and pair transcript derivations execute with partial independent KATs; and
+  pair transcript derivations, all ten complete pair bodies, and all three
+  legal envelope forms execute against checked-in independent KATs; and
 - frontend/authority policy precedence, revocation/fault selection, invalid
   grant mapping, and lease arithmetic execute only as explicitly untrusted
   semantics pending the protected admission constructors.
 
 These are component-level facts, not a frozen v0.4 release registry or deployed
-protocol. The pair KATs are partial and do not satisfy AC-035's independent
-every-body vector gate.
+protocol. The pair-codec every-body/envelope vector sub-gate is complete, but
+AC-035 as a whole remains open on complete outer-operation vectors, nonempty
+`STORE_HINT` routes, the pre-open/post-open layer boundary, and exact
+state-owned predecessor/dependency validation.
 
 ### `p2party-js/src/cryptography/`
 
@@ -262,11 +267,11 @@ not exercise blind rendezvous.
 
 ## Suggested next steps, in dependency order
 
-1. **Freeze the remaining Phase-0 bytes.** Complete the independent
-   every-pair-body vectors and external review for the proposed
-   `PairPlaintextV1` codec; freeze the
-   content-addressed route-family registry/parsers (derived `RouteId` ordering
-   itself is now executable and vector-tested); freeze the
+1. **Freeze the remaining Phase-0 bytes.** Add complete outer-operation and
+   state/layer-boundary vectors around the independently frozen
+   `PairPlaintextV1` codec; freeze the content-addressed route-family
+   registry/parsers (derived `RouteId` ordering itself is now executable and
+   vector-tested); freeze the
    authority-view/custody persistence shapes; then freeze the store HTTP
    profiles/allocation artifacts and release compatibility hash.
 2. **Implement the edge-local pair/admission boundary.** Pin a reviewed RFC

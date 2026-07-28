@@ -3,6 +3,48 @@
 Written 2026-07-28 for the next agent. Everything below is verified state, not
 plan. Nothing is pushed; no PR exists.
 
+## Continuation after this handoff
+
+The next review completed later on 2026-07-28 and changes the safe next-step
+ordering:
+
+- `mergeOperationSets()` now compares complete canonical signed operation
+  bytes when two entries claim one `OperationId`; same-signature/different-body
+  collisions no longer pass as duplicates.
+- Reducer tests now cover a non-revocation under the pinned authority and the
+  exact five-element pending payload contract.
+- `derivations.ts` now owns the exact `StableIdentityCommitment`,
+  `LocalPeerIdDigest`, and `LocalPeerId` equations, with room-separation and
+  length-failure tests.
+- Section 4.8 now has an explicit `AdmissionEvaluationInputV1`, versioned pair
+  and decision leases, an exact lease constructor/minimum, and a validated
+  atomic authority-admission view. Do not implement a caller-supplied
+  `authorityAdmissionAvailable` boolean.
+- The post-v0.4 roadmap places optional proof-of-work only at room-blind
+  Blind-RSA token issuance. It is Sybil-costing, not personhood, membership,
+  blacklist enforcement, server independence, BFT, or fairness.
+- The PQ successor now recommends both-required Ed25519 + ML-DSA-65 over one
+  exact shared transcript and records the browser key-custody nonclaim. No
+  v0.4 field or suite ID changed.
+
+Do **not** start payload reduction as a mechanical codec task. The absent
+`PairStepEnvelopeV1` codec, `STORE_HINT` ordering by derived `RouteId`, the
+timeless-signature/absolute-lease split, and the authority-view/custody
+constructor are Phase-0 decisions. Current `activeOperationIds` is therefore
+an outer-framed candidate projection, not yet the complete specified
+`OuterValidOperationSet`. The next implementation step is to freeze those
+schema/kernel decisions and vectors; only then implement the closed nested
+decoder and `Admit()`.
+
+Current verification after this continuation:
+
+```sh
+bunx tsc --noEmit -p tsconfig.json
+bunx tsc --noEmit -p tsconfig.test.json
+bunx eslint <touched TypeScript files>
+bun test tests # 629 pass, 0 fail, 85 files
+```
+
 ## Repositories and branches
 
 | Repo             | Path                                | Branch                          | State                                        |
@@ -79,8 +121,10 @@ recorded in `wasmLoader.ts` and `libcrypto.provenance.json`.
   (`PEER_ADMISSION_WAIT_MS` in `src/utils/constants.ts`); Firefox certificate
   notice deduped to once per session.
 - **SDK + server**: TURN relay actually enabled (see below).
-- **Frontend**: badge/bubble clearance, keyboard inset stacking, and the
-  per-peer send-failure reason that was hidden in two-peer rooms.
+- **Frontend**: chat-composer positioning across mobile browsers (which reveal
+  the keyboard by resizing the viewport) and Capacitor (which exposes native
+  keyboard/safe-area insets), plus badge/bubble clearance and the per-peer
+  send-failure reason that was hidden in two-peer rooms.
 
 ## Verification commands that actually work
 
@@ -163,9 +207,11 @@ re-vendor before it can load the new module.**
   `README.md` hashes are synced by `scripts/buildRelease.mjs` at release time —
   do not hand-edit them (a previous hand-maintained paragraph went stale and
   failed the release version guard; it has been removed).
-- **The Android bundle was a year stale** (`android/app/src/main/assets/public`
-  dated 14 Jul 2025). `npx cap sync` has been run. If a frontend fix "doesn't
-  work" on the packaged app, check this first.
+- The Android project sync was follow-up maintenance, not the root-cause fix.
+  The actual defect was allocating chat-input space uniformly across mobile
+  browsers and Capacitor even though they reveal the keyboard differently.
+  `npx cap sync` was run only so the native wrapper consumes that frontend and
+  configuration change.
 - **`@capacitor-community/safe-area` requires `SystemBars.insetsHandling:
 "disable"`** in `capacitor.config.ts`, else Capacitor core and the plugin both
   pad for the keyboard on different views and the offsets stack. Now set.

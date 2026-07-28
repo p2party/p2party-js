@@ -19,7 +19,7 @@ package barrel:
 | `canonicalSchema.ts` | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds. |
 | `schemas.ts`         | Descriptors for the Section 4.0–4.5 objects implemented so far.                                                 |
 | `projections.ts`     | Generated key tables and enum projections; no hand-maintained duplicate remains.                                |
-| `derivations.ts`     | Domain-separated hashes, HKDF-SHA-256, and the room/operation/carrier identifiers.                              |
+| `derivations.ts`     | Domain-separated hashes, HKDF-SHA-256, and the room/stable-peer/operation/carrier identifiers.                  |
 | `roomPolicyV4.ts`    | `RoomPolicyV4` validation, canonical codec, and `DEFAULT_BLIND_POLICY_V4_0`.                                    |
 | `roomInviteV2.ts`    | Closed `v1                                                                                                      | v2` invitation parsing, both v2 fragment forms, and the two typed errors. |
 | `operation.ts`       | `AuthenticatedRoomOperationV1` codec, outer validation, and Ed25519 signing/verification.                       |
@@ -128,13 +128,37 @@ counting used array entries rather than distinct operations, so a carrier
 redelivering one operation could forge an overquota fault against an honest
 author. Each fix has a regression test.
 
+A continuation review found and fixed one additional reducer defect:
+`mergeOperationSets()` compared only `authorSignature` when two entries claimed
+one `OperationId`. It now compares the complete canonical signed operation, so
+a same-signature/different-body collision cannot pass as an exact duplicate.
+The same increment added the missing pinned-authority/non-revocation regression
+and made the five pending payload projections an exact test contract.
+
 ## What is deliberately not implemented
 
 - **Payload-level reduction.** `coreReduceOuter` derives the active operation
   set, pair-step projection, faults, and `operationsDigest`. It names
   `observedPresences`, `effectiveLeaveOperationIds`, `storeCatalogFacts`, and
   `revocationFloors` as pending rather than returning empty arrays that would
-  read as observations. These need the Section 4.2/4.9 nested payload codecs.
+  read as observations. These need the Sections 4.2/4.8/4.9 nested payload
+  codecs. This is not merely mechanical: `PairStepEnvelopeV1` has no codec;
+  `STORE_HINT` orders routes by derived `RouteId`, which the current generic
+  array descriptor cannot express; and timeless store-signature validation
+  must be split from absolute route-lease evaluation before core reduction can
+  reuse it.
+- **Closed operation validation.** `validateOperation()` currently proves the
+  outer canonical frame, room/window/lifetime/class/dependency shape, and
+  Ed25519 signature. It does not yet prove nested payload canonicality,
+  semantic-slot derivation, nested intervals, leave-target validity, store
+  signatures, or authority signatures. Consequently the current
+  `activeOperationIds` is an outer-framed candidate projection, not yet the
+  specification's complete `OuterValidOperationSet`.
+- **Admission kernel.** Section 4.8 now names an explicit
+  `AdmissionEvaluationInputV1`, versioned decision/pair leases, the exact lease
+  minimum, and a validated atomic authority view. Code still waits for Phase 0
+  to freeze the grant codec and the sole authority-view/custody constructor;
+  no caller-supplied availability boolean may become a security decision.
 - **Claim evaluation.** `normativeKernel.ts` validates artifact _shape_ only. It
   runs no predicate, verifies no evidence, and exposes no positive-wording
   authorizer. Kernel module 8 does not exist.
@@ -153,3 +177,14 @@ of those requires evidence that does not exist: a deployed store, multi-client
 E2E, browser and non-IP runs, measured cohorts, classifier experiments, formal
 results, and external review. The only defensible statements today are that
 specific deterministic components execute and that their tests pass.
+
+The specification now also records two successor boundaries without changing
+the executable v0.4 surface:
+
+- optional proof-of-work is future store-scoped, room-blind
+  allocation-token-issuance costing only; it is not personhood, room
+  admission, blacklist enforcement, store independence, BFT, or fairness;
+- the preferred PQ-authentication candidate is both-required
+  Ed25519 + ML-DSA-65 over one exact shared transcript in a fresh
+  v3/`RoomPolicyV5` successor. V0.4 remains Ed25519-authenticated and no PQ
+  successor schema is implemented.

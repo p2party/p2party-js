@@ -22,6 +22,11 @@ import {
   encodeCanonical,
 } from "./canonicalSchema";
 import {
+  hkdfSha256Expand,
+  hkdfSha256Extract,
+  sha256,
+} from "../cryptography/webCryptoSha256";
+import {
   admissionGrantUnsignedV1Schema,
   admissionGrantV1Schema,
   admissionRevokeUnsignedV1Schema,
@@ -52,6 +57,12 @@ import {
 } from "./schemas";
 
 import type { TypeDescriptor } from "./canonicalSchema";
+
+export {
+  hkdfSha256Expand,
+  hkdfSha256Extract,
+  sha256,
+} from "../cryptography/webCryptoSha256";
 
 const textEncoder = new TextEncoder();
 
@@ -179,74 +190,8 @@ export const base64urlNoPadDecode = (encoded: string): Uint8Array => {
 };
 
 /* ------------------------------------------------------------------ *
- * Hash and key-derivation primitives
+ * Hash and key-derivation helpers
  * ------------------------------------------------------------------ */
-
-/** `H(x) = SHA-256(x)` (Section 3.3). */
-export const sha256 = async (input: Uint8Array): Promise<Uint8Array> =>
-  new Uint8Array(
-    await globalThis.crypto.subtle.digest(
-      "SHA-256",
-      input as unknown as ArrayBufferView<ArrayBuffer>,
-    ),
-  );
-
-const hmacSha256 = async (
-  key: Uint8Array,
-  message: Uint8Array,
-): Promise<Uint8Array> => {
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
-    "raw",
-    // An empty HMAC key is legal in RFC 2104 but not accepted by WebCrypto;
-    // HKDF-Extract with an empty salt uses a zero-filled block instead.
-    (key.length === 0
-      ? new Uint8Array(32)
-      : key) as unknown as ArrayBufferView<ArrayBuffer>,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return new Uint8Array(
-    await globalThis.crypto.subtle.sign(
-      "HMAC",
-      cryptoKey,
-      message as unknown as ArrayBufferView<ArrayBuffer>,
-    ),
-  );
-};
-
-/**
- * RFC 5869 HKDF-Extract with SHA-256, which is exactly
- * `HMAC-SHA-256(key = salt, msg = ikm)`. The HMAC itself comes from WebCrypto;
- * this composes the standard construction and does not implement a primitive.
- */
-export const hkdfSha256Extract = async (
-  salt: Uint8Array,
-  ikm: Uint8Array,
-): Promise<Uint8Array> => hmacSha256(salt, ikm);
-
-/** RFC 5869 §2.3 HKDF-Expand with SHA-256. */
-export const hkdfSha256Expand = async (
-  prk: Uint8Array,
-  info: Uint8Array,
-  length: number,
-): Promise<Uint8Array> => {
-  if (!Number.isSafeInteger(length) || length <= 0 || length > 255 * 32)
-    fail("HKDF-Expand output length is out of range");
-  const output = new Uint8Array(length);
-  let previousBlock: Uint8Array = new Uint8Array(0);
-  let offset = 0;
-  for (let counter = 1; offset < length; counter++) {
-    previousBlock = await hmacSha256(
-      prk,
-      concatBytes(previousBlock, info, byteOf(counter)),
-    );
-    const take = Math.min(previousBlock.length, length - offset);
-    output.set(previousBlock.subarray(0, take), offset);
-    offset += take;
-  }
-  return output;
-};
 
 const hashWithDomain = async (
   domainString: string,

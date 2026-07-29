@@ -32,6 +32,7 @@ import {
   admissionGrantUnsignedV1Schema,
   admissionGrantV1Schema,
   admissionRevokeUnsignedV1Schema,
+  authorityAdmissionStateDigestInputV1Schema,
   authenticatedRoomOperationUnsignedV1Schema,
   authenticatedRoomOperationV1Schema,
   carrierEnvelopeV1Schema,
@@ -1233,6 +1234,18 @@ export const admissionRevokeSignedMessage = async (
   concatBytes(
     domain("p2party/admission-revoke-signature/v1"),
     await sha256(canonical(admissionRevokeUnsignedV1Schema, unsignedRevoke)),
+  );
+
+/**
+ * Decision-relevant authority state. The schema itself excludes the moving
+ * reference window, whole-Core/custody digests, and unrelated identities.
+ */
+export const authorityAdmissionStateDigest = async (
+  input: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/authority-admission-state/v1",
+    canonical(authorityAdmissionStateDigestInputV1Schema, input),
   );
 
 /* ------------------------------------------------------------------ *

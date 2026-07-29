@@ -15,6 +15,7 @@
  */
 
 import {
+  MAX_CANONICAL_ENCODING_BYTES,
   array,
   bool,
   bytes32,
@@ -851,6 +852,41 @@ export const canonicalBytes32SetV1Schema = array(
   MAX_FRONTEND_ROOM_CONTROL_SET_ENTRIES_V1,
 );
 
+export const initializedRoomAdmissionFenceV1Schema = record(
+  "InitializedRoomAdmissionFenceV1",
+  [
+    { name: "version", type: u8 },
+    { name: "roomContextId", type: bytes32 },
+    { name: "roomPolicy", type: roomPolicyV4Schema },
+  ],
+);
+
+export const localPresenceOwnershipV1Schema = record(
+  "LocalPresenceOwnershipV1",
+  [
+    { name: "version", type: u8 },
+    {
+      name: "localPresenceOperationIds",
+      type: canonicalBytes32SetV1Schema,
+    },
+  ],
+);
+
+export const authorityCustodyStatusV1Schema = enumOf(
+  "AuthorityCustodyStatusV1",
+  ["complete", "saturated"],
+);
+
+export const authorityCustodyProjectionV1Schema = record(
+  "AuthorityCustodyProjectionV1",
+  [
+    { name: "version", type: u8 },
+    { name: "status", type: authorityCustodyStatusV1Schema },
+    { name: "authorityCustodyStateDigest", type: bytes32 },
+    { name: "firstSaturatedRequiredWorkId", type: optional(bytes32) },
+  ],
+);
+
 export const frontendRoomControlsV1Schema = record("FrontendRoomControlsV1", [
   { name: "version", type: u8 },
   { name: "policyGeneration", type: u64 },
@@ -1343,6 +1379,51 @@ export const pairAuthorChainPrefixEvidenceV1Schema = record(
   ],
 );
 
+export const identityHelloHistoricalPresenceEvidenceV1Schema = record(
+  "IdentityHelloHistoricalPresenceEvidenceV1",
+  [
+    {
+      name: "exactPresenceOperationBytes",
+      type: varBytes(MAX_CARRIED_ROOM_OPERATION_BYTES_V1),
+    },
+    { name: "presenceOperationId", type: bytes32 },
+    { name: "retainThroughLogicalWindow", type: u64 },
+    {
+      name: "authorChainPrefix",
+      type: array(
+        pairAuthorChainPrefixEvidenceV1Schema,
+        MAX_OPERATIONS_PER_AUTHOR_WINDOW_V1,
+        "sequence",
+      ),
+    },
+  ],
+);
+
+/**
+ * Exact pair-subject evidence retained for one authenticated IDENTITY_HELLO.
+ *
+ * Endpoint order is protocol-visible: remote HELLO author first, local
+ * responder second. The semantic codec requires exactly two entries.
+ */
+export const identityHelloHistoricalEvidenceBundleV1Schema = record(
+  "IdentityHelloHistoricalEvidenceBundleV1",
+  [
+    { name: "version", type: u8 },
+    {
+      name: "exactCoreStateBytes",
+      type: varBytes(MAX_CANONICAL_ENCODING_BYTES),
+    },
+    {
+      name: "endpointPresenceEvidence",
+      type: array(
+        identityHelloHistoricalPresenceEvidenceV1Schema,
+        2,
+        "sequence",
+      ),
+    },
+  ],
+);
+
 const pairSlotAcceptanceFields: readonly FieldDescriptor[] = [
   { name: "coordinate", type: pairAcceptedSlotCoordinateV1Schema },
   { name: "kind", type: pairStepKindV1Schema },
@@ -1563,6 +1644,43 @@ export const coreRevocationFloorV1Schema = record("CoreRevocationFloorV1", [
   { name: "validThroughLogicalWindow", type: u64 },
   { name: "revokeOperationId", type: bytes32 },
 ]);
+
+export const authorityWindowFaultV1Schema = record("AuthorityWindowFaultV1", [
+  { name: "logicalWindow", type: u64 },
+  {
+    name: "proofOperationIds",
+    type: array(bytes32, MAX_REGISTRY_ENTRIES),
+  },
+]);
+
+export const authorityAdmissionStatusV1Schema = enumOf(
+  "AuthorityAdmissionStatusV1",
+  ["available", "unavailable"],
+);
+
+/**
+ * Exact canonical tuple hashed by AuthorityAdmissionStateDigest. It excludes
+ * the reference window, whole-Core digest, custody digest source material,
+ * and unrelated authority facts by construction.
+ */
+export const authorityAdmissionStateDigestInputV1Schema = record(
+  "AuthorityAdmissionStateDigestInputV1",
+  [
+    { name: "roomContextId", type: bytes32 },
+    { name: "stableIdentityCommitment", type: bytes32 },
+    { name: "status", type: authorityAdmissionStatusV1Schema },
+    {
+      name: "revocationFacts",
+      type: array(coreRevocationFloorV1Schema, MAX_REGISTRY_ENTRIES),
+    },
+    {
+      name: "blockingAuthorityWindowFaults",
+      type: array(authorityWindowFaultV1Schema, MAX_REGISTRY_ENTRIES),
+    },
+    { name: "authorityCustodyStatus", type: authorityCustodyStatusV1Schema },
+    { name: "firstSaturatedRequiredWorkId", type: optional(bytes32) },
+  ],
+);
 
 const coreAuthorFaultV1Schema = record("CoreAuthorFaultV1", [
   {

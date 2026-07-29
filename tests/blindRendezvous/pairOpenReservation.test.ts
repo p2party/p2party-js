@@ -49,6 +49,10 @@ import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV
 import { newKeyPair, sign } from "../../src/cryptography/ed25519";
 import { generateHpkeRecipientKeyPair } from "../../src/cryptography/hpke";
 import { loadTestModule } from "../../src/cryptography/testModule";
+import {
+  createLocalStableIdentityCustodyV1,
+  destroyLocalStableIdentityCustodyV1,
+} from "../../src/blindRendezvous/localStableIdentityCustody";
 
 import type {
   ActivePairOperationCandidateV1,
@@ -77,6 +81,7 @@ import type {
   PairOpenReservationStorePortV1,
   ReservedIdentityHelloOpenV1,
 } from "../../src/blindRendezvous/pairOpenReservation";
+import type { LocalStableIdentityCustodyV1 } from "../../src/blindRendezvous/localStableIdentityCustody";
 
 const cryptoModule = await loadTestModule();
 const policy = DEFAULT_BLIND_POLICY_V4_0;
@@ -84,6 +89,7 @@ const ROOM_CAPABILITY = new Uint8Array(32).fill(0x59);
 const ROOM_ROOT = new Uint8Array(32).fill(0x5a);
 const HELLO_WINDOW = 1_000n;
 const RECEIVER_KEY_REVISION = 9n;
+const LOCAL_IDENTITY_KEY_REVISION = 7n;
 const ENVELOPE_BYTES = 4_096;
 
 const copyPolicy = () => ({
@@ -120,6 +126,7 @@ const copyExactRow = (
 interface PresenceFixture {
   readonly operation: OuterValidatedIdentifiedOperationV1;
   readonly stablePublicKey: Uint8Array;
+  readonly stableSecretKey: Uint8Array;
   readonly receiverSecretSeed: Uint8Array;
 }
 
@@ -186,6 +193,7 @@ const buildPresence = async (
   const fixture = {
     operation,
     stablePublicKey: Uint8Array.from(stable.publicKey),
+    stableSecretKey: Uint8Array.from(stable.secretKey),
     receiverSecretSeed: Uint8Array.from(receiver.secretKey),
   };
   stable.secretKey.fill(0);
@@ -240,12 +248,14 @@ const buildPairCandidate = async (
 interface ReservationFixture {
   readonly candidate: ActivePairOperationCandidateV1;
   readonly custody: LocalHelloReceiverCustodyV1;
+  readonly stableCustody: LocalStableIdentityCustodyV1;
   readonly evidenceView: HistoricalIdentityHelloEvidenceViewV1;
   readonly localEvidence: VerifiedHistoricalPairPresenceEvidenceV1;
   readonly subject: PairOpenBudgetSubjectV1;
   readonly exactCoreStateBytes: Uint8Array;
   readonly exactEvidenceCoreStateBytes: Uint8Array;
   readonly receiverSecretSeed: Uint8Array;
+  readonly stableSecretKey: Uint8Array;
 }
 
 const buildReservationFixture = async (): Promise<ReservationFixture> => {
@@ -270,18 +280,24 @@ const buildReservationFixture = async (): Promise<ReservationFixture> => {
   const evidenceView = await createHistoricalIdentityHelloEvidenceViewV1({
     historicalPresenceEvidence: [localEvidence],
   });
+  const stableCustody = await createLocalStableIdentityCustodyV1({
+    module: cryptoModule,
+    stableEd25519SecretKey: local.stableSecretKey,
+    localIdentityKeyRecordRevision: LOCAL_IDENTITY_KEY_REVISION,
+  });
   const custody = await createLocalHelloReceiverCustodyV1({
     module: cryptoModule,
     localPresenceEvidence: localEvidence,
     recipientHybridKemSecretSeed: local.receiverSecretSeed,
     roomRoot: ROOM_ROOT,
-    localStableEd25519PublicKey: local.stablePublicKey,
+    localStableIdentityCustody: stableCustody,
     receiverKeyRecordRevision: RECEIVER_KEY_REVISION,
   });
   const candidateSnapshot = snapshotActivePairOperationCandidate(candidate);
   return {
     candidate,
     custody,
+    stableCustody,
     evidenceView,
     localEvidence,
     subject: {
@@ -293,6 +309,7 @@ const buildReservationFixture = async (): Promise<ReservationFixture> => {
       candidateSnapshot.exactCoreStateBytes,
     ),
     receiverSecretSeed: local.receiverSecretSeed,
+    stableSecretKey: local.stableSecretKey,
   };
 };
 
@@ -313,8 +330,10 @@ const newTrial = (trialOrdinal = createdTrials.length) => {
 afterAll(() => {
   for (const trial of createdTrials) destroyExpectedIdentityHelloTrialV1(trial);
   destroyLocalHelloReceiverCustodyV1(fixture.custody);
+  destroyLocalStableIdentityCustodyV1(fixture.stableCustody);
   destroyHistoricalIdentityHelloEvidenceViewV1(fixture.evidenceView);
   fixture.receiverSecretSeed.fill(0);
+  fixture.stableSecretKey.fill(0);
 });
 
 const limits = (

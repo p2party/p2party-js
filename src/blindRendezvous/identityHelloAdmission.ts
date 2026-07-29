@@ -30,6 +30,7 @@ import {
 } from "./admissionPolicy";
 import {
   destroyConsumedIdentityHelloAdmissionClaimV1,
+  snapshotConsumedIdentityHelloAdmissionLocalCustodyV1,
   snapshotConsumedIdentityHelloAdmissionClaimV1,
   takeIdentityHelloAdmissionClaimForVerificationV1,
 } from "./identityHelloOpen";
@@ -150,6 +151,7 @@ export type PrepareIdentityHelloAdmissionResultV1 =
         | "core-changed"
         | "historical-evidence-changed"
         | "receiver-key-changed"
+        | "local-identity-key-changed"
         | "local-presence-ownership-changed";
     };
 
@@ -179,6 +181,7 @@ type VerifyIdentityHelloAdmissionCaptureResultV1 =
         | "core-changed"
         | "historical-evidence-changed"
         | "receiver-key-changed"
+        | "local-identity-key-changed"
         | "local-presence-ownership-changed";
     };
 
@@ -455,6 +458,8 @@ const verifyIdentityHelloAdmissionCaptureV1 = async (
         kind: "stale",
         reason: "local-presence-ownership-changed",
       };
+    if (captured.localIdentityKey.kind === "absent")
+      return { kind: "stale", reason: "local-identity-key-changed" };
 
     const exactInitializedRoomBytes = captured.initializedRoom.exactBytes;
     const exactCurrentCoreStateBytes = captured.currentCore.exactBytes;
@@ -462,6 +467,10 @@ const verifyIdentityHelloAdmissionCaptureV1 = async (
     const receiverKeyRecordRevision = requireU64(
       captured.receiverKey.recordRevision,
       "receiver-key record revision",
+    );
+    const localIdentityKeyRecordRevision = requireU64(
+      captured.localIdentityKey.recordRevision,
+      "local-identity-key record revision",
     );
     const exactLocalPresenceOwnershipBytes =
       captured.localPresenceOwnership.exactBytes;
@@ -578,9 +587,13 @@ const verifyIdentityHelloAdmissionCaptureV1 = async (
     )
       return { kind: "stale", reason: "historical-evidence-changed" };
 
-    if (receiverKeyRecordRevision !== facts.receiverKeyRecordRevision)
+    const liveLocalCustody =
+      snapshotConsumedIdentityHelloAdmissionLocalCustodyV1(consumedClaim);
+    if (
+      receiverKeyRecordRevision !== facts.receiverKeyRecordRevision ||
+      receiverKeyRecordRevision !== liveLocalCustody.receiverKeyRecordRevision
+    )
       return { kind: "stale", reason: "receiver-key-changed" };
-
     const localPresenceOwnership = ownLocalPresenceOwnership(
       exactLocalPresenceOwnershipBytes,
     );
@@ -588,12 +601,40 @@ const verifyIdentityHelloAdmissionCaptureV1 = async (
       !canonicalBytes32SetHas(
         localPresenceOwnership.localPresenceOperationIds,
         facts.endpointPresenceOperationIds[1],
+      ) ||
+      !canonicalBytes32SetHas(
+        localPresenceOwnership.localStableIdentityKeys,
+        liveLocalCustody.localStableEd25519PublicKey,
+      ) ||
+      !bytesEqual(
+        liveLocalCustody.localPresenceOperationId,
+        facts.endpointPresenceOperationIds[1],
+      ) ||
+      !bytesEqual(
+        historicalEvidence.endpointPresenceEvidence[1]
+          .exactPresenceOperationBytes,
+        liveLocalCustody.exactPresenceOperationBytes,
+      ) ||
+      !bytesEqual(
+        historicalEvidence.endpointPresenceEvidence[1].presenceOperationId,
+        liveLocalCustody.localPresenceOperationId,
       )
     )
       return {
         kind: "stale",
         reason: "local-presence-ownership-changed",
       };
+
+    if (
+      localIdentityKeyRecordRevision !== facts.localIdentityKeyRecordRevision ||
+      localIdentityKeyRecordRevision !==
+        liveLocalCustody.localIdentityKeyRecordRevision ||
+      !bytesEqual(
+        facts.localStableEd25519PublicKey,
+        liveLocalCustody.localStableEd25519PublicKey,
+      )
+    )
+      return { kind: "stale", reason: "local-identity-key-changed" };
 
     let frontendControls: FrontendRoomControlsV1 | null = null;
     if (exactFrontendControlsBytes !== null) {

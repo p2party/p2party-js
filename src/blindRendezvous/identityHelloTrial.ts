@@ -24,6 +24,7 @@ import { consumeReservedIdentityHelloOpenV1 } from "./pairOpenReservation";
 import { validatePresenceOwnershipV1 } from "./operationPayload";
 import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
 import { PAIR_BOOTSTRAP_SUITE_V1 } from "./pairBootstrapSuite";
+import { snapshotLocalStableIdentityCustodyV1 } from "./localStableIdentityCustody";
 import { snapshotByteInput } from "../cryptography/byteInput";
 import { createMlKem768X25519Backend } from "../cryptography/hybridKem";
 
@@ -37,6 +38,7 @@ import type {
 } from "./coreReduce";
 import type { ReservedIdentityHelloOpenV1 } from "./pairOpenReservation";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
+import type { LocalStableIdentityCustodyV1 } from "./localStableIdentityCustody";
 
 const U32_MAX = 0xffffffff;
 const U64_MAX = 0xffffffffffffffffn;
@@ -50,8 +52,9 @@ declare const expectedIdentityHelloTrialBrand: unique symbol;
  *
  * The current constructor is an interim trusted local-storage boundary:
  * `receiverKeyRecordRevision` and `roomRoot` have no independent storage
- * provenance yet. The future atomic room/key adapter must be their sole
- * caller. Their values never become caller-controlled trial inputs.
+ * provenance yet. Stable identity ownership is already sealed by an exact
+ * `LocalStableIdentityCustodyV1` handle. The future atomic room/key adapter
+ * must be the sole caller. None of these values become per-trial inputs.
  */
 export interface LocalHelloReceiverCustodyV1 {
   readonly [localHelloReceiverCustodyBrand]: true;
@@ -80,7 +83,7 @@ export interface CreateLocalHelloReceiverCustodyOptionsV1 {
   readonly recipientHybridKemSecretSeed: Uint8Array;
   /** Exact room-specific HPKE PSK derived by trusted initialized-room state. */
   readonly roomRoot: Uint8Array;
-  readonly localStableEd25519PublicKey: Uint8Array;
+  readonly localStableIdentityCustody: LocalStableIdentityCustodyV1;
   readonly receiverKeyRecordRevision: bigint;
 }
 
@@ -96,6 +99,7 @@ export interface LocalHelloReceiverCustodySnapshotV1 {
   readonly receiverKeyValidThroughLogicalWindow: bigint;
   readonly receiverEvidenceRetainThroughLogicalWindow: bigint;
   readonly localStableEd25519PublicKey: Uint8Array;
+  readonly localIdentityKeyRecordRevision: bigint;
   readonly receiverKeyRecordRevision: bigint;
 }
 
@@ -153,6 +157,7 @@ export interface ExpectedIdentityHelloTrialSnapshotV1 {
   readonly receiverEvidenceRetainThroughLogicalWindow: bigint;
   readonly trialOrdinal: number;
   readonly receiverKeyRecordRevision: bigint;
+  readonly localIdentityKeyRecordRevision: bigint;
   readonly activeCandidate: ActivePairOperationCandidateSnapshotV1;
   readonly receiverCustody: LocalHelloReceiverCustodySnapshotV1;
   readonly localPresenceEvidence: VerifiedHistoricalPairPresenceSnapshotV1;
@@ -228,7 +233,9 @@ interface PrivateLocalHelloReceiverCustody {
   readonly advertisedReceiverHybridKemPublicKey: Uint8Array;
   readonly receiverKeyValidThroughLogicalWindow: bigint;
   readonly receiverEvidenceRetainThroughLogicalWindow: bigint;
+  readonly localStableIdentityCustody: LocalStableIdentityCustodyV1;
   readonly localStableEd25519PublicKey: Uint8Array;
+  readonly localIdentityKeyRecordRevision: bigint;
   readonly recipientHybridKemSecretSeed: Uint8Array;
   readonly roomRoot: Uint8Array;
   readonly receiverKeyRecordRevision: bigint;
@@ -318,6 +325,18 @@ const requireCustodyState = (
   const state = custodyStates.get(custody);
   if (state === undefined)
     return fail("receiver custody must be a genuine live process-local handle");
+  const stableCustody = snapshotLocalStableIdentityCustodyV1(
+    state.localStableIdentityCustody,
+  );
+  if (
+    stableCustody.localIdentityKeyRecordRevision !==
+      state.localIdentityKeyRecordRevision ||
+    !bytesEqual(
+      stableCustody.localStableEd25519PublicKey,
+      state.localStableEd25519PublicKey,
+    )
+  )
+    return fail("receiver custody stable-identity binding changed");
   return state;
 };
 
@@ -371,6 +390,7 @@ const copyCustodySnapshot = (
   localStableEd25519PublicKey: Uint8Array.from(
     state.localStableEd25519PublicKey,
   ),
+  localIdentityKeyRecordRevision: state.localIdentityKeyRecordRevision,
   receiverKeyRecordRevision: state.receiverKeyRecordRevision,
 });
 
@@ -449,6 +469,8 @@ const copyTrialSnapshot = (
       localPresenceEvidence.retainThroughLogicalWindow,
     trialOrdinal: state.trialOrdinal,
     receiverKeyRecordRevision: receiverCustody.receiverKeyRecordRevision,
+    localIdentityKeyRecordRevision:
+      receiverCustody.localIdentityKeyRecordRevision,
     activeCandidate,
     receiverCustody,
     localPresenceEvidence,
@@ -646,11 +668,15 @@ export const createLocalHelloReceiverCustodyV1 = async (
       "identityHelloTrial: RoomRoot",
       { exactLength: PAIR_BOOTSTRAP_SUITE_V1.hpke.pskBytes },
     );
-    const localStableEd25519PublicKey = snapshotByteInput(
-      options.localStableEd25519PublicKey,
-      "identityHelloTrial: local stable Ed25519 public key",
-      { exactLength: 32 },
+    const localStableIdentityCustody = options.localStableIdentityCustody;
+    const stableCustody = snapshotLocalStableIdentityCustodyV1(
+      localStableIdentityCustody,
     );
+    const localStableEd25519PublicKey = Uint8Array.from(
+      stableCustody.localStableEd25519PublicKey,
+    );
+    const localIdentityKeyRecordRevision =
+      stableCustody.localIdentityKeyRecordRevision;
     const receiverKeyRecordRevision = requireU64(
       "receiverKeyRecordRevision",
       options.receiverKeyRecordRevision,
@@ -693,6 +719,19 @@ export const createLocalHelloReceiverCustodyV1 = async (
         "recipient hybrid KEM secret seed does not match the local presence",
       );
 
+    const stillLiveStableCustody = snapshotLocalStableIdentityCustodyV1(
+      localStableIdentityCustody,
+    );
+    if (
+      stillLiveStableCustody.localIdentityKeyRecordRevision !==
+        localIdentityKeyRecordRevision ||
+      !bytesEqual(
+        stillLiveStableCustody.localStableEd25519PublicKey,
+        localStableEd25519PublicKey,
+      )
+    )
+      fail("stable identity custody changed during receiver-key verification");
+
     const handle = Object.freeze({}) as LocalHelloReceiverCustodyV1;
     genuineCustodies.add(handle);
     custodyStates.set(handle, {
@@ -711,7 +750,9 @@ export const createLocalHelloReceiverCustodyV1 = async (
         source.presence.core.receiverKeyValidThroughLogicalWindow,
       receiverEvidenceRetainThroughLogicalWindow:
         source.retainThroughLogicalWindow,
+      localStableIdentityCustody,
       localStableEd25519PublicKey,
+      localIdentityKeyRecordRevision,
       recipientHybridKemSecretSeed: privateReceiverSeed,
       roomRoot: privateRoomRoot,
       receiverKeyRecordRevision,
@@ -784,6 +825,14 @@ export const createExpectedIdentityHelloTrialV1 = (
   const exactLocalEntry =
     localEntry ??
     fail("historical evidence view does not include the custody presence");
+  /*
+   * Bind the exact signed PRESENCE operation and advertised receiver key, not
+   * the custody constructor's source Core bytes. The same immutable PRESENCE
+   * can be proved in multiple complete Core snapshots (for example before and
+   * after an unrelated PAIR_STEP), while this view remains the sole exact
+   * HELLO-window Core selector. Requiring byte-identical source Core state
+   * would reject that valid historical replay without adding ownership proof.
+   */
   if (
     !bytesEqual(
       exactLocalEntry.exactPresenceOperationBytes,

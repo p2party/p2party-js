@@ -49,6 +49,11 @@ import {
 import { PAIR_BOOTSTRAP_SUITE_V1 } from "../../src/blindRendezvous/pairBootstrapSuite";
 import { createPairOpenReservationServiceV1 } from "../../src/blindRendezvous/pairOpenReservation";
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
+import {
+  createLocalStableIdentityCustodyV1,
+  destroyLocalStableIdentityCustodyV1,
+  snapshotLocalStableIdentityCustodyV1,
+} from "../../src/blindRendezvous/localStableIdentityCustody";
 
 import type {
   ActivePairOperationCandidateV1,
@@ -69,12 +74,14 @@ import type {
   ReservedIdentityHelloOpenV1,
 } from "../../src/blindRendezvous/pairOpenReservation";
 import type { PresenceCoreV1 } from "../../src/blindRendezvous/operationPayload";
+import type { LocalStableIdentityCustodyV1 } from "../../src/blindRendezvous/localStableIdentityCustody";
 
 const module = await loadTestModule();
 const policy = DEFAULT_BLIND_POLICY_V4_0;
 const DEFAULT_CAPABILITY = new Uint8Array(32).fill(0x53);
 const HELLO_WINDOW = 1_000n;
 const RECEIVER_KEY_RECORD_REVISION = 9n;
+const LOCAL_IDENTITY_KEY_RECORD_REVISION = 7n;
 
 const copyPolicy = () => ({
   ...policy,
@@ -115,6 +122,7 @@ interface PresenceFixture {
   readonly authorPublicKey: Uint8Array;
   readonly authorSecretKey: Uint8Array;
   readonly stablePublicKey: Uint8Array;
+  readonly stableSecretKey: Uint8Array;
   readonly receiverPublicKey: Uint8Array;
   readonly receiverSecretSeed: Uint8Array;
 }
@@ -189,6 +197,7 @@ const buildPresence = async (
   const authorPublicKey = Uint8Array.from(author.publicKey);
   const authorSecretKey = Uint8Array.from(author.secretKey);
   const stablePublicKey = Uint8Array.from(stable.publicKey);
+  const stableSecretKey = Uint8Array.from(stable.secretKey);
   receiver.destroy();
   stable.secretKey.fill(0);
   author.secretKey.fill(0);
@@ -197,6 +206,7 @@ const buildPresence = async (
     authorPublicKey,
     authorSecretKey,
     stablePublicKey,
+    stableSecretKey,
     receiverPublicKey,
     receiverSecretSeed,
   };
@@ -299,6 +309,7 @@ interface TrialFixture {
 
 const fixtures = new Set<TrialFixture>();
 const extraCustodies = new Set<LocalHelloReceiverCustodyV1>();
+const stableCustodies = new Set<LocalStableIdentityCustodyV1>();
 const extraEvidenceViews = new Set<HistoricalIdentityHelloEvidenceViewV1>();
 
 afterEach(() => {
@@ -318,10 +329,28 @@ afterEach(() => {
     fixture.remote.receiverSecretSeed.fill(0);
     fixture.local.authorSecretKey.fill(0);
     fixture.remote.authorSecretKey.fill(0);
+    fixture.local.stableSecretKey.fill(0);
+    fixture.remote.stableSecretKey.fill(0);
     fixture.roomRoot.fill(0);
   }
   fixtures.clear();
+  for (const custody of stableCustodies)
+    destroyLocalStableIdentityCustodyV1(custody);
+  stableCustodies.clear();
 });
+
+const createStableCustody = async (
+  presence: PresenceFixture,
+  revision = LOCAL_IDENTITY_KEY_RECORD_REVISION,
+): Promise<LocalStableIdentityCustodyV1> => {
+  const custody = await createLocalStableIdentityCustodyV1({
+    module,
+    stableEd25519SecretKey: presence.stableSecretKey,
+    localIdentityKeyRecordRevision: revision,
+  });
+  stableCustodies.add(custody);
+  return custody;
+};
 
 const buildFixture = async (
   bootstrap = true,
@@ -385,7 +414,7 @@ const buildFixture = async (
     localPresenceEvidence: localEvidence,
     recipientHybridKemSecretSeed: local.receiverSecretSeed,
     roomRoot,
-    localStableEd25519PublicKey: local.stablePublicKey,
+    localStableIdentityCustody: await createStableCustody(local),
     receiverKeyRecordRevision: RECEIVER_KEY_RECORD_REVISION,
   });
   const fixture: TrialFixture = {
@@ -449,6 +478,73 @@ const reserveTrial = async (
 };
 
 describe("identity HELLO receiver custody and expected trial", () => {
+  test("derives stable identity custody from owned secret bytes and rejects structural forgeries", async () => {
+    const keyPair = await newKeyPair(module);
+    const callerSecret = Uint8Array.from(keyPair.secretKey);
+    const expectedPublic = Uint8Array.from(keyPair.publicKey);
+    const pending = createLocalStableIdentityCustodyV1({
+      module,
+      stableEd25519SecretKey: callerSecret,
+      localIdentityKeyRecordRevision: LOCAL_IDENTITY_KEY_RECORD_REVISION,
+    });
+    callerSecret.fill(0xff);
+    keyPair.secretKey.fill(0);
+
+    const custody = await pending;
+    stableCustodies.add(custody);
+    const snapshot = snapshotLocalStableIdentityCustodyV1(custody);
+    expect(snapshot).toMatchObject({
+      version: 1,
+      localIdentityKeyRecordRevision: LOCAL_IDENTITY_KEY_RECORD_REVISION,
+    });
+    expectBytesEqual(snapshot.localStableEd25519PublicKey, expectedPublic);
+    snapshot.localStableEd25519PublicKey.fill(0);
+    expectBytesEqual(
+      snapshotLocalStableIdentityCustodyV1(custody).localStableEd25519PublicKey,
+      expectedPublic,
+    );
+
+    const spread = { ...custody } as LocalStableIdentityCustodyV1;
+    const cloned = structuredClone(custody) as LocalStableIdentityCustodyV1;
+    expect(() => snapshotLocalStableIdentityCustodyV1(spread)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => snapshotLocalStableIdentityCustodyV1(cloned)).toThrow(
+      "genuine live process-local handle",
+    );
+    await expect(
+      createLocalStableIdentityCustodyV1({
+        module,
+        stableEd25519SecretKey: new Uint8Array(63),
+        localIdentityKeyRecordRevision: 1n,
+      }),
+    ).rejects.toThrow();
+    const inconsistentSecret = await newKeyPair(module);
+    inconsistentSecret.secretKey[63] ^= 1;
+    await expect(
+      createLocalStableIdentityCustodyV1({
+        module,
+        stableEd25519SecretKey: inconsistentSecret.secretKey,
+        localIdentityKeyRecordRevision: 1n,
+      }),
+    ).rejects.toThrow("inconsistent public suffix");
+    inconsistentSecret.secretKey.fill(0);
+    await expect(
+      createLocalStableIdentityCustodyV1({
+        module,
+        stableEd25519SecretKey: new Uint8Array(64),
+        localIdentityKeyRecordRevision: 0x10000000000000000n,
+      }),
+    ).rejects.toThrow("unsigned 64-bit");
+
+    destroyLocalStableIdentityCustodyV1(custody);
+    destroyLocalStableIdentityCustodyV1(custody);
+    expect(() => snapshotLocalStableIdentityCustodyV1(custody)).toThrow(
+      "genuine live process-local handle",
+    );
+    expectedPublic.fill(0);
+  });
+
   test("captures one verified custody and creates a cryptography-free, provenance-bound trial", async () => {
     const fixture = await buildFixture();
     const moduleExports =
@@ -487,6 +583,12 @@ describe("identity HELLO receiver custody and expected trial", () => {
     expect(snapshot.trialOrdinal).toBe(3);
     expect(snapshot.receiverKeyRecordRevision).toBe(
       RECEIVER_KEY_RECORD_REVISION,
+    );
+    expect(snapshot.localIdentityKeyRecordRevision).toBe(
+      LOCAL_IDENTITY_KEY_RECORD_REVISION,
+    );
+    expect(custodySnapshot.localIdentityKeyRecordRevision).toBe(
+      LOCAL_IDENTITY_KEY_RECORD_REVISION,
     );
     expectBytesEqual(snapshot.activeOperationId, fixture.pair.operationId);
     expectBytesEqual(
@@ -574,20 +676,19 @@ describe("identity HELLO receiver custody and expected trial", () => {
     const fixture = await buildFixture();
     const seed = Uint8Array.from(fixture.local.receiverSecretSeed);
     const roomRoot = Uint8Array.from(fixture.roomRoot);
-    const stableKey = Uint8Array.from(fixture.local.stablePublicKey);
     const expectedSeed = Uint8Array.from(seed);
     const expectedRoomRoot = Uint8Array.from(roomRoot);
+    const stableCustody = await createStableCustody(fixture.local, 8n);
     const pending = createLocalHelloReceiverCustodyV1({
       module,
       localPresenceEvidence: fixture.localEvidence,
       recipientHybridKemSecretSeed: seed,
       roomRoot,
-      localStableEd25519PublicKey: stableKey,
+      localStableIdentityCustody: stableCustody,
       receiverKeyRecordRevision: 10n,
     });
     seed.fill(0xff);
     roomRoot.fill(0xee);
-    stableKey.fill(0xdd);
     const custody = await pending;
     extraCustodies.add(custody);
 
@@ -909,7 +1010,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         localPresenceEvidence: localEvidence,
         recipientHybridKemSecretSeed: local.receiverSecretSeed,
         roomRoot,
-        localStableEd25519PublicKey: local.stablePublicKey,
+        localStableIdentityCustody: await createStableCustody(local),
         receiverKeyRecordRevision: RECEIVER_KEY_RECORD_REVISION,
       });
       extraCustodies.add(custody);
@@ -994,6 +1095,14 @@ describe("identity HELLO receiver custody and expected trial", () => {
     const originalSeed = Uint8Array.from(fixture.local.receiverSecretSeed);
     const originalRoomRoot = Uint8Array.from(fixture.roomRoot);
     const wrongStable = await newKeyPair(module);
+    const wrongStableCustody = await createLocalStableIdentityCustodyV1({
+      module,
+      stableEd25519SecretKey: wrongStable.secretKey,
+      localIdentityKeyRecordRevision: 10n,
+    });
+    stableCustodies.add(wrongStableCustody);
+    const localStableCustody = await createStableCustody(fixture.local, 10n);
+    const remoteStableCustody = await createStableCustody(fixture.remote, 10n);
     try {
       await expect(
         createLocalHelloReceiverCustodyV1({
@@ -1001,7 +1110,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
           localPresenceEvidence: fixture.localEvidence,
           recipientHybridKemSecretSeed: fixture.local.receiverSecretSeed,
           roomRoot: fixture.roomRoot,
-          localStableEd25519PublicKey: wrongStable.publicKey,
+          localStableIdentityCustody: wrongStableCustody,
           receiverKeyRecordRevision: 10n,
         }),
       ).rejects.toThrow("stable key does not match the presence commitment");
@@ -1017,7 +1126,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
           localPresenceEvidence: fixture.localEvidence,
           recipientHybridKemSecretSeed: wrongReceiver.secretKey,
           roomRoot: fixture.roomRoot,
-          localStableEd25519PublicKey: fixture.local.stablePublicKey,
+          localStableIdentityCustody: localStableCustody,
           receiverKeyRecordRevision: 10n,
         }),
       ).rejects.toThrow("does not match the local presence");
@@ -1031,7 +1140,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         localPresenceEvidence: fixture.remoteEvidence,
         recipientHybridKemSecretSeed: fixture.remote.receiverSecretSeed,
         roomRoot: fixture.roomRoot,
-        localStableEd25519PublicKey: fixture.remote.stablePublicKey,
+        localStableIdentityCustody: remoteStableCustody,
         receiverKeyRecordRevision: 10n,
       }),
     ).rejects.toThrow("stable presence ownership signature does not verify");
@@ -1042,7 +1151,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         localPresenceEvidence: fixture.localEvidence,
         recipientHybridKemSecretSeed: fixture.local.receiverSecretSeed,
         roomRoot: new Uint8Array(PAIR_BOOTSTRAP_SUITE_V1.hpke.pskBytes - 1),
-        localStableEd25519PublicKey: fixture.local.stablePublicKey,
+        localStableIdentityCustody: localStableCustody,
         receiverKeyRecordRevision: 10n,
       }),
     ).rejects.toThrow();
@@ -1052,7 +1161,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         localPresenceEvidence: fixture.localEvidence,
         recipientHybridKemSecretSeed: fixture.local.receiverSecretSeed,
         roomRoot: fixture.roomRoot,
-        localStableEd25519PublicKey: fixture.local.stablePublicKey,
+        localStableIdentityCustody: localStableCustody,
         receiverKeyRecordRevision: 0x10000000000000000n,
       }),
     ).rejects.toThrow("unsigned 64-bit");
@@ -1062,7 +1171,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         localPresenceEvidence: {} as VerifiedHistoricalPairPresenceEvidenceV1,
         recipientHybridKemSecretSeed: fixture.local.receiverSecretSeed,
         roomRoot: fixture.roomRoot,
-        localStableEd25519PublicKey: fixture.local.stablePublicKey,
+        localStableIdentityCustody: localStableCustody,
         receiverKeyRecordRevision: 10n,
       }),
     ).rejects.toThrow();
@@ -1162,5 +1271,39 @@ describe("identity HELLO receiver custody and expected trial", () => {
     consumed.recipientHybridKemSecretSeed.fill(0);
     consumed.roomRoot.fill(0);
     destroyExpectedIdentityHelloTrialV1(siblingTrial);
+  });
+
+  test("destroying stable identity custody fails receiver liveness but not receiver cleanup", async () => {
+    const fixture = await buildFixture();
+    const stableCustody = await createStableCustody(fixture.local, 12n);
+    const receiverCustody = await createLocalHelloReceiverCustodyV1({
+      module,
+      localPresenceEvidence: fixture.localEvidence,
+      recipientHybridKemSecretSeed: fixture.local.receiverSecretSeed,
+      roomRoot: fixture.roomRoot,
+      localStableIdentityCustody: stableCustody,
+      receiverKeyRecordRevision: 13n,
+    });
+    extraCustodies.add(receiverCustody);
+    const trial = createTrial(fixture, {
+      receiverCustody,
+      trialOrdinal: 9,
+    });
+
+    destroyLocalStableIdentityCustodyV1(stableCustody);
+    destroyLocalStableIdentityCustodyV1(stableCustody);
+    expect(() => snapshotLocalHelloReceiverCustodyV1(receiverCustody)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => snapshotExpectedIdentityHelloTrialV1(trial)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() =>
+      destroyLocalHelloReceiverCustodyV1(receiverCustody),
+    ).not.toThrow();
+    expect(() =>
+      destroyLocalHelloReceiverCustodyV1(receiverCustody),
+    ).not.toThrow();
+    destroyExpectedIdentityHelloTrialV1(trial);
   });
 });

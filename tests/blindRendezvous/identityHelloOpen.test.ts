@@ -78,6 +78,10 @@ import {
   snapshotPreparedIdentityHelloAdmissionV1,
 } from "../../src/blindRendezvous/identityHelloAdmission";
 import { encodeFrontendRoomControlsV1 } from "../../src/blindRendezvous/admissionPolicy";
+import {
+  createLocalStableIdentityCustodyV1,
+  destroyLocalStableIdentityCustodyV1,
+} from "../../src/blindRendezvous/localStableIdentityCustody";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
@@ -102,6 +106,7 @@ import type {
 } from "../../src/blindRendezvous/identityHelloAdmission";
 import type { IdentityHelloAdmissionExactCaptureRowsV1 } from "../../src/blindRendezvous/identityHelloAdmissionPersistence";
 import type { FrontendRoomControlsV1 } from "../../src/blindRendezvous/admissionPolicy";
+import type { LocalStableIdentityCustodyV1 } from "../../src/blindRendezvous/localStableIdentityCustody";
 import type {
   AdmissionGrantV1,
   PresenceCoreV1,
@@ -123,6 +128,7 @@ import type {
 const module = await loadTestModule();
 const HELLO_WINDOW = 1_000n;
 const RECEIVER_REVISION = 17n;
+const LOCAL_IDENTITY_REVISION = 11n;
 
 type AuthenticatedDefect =
   | "none"
@@ -163,6 +169,7 @@ interface HelloFixture {
     VerifiedHistoricalPairPresenceEvidenceV1
   >;
   readonly evidenceView: HistoricalIdentityHelloEvidenceViewV1;
+  readonly localStableCustody: LocalStableIdentityCustodyV1;
   readonly localCustody: LocalHelloReceiverCustodyV1;
   readonly roomRoot: Uint8Array;
 }
@@ -171,6 +178,7 @@ const trackedSecrets = new Set<Uint8Array>();
 const trackedTrials = new Set<ExpectedIdentityHelloTrialV1>();
 const trackedViews = new Set<HistoricalIdentityHelloEvidenceViewV1>();
 const trackedCustodies = new Set<LocalHelloReceiverCustodyV1>();
+const trackedStableCustodies = new Set<LocalStableIdentityCustodyV1>();
 const trackedOpens = new Set<
   Extract<
     Awaited<ReturnType<typeof openReservedIdentityHelloV1>>,
@@ -200,6 +208,9 @@ afterEach(() => {
   for (const custody of trackedCustodies)
     destroyLocalHelloReceiverCustodyV1(custody);
   trackedCustodies.clear();
+  for (const custody of trackedStableCustodies)
+    destroyLocalStableIdentityCustodyV1(custody);
+  trackedStableCustodies.clear();
   for (const view of trackedViews)
     destroyHistoricalIdentityHelloEvidenceViewV1(view);
   trackedViews.clear();
@@ -209,6 +220,19 @@ afterEach(() => {
 
 const expectBytesEqual = (left: Uint8Array, right: Uint8Array): void => {
   expect(Buffer.from(left)).toEqual(Buffer.from(right));
+};
+
+const createStableCustody = async (
+  presence: PresenceFixture,
+  revision = LOCAL_IDENTITY_REVISION,
+): Promise<LocalStableIdentityCustodyV1> => {
+  const custody = await createLocalStableIdentityCustodyV1({
+    module,
+    stableEd25519SecretKey: presence.stableSecretKey,
+    localIdentityKeyRecordRevision: revision,
+  });
+  trackedStableCustodies.add(custody);
+  return custody;
 };
 
 const compareBytes = (left: Uint8Array, right: Uint8Array): number => {
@@ -792,12 +816,13 @@ const buildHelloFixture = async (
   const localEvidence = evidenceByPresence.get(local);
   if (localEvidence === undefined)
     throw new Error("test Core omitted the local presence");
+  const localStableCustody = await createStableCustody(local);
   const localCustody = await createLocalHelloReceiverCustodyV1({
     module,
     localPresenceEvidence: localEvidence,
     recipientHybridKemSecretSeed: local.receiverSecretSeed,
     roomRoot,
-    localStableEd25519PublicKey: local.stablePublicKey,
+    localStableIdentityCustody: localStableCustody,
     receiverKeyRecordRevision: RECEIVER_REVISION,
   });
   trackedCustodies.add(localCustody);
@@ -812,6 +837,7 @@ const buildHelloFixture = async (
     active,
     evidenceByPresence,
     evidenceView,
+    localStableCustody,
     localCustody,
     roomRoot,
   };
@@ -947,7 +973,10 @@ const capturedAdmission = (
           },
     authorityCustody: { kind: "absent" },
     plannerAndExplicitState: { kind: "absent" },
-    localIdentityKey: { kind: "absent" },
+    localIdentityKey: {
+      kind: "present",
+      recordRevision: facts.localIdentityKeyRecordRevision,
+    },
     localAuthorHead: { kind: "absent" },
     pairLedger: { kind: "absent" },
     provisionalPair: { kind: "absent" },
@@ -999,7 +1028,10 @@ const createCustody = async (
     localPresenceEvidence: evidence,
     recipientHybridKemSecretSeed: presence.receiverSecretSeed,
     roomRoot,
-    localStableEd25519PublicKey: presence.stablePublicKey,
+    localStableIdentityCustody: await createStableCustody(
+      presence,
+      LOCAL_IDENTITY_REVISION + 1n,
+    ),
     receiverKeyRecordRevision: RECEIVER_REVISION + 1n,
   });
   trackedCustodies.add(custody);
@@ -1133,6 +1165,13 @@ describe("reservation-gated identity HELLO open", () => {
     expectBytesEqual(
       snapshot.stableEd25519PublicKey,
       fixture.remote.stablePublicKey,
+    );
+    expectBytesEqual(
+      snapshot.localStableEd25519PublicKey,
+      fixture.local.stablePublicKey,
+    );
+    expect(snapshot.localIdentityKeyRecordRevision).toBe(
+      LOCAL_IDENTITY_REVISION,
     );
     expectBytesEqual(
       snapshot.claimedStableIdentityCommitment,
@@ -1436,6 +1475,7 @@ describe("reservation-gated identity HELLO open", () => {
       "core-changed",
       "historical-evidence-changed",
       "receiver-key-changed",
+      "local-identity-key-changed",
       "local-presence-ownership-changed",
     ] as const) {
       const fixture = await buildHelloFixture();
@@ -1490,6 +1530,15 @@ describe("reservation-gated identity HELLO open", () => {
             },
           };
           break;
+        case "local-identity-key-changed":
+          capture = {
+            ...base,
+            localIdentityKey: {
+              kind: "present",
+              recordRevision: LOCAL_IDENTITY_REVISION + 1n,
+            },
+          };
+          break;
         case "local-presence-ownership-changed":
           capture = {
             ...base,
@@ -1512,6 +1561,53 @@ describe("reservation-gated identity HELLO open", () => {
         "genuine live process-local handle",
       );
     }
+  });
+
+  test("requires captured ownership of both the local presence and stable identity", async () => {
+    const fixture = await buildHelloFixture();
+    const claim = await openAdmissionClaim(fixture);
+    const facts = snapshotIdentityHelloAdmissionClaimV1(claim);
+    const capture = capturedAdmission(fixture, claim, openFrontendControls(), {
+      localPresenceOwnership: {
+        kind: "present",
+        exactBytes: encodeLocalPresenceOwnershipV1({
+          version: 1,
+          localPresenceOperationIds: [facts.endpointPresenceOperationIds[1]],
+          localStableIdentityKeys: [],
+        }),
+      },
+    });
+
+    expect(await prepareAdmission(fixture, claim, capture)).toEqual({
+      kind: "stale",
+      reason: "local-presence-ownership-changed",
+    });
+  });
+
+  test("retains exact live stable custody through open and admission claim", async () => {
+    const openFixture = await buildHelloFixture();
+    const opened = await openFresh(openFixture);
+    expect(opened.kind).toBe("opened");
+    if (opened.kind !== "opened") return;
+    destroyLocalStableIdentityCustodyV1(openFixture.localStableCustody);
+    expect(() => snapshotVerifiedIdentityHelloOpenV1(opened.value)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() =>
+      destroyVerifiedIdentityHelloOpenV1(opened.value),
+    ).not.toThrow();
+
+    const claimFixture = await buildHelloFixture();
+    const claim = await openAdmissionClaim(claimFixture);
+    const capture = capturedAdmission(
+      claimFixture,
+      claim,
+      openFrontendControls(),
+    );
+    destroyLocalStableIdentityCustodyV1(claimFixture.localStableCustody);
+    await expect(
+      prepareAdmission(claimFixture, claim, capture),
+    ).rejects.toThrow("genuine live process-local handle");
   });
 
   test("rejects a current-Core rollback below the view that authenticated the HELLO", async () => {

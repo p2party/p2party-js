@@ -28,7 +28,10 @@ import {
   policyHash,
   stableIdentityCommitment,
 } from "./derivations";
-import { consumeReservedExpectedIdentityHelloTrialForPairOpenV1 } from "./identityHelloTrial";
+import {
+  consumeReservedExpectedIdentityHelloTrialForPairOpenV1,
+  snapshotLocalHelloReceiverCustodyV1,
+} from "./identityHelloTrial";
 import { deriveOperationId, encodeOperation } from "./operation";
 import {
   OperationPayloadValidationError,
@@ -73,6 +76,8 @@ import type {
 import type {
   ExpectedIdentityHelloTrialV1,
   ConsumedExpectedIdentityHelloTrialV1,
+  LocalHelloReceiverCustodySnapshotV1,
+  LocalHelloReceiverCustodyV1,
 } from "./identityHelloTrial";
 import type { PairAttemptLeaseV1 } from "./admissionPolicy";
 import type { AdmissionGrantV1 } from "./operationPayload";
@@ -129,6 +134,8 @@ export interface IdentityHelloAdmissionClaimSnapshotV1 {
   readonly exactHistoricalEvidenceBundleBytes: Uint8Array;
   readonly openedAtReferenceWindow: bigint;
   readonly receiverKeyRecordRevision: bigint;
+  readonly localIdentityKeyRecordRevision: bigint;
+  readonly localStableEd25519PublicKey: Uint8Array;
   readonly decisionRole: "hello-responder";
   readonly operationId: Uint8Array;
   readonly kind: "IDENTITY_HELLO";
@@ -165,6 +172,8 @@ export interface VerifiedIdentityHelloOpenSnapshotV1 {
   readonly basePairAttemptLease: PairAttemptLeaseV1;
   readonly trialOrdinal: number;
   readonly receiverKeyRecordRevision: bigint;
+  readonly localIdentityKeyRecordRevision: bigint;
+  readonly localStableEd25519PublicKey: Uint8Array;
 }
 
 export type OpenReservedIdentityHelloResultV1 =
@@ -214,6 +223,7 @@ const deferMissingPresenceEvidence = (): never => {
 interface PrivateVerifiedIdentityHelloOpen {
   readonly helloRoot: Uint8Array;
   readonly activeCandidate: ActivePairOperationCandidateV1;
+  readonly receiverCustody: LocalHelloReceiverCustodyV1;
   readonly localPresenceEvidence: VerifiedHistoricalPairPresenceEvidenceV1;
   readonly remotePresenceEvidence: VerifiedHistoricalPairPresenceEvidenceV1;
   readonly bindingBytes: Uint8Array;
@@ -222,7 +232,6 @@ interface PrivateVerifiedIdentityHelloOpen {
   readonly pairIdentitySignatureHash: Uint8Array;
   readonly basePairAttemptLease: PairAttemptLeaseV1;
   readonly trialOrdinal: number;
-  readonly receiverKeyRecordRevision: bigint;
 }
 
 interface AuthenticatedHelloFacts {
@@ -294,33 +303,79 @@ const checkedAddU64 = (left: bigint, right: bigint): bigint => {
 const minimum = (left: bigint, right: bigint): bigint =>
   left < right ? left : right;
 
+const snapshotBoundLocalReceiverCustody = (
+  state: PrivateVerifiedIdentityHelloOpen,
+): {
+  readonly receiverCustody: LocalHelloReceiverCustodySnapshotV1;
+  readonly localPresenceEvidence: VerifiedHistoricalPairPresenceSnapshotV1;
+} => {
+  const receiverCustody = snapshotLocalHelloReceiverCustodyV1(
+    state.receiverCustody,
+  );
+  const localPresenceEvidence = snapshotHistoricalPairPresenceEvidence(
+    state.localPresenceEvidence,
+  );
+  if (
+    !bytesEqual(
+      receiverCustody.localPresenceOperationId,
+      localPresenceEvidence.presenceOperationId,
+    ) ||
+    !bytesEqual(
+      receiverCustody.exactPresenceOperationBytes,
+      localPresenceEvidence.exactPresenceOperationBytes,
+    ) ||
+    !bytesEqual(
+      receiverCustody.advertisedReceiverHybridKemPublicKey,
+      localPresenceEvidence.presence.core.rendezvousHybridKemPublicKey,
+    ) ||
+    !bytesEqual(
+      receiverCustody.roomContextId,
+      localPresenceEvidence.roomContextId,
+    )
+  )
+    return invalidAdmissionInput(
+      "local receiver custody no longer binds the authenticated HELLO evidence",
+    );
+  return { receiverCustody, localPresenceEvidence };
+};
+
 const copyVerifiedSnapshot = (
   state: PrivateVerifiedIdentityHelloOpen,
-): VerifiedIdentityHelloOpenSnapshotV1 => ({
-  version: 1,
-  helloOperationId: Uint8Array.from(state.helloOperationId),
-  activeCandidate: snapshotActivePairOperationCandidate(state.activeCandidate),
-  pairOuterBinding: decodeCanonicalStrict(
-    pairOuterBindingV1Schema,
-    state.bindingBytes,
-  ) as PairOuterBindingV1,
-  plaintext: decodeCanonicalStrict(
-    pairPlaintextV1Schema,
-    state.plaintextBytes,
-  ) as PairPlaintextV1,
-  localPresenceEvidence: snapshotHistoricalPairPresenceEvidence(
-    state.localPresenceEvidence,
-  ),
-  remotePresenceEvidence: snapshotHistoricalPairPresenceEvidence(
-    state.remotePresenceEvidence,
-  ),
-  pairIdentitySignatureHash: Uint8Array.from(state.pairIdentitySignatureHash),
-  basePairAttemptLease: validateAndCopyPairAttemptLeaseV1(
-    state.basePairAttemptLease,
-  ),
-  trialOrdinal: state.trialOrdinal,
-  receiverKeyRecordRevision: state.receiverKeyRecordRevision,
-});
+): VerifiedIdentityHelloOpenSnapshotV1 => {
+  const { receiverCustody, localPresenceEvidence } =
+    snapshotBoundLocalReceiverCustody(state);
+
+  return {
+    version: 1,
+    helloOperationId: Uint8Array.from(state.helloOperationId),
+    activeCandidate: snapshotActivePairOperationCandidate(
+      state.activeCandidate,
+    ),
+    pairOuterBinding: decodeCanonicalStrict(
+      pairOuterBindingV1Schema,
+      state.bindingBytes,
+    ) as PairOuterBindingV1,
+    plaintext: decodeCanonicalStrict(
+      pairPlaintextV1Schema,
+      state.plaintextBytes,
+    ) as PairPlaintextV1,
+    localPresenceEvidence,
+    remotePresenceEvidence: snapshotHistoricalPairPresenceEvidence(
+      state.remotePresenceEvidence,
+    ),
+    pairIdentitySignatureHash: Uint8Array.from(state.pairIdentitySignatureHash),
+    basePairAttemptLease: validateAndCopyPairAttemptLeaseV1(
+      state.basePairAttemptLease,
+    ),
+    trialOrdinal: state.trialOrdinal,
+    receiverKeyRecordRevision: receiverCustody.receiverKeyRecordRevision,
+    localIdentityKeyRecordRevision:
+      receiverCustody.localIdentityKeyRecordRevision,
+    localStableEd25519PublicKey: Uint8Array.from(
+      receiverCustody.localStableEd25519PublicKey,
+    ),
+  };
+};
 
 const copyAdmissionClaimSnapshot = (
   state: PrivateVerifiedIdentityHelloOpen,
@@ -406,6 +461,10 @@ const copyAdmissionClaimSnapshot = (
       }),
     openedAtReferenceWindow: activeCandidate.referenceWindow,
     receiverKeyRecordRevision: opened.receiverKeyRecordRevision,
+    localIdentityKeyRecordRevision: opened.localIdentityKeyRecordRevision,
+    localStableEd25519PublicKey: Uint8Array.from(
+      opened.localStableEd25519PublicKey,
+    ),
     decisionRole: "hello-responder",
     operationId: Uint8Array.from(opened.helloOperationId),
     kind: "IDENTITY_HELLO",
@@ -836,11 +895,31 @@ export const openReservedIdentityHelloV1 = async (
     if (authenticatedFacts === undefined)
       return fail("HPKE open returned without authenticated HELLO facts");
 
+    const liveReceiverCustody = snapshotLocalHelloReceiverCustodyV1(
+      consumed.receiverCustody,
+    );
+    if (
+      liveReceiverCustody.receiverKeyRecordRevision !==
+        trialSnapshot.receiverKeyRecordRevision ||
+      liveReceiverCustody.localIdentityKeyRecordRevision !==
+        trialSnapshot.localIdentityKeyRecordRevision ||
+      !bytesEqual(
+        liveReceiverCustody.localStableEd25519PublicKey,
+        trialSnapshot.receiverCustody.localStableEd25519PublicKey,
+      ) ||
+      !bytesEqual(
+        liveReceiverCustody.localPresenceOperationId,
+        trialSnapshot.localPresenceOperationId,
+      )
+    )
+      return fail("local receiver custody changed while opening the HELLO");
+
     const handle = Object.freeze({}) as VerifiedIdentityHelloOpenV1;
     genuineVerifiedOpens.add(handle);
     verifiedStates.set(handle, {
       helloRoot: openedRoot,
       activeCandidate: consumed.activeCandidate,
+      receiverCustody: consumed.receiverCustody,
       localPresenceEvidence: consumed.localPresenceEvidence,
       remotePresenceEvidence: authenticatedFacts.remotePresenceEvidence,
       bindingBytes: encodeCanonical(pairOuterBindingV1Schema, opened.binding),
@@ -851,7 +930,6 @@ export const openReservedIdentityHelloV1 = async (
       ),
       basePairAttemptLease: authenticatedFacts.basePairAttemptLease,
       trialOrdinal: trialSnapshot.trialOrdinal,
-      receiverKeyRecordRevision: trialSnapshot.receiverKeyRecordRevision,
     });
     transferredRoot = true;
     return { kind: "opened", value: handle };
@@ -949,6 +1027,23 @@ export const snapshotConsumedIdentityHelloAdmissionClaimV1 = (
   value: ConsumedIdentityHelloAdmissionClaimV1,
 ): IdentityHelloAdmissionClaimSnapshotV1 =>
   copyAdmissionClaimSnapshot(requireConsumedAdmissionClaimState(value));
+
+/**
+ * Assert and project the exact live receiver/stable custody carried through
+ * the authenticated HELLO transition.
+ *
+ * This internal accessor returns no capability or secret. Its only caller is
+ * the admission capture verifier, which compares both persisted revisions and
+ * the captured local-ownership row before minting trusted policy context.
+ *
+ * @internal
+ */
+export const snapshotConsumedIdentityHelloAdmissionLocalCustodyV1 = (
+  value: ConsumedIdentityHelloAdmissionClaimV1,
+): LocalHelloReceiverCustodySnapshotV1 => {
+  const state = requireConsumedAdmissionClaimState(value);
+  return snapshotBoundLocalReceiverCustody(state).receiverCustody;
+};
 
 /** Wipe in-flight HelloRoot custody. Idempotent for a genuine handle. */
 export const destroyConsumedIdentityHelloAdmissionClaimV1 = (

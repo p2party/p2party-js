@@ -10,6 +10,7 @@ import {
   evaluatePeerAdmissionPolicySemantics,
   selectApplicableRevocationFacts,
   selectBlockingAuthorityWindowFaults,
+  validateAndCopyAllowedPeerAdmissionPolicyV1,
   validateAndCopyFrontendRoomControlsV1,
   validateAndCopyPairAttemptLeaseV1,
 } from "../../src/blindRendezvous/admissionPolicy";
@@ -700,6 +701,45 @@ describe("pair and decision lease semantics", () => {
     remoteStableIdentityCommitment: candidateCommitment,
     referenceWindow: 100n,
     ...overrides,
+  });
+
+  test("strictly owns an allowed policy without reading accessors", () => {
+    const source = authorityAllow();
+    const copy = validateAndCopyAllowedPeerAdmissionPolicyV1(source);
+    source.grantId!.fill(0xff);
+    source.authorityAdmissionStateDigest!.fill(0xff);
+    expect(hex(copy.grantId!)).toBe(hex(bytes(0x05)));
+    expect(hex(copy.authorityAdmissionStateDigest!)).toBe(hex(bytes(0x06)));
+
+    expect(() =>
+      validateAndCopyAllowedPeerAdmissionPolicyV1({
+        ...capabilityAllow(),
+        unregistered: true,
+      }),
+    ).toThrow("must contain exactly");
+
+    let getterReads = 0;
+    const accessor = Object.defineProperties(
+      {},
+      Object.fromEntries(
+        Object.entries(capabilityAllow()).map(([key, value]) => [
+          key,
+          key === "reason"
+            ? {
+                enumerable: true,
+                get: () => {
+                  getterReads += 1;
+                  return value;
+                },
+              }
+            : { enumerable: true, value },
+        ]),
+      ),
+    );
+    expect(() => validateAndCopyAllowedPeerAdmissionPolicyV1(accessor)).toThrow(
+      "must contain exactly",
+    );
+    expect(getterReads).toBe(0);
   });
 
   test("copies a pair-attempt lease and rejects an impossible interval", () => {

@@ -22,13 +22,11 @@ import {
 import { snapshotByteInput } from "../cryptography/byteInput";
 import {
   AdmissionPolicySemanticError,
-  constructBootstrapAdmissionDecisionLease,
   decodeFrontendRoomControlsV1,
   evaluatePeerAdmissionPolicySemantics,
   selectApplicableRevocationFacts,
   selectBlockingAuthorityWindowFaults,
-  validateAndCopyBootstrapAdmissionDecisionLeaseV1,
-  validateAndCopyPairAttemptLeaseV1,
+  validateAndCopyAllowedPeerAdmissionPolicyV1,
 } from "./admissionPolicy";
 import {
   destroyConsumedIdentityHelloAdmissionClaimV1,
@@ -56,9 +54,11 @@ import {
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type {
+  AdmissionAllowReason,
+  AllowedPeerAdmissionPolicyV1,
   AuthorityAdmissionPolicyViewV1,
   FrontendRoomControlsV1,
-  PairAdmissionDecision,
+  PeerAdmissionPolicyDecisionV1,
 } from "./admissionPolicy";
 import type { CoreRoomStateV1 } from "./coreReduce";
 import type {
@@ -162,10 +162,8 @@ export interface IdentityHelloAdmissionPreparationServiceV1 {
 export interface PreparedIdentityHelloAdmissionSnapshotV1 {
   readonly version: 1;
   readonly stage: "policy-allowed-pre-topology";
-  readonly decision: Extract<
-    PairAdmissionDecision,
-    { readonly result: "allow" }
-  >;
+  /** Cloneable diagnostic only; never accepted back as authority. */
+  readonly reason: AdmissionAllowReason;
 }
 
 type VerifyIdentityHelloAdmissionCaptureResultV1 =
@@ -204,10 +202,7 @@ interface PrivateVerifiedAdmissionContext {
 interface PrivatePreparedIdentityHelloAdmission {
   readonly snapshot: TrustedAdmissionSnapshotV1;
   readonly context: VerifiedAdmissionContextV1;
-  readonly decision: Extract<
-    PairAdmissionDecision,
-    { readonly result: "allow" }
-  >;
+  readonly policy: AllowedPeerAdmissionPolicyV1;
 }
 
 const trustedSnapshotStates = new WeakMap<
@@ -695,16 +690,18 @@ const deriveAuthorityView = async (
 };
 
 /**
- * Sole pure bootstrap admission policy call over genuine captured facts.
+ * Pure peer-policy check over genuine captured facts.
  *
- * It returns leases only; callers still lack ACCEPT/root access and must
- * commit those leases with the response/outbox in the effectful boundary.
+ * This is deliberately not `Admit`: topology has not been proved, so an allow
+ * cannot mint either bootstrap lease. The later composite project-and-admit
+ * transition consumes this private snapshot/context and performs the one lease
+ * construction only after genuine current or historical topology succeeds.
  */
-const admitVerifiedIdentityHelloV1 = async (
+const evaluateVerifiedIdentityHelloPolicyV1 = async (
   snapshotHandle: TrustedAdmissionSnapshotV1,
   contextHandle: VerifiedAdmissionContextV1,
   module?: LibCrypto,
-): Promise<PairAdmissionDecision> => {
+): Promise<PeerAdmissionPolicyDecisionV1> => {
   const snapshot = requireTrustedSnapshotState(snapshotHandle);
   const context = requireVerifiedContextState(contextHandle);
   const facts = context.facts;
@@ -724,7 +721,7 @@ const admitVerifiedIdentityHelloV1 = async (
     snapshot,
     facts.claimedStableIdentityCommitment,
   );
-  const policy = await evaluatePeerAdmissionPolicySemantics(
+  return evaluatePeerAdmissionPolicySemantics(
     {
       roomContextId: snapshot.roomContextId,
       roomPolicy: snapshot.roomPolicy,
@@ -739,29 +736,6 @@ const admitVerifiedIdentityHelloV1 = async (
     },
     module,
   );
-  if (policy.result === "deny") return policy;
-
-  try {
-    return constructBootstrapAdmissionDecisionLease({
-      policy,
-      roomContextId: snapshot.roomContextId,
-      stableEd25519PublicKey: facts.stableEd25519PublicKey,
-      stableIdentityCommitment: facts.claimedStableIdentityCommitment,
-      admittedPresenceOperationId: facts.admittedPresenceOperationId,
-      admittedIdentityOperationId: facts.operationId,
-      admittedIdentityOperationLogicalWindow: facts.logicalWindow,
-      admittedIdentityOperationValidThroughLogicalWindow:
-        facts.validThroughLogicalWindow,
-      admittedPresenceEvidenceRetainThroughLogicalWindow:
-        facts.admittedPresenceEvidenceRetainThroughLogicalWindow,
-      basePairAttemptLease: facts.basePairAttemptLease,
-      referenceWindow: snapshot.referenceWindow,
-    });
-  } catch (error) {
-    if (error instanceof AdmissionPolicySemanticError)
-      return invalidAdmissionInput(error.message);
-    throw error;
-  }
 };
 
 /** Drop an ephemeral trusted snapshot. Idempotent for a genuine handle. */
@@ -800,28 +774,17 @@ const destroyVerifiedAdmissionContextV1 = (
 const mintPreparedIdentityHelloAdmission = (
   snapshot: TrustedAdmissionSnapshotV1,
   context: VerifiedAdmissionContextV1,
-  decision: Extract<PairAdmissionDecision, { readonly result: "allow" }>,
+  policy: AllowedPeerAdmissionPolicyV1,
 ): PreparedIdentityHelloAdmissionV1 => {
   const prepared = Object.freeze({}) as PreparedIdentityHelloAdmissionV1;
   genuinePreparedAdmissions.add(prepared);
   preparedAdmissionStates.set(prepared, {
     snapshot,
     context,
-    decision,
+    policy: validateAndCopyAllowedPeerAdmissionPolicyV1(policy),
   });
   return prepared;
 };
-
-const copyAllowedDecision = (
-  value: Extract<PairAdmissionDecision, { readonly result: "allow" }>,
-): Extract<PairAdmissionDecision, { readonly result: "allow" }> => ({
-  result: "allow",
-  reason: value.reason,
-  bootstrapLease: validateAndCopyBootstrapAdmissionDecisionLeaseV1(
-    value.bootstrapLease,
-  ),
-  pairAttemptLease: validateAndCopyPairAttemptLeaseV1(value.pairAttemptLease),
-});
 
 /**
  * Capture one storage adapter and initialized-room provenance boundary.
@@ -886,7 +849,7 @@ export const createIdentityHelloAdmissionPreparationServiceV1 = (
         if (verification.kind === "stale") return verification;
         verified = verification;
 
-        const decision = await admitVerifiedIdentityHelloV1(
+        const decision = await evaluateVerifiedIdentityHelloPolicyV1(
           verification.snapshot,
           verification.context,
           module,
@@ -934,7 +897,7 @@ export const snapshotPreparedIdentityHelloAdmissionV1 = (
   return {
     version: 1,
     stage: "policy-allowed-pre-topology",
-    decision: copyAllowedDecision(state.decision),
+    reason: state.policy.reason,
   };
 };
 

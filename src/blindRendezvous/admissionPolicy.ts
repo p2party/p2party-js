@@ -1148,11 +1148,25 @@ export const decodeBootstrapAdmissionDecisionLeaseV1 = (
     validateAndCopyBootstrapAdmissionDecisionLeaseV1,
   );
 
-const copyAllowedPolicy = (
-  policy: AllowedPeerAdmissionPolicyV1,
+export const validateAndCopyAllowedPeerAdmissionPolicyV1 = (
+  value: unknown,
 ): AllowedPeerAdmissionPolicyV1 => {
+  const fields = [
+    "result",
+    "reason",
+    "localPolicyGeneration",
+    "grantId",
+    "grantGeneration",
+    "authorityAdmissionStateDigest",
+    "grantValidThroughLogicalWindow",
+  ] as const;
+  if (!hasExactOwnDataFields(value, fields))
+    return fail(
+      "AllowedPeerAdmissionPolicyV1 must contain exactly its declared fields",
+    );
+  const policy = value;
   if (policy.result !== "allow")
-    return fail("lease construction requires an allowed policy result");
+    return fail("allowed policy copy requires an allow result");
   if (
     policy.reason !== "open" &&
     policy.reason !== "address-book" &&
@@ -1216,7 +1230,7 @@ const copyAllowedPolicy = (
 export const constructBootstrapAdmissionDecisionLease = (
   input: BootstrapAdmissionLeaseSemanticInputV1,
 ): PairAdmissionDecision => {
-  const policy = copyAllowedPolicy(input.policy);
+  const policy = validateAndCopyAllowedPeerAdmissionPolicyV1(input.policy);
   const basePairAttemptLease = validateAndCopyPairAttemptLeaseV1(
     input.basePairAttemptLease,
   );
@@ -1305,7 +1319,7 @@ export const constructBootstrapAdmissionDecisionLease = (
 export const constructStableEdgeAdmissionLease = (
   input: StableEdgeAdmissionLeaseSemanticInputV1,
 ): StableEdgeAdmissionDecision => {
-  const policy = copyAllowedPolicy(input.policy);
+  const policy = validateAndCopyAllowedPeerAdmissionPolicyV1(input.policy);
   const referenceWindow = requireU64("referenceWindow", input.referenceWindow);
   if (
     policy.grantValidThroughLogicalWindow !== null &&

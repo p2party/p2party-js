@@ -1239,7 +1239,7 @@ describe("reservation-gated identity HELLO open", () => {
     );
   });
 
-  test("prepares one opaque allow only after the captured port returns exact current state", async () => {
+  test("prepares one opaque policy allow without leases after exact capture", async () => {
     const fixture = await buildHelloFixture({ pairLifetimeWindows: 19 });
     const claim = await openAdmissionClaim(fixture);
     const service = createIdentityHelloAdmissionPreparationServiceV1(
@@ -1262,35 +1262,14 @@ describe("reservation-gated identity HELLO open", () => {
     const preparedSnapshot = snapshotPreparedIdentityHelloAdmissionV1(
       prepared.value,
     );
-    expect(preparedSnapshot.stage).toBe("policy-allowed-pre-topology");
-    const decision = preparedSnapshot.decision;
-    expect(decision.reason).toBe("open");
-    expect(decision.bootstrapLease.localPolicyGeneration).toBe(1n);
-    expect(decision.bootstrapLease.grantId).toBeNull();
-    expect(decision.pairAttemptLease.validThroughLogicalWindow).toBe(
-      HELLO_WINDOW + 19n,
-    );
-    expectBytesEqual(
-      decision.bootstrapLease.stableEd25519PublicKey,
-      fixture.remote.stablePublicKey,
-    );
-    expectBytesEqual(
-      decision.bootstrapLease.admittedPresenceOperationId,
-      fixture.remote.identified.operationId,
-    );
-
-    decision.bootstrapLease.stableEd25519PublicKey.fill(0);
-    decision.pairAttemptLease.pairEdgeId.fill(0);
-    const repeated = snapshotPreparedIdentityHelloAdmissionV1(
-      prepared.value,
-    ).decision;
-    expectBytesEqual(
-      repeated.bootstrapLease.stableEd25519PublicKey,
-      fixture.remote.stablePublicKey,
-    );
-    expect(
-      repeated.pairAttemptLease.pairEdgeId.some((byte) => byte !== 0),
-    ).toBe(true);
+    expect(preparedSnapshot).toEqual({
+      version: 1,
+      stage: "policy-allowed-pre-topology",
+      reason: "open",
+    });
+    expect("decision" in preparedSnapshot).toBe(false);
+    expect("bootstrapLease" in preparedSnapshot).toBe(false);
+    expect("pairAttemptLease" in preparedSnapshot).toBe(false);
 
     expect(() =>
       snapshotPreparedIdentityHelloAdmissionV1({
@@ -1299,7 +1278,7 @@ describe("reservation-gated identity HELLO open", () => {
     ).toThrow("genuine live process-local handle");
   });
 
-  test("reaches pre-topology policy admission through an overcapacity raw Core", async () => {
+  test("reaches policy evaluation only through an overcapacity raw Core", async () => {
     const fixture = await buildHelloFixture({ maxRoomMembers: 2 });
     const claim = await openAdmissionClaim(fixture);
     const facts = snapshotIdentityHelloAdmissionClaimV1(claim);

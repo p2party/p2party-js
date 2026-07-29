@@ -768,7 +768,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
     destroyExpectedIdentityHelloTrialV1(trial);
   });
 
-  test("rejects fake provenance, established framing, incomplete custody views, duplicates, and mixed historical Core snapshots", async () => {
+  test("rejects fake provenance, established framing, missing local custody, duplicates, and mixed historical Core snapshots", async () => {
     const fixture = await buildFixture();
     expect(() =>
       createTrial(fixture, {
@@ -811,11 +811,18 @@ describe("identity HELLO receiver custody and expected trial", () => {
       }),
     ).toThrow("does not include the custody presence");
 
-    await expect(
-      createHistoricalIdentityHelloEvidenceViewV1({
-        historicalPresenceEvidence: [fixture.localEvidence],
-      }),
-    ).rejects.toThrow("complete observed Core roster");
+    const localOnlyView = await createHistoricalIdentityHelloEvidenceViewV1({
+      historicalPresenceEvidence: [fixture.localEvidence],
+    });
+    extraEvidenceViews.add(localOnlyView);
+    const localOnlyTrial = createTrial(fixture, {
+      historicalEvidenceView: localOnlyView,
+    });
+    expect(
+      snapshotExpectedIdentityHelloTrialV1(localOnlyTrial)
+        .historicalEvidenceView.presenceOperationIds,
+    ).toHaveLength(1);
+    destroyExpectedIdentityHelloTrialV1(localOnlyTrial);
     await expect(
       createHistoricalIdentityHelloEvidenceViewV1({
         historicalPresenceEvidence: [
@@ -850,6 +857,90 @@ describe("identity HELLO receiver custody and expected trial", () => {
     ).toThrow("another room or policy");
   });
 
+  test("accepts a bounded selected evidence view from an overcapacity Core", async () => {
+    const overcapacityPolicy = {
+      ...copyPolicy(),
+      maxRoomMembers: 2,
+    };
+    const context = await createOperationValidationContext(
+      new Uint8Array(32).fill(0x55),
+      overcapacityPolicy,
+      HELLO_WINDOW,
+    );
+    const local = await buildPresence(context, 0x31, true);
+    const selectedRemote = await buildPresence(context, 0x32, false);
+    const excessRemote = await buildPresence(context, 0x33, false);
+    const pair = await buildPairCandidate(context, true);
+    const roomRoot = new Uint8Array(PAIR_BOOTSTRAP_SUITE_V1.hpke.pskBytes).fill(
+      0x62,
+    );
+    let trial: ExpectedIdentityHelloTrialV1 | undefined;
+    try {
+      const state = await coreReduce(
+        [
+          local.identified,
+          selectedRemote.identified,
+          excessRemote.identified,
+          pair,
+        ],
+        context,
+        module,
+      );
+      expect(state.roomCapacityState).toBe("overcapacity");
+      expect(state.observedPresences).toHaveLength(3);
+
+      const localEvidence = await captureHistoricalPairPresenceEvidence(
+        local.identified,
+        state,
+        HELLO_WINDOW,
+      );
+      const selectedRemoteEvidence =
+        await captureHistoricalPairPresenceEvidence(
+          selectedRemote.identified,
+          state,
+          HELLO_WINDOW,
+        );
+      const evidenceView = await createHistoricalIdentityHelloEvidenceViewV1({
+        historicalPresenceEvidence: [localEvidence, selectedRemoteEvidence],
+      });
+      extraEvidenceViews.add(evidenceView);
+      const custody = await createLocalHelloReceiverCustodyV1({
+        module,
+        localPresenceEvidence: localEvidence,
+        recipientHybridKemSecretSeed: local.receiverSecretSeed,
+        roomRoot,
+        localStableEd25519PublicKey: local.stablePublicKey,
+        receiverKeyRecordRevision: RECEIVER_KEY_RECORD_REVISION,
+      });
+      extraCustodies.add(custody);
+      trial = createExpectedIdentityHelloTrialV1({
+        activeCandidate: await captureActivePairOperationCandidate(pair, state),
+        receiverCustody: custody,
+        historicalEvidenceView: evidenceView,
+        trialOrdinal: 0,
+      });
+      const snapshot = snapshotExpectedIdentityHelloTrialV1(trial);
+      expect(snapshot.historicalEvidenceView.presenceOperationIds).toHaveLength(
+        2,
+      );
+      expect(
+        snapshot.historicalEvidenceView.presenceOperationIds.some(
+          (operationId) =>
+            Buffer.from(operationId).equals(
+              Buffer.from(excessRemote.identified.operationId),
+            ),
+        ),
+      ).toBe(false);
+    } finally {
+      if (trial !== undefined) destroyExpectedIdentityHelloTrialV1(trial);
+      for (const presence of [local, selectedRemote, excessRemote]) {
+        presence.receiverSecretSeed.fill(0);
+        presence.authorSecretKey.fill(0);
+      }
+      roomRoot.fill(0);
+    }
+  });
+
   test("rejects sparse, accessor-backed, non-plain, oversized evidence views and invalid trial scalars", async () => {
     const fixture = await buildFixture();
     expect(() => createTrial(fixture, { trialOrdinal: -1 })).toThrow(
@@ -862,7 +953,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
           () => fixture.localEvidence,
         ),
       }),
-    ).rejects.toThrow("room-member view bound");
+    ).rejects.toThrow("bounded projected-view limit");
 
     const sparse = new Array<VerifiedHistoricalPairPresenceEvidenceV1>(2);
     sparse[1] = fixture.remoteEvidence;

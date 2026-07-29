@@ -58,8 +58,11 @@ export interface LocalHelloReceiverCustodyV1 {
 }
 
 /**
- * Opaque complete observed-roster projection for one exact HELLO-time Core
- * view. It is reusable across every local receiver-key trial for that view.
+ * Opaque bounded endpoint-evidence lookup for one exact HELLO-time Core view.
+ *
+ * It is not admission or topology authority. The trusted caller supplies the
+ * locally selected subset; the later planner/explicit-state fence decides
+ * whether an authenticated endpoint may receive a response.
  */
 export interface HistoricalIdentityHelloEvidenceViewV1 {
   readonly [historicalIdentityHelloEvidenceViewBrand]: true;
@@ -98,15 +101,15 @@ export interface LocalHelloReceiverCustodySnapshotV1 {
 
 export interface CreateHistoricalIdentityHelloEvidenceViewOptionsV1 {
   /**
-   * The complete set of observed PRESENCE evidence from one genuine
-   * HELLO-time Core result. The constructor proves completeness against that
-   * exact Core state's observed roster.
+   * A nonempty bounded subset of observed PRESENCE evidence from one genuine
+   * HELLO-time Core result. Production supplies the Project-selected subset
+   * needed by local receiver trials, never the whole raw overcapacity roster.
    */
   readonly historicalPresenceEvidence: readonly VerifiedHistoricalPairPresenceEvidenceV1[];
 }
 
 /**
- * Compact, deeply owned metadata for one complete historical evidence view.
+ * Compact, deeply owned metadata for one bounded historical evidence view.
  *
  * Presence operation IDs are sufficient for deterministic membership and
  * lookup. Exact operation/prefix snapshots are resolved one at a time only
@@ -192,7 +195,7 @@ export interface ConsumedExpectedIdentityHelloTrialV1 {
   readonly receiverCustody: LocalHelloReceiverCustodyV1;
   readonly localPresenceEvidence: VerifiedHistoricalPairPresenceEvidenceV1;
   /**
-   * Exact-ID lookup over the complete fenced view. This function exists only
+   * Exact-ID lookup over the bounded fenced view. This function exists only
    * after the durable reservation is consumed; it returns an opaque genuine
    * evidence handle, never a caller-assembled structural proof.
    */
@@ -463,7 +466,7 @@ const snapshotDenseEvidenceHandles = (
     );
   if (input.length < 1 || input.length > maximumLength)
     return fail(
-      "historical presence evidence exceeds the room-member view bound",
+      "historical presence evidence exceeds the bounded projected-view limit",
     );
 
   const captured: VerifiedHistoricalPairPresenceEvidenceV1[] = [];
@@ -479,13 +482,13 @@ const snapshotDenseEvidenceHandles = (
 };
 
 /**
- * Capture the complete observed roster for one exact historical Core view.
+ * Capture one bounded exact-Core evidence subset.
  *
- * The O(member-count) provenance work and canonical Core decode happen once
- * here. Every later receiver-key trial reuses the opaque result and performs
- * no roster walk. A view may legitimately omit a future sender presence only
- * because that operation is absent from this exact Core snapshot; an
- * authenticated HELLO naming it is deferred until a newer exact view exists.
+ * The O(selected-member-count) provenance work and canonical Core decode
+ * happen once here. Every later receiver-key trial reuses the opaque result
+ * and performs no raw-roster walk. A view may omit an otherwise valid Core
+ * presence because Project did not select it; a HELLO naming an omitted
+ * endpoint is deferred and can never bypass later planner/admission fences.
  */
 export const createHistoricalIdentityHelloEvidenceViewV1 = async (
   options: CreateHistoricalIdentityHelloEvidenceViewOptionsV1,
@@ -553,16 +556,17 @@ export const createHistoricalIdentityHelloEvidenceViewV1 = async (
   const core = await decodeCoreRoomStateV1(exactCoreStateBytes);
   if (core.referenceWindow !== helloLogicalWindow)
     fail("historical evidence Core view is not at the exact HELLO window");
-  if (core.roomCapacityState !== "within-policy")
-    fail("historical evidence Core view exceeds the room-member policy");
-  if (core.observedPresences.length !== evidencePairs.length)
-    fail(
-      "historical presence evidence is not the complete observed Core roster",
-    );
-  for (const presence of core.observedPresences) {
-    if (!presenceIds.has(bytesKey(presence.presenceOperationId)))
+  for (const evidence of evidencePairs) {
+    if (
+      !core.observedPresences.some((presence) =>
+        bytesEqual(
+          presence.presenceOperationId,
+          evidence.snapshot.presenceOperationId,
+        ),
+      )
+    )
       fail(
-        "historical presence evidence is not the complete observed Core roster",
+        "historical presence evidence is not observed in its exact Core view",
       );
   }
 

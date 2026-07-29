@@ -36,6 +36,7 @@ import {
   admissionGrantV1Schema,
   admissionRevokeV1Schema,
   authenticatedRoomOperationV1Schema,
+  corePresenceFactV1Schema,
   leaveV1Schema,
   presenceV1Schema,
   storeHintOperationV1Schema,
@@ -47,6 +48,7 @@ import type {
   AuthenticatedRoomOperationV1,
   OperationKindV1,
 } from "./operation";
+import type { CorePresenceFactV1 } from "./coreReduce";
 import type { RoomPolicyV4 } from "./roomPolicyV4";
 import type { StoreDescriptorV1, StoreRouteV1 } from "./storeDescriptor";
 import type { TypeDescriptor } from "./canonicalSchema";
@@ -332,8 +334,9 @@ interface PresenceProofTranscriptV1 {
   readonly core: PresenceCoreV1;
 }
 
-const presenceTranscript = async (
-  operation: AuthenticatedRoomOperationV1,
+const presenceTranscriptFromFacts = async (
+  logicalWindow: bigint,
+  authorEpochEd25519Key: Uint8Array,
   presence: PresenceV1,
   context: NonPairPayloadValidationContext,
 ): Promise<{
@@ -343,14 +346,45 @@ const presenceTranscript = async (
   const transcript: PresenceProofTranscriptV1 = {
     roomContextId: context.roomContextId,
     policyHash: await policyHash(context.roomPolicy),
-    logicalWindow: operation.logicalWindow,
-    authorEpochEd25519Key: operation.authorEpochEd25519Key,
+    logicalWindow,
+    authorEpochEd25519Key,
     core: presence.core,
   };
   return {
     transcript,
     transcriptHash: await presenceProofTranscriptHash(transcript),
   };
+};
+
+const validateOwnedPresenceProof = async (
+  logicalWindow: bigint,
+  authorEpochEd25519Key: Uint8Array,
+  presence: PresenceV1,
+  stableEd25519PublicKey: Uint8Array,
+  context: NonPairPayloadValidationContext,
+  module?: LibCrypto,
+): Promise<void> => {
+  const expectedCommitment = await stableIdentityCommitment(
+    context.roomContextId,
+    stableEd25519PublicKey,
+  );
+  if (!bytesEqual(presence.core.stableIdentityCommitment, expectedCommitment))
+    fail("stable key does not match the presence commitment");
+  const { transcriptHash } = await presenceTranscriptFromFacts(
+    logicalWindow,
+    authorEpochEd25519Key,
+    presence,
+    context,
+  );
+  if (
+    !(await verify(
+      presenceOwnershipSignedMessage(transcriptHash),
+      Uint8Array.from(presence.stableOwnershipSignature),
+      stableEd25519PublicKey,
+      module,
+    ))
+  )
+    fail("stable presence ownership signature does not verify");
 };
 
 /**
@@ -387,31 +421,49 @@ export const validatePresenceOwnershipV1 = async (
     )
   )
     fail("stable ownership proof does not match the operation payload");
-  const expectedCommitment = await stableIdentityCommitment(
-    privateContext.roomContextId,
-    privateStableKey,
-  );
-  if (
-    !bytesEqual(
-      privatePresence.core.stableIdentityCommitment,
-      expectedCommitment,
-    )
-  )
-    fail("stable key does not match the presence commitment");
-  const { transcriptHash } = await presenceTranscript(
-    privateOperation,
+  await validateOwnedPresenceProof(
+    privateOperation.logicalWindow,
+    privateOperation.authorEpochEd25519Key,
     privatePresence,
+    privateStableKey,
     privateContext,
+    module,
   );
-  if (
-    !(await verify(
-      presenceOwnershipSignedMessage(transcriptHash),
-      Uint8Array.from(privatePresence.stableOwnershipSignature),
-      privateStableKey,
-      module,
-    ))
-  )
-    fail("stable presence ownership signature does not verify");
+};
+
+/**
+ * Verify ownership directly from a trusted Core presence fact.
+ *
+ * Core already authenticated the outer operation and preserved every field
+ * used by the ownership transcript. This avoids fabricating an incomplete
+ * `AuthenticatedRoomOperationV1` merely to perform a local address-book
+ * lookup. The function proves only the signature/commitment relation; the
+ * caller must still obtain the fact from a genuine current or retained Core
+ * projection before treating it as admission evidence.
+ */
+export const validateCorePresenceFactOwnershipV1 = async (
+  fact: CorePresenceFactV1,
+  stableEd25519PublicKey: Uint8Array,
+  context: NonPairPayloadValidationContext,
+  module?: LibCrypto,
+): Promise<void> => {
+  const privateFact = snapshotCanonical<CorePresenceFactV1>(
+    "CorePresenceFactV1",
+    corePresenceFactV1Schema,
+    fact,
+  );
+  const privateStableKey = Uint8Array.from(stableEd25519PublicKey);
+  const privateContext = snapshotPayloadContext(context);
+  if (privateStableKey.length !== 32)
+    fail("stableEd25519PublicKey must be exactly 32 bytes");
+  await validateOwnedPresenceProof(
+    privateFact.logicalWindow,
+    privateFact.authorEpochEd25519Key,
+    privateFact.presence,
+    privateStableKey,
+    privateContext,
+    module,
+  );
 };
 
 const validatePresence = async (
@@ -437,8 +489,9 @@ const validatePresence = async (
     BigInt(context.roomPolicy.protocolLimits.maxClockSkewWindows),
   );
 
-  const { transcriptHash } = await presenceTranscript(
-    operation,
+  const { transcriptHash } = await presenceTranscriptFromFacts(
+    operation.logicalWindow,
+    operation.authorEpochEd25519Key,
     presence,
     context,
   );

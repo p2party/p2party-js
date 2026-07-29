@@ -36,6 +36,7 @@ import {
   encodePresenceV1,
   encodeStoreHintOperationV1,
   validateAdmissionGrantV1,
+  validateCorePresenceFactOwnershipV1,
   validatePresenceOwnershipV1,
 } from "../../src/blindRendezvous/operationPayload";
 import { DEFAULT_BLIND_POLICY_V4_0 } from "../../src/blindRendezvous/roomPolicyV4";
@@ -64,6 +65,7 @@ import type {
   StoreDescriptorV1,
   StoreRouteV1,
 } from "../../src/blindRendezvous/storeDescriptor";
+import type { CorePresenceFactV1 } from "../../src/blindRendezvous/coreReduce";
 
 const bytes = (fill: number, length = 32): Uint8Array =>
   new Uint8Array(length).fill(fill);
@@ -396,6 +398,45 @@ describe("PRESENCE intrinsic and deferred ownership validation", () => {
     fixture.presence.core.presenceNonce.fill(0);
     mutableStableKey.fill(0);
     await expect(pending).resolves.toBeUndefined();
+  });
+
+  test("verifies a trusted Core fact without fabricating an outer operation", async () => {
+    const fixture = await buildPresence(capabilityContext);
+    const fact: CorePresenceFactV1 = {
+      presenceOperationId: await deriveOperationId(fixture.operation),
+      authorEpochEd25519Key: Uint8Array.from(
+        fixture.operation.authorEpochEd25519Key,
+      ),
+      logicalWindow: fixture.operation.logicalWindow,
+      presence: decodePresenceV1(encodePresenceV1(fixture.presence)),
+    };
+    const mutableStableKey = Uint8Array.from(stable.publicKey);
+    const pending = validateCorePresenceFactOwnershipV1(
+      fact,
+      mutableStableKey,
+      capabilityContext,
+    );
+    fact.presenceOperationId.fill(0);
+    fact.authorEpochEd25519Key.fill(0);
+    fact.presence.stableOwnershipSignature.fill(0);
+    mutableStableKey.fill(0);
+    await expect(pending).resolves.toBeUndefined();
+
+    const wrongKeyFact: CorePresenceFactV1 = {
+      presenceOperationId: await deriveOperationId(fixture.operation),
+      authorEpochEd25519Key: Uint8Array.from(
+        fixture.operation.authorEpochEd25519Key,
+      ),
+      logicalWindow: fixture.operation.logicalWindow,
+      presence: decodePresenceV1(encodePresenceV1(fixture.presence)),
+    };
+    await expect(
+      validateCorePresenceFactOwnershipV1(
+        wrongKeyFact,
+        otherStable.publicKey,
+        capabilityContext,
+      ),
+    ).rejects.toThrow("does not match the presence commitment");
   });
 
   test("does not pretend the hidden stable key is core-verifiable", async () => {

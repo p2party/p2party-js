@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   consumedPairRoutingTagsV1,
   createEmptyPairAcceptedSlotLedgerV1,
+  decodePairAcceptedSlotLedgerV1,
+  encodePairAcceptedSlotLedgerV1,
   pairEdgeIsStalledV1,
   previewAuthenticatedPairSlotV1,
   recordAcceptedPairSlotV1,
@@ -531,6 +533,42 @@ describe("pair accepted-slot ledger", () => {
     };
     expect(() => restorePairAcceptedSlotLedgerV1(shortProof)).toThrow(
       "must contain exactly two IDs",
+    );
+  });
+
+  test("round-trips strict canonical durable bytes and owns encoded input", () => {
+    let ledger = createEmptyPairAcceptedSlotLedgerV1();
+    ledger = accept(
+      ledger,
+      candidate({ edge: 0x21, operation: 0x31, response: 0x41 }),
+    );
+    ledger = accept(
+      ledger,
+      candidate({
+        edge: 0x22,
+        operation: 0x32,
+        response: null,
+        kind: "PAIR_CHECKPOINT",
+        pairSequence: 8n,
+        tag: 0x52,
+      }),
+    );
+
+    const encoded = encodePairAcceptedSlotLedgerV1(ledger);
+    const expected = Uint8Array.from(encoded);
+    const restored = decodePairAcceptedSlotLedgerV1(encoded);
+    encoded.fill(0xff);
+
+    expect(encodePairAcceptedSlotLedgerV1(restored)).toEqual(expected);
+    expect(snapshotPairAcceptedSlotLedgerV1(restored)).toEqual(
+      snapshotPairAcceptedSlotLedgerV1(ledger),
+    );
+
+    const malformed = Uint8Array.from(expected);
+    malformed[0] ^= 0xff;
+    expect(() => decodePairAcceptedSlotLedgerV1(malformed)).toThrow();
+    expect(() => decodePairAcceptedSlotLedgerV1(new Uint8Array(0))).toThrow(
+      "must not be empty",
     );
   });
 });

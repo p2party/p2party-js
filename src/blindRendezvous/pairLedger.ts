@@ -14,11 +14,13 @@
  */
 
 import {
+  MAX_CANONICAL_ENCODING_BYTES,
   bytes32,
   bytesEqual,
   decodeCanonicalStrict,
   encodeCanonical,
 } from "./canonicalSchema";
+import { snapshotByteInput } from "../cryptography/byteInput";
 import {
   pairAcceptedSlotCoordinateV1Schema,
   pairAcceptedSlotLedgerSnapshotV1Schema,
@@ -502,6 +504,15 @@ export const snapshotPairAcceptedSlotLedgerV1 = (
     },
   );
 
+/** Canonical durable bytes for one genuine process-local ledger. */
+export const encodePairAcceptedSlotLedgerV1 = (
+  ledger: PairAcceptedSlotLedgerV1,
+): Uint8Array =>
+  encodeCanonical(
+    pairAcceptedSlotLedgerSnapshotV1Schema,
+    snapshotPairAcceptedSlotLedgerV1(ledger),
+  );
+
 /**
  * Strict structural reconstruction boundary.
  *
@@ -536,6 +547,38 @@ export const restorePairAcceptedSlotLedgerV1 = (
   }
   validateGlobalEntrySemantics(entries);
   return createHandle(entries);
+};
+
+/**
+ * Strict canonical durable-byte reconstruction.
+ *
+ * This restores structural ledger invariants only. The trusted pair
+ * transaction must still revalidate the retained signed operation bytes
+ * before the restored handle can authorize protocol effects.
+ */
+export const decodePairAcceptedSlotLedgerV1 = (
+  encoded: Uint8Array,
+): PairAcceptedSlotLedgerV1 => {
+  let bytes: Uint8Array;
+  try {
+    bytes = snapshotByteInput(encoded, "pairLedger: encoded ledger", {
+      maximumLength: MAX_CANONICAL_ENCODING_BYTES,
+    });
+  } catch (cause) {
+    if (cause instanceof Error) return fail(cause.message);
+    return fail("encoded ledger must be canonical bytes");
+  }
+  if (bytes.length === 0) return fail("encoded ledger must not be empty");
+
+  try {
+    return restorePairAcceptedSlotLedgerV1(
+      decodeCanonicalStrict(pairAcceptedSlotLedgerSnapshotV1Schema, bytes),
+    );
+  } catch (cause) {
+    if (cause instanceof PairLedgerError) throw cause;
+    if (cause instanceof Error) return fail(cause.message);
+    return fail("encoded ledger validation failed");
+  }
 };
 
 /**

@@ -227,7 +227,7 @@ const input = (
     overrides.maxRetainedValidOperationsPerRoom ??
     Math.max(
       roomPolicy.maxRoomMembers + 2,
-      coreRoomState.activeOperationIds.length,
+      coreRoomState.activeOperationIds.length + 1,
     ),
   maxPairLedgerEntriesPerRoom: roomPolicy.maxRoomMembers + 2,
 });
@@ -893,7 +893,19 @@ describe("local admissible Project semantics", () => {
       1,
     );
     const core = await coreState([fact], 3);
-    const resourceLimited = await evaluateLocalAdmissibleProjectionSemanticsV1(
+    const belowResourceLimit =
+      await evaluateLocalAdmissibleProjectionSemanticsV1(
+        input(
+          context.roomContextId,
+          context.roomPolicy,
+          core,
+          [fact.presenceOperationId],
+          { maxRetainedValidOperationsPerRoom: 2 },
+        ),
+      );
+    expect(belowResourceLimit.projectionStatus).toBe("ready");
+
+    const atResourceLimit = await evaluateLocalAdmissibleProjectionSemanticsV1(
       input(
         context.roomContextId,
         context.roomPolicy,
@@ -902,7 +914,11 @@ describe("local admissible Project semantics", () => {
         { maxRetainedValidOperationsPerRoom: 1 },
       ),
     );
-    expect(resourceLimited.projectionStatus).toBe("ready");
+    expect(atResourceLimit).toMatchObject({
+      projectionStatus: "projection-resource-overcapacity",
+      plannerStatus: "unavailable",
+      topologySelections: [],
+    });
 
     const secondStable = await newKeyPair();
     const secondFact = await presenceFact(

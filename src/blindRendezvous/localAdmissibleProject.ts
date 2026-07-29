@@ -643,8 +643,8 @@ export const evaluateLocalAdmissibleProjectionSemanticsV1 = async (
     core.observedPresences.map((fact) => fact.presenceOperationId),
   );
   if (
-    core.activeOperationIds.length > input.maxRetainedValidOperationsPerRoom ||
-    core.observedPresences.length > input.maxRetainedValidOperationsPerRoom
+    core.activeOperationIds.length >= input.maxRetainedValidOperationsPerRoom ||
+    core.observedPresences.length >= input.maxRetainedValidOperationsPerRoom
   ) {
     return {
       version: 1,

@@ -95,41 +95,24 @@ export const IDENTITY_HELLO_ADMISSION_CAS_FENCE_ORDER_V1 = Object.freeze([
 export type IdentityHelloAdmissionCasConflictFenceV1 =
   (typeof IDENTITY_HELLO_ADMISSION_CAS_FENCE_ORDER_V1)[number];
 
-interface ExactPresentIdentityHelloAdmissionRowV1 {
-  readonly kind: "present";
-  readonly exactBytes: Uint8Array;
-}
-
 /**
- * Closed write masks for the three legal persistence transitions.
+ * Closed effects for the four legal persistence transitions.
  *
- * These are an adapter contract, not caller input. A later trusted transition
- * must construct every row from canonical codecs and prove that the same
- * ACCEPT operation ID is bound through the author head, pair ledger,
+ * Every effect carries one complete next-state projection instead of a
+ * per-variant partial write mask. This is deliberately repetitive at runtime
+ * but singular in the type system: an added mutable row cannot be forgotten
+ * by fork cancellation, denial, or replay reauthorization.
+ *
+ * These are an adapter contract, not caller input. The trusted transition
+ * must construct every row from canonical codecs. `accept-new` additionally
+ * proves that one ACCEPT operation ID binds the author head, pair ledger,
  * provisional pair, outbox, and resource reservation.
  */
-export type PreparedIdentityHelloAdmissionMutationV1 =
-  | {
-      readonly kind: "accept-new";
-      readonly nextLocalAuthorHead: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextPairLedger: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextProvisionalPair: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextIdentityBootstrapOutbox: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextResourceState: ExactPresentIdentityHelloAdmissionRowV1;
-    }
-  | {
-      readonly kind: "requeue-replay";
-      readonly nextProvisionalPair: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextIdentityBootstrapOutbox: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextResourceState: ExactPresentIdentityHelloAdmissionRowV1;
-    }
-  | {
-      readonly kind: "record-fork";
-      readonly nextPairLedger: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextProvisionalPair: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextIdentityBootstrapOutbox: ExactPresentIdentityHelloAdmissionRowV1;
-      readonly nextResourceState: ExactPresentIdentityHelloAdmissionRowV1;
-    };
+export interface PreparedIdentityHelloAdmissionMutationV1 {
+  readonly kind:
+    "accept-new" | "record-denial" | "requeue-replay" | "record-fork";
+  readonly nextRows: IdentityHelloAdmissionCommittedRowsV1;
+}
 
 export interface IdentityHelloAdmissionCasRequestV1 {
   readonly locator: IdentityHelloAdmissionReadLocatorV1;
@@ -139,6 +122,7 @@ export interface IdentityHelloAdmissionCasRequestV1 {
 
 /** Complete mutable-row echo after a successful durable commit. */
 export interface IdentityHelloAdmissionCommittedRowsV1 {
+  readonly plannerAndExplicitState: ExactIdentityHelloAdmissionRowV1;
   readonly localAuthorHead: ExactIdentityHelloAdmissionRowV1;
   readonly pairLedger: ExactIdentityHelloAdmissionRowV1;
   readonly provisionalPair: ExactIdentityHelloAdmissionRowV1;

@@ -60,6 +60,7 @@ import {
   validateMlKem768X25519PublicKey,
 } from "../cryptography/hybridKem";
 import { verifyIdentityCrossSig } from "../cryptography/identityCrossSig";
+import { encodeIdentityHelloHistoricalEvidenceBundleV1 } from "./identityHelloHistoricalEvidence";
 import { pairOuterBindingV1Schema, pairPlaintextV1Schema } from "./schemas";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
@@ -88,6 +89,7 @@ const U64_MAX = 0xffffffffffffffffn;
 
 declare const verifiedIdentityHelloOpenBrand: unique symbol;
 declare const identityHelloAdmissionClaimBrand: unique symbol;
+declare const consumedIdentityHelloAdmissionClaimBrand: unique symbol;
 
 /** Opaque authenticated HELLO result. HelloRoot is never structurally exposed. */
 export interface VerifiedIdentityHelloOpenV1 {
@@ -106,9 +108,27 @@ export interface IdentityHelloAdmissionClaimV1 {
   readonly [identityHelloAdmissionClaimBrand]: true;
 }
 
+/**
+ * Internal one-use transfer of an admission claim into asynchronous
+ * verification custody. It exposes no fields and retains the same private
+ * HelloRoot allocation; no secret is copied across this transition.
+ */
+export interface ConsumedIdentityHelloAdmissionClaimV1 {
+  readonly [consumedIdentityHelloAdmissionClaimBrand]: true;
+}
+
 export interface IdentityHelloAdmissionClaimSnapshotV1 {
   readonly version: 1;
   readonly roomContextId: Uint8Array;
+  readonly roomPolicy: RoomPolicyV4;
+  /** Current-Core fence at the successful open; a later capture may advance. */
+  readonly exactOpenedCoreStateBytes: Uint8Array;
+  /** Exact HELLO-time Core row selecting the complete evidence bundle. */
+  readonly exactHistoricalEvidenceCoreStateBytes: Uint8Array;
+  /** Canonical Core + remote/local PRESENCE + author-prefix evidence. */
+  readonly exactHistoricalEvidenceBundleBytes: Uint8Array;
+  readonly openedAtReferenceWindow: bigint;
+  readonly receiverKeyRecordRevision: bigint;
   readonly decisionRole: "hello-responder";
   readonly operationId: Uint8Array;
   readonly kind: "IDENTITY_HELLO";
@@ -218,6 +238,11 @@ const admissionClaimStates = new WeakMap<
   PrivateVerifiedIdentityHelloOpen
 >();
 const genuineAdmissionClaims = new WeakSet<object>();
+const consumedAdmissionClaimStates = new WeakMap<
+  object,
+  PrivateVerifiedIdentityHelloOpen
+>();
+const genuineConsumedAdmissionClaims = new WeakSet<object>();
 
 const requireVerifiedState = (
   value: VerifiedIdentityHelloOpenV1,
@@ -241,6 +266,21 @@ const requireAdmissionClaimState = (
   if (state === undefined)
     return invalidAdmissionInput(
       "admission claim must be a genuine live process-local handle",
+    );
+  return state;
+};
+
+const requireConsumedAdmissionClaimState = (
+  value: ConsumedIdentityHelloAdmissionClaimV1,
+): PrivateVerifiedIdentityHelloOpen => {
+  if (typeof value !== "object" || value === null)
+    return invalidAdmissionInput(
+      "consumed admission claim must be a genuine live process-local handle",
+    );
+  const state = consumedAdmissionClaimStates.get(value);
+  if (state === undefined)
+    return invalidAdmissionInput(
+      "consumed admission claim must be a genuine live process-local handle",
     );
   return state;
 };
@@ -286,7 +326,12 @@ const copyAdmissionClaimSnapshot = (
   state: PrivateVerifiedIdentityHelloOpen,
 ): IdentityHelloAdmissionClaimSnapshotV1 => {
   const opened = copyVerifiedSnapshot(state);
-  const { plaintext, activeCandidate, remotePresenceEvidence } = opened;
+  const {
+    plaintext,
+    activeCandidate,
+    localPresenceEvidence,
+    remotePresenceEvidence,
+  } = opened;
   if (
     plaintext.kind !== "IDENTITY_HELLO" ||
     plaintext.body.kind !== "IDENTITY_HELLO" ||
@@ -315,6 +360,10 @@ const copyAdmissionClaimSnapshot = (
     !bytesEqual(
       remotePresenceEvidence.presenceOperationId,
       plaintext.endpointPresenceOperationIds[0],
+    ) ||
+    !bytesEqual(
+      localPresenceEvidence.presenceOperationId,
+      plaintext.endpointPresenceOperationIds[1],
     )
   )
     return invalidAdmissionInput(
@@ -325,6 +374,38 @@ const copyAdmissionClaimSnapshot = (
   return {
     version: 1,
     roomContextId: Uint8Array.from(activeCandidate.roomContextId),
+    roomPolicy: activeCandidate.roomPolicy,
+    exactOpenedCoreStateBytes: Uint8Array.from(
+      activeCandidate.exactCoreStateBytes,
+    ),
+    exactHistoricalEvidenceCoreStateBytes: Uint8Array.from(
+      remotePresenceEvidence.exactCoreStateBytes,
+    ),
+    exactHistoricalEvidenceBundleBytes:
+      encodeIdentityHelloHistoricalEvidenceBundleV1({
+        version: 1,
+        exactCoreStateBytes: remotePresenceEvidence.exactCoreStateBytes,
+        endpointPresenceEvidence: [
+          {
+            exactPresenceOperationBytes:
+              remotePresenceEvidence.exactPresenceOperationBytes,
+            presenceOperationId: remotePresenceEvidence.presenceOperationId,
+            retainThroughLogicalWindow:
+              remotePresenceEvidence.retainThroughLogicalWindow,
+            authorChainPrefix: remotePresenceEvidence.authorChainPrefix,
+          },
+          {
+            exactPresenceOperationBytes:
+              localPresenceEvidence.exactPresenceOperationBytes,
+            presenceOperationId: localPresenceEvidence.presenceOperationId,
+            retainThroughLogicalWindow:
+              localPresenceEvidence.retainThroughLogicalWindow,
+            authorChainPrefix: localPresenceEvidence.authorChainPrefix,
+          },
+        ],
+      }),
+    openedAtReferenceWindow: activeCandidate.referenceWindow,
+    receiverKeyRecordRevision: opened.receiverKeyRecordRevision,
     decisionRole: "hello-responder",
     operationId: Uint8Array.from(opened.helloOperationId),
     kind: "IDENTITY_HELLO",
@@ -829,6 +910,63 @@ export const snapshotIdentityHelloAdmissionClaimV1 = (
   value: IdentityHelloAdmissionClaimV1,
 ): IdentityHelloAdmissionClaimSnapshotV1 =>
   copyAdmissionClaimSnapshot(requireAdmissionClaimState(value));
+
+/**
+ * Synchronously spend one admission claim into in-flight verification custody.
+ *
+ * The source entry is deleted before return, so reentrancy and concurrent
+ * verification cannot reuse it. The private state and HelloRoot allocation are
+ * moved without copying. A minting failure wipes the transferred root.
+ *
+ * @internal
+ */
+export const takeIdentityHelloAdmissionClaimForVerificationV1 = (
+  value: IdentityHelloAdmissionClaimV1,
+): ConsumedIdentityHelloAdmissionClaimV1 => {
+  const state =
+    typeof value === "object" && value !== null
+      ? admissionClaimStates.get(value)
+      : undefined;
+  if (state === undefined)
+    return invalidAdmissionInput(
+      "admission claim must be a genuine live process-local handle",
+    );
+
+  admissionClaimStates.delete(value);
+  try {
+    const consumed = Object.freeze({}) as ConsumedIdentityHelloAdmissionClaimV1;
+    genuineConsumedAdmissionClaims.add(consumed);
+    consumedAdmissionClaimStates.set(consumed, state);
+    return consumed;
+  } catch (error) {
+    state.helloRoot.fill(0);
+    throw error;
+  }
+};
+
+/** @internal Fresh owned non-secret projection of one live consumed claim. */
+export const snapshotConsumedIdentityHelloAdmissionClaimV1 = (
+  value: ConsumedIdentityHelloAdmissionClaimV1,
+): IdentityHelloAdmissionClaimSnapshotV1 =>
+  copyAdmissionClaimSnapshot(requireConsumedAdmissionClaimState(value));
+
+/** Wipe in-flight HelloRoot custody. Idempotent for a genuine handle. */
+export const destroyConsumedIdentityHelloAdmissionClaimV1 = (
+  value: ConsumedIdentityHelloAdmissionClaimV1,
+): void => {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !genuineConsumedAdmissionClaims.has(value)
+  )
+    return invalidAdmissionInput(
+      "consumed admission claim must be a genuine process-local handle",
+    );
+  const state = consumedAdmissionClaimStates.get(value);
+  if (state === undefined) return;
+  state.helloRoot.fill(0);
+  consumedAdmissionClaimStates.delete(value);
+};
 
 /** Wipe the retained HelloRoot. Idempotent for a genuine claim handle. */
 export const destroyIdentityHelloAdmissionClaimV1 = (

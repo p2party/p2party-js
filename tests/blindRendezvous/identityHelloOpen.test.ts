@@ -11,6 +11,8 @@ import {
   captureActivePairOperationCandidate,
   captureHistoricalPairPresenceEvidence,
   coreReduce,
+  decodeCoreRoomStateV1,
+  encodeCoreRoomStateV1,
   validateAndIdentifyOperationCandidate,
 } from "../../src/blindRendezvous/coreReduce";
 import {
@@ -20,6 +22,7 @@ import {
   pairSemanticSlot,
   policyHash,
   presenceOwnershipSignedMessage,
+  presencePermitSignedMessage,
   presenceProofTranscriptHash,
   presenceSemanticSlot,
   stableIdentityCommitment,
@@ -32,6 +35,10 @@ import {
   snapshotVerifiedIdentityHelloOpenV1,
   takeVerifiedIdentityHelloOpenForAdmissionV1,
 } from "../../src/blindRendezvous/identityHelloOpen";
+import {
+  decodeAndVerifyIdentityHelloHistoricalEvidenceBundleV1,
+  encodeIdentityHelloHistoricalEvidenceBundleV1,
+} from "../../src/blindRendezvous/identityHelloHistoricalEvidence";
 import {
   createExpectedIdentityHelloTrialV1,
   createHistoricalIdentityHelloEvidenceViewV1,
@@ -62,6 +69,15 @@ import { encodePairStepEnvelopeV1 } from "../../src/blindRendezvous/pairStepEnve
 import { copyBlindDefaultPolicy } from "../../src/blindRendezvous/roomPolicyV4";
 import { decodeRoomPolicyV1 } from "../../src/roomPolicy";
 import { AdmissionInputError } from "../../src/blindRendezvous/admissionInput";
+import {
+  createIdentityHelloAdmissionPreparationServiceV1,
+  destroyPreparedIdentityHelloAdmissionV1,
+  encodeAuthorityCustodyProjectionV1,
+  encodeInitializedRoomAdmissionFenceV1,
+  encodeLocalPresenceOwnershipV1,
+  snapshotPreparedIdentityHelloAdmissionV1,
+} from "../../src/blindRendezvous/identityHelloAdmission";
+import { encodeFrontendRoomControlsV1 } from "../../src/blindRendezvous/admissionPolicy";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
@@ -81,8 +97,15 @@ import type {
 } from "../../src/blindRendezvous/operation";
 import type { IdentityHelloAdmissionClaimV1 } from "../../src/blindRendezvous/identityHelloOpen";
 import type {
+  IdentityHelloAdmissionCapturePortV1,
+  PreparedIdentityHelloAdmissionV1,
+} from "../../src/blindRendezvous/identityHelloAdmission";
+import type { IdentityHelloAdmissionExactCaptureRowsV1 } from "../../src/blindRendezvous/identityHelloAdmissionPersistence";
+import type { FrontendRoomControlsV1 } from "../../src/blindRendezvous/admissionPolicy";
+import type {
   AdmissionGrantV1,
   PresenceCoreV1,
+  PresencePermitV1,
 } from "../../src/blindRendezvous/operationPayload";
 import type {
   PairBootstrapInfoV1,
@@ -155,6 +178,7 @@ const trackedOpens = new Set<
   >["value"]
 >();
 const trackedAdmissionClaims = new Set<IdentityHelloAdmissionClaimV1>();
+const trackedPreparedAdmissions = new Set<PreparedIdentityHelloAdmissionV1>();
 let fixtureOrdinal = 0;
 
 const trackSecret = (value: Uint8Array): Uint8Array => {
@@ -163,6 +187,9 @@ const trackSecret = (value: Uint8Array): Uint8Array => {
 };
 
 afterEach(() => {
+  for (const prepared of trackedPreparedAdmissions)
+    destroyPreparedIdentityHelloAdmissionV1(prepared);
+  trackedPreparedAdmissions.clear();
   for (const claim of trackedAdmissionClaims)
     destroyIdentityHelloAdmissionClaimV1(claim);
   trackedAdmissionClaims.clear();
@@ -228,6 +255,7 @@ const buildPresence = async (
   context: OperationValidationContext,
   nonceByte: number,
   options: {
+    readonly authorityPermitSecretKey?: Uint8Array;
     readonly genuineOwnership?: boolean;
     readonly stable?: {
       readonly publicKey: Uint8Array;
@@ -279,10 +307,33 @@ const buildPresence = async (
           stable.secretKey,
           module,
         );
+  let authorityPermit: PresencePermitV1 | null = null;
+  if (context.roomPolicy.admissionFloor.mode === "authority-grant") {
+    if (options.authorityPermitSecretKey === undefined)
+      throw new Error("authority-mode test PRESENCE requires a permit signer");
+    const unsignedPermit = {
+      version: 1 as const,
+      roomContextId: context.roomContextId,
+      presenceProofTranscriptHash: proofHash,
+      permitSerial: new Uint8Array(32).fill(nonceByte ^ 0x5a),
+      generation: 1n,
+      issuedAtLogicalWindow: HELLO_WINDOW,
+      notBeforeLogicalWindow: HELLO_WINDOW,
+      notAfterLogicalWindow: validThrough,
+    };
+    authorityPermit = {
+      ...unsignedPermit,
+      authoritySignature: await sign(
+        await presencePermitSignedMessage(unsignedPermit),
+        options.authorityPermitSecretKey,
+        module,
+      ),
+    };
+  }
   const payload = encodePresenceV1({
     core,
     stableOwnershipSignature: ownershipSignature,
-    authorityPermit: null,
+    authorityPermit,
   });
   const unsigned: UnsignedRoomOperationV1 = {
     version: 1,
@@ -467,17 +518,44 @@ const buildHelloFixture = async (
     readonly lowOrderKemCiphertext?: boolean;
     readonly carriedGrantNotAfter?: bigint | null;
     readonly pairLifetimeWindows?: number;
+    readonly authorityMode?: boolean;
+    readonly maxRoomMembers?: number;
   } = {},
 ): Promise<HelloFixture> => {
   fixtureOrdinal += 1;
   const capability = trackSecret(
     new Uint8Array(32).fill(0x30 + (fixtureOrdinal % 128)),
   );
+  const authority =
+    options.authorityMode === true ? await newKeyPair(module) : null;
+  if (authority !== null) trackSecret(authority.secretKey);
+  const defaultPolicy = copyBlindDefaultPolicy();
+  const boundedPolicy = {
+    ...defaultPolicy,
+    maxRoomMembers: options.maxRoomMembers ?? defaultPolicy.maxRoomMembers,
+  };
   const context = await createOperationValidationContext(
     capability,
-    copyBlindDefaultPolicy(),
+    authority === null
+      ? boundedPolicy
+      : {
+          ...boundedPolicy,
+          admissionFloor: {
+            mode: "authority-grant",
+            authorityEd25519PublicKey: authority.publicKey,
+            maxAuthorityCredentialLifetimeWindows: 10_000,
+          },
+        },
     HELLO_WINDOW,
   );
+  const buildFixturePresence = (
+    nonceByte: number,
+    presenceOptions: Parameters<typeof buildPresence>[2] = {},
+  ): Promise<PresenceFixture> =>
+    buildPresence(context, nonceByte, {
+      ...presenceOptions,
+      authorityPermitSecretKey: authority?.secretKey,
+    });
   const defect = options.defect ?? "none";
   let presences: PresenceFixture[];
   let remote: PresenceFixture;
@@ -487,24 +565,24 @@ const buildHelloFixture = async (
   if (defect === "self") {
     const sharedStable = await newKeyPair(module);
     trackSecret(sharedStable.secretKey);
-    const first = await buildPresence(context, 0x21, {
+    const first = await buildFixturePresence(0x21, {
       stable: sharedStable,
     });
-    const second = await buildPresence(context, 0x22, {
+    const second = await buildFixturePresence(0x22, {
       stable: sharedStable,
     });
-    alternate = await buildPresence(context, 0x23);
+    alternate = await buildFixturePresence(0x23);
     [remote, local] = [first, second].sort((left, right) =>
       compareBytes(left.identified.operationId, right.identified.operationId),
     ) as [PresenceFixture, PresenceFixture];
     presences = [remote, local, alternate];
   } else if (defect === "ownership") {
     const genuine: PresenceFixture[] = [
-      await buildPresence(context, 0x22),
-      await buildPresence(context, 0x23),
+      await buildFixturePresence(0x22),
+      await buildFixturePresence(0x23),
     ];
     let nonceByte = 0x21;
-    remote = await buildPresence(context, nonceByte, {
+    remote = await buildFixturePresence(nonceByte, {
       genuineOwnership: false,
     });
     while (
@@ -517,7 +595,7 @@ const buildHelloFixture = async (
       )
     ) {
       nonceByte += 1;
-      remote = await buildPresence(context, nonceByte, {
+      remote = await buildFixturePresence(nonceByte, {
         genuineOwnership: false,
       });
     }
@@ -534,9 +612,9 @@ const buildHelloFixture = async (
     presences = [remote, ...genuine];
   } else {
     const sorted = [
-      await buildPresence(context, 0x21),
-      await buildPresence(context, 0x22),
-      await buildPresence(context, 0x23),
+      await buildFixturePresence(0x21),
+      await buildFixturePresence(0x22),
+      await buildFixturePresence(0x23),
     ].sort((left, right) =>
       compareBytes(left.identified.operationId, right.identified.operationId),
     );
@@ -694,8 +772,21 @@ const buildHelloFixture = async (
         HELLO_WINDOW,
       ),
     );
+  const evidenceViewPresenceOrder = [
+    local,
+    remote,
+    ...observedPresences.filter(
+      (presence) => presence !== local && presence !== remote,
+    ),
+  ];
   const evidenceView = await createHistoricalIdentityHelloEvidenceViewV1({
-    historicalPresenceEvidence: [...evidenceByPresence.values()],
+    historicalPresenceEvidence: evidenceViewPresenceOrder
+      .map((presence) => evidenceByPresence.get(presence))
+      .filter(
+        (evidence): evidence is VerifiedHistoricalPairPresenceEvidenceV1 =>
+          evidence !== undefined,
+      )
+      .slice(0, context.roomPolicy.maxRoomMembers),
   });
   trackedViews.add(evidenceView);
   const localEvidence = evidenceByPresence.get(local);
@@ -789,6 +880,108 @@ const openFresh = async (
     options.cryptoModule ?? module,
   );
   if (result.kind === "opened") trackedOpens.add(result.value);
+  return result;
+};
+
+const openAdmissionClaim = async (
+  fixture: HelloFixture,
+): Promise<IdentityHelloAdmissionClaimV1> => {
+  const opened = await openFresh(fixture);
+  if (opened.kind !== "opened")
+    throw new Error(`test expected opened HELLO, received ${opened.kind}`);
+  const claim = takeVerifiedIdentityHelloOpenForAdmissionV1(opened.value);
+  trackedAdmissionClaims.add(claim);
+  return claim;
+};
+
+const openFrontendControls = (
+  overrides: Partial<FrontendRoomControlsV1> = {},
+): FrontendRoomControlsV1 => ({
+  version: 1,
+  policyGeneration: 1n,
+  onlyConnectWithKnownPeers: false,
+  allowedStableIdentityKeys: [],
+  deniedStableIdentityKeys: [],
+  deniedRoomIdentityCommitments: [],
+  ...overrides,
+});
+
+const capturedAdmission = (
+  fixture: HelloFixture,
+  claim: IdentityHelloAdmissionClaimV1,
+  controls: FrontendRoomControlsV1 | null,
+  overrides: Partial<IdentityHelloAdmissionExactCaptureRowsV1> = {},
+): IdentityHelloAdmissionExactCaptureRowsV1 => {
+  const facts = snapshotIdentityHelloAdmissionClaimV1(claim);
+  return {
+    initializedRoom: {
+      kind: "present",
+      exactBytes: encodeInitializedRoomAdmissionFenceV1(fixture.context),
+    },
+    currentCore: {
+      kind: "present",
+      exactBytes: facts.exactOpenedCoreStateBytes,
+    },
+    historicalEvidence: {
+      kind: "present",
+      exactBytes: facts.exactHistoricalEvidenceBundleBytes,
+    },
+    receiverKey: {
+      kind: "present",
+      recordRevision: facts.receiverKeyRecordRevision,
+    },
+    localPresenceOwnership: {
+      kind: "present",
+      exactBytes: encodeLocalPresenceOwnershipV1({
+        version: 1,
+        localPresenceOperationIds: [facts.endpointPresenceOperationIds[1]],
+      }),
+    },
+    frontendControls:
+      controls === null
+        ? { kind: "absent" }
+        : {
+            kind: "present",
+            exactBytes: encodeFrontendRoomControlsV1(controls),
+          },
+    authorityCustody: { kind: "absent" },
+    plannerAndExplicitState: { kind: "absent" },
+    localIdentityKey: { kind: "absent" },
+    localAuthorHead: { kind: "absent" },
+    pairLedger: { kind: "absent" },
+    provisionalPair: { kind: "absent" },
+    identityBootstrapOutbox: { kind: "absent" },
+    resourceState: { kind: "absent" },
+    ...overrides,
+  };
+};
+
+const admissionPort = (
+  capture: IdentityHelloAdmissionExactCaptureRowsV1,
+): IdentityHelloAdmissionCapturePortV1 => ({
+  readExactCapture: async () => capture,
+});
+
+const prepareAdmission = async (
+  fixture: HelloFixture,
+  claim: IdentityHelloAdmissionClaimV1,
+  capture: IdentityHelloAdmissionExactCaptureRowsV1,
+  initializedRoom: OperationValidationContext = fixture.context,
+) =>
+  createIdentityHelloAdmissionPreparationServiceV1(
+    admissionPort(capture),
+    initializedRoom,
+    module,
+  ).prepareIdentityHelloAdmission(claim);
+
+const trackPreparedAdmission = (
+  result: Awaited<ReturnType<typeof prepareAdmission>>,
+): Extract<typeof result, { kind: "prepared" }> => {
+  if (result.kind !== "prepared")
+    throw new Error(
+      `test expected prepared admission, received ${result.kind} (${result.reason})`,
+    );
+  trackedPreparedAdmissions.add(result.value);
   return result;
 };
 
@@ -958,10 +1151,65 @@ describe("reservation-gated identity HELLO open", () => {
     expect(snapshot.optionalGrant?.notAfterLogicalWindow).toBe(
       HELLO_WINDOW + 9n,
     );
+    const borrowedHistoricalBytes = Uint8Array.from(
+      snapshot.exactHistoricalEvidenceBundleBytes,
+    );
+    const borrowedHistoricalBinding = {
+      roomContextId: Uint8Array.from(snapshot.roomContextId),
+      roomPolicy: structuredClone(snapshot.roomPolicy),
+      exactCoreStateBytes: Uint8Array.from(
+        snapshot.exactHistoricalEvidenceCoreStateBytes,
+      ),
+      endpointPresenceOperationIds: [
+        Uint8Array.from(snapshot.endpointPresenceOperationIds[0]),
+        Uint8Array.from(snapshot.endpointPresenceOperationIds[1]),
+      ] as const,
+    };
+    const pendingHistoricalEvidence =
+      decodeAndVerifyIdentityHelloHistoricalEvidenceBundleV1(
+        borrowedHistoricalBytes,
+        borrowedHistoricalBinding,
+      );
+    borrowedHistoricalBytes.fill(0);
+    borrowedHistoricalBinding.roomContextId.fill(0);
+    borrowedHistoricalBinding.roomPolicy.sessionPolicyV1.fill(0);
+    borrowedHistoricalBinding.exactCoreStateBytes.fill(0);
+    borrowedHistoricalBinding.endpointPresenceOperationIds[0].fill(0);
+    borrowedHistoricalBinding.endpointPresenceOperationIds[1].fill(0);
+    const historicalEvidence = await pendingHistoricalEvidence;
+    expectBytesEqual(
+      historicalEvidence.endpointPresenceEvidence[0].presenceOperationId,
+      fixture.remote.identified.operationId,
+    );
+    expectBytesEqual(
+      historicalEvidence.endpointPresenceEvidence[1].presenceOperationId,
+      fixture.local.identified.operationId,
+    );
+    const changedRetention = encodeIdentityHelloHistoricalEvidenceBundleV1({
+      ...historicalEvidence,
+      endpointPresenceEvidence: [
+        {
+          ...historicalEvidence.endpointPresenceEvidence[0],
+          retainThroughLogicalWindow:
+            historicalEvidence.endpointPresenceEvidence[0]
+              .retainThroughLogicalWindow + 1n,
+        },
+        historicalEvidence.endpointPresenceEvidence[1],
+      ],
+    });
+    await expect(
+      decodeAndVerifyIdentityHelloHistoricalEvidenceBundleV1(changedRetention, {
+        roomContextId: snapshot.roomContextId,
+        roomPolicy: snapshot.roomPolicy,
+        exactCoreStateBytes: snapshot.exactHistoricalEvidenceCoreStateBytes,
+        endpointPresenceOperationIds: snapshot.endpointPresenceOperationIds,
+      }),
+    ).rejects.toThrow("retention horizon changed");
     expect(containsSecretField(snapshot)).toBe(false);
 
     snapshot.operationId.fill(0);
     snapshot.stableEd25519PublicKey.fill(0);
+    snapshot.exactHistoricalEvidenceBundleBytes.fill(0);
     snapshot.optionalGrant?.authoritySignature.fill(0);
     const fresh = snapshotIdentityHelloAdmissionClaimV1(claim);
     expectBytesEqual(fresh.operationId, fixture.pair.operationId);
@@ -971,6 +1219,9 @@ describe("reservation-gated identity HELLO open", () => {
     );
     expect(
       fresh.optionalGrant?.authoritySignature.some((byte) => byte !== 0),
+    ).toBe(true);
+    expect(
+      fresh.exactHistoricalEvidenceBundleBytes.some((byte) => byte !== 0),
     ).toBe(true);
 
     const spread = { ...(claim as object) };
@@ -982,6 +1233,402 @@ describe("reservation-gated identity HELLO open", () => {
 
     destroyIdentityHelloAdmissionClaimV1(claim);
     destroyIdentityHelloAdmissionClaimV1(claim);
+    expect(() => snapshotIdentityHelloAdmissionClaimV1(claim)).toThrow(
+      "genuine live process-local handle",
+    );
+  });
+
+  test("prepares one opaque allow only after the captured port returns exact current state", async () => {
+    const fixture = await buildHelloFixture({ pairLifetimeWindows: 19 });
+    const claim = await openAdmissionClaim(fixture);
+    const service = createIdentityHelloAdmissionPreparationServiceV1(
+      admissionPort(capturedAdmission(fixture, claim, openFrontendControls())),
+      fixture.context,
+      module,
+    );
+    const prepared = trackPreparedAdmission(
+      await service.prepareIdentityHelloAdmission(claim),
+    );
+
+    expect(Reflect.ownKeys(prepared.value)).toEqual([]);
+    expect(() => snapshotIdentityHelloAdmissionClaimV1(claim)).toThrow(
+      "genuine live process-local handle",
+    );
+    await expect(
+      service.prepareIdentityHelloAdmission(claim),
+    ).rejects.toBeInstanceOf(AdmissionInputError);
+
+    const preparedSnapshot = snapshotPreparedIdentityHelloAdmissionV1(
+      prepared.value,
+    );
+    expect(preparedSnapshot.stage).toBe("policy-allowed-pre-topology");
+    const decision = preparedSnapshot.decision;
+    expect(decision.reason).toBe("open");
+    expect(decision.bootstrapLease.localPolicyGeneration).toBe(1n);
+    expect(decision.bootstrapLease.grantId).toBeNull();
+    expect(decision.pairAttemptLease.validThroughLogicalWindow).toBe(
+      HELLO_WINDOW + 19n,
+    );
+    expectBytesEqual(
+      decision.bootstrapLease.stableEd25519PublicKey,
+      fixture.remote.stablePublicKey,
+    );
+    expectBytesEqual(
+      decision.bootstrapLease.admittedPresenceOperationId,
+      fixture.remote.identified.operationId,
+    );
+
+    decision.bootstrapLease.stableEd25519PublicKey.fill(0);
+    decision.pairAttemptLease.pairEdgeId.fill(0);
+    const repeated = snapshotPreparedIdentityHelloAdmissionV1(
+      prepared.value,
+    ).decision;
+    expectBytesEqual(
+      repeated.bootstrapLease.stableEd25519PublicKey,
+      fixture.remote.stablePublicKey,
+    );
+    expect(
+      repeated.pairAttemptLease.pairEdgeId.some((byte) => byte !== 0),
+    ).toBe(true);
+
+    expect(() =>
+      snapshotPreparedIdentityHelloAdmissionV1({
+        ...(prepared.value as object),
+      } as PreparedIdentityHelloAdmissionV1),
+    ).toThrow("genuine live process-local handle");
+  });
+
+  test("reaches pre-topology policy admission through an overcapacity raw Core", async () => {
+    const fixture = await buildHelloFixture({ maxRoomMembers: 2 });
+    const claim = await openAdmissionClaim(fixture);
+    const facts = snapshotIdentityHelloAdmissionClaimV1(claim);
+    const core = await decodeCoreRoomStateV1(facts.exactOpenedCoreStateBytes);
+    expect(core.roomCapacityState).toBe("overcapacity");
+    expect(core.observedPresences).toHaveLength(3);
+
+    const prepared = trackPreparedAdmission(
+      await prepareAdmission(
+        fixture,
+        claim,
+        capturedAdmission(fixture, claim, openFrontendControls()),
+      ),
+    );
+    expect(snapshotPreparedIdentityHelloAdmissionV1(prepared.value).stage).toBe(
+      "policy-allowed-pre-topology",
+    );
+  });
+
+  test("spends the claim before an asynchronous capture can race", async () => {
+    const fixture = await buildHelloFixture();
+    const claim = await openAdmissionClaim(fixture);
+    const capture = capturedAdmission(fixture, claim, openFrontendControls());
+    let releaseCapture: (() => void) | undefined;
+    const captureGate = new Promise<void>((resolve) => {
+      releaseCapture = resolve;
+    });
+    const service = createIdentityHelloAdmissionPreparationServiceV1(
+      {
+        readExactCapture: async () => {
+          await captureGate;
+          return capture;
+        },
+      },
+      fixture.context,
+      module,
+    );
+
+    const first = service.prepareIdentityHelloAdmission(claim);
+    await expect(
+      service.prepareIdentityHelloAdmission(claim),
+    ).rejects.toBeInstanceOf(AdmissionInputError);
+    releaseCapture?.();
+    trackPreparedAdmission(await first);
+  });
+
+  test("applies current frontend deny/address-book state only from the factory-captured port", async () => {
+    const blacklistedFixture = await buildHelloFixture();
+    const blacklistedClaim = await openAdmissionClaim(blacklistedFixture);
+    expect(
+      await prepareAdmission(
+        blacklistedFixture,
+        blacklistedClaim,
+        capturedAdmission(
+          blacklistedFixture,
+          blacklistedClaim,
+          openFrontendControls({
+            deniedStableIdentityKeys: [
+              Uint8Array.from(blacklistedFixture.remote.stablePublicKey),
+            ],
+          }),
+        ),
+      ),
+    ).toEqual({ kind: "denied", reason: "blacklisted" });
+
+    const unknownFixture = await buildHelloFixture();
+    const unknownClaim = await openAdmissionClaim(unknownFixture);
+    expect(
+      await prepareAdmission(
+        unknownFixture,
+        unknownClaim,
+        capturedAdmission(
+          unknownFixture,
+          unknownClaim,
+          openFrontendControls({ onlyConnectWithKnownPeers: true }),
+        ),
+      ),
+    ).toEqual({ kind: "denied", reason: "not-in-address-book" });
+
+    const unavailableFixture = await buildHelloFixture();
+    const unavailableClaim = await openAdmissionClaim(unavailableFixture);
+    expect(
+      await prepareAdmission(
+        unavailableFixture,
+        unavailableClaim,
+        capturedAdmission(unavailableFixture, unavailableClaim, null),
+      ),
+    ).toEqual({ kind: "denied", reason: "policy-unavailable" });
+  });
+
+  test("fails authority admission closed for absent, complete, or saturated custody and rejects custody in capability rooms", async () => {
+    for (const authorityCustody of [
+      { kind: "absent" } as const,
+      {
+        kind: "present" as const,
+        exactBytes: encodeAuthorityCustodyProjectionV1({
+          version: 1,
+          status: "complete",
+          authorityCustodyStateDigest: new Uint8Array(32).fill(0x41),
+          firstSaturatedRequiredWorkId: null,
+        }),
+      },
+      {
+        kind: "present" as const,
+        exactBytes: encodeAuthorityCustodyProjectionV1({
+          version: 1,
+          status: "saturated",
+          authorityCustodyStateDigest: new Uint8Array(32).fill(0x42),
+          firstSaturatedRequiredWorkId: new Uint8Array(32).fill(0x43),
+        }),
+      },
+    ]) {
+      const fixture = await buildHelloFixture({ authorityMode: true });
+      const claim = await openAdmissionClaim(fixture);
+      expect(
+        await prepareAdmission(
+          fixture,
+          claim,
+          capturedAdmission(fixture, claim, openFrontendControls(), {
+            authorityCustody,
+          }),
+        ),
+      ).toEqual({ kind: "denied", reason: "policy-unavailable" });
+    }
+
+    const capabilityFixture = await buildHelloFixture();
+    const capabilityClaim = await openAdmissionClaim(capabilityFixture);
+    await expect(
+      prepareAdmission(
+        capabilityFixture,
+        capabilityClaim,
+        capturedAdmission(
+          capabilityFixture,
+          capabilityClaim,
+          openFrontendControls(),
+          {
+            authorityCustody: {
+              kind: "present",
+              exactBytes: encodeAuthorityCustodyProjectionV1({
+                version: 1,
+                status: "complete",
+                authorityCustodyStateDigest: new Uint8Array(32).fill(0x44),
+                firstSaturatedRequiredWorkId: null,
+              }),
+            },
+          },
+        ),
+      ),
+    ).rejects.toBeInstanceOf(AdmissionInputError);
+  });
+
+  test("spends and wipes a claim when any captured provenance fence is stale", async () => {
+    for (const reason of [
+      "initialized-room-changed",
+      "core-changed",
+      "historical-evidence-changed",
+      "receiver-key-changed",
+      "local-presence-ownership-changed",
+    ] as const) {
+      const fixture = await buildHelloFixture();
+      const claim = await openAdmissionClaim(fixture);
+      const base = capturedAdmission(fixture, claim, openFrontendControls());
+      let capture: IdentityHelloAdmissionExactCaptureRowsV1;
+      let initializedRoom = fixture.context;
+      switch (reason) {
+        case "initialized-room-changed": {
+          if (base.initializedRoom.kind !== "present")
+            throw new Error("test requires an initialized-room row");
+          const changed = Uint8Array.from(base.initializedRoom.exactBytes);
+          changed[1] ^= 1;
+          capture = {
+            ...base,
+            initializedRoom: { kind: "present", exactBytes: changed },
+          };
+          break;
+        }
+        case "core-changed": {
+          initializedRoom = operationValidationContextAt(
+            fixture.context,
+            HELLO_WINDOW + 1n,
+          );
+          capture = {
+            ...base,
+            initializedRoom: {
+              kind: "present",
+              exactBytes:
+                encodeInitializedRoomAdmissionFenceV1(initializedRoom),
+            },
+          };
+          break;
+        }
+        case "historical-evidence-changed": {
+          if (base.historicalEvidence.kind !== "present")
+            throw new Error("test requires a historical-evidence row");
+          const changed = Uint8Array.from(base.historicalEvidence.exactBytes);
+          changed[changed.length - 1] ^= 1;
+          capture = {
+            ...base,
+            historicalEvidence: { kind: "present", exactBytes: changed },
+          };
+          break;
+        }
+        case "receiver-key-changed":
+          capture = {
+            ...base,
+            receiverKey: {
+              kind: "present",
+              recordRevision: RECEIVER_REVISION + 1n,
+            },
+          };
+          break;
+        case "local-presence-ownership-changed":
+          capture = {
+            ...base,
+            localPresenceOwnership: {
+              kind: "present",
+              exactBytes: encodeLocalPresenceOwnershipV1({
+                version: 1,
+                localPresenceOperationIds: [],
+              }),
+            },
+          };
+          break;
+      }
+
+      expect(
+        await prepareAdmission(fixture, claim, capture, initializedRoom),
+      ).toEqual({ kind: "stale", reason });
+      expect(() => snapshotIdentityHelloAdmissionClaimV1(claim)).toThrow(
+        "genuine live process-local handle",
+      );
+    }
+  });
+
+  test("rejects a current-Core rollback below the view that authenticated the HELLO", async () => {
+    const fixture = await buildHelloFixture();
+    const claim = await openAdmissionClaim(fixture);
+    const facts = snapshotIdentityHelloAdmissionClaimV1(claim);
+    const base = capturedAdmission(fixture, claim, openFrontendControls());
+    const rolledBackWindow = facts.openedAtReferenceWindow - 1n;
+    const rolledBackRoom = operationValidationContextAt(
+      fixture.context,
+      rolledBackWindow,
+    );
+    const openedCore = await decodeCoreRoomStateV1(
+      facts.exactOpenedCoreStateBytes,
+    );
+    const rolledBackCoreBytes = await encodeCoreRoomStateV1({
+      ...openedCore,
+      referenceWindow: rolledBackWindow,
+    });
+
+    expect(
+      await prepareAdmission(
+        fixture,
+        claim,
+        {
+          ...base,
+          initializedRoom: {
+            kind: "present",
+            exactBytes: encodeInitializedRoomAdmissionFenceV1(rolledBackRoom),
+          },
+          currentCore: {
+            kind: "present",
+            exactBytes: rolledBackCoreBytes,
+          },
+        },
+        rolledBackRoom,
+      ),
+    ).toEqual({ kind: "stale", reason: "core-changed" });
+  });
+
+  test("rejects accessor-backed and open port capture records without reading them", async () => {
+    const accessorFixture = await buildHelloFixture();
+    const accessorClaim = await openAdmissionClaim(accessorFixture);
+    const accessorCapture = capturedAdmission(
+      accessorFixture,
+      accessorClaim,
+      openFrontendControls(),
+    );
+    let accessorReads = 0;
+    Object.defineProperty(accessorCapture, "currentCore", {
+      enumerable: true,
+      get() {
+        accessorReads++;
+        return new Uint8Array();
+      },
+    });
+    await expect(
+      prepareAdmission(accessorFixture, accessorClaim, accessorCapture),
+    ).rejects.toBeInstanceOf(AdmissionInputError);
+    expect(accessorReads).toBe(0);
+    expect(() => snapshotIdentityHelloAdmissionClaimV1(accessorClaim)).toThrow(
+      "genuine live process-local handle",
+    );
+
+    const extraFixture = await buildHelloFixture();
+    const extraClaim = await openAdmissionClaim(extraFixture);
+    const extraCapture = {
+      ...capturedAdmission(extraFixture, extraClaim, openFrontendControls()),
+      untrustedAvailability: true,
+    };
+    await expect(
+      prepareAdmission(
+        extraFixture,
+        extraClaim,
+        extraCapture as unknown as IdentityHelloAdmissionExactCaptureRowsV1,
+      ),
+    ).rejects.toThrow("capture rows must contain exactly every declared fence");
+    expect(() => snapshotIdentityHelloAdmissionClaimV1(extraClaim)).toThrow(
+      "genuine live process-local handle",
+    );
+  });
+
+  test("propagates capture-port failures after spending and wiping the claim", async () => {
+    const fixture = await buildHelloFixture();
+    const claim = await openAdmissionClaim(fixture);
+    const failure = new Error("capture transaction aborted");
+    const service = createIdentityHelloAdmissionPreparationServiceV1(
+      {
+        readExactCapture: async () => {
+          throw failure;
+        },
+      },
+      fixture.context,
+      module,
+    );
+    await expect(service.prepareIdentityHelloAdmission(claim)).rejects.toBe(
+      failure,
+    );
     expect(() => snapshotIdentityHelloAdmissionClaimV1(claim)).toThrow(
       "genuine live process-local handle",
     );

@@ -366,6 +366,53 @@ export const localPeerId = async (
     await localPeerIdDigest(roomContextIdBytes, stableIdentityCommitmentBytes),
   )}`;
 
+/**
+ * `EligiblePresenceRank =
+ *    H("p2party/presence-rank/authority/v1" ||
+ *      RoomContextId || permitSerial || U64BE(generation))`
+ */
+export const authorityPresenceRank = async (
+  roomContextIdBytes: Uint8Array,
+  permitSerialBytes: Uint8Array,
+  generation: bigint,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/presence-rank/authority/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("permitSerial", permitSerialBytes, 32),
+    u64be(generation),
+  );
+
+/**
+ * `EligiblePresenceRank =
+ *    H("p2party/presence-rank/address-book/v1" ||
+ *      RoomContextId || StableIdentityCommitment)`
+ */
+export const addressBookPresenceRank = async (
+  roomContextIdBytes: Uint8Array,
+  stableIdentityCommitmentBytes: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/presence-rank/address-book/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("StableIdentityCommitment", stableIdentityCommitmentBytes, 32),
+  );
+
+/**
+ * `EligiblePresenceRank =
+ *    H("p2party/presence-rank/open/v1" ||
+ *      RoomContextId || PresenceOperationId)`
+ */
+export const openPresenceRank = async (
+  roomContextIdBytes: Uint8Array,
+  presenceOperationIdBytes: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/presence-rank/open/v1",
+    requireBytes("RoomContextId", roomContextIdBytes, 32),
+    requireBytes("PresenceOperationId", presenceOperationIdBytes, 32),
+  );
+
 /* ------------------------------------------------------------------ *
  * Section 4.4 — operation identity and semantic slots
  * ------------------------------------------------------------------ */
@@ -1332,6 +1379,26 @@ export const coreOperationSetDigest = async (
   hashWithDomain(
     "p2party/core-operation-set/v1",
     canonical(operationIdSetSchema, operationIds),
+  );
+
+/**
+ * `ObservedRosterHash =
+ *    H("p2party/observed-roster/v1" ||
+ *      U64BE(referenceWindow) ||
+ *      Canonical(Sort(validActivePresenceOperationIds)))`
+ *
+ * `CoreRoomStateV1.observedPresences` already carries this set in canonical
+ * operation-ID order. Requiring that order here keeps the schema registry as
+ * the one sorted-set validator instead of silently inventing another sorter.
+ */
+export const observedRosterHash = async (
+  referenceWindow: bigint,
+  validActivePresenceOperationIds: readonly Uint8Array[],
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/observed-roster/v1",
+    u64be(referenceWindow),
+    canonical(operationIdSetSchema, validActivePresenceOperationIds),
   );
 
 /* ------------------------------------------------------------------ *

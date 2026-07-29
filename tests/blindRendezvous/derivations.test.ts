@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import { encodeRoomPolicyV1, hashRoomPolicyV1 } from "../../src/roomPolicy";
 import {
+  addressBookPresenceRank,
+  authorityPresenceRank,
   base64urlNoPad,
   base64urlNoPadDecode,
   byteOf,
@@ -14,6 +16,8 @@ import {
   localPeerId,
   localPeerIdDigest,
   localRoomId,
+  observedRosterHash,
+  openPresenceRank,
   pairFlightAeadKey,
   pairFlightRoot,
   pairFlightSecret,
@@ -287,6 +291,73 @@ describe("room identity derivations", () => {
     ).rejects.toThrow("StableIdentityCommitment must be exactly 32 bytes");
     await expect(localPeerId(new Uint8Array(31), commitment)).rejects.toThrow(
       "RoomContextId must be exactly 32 bytes",
+    );
+  });
+});
+
+describe("local admissible projection derivations", () => {
+  const room = filled(0x11);
+  const permitSerial = filled(0x22);
+  const commitment = filled(0x33);
+  const presenceOperationId = filled(0x44);
+
+  test("presence ranks pin each eligibility class and exact argument order", async () => {
+    expect(hex(await authorityPresenceRank(room, permitSerial, 7n))).toBe(
+      hex(
+        await sha256(
+          Uint8Array.from([
+            ...domain("p2party/presence-rank/authority/v1"),
+            ...room,
+            ...permitSerial,
+            ...u64be(7n),
+          ]),
+        ),
+      ),
+    );
+    expect(hex(await addressBookPresenceRank(room, commitment))).toBe(
+      hex(
+        await sha256(
+          Uint8Array.from([
+            ...domain("p2party/presence-rank/address-book/v1"),
+            ...room,
+            ...commitment,
+          ]),
+        ),
+      ),
+    );
+    expect(hex(await openPresenceRank(room, presenceOperationId))).toBe(
+      hex(
+        await sha256(
+          Uint8Array.from([
+            ...domain("p2party/presence-rank/open/v1"),
+            ...room,
+            ...presenceOperationId,
+          ]),
+        ),
+      ),
+    );
+  });
+
+  test("observed roster hashing binds the reference window and canonical set", async () => {
+    const first = filled(0x01);
+    const second = filled(0x02);
+    const canonicalSet = Uint8Array.from([0, 2, ...first, ...second]);
+    expect(hex(await observedRosterHash(9n, [first, second]))).toBe(
+      hex(
+        await sha256(
+          Uint8Array.from([
+            ...domain("p2party/observed-roster/v1"),
+            ...u64be(9n),
+            ...canonicalSet,
+          ]),
+        ),
+      ),
+    );
+    await expect(observedRosterHash(9n, [second, first])).rejects.toThrow(
+      "must be sorted",
+    );
+    await expect(observedRosterHash(9n, [first, first])).rejects.toThrow(
+      "duplicate-free",
     );
   });
 });

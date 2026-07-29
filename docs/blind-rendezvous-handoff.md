@@ -6,6 +6,107 @@ local `master`; the pair-plaintext/admission-semantics increment described
 below extends the current local `p2party-js` Phase-0 checkpoint. Nothing is
 pushed; no PR exists.
 
+## Offline handoff on 2026-07-28
+
+Stop point: local `master` is clean except for the intentionally untracked
+`docs/rendezvous-prior-art.md` research shelf and the two untracked
+retained-operation draft files named below. Nothing was pushed or deployed.
+
+Two reviewed checkpoints were added:
+
+- `663a986` binds one genuine local PRESENCE to live, process-opaque
+  author-epoch, stable-identity, and historical receiver custody without
+  minting topology, admission, lease, or publication authority.
+- `53cde9a` moves Ed25519 key-material consistency into one cryptography SSOT
+  and adds versioned IndexedDB stable-identity custody. The identity row and
+  persistent high-water/tombstone revision change atomically; set/set and
+  identity-set/delete races allocate unique revisions; delete/recreate cannot
+  ABA; the actual legacy `{pub, wrappedSecret}` row migrates coherently; and
+  malformed/overflow state fails closed.
+
+The main-realm client boundary now re-derives the complete Ed25519
+seed-to-secret/public pair. It rejects `seedA || publicB`, rejects malformed
+worker revisions, preserves caller-owned inputs, transfers owned copies to the
+worker, explicitly wipes failed or unclaimed secret buffers, and leaves the DB
+worker free of a second WASM/CDN dependency. Worker output tests perform a real
+structured-clone transfer and prove the worker-side buffer is detached. The
+worker's suffix comparison is only defense in depth; it is not the canonical
+key-consistency proof.
+
+Verification at this stop point:
+
+- focused DB/custody run: 88 tests, 523 assertions;
+- focused DB boundary + worker + identity trial run: 66 tests, 418 assertions;
+- both TypeScript configurations and scoped ESLint passed;
+- changed/new-file formatting and `git diff --check` passed;
+- `build:worker` and `build:package` passed; and
+- the worker artifact contains no Ed25519 derivation, WASM-loader, CDN, or
+  `libcrypto.wasm` dependency.
+
+These guarantees are intentionally narrower than “rollback proof” or
+“concurrent teardown proof”:
+
+- revisions are monotonic only while the local IndexedDB state remains intact;
+  whole-origin rollback/clearing, same-origin compromise, and manual
+  row-plus-counter restoration are not prevented;
+- revision metadata is structurally transactional but not cryptographically
+  or remotely anchored;
+- JavaScript zeroization is best effort;
+- `signalingServerApi.ts` does not yet use `recordRevision`, so the SDK has not
+  earned multi-tab current-key convergence;
+- identity deletion clears ratchets present when its transaction linearizes,
+  but an already-running `setRatchetSession` can commit afterward and recreate
+  one; and
+- browser shutdown/offline crypto still requires the exact SRI-pinned WASM to
+  be self-hosted or cached/configured before use. Only the DB worker itself is
+  network-independent.
+
+The next smallest correctness slice is DB-as-SSOT
+`getOrCreateIdentityEd25519`, followed by revision-CAS for explicit rotation.
+Every ratchet write must then carry the expected stable-identity revision and
+check it in the same `meta + ratchetSessions` transaction. This closes both the
+multi-tab key race and the reproduced post-delete ratchet recreation; do not
+paper over either with lifecycle ordering.
+
+Two untracked drafts currently pass their focused suite (19 tests,
+109 assertions) and both typechecks:
+
+- `src/blindRendezvous/retainedOperationStore.ts`
+- `tests/blindRendezvous/retainedOperationStore.test.ts`
+
+They define strict local historical manifests, exact content-address
+validation, absent-versus-empty state, exclusive capacity fences, sticky
+incomplete-overcapacity state, and closed CAS material. A candidate is now
+owned before the first await for a complete manifest, while absent or already
+incomplete state does not inspect it.
+
+Do **not** commit or build the IndexedDB v20 adapter from this draft yet. Its
+single-window CAS currently requires the candidate content key to be absent.
+That conflicts with the intended room-wide content-addressed SSOT when the
+same immutable operation must be referenced by several historical-window
+manifests: after the first window inserts the row, the next window cannot
+reuse it. The minimal repair is an exact “ensure absent-or-byte-identical
+content row, then replace this manifest” transition plus a room-scoped
+inventory row with its own non-reused revision and the physical unique-row
+count/byte total. Per-window manifests should contain membership only. One
+room-wide atomic fan-out planner/adapter must fence the inventory and all
+affected manifests, scan for extra physical rows, insert absent content once,
+reuse byte-identical existing content at zero physical delta, and update or
+mark every affected retained window in one transaction. Manifest deletion
+also needs a retained high-water/tombstone so absence cannot ABA. Count/byte
+evidence must describe the room-wide physical union once, not independently
+double-charge shared bytes per manifest. Empty-complete initialization must
+come from a trusted complete boundary, never mere row absence. Only after that
+contract is reviewed should the additive DB migration and adapter land.
+
+Historical replay must then reuse the existing sole path
+`decodeOperation -> validateAndIdentifyOperationCandidate -> coreReduce`.
+Neither persisted decoded Core bytes nor a digest may mint current/historical
+ownership or topology. Complete manifest replay, live key revisions, planner
+and resource rows, current admission vetoes, and the exact HELLO window all
+remain required before the private composite projector can mint one
+pair-scoped topology capability.
+
 ## Topology/provenance continuation on 2026-07-28
 
 The next local `master` checkpoints now exist after the older notes below:

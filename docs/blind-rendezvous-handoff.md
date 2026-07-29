@@ -6,6 +6,67 @@ local `master`; the pair-plaintext/admission-semantics increment described
 below extends the current local `p2party-js` Phase-0 checkpoint. Nothing is
 pushed; no PR exists.
 
+## Topology/provenance continuation on 2026-07-28
+
+The next local `master` checkpoints now exist after the older notes below:
+
+- `94eee32` defines the exact admission capture codecs.
+- `163b55c` through `a8d0051` add one-use HELLO preparation, bounded trial and
+  pair-ledger state, complete admission CAS rows, planner state, admissible
+  rank derivation, and Core-fact ownership verification.
+- `92fcbbe` adds the pure bounded local Project semantics with separate
+  projection/planner statuses and separate planner/explicit topology origins.
+- `68c2f4e` makes exact retained-operation capacity fail closed.
+- `1ae1742` synchronizes and strengthens the normative spec around strict-self
+  deduplication, delayed HELLO projection, current policy vetoes, ephemeral
+  topology provenance, and the one composite `project-and-admit` kernel
+  boundary.
+
+The strengthened spec received a strict scoped review GO. In particular:
+
+- logical room overcapacity remains a complete Core input and is
+  deterministically rank-capped; only physical custody/resource
+  incompleteness or saturation fails Project;
+- delayed pair flights evaluate presence activity and permit validity at the
+  signed HELLO window, while current deny/revocation/authority, planner,
+  degree, ledger, outbox, and resource state remain vetoes;
+- a distinct historical local-custody proof must bind exact authenticated
+  operation evidence and live stable/receiver key handles;
+- cloneable projection output is diagnostic only; an opaque pair topology
+  handle exists only inside one `project-and-admit` invocation and is never
+  persisted or reimported; and
+- incoming explicit attempts require the receiver's current on-demand policy,
+  not a reciprocal local UI request.
+
+The committed implementation is still a safe non-authorizing foundation, not
+that complete boundary. `localAdmissibleProject.ts` accepts deeply owned but
+structural inputs and deliberately cannot mint topology or publication
+authority. Authority projection remains fail-closed. The HELLO preparation
+service currently reaches only `policy-allowed-pre-topology`.
+
+The next production-critical work is therefore:
+
+1. prove complete current local ownership from exact retained operations plus
+   live author, stable-identity, and receiver-key custody;
+2. reconstruct historical Core from the complete authenticated operation and
+   author-prefix SSOT for the HELLO window, then mint the distinct historical
+   local-custody proof;
+3. canonical-decode and bind the planner and physical resource rows;
+4. execute current/historical projection and `Admit` inside one private
+   composite invocation; and
+5. prepare the exact ACCEPT/outbox mutation and commit every captured fence in
+   the existing fixed CAS order before any byte is publishable.
+
+Do not “complete” steps 1 or 2 by trusting
+`LocalPresenceOwnershipRecordV1`, decoded `CoreRoomStateV1` bytes, a digest, or
+the pair-subject endpoint evidence bundle alone. Those are structural
+selectors/fences, not non-omission or key-custody authority.
+
+Last verification after removing premature pre-topology leases:
+`bun test tests/blindRendezvous` — 379 pass, 0 fail, 29 files. Both TypeScript
+configurations, focused ESLint, formatting, and `git diff --check` passed.
+`bun test tests` also passes: 1,023 tests across 128 files.
+
 ## Continuation after this handoff
 
 The next review completed later on 2026-07-28 and changes the safe next-step
@@ -82,11 +143,11 @@ and `git diff --check` also pass.
 
 ## Repositories and branches
 
-| Repo             | Path                                | Branch   | Local state                                                                  |
-| ---------------- | ----------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `master` | WebRTC/TURN baseline plus current pair/admission Phase-0 checkpoint, local only   |
-| `p2party-server` | `~/Desktop/@p2party/p2party-server` | `master` | TURN endpoint issuance merged; 1 commit ahead of `origin/master`             |
-| `p2party.com`    | `~/Desktop/@p2party/p2party.com`    | `master` | Frontend fixes already present; 2 commits ahead of `origin/master`           |
+| Repo             | Path                                | Branch   | Local state                                                                     |
+| ---------------- | ----------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| `p2party-js`     | `~/Desktop/@p2party/p2party-js`     | `master` | WebRTC/TURN baseline plus current pair/admission Phase-0 checkpoint, local only |
+| `p2party-server` | `~/Desktop/@p2party/p2party-server` | `master` | TURN endpoint issuance merged; 1 commit ahead of `origin/master`                |
+| `p2party.com`    | `~/Desktop/@p2party/p2party.com`    | `master` | Frontend fixes already present; 2 commits ahead of `origin/master`              |
 
 `docs/rendezvous-prior-art.md` remains an intentionally untracked local
 research shelf. Its bytes are identical to the version removed by `b2c147f`;
@@ -129,12 +190,12 @@ do not stage it unless the maintainer explicitly reverses that decision.
 | `canonicalSchema.ts`  | Descriptor-driven canonical binary codec: field order, integer widths, enum bytes, collection ordering, bounds.            |
 | `schemas.ts`          | Descriptors for implemented room operations, pair/non-pair payloads, store objects, and canonical Core state/faults.       |
 | `projections.ts`      | Generated key tables and enum projections. No hand-maintained duplicate remains.                                           |
-| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/pair/operation/carrier identifiers and transcript inputs.                     |
+| `derivations.ts`      | Domain-separated hashes, HKDF-SHA-256, room/pair/operation/carrier identifiers and transcript inputs.                      |
 | `roomPolicyV4.ts`     | `RoomPolicyV4` validation, canonical codec, `DEFAULT_BLIND_POLICY_V4_0`.                                                   |
 | `roomInviteV2.ts`     | Closed `v1 \| v2` invitation parsing, both v2 fragment forms, the two typed errors.                                        |
 | `pairStepEnvelope.ts` | Schema-derived `PairStepEnvelopeV1` framing and exact suite-1 class targets.                                               |
 | `pairPlaintext.ts`    | Closed ten-body codec, minimal class/zero padding, initial slots, candidate shape/order, and v4 framing validation.        |
-| `admissionPolicy.ts`  | Internal semantic-only frontend/authority policy order and bootstrap/stable-edge lease arithmetic.                        |
+| `admissionPolicy.ts`  | Internal semantic-only frontend/authority policy order and bootstrap/stable-edge lease arithmetic.                         |
 | `operation.ts`        | Operation codec/signatures, process-private room-validation context, active/candidate outer gates, pair-slot binding.      |
 | `operationPayload.ts` | Closed non-pair codecs and intrinsic validation for grant/revoke, presence/permit, leave, and descriptor-only store hints. |
 | `coreReduce.ts`       | Provenance-checked candidate ingress, payload reduction, dependency-evidence fixed point, canonical Core state/faults.     |

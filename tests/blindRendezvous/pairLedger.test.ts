@@ -8,6 +8,7 @@ import {
   pairEdgeIsStalledV1,
   previewAuthenticatedPairSlotV1,
   recordAcceptedPairSlotV1,
+  recordDeniedIdentityHelloSlotV1,
   restorePairAcceptedSlotLedgerV1,
   snapshotPairAcceptedSlotLedgerV1,
 } from "../../src/blindRendezvous/pairLedger";
@@ -104,6 +105,52 @@ describe("pair accepted-slot ledger", () => {
     expect(
       snapshotPairAcceptedSlotLedgerV1(accepted.ledger).entries,
     ).toHaveLength(1);
+  });
+
+  test("durably reserves a denied HELLO as no-response replay and fork evidence", () => {
+    const deniedHello = candidate({
+      operation: 0x41,
+      response: null,
+    });
+    const denied = recordDeniedIdentityHelloSlotV1(
+      createEmptyPairAcceptedSlotLedgerV1(),
+      deniedHello,
+    );
+    expect(denied.result).toBe("accepted");
+    if (denied.result !== "accepted")
+      throw new Error("expected denied slot reservation");
+
+    const replay = recordDeniedIdentityHelloSlotV1(denied.ledger, deniedHello);
+    expect(replay.result).toBe("replay");
+    if (replay.result !== "replay") throw new Error("expected denied replay");
+    expect(replay.cachedExactResponse).toBeNull();
+
+    const conflict = recordDeniedIdentityHelloSlotV1(
+      denied.ledger,
+      candidate({ operation: 0x42, response: null }),
+    );
+    expect(conflict.result).toBe("fork");
+    expect(
+      pairEdgeIsStalledV1(conflict.ledger, deniedHello.coordinate.pairEdgeId),
+    ).toBe(true);
+
+    expect(() =>
+      recordDeniedIdentityHelloSlotV1(
+        createEmptyPairAcceptedSlotLedgerV1(),
+        candidate({ operation: 0x43, response: 0x63 }),
+      ),
+    ).toThrow("with no cached response for denial");
+    expect(() =>
+      recordDeniedIdentityHelloSlotV1(
+        createEmptyPairAcceptedSlotLedgerV1(),
+        candidate({
+          operation: 0x44,
+          response: null,
+          kind: "PAIR_CHECKPOINT",
+          pairSequence: 8n,
+        }),
+      ),
+    ).toThrow("must be an IDENTITY_HELLO");
   });
 
   test("replays an exact accepted ID with freshly owned exact response bytes", () => {
@@ -443,7 +490,7 @@ describe("pair accepted-slot ledger", () => {
     const restored = restorePairAcceptedSlotLedgerV1(snapshot);
     expect(snapshotPairAcceptedSlotLedgerV1(restored)).toEqual(snapshot);
 
-    const helloWithoutResponse: PairAcceptedSlotLedgerSnapshotV1 = {
+    const deniedHelloWithoutResponse: PairAcceptedSlotLedgerSnapshotV1 = {
       version: 1,
       entries: [
         {
@@ -453,8 +500,31 @@ describe("pair accepted-slot ledger", () => {
         },
       ],
     };
-    expect(() => restorePairAcceptedSlotLedgerV1(helloWithoutResponse)).toThrow(
-      "non-null for durable IDENTITY_HELLO acceptance",
+    expect(
+      snapshotPairAcceptedSlotLedgerV1(
+        restorePairAcceptedSlotLedgerV1(deniedHelloWithoutResponse),
+      ),
+    ).toEqual(deniedHelloWithoutResponse);
+
+    const nonterminalWithoutResponse: PairAcceptedSlotLedgerSnapshotV1 = {
+      version: 1,
+      entries: [
+        {
+          version: 1,
+          ...candidate({
+            operation: 0x62,
+            response: null,
+            kind: "PQ_CONTROL",
+            pairSequence: 2n,
+          }),
+          forkProofOperationIds: null,
+        },
+      ],
+    };
+    expect(() =>
+      restorePairAcceptedSlotLedgerV1(nonterminalWithoutResponse),
+    ).toThrow(
+      "may be null only for a denied IDENTITY_HELLO or terminal PAIR_CHECKPOINT",
     );
 
     const reversed: PairAcceptedSlotLedgerSnapshotV1 = {

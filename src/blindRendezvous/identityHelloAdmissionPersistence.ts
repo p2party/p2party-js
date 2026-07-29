@@ -119,12 +119,15 @@ export type PreparedIdentityHelloAdmissionMutationV1 =
     }
   | {
       readonly kind: "requeue-replay";
+      readonly nextProvisionalPair: ExactPresentIdentityHelloAdmissionRowV1;
       readonly nextIdentityBootstrapOutbox: ExactPresentIdentityHelloAdmissionRowV1;
       readonly nextResourceState: ExactPresentIdentityHelloAdmissionRowV1;
     }
   | {
       readonly kind: "record-fork";
       readonly nextPairLedger: ExactPresentIdentityHelloAdmissionRowV1;
+      readonly nextProvisionalPair: ExactPresentIdentityHelloAdmissionRowV1;
+      readonly nextIdentityBootstrapOutbox: ExactPresentIdentityHelloAdmissionRowV1;
       readonly nextResourceState: ExactPresentIdentityHelloAdmissionRowV1;
     };
 

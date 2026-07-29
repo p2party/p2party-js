@@ -67,6 +67,12 @@ export interface PairSlotAcceptanceCandidateV1 {
 export interface PairAcceptedSlotEntryV1 extends PairSlotAcceptanceCandidateV1 {
   readonly version: 1;
   /**
+   * A null cached response is durable only for a locally denied
+   * IDENTITY_HELLO or terminal PAIR_CHECKPOINT. The former still reserves its
+   * authenticated slot so a later conflicting HELLO cannot win by arrival.
+   */
+  readonly cachedExactResponse: Uint8Array | null;
+  /**
    * Bytewise-lowest two distinct authenticated IDs observed at this
    * coordinate. These are a bounded fork-evidence index; the validated outer
    * operation store remains the SSOT for the referenced signed bytes.
@@ -240,6 +246,31 @@ const validatePersistableCandidateSemantics = (
     fail(
       `${name}.cachedExactResponse must be non-null for durable IDENTITY_HELLO acceptance`,
     );
+  if (
+    candidate.cachedExactResponse === null &&
+    candidate.kind !== "PAIR_CHECKPOINT"
+  )
+    fail(
+      `${name}.cachedExactResponse may be null only for a denied IDENTITY_HELLO or terminal PAIR_CHECKPOINT`,
+    );
+  if (
+    candidate.kind === "PAIR_CHECKPOINT" &&
+    candidate.cachedExactResponse !== null
+  )
+    fail(`${name}.cachedExactResponse must be null for PAIR_CHECKPOINT`);
+};
+
+const validateDeniedIdentityHelloSemantics = (
+  candidate: PairSlotAcceptanceCandidateV1,
+  name: string,
+): void => {
+  if (
+    candidate.kind !== "IDENTITY_HELLO" ||
+    candidate.cachedExactResponse !== null
+  )
+    fail(
+      `${name} must be an IDENTITY_HELLO with no cached response for denial`,
+    );
 };
 
 const validateEntrySemantics = (
@@ -248,7 +279,14 @@ const validateEntrySemantics = (
 ): void => {
   if (entry.version !== 1) fail(`${name}.version must be 1`);
   validateCandidateSemantics(entry, name);
-  validatePersistableCandidateSemantics(entry, name);
+  if (entry.cachedExactResponse === null) {
+    if (entry.kind !== "IDENTITY_HELLO" && entry.kind !== "PAIR_CHECKPOINT")
+      fail(
+        `${name}.cachedExactResponse may be null only for a denied IDENTITY_HELLO or terminal PAIR_CHECKPOINT`,
+      );
+  } else if (entry.kind === "PAIR_CHECKPOINT") {
+    fail(`${name}.cachedExactResponse must be null for PAIR_CHECKPOINT`);
+  }
   if (
     entry.forkProofOperationIds !== null &&
     entry.forkProofOperationIds.length !== 2
@@ -618,9 +656,10 @@ export const previewAuthenticatedPairSlotV1 = (
  * Exact ID replays return the persisted response. A different ID at the same
  * coordinate records a bounded proof and stalls only that retained edge.
  */
-export const recordAcceptedPairSlotV1 = (
+const recordAuthenticatedPairSlotV1 = (
   ledger: PairAcceptedSlotLedgerV1,
   candidateValue: PairSlotAcceptanceCandidateV1,
+  disposition: "accepted" | "denied-identity-hello",
 ): PairAcceptedSlotTransitionV1 => {
   const classification = classifyAuthenticatedPairSlot(ledger, candidateValue);
   switch (classification.result) {
@@ -655,10 +694,16 @@ export const recordAcceptedPairSlotV1 = (
     case "edge-stalled":
       return { result: "edge-stalled", ledger };
     case "unoccupied": {
-      validatePersistableCandidateSemantics(
-        classification.candidate,
-        "candidate",
-      );
+      if (disposition === "accepted")
+        validatePersistableCandidateSemantics(
+          classification.candidate,
+          "candidate",
+        );
+      else
+        validateDeniedIdentityHelloSemantics(
+          classification.candidate,
+          "candidate",
+        );
       const entries = [...classification.state.entries];
       entries.splice(
         classification.at,
@@ -669,6 +714,31 @@ export const recordAcceptedPairSlotV1 = (
     }
   }
 };
+
+export const recordAcceptedPairSlotV1 = (
+  ledger: PairAcceptedSlotLedgerV1,
+  candidateValue: PairSlotAcceptanceCandidateV1,
+): PairAcceptedSlotTransitionV1 =>
+  recordAuthenticatedPairSlotV1(ledger, candidateValue, "accepted");
+
+/**
+ * Persist a stable-signature-valid HELLO that current local policy denies.
+ *
+ * Denial sends no sensitive response, so an exact replay remains a null
+ * response. Reserving the authenticated slot is nevertheless load-bearing:
+ * a later byte-different HELLO at the same coordinate is a fork rather than
+ * an arrival-order winner. Only the trusted admission transaction may call
+ * this after its sole policy kernel returns deny.
+ */
+export const recordDeniedIdentityHelloSlotV1 = (
+  ledger: PairAcceptedSlotLedgerV1,
+  candidateValue: PairSlotAcceptanceCandidateV1,
+): PairAcceptedSlotTransitionV1 =>
+  recordAuthenticatedPairSlotV1(
+    ledger,
+    candidateValue,
+    "denied-identity-hello",
+  );
 
 /** True exactly while retained fork evidence stalls this edge. */
 export const pairEdgeIsStalledV1 = (

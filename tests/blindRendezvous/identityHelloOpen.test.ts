@@ -935,6 +935,7 @@ const capturedAdmission = (
       exactBytes: encodeLocalPresenceOwnershipV1({
         version: 1,
         localPresenceOperationIds: [facts.endpointPresenceOperationIds[1]],
+        localStableIdentityKeys: [fixture.local.stablePublicKey],
       }),
     },
     frontendControls:
@@ -1518,6 +1519,7 @@ describe("reservation-gated identity HELLO open", () => {
               exactBytes: encodeLocalPresenceOwnershipV1({
                 version: 1,
                 localPresenceOperationIds: [],
+                localStableIdentityKeys: [fixture.local.stablePublicKey],
               }),
             },
           };

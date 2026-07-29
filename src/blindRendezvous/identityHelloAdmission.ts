@@ -106,6 +106,7 @@ export interface InitializedRoomAdmissionFenceV1 {
 export interface LocalPresenceOwnershipV1 {
   readonly version: 1;
   readonly localPresenceOperationIds: readonly Uint8Array[];
+  readonly localStableIdentityKeys: readonly Uint8Array[];
 }
 
 export type AuthorityCustodyProjectionV1 =

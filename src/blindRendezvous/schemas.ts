@@ -869,6 +869,10 @@ export const localPresenceOwnershipV1Schema = record(
       name: "localPresenceOperationIds",
       type: canonicalBytes32SetV1Schema,
     },
+    {
+      name: "localStableIdentityKeys",
+      type: canonicalBytes32SetV1Schema,
+    },
   ],
 );
 

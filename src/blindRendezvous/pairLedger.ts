@@ -100,6 +100,25 @@ export type PairAcceptedSlotTransitionV1 =
       readonly ledger: PairAcceptedSlotLedgerV1;
     };
 
+/**
+ * Read-only classification at the authenticated pair-slot boundary.
+ *
+ * `unoccupied` is deliberately not called `accepted`: no durable entry or
+ * fork proof exists until `recordAcceptedPairSlotV1` succeeds.
+ */
+export type AuthenticatedPairSlotPreviewV1 =
+  | { readonly result: "unoccupied" }
+  | {
+      readonly result: "replay";
+      /** Exact cached bytes are freshly owned by this result. */
+      readonly cachedExactResponse: Uint8Array | null;
+    }
+  | {
+      readonly result: "fork";
+      readonly forkProofOperationIds: readonly [Uint8Array, Uint8Array];
+    }
+  | { readonly result: "edge-stalled" };
+
 export class PairLedgerError extends Error {
   override readonly name = "PairLedgerError";
 
@@ -208,12 +227,26 @@ const ownCandidate = (
   return candidate;
 };
 
+const validatePersistableCandidateSemantics = (
+  candidate: PairSlotAcceptanceCandidateV1,
+  name: string,
+): void => {
+  if (
+    candidate.kind === "IDENTITY_HELLO" &&
+    candidate.cachedExactResponse === null
+  )
+    fail(
+      `${name}.cachedExactResponse must be non-null for durable IDENTITY_HELLO acceptance`,
+    );
+};
+
 const validateEntrySemantics = (
   entry: PairAcceptedSlotEntryV1,
   name: string,
 ): void => {
   if (entry.version !== 1) fail(`${name}.version must be 1`);
   validateCandidateSemantics(entry, name);
+  validatePersistableCandidateSemantics(entry, name);
   if (
     entry.forkProofOperationIds !== null &&
     entry.forkProofOperationIds.length !== 2
@@ -307,6 +340,13 @@ const proofOut = (
   Uint8Array.from(proof[1]),
 ];
 
+const cachedResponseOut = (
+  entry: PairAcceptedSlotEntryV1,
+): Uint8Array | null =>
+  entry.cachedExactResponse === null
+    ? null
+    : Uint8Array.from(entry.cachedExactResponse);
+
 const edgeIsStalled = (state: InternalState, pairEdgeId: Uint8Array): boolean =>
   state.entries.some(
     ({ value }) =>
@@ -371,6 +411,81 @@ const assertCandidateCoordinateOwnership = (
   }
 };
 
+type InternalAuthenticatedPairSlotClassificationV1 = {
+  readonly state: InternalState;
+  readonly candidate: PairSlotAcceptanceCandidateV1;
+  readonly at: number;
+} & (
+  | { readonly result: "unoccupied" }
+  | {
+      readonly result: "replay";
+      readonly existing: InternalEntry;
+    }
+  | {
+      readonly result: "fork";
+      readonly existing: InternalEntry;
+      readonly forkProofOperationIds: readonly [Uint8Array, Uint8Array];
+      readonly proofAlreadyRecorded: boolean;
+    }
+  | { readonly result: "edge-stalled" }
+);
+
+/**
+ * The single validated lookup path shared by read-only preview and mutation.
+ * Preserve the ordering here: coordinate conflicts precede edge-stall checks,
+ * while a stalled edge masks cross-coordinate ownership errors as before.
+ */
+const classifyAuthenticatedPairSlot = (
+  ledger: PairAcceptedSlotLedgerV1,
+  candidateValue: PairSlotAcceptanceCandidateV1,
+): InternalAuthenticatedPairSlotClassificationV1 => {
+  const state = requireState(ledger);
+  const candidate = ownCandidate(candidateValue);
+  const key = coordinateKey(candidate.coordinate);
+  const at = lowerBoundEntry(state.entries, key);
+  const existing = state.entries[at];
+  const common = {
+    state,
+    candidate,
+    at,
+  };
+
+  if (
+    existing !== undefined &&
+    compareBytes(existing.coordinateKey, key) === 0
+  ) {
+    assertCandidateCoordinateOwnership(state, candidate, key);
+    if (
+      bytesEqual(
+        existing.value.acceptedOperationId,
+        candidate.acceptedOperationId,
+      )
+    )
+      return { ...common, result: "replay", existing };
+
+    const proof = canonicalForkProof(
+      existing.value,
+      candidate.acceptedOperationId,
+    );
+    return {
+      ...common,
+      result: "fork",
+      existing,
+      forkProofOperationIds: proof,
+      proofAlreadyRecorded:
+        existing.value.forkProofOperationIds !== null &&
+        bytesEqual(existing.value.forkProofOperationIds[0], proof[0]) &&
+        bytesEqual(existing.value.forkProofOperationIds[1], proof[1]),
+    };
+  }
+
+  if (edgeIsStalled(state, candidate.coordinate.pairEdgeId))
+    return { ...common, result: "edge-stalled" };
+
+  assertCandidateCoordinateOwnership(state, candidate, key);
+  return { ...common, result: "unoccupied" };
+};
+
 /** Create the unique empty ledger value. */
 export const createEmptyPairAcceptedSlotLedgerV1 =
   (): PairAcceptedSlotLedgerV1 => createHandle([]);
@@ -424,6 +539,37 @@ export const restorePairAcceptedSlotLedgerV1 = (
 };
 
 /**
+ * Classify one fully authenticated candidate without creating any durable
+ * entry, fork proof, consumed-tag projection, or replacement ledger handle.
+ *
+ * A new IDENTITY_HELLO may be previewed with a null cached response so the
+ * caller can run admission and construct that response. The subsequent record
+ * call revalidates the candidate and requires the exact response atomically.
+ */
+export const previewAuthenticatedPairSlotV1 = (
+  ledger: PairAcceptedSlotLedgerV1,
+  candidateValue: PairSlotAcceptanceCandidateV1,
+): AuthenticatedPairSlotPreviewV1 => {
+  const classification = classifyAuthenticatedPairSlot(ledger, candidateValue);
+  switch (classification.result) {
+    case "unoccupied":
+      return { result: "unoccupied" };
+    case "replay":
+      return {
+        result: "replay",
+        cachedExactResponse: cachedResponseOut(classification.existing.value),
+      };
+    case "fork":
+      return {
+        result: "fork",
+        forkProofOperationIds: proofOut(classification.forkProofOperationIds),
+      };
+    case "edge-stalled":
+      return { result: "edge-stalled" };
+  }
+};
+
+/**
  * Record one already fully authenticated pair operation.
  *
  * Exact ID replays return the persisted response. A different ID at the same
@@ -433,64 +579,52 @@ export const recordAcceptedPairSlotV1 = (
   ledger: PairAcceptedSlotLedgerV1,
   candidateValue: PairSlotAcceptanceCandidateV1,
 ): PairAcceptedSlotTransitionV1 => {
-  const state = requireState(ledger);
-  const candidate = ownCandidate(candidateValue);
-  const key = coordinateKey(candidate.coordinate);
-  const at = lowerBoundEntry(state.entries, key);
-  const existing = state.entries[at];
-
-  if (
-    existing !== undefined &&
-    compareBytes(existing.coordinateKey, key) === 0
-  ) {
-    assertCandidateCoordinateOwnership(state, candidate, key);
-    if (
-      bytesEqual(
-        existing.value.acceptedOperationId,
-        candidate.acceptedOperationId,
-      )
-    )
+  const classification = classifyAuthenticatedPairSlot(ledger, candidateValue);
+  switch (classification.result) {
+    case "replay":
       return {
         result: "replay",
-        cachedExactResponse:
-          existing.value.cachedExactResponse === null
-            ? null
-            : Uint8Array.from(existing.value.cachedExactResponse),
+        cachedExactResponse: cachedResponseOut(classification.existing.value),
         ledger,
       };
+    case "fork": {
+      if (classification.proofAlreadyRecorded)
+        return {
+          result: "fork",
+          forkProofOperationIds: proofOut(classification.forkProofOperationIds),
+          ledger,
+        };
 
-    const proof = canonicalForkProof(
-      existing.value,
-      candidate.acceptedOperationId,
-    );
-    const unchanged =
-      existing.value.forkProofOperationIds !== null &&
-      bytesEqual(existing.value.forkProofOperationIds[0], proof[0]) &&
-      bytesEqual(existing.value.forkProofOperationIds[1], proof[1]);
-    if (unchanged)
+      const entries = [...classification.state.entries];
+      entries[classification.at] = internalEntry(
+        candidateEntry(
+          classification.existing.value,
+          classification.forkProofOperationIds,
+        ),
+      );
+      const next = createHandle(entries);
       return {
         result: "fork",
-        forkProofOperationIds: proofOut(proof),
-        ledger,
+        forkProofOperationIds: proofOut(classification.forkProofOperationIds),
+        ledger: next,
       };
-
-    const entries = [...state.entries];
-    entries[at] = internalEntry(candidateEntry(existing.value, proof));
-    const next = createHandle(entries);
-    return {
-      result: "fork",
-      forkProofOperationIds: proofOut(proof),
-      ledger: next,
-    };
+    }
+    case "edge-stalled":
+      return { result: "edge-stalled", ledger };
+    case "unoccupied": {
+      validatePersistableCandidateSemantics(
+        classification.candidate,
+        "candidate",
+      );
+      const entries = [...classification.state.entries];
+      entries.splice(
+        classification.at,
+        0,
+        internalEntry(candidateEntry(classification.candidate, null)),
+      );
+      return { result: "accepted", ledger: createHandle(entries) };
+    }
   }
-
-  if (edgeIsStalled(state, candidate.coordinate.pairEdgeId))
-    return { result: "edge-stalled", ledger };
-
-  assertCandidateCoordinateOwnership(state, candidate, key);
-  const entries = [...state.entries];
-  entries.splice(at, 0, internalEntry(candidateEntry(candidate, null)));
-  return { result: "accepted", ledger: createHandle(entries) };
 };
 
 /** True exactly while retained fork evidence stalls this edge. */

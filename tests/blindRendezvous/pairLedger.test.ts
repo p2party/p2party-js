@@ -4,6 +4,7 @@ import {
   consumedPairRoutingTagsV1,
   createEmptyPairAcceptedSlotLedgerV1,
   pairEdgeIsStalledV1,
+  previewAuthenticatedPairSlotV1,
   recordAcceptedPairSlotV1,
   restorePairAcceptedSlotLedgerV1,
   snapshotPairAcceptedSlotLedgerV1,
@@ -76,9 +77,51 @@ const accept = (
 };
 
 describe("pair accepted-slot ledger", () => {
+  test("previews a new HELLO without persistence, then requires its exact response", () => {
+    const ledger = createEmptyPairAcceptedSlotLedgerV1();
+    const pendingHello = candidate({
+      operation: 0x41,
+      response: null,
+    });
+
+    expect(previewAuthenticatedPairSlotV1(ledger, pendingHello)).toEqual({
+      result: "unoccupied",
+    });
+    expect(snapshotPairAcceptedSlotLedgerV1(ledger).entries).toEqual([]);
+    expect(() => recordAcceptedPairSlotV1(ledger, pendingHello)).toThrow(
+      "non-null for durable IDENTITY_HELLO acceptance",
+    );
+    expect(snapshotPairAcceptedSlotLedgerV1(ledger).entries).toEqual([]);
+
+    const completedHello = {
+      ...pendingHello,
+      cachedExactResponse: bytes(0x71, 48),
+    };
+    const accepted = recordAcceptedPairSlotV1(ledger, completedHello);
+    expect(accepted.result).toBe("accepted");
+    expect(
+      snapshotPairAcceptedSlotLedgerV1(accepted.ledger).entries,
+    ).toHaveLength(1);
+  });
+
   test("replays an exact accepted ID with freshly owned exact response bytes", () => {
     const value = candidate({ operation: 0x41, response: 0x71 });
     const accepted = accept(createEmptyPairAcceptedSlotLedgerV1(), value);
+    const preview = previewAuthenticatedPairSlotV1(accepted, {
+      ...value,
+      cachedExactResponse: null,
+    });
+    expect(preview.result).toBe("replay");
+    if (preview.result !== "replay") throw new Error("expected replay");
+    expect(preview.cachedExactResponse).toEqual(value.cachedExactResponse);
+
+    preview.cachedExactResponse?.fill(0xee);
+    const secondPreview = previewAuthenticatedPairSlotV1(accepted, value);
+    if (secondPreview.result !== "replay") throw new Error("expected replay");
+    expect(secondPreview.cachedExactResponse).toEqual(
+      value.cachedExactResponse,
+    );
+
     const firstReplay = recordAcceptedPairSlotV1(accepted, value);
     expect(firstReplay.result).toBe("replay");
     expect(firstReplay.ledger).toBe(accepted);
@@ -92,6 +135,54 @@ describe("pair accepted-slot ledger", () => {
     expect(secondReplay.cachedExactResponse).not.toBe(
       firstReplay.cachedExactResponse,
     );
+  });
+
+  test("previews forks and stalls without materializing either state", () => {
+    const first = candidate({
+      operation: 0x21,
+      kind: "PQ_CONTROL",
+      pairSequence: 2n,
+    });
+    const conflicting = candidate({
+      operation: 0x81,
+      kind: "PAIR_CHECKPOINT",
+      response: null,
+      pairSequence: 2n,
+    });
+    const later = candidate({
+      operation: 0x82,
+      kind: "PQ_CONTROL",
+      pairSequence: 3n,
+      tag: 0x52,
+    });
+    const ledger = accept(createEmptyPairAcceptedSlotLedgerV1(), first);
+    const before = snapshotPairAcceptedSlotLedgerV1(ledger);
+
+    const preview = previewAuthenticatedPairSlotV1(ledger, conflicting);
+    expect(preview.result).toBe("fork");
+    if (preview.result !== "fork") throw new Error("expected fork");
+    const expectedProof = preview.forkProofOperationIds.map(hex);
+    preview.forkProofOperationIds[0].fill(0xff);
+
+    const repeatedPreview = previewAuthenticatedPairSlotV1(ledger, conflicting);
+    if (repeatedPreview.result !== "fork")
+      throw new Error("expected repeated fork");
+    expect(repeatedPreview.forkProofOperationIds.map(hex)).toEqual(
+      expectedProof,
+    );
+    expect(snapshotPairAcceptedSlotLedgerV1(ledger)).toEqual(before);
+    expect(pairEdgeIsStalledV1(ledger, first.coordinate.pairEdgeId)).toBe(
+      false,
+    );
+    expect(previewAuthenticatedPairSlotV1(ledger, later)).toEqual({
+      result: "unoccupied",
+    });
+
+    const recordedFork = recordAcceptedPairSlotV1(ledger, conflicting);
+    if (recordedFork.result !== "fork") throw new Error("expected fork");
+    expect(previewAuthenticatedPairSlotV1(recordedFork.ledger, later)).toEqual({
+      result: "edge-stalled",
+    });
   });
 
   test("preserves a null cached response on exact replay", () => {
@@ -250,22 +341,53 @@ describe("pair accepted-slot ledger", () => {
     ]);
   });
 
+  test("preview and record share strict candidate and ledger validation", () => {
+    const ledger = createEmptyPairAcceptedSlotLedgerV1();
+    const malformed = {
+      ...candidate(),
+      exactOperationBytes: new Uint8Array(0),
+    };
+
+    expect(() => previewAuthenticatedPairSlotV1(ledger, malformed)).toThrow(
+      "exactOperationBytes must not be empty",
+    );
+    expect(() => recordAcceptedPairSlotV1(ledger, malformed)).toThrow(
+      "exactOperationBytes must not be empty",
+    );
+    expect(() =>
+      previewAuthenticatedPairSlotV1(
+        {} as PairAcceptedSlotLedgerV1,
+        candidate(),
+      ),
+    ).toThrow("genuine process-local handle");
+  });
+
   test("rejects operation-ID or one-use-tag reuse across coordinates", () => {
     const first = candidate({ edge: 0x21, operation: 0x31, tag: 0x41 });
     const accepted = accept(createEmptyPairAcceptedSlotLedgerV1(), first);
+    const reusedOperationId = candidate({
+      edge: 0x22,
+      operation: 0x31,
+      tag: 0x42,
+    });
+    const reusedRoutingTag = candidate({
+      edge: 0x22,
+      operation: 0x32,
+      tag: 0x41,
+    });
 
     expect(() =>
-      recordAcceptedPairSlotV1(
-        accepted,
-        candidate({ edge: 0x22, operation: 0x31, tag: 0x42 }),
-      ),
+      previewAuthenticatedPairSlotV1(accepted, reusedOperationId),
     ).toThrow("one operation ID must not bind two");
+    expect(() => recordAcceptedPairSlotV1(accepted, reusedOperationId)).toThrow(
+      "one operation ID must not bind two",
+    );
     expect(() =>
-      recordAcceptedPairSlotV1(
-        accepted,
-        candidate({ edge: 0x22, operation: 0x32, tag: 0x41 }),
-      ),
+      previewAuthenticatedPairSlotV1(accepted, reusedRoutingTag),
     ).toThrow("one-use routing tags must be unique");
+    expect(() => recordAcceptedPairSlotV1(accepted, reusedRoutingTag)).toThrow(
+      "one-use routing tags must be unique",
+    );
   });
 
   test("owns candidate, snapshot, proof, and replay bytes across mutation", () => {
@@ -318,6 +440,20 @@ describe("pair accepted-slot ledger", () => {
     const snapshot = snapshotPairAcceptedSlotLedgerV1(ledger);
     const restored = restorePairAcceptedSlotLedgerV1(snapshot);
     expect(snapshotPairAcceptedSlotLedgerV1(restored)).toEqual(snapshot);
+
+    const helloWithoutResponse: PairAcceptedSlotLedgerSnapshotV1 = {
+      version: 1,
+      entries: [
+        {
+          version: 1,
+          ...candidate({ operation: 0x61, response: null }),
+          forkProofOperationIds: null,
+        },
+      ],
+    };
+    expect(() => restorePairAcceptedSlotLedgerV1(helloWithoutResponse)).toThrow(
+      "non-null for durable IDENTITY_HELLO acceptance",
+    );
 
     const reversed: PairAcceptedSlotLedgerSnapshotV1 = {
       ...snapshot,

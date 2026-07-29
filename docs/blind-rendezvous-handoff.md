@@ -21,6 +21,11 @@ The next local `master` checkpoints now exist after the older notes below:
   deduplication, delayed HELLO projection, current policy vetoes, ephemeral
   topology provenance, and the one composite `project-and-admit` kernel
   boundary.
+- `bc21d4d` removes premature pre-topology lease construction: a successful
+  HELLO capture now yields only an opaque `policy-allowed-pre-topology` handle.
+- `47f0b79` adds process-opaque stable Ed25519 private-key custody and carries
+  the exact stable/receiver custody handles through HELLO open and admission
+  capture.
 
 The strengthened spec received a strict scoped review GO. In particular:
 
@@ -39,10 +44,24 @@ The strengthened spec received a strict scoped review GO. In particular:
   not a reciprocal local UI request.
 
 The committed implementation is still a safe non-authorizing foundation, not
-that complete boundary. `localAdmissibleProject.ts` accepts deeply owned but
-structural inputs and deliberately cannot mint topology or publication
-authority. Authority projection remains fail-closed. The HELLO preparation
-service currently reaches only `policy-allowed-pre-topology`.
+that complete boundary. `localStableIdentityCustody.ts` now derives the stable
+public key from an owned, internally consistent 64-byte Ed25519 secret, binds
+one non-reused key-record revision, uses process-local `WeakMap` provenance,
+and wipes its secret on destruction. Receiver custody retains that exact
+handle and rechecks it after asynchronous ownership/KEM verification.
+HELLO open, admission claim, and capture retain and recheck the exact receiver
+handle; both receiver and stable-key revision rows must be present and match,
+and the captured structural ownership row must contain the exact local
+PRESENCE ID and live stable public key.
+
+This proves live stable/receiver key custody and exact local PRESENCE binding
+for this path. It does **not** prove that the captured local key/presence sets
+are complete, that the local author private key is custodied, or that the
+HELLO-time Core came from a complete authenticated operation set.
+`localAdmissibleProject.ts` still accepts deeply owned but structural inputs
+and deliberately cannot mint topology or publication authority. Authority
+projection remains fail-closed. The HELLO preparation service still reaches
+only `policy-allowed-pre-topology`.
 
 The next production-critical work is therefore:
 
@@ -62,10 +81,13 @@ Do not “complete” steps 1 or 2 by trusting
 the pair-subject endpoint evidence bundle alone. Those are structural
 selectors/fences, not non-omission or key-custody authority.
 
-Last verification after removing premature pre-topology leases:
-`bun test tests/blindRendezvous` — 379 pass, 0 fail, 29 files. Both TypeScript
-configurations, focused ESLint, formatting, and `git diff --check` passed.
-`bun test tests` also passes: 1,023 tests across 128 files.
+Last verification after stable-identity custody:
+`bun test tests/blindRendezvous` — 383 pass, 0 fail, 2,410 assertions across
+29 files. Both TypeScript configurations, focused ESLint, formatting, and
+`git diff --check` passed. `bun test tests` also passes: 1,027 tests and
+18,448 assertions across 128 files. A separate read-only security review
+returned GO with no authorization, provenance, secret-exposure, or fail-open
+finding.
 
 ## Continuation after this handoff
 

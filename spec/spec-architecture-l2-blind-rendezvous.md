@@ -1057,7 +1057,8 @@ harness is neither.
 - **REQ-024 — Executable normative kernel and generated projections:** A
   conforming release ships one content-addressed
   `ExecutableRendezvousKernelManifestV1`. Its closed pure modules implement
-  canonical operation-set validation, `CoreReduce`, `Admit`,
+  canonical operation-set validation, `CoreReduce`, current/historical
+  pair-scoped `Project` plus `Admit`,
   `DeriveAssurance`, L3 required-work derivation, the production delivery
   scheduler and `R2Conforms`, eventual pair-control transitions, and claim
   evaluation. A kernel module has no ambient clock, randomness, network,
@@ -2558,13 +2559,15 @@ notation and not a replacement for implementation tests. The release's
   set, scheduler workload (including worst-case authorized valid competing
   work), profile, resource limits, and fair-edge assumptions.
 - **FPO-003 — Pre-SDP non-disclosure:** Within one current, persisted
-  `BootstrapAdmissionDecisionLeaseV1`, transport disclosure in every admission mode
-  requires a current `Admit() == allow` result and authenticated pair
-  transcript. Strict modes additionally admit no HELLO before their exact
-  eligibility proof passes. A frontend policy-generation change invalidates
-  the lease immediately. Revocation after an otherwise unchanged modeled lease
-  interval is outside this property and is covered by the explicit recheck
-  requirements.
+  `BootstrapAdmissionDecisionLeaseV1`, transport disclosure in every admission
+  mode requires a genuine current or historical
+  `VerifiedPairAttemptTopologyV1`, a current `Admit() == allow` result, and an
+  authenticated pair transcript, all bound to the same exact attempt and CAS
+  fences. Strict modes additionally emit no HELLO before their exact
+  eligibility proof passes. A frontend policy-generation, topology, or
+  resource-fence change invalidates the lease immediately. Revocation after an
+  otherwise unchanged modeled lease interval is outside this property and is
+  covered by the explicit recheck requirements.
 - **FPO-004 — Sole-store non-disclosure:** For two executions differing only
   in room, stable identity, membership, pair edge, or SDP plaintext, a sole
   store's protocol-view distributions are computationally indistinguishable
@@ -2647,13 +2650,42 @@ cannot silently become protocol law.
 The following publication artifacts make the normative subset mechanically
 checkable. `Uint16` below is an unsigned 16-bit integer. All arrays are
 bounded, sorted by their complete canonical key, and duplicate-free. Module
-IDs are closed: `1 validate-operation-set`, `2 core-reduce`, `3 admit`,
+IDs are closed: `1 validate-operation-set`, `2 core-reduce`,
+`3 project-and-admit`,
 `4 derive-assurance`, `5 derive-l3-required-work`,
 `6 delivery-scheduler-and-r2-conforms`,
 `7 eventual-pair-control-transition`, and `8 evaluate-claim`.
 Entrypoint IDs are also closed in v1: modules `1..5` own entrypoints `1..5`;
 module 6 owns `6 delivery-scheduler` and `7 r2-conforms`; module 7 owns
 `8 eventual-pair-control-transition`; and module 8 owns `9 evaluate-claim`.
+Entrypoint `3 project-and-admit` is one composite pure boundary, not separate
+public `Project` and `Admit` entrypoints. Its frozen input and output schemas
+are closed tagged unions with exactly these input branches:
+
+- `current-project`, which returns the cloneable diagnostic projection;
+- `current-attempt`, which projects and authorizes one exact unpublished
+  outbound attempt or, when given a verified identity flight, immediately
+  consumes that topology in admission; and
+- `historical-attempt`, which reconstructs the exact HELLO-window projection
+  and decides or rechecks the corresponding bootstrap flight whenever the
+  exact endpoints are no longer both in current projection.
+
+The attempt branches take every canonical input required for their applicable
+internal phases and return only the final closed outbound-attempt
+authorization, admission decision/lease, or denial. A
+`VerifiedPairAttemptTopologyV1` may exist as an implementation-private
+refinement between those phases in one invocation, but it is never a
+canonical entrypoint input or output and cannot cross an invocation,
+serialization, worker, or persistence boundary. This keeps one executable
+entrypoint and one admission decision SSOT while allowing the production
+wrapper to enforce process-local provenance. ACCEPT and later transport-offer
+reauthorization use the applicable attempt branch with the persisted exact
+attempt coordinates/evidence and freshly captured current fences; they do not
+import a prior opaque handle. The owning effectful wrapper invokes this
+entrypoint itself and immediately consumes its result in the same prepared
+transition; no public adapter or later transition may supply or reimport a
+caller-assembled outbound authorization, admission decision, or lease as
+authority.
 
 ```ts
 type KernelModuleIdV1 = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
@@ -3461,7 +3493,8 @@ allowOnDemandEdges is an explicit closed boolean
 `ConnectionPlannerPolicyV1` is local source state: peers may intentionally
 choose different modes or stricter caps. Such differences may yield different
 desired edge sets and do not violate room-state convergence. Mutual admission,
-the receiver's planner, and both hard degree caps still apply.
+the receiver's applicable planner/on-demand rule, and both hard degree caps
+still apply.
 
 #### Byte-frozen v2 blind policy resolution
 
@@ -7428,23 +7461,33 @@ Changing any variant, field, or order requires a new core-state version and
 new independent known-answer vectors.
 
 ```ts
-
 type LocalAdmissiblePeerV1 = {
   localPeerId: string; // canonical "peer.v1." handle
   presenceOperationId: Bytes32;
   stableIdentityCommitment: Bytes32;
   rank: Bytes32;
   eligibility: "open" | "local-address-book-proved" | "authority-permit-proved";
+  // Diagnostic/UI union only. It is never an attempt-mode authorization bit.
   desiredEdge: boolean;
 };
 
 declare const VERIFIED_LOCAL_PRESENCE_OWNERSHIP_V1: unique symbol;
 
-// Module-private result of matching retained local presence-operation bytes
-// to local author/private-key custody in the same projection transaction.
+// Canonical persisted capture row. Decoding it proves only shape and byte
+// ownership; it does not prove key custody or local presence ownership.
+type LocalPresenceOwnershipRecordV1 = {
+  version: 1;
+  localPresenceOperationIds: CanonicalBytes32SetV1;
+  localStableIdentityKeys: CanonicalBytes32SetV1;
+};
+
+// Module-private result of verifying one exact captured record against the
+// retained Core facts plus live local author, stable-identity, and receiver-key
+// custody in the same projection transaction.
 type VerifiedLocalPresenceOwnershipV1 = {
   version: 1;
-  ownedPresenceOperationIds: CanonicalBytes32SetV1;
+  localPresenceOperationIds: CanonicalBytes32SetV1;
+  localStableIdentityKeys: CanonicalBytes32SetV1;
   readonly [VERIFIED_LOCAL_PRESENCE_OWNERSHIP_V1]: true;
 };
 
@@ -7459,6 +7502,33 @@ type LocalAdmissibleStateV1 = {
   // Selected remote vertices only; the room cap includes the local vertex.
   peers: readonly LocalAdmissiblePeerV1[];
   requestedExplicitPeerIds: readonly string[];
+};
+
+type LocalAdmissibleProjectionStatusV1 =
+  | "ready"
+  | "policy-unavailable"
+  | "projection-resource-overcapacity"
+  | "no-unambiguous-local-presence";
+
+type LocalAdmissiblePlannerStatusV1 =
+  "ready" | "unavailable" | "full-mesh-overcapacity";
+
+type LocalTopologySelectionFactV1 = {
+  presenceOperationId: Bytes32;
+  plannerSelected: boolean;
+  // Outbound local user intent only; never required for an incoming explicit
+  // HELLO.
+  locallyRequestedExplicit: boolean;
+};
+
+type LocalAdmissibleProjectionV1 = {
+  version: 1;
+  projectionStatus: LocalAdmissibleProjectionStatusV1;
+  plannerStatus: LocalAdmissiblePlannerStatusV1;
+  observedRosterHash: Bytes32;
+  state: LocalAdmissibleStateV1;
+  // Exactly one entry per state.peers item, in the same canonical order.
+  topologySelections: readonly LocalTopologySelectionFactV1[];
 };
 
 type LocalDeliveryStateV1 = {
@@ -7572,8 +7642,15 @@ snapshot =
     referenceWindow
   )
 
+LocalAdmissibleProjection(referenceWindow) =
+  Project(
+    snapshot,
+    capturedPlannerAndExplicitState,
+    capturedResourceState
+  )
+
 LocalAdmissibleState(referenceWindow) =
-  Project(snapshot, plannerPolicy)
+  LocalAdmissibleProjection(referenceWindow).state
 
 LocalDeliveryState(referenceWindow) =
   ProjectDelivery(
@@ -7601,14 +7678,27 @@ without violating core convergence. Different carrier permissions change
 `Project` is invoked only with the one `TrustedAdmissionSnapshotV1` captured
 by the local projection transaction. That snapshot contains the exact core
 state, immutable room policy/context, frontend controls (or lookup failure),
-module-private local presence ownership, and authority custody from the same
-atomic source; planner policy is its only separate local preference input.
-`Project` fails closed when any required input is absent, mismatched,
-unbranded, or over capacity. For each authority-mode commitment it calls the sole
+module-private verified local presence ownership, and authority custody from
+the same atomic source. The exact planner/explicit row and trusted resource row
+are separate inputs captured by that same logical optimistic transaction and
+are exact CAS fences; caller-supplied scalar limits or reconstructed planner
+booleans are not authority. `Project` fails closed when any required input is
+absent, mismatched, or unbranded, or when the trusted physical
+custody/resource projection is incomplete, saturated, or at or over a
+retained-operation count/byte cap. A complete Core whose
+`roomCapacityState="overcapacity"` is not a physical resource failure:
+`Project` must still apply the deterministic eligible-vertex rank and
+`maxRoomMembers` cap. For each authority-mode commitment it calls the sole
 `DeriveAuthorityAdmissionView`; it cannot accept a caller-supplied permit
 winner, authority availability bit, revocation floor, or view. Thus
 `maxRoomMembers`, room/policy binding, local ownership, and authority custody
 are explicit inputs rather than ambient dependencies.
+
+The cloneable `LocalAdmissibleProjectionV1` is diagnostic output, not a
+capability. It may drive the room/member/edge UI, but no topology, HELLO,
+admission, persistence, or publication transition accepts it back as proof.
+Only the module-private projection call operating on genuine captured handles
+may mint the pair-scoped opaque topology authorization defined below.
 
 `ProjectDelivery` captures `activationAtUnixMs` once in the same atomic input
 snapshot as `referenceWindow`. Every catalog, prewarm, active-context, and
@@ -7702,20 +7792,20 @@ them.
 
 Conflict rules are:
 
-| Input                                                                           | Deterministic result                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Same `OperationId`                                                              | No-op.                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Same carrier object ID and same bytes                                           | Carrier duplicate; no-op.                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Same carrier object ID and different bytes                                      | Record carrier equivocation; independently validate both bytes and union every distinct valid logical operation recovered. Neither carrier branch is authoritative.                                                                                                                                                                                                                                                            |
-| Invalid room AEAD, signature, context, codec, or bound                          | Drop as untrusted garbage before state mutation.                                                                                                                                                                                                                                                                                                                                                                               |
-| Same authenticated author sequence slot, different operations                   | Mark that author forked for the logical window and exclude its dependent state. For the pinned authority, every revoke carried by that faulted/overquota authority window is excluded before floor reduction; record the fault and make authority admission unavailable through the complete affected horizon. Revokes from other nonfaulted windows still reduce normally.                                                    |
-| Same authenticated pair-control slot, different authenticated pair operation ID | Fail only that stable pair edge, even if the plaintext is byte-equal.                                                                                                                                                                                                                                                                                                                                                          |
-| Distinct operation IDs in the same `PRESENCE`/`LEAVE` semantic slot             | While at least two branches are current or promoted as exact dependency evidence, mark that semantic subject forked and exclude both branches, every operation with an explicit dependency on either branch, and every later operation in either branch's same author/window chain. This applies even when decoded payloads are byte-equal; exact duplicates already have one `OperationId`, so no representative is selected. |
+| Input                                                                           | Deterministic result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Same `OperationId`                                                              | No-op.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Same carrier object ID and same bytes                                           | Carrier duplicate; no-op.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Same carrier object ID and different bytes                                      | Record carrier equivocation; independently validate both bytes and union every distinct valid logical operation recovered. Neither carrier branch is authoritative.                                                                                                                                                                                                                                                                                                                                                     |
+| Invalid room AEAD, signature, context, codec, or bound                          | Drop as untrusted garbage before state mutation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Same authenticated author sequence slot, different operations                   | Mark that author forked for the logical window and exclude its dependent state. For the pinned authority, every revoke carried by that faulted/overquota authority window is excluded before floor reduction; record the fault and make authority admission unavailable through the complete affected horizon. Revokes from other nonfaulted windows still reduce normally.                                                                                                                                             |
+| Same authenticated pair-control slot, different authenticated pair operation ID | Fail only that stable pair edge, even if the plaintext is byte-equal.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Distinct operation IDs in the same `PRESENCE`/`LEAVE` semantic slot             | While at least two branches are current or promoted as exact dependency evidence, mark that semantic subject forked and exclude both branches, every operation with an explicit dependency on either branch, and every later operation in either branch's same author/window chain. This applies even when decoded payloads are byte-equal; exact duplicates already have one `OperationId`, so no representative is selected.                                                                                          |
 | `STORE_HINT` values for the same `(StoreId, descriptorGeneration)`              | Retain every live per-source fact at every generation. Equal `DescriptorHash` values preserve each exact source route subset and hint lease; delivery unions only currently live sources. At the greatest live generation, different current-live hashes retain all live branches plus one core fault and make that generation's projection inert. The client-global catalog also persists the canonical two-hash fork proof and requires a strictly higher singleton generation before that observer reuses the store. |
-| Distinct valid `ADMISSION_REVOKE` values                                        | Retain every canonical fact and compute the applicable commitment floor by maximum generation at the queried reference window; never pick or flatten one tombstone by arrival order.                                                                                                                                                                                                                                           |
-| Missing bounded dependency                                                      | Buffer only the dependent operation within room-policy dependency/window limits and local resource bytes.                                                                                                                                                                                                                                                                                                                      |
-| Operation after semantic expiry                                                 | Ignore for derived state; keep only bounded replay evidence if required.                                                                                                                                                                                                                                                                                                                                                       |
-| Store omission or stale frontier                                                | Continue union from other paths and report availability/consistency degradation.                                                                                                                                                                                                                                                                                                                                               |
+| Distinct valid `ADMISSION_REVOKE` values                                        | Retain every canonical fact and compute the applicable commitment floor by maximum generation at the queried reference window; never pick or flatten one tombstone by arrival order.                                                                                                                                                                                                                                                                                                                                    |
+| Missing bounded dependency                                                      | Buffer only the dependent operation within room-policy dependency/window limits and local resource bytes.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Operation after semantic expiry                                                 | Ignore for derived state; keep only bounded replay evidence if required.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Store omission or stale frontier                                                | Continue union from other paths and report availability/consistency degradation.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 Core semantic faults are reference-window facts, not unbounded tombstones. A
 presence/leave fault disappears from a later `CoreRoomStateV1` after fewer than
@@ -7862,6 +7952,7 @@ type PairAttemptLeaseV1 = {
 
 declare const VERIFIED_ADMISSION_CONTEXT_V1: unique symbol;
 declare const TRUSTED_ADMISSION_SNAPSHOT_V1: unique symbol;
+declare const VERIFIED_PAIR_ATTEMPT_TOPOLOGY_V1: unique symbol;
 declare const VERIFIED_AUTHORITY_VIEW_V1: unique symbol;
 declare const VERIFIED_STABLE_EDGE_CONTEXT_V1: unique symbol;
 
@@ -7924,6 +8015,22 @@ type TrustedAdmissionSnapshotV1 = {
   authorityCustody: AuthorityCustodyProjectionV1 | null;
   localPresenceOwnership: VerifiedLocalPresenceOwnershipV1;
   readonly [TRUSTED_ADMISSION_SNAPSHOT_V1]: true;
+};
+
+// Pair-scoped, non-serializable topology result. It contains no reusable
+// roster authority and cannot be reconstructed from LocalAdmissibleStateV1.
+type VerifiedPairAttemptTopologyV1 = {
+  version: 1;
+  roomContextId: Bytes32;
+  helloOperationId: Bytes32;
+  helloLogicalWindow: bigint;
+  pairEdgeId: Bytes32;
+  endpointPresenceOperationIds: readonly [Bytes32, Bytes32];
+  attemptMode: "planner" | "explicit";
+  projectionSource: "current" | "hello-time-historical";
+  sourceCoreOperationsDigest: Bytes32;
+  evaluatedAtReferenceWindow: bigint;
+  readonly [VERIFIED_PAIR_ATTEMPT_TOPOLOGY_V1]: true;
 };
 
 // Module-private, commitment-scoped result of the sole authority constructor.
@@ -8045,12 +8152,34 @@ remains an explicit platform-compromise nonclaim.
 referenceWindow)` is the sole constructor for
 `TrustedAdmissionSnapshotV1`. It owns one atomic read-only capture of the
 immutable room policy/context, exact `CoreRoomStateV1`, current frontend
-controls, protected authority custody, and locally owned presence-operation
-set. It requires the core reference window and initialized room policy/context to
-match exactly. In authority mode, a missing, ambiguous, rollback-failed, or
-saturated custody source is represented faithfully and never becomes an empty
-complete partition; in capability mode authority custody is canonically null.
-The result is ephemeral trusted state, not persisted or decoded.
+controls, protected authority custody, canonical
+`LocalPresenceOwnershipRecordV1`, and the exact local author, stable-identity,
+and receiver-key records needed to verify it. It requires the core reference
+window and initialized room policy/context to match exactly. After the read
+transaction completes, its sole private verifier derives every listed stable
+public key from a currently custodied local key handle and, for every claimed
+local presence operation ID:
+
+1. finds the exact retained Core fact and re-derives its operation ID;
+2. binds its author key to current local author/private-key custody;
+3. binds its stable commitment to exactly one listed locally custodied stable
+   key and verifies the presence ownership signature; and
+4. binds its advertised hybrid receiver key to current local receiver-key
+   custody and revision.
+
+Every claimed local presence corresponds to exactly one listed key; a
+currently custodied local stable key may remain listed without a currently
+owned presence. Both sets are complete for the captured local identity/key
+revision, canonical, and duplicate-free rather than caller-selected subsets.
+Only that complete verification mints
+`VerifiedLocalPresenceOwnershipV1`; canonical decoding of the persisted record
+alone never does. In authority mode, a missing, ambiguous,
+rollback-failed, or saturated custody source is represented faithfully and
+never becomes an empty complete partition; in capability mode authority
+custody is canonically null. The branded result is ephemeral trusted state,
+not persisted or decoded. Its private side-table entry is bound by object
+identity to the exact Core/snapshot/key capture; object spread, structured
+clone, deserialization, or a TypeScript assertion cannot recreate it.
 
 In the browser adapter, that read transaction copies every exact canonical
 projection and must reach `transaction.oncomplete` before signature, KEM,
@@ -8064,7 +8193,8 @@ logical optimistic admission transaction:
 atomic read-only capture
 → transaction.oncomplete
 → construct branded snapshot/context
-→ asynchronous verification + pure Admit + exact response preparation
+→ asynchronous verification + current/historical opaque pair projection
+→ pure Admit + exact response preparation
 → one atomic readwrite CAS of every captured fence
 → persist pair-attempt lease + bootstrap lease + pair/author state
   + exact response custody + outbox
@@ -8084,6 +8214,10 @@ bounded outbox/resource state captured by the read transaction. A digest may
 index a row but never replaces exact canonical-byte or exact-absence
 comparison. The adapter performs no cryptography while the write transaction
 is live and reports success only from `transaction.oncomplete`.
+The private topology handle remains valid only while all of its
+current/historical Core, endpoint evidence, ownership/key,
+frontend/authority, planner/on-demand, degree/ledger, and count/byte resource
+fences compare exactly; any mismatch discards it and emits no sensitive byte.
 
 One private policy kernel is the SSOT for both bootstrap and stable-edge
 decisions:
@@ -8178,9 +8312,24 @@ EvaluatePeerAdmissionPolicy(
   )
 
 Admit(snapshot: TrustedAdmissionSnapshotV1,
-      ctx: VerifiedAdmissionContextV1):
+      ctx: VerifiedAdmissionContextV1,
+      topology: VerifiedPairAttemptTopologyV1):
   require ctx was created by VerifyAdmissionContext
+  require topology was created by the sole current or historical pair
+    projection constructor for this exact snapshot/context/planner/resource
+    capture
   require ctx.roomContextId == snapshot.roomContextId
+  require topology.roomContextId == ctx.roomContextId
+  require topology.helloOperationId ==
+    ctx.basePairAttemptLease.helloOperationId
+  require topology.helloLogicalWindow ==
+    ctx.basePairAttemptLease.helloLogicalWindow
+  require topology.pairEdgeId == ctx.pairEdgeId
+  require topology.endpointPresenceOperationIds ==
+    ctx.endpointPresenceOperationIds
+  require topology.attemptMode ==
+    ctx.basePairAttemptLease.attemptMode
+  require topology.evaluatedAtReferenceWindow == snapshot.referenceWindow
   require ctx.logicalWindow
     <= snapshot.referenceWindow
     <= ctx.validThroughLogicalWindow
@@ -8236,9 +8385,14 @@ Admit(snapshot: TrustedAdmissionSnapshotV1,
   )
 ```
 
-`Admit()` is pure and performs no persistence or network action. Only the
-effectful wrapper above may capture its trusted inputs or atomically persist
-the returned leases with the exact outbound intent.
+`Admit()` is the module-private pure phase of composite kernel entrypoint 3,
+not another manifest entrypoint. Its signature above specifies the internal
+refinement boundary; the opaque topology argument is created and consumed
+within one `project-and-admit` invocation. It performs no persistence or
+network action. A policy allow without the genuine pair-scoped topology
+handle is still pre-topology and cannot prepare, persist, or publish a
+response. Only the effectful wrapper above may capture the trusted inputs or
+atomically persist the returned leases with the exact outbound intent.
 `EvaluateBootstrapAdmissionAndPersist` persists exactly the
 `pairAttemptLease` returned by `Admit`; no opener, caller, adapter, or later
 flight may persist or reconstruct `basePairAttemptLease`. A failed top-level
@@ -8714,6 +8868,24 @@ type HistoricalPairPresenceEvidenceV1 = {
   presenceOperationId: Bytes32;
   retainThroughLogicalWindow: bigint;
 };
+
+declare const VERIFIED_HISTORICAL_LOCAL_PRESENCE_CUSTODY_V1: unique symbol;
+
+// Module-private proof that one exact historical local presence remains
+// operable for one HELLO window. This is neither the structural ownership row
+// nor the current-Core ownership brand.
+type VerifiedHistoricalLocalPresenceCustodyV1 = {
+  version: 1;
+  roomContextId: Bytes32;
+  helloLogicalWindow: bigint;
+  localPresenceOperationId: Bytes32;
+  sourceHistoricalCoreOperationsDigest: Bytes32;
+  stableEd25519PublicKey: Bytes32;
+  rendezvousHybridKemPublicKey: Uint8Array; // exactly 1,216 bytes
+  stableKeyCustodyRecordRevision: bigint;
+  receiverKeyCustodyRecordRevision: bigint;
+  readonly [VERIFIED_HISTORICAL_LOCAL_PRESENCE_CUSTODY_V1]: true;
+};
 ```
 
 A `PRESENCE` payload is inside the canonical room operation. Its
@@ -8804,10 +8976,54 @@ horizon as `HistoricalPairPresenceEvidenceV1`, charged to the ordinary retained
 valid-operation count/bytes. It may prove only that the exact presence was
 valid at `HELLO.logicalWindow`, bind its receiver key/commitment, and satisfy
 the HELLO implicit dependency. It never re-enters the current roster,
-capacity selection, planner, presence rank, or leave state. The
+current `LocalAdmissibleStateV1`, current presence rank/cap selection, or
+current leave state. Its only topology use is inside the non-serializable,
+pair-scoped HELLO-time projection below; that function cannot return a room
+roster or UI member. The
 `operationRetentionWindows + receiverKeyOverlapWindows <=
 pairControlRetentionWindows` profile invariant ensures carrier and local
 prefix custody cover this historical-pair horizon.
+
+For every logical window still reachable by any advertised receiver-key
+overlap, historical topology custody retains in the ordinary
+content-addressed operation-byte SSOT the complete validated operation and
+author-prefix evidence capable of affecting `CoreReduce` at that window. This
+retention exists before a delayed HELLO is first observed. Once an attempt is
+observed, its historical view references the exact set used at the decision
+boundary; it does not copy a second operation set. Shared bytes are charged
+once and every window/reference/retention obligation is bounded. On restart
+the client reauthenticates the exact bytes available for that historical
+window and reruns the ordinary reducer. Persisted decoded
+`CoreRoomStateV1` bytes, `operationsDigest`, or an endpoint-only evidence
+subset never mint historical topology provenance by themselves. If the
+complete set cannot be retained within both count and byte caps, the affected
+historical window is persistently incomplete/overcapacity and any attempt
+using it produces no response.
+
+`VerifyHistoricalLocalPresenceCustody` is the sole constructor for
+`VerifiedHistoricalLocalPresenceCustodyV1`. In the same optimistic admission
+capture it consumes the exact `HistoricalPairPresenceEvidenceV1`, the complete
+authenticated operation/author-prefix set for `HELLO.logicalWindow`, and the
+live protected stable-identity and receiver-key custody records. After the
+read transaction completes it reauthenticates and reduces that exact
+historical set, requires the evidence operation to be its exact selected local
+presence candidate, recomputes the operation ID and stable commitment,
+verifies the stable ownership signature under the retained local stable key,
+and derives the advertised hybrid receiver public key from the retained
+private key seed. Its object-identity side-table binds the exact historical
+Core digest, HELLO window, operation bytes, both key handles and revisions,
+and retention/resource fences.
+
+Canonical decoding of `LocalPresenceOwnershipRecordV1`, reuse of
+`VerifiedLocalPresenceOwnershipV1`, decoded historical Core bytes, or a
+caller-assembled object cannot mint this brand. The old presence author
+private key need not be retained after its signed operation and complete
+author-prefix evidence authenticate; construction of any new response
+separately requires current local author-key custody and its exact CAS head.
+The stable identity private key and matching historical hybrid receiver
+private key do remain required. Every named operation/evidence/key revision
+is compared again by the allow transaction, so rotation, erasure, or drift
+invalidates the brand and emits no response.
 
 Only pair-local derived outputs, response private keys, and bootstrap roots
 are erased after that pair completes. Retiring the shared presence receiver
@@ -8818,11 +9034,19 @@ does not claim indefinite discovery during a shutdown.
 `Project` assigns presence eligibility with one closed precedence rule:
 
 ```text
+strictProjectionStableKeys =
+  snapshot.frontendControls.allowedStableIdentityKeys
+  ∪ snapshot.localPresenceOwnership.localStableIdentityKeys
+
 if snapshot.roomPolicy requires an authority permit:
   require the canonical valid permit winner
+  if snapshot.frontendControls.onlyConnectWithKnownPeers:
+    require one unambiguous key in strictProjectionStableKeys whose room
+      commitment matches and whose stable signature verifies this exact fact
   eligibility = "authority-permit-proved"
 else if snapshot.frontendControls.onlyConnectWithKnownPeers:
-  require one unambiguous allowed address-book key that verifies ownership
+  require one unambiguous key in strictProjectionStableKeys whose room
+    commitment matches and whose stable signature verifies this exact fact
   eligibility = "local-address-book-proved"
 else:
   eligibility = "open"
@@ -8840,9 +9064,26 @@ rank. In authority mode it never substitutes for the permit. Canonical
 duplicate/reused-permit resolution runs first over all active core presences;
 frontend denial then removes its winner and never promotes a losing reuse.
 Strict-mode duplicate stable-commitment reduction runs after denial and before
-rank/cap selection. An unavailable or ambiguous lookup denies at the relevant
-step. Thus local policy may remove vertices but cannot select a different
+rank/cap selection. It verifies candidates in canonical
+`PresenceOperationId` order and retains the lowest valid fact for the
+commitment; an invalid lower fact does not block a later valid fact. The same
+stable key appearing in both the address book and verified local-key set is
+one key, not an ambiguity; two distinct keys producing the same commitment
+fail closed. An unavailable or ambiguous lookup denies at the relevant step.
+Thus local policy may remove vertices but cannot select a different
 credential-reuse winner or change eligibility by implementation order.
+
+The v1 label `"local-address-book-proved"` names this strict local-known rank
+class. For a local vertex, verified stable-key custody is implicit local
+knowledge, so the user need not add their own key to the remote-peer address
+book. That exception is identity-wide, not operation-ID-wide, and it never
+bypasses signature verification. If a lower valid `P1` and a higher locally
+owned `P2` share the same locally custodied stable key, `P1` is the canonical
+strict winner; `P2` cannot become the local vertex merely because its
+operation ID is listed as locally owned.
+This union exists only inside local presence projection. It does not add the
+client's own keys to `EvaluatePeerAdmissionPolicy` for a remote identity or
+bypass the pair layer's equal-stable-key/self rejection.
 
 ```text
 EligiblePresenceRank =
@@ -8900,13 +9141,50 @@ convergent core state; arrival order and server choice never select it.
 
 `LocalAdmissibleStateV1.peers` contains only selected remote vertices.
 `Project` recognizes local ownership only from
-`snapshot.localPresenceOwnership.ownedPresenceOperationIds`. If exactly one
+`snapshot.localPresenceOwnership.localPresenceOperationIds`. The associated
+`localStableIdentityKeys` participate in strict proof and identity-wide
+deduplication before this exact operation-ID ownership test; they do not make
+an arbitrary matching fact locally owned. If exactly one
 such current locally owned presence is in the selected set,
 `localPresenceOperationId` and `localPresenceRank` contain its exact values.
 If local ownership is absent, ambiguous, forked, or outside the bounded
 selection, both fields are null, every `desiredEdge` is false, and the planner
 creates no new edge. This fail-closed state cannot be repaired by pretending
 that the first remote peer is the local vertex.
+
+`projectionStatus` reports that local projection result independently of the
+planner. `plannerStatus="full-mesh-overcapacity"` empties only the planner
+selection when the bounded full-mesh rule cannot run; it does not rewrite a
+ready projection and does not erase a separately permitted explicit request.
+If there is no unambiguous selected local presence, `plannerStatus` is
+`"unavailable"` regardless of full-mesh size.
+
+The status precedence is normative. Invalid canonical shape, room binding, or
+trusted provenance is an input error and returns no projection. For a
+well-formed call, `Project` evaluates statuses in this exact order:
+
+1. incomplete/saturated trusted physical custody or resource state, including
+   an exact retained-operation count or byte count at its cap, yields
+   `projectionStatus="projection-resource-overcapacity"`;
+2. otherwise missing frontend controls or unavailable required authority
+   custody/view yields `projectionStatus="policy-unavailable"`;
+3. otherwise absence or ambiguity of the selected local presence yields
+   `projectionStatus="no-unambiguous-local-presence"`; and
+4. otherwise `projectionStatus="ready"`.
+
+`CoreRoomStateV1.roomCapacityState="overcapacity"` does not trigger step 1;
+it is a complete logical input that is deterministically rank-capped. Planner
+status is then evaluated in this exact order: any non-ready projection or
+missing unambiguous local vertex yields `"unavailable"`; otherwise an
+infeasible bounded full-mesh selection yields `"full-mesh-overcapacity"`;
+otherwise it yields `"ready"`. Thus resource state precedes policy state,
+policy precedes local ambiguity, and planner unavailability precedes
+full-mesh overflow.
+
+`topologySelections` is the SSOT for the two origins:
+`plannerSelected` and `locallyRequestedExplicit`. For a selected remote peer,
+`desiredEdge` is exactly their UI-friendly OR. No admission path may infer
+either origin from that boolean or from a non-`ready` planner status.
 
 The room boundary is exact:
 
@@ -8929,10 +9207,12 @@ payload, or authorize a final transport.
 
 Open ranks are intentionally grindable by a capability holder and open rooms
 have no Sybil-resistant fairness or eclipse guarantee. Strict address-book
-mode admits only the lowest `PresenceOperationId` among every overlapping live
-presence for one `StableIdentityCommitment` at the explicit
-`referenceWindow`; other valid presences signed by that same stable key are
-retained as duplicate-identity evidence but are not planner vertices.
+mode admits only the lowest `PresenceOperationId` among the overlapping live
+presences for one `StableIdentityCommitment` whose ownership signature
+verifies under the one unambiguous eligible stable key at the explicit
+`referenceWindow`; an invalid lower fact is skipped, while other valid
+presences signed by that same stable key are retained as duplicate-identity
+evidence but are not planner vertices.
 Authority mode applies both that commitment rule and the same lowest-operation
 rule across every overlapping live presence for one
 `(permitSerial,generation)`. The deduplication key never includes a presence's
@@ -8952,7 +9232,23 @@ local vertex and no new edge is produced. Its modes are:
 - `sparse-ring`: the default deterministic bounded-degree overlay below; and
 - `full-mesh-small-room`: all vertices in `V` only when
   `|V| <= fullMeshMaxMembers` and the degree cap permits it. Otherwise it fails
-  closed to `overcapacity`; it does not silently expand the cap.
+  closed with `plannerStatus="full-mesh-overcapacity"` and an empty
+  planner-selected set; it does not silently expand the cap or disable a
+  separately valid explicit selection.
+
+The explicit-request channel is orthogonal to automatic planner mode:
+`mode="explicit"` makes the automatic planner select nothing, while bounded
+user requests may augment sparse or full-mesh modes when
+`allowOnDemandEdges=true`.
+
+A local explicit request names `LocalPeerId`, but the transition records an
+exact presence operation. It resolves the request to at most one selected
+remote vertex: the first matching vertex in `V`'s canonical
+`(EligiblePresenceRank, PresenceOperationId)` order. It never fans one request
+out to every overlapping open-mode presence, and it never reaches beyond the
+bounded selected set. No match means no attempt. The resulting
+`locallyRequestedExplicit` fact remains distinct from planner selection even
+when both select the same presence.
 
 For `sparse-ring`, use `V` in its already canonical
 `(EligiblePresenceRank, PresenceOperationId)` order. Let `p` be the exact
@@ -8991,22 +9287,123 @@ change a pair's direction or transcript.
 
 A new pair attempt is eligible when:
 
-1. both exact presences are valid in the local room and retained;
+1. both exact presences were valid in the local room at the HELLO logical
+   window and that fact is proved by a genuine current or retained historical
+   Core/evidence capture;
 2. the target's strict presence proof/permit verifies whenever strict local or
    canonical policy requires it, and neither known commitment is locally
    denied;
 3. the initiator's local planner selects the remote presence or the user made
    an explicit bounded request and its local `allowOnDemandEdges` is true;
-4. on receipt, the receiver's current local planner independently selects the
-   initiator or both identifies the request as explicit and has
+4. on receipt, the receiver's current planner policy applied to the applicable
+   current or exact HELLO-time private projection independently selects the
+   initiator, or the signed request is explicit and current
    `allowOnDemandEdges=true`;
 5. the fixed attempt slot, author quota, pair-open trial budget, and retained
    byte budget permit it; and
 6. neither side exceeds its hard active/provisional degree cap.
 
-The receiver uses its own observed set. A malicious initiator cannot present a
-hand-picked fake roster to make itself everyone's neighbor. View mismatch may
-delay an honest edge; it never authorizes a cross-room or over-degree edge.
+For an exact selected remote presence, outgoing attempt provenance has one
+deterministic precedence rule:
+
+```text
+OutboundAttemptMode(presence) =
+  if topologySelections[presence].locallyRequestedExplicit
+     and local allowOnDemandEdges == true:
+    "explicit"
+  else if topologySelections[presence].plannerSelected:
+    "planner"
+  else:
+    no attempt
+```
+
+Thus a real explicit API request remains the authenticated origin when both
+bits are true; implementations cannot choose different persisted modes.
+
+For an incoming authenticated HELLO, the receiver never consults
+`locallyRequestedExplicit`: that bit records its own outbound UI intent, not
+the sender's. The receiver requires the exact initiator presence to be a
+selected vertex and then applies:
+
+```text
+attemptMode="planner"
+  => exact initiator presence is planner-selected by the receiver
+
+attemptMode="explicit"
+  => receiver allowOnDemandEdges == true
+```
+
+Both branches still require current frontend/authority admission, exact room
+and endpoint binding, unambiguous local ownership/custody, and all pair,
+degree, replay/fork, outbox, and count/byte resource fences.
+
+`ProjectHistoricalPairAttempt` resolves the apparent conflict between current
+topology and delayed delivery. It is a distinct module-private constructor,
+run only after an authenticated HELLO has opened and before response
+preparation. It takes:
+
+- the genuine exact local `CoreRoomStateV1` re-derived at
+  `HELLO.logicalWindow` from the retained authenticated operation/prefix set,
+  not decoded Core bytes, a peer-supplied roster, or an endpoint-only set;
+- retained authenticated evidence for both exact endpoint presences and
+  a genuine `VerifiedHistoricalLocalPresenceCustodyV1` for the exact local
+  endpoint;
+- the current `TrustedAdmissionSnapshotV1`;
+- the current exact planner/explicit row; and
+- the exact historical and current resource/degree/ledger fences.
+
+Historical projection has two explicit clocks and no ambient notion of
+“current.” Its `projectionWindow` is exactly `HELLO.logicalWindow`; its
+`decisionReferenceWindow` is exactly `snapshot.referenceWindow`, with
+`HELLO.logicalWindow <= decisionReferenceWindow`. The re-derived historical
+Core must have `referenceWindow == projectionWindow`.
+
+At `projectionWindow`, the shared semantic kernel evaluates presence activity,
+LEAVEs and presence/author faults, presence and receiver-key intervals,
+presence-permit issuance/not-before/not-after validity, canonical permit
+reuse, stable-commitment deduplication, eligibility rank, the bounded vertex
+cap, and the planner topology over that vertex set. At
+`decisionReferenceWindow`, it evaluates the successfully loaded current
+frontend controls and deny/known-key state, required authority custody,
+authority faults/availability and revocation floor, current planner and
+`allowOnDemandEdges` policy, sender admission grant through `Admit`, pair
+degree/ledger/outbox state, and every current or retained-historical
+count/byte resource fence. An authority presence permit must therefore have
+been valid at `projectionWindow` and its generation must also pass
+`AuthorityGenerationAllowed` against the current authority view at
+`decisionReferenceWindow`. A delayed HELLO neither uses current presence
+activity to reject a once-valid endpoint nor uses historical policy state to
+bypass a current deny or revocation.
+
+The constructor reuses the same eligibility, proof, duplicate resolution,
+rank, cap, and planner semantic kernel as current `Project` under that
+two-clock split. It requires the historical local endpoint to be the unique
+selected locally owned/custodied vertex and the remote endpoint to be one
+exact selected vertex. Missing, incomplete, ambiguous, expired,
+physically at-cap/overcapacity, or caller-assembled historical state fails
+closed; a logically over-cap but completely retained historical Core is
+rank-capped exactly like current Project. Two endpoint facts are never treated
+as a complete roster.
+
+The constructor mints one `VerifiedPairAttemptTopologyV1` bound to the exact
+HELLO operation, pair edge, endpoint tuple, signed attempt mode, snapshot,
+planner row, and resource fences. It authorizes only that attempt and cannot
+be serialized, decoded, cloned, spread, asserted, or reused for another
+transition. Its `projectionSource` is `"hello-time-historical"`. The ordinary
+current/outbound projector may mint the same opaque type with source
+`"current"`, but a cloneable `LocalAdmissibleProjectionV1` never can.
+
+Historical projection never inserts a presence into current Core or
+`LocalAdmissibleStateV1`, never emits a roster/member event, never changes
+current UI rank/cap state, and never creates a general current neighbor. It
+only lets one still-within-horizon pair attempt use the topology facts that
+were genuine at its signed HELLO window while current denial, revocation,
+authority availability, resource, and degree state remain vetoes.
+
+The receiver therefore uses only its own current or exact retained historical
+Core capture. A malicious initiator cannot present a hand-picked fake roster
+to make itself everyone's neighbor. View mismatch may delay an honest edge;
+it never authorizes a cross-room or over-degree edge.
 
 Different partial views and planner policies can create harmless tentative or
 extra edges.
@@ -9409,11 +9806,16 @@ for every later step. After opening, the state-derived expected kind, decrypted
 pair-private and bound by `identityTranscriptSignature`; ACCEPT and every
 later flight inherit it from the admitted attempt ledger. An honest sender
 sets `"explicit"` only for a bounded explicit API request. A receiver accepts
-that bypass only when its own `allowOnDemandEdges` is true and otherwise
-requires `"planner"` plus local neighbor selection. The field authenticates
-the remote endpoint's declared attempt origin, not the truth of a human
-gesture; a malicious peer can request an edge, but cannot bypass the
-receiver's admission or degree policy.
+that mode only when the exact initiator presence is selected/admissible in the
+applicable current or HELLO-time historical private projection and its own
+current `allowOnDemandEdges` is true. It does not require the receiver's own
+explicit-request row, `locallyRequestedExplicit`, or diagnostic
+`desiredEdge`. `"planner"` instead requires the exact initiator presence's
+private `plannerSelected` fact. The field authenticates the remote endpoint's
+declared attempt origin, not the truth of a human gesture; a malicious peer
+can request an edge, but cannot bypass the receiver's current
+frontend/authority admission, exact room/pair binding, degree policy, or
+resource/replay/fork fences.
 
 Pair parsing verifies only the closed credential framing, pair/room
 transcript, stable identity signature, and exact identity-to-commitment
@@ -9450,8 +9852,11 @@ After HELLO cryptographic validation, the opener derives only a
 grant-agnostic `basePairAttemptLease`: its horizon is the minimum of HELLO's
 outer expiry and
 `checkedAdd(HELLO.logicalWindow, pairControlRetentionWindows)`. It is an
-opaque input to sole `Admit()` and is never persisted. After validating the
-sender grant and all current frontend policy, `Admit()` returns the initial
+opaque input to sole `Admit()` and is never persisted. The genuine
+`VerifiedPairAttemptTopologyV1` is its second opaque input and is likewise
+never serialized; only the exact mode/coordinates and source fences it
+authorized are persisted or CAS-bound. After validating topology, the sender
+grant, and all current frontend policy, `Admit()` returns the initial
 persistable `PairAttemptLeaseV1`, narrowing that base horizon by the sender
 grant's `notAfterLogicalWindow` in authority mode. The allow transaction
 persists exactly that returned lease together with the bootstrap admission
@@ -9738,30 +10143,39 @@ The pre-SDP state machine is:
 
 ```text
 initiator:
-  verify target presence eligibility if strict mode
-  → create response private-key package
+  create response private-key package
   → create HPKE context and exact HELLO
-  → atomically persist keys, exact ciphertext, slot, and outbox
+  → invoke current-attempt with the exact unpublished HELLO and selected
+    presence; it internally creates and consumes the opaque topology handle
+  → if authorized, atomically persist keys, exact ciphertext, slot, and outbox
   → publish exact pair ciphertext
 
 responder:
   open HELLO
   → verify pair/presence binding, commitment, and stable signature
-  → run frontend Admit()
+  → derive opaque exact HELLO-time historical pair projection under current
+    frontend/authority/planner/resource fences
+  → run frontend Admit() within that same project-and-admit invocation
   → if denied: generate no sensitive response
   → if allowed: atomically persist bootstrap lease, exact ACCEPT, and outbox
 
 initiator:
   open ACCEPT
   → verify responder commitment, identity, exact dependency, and signature
-  → run frontend Admit()
+  → recapture the persisted outbound attempt coordinates/evidence and current
+    fences, then rederive a fresh opaque applicable current or HELLO-time
+    historical topology handle
+  → run frontend Admit() within that same project-and-admit invocation
   → if denied: generate no SDP/ICE
   → if allowed: derive EstablishedPairRoot and atomically persist
     bootstrap lease, exact TRANSPORT_OFFER, and outbox
 
 responder:
   authenticate TRANSPORT_OFFER under EstablishedPairRoot
-  → require exact ACCEPT dependency and re-run frontend Admit()
+  → require exact ACCEPT dependency
+  → recapture the persisted admitted-attempt coordinates/evidence and current
+    fences, then rederive a fresh opaque historical topology handle
+  → re-run frontend Admit() within that same project-and-admit invocation
   → only then release the pair-private SDP/candidate to the transport
 ```
 
@@ -11277,7 +11691,9 @@ never substitutes for mandatory hybrid identity authentication.
   malicious client, and is absent from an address-book-only/authority policy
   or uses an exactly blacklisted stable key, strict honest endpoints emit no
   first identity flight to an unproved presence and no SDP/ICE before
-  bilateral admission.
+  bilateral admission. The same result holds for prompt and delayed HELLOs,
+  current and historical pair projection, and store/contact/portable
+  carriers.
   The attacker cannot decrypt SDP/ICE exchanged by any two allowed members
   from its complete server state, all carrier objects, and its room-level
   plaintext view.
@@ -11312,7 +11728,12 @@ never substitutes for mandatory hybrid identity authentication.
   caller-fabricated context/snapshot/view never becomes an allow. After stable
   promotion, expiry of the original presence, identity operation, or
   pair-attempt lease does not deny an otherwise current stable edge; an expired
-  authority grant does.
+  authority grant does. Structural/cloned local-ownership rows or
+  current/historical topology results never authorize a response. Changing
+  either local stable-key set, historical Core/evidence bytes,
+  planner/on-demand row, degree/ledger row, or count/byte resource fence
+  between projection and CAS invalidates the opaque topology handle and
+  publishes nothing.
 
 - **AC-008 — Strict admission and rotation:** An authority-grant room rejects
   a fresh attacker key without a valid grant even if it holds the capability.
@@ -11356,14 +11777,21 @@ never substitutes for mandatory hybrid identity authentication.
   observed `n <= 2k`, mixed open/address-book/authority eligibility at
   overcapacity (ordered only by rank then operation ID), a local presence just
   inside/outside the cap, missing/ambiguous local presence producing no edge,
-  and checked multiplication at every numeric limit.
+  and checked multiplication at every numeric limit. Additional vectors cover
+  independent projection/planner statuses, exact-cap resource saturation,
+  full-mesh planner overflow with a surviving explicit selection, one
+  `LocalPeerId` matching several selected open presences but resolving to the
+  first canonical one only, and a request whose matches are all outside the
+  cap producing none.
 
 - **AC-011 — Divergent roster safety and convergence:** Model-checked clients
   receiving every permutation, duplicate, and bounded partition of the same
   operations never create a cross-room or over-degree edge. After all required
   operations arrive, their `CoreRoomState` values are byte-identical.
-  Desired graphs are byte-identical only when local frontend/planner facts also
-  match. A presence authored in window `x` and an exact same-author-key LEAVE
+  Desired graphs derived from the two `topologySelections` origin bits are
+  byte-identical only when local frontend/planner facts also match; changing
+  diagnostic `desiredEdge` alone cannot authorize a transition. A presence
+  authored in window `x` and an exact same-author-key LEAVE
   in its own chain in window `x+1` reduces correctly when the presence remains
   valid there. This must also hold when the LEAVE is first delivered after
   restart and after the presence's outer lifetime, using only retained,
@@ -11553,8 +11981,14 @@ never substitutes for mandatory hybrid identity authentication.
   bounded inert prefix evidence; the prefix's old semantic fact does not
   reappear, and prefix evidence is deleted only after its exact
   maximum-descendant-plus-skew boundary. A delayed HELLO at the last receiver
-  overlap window uses exact historical presence evidence after roster expiry
-  and never resurrects that roster vertex. A first-delivered cross-window
+  overlap window reconstructs and revalidates the genuine exact HELLO-window
+  Core from its content-addressed operation/prefix references after roster
+  expiry, applies current
+  frontend/deny/authority/planner/on-demand/degree/resource fences, and mints
+  at most one opaque authorization for that exact pair attempt. Vectors vary
+  each current veto, historical byte, endpoint, attempt mode, and exact
+  capacity boundary. No branch mutates current Core, UI membership, rank,
+  roster, or general neighbor state. A first-delivered cross-window
   LEAVE after restart likewise promotes the exact referenced presence's full
   semantic slot and required author prefixes only through the checked room
   evidence horizon; a sibling branch still proves the same semantic fork, a
@@ -11834,7 +12268,8 @@ PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
 - **AC-034 — Core/local separation:** For the same valid operation set,
   immutable room policy, and reference window, clients with different peer
   allow/deny lists and planner modes derive byte-identical `CoreRoomState` and
-  intentionally different `LocalAdmissibleState`. Different client-global
+  intentionally different complete `LocalAdmissibleProjectionV1` values,
+  including independent status axes and topology-origin facts. Different client-global
   carrier policies alter only `LocalDeliveryState`; they cannot make a peer
   admissible or inadmissible. In a three-member room, an identical outer-valid
   pair step between A and B appears in A, B, and C's
@@ -11864,7 +12299,13 @@ PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
 - **AC-036 — Strict presence gate and honest open-mode label:** Address-book
   signatures and authority permits bind the exact presence core; forgeries,
   reused permits, and commitment substitution cannot trigger a strict
-  initiator identity hello. Open/denylist-only tests demonstrate the possible
+  initiator identity hello. Strict-self vectors cover a verified locally
+  custodied stable key absent from the address book, deny overriding that
+  implicit local-known key, an invalid lower duplicate followed by a valid
+  higher duplicate, and a lower valid unowned `P1` defeating a higher locally
+  owned `P2` of the same identity so no local vertex is invented. A structural
+  ownership record or corrupt claimed local signature never substitutes for
+  the genuine custody brand. Open/denylist-only tests demonstrate the possible
   first-flight identity disclosure and require
   `identityDisclosure: "first-flight-visible-to-selected-capability-holder"`.
 
@@ -11878,7 +12319,13 @@ PAIR_CHECKPOINT` under duplicate/reorder/restart schedules.
   requiring an encrypted field first. Equal stable keys, ciphertext
   relocation, exact replay, authenticated slot fork, forged/changed
   `attemptMode`, and planner-vs-explicit receiver policy have the required
-  rejection behavior. Claim vectors substitute attacker-owned claimant keys
+  rejection behavior. Incoming explicit succeeds without a reciprocal local
+  request only when the exact initiator vertex is selected and current
+  `allowOnDemandEdges=true`; it fails when false. Planner mode requires the
+  private exact `plannerSelected` fact, and neither `desiredEdge` nor
+  `locallyRequestedExplicit` can substitute. When both outbound origin bits
+  are true, `"explicit"` deterministically wins and that exact mode survives
+  restart. Claim vectors substitute attacker-owned claimant keys
   into concurrent offers/answers and fail before persistence because the keys
   do not byte-equal the confirmed flight senders; both signatures,
   `StableEdgeId`, `PairEdgeId`, and transcript ID are recomputed exactly.
@@ -13689,6 +14136,10 @@ grant, and the bootstrap/pre-SDP branch of current frontend-parity tests pass.
 - Implement the `explicit`/`sparse-ring`/bounded-small-full-mesh local planner,
   fixed attempt/trial slots, mutual eligibility, hard degree cap, late join,
   and graceful retirement.
+- Wrap the cloneable projection semantics behind genuine captured
+  ownership/resource/planner custody, and implement the distinct opaque
+  pair-scoped HELLO-time historical projection without mutating current
+  room/UI state.
 - Carry complete pair-encrypted WebRTC offer/answer through the operation log.
 - Generalize transport bindings and adapt the existing `HandshakeTransport`.
 - Run the fresh existing v4 handshake and promote only byte-matched identities

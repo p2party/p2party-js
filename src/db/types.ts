@@ -219,16 +219,30 @@ export interface StoredIdentityX25519 {
   crossSig: ArrayBuffer;
 }
 
-/** Ed25519 account identity at the worker API boundary. */
-export interface IdentityEd25519 {
+/** Ed25519 account key material accepted by the worker write boundary. */
+export interface IdentityEd25519KeyMaterial {
   pub: ArrayBuffer;
   secret: ArrayBuffer;
 }
 
+/** Ed25519 account identity returned by the worker read boundary. */
+export interface IdentityEd25519 extends IdentityEd25519KeyMaterial {
+  /** Persistent, non-reused uint64 revision allocated by IndexedDB. */
+  recordRevision: bigint;
+}
+
 /** At-rest Ed25519 record (meta key "identityEd25519"). */
 export interface StoredIdentityEd25519 {
+  version: 1;
   pub: ArrayBuffer;
   wrappedSecret: ArrayBuffer;
+  recordRevision: bigint;
+}
+
+/** Persistent Ed25519 revision high-water/tombstone record in the meta store. */
+export interface StoredIdentityEd25519Revision {
+  version: 1;
+  lastRevision: bigint;
 }
 
 /** Non-secret online PIN-guess throttle state for one room/peer-identity edge. */
@@ -500,7 +514,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "setIdentityEd25519";
-      args: [identity: IdentityEd25519];
+      args: [identity: IdentityEd25519KeyMaterial];
     }
   | {
       id: number;
@@ -565,7 +579,7 @@ export interface WorkerMethodReturnTypes {
   setIdentityX25519: undefined;
   deleteIdentityX25519: undefined;
   getIdentityEd25519: IdentityEd25519 | undefined;
-  setIdentityEd25519: undefined;
+  setIdentityEd25519: bigint;
   deleteIdentityEd25519: undefined;
   deleteDB: undefined;
 }

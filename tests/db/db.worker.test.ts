@@ -21,6 +21,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 
 import { getDB } from "../../src/db/src/getDB";
+import { getWrapKey, wrapSecret } from "../../src/db/ratchetWrap";
 import { MAX_MESSAGE_SIZE } from "../../src/utils/constants";
 
 import type {
@@ -34,6 +35,8 @@ import type {
 beforeEach(() => {
   (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB =
     new IDBFactory();
+  lastDispatchedWorkerMessage = undefined;
+  lastWorkerTransferredBuffers = [];
 });
 
 const rnd = (n: number) => crypto.getRandomValues(new Uint8Array(n)).buffer;
@@ -66,6 +69,10 @@ interface WorkerResponse {
 }
 
 let nextId = 1;
+let lastDispatchedWorkerMessage:
+  | { id: number; method: string; args: unknown[] }
+  | undefined;
+let lastWorkerTransferredBuffers: ArrayBuffer[] = [];
 
 // Dispatches a real message through db.worker.ts's actual `onmessage` handler
 // and captures whatever it posts back, matched by id.
@@ -76,10 +83,27 @@ async function callWorker(
   await import("../../src/db/db.worker"); // idempotent after the first call
   const id = nextId++;
   let captured: WorkerResponse | undefined;
-  (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
-    (m: unknown) => {
-      captured = m as WorkerResponse;
-    };
+  (
+    globalThis as unknown as {
+      postMessage: (
+        message: unknown,
+        transferOrOptions?: Transferable[] | StructuredSerializeOptions,
+      ) => void;
+    }
+  ).postMessage = (
+    message: unknown,
+    transferOrOptions?: Transferable[] | StructuredSerializeOptions,
+  ) => {
+    const transfer = (
+      Array.isArray(transferOrOptions)
+        ? transferOrOptions
+        : (transferOrOptions?.transfer ?? [])
+    ).filter(
+      (value): value is ArrayBuffer => value instanceof ArrayBuffer,
+    );
+    lastWorkerTransferredBuffers = transfer;
+    captured = structuredClone(message, { transfer }) as WorkerResponse;
+  };
   const handler = (
     globalThis as unknown as {
       onmessage: (e: MessageEvent) => Promise<void>;
@@ -87,9 +111,8 @@ async function callWorker(
   ).onmessage;
   // A real Worker receives a structured clone. Preserve that boundary here so
   // worker-side secret wiping cannot mutate the caller's buffers in-process.
-  await handler({
-    data: structuredClone({ id, method, args }),
-  } as MessageEvent);
+  lastDispatchedWorkerMessage = structuredClone({ id, method, args });
+  await handler({ data: lastDispatchedWorkerMessage } as MessageEvent);
   if (!captured || captured.id !== id) {
     throw new Error(`worker did not respond to message id ${id}`);
   }
@@ -103,9 +126,20 @@ async function callWorkersConcurrently(
   const responses = new Map<number, WorkerResponse>();
   const ids = calls.map(() => nextId++);
   (
-    globalThis as unknown as { postMessage: (m: unknown) => void }
-  ).postMessage = (message: unknown) => {
-    const response = message as WorkerResponse;
+    globalThis as unknown as {
+      postMessage: (
+        message: unknown,
+        transferOrOptions?: Transferable[] | StructuredSerializeOptions,
+      ) => void;
+    }
+  ).postMessage = (
+    message: unknown,
+    transferOrOptions?: Transferable[] | StructuredSerializeOptions,
+  ) => {
+    const transfer = Array.isArray(transferOrOptions)
+      ? transferOrOptions
+      : (transferOrOptions?.transfer ?? []);
+    const response = structuredClone(message, { transfer }) as WorkerResponse;
     responses.set(response.id, response);
   };
   const handler = (
@@ -758,28 +792,81 @@ describe("db.worker identityX25519 wiring (WebCrypto-wrapped at rest)", () => {
 });
 
 describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
-  const sampleIdentity = () => ({
-    pub: rnd(32),
-    secret: rnd(64),
+  const revisionMetaId = "identityEd25519Revision";
+  const uint64Max = 0xffff_ffff_ffff_ffffn;
+  const identityVectors = [
+    {
+      seed: "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      pub: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    },
+    {
+      seed: "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      pub: "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    },
+    {
+      seed: "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      pub: "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+    },
+  ] as const;
+  let identityVectorIndex = 0;
+  beforeEach(() => {
+    identityVectorIndex = 0;
   });
+  const sampleIdentity = () => {
+    const vector =
+      identityVectors[identityVectorIndex++ % identityVectors.length];
+    const publicBytes = Uint8Array.from(Buffer.from(vector.pub, "hex"));
+    const secretBytes = new Uint8Array(64);
+    secretBytes.set(Buffer.from(vector.seed, "hex"));
+    secretBytes.set(publicBytes, 32);
+    return {
+      pub: publicBytes.buffer,
+      secret: secretBytes.buffer,
+    };
+  };
 
-  test("round-trips while keeping the raw secret encrypted", async () => {
+  test("round-trips a bigint revision while keeping the raw secret encrypted", async () => {
     const identity = sampleIdentity();
     const set = await callWorker("setIdentityEd25519", [identity]);
     expect(set.error).toBeUndefined();
+    expect(set.result).toBe(1n);
+    const dispatchedSetIdentity = lastDispatchedWorkerMessage?.args[0] as {
+      secret: ArrayBuffer;
+    };
+    expect(
+      [...new Uint8Array(dispatchedSetIdentity.secret)].every(
+        (value) => value === 0,
+      ),
+    ).toBe(true);
 
     const get = await callWorker("getIdentityEd25519", []);
     expect(get.error).toBeUndefined();
-    const restored = get.result as { pub: ArrayBuffer; secret: ArrayBuffer };
+    const restored = get.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
     expect(eq(restored.pub, identity.pub)).toBe(true);
     expect(eq(restored.secret, identity.secret)).toBe(true);
+    expect(restored.recordRevision).toBe(1n);
+    expect(lastWorkerTransferredBuffers).toHaveLength(1);
+    expect(lastWorkerTransferredBuffers[0].byteLength).toBe(0);
 
     const db = await getDB();
     const raw = (await db.get("meta", "identityEd25519")) as unknown as {
+      version: number;
       pub: ArrayBuffer;
       wrappedSecret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    const revision = (await db.get("meta", revisionMetaId)) as unknown as {
+      version: number;
+      lastRevision: bigint;
     };
     db.close();
+    expect(raw.version).toBe(1);
+    expect(raw.recordRevision).toBe(1n);
+    expect(revision).toEqual({ version: 1, lastRevision: 1n });
     expect(eq(raw.pub, identity.pub)).toBe(true);
     expect(eq(raw.wrappedSecret, identity.secret)).toBe(false);
     expect(raw.wrappedSecret.byteLength).toBeGreaterThan(
@@ -787,17 +874,467 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
     );
   });
 
-  test("rejects invalid lengths and deletes the wrapped identity", async () => {
+  test("overwrites monotonically and returns each allocated revision", async () => {
+    const first = sampleIdentity();
+    const second = sampleIdentity();
+
+    expect((await callWorker("setIdentityEd25519", [first])).result).toBe(1n);
+    expect((await callWorker("setIdentityEd25519", [second])).result).toBe(2n);
+
+    const get = await callWorker("getIdentityEd25519", []);
+    const restored = get.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(restored.recordRevision).toBe(2n);
+    expect(eq(restored.pub, second.pub)).toBe(true);
+    expect(eq(restored.secret, second.secret)).toBe(true);
+  });
+
+  test("serializes concurrent sets into unique revisions and a matching final row", async () => {
+    const identities = [sampleIdentity(), sampleIdentity(), sampleIdentity()];
+    const responses = await callWorkersConcurrently(
+      identities.map((identity) => ({
+        method: "setIdentityEd25519",
+        args: [identity],
+      })),
+    );
+    expect(responses.every((response) => response.error === undefined)).toBe(
+      true,
+    );
+
+    const allocations = responses.map((response, index) => ({
+      revision: response.result as bigint,
+      identity: identities[index],
+    }));
+    expect(
+      allocations
+        .map(({ revision }) => revision)
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    ).toEqual([1n, 2n, 3n]);
+
+    const winner = allocations.find(({ revision }) => revision === 3n);
+    expect(winner).toBeDefined();
+    const get = await callWorker("getIdentityEd25519", []);
+    const restored = get.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(restored.recordRevision).toBe(3n);
+    expect(eq(restored.pub, winner!.identity.pub)).toBe(true);
+    expect(eq(restored.secret, winner!.identity.secret)).toBe(true);
+  });
+
+  test("delete records a tombstone, repeated delete is idempotent, and recreate cannot ABA", async () => {
+    const first = sampleIdentity();
+    const second = sampleIdentity();
+    expect((await callWorker("setIdentityEd25519", [first])).result).toBe(1n);
+
+    expect(
+      (await callWorker("deleteIdentityEd25519", [])).error,
+    ).toBeUndefined();
+    const dbAfterDelete = await getDB();
+    expect(await dbAfterDelete.get("meta", "identityEd25519")).toBeUndefined();
+    expect(await dbAfterDelete.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 2n,
+    });
+    dbAfterDelete.close();
+
+    expect(
+      (await callWorker("deleteIdentityEd25519", [])).error,
+    ).toBeUndefined();
+    const dbAfterRepeatedDelete = await getDB();
+    expect(await dbAfterRepeatedDelete.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 2n,
+    });
+    dbAfterRepeatedDelete.close();
+
+    expect((await callWorker("setIdentityEd25519", [second])).result).toBe(3n);
+    const restored = (await callWorker("getIdentityEd25519", [])).result as {
+      pub: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(restored.recordRevision).toBe(3n);
+    expect(eq(restored.pub, second.pub)).toBe(true);
+  });
+
+  test("concurrent identity set/delete linearizes revisions and clears ratchets present at delete", async () => {
+    const first = sampleIdentity();
+    const replacement = sampleIdentity();
+    const session = sampleSession();
+    expect((await callWorker("setIdentityEd25519", [first])).result).toBe(1n);
+    await callWorker("setRatchetSession", [session]);
+
+    const [set, del] = await callWorkersConcurrently([
+      { method: "setIdentityEd25519", args: [replacement] },
+      { method: "deleteIdentityEd25519", args: [] },
+    ]);
+    expect(set.error).toBeUndefined();
+    expect(del.error).toBeUndefined();
+    expect([2n, 3n]).toContain(set.result as bigint);
+
+    const get = await callWorker("getIdentityEd25519", []);
+    if (set.result === 2n) {
+      // set(2) linearized first, then delete retired it at tombstone 3.
+      expect(get.result).toBeUndefined();
+    } else {
+      // delete retired revision 1 at tombstone 2, then set allocated 3.
+      const restored = get.result as {
+        pub: ArrayBuffer;
+        secret: ArrayBuffer;
+        recordRevision: bigint;
+      };
+      expect(restored.recordRevision).toBe(3n);
+      expect(eq(restored.pub, replacement.pub)).toBe(true);
+      expect(eq(restored.secret, replacement.secret)).toBe(true);
+    }
+
+    const db = await getDB();
+    expect(await db.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 3n,
+    });
+    expect(
+      await db.get("ratchetSessions", [session.roomId, session.peerPublicKey]),
+    ).toBeUndefined();
+    db.close();
+  });
+
+  test("lazily migrates a legacy identity and absent counter as one revision", async () => {
+    const identity = sampleIdentity();
+    const wrappedSecret = await wrapSecret(await getWrapKey(), identity.secret);
+    const db = await getDB();
+    await db.put(
+      "meta",
+      { pub: identity.pub, wrappedSecret } as never,
+      "identityEd25519",
+    );
+    db.close();
+
+    const get = await callWorker("getIdentityEd25519", []);
+    expect(get.error).toBeUndefined();
+    const restored = get.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(restored.recordRevision).toBe(1n);
+    expect(eq(restored.pub, identity.pub)).toBe(true);
+    expect(eq(restored.secret, identity.secret)).toBe(true);
+
+    const migratedDb = await getDB();
+    const raw = (await migratedDb.get(
+      "meta",
+      "identityEd25519",
+    )) as unknown as {
+      version: number;
+      recordRevision: bigint;
+    };
+    expect(raw.version).toBe(1);
+    expect(raw.recordRevision).toBe(1n);
+    expect(await migratedDb.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 1n,
+    });
+    migratedDb.close();
+  });
+
+  test("direct legacy delete reserves revision 1, writes tombstone 2, and clears ratchets", async () => {
+    const legacyIdentity = sampleIdentity();
+    const wrappedSecret = await wrapSecret(
+      await getWrapKey(),
+      legacyIdentity.secret,
+    );
+    const session = sampleSession();
+    await callWorker("setRatchetSession", [session]);
+    const db = await getDB();
+    await db.put(
+      "meta",
+      { pub: legacyIdentity.pub, wrappedSecret } as never,
+      "identityEd25519",
+    );
+    db.close();
+
+    const del = await callWorker("deleteIdentityEd25519", []);
+    expect(del.error).toBeUndefined();
+
+    const after = await getDB();
+    expect(await after.get("meta", "identityEd25519")).toBeUndefined();
+    expect(await after.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 2n,
+    });
+    expect(
+      await after.get("ratchetSessions", [
+        session.roomId,
+        session.peerPublicKey,
+      ]),
+    ).toBeUndefined();
+    after.close();
+  });
+
+  test("a direct overwrite of a legacy identity allocates after its migration revision", async () => {
+    const legacyIdentity = sampleIdentity();
+    const replacement = sampleIdentity();
+    const wrappedSecret = await wrapSecret(
+      await getWrapKey(),
+      legacyIdentity.secret,
+    );
+    const db = await getDB();
+    await db.put(
+      "meta",
+      { pub: legacyIdentity.pub, wrappedSecret } as never,
+      "identityEd25519",
+    );
+    db.close();
+
+    const set = await callWorker("setIdentityEd25519", [replacement]);
+    expect(set.error).toBeUndefined();
+    expect(set.result).toBe(2n);
+
+    const get = await callWorker("getIdentityEd25519", []);
+    const restored = get.result as {
+      pub: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(restored.recordRevision).toBe(2n);
+    expect(eq(restored.pub, replacement.pub)).toBe(true);
+    const finalDb = await getDB();
+    expect(await finalDb.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 2n,
+    });
+    finalDb.close();
+  });
+
+  test("a get racing a legacy overwrite returns a coherent revision and preserves the replacement", async () => {
+    const legacyIdentity = sampleIdentity();
+    const replacement = sampleIdentity();
+    const wrappedSecret = await wrapSecret(
+      await getWrapKey(),
+      legacyIdentity.secret,
+    );
+    const db = await getDB();
+    await db.put(
+      "meta",
+      { pub: legacyIdentity.pub, wrappedSecret } as never,
+      "identityEd25519",
+    );
+    db.close();
+
+    const [get, set] = await callWorkersConcurrently([
+      { method: "getIdentityEd25519", args: [] },
+      { method: "setIdentityEd25519", args: [replacement] },
+    ]);
+    expect(get.error).toBeUndefined();
+    expect(set.error).toBeUndefined();
+    expect(set.result).toBe(2n);
+    const racedRead = get.result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect([1n, 2n]).toContain(racedRead.recordRevision);
+    if (racedRead.recordRevision === 1n) {
+      expect(eq(racedRead.pub, legacyIdentity.pub)).toBe(true);
+      expect(eq(racedRead.secret, legacyIdentity.secret)).toBe(true);
+    } else {
+      expect(eq(racedRead.pub, replacement.pub)).toBe(true);
+      expect(eq(racedRead.secret, replacement.secret)).toBe(true);
+    }
+
+    const final = (await callWorker("getIdentityEd25519", [])).result as {
+      pub: ArrayBuffer;
+      secret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    expect(final.recordRevision).toBe(2n);
+    expect(eq(final.pub, replacement.pub)).toBe(true);
+    expect(eq(final.secret, replacement.secret)).toBe(true);
+  });
+
+  test("rejects invalid lengths and mismatched public/secret material without allocating", async () => {
     const invalid = await callWorker("setIdentityEd25519", [
       { pub: rnd(31), secret: rnd(64) },
     ]);
     expect(String(invalid.error)).toContain("invalid key lengths");
 
+    const mismatched = sampleIdentity();
+    mismatched.pub = rnd(32);
+    const mismatch = await callWorker("setIdentityEd25519", [mismatched]);
+    expect(String(mismatch.error)).toContain(
+      "public key does not match the secret key",
+    );
+    const rejectedWorkerSecret = (
+      lastDispatchedWorkerMessage?.args[0] as { secret: ArrayBuffer }
+    ).secret;
+    expect(
+      [...new Uint8Array(rejectedWorkerSecret)].every((value) => value === 0),
+    ).toBe(true);
+
+    const db = await getDB();
+    expect(await db.get("meta", "identityEd25519")).toBeUndefined();
+    expect(await db.get("meta", revisionMetaId)).toBeUndefined();
+    db.close();
+  });
+
+  test("rejects a stored public/secret mismatch without returning custody material", async () => {
     const identity = sampleIdentity();
     await callWorker("setIdentityEd25519", [identity]);
+    const db = await getDB();
+    const raw = (await db.get("meta", "identityEd25519")) as unknown as {
+      version: 1;
+      pub: ArrayBuffer;
+      wrappedSecret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+    await db.put("meta", { ...raw, pub: rnd(32) }, "identityEd25519");
+    db.close();
+
+    const get = await callWorker("getIdentityEd25519", []);
+    expect(String(get.error)).toContain(
+      "public and secret keys are inconsistent",
+    );
+    expect(get.result).toBeUndefined();
+  });
+
+  test("does not migrate or overwrite a malformed stored identity", async () => {
+    const identity = sampleIdentity();
+    const malformed = {
+      pub: identity.pub,
+      wrappedSecret: rnd(91),
+    };
+    const db = await getDB();
+    await db.put("meta", malformed as never, "identityEd25519");
+    db.close();
+
+    const get = await callWorker("getIdentityEd25519", []);
+    expect(String(get.error)).toContain("wrapped secret is malformed");
+    const set = await callWorker("setIdentityEd25519", [sampleIdentity()]);
+    expect(String(set.error)).toContain("wrapped secret is malformed");
+
+    const after = await getDB();
+    const raw = (await after.get("meta", "identityEd25519")) as unknown as {
+      pub: ArrayBuffer;
+      wrappedSecret: ArrayBuffer;
+      version?: number;
+    };
+    expect(raw.version).toBeUndefined();
+    expect(eq(raw.pub, malformed.pub)).toBe(true);
+    expect(eq(raw.wrappedSecret, malformed.wrappedSecret)).toBe(true);
+    expect(await after.get("meta", revisionMetaId)).toBeUndefined();
+    after.close();
+  });
+
+  test("fails closed on malformed and overflow revision state without partial mutation", async () => {
+    const identity = sampleIdentity();
+    const malformedDb = await getDB();
+    await malformedDb.put(
+      "meta",
+      { version: 1, lastRevision: "1" } as never,
+      revisionMetaId,
+    );
+    malformedDb.close();
+
+    const malformedSet = await callWorker("setIdentityEd25519", [identity]);
+    expect(String(malformedSet.error)).toContain("must be a uint64");
+    const afterMalformed = await getDB();
+    expect(await afterMalformed.get("meta", "identityEd25519")).toBeUndefined();
+    expect(await afterMalformed.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: "1",
+    } as never);
+    afterMalformed.close();
+
+    (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB =
+      new IDBFactory();
+    const overflowDb = await getDB();
+    await overflowDb.put(
+      "meta",
+      { version: 1, lastRevision: uint64Max },
+      revisionMetaId,
+    );
+    overflowDb.close();
+
+    const overflowSet = await callWorker("setIdentityEd25519", [identity]);
+    expect(String(overflowSet.error)).toContain("revision overflow");
+    const afterOverflow = await getDB();
+    expect(await afterOverflow.get("meta", "identityEd25519")).toBeUndefined();
+    expect(await afterOverflow.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: uint64Max,
+    });
+    afterOverflow.close();
+  });
+
+  test("overflowing delete retains both the identity and its ratchet", async () => {
+    const identity = sampleIdentity();
+    const wrappedSecret = await wrapSecret(await getWrapKey(), identity.secret);
+    const session = sampleSession();
+    await callWorker("setRatchetSession", [session]);
+    const db = await getDB();
+    const tx = db.transaction("meta", "readwrite");
+    await Promise.all([
+      tx.store.put(
+        {
+          version: 1,
+          pub: identity.pub,
+          wrappedSecret,
+          recordRevision: uint64Max,
+        },
+        "identityEd25519",
+      ),
+      tx.store.put({ version: 1, lastRevision: uint64Max }, revisionMetaId),
+    ]);
+    await tx.done;
+    db.close();
+
+    const del = await callWorker("deleteIdentityEd25519", []);
+    expect(String(del.error)).toContain("revision overflow");
+
+    const after = await getDB();
+    expect(await after.get("meta", "identityEd25519")).toBeDefined();
+    expect(await after.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: uint64Max,
+    });
+    expect(
+      await after.get("ratchetSessions", [
+        session.roomId,
+        session.peerPublicKey,
+      ]),
+    ).toBeDefined();
+    after.close();
+  });
+
+  test("delete clears currently persisted ratchets while retaining the tombstone", async () => {
+    const identity = sampleIdentity();
+    const session = sampleSession();
+    await callWorker("setIdentityEd25519", [identity]);
+    await callWorker("setRatchetSession", [session]);
+
     const del = await callWorker("deleteIdentityEd25519", []);
     expect(del.error).toBeUndefined();
     expect((await callWorker("getIdentityEd25519", [])).result).toBeUndefined();
+    expect(
+      (
+        await callWorker("getRatchetSession", [
+          session.roomId,
+          session.peerPublicKey,
+        ])
+      ).result,
+    ).toBeUndefined();
+
+    const db = await getDB();
+    expect(await db.get("meta", revisionMetaId)).toEqual({
+      version: 1,
+      lastRevision: 2n,
+    });
+    db.close();
   });
 });
 

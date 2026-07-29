@@ -12,6 +12,7 @@ import type {
   RatchetSession,
   StoredIdentityX25519,
   StoredIdentityEd25519,
+  StoredIdentityEd25519Revision,
   PinAttemptState,
 } from "../types";
 
@@ -77,6 +78,7 @@ export interface RepoSchema extends DBSchema {
       | CryptoKey
       | StoredIdentityX25519
       | StoredIdentityEd25519
+      | StoredIdentityEd25519Revision
       | PinAttemptState;
     key: string;
   };

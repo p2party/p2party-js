@@ -8,12 +8,12 @@
  */
 
 import {
-  captureConsistentLocalEd25519KeyMaterial,
-  wipeOwnedLocalEd25519KeyMaterial,
-} from "./localEd25519KeyMaterial";
+  captureConsistentEd25519KeyMaterial,
+  wipeOwnedEd25519KeyMaterial,
+} from "../cryptography/ownedEd25519KeyMaterial";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { OwnedLocalEd25519KeyMaterial } from "./localEd25519KeyMaterial";
+import type { OwnedEd25519KeyMaterial } from "../cryptography/ownedEd25519KeyMaterial";
 
 const U64_MAX = 0xffffffffffffffffn;
 
@@ -49,7 +49,7 @@ const fail = (message: string): never => {
 };
 
 interface PrivateLocalStableIdentityCustody {
-  readonly keyMaterial: OwnedLocalEd25519KeyMaterial;
+  readonly keyMaterial: OwnedEd25519KeyMaterial;
   readonly localIdentityKeyRecordRevision: bigint;
 }
 
@@ -83,12 +83,12 @@ const requireCustodyState = (
 export const createLocalStableIdentityCustodyV1 = async (
   options: CreateLocalStableIdentityCustodyOptionsV1,
 ): Promise<LocalStableIdentityCustodyV1> => {
-  let keyMaterial: OwnedLocalEd25519KeyMaterial | undefined;
+  let keyMaterial: OwnedEd25519KeyMaterial | undefined;
   let transferred = false;
 
   try {
     let localIdentityKeyRecordRevision = 0n;
-    keyMaterial = await captureConsistentLocalEd25519KeyMaterial({
+    keyMaterial = await captureConsistentEd25519KeyMaterial({
       module: options.module,
       secretKey: options.stableEd25519SecretKey,
       inputLabel: "localStableIdentityCustody: stable Ed25519 secret key",
@@ -98,8 +98,8 @@ export const createLocalStableIdentityCustodyV1 = async (
           options.localIdentityKeyRecordRevision,
         );
       },
-      rejectInconsistentPublicSuffix: () =>
-        fail("stable Ed25519 secret key has an inconsistent public suffix"),
+      rejectInconsistentSecretKey: () =>
+        fail("stable Ed25519 secret key is inconsistent with its seed"),
     });
 
     const handle = Object.freeze({}) as LocalStableIdentityCustodyV1;
@@ -112,7 +112,7 @@ export const createLocalStableIdentityCustodyV1 = async (
     return handle;
   } finally {
     if (!transferred && keyMaterial !== undefined)
-      wipeOwnedLocalEd25519KeyMaterial(keyMaterial);
+      wipeOwnedEd25519KeyMaterial(keyMaterial);
   }
 };
 
@@ -145,6 +145,6 @@ export const destroyLocalStableIdentityCustodyV1 = (
     return fail("custody must be a genuine process-local handle");
   const state = custodyStates.get(custody);
   if (state === undefined) return;
-  wipeOwnedLocalEd25519KeyMaterial(state.keyMaterial);
+  wipeOwnedEd25519KeyMaterial(state.keyMaterial);
   custodyStates.delete(custody);
 };

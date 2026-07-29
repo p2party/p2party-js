@@ -591,8 +591,23 @@ describe("identity HELLO receiver custody and expected trial", () => {
         stableEd25519SecretKey: inconsistentSecret.secretKey,
         localIdentityKeyRecordRevision: 1n,
       }),
-    ).rejects.toThrow("inconsistent public suffix");
+    ).rejects.toThrow("inconsistent with its seed");
     inconsistentSecret.secretKey.fill(0);
+    const seedOwner = await newKeyPair(module);
+    const suffixOwner = await newKeyPair(module);
+    const mixedSecret = new Uint8Array(64);
+    mixedSecret.set(seedOwner.secretKey.subarray(0, 32));
+    mixedSecret.set(suffixOwner.publicKey, 32);
+    await expect(
+      createLocalStableIdentityCustodyV1({
+        module,
+        stableEd25519SecretKey: mixedSecret,
+        localIdentityKeyRecordRevision: 1n,
+      }),
+    ).rejects.toThrow("inconsistent with its seed");
+    seedOwner.secretKey.fill(0);
+    suffixOwner.secretKey.fill(0);
+    mixedSecret.fill(0);
     await expect(
       createLocalStableIdentityCustodyV1({
         module,
@@ -1448,7 +1463,7 @@ describe("identity HELLO receiver custody and expected trial", () => {
         roomContextId: context.roomContextId,
         logicalWindow: HELLO_WINDOW,
       }),
-    ).rejects.toThrow("inconsistent public suffix");
+    ).rejects.toThrow("inconsistent with its seed");
     inconsistent.secretKey.fill(0);
 
     for (const revision of [-1n, 0x10000000000000000n]) {

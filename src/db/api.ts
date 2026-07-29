@@ -6,9 +6,14 @@ import type {
   NewChunkSelector,
   SendQueue,
   RatchetSession,
-  IdentityEd25519,
+  IdentityEd25519KeyMaterial,
   IdentityX25519,
 } from "./types";
+import {
+  readIdentityEd25519AtClientBoundary,
+  wipeUnclaimedWorkerSecret,
+  writeIdentityEd25519AtClientBoundary,
+} from "./identityEd25519ClientBoundary";
 // import type { MessageType } from "../utils/messageTypes";
 
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
@@ -30,7 +35,13 @@ worker.onmessage = (e: MessageEvent) => {
     error: unknown;
   };
   const p = pending.get(id);
-  if (!p) return;
+  if (!p) {
+    // A worker-wide error may already have rejected and removed this call.
+    // Explicitly retire any late transferred identity secret instead of
+    // leaving its lifetime to garbage collection.
+    wipeUnclaimedWorkerSecret(result);
+    return;
+  }
   pending.delete(id);
   if (error) p.reject(error);
   else p.resolve(result);
@@ -65,10 +76,11 @@ worker.onmessageerror = () => {
   );
 };
 
-function callWorker<M extends WorkerMessages["method"]>(
-  method: M,
-  ...args: Extract<WorkerMessages, { method: M }>["args"]
-): Promise<import("./types").WorkerMethodReturnTypes[M]> {
+const callWorkerOwned = (
+  method: WorkerMessages["method"],
+  args: readonly unknown[],
+  transfer: Transferable[] = [],
+): Promise<unknown> => {
   return new Promise((resolve, reject) => {
     // An empty bundle builds a worker that never replies, so the call would
     // hang rather than fail. Say why instead of stalling the caller.
@@ -86,8 +98,22 @@ function callWorker<M extends WorkerMessages["method"]>(
       resolve: resolve as (value: unknown) => void,
       reject,
     });
-    worker.postMessage({ id, method, args });
+    try {
+      worker.postMessage({ id, method, args }, transfer);
+    } catch (error) {
+      pending.delete(id);
+      reject(error);
+    }
   });
+};
+
+function callWorker<M extends WorkerMessages["method"]>(
+  method: M,
+  ...args: Extract<WorkerMessages, { method: M }>["args"]
+): Promise<import("./types").WorkerMethodReturnTypes[M]> {
+  return callWorkerOwned(method, args) as Promise<
+    import("./types").WorkerMethodReturnTypes[M]
+  >;
 }
 
 export const getDBAddressBookEntry = (
@@ -337,9 +363,19 @@ export const setIdentityX25519 = (identity: IdentityX25519) =>
 export const deleteIdentityX25519 = () => callWorker("deleteIdentityX25519");
 
 // Ed25519 account identity, also WebCrypto-wrapped at rest (worker-side).
-export const getIdentityEd25519 = () => callWorker("getIdentityEd25519");
+// Seed derivation stays in the configured main cryptography realm; the
+// database worker never introduces a second implicit WASM/CDN dependency.
+export const getIdentityEd25519 = () =>
+  readIdentityEd25519AtClientBoundary(() => callWorker("getIdentityEd25519"));
 
-export const setIdentityEd25519 = (identity: IdentityEd25519) =>
-  callWorker("setIdentityEd25519", identity);
+export const setIdentityEd25519 = async (
+  identity: IdentityEd25519KeyMaterial,
+): Promise<bigint> => {
+  return writeIdentityEd25519AtClientBoundary(
+    identity,
+    (ownedIdentity, transfer) =>
+      callWorkerOwned("setIdentityEd25519", [ownedIdentity], transfer),
+  );
+};
 
 export const deleteIdentityEd25519 = () => callWorker("deleteIdentityEd25519");

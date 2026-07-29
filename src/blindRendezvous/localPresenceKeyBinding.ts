@@ -13,9 +13,9 @@ import { snapshotByteInput } from "../cryptography/byteInput";
 import { bytesEqual } from "./canonicalSchema";
 import { snapshotHistoricalPairPresenceEvidence } from "./coreReduce";
 import {
-  captureConsistentLocalEd25519KeyMaterial,
-  wipeOwnedLocalEd25519KeyMaterial,
-} from "./localEd25519KeyMaterial";
+  captureConsistentEd25519KeyMaterial,
+  wipeOwnedEd25519KeyMaterial,
+} from "../cryptography/ownedEd25519KeyMaterial";
 import { snapshotLocalHelloReceiverCustodyV1 } from "./identityHelloTrial";
 import { snapshotOperationValidationContext } from "./operation";
 import { validatePresenceOwnershipV1 } from "./operationPayload";
@@ -24,7 +24,7 @@ import { decodeRoomPolicyV4, encodeRoomPolicyV4 } from "./roomPolicyV4";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { VerifiedHistoricalPairPresenceEvidenceV1 } from "./coreReduce";
 import type { LocalHelloReceiverCustodyV1 } from "./identityHelloTrial";
-import type { OwnedLocalEd25519KeyMaterial } from "./localEd25519KeyMaterial";
+import type { OwnedEd25519KeyMaterial } from "../cryptography/ownedEd25519KeyMaterial";
 import type { OperationValidationContext } from "./operation";
 import type { AuthenticatedRoomOperationV1 } from "./operation";
 import type { PresenceV1 } from "./operationPayload";
@@ -111,7 +111,7 @@ const fail = (message: string): never => {
 
 interface PrivateLocalAuthorEpochCustody {
   readonly module: LibCrypto;
-  readonly keyMaterial: OwnedLocalEd25519KeyMaterial;
+  readonly keyMaterial: OwnedEd25519KeyMaterial;
   readonly authorEpochKeyRecordRevision: bigint;
   readonly roomContextId: Uint8Array;
   readonly logicalWindow: bigint;
@@ -193,7 +193,7 @@ const copyAuthorCustodySnapshot = (
 export const createLocalAuthorEpochCustodyV1 = async (
   options: CreateLocalAuthorEpochCustodyOptionsV1,
 ): Promise<LocalAuthorEpochCustodyV1> => {
-  let keyMaterial: OwnedLocalEd25519KeyMaterial | undefined;
+  let keyMaterial: OwnedEd25519KeyMaterial | undefined;
   let transferred = false;
 
   try {
@@ -208,14 +208,12 @@ export const createLocalAuthorEpochCustodyV1 = async (
       "authorEpochKeyRecordRevision",
       options.authorEpochKeyRecordRevision,
     );
-    keyMaterial = await captureConsistentLocalEd25519KeyMaterial({
+    keyMaterial = await captureConsistentEd25519KeyMaterial({
       module,
       secretKey: options.authorEpochEd25519SecretKey,
       inputLabel: "localPresenceKeyBinding: author-epoch Ed25519 secret key",
-      rejectInconsistentPublicSuffix: () =>
-        fail(
-          "author-epoch Ed25519 secret key has an inconsistent public suffix",
-        ),
+      rejectInconsistentSecretKey: () =>
+        fail("author-epoch Ed25519 secret key is inconsistent with its seed"),
     });
 
     const handle = Object.freeze({}) as LocalAuthorEpochCustodyV1;
@@ -231,7 +229,7 @@ export const createLocalAuthorEpochCustodyV1 = async (
     return handle;
   } finally {
     if (!transferred && keyMaterial !== undefined)
-      wipeOwnedLocalEd25519KeyMaterial(keyMaterial);
+      wipeOwnedEd25519KeyMaterial(keyMaterial);
   }
 };
 
@@ -258,7 +256,7 @@ export const destroyLocalAuthorEpochCustodyV1 = (
     return fail("author-epoch custody must be a genuine process-local handle");
   const state = authorCustodyStates.get(custody);
   if (state === undefined) return;
-  wipeOwnedLocalEd25519KeyMaterial(state.keyMaterial);
+  wipeOwnedEd25519KeyMaterial(state.keyMaterial);
   authorCustodyStates.delete(custody);
 };
 

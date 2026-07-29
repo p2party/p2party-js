@@ -34,8 +34,10 @@ import type {
   NewChunkSelector,
   RatchetSession,
   IdentityEd25519,
+  IdentityEd25519KeyMaterial,
   IdentityX25519,
   StoredIdentityEd25519,
+  StoredIdentityEd25519Revision,
   StoredIdentityX25519,
   PinAttemptState,
 } from "./types";
@@ -2060,44 +2062,392 @@ async function fnDeleteIdentityX25519(): Promise<void> {
 
 // The account-signing identity is no longer persisted in localStorage. Its
 // secret uses the same non-extractable AES-GCM wrapping key as ratchet/X25519
-// secrets; the public half remains inspectable.
+// secrets; the public half remains inspectable. The high-water record is kept
+// separately so deleting the identity cannot make a later key reuse a revision.
+// Both values live in the existing out-of-line `meta` store, so this adds no
+// IndexedDB schema and intentionally requires no dbVersion bump.
 const IDENTITY_ED25519_META_ID = "identityEd25519";
+const IDENTITY_ED25519_REVISION_META_ID = "identityEd25519Revision";
+const IDENTITY_ED25519_RECORD_VERSION = 1;
+const FIRST_IDENTITY_ED25519_REVISION = 1n;
+const UINT64_MAX = 0xffff_ffff_ffff_ffffn;
+const WRAPPED_ED25519_SECRET_BYTES = 12 + 64 + 16;
+
+interface LegacyStoredIdentityEd25519 {
+  pub: ArrayBuffer;
+  wrappedSecret: ArrayBuffer;
+}
+
+type ParsedStoredIdentityEd25519 =
+  | {
+      kind: "legacy";
+      pub: ArrayBuffer;
+      wrappedSecret: ArrayBuffer;
+    }
+  | {
+      kind: "current";
+      pub: ArrayBuffer;
+      wrappedSecret: ArrayBuffer;
+      recordRevision: bigint;
+    };
+
+interface IdentityEd25519StorageSnapshot {
+  identity: ParsedStoredIdentityEd25519 | undefined;
+  revision: StoredIdentityEd25519Revision | undefined;
+}
+
+const edIdentityCopyBuffer = (value: ArrayBuffer): ArrayBuffer =>
+  value.slice(0);
+
+const edIdentityBuffersEqual = (
+  left: ArrayBuffer,
+  right: ArrayBuffer,
+): boolean => {
+  if (left.byteLength !== right.byteLength) return false;
+  const a = new Uint8Array(left);
+  const b = new Uint8Array(right);
+  let difference = 0;
+  for (let i = 0; i < a.byteLength; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
+};
+
+// Defense in depth for direct worker messages and stored rows. Full
+// seed-derived consistency is enforced by the main-realm client boundary.
+const edIdentityPublicMatchesSecretSuffix = (
+  pub: ArrayBuffer,
+  secret: ArrayBuffer,
+): boolean => {
+  if (pub.byteLength !== 32 || secret.byteLength !== 64) return false;
+  const publicBytes = new Uint8Array(pub);
+  const secretBytes = new Uint8Array(secret);
+  let difference = 0;
+  for (let i = 0; i < publicBytes.byteLength; i++) {
+    difference |= publicBytes[i] ^ secretBytes[32 + i];
+  }
+  return difference === 0;
+};
+
+const requireExactEdIdentityDataRecord = (
+  value: unknown,
+  expectedKeys: readonly string[],
+  name: string,
+): Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error(`${name} is malformed`);
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+  )
+    throw new Error(`${name} is malformed`);
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor))
+      throw new Error(`${name} is malformed`);
+  }
+  return value as Record<string, unknown>;
+};
+
+const requireEdIdentityU64 = (
+  value: unknown,
+  name: string,
+  allowZero: boolean,
+): bigint => {
+  if (
+    typeof value !== "bigint" ||
+    value < 0n ||
+    value > UINT64_MAX ||
+    (!allowZero && value === 0n)
+  )
+    throw new Error(`${name} must be a ${allowZero ? "" : "non-zero "}uint64`);
+  return value;
+};
+
+const requireStoredEdIdentityBytes = (
+  record: Record<string, unknown>,
+): LegacyStoredIdentityEd25519 => {
+  const pub = record.pub;
+  const wrappedSecret = record.wrappedSecret;
+  if (!(pub instanceof ArrayBuffer) || pub.byteLength !== 32)
+    throw new Error("Stored Ed25519 public key has an invalid length");
+  if (
+    !(wrappedSecret instanceof ArrayBuffer) ||
+    wrappedSecret.byteLength !== WRAPPED_ED25519_SECRET_BYTES
+  )
+    throw new Error("Stored Ed25519 wrapped secret is malformed");
+  return { pub, wrappedSecret };
+};
+
+const parseStoredIdentityEd25519 = (
+  value: unknown,
+): ParsedStoredIdentityEd25519 | undefined => {
+  if (value === undefined) return undefined;
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    Object.prototype.hasOwnProperty.call(value, "version")
+  ) {
+    const record = requireExactEdIdentityDataRecord(
+      value,
+      ["version", "pub", "wrappedSecret", "recordRevision"],
+      "Stored Ed25519 identity",
+    );
+    if (record.version !== IDENTITY_ED25519_RECORD_VERSION)
+      throw new Error("Stored Ed25519 identity version is unsupported");
+    const bytes = requireStoredEdIdentityBytes(record);
+    return {
+      kind: "current",
+      ...bytes,
+      recordRevision: requireEdIdentityU64(
+        record.recordRevision,
+        "Stored Ed25519 identity revision",
+        false,
+      ),
+    };
+  }
+  const record = requireExactEdIdentityDataRecord(
+    value,
+    ["pub", "wrappedSecret"],
+    "Legacy stored Ed25519 identity",
+  );
+  return { kind: "legacy", ...requireStoredEdIdentityBytes(record) };
+};
+
+const parseIdentityEd25519Revision = (
+  value: unknown,
+): StoredIdentityEd25519Revision | undefined => {
+  if (value === undefined) return undefined;
+  const record = requireExactEdIdentityDataRecord(
+    value,
+    ["version", "lastRevision"],
+    "Ed25519 identity revision record",
+  );
+  if (record.version !== IDENTITY_ED25519_RECORD_VERSION)
+    throw new Error("Ed25519 identity revision version is unsupported");
+  return {
+    version: IDENTITY_ED25519_RECORD_VERSION,
+    lastRevision: requireEdIdentityU64(
+      record.lastRevision,
+      "Ed25519 identity high-water revision",
+      true,
+    ),
+  };
+};
+
+const assertEdIdentityRevisionConsistency = (
+  identity: ParsedStoredIdentityEd25519 | undefined,
+  revision: StoredIdentityEd25519Revision | undefined,
+): void => {
+  if (identity?.kind === "legacy" && revision !== undefined)
+    throw new Error("Stored Ed25519 identity revision state is inconsistent");
+  if (
+    identity?.kind === "current" &&
+    (revision === undefined ||
+      identity.recordRevision !== revision.lastRevision)
+  )
+    throw new Error("Stored Ed25519 identity revision state is inconsistent");
+};
+
+const identityEd25519HighWater = (
+  identity: ParsedStoredIdentityEd25519 | undefined,
+  revision: StoredIdentityEd25519Revision | undefined,
+): bigint => {
+  // The actual legacy row predates revisions. Its existing key owns revision 1,
+  // so a direct overwrite/delete must allocate after it just as if get migrated.
+  if (identity?.kind === "legacy") return FIRST_IDENTITY_ED25519_REVISION;
+  return revision?.lastRevision ?? 0n;
+};
+
+const incrementEdIdentityRevision = (revision: bigint): bigint => {
+  if (revision >= UINT64_MAX)
+    throw new Error("Ed25519 identity revision overflow");
+  return revision + 1n;
+};
+
+type RepoDatabase = Awaited<ReturnType<typeof getDB>>;
+
+const readIdentityEd25519StorageSnapshot = async (
+  db: RepoDatabase,
+): Promise<IdentityEd25519StorageSnapshot> => {
+  const tx = db.transaction("meta", "readonly");
+  const store = tx.objectStore("meta");
+  const [identityValue, revisionValue] = await Promise.all([
+    store.get(IDENTITY_ED25519_META_ID),
+    store.get(IDENTITY_ED25519_REVISION_META_ID),
+  ]);
+  await tx.done;
+  const identity = parseStoredIdentityEd25519(identityValue);
+  const revision = parseIdentityEd25519Revision(revisionValue);
+  assertEdIdentityRevisionConsistency(identity, revision);
+  return { identity, revision };
+};
+
+const migrateLegacyIdentityEd25519IfUnchanged = async (
+  db: RepoDatabase,
+  expected: IdentityEd25519StorageSnapshot,
+): Promise<boolean> => {
+  if (expected.identity?.kind !== "legacy" || expected.revision !== undefined)
+    throw new Error("Legacy Ed25519 migration state is inconsistent");
+  const tx = db.transaction("meta", "readwrite");
+  const store = tx.objectStore("meta");
+  const [identityValue, revisionValue] = await Promise.all([
+    store.get(IDENTITY_ED25519_META_ID),
+    store.get(IDENTITY_ED25519_REVISION_META_ID),
+  ]);
+  const current = {
+    identity: parseStoredIdentityEd25519(identityValue),
+    revision: parseIdentityEd25519Revision(revisionValue),
+  };
+  assertEdIdentityRevisionConsistency(current.identity, current.revision);
+  if (
+    current.identity?.kind !== "legacy" ||
+    current.revision !== undefined ||
+    !edIdentityBuffersEqual(expected.identity.pub, current.identity.pub) ||
+    !edIdentityBuffersEqual(
+      expected.identity.wrappedSecret,
+      current.identity.wrappedSecret,
+    )
+  ) {
+    await tx.done;
+    return false;
+  }
+  await Promise.all([
+    store.put(
+      {
+        version: IDENTITY_ED25519_RECORD_VERSION,
+        pub: edIdentityCopyBuffer(expected.identity.pub),
+        wrappedSecret: edIdentityCopyBuffer(expected.identity.wrappedSecret),
+        recordRevision: FIRST_IDENTITY_ED25519_REVISION,
+      } satisfies StoredIdentityEd25519,
+      IDENTITY_ED25519_META_ID,
+    ),
+    store.put(
+      {
+        version: IDENTITY_ED25519_RECORD_VERSION,
+        lastRevision: FIRST_IDENTITY_ED25519_REVISION,
+      } satisfies StoredIdentityEd25519Revision,
+      IDENTITY_ED25519_REVISION_META_ID,
+    ),
+  ]);
+  await tx.done;
+  return true;
+};
 
 async function fnGetIdentityEd25519(): Promise<IdentityEd25519 | undefined> {
   const db = await getDB();
-  let stored: StoredIdentityEd25519 | undefined;
+  let wrapKey: CryptoKey | undefined;
   try {
-    stored = (await db.get("meta", IDENTITY_ED25519_META_ID)) as
-      StoredIdentityEd25519 | undefined;
+    for (;;) {
+      const snapshot = await readIdentityEd25519StorageSnapshot(db);
+      if (!snapshot.identity) return undefined;
+
+      wrapKey ??= await getWrapKey();
+      const secret = await unwrapSecret(
+        wrapKey,
+        snapshot.identity.wrappedSecret,
+      );
+      if (
+        secret.byteLength !== 64 ||
+        !edIdentityPublicMatchesSecretSuffix(snapshot.identity.pub, secret)
+      ) {
+        new Uint8Array(secret).fill(0);
+        throw new Error(
+          "Stored Ed25519 public and secret keys are inconsistent",
+        );
+      }
+      try {
+        if (
+          snapshot.identity.kind === "legacy" &&
+          !(await migrateLegacyIdentityEd25519IfUnchanged(db, snapshot))
+        ) {
+          new Uint8Array(secret).fill(0);
+          continue;
+        }
+        return {
+          pub: edIdentityCopyBuffer(snapshot.identity.pub),
+          secret,
+          recordRevision:
+            snapshot.identity.kind === "legacy"
+              ? FIRST_IDENTITY_ED25519_REVISION
+              : snapshot.identity.recordRevision,
+        };
+      } catch (error) {
+        new Uint8Array(secret).fill(0);
+        throw error;
+      }
+    }
   } finally {
     db.close();
   }
-  if (!stored) return undefined;
-  if (stored.pub.byteLength !== 32)
-    throw new Error("Stored Ed25519 public key has an invalid length");
-
-  const key = await getWrapKey();
-  const secret = await unwrapSecret(key, stored.wrappedSecret);
-  if (secret.byteLength !== 64)
-    throw new Error("Stored Ed25519 secret key has an invalid length");
-  return { pub: stored.pub, secret };
 }
 
-async function fnSetIdentityEd25519(identity: IdentityEd25519): Promise<void> {
-  if (identity.pub.byteLength !== 32 || identity.secret.byteLength !== 64)
-    throw new Error("Ed25519 identity has invalid key lengths");
-
-  const key = await getWrapKey();
-  const wrappedSecret = await wrapSecret(key, identity.secret);
-  const stored: StoredIdentityEd25519 = {
-    pub: identity.pub,
-    wrappedSecret,
-  };
-  const db = await getDB();
+async function fnSetIdentityEd25519(
+  identity: IdentityEd25519KeyMaterial,
+): Promise<bigint> {
+  const ownedMessageSecret =
+    typeof identity === "object" &&
+    identity !== null &&
+    identity.secret instanceof ArrayBuffer
+      ? new Uint8Array(identity.secret)
+      : undefined;
   try {
-    await db.put("meta", stored, IDENTITY_ED25519_META_ID);
+    if (
+      !(identity.pub instanceof ArrayBuffer) ||
+      !(identity.secret instanceof ArrayBuffer) ||
+      identity.pub.byteLength !== 32 ||
+      identity.secret.byteLength !== 64
+    )
+      throw new Error("Ed25519 identity has invalid key lengths");
+    if (!edIdentityPublicMatchesSecretSuffix(identity.pub, identity.secret))
+      throw new Error("Ed25519 public key does not match the secret key");
+
+    const pub = edIdentityCopyBuffer(identity.pub);
+    const secret = edIdentityCopyBuffer(identity.secret);
+    let wrappedSecret: ArrayBuffer;
+    try {
+      const key = await getWrapKey();
+      wrappedSecret = await wrapSecret(key, secret);
+    } finally {
+      new Uint8Array(secret).fill(0);
+    }
+
+    const db = await getDB();
+    try {
+      const tx = db.transaction("meta", "readwrite");
+      const store = tx.objectStore("meta");
+      const [identityValue, revisionValue] = await Promise.all([
+        store.get(IDENTITY_ED25519_META_ID),
+        store.get(IDENTITY_ED25519_REVISION_META_ID),
+      ]);
+      const currentIdentity = parseStoredIdentityEd25519(identityValue);
+      const currentRevision = parseIdentityEd25519Revision(revisionValue);
+      assertEdIdentityRevisionConsistency(currentIdentity, currentRevision);
+      const highWaterRevision = identityEd25519HighWater(
+        currentIdentity,
+        currentRevision,
+      );
+      const recordRevision = incrementEdIdentityRevision(highWaterRevision);
+      const stored: StoredIdentityEd25519 = {
+        version: IDENTITY_ED25519_RECORD_VERSION,
+        pub,
+        wrappedSecret,
+        recordRevision,
+      };
+      const revision: StoredIdentityEd25519Revision = {
+        version: IDENTITY_ED25519_RECORD_VERSION,
+        lastRevision: recordRevision,
+      };
+      await Promise.all([
+        store.put(stored, IDENTITY_ED25519_META_ID),
+        store.put(revision, IDENTITY_ED25519_REVISION_META_ID),
+      ]);
+      await tx.done;
+      return recordRevision;
+    } finally {
+      db.close();
+    }
   } finally {
-    db.close();
+    ownedMessageSecret?.fill(0);
   }
 }
 
@@ -2105,7 +2455,26 @@ async function fnDeleteIdentityEd25519(): Promise<void> {
   const db = await getDB();
   try {
     const tx = db.transaction(["meta", "ratchetSessions"], "readwrite");
-    await tx.objectStore("meta").delete(IDENTITY_ED25519_META_ID);
+    const meta = tx.objectStore("meta");
+    const [identityValue, revisionValue] = await Promise.all([
+      meta.get(IDENTITY_ED25519_META_ID),
+      meta.get(IDENTITY_ED25519_REVISION_META_ID),
+    ]);
+    const identity = parseStoredIdentityEd25519(identityValue);
+    const revision = parseIdentityEd25519Revision(revisionValue);
+    assertEdIdentityRevisionConsistency(identity, revision);
+    if (identity !== undefined) {
+      const highWaterRevision = identityEd25519HighWater(identity, revision);
+      const retiredRevision = incrementEdIdentityRevision(highWaterRevision);
+      await meta.put(
+        {
+          version: IDENTITY_ED25519_RECORD_VERSION,
+          lastRevision: retiredRevision,
+        } satisfies StoredIdentityEd25519Revision,
+        IDENTITY_ED25519_REVISION_META_ID,
+      );
+      await meta.delete(IDENTITY_ED25519_META_ID);
+    }
     await tx.objectStore("ratchetSessions").clear();
     await tx.done;
   } finally {
@@ -2579,8 +2948,7 @@ onmessage = async (e: MessageEvent) => {
         result = await fnGetIdentityEd25519();
         break;
       case "setIdentityEd25519":
-        await fnSetIdentityEd25519(...message.args);
-        result = undefined;
+        result = await fnSetIdentityEd25519(...message.args);
         break;
       case "deleteIdentityEd25519":
         await fnDeleteIdentityEd25519();
@@ -2595,7 +2963,21 @@ onmessage = async (e: MessageEvent) => {
         return;
     }
 
-    postMessage({ id, result });
+    if (message.method === "getIdentityEd25519" && result !== undefined) {
+      const secret = (result as IdentityEd25519).secret;
+      try {
+        (
+          globalThis as unknown as {
+            postMessage: (message: unknown, transfer?: Transferable[]) => void;
+          }
+        ).postMessage({ id, result }, [secret]);
+      } catch (error) {
+        new Uint8Array(secret).fill(0);
+        throw error;
+      }
+    } else {
+      postMessage({ id, result });
+    }
   } catch (error: unknown) {
     postMessage({ id, error: String(error) });
   }

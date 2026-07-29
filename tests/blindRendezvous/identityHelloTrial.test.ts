@@ -54,6 +54,14 @@ import {
   destroyLocalStableIdentityCustodyV1,
   snapshotLocalStableIdentityCustodyV1,
 } from "../../src/blindRendezvous/localStableIdentityCustody";
+import {
+  createLocalAuthorEpochCustodyV1,
+  createVerifiedLocalPresenceKeyBindingV1,
+  destroyLocalAuthorEpochCustodyV1,
+  destroyVerifiedLocalPresenceKeyBindingV1,
+  snapshotLocalAuthorEpochCustodyV1,
+  snapshotVerifiedLocalPresenceKeyBindingV1,
+} from "../../src/blindRendezvous/localPresenceKeyBinding";
 
 import type {
   ActivePairOperationCandidateV1,
@@ -75,6 +83,10 @@ import type {
 } from "../../src/blindRendezvous/pairOpenReservation";
 import type { PresenceCoreV1 } from "../../src/blindRendezvous/operationPayload";
 import type { LocalStableIdentityCustodyV1 } from "../../src/blindRendezvous/localStableIdentityCustody";
+import type {
+  LocalAuthorEpochCustodyV1,
+  VerifiedLocalPresenceKeyBindingV1,
+} from "../../src/blindRendezvous/localPresenceKeyBinding";
 
 const module = await loadTestModule();
 const policy = DEFAULT_BLIND_POLICY_V4_0;
@@ -310,9 +322,17 @@ interface TrialFixture {
 const fixtures = new Set<TrialFixture>();
 const extraCustodies = new Set<LocalHelloReceiverCustodyV1>();
 const stableCustodies = new Set<LocalStableIdentityCustodyV1>();
+const authorCustodies = new Set<LocalAuthorEpochCustodyV1>();
+const localPresenceKeyBindings = new Set<VerifiedLocalPresenceKeyBindingV1>();
 const extraEvidenceViews = new Set<HistoricalIdentityHelloEvidenceViewV1>();
 
 afterEach(() => {
+  for (const binding of localPresenceKeyBindings)
+    destroyVerifiedLocalPresenceKeyBindingV1(binding);
+  localPresenceKeyBindings.clear();
+  for (const custody of authorCustodies)
+    destroyLocalAuthorEpochCustodyV1(custody);
+  authorCustodies.clear();
   for (const custody of extraCustodies)
     destroyLocalHelloReceiverCustodyV1(custody);
   extraCustodies.clear();
@@ -350,6 +370,50 @@ const createStableCustody = async (
   });
   stableCustodies.add(custody);
   return custody;
+};
+
+const createAuthorCustody = async (
+  presence: PresenceFixture,
+  context: OperationValidationContext,
+  overrides: {
+    readonly authorEpochEd25519SecretKey?: Uint8Array;
+    readonly authorEpochKeyRecordRevision?: bigint;
+    readonly roomContextId?: Uint8Array;
+    readonly logicalWindow?: bigint;
+  } = {},
+): Promise<LocalAuthorEpochCustodyV1> => {
+  const custody = await createLocalAuthorEpochCustodyV1({
+    module,
+    authorEpochEd25519SecretKey:
+      overrides.authorEpochEd25519SecretKey ?? presence.authorSecretKey,
+    authorEpochKeyRecordRevision: overrides.authorEpochKeyRecordRevision ?? 11n,
+    roomContextId: overrides.roomContextId ?? context.roomContextId,
+    logicalWindow: overrides.logicalWindow ?? HELLO_WINDOW,
+  });
+  authorCustodies.add(custody);
+  return custody;
+};
+
+const createLocalPresenceKeyBinding = async (
+  fixture: TrialFixture,
+  overrides: {
+    readonly localPresenceEvidence?: VerifiedHistoricalPairPresenceEvidenceV1;
+    readonly receiverCustody?: LocalHelloReceiverCustodyV1;
+    readonly authorEpochCustody?: LocalAuthorEpochCustodyV1;
+    readonly initializedRoom?: OperationValidationContext;
+  } = {},
+): Promise<VerifiedLocalPresenceKeyBindingV1> => {
+  const binding = await createVerifiedLocalPresenceKeyBindingV1({
+    localPresenceEvidence:
+      overrides.localPresenceEvidence ?? fixture.localEvidence,
+    receiverCustody: overrides.receiverCustody ?? fixture.custody,
+    authorEpochCustody:
+      overrides.authorEpochCustody ??
+      (await createAuthorCustody(fixture.local, fixture.context)),
+    initializedRoom: overrides.initializedRoom ?? fixture.context,
+  });
+  localPresenceKeyBindings.add(binding);
+  return binding;
 };
 
 const buildFixture = async (
@@ -1305,5 +1369,492 @@ describe("identity HELLO receiver custody and expected trial", () => {
       destroyLocalHelloReceiverCustodyV1(receiverCustody),
     ).not.toThrow();
     destroyExpectedIdentityHelloTrialV1(trial);
+  });
+
+  test("owns room/window author custody and rejects forgeries and invalid revision boundaries", async () => {
+    const context = await createOperationValidationContext(
+      DEFAULT_CAPABILITY,
+      copyPolicy(),
+      HELLO_WINDOW,
+    );
+    const keyPair = await newKeyPair(module);
+    const callerSecret = Uint8Array.from(keyPair.secretKey);
+    const callerRoomContextId = Uint8Array.from(context.roomContextId);
+    const expectedPublic = Uint8Array.from(keyPair.publicKey);
+    const expectedRoomContextId = Uint8Array.from(context.roomContextId);
+    const pending = createLocalAuthorEpochCustodyV1({
+      module,
+      authorEpochEd25519SecretKey: callerSecret,
+      authorEpochKeyRecordRevision: 12n,
+      roomContextId: callerRoomContextId,
+      logicalWindow: HELLO_WINDOW,
+    });
+    callerSecret.fill(0xff);
+    callerRoomContextId.fill(0xee);
+
+    const custody = await pending;
+    authorCustodies.add(custody);
+    const snapshot = snapshotLocalAuthorEpochCustodyV1(custody);
+    expect(snapshot).toMatchObject({
+      version: 1,
+      authorEpochKeyRecordRevision: 12n,
+      logicalWindow: HELLO_WINDOW,
+    });
+    expectBytesEqual(snapshot.authorEpochEd25519PublicKey, expectedPublic);
+    expectBytesEqual(snapshot.roomContextId, expectedRoomContextId);
+    expect(containsSecretField(snapshot)).toBe(false);
+    expect(Reflect.ownKeys(custody)).toEqual([]);
+
+    snapshot.authorEpochEd25519PublicKey.fill(0);
+    snapshot.roomContextId.fill(0);
+    const secondSnapshot = snapshotLocalAuthorEpochCustodyV1(custody);
+    expectBytesEqual(
+      secondSnapshot.authorEpochEd25519PublicKey,
+      expectedPublic,
+    );
+    expectBytesEqual(secondSnapshot.roomContextId, expectedRoomContextId);
+
+    const spread = { ...custody } as LocalAuthorEpochCustodyV1;
+    const clone = structuredClone(custody) as LocalAuthorEpochCustodyV1;
+    expect(() => snapshotLocalAuthorEpochCustodyV1(spread)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => snapshotLocalAuthorEpochCustodyV1(clone)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => destroyLocalAuthorEpochCustodyV1(spread)).toThrow(
+      "genuine process-local handle",
+    );
+
+    const stableCustody = await createLocalStableIdentityCustodyV1({
+      module,
+      stableEd25519SecretKey: keyPair.secretKey,
+      localIdentityKeyRecordRevision: 1n,
+    });
+    stableCustodies.add(stableCustody);
+    expect(() =>
+      snapshotLocalAuthorEpochCustodyV1(
+        stableCustody as unknown as LocalAuthorEpochCustodyV1,
+      ),
+    ).toThrow("genuine live process-local handle");
+
+    const inconsistent = await newKeyPair(module);
+    inconsistent.secretKey[63] ^= 1;
+    await expect(
+      createLocalAuthorEpochCustodyV1({
+        module,
+        authorEpochEd25519SecretKey: inconsistent.secretKey,
+        authorEpochKeyRecordRevision: 0n,
+        roomContextId: context.roomContextId,
+        logicalWindow: HELLO_WINDOW,
+      }),
+    ).rejects.toThrow("inconsistent public suffix");
+    inconsistent.secretKey.fill(0);
+
+    for (const revision of [-1n, 0x10000000000000000n]) {
+      await expect(
+        createLocalAuthorEpochCustodyV1({
+          module,
+          authorEpochEd25519SecretKey: keyPair.secretKey,
+          authorEpochKeyRecordRevision: revision,
+          roomContextId: context.roomContextId,
+          logicalWindow: HELLO_WINDOW,
+        }),
+      ).rejects.toThrow("unsigned 64-bit");
+    }
+    for (const logicalWindow of [-1n, 0x10000000000000000n]) {
+      await expect(
+        createLocalAuthorEpochCustodyV1({
+          module,
+          authorEpochEd25519SecretKey: keyPair.secretKey,
+          authorEpochKeyRecordRevision: 0n,
+          roomContextId: context.roomContextId,
+          logicalWindow,
+        }),
+      ).rejects.toThrow("unsigned 64-bit");
+    }
+    await expect(
+      createLocalAuthorEpochCustodyV1({
+        module,
+        authorEpochEd25519SecretKey: keyPair.secretKey,
+        authorEpochKeyRecordRevision: 0n,
+        roomContextId: new Uint8Array(31),
+        logicalWindow: HELLO_WINDOW,
+      }),
+    ).rejects.toThrow();
+
+    const maximum = await createLocalAuthorEpochCustodyV1({
+      module,
+      authorEpochEd25519SecretKey: keyPair.secretKey,
+      authorEpochKeyRecordRevision: 0xffffffffffffffffn,
+      roomContextId: context.roomContextId,
+      logicalWindow: 0xffffffffffffffffn,
+    });
+    authorCustodies.add(maximum);
+    expect(snapshotLocalAuthorEpochCustodyV1(maximum)).toMatchObject({
+      authorEpochKeyRecordRevision: 0xffffffffffffffffn,
+      logicalWindow: 0xffffffffffffffffn,
+    });
+
+    destroyLocalAuthorEpochCustodyV1(custody);
+    destroyLocalAuthorEpochCustodyV1(custody);
+    expect(() => snapshotLocalAuthorEpochCustodyV1(custody)).toThrow(
+      "genuine live process-local handle",
+    );
+    keyPair.secretKey.fill(0);
+    expectedPublic.fill(0);
+    expectedRoomContextId.fill(0);
+  });
+
+  test("binds one exact genuine PRESENCE when re-proved in a later genuine Core window without minting authority", async () => {
+    const fixture = await buildFixture();
+    const authorCustody = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+    );
+    const laterContext = operationValidationContextAt(
+      fixture.context,
+      HELLO_WINDOW + 1n,
+    );
+    const laterCore = await coreReduce(
+      [fixture.local.identified, fixture.remote.identified],
+      laterContext,
+      module,
+    );
+    const laterEvidence = await captureHistoricalPairPresenceEvidence(
+      fixture.local.identified,
+      laterCore,
+      HELLO_WINDOW + 1n,
+    );
+    const binding = await createLocalPresenceKeyBinding(fixture, {
+      localPresenceEvidence: laterEvidence,
+      authorEpochCustody: authorCustody,
+      initializedRoom: laterContext,
+    });
+    const snapshot = snapshotVerifiedLocalPresenceKeyBindingV1(binding);
+    const receiver = snapshotLocalHelloReceiverCustodyV1(fixture.custody);
+
+    expect(snapshot).toMatchObject({
+      version: 1,
+      presenceLogicalWindow: HELLO_WINDOW,
+      provedAtLogicalWindow: HELLO_WINDOW + 1n,
+      authorEpochKeyRecordRevision: 11n,
+      receiverKeyRecordRevision: RECEIVER_KEY_RECORD_REVISION,
+      localIdentityKeyRecordRevision: LOCAL_IDENTITY_KEY_RECORD_REVISION,
+    });
+    expectBytesEqual(
+      snapshot.localPresenceOperationId,
+      receiver.localPresenceOperationId,
+    );
+    expectBytesEqual(
+      snapshot.exactPresenceOperationBytes,
+      receiver.exactPresenceOperationBytes,
+    );
+    expectBytesEqual(
+      snapshot.authorEpochEd25519PublicKey,
+      fixture.local.authorPublicKey,
+    );
+    expectBytesEqual(
+      snapshot.advertisedReceiverHybridKemPublicKey,
+      fixture.local.receiverPublicKey,
+    );
+    expectBytesEqual(
+      snapshot.localStableEd25519PublicKey,
+      fixture.local.stablePublicKey,
+    );
+    expect(containsSecretField(snapshot)).toBe(false);
+    expect(Reflect.ownKeys(binding)).toEqual([]);
+    expect("decision" in (snapshot as unknown as Record<string, unknown>)).toBe(
+      false,
+    );
+    expect("topology" in (snapshot as unknown as Record<string, unknown>)).toBe(
+      false,
+    );
+    expect("lease" in (snapshot as unknown as Record<string, unknown>)).toBe(
+      false,
+    );
+
+    snapshot.localPresenceOperationId.fill(0);
+    snapshot.exactPresenceOperationBytes.fill(0);
+    snapshot.authorEpochEd25519PublicKey.fill(0);
+    snapshot.advertisedReceiverHybridKemPublicKey.fill(0);
+    snapshot.localStableEd25519PublicKey.fill(0);
+    snapshot.roomContextId.fill(0);
+    snapshot.roomPolicy.sessionPolicyV1.fill(0);
+    const secondSnapshot = snapshotVerifiedLocalPresenceKeyBindingV1(binding);
+    expectBytesEqual(
+      secondSnapshot.localPresenceOperationId,
+      receiver.localPresenceOperationId,
+    );
+    expectBytesEqual(
+      secondSnapshot.authorEpochEd25519PublicKey,
+      fixture.local.authorPublicKey,
+    );
+
+    const spread = { ...binding } as VerifiedLocalPresenceKeyBindingV1;
+    const clone = structuredClone(binding) as VerifiedLocalPresenceKeyBindingV1;
+    expect(() => snapshotVerifiedLocalPresenceKeyBindingV1(spread)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => snapshotVerifiedLocalPresenceKeyBindingV1(clone)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() => destroyVerifiedLocalPresenceKeyBindingV1(spread)).toThrow(
+      "genuine process-local handle",
+    );
+
+    destroyVerifiedLocalPresenceKeyBindingV1(binding);
+    destroyVerifiedLocalPresenceKeyBindingV1(binding);
+    expect(() => snapshotVerifiedLocalPresenceKeyBindingV1(binding)).toThrow(
+      "genuine live process-local handle",
+    );
+  });
+
+  test("rejects wrong author, room, window, evidence, receiver, and validation context", async () => {
+    const fixture = await buildFixture();
+    const wrongAuthorKey = await newKeyPair(module);
+    const wrongAuthor = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+      { authorEpochEd25519SecretKey: wrongAuthorKey.secretKey },
+    );
+    wrongAuthorKey.secretKey.fill(0);
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: wrongAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("does not match the PRESENCE author");
+
+    const wrongRoomAuthor = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+      { roomContextId: new Uint8Array(32).fill(0xd1) },
+    );
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: wrongRoomAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("initialized room");
+
+    const wrongWindowAuthor = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+      { logicalWindow: HELLO_WINDOW + 1n },
+    );
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: wrongWindowAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("another logical window");
+
+    const correctAuthor = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+    );
+    const remoteAuthor = await createAuthorCustody(
+      fixture.remote,
+      fixture.context,
+    );
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.remoteEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: remoteAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("another exact PRESENCE");
+
+    const otherFixture = await buildFixture();
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: otherFixture.custody,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("another exact PRESENCE");
+
+    const otherContext = await createOperationValidationContext(
+      new Uint8Array(32).fill(0xd2),
+      copyPolicy(),
+      HELLO_WINDOW,
+    );
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: otherContext,
+      }),
+    ).rejects.toThrow("initialized room");
+
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: {} as VerifiedHistoricalPairPresenceEvidenceV1,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("live result");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: {} as LocalHelloReceiverCustodyV1,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("genuine live process-local handle");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: {} as LocalAuthorEpochCustodyV1,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("genuine live process-local handle");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: {
+          ...fixture.localEvidence,
+        } as VerifiedHistoricalPairPresenceEvidenceV1,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("live result");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: structuredClone(
+          fixture.custody,
+        ) as LocalHelloReceiverCustodyV1,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("genuine live process-local handle");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: {
+          ...correctAuthor,
+        } as LocalAuthorEpochCustodyV1,
+        initializedRoom: fixture.context,
+      }),
+    ).rejects.toThrow("genuine live process-local handle");
+    await expect(
+      createVerifiedLocalPresenceKeyBindingV1({
+        localPresenceEvidence: fixture.localEvidence,
+        receiverCustody: fixture.custody,
+        authorEpochCustody: correctAuthor,
+        initializedRoom: {
+          ...fixture.context,
+        } as OperationValidationContext,
+      }),
+    ).rejects.toThrow("createOperationValidationContext");
+  });
+
+  test("author retirement invalidates only the binding and leaves historical receiver custody usable", async () => {
+    const fixture = await buildFixture();
+    const authorCustody = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+    );
+    const binding = await createLocalPresenceKeyBinding(fixture, {
+      authorEpochCustody: authorCustody,
+    });
+
+    destroyLocalAuthorEpochCustodyV1(authorCustody);
+    destroyLocalAuthorEpochCustodyV1(authorCustody);
+    expect(() => snapshotVerifiedLocalPresenceKeyBindingV1(binding)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() =>
+      snapshotLocalHelloReceiverCustodyV1(fixture.custody),
+    ).not.toThrow();
+    expect(() =>
+      destroyVerifiedLocalPresenceKeyBindingV1(binding),
+    ).not.toThrow();
+    expect(() =>
+      destroyVerifiedLocalPresenceKeyBindingV1(binding),
+    ).not.toThrow();
+  });
+
+  test("receiver or stable-key retirement invalidates a binding without blocking cleanup", async () => {
+    const receiverFixture = await buildFixture();
+    const receiverAuthor = await createAuthorCustody(
+      receiverFixture.local,
+      receiverFixture.context,
+    );
+    const receiverBinding = await createLocalPresenceKeyBinding(
+      receiverFixture,
+      { authorEpochCustody: receiverAuthor },
+    );
+    destroyLocalHelloReceiverCustodyV1(receiverFixture.custody);
+    expect(() =>
+      snapshotVerifiedLocalPresenceKeyBindingV1(receiverBinding),
+    ).toThrow("genuine live process-local handle");
+    expect(() =>
+      destroyVerifiedLocalPresenceKeyBindingV1(receiverBinding),
+    ).not.toThrow();
+
+    const stableFixture = await buildFixture();
+    const stableCustody = await createStableCustody(stableFixture.local, 19n);
+    const receiverCustody = await createLocalHelloReceiverCustodyV1({
+      module,
+      localPresenceEvidence: stableFixture.localEvidence,
+      recipientHybridKemSecretSeed: stableFixture.local.receiverSecretSeed,
+      roomRoot: stableFixture.roomRoot,
+      localStableIdentityCustody: stableCustody,
+      receiverKeyRecordRevision: 20n,
+    });
+    extraCustodies.add(receiverCustody);
+    const authorCustody = await createAuthorCustody(
+      stableFixture.local,
+      stableFixture.context,
+    );
+    const binding = await createLocalPresenceKeyBinding(stableFixture, {
+      receiverCustody,
+      authorEpochCustody: authorCustody,
+    });
+
+    destroyLocalStableIdentityCustodyV1(stableCustody);
+    expect(() => snapshotVerifiedLocalPresenceKeyBindingV1(binding)).toThrow(
+      "genuine live process-local handle",
+    );
+    expect(() =>
+      destroyVerifiedLocalPresenceKeyBindingV1(binding),
+    ).not.toThrow();
+    expect(() =>
+      destroyLocalHelloReceiverCustodyV1(receiverCustody),
+    ).not.toThrow();
+  });
+
+  test("rechecks exact handles after ownership verification yields", async () => {
+    const fixture = await buildFixture();
+    const authorCustody = await createAuthorCustody(
+      fixture.local,
+      fixture.context,
+    );
+    const pending = createVerifiedLocalPresenceKeyBindingV1({
+      localPresenceEvidence: fixture.localEvidence,
+      receiverCustody: fixture.custody,
+      authorEpochCustody: authorCustody,
+      initializedRoom: fixture.context,
+    });
+    destroyLocalAuthorEpochCustodyV1(authorCustody);
+    await expect(pending).rejects.toThrow("genuine live process-local handle");
+    expect(() =>
+      snapshotLocalHelloReceiverCustodyV1(fixture.custody),
+    ).not.toThrow();
   });
 });

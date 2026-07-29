@@ -7,16 +7,13 @@
  * public identity. This internal module is absent from the package barrel.
  */
 
-import { snapshotByteInput } from "../cryptography/byteInput";
-import { bytesEqual } from "./canonicalSchema";
-import { keyPairFromSeed } from "../cryptography/ed25519";
 import {
-  crypto_sign_ed25519_SECRETKEYBYTES,
-  crypto_sign_ed25519_SEEDBYTES,
-} from "../cryptography/interfaces";
+  captureConsistentLocalEd25519KeyMaterial,
+  wipeOwnedLocalEd25519KeyMaterial,
+} from "./localEd25519KeyMaterial";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { SignKeyPair } from "../cryptography/interfaces";
+import type { OwnedLocalEd25519KeyMaterial } from "./localEd25519KeyMaterial";
 
 const U64_MAX = 0xffffffffffffffffn;
 
@@ -52,8 +49,7 @@ const fail = (message: string): never => {
 };
 
 interface PrivateLocalStableIdentityCustody {
-  readonly stableEd25519SecretKey: Uint8Array;
-  readonly localStableEd25519PublicKey: Uint8Array;
+  readonly keyMaterial: OwnedLocalEd25519KeyMaterial;
   readonly localIdentityKeyRecordRevision: bigint;
 }
 
@@ -87,42 +83,36 @@ const requireCustodyState = (
 export const createLocalStableIdentityCustodyV1 = async (
   options: CreateLocalStableIdentityCustodyOptionsV1,
 ): Promise<LocalStableIdentityCustodyV1> => {
-  const cryptoModule = options.module;
-  let privateSecretKey: Uint8Array | undefined;
-  let derivedKeyPair: SignKeyPair | undefined;
+  let keyMaterial: OwnedLocalEd25519KeyMaterial | undefined;
   let transferred = false;
 
   try {
-    privateSecretKey = snapshotByteInput(
-      options.stableEd25519SecretKey,
-      "localStableIdentityCustody: stable Ed25519 secret key",
-      { exactLength: crypto_sign_ed25519_SECRETKEYBYTES },
-    );
-    const localIdentityKeyRecordRevision = requireU64(
-      "localIdentityKeyRecordRevision",
-      options.localIdentityKeyRecordRevision,
-    );
-    derivedKeyPair = await keyPairFromSeed(
-      privateSecretKey.subarray(0, crypto_sign_ed25519_SEEDBYTES),
-      cryptoModule,
-    );
-    if (!bytesEqual(derivedKeyPair.secretKey, privateSecretKey))
-      return fail(
-        "stable Ed25519 secret key has an inconsistent public suffix",
-      );
+    let localIdentityKeyRecordRevision = 0n;
+    keyMaterial = await captureConsistentLocalEd25519KeyMaterial({
+      module: options.module,
+      secretKey: options.stableEd25519SecretKey,
+      inputLabel: "localStableIdentityCustody: stable Ed25519 secret key",
+      validateBeforeDerivation: () => {
+        localIdentityKeyRecordRevision = requireU64(
+          "localIdentityKeyRecordRevision",
+          options.localIdentityKeyRecordRevision,
+        );
+      },
+      rejectInconsistentPublicSuffix: () =>
+        fail("stable Ed25519 secret key has an inconsistent public suffix"),
+    });
 
     const handle = Object.freeze({}) as LocalStableIdentityCustodyV1;
     genuineCustodies.add(handle);
     custodyStates.set(handle, {
-      stableEd25519SecretKey: privateSecretKey,
-      localStableEd25519PublicKey: Uint8Array.from(derivedKeyPair.publicKey),
+      keyMaterial,
       localIdentityKeyRecordRevision,
     });
     transferred = true;
     return handle;
   } finally {
-    derivedKeyPair?.secretKey.fill(0);
-    if (!transferred) privateSecretKey?.fill(0);
+    if (!transferred && keyMaterial !== undefined)
+      wipeOwnedLocalEd25519KeyMaterial(keyMaterial);
   }
 };
 
@@ -133,9 +123,7 @@ export const snapshotLocalStableIdentityCustodyV1 = (
   const state = requireCustodyState(custody);
   return {
     version: 1,
-    localStableEd25519PublicKey: Uint8Array.from(
-      state.localStableEd25519PublicKey,
-    ),
+    localStableEd25519PublicKey: Uint8Array.from(state.keyMaterial.publicKey),
     localIdentityKeyRecordRevision: state.localIdentityKeyRecordRevision,
   };
 };
@@ -157,6 +145,6 @@ export const destroyLocalStableIdentityCustodyV1 = (
     return fail("custody must be a genuine process-local handle");
   const state = custodyStates.get(custody);
   if (state === undefined) return;
-  state.stableEd25519SecretKey.fill(0);
+  wipeOwnedLocalEd25519KeyMaterial(state.keyMaterial);
   custodyStates.delete(custody);
 };

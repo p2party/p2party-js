@@ -1769,3 +1769,67 @@ export const coreRoomStateV1Schema = record("CoreRoomStateV1", [
   },
   { name: "operationsDigest", type: bytes32 },
 ]);
+
+/* ------------------------------------------------------------------ *
+ * Section 4.10 — local planner and topology persistence
+ * ------------------------------------------------------------------ */
+
+export const connectionPlannerModeV1Schema = enumOf("ConnectionPlannerModeV1", [
+  "explicit",
+  "sparse-ring",
+  "full-mesh-small-room",
+]);
+
+export const connectionPlannerPolicyV1Schema = record(
+  "ConnectionPlannerPolicyV1",
+  [
+    { name: "version", type: u8 },
+    { name: "mode", type: connectionPlannerModeV1Schema },
+    { name: "sparseRadius", type: u32 },
+    { name: "maxProvisionalEdges", type: u32 },
+    { name: "maxActiveStableEdges", type: u32 },
+    { name: "fullMeshMaxMembers", type: u32 },
+    { name: "allowOnDemandEdges", type: bool },
+  ],
+);
+
+export const provisionalTopologyEdgeV1Schema = record(
+  "ProvisionalTopologyEdgeV1",
+  [
+    { name: "pairEdgeId", type: bytes32 },
+    {
+      name: "endpointPresenceOperationIds",
+      type: array(bytes32, 2),
+    },
+    { name: "remoteLocalPeerId", type: text(51) },
+  ],
+);
+
+export const activeStableTopologyEdgeV1Schema = record(
+  "ActiveStableTopologyEdgeV1",
+  [
+    { name: "stableEdgeId", type: bytes32 },
+    { name: "remoteLocalPeerId", type: text(51) },
+  ],
+);
+
+export const plannerAndExplicitStateV1Schema = record(
+  "PlannerAndExplicitStateV1",
+  [
+    { name: "version", type: u8 },
+    { name: "roomContextId", type: bytes32 },
+    { name: "plannerPolicy", type: connectionPlannerPolicyV1Schema },
+    {
+      name: "requestedExplicitPeerIds",
+      type: array(text(51), MAX_REGISTRY_ENTRIES),
+    },
+    {
+      name: "provisionalEdges",
+      type: array(provisionalTopologyEdgeV1Schema, MAX_REGISTRY_ENTRIES),
+    },
+    {
+      name: "activeStableEdges",
+      type: array(activeStableTopologyEdgeV1Schema, MAX_REGISTRY_ENTRIES),
+    },
+  ],
+);

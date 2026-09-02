@@ -1,0 +1,122 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>p2party desync probe</title>
+<script>
+  window.process = { env: { NODE_ENV: "production" }, versions: {}, platform: "browser", nextTick: (f) => setTimeout(f, 0) };
+  window.global = window;
+  // Headless Chromium reports hidden; present visible so scheduled cover runs.
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+
+  // ---- console capture with IN-PAGE timestamps (installed BEFORE the bundle) ----
+  // Playwright's console events are timestamped when the driver receives them,
+  // which is useless for a page whose process is SIGSTOPped: every line the
+  // page logged around the freeze arrives in one burst at thaw. Each line is
+  // therefore also recorded here with the page's own Date.now().
+  (() => {
+    const T0 = Date.now();
+    const lines = [];
+    const fmt = (a) => {
+      if (typeof a === "string") return a;
+      if (a instanceof Error) return a.message;
+      try { const s = JSON.stringify(a); return s.length > 400 ? s.slice(0, 400) + "..." : s; } catch { return String(a); }
+    };
+    for (const kind of ["log", "info", "warn", "error", "debug"]) {
+      const orig = console[kind].bind(console);
+      console[kind] = (...args) => { if (lines.length < 20000) lines.push({ t: Date.now(), rel: Date.now() - T0, kind, text: args.map(fmt).join(" ").slice(0, 600) }); orig(...args); };
+    }
+    window.__consoleLines = () => lines;
+    window.__pageT0 = T0;
+  })();
+
+  // ---- RTCPeerConnection instrumentation (installed BEFORE the bundle) ----
+  // Keeps a registry of every RTCPeerConnection ever constructed on this page
+  // with creation time, live states, DTLS fingerprints (from local/remote SDP)
+  // and its data channels. window.__pcs() dumps it; window.__pcEvents() is the
+  // per-PC state-change timeline.
+  (() => {
+    const Native = window.RTCPeerConnection;
+    const registry = [];
+    const events = [];
+    const T0 = Date.now();
+    let seq = 0;
+    const fp = (desc) => {
+      if (!desc || !desc.sdp) return null;
+      const m = desc.sdp.match(/a=fingerprint:(\S+)\s+([0-9A-Fa-f:]+)/);
+      return m ? m[2].slice(0, 23) : null; // first 8 bytes of the hash is plenty to compare
+    };
+    // host candidates (ip:port) from an SDP, so the driver can target A's UDP sockets
+    const hostCands = (desc) => {
+      if (!desc || !desc.sdp) return [];
+      const out = [];
+      for (const m of desc.sdp.matchAll(/a=candidate:\S+ \d+ udp \d+ (\S+) (\d+) typ host/g)) out.push({ ip: m[1], port: +m[2] });
+      return out;
+    };
+    const iceUfrag = (desc) => {
+      if (!desc || !desc.sdp) return null;
+      const m = desc.sdp.match(/a=ice-ufrag:(\S+)/);
+      return m ? m[1] : null;
+    };
+    class Instrumented extends Native {
+      constructor(...args) {
+        super(...args);
+        const rec = { id: ++seq, createdAt: Date.now() - T0, createdAtAbs: Date.now(), token: Math.random().toString(36).slice(2, 10), pc: this, channels: [] };
+        registry.push(rec);
+        this.__pcId = rec.id;
+        this.addEventListener("datachannel", (e) => { rec.channels.push(e.channel); watchChannel(rec, e.channel, "in"); });
+        for (const ev of ["connectionstatechange", "iceconnectionstatechange", "signalingstatechange", "icegatheringstatechange"]) {
+          this.addEventListener(ev, () => {
+            events.push({ t: Date.now() - T0, pc: rec.id, ev, cs: this.connectionState, ics: this.iceConnectionState, ss: this.signalingState, peer: (this.withPeerId || "").slice(0, 8) });
+          });
+        }
+        events.push({ t: rec.createdAt, pc: rec.id, ev: "created" });
+      }
+      createDataChannel(...args) {
+        const ch = super.createDataChannel(...args);
+        const rec = registry.find((r) => r.pc === this);
+        if (rec) { rec.channels.push(ch); watchChannel(rec, ch, "out"); }
+        return ch;
+      }
+      close() {
+        const rec = registry.find((r) => r.pc === this);
+        events.push({ t: Date.now() - T0, pc: rec ? rec.id : -1, ev: "close()", peer: (this.withPeerId || "").slice(0, 8), stack: (new Error().stack || "").split("\n").slice(2, 5).join(" | ") });
+        return super.close();
+      }
+    }
+    const watchChannel = (rec, ch, dir) => {
+      const base = { pc: rec.id, label: ch.label, dir };
+      ch.addEventListener("open", () => events.push({ t: Date.now() - T0, ...base, ev: "dc-open" }));
+      ch.addEventListener("close", () => events.push({ t: Date.now() - T0, ...base, ev: "dc-close" }));
+      ch.addEventListener("error", (e) => events.push({ t: Date.now() - T0, ...base, ev: "dc-error", err: String(e && e.error && e.error.message || e) }));
+    };
+    window.RTCPeerConnection = Instrumented;
+    window.__pcs = () => registry.map((rec) => {
+      const pc = rec.pc;
+      let stats = null;
+      return {
+        id: rec.id,
+        token: rec.token,
+        createdAt: rec.createdAt,
+        createdAtAbs: rec.createdAtAbs,
+        roomId: (pc.roomId || "").slice(0, 8),
+        withPeerId: pc.withPeerId || "",
+        withPeerPublicKey: pc.withPeerPublicKey || "",
+        connectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        signalingState: pc.signalingState,
+        iceGatheringState: pc.iceGatheringState,
+        localFingerprint: fp(pc.localDescription),
+        remoteFingerprint: fp(pc.remoteDescription),
+        localUfrag: iceUfrag(pc.localDescription),
+        localHostCandidates: hostCands(pc.localDescription),
+        remoteHostCandidates: hostCands(pc.remoteDescription),
+        remoteUfrag: iceUfrag(pc.remoteDescription),
+        hasMainChannel: !!pc.mainChannel,
+        handlers: { onconnectionstatechange: !!pc.onconnectionstatechange, ondatachannel: !!pc.ondatachannel, onnegotiationneeded: !!pc.onnegotiationneeded },
+        channels: rec.channels.map((c) => ({ label: c.label, id: c.id, readyState: c.readyState })),
+      };
+    });
+    window.__pcEvents = () => events;
+  })();
+</script>
+<script src="./worker-inject.js"></script>
+</head><body><script type="module" src="./app-bundle.js"></script></body></html>

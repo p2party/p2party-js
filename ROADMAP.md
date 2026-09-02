@@ -1,6 +1,7 @@
 # Roadmap
 
-Direction, not a schedule. Nothing here carries a date, and anything in
+Direction, not a schedule. Nothing here is promised by a date — the only dates
+below say when a measurement or an observation was taken — and anything in
 "Research directions" may turn out to be a bad idea once it is studied
 properly. What the current source release contains is described in the
 [README](README.md) and bounded honestly in the
@@ -12,42 +13,109 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 Implemented and verified in the `0.14.4` SDK release candidate:
 
-> `0.14.4` is not a statement about the currently deployed service. The
-> coordinated SDK, signaling-server, and frontend deployment is still pending.
+> The service already runs this build. As observed on 2026-09-02,
+> `https://p2party.com` serves the `0.14.4` bundle — the `libcrypto.wasm` it
+> self-hosts is byte-identical to the one inside the vendored
+> `p2party-0.14.4.tgz` — and `https://signaling.p2party.com/health` answers
+> `{"status":"ok","protocolVersion":4,"version":"0.1.1"}`. What is still
+> outstanding is distribution, not deployment: `0.14.4` is not on npm
+> (`npm view p2party version` answers `0.14.3`), nothing is uploaded under
+> `https://cdn.p2party.com/@0.14.4/`, and the local commits in all three
+> repositories are unpushed.
 
-- protocol v4 — hybrid interactive 3DH ⊕ ML-KEM bootstrap, Ed25519-pinned
-  identities, three chained confirmation flights, per-edge Double Ratchet;
+- protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets
+  are combined by `HKDF-Extract` over a fixed-order concatenation —
+  `3DH ‖ ML-KEM`, or `CPace-ISK ‖ 3DH ‖ ML-KEM` in a PIN room — expanded under
+  a domain separator that names the mode and the ML-KEM parameter set. It is
+  not an XOR, and it is deliberately not X-Wing: see the comment and
+  `hybridKdfDomain` in `src/handlers/handshakeCore.ts`. Three chained
+  confirmation flights and a per-edge Double Ratchet follow;
+- session-scoped Ed25519 identity anchoring — an edge authenticates against
+  the Ed25519 key the signaling roster supplied for that session
+  (`handleWebSocketMessage.ts` copies `message.peers[i].publicKey` into
+  `peerPublicKey`, and the handshake reads it back as
+  `epc.withPeerPublicKey`). The SDK has no automatic trust-on-first-use store.
+  The one durable pin is the opt-in address book —
+  `addPeerToAddressBook` plus `onlyAllowConnectionsFromAddressBook`, which the
+  application must switch on per room — and it filters who a room stays
+  connected to rather than being checked inside the handshake;
 - sparse post-quantum healing — the OFFER/ADVANCE/ACK epoch exchange, with
   persist-before-dispatch and application traffic blocked mid-exchange;
 - room-wide scheduled timing cover — policy-pinned cadence, lanes, and frames
   per cell, emitted whether or not there is data to send;
 - reliable transfer — per-message channels, authenticated receipts, selective
-  retransmission, reconnect resume, files to 10 GiB;
+  retransmission, and resume across a replaced or re-authenticated peer
+  connection while the sending page stays alive. There is no sender-side
+  resume across a page reload: an in-flight send does not survive one. A
+  receiver does — on a fresh per-message channel it replays receipts for the
+  chunk leaf-hashes it durably holds (`handleOpenChannel.ts`), so a still-live
+  sender resends only the gaps. `MAX_MESSAGE_SIZE` enforces a 10 GiB ceiling
+  (`src/utils/constants.ts`) — an enforced limit, not a transfer that has been
+  demonstrated at that size;
 - a store-free `p2party/session` API for non-browser transports.
+
+One caveat belongs here rather than in a footnote. The post-connect DTLS
+fingerprint tripwire — comparing the live certificate from `getStats()` against
+the fingerprint in the SDP — is **skipped** on engines that report no
+`transport` or `certificate` statistics, which today means Firefox
+(`src/handlers/handleHandshake.ts`). The library warns once per session and
+continues. What survives there is the transcript binding: both SDP fingerprints
+are authenticated inside the handshake, so a rewritten SDP still produces a
+transcript both peers reject. What is lost is the narrower check that the DTLS
+transport terminates on the certificate the SDP advertised.
 
 ## Near term
 
 **Close the verification gaps.** Three properties are implemented and believed
-correct but not yet demonstrated end to end: PIN backoff escalation under
+correct but still not demonstrated end to end: PIN backoff escalation under
 repeated wrong PINs, packet-trace indistinguishability at n > 2, and cover
 behaviour across a real network rather than loopback. Claims stay out of the
 README until a harness demonstrates them.
+
+The reconnect work in this cycle closed a fourth gap and left a fifth. What it
+demonstrated: two separate headless-Chromium processes against a Bun relay
+mirroring the signaling server, one process SIGSTOPped whole-tree with its UDP
+host-candidate buffers flooded — a phone asleep with the radio off. Across a
+seven-scenario matrix (baseline, socket drop, a 20 s freeze in each identity
+role with the socket dropped and with it kept, and a 45 s freeze) both sides
+reconverge and exchange byte-exact messages 0.5–6.5 s after wake, and four
+in-flight 8 MiB transfer configurations finish byte-exact with the sender
+reporting `delivered` — including the one that previously failed
+deterministically, now 3/3.
+
+What it did not do: this is n = 2 on loopback, so it moves neither the n > 2
+gap nor the real-network gap. And the harness itself is not in the repository —
+it was built in a scratch directory, so nobody can re-run it from a clone.
+Committing it is the near-term task; the behaviour it covers is meanwhile held
+by the unit suite, which the same commits extended test-first.
+
+One known follow-up, recorded rather than fixed: when a frozen _identity
+responder_ is carrying an in-flight transfer, convergence takes ~37 s instead
+of the ~5–7 s the other configurations show. The surviving transport's SCTP
+association accepts our new streams but not the peer's, so recovery waits out
+the 30 s handshake step timeout. The outcome is correct; the latency is not.
 
 **Independent security audit.** The protocol has had no third-party review.
 This is the single most valuable thing that could happen to the project, and
 no amount of internal testing substitutes for it.
 
-**Untangle the module graph.** 62 elementary import cycles remain between the
-store, the RTK Query layer, and the handlers, measured with `madge` on
-2026-07-27; an earlier estimate of "roughly eleven" counted clusters rather
-than cycles. They are latent initialization-order hazards, not current bugs —
+**Untangle the module graph.** 15 elementary import cycles remain, all of them
+in the same runtime cluster: `store.ts`, the RTK Query layer
+(`api/signalingServerApi.ts`, `api/webrtc/*`), and the handlers. Re-measured on
+2026-09-02 with `npx --yes madge --circular --extensions ts src/index.ts`; an
+earlier count of 62 was taken on 2026-07-27, and an earlier estimate of
+"roughly eleven" counted clusters rather than cycles. The number moves; the
+cluster does not. They are latent initialization-order hazards, not current bugs —
 but they are also what stands between the SDK and a second rendezvous
 transport, since no board client can reuse the peer-connection handlers without
 importing the WebSocket API.
 
 **Identity backup and restore.** Long-term Ed25519/X25519 identities currently
-live only in browser storage. Losing the profile loses the identity. A
-mnemonic backup and restore flow is the missing piece.
+live only in browser storage. Losing the profile loses the identity. The
+primitives exist — `generateMnemonic()` and `keyPairFromMnemonic()` in
+`src/cryptography/mnemonic.ts` — but nothing calls them: no flow in the SDK or
+the frontend derives an identity from a phrase, and the SDK's own test suite
+does not exercise them. The missing piece is the flow, not the cryptography.
 
 ## Research directions
 
@@ -71,10 +139,19 @@ trusted observer.
 
 This one has a written architecture ahead of the others:
 [the L2 blind-rendezvous spec](spec/spec-architecture-l2-blind-rendezvous.md)
-covers the presence board, pairwise inboxes, tiers, and release gates, and
-[the annotated bibliography](docs/rendezvous-prior-art.md) collects the
-verified prior art behind it. Neither is an implementation, and the spec's own
-gates keep `blind-meeting-point` disabled until they are met.
+covers the presence board, pairwise inboxes, tiers, and release gates. An
+annotated bibliography of the verified prior art behind it is maintained
+alongside the spec but is not published in this repository.
+
+It also has code. `src/blindRendezvous/` holds 31 modules and roughly 21,000
+lines with 29 test files behind them — the operation codec, admission policy,
+presence projection, carrier envelope and derivations. None of it is exported
+from `src/index.ts`, nothing outside that directory imports it, and
+`src/utils/roomConnectAdmission.ts` still throws
+`"Private rendezvous room connections are not wired yet"` for any
+`rendezvousMode` other than `legacy-signaling`. So: implemented components,
+unwired, held behind the spec's own release gates rather than behind missing
+code.
 
 **Finding peers across independently operated servers.** A room today lives on
 exactly one signaling service. Federating discovery is what makes self-hosting
@@ -143,6 +220,18 @@ binding, and uses its own domain-separated combiner — so none of the existing
 PQXDH or Double Ratchet proofs transfer to it directly. A ProVerif or
 CryptoVerif model in the style of Bhargavan et al.'s PQXDH verification would
 turn the current implementation claims into analysed ones.
+
+A first step exists and is explicitly not a proof. `formal/proverif/` holds an
+838-line symbolic model of the no-PIN pairwise bootstrap after triple
+confirmation, with `PROFILE_BASELINE` and `PROFILE_THREAT` query profiles in
+the C-preprocessor style of the PQXDH artifact. Both profiles preprocess
+cleanly with `cpp -P -traditional-cpp`. **Neither has ever been run**: ProVerif
+is not installed, so no parser or solver result has been recorded, and nothing
+in it may be cited as a verified property. `formal/proverif/README.md` states
+its own limits — the Ed25519 anchor is assumed pre-authenticated, and the
+symbolic `hybrid_extract` cannot say anything about whether the real combiner
+is robust. Installing ProVerif and getting both profiles through it, traces
+reviewed, is the next milestone.
 
 **Private swarm transfer.** A fail-closed BitTorrent extension carrying
 p2party sessions over fixed cells — BEP 3/10/27 for the base protocol and

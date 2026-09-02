@@ -4,12 +4,14 @@ import webrtcApi from ".";
 import { runRoomPeerExclusive } from "./negotiationLock";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import {
+  discardIceCandidatesForAttempt,
   enqueueConnectionIceCandidate,
   enqueuePendingIceCandidate,
   normalizeIceCandidate,
 } from "./pendingIceCandidates";
 import { candidateMatchesRemoteIceGeneration } from "./iceGeneration";
 import { repairIceTransportAfterCandidateFailure } from "./iceRepair";
+import { awaitPcOperation } from "./settleOnClose";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -54,9 +56,37 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
           epc.remoteDescription,
         )
       ) {
+        // The add is awaited through awaitPcOperation: close() aborts an
+        // in-flight addIceCandidate without ever settling its promise, and a
+        // plain await on that would hold this room/peer mutex — and, through
+        // the socket's serial ingress queue, every later signaling frame —
+        // forever.
+        let addFailed: boolean;
         try {
-          await epc.addIceCandidate(candidateInit);
+          const outcome = await awaitPcOperation(
+            epc,
+            epc.addIceCandidate(candidateInit),
+            { name: `addIceCandidate(${roomId}, ${peerId})` },
+          );
+          if (outcome === "closed") {
+            // The transport is gone and its own close path owns the follow-up.
+            // Everything buffered for this attempt died with it; another
+            // room's candidates for the same peer are untouched.
+            discardIceCandidatesForAttempt(
+              epc.iceCandidates,
+              iceCandidates,
+              roomId,
+              peerId,
+            );
+            return { data: undefined };
+          }
+          // A live transport that never answered is a failed add.
+          addFailed = outcome === "timeout";
         } catch {
+          addFailed = true;
+        }
+
+        if (addFailed) {
           const offerCollision =
             epc.makingOffer || (epc.signalingState as string) !== "stable";
           const isPolite = keyPair.peerId < epc.withPeerId;

@@ -13,6 +13,7 @@ import {
   detectRemoteTransportChange,
   resetEdgeAuthenticationForNewRemoteTransport,
 } from "./remoteTransportChange";
+import { awaitPcOperation } from "./settleOnClose";
 import { isIdentityInitiator } from "../../utils/identityRole";
 import { PROTOCOL_VERSION } from "../../utils/constants";
 
@@ -144,10 +145,29 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       return { data: undefined };
     }
 
+    // Every SDP operation below is awaited through awaitPcOperation. A
+    // connection that closes underneath an in-flight setLocalDescription /
+    // setRemoteDescription aborts it WITHOUT settling its promise and fires no
+    // event, so a plain await would hold this room/peer mutex — and, through
+    // the socket's strictly serial ingress queue, every later signaling frame
+    // on that socket — forever. "closed" abandons the attempt (nothing can be
+    // applied to a dead transport, and its own close path owns the follow-up);
+    // "timeout" is reported into the operation's existing failure branch.
+
     // Polite peer must rollback its local description before accepting remote offer
     if (offerCollision && isPolite) {
       try {
-        await epc.setLocalDescription({ type: "rollback" });
+        const rolledBack = await awaitPcOperation(
+          epc,
+          epc.setLocalDescription({ type: "rollback" }),
+          { name: `rollback(${roomId}, ${peerId})` },
+        );
+        if (rolledBack === "closed") {
+          discardIceForAttempt();
+          return { data: undefined };
+        }
+        if (rolledBack === "timeout")
+          throw new Error(`rollback did not settle for ${peerId}`);
         debugLog(`Polite peer rolled back local description for ${peerId}`);
       } catch (e) {
         console.error(`Failed to rollback for ${peerId}:`, e);
@@ -261,7 +281,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
 
     {
       try {
-        await epc.setRemoteDescription(description);
+        const applied = await awaitPcOperation(
+          epc,
+          epc.setRemoteDescription(description),
+          { name: `setRemoteDescription(${roomId}, ${peerId})` },
+        );
+        if (applied === "closed") {
+          discardIceForAttempt();
+          return { data: undefined };
+        }
+        if (applied === "timeout")
+          throw new Error(`setRemoteDescription did not settle for ${peerId}`);
       } catch (e: unknown) {
         // Handle ICE restart mismatch - if we receive an offer with new ICE credentials
         // but didn't request a restart, we need to accept the restart gracefully
@@ -282,9 +312,34 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           try {
             // Rollback and accept the restart
             if (epc.signalingState !== "stable") {
-              await epc.setLocalDescription({ type: "rollback" });
+              const rolledBack = await awaitPcOperation(
+                epc,
+                epc.setLocalDescription({ type: "rollback" }),
+                { name: `restart rollback(${roomId}, ${peerId})` },
+              );
+              if (rolledBack === "closed") {
+                discardIceForAttempt();
+                return { data: undefined };
+              }
+              if (rolledBack === "timeout")
+                throw new Error(`rollback did not settle for ${peerId}`, {
+                  cause: e,
+                });
             }
-            await epc.setRemoteDescription(description);
+            const applied = await awaitPcOperation(
+              epc,
+              epc.setRemoteDescription(description),
+              { name: `restart setRemoteDescription(${roomId}, ${peerId})` },
+            );
+            if (applied === "closed") {
+              discardIceForAttempt();
+              return { data: undefined };
+            }
+            if (applied === "timeout")
+              throw new Error(
+                `setRemoteDescription did not settle for ${peerId}`,
+                { cause: e },
+              );
           } catch (retryError) {
             console.error(
               `Failed to handle ICE restart for ${peerId}:`,
@@ -301,7 +356,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       }
       if (description.type === "offer") {
         try {
-          await epc.setLocalDescription();
+          const answered = await awaitPcOperation(
+            epc,
+            epc.setLocalDescription(),
+            { name: `setLocalDescription(${roomId}, ${peerId})` },
+          );
+          if (answered === "closed") {
+            discardIceForAttempt();
+            return { data: undefined };
+          }
+          if (answered === "timeout")
+            throw new Error(`setLocalDescription did not settle for ${peerId}`);
         } catch (error) {
           console.error(`setLocalDescription failed for ${peerId}:`, error);
           discardIceForAttempt();

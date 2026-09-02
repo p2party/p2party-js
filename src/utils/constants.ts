@@ -233,6 +233,18 @@ export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 export const SIGNALING_HEARTBEAT_TIMEOUT_MS = 25_000;
 export const SIGNALING_HEARTBEAT_CHECK_MS = 5_000;
 
+// Bound every RTCPeerConnection operation awaited inside a room/peer
+// negotiation critical section. close() aborts an in-flight addIceCandidate /
+// setLocalDescription / setRemoteDescription WITHOUT settling its promise and
+// fires no event, so an await on one can hang forever — holding the (room,
+// peer) mutex and, because the socket ingress queue is strictly serial, every
+// later signaling frame behind it. The poll interval is what "as soon as the
+// PC closes" costs; the budget only has to outlive a legitimately slow
+// operation on a live transport (a candidate add or SDP apply is milliseconds
+// of local work, so seconds are already generous).
+export const PC_OPERATION_POLL_MS = 100;
+export const PC_OPERATION_TIMEOUT_MS = 8_000;
+
 // Streaming send-side hash: read the file from disk one HASH_WINDOW_BYTES slice
 // at a time (O(1) memory — never the whole file) and feed it to the WASM
 // incremental SHA-512 in HASH_WASM_CHUNK_BYTES sub-chunks (the WASM heap buffer

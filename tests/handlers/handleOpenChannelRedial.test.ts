@@ -495,6 +495,7 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       roomId: ROOM_ID,
       peerId: PEER_ID,
       api,
+      dataChannels: [],
       reason: new Error("Remote DTLS certificate changed"),
     });
     const newLease = pc.epc.ratchetGateLease;

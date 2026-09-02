@@ -17,6 +17,15 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   mainChannel?: IRTCDataChannel;
   /** Gate ownership captured when this concrete transport is created. */
   ratchetGateLease: RatchetGateLease;
+  /**
+   * How many times this RTCPeerConnection has been re-bound IN PLACE onto a
+   * new remote DTLS certificate since it last authenticated. The re-bind
+   * budget (see decideRemoteTransportChangeResponse) reads it to guarantee
+   * that a peer which keeps presenting fresh certificates converges on a
+   * replacement transport instead of looping; the handshake success path
+   * clears it.
+   */
+  remoteTransportRebinds: number;
   /** Resolves once the per-transport WASM dependency is ready. */
   initialization?: Promise<void>;
   /**

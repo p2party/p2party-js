@@ -252,7 +252,12 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     //
     // - "reset-in-place": nothing proven against the old certificate has to
     //   be opened on the old SCTP association, so the browser renegotiates
-    //   DTLS on this PC and the edge simply re-authenticates on it.
+    //   DTLS on this PC and the edge simply re-authenticates on it. Every
+    //   channel of the generation it retires — `main` and the per-message
+    //   channels, which are gated on the lease being replaced — is closed and
+    //   unregistered with it, which is why `dataChannels` is handed over. At
+    //   most one such re-bind is granted before the transport must prove an
+    //   authentication, so this branch can never loop.
     // - "replace": this transport was authenticated and the peer's new
     //   certificate means our SCTP association is dead on the far side while
     //   still writable here. It is torn down through the transport-failure
@@ -327,6 +332,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           roomId,
           peerId,
           api,
+          dataChannels,
           reason: new Error(
             `Remote DTLS certificate changed (${roomId}, ${peerId})`,
           ),

@@ -206,6 +206,22 @@ afterEach(() => {
   forgetRetiredRemoteTransports(ROOM_ID, OTHER_PEER_ID);
 });
 
+const liveRatchetState = (
+  rootKey: Uint8Array,
+): NonNullable<IRTCPeerConnection["ratchetState"]> => ({
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
+  rootKey,
+  sendingChainKey: null,
+  receivingChainKey: null,
+  dhSelfPub: new Uint8Array(32),
+  dhSelfSec: new Uint8Array(32),
+  dhRemotePub: null,
+  Ns: 0,
+  Nr: 0,
+  PN: 0,
+  skipped: new Map<string, Uint8Array>(),
+});
+
 interface FakePeerConnectionOptions {
   peerPublicKey: string;
   signalingState: RTCSignalingState;
@@ -258,6 +274,7 @@ const fakePeerConnection = ({
     ignoreOffer: false,
     iceCandidates: [],
     ratchetGateLease: resetRatchetGate(ROOM_ID, PEER_ID),
+    remoteTransportRebinds: 0,
     signalingState,
     connectionState,
     remoteDescription:
@@ -267,21 +284,7 @@ const fakePeerConnection = ({
     localDescription: { type: "offer", sdp: fingerprintSdp("11") },
     ondatachannel: null,
     mainChannel: main?.channel,
-    ratchetState: authenticated
-      ? {
-          rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
-          rootKey,
-          sendingChainKey: null,
-          receivingChainKey: null,
-          dhSelfPub: new Uint8Array(32),
-          dhSelfSec: new Uint8Array(32),
-          dhRemotePub: null,
-          Ns: 0,
-          Nr: 0,
-          PN: 0,
-          skipped: new Map<string, Uint8Array>(),
-        }
-      : undefined,
+    ratchetState: authenticated ? liveRatchetState(rootKey) : undefined,
     setRemoteDescription: async (next: RTCSessionDescriptionInit) => {
       appliedRemote.push(next);
       epc.remoteDescription = next as RTCSessionDescription;
@@ -324,6 +327,19 @@ const fakePeerConnection = ({
     main,
     rootKey,
   };
+};
+
+/**
+ * Drive the fake transport's signaling state from a test. The field is
+ * writable on the fake (its own SDP operations set it) but `readonly` on
+ * RTCPeerConnection, which is what the returned handle is typed as.
+ */
+const setSignalingState = (
+  epc: IRTCPeerConnection,
+  signalingState: RTCSignalingState,
+): void => {
+  (epc as unknown as { signalingState: RTCSignalingState }).signalingState =
+    signalingState;
 };
 
 const fakeApi = (
@@ -529,6 +545,8 @@ describe("setDescriptionQuery remote transport binding", () => {
     expect(
       isCurrentRatchetGateLease(ROOM_ID, PEER_ID, nextEpc.ratchetGateLease),
     ).toBe(true);
+    // A fresh transport starts with a clean in-place re-bind budget.
+    expect(nextEpc.remoteTransportRebinds).toBe(0);
 
     // The offer was applied on the fresh transport and answered from it.
     expect(next.appliedRemote.map((d) => d.type)).toEqual(["offer"]);
@@ -773,6 +791,108 @@ describe("setDescriptionQuery remote transport binding", () => {
       }),
     ]);
     expect(pc.createdLabels).toEqual([]);
+    expect(ofType(dispatched, setConnectingToPeers.type)).toEqual([]);
+    // Exactly one in-place re-bind is now on the record for this transport.
+    expect(pc.epc.remoteTransportRebinds).toBe(1);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a second fingerprint change on a transport that never authenticated after its re-bind replaces it", async () => {
+    // The livelock this bound exists for: our re-bound PC keeps its ICE
+    // connection, so neither an ICE failure nor the grace timer ever replaces
+    // it and our LOCAL certificate never changes — while the peer, which
+    // retired that certificate when it tore the edge down, mints a new one
+    // every round and discards each answer we produce. Re-binding a second
+    // time in place would repeat that forever.
+    const pc = fakePeerConnection({
+      peerPublicKey: LOWER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api, dispatched } = fakeApi(HIGHER_PUBLIC_KEY);
+    freshTransports();
+
+    const first = await applyDescription(
+      pc.epc,
+      description("answer", "bb"),
+      api,
+      LOWER_PUBLIC_KEY,
+    );
+    expect(first.disconnects).toEqual([]);
+    expect(pc.epc.remoteTransportRebinds).toBe(1);
+    // Nothing authenticated on it since: no ratchet, an unsettled gate, no main.
+    expect(pc.epc.ratchetState).toBeUndefined();
+    expect(pc.epc.mainChannel).toBeUndefined();
+    const reboundSdp = pc.epc.remoteDescription?.sdp;
+
+    // We ICE-restarted on the re-bound transport; the peer answers from yet
+    // another fresh one.
+    setSignalingState(pc.epc, "have-local-offer");
+    const second = await applyDescription(
+      pc.epc,
+      description("answer", "cc"),
+      api,
+      LOWER_PUBLIC_KEY,
+    );
+
+    // This time the transport goes through the transport-failure path...
+    expect(second.disconnects).toEqual([{ roomId: ROOM_ID, peerId: PEER_ID }]);
+    expect(pc.closes.count).toBe(1);
+    expect(second.peerConnections).toEqual([]);
+    // ...the certificate it was bound to is retired so a late answer from the
+    // peer's old transport can never bind our replacement...
+    expect(isRetiredRemoteTransport(ROOM_ID, PEER_ID, reboundSdp!)).toBe(true);
+    // ...the answer that belonged to its own offer was discarded, and the
+    // roster round rebuilds the edge on a fresh certificate of ours.
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["answer"]);
+    expect(freshTransports()).toEqual([]);
+    expect(ofType(dispatched, setConnectingToPeers.type)).toEqual([REDIAL()]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a transport that authenticated after its re-bind may re-bind in place again", async () => {
+    const pc = fakePeerConnection({
+      peerPublicKey: LOWER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api, dispatched } = fakeApi(HIGHER_PUBLIC_KEY);
+
+    const first = await applyDescription(
+      pc.epc,
+      description("answer", "bb"),
+      api,
+      LOWER_PUBLIC_KEY,
+    );
+    expect(first.disconnects).toEqual([]);
+    expect(pc.epc.remoteTransportRebinds).toBe(1);
+
+    // The replacement handshake ran to completion on this same transport:
+    // handleOpenChannel's post-runHandshake success path installs the ratchet
+    // and clears the counter, so a long-lived edge that legitimately re-binds
+    // once per reconnect is never penalised.
+    pc.epc.ratchetState = liveRatchetState(new Uint8Array(32).fill(9));
+    pc.epc.remoteTransportRebinds = 0;
+    setSignalingState(pc.epc, "have-local-offer");
+
+    const second = await applyDescription(
+      pc.epc,
+      description("answer", "cc"),
+      api,
+      LOWER_PUBLIC_KEY,
+    );
+
+    expect(second.disconnects).toEqual([]);
+    expect(pc.closes.count).toBe(0);
+    expect(second.peerConnections).toEqual([pc.epc]);
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["answer", "answer"]);
+    expect(pc.epc.remoteTransportRebinds).toBe(1);
     expect(ofType(dispatched, setConnectingToPeers.type)).toEqual([]);
 
     resetRatchetGate(ROOM_ID, PEER_ID);

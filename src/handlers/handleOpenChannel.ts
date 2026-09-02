@@ -800,6 +800,12 @@ export const handleOpenChannel = async (
             handshakeLease,
             ratchetGateLease,
           );
+          // This transport has now proven an authentication, so the in-place
+          // re-bind budget it may have spent is refunded: a long-lived edge
+          // that legitimately re-binds once per reconnect is never pushed into
+          // a replacement, while consecutive re-binds that authenticate
+          // nothing still converge on one (decideRemoteTransportChangeResponse).
+          epc.remoteTransportRebinds = 0;
           api.dispatch(
             setPeerHandshakeStatus({
               roomId,

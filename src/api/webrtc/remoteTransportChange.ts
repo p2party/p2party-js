@@ -9,7 +9,7 @@ import { parseFingerprintFromSdp } from "../../utils/sdpFingerprint";
 import { debugLog } from "../../utils/debug";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { IRTCPeerConnection } from "./interfaces";
+import type { IRTCDataChannel, IRTCPeerConnection } from "./interfaces";
 
 /**
  * True iff both SDPs declare a sha-256 DTLS fingerprint and the two differ.
@@ -63,12 +63,32 @@ export const isEdgeAuthenticatedOnTransport = (
   isRatchetGateOpen(roomId, peerId, epc.ratchetGateLease) ||
   epc.mainChannel?.readyState === "open";
 
+/**
+ * True iff this transport COMPLETED an edge authentication: a live ratchet, or
+ * the per-peer gate open under its own lease.
+ *
+ * Deliberately narrower than `isEdgeAuthenticatedOnTransport`, which also
+ * counts an open `main` — a handshake merely in flight. The re-bind budget
+ * below has to distinguish "this transport proved something" from "this
+ * transport is trying again", and an open `main` is the latter.
+ */
+const hasProvenEdgeAuthentication = (
+  epc: Pick<IRTCPeerConnection, "ratchetState" | "ratchetGateLease">,
+  roomId: string,
+  peerId: string,
+): boolean =>
+  epc.ratchetState !== undefined ||
+  isRatchetGateOpen(roomId, peerId, epc.ratchetGateLease);
+
 export type RemoteTransportChangeResponse = "reset-in-place" | "replace";
 
 export interface RemoteTransportChangeDecisionParams {
   epc: Pick<
     IRTCPeerConnection,
-    "ratchetState" | "ratchetGateLease" | "mainChannel"
+    | "ratchetState"
+    | "ratchetGateLease"
+    | "mainChannel"
+    | "remoteTransportRebinds"
   >;
   roomId: string;
   peerId: string;
@@ -104,6 +124,19 @@ export interface RemoteTransportChangeDecisionParams {
  *   clean handshake. Replacing here would instead leave the peer's fresh PC
  *   bound to our closed one with nothing to re-offer to our channel-less
  *   replacement (a never-connected transport does not re-dial on failure).
+ *
+ * All of that is bounded by one invariant: AT MOST ONE in-place re-bind per
+ * unauthenticated transport. An in-place re-bind changes only the REMOTE
+ * certificate — ours is minted with the RTCPeerConnection and lives as long as
+ * it does. A PC whose ICE stays connected never fails, so neither the
+ * ICE-failure re-dial nor the grace-timer teardown ever replaces it, and it
+ * keeps answering with a certificate the peer may already have retired (T9)
+ * while the peer keeps offering from ever newer ones: a livelock in which both
+ * sides negotiate forever and no `main` ever opens. Requiring the first
+ * re-bind to have actually authenticated before granting a second one caps the
+ * loop at one round — the second fingerprint change replaces the transport,
+ * which mints a new local certificate the peer has never retired, and the edge
+ * converges.
  */
 export const decideRemoteTransportChangeResponse = ({
   epc,
@@ -112,6 +145,11 @@ export const decideRemoteTransportChangeResponse = ({
   descriptionType,
   isInitiator,
 }: RemoteTransportChangeDecisionParams): RemoteTransportChangeResponse => {
+  if (
+    epc.remoteTransportRebinds > 0 &&
+    !hasProvenEdgeAuthentication(epc, roomId, peerId)
+  )
+    return "replace";
   if (!isEdgeAuthenticatedOnTransport(epc, roomId, peerId))
     return "reset-in-place";
   if (descriptionType === "offer") return "replace";
@@ -123,8 +161,48 @@ export interface ResetEdgeAuthenticationParams {
   roomId: string;
   peerId: string;
   api: Pick<BaseQueryApi, "dispatch">;
+  /**
+   * The shared open-channel registry. Passed in explicitly (the caller already
+   * holds it) so this helper stays store-free and unit-testable: it owns the
+   * retirement of the generation's channels, which live in BOTH this array and
+   * `epc.messageChannels`.
+   */
+  dataChannels: IRTCDataChannel[];
   reason: Error;
 }
+
+/** Drop exactly this channel object from the shared open-channel registry. */
+const unregisterDataChannel = (
+  channel: IRTCDataChannel,
+  dataChannels: IRTCDataChannel[],
+): void => {
+  for (let index = dataChannels.length - 1; index >= 0; index--)
+    if (dataChannels[index] === channel) dataChannels.splice(index, 1);
+};
+
+/**
+ * Retire one non-main channel of the generation being dropped: release its
+ * protocol accounting, detach every handler, close it, and unregister it from
+ * both the edge's set and the shared array. Same operation, same order, as
+ * disconnectFromPeerQuery's channel sweep — an already-closed channel is
+ * released and unregistered but never re-closed.
+ */
+const releaseRetiredChannel = (
+  channel: IRTCDataChannel,
+  epc: IRTCPeerConnection,
+  dataChannels: IRTCDataChannel[],
+): void => {
+  channel.releaseProtocolResources?.();
+  channel.onopen = null;
+  channel.onclose = null;
+  channel.onerror = null;
+  channel.onclosing = null;
+  channel.onmessage = null;
+  channel.onbufferedamountlow = null;
+  if (channel.readyState !== "closed") channel.close();
+  epc.messageChannels?.delete(channel);
+  unregisterDataChannel(channel, dataChannels);
+};
 
 /**
  * Drop everything that authenticated this room/peer edge against the previous
@@ -140,15 +218,28 @@ export interface ResetEdgeAuthenticationParams {
  * fingerprint pair. The old `main` is closed here; its onclose handler
  * observes a stale gate lease (replaced below) and returns early, so closing
  * it never cascades into a disconnectFromPeer of the edge we are keeping.
- * Per-message channels are left alone: they are gated on the ratchet lease
- * and drain/close on their own once their transfer settles or the lease
- * check fails.
+ *
+ * EVERY other channel of the retired generation goes with it. A per-message
+ * channel belongs to the ratchet generation that opened it: it captured that
+ * generation's gate lease, so once the lease is replaced here its next inbound
+ * frame can only be rejected as application data before peer authentication —
+ * and that rejection closes the channel, which on a live transfer cascades
+ * into closing `main` and tearing down the very edge this re-bind exists to
+ * keep. (Observed on the process-freeze harness: an 8 MiB transfer in flight
+ * across the freeze left its data channel OPEN on the surviving PC, and the
+ * first frame after the re-bind killed the edge.) The sender loses nothing:
+ * handleSendMessage treats a closed per-message channel as a resume and
+ * re-opens it on the re-authenticated edge. Cover lanes are NOT swept here —
+ * `teardownCoverEdge` above closes each one, and the close listener
+ * `registerCoverChannelUntilClose` installed unregisters it from both
+ * `epc.coverChannels` and the shared array.
  */
 export const resetEdgeAuthenticationForNewRemoteTransport = ({
   epc,
   roomId,
   peerId,
   api,
+  dataChannels,
   reason,
 }: ResetEdgeAuthenticationParams): void => {
   // Reject any in-flight handshake step on the old transcript first, then
@@ -176,13 +267,48 @@ export const resetEdgeAuthenticationForNewRemoteTransport = ({
   epc.messageKeyByMerkleRoot?.clear();
   epc.messageKeyByMerkleRoot = undefined;
   epc.serializeEdgeCryptoState = undefined;
+  // Cover lanes are owned by teardownCoverEdge, which closes every one of
+  // them; the close listener registerCoverChannelUntilClose installed then
+  // unregisters the lane from `epc.coverChannels` AND from the shared array.
+  // That listener fires on the close EVENT, so a lane can still be in the
+  // array a moment later — capture the set first and let its own teardown
+  // finish the job rather than racing it with a blunter release.
+  const coverLanes = new Set<IRTCDataChannel>(epc.coverChannels);
   teardownCoverEdge(epc);
   releaseScheduledReceipts(epc);
 
   const previousMain = epc.mainChannel;
   epc.mainChannel = undefined;
-  if (previousMain && previousMain.readyState !== "closed")
-    previousMain.close();
+
+  // The generation's channels: everything this edge tracks as a message
+  // channel, plus anything of this room/peer still registered in the shared
+  // array (a channel whose own accounting already released it, or one this
+  // edge never tracked). `main` is retired separately, below.
+  const retired = new Set<IRTCDataChannel>(epc.messageChannels);
+  for (const channel of dataChannels)
+    if (
+      channel !== previousMain &&
+      !coverLanes.has(channel) &&
+      channel.withPeerId === peerId &&
+      channel.roomIds.includes(roomId)
+    )
+      retired.add(channel);
+  for (const channel of retired)
+    releaseRetiredChannel(channel, epc, dataChannels);
+
+  // `main` keeps the treatment it has always had — closed once, detached from
+  // the connection, its own onclose left to observe the stale lease and return
+  // — and is dropped from the shared array, which nothing else does for it on
+  // this path.
+  if (previousMain) {
+    unregisterDataChannel(previousMain, dataChannels);
+    if (previousMain.readyState !== "closed") previousMain.close();
+  }
+
+  // One more in-place re-bind on the record for this transport. The handshake
+  // success path clears it, so decideRemoteTransportChangeResponse's budget
+  // only ever counts re-binds that authenticated nothing.
+  epc.remoteTransportRebinds = (epc.remoteTransportRebinds ?? 0) + 1;
 
   api.dispatch(
     setPeerHandshakeStatus({ roomId, peerId, status: "authenticating" }),

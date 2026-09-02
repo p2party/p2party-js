@@ -112,6 +112,7 @@ describe("detectRemoteTransportChange", () => {
 
 const ROOM_ID = "00000000-0000-4000-8000-00000000000a";
 const PEER_ID = "00000000-0000-4000-8000-00000000000b";
+const OTHER_PEER_ID = "00000000-0000-4000-8000-00000000000e";
 const PEER_PUBLIC_KEY = "cd".repeat(32);
 
 const fakeApi = (): {
@@ -128,6 +129,49 @@ const fakeApi = (): {
   return { api, dispatched };
 };
 
+interface ChannelFake {
+  channel: IRTCDataChannel;
+  closes: () => number;
+  releases: () => number;
+}
+
+/**
+ * The slice of an IRTCDataChannel the retirement sweep touches: a readyState
+ * that follows close(), the protocol-accounting hook, and every handler
+ * property it is expected to detach.
+ */
+const fakeChannel = (
+  label: string,
+  readyState: RTCDataChannelState,
+  { peerId = PEER_ID, roomId = ROOM_ID }: { peerId?: string; roomId?: string } = {},
+): ChannelFake => {
+  let state = readyState;
+  let closes = 0;
+  let releases = 0;
+  const channel = {
+    label,
+    withPeerId: peerId,
+    roomIds: [roomId],
+    get readyState() {
+      return state;
+    },
+    close: () => {
+      closes += 1;
+      state = "closed";
+    },
+    releaseProtocolResources: () => {
+      releases += 1;
+    },
+    onopen: () => undefined,
+    onclose: () => undefined,
+    onerror: () => undefined,
+    onclosing: () => undefined,
+    onmessage: () => undefined,
+    onbufferedamountlow: () => undefined,
+  } as unknown as IRTCDataChannel;
+  return { channel, closes: () => closes, releases: () => releases };
+};
+
 describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
   test("wipes the authenticated edge state and reopens the gate for a fresh handshake", async () => {
     const oldLease = resetRatchetGate(ROOM_ID, PEER_ID);
@@ -135,25 +179,10 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
     const oldGate = getRatchetGate(ROOM_ID, PEER_ID);
     setHandshakeChannel(ROOM_ID, PEER_ID, { send: () => undefined });
 
-    let mainCloses = 0;
-    let mainReadyState: RTCDataChannelState = "open";
-    const main = {
-      label: "main",
-      get readyState() {
-        return mainReadyState;
-      },
-      close: () => {
-        mainCloses += 1;
-        mainReadyState = "closed";
-      },
-    } as unknown as IRTCDataChannel;
-    const messageChannel = {
-      label: "message",
-      readyState: "open",
-      close: () => {
-        throw new Error("per-message channels must be left alone");
-      },
-    } as unknown as IRTCDataChannel;
+    const mainFake = fakeChannel("main", "open");
+    const main = mainFake.channel;
+    const messageFake = fakeChannel("message", "open");
+    const messageChannel = messageFake.channel;
     const rootKey = new Uint8Array(32).fill(1);
     const sendingChainKey = new Uint8Array(32).fill(2);
     const receivingChainKey = new Uint8Array(32).fill(3);
@@ -196,6 +225,7 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
         },
       },
     } as unknown as IRTCPeerConnection;
+    const dataChannels = [main, messageChannel];
     const { api, dispatched } = fakeApi();
 
     resetEdgeAuthenticationForNewRemoteTransport({
@@ -203,6 +233,7 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       roomId: ROOM_ID,
       peerId: PEER_ID,
       api,
+      dataChannels,
       reason: new Error("Remote DTLS certificate changed"),
     });
 
@@ -217,10 +248,13 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
     // Handshake inbox: nothing left to clear.
     expect(clearHandshakeChannel(ROOM_ID, PEER_ID)).toBe(false);
 
-    // Main channel closed and detached WITHOUT touching per-message channels.
-    expect(mainCloses).toBe(1);
+    // Main channel closed and detached, and the retired generation's
+    // per-message channels went with it.
+    expect(mainFake.closes()).toBe(1);
     expect(epc.mainChannel).toBeUndefined();
-    expect(epc.messageChannels?.has(messageChannel)).toBe(true);
+    expect(messageFake.closes()).toBe(1);
+    expect(epc.messageChannels?.has(messageChannel)).toBe(false);
+    expect(dataChannels).toEqual([]);
 
     // Crypto state wiped.
     for (const secret of [
@@ -255,14 +289,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
 
   test("a bare edge with no main or crypto state still gets a fresh gate and status", () => {
     const oldLease = resetRatchetGate(ROOM_ID, PEER_ID);
-    let mainCloses = 0;
-    const closedMain = {
-      label: "main",
-      readyState: "closed",
-      close: () => {
-        mainCloses += 1;
-      },
-    } as unknown as IRTCDataChannel;
+    const closedMainFake = fakeChannel("main", "closed");
+    const closedMain = closedMainFake.channel;
     const epc = {
       roomId: ROOM_ID,
       withPeerId: PEER_ID,
@@ -278,11 +306,12 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
         roomId: ROOM_ID,
         peerId: PEER_ID,
         api,
+        dataChannels: [],
         reason: new Error("Remote DTLS certificate changed"),
       }),
     ).not.toThrow();
 
-    expect(mainCloses).toBe(0);
+    expect(closedMainFake.closes()).toBe(0);
     expect(epc.mainChannel).toBeUndefined();
     expect(isCurrentRatchetGateLease(ROOM_ID, PEER_ID, oldLease)).toBe(false);
     expect(
@@ -295,6 +324,147 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
         status: "authenticating",
       }),
     ]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("releases every channel bound to the generation it retires", () => {
+    // A per-message channel belongs to the ratchet generation that opened it.
+    // One that survives the re-bind can only ever be rejected as unauthenticated
+    // application data, and that rejection closes `main` with it — which tears
+    // the whole edge down. Retire the generation's channels with its keys.
+    const oldLease = resetRatchetGate(ROOM_ID, PEER_ID);
+    const main = fakeChannel("main", "open");
+    const transfer = fakeChannel("file~aa", "open");
+    // Registered in the shared array by its onopen but no longer in
+    // messageChannels (its own accounting already released it).
+    const registered = fakeChannel("file~bb", "open");
+    const alreadyClosed = fakeChannel("file~cc", "closed");
+    const otherEdge = fakeChannel("file~dd", "open", { peerId: OTHER_PEER_ID });
+    const dataChannels = [
+      main.channel,
+      transfer.channel,
+      registered.channel,
+      alreadyClosed.channel,
+      otherEdge.channel,
+    ];
+    const epc = {
+      roomId: ROOM_ID,
+      withPeerId: PEER_ID,
+      withPeerPublicKey: PEER_PUBLIC_KEY,
+      ratchetGateLease: oldLease,
+      mainChannel: main.channel,
+      messageChannels: new Set([transfer.channel, alreadyClosed.channel]),
+    } as unknown as IRTCPeerConnection;
+    const { api } = fakeApi();
+
+    resetEdgeAuthenticationForNewRemoteTransport({
+      epc,
+      roomId: ROOM_ID,
+      peerId: PEER_ID,
+      api,
+      dataChannels,
+      reason: new Error("Remote DTLS certificate changed"),
+    });
+
+    // Every channel of this edge is released, detached and closed exactly once.
+    for (const retired of [transfer, registered, alreadyClosed]) {
+      expect(retired.releases()).toBe(1);
+      expect(retired.channel.onopen).toBeNull();
+      expect(retired.channel.onclose).toBeNull();
+      expect(retired.channel.onerror).toBeNull();
+      expect(retired.channel.onmessage).toBeNull();
+      expect(retired.channel.onbufferedamountlow).toBeNull();
+    }
+    expect(transfer.closes()).toBe(1);
+    expect(registered.closes()).toBe(1);
+    // An already-closed channel is released and unregistered, never re-closed.
+    expect(alreadyClosed.closes()).toBe(0);
+
+    // Main keeps the treatment it always had — closed once, detached from the
+    // connection, its own onclose left to observe the stale lease and return.
+    expect(main.closes()).toBe(1);
+    expect(epc.mainChannel).toBeUndefined();
+    expect(main.channel.onclose).not.toBeNull();
+
+    // Both registries hold nothing of this edge's retired generation, and the
+    // peer's other edge is untouched.
+    expect(epc.messageChannels?.size ?? 0).toBe(0);
+    expect(dataChannels).toEqual([otherEdge.channel]);
+    expect(otherEdge.closes()).toBe(0);
+    expect(otherEdge.releases()).toBe(0);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("leaves a cover lane to teardownCoverEdge and its own close listener", () => {
+    // Cover lanes are NOT the sweep's business: teardownCoverEdge closes each
+    // one and the close listener registerCoverChannelUntilClose installed
+    // unregisters it from both registries. Releasing them here as well would
+    // skip that owner's own close bookkeeping.
+    const oldLease = resetRatchetGate(ROOM_ID, PEER_ID);
+    const lane = fakeChannel("cover~aa", "open");
+    const dataChannels = [lane.channel];
+    let coverDestroyed = 0;
+    const epc = {
+      roomId: ROOM_ID,
+      withPeerId: PEER_ID,
+      withPeerPublicKey: PEER_PUBLIC_KEY,
+      ratchetGateLease: oldLease,
+      coverChannels: new Set([lane.channel]),
+      coverRuntime: {
+        destroy: () => {
+          coverDestroyed += 1;
+        },
+      },
+    } as unknown as IRTCPeerConnection;
+    const { api } = fakeApi();
+
+    resetEdgeAuthenticationForNewRemoteTransport({
+      epc,
+      roomId: ROOM_ID,
+      peerId: PEER_ID,
+      api,
+      dataChannels,
+      reason: new Error("Remote DTLS certificate changed"),
+    });
+
+    expect(coverDestroyed).toBe(1);
+    expect(epc.coverChannels).toBeUndefined();
+    // Closed by teardownCoverEdge, exactly once, and otherwise untouched: its
+    // own close listener owns the unregistration.
+    expect(lane.closes()).toBe(1);
+    expect(lane.releases()).toBe(0);
+    expect(lane.channel.onclose).not.toBeNull();
+    expect(dataChannels).toEqual([lane.channel]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("counts every in-place re-bind of this transport", () => {
+    const epc = {
+      roomId: ROOM_ID,
+      withPeerId: PEER_ID,
+      withPeerPublicKey: PEER_PUBLIC_KEY,
+      ratchetGateLease: resetRatchetGate(ROOM_ID, PEER_ID),
+      remoteTransportRebinds: 0,
+    } as unknown as IRTCPeerConnection;
+    const { api } = fakeApi();
+    const reset = (): void => {
+      resetEdgeAuthenticationForNewRemoteTransport({
+        epc,
+        roomId: ROOM_ID,
+        peerId: PEER_ID,
+        api,
+        dataChannels: [],
+        reason: new Error("Remote DTLS certificate changed"),
+      });
+    };
+
+    reset();
+    expect(epc.remoteTransportRebinds).toBe(1);
+    reset();
+    expect(epc.remoteTransportRebinds).toBe(2);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });
@@ -398,11 +568,13 @@ describe("decideRemoteTransportChangeResponse", () => {
     authenticated: boolean,
     descriptionType: RTCSdpType,
     isInitiator: boolean,
+    remoteTransportRebinds = 0,
   ) => {
     const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
     const epc = {
       ratchetGateLease: lease,
       ratchetState: authenticated ? ratchetState() : undefined,
+      remoteTransportRebinds,
     } as unknown as IRTCPeerConnection;
     const response = decideRemoteTransportChangeResponse({
       epc,
@@ -433,5 +605,27 @@ describe("decideRemoteTransportChangeResponse", () => {
 
   test("the responder keeps its authenticated transport on such an answer: the peer's fresh main opens over the re-run DTLS", () => {
     expect(decide(true, "answer", false)).toBe("reset-in-place");
+  });
+
+  test("a transport already re-bound once, still unauthenticated, is replaced whatever the role or description", () => {
+    // At most ONE in-place re-bind per unauthenticated transport. Without this
+    // bound a peer that keeps minting certificates loops forever: our remote
+    // fingerprint changes every round while our local one never does, because
+    // a PC whose ICE stays connected never fails and is never replaced, so we
+    // keep answering with a certificate the peer has already retired.
+    expect(decide(false, "offer", true, 1)).toBe("replace");
+    expect(decide(false, "answer", true, 1)).toBe("replace");
+    expect(decide(false, "offer", false, 1)).toBe("replace");
+    // Even the ratified responder+answer case, which is what re-bound it.
+    expect(decide(false, "answer", false, 1)).toBe("replace");
+  });
+
+  test("a transport that authenticated after its re-bind is judged on its role again", () => {
+    // The handshake success path clears the counter, so a long-lived edge that
+    // legitimately re-binds once per reconnect is never penalised.
+    expect(decide(true, "answer", false, 0)).toBe("reset-in-place");
+    // A live ratchet proves the re-bind converged even if the counter stands.
+    expect(decide(true, "answer", false, 1)).toBe("reset-in-place");
+    expect(decide(true, "offer", false, 1)).toBe("replace");
   });
 });

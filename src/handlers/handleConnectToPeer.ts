@@ -161,6 +161,7 @@ export const handleConnectToPeer = async (
       epc.ignoreOffer = false;
       epc.iceCandidates = [] as RTCIceCandidateInit[];
       epc.ratchetGateLease = ratchetGateLease;
+      epc.remoteTransportRebinds = 0;
       epc.ensureFreshIceConfiguration = async (): Promise<boolean> => {
         let state = api.getState() as State;
         const proof = waitForFreshSocketProof(state.signalingServer.isVerified);

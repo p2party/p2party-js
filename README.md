@@ -419,8 +419,10 @@ if (status.derivation !== "mnemonic") {
     // password: folded into the derivation, and just as unrecoverable.
   });
 
-  // Show it once. Storing it is storing the identity.
-  console.log(mnemonic, "now derives", publicKey);
+  // Show it once, in the UI. Never log it: console output is storage, and
+  // devtools, extensions and webview log shippers all keep it.
+  showRecoveryPhraseOnce(mnemonic);
+  console.log("recoverable identity", publicKey);
 }
 ```
 

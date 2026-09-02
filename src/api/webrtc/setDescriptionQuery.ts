@@ -7,6 +7,10 @@ import {
   discardIceCandidatesForAttempt,
   takePendingIceCandidates,
 } from "./pendingIceCandidates";
+import {
+  detectRemoteTransportChange,
+  resetEdgeAuthenticationForNewRemoteTransport,
+} from "./remoteTransportChange";
 import { isIdentityInitiator } from "../../utils/identityRole";
 import { PROTOCOL_VERSION } from "../../utils/constants";
 
@@ -28,6 +32,13 @@ export interface RTCSetDescriptionParamsExtension extends RTCSetDescriptionParam
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
 }
+
+// A predicate rather than inline checks: the PC may close during the awaits
+// in the query body, and TypeScript's control-flow narrowing from the early
+// `signalingState === "closed"` return would otherwise flag the later re-check
+// as unreachable.
+const isTransportClosed = (epc: IRTCPeerConnection): boolean =>
+  epc.signalingState === "closed" || epc.connectionState === "closed";
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
   RTCSetDescriptionParamsExtension,
@@ -91,6 +102,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       };
     }
 
+    // Compare the incoming fingerprint against the remote description applied
+    // RIGHT NOW, before any rollback/ignore decision below can touch it. A
+    // different DTLS certificate means the peer rebuilt its RTCPeerConnection
+    // while ours survived (e.g. it tore the edge down during a radio-off
+    // freeze shorter than the ICE consent timeout); everything this side
+    // authenticated against the old certificate must be reset once the
+    // description is actually applied. A fresh PC has nothing to compare.
+    const remoteTransportChanged =
+      connectionIndex > -1 &&
+      detectRemoteTransportChange(epc.remoteDescription?.sdp, description.sdp);
+
     const offerCollision =
       description.type === "offer" &&
       (epc.makingOffer || epc.signalingState !== "stable");
@@ -147,6 +169,16 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     }
 
     {
+      if (remoteTransportChanged)
+        resetEdgeAuthenticationForNewRemoteTransport({
+          epc,
+          roomId,
+          peerId,
+          api,
+          reason: new Error(
+            `Remote DTLS certificate changed (${roomId}, ${peerId})`,
+          ),
+        });
       try {
         await epc.setRemoteDescription(description);
       } catch (e: unknown) {
@@ -213,9 +245,17 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       }
     }
 
+    // Open `main` for the identity initiator whenever this transport has no
+    // live one. Deliberately NOT gated on connectionIndex > -1 or
+    // connectionState === "connected": after a reconnect the responder may
+    // legitimately offer first (its PC was rebuilt while ours survived, or
+    // ours was just created from its inbound offer), so the initiator must
+    // answer AND open main on that PC; and data channels may be created before
+    // the transport reaches "connected" (SCTP opens them once DTLS completes).
+    // When the transport reset above closed a stale main, epc.mainChannel is
+    // already undefined, so this opens exactly one replacement per call.
     if (
-      epc.connectionState === "connected" &&
-      connectionIndex > -1 &&
+      !isTransportClosed(epc) &&
       isIdentityInitiator(keyPair.publicKey, epc.withPeerPublicKey) &&
       (!epc.mainChannel ||
         epc.mainChannel.readyState === "closing" ||

@@ -16,6 +16,7 @@ import { SparsePqHealingState } from "./pqHealingRuntime";
 import { FRAME_TYPE_HANDSHAKE } from "../utils/constants";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { isIdentityInitiator } from "../utils/identityRole";
+import { parseFingerprintFromSdp } from "../utils/sdpFingerprint";
 import {
   isHandshakePayloadForStep,
   performHandshakeCore,
@@ -34,23 +35,10 @@ import type {
   IRTCDataChannel,
 } from "../api/webrtc/interfaces";
 
-const FINGERPRINT_RE = /a=fingerprint:sha-256\s+([0-9A-Fa-f:]+)/;
-
-/**
- * Raw bytes of the `a=fingerprint:sha-256 XX:XX:...` line in an SDP blob.
- * Throws if no sha-256 fingerprint attribute is present, or if the one found
- * doesn't decode to exactly 32 bytes.
- */
-export const parseFingerprintFromSdp = (sdp: string): Uint8Array => {
-  const match = FINGERPRINT_RE.exec(sdp);
-  if (!match) throw new Error("No sha-256 DTLS fingerprint found in SDP");
-
-  const bytes = match[1].split(":").map((byte) => parseInt(byte, 16));
-  if (bytes.length !== 32 || bytes.some((b) => Number.isNaN(b)))
-    throw new Error("Malformed sha-256 DTLS fingerprint in SDP");
-
-  return Uint8Array.from(bytes);
-};
+// The fingerprint parser lives in the store-free utils module so the signaling
+// path can detect a remote certificate change without importing this file;
+// it stays exported here for the handshake transcript and existing callers.
+export { parseFingerprintFromSdp };
 
 const normalizeFingerprintHex = (fp: string): string =>
   fp.replace(/:/g, "").toLowerCase();

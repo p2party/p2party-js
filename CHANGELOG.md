@@ -72,6 +72,13 @@ blind-rendezvous threat model.
 - Release packaging now copies the README only after synchronizing the exact
   bundle and worker SRI values, then verifies those values inside the packed
   tarball.
+- Documentation only: the 0.13.0 entry below and the header comment in
+  `src/handlers/coverRuntime.ts` both said sparse-PQ control cells substitute
+  into scheduled cover slots. No such code has ever existed. The one outbound
+  path for a control cell is the orchestrator's `sendControlFrame`, whose sole
+  implementation writes to the persistent `main` channel, in scheduled rooms as
+  well as immediate ones; the runtime's `"control"` cover job carries scheduled
+  receipts. Both statements corrected. No behaviour changed.
 
 ### Deployment note
 
@@ -239,9 +246,12 @@ and room-wide scheduled timing cover.
 - **Scheduled timing cover.** An authenticated room policy opens exactly
   `coverLanes` fixed-schedule lanes per edge, each emitting `coverFramesPerCell`
   authenticated 65,490-byte cells per epoch for `coverDurationEpochs`, closing
-  only at cycle boundaries. Real message chunks, PQ control, receipts, and an
-  encrypted CANCEL substitute into scheduled slots; dummy cover cells fill the
-  rest. Absolute room-phased cycles derived from the policy hash; browser
+  only at cycle boundaries. Real message chunks, receipts, and an encrypted
+  CANCEL substitute into scheduled slots; dummy cover cells fill the rest.
+  (This entry originally also listed sparse-PQ control cells. It was wrong when
+  written and is corrected here: a PQ control cell has only ever ridden the
+  persistent `main` channel, in every room. See the 0.14.4 note below.)
+  Absolute room-phased cycles derived from the policy hash; browser
   visibility/freeze/pagehide/offline suspend cover and resume only at a future
   boundary. Surfaced status (`starting|active|degraded|suspended|stopped`) so a
   browser-imposed gap is never claimed as cover.

@@ -38,9 +38,17 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 // exactly `coverLanes` outbound channels at every cycle boundary, keeps dummy
 // and real lanes byte-shape-identical (same label format, same 65,490-byte
 // cells, same lifecycle), and closes lanes only at the fixed boundary. Real
-// data, PQ controls, receipts, and CANCEL substitute into already-scheduled
-// slots — the runtime never accelerates, never sends a catch-up burst after a
-// suspension, and never falls back to the WebSocket relay for any payload.
+// data, receipts, and CANCEL substitute into already-scheduled slots — the
+// runtime never accelerates, never sends a catch-up burst after a suspension,
+// and never falls back to the WebSocket relay for any payload.
+//
+// Sparse-PQ control cells do NOT substitute into cover slots. The only
+// outbound path for one is `sendControlFrame`, and the sole implementation
+// (handleOpenChannel, at orchestrator install) writes it to the persistent
+// `main` channel in every room, scheduled or not. The `"control"` CoverJob
+// kind here carries scheduled RECEIPTS (coverTransfer's receipt drain job),
+// not PQ controls. Inbound routing accepts a PQ control frame arriving on a
+// cover lane, but nothing on this side puts one there.
 // Browser visibility/freeze/pagehide/offline events suspend cover; resume
 // targets a strictly future cycle boundary, and the surfaced status makes the
 // suspension gap visible to the UI instead of silently claiming cover.

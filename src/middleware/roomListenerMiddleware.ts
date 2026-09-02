@@ -56,10 +56,11 @@ roomListenerMiddleware.startListening({
       ) {
         signalingPeerRequestDebouncer.resetSocketLifecycle();
       } else if (setConnectingToPeers.match(action)) {
-        const { roomId, connectingToPeers } = action.payload;
+        const { roomId, connectingToPeers, reason } = action.payload;
         debugLog("[roomListenerMiddleware] setConnectingToPeers:", {
           roomId,
           connectingToPeers,
+          reason,
         });
         if (connectingToPeers) {
           const { signalingServer, keyPair, rooms } =
@@ -81,11 +82,14 @@ roomListenerMiddleware.startListening({
             roomIndex > -1 &&
             isUUID(rooms[roomIndex].id)
           ) {
-            // Debounce peers requests to prevent rapid re-requests
+            // Debounce peers requests to prevent rapid re-requests. A re-dial
+            // after an edge teardown gets its own budget: it may land inside
+            // the join window of a fresh room join, and the edge it needs to
+            // rebuild was torn down after that join's peers request went out.
             const now = Date.now();
             if (
               !signalingPeerRequestDebouncer.shouldSend(
-                "join",
+                reason === "redial" ? "redial" : "join",
                 roomId,
                 PEERS_REQUEST_DEBOUNCE_MS,
                 now,

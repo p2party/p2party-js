@@ -685,7 +685,13 @@ const roomSlice = createSlice({
 
     setConnectingToPeers: (
       state,
-      action: PayloadAction<{ roomId: string; connectingToPeers: boolean }>,
+      action: PayloadAction<{
+        roomId: string;
+        connectingToPeers: boolean;
+        // Read by roomListenerMiddleware only: a "redial" after an edge
+        // teardown is debounced independently of a room join.
+        reason?: "redial";
+      }>,
     ) => {
       const { roomId, connectingToPeers } = action.payload;
 

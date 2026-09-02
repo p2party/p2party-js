@@ -1,4 +1,4 @@
-export type SignalingPeerRequestKind = "join" | "empty-roster";
+export type SignalingPeerRequestKind = "join" | "empty-roster" | "redial";
 
 /**
  * Bounds repeated peer-list requests only within one socket lifecycle.

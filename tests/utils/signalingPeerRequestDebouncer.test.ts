@@ -21,4 +21,12 @@ describe("signaling peer request debounce", () => {
       true,
     );
   });
+
+  test("a re-dial after an edge teardown is not swallowed by the join window", () => {
+    const debouncer = new SignalingPeerRequestDebouncer();
+
+    expect(debouncer.shouldSend("join", "room-id", 2000, 10_000)).toBe(true);
+    expect(debouncer.shouldSend("redial", "room-id", 2000, 10_001)).toBe(true);
+    expect(debouncer.shouldSend("redial", "room-id", 2000, 10_002)).toBe(false);
+  });
 });

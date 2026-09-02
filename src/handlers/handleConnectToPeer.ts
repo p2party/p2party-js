@@ -2,6 +2,7 @@ import { debugLog } from "../utils/debug";
 import { isUUID } from "class-validator";
 
 import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
+import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
 
 import signalingServerApi, {
   sendRoomRequestMessage,
@@ -381,9 +382,20 @@ export const handleConnectToPeer = async (
         disconnectTimeout = setTimeout(() => {
           if (epc.connectionState !== "disconnected") return;
 
-          void api.dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
-          );
+          // disconnectFromPeer nulls every handler before it closes the PC, so
+          // nothing downstream re-dials. Re-request the roster once the edge is
+          // gone: the peer usually still holds its side (its ICE consent has
+          // not expired while it was frozen) and will not offer on its own.
+          void api
+            .dispatch(
+              webrtcApi.endpoints.disconnectFromPeer.initiate({
+                peerId,
+                roomId,
+              }),
+            )
+            .then(() => {
+              requestPeersAfterEdgeTeardown(api, roomId);
+            });
 
           console.error(
             `RTC Connection with peer ${peerId} in room ${roomId} has disconnected.`,
@@ -406,25 +418,7 @@ export const handleConnectToPeer = async (
           `RTC Connection with peer ${peerId} in room ${roomId} has ${epc.connectionState}.`,
         );
 
-        if (epc.connectionState === "closed") {
-          const { signalingServer } = api.getState() as State;
-          if (signalingServer.isConnected) {
-            const currentKeyPair = (api.getState() as State).keyPair;
-            await api
-              .dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "peers",
-                    fromPeerId: currentKeyPair.peerId,
-                    roomId,
-                    protocolVersion: PROTOCOL_VERSION,
-                  },
-                }),
-              )
-              .unwrap()
-              .catch(() => undefined);
-          }
-        }
+        requestPeersAfterEdgeTeardown(api, roomId);
       } else {
         if (disconnectTimeout) {
           clearTimeout(disconnectTimeout);

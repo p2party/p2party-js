@@ -4,6 +4,95 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+Identity backup and restore. An identity lived in exactly one browser profile:
+losing the profile lost the account, and the phrase-to-key derivation that could
+have prevented that was exported but unreachable — nothing in the SDK ever
+created a _stored_ identity from a phrase. These calls close that gap in the one
+direction the derivation runs. Still protocol v4; no wire shape changes.
+
+### Added
+
+- `createRecoverableIdentity({ strength?, password? })` replaces the identity in
+  use with one derived from a fresh recovery phrase, and returns that phrase
+  exactly once — 24 words by default, 12 at `strength: 128`. Neither the SDK nor
+  its storage keeps a copy, by design: a phrase at rest is the identity at rest.
+  The optional password is folded into the derivation and is never stored or
+  checked, so restoring with a different one silently derives a different
+  identity.
+
+- `restoreIdentityFromMnemonic(mnemonic, password?)` adopts the identity a
+  phrase encodes. The phrase is validated and derived before anything is torn
+  down, so a mistyped one rejects with the new `InvalidRecoveryPhraseError`
+  having disconnected nothing, and argon2id does not run holding the global
+  lock. Only a phrase that derives a key opens the exclusive boundary a purge
+  takes: no connection attempt, room operation or identity bootstrap can
+  interleave, and any in-flight attempt is cancelled before it can write the
+  outgoing identity back to storage. Inside it, signaling is disconnected, every
+  room's WebRTC transport is brought to a terminal state, and the cross-signed
+  X25519 identity is deleted for the next bootstrap to regenerate and re-sign —
+  all three settle even when one fails, and a failure there aborts the swap
+  rather than moving the identity out from under a transport that may still be
+  live. The Ed25519 key is persisted before the in-memory identity is adopted,
+  so a key that could not be stored never survives only until a reload. Rooms,
+  messages, the address book and cached room PINs are kept, so the caller can
+  reconnect to the same rooms; peers see the identity-key change exactly as they
+  would after a purge. Signaling is left disconnected — call `connect()`
+  afterwards.
+
+- `getIdentityBackupStatus()` reports the current Ed25519 public key and whether
+  a phrase can reproduce it, without requiring a connection first. The
+  provenance is recorded at rest bound to the key it describes, and a flag that
+  no longer binds to the stored key is reported as unknown rather than carried
+  over: claiming recoverability for a key that was never derived from a phrase
+  would hand the user a backup that restores someone else's identity. A newly
+  generated identity — and the adopted legacy `localStorage` one — is recorded
+  as `"random"`; an identity already in storage before this shipped has no
+  record and reads `null`. Neither can be exported, and the only route to a
+  recoverable one is to replace it.
+
+- `validateMnemonicWords(words)` and `validateMnemonic(phrase)` are exported.
+  The first is synchronous — word count and wordlist membership, naming the
+  first mistyped word — so a restore form can check on every keystroke; the
+  checksum needs SHA-512, which Web Crypto only exposes asynchronously. The
+  `MnemonicValidation`, `CreatedRecoverableIdentity`,
+  `CreateRecoverableIdentityOptions`, `RestoredIdentity` and
+  `IdentityDerivation` types are exported with them.
+
+### Changed
+
+- Recovery-phrase normalisation is now part of the derivation contract: NFKD,
+  runs of whitespace collapsed to one space, trimmed, lowercased. A phrase
+  transcribed from paper or a password manager arrives with a trailing newline,
+  a double space or an autocapitalised first word, and the wordlist lookup used
+  to reject all of those outright. How a phrase was typed can no longer change
+  the identity it restores. Every phrase that derived a key before was already
+  canonical, so no existing backup changes meaning, and a known-answer test pins
+  the public key of a fixed phrase to prove it.
+
+- The mnemonic module is runtime-agnostic. It reached for `window.crypto`, which
+  does not exist under Bun, Node or a worker, so every mnemonic path threw
+  outside a document and none of it was covered by a test; it now goes through
+  `globalThis.crypto` and fails loudly when Web Crypto is missing.
+  `keyPairFromMnemonic()` also accepts an optional preloaded WASM module, like
+  every other operation helper. Argon2id parameters and the salt scheme are
+  untouched.
+
+- Secrets on the mnemonic path are wiped: the argon2id seed and the salt after
+  the key pair is built, the encoded password and its digest after the salt is
+  taken, and the entropy and its hash after the words are formed.
+
+- Documentation, no behaviour change: the README describes backup and restore as
+  the one-way derivation it is, including the part that costs the user something
+  — an identity created randomly cannot be exported, and becoming recoverable
+  means replacing it, which contacts see as an identity-key change.
+  `docs/getting-started.md` points at it, ADR-A1 in
+  `docs/design-decisions-and-security-findings.md` records the shipped state and
+  the one-way ("option A") decision, `docs/references.md` says which of the two
+  encodings sharing the wordlist is the one that restores an identity, and
+  `ROADMAP.md` no longer lists the SDK flow as missing.
+
 ## [0.14.5] — 2026-09-02
 
 Peer-edge transport binding and liveness. A phone backgrounded with its radio

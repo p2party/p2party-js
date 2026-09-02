@@ -44,6 +44,12 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   It borrows the words, not the format: the checksum is SHA-256 over p2party's
   own domain separator, so a BIP-39 phrase is not a valid invite. See
   [docs/references.md](docs/references.md).
+- An identity created from a recovery phrase can be restored on another device:
+  12 to 48 words drawn from the same wordlist, checksummed with SHA-512 and
+  stretched into the Ed25519 seed with argon2id. The derivation runs one way, so
+  a randomly generated identity cannot be exported — it can only be replaced by
+  a recoverable one. See
+  [Back up and restore your identity](#back-up-and-restore-your-identity).
 - `p2party/session` exposes the cryptography without
   [Redux](https://redux-toolkit.js.org/), IndexedDB, WebRTC, signaling,
   `window`, or `localStorage`.
@@ -391,6 +397,90 @@ shape; [docs/getting-started.md](docs/getting-started.md#send-cancel-and-read)
 covers reading inbound messages and the metadata-only read that avoids
 materializing large files.
 
+## Back up and restore your identity
+
+An identity is an Ed25519 key pair in browser storage. Lose the profile and you
+lose the identity — unless it was created from a recovery phrase, because the
+phrase is the only thing that can reproduce it.
+
+```ts
+// Can the identity in use be backed up at all?
+const status = await p2party.getIdentityBackupStatus();
+// status.derivation === "mnemonic" -> a phrase restores it
+// status.derivation === "random"   -> nothing can; it can only be replaced
+// status.derivation === null       -> unknown: no identity is stored yet, or
+//                                     one whose provenance was never recorded.
+//                                     Treat it as having no backup.
+
+if (status.derivation !== "mnemonic") {
+  // Replaces the identity in use and hands back the only copy of the phrase.
+  const { mnemonic, publicKey } = await p2party.createRecoverableIdentity({
+    strength: 256, // 24 words; 128 gives 12. Default 256.
+    // password: folded into the derivation, and just as unrecoverable.
+  });
+
+  // Show it once. Storing it is storing the identity.
+  console.log(mnemonic, "now derives", publicKey);
+}
+```
+
+On another device, before connecting, adopt the identity a phrase encodes:
+
+```ts
+try {
+  const { publicKey } = await p2party.restoreIdentityFromMnemonic(
+    typedPhrase,
+    password, // omit unless one was used at creation
+  );
+  console.log("restored", publicKey);
+} catch (error) {
+  if (error instanceof p2party.InvalidRecoveryPhraseError) {
+    // A typo. Nothing was disconnected and nothing was replaced, so keep the
+    // form open and let the user fix it.
+  }
+}
+
+// Both calls leave signaling disconnected. Come back online yourself.
+await p2party.connect(roomUrl);
+```
+
+**What the phrase is.** 12 to 48 words from the shared wordlist, checksummed
+with SHA-512 and stretched by argon2id — salted with the optional password —
+into the Ed25519 seed. It borrows the BIP-39 English words and nothing else, so
+no BIP-39 wallet can restore one of these identities —
+[docs/references.md](docs/references.md) has the exact differences. The
+derivation runs one way: an identity can be _created_ from a phrase, never
+exported to one.
+
+**Existing identities cannot be exported.** Every identity the SDK generated
+before this — and any it still generates on first connect — comes from a random
+seed, so no phrase describes it. A newly generated one is recorded as
+`"random"`; one that predates the record, or whose record no longer binds to
+the stored key, reads `null`. Both mean the same thing to an app, and reporting
+it is the point: say the identity has no backup instead of offering one that
+cannot exist. The only route to a recoverable identity is
+`createRecoverableIdentity()`, which _replaces_ the current one: contacts see a
+new identity key for this device and their clients flag the change, exactly as
+they would after a purge.
+
+**The phrase is shown once and stored nowhere.** Neither the SDK nor its
+storage keeps a copy, by design — a phrase at rest is the identity at rest — so
+an app that drops it before the user has written it down has lost the backup.
+The password is not stored or checked either: restoring with a different one
+silently derives a different identity.
+
+**What restoring does to a running mesh.** It rotates the account key, so it
+takes the same exclusive path a purge does: signaling is disconnected, every
+room's WebRTC transport is brought to a terminal state, and the cross-signed
+X25519 identity is dropped so the next connection regenerates and re-signs it.
+Rooms, messages, the address book and cached room PINs are all kept — reconnect
+and you are in the same rooms under the restored key. An invalid phrase rejects
+with `InvalidRecoveryPhraseError` before any of that starts.
+
+While a phrase is being typed, `validateMnemonicWords(words)` is synchronous
+and names the first word that is not in the wordlist; `validateMnemonic(phrase)`
+adds the SHA-512 checksum and returns a promise.
+
 ## Cryptography without WebRTC
 
 `p2party/session` is the same protocol-v4 cryptography with no Redux, no
@@ -599,11 +689,11 @@ argon2id over the normalized phrase — with an optional password used as the
 salt — rather than PBKDF2-HMAC-SHA512. The three canonical BIP-39 English test
 vectors all fail `validateMnemonic()`. Treat it as a p2party-specific format.
 
-These are primitives, not a feature. Nothing in the SDK or in the p2party.com
-frontend currently derives a stored identity from a phrase, so there is no
-backup or restore flow to call today — building one is on the
-[roadmap](ROADMAP.md#near-term). Until it exists, an identity created any other
-way is not recoverable from a phrase.
+These are the primitives. The identity the mesh actually uses is created,
+replaced and restored through
+[`createRecoverableIdentity()` and `restoreIdentityFromMnemonic()`](#back-up-and-restore-your-identity),
+which take care of the storage, the cross-signed X25519 identity and the
+transports authenticated by the outgoing key.
 
 **Room policy as data.** A policy is a value you can encode, hash, compare and
 validate before anything touches the network — useful for showing two peers

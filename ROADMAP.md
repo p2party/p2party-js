@@ -111,12 +111,16 @@ but they are also what stands between the SDK and a second rendezvous
 transport, since no board client can reuse the peer-connection handlers without
 importing the WebSocket API.
 
-**Identity backup and restore.** Long-term Ed25519/X25519 identities currently
-live only in browser storage. Losing the profile loses the identity. The
-primitives exist — `generateMnemonic()` and `keyPairFromMnemonic()` in
-`src/cryptography/mnemonic.ts` — but nothing calls them: no flow in the SDK or
-the frontend derives an identity from a phrase, and the SDK's own test suite
-does not exercise them. The missing piece is the flow, not the cryptography.
+**Identity backup and restore.** The SDK flow now exists:
+`createRecoverableIdentity()`, `restoreIdentityFromMnemonic()` and
+`getIdentityBackupStatus()` create, adopt and describe an identity derived from
+a recovery phrase, with tests over the ordering the swap depends on. See
+[Back up and restore your identity](README.md#back-up-and-restore-your-identity).
+The derivation is one way, which is the residue: an identity generated randomly —
+every identity that existed before these calls — cannot be exported, only
+replaced, and replacing it is an identity-key change every contact sees. There
+is no migration for those users beyond that trade, and the p2party.com flow that
+puts it in front of them is tracked in that repository.
 
 ## Research directions
 

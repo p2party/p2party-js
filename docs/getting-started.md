@@ -174,6 +174,21 @@ returned. The application limit is 10 GiB. Cancellation is scoped most
 precisely by the handle's transfer ID, so prefer `handle.cancel()` over a
 content-hash lookup for concurrent identical sends.
 
+## Back up and restore an identity
+
+The identity behind every room is an Ed25519 key pair in browser storage, and
+only an identity created from a recovery phrase can be brought back after that
+storage is gone. `getIdentityBackupStatus()` says which kind is in use,
+`createRecoverableIdentity()` replaces the current identity with one a phrase
+reproduces and returns that phrase exactly once, and
+`restoreIdentityFromMnemonic()` adopts the identity a phrase encodes. The
+derivation is one way — an identity generated randomly, which is every identity
+that existed before these calls, cannot be exported to a phrase — and both
+calls replace the account key, so contacts see an identity change and signaling
+is left disconnected until you `connect()` again. The full contract, including
+what survives a restore and what a mistyped phrase costs, is in the
+[README](../README.md#back-up-and-restore-your-identity).
+
 ## Package artifacts and WASM
 
 The 0.14 package exports:

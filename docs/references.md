@@ -13,13 +13,13 @@ These are compiled into the shipped `libcrypto.wasm` or bundled into the
 package. Licences and notices are reproduced in
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-| Project                 | Used for                                                           | Link                                                                                       |
-| ----------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| libsodium               | X25519, Ed25519, ChaCha20-Poly1305, BLAKE2b, HKDF, Argon2, SHA-512 | [github.com/jedisct1/libsodium](https://github.com/jedisct1/libsodium)                     |
-| mlkem-native            | ML-KEM-512/768/1024 (FIPS 203)                                     | [github.com/pq-code-package/mlkem-native](https://github.com/pq-code-package/mlkem-native) |
-| Emscripten              | Compiles the C cryptography to the pinned WASM module              | [emscripten.org](https://emscripten.org/)                                                  |
-| BIP-39 English wordlist | The 2,048 words only — see the note below                          | [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)       |
-| Redux Toolkit           | Browser-root state store                                           | [redux-toolkit.js.org](https://redux-toolkit.js.org/)                                      |
+| Project                 | Used for                                                                                        | Link                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| libsodium               | X25519, Ed25519, ChaCha20-Poly1305, BLAKE2b, HKDF, Argon2, SHA-512                              | [github.com/jedisct1/libsodium](https://github.com/jedisct1/libsodium)                     |
+| mlkem-native            | ML-KEM-512/768/1024 (FIPS 203)                                                                  | [github.com/pq-code-package/mlkem-native](https://github.com/pq-code-package/mlkem-native) |
+| Emscripten              | Compiles the C cryptography to the pinned WASM module                                           | [emscripten.org](https://emscripten.org/)                                                  |
+| BIP-39 English wordlist | The 2,048 words only, shared by room invites and identity recovery phrases — see the note below | [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)       |
+| Redux Toolkit           | Browser-root state store                                                                        | [redux-toolkit.js.org](https://redux-toolkit.js.org/)                                      |
 
 `src/utils/wordlist.json` is the BIP-39 English list, and that is the whole
 extent of the relationship. Two unrelated encodings share it, and **neither
@@ -32,6 +32,10 @@ uses BIP-39 checksum semantics**:
 - the identity recovery phrase (`src/cryptography/mnemonic.ts`), which takes
   128–512 bits of entropy (12–48 words), checksums with the leading bits of
   SHA-512, and derives its seed with argon2id rather than PBKDF2-HMAC-SHA512.
+  This is the phrase
+  [identity backup and restore](../README.md#back-up-and-restore-your-identity)
+  derives an Ed25519 identity from; the invite encodes a room capability and
+  restores no identity at all.
 
 Both reject the canonical BIP-39 English test vectors — the invite decoder with
 `Room invite checksum is invalid`, `validateMnemonic()` by returning `false` —

@@ -85,6 +85,7 @@ const webrtcApi = createApi({
             peerConnections,
             iceCandidates,
             dataChannels,
+            disconnectPeer: disconnectPeerThroughApi(api),
           },
           api,
           extraOptions,

@@ -36,9 +36,12 @@ type RoomSlice = typeof import("../../../src/reducers/roomSlice");
 
 let detectRemoteTransportChange: RemoteTransportChange["detectRemoteTransportChange"];
 let resetEdgeAuthenticationForNewRemoteTransport: RemoteTransportChange["resetEdgeAuthenticationForNewRemoteTransport"];
+let isEdgeAuthenticatedOnTransport: RemoteTransportChange["isEdgeAuthenticatedOnTransport"];
+let decideRemoteTransportChangeResponse: RemoteTransportChange["decideRemoteTransportChangeResponse"];
 let claimRatchetGate: RatchetGate["claimRatchetGate"];
 let getRatchetGate: RatchetGate["getRatchetGate"];
 let isCurrentRatchetGateLease: RatchetGate["isCurrentRatchetGateLease"];
+let openRatchetGate: RatchetGate["openRatchetGate"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
 let setHandshakeChannel: HandleHandshake["setHandshakeChannel"];
 let clearHandshakeChannel: HandleHandshake["clearHandshakeChannel"];
@@ -51,11 +54,14 @@ beforeAll(async () => {
   ({
     detectRemoteTransportChange,
     resetEdgeAuthenticationForNewRemoteTransport,
+    isEdgeAuthenticatedOnTransport,
+    decideRemoteTransportChangeResponse,
   } = await import("../../../src/api/webrtc/remoteTransportChange"));
   ({
     claimRatchetGate,
     getRatchetGate,
     isCurrentRatchetGateLease,
+    openRatchetGate,
     resetRatchetGate,
   } = await import("../../../src/handlers/ratchetGate"));
   ({ setHandshakeChannel, clearHandshakeChannel } =
@@ -291,5 +297,141 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
     ]);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+});
+
+const AUTH_ROOM_ID = "00000000-0000-4000-8000-00000000000c";
+const AUTH_PEER_ID = "00000000-0000-4000-8000-00000000000d";
+
+const ratchetState = (): NonNullable<IRTCPeerConnection["ratchetState"]> => ({
+  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
+  rootKey: new Uint8Array(32),
+  sendingChainKey: null,
+  receivingChainKey: null,
+  dhSelfPub: new Uint8Array(32),
+  dhSelfSec: new Uint8Array(32),
+  dhRemotePub: null,
+  Ns: 0,
+  Nr: 0,
+  PN: 0,
+  skipped: new Map<string, Uint8Array>(),
+});
+
+const mainChannel = (readyState: RTCDataChannelState): IRTCDataChannel =>
+  ({ label: "main", readyState }) as unknown as IRTCDataChannel;
+
+describe("isEdgeAuthenticatedOnTransport", () => {
+  test("a fresh transport with a pending gate, no ratchet and no main is not authenticated", () => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    const epc = {
+      ratchetGateLease: lease,
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      false,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+
+  test("a still-connecting main does not make the transport authenticated", () => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    const epc = {
+      ratchetGateLease: lease,
+      mainChannel: mainChannel("connecting"),
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      false,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+
+  test("a live ratchet means the edge was authenticated on this transport", () => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    const epc = {
+      ratchetGateLease: lease,
+      ratchetState: ratchetState(),
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      true,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+
+  test("an open gate held by this transport's lease means authenticated", () => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    expect(openRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID, lease)).toBe(true);
+    const epc = {
+      ratchetGateLease: lease,
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      true,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+
+  test("an open gate under another transport's lease does not authenticate this one", () => {
+    const oldLease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    expect(openRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID, oldLease)).toBe(true);
+    const epc = {
+      ratchetGateLease: { token: Symbol("stale") },
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      false,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+
+  test("an open main (handshake in flight over a live SCTP association) means authenticated", () => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    const epc = {
+      ratchetGateLease: lease,
+      mainChannel: mainChannel("open"),
+    } as unknown as IRTCPeerConnection;
+    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
+      true,
+    );
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+  });
+});
+
+describe("decideRemoteTransportChangeResponse", () => {
+  const decide = (
+    authenticated: boolean,
+    descriptionType: RTCSdpType,
+    isInitiator: boolean,
+  ) => {
+    const lease = resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    const epc = {
+      ratchetGateLease: lease,
+      ratchetState: authenticated ? ratchetState() : undefined,
+    } as unknown as IRTCPeerConnection;
+    const response = decideRemoteTransportChangeResponse({
+      epc,
+      roomId: AUTH_ROOM_ID,
+      peerId: AUTH_PEER_ID,
+      descriptionType,
+      isInitiator,
+    });
+    resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
+    return response;
+  };
+
+  test("a never-authenticated transport is re-bound in place for either role and either description", () => {
+    expect(decide(false, "offer", true)).toBe("reset-in-place");
+    expect(decide(false, "answer", true)).toBe("reset-in-place");
+    expect(decide(false, "offer", false)).toBe("reset-in-place");
+    expect(decide(false, "answer", false)).toBe("reset-in-place");
+  });
+
+  test("an authenticated transport is replaced when the peer's fresh transport offers, for either role", () => {
+    expect(decide(true, "offer", true)).toBe("replace");
+    expect(decide(true, "offer", false)).toBe("replace");
+  });
+
+  test("the identity initiator replaces its authenticated transport on an answer from a fresh peer transport", () => {
+    expect(decide(true, "answer", true)).toBe("replace");
+  });
+
+  test("the responder keeps its authenticated transport on such an answer: the peer's fresh main opens over the re-run DTLS", () => {
+    expect(decide(true, "answer", false)).toBe("reset-in-place");
   });
 });

@@ -8,6 +8,7 @@ import {
   takePendingIceCandidates,
 } from "./pendingIceCandidates";
 import {
+  decideRemoteTransportChangeResponse,
   detectRemoteTransportChange,
   resetEdgeAuthenticationForNewRemoteTransport,
 } from "./remoteTransportChange";
@@ -16,6 +17,8 @@ import { PROTOCOL_VERSION } from "../../utils/constants";
 
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
+import { requestPeersAfterEdgeTeardown } from "../../handlers/edgeTeardownFollowUp";
+import { setPeer } from "../../reducers/roomSlice";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type { State } from "../../store";
@@ -24,6 +27,7 @@ import type {
   IRTCPeerConnection,
   IRTCIceCandidate,
   IRTCDataChannel,
+  DisconnectPeerTransport,
 } from "./interfaces";
 import type { WebSocketMessageDescriptionSend } from "../../utils/interfaces";
 
@@ -31,6 +35,13 @@ export interface RTCSetDescriptionParamsExtension extends RTCSetDescriptionParam
   peerConnections: IRTCPeerConnection[];
   iceCandidates: IRTCIceCandidate[];
   dataChannels: IRTCDataChannel[];
+  /**
+   * Tears one room/peer transport down through the same path as a transport
+   * failure (disconnectFromPeer). Injected, like the bulk teardown queries
+   * do, so this module needs no import of the API that registers it and a
+   * test can bind the real query to its own transport registry.
+   */
+  disconnectPeer: DisconnectPeerTransport;
 }
 
 // A predicate rather than inline checks: the PC may close during the awaits
@@ -39,6 +50,30 @@ export interface RTCSetDescriptionParamsExtension extends RTCSetDescriptionParam
 // as unreachable.
 const isTransportClosed = (epc: IRTCPeerConnection): boolean =>
   epc.signalingState === "closed" || epc.connectionState === "closed";
+
+const attachDataChannelHandler = (
+  epc: IRTCPeerConnection,
+  dataChannels: IRTCDataChannel[],
+  api: Parameters<typeof handleOpenChannel>[1],
+): void => {
+  epc.ondatachannel = async (e: RTCDataChannelEvent) => {
+    try {
+      const channel = await handleOpenChannel(
+        {
+          channel: e.channel,
+          epc,
+          roomId: epc.roomId,
+          dataChannels,
+          incoming: true,
+        },
+        api,
+      );
+      if (channel.label === "main") epc.mainChannel = channel;
+    } catch (error) {
+      console.error("Rejected incoming DataChannel:", error);
+    }
+  };
+};
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
   RTCSetDescriptionParamsExtension,
@@ -53,6 +88,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     peerConnections,
     iceCandidates,
     dataChannels,
+    disconnectPeer,
   },
   api,
 ) => {
@@ -65,7 +101,10 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       peerId,
     );
 
-    const epc =
+    // Reassigned exactly once, when a stale authenticated transport is
+    // replaced below. discardIceForAttempt reads this binding, so it follows
+    // the replacement; the ondatachannel handler is bound per transport.
+    let epc =
       connectionIndex > -1
         ? peerConnections[connectionIndex]
         : await handleConnectToPeer(
@@ -82,33 +121,16 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     if (
       connectionIndex === -1 ||
       peerConnections[connectionIndex].ondatachannel == undefined
-    ) {
-      epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-        try {
-          const channel = await handleOpenChannel(
-            {
-              channel: e.channel,
-              epc,
-              roomId: epc.roomId,
-              dataChannels,
-              incoming: true,
-            },
-            api,
-          );
-          if (channel.label === "main") epc.mainChannel = channel;
-        } catch (error) {
-          console.error("Rejected incoming DataChannel:", error);
-        }
-      };
-    }
+    )
+      attachDataChannelHandler(epc, dataChannels, api);
 
     // Compare the incoming fingerprint against the remote description applied
     // RIGHT NOW, before any rollback/ignore decision below can touch it. A
     // different DTLS certificate means the peer rebuilt its RTCPeerConnection
     // while ours survived (e.g. it tore the edge down during a radio-off
     // freeze shorter than the ICE consent timeout); everything this side
-    // authenticated against the old certificate must be reset once the
-    // description is actually applied. A fresh PC has nothing to compare.
+    // authenticated against the old certificate must go once the description
+    // is actually applied. A fresh PC has nothing to compare.
     const remoteTransportChanged =
       connectionIndex > -1 &&
       detectRemoteTransportChange(epc.remoteDescription?.sdp, description.sdp);
@@ -178,8 +200,66 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       return { data: undefined };
     }
 
-    {
-      if (remoteTransportChanged)
+    // The description is going to be applied. If it binds a new remote DTLS
+    // certificate, decide what happens to the transport that carries the old
+    // one (see decideRemoteTransportChangeResponse for the full argument):
+    //
+    // - "reset-in-place": nothing proven against the old certificate has to
+    //   be opened on the old SCTP association, so the browser renegotiates
+    //   DTLS on this PC and the edge simply re-authenticates on it.
+    // - "replace": this transport was authenticated and the peer's new
+    //   certificate means our SCTP association is dead on the far side while
+    //   still writable here. It is torn down through the transport-failure
+    //   path (disconnectFromPeer: PC closed, roster entry and non-failed
+    //   handshake status dropped, per-message channels die with it and the
+    //   send path's resume-on-replaced-PC logic takes over). An OFFER then
+    //   continues on a fresh PC exactly as the no-transport path would; an
+    //   ANSWER belonged to the stale PC's own offer and cannot be applied to
+    //   any other PC, so it is discarded and the room is re-dialed.
+    //
+    // The teardown runs INSIDE the room/peer critical section on purpose:
+    // disconnectFromPeer is synchronous, never takes this negotiation mutex,
+    // and its releaseRoomPeerMutex only forgets the registry key once the
+    // mutex is idle (i.e. after this operation itself releases it), so no
+    // deadlock is possible, while a concurrent candidate or description for
+    // the same edge queues behind the lock and can never observe a
+    // half-replaced transport.
+    if (remoteTransportChanged) {
+      const amInitiator = isIdentityInitiator(
+        keyPair.publicKey,
+        epc.withPeerPublicKey,
+      );
+      const response = decideRemoteTransportChangeResponse({
+        epc,
+        roomId,
+        peerId,
+        descriptionType: description.type,
+        isInitiator: amInitiator,
+      });
+      if (response === "replace") {
+        debugLog(
+          `Remote DTLS certificate changed for ${peerId} in ${roomId} on an authenticated transport; replacing it`,
+        );
+        await disconnectPeer({ roomId, peerId });
+        if (description.type !== "offer") {
+          // The re-dial's roster round re-introduces the peer and
+          // connectWithPeer builds our fresh transport; the peer's fresh PC,
+          // currently connecting towards our closed one, receives that new
+          // offer and restarts ICE on it.
+          requestPeersAfterEdgeTeardown(api, roomId);
+          return { data: undefined };
+        }
+        epc = await handleConnectToPeer(
+          { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
+          api,
+        );
+        attachDataChannelHandler(epc, dataChannels, api);
+        if (!peerConnections.includes(epc)) peerConnections.push(epc);
+        // The peer proved it is live by offering: put it back on the roster
+        // now, ahead of the fresh main's "authenticating" report, so no
+        // handshake status ever describes a peer outside the roster.
+        api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
+      } else {
         resetEdgeAuthenticationForNewRemoteTransport({
           epc,
           roomId,
@@ -189,6 +269,10 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
             `Remote DTLS certificate changed (${roomId}, ${peerId})`,
           ),
         });
+      }
+    }
+
+    {
       try {
         await epc.setRemoteDescription(description);
       } catch (e: unknown) {
@@ -263,7 +347,8 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     // answer AND open main on that PC; and data channels may be created before
     // the transport reaches "connected" (SCTP opens them once DTLS completes).
     // When the transport reset above closed a stale main, epc.mainChannel is
-    // already undefined, so this opens exactly one replacement per call.
+    // already undefined, and a replacement transport starts with none, so
+    // this opens exactly one main per call.
     if (
       !isTransportClosed(epc) &&
       isIdentityInitiator(keyPair.publicKey, epc.withPeerPublicKey) &&

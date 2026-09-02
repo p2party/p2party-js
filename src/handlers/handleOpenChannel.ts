@@ -34,6 +34,7 @@ import {
 } from "./pqHealingOrchestrator";
 import { installCoverEdge } from "./coverEdge";
 import { abortTransfer } from "./transferAbort";
+import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
 
 import webrtcApi from "../api/webrtc";
 
@@ -415,17 +416,13 @@ export const handleOpenChannel = async (
           peerId: epc.withPeerId,
         }),
       );
-      // Debounce reconnection attempts to prevent rapid loops
-      const now = Date.now();
-      const lastAttempt = lastReconnectAttempt.get(roomId) ?? 0;
-      if (now - lastAttempt > RECONNECT_DEBOUNCE_MS) {
-        lastReconnectAttempt.set(roomId, now);
-        api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
-      } else {
-        debugLog(
-          `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
-        );
-      }
+      // A main that closed on its own is a transport failure (a deliberate
+      // disconnect nulls this handler before closing, and a replaced
+      // transport's stale lease returned above), so re-dial under the
+      // dedicated "redial" budget: the "join" budget may have just been
+      // consumed by a socket reconnect's roster request, which would swallow
+      // the one re-dial that can rebuild this edge.
+      requestPeersAfterEdgeTeardown(api, roomId);
     } else {
       if (!dataChannels.includes(extChannel)) return;
       // SCTP delivers queued `message` events before `close`, but our decrypt /
@@ -953,6 +950,14 @@ export const handleOpenChannel = async (
           console.error("protocol-v4 handshake failed:", handshakeError);
           if (extChannel.readyState !== "closed") extChannel.close();
           if (epc.connectionState !== "closed") epc.close();
+          // pc.close() fires no connectionstatechange, so no transport-level
+          // follow-up ever re-dials for this edge; the main onclose above may
+          // run too, and its re-dial then dedups under the same budget. Only
+          // a transport failure is worth rebuilding the edge for: a PIN or
+          // policy mismatch fails again on any fresh transport and a re-dial
+          // would only burn another attempt against the PIN throttle.
+          if (failureReason === "transport")
+            requestPeersAfterEdgeTeardown(api, roomId);
         } finally {
           pin?.fill(0);
         }

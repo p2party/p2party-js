@@ -4,6 +4,161 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.5] — 2026-09-02
+
+Peer-edge transport binding and liveness. A phone backgrounded with its radio
+off for less than the ~30 s ICE consent timeout woke holding a peer connection
+that still read `connected`, while its peer had already torn that edge down and
+built a fresh one. The woken side reused the stale transport, its zombie `main`
+channel blocked a replacement, no handshake ever ran on the peer's new
+transport, and the split was permanent until a manual reconnect: one side showed
+the peer reachable and its sends failed as undelivered, the other showed no
+handshake at all and its sends hung forever. This is still protocol v4 and
+changes no wire shape; every change below is on the local recovery path.
+
+### Fixed
+
+- A peer edge is now bound to the DTLS certificate it was authenticated
+  against. When the remote certificate on an incoming description differs from
+  the one already applied, the edge is re-authenticated rather than reused: the
+  in-flight handshake transcript is rejected, the ratchet-gate lease is
+  replaced, and the PQ orchestrator, ratchet, message-key caches and scheduled
+  cover of the old certificate are destroyed. Keeping a ratchet across a remote
+  certificate change also violated transport binding, since the handshake
+  transcript binds both DTLS fingerprints.
+
+  An edge that has been _authenticated_ on this connection is REPLACED rather
+  than rebound in place, because the old SCTP association is dead on the far
+  side but still writable locally: the replacement `main` opened before DTLS
+  re-ran, the handshake read the old remote certificate out of `getStats()` and
+  failed as a fingerprint mismatch. A never-authenticated connection is still
+  rebound in place, and at most once — a second fingerprint change replaces it,
+  so a peer that keeps presenting new certificates always converges on a
+  replacement instead of livelocking against a local certificate the peer has
+  already retired.
+
+- An answer carrying the DTLS fingerprint of a transport this side has retired
+  is discarded, with its queued ICE, before anything is built or applied. A
+  fresh connection's first `setRemoteDescription` had no binding check at all —
+  there is nothing on the wire correlating an answer with the offer it answers —
+  so a stale answer drained from a frozen peer's socket backlog could bind a
+  brand-new connection to a dead certificate, after which the correct answer was
+  dropped as stale and neither transport ever connected. Offers are deliberately
+  not blocked: an offer on a retired transport is evidence that retiring it was
+  premature, and answering it rebinds the edge immediately. The retired set is
+  bounded to 4 fingerprints per edge with a 120 s TTL, and forgotten when a room
+  is left or purged, so a peer can never be locked out.
+
+- Every failure teardown re-dials the room, under its own debounce budget.
+  A grace-timer teardown, a `main` channel close or error, and a handshake
+  transport failure previously either re-dialed under the room-join budget — which
+  the reconnect's own roster request had just consumed — or not at all, because
+  `disconnectFromPeer` nulls the handlers before closing and `close()` fires no
+  `connectionstatechange`. Deliberate teardowns (the public `disconnectFromPeer`,
+  purge, leave, address-book removal) still never re-dial, and neither does a PIN
+  or policy failure, which would only burn another attempt against the throttle.
+  A first offer that is never answered is torn down and re-dialed after 15 s.
+
+- A handshake attempt that has been superseded now dies quietly. An in-place
+  edge re-authentication rejects the transcript on a connection it deliberately
+  keeps alive, and the `main` channel's catch had no stale-lease guard, so it
+  read its own supersession as a transport failure: it dispatched a `failed`
+  status over the `authenticating` the reset had just set, closed the connection
+  the reset meant to keep, and re-dialed. It now closes only its own channel.
+
+- A send to a peer that never authenticates fails with a clear error inside a
+  bounded wait instead of hanging forever. Every gate wait on the send path
+  (reconcile, scheduled fan-out, and transfer cipher binding) now races the
+  ratchet gate against a 45 s budget — chosen to outlast the 30 s handshake step
+  timeout, so a handshake that fails on its own still rejects the gate first —
+  and surfaces "Peer is not authenticated on this transport: the handshake did
+  not complete within the wait budget" as that peer's outcome.
+
+- A half-open signaling socket is detected instead of being believed. When a
+  page freezes with the radio off, the server drops the client after a missed
+  ping, but no local `close` event fires until the TCP stack gives up, so Redux
+  kept reporting a live verified socket and nothing reconnected. A heartbeat
+  watchdog with an injected clock now declares the socket dead after 25 s
+  without an answered server heartbeat, checking every 5 s and immediately on
+  `visibilitychange`, `pageshow`, `online` and `focus` because timers are
+  throttled while the page is hidden. The close bookkeeping became one shared
+  run-once settlement that the watchdog invokes directly.
+
+- `RTCPeerConnection` operations settle when the connection closes underneath
+  them. Closing a connection aborts its in-flight operations without settling
+  their promises, so an awaited `addIceCandidate` or `setRemoteDescription` that
+  raced a teardown never returned — stranding the per-peer negotiation mutex and,
+  because those dispatches are awaited from the socket's strictly serial ingress
+  queue, stopping every later frame on that socket (measured: a peer's
+  introductions went unanswered for two minutes after a candidate raced a
+  teardown). Each operation is now polled alongside the transport and settles on
+  its own result, on `closed`, or on a timeout; an abandoned operation's later
+  rejection is consumed.
+
+- An interrupted transfer resumes across an edge re-authentication instead of
+  being reported as a peer cancellation. A transfer belongs to the ratchet
+  generation it was sealed under, identified by that generation's gate lease:
+  the sender's cancel classifier now also requires the lease to be unchanged, so
+  a locally retired channel falls through to resume, and the cipher-binding
+  shortcut is generation-aware, so a re-bind on the same connection re-runs the
+  gate wait and the ratchet step instead of sealing with a key that was just
+  wiped. A re-bind that fails owes the transfer another of its bounded resume
+  attempts; a genuine cancel and a gate-wait timeout stay terminal. The
+  re-authentication itself now retires every channel of the old generation
+  (each per-message channel plus any stale registry entry, not only `main`),
+  because a channel carrying that generation's lease could only have its next
+  inbound frame rejected as unauthenticated application data, which closed the
+  channel and cascaded into tearing down the very edge the re-bind exists to
+  keep.
+
+- Documentation only, no behaviour change: the roadmap's "Where things stand"
+  and "Near term" were re-checked claim by claim against the source and the
+  deployed services; the README's `sealed.root` length (64 bytes, SHA-512), its
+  CDN and npm install paths (which pointed at objects that answer 404), and its
+  recovery-phrase description (p2party's word encoding is not BIP-39 — SHA-512
+  checksum, 12-48 words, argon2id seed — and nothing calls it yet) were
+  corrected; `docs/session-api.md` and `SessionCryptoOptions` now say what
+  `wasmLoader.ts` actually does (packaged file first with an SRI check on Node
+  and Bun, CDN only as a fallback); a `protocol-v3` label on a `protocolVersion:
+4` interface was dropped; and the claim that sparse-PQ control cells
+  substitute into scheduled cover slots was removed from the 0.13.0 entry and
+  `coverRuntime.ts` — no such code has ever existed.
+
+### Verification
+
+A reproduction harness of two separate headless-Chromium processes, one
+SIGSTOPped whole-process-tree with the kernel receive buffers of its UDP host
+candidates flooded (a phone asleep with the radio off), against a Bun relay
+mirroring the signaling server's message flow. It is preserved with its pass
+criteria in `docs/e2e/desync/` and `docs/e2e/README.md`.
+
+Recorded 2026-09-02: the seven-scenario matrix passes — baseline, socket drop,
+a 20 s freeze in both identity roles with the socket dropped and with it kept,
+and a 45 s freeze — with both sides re-authenticating 1-6 s after wake and
+exchanging byte-exact messages in both directions by 6.5 s (0 s and 0.5 s
+respectively in the two scenarios with no wake). Four in-flight 8 MiB transfer
+configurations complete byte-exact with the sender resolving `delivered`; the
+configuration that previously failed deterministically now passes 3/3. Unit and
+integration suite: 1196 tests, 0 failures.
+
+Known follow-up, recorded rather than claimed fixed: in the one configuration
+where a frozen identity _responder_ carries an in-flight transfer, convergence
+takes ~37 s rather than ~7 s, because the surviving transport's SCTP
+association accepts our new streams but not the peer's, so recovery waits out
+the 30 s handshake step timeout. The outcome is correct; the latency is not.
+
+Not covered: an in-flight send does not survive reloading the sending page (a
+reloaded receiver does resume, by replaying receipts for the leaf-hashes it
+durably holds), and the harness runs n = 2 over loopback.
+
+### Deployment note
+
+No signaling-server change is required: 0.14.5 is wire-compatible with
+`p2party-server` 0.1.1, which 0.14.4 already required, and every change is on
+the SDK's local recovery path. Frontends that vendor the SDK tarball must
+re-vendor it to get the fix; nothing in the browser mesh recovers a stale edge
+without the new SDK on at least the woken side.
+
 ## [0.14.4] — 2026-07-28
 
 WebRTC, signaling, TURN, and terminal-purge correctness. This is still protocol

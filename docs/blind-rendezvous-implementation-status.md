@@ -271,7 +271,7 @@ remaining AC-035 every-body vector gate and are not described as a freeze.
 - **SDK/frontend/server integration.** The blind modules remain outside the
   package barrel; no frontend room flow, pre-SDP gate, store transport, peer
   store role, or backend blind endpoint consumes them. The existing WebRTC path
-  is only the proven `0.14.4` correctness baseline.
+  is only the proven correctness baseline of the shipped release.
 - **Claim evaluation.** `normativeKernel.ts` validates artifact _shape_ only. It
   runs no predicate, verifies no evidence, and exposes no positive-wording
   authorizer. Kernel module 8 does not exist.

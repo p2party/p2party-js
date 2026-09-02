@@ -301,11 +301,11 @@ checks freeze it.
 ### 1.5 Existing three-repository baseline and production delta
 
 This baseline is a static source audit updated 2026-07-28, not execution or
-conformance evidence. The inspected workspace packages identify the SDK as
-0.14.4 while the public npm `latest` observed during the audit was older; the
-public release and workspace state shall not be conflated. No commit is pinned
-in this proposal, and existing local changes in sibling worktrees are not
-attributed to a release.
+conformance evidence. The inspected workspace packages identify the SDK as the
+then-current workspace version while the public npm `latest` observed during
+the audit was older; the public release and workspace state shall not be
+conflated. No commit is pinned in this proposal, and existing local changes in
+sibling worktrees are not attributed to a release.
 
 The repository boundary is:
 

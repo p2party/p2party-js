@@ -378,7 +378,7 @@ recorded in `wasmLoader.ts` and `libcrypto.provenance.json`.
   handling cover Chrome Android, iOS Safari geometry, and Capacitor. Badge
   clearance and the formerly hidden per-peer send-failure reason remain.
 
-The SDK `0.14.4` production baseline was also exercised against
+The SDK production baseline in place at the time was also exercised against
 `wss://signaling.p2party.com/ws` and `https://p2party.com`: text, byte-exact
 files, selective retransmission, a 16 MiB multi-window OPFS transfer,
 reconnect/resume, drain-before-close, and OPFS reload persistence all completed
@@ -446,8 +446,8 @@ form an end-to-end store implementation. What remains:
 It vendors `p2party` as a hash-verified tarball (`file:vendor/p2party-<v>.tgz`,
 `scripts/verifyLocalDependency.mjs` enforces the sha512). The blind modules are
 deliberately not in the barrel. Integration needs a reviewed public API and a
-new vendored package artifact/hash; the successful `0.14.4` production run did
-not exercise blind rendezvous.
+new vendored package artifact/hash; the successful production run recorded
+above did not exercise blind rendezvous.
 
 ## Suggested next steps, in dependency order
 

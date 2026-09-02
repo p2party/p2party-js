@@ -11,17 +11,18 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Implemented and verified in the `0.14.4` SDK release candidate:
+Implemented and verified in the `0.14.5` SDK release candidate:
 
-> The service already runs this build. As observed on 2026-09-02,
-> `https://p2party.com` serves the `0.14.4` bundle — the `libcrypto.wasm` it
-> self-hosts is byte-identical to the one inside the vendored
-> `p2party-0.14.4.tgz` — and `https://signaling.p2party.com/health` answers
-> `{"status":"ok","protocolVersion":4,"version":"0.1.1"}`. What is still
-> outstanding is distribution, not deployment: `0.14.4` is not on npm
-> (`npm view p2party version` answers `0.14.3`), nothing is uploaded under
-> `https://cdn.p2party.com/@0.14.4/`, and the local commits in all three
-> repositories are unpushed.
+> The deployed service does not run this build yet. As observed on 2026-09-02,
+> `https://p2party.com` serves the bundle of the release it vendors — the
+> `libcrypto.wasm` it self-hosts is byte-identical to the one inside that
+> vendored tarball — and `https://signaling.p2party.com/health` answers
+> `{"status":"ok","protocolVersion":4,"version":"0.1.1"}`, which is the server
+> this SDK requires and already the deployed one. What is outstanding is
+> distribution plus a frontend re-vendor, not a server change: `0.14.5` is not
+> on npm (`npm view p2party version` answers an older release), nothing is
+> uploaded under `https://cdn.p2party.com/@0.14.5/`, and the local commits in
+> all three repositories are unpushed.
 
 - protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets
   are combined by `HKDF-Extract` over a fixed-order concatenation —

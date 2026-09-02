@@ -697,13 +697,14 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.4` is not on the CDN yet.** The release pipeline uploads its objects
+> **`0.14.5` is not on the CDN yet.** The release pipeline uploads its objects
 > from the tarball it publishes, and that pipeline has not run for this
-> version: every path under `https://cdn.p2party.com/@0.14.4/` currently
-> answers 404, and npm still resolves `p2party` to `0.14.3`. The snippet below
-> is generated from this build and is what the release will serve — until then,
-> either pin `0.14.3` (its objects are live) or self-host the bundle, which
-> works today and is described in the next section.
+> version: every path under `https://cdn.p2party.com/@0.14.5/` currently
+> answers 404, and npm still resolves `p2party` to an older release. The
+> snippet below is generated from this build and is what the release will
+> serve — until then, either pin the version `npm view p2party version` reports
+> (its objects are live) or self-host the bundle, which works today and is
+> described in the next section.
 
 A release publishes its browser bundle, its database worker and its
 cryptographic module as immutable, versioned CDN objects. The version is in the
@@ -716,8 +717,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.4/p2party.min.js"
-  integrity="sha384-LJgpREy2v2Walb06fJPRjCYT5jhmmxYK6GQajUDQBTS9gEC0o7n5N6WtKJnGkOlZ"
+  src="https://cdn.p2party.com/@0.14.5/p2party.min.js"
+  integrity="sha384-PF4yATBGh6W2OsRe/BwLGD0BNPlvHKZ+rylMQ7i9cPKgPGdUXMh6FcRhPWhmfoFr"
   crossorigin="anonymous"
 ></script>
 
@@ -756,7 +757,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-E+7JbGdTHDmz1F5eZWzLOR7PGdIFK3qmEh+v5nQtpLhWi1ymxg47okdUkhhjB/zs`.
+`integrity=sha384-bWG1CdEqf1xTiqEFyz4wMqGrVROMe5Jrwk8oEaUf5a0cQVRatpprvlCe2XqWdWVe`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.
@@ -783,7 +784,7 @@ The npm tarball is the copy that always exists. It carries both files, and the
 package exports them, so no network fetch is needed to obtain either:
 
 ```sh
-npm pack p2party@0.14.3 && tar -xzf p2party-0.14.3.tgz
+npm pack p2party && tar -xzf p2party-*.tgz
 ls package/lib/libcrypto.wasm package/lib/libcrypto.provenance.json
 # already installed? the subpaths resolve straight out of node_modules:
 node -p "require.resolve('p2party/libcrypto.wasm')"
@@ -795,15 +796,15 @@ immutable, versioned path, so a URL names exactly one build and is safe to
 cache forever:
 
 ```sh
-curl -O "https://cdn.p2party.com/@0.14.3/libcrypto.wasm"
+curl -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
 ```
 
-Two caveats, both current as of `0.14.4`. The CDN carries only three objects —
+Two caveats, both current as of `0.14.5`. The CDN carries only three objects —
 `p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the `assets` array
 in `scripts/uploadToCDN.mjs`) — so **`libcrypto.provenance.json` is not on the
-CDN for any version**; take it from the tarball. And nothing at all is uploaded
-for `0.14.4` yet, so substitute a version that is actually published rather
-than reading one out of `npm view`.
+CDN for any version**; take it from the tarball. And nothing is uploaded for
+`0.14.5` yet, which is why the command above asks npm for a version that is
+actually published instead of naming this one.
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
 are both recorded in the provenance file:

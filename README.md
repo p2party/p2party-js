@@ -38,9 +38,12 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   Browser builds use IndexedDB and, where available, OPFS for disk-backed large
   file receipt.
 - Room capabilities have a compact 43-character base64url form, a versioned
-  fragment invite, and an optional checksum-protected 24-word
-  [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)
-  representation.
+  fragment invite, and an optional checksum-protected 24-word representation
+  drawn from the
+  [BIP-39 English wordlist](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md).
+  It borrows the words, not the format: the checksum is SHA-256 over p2party's
+  own domain separator, so a BIP-39 phrase is not a valid invite. See
+  [docs/references.md](docs/references.md).
 - `p2party/session` exposes the cryptography without
   [Redux](https://redux-toolkit.js.org/), IndexedDB, WebRTC, signaling,
   `window`, or `localStorage`.

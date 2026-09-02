@@ -222,7 +222,7 @@ Format: **Decision / Context / Rationale / Status**. Grouped by area.
 
 - _Decision:_ Derive the identity keypair seed from a mnemonic using argon2.
 - _Context:_ Establishes the identity-key derivation path the later PACE/Double-Ratchet spec builds on.
-- _Status:_ Shipped — `2b68c5b`.
+- _Status:_ **Primitive landed in `2b68c5b`; not shipped as a capability.** `generateMnemonic()` and `keyPairFromMnemonic()` exist in `src/cryptography/mnemonic.ts` and are exported from `src/index.ts`, and the derivation is deterministic (argon2id over the NFKD-normalized phrase, salted by an optional password). But nothing in this repository or in the p2party.com frontend derives a *stored* identity from a phrase, no backup or restore flow calls either function, and no test in `tests/` exercises them. The phrase format is also not BIP-39 — SHA-512 checksum, 128–512 bits of entropy — so a BIP-39 wallet cannot restore one of these identities. Earlier revisions of this entry read "Shipped", which overstated it. The remaining work is the flow; see the identity backup and restore entry in [ROADMAP.md](../ROADMAP.md).
 
 **ADR-A2 — CPace + interactive 3DH + mandatory ML-KEM + Double Ratchet = protocol-v3** _(historical spec, implemented and evolved in the current working tree)_
 

@@ -18,8 +18,24 @@ package. Licences and notices are reproduced in
 | libsodium               | X25519, Ed25519, ChaCha20-Poly1305, BLAKE2b, HKDF, Argon2, SHA-512 | [github.com/jedisct1/libsodium](https://github.com/jedisct1/libsodium)                     |
 | mlkem-native            | ML-KEM-512/768/1024 (FIPS 203)                                     | [github.com/pq-code-package/mlkem-native](https://github.com/pq-code-package/mlkem-native) |
 | Emscripten              | Compiles the C cryptography to the pinned WASM module              | [emscripten.org](https://emscripten.org/)                                                  |
-| BIP-39 English wordlist | The 24-word room-capability encoding                               | [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)       |
+| BIP-39 English wordlist | The 2,048 words only — see the note below                          | [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)       |
 | Redux Toolkit           | Browser-root state store                                           | [redux-toolkit.js.org](https://redux-toolkit.js.org/)                                      |
+
+`src/utils/wordlist.json` is the BIP-39 English list, and that is the whole
+extent of the relationship. Two unrelated encodings share it, and **neither
+uses BIP-39 checksum semantics**:
+
+- the 24-word room invite (`src/roomInvite.ts`), which encodes a 32-byte room
+  capability and checksums it with SHA-256 over the domain separator
+  `p2party/room-invite/checksum/v1\0`, under its own wordlist id
+  `p2party-invite-en-v1`; and
+- the identity recovery phrase (`src/cryptography/mnemonic.ts`), which takes
+  128–512 bits of entropy (12–48 words), checksums with the leading bits of
+  SHA-512, and derives its seed with argon2id rather than PBKDF2-HMAC-SHA512.
+
+Both reject the canonical BIP-39 English test vectors — the invite decoder with
+`Room invite checksum is invalid`, `validateMnemonic()` by returning `false` —
+and no BIP-39 tool can restore either. Do not describe them as BIP-39.
 
 ## 2. Standards the wire format implements
 

@@ -31,6 +31,7 @@ import {
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { sealChunk } from "./messageChunkCrypto";
 import { isRatchetGateWaitTimeout, waitForRatchetGate } from "./ratchetGateWait";
+import { isCurrentRatchetGateLease } from "./ratchetGate";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
 import { enqueueScheduledSend, trackScheduledSend } from "./coverEdge";
 import { ratchetEncryptDurably } from "./ratchetPersist";
@@ -69,6 +70,7 @@ import type {
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetHeader } from "../cryptography/ratchet";
+import type { RatchetGateLease } from "./ratchetGate";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
@@ -453,6 +455,13 @@ const resumeChannel = async (
 
 interface TransferCipher {
   epc: IRTCPeerConnection;
+  /**
+   * Gate lease of the ratchet generation `messageKey`/`header` were derived
+   * from. An in-place re-bind (remoteTransportChange) keeps the
+   * RTCPeerConnection and replaces this lease, so the epc identity alone does
+   * NOT identify the crypto generation.
+   */
+  lease?: RatchetGateLease;
   messageKey: Uint8Array;
   header: RatchetHeader;
   /**
@@ -530,11 +539,20 @@ const waitForPqTrafficAdmission = async (
 /**
  * Bind an in-flight message to the active cryptographic transport.
  *
- * Reopening only its DataChannel on the SAME RTCPeerConnection retains the
- * ratchet session, so the per-message key/header remain valid. A replacement
- * RTCPeerConnection, however, performs a fresh hybrid handshake and owns an
- * unrelated ratchet. It must advance that ratchet once and reseal the missing
- * plaintext chunks; replaying the old ciphertext/key/header cannot decrypt.
+ * Reopening only its DataChannel on the same RTCPeerConnection AND the same
+ * ratchet generation retains the session, so the per-message key/header remain
+ * valid. Anything else — a replacement RTCPeerConnection, or the same one
+ * re-bound in place onto a new remote DTLS certificate — performs a fresh
+ * hybrid handshake and owns an unrelated ratchet. It must wait for that
+ * generation's gate, advance its ratchet once and reseal the missing plaintext
+ * chunks; replaying the old ciphertext/key/header cannot decrypt.
+ *
+ * The generation is identified by the gate lease, NOT by the connection: an
+ * in-place re-bind keeps the very same epc while wiping its ratchet, PQ
+ * runtime and message keys. Treating that as "same transport" would keep
+ * sealing with a dead key and, worse, push frames onto an edge whose gate is
+ * still closed — which the receiver can only reject as application data before
+ * peer authentication, closing the channel and cascading into the edge.
  *
  * Exported only so the transport-identity and key-erasure contract has a focused
  * unit test. It is not part of the package's public root exports.
@@ -549,7 +567,8 @@ export const bindTransferCipherToConnection = async (
   signal?: AbortSignal,
 ): Promise<TransferCipher> => {
   throwIfTransferAborted(signal);
-  if (transfer.epc === nextEpc) return transfer;
+  if (transfer.epc === nextEpc && transfer.lease === nextEpc.ratchetGateLease)
+    return transfer;
 
   await waitWithTransferAbort(
     waitForGate(roomId, nextEpc.withPeerId, signal),
@@ -568,25 +587,69 @@ export const bindTransferCipherToConnection = async (
   transfer.pqContext?.rootKey.fill(0);
   return {
     epc: nextEpc,
+    lease: nextEpc.ratchetGateLease,
     messageKey: stepped.messageKey,
     header: stepped.header,
     pqContext: stepped.pqContext,
   };
 };
 
+/**
+ * True iff a per-message channel closing is the PEER cancelling this transfer.
+ *
+ * Immediate mode has no CANCEL frame: one DataChannel is one logical message,
+ * so its close IS the signal — but only when nothing on OUR side retired it.
+ * Three things must hold: the RTCPeerConnection is still connected, it is
+ * still the registered transport for this room/peer, and the ratchet
+ * generation the transfer was sealed under is still the current one.
+ *
+ * That last test is what separates a remote cancel from a local retirement.
+ * An in-place edge re-bind (remoteTransportChange) closes the generation's
+ * message channels while KEEPING the connection connected and registered, so
+ * the first two tests still pass; the gate lease it replaces is the only
+ * evidence that the close was ours. Without it the sender abandons a perfectly
+ * resumable transfer — and reports "cancelled by peer", which an application
+ * may act on by deleting its outgoing message. Mirrors the receiver's
+ * `authenticatedTransportStillAlive` test in handleOpenChannel.
+ */
 export const isAuthenticatedPeerCancel = (
   currentEpc: IRTCPeerConnection,
   peerConnections: IRTCPeerConnection[],
   roomId: string,
   peerId: string,
+  transferGateLease: RatchetGateLease | undefined,
 ): boolean =>
   currentEpc.connectionState === "connected" &&
+  transferGateLease !== undefined &&
+  isCurrentRatchetGateLease(roomId, peerId, transferGateLease) &&
   peerConnections.some(
     (candidate) =>
       candidate === currentEpc &&
       candidate.roomId === roomId &&
       candidate.withPeerId === peerId,
   );
+
+/**
+ * A resumed transfer failed to re-bind onto the transport it resumed on: is
+ * another of its bounded resume attempts owed?
+ *
+ * The normal reason is that the transport was REPLACED before its gate could
+ * open — an unauthenticated transport is granted at most one in-place re-bind
+ * (decideRemoteTransportChangeResponse), and the replacement tears the old one
+ * down, which rejects the gate every awaiter is sitting on. The peer is coming
+ * back on the replacement, so giving up here would abandon a transfer that is
+ * one attempt away from finishing.
+ *
+ * Two failures are terminal. A cancelled transfer resumes nothing. And a
+ * gate-wait TIMEOUT means nothing replaced anything: the peer simply never
+ * opened a handshake within the budget (a stale authenticated view), so
+ * another attempt only buys another full budget of the same wait — the same
+ * reason the send's first gate wait rethrows it.
+ */
+export const isResumableRebindFailure = (
+  error: unknown,
+  signal?: AbortSignal,
+): boolean => !signal?.aborted && !isRatchetGateWaitTimeout(error);
 
 export interface PeerSendTarget {
   peerId: string;
@@ -805,6 +868,14 @@ const sendWithReconcile = async (
   throwIfTransferAborted(signal);
   clearTransfer(roomId, peerId, transferId);
 
+  // The ratchet generation this transfer's channel was opened on — the same
+  // token handleOpenChannel captured for it. Everything derived below belongs
+  // to it, and it is what tells a peer's cancel apart from our own retirement
+  // of the generation (isAuthenticatedPeerCancel). Captured BEFORE the gate
+  // wait: a re-bind that races the wait leaves a stale token here, which
+  // resumes the transfer rather than declaring a cancel that never happened.
+  let transportGateLease: RatchetGateLease | undefined = epc.ratchetGateLease;
+
   // This path no longer persists ciphertext. Remove any queue records left by an
   // older runtime before this channel can drain them; plaintext newChunks are the
   // sole durable resend source.
@@ -911,11 +982,20 @@ const sendWithReconcile = async (
         currentChannel.readyState === "closing"
       ) {
         // One DataChannel is one logical message. If only this stream closed
-        // while its authenticated RTCPeerConnection remains current and
-        // connected, that close is the peer's immediate-mode CANCEL signal.
-        // Resume is reserved for a replacement PC after a transport failure.
+        // while its authenticated RTCPeerConnection remains current, connected
+        // AND on the generation this transfer was sealed under, that close is
+        // the peer's immediate-mode CANCEL signal. Resume is reserved for a
+        // replacement PC after a transport failure — and for the same PC once
+        // an in-place re-bind has retired this transfer's generation, which
+        // closes its channel from our own side.
         if (
-          isAuthenticatedPeerCancel(currentEpc, peerConnections, roomId, peerId)
+          isAuthenticatedPeerCancel(
+            currentEpc,
+            peerConnections,
+            roomId,
+            peerId,
+            transportGateLease,
+          )
         )
           throw new Error("Message transfer cancelled by peer");
 
@@ -932,20 +1012,48 @@ const sendWithReconcile = async (
           signal,
         );
         if (!resumed) break;
-        const rebound = await bindTransferCipherToConnection(
-          { epc: currentEpc, messageKey, header },
-          resumed.epc,
-          roomId,
-          encryptionModule,
-          waitForRatchetGate,
-          ratchetEncryptDurably,
-          signal,
-        );
+        // Adopt the replacement channel BEFORE re-deriving: re-binding can
+        // reject (a gate that never opens on the new generation), and the
+        // terminal-close runner must then close the channel we just opened,
+        // not the dead one it replaced.
+        currentChannel = resumed.channel;
+        // The whole cipher — key, header and the OWNED PQ context — is handed
+        // over, so the old generation's secrets are wiped by the re-bind
+        // instead of being dropped un-wiped when `pqContext` is reassigned.
+        let rebound: TransferCipher;
+        try {
+          rebound = await bindTransferCipherToConnection(
+            {
+              epc: currentEpc,
+              lease: transportGateLease,
+              messageKey,
+              header,
+              pqContext,
+            },
+            resumed.epc,
+            roomId,
+            encryptionModule,
+            waitForRatchetGate,
+            ratchetEncryptDurably,
+            signal,
+          );
+        } catch (error) {
+          if (!isResumableRebindFailure(error, signal)) throw error;
+          // The generation we resumed onto never opened its gate — it was
+          // replaced first. Nothing was re-derived, so the cipher is still the
+          // old generation's and this channel must never carry a frame (an
+          // unauthenticated edge can only reject it, closing the channel and
+          // cascading into `main`). Drop it and spend another of the bounded
+          // resume attempts on the transport that replaces it.
+          console.error(error);
+          closeTransferChannel(currentChannel);
+          continue;
+        }
         currentEpc = rebound.epc;
+        transportGateLease = rebound.lease;
         messageKey = rebound.messageKey;
         header = rebound.header;
         pqContext = rebound.pqContext ?? null;
-        currentChannel = resumed.channel;
         retries = 0; // fresh retransmit budget for the resumed transfer
 
         // Telemetry: surface the reconnect recovery to the UI as a reliability

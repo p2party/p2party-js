@@ -37,6 +37,10 @@ let runWithTerminalChannelClose: typeof import("../../src/handlers/handleSendMes
 let runPeerSendFanout: typeof import("../../src/handlers/handleSendMessage")["runPeerSendFanout"];
 let shouldDeleteLocalMessageAfterFailure: typeof import("../../src/handlers/handleSendMessage")["shouldDeleteLocalMessageAfterFailure"];
 let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")["waitForReceiptWindow"];
+let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
+let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
+let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
+let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
 
 beforeAll(async () => {
   // Enter the store/API cycle through its normal application root. Importing
@@ -47,11 +51,18 @@ beforeAll(async () => {
     bindTransferCipherToConnection,
     closeTransferChannel,
     isAuthenticatedPeerCancel,
+    isResumableRebindFailure,
     runPeerSendFanout,
     runWithTerminalChannelClose,
     shouldDeleteLocalMessageAfterFailure,
     waitForReceiptWindow,
   } = await import("../../src/handlers/handleSendMessage"));
+  ({ claimRatchetGate, resetRatchetGate } = await import(
+    "../../src/handlers/ratchetGate"
+  ));
+  ({ RATCHET_GATE_WAIT_TIMEOUT_MESSAGE } = await import(
+    "../../src/handlers/ratchetGateWait"
+  ));
 });
 
 describe("per-message DataChannel close semantics", () => {
@@ -102,30 +113,76 @@ describe("per-message DataChannel close semantics", () => {
     expect(closeCalls).toBe(1);
   });
 
-  test("same connected authenticated PC means peer cancel", () => {
+  test("same connected authenticated PC on the same generation means peer cancel", () => {
+    const lease = claimRatchetGate("room", "cancel-live");
     const current = {
-      ...fakeConnection("peer"),
+      ...fakeConnection("cancel-live"),
       roomId: "room",
       connectionState: "connected",
+      ratchetGateLease: lease,
     } as IRTCPeerConnection;
     expect(
-      isAuthenticatedPeerCancel(current, [current], "room", "peer"),
+      isAuthenticatedPeerCancel(
+        current,
+        [current],
+        "room",
+        "cancel-live",
+        lease,
+      ),
     ).toBe(true);
   });
 
   test("a replacement or failed PC remains eligible for resume", () => {
+    const lease = claimRatchetGate("room", "cancel-replaced");
     const old = {
-      ...fakeConnection("peer"),
+      ...fakeConnection("cancel-replaced"),
       roomId: "room",
       connectionState: "closed",
+      ratchetGateLease: lease,
     } as IRTCPeerConnection;
     const replacement = {
-      ...fakeConnection("peer"),
+      ...fakeConnection("cancel-replaced"),
       roomId: "room",
       connectionState: "connected",
+      ratchetGateLease: lease,
     } as IRTCPeerConnection;
     expect(
-      isAuthenticatedPeerCancel(old, [replacement], "room", "peer"),
+      isAuthenticatedPeerCancel(
+        old,
+        [replacement],
+        "room",
+        "cancel-replaced",
+        lease,
+      ),
+    ).toBe(false);
+  });
+
+  // The in-place re-bind (remoteTransportChange) closes the generation's
+  // per-message channels while keeping the RTCPeerConnection connected and
+  // registered. Without the lease test the sender would read its own local
+  // retirement as a remote cancel and abandon a resumable transfer.
+  test("a retired generation on the same live PC is a resume, not a cancel", () => {
+    const openedUnder = claimRatchetGate("room", "cancel-rebound");
+    const current = {
+      ...fakeConnection("cancel-rebound"),
+      roomId: "room",
+      connectionState: "connected",
+      ratchetGateLease: openedUnder,
+    } as IRTCPeerConnection;
+    // The re-bind replaces the gate at the same room/peer key; the PC stays.
+    current.ratchetGateLease = resetRatchetGate(
+      "room",
+      "cancel-rebound",
+      new Error("Remote DTLS certificate changed"),
+    );
+    expect(
+      isAuthenticatedPeerCancel(
+        current,
+        [current],
+        "room",
+        "cancel-rebound",
+        openedUnder,
+      ),
     ).toBe(false);
   });
 });
@@ -244,11 +301,52 @@ describe("room-mesh send fanout", () => {
   });
 });
 
+describe("a re-bind that fails owes the transfer another resume attempt", () => {
+  test("a gate rejected by a transport teardown is retryable", () => {
+    // The transport a resume landed on can be REPLACED before its gate opens
+    // (an unauthenticated transport gets at most one in-place re-bind), which
+    // rejects the gate with the teardown error. The peer is coming back on the
+    // replacement, so the transfer is owed another of its bounded attempts.
+    expect(
+      isResumableRebindFailure(
+        new Error("Room/peer transport closed (room, peer)"),
+      ),
+    ).toBe(true);
+  });
+
+  test("a gate-wait timeout is terminal", () => {
+    // Nothing replaced anything: the peer simply never opened a handshake
+    // within the budget. Spending another attempt buys another full budget of
+    // waiting on the same stale view, so this stays terminal — exactly as the
+    // send's first gate wait already treats it.
+    expect(
+      isResumableRebindFailure(new Error(RATCHET_GATE_WAIT_TIMEOUT_MESSAGE)),
+    ).toBe(false);
+  });
+
+  test("a cancelled transfer never resumes", () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(
+      isResumableRebindFailure(
+        new Error("Room/peer transport closed (room, peer)"),
+        controller.signal,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("in-flight message cipher follows the cryptographic transport", () => {
-  test("reopening a DataChannel on the same PC reuses the message cipher", async () => {
-    const epc = fakeConnection("peer");
+  test("reopening a DataChannel on the same PC and generation reuses the message cipher", async () => {
+    const epc = fakeConnection("bind-same-generation");
+    epc.ratchetGateLease = claimRatchetGate("room", "bind-same-generation");
     const messageKey = new Uint8Array(32).fill(7);
-    const original = { epc, messageKey, header: header(1) };
+    const original = {
+      epc,
+      lease: epc.ratchetGateLease,
+      messageKey,
+      header: header(1),
+    };
     let gateCalls = 0;
     let stepCalls = 0;
 
@@ -274,6 +372,64 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
     expect(messageKey.every((byte) => byte === 7)).toBe(true);
     expect(gateCalls).toBe(0);
     expect(stepCalls).toBe(0);
+  });
+
+  // An in-place re-bind keeps the RTCPeerConnection and replaces the gate: the
+  // ratchet the transfer sealed with was wiped, so "same epc" no longer means
+  // "same crypto generation". Re-deriving is mandatory, and the sender must
+  // not push a frame before the replacement gate opens.
+  test("the same PC on a replaced generation waits for the gate and re-derives", async () => {
+    const epc = fakeConnection("bind-rebound");
+    const openedUnder = claimRatchetGate("room", "bind-rebound");
+    const oldKey = new Uint8Array(32).fill(9);
+    const oldPqRootKey = new Uint8Array(32).fill(8);
+    const newKey = new Uint8Array(32).fill(4);
+    const newPqContext = {
+      rootKey: new Uint8Array(32).fill(2),
+    } as unknown as NonNullable<
+      Awaited<ReturnType<BindTransferCipherToConnection>>["pqContext"]
+    >;
+    const events: string[] = [];
+
+    epc.ratchetGateLease = resetRatchetGate(
+      "room",
+      "bind-rebound",
+      new Error("Remote DTLS certificate changed"),
+    );
+
+    const rebound = await bindTransferCipherToConnection(
+      {
+        epc,
+        lease: openedUnder,
+        messageKey: oldKey,
+        header: header(1),
+        pqContext: {
+          rootKey: oldPqRootKey,
+        } as unknown as typeof newPqContext,
+      },
+      epc,
+      "room",
+      {} as LibCrypto,
+      async (roomId, peerId) => {
+        events.push(`gate:${roomId}:${peerId}`);
+      },
+      async () => {
+        events.push("step");
+        return {
+          messageKey: newKey,
+          header: header(2),
+          pqContext: newPqContext,
+        };
+      },
+    );
+
+    expect(events).toEqual(["gate:room:bind-rebound", "step"]);
+    expect(oldKey.every((byte) => byte === 0)).toBe(true);
+    expect(oldPqRootKey.every((byte) => byte === 0)).toBe(true);
+    expect(rebound.epc).toBe(epc);
+    expect(rebound.lease).toBe(epc.ratchetGateLease);
+    expect(rebound.messageKey).toBe(newKey);
+    expect(rebound.pqContext).toBe(newPqContext);
   });
 
   test("replacement PC waits for its gate, ratchets once, and wipes the old key", async () => {

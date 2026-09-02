@@ -227,12 +227,23 @@ const releaseRetiredChannel = (
  * into closing `main` and tearing down the very edge this re-bind exists to
  * keep. (Observed on the process-freeze harness: an 8 MiB transfer in flight
  * across the freeze left its data channel OPEN on the surviving PC, and the
- * first frame after the re-bind killed the edge.) The sender loses nothing:
- * handleSendMessage treats a closed per-message channel as a resume and
- * re-opens it on the re-authenticated edge. Cover lanes are NOT swept here —
- * `teardownCoverEdge` above closes each one, and the close listener
+ * first frame after the re-bind killed the edge.) A send in flight over such a
+ * channel loses nothing: the gate lease replaced here is exactly what tells
+ * handleSendMessage that the close was OURS, so the transfer resumes on the
+ * re-authenticated generation (re-opening its channel, re-stepping the ratchet)
+ * instead of being read as a cancel by the peer. Cover lanes are NOT swept
+ * here — `teardownCoverEdge` above closes each one, and the close listener
  * `registerCoverChannelUntilClose` installed unregisters it from both
  * `epc.coverChannels` and the shared array.
+ *
+ * Detaching those handlers also skips the receive-side bookkeeping a normal
+ * close would have run — `forgetCompletedReceiveMessageKey`. That is
+ * deliberate: retiring a key durably is asynchronous I/O and this reset is a
+ * synchronous step on the description path. Every key is wiped from RAM below
+ * (message-key cache filled with zeros, ratchet wiped, PQ runtime destroyed),
+ * and the durable edge checkpoint is keyed by (roomId, peerPublicKey) and
+ * rewritten whole by the next handshake's persist, so a completed transfer's
+ * key survives only until this edge re-authenticates.
  */
 export const resetEdgeAuthenticationForNewRemoteTransport = ({
   epc,

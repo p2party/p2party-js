@@ -211,6 +211,15 @@ export const RECONNECT_RESUME_TIMEOUT_MS = 30000;
 export const RECONNECT_RESUME_POLL_MS = 500;
 export const MAX_RESUME_ATTEMPTS = 3;
 
+// Bound the send path's wait on the per-peer ratchet gate. A peer whose edge
+// re-dialled onto a fresh transport may never finish the handshake (the other
+// side still thinks it is authenticated, or the `main` channel never opens);
+// without a bound every send to that peer hangs forever on the gate. The
+// budget must be >= HANDSHAKE_STEP_TIMEOUT_MS (30 s, handleHandshake.ts) so a
+// handshake that fails on its own rejects the gate first, plus a margin for the
+// channel open + first step to start.
+export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
+
 // Streaming send-side hash: read the file from disk one HASH_WINDOW_BYTES slice
 // at a time (O(1) memory — never the whole file) and feed it to the WASM
 // incremental SHA-512 in HASH_WASM_CHUNK_BYTES sub-chunks (the WASM heap buffer

@@ -30,7 +30,7 @@ import {
 } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { sealChunk } from "./messageChunkCrypto";
-import { getRatchetGate } from "./ratchetGate";
+import { isRatchetGateWaitTimeout, waitForRatchetGate } from "./ratchetGateWait";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
 import { enqueueScheduledSend, trackScheduledSend } from "./coverEdge";
 import { ratchetEncryptDurably } from "./ratchetPersist";
@@ -489,7 +489,11 @@ export const runWithTerminalChannelClose = async <T>(
   }
 };
 
-type WaitForRatchetGate = (roomId: string, peerId: string) => Promise<void>;
+type WaitForRatchetGate = (
+  roomId: string,
+  peerId: string,
+  signal?: AbortSignal,
+) => Promise<void>;
 type DurableRatchetStep = (
   epc: IRTCPeerConnection,
   roomId: string,
@@ -540,14 +544,17 @@ export const bindTransferCipherToConnection = async (
   nextEpc: IRTCPeerConnection,
   roomId: string,
   module: LibCrypto,
-  waitForGate: WaitForRatchetGate = getRatchetGate,
+  waitForGate: WaitForRatchetGate = waitForRatchetGate,
   ratchetStep: DurableRatchetStep = ratchetEncryptDurably,
   signal?: AbortSignal,
 ): Promise<TransferCipher> => {
   throwIfTransferAborted(signal);
   if (transfer.epc === nextEpc) return transfer;
 
-  await waitWithTransferAbort(waitForGate(roomId, nextEpc.withPeerId), signal);
+  await waitWithTransferAbort(
+    waitForGate(roomId, nextEpc.withPeerId, signal),
+    signal,
+  );
   if (!nextEpc.ratchetState)
     throw new Error("v3 send: replacement connection has no ratchet state");
 
@@ -806,10 +813,13 @@ const sendWithReconcile = async (
 
   // protocol-v3: do not send until the PACE + Double-Ratchet handshake has seeded
   // this peer's ratchet (the `main` channel opens the gate). A rejected gate =
-  // failed handshake → abort this peer's send.
+  // failed handshake → abort this peer's send. The wait is bounded: a peer whose
+  // handshake never starts (stale authenticated view after an edge re-dial)
+  // fails this send with the transport-binding error instead of hanging.
   try {
-    await waitWithTransferAbort(getRatchetGate(roomId, peerId), signal);
+    await waitForRatchetGate(roomId, peerId, signal);
   } catch (error) {
+    if (isRatchetGateWaitTimeout(error)) throw error;
     throw new Error("v3 send: ratchet gate rejected", { cause: error });
   }
   if (!epc.ratchetState) throw new Error("v3 send: no ratchet state for peer");
@@ -927,7 +937,7 @@ const sendWithReconcile = async (
           resumed.epc,
           roomId,
           encryptionModule,
-          getRatchetGate,
+          waitForRatchetGate,
           ratchetEncryptDurably,
           signal,
         );
@@ -1120,10 +1130,7 @@ const sendScheduled = async (
       continue;
     }
     try {
-      await waitWithTransferAbort(
-        getRatchetGate(roomId, target.peerId),
-        signal,
-      );
+      await waitForRatchetGate(roomId, target.peerId, signal);
       if (!epc.ratchetState)
         throw new Error("v4 scheduled send: no ratchet state");
       await waitForPqTrafficAdmission(epc, signal);

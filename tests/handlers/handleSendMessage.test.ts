@@ -335,6 +335,36 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
     expect(stepCalled).toBe(false);
     expect(oldKey.every((byte) => byte === 5)).toBe(true);
   });
+
+  test("replacement PC hands the transfer's abort signal to the gate waiter", async () => {
+    // The default waiter is the bounded waitForRatchetGate; it needs the
+    // transfer's signal so a cancel still wins over the wall-clock budget.
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+
+    const rebound = await bindTransferCipherToConnection(
+      {
+        epc: fakeConnection("peer"),
+        messageKey: new Uint8Array(32).fill(3),
+        header: header(1),
+      },
+      fakeConnection("peer"),
+      "room",
+      {} as LibCrypto,
+      async (_roomId, _peerId, signal) => {
+        seenSignal = signal;
+      },
+      async () => ({
+        messageKey: new Uint8Array(32),
+        header: header(2),
+        pqContext: null,
+      }),
+      controller.signal,
+    );
+
+    expect(seenSignal).toBe(controller.signal);
+    expect(rebound.header.N).toBe(2);
+  });
 });
 
 describe("sender receipt-window flow control", () => {

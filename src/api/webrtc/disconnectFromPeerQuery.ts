@@ -11,6 +11,7 @@ import { teardownCoverEdge } from "../../handlers/coverEdge";
 import { rejectRatchetGate } from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
+import { retireRemoteTransport } from "./retiredRemoteTransports";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -50,6 +51,20 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     )
       continue;
     terminalRoomIds.add(connection.roomId);
+
+    // This side stops believing in the remote transport this connection was
+    // bound to. The peer may still hold it (its ICE consent survived a freeze
+    // this side gave up on) and answer an offer it queued before the
+    // teardown; that answer would otherwise land on the replacement
+    // transport, which has no remote description to compare a fingerprint
+    // against, and bind it to a certificate we just retired. An offer from
+    // the same transport is still accepted — it proves the peer negotiates
+    // there — and un-retires it (see retiredRemoteTransports).
+    retireRemoteTransport(
+      connection.roomId,
+      connection.withPeerId,
+      connection.remoteDescription?.sdp,
+    );
 
     const teardownError = new Error(
       `Room/peer transport closed (${connection.roomId}, ${connection.withPeerId})`,

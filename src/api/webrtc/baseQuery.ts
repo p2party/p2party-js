@@ -7,6 +7,7 @@ import { getDBPeerIsBlacklisted } from "../../db/api";
 import { attachDataChannelHandler } from "./dataChannelHandler";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import { runRoomPeerExclusive } from "./negotiationLock";
+import { retireRemoteTransport } from "./retiredRemoteTransports";
 import { isIdentityInitiator } from "../../utils/identityRole";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -91,7 +92,12 @@ const webrtcBaseQuery: BaseQueryFn<
         return { data: undefined };
       }
 
-      // A replaced edge must stop claiming cover, same as a disconnected one.
+      // A replaced edge must stop claiming cover, same as a disconnected one,
+      // and the remote certificate it was bound to is retired with it: an
+      // answer the peer still produces on that transport must never bind the
+      // replacement built below, which has no remote description of its own
+      // to compare a fingerprint against (see retiredRemoteTransports).
+      retireRemoteTransport(roomId, peerId, epc.remoteDescription?.sdp);
       teardownCoverEdge(epc);
       clearConnectionHandlers(epc);
       if (epc.connectionState !== "closed") epc.close();

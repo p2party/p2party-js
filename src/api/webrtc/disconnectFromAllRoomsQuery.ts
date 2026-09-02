@@ -1,5 +1,6 @@
 import { deleteMessageStateOnly, deletePeer } from "../../reducers/roomSlice";
 import { deleteRoomDataTerminal } from "./deleteRoomData";
+import { forgetRetiredRemoteTransports } from "./retiredRemoteTransports";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -56,6 +57,9 @@ const webrtcDisconnectAllRoomsQuery: BaseQueryFn<
   for (const target of targets) {
     await disconnectPeer(target);
     api.dispatch(deletePeer(target));
+    // Every left room is terminal for its edges, exactly as in the
+    // single-room path: their retired certificates are forgotten with them.
+    forgetRetiredRemoteTransports(target.roomId, target.peerId);
   }
 
   if (deleteMessages) {

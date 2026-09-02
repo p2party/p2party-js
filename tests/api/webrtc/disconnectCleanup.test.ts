@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { IRTCDataChannel } from "../../../src/api/webrtc/interfaces";
+import type {
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "../../../src/api/webrtc/interfaces";
 
 const loadQueries = async () => {
   if (!("localStorage" in globalThis)) {
@@ -17,17 +20,27 @@ const loadQueries = async () => {
       } satisfies Storage,
     });
   }
-  const [all, room, allRooms] = await Promise.all([
+  const [all, room, allRooms, retired] = await Promise.all([
     import("../../../src/api/webrtc/disconnectQuery"),
     import("../../../src/api/webrtc/disconnectFromRoomQuery"),
     import("../../../src/api/webrtc/disconnectFromAllRoomsQuery"),
+    import("../../../src/api/webrtc/retiredRemoteTransports"),
   ]);
   return {
     disconnectAll: all.default,
     disconnectRoom: room.default,
     disconnectAllRooms: allRooms.default,
+    isRetiredRemoteTransport: retired.isRetiredRemoteTransport,
+    retireRemoteTransport: retired.retireRemoteTransport,
   };
 };
+
+const fingerprintSdp = (hexByte: string): string =>
+  "v=0\r\n" +
+  `a=fingerprint:sha-256 ${Array<string>(32).fill(hexByte).join(":")}\r\n`;
+
+const roomPeerConnection = (roomId: string, withPeerId: string) =>
+  ({ roomId, withPeerId }) as unknown as IRTCPeerConnection;
 
 const api = {
   dispatch: (action: unknown) => action,
@@ -119,5 +132,67 @@ describe("bulk DataChannel cleanup", () => {
     expect(target.released.count).toBe(1);
     expect(preserved.released.count).toBe(0);
     expect(channels).toEqual([preserved.value]);
+  });
+});
+
+describe("retired remote transports of a left room", () => {
+  test("leaving a room forgets the retired transports of its edges only", async () => {
+    const { disconnectRoom, isRetiredRemoteTransport, retireRemoteTransport } =
+      await loadQueries();
+    retireRemoteTransport("room-a", "peer-1", fingerprintSdp("aa"));
+    retireRemoteTransport("room-b", "peer-1", fingerprintSdp("aa"));
+
+    await disconnectRoom(
+      {
+        roomId: "room-a",
+        deleteMessages: false,
+        peerConnections: [roomPeerConnection("room-a", "peer-1")],
+        dataChannels: [],
+        disconnectPeer: async () => undefined,
+      },
+      api,
+      {},
+    );
+
+    expect(
+      isRetiredRemoteTransport("room-a", "peer-1", fingerprintSdp("aa")),
+    ).toBe(false);
+    // The same peer's edge in a room we stay in keeps its retirements.
+    expect(
+      isRetiredRemoteTransport("room-b", "peer-1", fingerprintSdp("aa")),
+    ).toBe(true);
+  });
+
+  test("leaving every room forgets the retired transports of each", async () => {
+    const {
+      disconnectAllRooms,
+      isRetiredRemoteTransport,
+      retireRemoteTransport,
+    } = await loadQueries();
+    retireRemoteTransport("room-c", "peer-2", fingerprintSdp("bb"));
+    retireRemoteTransport("room-d", "peer-2", fingerprintSdp("bb"));
+
+    await disconnectAllRooms(
+      {
+        deleteMessages: false,
+        exceptionRoomIds: ["room-d"],
+        peerConnections: [
+          roomPeerConnection("room-c", "peer-2"),
+          roomPeerConnection("room-d", "peer-2"),
+        ],
+        dataChannels: [],
+        disconnectPeer: async () => undefined,
+      },
+      api,
+      {},
+    );
+
+    expect(
+      isRetiredRemoteTransport("room-c", "peer-2", fingerprintSdp("bb")),
+    ).toBe(false);
+    // The excepted room is not left, so its edge keeps its retirements.
+    expect(
+      isRetiredRemoteTransport("room-d", "peer-2", fingerprintSdp("bb")),
+    ).toBe(true);
   });
 });

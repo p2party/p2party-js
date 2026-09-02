@@ -1,5 +1,6 @@
 import { deleteMessageStateOnly, deletePeer } from "../../reducers/roomSlice";
 import { deleteRoomDataTerminal } from "./deleteRoomData";
+import { forgetRetiredRemoteTransports } from "./retiredRemoteTransports";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
 import type {
@@ -43,6 +44,10 @@ const webrtcDisconnectRoomQuery: BaseQueryFn<
   for (const peerId of roomPeers) {
     await disconnectPeer({ peerId, roomId });
     api.dispatch(deletePeer({ peerId, roomId }));
+    // Leaving the room is terminal for its edges: the teardown above retired
+    // their remote certificates, and nothing in this room will negotiate
+    // again unless the user rejoins, which must start from a clean slate.
+    forgetRetiredRemoteTransports(roomId, peerId);
   }
 
   if (deleteMessages)

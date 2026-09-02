@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
@@ -34,6 +34,7 @@ const ROOM_ID = "00000000-0000-4000-8000-0000000000aa";
 const ROOM_URL = "aa".repeat(32);
 const SELF_PEER_ID = "00000000-0000-4000-8000-000000000001";
 const PEER_ID = "00000000-0000-4000-8000-000000000002";
+const OTHER_PEER_ID = "00000000-0000-4000-8000-000000000004";
 // The lexicographically lower canonical Ed25519 identity is the initiator that
 // creates `main`.
 const LOWER_PUBLIC_KEY = `${"00".repeat(31)}01`;
@@ -158,9 +159,16 @@ type DisconnectFromPeerQuery =
 type RatchetGate = typeof import("../../../src/handlers/ratchetGate");
 type RoomSlice = typeof import("../../../src/reducers/roomSlice");
 type RoomPolicy = typeof import("../../../src/roomPolicy");
+type PendingOffer = typeof import("../../../src/api/webrtc/pendingOffer");
+type RetiredRemoteTransports =
+  typeof import("../../../src/api/webrtc/retiredRemoteTransports");
 
 let webrtcSetDescriptionQuery: SetDescriptionQuery["default"];
 let webrtcDisconnectPeerQuery: DisconnectFromPeerQuery["default"];
+let hasUnansweredFirstOffer: PendingOffer["hasUnansweredFirstOffer"];
+let forgetRetiredRemoteTransports: RetiredRemoteTransports["forgetRetiredRemoteTransports"];
+let isRetiredRemoteTransport: RetiredRemoteTransports["isRetiredRemoteTransport"];
+let retireRemoteTransport: RetiredRemoteTransports["retireRemoteTransport"];
 let isCurrentRatchetGateLease: RatchetGate["isCurrentRatchetGateLease"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
 let deletePeer: RoomSlice["deletePeer"];
@@ -182,6 +190,20 @@ beforeAll(async () => {
   ({ deletePeer, setConnectingToPeers, setPeer, setPeerHandshakeStatus } =
     await import("../../../src/reducers/roomSlice"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../../src/roomPolicy"));
+  ({ hasUnansweredFirstOffer } =
+    await import("../../../src/api/webrtc/pendingOffer"));
+  ({
+    forgetRetiredRemoteTransports,
+    isRetiredRemoteTransport,
+    retireRemoteTransport,
+  } = await import("../../../src/api/webrtc/retiredRemoteTransports"));
+});
+
+// Retirement is per-edge module state that outlives one query, exactly as the
+// ratchet gate does; every test starts from a clean edge.
+afterEach(() => {
+  forgetRetiredRemoteTransports(ROOM_ID, PEER_ID);
+  forgetRetiredRemoteTransports(ROOM_ID, OTHER_PEER_ID);
 });
 
 interface FakePeerConnectionOptions {
@@ -901,6 +923,230 @@ describe("setDescriptionQuery remote transport binding", () => {
     expect(dispatched).toEqual([]);
     expect(disconnects).toEqual([]);
     expect(pc.main?.closes.count).toBe(0);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("an answer from a retired remote transport is discarded and leaves the first offer pending", async () => {
+    // The poisoning shape: our fresh transport holds an unanswered first offer
+    // and the peer's answer was produced on the transport we already retired
+    // (its queued ICE-restart offer was answered after a thaw). Nothing on
+    // this PC could detect it — there is no remote description to compare a
+    // fingerprint against — so the retirement set is the only guard.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "new",
+      pendingMain: true,
+    });
+    const { api, dispatched } = fakeApi(LOWER_PUBLIC_KEY);
+    retireRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa"));
+    freshTransports();
+
+    const { peerConnections, disconnects } = await applyDescription(
+      pc.epc,
+      description("answer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    // Nothing was applied and nothing was torn down or rebuilt.
+    expect(pc.appliedRemote).toEqual([]);
+    expect(pc.localCalls).toEqual([]);
+    expect(pc.epc.remoteDescription).toBeNull();
+    expect(pc.epc.signalingState).toBe("have-local-offer");
+    expect(disconnects).toEqual([]);
+    expect(peerConnections).toEqual([pc.epc]);
+    expect(freshTransports()).toEqual([]);
+    expect(pc.closes.count).toBe(0);
+    expect(dispatched).toEqual([]);
+    // The pending main survives; no duplicate is opened on this transport.
+    expect(pc.createdLabels).toEqual([]);
+    expect(pc.main?.closes.count).toBe(0);
+    // The first offer is still unanswered, so its watchdog stays armed and
+    // the edge is re-dialed instead of sitting on a poisoned transport.
+    expect(hasUnansweredFirstOffer(pc.epc)).toBe(true);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a fingerprint retired for another edge does not block this one", async () => {
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "connecting",
+    });
+    const { api } = fakeApi(LOWER_PUBLIC_KEY);
+    retireRemoteTransport(ROOM_ID, OTHER_PEER_ID, fingerprintSdp("aa"));
+
+    await applyDescription(
+      pc.epc,
+      description("answer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["answer"]);
+    expect(pc.createdLabels).toEqual(["main"]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("an offer from a live remote transport is applied while another of the peer's transports is retired", async () => {
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "stable",
+      connectionState: "new",
+    });
+    const { api, dispatched } = fakeApi(LOWER_PUBLIC_KEY);
+    retireRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("cc"));
+
+    const { disconnects } = await applyDescription(
+      pc.epc,
+      description("offer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(disconnects).toEqual([]);
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["offer"]);
+    expect(pc.epc.localDescription?.type).toBe("answer");
+    expect(thunks(dispatched)).toHaveLength(1);
+    expect(pc.createdLabels).toEqual(["main"]);
+    // The other transport stays retired: nothing bound to it.
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("cc")),
+    ).toBe(true);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("an offer from a retired remote transport is answered and un-retires it", async () => {
+    // The peer we gave up on is demonstrably negotiating again: it offers on
+    // the very transport we retired. An offer is not a reply to anything we
+    // hold, so answering it binds this transport to a live remote — and a
+    // transport we are bound to is not retired any more, or the answer to our
+    // own next ICE restart would be discarded.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "stable",
+      connectionState: "new",
+    });
+    const { api, dispatched } = fakeApi(LOWER_PUBLIC_KEY);
+    retireRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa"));
+
+    const { disconnects } = await applyDescription(
+      pc.epc,
+      description("offer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(disconnects).toEqual([]);
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["offer"]);
+    expect(pc.epc.localDescription?.type).toBe("answer");
+    expect(thunks(dispatched)).toHaveLength(1);
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa")),
+    ).toBe(false);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("an answer applied from a retired-elsewhere transport clears only its own retirement", async () => {
+    // The normal path: an answer whose fingerprint was never retired is
+    // applied and leaves every other retirement of the edge in place.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "connecting",
+    });
+    const { api } = fakeApi(LOWER_PUBLIC_KEY);
+    retireRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("cc"));
+
+    await applyDescription(
+      pc.epc,
+      description("answer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["answer"]);
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("cc")),
+    ).toBe(true);
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa")),
+    ).toBe(false);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("replacing an authenticated transport retires the certificate it was bound to", async () => {
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "stable",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api } = fakeApi(LOWER_PUBLIC_KEY);
+    freshTransports();
+
+    const { disconnects } = await applyDescription(
+      pc.epc,
+      description("offer", "bb"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(disconnects).toEqual([{ roomId: ROOM_ID, peerId: PEER_ID }]);
+    // The peer's old certificate can never bind another transport of ours...
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa")),
+    ).toBe(true);
+    // ...while the certificate that replaced it stays usable.
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("bb")),
+    ).toBe(false);
+    expect(freshTransports()).toHaveLength(1);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("tearing an edge down retires the remote transport of every connection it closes", async () => {
+    // The grace-timer / ICE-failure teardown that closed the transport whose
+    // queued answer poisons the fresh one later.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "stable",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api } = fakeApi(LOWER_PUBLIC_KEY);
+    const peerConnections: IRTCPeerConnection[] = [pc.epc];
+
+    webrtcDisconnectPeerQuery(
+      {
+        peerId: PEER_ID,
+        roomId: ROOM_ID,
+        peerConnections,
+        dataChannels: [],
+        iceCandidates: [],
+      },
+      api,
+      {},
+    );
+
+    expect(peerConnections).toEqual([]);
+    expect(pc.closes.count).toBe(1);
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("aa")),
+    ).toBe(true);
+    expect(
+      isRetiredRemoteTransport(ROOM_ID, PEER_ID, fingerprintSdp("bb")),
+    ).toBe(false);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

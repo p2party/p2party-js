@@ -13,6 +13,11 @@ import {
   detectRemoteTransportChange,
   resetEdgeAuthenticationForNewRemoteTransport,
 } from "./remoteTransportChange";
+import {
+  forgetRetiredRemoteTransport,
+  isRetiredRemoteTransport,
+  retireRemoteTransport,
+} from "./retiredRemoteTransports";
 import { awaitPcOperation } from "./settleOnClose";
 import { isIdentityInitiator } from "../../utils/identityRole";
 import { PROTOCOL_VERSION } from "../../utils/constants";
@@ -78,6 +83,50 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
       roomId,
       peerId,
     );
+
+    // An ANSWER produced on a remote transport this side has already retired
+    // is refused before anything is built or applied.
+    //
+    // detectRemoteTransportChange below only guards a transport that ALREADY
+    // carries a remote description: on a fresh or replaced RTCPeerConnection
+    // the first setRemoteDescription has nothing to compare a fingerprint
+    // against, and nothing on the wire correlates an answer with the offer it
+    // answers (the SDK cannot add signaling fields without a server change).
+    // A queued answer from the peer's retired transport therefore binds our
+    // brand-new PC to a certificate that is dead on the far side, and the
+    // peer's correct answer that follows is then dropped as stale because the
+    // PC is already "stable" — an edge deadlock nothing recovers from, since
+    // neither transport ever connects and no failure path re-dials.
+    //
+    // Only answers: an OFFER is not a reply to anything we hold. Retirement
+    // is this side's unilateral decision (a grace-timer teardown while the
+    // peer's transport was merely unreachable), so the peer offering on it is
+    // the evidence that the decision was premature, and answering rebinds the
+    // edge immediately instead of waiting out an ICE failure — measured on
+    // the process-freeze harness as a 2 s heal instead of 13 s. Wrongly
+    // accepting an offer is recoverable anyway: the transport then HAS a
+    // remote description, so the peer's next offer takes the fingerprint-
+    // change path above, while a wrongly accepted answer is terminal.
+    //
+    // Discarding leaves the transport exactly as it was: an unanswered first
+    // offer stays unanswered, so its watchdog still fires and re-dials.
+    if (
+      description.type === "answer" &&
+      isRetiredRemoteTransport(roomId, peerId, description.sdp)
+    ) {
+      console.warn(
+        `Ignoring ${description.type} from a retired remote transport of ${peerId} in ${roomId}`,
+      );
+      discardIceCandidatesForAttempt(
+        connectionIndex > -1
+          ? peerConnections[connectionIndex].iceCandidates
+          : [],
+        iceCandidates,
+        roomId,
+        peerId,
+      );
+      return { data: undefined };
+    }
 
     // Reassigned exactly once, when a stale authenticated transport is
     // replaced below. discardIceForAttempt reads this binding, so it follows
@@ -237,6 +286,12 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         debugLog(
           `Remote DTLS certificate changed for ${peerId} in ${roomId} on an authenticated transport; replacing it`,
         );
+        // We stop believing in the certificate this transport was bound to
+        // right here, before the teardown that owns the same retirement can
+        // read it off a closed connection: any later description the peer
+        // still produces on it (a queued ICE restart it answers after a
+        // freeze) must never bind the replacement.
+        retireRemoteTransport(roomId, peerId, epc.remoteDescription?.sdp);
         await disconnectPeer({ roomId, peerId });
         if (description.type !== "offer") {
           // The re-dial's roster round re-introduces the peer and
@@ -354,6 +409,13 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           return { data: undefined };
         }
       }
+      // The description was applied: this transport is bound to that remote
+      // certificate again, so it is no longer retired. Only an offer can
+      // reach here while retired (an offer is not a reply to anything we
+      // hold, so the peer offering on it proves it negotiates there), and
+      // leaving it retired would discard the answer to our own next ICE
+      // restart on this very binding.
+      forgetRetiredRemoteTransport(roomId, peerId, description.sdp);
       if (description.type === "offer") {
         try {
           const answered = await awaitPcOperation(

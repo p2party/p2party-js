@@ -130,8 +130,11 @@ export interface SessionChannelBinding {
 
 export interface SessionCryptoOptions {
   /**
-   * Local/self-hosted libcrypto.wasm bytes. Supply this in Node/Bun or offline
-   * deployments; when omitted the versioned p2party CDN loader is used.
+   * Local/self-hosted libcrypto.wasm bytes; an override, rarely a necessity.
+   * Omitted, the loader reads this release's WASM from the installed package on
+   * Node and Bun and checks it against the build-pinned SHA-384, so an offline
+   * install already works; it falls back to the versioned p2party CDN under the
+   * same SRI when that read fails, which is also the only path in a browser.
    */
   wasmBinary?: ArrayBuffer | Uint8Array;
 }
@@ -155,7 +158,7 @@ export interface EncryptedSessionMessage {
   protocolVersion: 4;
   /** The message Merkle root; authenticated as AEAD additional data. */
   root: Uint8Array;
-  /** Uniform protocol-v3 chunk frames. */
+  /** Uniform protocol-v4 chunk frames. */
   frames: Uint8Array[];
 }
 

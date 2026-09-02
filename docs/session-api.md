@@ -450,8 +450,16 @@ interface SessionCryptoOptions {
 
 Supplying bytes is the reproducible, offline-safe path. Resolve the exported
 `p2party/libcrypto.wasm` package subpath or pin a self-hosted copy from the same
-release. When `wasmBinary` is omitted, the loader fetches the immutable
-versioned p2party CDN artifact and checks the build-pinned SHA-384 SRI.
+release.
+
+Omitting `wasmBinary` does not always mean a network call. On Node and Bun the
+loader reads this release's WASM from the installed package — the file next to
+the bundle — and hashes it against the build-pinned SHA-384 before use, so an
+offline or air-gapped install needs no configuration. It falls back to the
+immutable versioned p2party CDN artifact, under the same SRI, only when that
+read fails or the digest does not match. In a browser, where there is no
+filesystem, the CDN fetch is the only path. An explicit `setWasmSourceUrl()` is
+honoured everywhere, including on Node, in preference to the packaged copy.
 
 See [Protocol-v4 security](protocol-v4-security.md) for the exact claims and
 non-claims of the session this API constructs.

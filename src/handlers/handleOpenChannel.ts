@@ -40,7 +40,6 @@ import webrtcApi from "../api/webrtc";
 
 import {
   setChannel,
-  setConnectingToPeers,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
 } from "../reducers/roomSlice";
@@ -98,9 +97,6 @@ import type {
 import type { HandshakeLease } from "./handleHandshake";
 import type { RatchetGateLease } from "./ratchetGate";
 
-// Track last reconnection attempt per room to prevent rapid reconnection loops
-const lastReconnectAttempt = new Map<string, number>();
-const RECONNECT_DEBOUNCE_MS = 2000;
 export const MAX_MESSAGE_CHANNELS_PER_EDGE = 64;
 const ROOM_CHANNEL_CONTEXT_DOMAIN = new TextEncoder().encode(
   "p2party/room-channel/v1\u0000",
@@ -546,17 +542,14 @@ export const handleOpenChannel = async (
       );
     }
 
-    // Debounce reconnection attempts to prevent rapid loops
-    const now = Date.now();
-    const lastAttempt = lastReconnectAttempt.get(roomId) ?? 0;
-    if (now - lastAttempt > RECONNECT_DEBOUNCE_MS) {
-      lastReconnectAttempt.set(roomId, now);
-      api.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
-    } else {
-      debugLog(
-        `Skipping reconnection for ${roomId} - debounce (${String(now - lastAttempt)}ms since last)`,
-      );
-    }
+    // Either teardown above may have closed the whole edge (a main error
+    // always does; a per-message channel error does once the peer has no
+    // channel left), and disconnectFromPeer nulls every handler before
+    // closing, so this is the only re-dial the edge gets. It goes under the
+    // dedicated "redial" budget for the same reason main's onclose does: the
+    // "join" budget may have just been consumed by a socket reconnect's
+    // roster request. A replaced transport's stale lease returned above.
+    requestPeersAfterEdgeTeardown(api, roomId);
   };
 
   extChannel.onmessage = async (e) => {
@@ -879,6 +872,18 @@ export const handleOpenChannel = async (
         } catch (error) {
           const handshakeError =
             error instanceof Error ? error : new Error(String(error));
+          // Captured before this catch closes anything: a transport that is
+          // ALREADY closed here was torn down by someone else while the
+          // handshake was in flight (a deliberate disconnectFromPeer, purge or
+          // leave, an address-book removal, a grace-timer or ICE-failure
+          // teardown, or the replacement of a stale transport), and that
+          // teardown rejected the handshake as a side effect. Such a path
+          // owns the peer's status (deletePeer already dropped it with the
+          // roster entry) and its own follow-up, so this catch must neither
+          // record a "failed" status for a peer no longer on the roster nor
+          // re-dial an edge the user may have just dropped on purpose. A
+          // genuine handshake failure always finds the transport still open.
+          const transportAlreadyClosed = epc.connectionState === "closed";
           if (
             pinRoom &&
             handshakeStarted &&
@@ -924,15 +929,16 @@ export const handleOpenChannel = async (
               }
             }
           }
-          api.dispatch(
-            setPeerHandshakeStatus({
-              roomId,
-              peerId: epc.withPeerId,
-              status: "failed",
-              reason: failureReason,
-              retryAfter,
-            }),
-          );
+          if (!transportAlreadyClosed)
+            api.dispatch(
+              setPeerHandshakeStatus({
+                roomId,
+                peerId: epc.withPeerId,
+                status: "failed",
+                reason: failureReason,
+                retryAfter,
+              }),
+            );
           if (ratchetGateLease)
             rejectRatchetGate(
               roomId,
@@ -956,7 +962,7 @@ export const handleOpenChannel = async (
           // a transport failure is worth rebuilding the edge for: a PIN or
           // policy mismatch fails again on any fresh transport and a re-dial
           // would only burn another attempt against the PIN throttle.
-          if (failureReason === "transport")
+          if (failureReason === "transport" && !transportAlreadyClosed)
             requestPeersAfterEdgeTeardown(api, roomId);
         } finally {
           pin?.fill(0);

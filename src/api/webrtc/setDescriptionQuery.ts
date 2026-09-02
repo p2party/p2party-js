@@ -1,6 +1,7 @@
 import { debugLog } from "../../utils/debug";
 import signalingServerApi from "../signalingServerApi";
 
+import { attachDataChannelHandler } from "./dataChannelHandler";
 import { runRoomPeerExclusive } from "./negotiationLock";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import {
@@ -50,30 +51,6 @@ export interface RTCSetDescriptionParamsExtension extends RTCSetDescriptionParam
 // as unreachable.
 const isTransportClosed = (epc: IRTCPeerConnection): boolean =>
   epc.signalingState === "closed" || epc.connectionState === "closed";
-
-const attachDataChannelHandler = (
-  epc: IRTCPeerConnection,
-  dataChannels: IRTCDataChannel[],
-  api: Parameters<typeof handleOpenChannel>[1],
-): void => {
-  epc.ondatachannel = async (e: RTCDataChannelEvent) => {
-    try {
-      const channel = await handleOpenChannel(
-        {
-          channel: e.channel,
-          epc,
-          roomId: epc.roomId,
-          dataChannels,
-          incoming: true,
-        },
-        api,
-      );
-      if (channel.label === "main") epc.mainChannel = channel;
-    } catch (error) {
-      console.error("Rejected incoming DataChannel:", error);
-    }
-  };
-};
 
 const webrtcSetDescriptionQuery: BaseQueryFn<
   RTCSetDescriptionParamsExtension,
@@ -249,10 +226,20 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           requestPeersAfterEdgeTeardown(api, roomId);
           return { data: undefined };
         }
-        epc = await handleConnectToPeer(
-          { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
-          api,
-        );
+        try {
+          epc = await handleConnectToPeer(
+            { peerId, peerPublicKey, roomId, peerConnections, rtcConfig },
+            api,
+          );
+        } catch (error) {
+          // The authenticated edge is already gone and no transport-level
+          // event will ever fire for it. Whatever refused the rebuild (an
+          // inactive room, the room edge budget, a WASM or identity problem)
+          // is reported to the caller as on the no-transport path, but the
+          // next roster round must still get a chance to rebuild the edge.
+          requestPeersAfterEdgeTeardown(api, roomId);
+          throw error;
+        }
         attachDataChannelHandler(epc, dataChannels, api);
         if (!peerConnections.includes(epc)) peerConnections.push(epc);
         // The peer proved it is live by offering: put it back on the roster

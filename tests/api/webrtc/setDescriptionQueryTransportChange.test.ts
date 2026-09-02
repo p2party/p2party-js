@@ -380,6 +380,8 @@ const applyDescription = async (
   next: RTCSessionDescription,
   api: BaseQueryApi,
   peerPublicKey: string,
+  /** Runs right after the injected teardown, before the query continues. */
+  afterDisconnect?: () => void,
 ): Promise<Applied> => {
   const peerConnections: IRTCPeerConnection[] = [epc];
   const dataChannels: IRTCDataChannel[] = [];
@@ -401,6 +403,7 @@ const applyDescription = async (
           api,
           {},
         );
+        afterDisconnect?.();
       },
     },
     api,
@@ -567,6 +570,68 @@ describe("setDescriptionQuery remote transport binding", () => {
     expect(next.createdLabels).toEqual([]);
     expect(peerConnections[0].mainChannel).toBeUndefined();
     expect(ofType(dispatched, setConnectingToPeers.type)).toEqual([]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a replacement that cannot be built after the stale transport is gone re-dials the room and reports the failure", async () => {
+    // The room went inactive between the teardown and the rebuild: the
+    // authenticated edge is already down and no transport event will ever
+    // fire for it, so the next roster round is the only thing that can
+    // rebuild it. The refusal itself still surfaces to the caller exactly as
+    // it does on the no-transport path.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "stable",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api, dispatched } = fakeApi(LOWER_PUBLIC_KEY);
+    freshTransports();
+    const peerConnections: IRTCPeerConnection[] = [pc.epc];
+    const disconnects: RTCDisconnectFromPeerParams[] = [];
+
+    await expect(
+      webrtcSetDescriptionQuery(
+        {
+          peerId: PEER_ID,
+          peerPublicKey: HIGHER_PUBLIC_KEY,
+          roomId: ROOM_ID,
+          description: description("offer", "bb"),
+          peerConnections,
+          iceCandidates: [],
+          dataChannels: [],
+          disconnectPeer: async (params) => {
+            disconnects.push(params);
+            await webrtcDisconnectPeerQuery(
+              {
+                ...params,
+                peerConnections,
+                dataChannels: [],
+                iceCandidates: [],
+              },
+              api,
+              {},
+            );
+            (
+              api.getState() as { rooms: { signalingActive: boolean }[] }
+            ).rooms[0].signalingActive = false;
+          },
+        },
+        api,
+        {},
+      ),
+    ).rejects.toThrow("inactive room");
+
+    expect(disconnects).toEqual([{ roomId: ROOM_ID, peerId: PEER_ID }]);
+    expect(pc.closes.count).toBe(1);
+    expect(peerConnections).toEqual([]);
+    expect(freshTransports()).toEqual([]);
+    expect(pc.appliedRemote).toEqual([]);
+    expect(thunks(dispatched)).toEqual([]);
+    expect(ofType(dispatched, setPeer.type)).toEqual([]);
+    expect(ofType(dispatched, setConnectingToPeers.type)).toEqual([REDIAL()]);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

@@ -27,6 +27,8 @@ const localStorageMemory: Record<string, string> = {};
 } as Storage;
 
 type HandleOpenChannel = typeof import("../../src/handlers/handleOpenChannel");
+type DisconnectFromPeerQuery =
+  typeof import("../../src/api/webrtc/disconnectFromPeerQuery");
 type RatchetGate = typeof import("../../src/handlers/ratchetGate");
 type RoomSlice = typeof import("../../src/reducers/roomSlice");
 type RoomPolicy = typeof import("../../src/roomPolicy");
@@ -34,6 +36,7 @@ type RoomPinVault = typeof import("../../src/roomPinVault");
 type RoomPinAttempts = typeof import("../../src/roomPinAttempts");
 
 let handleOpenChannel: HandleOpenChannel["handleOpenChannel"];
+let webrtcDisconnectPeerQuery: DisconnectFromPeerQuery["default"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
 let setConnectingToPeers: RoomSlice["setConnectingToPeers"];
 let setPeerHandshakeStatus: RoomSlice["setPeerHandshakeStatus"];
@@ -46,6 +49,8 @@ let MAX_ROOM_PIN_FAILURES_PER_WINDOW: RoomPinAttempts["MAX_ROOM_PIN_FAILURES_PER
 beforeAll(async () => {
   await import("../../src/store");
   ({ handleOpenChannel } = await import("../../src/handlers/handleOpenChannel"));
+  ({ default: webrtcDisconnectPeerQuery } =
+    await import("../../src/api/webrtc/disconnectFromPeerQuery"));
   ({ resetRatchetGate } = await import("../../src/handlers/ratchetGate"));
   ({ setConnectingToPeers, setPeerHandshakeStatus } =
     await import("../../src/reducers/roomSlice"));
@@ -97,7 +102,40 @@ interface FakePeerConnection {
   closes: { count: number };
 }
 
-const fakePeerConnection = (roomId: string): FakePeerConnection => {
+/**
+ * A getStats the test releases by hand: the handshake's first await is the
+ * DTLS fingerprint check, so the handshake can be parked exactly there while
+ * something else happens to the transport.
+ */
+interface DeferredStats {
+  getStats: () => Promise<RTCStatsReport>;
+  /** Resolves the parked call with an empty report (no certificate rows). */
+  release: () => void;
+  calls: { count: number };
+}
+
+const deferredStats = (): DeferredStats => {
+  const calls = { count: 0 };
+  let resolve: ((report: RTCStatsReport) => void) | undefined;
+  const pending = new Promise<RTCStatsReport>((r) => {
+    resolve = r;
+  });
+  return {
+    calls,
+    getStats: () => {
+      calls.count += 1;
+      return pending;
+    },
+    release: () => {
+      resolve?.({ forEach: () => undefined } as unknown as RTCStatsReport);
+    },
+  };
+};
+
+const fakePeerConnection = (
+  roomId: string,
+  getStats?: DeferredStats["getStats"],
+): FakePeerConnection => {
   const closes = { count: 0 };
   const epc = {
     roomId,
@@ -108,6 +146,7 @@ const fakePeerConnection = (roomId: string): FakePeerConnection => {
     localDescription: { type: "offer", sdp: fingerprintSdp("11") },
     remoteDescription: { type: "answer", sdp: fingerprintSdp("aa") },
     ratchetGateLease: resetRatchetGate(roomId, PEER_ID),
+    getStats,
     close: () => {
       closes.count += 1;
       epc.connectionState = "closed";
@@ -117,6 +156,17 @@ const fakePeerConnection = (roomId: string): FakePeerConnection => {
   };
   return { epc, closes };
 };
+
+const activeRoom = (id: string) => ({
+  id,
+  url: "cc".repeat(32),
+  rtcConfig: { iceServers: [] },
+  signalingActive: true,
+  policy: DEFAULT_ROOM_POLICY_V1,
+  peers: [{ peerId: PEER_ID, peerPublicKey: HIGHER_PUBLIC_KEY }],
+  channels: [],
+  messages: [],
+});
 
 const fakeApi = (
   rooms: unknown[],
@@ -151,6 +201,16 @@ const fakeApi = (
 
 const flushMicrotasks = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+
+// The handshake's failure path crosses timers (the IndexedDB worker call it
+// makes after the fingerprint check settles asynchronously), so settle a few
+// macrotask turns too.
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) {
+    await flushMicrotasks();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 };
 
 const REDIAL = (roomId: string) =>
@@ -304,6 +364,144 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     await channel.onclose?.call(channel, new Event("close"));
 
     expect(dispatched.slice(beforeClose)).toEqual([]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a handshake rejected by a deliberate teardown of its transport neither fails the status nor re-dials", async () => {
+    // Park the handshake at its DTLS fingerprint check, then tear the edge
+    // down through the real disconnectFromPeer query (the path behind the
+    // public disconnectFromPeer, purge/leave, address-book removal and the
+    // T7 replacement) while it is parked. That teardown rejects the in-flight
+    // handshake without a lease; the catch must recognise that the transport
+    // was already closed by someone else and leave both the status and the
+    // follow-up to that path: a "failed" status here would describe a peer
+    // deletePeer just removed, and a re-dial would rebuild the edge the user
+    // just dropped.
+    const stats = deferredStats();
+    const pc = fakePeerConnection(ROOM_ID, stats.getStats);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([activeRoom(ROOM_ID)]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    const beforeOpen = dispatched.length;
+    channel.onopen?.call(channel, new Event("open"));
+    await settle();
+    expect(stats.calls.count).toBe(1);
+    expect(handshakeStatuses(dispatched.slice(beforeOpen))).toEqual([
+      setPeerHandshakeStatus({
+        roomId: ROOM_ID,
+        peerId: PEER_ID,
+        status: "authenticating",
+      }),
+    ]);
+
+    webrtcDisconnectPeerQuery(
+      {
+        roomId: ROOM_ID,
+        peerId: PEER_ID,
+        peerConnections: [pc.epc],
+        dataChannels: [channel],
+        iceCandidates: [],
+      },
+      api,
+      {},
+    );
+    expect(pc.closes.count).toBe(1);
+    const afterTeardown = dispatched.length;
+
+    stats.release();
+    await settle();
+
+    const afterRejection = dispatched.slice(afterTeardown);
+    expect(handshakeStatuses(afterRejection)).toEqual([]);
+    expect(redials(afterRejection)).toEqual([]);
+    // The teardown owned the close; the catch did not close it again.
+    expect(pc.closes.count).toBe(1);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a handshake that fails while its transport is still open reports the failure and re-dials", async () => {
+    // Same parked handshake, but nothing else touched the transport: releasing
+    // the fingerprint check lets it fail on its own (no identity is
+    // provisioned under this runtime), and the catch still owns the outcome.
+    const stats = deferredStats();
+    const pc = fakePeerConnection(ROOM_ID, stats.getStats);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([activeRoom(ROOM_ID)]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    const beforeOpen = dispatched.length;
+    channel.onopen?.call(channel, new Event("open"));
+    await settle();
+    expect(stats.calls.count).toBe(1);
+
+    stats.release();
+    await settle();
+
+    const afterOpen = dispatched.slice(beforeOpen);
+    const failed = handshakeStatuses(afterOpen).at(-1) as {
+      payload: { status: string; reason?: string };
+    };
+    expect(failed.payload.status).toBe("failed");
+    expect(failed.payload.reason).toBe("transport");
+    expect(main.closes.count).toBe(1);
+    expect(pc.closes.count).toBe(1);
+    expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID)]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a main channel error tears the edge down and re-dials under the redial budget", async () => {
+    // disconnectFromPeer nulls onclose before closing, so this is the only
+    // re-dial an errored main gets; under the join budget it was swallowed
+    // whenever a socket reconnect's roster request had just gone out.
+    const pc = fakePeerConnection(ROOM_ID);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    const beforeError = dispatched.length;
+    await channel.onerror?.call(
+      channel,
+      new Event("error") as RTCErrorEvent,
+    );
+
+    const afterError = dispatched.slice(beforeError);
+    expect(afterError).toHaveLength(2);
+    expect(typeof afterError[0]).toBe("function");
+    expect(afterError[1]).toEqual(REDIAL(ROOM_ID));
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a main channel error on a replaced transport neither tears down nor re-dials", async () => {
+    const pc = fakePeerConnection(ROOM_ID);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    resetRatchetGate(ROOM_ID, PEER_ID);
+    const beforeError = dispatched.length;
+    await channel.onerror?.call(
+      channel,
+      new Event("error") as RTCErrorEvent,
+    );
+
+    expect(dispatched.slice(beforeError)).toEqual([]);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

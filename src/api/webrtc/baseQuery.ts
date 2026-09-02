@@ -4,6 +4,7 @@ import { teardownCoverEdge } from "../../handlers/coverEdge";
 
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
+import { attachDataChannelHandler } from "./dataChannelHandler";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import { runRoomPeerExclusive } from "./negotiationLock";
 import { isIdentityInitiator } from "../../utils/identityRole";
@@ -31,30 +32,6 @@ const clearConnectionHandlers = (epc: IRTCPeerConnection): void => {
   epc.onconnectionstatechange = null;
   epc.onicegatheringstatechange = null;
   epc.oniceconnectionstatechange = null;
-};
-
-const attachDataChannelHandler = (
-  epc: IRTCPeerConnection,
-  dataChannels: IRTCDataChannel[],
-  api: Parameters<typeof handleOpenChannel>[1],
-): void => {
-  epc.ondatachannel = async (event: RTCDataChannelEvent) => {
-    try {
-      const channel = await handleOpenChannel(
-        {
-          channel: event.channel,
-          epc,
-          roomId: epc.roomId,
-          dataChannels,
-          incoming: true,
-        },
-        api,
-      );
-      if (channel.label === "main") epc.mainChannel = channel;
-    } catch (error) {
-      console.error("Rejected incoming DataChannel:", error);
-    }
-  };
 };
 
 const openMainChannel = async (

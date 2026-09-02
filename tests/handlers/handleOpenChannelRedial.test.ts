@@ -29,6 +29,8 @@ const localStorageMemory: Record<string, string> = {};
 type HandleOpenChannel = typeof import("../../src/handlers/handleOpenChannel");
 type DisconnectFromPeerQuery =
   typeof import("../../src/api/webrtc/disconnectFromPeerQuery");
+type RemoteTransportChange =
+  typeof import("../../src/api/webrtc/remoteTransportChange");
 type RatchetGate = typeof import("../../src/handlers/ratchetGate");
 type RoomSlice = typeof import("../../src/reducers/roomSlice");
 type RoomPolicy = typeof import("../../src/roomPolicy");
@@ -37,7 +39,9 @@ type RoomPinAttempts = typeof import("../../src/roomPinAttempts");
 
 let handleOpenChannel: HandleOpenChannel["handleOpenChannel"];
 let webrtcDisconnectPeerQuery: DisconnectFromPeerQuery["default"];
+let resetEdgeAuthenticationForNewRemoteTransport: RemoteTransportChange["resetEdgeAuthenticationForNewRemoteTransport"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
+let isCurrentRatchetGateLease: RatchetGate["isCurrentRatchetGateLease"];
 let setConnectingToPeers: RoomSlice["setConnectingToPeers"];
 let setPeerHandshakeStatus: RoomSlice["setPeerHandshakeStatus"];
 let DEFAULT_ROOM_POLICY_V1: RoomPolicy["DEFAULT_ROOM_POLICY_V1"];
@@ -51,7 +55,12 @@ beforeAll(async () => {
   ({ handleOpenChannel } = await import("../../src/handlers/handleOpenChannel"));
   ({ default: webrtcDisconnectPeerQuery } =
     await import("../../src/api/webrtc/disconnectFromPeerQuery"));
-  ({ resetRatchetGate } = await import("../../src/handlers/ratchetGate"));
+  ({ resetEdgeAuthenticationForNewRemoteTransport } = await import(
+    "../../src/api/webrtc/remoteTransportChange"
+  ));
+  ({ resetRatchetGate, isCurrentRatchetGateLease } = await import(
+    "../../src/handlers/ratchetGate"
+  ));
   ({ setConnectingToPeers, setPeerHandshakeStatus } =
     await import("../../src/reducers/roomSlice"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy"));
@@ -455,6 +464,54 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     expect(main.closes.count).toBe(1);
     expect(pc.closes.count).toBe(1);
     expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID)]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a handshake superseded by an in-place edge re-authentication dies quietly", async () => {
+    // Park the handshake at its DTLS fingerprint check, then re-bind the edge
+    // IN PLACE for a new remote certificate (the T1 path,
+    // resetEdgeAuthenticationForNewRemoteTransport): it rejects the parked
+    // transcript and hands the edge a fresh ratchet-gate lease while KEEPING
+    // the RTCPeerConnection. The rejection that then reaches this catch
+    // belongs to the superseded attempt, so it must not overwrite the
+    // "authenticating" status the reset just set with a "failed" one, must not
+    // close the connection the reset deliberately kept, and must not re-dial.
+    const stats = deferredStats();
+    const pc = fakePeerConnection(ROOM_ID, stats.getStats);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([activeRoom(ROOM_ID)]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    channel.onopen?.call(channel, new Event("open"));
+    await settle();
+    expect(stats.calls.count).toBe(1);
+
+    resetEdgeAuthenticationForNewRemoteTransport({
+      epc: pc.epc,
+      roomId: ROOM_ID,
+      peerId: PEER_ID,
+      api,
+      reason: new Error("Remote DTLS certificate changed"),
+    });
+    const newLease = pc.epc.ratchetGateLease;
+    expect(newLease).toBeDefined();
+    const afterReset = dispatched.length;
+
+    stats.release();
+    await settle();
+
+    const afterRejection = dispatched.slice(afterReset);
+    expect(handshakeStatuses(afterRejection)).toEqual([]);
+    expect(redials(afterRejection)).toEqual([]);
+    // The reset kept the RTCPeerConnection; the superseded catch left it alone.
+    expect(pc.closes.count).toBe(0);
+    expect(pc.epc.connectionState).toBe("connected");
+    // The replacement attempt still owns the edge.
+    expect(isCurrentRatchetGateLease(ROOM_ID, PEER_ID, newLease!)).toBe(true);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

@@ -872,6 +872,27 @@ export const handleOpenChannel = async (
         } catch (error) {
           const handshakeError =
             error instanceof Error ? error : new Error(String(error));
+          // A superseded attempt owns nothing. When the edge was re-bound IN
+          // PLACE for a new remote DTLS certificate
+          // (resetEdgeAuthenticationForNewRemoteTransport), the reset rejected
+          // this transcript on purpose and handed the edge a fresh gate lease
+          // while KEEPING the RTCPeerConnection. The rejection then arrives
+          // here on a still-connected transport, so the checks below would
+          // read it as a genuine transport failure: a "failed" status over the
+          // "authenticating" the reset just set, a close of the connection the
+          // reset meant to keep, and a re-dial of an edge that is already
+          // healing. Let it die quietly instead — only this concrete channel,
+          // which the replacement no longer uses, is closed.
+          if (
+            ratchetGateLease &&
+            !isCurrentRatchetGateLease(roomId, epc.withPeerId, ratchetGateLease)
+          ) {
+            debugLog(
+              `Superseded handshake attempt for ${epc.withPeerId} in ${roomId} failed after its transport was replaced: ${handshakeError.message}`,
+            );
+            if (extChannel.readyState !== "closed") extChannel.close();
+            return;
+          }
           // Captured before this catch closes anything: a transport that is
           // ALREADY closed here was torn down by someone else while the
           // handshake was in flight (a deliberate disconnectFromPeer, purge or

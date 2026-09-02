@@ -185,6 +185,53 @@ describe("per-message DataChannel close semantics", () => {
       ),
     ).toBe(false);
   });
+
+  // The transport must still be the REGISTERED one for this room/peer. A
+  // connection dropped from `peerConnections` (disconnect sweep, replacement)
+  // can still report "connected" for as long as the application holds it, and
+  // its gate lease can still be the current one when the replacement has not
+  // claimed a new gate yet — neither of the other two tests fails on its own.
+  test("an unregistered PC is a resume even while connected on the current generation", () => {
+    const lease = claimRatchetGate("room", "cancel-unregistered");
+    const current = {
+      ...fakeConnection("cancel-unregistered"),
+      roomId: "room",
+      connectionState: "connected",
+      ratchetGateLease: lease,
+    } as IRTCPeerConnection;
+    expect(
+      isAuthenticatedPeerCancel(
+        current,
+        [],
+        "room",
+        "cancel-unregistered",
+        lease,
+      ),
+    ).toBe(false);
+  });
+
+  // Every real transport is minted with a gate lease (handleConnectToPeer), so
+  // an absent one means the caller lost track of the generation. Guessing
+  // "cancel" there is the failure this whole predicate exists to avoid: it
+  // hands the application a cancel it can act on by deleting the message.
+  test("a transfer with no recorded generation is never reported as a cancel", () => {
+    const lease = claimRatchetGate("room", "cancel-leaseless");
+    const current = {
+      ...fakeConnection("cancel-leaseless"),
+      roomId: "room",
+      connectionState: "connected",
+      ratchetGateLease: lease,
+    } as IRTCPeerConnection;
+    expect(
+      isAuthenticatedPeerCancel(
+        current,
+        [current],
+        "room",
+        "cancel-leaseless",
+        undefined,
+      ),
+    ).toBe(false);
+  });
 });
 
 const fakeConnection = (
@@ -435,6 +482,10 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
   test("replacement PC waits for its gate, ratchets once, and wipes the old key", async () => {
     const oldEpc = fakeConnection("peer");
     const replacement = fakeConnection("peer");
+    // A replacement transport owns a new gate, and the re-bound cipher must
+    // record it: the send loop carries this lease forward as the generation a
+    // later channel close is judged against.
+    replacement.ratchetGateLease = claimRatchetGate("room", "bind-replacement");
     const oldKey = new Uint8Array(32).fill(9);
     const newKey = new Uint8Array(32).fill(4);
     const events: string[] = [];
@@ -458,6 +509,7 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
     expect(events).toEqual(["gate:room:peer", "step:room:true"]);
     expect(oldKey.every((byte) => byte === 0)).toBe(true);
     expect(rebound.epc).toBe(replacement);
+    expect(rebound.lease).toBe(replacement.ratchetGateLease);
     expect(rebound.messageKey).toBe(newKey);
     expect(rebound.header.N).toBe(2);
   });

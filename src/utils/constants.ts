@@ -220,6 +220,19 @@ export const MAX_RESUME_ATTEMPTS = 3;
 // channel open + first step to start.
 export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 
+// Signaling liveness. The server pings every 10 s (p2party-server
+// src/utils/handleInterval.ts PING_INTERVAL). When a mobile browser freezes
+// the page with its radio off, the WebSocket can come back half-open: the
+// server has long since closed its end, but no onclose fires locally until
+// the TCP stack gives up, so Redux keeps reporting a live, verified socket
+// and no reconnect (and no peer re-dial) ever starts. The SDK therefore
+// stamps the wall clock on every answered server heartbeat and, on an
+// interval and on each wake event, marks the socket dead itself once no
+// heartbeat arrived for the timeout: 25 s tolerates two lost pings plus
+// jitter without reacting to ordinary delay.
+export const SIGNALING_HEARTBEAT_TIMEOUT_MS = 25_000;
+export const SIGNALING_HEARTBEAT_CHECK_MS = 5_000;
+
 // Streaming send-side hash: read the file from disk one HASH_WINDOW_BYTES slice
 // at a time (O(1) memory — never the whole file) and feed it to the WASM
 // incremental SHA-512 in HASH_WASM_CHUNK_BYTES sub-chunks (the WASM heap buffer

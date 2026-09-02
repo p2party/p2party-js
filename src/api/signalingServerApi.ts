@@ -31,6 +31,16 @@ import {
 } from "../utils/signalingIngressQueue";
 import { MAX_SIGNALING_MESSAGE_CHARS } from "../utils/signalingBounds";
 import {
+  createSignalingHeartbeatWatchdog,
+  type SignalingHeartbeatWatchdog,
+  type SignalingHeartbeatWatchdogEnv,
+  type SignalingWakeEventName,
+} from "../utils/signalingHeartbeatWatchdog";
+import {
+  SIGNALING_HEARTBEAT_CHECK_MS,
+  SIGNALING_HEARTBEAT_TIMEOUT_MS,
+} from "../utils/constants";
+import {
   acknowledgeRoomLeft,
   cancelRoomLeavesForSocket,
   parseRoomLeftAcknowledgement,
@@ -90,6 +100,29 @@ export interface WebSocketMessage {
 
 let ws: WebSocket | null = null;
 let wsIngressLease: SignalingSocketIngressLease | null = null;
+// Liveness watchdog of the open socket in `ws`. Invariant: null, or owned by
+// exactly that socket — every path that replaces `ws` stops it first.
+let wsHeartbeatWatchdog: SignalingHeartbeatWatchdog | null = null;
+const stopCurrentHeartbeatWatchdog = (): void => {
+  wsHeartbeatWatchdog?.stop();
+  wsHeartbeatWatchdog = null;
+};
+
+/** Wake events the browser fires when a frozen/backgrounded page resumes. */
+const browserWakeEnv = (): SignalingHeartbeatWatchdogEnv | undefined => {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return undefined;
+  const targetOf = (name: SignalingWakeEventName): EventTarget =>
+    name === "visibilitychange" ? document : window;
+  return {
+    addListener: (name, listener) =>
+      targetOf(name).addEventListener(name, listener),
+    removeListener: (name, listener) =>
+      targetOf(name).removeEventListener(name, listener),
+    isVisible: () => document.visibilityState === "visible",
+  };
+};
+
 const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   { signalingServerUrl },
   api,
@@ -340,6 +373,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         const cancelAttempt = (): void => {
           resolveOnce({ error: "WebSocket connection attempt was cancelled" });
           if (ws !== socket) return;
+          stopCurrentHeartbeatWatchdog();
           invalidateSocketIngress("socket-replaced");
           ingressQueue.close();
           socket.onmessage = null;
@@ -354,10 +388,63 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
             attempt,
             cancelAttempt,
           );
+        // One settlement for every way this socket stops being ours after
+        // open: the browser's close event, or the heartbeat watchdog deciding
+        // the socket is half-open. The watchdog path must not wait for the
+        // browser: a socket the platform silently dropped fires no close
+        // event until TCP gives up, so the bookkeeping runs synchronously
+        // here and the close handshake is merely started.
+        let socketSettled = false;
+        const settleClosedSocket = (
+          close?: Readonly<{ code: number; reason: string }>,
+        ): void => {
+          if (socketSettled) return;
+          socketSettled = true;
+          stopCurrentHeartbeatWatchdog();
+          invalidateSocketIngress("socket-closed");
+          ingressQueue.close();
+          socket.onmessage = null;
+          socket.onopen = null;
+          socket.onclose = null;
+          socket.onerror = null;
+          if (close) socket.close(close.code, close.reason);
+          ws = null;
+          signalingAttemptLifecycle.clear(attempt);
+
+          api.dispatch(signalingServerActions.disconnect());
+          resolveOnce({ data: undefined });
+        };
+        // This socket's own instance: a beat that lands after the socket was
+        // replaced hits a stopped watchdog (a no-op), never the successor's.
+        let heartbeatWatchdog: SignalingHeartbeatWatchdog | null = null;
+        const noteHeartbeat = (): void => heartbeatWatchdog?.beat();
         try {
           socket.onopen = () => {
             if (!isCurrentSocket()) return;
             debugLog("WebSocket connected to:", fullUrl);
+            const watchdog = createSignalingHeartbeatWatchdog({
+              now: () => Date.now(),
+              timeoutMs: SIGNALING_HEARTBEAT_TIMEOUT_MS,
+              checkEveryMs: SIGNALING_HEARTBEAT_CHECK_MS,
+              schedule: {
+                setInterval: (callback, ms) => setInterval(callback, ms),
+                clearInterval: (handle) => clearInterval(handle),
+              },
+              env: browserWakeEnv(),
+              onDead: () => {
+                if (!ownsSocketAttempt()) return;
+                console.warn(
+                  "p2party: no signaling heartbeat for " +
+                    `${SIGNALING_HEARTBEAT_TIMEOUT_MS} ms; marking the socket disconnected`,
+                );
+                settleClosedSocket({
+                  code: 4000,
+                  reason: "signaling heartbeat lost",
+                });
+              },
+            });
+            heartbeatWatchdog = watchdog;
+            wsHeartbeatWatchdog = watchdog;
             api.dispatch(signalingServerActions.connectionEstablished());
             signalingAttemptLifecycle.disarmCancellation(attempt);
             resolveOnce({ data: undefined });
@@ -366,6 +453,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           socket.onerror = (error) => {
             if (!ownsSocketAttempt()) return;
             console.error("WebSocket error:", error);
+            stopCurrentHeartbeatWatchdog();
             invalidateSocketIngress("socket-closed");
             ingressQueue.close();
             socket.onmessage = null;
@@ -426,8 +514,10 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
                     if ("error" in result) throw new Error(result.error);
                   },
                 })
-              )
+              ) {
+                noteHeartbeat();
                 return;
+              }
             } catch (error) {
               console.error("Could not answer signaling heartbeat", error);
               invalidateSocketIngress("ingress-rejected");
@@ -443,6 +533,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
                   socket,
                   api,
                   isCurrentSocket,
+                  noteHeartbeat,
                 ),
               payloadSize,
             );
@@ -450,18 +541,8 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
 
           socket.onclose = () => {
             if (!ownsSocketAttempt()) return;
-            invalidateSocketIngress("socket-closed");
-            ingressQueue.close();
-            socket.onmessage = null;
-            socket.onopen = null;
-            socket.onclose = null;
-            socket.onerror = null;
-            ws = null;
-            signalingAttemptLifecycle.clear(attempt);
-
-            api.dispatch(signalingServerActions.disconnect());
+            settleClosedSocket();
             debugLog("WebSocket disconnected");
-            resolveOnce({ data: undefined });
           };
         } catch (error) {
           signalingAttemptLifecycle.disarmCancellation(attempt);
@@ -473,6 +554,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           if (ownsSocketAttempt()) {
             debugLog("Cleaning up WebSocket connection...");
             signalingAttemptLifecycle.cancelActive();
+            stopCurrentHeartbeatWatchdog();
             invalidateSocketIngress("socket-closed");
             ingressQueue.close();
             socket.onmessage = null;
@@ -488,6 +570,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
       releaseIdentityBootstrap?.();
       const ownsAttempt = signalingAttemptLifecycle.isCurrent(attempt);
       if (ownsAttempt && socketForAttempt && ws === socketForAttempt) {
+        stopCurrentHeartbeatWatchdog();
         wsIngressLease?.invalidate();
         wsIngressLease = null;
         cancelRoomLeavesForSocket(socketForAttempt, "socket-closed");
@@ -524,6 +607,7 @@ const websocketDisconnectQuery: BaseQueryFn<undefined, undefined> = (
   const ingressLease = wsIngressLease;
   ws = null;
   wsIngressLease = null;
+  stopCurrentHeartbeatWatchdog();
   // Also cancels an attempt still awaiting identity bootstrap, where no
   // WebSocket object exists yet.
   signalingAttemptLifecycle.cancelActive();

@@ -82,12 +82,17 @@ const handleWebSocketMessage = async (
   ws: WebSocket,
   api: BaseQueryApi,
   isCurrentSocket: () => boolean = () => true,
+  // Reports each answered server heartbeat to the socket's liveness watchdog.
+  // Passed in by the socket owner rather than imported, so this handler stays
+  // free of any dependency on the live socket's state.
+  onHeartbeat: () => void = () => undefined,
 ) => {
   try {
     if (!isCurrentSocket()) return;
     if (event.data === "PING") {
       if (!isCurrentSocket()) return;
       ws.send("PONG");
+      onHeartbeat();
 
       return;
     }
@@ -128,6 +133,7 @@ const handleWebSocketMessage = async (
             },
           }),
         );
+        onHeartbeat();
 
         break;
       }

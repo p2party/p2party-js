@@ -26,6 +26,15 @@ export interface EdgeTeardownFollowUpApi {
  * The request goes through setConnectingToPeers, whose listener debounces it
  * under the dedicated "redial" key: a teardown that happens to land inside
  * the "join" window of a fresh room join must still be able to re-dial.
+ *
+ * Callers decide WHEN a teardown deserves a re-dial; this helper has no
+ * backoff of its own. handleConnectToPeer re-dials after an ICE failure or
+ * grace-timer teardown only for an edge that had reached "connected" at least
+ * once (a transport that never connected would otherwise rebuild and fail
+ * again on every ICE failure interval), and after a fresh transport's first
+ * offer went unanswered for PENDING_OFFER_TIMEOUT_MS (by then the signaling
+ * server has dropped a dark peer from the roster, so a re-dial to a peer that
+ * is really gone builds nothing).
  */
 export const requestPeersAfterEdgeTeardown = (
   api: EdgeTeardownFollowUpApi,

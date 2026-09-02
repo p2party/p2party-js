@@ -103,12 +103,19 @@ interface FakePeerConnectionOptions {
   remoteFingerprint?: string;
   /** Install an open `main` plus live ratchet state (an authenticated edge). */
   authenticated?: boolean;
+  /**
+   * Install a still-connecting `main` and no ratchet state: the initiator has
+   * created the channel and offered on a fresh transport, nothing answered yet.
+   */
+  pendingMain?: boolean;
 }
 
 interface FakePeerConnection {
   epc: IRTCPeerConnection;
   createdLabels: string[];
   appliedRemote: RTCSessionDescriptionInit[];
+  /** Every setLocalDescription argument, in order (`undefined` = implicit). */
+  localCalls: (RTCSessionDescriptionInit | undefined)[];
   main?: FakeChannel;
   rootKey: Uint8Array;
 }
@@ -119,10 +126,16 @@ const fakePeerConnection = ({
   connectionState,
   remoteFingerprint,
   authenticated = false,
+  pendingMain = false,
 }: FakePeerConnectionOptions): FakePeerConnection => {
   const createdLabels: string[] = [];
   const appliedRemote: RTCSessionDescriptionInit[] = [];
-  const main = authenticated ? fakeChannel("main", "open") : undefined;
+  const localCalls: (RTCSessionDescriptionInit | undefined)[] = [];
+  const main = authenticated
+    ? fakeChannel("main", "open")
+    : pendingMain
+      ? fakeChannel("main", "connecting")
+      : undefined;
   const rootKey = new Uint8Array(32).fill(7);
   const epc = {
     roomId: ROOM_ID,
@@ -163,6 +176,7 @@ const fakePeerConnection = ({
         next.type === "offer" ? "have-remote-offer" : "stable";
     },
     setLocalDescription: async (next?: RTCSessionDescriptionInit) => {
+      localCalls.push(next);
       if (next?.type === "rollback") {
         epc.signalingState = "stable";
         return;
@@ -183,16 +197,17 @@ const fakePeerConnection = ({
     localDescription: RTCSessionDescription | null;
     signalingState: RTCSignalingState;
   };
-  return { epc, createdLabels, appliedRemote, main, rootKey };
+  return { epc, createdLabels, appliedRemote, localCalls, main, rootKey };
 };
 
 const fakeApi = (
   selfPublicKey: string,
+  selfPeerId = SELF_PEER_ID,
 ): { api: BaseQueryApi; dispatched: unknown[] } => {
   const dispatched: unknown[] = [];
   const state = {
     keyPair: {
-      peerId: SELF_PEER_ID,
+      peerId: selfPeerId,
       publicKey: selfPublicKey,
       secretKey: "",
       challengeId: "",
@@ -425,6 +440,78 @@ describe("setDescriptionQuery remote transport binding", () => {
     ).toHaveLength(1);
     expect(pc.createdLabels).toEqual(["main"]);
     expect(pc.epc.mainChannel?.label).toBe("main");
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  // Impolite by peerId ordering: the polite peer has the lexicographically
+  // smaller peerId, so a self peerId above PEER_ID would normally ignore any
+  // colliding offer.
+  const IMPOLITE_SELF_PEER_ID = "00000000-0000-4000-8000-000000000003";
+
+  test("an impolite initiator rolls back a never-answered first offer for the peer's colliding offer", async () => {
+    // The awake initiator re-dialed the room, built a fresh PC, created main
+    // and offered while the peer was unreachable; the offer was lost. The
+    // peer's own offer (an ICE restart on its surviving PC) arrives now.
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "new",
+      pendingMain: true,
+    });
+    const { api, dispatched } = fakeApi(
+      LOWER_PUBLIC_KEY,
+      IMPOLITE_SELF_PEER_ID,
+    );
+
+    await applyDescription(
+      pc.epc,
+      description("offer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(pc.epc.ignoreOffer).toBe(false);
+    // Rollback first, then the peer's offer is applied and answered.
+    expect(pc.localCalls[0]).toEqual({ type: "rollback" });
+    expect(pc.appliedRemote.map((d) => d.type)).toEqual(["offer"]);
+    expect(pc.epc.localDescription?.type).toBe("answer");
+    expect(
+      dispatched.filter((action) => typeof action === "function"),
+    ).toHaveLength(1);
+    // The pending main survives the rollback; no duplicate is created.
+    expect(pc.createdLabels).toEqual([]);
+    expect(pc.epc.mainChannel).toBe(pc.main?.channel);
+    expect(pc.main?.closes.count).toBe(0);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("an impolite peer still ignores a colliding offer on a transport that has a remote description", async () => {
+    const pc = fakePeerConnection({
+      peerPublicKey: HIGHER_PUBLIC_KEY,
+      signalingState: "have-local-offer",
+      connectionState: "connected",
+      remoteFingerprint: "aa",
+      authenticated: true,
+    });
+    const { api, dispatched } = fakeApi(
+      LOWER_PUBLIC_KEY,
+      IMPOLITE_SELF_PEER_ID,
+    );
+
+    await applyDescription(
+      pc.epc,
+      description("offer", "aa"),
+      api,
+      HIGHER_PUBLIC_KEY,
+    );
+
+    expect(pc.epc.ignoreOffer).toBe(true);
+    expect(pc.localCalls).toEqual([]);
+    expect(pc.appliedRemote).toEqual([]);
+    expect(dispatched).toEqual([]);
+    expect(pc.main?.closes.count).toBe(0);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

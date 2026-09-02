@@ -116,8 +116,18 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
     const offerCollision =
       description.type === "offer" &&
       (epc.makingOffer || epc.signalingState !== "stable");
-    // Polite peer has the lexicographically smaller peerId
-    const isPolite = keyPair.peerId < epc.withPeerId;
+    // Polite peer has the lexicographically smaller peerId, EXCEPT that an
+    // outstanding offer on a transport that has never had a remote description
+    // has nothing to lose, so its owner always yields. Invariant behind that
+    // exception: only the identity initiator offers on a fresh transport (the
+    // responder creates no channel there, so onnegotiationneeded never fires
+    // for it), hence both sides can never be in that state at once. Without
+    // it, an impolite initiator that re-dialed while the peer was unreachable
+    // (its first offer lost) would ignore the peer's own offer on wake and
+    // hold its never-answered PC forever, while the peer's older PC sits in
+    // have-local-offer waiting for an answer that never comes.
+    const isPolite =
+      epc.remoteDescription == null || keyPair.peerId < epc.withPeerId;
     const ignoreOffer = !isPolite && offerCollision;
     epc.ignoreOffer = ignoreOffer;
 

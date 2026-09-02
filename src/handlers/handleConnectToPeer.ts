@@ -15,6 +15,10 @@ import {
 } from "../api/webrtc/roomPeer";
 import { assertRoomEdgeBudget } from "../api/webrtc/roomEdgeBudget";
 import {
+  hasUnansweredFirstOffer,
+  PENDING_OFFER_TIMEOUT_MS,
+} from "../api/webrtc/pendingOffer";
+import {
   getRoomIdentityMutex,
   getRoomIceConfigurationMutex,
   releaseRoomIdentityMutex,
@@ -239,6 +243,40 @@ export const handleConnectToPeer = async (
       epc.initialization = undefined;
     }
 
+    // True once this transport has reached "connected" at least once. A silent
+    // teardown re-dials the room only for such an edge: a transport that never
+    // connected (no reachable relay, a peer behind an unfriendly NAT) would
+    // otherwise re-dial, rebuild and fail again on every ICE failure with no
+    // backoff. Not re-dialing there is what the failed branch always did.
+    let wasConnected = false;
+
+    // A fresh transport's first offer can be lost outright: the peer was still
+    // on the roster but its socket had gone dark, so the server dropped the
+    // frame with the socket. Nothing on this PC would ever fire again (no
+    // remote description, so no ICE checks and no failure), and a later
+    // `connection` frame from the peer would merely reuse it. Bound the wait:
+    // tear the transport down and re-dial so the next roster round rebuilds
+    // it against the peer's live socket.
+    let pendingOfferWatchdog: ReturnType<typeof setTimeout> | undefined;
+    const armPendingOfferWatchdog = (): void => {
+      if (pendingOfferWatchdog) clearTimeout(pendingOfferWatchdog);
+      pendingOfferWatchdog = setTimeout(() => {
+        pendingOfferWatchdog = undefined;
+        if (!peerConnections.includes(epc) || !hasUnansweredFirstOffer(epc))
+          return;
+        console.warn(
+          `p2party: first offer to ${peerId} in room ${roomId} was never answered; rebuilding the transport`,
+        );
+        void api
+          .dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
+          )
+          .then(() => {
+            requestPeersAfterEdgeTeardown(api, roomId);
+          });
+      }, PENDING_OFFER_TIMEOUT_MS);
+    };
+
     epc.onnegotiationneeded = async () => {
       // Don't start a new negotiation if we're already making an offer or not in stable state
       if (epc.makingOffer || epc.signalingState !== "stable") {
@@ -251,6 +289,10 @@ export const handleConnectToPeer = async (
       try {
         epc.makingOffer = true;
         await epc.setLocalDescription();
+        // Only the first offer on a fresh transport is watched; an ICE-restart
+        // offer keeps the previous remote description and is owned by the ICE
+        // repair paths.
+        if (hasUnansweredFirstOffer(epc)) armPendingOfferWatchdog();
 
         if (epc.localDescription) {
           const currentKeyPair = (api.getState() as State).keyPair;
@@ -394,7 +436,7 @@ export const handleConnectToPeer = async (
               }),
             )
             .then(() => {
-              requestPeersAfterEdgeTeardown(api, roomId);
+              if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId);
             });
 
           console.error(
@@ -418,7 +460,7 @@ export const handleConnectToPeer = async (
           `RTC Connection with peer ${peerId} in room ${roomId} has ${epc.connectionState}.`,
         );
 
-        requestPeersAfterEdgeTeardown(api, roomId);
+        if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId);
       } else {
         if (disconnectTimeout) {
           clearTimeout(disconnectTimeout);
@@ -426,6 +468,7 @@ export const handleConnectToPeer = async (
         }
 
         if (epc.connectionState === "connected") {
+          wasConnected = true;
           api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
           debugLog(

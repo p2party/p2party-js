@@ -9,7 +9,12 @@ import {
   generateSessionIdentity,
   restoreSession,
 } from "./session";
-import { generateMnemonic, keyPairFromMnemonic } from "./cryptography/mnemonic";
+import {
+  generateMnemonic,
+  keyPairFromMnemonic,
+  validateMnemonic,
+  validateMnemonicWords,
+} from "./cryptography/mnemonic";
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 import { setWasmSourceUrl } from "./cryptography/wasmLoader";
 import { setDebugLogging } from "./utils/debug";
@@ -30,8 +35,12 @@ import {
   getDBAllChunks,
   getDBAllNewChunksCount,
   getDBPeerIsBlacklisted,
+  getIdentityDerivation,
+  getIdentityEd25519,
   setDBAddressBookEntry,
   setDBPeerInBlacklist,
+  setIdentityDerivation,
+  setIdentityEd25519,
 } from "./db/api";
 import {
   getFileExtension,
@@ -113,7 +122,11 @@ import {
   deleteRoom,
   purgeAllRooms,
 } from "./reducers/roomSlice";
-import { keyPairSelector, resetIdentity } from "./reducers/keyPairSlice";
+import {
+  keyPairSelector,
+  resetIdentity,
+  setKeyPair,
+} from "./reducers/keyPairSlice";
 import {
   signalingServerActions,
   signalingServerSelector,
@@ -122,6 +135,7 @@ import { setCurrentRoomUrl } from "./reducers/commonSlice";
 
 import { compileChannelMessageLabel } from "./utils/channelLabel";
 import { uint8ArrayToHex } from "./utils/uint8array";
+import { isCanonicalEd25519Identity } from "./utils/identityRole";
 import { signalingAttemptLifecycle } from "./utils/signalingAttemptLifecycle";
 import { signalingRoomOperationLifecycle } from "./utils/signalingRoomOperationLifecycle";
 import {
@@ -129,6 +143,11 @@ import {
   runRoomPurgeSettlement,
   runTerminalSettlement,
 } from "./utils/terminalSettlement";
+import {
+  createRecoverableIdentityWith,
+  InvalidRecoveryPhraseError,
+  restoreIdentityFromMnemonicWith,
+} from "./utils/identityRestore";
 import { resolveRoomConnectAdmission } from "./utils/roomConnectAdmission";
 import { RemoteRoomRevocationUnconfirmedError } from "./utils/roomLeaveCoordinator";
 
@@ -158,10 +177,17 @@ import type {
 import type { RoomData } from "./api/webrtc/interfaces";
 import type {
   BlacklistedPeer,
+  IdentityDerivation,
   UsernamedPeer,
   UniqueRoom,
   RoomStats,
 } from "./db/types";
+import type {
+  CreatedRecoverableIdentity,
+  CreateRecoverableIdentityOptions,
+  IdentityRestoreEffects,
+  RestoredIdentity,
+} from "./utils/identityRestore";
 import type { KeyPair } from "./reducers/keyPairSlice";
 import type { RoomPolicyV1 } from "./roomPolicy";
 import type { SendMessageResult } from "./handlers/handleSendMessage";
@@ -1369,24 +1395,197 @@ const stopSignalingAndDeleteIdentity = async (
   }
 };
 
+/**
+ * Bring every room's WebRTC transport to a terminal state without touching the
+ * durable data behind it. Both identity-wide operations need exactly this: the
+ * edges authenticated by the outgoing identity have to be closed, whether that
+ * identity is being deleted or replaced.
+ */
+const disconnectEveryRoomTransport = async (message: string): Promise<void> => {
+  const { rooms } = store.getState();
+  await runTerminalSettlement(
+    message,
+    rooms.map(
+      (room) => async () =>
+        await dispatch(
+          webrtcApi.endpoints.disconnectFromRoom.initiate({
+            roomId: room.id,
+          }),
+        ).unwrap(),
+    ),
+  );
+};
+
 const purgeIdentity = async () => {
   await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
     abortAllTransfers();
-    await stopSignalingAndDeleteIdentity(async () => {
-      const { rooms } = store.getState();
-      await runTerminalSettlement(
-        "One or more WebRTC rooms could not be disconnected during identity purge",
-        rooms.map(
-          (room) => async () =>
-            await dispatch(
-              webrtcApi.endpoints.disconnectFromRoom.initiate({
-                roomId: room.id,
-              }),
-            ).unwrap(),
+    await stopSignalingAndDeleteIdentity(
+      async () =>
+        await disconnectEveryRoomTransport(
+          "One or more WebRTC rooms could not be disconnected during identity purge",
         ),
-      );
-    });
+    );
   });
+};
+
+const toIdentityBuffer = (bytes: Uint8Array): ArrayBuffer => {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+
+  return buffer;
+};
+
+/**
+ * The real seams behind an identity restore. The ordering contract that uses
+ * them lives in `utils/identityRestore`, where it can be asserted without a
+ * socket, a WebRTC stack or IndexedDB.
+ */
+const identityRestoreEffects: IdentityRestoreEffects = {
+  deriveIdentity: async (mnemonic, password) =>
+    await keyPairFromMnemonic(mnemonic, password),
+
+  // The same exclusive boundary a purge takes: no connection attempt, room
+  // operation or identity bootstrap can interleave with the swap, and any
+  // in-flight attempt is cancelled before it can write the outgoing identity
+  // back to storage.
+  runExclusive: async (operation) =>
+    await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+      abortAllTransfers();
+      const releaseIdentityBootstrap =
+        await signalingAttemptLifecycle.cancelAndAcquireBootstrap();
+      try {
+        return await operation();
+      } finally {
+        // No await between the final cancellation and releasing the lease, so
+        // every attempt begun during the swap stays rejected.
+        signalingAttemptLifecycle.cancelActive();
+        dispatch(signalingServerActions.disconnect());
+        releaseIdentityBootstrap();
+      }
+    }),
+
+  disconnectSignaling: async () => {
+    await dispatch(
+      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+    ).unwrap();
+  },
+
+  // Rooms, messages, the address book and the room PIN vault are all kept, so
+  // the caller can reconnect to the same rooms under the restored identity.
+  teardownRooms: async () =>
+    await disconnectEveryRoomTransport(
+      "One or more WebRTC rooms could not be disconnected during identity restore",
+    ),
+
+  deleteIdentityX25519: () => deleteIdentityX25519(),
+
+  writeIdentityEd25519: async ({ publicKey, secretKey }) => {
+    // The write boundary copies before it transfers, so this copy of the
+    // account secret is ours to wipe rather than something the worker takes.
+    const secret = toIdentityBuffer(secretKey);
+    try {
+      await setIdentityEd25519({ pub: toIdentityBuffer(publicKey), secret });
+    } finally {
+      if (secret.byteLength > 0) new Uint8Array(secret).fill(0);
+    }
+  },
+
+  recordDerivation: async () => {
+    await setIdentityDerivation("mnemonic");
+  },
+
+  resetIdentityState: () => {
+    dispatch(resetIdentity());
+  },
+
+  adoptIdentity: (publicKey, secretKey) => {
+    dispatch(setKeyPair({ publicKey, secretKey }));
+  },
+};
+
+/**
+ * Adopt the identity a recovery phrase encodes, in place of the current one.
+ *
+ * An invalid phrase rejects with `InvalidRecoveryPhraseError` before anything
+ * is disconnected, so a typo costs nothing. Only a phrase that derives a key
+ * opens the exclusive boundary: signaling is disconnected, every room's WebRTC
+ * transport is brought to a terminal state, the cross-signed X25519 identity is
+ * deleted (the next connection regenerates and re-signs it), the Ed25519 key is
+ * persisted, and the identity is adopted in memory last.
+ *
+ * Rooms, messages, the address book and cached room PINs are all kept. Peers
+ * see a new identity key for this device, exactly as they would after a purge,
+ * so the address book will report an identity change.
+ *
+ * Signaling is left disconnected: call `connect(roomUrl)` afterwards to come
+ * back online under the restored identity.
+ *
+ * @param mnemonic - The recovery phrase, in any transcription
+ * @param password - The passphrase the identity was created with, if any
+ * @returns The restored Ed25519 public key, hex-encoded
+ */
+const restoreIdentityFromMnemonic = async (
+  mnemonic: string,
+  password?: string,
+): Promise<RestoredIdentity> =>
+  await restoreIdentityFromMnemonicWith(
+    identityRestoreEffects,
+    mnemonic,
+    password,
+  );
+
+/**
+ * Replace the current identity with a freshly generated, recoverable one and
+ * return the phrase that restores it.
+ *
+ * The phrase is shown once and stored nowhere: it is the only backup, and a
+ * caller that drops it before the user has written it down has lost it. A
+ * `password` is folded into the derivation and is equally unrecoverable — the
+ * phrase alone will not restore the identity without it.
+ *
+ * As with `restoreIdentityFromMnemonic`, signaling is left disconnected; call
+ * `connect(roomUrl)` afterwards.
+ *
+ * @param options - Entropy bits (128 gives 12 words, 256 gives 24) and an
+ *   optional passphrase
+ * @returns The recovery phrase and the Ed25519 public key it now derives
+ */
+const createRecoverableIdentity = async (
+  options?: CreateRecoverableIdentityOptions,
+): Promise<CreatedRecoverableIdentity> =>
+  await createRecoverableIdentityWith(identityRestoreEffects, options);
+
+/** What the current account key is, and whether a phrase can reproduce it. */
+export interface IdentityBackupStatus {
+  publicKey: string;
+  derivation: IdentityDerivation | null;
+}
+
+/**
+ * Whether the identity in use can be backed up at all.
+ *
+ * `derivation` is "mnemonic" only for an identity that was created from a
+ * recovery phrase; a "random" one cannot be exported, and the only way to get a
+ * recoverable identity is `createRecoverableIdentity`, which replaces it. It is
+ * null when no identity is stored yet, and also when the stored flag no longer
+ * describes the stored key — an unreadable provenance hint must never be
+ * reported as "this can be backed up".
+ *
+ * @returns The current Ed25519 public key (empty when there is none) and how it
+ *   came into being
+ */
+const getIdentityBackupStatus = async (): Promise<IdentityBackupStatus> => {
+  let publicKey = keyPairSelector(store.getState()).publicKey;
+  // Before the first connection Redux holds no identity, but one may already
+  // be stored: reading the status must not depend on having connected.
+  if (!isCanonicalEd25519Identity(publicKey)) {
+    const stored = await getIdentityEd25519();
+    publicKey = stored ? uint8ArrayToHex(new Uint8Array(stored.pub)) : "";
+    // The read boundary hands back the account secret; nothing here wants it.
+    if (stored) new Uint8Array(stored.secret).fill(0);
+  }
+
+  return { publicKey, derivation: await getIdentityDerivation() };
 };
 
 /**
@@ -1547,6 +1746,16 @@ export const p2party = {
   newKeyPair,
   generateMnemonic,
   keyPairFromMnemonic,
+  validateMnemonic,
+  validateMnemonicWords,
+  // Identity backup: only an identity created from a phrase can be restored
+  // from one, so `getIdentityBackupStatus` says whether the current one can,
+  // and `createRecoverableIdentity` is how a random one is replaced by one
+  // that can. Both leave signaling disconnected; reconnect with `connect`.
+  createRecoverableIdentity,
+  restoreIdentityFromMnemonic,
+  getIdentityBackupStatus,
+  InvalidRecoveryPhraseError,
   MIN_CHUNKS: 1,
   MIN_CHUNK_SIZE: CHUNK_SIZE_FLOOR + 1,
   MAX_CHUNK_SIZE: CHUNK_LEN,
@@ -1603,6 +1812,7 @@ export type {
   SignalingState,
   KeyPair,
   RoomPolicyV1,
+  IdentityDerivation,
   WebSocketMessageRoomIdRequest,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageChallengeRequest,
@@ -1623,6 +1833,12 @@ export {
   setWasmSourceUrl,
   MessageDeliveryError,
   RemoteRoomRevocationUnconfirmedError,
+  createRecoverableIdentity,
+  restoreIdentityFromMnemonic,
+  getIdentityBackupStatus,
+  validateMnemonic,
+  validateMnemonicWords,
+  InvalidRecoveryPhraseError,
   joinRoom,
   waitForRoom,
   waitForPeers,
@@ -1653,6 +1869,15 @@ export {
 };
 
 export type { TransferAck } from "./handlers/reconcile";
+
+// The identity-backup surface: what a phrase produces, what it costs to make
+// one, and the shape `validateMnemonicWords` reports a bad phrase in.
+export type { MnemonicValidation } from "./cryptography/mnemonic";
+export type {
+  CreatedRecoverableIdentity,
+  CreateRecoverableIdentityOptions,
+  RestoredIdentity,
+} from "./utils/identityRestore";
 
 export type {
   RoomAuthMode,

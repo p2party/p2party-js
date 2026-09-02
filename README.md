@@ -446,7 +446,8 @@ const decoder = new TextDecoder();
 const sealed = await alice.encrypt(encoder.encode("hello bob"));
 
 // sealed.protocolVersion === 4
-// sealed.root   -> 32-byte Merkle root, authenticated as AEAD additional data
+// sealed.root   -> 64-byte SHA-512 Merkle root, authenticated as AEAD
+//                  additional data (decrypt() rejects any other length)
 // sealed.frames -> [Uint8Array(65490)]  one uniform cell; a 9-byte message and
 //                  a 60 KiB message produce byte-identical frame sizes.
 //                  Each frame is:
@@ -517,8 +518,8 @@ envelope codec and the sparse-PQ healing hooks are in
 `joinRoom()` and `createSession()` are the batteries-included paths. Every step
 they take is also a public call, so you can drive the protocol yourself.
 
-**Identity, signing, and recovery phrases.** Keys are Ed25519; the recovery
-phrase is BIP-39, so a wallet-style backup flow works without a second library:
+**Identity, signing, and recovery phrases.** Keys are Ed25519, and a phrase
+derives one deterministically:
 
 ```ts
 const mnemonic = await p2party.generateMnemonic(256); // 24 words
@@ -529,6 +530,20 @@ const bytes = new TextEncoder().encode("anything you want attributable");
 const signature = await p2party.sign(bytes, keyPair.secretKey);
 const ok = await p2party.verify(bytes, signature, keyPair.publicKey);
 ```
+
+**This phrase is not BIP-39, and a BIP-39 wallet cannot restore it.** It draws
+its words from the BIP-39 English wordlist and nothing else: the checksum is
+the leading bits of SHA-512 rather than SHA-256, entropy runs from 128 to 512
+bits (12 to 48 words, where BIP-39 stops at 24), and the seed comes from
+argon2id over the normalized phrase — with an optional password used as the
+salt — rather than PBKDF2-HMAC-SHA512. The three canonical BIP-39 English test
+vectors all fail `validateMnemonic()`. Treat it as a p2party-specific format.
+
+These are primitives, not a feature. Nothing in the SDK or in the p2party.com
+frontend currently derives a stored identity from a phrase, so there is no
+backup or restore flow to call today — building one is on the
+[roadmap](ROADMAP.md#near-term). Until it exists, an identity created any other
+way is not recoverable from a phrase.
 
 **Room policy as data.** A policy is a value you can encode, hash, compare and
 validate before anything touches the network — useful for showing two peers

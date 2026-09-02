@@ -637,7 +637,15 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-Every release publishes its browser bundle, its database worker and its
+> **`0.14.4` is not on the CDN yet.** The release pipeline uploads its objects
+> from the tarball it publishes, and that pipeline has not run for this
+> version: every path under `https://cdn.p2party.com/@0.14.4/` currently
+> answers 404, and npm still resolves `p2party` to `0.14.3`. The snippet below
+> is generated from this build and is what the release will serve — until then,
+> either pin `0.14.3` (its objects are live) or self-host the bundle, which
+> works today and is described in the next section.
+
+A release publishes its browser bundle, its database worker and its
 cryptographic module as immutable, versioned CDN objects. The version is in the
 path, so a URL names exactly one build and is safe to cache forever. Drop the
 script in and `window.p2party` is there — no npm, no bundler, no build:
@@ -709,20 +717,36 @@ p2party.setWasmSourceUrl(
 
 The SRI check remains active, so a URL serving different bytes fails closed.
 
-### Download the WASM from the CDN
+### Get the WASM and check it
 
-Every release publishes its cryptographic module as an immutable, versioned
-object. The path carries the version, so a URL always names exactly one build
-and is safe to cache forever:
+The npm tarball is the copy that always exists. It carries both files, and the
+package exports them, so no network fetch is needed to obtain either:
 
 ```sh
-VERSION=$(npm view p2party version)   # or `npm pkg get version` in your project
-curl -O "https://cdn.p2party.com/@$VERSION/libcrypto.wasm"
-curl -O "https://cdn.p2party.com/@$VERSION/libcrypto.provenance.json"
+npm pack p2party@0.14.3 && tar -xzf p2party-0.14.3.tgz
+ls package/lib/libcrypto.wasm package/lib/libcrypto.provenance.json
+# already installed? the subpaths resolve straight out of node_modules:
+node -p "require.resolve('p2party/libcrypto.wasm')"
+node -p "require.resolve('p2party/libcrypto.provenance.json')"
 ```
 
+A published release also mirrors its cryptographic module to the CDN under an
+immutable, versioned path, so a URL names exactly one build and is safe to
+cache forever:
+
+```sh
+curl -O "https://cdn.p2party.com/@0.14.3/libcrypto.wasm"
+```
+
+Two caveats, both current as of `0.14.4`. The CDN carries only three objects —
+`p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the `assets` array
+in `scripts/uploadToCDN.mjs`) — so **`libcrypto.provenance.json` is not on the
+CDN for any version**; take it from the tarball. And nothing at all is uploaded
+for `0.14.4` yet, so substitute a version that is actually published rather
+than reading one out of `npm view`.
+
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
-are both recorded in the provenance file that sits next to it:
+are both recorded in the provenance file:
 
 ```sh
 shasum -a 256 libcrypto.wasm
@@ -730,13 +754,14 @@ openssl dgst -sha384 -binary libcrypto.wasm | openssl base64 -A
 ```
 
 Compare them against `libcrypto.provenance.json`, which records the same
-`sha256` and `sri` for the bytes beside it. Those are also the bytes npm ships:
-the release workflow uploads the CDN object from the very tarball it publishes,
-then re-downloads and compares before `npm publish` runs, so the two can never
-diverge.
+`sha256` and `sri` for the bytes the same release ships. CDN and npm cannot
+diverge for a release the pipeline actually ran: `.github/workflows/release.yml`
+unpacks the validated tarball, uploads the CDN object from it, and runs
+`npm run verify:cdn` before `npm publish`.
 
 Serve the file yourself and point the browser root at it with
 `setWasmSourceUrl()` above, or hand the bytes straight to `p2party/session`.
+Self-hosting is the path that works today for every version, published or not.
 
 On Node and Bun, `p2party/session` needs none of this: it reads the WASM from
 the installed package and checks it against the same pinned SHA-384, so an

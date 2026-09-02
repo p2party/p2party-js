@@ -32,6 +32,12 @@ export interface IdentityPurgeSettlement {
   readonly teardownRooms: TerminalSettlementStep;
   readonly deleteIdentityX25519: TerminalSettlementStep;
   readonly deleteIdentityEd25519: TerminalSettlementStep;
+  /**
+   * The non-secret record of how the purged identity was created. It describes
+   * a key that no longer exists, so leaving it behind would let the next
+   * identity inherit a stale claim about whether it can be backed up.
+   */
+  readonly deleteIdentityDerivation: TerminalSettlementStep;
 }
 
 /**
@@ -49,6 +55,7 @@ export const runIdentityPurgeSettlement = async (
     steps.teardownRooms,
     steps.deleteIdentityX25519,
     steps.deleteIdentityEd25519,
+    steps.deleteIdentityDerivation,
   ]);
 
 export interface RoomPurgeSettlement {

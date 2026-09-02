@@ -6,6 +6,7 @@ import type {
   NewChunkSelector,
   SendQueue,
   RatchetSession,
+  IdentityDerivation,
   IdentityEd25519KeyMaterial,
   IdentityX25519,
 } from "./types";
@@ -379,3 +380,16 @@ export const setIdentityEd25519 = async (
 };
 
 export const deleteIdentityEd25519 = () => callWorker("deleteIdentityEd25519");
+
+// Non-secret provenance of the account identity: only an identity derived from
+// a recovery phrase can ever be exported as one. Null means "unknown" — no flag
+// was recorded, or the recorded one describes a superseded account key — and
+// callers must treat that as "not exportable".
+export const getIdentityDerivation = (): Promise<IdentityDerivation | null> =>
+  callWorker("getIdentityDerivation");
+
+export const setIdentityDerivation = (derivation: IdentityDerivation) =>
+  callWorker("setIdentityDerivation", derivation);
+
+export const deleteIdentityDerivation = () =>
+  callWorker("deleteIdentityDerivation");

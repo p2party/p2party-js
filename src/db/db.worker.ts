@@ -39,6 +39,8 @@ import type {
   StoredIdentityEd25519,
   StoredIdentityEd25519Revision,
   StoredIdentityX25519,
+  IdentityDerivation,
+  StoredIdentityDerivation,
   PinAttemptState,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
@@ -2484,6 +2486,119 @@ async function fnDeleteIdentityEd25519(): Promise<void> {
   ratchetLastWrite.clear();
 }
 
+// Whether the account identity was derived from a recovery phrase. Non-secret
+// and never a key, but durable: after a reload the app can only tell the user
+// "you can back this identity up" if it remembers how the key was created.
+// Like both identity records this lives in the existing out-of-line `meta`
+// store, so it adds no IndexedDB schema and requires no dbVersion bump.
+const IDENTITY_DERIVATION_META_ID = "identityDerivation";
+const IDENTITY_DERIVATION_RECORD_VERSION = 1;
+
+const isIdentityDerivation = (value: unknown): value is IdentityDerivation =>
+  value === "random" || value === "mnemonic";
+
+/**
+ * A malformed or future-versioned row is reported as unknown rather than
+ * thrown: the only fail-safe reading of an unreadable provenance hint is "we
+ * cannot promise this identity is recoverable", and a throw here would break
+ * signaling bootstrap over a value no protocol step depends on.
+ */
+const parseStoredIdentityDerivation = (
+  value: unknown,
+): StoredIdentityDerivation | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.version !== IDENTITY_DERIVATION_RECORD_VERSION) return undefined;
+  if (!isIdentityDerivation(record.derivation)) return undefined;
+  const boundPub = record.boundPub;
+  if (boundPub !== null && !(boundPub instanceof ArrayBuffer)) return undefined;
+  if (boundPub instanceof ArrayBuffer && boundPub.byteLength !== 32)
+    return undefined;
+  return {
+    version: IDENTITY_DERIVATION_RECORD_VERSION,
+    derivation: record.derivation,
+    boundPub,
+  };
+};
+
+const storedIdentityEd25519Pub = (value: unknown): ArrayBuffer | undefined => {
+  try {
+    return parseStoredIdentityEd25519(value)?.pub;
+  } catch {
+    // An unreadable identity row is the Ed25519 path's problem to report; here
+    // it only means the flag has nothing it can still be bound to.
+    return undefined;
+  }
+};
+
+async function fnGetIdentityDerivation(): Promise<IdentityDerivation | null> {
+  const db = await getDB();
+  let derivationValue: unknown;
+  let identityValue: unknown;
+  try {
+    const tx = db.transaction("meta", "readonly");
+    const store = tx.objectStore("meta");
+    [derivationValue, identityValue] = await Promise.all([
+      store.get(IDENTITY_DERIVATION_META_ID),
+      store.get(IDENTITY_ED25519_META_ID),
+    ]);
+    await tx.done;
+  } finally {
+    db.close();
+  }
+
+  const stored = parseStoredIdentityDerivation(derivationValue);
+  if (stored === undefined) return null;
+  if (stored.boundPub === null) return stored.derivation;
+
+  // The claim was recorded against a specific account key. If that key is gone
+  // or was replaced, the claim no longer describes the identity in use.
+  const currentPub = storedIdentityEd25519Pub(identityValue);
+  if (currentPub === undefined) return null;
+  return edIdentityBuffersEqual(stored.boundPub, currentPub)
+    ? stored.derivation
+    : null;
+}
+
+async function fnSetIdentityDerivation(
+  derivation: IdentityDerivation,
+): Promise<void> {
+  if (!isIdentityDerivation(derivation))
+    throw new Error("Identity derivation value is unsupported");
+  const db = await getDB();
+  try {
+    const tx = db.transaction("meta", "readwrite");
+    const store = tx.objectStore("meta");
+    // Bind in the same transaction that writes the flag, so a concurrent
+    // identity rotation cannot be recorded as the key this claim describes.
+    const boundPub = storedIdentityEd25519Pub(
+      await store.get(IDENTITY_ED25519_META_ID),
+    );
+    await store.put(
+      {
+        version: IDENTITY_DERIVATION_RECORD_VERSION,
+        derivation,
+        boundPub:
+          boundPub === undefined ? null : edIdentityCopyBuffer(boundPub),
+      } satisfies StoredIdentityDerivation,
+      IDENTITY_DERIVATION_META_ID,
+    );
+    await tx.done;
+  } finally {
+    db.close();
+  }
+}
+
+async function fnDeleteIdentityDerivation(): Promise<void> {
+  const db = await getDB();
+  try {
+    await db.delete("meta", IDENTITY_DERIVATION_META_ID);
+  } finally {
+    db.close();
+  }
+}
+
 async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
   const db = await getDB();
   try {
@@ -2952,6 +3067,17 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteIdentityEd25519":
         await fnDeleteIdentityEd25519();
+        result = undefined;
+        break;
+      case "getIdentityDerivation":
+        result = await fnGetIdentityDerivation();
+        break;
+      case "setIdentityDerivation":
+        await fnSetIdentityDerivation(...message.args);
+        result = undefined;
+        break;
+      case "deleteIdentityDerivation":
+        await fnDeleteIdentityDerivation();
         result = undefined;
         break;
       case "deleteDB":

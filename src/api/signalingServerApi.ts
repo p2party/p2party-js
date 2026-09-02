@@ -60,6 +60,7 @@ import {
 import {
   getIdentityEd25519,
   getIdentityX25519,
+  setIdentityDerivation,
   setIdentityEd25519,
   setIdentityX25519,
 } from "../db/api";
@@ -237,6 +238,11 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
               secretBytes.fill(0);
             }
             requireCurrentAttempt();
+            // The adopted legacy key was generated from a random seed, so no
+            // recovery phrase can ever reproduce it. Record that before the
+            // user is ever offered a backup.
+            await setIdentityDerivation("random");
+            requireCurrentAttempt();
           } else {
             const generated = await newKeyPair();
             try {
@@ -247,6 +253,11 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
                 pub: toBuf(generated.publicKey),
                 secret: toBuf(generated.secretKey),
               });
+              requireCurrentAttempt();
+              // Randomly seeded: unrecoverable by design. Persisting this is
+              // what lets the app tell the user their identity cannot be
+              // backed up, instead of silently offering an unusable phrase.
+              await setIdentityDerivation("random");
               requireCurrentAttempt();
             } finally {
               generated.secretKey.fill(0);

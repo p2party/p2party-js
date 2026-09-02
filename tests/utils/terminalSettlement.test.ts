@@ -34,8 +34,8 @@ describe("fail-closed terminal settlement", () => {
     ]);
   });
 
-  test("each identity deletion failure occurs only after room teardown and still permits both deletes", async () => {
-    for (const failingDelete of ["x25519", "ed25519"]) {
+  test("each identity deletion failure occurs only after room teardown and still permits every delete", async () => {
+    for (const failingDelete of ["x25519", "ed25519", "derivation"]) {
       const order: string[] = [];
       const settling = runIdentityPurgeSettlement({
         disconnectSignaling: () => {
@@ -58,6 +58,11 @@ describe("fail-closed terminal settlement", () => {
           order.push("ed25519");
           if (failingDelete === "ed25519") throw new Error("ed25519 delete");
         },
+        deleteIdentityDerivation: () => {
+          order.push("derivation");
+          if (failingDelete === "derivation")
+            throw new Error("derivation delete");
+        },
       });
 
       await expect(settling).rejects.toBeInstanceOf(AggregateError);
@@ -68,6 +73,10 @@ describe("fail-closed terminal settlement", () => {
         "rooms-terminal",
         "x25519",
         "ed25519",
+        // The provenance flag describes the key that was just purged; leaving
+        // it behind would let a fresh random identity inherit the claim that
+        // it can be exported as a recovery phrase.
+        "derivation",
       ]);
     }
   });
@@ -96,6 +105,9 @@ describe("fail-closed terminal settlement", () => {
         await deleteDeferred;
       },
       deleteIdentityEd25519: () => {
+        expect(transportsTerminal).toBe(true);
+      },
+      deleteIdentityDerivation: () => {
         expect(transportsTerminal).toBe(true);
       },
     });

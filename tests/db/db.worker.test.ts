@@ -1338,6 +1338,133 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
   });
 });
 
+describe("db.worker identityDerivation wiring (non-secret provenance flag)", () => {
+  // The flag is bound to the account key it describes, so a rotation must be
+  // reproducible here: RFC 8032 vectors give two distinct valid identities.
+  const edVectors = [
+    {
+      seed: "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      pub: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    },
+    {
+      seed: "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      pub: "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    },
+  ] as const;
+
+  // setIdentityEd25519 takes ownership of the secret buffer and zeroes it, so
+  // every store needs a freshly built identity.
+  const edIdentity = (index: number) => {
+    const vector = edVectors[index];
+    const publicBytes = Uint8Array.from(Buffer.from(vector.pub, "hex"));
+    const secretBytes = new Uint8Array(64);
+    secretBytes.set(Buffer.from(vector.seed, "hex"));
+    secretBytes.set(publicBytes, 32);
+    return { pub: publicBytes.buffer, secret: secretBytes.buffer };
+  };
+
+  test("getIdentityDerivation is null before anything was ever recorded", async () => {
+    const resp = await callWorker("getIdentityDerivation", []);
+    expect(resp.error).toBeUndefined();
+    expect(resp.result).toBeNull();
+  });
+
+  test("set -> get round-trips each derivation and overwrites in place", async () => {
+    const setMnemonic = await callWorker("setIdentityDerivation", ["mnemonic"]);
+    expect(setMnemonic.error).toBeUndefined();
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "mnemonic",
+    );
+
+    const setRandom = await callWorker("setIdentityDerivation", ["random"]);
+    expect(setRandom.error).toBeUndefined();
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "random",
+    );
+  });
+
+  test("deleteIdentityDerivation clears the flag back to null", async () => {
+    await callWorker("setIdentityDerivation", ["mnemonic"]);
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "mnemonic",
+    );
+
+    const del = await callWorker("deleteIdentityDerivation", []);
+    expect(del.error).toBeUndefined();
+    const after = await callWorker("getIdentityDerivation", []);
+    expect(after.error).toBeUndefined();
+    expect(after.result).toBeNull();
+
+    const db = await getDB();
+    expect(await db.get("meta", "identityDerivation")).toBeUndefined();
+    db.close();
+  });
+
+  test("deleting a flag that was never written is not an error", async () => {
+    const del = await callWorker("deleteIdentityDerivation", []);
+    expect(del.error).toBeUndefined();
+    expect((await callWorker("getIdentityDerivation", [])).result).toBeNull();
+  });
+
+  test("rejects an unknown derivation and leaves the stored flag untouched", async () => {
+    await callWorker("setIdentityDerivation", ["mnemonic"]);
+
+    const bad = await callWorker("setIdentityDerivation", ["imported"]);
+    expect(bad.error).toBeDefined();
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "mnemonic",
+    );
+  });
+
+  test("the stored row is plaintext, non-secret metadata", async () => {
+    await callWorker("setIdentityDerivation", ["mnemonic"]);
+
+    const db = await getDB();
+    const raw = (await db.get("meta", "identityDerivation")) as unknown as {
+      version: number;
+      derivation: string;
+    };
+    db.close();
+
+    expect(raw.version).toBe(1);
+    expect(raw.derivation).toBe("mnemonic");
+  });
+
+  test("a corrupt row reads back as null instead of claiming recoverability", async () => {
+    const db = await getDB();
+    await db.put(
+      "meta",
+      { version: 2, derivation: "mnemonic" } as never,
+      "identityDerivation",
+    );
+    db.close();
+
+    const resp = await callWorker("getIdentityDerivation", []);
+    expect(resp.error).toBeUndefined();
+    expect(resp.result).toBeNull();
+  });
+
+  test("a flag left over from a previous account key reads back as null", async () => {
+    await callWorker("setIdentityEd25519", [edIdentity(0)]);
+    await callWorker("setIdentityDerivation", ["mnemonic"]);
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "mnemonic",
+    );
+
+    // Rotating the account key without touching the flag must not let the old
+    // "recoverable" claim describe the new, unrelated identity.
+    await callWorker("setIdentityEd25519", [edIdentity(1)]);
+    expect((await callWorker("getIdentityDerivation", [])).result).toBeNull();
+  });
+
+  test("a flag recorded before any account key still reads back", async () => {
+    await callWorker("setIdentityDerivation", ["random"]);
+    expect((await callWorker("getIdentityDerivation", [])).result).toBe(
+      "random",
+    );
+  });
+});
+
 describe("getDBRoomStats", () => {
   const roomId = "11111111-1111-4111-8111-111111111111";
   const peerA = "aaaaaaaa-1111-4111-8111-111111111111";

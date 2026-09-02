@@ -245,6 +245,29 @@ export interface StoredIdentityEd25519Revision {
   lastRevision: bigint;
 }
 
+/**
+ * How the current Ed25519 account identity came into being. "mnemonic" means it
+ * was derived from a recovery phrase and can therefore be reproduced from one;
+ * "random" means it was generated from a random seed and is unrecoverable.
+ * Non-secret: it says nothing about the phrase or the key, only about whether a
+ * backup is possible at all.
+ */
+export type IdentityDerivation = "random" | "mnemonic";
+
+/** At-rest derivation record (meta key "identityDerivation"). */
+export interface StoredIdentityDerivation {
+  version: 1;
+  derivation: IdentityDerivation;
+  /**
+   * The Ed25519 public key this claim describes, when one was stored at the
+   * time it was recorded. A flag whose binding no longer matches the stored
+   * account key is reported as unknown rather than carried over: claiming
+   * recoverability for a key that was never derived from a phrase would hand
+   * the user a backup that restores someone else's identity.
+   */
+  boundPub: ArrayBuffer | null;
+}
+
 /** Non-secret online PIN-guess throttle state for one room/peer-identity edge. */
 export interface PinAttemptState {
   failures: number;
@@ -523,6 +546,21 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "getIdentityDerivation";
+      args: [];
+    }
+  | {
+      id: number;
+      method: "setIdentityDerivation";
+      args: [derivation: IdentityDerivation];
+    }
+  | {
+      id: number;
+      method: "deleteIdentityDerivation";
+      args: [];
+    }
+  | {
+      id: number;
       method: "deleteDB";
       args: [];
     };
@@ -581,5 +619,8 @@ export interface WorkerMethodReturnTypes {
   getIdentityEd25519: IdentityEd25519 | undefined;
   setIdentityEd25519: bigint;
   deleteIdentityEd25519: undefined;
+  getIdentityDerivation: IdentityDerivation | null;
+  setIdentityDerivation: undefined;
+  deleteIdentityDerivation: undefined;
   deleteDB: undefined;
 }

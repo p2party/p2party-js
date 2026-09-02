@@ -13,6 +13,7 @@ import type {
   StoredIdentityX25519,
   StoredIdentityEd25519,
   StoredIdentityEd25519Revision,
+  StoredIdentityDerivation,
   PinAttemptState,
 } from "../types";
 
@@ -79,6 +80,7 @@ export interface RepoSchema extends DBSchema {
       | StoredIdentityX25519
       | StoredIdentityEd25519
       | StoredIdentityEd25519Revision
+      | StoredIdentityDerivation
       | PinAttemptState;
     key: string;
   };

@@ -23,6 +23,7 @@ import {
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
   getDBRoomStats,
+  deleteIdentityDerivation,
   deleteIdentityEd25519,
   deleteIdentityX25519,
   getDBAddressBookEntry,
@@ -1354,6 +1355,10 @@ const stopSignalingAndDeleteIdentity = async (
       // before deleting the Ed25519 identity it authenticates.
       deleteIdentityX25519: () => deleteIdentityX25519(),
       deleteIdentityEd25519: () => deleteIdentityEd25519(),
+      // Non-secret, but it describes the key just deleted: a surviving
+      // "mnemonic" flag would tell the next, randomly generated identity that
+      // it can be exported as a recovery phrase.
+      deleteIdentityDerivation: () => deleteIdentityDerivation(),
     });
   } finally {
     // No await between the final cancellation/state reset and releasing the

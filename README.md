@@ -192,6 +192,63 @@ protocol-v4 acknowledgement: p2party next runs its authenticated HELLO plus
 three chained confirmation flights over the main channel. Message receipts are
 a third, delivery-level acknowledgement.
 
+### When a peer sleeps
+
+A phone that backgrounds with its radio off for less than WebRTC's ~30 s ICE
+consent timeout used to wake into a permanent split. Its peer had already torn
+that edge down and built a fresh one, but the woken side still read
+`connected`, reused the dead transport, and let its zombie `main` channel block
+a replacement — so no handshake ever ran on the peer's new transport. One side
+showed the peer reachable and every send failed undelivered; the other showed
+no handshake at all and its sends hung forever. Only a manual reconnect cleared
+it.
+
+Seven behaviours now hold the edge together, and each is what the library does
+rather than a guarantee about your network:
+
+- **A peer edge is bound to the DTLS certificate it authenticated against.**
+  When the remote certificate changes, an already-authenticated transport is
+  replaced outright. One that never authenticated is re-authenticated in place
+  instead, at most once, so a peer that keeps presenting fresh certificates
+  still converges on a replacement rather than looping.
+- **Descriptions from a retired transport are discarded**, so an answer
+  belonging to a dead connection can no longer poison the one that replaced it.
+- **Every failure teardown re-dials the room** under its own debounce budget.
+  Deliberate teardowns — `disconnectFromPeer`, leaving, address-book removal —
+  do not. A superseded handshake attempt dies quietly instead of tearing down
+  the transport that superseded it.
+- **A send to a peer that never authenticates fails inside a bounded wait**
+  with a stated reason, rather than hanging on the ratchet gate forever.
+- **A half-open signaling socket is detected**, by a heartbeat watchdog (25 s
+  with no server ping) and on wake events, and marked disconnected so a
+  reconnect can run.
+- **RTCPeerConnection operations settle when the connection closes underneath
+  them**, so a closing connection cannot strand the per-peer lock and wedge the
+  socket's ingress queue.
+- **An interrupted transfer resumes across an edge re-authentication.** The
+  transfer's cipher and its cancel detection follow the cryptographic
+  generation rather than the connection object, so a channel closed by a
+  re-authentication reads as a resume, not as a peer cancelling on you.
+
+Verified with two separate headless-Chromium processes against a Bun relay
+mirroring the signaling server, one process SIGSTOPped whole-tree with its UDP
+host-candidate buffers flooded — a phone asleep with the radio off. Across
+seven scenarios (baseline, socket drop, a 20 s freeze in each identity role
+with the socket dropped and with it kept, and a 45 s freeze) both sides
+reconverge and exchange byte-exact messages 0.5–6.5 s after wake, and four
+in-flight 8 MiB transfer configurations finish byte-exact with the sender
+reporting `delivered`.
+
+Two limits, since they are as real as the fixes. Resume follows a live page: a
+send in flight does not survive reloading the sending page, though a reloaded
+receiver replays receipts for what it already holds so a still-live sender
+resends only the gaps. And when a frozen identity responder is carrying an
+in-flight transfer, reconvergence takes about 37 s rather than the usual 5–7 s
+— the surviving SCTP association accepts our new streams but not the peer's, so
+recovery waits out the 30 s handshake step timeout. The transfer completes
+correctly; the latency is a known open item on the
+[roadmap](ROADMAP.md#near-term).
+
 ## Wire format
 
 Fixed 65,490-byte cells, a 65-byte receipt frame, and outer frame tags that make

@@ -233,6 +233,19 @@ export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 export const SIGNALING_HEARTBEAT_TIMEOUT_MS = 25_000;
 export const SIGNALING_HEARTBEAT_CHECK_MS = 5_000;
 
+// Bound an IN-PLACE re-bind of an existing RTCPeerConnection onto a new remote
+// DTLS certificate (see remoteTransportChange). The surviving SCTP association
+// keeps accepting OUR new outbound streams while never delivering the peer's,
+// so the re-bound transport looks alive from here but the peer's fresh `main`
+// never arrives and the edge never re-authenticates. Nothing else ends that
+// state quickly: a PC whose ICE stays connected never fails, so the only exit
+// is the PEER's HANDSHAKE_STEP_TIMEOUT_MS (30 s, handleHandshake.ts) tearing
+// its own side down — measured on the process-freeze harness as a ~37 s
+// convergence instead of ~7 s. Shorter than that 30 s so the edge is REBUILT
+// rather than waited out, and comfortably longer than a healthy re-bind, which
+// the same harness measures at about 2 s.
+export const REBIND_AUTHENTICATION_DEADLINE_MS = 10_000;
+
 // Bound every RTCPeerConnection operation awaited inside a room/peer
 // negotiation critical section. close() aborts an in-flight addIceCandidate /
 // setLocalDescription / setRemoteDescription WITHOUT settling its promise and

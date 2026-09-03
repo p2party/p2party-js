@@ -37,6 +37,7 @@ import { abortTransfer } from "./transferAbort";
 import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
 
 import webrtcApi from "../api/webrtc";
+import { clearRebindAuthenticationDeadline } from "../api/webrtc/rebindDeadline";
 
 import {
   setChannel,
@@ -806,6 +807,10 @@ export const handleOpenChannel = async (
           // a replacement, while consecutive re-binds that authenticate
           // nothing still converge on one (decideRemoteTransportChangeResponse).
           epc.remoteTransportRebinds = 0;
+          // ...and the deadline that re-bind armed has been met, so it is
+          // released here too: an authenticated edge must never be torn down
+          // by a timer that only exists to bound a re-bind in progress.
+          clearRebindAuthenticationDeadline(epc);
           api.dispatch(
             setPeerHandshakeStatus({
               roomId,

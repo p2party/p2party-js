@@ -7,9 +7,15 @@ import { isRatchetGateOpen, resetRatchetGate } from "../../handlers/ratchetGate"
 import { setPeerHandshakeStatus } from "../../reducers/roomSlice";
 import { parseFingerprintFromSdp } from "../../utils/sdpFingerprint";
 import { debugLog } from "../../utils/debug";
+import { armRebindAuthenticationDeadline } from "./rebindDeadline";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { IRTCDataChannel, IRTCPeerConnection } from "./interfaces";
+import type { RebindDeadlineScheduler } from "./rebindDeadline";
+import type {
+  DisconnectPeerTransport,
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "./interfaces";
 
 /**
  * True iff both SDPs declare a sha-256 DTLS fingerprint and the two differ.
@@ -160,7 +166,7 @@ export interface ResetEdgeAuthenticationParams {
   epc: IRTCPeerConnection;
   roomId: string;
   peerId: string;
-  api: Pick<BaseQueryApi, "dispatch">;
+  api: Pick<BaseQueryApi, "dispatch" | "getState">;
   /**
    * The shared open-channel registry. Passed in explicitly (the caller already
    * holds it) so this helper stays store-free and unit-testable: it owns the
@@ -168,6 +174,15 @@ export interface ResetEdgeAuthenticationParams {
    * `epc.messageChannels`.
    */
   dataChannels: IRTCDataChannel[];
+  /**
+   * Tears this room/peer transport down through the transport-failure path.
+   * Injected exactly as setDescriptionQuery's own teardown is, so the deadline
+   * armed below needs no import of the API that registers it.
+   */
+  disconnectPeer: DisconnectPeerTransport;
+  /** Test seams for the re-bind deadline; production takes the defaults. */
+  deadlineMs?: number;
+  schedule?: RebindDeadlineScheduler;
   reason: Error;
 }
 
@@ -251,6 +266,9 @@ export const resetEdgeAuthenticationForNewRemoteTransport = ({
   peerId,
   api,
   dataChannels,
+  disconnectPeer,
+  deadlineMs,
+  schedule,
   reason,
 }: ResetEdgeAuthenticationParams): void => {
   // Reject any in-flight handshake step on the old transcript first, then
@@ -320,6 +338,21 @@ export const resetEdgeAuthenticationForNewRemoteTransport = ({
   // success path clears it, so decideRemoteTransportChangeResponse's budget
   // only ever counts re-binds that authenticated nothing.
   epc.remoteTransportRebinds = (epc.remoteTransportRebinds ?? 0) + 1;
+
+  // A re-bind that never completes must not cost the peer's 30 s handshake
+  // step timeout: the surviving SCTP association can accept our own new
+  // streams while never delivering the peer's `main`, and nothing else on a
+  // still-ICE-connected transport ever notices. Armed AFTER the gate above is
+  // replaced, so the deadline owns this attempt's lease.
+  armRebindAuthenticationDeadline({
+    epc,
+    roomId,
+    peerId,
+    api,
+    disconnectPeer,
+    deadlineMs,
+    schedule,
+  });
 
   api.dispatch(
     setPeerHandshakeStatus({ roomId, peerId, status: "authenticating" }),

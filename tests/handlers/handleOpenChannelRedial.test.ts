@@ -496,6 +496,13 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       peerId: PEER_ID,
       api,
       dataChannels: [],
+      // This test is about the superseded handshake, not the re-bind
+      // deadline: arm nothing real and tear nothing down.
+      disconnectPeer: () => Promise.resolve(),
+      schedule: {
+        setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>,
+        clearTimeout: () => undefined,
+      },
       reason: new Error("Remote DTLS certificate changed"),
     });
     const newLease = pc.epc.ratchetGateLease;

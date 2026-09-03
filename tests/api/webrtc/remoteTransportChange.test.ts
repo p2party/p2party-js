@@ -3,8 +3,11 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
+  IRTCIceCandidate,
   IRTCPeerConnection,
+  RTCDisconnectFromPeerParams,
 } from "../../../src/api/webrtc/interfaces";
+import type { RebindDeadlineScheduler } from "../../../src/api/webrtc/rebindDeadline";
 
 // The edge re-authentication helper imports the handshake inbox, which imports
 // the Redux store, whose identity slice reads localStorage at module
@@ -30,6 +33,9 @@ const localStorageMemory: Record<string, string> = {};
 
 type RemoteTransportChange =
   typeof import("../../../src/api/webrtc/remoteTransportChange");
+type RebindDeadline = typeof import("../../../src/api/webrtc/rebindDeadline");
+type DisconnectFromPeerQuery =
+  typeof import("../../../src/api/webrtc/disconnectFromPeerQuery");
 type RatchetGate = typeof import("../../../src/handlers/ratchetGate");
 type HandleHandshake = typeof import("../../../src/handlers/handleHandshake");
 type RoomSlice = typeof import("../../../src/reducers/roomSlice");
@@ -38,6 +44,8 @@ let detectRemoteTransportChange: RemoteTransportChange["detectRemoteTransportCha
 let resetEdgeAuthenticationForNewRemoteTransport: RemoteTransportChange["resetEdgeAuthenticationForNewRemoteTransport"];
 let isEdgeAuthenticatedOnTransport: RemoteTransportChange["isEdgeAuthenticatedOnTransport"];
 let decideRemoteTransportChangeResponse: RemoteTransportChange["decideRemoteTransportChangeResponse"];
+let clearRebindAuthenticationDeadline: RebindDeadline["clearRebindAuthenticationDeadline"];
+let webrtcDisconnectPeerQuery: DisconnectFromPeerQuery["default"];
 let claimRatchetGate: RatchetGate["claimRatchetGate"];
 let getRatchetGate: RatchetGate["getRatchetGate"];
 let isCurrentRatchetGateLease: RatchetGate["isCurrentRatchetGateLease"];
@@ -46,6 +54,8 @@ let resetRatchetGate: RatchetGate["resetRatchetGate"];
 let setHandshakeChannel: HandleHandshake["setHandshakeChannel"];
 let clearHandshakeChannel: HandleHandshake["clearHandshakeChannel"];
 let setPeerHandshakeStatus: RoomSlice["setPeerHandshakeStatus"];
+let setConnectingToPeers: RoomSlice["setConnectingToPeers"];
+let REBIND_AUTHENTICATION_DEADLINE_MS: number;
 
 beforeAll(async () => {
   // Enter the store/API cycle through its normal application root so every
@@ -57,6 +67,10 @@ beforeAll(async () => {
     isEdgeAuthenticatedOnTransport,
     decideRemoteTransportChangeResponse,
   } = await import("../../../src/api/webrtc/remoteTransportChange"));
+  ({ clearRebindAuthenticationDeadline } =
+    await import("../../../src/api/webrtc/rebindDeadline"));
+  ({ default: webrtcDisconnectPeerQuery } =
+    await import("../../../src/api/webrtc/disconnectFromPeerQuery"));
   ({
     claimRatchetGate,
     getRatchetGate,
@@ -66,8 +80,10 @@ beforeAll(async () => {
   } = await import("../../../src/handlers/ratchetGate"));
   ({ setHandshakeChannel, clearHandshakeChannel } =
     await import("../../../src/handlers/handleHandshake"));
-  ({ setPeerHandshakeStatus } =
+  ({ setPeerHandshakeStatus, setConnectingToPeers } =
     await import("../../../src/reducers/roomSlice"));
+  ({ REBIND_AUTHENTICATION_DEADLINE_MS } =
+    await import("../../../src/utils/constants"));
 });
 
 const fingerprintSdp = (hexByte: string): string =>
@@ -116,7 +132,7 @@ const OTHER_PEER_ID = "00000000-0000-4000-8000-00000000000e";
 const PEER_PUBLIC_KEY = "cd".repeat(32);
 
 const fakeApi = (): {
-  api: Pick<BaseQueryApi, "dispatch">;
+  api: Pick<BaseQueryApi, "dispatch" | "getState">;
   dispatched: unknown[];
 } => {
   const dispatched: unknown[] = [];
@@ -125,8 +141,87 @@ const fakeApi = (): {
       dispatched.push(action);
       return action;
     },
-  } as unknown as Pick<BaseQueryApi, "dispatch">;
+    // A connected, verified socket: requestPeersAfterEdgeTeardown reads it
+    // when a missed re-bind deadline rebuilds the edge.
+    getState: () => ({
+      signalingServer: { isConnected: true, isVerified: true },
+      rooms: [],
+    }),
+  } as unknown as Pick<BaseQueryApi, "dispatch" | "getState">;
   return { api, dispatched };
+};
+
+/** A teardown transport that records what the deadline asked it to tear down. */
+const fakeDisconnectPeer = (): {
+  disconnectPeer: (params: RTCDisconnectFromPeerParams) => Promise<void>;
+  disconnects: RTCDisconnectFromPeerParams[];
+} => {
+  const disconnects: RTCDisconnectFromPeerParams[] = [];
+  return {
+    disconnectPeer: (params) => {
+      disconnects.push(params);
+      return Promise.resolve();
+    },
+    disconnects,
+  };
+};
+
+/**
+ * A scheduler the test drives by hand: nothing waits in real time, and every
+ * arm/clear the deadline performs is observable.
+ */
+const fakeScheduler = (): {
+  schedule: RebindDeadlineScheduler;
+  arms: () => number;
+  clears: () => number;
+  delay: () => number | undefined;
+  pending: () => boolean;
+  fire: () => void;
+} => {
+  let arms = 0;
+  let clears = 0;
+  let delay: number | undefined;
+  let callback: (() => void) | undefined;
+  const schedule: RebindDeadlineScheduler = {
+    setTimeout: (fn, delayMs) => {
+      arms += 1;
+      delay = delayMs;
+      callback = fn;
+      return arms as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout: () => {
+      clears += 1;
+      callback = undefined;
+    },
+  };
+  return {
+    schedule,
+    arms: () => arms,
+    clears: () => clears,
+    delay: () => delay,
+    pending: () => callback !== undefined,
+    fire: () => {
+      const fn = callback;
+      callback = undefined;
+      fn?.();
+    },
+  };
+};
+
+/** Let the deadline's teardown-then-re-dial promise chain run to completion. */
+const settle = async (): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+};
+
+/**
+ * The re-bind tests below are not about the deadline: they arm nothing real,
+ * so no stray timer of theirs can fire into a later test's registries.
+ */
+const inertSchedule: RebindDeadlineScheduler = {
+  setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>,
+  clearTimeout: () => undefined,
 };
 
 interface ChannelFake {
@@ -234,6 +329,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       peerId: PEER_ID,
       api,
       dataChannels,
+      disconnectPeer: () => Promise.resolve(),
+      schedule: inertSchedule,
       reason: new Error("Remote DTLS certificate changed"),
     });
 
@@ -307,6 +404,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
         peerId: PEER_ID,
         api,
         dataChannels: [],
+        disconnectPeer: () => Promise.resolve(),
+        schedule: inertSchedule,
         reason: new Error("Remote DTLS certificate changed"),
       }),
     ).not.toThrow();
@@ -364,6 +463,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       peerId: PEER_ID,
       api,
       dataChannels,
+      disconnectPeer: () => Promise.resolve(),
+      schedule: inertSchedule,
       reason: new Error("Remote DTLS certificate changed"),
     });
 
@@ -426,6 +527,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       peerId: PEER_ID,
       api,
       dataChannels,
+      disconnectPeer: () => Promise.resolve(),
+      schedule: inertSchedule,
       reason: new Error("Remote DTLS certificate changed"),
     });
 
@@ -457,6 +560,8 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
         peerId: PEER_ID,
         api,
         dataChannels: [],
+        disconnectPeer: () => Promise.resolve(),
+        schedule: inertSchedule,
         reason: new Error("Remote DTLS certificate changed"),
       });
     };
@@ -627,5 +732,224 @@ describe("decideRemoteTransportChangeResponse", () => {
     // A live ratchet proves the re-bind converged even if the counter stands.
     expect(decide(true, "answer", false, 1)).toBe("reset-in-place");
     expect(decide(true, "offer", false, 1)).toBe("replace");
+  });
+});
+
+const DEADLINE_ROOM_ID = "00000000-0000-4000-8000-00000000000f";
+const DEADLINE_PEER_ID = "00000000-0000-4000-8000-000000000010";
+
+interface ArmedRebind {
+  epc: IRTCPeerConnection;
+  scheduler: ReturnType<typeof fakeScheduler>;
+  disconnects: RTCDisconnectFromPeerParams[];
+  dispatched: unknown[];
+}
+
+/**
+ * One in-place re-bind of a bare transport, with its deadline armed on a
+ * hand-driven scheduler.
+ */
+const armRebind = (): ArmedRebind => {
+  const scheduler = fakeScheduler();
+  const { disconnectPeer, disconnects } = fakeDisconnectPeer();
+  const { api, dispatched } = fakeApi();
+  const epc = {
+    roomId: DEADLINE_ROOM_ID,
+    withPeerId: DEADLINE_PEER_ID,
+    withPeerPublicKey: PEER_PUBLIC_KEY,
+    connectionState: "connected",
+    ratchetGateLease: resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID),
+    remoteTransportRebinds: 0,
+    close: () => undefined,
+  } as unknown as IRTCPeerConnection;
+
+  resetEdgeAuthenticationForNewRemoteTransport({
+    epc,
+    roomId: DEADLINE_ROOM_ID,
+    peerId: DEADLINE_PEER_ID,
+    api,
+    dataChannels: [],
+    disconnectPeer,
+    schedule: scheduler.schedule,
+    reason: new Error("Remote DTLS certificate changed"),
+  });
+
+  return { epc, scheduler, disconnects, dispatched };
+};
+
+const REDIAL = () =>
+  setConnectingToPeers({
+    roomId: DEADLINE_ROOM_ID,
+    connectingToPeers: true,
+    reason: "redial",
+  });
+
+const redials = (dispatched: unknown[]): unknown[] =>
+  dispatched.filter(
+    (action) => (action as { type?: string }).type === setConnectingToPeers.type,
+  );
+
+describe("the in-place re-bind authentication deadline", () => {
+  test("every in-place re-bind arms one, shorter than the handshake step timeout", () => {
+    const { epc, scheduler } = armRebind();
+
+    expect(scheduler.arms()).toBe(1);
+    expect(scheduler.clears()).toBe(0);
+    expect(scheduler.delay()).toBe(REBIND_AUTHENTICATION_DEADLINE_MS);
+    expect(epc.rebindDeadline).not.toBeUndefined();
+    // Shorter than handleHandshake's HANDSHAKE_STEP_TIMEOUT_MS (30 s): the
+    // edge is rebuilt rather than waited out. Longer than a healthy re-bind,
+    // which the process-freeze harness measures at about 2 s.
+    expect(REBIND_AUTHENTICATION_DEADLINE_MS).toBeLessThan(30_000);
+    expect(REBIND_AUTHENTICATION_DEADLINE_MS).toBeGreaterThan(2_000);
+
+    clearRebindAuthenticationDeadline(epc);
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("a re-bind that authenticates in time clears the deadline and tears nothing down", async () => {
+    const { epc, scheduler, disconnects, dispatched } = armRebind();
+
+    // The handshake succeeded on this transport: the same place that refunds
+    // the re-bind budget releases the deadline.
+    epc.ratchetState = ratchetState();
+    expect(
+      openRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID, epc.ratchetGateLease),
+    ).toBe(true);
+    clearRebindAuthenticationDeadline(epc);
+
+    expect(scheduler.clears()).toBe(1);
+    expect(scheduler.pending()).toBe(false);
+    expect(epc.rebindDeadline).toBeUndefined();
+
+    // Idempotent: a second clear (teardown after a success) does nothing.
+    clearRebindAuthenticationDeadline(epc);
+    expect(scheduler.clears()).toBe(1);
+
+    scheduler.fire();
+    await settle();
+    expect(disconnects).toEqual([]);
+    expect(redials(dispatched)).toEqual([]);
+
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("a re-bind that never authenticates rebuilds the edge exactly once", async () => {
+    const { epc, disconnects, dispatched, scheduler } = armRebind();
+
+    scheduler.fire();
+    await settle();
+
+    expect(disconnects).toEqual([
+      { roomId: DEADLINE_ROOM_ID, peerId: DEADLINE_PEER_ID },
+    ]);
+    // The room re-introduces the pair so a fresh transport is built.
+    expect(redials(dispatched)).toEqual([REDIAL()]);
+    expect(epc.rebindDeadline).toBeUndefined();
+
+    // Nothing re-arms behind it: the deadline fires at most once.
+    scheduler.fire();
+    await settle();
+    expect(disconnects.length).toBe(1);
+    expect(redials(dispatched).length).toBe(1);
+
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("a deadline whose transport was replaced meanwhile does nothing", async () => {
+    const { disconnects, dispatched, scheduler } = armRebind();
+
+    // A replacement transport for this edge claims a fresh gate lease, so the
+    // connection this deadline belongs to is no longer the current one.
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+
+    scheduler.fire();
+    await settle();
+
+    expect(disconnects).toEqual([]);
+    expect(redials(dispatched)).toEqual([]);
+
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("a deadline that fires on an edge which authenticated meanwhile does nothing", async () => {
+    const { epc, disconnects, dispatched, scheduler } = armRebind();
+
+    epc.ratchetState = ratchetState();
+
+    scheduler.fire();
+    await settle();
+
+    expect(disconnects).toEqual([]);
+    expect(redials(dispatched)).toEqual([]);
+
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("a later re-bind of the same transport clears the old deadline and arms a new one", () => {
+    const scheduler = fakeScheduler();
+    const { disconnectPeer } = fakeDisconnectPeer();
+    const { api } = fakeApi();
+    const epc = {
+      roomId: DEADLINE_ROOM_ID,
+      withPeerId: DEADLINE_PEER_ID,
+      withPeerPublicKey: PEER_PUBLIC_KEY,
+      ratchetGateLease: resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID),
+      remoteTransportRebinds: 0,
+    } as unknown as IRTCPeerConnection;
+    const reset = (): void => {
+      resetEdgeAuthenticationForNewRemoteTransport({
+        epc,
+        roomId: DEADLINE_ROOM_ID,
+        peerId: DEADLINE_PEER_ID,
+        api,
+        dataChannels: [],
+        disconnectPeer,
+        schedule: scheduler.schedule,
+        reason: new Error("Remote DTLS certificate changed"),
+      });
+    };
+
+    reset();
+    reset();
+
+    expect(scheduler.arms()).toBe(2);
+    expect(scheduler.clears()).toBe(1);
+    expect(scheduler.pending()).toBe(true);
+
+    clearRebindAuthenticationDeadline(epc);
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
+  });
+
+  test("the peer teardown path clears a pending deadline", async () => {
+    const { epc, scheduler, disconnects, dispatched } = armRebind();
+    const peerConnections = [epc];
+    const dataChannels: IRTCDataChannel[] = [];
+    const iceCandidates: IRTCIceCandidate[] = [];
+    const { api } = fakeApi();
+
+    await webrtcDisconnectPeerQuery(
+      {
+        peerId: DEADLINE_PEER_ID,
+        roomId: DEADLINE_ROOM_ID,
+        peerConnections,
+        dataChannels,
+        iceCandidates,
+      },
+      api as BaseQueryApi,
+      {},
+    );
+
+    expect(scheduler.clears()).toBe(1);
+    expect(scheduler.pending()).toBe(false);
+    expect(epc.rebindDeadline).toBeUndefined();
+
+    // A torn-down connection never fires it.
+    scheduler.fire();
+    await settle();
+    expect(disconnects).toEqual([]);
+    expect(redials(dispatched)).toEqual([]);
+
+    resetRatchetGate(DEADLINE_ROOM_ID, DEADLINE_PEER_ID);
   });
 });

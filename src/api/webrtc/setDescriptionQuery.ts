@@ -333,6 +333,9 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           peerId,
           api,
           dataChannels,
+          // The deadline it arms rebuilds the edge through this very path if
+          // the re-bind never re-authenticates.
+          disconnectPeer,
           reason: new Error(
             `Remote DTLS certificate changed (${roomId}, ${peerId})`,
           ),

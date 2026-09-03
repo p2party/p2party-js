@@ -26,6 +26,19 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
    * clears it.
    */
   remoteTransportRebinds: number;
+  /**
+   * Deadline armed by the in-place re-bind above: if this transport has not
+   * re-authenticated when it fires, the edge is torn down and rebuilt instead
+   * of waiting out the peer's 30 s handshake step timeout. Cleared by the
+   * handshake success path, by the teardown, and re-armed by a later re-bind.
+   */
+  rebindDeadline?: ReturnType<typeof setTimeout>;
+  /**
+   * The `clearTimeout` that matches whatever scheduled `rebindDeadline`. The
+   * arming site owns the scheduler (tests inject one), while the clearing
+   * sites — handshake success, peer teardown — only hold the connection.
+   */
+  rebindDeadlineClear?: (handle: ReturnType<typeof setTimeout>) => void;
   /** Resolves once the per-transport WASM dependency is ready. */
   initialization?: Promise<void>;
   /**

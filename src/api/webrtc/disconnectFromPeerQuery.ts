@@ -11,6 +11,7 @@ import { teardownCoverEdge } from "../../handlers/coverEdge";
 import { rejectRatchetGate } from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
+import { clearRebindAuthenticationDeadline } from "./rebindDeadline";
 import { retireRemoteTransport } from "./retiredRemoteTransports";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -109,6 +110,11 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     connection.messageChannels?.clear();
     connection.messageChannels = undefined;
     connection.mainChannel = undefined;
+    // A transport being torn down here can carry an armed in-place re-bind
+    // deadline (remoteTransportChange). Release it with everything else this
+    // connection owns: the edge is going away now, and the deadline's own job
+    // — tearing it down and re-dialling — is exactly what is happening.
+    clearRebindAuthenticationDeadline(connection);
 
     connection.ontrack = null;
     connection.ondatachannel = null;

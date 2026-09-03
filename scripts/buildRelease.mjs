@@ -283,7 +283,8 @@ const validateDocumentedVersions = () => {
   // scanning it here fails every release on a reference the build is about to
   // correct, and the only way through is to hand-edit the line the script
   // exists to own. That is the manual step the sync was written to remove.
-  const autoSynced = /src="https:\/\/cdn\.p2party\.com\/@[^"/]+\/p2party\.min\.js"/u;
+  const autoSynced =
+    /src="https:\/\/cdn\.p2party\.com\/@[^"/]+\/p2party\.min\.js"/u;
 
   for (const relativePath of documentation) {
     const absolute = path.join(projectRoot, relativePath);

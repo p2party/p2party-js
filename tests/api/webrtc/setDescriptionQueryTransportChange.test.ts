@@ -712,6 +712,7 @@ describe("setDescriptionQuery remote transport binding", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: HIGHER_PUBLIC_KEY,
         status: "authenticating",
       }),
     ]);
@@ -787,6 +788,7 @@ describe("setDescriptionQuery remote transport binding", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: LOWER_PUBLIC_KEY,
         status: "authenticating",
       }),
     ]);

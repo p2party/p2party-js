@@ -739,6 +739,7 @@ export const handleOpenChannel = async (
           setPeerHandshakeStatus({
             roomId,
             peerId: epc.withPeerId,
+            peerPublicKey: epc.withPeerPublicKey,
             status: "authenticating",
           }),
         );
@@ -815,6 +816,7 @@ export const handleOpenChannel = async (
             setPeerHandshakeStatus({
               roomId,
               peerId: epc.withPeerId,
+              peerPublicKey: epc.withPeerPublicKey,
               status: "authenticated",
             }),
           );
@@ -966,6 +968,7 @@ export const handleOpenChannel = async (
               setPeerHandshakeStatus({
                 roomId,
                 peerId: epc.withPeerId,
+                peerPublicKey: epc.withPeerPublicKey,
                 status: "failed",
                 reason: failureReason,
                 retryAfter,

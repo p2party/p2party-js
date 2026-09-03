@@ -191,8 +191,24 @@ export interface PeerHandshakeStatus {
   reason?: PeerHandshakeFailureReason;
   /** Absolute epoch ms after which a throttled PIN retry may succeed. */
   retryAfter?: number;
+  /**
+   * The stable identity this status describes, in the same hex spelling as
+   * `Peer.peerPublicKey`. A peerId is a per-session signaling handle: a peer
+   * that fails and reconnects arrives under a new one, and a joiner that fails
+   * is dropped from `peers` altogether — so a UI that keys a failure on the
+   * peerId either loses it or leaves a stale one on top of a working room.
+   * The identity is what stays the same across both.
+   *
+   * Optional only because a status persisted by an older build has none.
+   */
+  peerPublicKey?: string;
 }
 
+/**
+ * `peerPublicKey` is inherited as optional so a caller that only has a peerId
+ * still compiles, but every in-library dispatch supplies it: the edge always
+ * knows the identity it is authenticating against (`epc.withPeerPublicKey`).
+ */
 export interface SetPeerHandshakeStatusArgs extends PeerHandshakeStatus {
   roomId: string;
   peerId: string;
@@ -800,14 +816,20 @@ const roomSlice = createSlice({
       state,
       action: PayloadAction<SetPeerHandshakeStatusArgs>,
     ) => {
-      const { roomId, peerId, status, reason, retryAfter } = action.payload;
+      const { roomId, peerId, status, reason, retryAfter, peerPublicKey } =
+        action.payload;
 
       const roomIndex = state.findIndex((r) => r.id === roomId);
 
       if (roomIndex > -1) {
         const room = state[roomIndex];
         room.handshakeStatusByPeer ??= {};
-        room.handshakeStatusByPeer[peerId] = { status, reason, retryAfter };
+        room.handshakeStatusByPeer[peerId] = {
+          status,
+          reason,
+          retryAfter,
+          peerPublicKey,
+        };
       }
     },
 

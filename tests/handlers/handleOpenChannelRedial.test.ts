@@ -260,11 +260,13 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: HIGHER_PUBLIC_KEY,
         status: "authenticating",
       }),
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: HIGHER_PUBLIC_KEY,
         status: "failed",
         reason: "transport",
         retryAfter: undefined,
@@ -404,6 +406,7 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: HIGHER_PUBLIC_KEY,
         status: "authenticating",
       }),
     ]);

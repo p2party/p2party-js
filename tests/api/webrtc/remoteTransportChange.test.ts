@@ -377,6 +377,7 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: PEER_PUBLIC_KEY,
         status: "authenticating",
       }),
     ]);
@@ -420,6 +421,7 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
       setPeerHandshakeStatus({
         roomId: ROOM_ID,
         peerId: PEER_ID,
+        peerPublicKey: PEER_PUBLIC_KEY,
         status: "authenticating",
       }),
     ]);

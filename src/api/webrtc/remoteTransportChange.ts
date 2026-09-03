@@ -355,7 +355,12 @@ export const resetEdgeAuthenticationForNewRemoteTransport = ({
   });
 
   api.dispatch(
-    setPeerHandshakeStatus({ roomId, peerId, status: "authenticating" }),
+    setPeerHandshakeStatus({
+      roomId,
+      peerId,
+      peerPublicKey: epc.withPeerPublicKey,
+      status: "authenticating",
+    }),
   );
   debugLog(
     `Remote DTLS certificate changed for ${peerId} in ${roomId}; edge authentication reset`,

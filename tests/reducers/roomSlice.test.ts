@@ -537,4 +537,38 @@ describe("per-peer handshake status", () => {
     state = roomReducer(state, deletePeer({ roomId, peerId }));
     expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
   });
+
+  test("a failure carries the stable peer identity, not just the peerId", () => {
+    const peerPublicKey = "c".repeat(64);
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "b".repeat(63) + "c", id: roomId }),
+    );
+    state = roomReducer(state, setPeer({ roomId, peerId, peerPublicKey }));
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId,
+        peerPublicKey,
+        status: "failed",
+        reason: "pin-mismatch",
+      }),
+    );
+    expect(state[0].handshakeStatusByPeer?.[peerId]?.peerPublicKey).toBe(
+      peerPublicKey,
+    );
+
+    // The peerId is transient — a joiner that failed is dropped from the
+    // roster and comes back under a new one — so the identity is what a UI
+    // must key the failure on, and it has to outlive the teardown too.
+    state = roomReducer(state, deletePeer({ roomId, peerId }));
+    expect(state[0].peers).toHaveLength(0);
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toEqual({
+      status: "failed",
+      reason: "pin-mismatch",
+      retryAfter: undefined,
+      peerPublicKey,
+    });
+  });
 });

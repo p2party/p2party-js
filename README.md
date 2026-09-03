@@ -90,7 +90,7 @@ npm audit signatures
 
 To build the artifact yourself instead, see
 [Building from source](CONTRIBUTING.md#building-from-source). That path needs an
-exact toolchain (Node 24, Emscripten 6.0.3, pinned submodules), because the
+exact toolchain (Node 24, Emscripten 6.0.9, pinned submodules), because the
 release build reproduces the pinned WASM and refuses to emit an artifact it
 cannot attest.
 
@@ -949,7 +949,7 @@ release rather than surfacing later as a broken offline install.
 ## Development
 
 The reproducible release toolchain is Node 24.11.1, npm 11.6.2, Bun 1.3.14,
-Emscripten 6.0.3, and the repository's pinned libsodium source object. npm and
+Emscripten 6.0.9, and the repository's pinned libsodium source object. npm and
 `package-lock.json` are the dependency authority; Bun is the test runner.
 
 ```sh

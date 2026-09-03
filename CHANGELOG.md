@@ -57,6 +57,17 @@ half a second, the twenty-second freeze in both identity roles with the socket
 dropped and with it kept, the forty-five-second freeze, and both in-flight
 transfer directions, all byte-exact.
 
+### Changed
+
+- The Emscripten pin moves 6.0.3 → 6.0.9, in `scripts/buildRelease.mjs`, both
+  GitHub workflows and the two documents that state the toolchain, so
+  `libcrypto.wasm` and its pinned SRI change with it. This closes a gap rather
+  than opening one: 0.14.5 and 0.14.6 were packaged by hand around the version
+  gate, against a compiler newer than the pin, so their provenance recorded a
+  toolchain the README did not promise. The release script now runs its own
+  validation again, and the version it enforces is the version the provenance
+  records.
+
 ### Deployment note
 
 No signaling-server change. An app must re-vendor this SDK for the PIN failure

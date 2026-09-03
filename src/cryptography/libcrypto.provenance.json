@@ -29,17 +29,17 @@
     }
   },
   "toolchain": {
-    "emscripten": "6.0.3"
+    "emscripten": "6.0.9"
   },
   "build": {
-    "mode": "production",
+    "mode": "development",
     "linkTimeOptimization": false,
     "publicSodiumApi": true
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 211367,
-    "sha256": "d40f62bbf0ebe17453962e1c5795629e17a6dc4e4fbf774201f061539363d66a",
-    "sri": "sha384-xhO/aA9PVAK17BjqHHo25MVhidxGD4R8Ny6WIRQJx3Zw78ZQ8WpZVEUJR6pIQYZv"
+    "bytes": 1695539,
+    "sha256": "bae9e0e334343669ead06e9bac7eff22ef6f0141aaa561d72852c68f72763eb9",
+    "sri": "sha384-stlKVIG73jX5ndgeCt5qKc+4TonXaTQdvQHhptklW9HMJJl+GEDifwRkYoPnE2mn"
   }
 }

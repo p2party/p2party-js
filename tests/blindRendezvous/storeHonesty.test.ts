@@ -891,6 +891,69 @@ describe("verifyStoreCheckpointChain over an observed run", () => {
     expect(verdict.outcome).toBe("checkpoint-conflict");
   });
 
+  test("blame outranks a gap: a broken link adjacent to a hole still surfaces", async () => {
+    // The same rule as above, but for the one pairing that distinguishes the
+    // two passes: a store hiding a BROKEN LINK behind an earlier retention
+    // hole. The run skips 101-103, so 100 -> 104 is a blameless gap, while
+    // 104 -> 105 is adjacent and misnamed, which is blame. Reporting the gap
+    // here would let the store answer a breach with "you did not keep enough".
+    // The same-window conflict above cannot bind this, because a conflict is
+    // decided in an earlier pass and would surface under either ordering.
+    const afterHole = await signCheckpoint(
+      body({
+        ingressWindow: CHAIN_START + 4n,
+        previousCheckpointHash: bytes(0x5a),
+        finalizedChunkRoot: bytes(0x93),
+      }),
+    );
+    const misnamedPredecessor = await signCheckpoint(
+      body({
+        ingressWindow: CHAIN_START + 5n,
+        previousCheckpointHash: bytes(0x5b),
+        finalizedChunkRoot: bytes(0x94),
+      }),
+    );
+    // The link really is broken: 105 does not name the hash of 104.
+    expect(hex(misnamedPredecessor.previousCheckpointHash)).not.toBe(
+      hex(await publicStoreCheckpointHash(afterHole)),
+    );
+
+    const verdict = await verifyStoreCheckpointChain(
+      [observed(head), observed(afterHole), observed(misnamedPredecessor)],
+      geometry,
+    );
+    expect(verdict.outcome).toBe("chain-breach");
+    if (verdict.outcome !== "chain-breach") throw new Error("unreachable");
+    expect(verdict.previous.ingressWindow).toBe(CHAIN_START + 4n);
+    expect(verdict.next.ingressWindow).toBe(CHAIN_START + 5n);
+  });
+
+  test("a chain-verified verdict owns the bytes it reports", async () => {
+    // A verdict is what a client retains after the store's reply is gone. If
+    // it aliased the arrays that reply was decoded into, reusing that buffer
+    // would silently rewrite what the client believes it verified. The
+    // conflict and breach verdicts deliberately still carry the caller's own
+    // checkpoint objects, because those are the exact halves a proof is built
+    // from; that asymmetry is documented on the function.
+    const borrowed = await signCheckpoint(
+      body({
+        storeId: Uint8Array.from(STORE_ID),
+        deliveryProfileHash: Uint8Array.from(PROFILE),
+      }),
+    );
+    const verdict = await verifyStoreCheckpointChain(
+      [observed(borrowed)],
+      geometry,
+    );
+    expect(verdict.outcome).toBe("chain-verified");
+    if (verdict.outcome !== "chain-verified") throw new Error("unreachable");
+
+    borrowed.storeId.fill(0);
+    borrowed.deliveryProfileHash.fill(0);
+    expect(hex(verdict.storeId)).toBe(hex(STORE_ID));
+    expect(hex(verdict.deliveryProfileHash)).toBe(hex(PROFILE));
+  });
+
   test("chain-start equivocation across a run is returned as the permanent fault", async () => {
     const moved = await signDescriptor({
       ...descriptorFields,
@@ -959,5 +1022,92 @@ describe("verifyStoreCheckpointChain over an observed run", () => {
         geometry,
       ),
     ).rejects.toThrow("ordered by ingress window");
+  });
+});
+
+/**
+ * These assert what the code does today so that the gap is on the record and
+ * cannot be mistaken for a guarantee. They are not statements that the
+ * behaviour is right.
+ */
+describe("what these checks do not decide", () => {
+  const observe = (
+    checkpoint: PublicStoreCheckpointV1,
+  ): ObservedStoreCheckpoint => ({
+    checkpoint,
+    descriptor,
+    finalizationInstantUnixMs: NOW,
+  });
+
+  test("the root half of the profile-fixed count/root condition is not decided here", async () => {
+    // Section 4.3 requires "the profile-fixed count/root checks pass". Only
+    // the count half is enforced here (driven above); the root half is not,
+    // because recomputing finalizedChunkRoot needs the window's chunk hashes
+    // and this function is never handed them. That work lives in
+    // verifyCheckpointChunkInclusion, and nothing composes the two, so no
+    // single call asserts both. A store signing an invented root is therefore
+    // structurally valid to this predicate, and to the chain entry point.
+    const inventedRoot = await signCheckpoint(
+      body({ finalizedChunkRoot: bytes(0xab) }),
+    );
+    expect(
+      (
+        await structurallyValidCheckpoint(
+          descriptor,
+          inventedRoot,
+          geometry,
+          NOW,
+        )
+      ).valid,
+    ).toBe(true);
+    expect(
+      (await verifyStoreCheckpointChain([observe(inventedRoot)], geometry))
+        .outcome,
+    ).toBe("chain-verified");
+  });
+
+  test("a checkpoint's version byte is not checked, though a descriptor's is", async () => {
+    // The specification's condition list for StructurallyValidCheckpoint does
+    // not name a version check; StoreDescriptorAuthentic does name one
+    // ("descriptor.version == 1"), and validateStoreDescriptor implements it.
+    // Each function follows its own list, so a store can sign a checkpoint
+    // body whose version byte is not 1 and have it accepted, including through
+    // the chain entry point that a future store client would call on
+    // store-supplied bytes. Whether the version byte belongs to structural
+    // validity is a question for the specification, not something to decide by
+    // changing the predicate under a test; see the TODO in publicWindow.ts.
+    const unknownVersion = await signCheckpoint({
+      ...body(),
+      version: 2,
+    } as unknown as PublicStoreCheckpointBodyV1);
+    expect(
+      (
+        await structurallyValidCheckpoint(
+          descriptor,
+          unknownVersion,
+          geometry,
+          NOW,
+        )
+      ).valid,
+    ).toBe(true);
+    expect(
+      (await verifyStoreCheckpointChain([observe(unknownVersion)], geometry))
+        .outcome,
+    ).toBe("chain-verified");
+
+    const unknownDescriptorVersion = await signDescriptor({
+      ...descriptorFields,
+      version: 2,
+    } as unknown as UnsignedDescriptor);
+    expect(
+      rejection(
+        await structurallyValidCheckpoint(
+          unknownDescriptorVersion,
+          head,
+          geometry,
+          NOW,
+        ),
+      ),
+    ).toBe("unsupported descriptor version");
   });
 });

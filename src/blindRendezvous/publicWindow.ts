@@ -703,6 +703,20 @@ export const isChainStart = (checkpoint: PublicStoreCheckpointV1): boolean =>
  *
  * `finalizationInstantUnixMs` is the instant the checkpoint was finalized, and
  * the descriptor must have been valid then — not now.
+ *
+ * Of the specification's "profile-fixed count/root checks", only the count half
+ * is decided here. Recomputing `finalizedChunkRoot` needs the window's chunk
+ * hashes, which this predicate is never given; that is
+ * `verifyCheckpointChunkInclusion`, and nothing composes the two, so no single
+ * call asserts both halves. A checkpoint accepted here may still carry a root
+ * no chunk sequence produces.
+ *
+ * TODO(spec): the condition list in Section 4.3 does not name a version check,
+ * so `checkpoint.version` is not checked here, while `StoreDescriptorAuthentic`
+ * does name one and `validateStoreDescriptor` enforces it. Whether the version
+ * byte belongs to structural validity is a question for the specification, not
+ * one to settle by tightening this predicate; the current behaviour is pinned
+ * in tests/blindRendezvous/storeHonesty.test.ts.
  */
 export const structurallyValidCheckpoint = async (
   descriptor: StoreDescriptorV1,
@@ -905,7 +919,15 @@ export type StoreCheckpointChainVerdict =
  * internally consistent and signed, over exactly the windows supplied. It is
  * not a completeness, availability, or non-equivocation claim — a store that
  * showed this client one branch and another client a different one is caught
- * only when the two observations meet.
+ * only when the two observations meet. Nor does it assert `finalizedChunkRoot`:
+ * `structurallyValidCheckpoint` cannot, and this composes that, not inclusion.
+ *
+ * A `chain-verified` verdict copies the bytes it reports, so it stays true
+ * after the buffers a store's reply was decoded into are reused. The conflict
+ * and breach verdicts deliberately do not: they carry the caller's own
+ * checkpoint and descriptor objects, because those are the exact halves the
+ * specification's proofs are built from, and copying them here would only
+ * hide that they must be retained unmutated to stay usable as evidence.
  *
  * Ordering the run is the caller's job: observations must arrive sorted by
  * ingress window. A store cannot cause a violation of that, so it throws
@@ -1041,8 +1063,8 @@ export const verifyStoreCheckpointChain = async (
   const head = distinct[distinct.length - 1];
   return {
     outcome: "chain-verified",
-    storeId: first.storeId,
-    deliveryProfileHash: first.deliveryProfileHash,
+    storeId: Uint8Array.from(first.storeId),
+    deliveryProfileHash: Uint8Array.from(first.deliveryProfileHash),
     chainStartIngressWindow: first.chainStartIngressWindow,
     firstIngressWindow: first.ingressWindow,
     headIngressWindow: head.ingressWindow,

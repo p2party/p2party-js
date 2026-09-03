@@ -32,14 +32,14 @@
     "emscripten": "6.0.9"
   },
   "build": {
-    "mode": "development",
+    "mode": "production",
     "linkTimeOptimization": false,
     "publicSodiumApi": true
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 1695539,
-    "sha256": "bae9e0e334343669ead06e9bac7eff22ef6f0141aaa561d72852c68f72763eb9",
-    "sri": "sha384-stlKVIG73jX5ndgeCt5qKc+4TonXaTQdvQHhptklW9HMJJl+GEDifwRkYoPnE2mn"
+    "bytes": 211350,
+    "sha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+    "sri": "sha384-K0QqktkF2/8IHMDEgDIcyDl/ywcUXUO8fF1ZzcwhVrUYfGn8jN8Foohn1+bw4HmZ"
   }
 }

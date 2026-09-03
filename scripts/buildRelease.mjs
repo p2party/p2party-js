@@ -276,12 +276,22 @@ const validateDocumentedVersions = () => {
     .split("\n")
     .filter(Boolean);
 
+  // The one line this scan must not judge is the line the build owns.
+  // syncDocumentedIntegrity rewrites the README's pasteable bundle `src` —
+  // version included, deliberately, so the pinned hash and the URL that names
+  // its build stay a matched pair. That rewrite happens after validation, so
+  // scanning it here fails every release on a reference the build is about to
+  // correct, and the only way through is to hand-edit the line the script
+  // exists to own. That is the manual step the sync was written to remove.
+  const autoSynced = /src="https:\/\/cdn\.p2party\.com\/@[^"/]+\/p2party\.min\.js"/u;
+
   for (const relativePath of documentation) {
     const absolute = path.join(projectRoot, relativePath);
     if (!existsSync(absolute)) continue;
     readFileSync(absolute, "utf8")
       .split("\n")
       .forEach((line, index) => {
+        if (autoSynced.test(line)) return;
         for (const [version] of line.matchAll(stale))
           fail(
             `${relativePath}:${index + 1} names released version ${version}, but this release is ${current} — ${line.trim()}`,

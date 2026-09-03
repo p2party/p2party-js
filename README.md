@@ -403,7 +403,7 @@ An identity is an Ed25519 key pair in browser storage. Lose the profile and you
 lose the identity — unless it was created from a recovery phrase, because the
 phrase is the only thing that can reproduce it.
 
-Three calls, all new in `0.14.6`: `getIdentityBackupStatus()` reports whether
+Three calls, introduced together: `getIdentityBackupStatus()` reports whether
 the identity in use can be backed up at all, `createRecoverableIdentity()`
 replaces it with one a phrase derives and hands back that phrase once, and
 `restoreIdentityFromMnemonic()` adopts the identity a phrase encodes — on this
@@ -795,9 +795,9 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.6` is not on the CDN yet.** The release pipeline uploads its objects
+> **`0.14.7` is not on the CDN yet.** The release pipeline uploads its objects
 > from the tarball it publishes, and that pipeline has not run for this
-> version: every path under `https://cdn.p2party.com/@0.14.6/` currently
+> version: every path under `https://cdn.p2party.com/@0.14.7/` currently
 > answers 404, and npm still resolves `p2party` to an older release. The
 > snippet below is generated from this build and is what the release will
 > serve — until then, either pin the version `npm view p2party version` reports
@@ -815,8 +815,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.6/p2party.min.js"
-  integrity="sha384-/mtrq23jz4WeCyhalMJW6gn29h50PZRcFi3dvAYKzUPM/jH17CdpRkL/ACigpoWY"
+  src="https://cdn.p2party.com/@0.14.7/p2party.min.js"
+  integrity="sha384-Wh2Pxka9YN2oAZmzYgaoyLmfKQMXsMO4AfUmshluGmYjfS0+ahOZGCTBGHtKTcC9"
   crossorigin="anonymous"
 ></script>
 
@@ -897,12 +897,13 @@ cache forever:
 curl -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
 ```
 
-Two caveats, both current as of `0.14.6`. The CDN carries only three objects —
-`p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the `assets` array
-in `scripts/uploadToCDN.mjs`) — so **`libcrypto.provenance.json` is not on the
-CDN for any version**; take it from the tarball. And nothing is uploaded for
-`0.14.6` yet, which is why the command above asks npm for a version that is
-actually published instead of naming this one.
+Two caveats, both current as of this release. The CDN carries only three
+objects — `p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the
+`assets` array in `scripts/uploadToCDN.mjs`) — so
+**`libcrypto.provenance.json` is not on the CDN for any version**; take it from
+the tarball. And nothing is uploaded for this release yet, which is why the
+command above asks npm for a version that is actually published instead of
+naming this one.
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
 are both recorded in the provenance file:

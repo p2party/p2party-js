@@ -60,13 +60,27 @@ transfer directions, all byte-exact.
 ### Changed
 
 - The Emscripten pin moves 6.0.3 → 6.0.9, in `scripts/buildRelease.mjs`, both
-  GitHub workflows and the two documents that state the toolchain, so
-  `libcrypto.wasm` and its pinned SRI change with it. This closes a gap rather
-  than opening one: 0.14.5 and 0.14.6 were packaged by hand around the version
-  gate, against a compiler newer than the pin, so their provenance recorded a
-  toolchain the README did not promise. The release script now runs its own
-  validation again, and the version it enforces is the version the provenance
-  records.
+  GitHub workflows and the two documents that state the toolchain. This closes
+  a gap rather than opening one: 0.14.5 and 0.14.6 were packaged by hand around
+  the version gate, against a compiler newer than the pin, so their provenance
+  recorded a toolchain the README did not promise. The release script now runs
+  its own validation again, and the version it enforces is the version the
+  provenance records.
+
+  The release artifact is unchanged by the move. `libcrypto.wasm` is
+  byte-identical to the one 6.0.8 produced — 211,350 bytes, the same SHA-256
+  and the same pinned SRI — so the optimized output converges across those two
+  compiler releases even though the development build, which carries assertions
+  and heap checks, does not. Only the attestation changed, and it now names the
+  compiler the pin enforces.
+
+- The release script no longer fails on the one documentation line it owns.
+  `syncDocumentedIntegrity` rewrites the README's pasteable bundle `src`,
+  version included, so that the pinned hash and the URL naming its build stay a
+  matched pair — but the stale-version scan ran first and rejected exactly that
+  line, so no release could pass validation without hand-editing it. That was
+  the manual step the sync exists to remove. The scan now skips it and judges
+  every other reference as before.
 
 ### Deployment note
 

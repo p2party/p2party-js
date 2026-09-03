@@ -704,9 +704,10 @@ const roomSlice = createSlice({
       action: PayloadAction<{
         roomId: string;
         connectingToPeers: boolean;
-        // Read by roomListenerMiddleware only: a "redial" after an edge
-        // teardown is debounced independently of a room join.
-        reason?: "redial";
+        // Read by roomListenerMiddleware only, to pick the debounce budget: a
+        // "redial" after an edge teardown and a "reconcile" of a room that has
+        // nobody in it each have their own, independent of a room join.
+        reason?: "redial" | "reconcile";
       }>,
     ) => {
       const { roomId, connectingToPeers } = action.payload;

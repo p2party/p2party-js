@@ -273,3 +273,22 @@ export const HASH_WASM_CHUNK_BYTES = 64 * 1024; // 64 KiB WASM update buffer
 //   - SEND: a sent copy's IndexedDB chunks are streamed here on read.
 // Falls back to an in-memory Blob where OPFS is unavailable.
 export const OPFS_REASSEMBLE_DIR = "p2party-reassembled";
+
+// Bounded reconciliation of a room that has nobody in it (roomRosterReconciler,
+// wired in roomListenerMiddleware). Every other roster request in the SDK is
+// caused by an event — a join, a server introduction, an edge teardown that
+// re-dials — so a room whose last peer went away without producing one of those
+// stays empty on a healthy, verified socket until the page is reloaded. These
+// delays are the "ask again" schedule for exactly that state: 5 s is well past
+// the join and re-dial debounce windows, the cap keeps a genuinely empty room
+// (the common case: the user is first in) down to one request a minute, and the
+// attempt cap stops it entirely after ~5 minutes of nothing changing.
+export const ROOM_ROSTER_RECONCILE_DELAYS_MS = [
+  5_000, 10_000, 20_000, 40_000, 60_000,
+];
+export const ROOM_ROSTER_RECONCILE_MAX_ATTEMPTS = 8;
+// The reconciler's own debounce budget, under its own key so it can neither be
+// swallowed by nor swallow a join or a re-dial. Shorter than the first backoff
+// delay, so it never suppresses a scheduled attempt — it only bounds a room
+// observed as stranded by two different code paths in the same instant.
+export const ROOM_ROSTER_RECONCILE_DEBOUNCE_MS = 4_000;

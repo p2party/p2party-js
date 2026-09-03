@@ -20,6 +20,11 @@
 //             for the whole freeze (+15 s), so the relay does NOT evict A even though
 //             no pong arrives (Android-style: JS throttled but the socket survives;
 //             the frontend focus handler then sees isConnected=true and does nothing).
+//             "stranded": keepalive AND blackhole A both ways until 40 s past the
+//             thaw, so A stays registered while no signalling reaches it in either
+//             direction. Both sides end with healthy sockets and empty rosters and
+//             no inbound frame can start the recovery, which is what exercises the
+//             client's roster reconciliation and its heartbeat watchdog.
 // Probe sends: whenever A says "authenticated" for B but B does not say so for A
 //             (the asymmetric window), ONE sendMessage on "main" from A and ONE from B
 //             at ~10 s and again at ~60 s after t=0, recording exactly what the
@@ -83,7 +88,14 @@ const scenario = positional[0] ?? "baseline";
 const role = positional[1] ?? "initiator";
 const PEERID_MODE = flags.peerid === "fresh" ? "fresh" : "stable";
 const OBSERVE_S = Number(flags.observe ?? 120);
-const SOCKET_MODE = flags.socket === "close2s" ? "close2s" : flags.socket === "keep" ? "keep" : "evict";
+const SOCKET_MODE =
+  flags.socket === "close2s"
+    ? "close2s"
+    : flags.socket === "keep"
+      ? "keep"
+      : flags.socket === "stranded"
+        ? "stranded"
+        : "evict";
 const REFOCUS_S = Number(flags.refocus ?? 0);
 const UDP_FLOOD = flags.udpflood === "1" || flags.udpflood === "true";
 const TRANSFER = (() => {
@@ -501,10 +513,22 @@ try {
     say(`  SIGSTOP sent to A's tree: root=${fz.root} descendants=[${fz.pids.join(",")}] -> ps stat: ${fz.states.map((s) => `${s.pid}=${s.stat}`).join(" ")} ${allT ? "(ALL STOPPED)" : "(WARNING: not all T)"}`);
     if (!allT) results.problems.push("not every pid of A's tree showed stat T right after SIGSTOP: " + JSON.stringify(fz.states));
     results.fault.note = `proc-freeze-${PROC_FREEZE_S}: A's whole Chromium process tree SIGSTOPped for ${PROC_FREEZE_S} s (JS + WebSocket + ICE all stop); socket=${SOCKET_MODE}${UDP_FLOOD ? "; udpflood (A's UDP receive buffers filled: B's datagrams to A dropped)" : ""}`;
-    if (SOCKET_MODE === "keep") {
+    if (SOCKET_MODE === "keep" || SOCKET_MODE === "stranded") {
       const ka = await ctl(`keepalive?peerId=${dA0.keyPair.peerId}&ms=${PROC_FREEZE_S * 1000 + 15000}`);
       results.fault.keepalive = { at: rel(), ...ka };
       say(`  relay ctl keepalive for A (${PROC_FREEZE_S + 15}s: pong-timeout eviction suppressed): ${JSON.stringify(ka)}`);
+    }
+    if (SOCKET_MODE === "stranded") {
+      // Keep A registered but cut its signalling both ways, past the thaw. The
+      // room then has two healthy sockets and two empty rosters: introductions
+      // to A were dropped and A's own requests never left. Nothing in an
+      // inbound frame can start the recovery, so this is what exercises the
+      // client's own roster reconciliation (and, now that the relay's ping
+      // shares the drop gate, its heartbeat watchdog).
+      const strandMs = PROC_FREEZE_S * 1000 + 40000;
+      const bh = await ctl(`blackhole?peerId=${dA0.keyPair.peerId}&ms=${strandMs}`);
+      results.fault.blackhole = { at: rel(), ms: strandMs, ...bh };
+      say(`  relay ctl blackhole A both ways for ${Math.round(strandMs / 1000)}s (stranded: registered but unreachable): ${JSON.stringify(bh)}`);
     }
     if (UDP_FLOOD) {
       const targets = [];

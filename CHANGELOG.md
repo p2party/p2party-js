@@ -4,6 +4,65 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.7] — 2026-09-03
+
+Three recovery gaps left open by 0.14.5, each one a case where the software
+waited instead of acting. Still protocol v4; no wire shape changes. The room
+PIN feedback needs a re-vendored app to be visible, and nothing here needs a
+signaling-server change.
+
+### Fixed
+
+- An edge that re-authenticates in place now has ten seconds to finish. When a
+  peer that slept comes back and re-binds its surviving connection, the peer's
+  new handshake can be unreachable on that connection: its stream association
+  accepts our new channels and not theirs. Recovery used to wait out the
+  thirty-second handshake step timeout. It now rebuilds the edge at the
+  deadline, which took a sleeping responder carrying an eight-mebibyte transfer
+  from 37.5 seconds to 17.5 seconds, measured three times with identical
+  results, transfer byte-exact and the sender reporting delivered.
+
+- A room PIN that is rejected is now something you can see and answer. The SDK
+  already classified the failure, but a rejected joiner is dropped from the
+  roster before the app can attach the failure to anyone, so the room merely
+  looked empty and the PIN could not be typed again. A handshake failure now
+  carries the peer's stable Ed25519 identity, which is what lets an app show a
+  rejected join without resurrecting a stale warning for a peer that has since
+  reconnected under a new signaling id.
+
+- An active room with nobody in it now asks again. A verified socket whose
+  roster is empty, or whose peers have never authenticated, re-requests the
+  room's peers on a backoff that stops the moment one appears, and never runs
+  for an inactive room or an unverified socket. Recovery could not come from an
+  inbound frame: the server answers a peer request by introducing you to the
+  other members and sending the requester nothing, so a client whose
+  introductions were lost had nothing to react to. Two healthy sockets could sit
+  either side of an empty room indefinitely.
+
+### Verification
+
+The reproduction harness in `docs/e2e/desync/` gained a `--socket=stranded`
+mode, which keeps a frozen client registered while cutting its signalling in
+both directions until well past the thaw. It is the first scenario to leave two
+healthy sockets with two empty rosters and no inbound frame able to start the
+recovery, which is what the roster reconciliation had to be measured against:
+both identity roles converge about six seconds after the fault clears, where
+the same configuration previously never recovered at all. The relay's heartbeat
+now goes through the same drop gate as every routed frame, because a real
+network fault does not spare pings and sparing them was what made the client's
+own liveness watchdog untestable.
+
+Eight regression scenarios were re-run unchanged: baseline and socket-drop at
+half a second, the twenty-second freeze in both identity roles with the socket
+dropped and with it kept, the forty-five-second freeze, and both in-flight
+transfer directions, all byte-exact.
+
+### Deployment note
+
+No signaling-server change. An app must re-vendor this SDK for the PIN failure
+to reach its interface, because the app reads the new identity field on a
+handshake failure.
+
 ## [0.14.6] — 2026-09-03
 
 Identity backup and restore. An identity lived in exactly one browser profile:

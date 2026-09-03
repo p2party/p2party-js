@@ -122,8 +122,16 @@ const startHeartbeat = (ws: Sock) => {
       return;
     }
     if (ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ type: "ping" }));
-    log(`ping srv->${short(ws.data.peerId)} (sock#${ws.data.sock})`);
+    // The heartbeat goes through the same drop gate as routed frames. A real
+    // network fault does not spare pings, and sparing them here made the
+    // client's own liveness watchdog untestable: it kept measuring a live
+    // socket because the server's pings arrived throughout the fault.
+    if (blackholed(ws)) {
+      log(`ping srv->${short(ws.data.peerId)} DROPPED(blackhole sock#${ws.data.sock})`);
+    } else {
+      ws.send(JSON.stringify({ type: "ping" }));
+      log(`ping srv->${short(ws.data.peerId)} (sock#${ws.data.sock})`);
+    }
     ws.data.isAlive = false;
     ws.data.pongTimeout = setTimeout(() => {
       if (!ws.data.isAlive && ws.data.keepaliveUntil > Date.now()) {

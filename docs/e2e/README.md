@@ -56,11 +56,13 @@ Drives the real `p2party` public API end to end in the browser.
   visibility stub.
 
 To rebuild `worker-inject.js`:
+
 ```
 npm run build:worker   # → lib/db.worker.js
 node -e 'const fs=require("fs");const w=fs.readFileSync("lib/db.worker.js","utf8");fs.writeFileSync("worker-inject.js","window.process=window.process||{env:{}};window.process.env.INDEXEDDB_WORKER_JS="+JSON.stringify(w)+";")'
 cp src/cryptography/libcrypto.wasm .   # into the appstack dir
 ```
+
 Run: `bun build app-entry.ts --target=browser --outfile=app-bundle.js --define:process.env.NODE_ENV='"production"'`
 then `PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright node app-driver.mjs`.
 
@@ -149,13 +151,26 @@ Flags:
   kernel instead of being queued for A to read at thaw. Without it, loopback
   delivers B's close into the frozen A and A's stale connection closes at thaw —
   i.e. the harness accidentally repairs the very thing under test.
-- `--socket=evict|close2s|keep` — what happens to A's signaling socket during
-  the freeze. `evict` (default): nothing but the freeze, so the relay's
+- `--socket=evict|close2s|keep|stranded` — what happens to A's signaling socket
+  during the freeze. `evict` (default): nothing but the freeze, so the relay's
   ping/pong timer evicts A. `close2s`: also close A's socket server-side 2 s in
   (iOS tears the socket down on suspend). `keep`: suppress the pong-timeout
   eviction for the whole freeze (Android-style — JS throttled but the socket
   survives, so the frontend focus handler sees `isConnected=true` and does
-  nothing).
+  nothing). `stranded`: `keep` plus a black-hole of A's frames in both
+  directions until 40 s past the thaw, so A stays registered while no
+  signalling reaches it either way.
+
+  `stranded` is the only scenario that leaves **two healthy sockets and two
+  empty rosters** with nothing inbound able to start the recovery: A's
+  introductions were dropped and A's own requests never left, and the server
+  answers a peers request by introducing the requester to the other members
+  rather than replying to it. It is therefore what exercises the client's own
+  roster reconciliation, and its liveness watchdog. Note that the relay's
+  heartbeat shares the black-hole gate, deliberately: a real network fault does
+  not spare pings, and sparing them meant the watchdog kept measuring a live
+  socket right through the fault and could never be exercised at all.
+
 - `--transfer=<A2B|B2A>:<MiB>` — a real in-flight file transfer across the
   fault. Random payload (SHA-256 recorded) generated while the link is healthy;
   `p2party.sendMessage(File, "main", roomId)` fired in the last instant before
@@ -191,7 +206,7 @@ Evaluated every second from `t=0` and recorded as
 - **I5** — no handshake or cover entries left for peerIds not in the roster.
 - **I6** — every roster peerId is still live in the relay registry.
 - **I7** — the pre-fault connection instances are kept or replaced
-  *symmetrically*. A holding its pre-fault instance while B has replaced its
+  _symmetrically_. A holding its pre-fault instance while B has replaced its
   own **is** the stale-transport reuse: this is the invariant that failed
   before the fix.
 - **fpAgree** — the two live transports' DTLS fingerprints match pairwise
@@ -222,6 +237,39 @@ As with the other harnesses here, this runs against the **development** WASM
 (`src/cryptography/libcrypto.wasm`, SRI-pinned in `wasmLoader.ts`); do not run
 `npm run predist` first.
 
+### Recorded results (2026-09-03, at the 0.14.7 branch tip)
+
+Fifteen runs, `--udpflood=1` throughout, macOS + headless Chromium. These are
+the numbers the three recovery fixes in 0.14.7 were accepted on. `I2` and `I4`
+are seconds after the fault cleared.
+
+| run             | scenario                          | faulted role | socket   | I2    | I4      |
+| --------------- | --------------------------------- | ------------ | -------- | ----- | ------- |
+| 961 / 962 / 963 | proc-freeze-20 `--transfer=A2B:8` | responder    | evict    | +12 s | +17.5 s |
+| 964             | proc-freeze-20                    | initiator    | stranded | +6 s  | +6.5 s  |
+| 965             | proc-freeze-20                    | responder    | stranded | +6 s  | +6.9 s  |
+| 966             | ws-drop                           | initiator    | —        | +0 s  | +0.5 s  |
+| 967             | proc-freeze-20                    | initiator    | evict    | +2 s  | +2.5 s  |
+| 968             | proc-freeze-20                    | responder    | evict    | +2 s  | +2.5 s  |
+| 969             | proc-freeze-20                    | initiator    | keep     | +6 s  | +6.5 s  |
+| 970             | proc-freeze-20                    | responder    | keep     | +1 s  | +1.5 s  |
+| 971             | proc-freeze-45                    | initiator    | evict    | +1 s  | +2.5 s  |
+| 972             | proc-freeze-20 `--transfer=A2B:8` | initiator    | evict    | +2 s  | +7.5 s  |
+| 973             | proc-freeze-20 `--transfer=B2A:8` | initiator    | evict    | +2 s  | +5.9 s  |
+
+Two of those rows are the point of the release. Runs 961-963 are the
+configuration that used to take 37.5 s, because recovery waited out the 30 s
+handshake step timeout; the ten-second re-bind deadline replaced that wait, and
+the three runs are identical to the tenth of a second. Runs 964 and 965 are the
+`stranded` configuration, which before this release never recovered at all.
+
+Every transfer run ended byte-exact with the sender resolving `delivered`
+(151/151 real chunks, 0 retransmits). `I7`, the informational "both sides
+replaced their transport symmetrically" invariant, is false in the
+responder-frozen rows: that is the normal shape of that configuration, where
+the frozen responder keeps its pre-fault connection while its peer holds a
+fresh one.
+
 ### Recorded results (2026-09-02, at `e41d8c7`)
 
 Eighteen runs, `--udpflood=1` throughout, macOS + headless Chromium. `I2` and
@@ -230,31 +278,31 @@ Eighteen runs, `--udpflood=1` throughout, macOS + headless Chromium. `I2` and
 Seven-scenario regression matrix — all pass, both sides converge 1–6 s after
 wake and exchange byte-exact messages both ways:
 
-| run | scenario | faulted role | socket | I2 | I4 |
-| --- | --- | --- | --- | --- | --- |
-| 710 | baseline | initiator | — | +0 s | +0.5 s |
-| 711 | ws-drop | initiator | — | +0 s | +0.5 s |
-| 712 / 713 | proc-freeze-20 | initiator | evict | +2 s | +2.5 s |
-| 714 / 715 | proc-freeze-20 | responder | evict | +2 s / +3 s | +2.5 s / +3.5 s |
-| 716 | proc-freeze-20 | initiator | keep | +6 s | +6.5 s |
-| 717 / 718 | proc-freeze-20 | responder | keep | +1 s | +1.5 s |
-| 719 | proc-freeze-45 | initiator | evict | +1 s | +2.5 s |
+| run       | scenario       | faulted role | socket | I2          | I4              |
+| --------- | -------------- | ------------ | ------ | ----------- | --------------- |
+| 710       | baseline       | initiator    | —      | +0 s        | +0.5 s          |
+| 711       | ws-drop        | initiator    | —      | +0 s        | +0.5 s          |
+| 712 / 713 | proc-freeze-20 | initiator    | evict  | +2 s        | +2.5 s          |
+| 714 / 715 | proc-freeze-20 | responder    | evict  | +2 s / +3 s | +2.5 s / +3.5 s |
+| 716       | proc-freeze-20 | initiator    | keep   | +6 s        | +6.5 s          |
+| 717 / 718 | proc-freeze-20 | responder    | keep   | +1 s        | +1.5 s          |
+| 719       | proc-freeze-45 | initiator    | evict  | +1 s        | +2.5 s          |
 
 In-flight 8 MiB transfers across a 20 s freeze — all four configurations
 byte-exact with the sender resolving `delivered`:
 
-| run | direction | faulted role | receiver complete | I2 |
-| --- | --- | --- | --- | --- |
-| 704 / 705 | A2B (frozen side sends) | initiator | +7 s | +2 s |
-| 706 / 707 | B2A (awake side sends) | initiator | +5 s | +2 s |
-| 708 | B2A (awake side sends) | responder | +5 s | +2 s |
-| 701 / 702 / 703 | A2B (frozen side sends) | responder | +37 s | +32 s |
+| run             | direction               | faulted role | receiver complete | I2    |
+| --------------- | ----------------------- | ------------ | ----------------- | ----- |
+| 704 / 705       | A2B (frozen side sends) | initiator    | +7 s              | +2 s  |
+| 706 / 707       | B2A (awake side sends)  | initiator    | +5 s              | +2 s  |
+| 708             | B2A (awake side sends)  | responder    | +5 s              | +2 s  |
+| 701 / 702 / 703 | A2B (frozen side sends) | responder    | +37 s             | +32 s |
 
 Run 701–703 is the configuration that failed deterministically before the fix
 and now passes 3/3 byte-exact.
 
-**Known follow-up (not fixed):** that same configuration — a frozen *identity
-responder* carrying an in-flight transfer — converges in ~37 s rather than the
+**Known follow-up (not fixed):** that same configuration — a frozen _identity
+responder_ carrying an in-flight transfer — converges in ~37 s rather than the
 ~7 s of every other configuration, because the surviving transport's SCTP
 association accepts our new streams but not the peer's, so recovery waits out
 the 30 s handshake step timeout. The outcome is correct; the latency is not yet.

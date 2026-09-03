@@ -24,6 +24,7 @@ import { verify } from "../cryptography/ed25519";
 import { encodeCanonical } from "./canonicalSchema";
 import { concatBytes, domain, sha256 } from "./derivations";
 import {
+  chainStartConflict,
   descriptorChainStart,
   descriptorHash,
   descriptorSupportsProfile,
@@ -814,4 +815,238 @@ export const chainValidSuccessor = async (
     return invalid("successor does not link to this exact predecessor");
 
   return { valid: true };
+};
+
+/* ------------------------------------------------------------------ *
+ * Sequence-level store honesty
+ * ------------------------------------------------------------------ */
+
+/**
+ * One checkpoint exactly as a client observed it: the read itself, the
+ * descriptor embedded beside it, and the instant that window was finalized.
+ *
+ * Deliberately not a `...V1` name: this is an in-memory bundle of three
+ * already-frozen objects, not a wire shape the specification has registered.
+ */
+export interface ObservedStoreCheckpoint {
+  readonly checkpoint: PublicStoreCheckpointV1;
+  readonly descriptor: StoreDescriptorV1;
+  readonly finalizationInstantUnixMs: bigint;
+}
+
+/**
+ * What `verifyStoreCheckpointChain` detected. Exactly one outcome is blame-free
+ * besides success: `unverified-chain-gap` says the client did not observe
+ * enough, which the specification is explicit is not a fault.
+ */
+export type StoreCheckpointChainVerdict =
+  | {
+      readonly outcome: "chain-verified";
+      readonly storeId: Uint8Array;
+      readonly deliveryProfileHash: Uint8Array;
+      readonly chainStartIngressWindow: bigint;
+      readonly firstIngressWindow: bigint;
+      readonly headIngressWindow: bigint;
+      readonly headCheckpointHash: Uint8Array;
+      readonly startsAtChainStart: boolean;
+    }
+  | {
+      readonly outcome: "structurally-invalid-checkpoint";
+      readonly reason: string;
+      readonly index: number;
+    }
+  | {
+      readonly outcome: "not-one-store-profile-chain";
+      readonly reason: string;
+      readonly index: number;
+    }
+  | {
+      readonly outcome: "chain-start-conflict";
+      readonly reason: string;
+      readonly canonicalOrder: readonly [StoreDescriptorV1, StoreDescriptorV1];
+    }
+  | {
+      readonly outcome: "checkpoint-conflict";
+      readonly reason: string;
+      readonly canonicalOrder: readonly [
+        PublicStoreCheckpointV1,
+        PublicStoreCheckpointV1,
+      ];
+    }
+  | {
+      readonly outcome: "chain-breach";
+      readonly reason: string;
+      readonly previous: PublicStoreCheckpointV1;
+      readonly next: PublicStoreCheckpointV1;
+    }
+  | {
+      readonly outcome: "unverified-chain-gap";
+      readonly reason: string;
+      readonly afterIngressWindow: bigint;
+      readonly beforeIngressWindow: bigint;
+    };
+
+/**
+ * The sequence form of the Section 4.3 checkpoint checks: one entry point a
+ * store client can call over the run of checkpoints it actually holds.
+ *
+ * `chainValidSuccessor` remains the specified predicate for a single pair; this
+ * verifies each checkpoint's structure exactly once and then decides the
+ * pairwise questions, so a long run costs one signature verification per
+ * checkpoint rather than two.
+ *
+ * Blame is reported before absence. A store must not be able to bury an
+ * equivocation behind a hole in what the client happened to retain, so a
+ * conflict, chain-start conflict, or broken predecessor anywhere in the run
+ * outranks a missing window; only when no fault exists does a gap become the
+ * verdict.
+ *
+ * What a `chain-verified` verdict is not: it says the observed run is
+ * internally consistent and signed, over exactly the windows supplied. It is
+ * not a completeness, availability, or non-equivocation claim — a store that
+ * showed this client one branch and another client a different one is caught
+ * only when the two observations meet.
+ *
+ * Ordering the run is the caller's job: observations must arrive sorted by
+ * ingress window. A store cannot cause a violation of that, so it throws
+ * rather than returning a verdict that would read as a detected fault.
+ */
+export const verifyStoreCheckpointChain = async (
+  observations: readonly ObservedStoreCheckpoint[],
+  geometry: PublicProfileGeometry,
+  module?: LibCrypto,
+): Promise<StoreCheckpointChainVerdict> => {
+  if (observations.length === 0)
+    fail("a checkpoint chain observation must be nonempty");
+  for (let index = 1; index < observations.length; index++)
+    if (
+      observations[index].checkpoint.ingressWindow <
+      observations[index - 1].checkpoint.ingressWindow
+    )
+      fail("observations must be ordered by ingress window");
+
+  // Structure first: a conflict or a breach between checkpoints that are not
+  // themselves valid is junk rather than evidence, and every proof the
+  // specification defines requires both of its halves to be structurally valid.
+  for (let index = 0; index < observations.length; index++) {
+    const observation = observations[index];
+    const valid = await structurallyValidCheckpoint(
+      observation.descriptor,
+      observation.checkpoint,
+      geometry,
+      observation.finalizationInstantUnixMs,
+      module,
+    );
+    if (!valid.valid)
+      return {
+        outcome: "structurally-invalid-checkpoint",
+        reason: valid.reason,
+        index,
+      };
+  }
+
+  const first = observations[0].checkpoint;
+  for (let index = 1; index < observations.length; index++) {
+    const { checkpoint } = observations[index];
+    if (
+      !bytesEqual(checkpoint.storeId, first.storeId) ||
+      !bytesEqual(checkpoint.deliveryProfileHash, first.deliveryProfileHash)
+    )
+      return {
+        outcome: "not-one-store-profile-chain",
+        reason: "observations name more than one store or delivery profile",
+        index,
+      };
+  }
+
+  // A disagreement about the chain start is signed equivocation about where
+  // accountability begins, and it is permanent for that store and profile.
+  for (let index = 1; index < observations.length; index++) {
+    const observation = observations[index];
+    if (
+      observation.checkpoint.chainStartIngressWindow ===
+      first.chainStartIngressWindow
+    )
+      continue;
+    const conflict = await chainStartConflict(
+      observations[0].descriptor,
+      observation.descriptor,
+      first.deliveryProfileHash,
+      module,
+    );
+    if (conflict.conflicting)
+      return {
+        outcome: "chain-start-conflict",
+        reason: "two valid descriptors name different chain starts",
+        canonicalOrder: conflict.canonicalOrder,
+      };
+    // Unreachable behind the checks above, and kept as defence in depth: both
+    // descriptors are already known valid, structural validity ties each one to
+    // its checkpoint's store and profile, and the pass above has forced those
+    // equal — so differing chain starts are always a conflict.
+    return {
+      outcome: "not-one-store-profile-chain",
+      reason: "observations do not share one chain start",
+      index,
+    };
+  }
+
+  // Two checkpoints for one window: either the same object seen twice, or
+  // signed same-window equivocation.
+  const distinct: PublicStoreCheckpointV1[] = [first];
+  for (let index = 1; index < observations.length; index++) {
+    const { checkpoint } = observations[index];
+    const previous = distinct[distinct.length - 1];
+    if (checkpoint.ingressWindow !== previous.ingressWindow) {
+      distinct.push(checkpoint);
+      continue;
+    }
+    const conflict = await checkpointsConflict(previous, checkpoint);
+    if (conflict.conflicting)
+      return {
+        outcome: "checkpoint-conflict",
+        reason:
+          "two distinct signed checkpoints for one store, profile, window",
+        canonicalOrder: conflict.canonicalOrder,
+      };
+  }
+
+  // A broken predecessor is blame; a missing window is not, so every adjacent
+  // pair is checked before any gap is reported.
+  for (let index = 1; index < distinct.length; index++) {
+    const previous = distinct[index - 1];
+    const next = distinct[index];
+    if (next.ingressWindow !== previous.ingressWindow + 1n) continue;
+    if (!(await chainLinksSuccessor(previous, next)))
+      return {
+        outcome: "chain-breach",
+        reason: "successor does not link to this exact predecessor",
+        previous,
+        next,
+      };
+  }
+
+  for (let index = 1; index < distinct.length; index++) {
+    const previous = distinct[index - 1];
+    const next = distinct[index];
+    if (next.ingressWindow === previous.ingressWindow + 1n) continue;
+    return {
+      outcome: "unverified-chain-gap",
+      reason: "the run skips a window, which no proof can attribute",
+      afterIngressWindow: previous.ingressWindow,
+      beforeIngressWindow: next.ingressWindow,
+    };
+  }
+
+  const head = distinct[distinct.length - 1];
+  return {
+    outcome: "chain-verified",
+    storeId: first.storeId,
+    deliveryProfileHash: first.deliveryProfileHash,
+    chainStartIngressWindow: first.chainStartIngressWindow,
+    firstIngressWindow: first.ingressWindow,
+    headIngressWindow: head.ingressWindow,
+    headCheckpointHash: await publicStoreCheckpointHash(head),
+    startsAtChainStart: isChainStart(first),
+  };
 };

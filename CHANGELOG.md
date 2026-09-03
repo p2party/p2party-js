@@ -4,13 +4,24 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.14.6] — 2026-09-03
 
 Identity backup and restore. An identity lived in exactly one browser profile:
 losing the profile lost the account, and the phrase-to-key derivation that could
 have prevented that was exported but unreachable — nothing in the SDK ever
 created a _stored_ identity from a phrase. These calls close that gap in the one
 direction the derivation runs. Still protocol v4; no wire shape changes.
+
+What the feature cannot do is as much of this release as what it can. Only an
+identity **created** from a recovery phrase can be restored from one. The
+derivation runs one way, so an identity that already exists — every identity the
+SDK has generated to date, and every one it still generates on first connect —
+cannot be exported to a phrase at all; the only route to a recoverable identity
+is `createRecoverableIdentity()`, which _replaces_ the current one. Restoring is
+not a merge either: it adopts the phrase's identity in place of whatever that
+device held, and deletes the cross-signed X25519 identity so the next connection
+regenerates and re-signs it. Contacts see both as an identity-key change,
+exactly as they would after a purge.
 
 ### Added
 
@@ -52,6 +63,23 @@ direction the derivation runs. Still protocol v4; no wire shape changes.
   record and reads `null`. Neither can be exported, and the only route to a
   recoverable one is to replace it.
 
+- Identity-derivation provenance is persisted, because how an account key came
+  into being is not derivable from the key and has to survive a reload. It is a
+  non-secret record under a new `identityDerivation` id in the existing
+  out-of-line `meta` store — no schema change, no `dbVersion` bump — carrying a
+  record version, the flag, and the 32-byte Ed25519 public key it was written
+  against. That binding is read inside the same transaction that writes the
+  flag, so a concurrent rotation cannot be recorded as the key the claim
+  describes. Bootstrap writes `"random"` on both paths that install an
+  unrecoverable key, `createRecoverableIdentity()` and
+  `restoreIdentityFromMnemonic()` write `"mnemonic"`, and the identity purge
+  deletes the record as its own settlement step, after the key it describes is
+  gone. A malformed row, a future record version, or a binding that no longer
+  matches the stored key all read back as `null` rather than throwing: no
+  protocol step depends on the value, so failing signaling bootstrap over it
+  would be the worse error, and the fail-safe reading of an unreadable
+  provenance hint is "this cannot be promised recoverable".
+
 - `validateMnemonicWords(words)` and `validateMnemonic(phrase)` are exported.
   The first is synchronous — word count and wordlist membership, naming the
   first mistyped word — so a restore form can check on every keystroke; the
@@ -59,6 +87,10 @@ direction the derivation runs. Still protocol v4; no wire shape changes.
   `MnemonicValidation`, `CreatedRecoverableIdentity`,
   `CreateRecoverableIdentityOptions`, `RestoredIdentity` and
   `IdentityDerivation` types are exported with them.
+  `src/cryptography/mnemonic.ts` also gains `normalizeMnemonic(phrase)` and
+  `validateMnemonicPhrase(phrase)` — the normalisation the derivation contract
+  is now stated in terms of, and the full check reported in the same shape as
+  the synchronous one — as module exports, not package-root ones.
 
 ### Changed
 
@@ -83,15 +115,55 @@ direction the derivation runs. Still protocol v4; no wire shape changes.
   the key pair is built, the encoded password and its digest after the salt is
   taken, and the entropy and its hash after the words are formed.
 
-- Documentation, no behaviour change: the README describes backup and restore as
-  the one-way derivation it is, including the part that costs the user something
-  — an identity created randomly cannot be exported, and becoming recoverable
-  means replacing it, which contacts see as an identity-key change.
-  `docs/getting-started.md` points at it, ADR-A1 in
+- Documentation, no behaviour change: the recovery-phrase documentation
+  described primitives nobody could reach, and now describes the shipped flow
+  and what it costs — an identity created randomly cannot be exported, and
+  becoming recoverable means replacing it, which contacts see as an
+  identity-key change. The README's backup section states in the place a user
+  looks for it that these phrases borrow the BIP-39 English words and nothing
+  else, so no BIP-39 wallet restores one of these identities; 0.14.5 had already
+  corrected the encoding claims themselves, and `docs/references.md` now says
+  which of the two encodings sharing that wordlist is the one that restores an
+  identity. `docs/getting-started.md` points at the contract, ADR-A1 in
   `docs/design-decisions-and-security-findings.md` records the shipped state and
-  the one-way ("option A") decision, `docs/references.md` says which of the two
-  encodings sharing the wordlist is the one that restores an identity, and
-  `ROADMAP.md` no longer lists the SDK flow as missing.
+  the one-way ("option A") decision, and `ROADMAP.md` no longer lists the SDK
+  flow as missing.
+
+### Verification
+
+`npm run check` green on the release commit: lint, format:check, both typecheck
+projects, 1224 tests / 0 failures across 146 files, and the standalone session
+example printing OK.
+
+Recorded 2026-09-03, before this release commit: a 17-step run through the real
+app UI in headless Chromium, against the local signaling stack and a tarball
+packed by hand from this source. Creating an identity from a phrase replaces the
+random one; the phrase panel keeps its Done control disabled until the
+written-it-down checkbox is ticked; a second peer joins, messages go byte-exact
+in both directions, and the peer saves the contact; the first device is dropped
+entirely; a fresh browser context restores from the 24 words and derives the
+identical Ed25519 key; it rejoins under the same peer id, which the server
+reissues because the key is reproduced exactly; messages flow byte-exact again;
+and the peer's client raises no identity-key-change warning, because the key did
+not change.
+
+Not covered: that run is a recorded manual one, n = 2 over loopback, and is not
+in the automated suite. Nothing migrates the identities already in the field —
+one created before this release still reads `null` and still cannot be exported.
+
+### Deployment note
+
+No signaling-server change: this release adds no wire shape and no signaling
+message, so the requirement is the one 0.14.5 already carries, `p2party-server`
+0.1.1. Everything new is local — the identity API, one `meta` row, and the
+mnemonic module.
+
+The p2party.com Identity menu needs this SDK version: its "Back up identity" and
+"Restore identity" dialogs call `getIdentityBackupStatus`,
+`createRecoverableIdentity`, `restoreIdentityFromMnemonic` and
+`validateMnemonicWords`, none of which exist before 0.14.6. A frontend that
+vendors the SDK tarball must re-vendor this release for those dialogs to work at
+all.
 
 ## [0.14.5] — 2026-09-02
 

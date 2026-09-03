@@ -70,17 +70,18 @@ then `PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright node app-driver.mj
 - cover lanes: real cover cells authenticated + real chunk decrypted byte-exact.
 - full app stack: immediate / PIN / scheduled all deliver byte-exact.
 
-## `desync/` — the mobile peer-desync reproduction (0.14.5)
+## `desync/` — the mobile peer-desync reproduction
 
-The harness that reproduced, and then verified the fix for, the permanent
-peer split described in `CHANGELOG.md` 0.14.5: **a phone backgrounded with its
-radio off for less than the ~30 s ICE consent timeout woke holding a peer
-connection that still read `connected`, while its peer had already torn that
-edge down and built a fresh one.** The woken side reused the stale transport,
-its zombie `main` channel blocked a replacement, no handshake ever ran on the
-peer's new transport, and the split was permanent until a manual reconnect —
-one side showed the peer reachable and its sends failed as undelivered, the
-other showed no handshake at all and its sends hung forever.
+The harness that reproduced, and then verified the fix for, the permanent peer
+split described in the `CHANGELOG.md` entry for the peer-edge transport binding
+and liveness release: **a phone backgrounded with its radio off for less than
+the ~30 s ICE consent timeout woke holding a peer connection that still read
+`connected`, while its peer had already torn that edge down and built a fresh
+one.** The woken side reused the stale transport, its zombie `main` channel
+blocked a replacement, no handshake ever ran on the peer's new transport, and
+the split was permanent until a manual reconnect — one side showed the peer
+reachable and its sends failed as undelivered, the other showed no handshake at
+all and its sends hung forever.
 
 Unlike `appstack/`, which drives two pages of **one** browser, this harness
 launches **two separate Chromium processes** (one `chromium.launch()` each, so

@@ -403,6 +403,12 @@ An identity is an Ed25519 key pair in browser storage. Lose the profile and you
 lose the identity — unless it was created from a recovery phrase, because the
 phrase is the only thing that can reproduce it.
 
+Three calls, all new in `0.14.6`: `getIdentityBackupStatus()` reports whether
+the identity in use can be backed up at all, `createRecoverableIdentity()`
+replaces it with one a phrase derives and hands back that phrase once, and
+`restoreIdentityFromMnemonic()` adopts the identity a phrase encodes — on this
+device or any other.
+
 ```ts
 // Can the identity in use be backed up at all?
 const status = await p2party.getIdentityBackupStatus();
@@ -789,9 +795,9 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.5` is not on the CDN yet.** The release pipeline uploads its objects
+> **`0.14.6` is not on the CDN yet.** The release pipeline uploads its objects
 > from the tarball it publishes, and that pipeline has not run for this
-> version: every path under `https://cdn.p2party.com/@0.14.5/` currently
+> version: every path under `https://cdn.p2party.com/@0.14.6/` currently
 > answers 404, and npm still resolves `p2party` to an older release. The
 > snippet below is generated from this build and is what the release will
 > serve — until then, either pin the version `npm view p2party version` reports
@@ -809,8 +815,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.5/p2party.min.js"
-  integrity="sha384-PF4yATBGh6W2OsRe/BwLGD0BNPlvHKZ+rylMQ7i9cPKgPGdUXMh6FcRhPWhmfoFr"
+  src="https://cdn.p2party.com/@0.14.6/p2party.min.js"
+  integrity="sha384-/mtrq23jz4WeCyhalMJW6gn29h50PZRcFi3dvAYKzUPM/jH17CdpRkL/ACigpoWY"
   crossorigin="anonymous"
 ></script>
 
@@ -849,7 +855,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-bWG1CdEqf1xTiqEFyz4wMqGrVROMe5Jrwk8oEaUf5a0cQVRatpprvlCe2XqWdWVe`.
+`integrity=sha384-BudWf1U+vDU/j4pf2sX+bLogS/7MuPyzKRA9AfLoZqdbduUCwYr42p38rEoQRXa8`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.
@@ -891,11 +897,11 @@ cache forever:
 curl -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
 ```
 
-Two caveats, both current as of `0.14.5`. The CDN carries only three objects —
+Two caveats, both current as of `0.14.6`. The CDN carries only three objects —
 `p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the `assets` array
 in `scripts/uploadToCDN.mjs`) — so **`libcrypto.provenance.json` is not on the
 CDN for any version**; take it from the tarball. And nothing is uploaded for
-`0.14.5` yet, which is why the command above asks npm for a version that is
+`0.14.6` yet, which is why the command above asks npm for a version that is
 actually published instead of naming this one.
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value

@@ -1,0 +1,964 @@
+import { readFileSync } from "node:fs";
+
+import { describe, expect, test } from "bun:test";
+
+import { newKeyPair } from "../../../src/cryptography/ed25519";
+import { loadTestModule } from "../../../src/cryptography/testModule";
+import {
+  buildCarrierPlaintext,
+  createCarrierAeadProvider,
+  decodeCarrierEnvelope,
+  encodeCarrierEnvelope,
+  envelopesAreCarrierSeparated,
+  openCarrierEnvelope,
+  sealCarrierEnvelope,
+} from "../../../src/blindRendezvous/carrierEnvelope";
+import {
+  deliveryProfileHash,
+  policyHash,
+  roomRoot,
+} from "../../../src/blindRendezvous/derivations";
+import {
+  createOperationValidationContext,
+  decodeOperation,
+  deriveOperationId,
+  encodeOperation,
+  operationValidationContextAt,
+} from "../../../src/blindRendezvous/operation";
+import { ingressWindowStartMs } from "../../../src/blindRendezvous/publicWindow";
+import { copyBlindDefaultPolicy } from "../../../src/blindRendezvous/roomPolicyV4";
+import { CarrierRuntime } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import { PairDriver } from "../../../src/blindRendezvous/prototype/pairDriver";
+import {
+  PROTOTYPE_DELIVERY_PROFILE_V0,
+  carrierObjectWireBytes,
+  withDeliveryWindowMs,
+} from "../../../src/blindRendezvous/prototype/profile";
+import {
+  PrototypeStoreClient,
+  buildAppendAdmission,
+} from "../../../src/blindRendezvous/prototype/storeClient";
+import {
+  PROTOTYPE_STORE_MEDIA_TYPES,
+  PROTOTYPE_STORE_ROUTES,
+} from "../../../src/blindRendezvous/prototype/storeRoutes";
+import {
+  decodePublicAppendRequestV1,
+  encodeStoreWitnessRecordsV1,
+} from "../../../src/blindRendezvous/prototype/storeWire";
+import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
+import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store/storeCore";
+import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
+import { generateSessionIdentity } from "../../../src/session";
+
+import type { CarrierEnvelopeV1 } from "../../../src/blindRendezvous/carrierEnvelope";
+import type { OuterValidatedIdentifiedOperationV1 } from "../../../src/blindRendezvous/coreReduce";
+import type {
+  AuthenticatedRoomOperationV1,
+  OperationValidationContext,
+} from "../../../src/blindRendezvous/operation";
+import type { CarrierEvent } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import type { TransportCandidateProvider } from "../../../src/blindRendezvous/prototype/pairDriver";
+import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
+
+const module = await loadTestModule();
+
+const wasmFileBytes = readFileSync(
+  new URL("../../../src/cryptography/libcrypto.wasm", import.meta.url),
+);
+const wasmBinary = new ArrayBuffer(wasmFileBytes.byteLength);
+new Uint8Array(wasmBinary).set(wasmFileBytes);
+
+/** One stable identity is enough: every room below uses a fresh capability, a
+ * fresh author epoch key and a fresh presence, and none of them pairs. */
+const sessionIdentity = await generateSessionIdentity({ wasmBinary });
+sessionIdentity.x25519SecretKey.fill(0);
+
+const profile = withDeliveryWindowMs(PROTOTYPE_DELIVERY_PROFILE_V0, 4_000n);
+const PROFILE_HASH = await deliveryProfileHash(profile);
+const POLICY = copyBlindDefaultPolicy();
+const LOGICAL_WINDOW_MS = POLICY.protocolLimits.logicalWindowMs;
+const AEAD = createCarrierAeadProvider(module);
+
+/** 1_800_000_000_000 / 4_000 is exact, so the run starts on a window edge. */
+const START_MS = 1_800_000_000_000n;
+const CHAIN_START = START_MS / profile.deliveryWindowMs;
+const windowStartMs = (window: bigint): bigint =>
+  ingressWindowStartMs(window, profile.deliveryWindowMs);
+
+/** Σ over classes of the class's scheduled appends, at one room slot. */
+const APPENDS_PER_WINDOW = profile.sizeClasses.reduce(
+  (total, sizeClass) => total + sizeClass.appendSchedule.length,
+  0,
+);
+/** Σ over classes of publicChunksPerWindow: the fixed chunk GETs of one scan. */
+const CHUNKS_PER_WINDOW = profile.sizeClasses.reduce(
+  (total, sizeClass) => total + sizeClass.publicChunksPerWindow,
+  0,
+);
+
+const hex = (value: Uint8Array): string =>
+  [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const randomBytes = (length: number): Uint8Array => {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return bytes;
+};
+
+/** `lib.dom`'s `BodyInit` is narrower than the codecs' `Uint8Array`. */
+const asBody = (bytes: Uint8Array): ArrayBuffer => {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+};
+
+/* ------------------------------------------------------------------ *
+ * A deterministic clock and timer queue
+ * ------------------------------------------------------------------ */
+
+interface PendingTimer {
+  readonly id: number;
+  readonly dueMs: bigint;
+  readonly sequence: number;
+  readonly callback: () => void;
+}
+
+/**
+ * The whole point of the runtime taking its clock and timers from options: the
+ * schedule is driven here, event by event, with no wall clock and no real
+ * delay. `advanceTo` fires every timer due at or before the target in
+ * `(dueMs, arming order)` order and settles the work each one released before
+ * the next one fires, so a run is reproducible.
+ */
+class FakeScheduler {
+  nowMs: bigint;
+
+  readonly clock = { nowMs: (): bigint => this.nowMs };
+
+  readonly timers = {
+    setTimeout: (callback: () => void, delayMs: number): number => {
+      const id = this.#nextId++;
+      const delay = BigInt(Math.max(0, Math.trunc(delayMs)));
+      this.#pending.set(id, {
+        id,
+        dueMs: this.nowMs + delay,
+        sequence: this.#nextSequence++,
+        callback,
+      });
+      return id;
+    },
+    clearTimeout: (handle: number): void => {
+      this.#pending.delete(handle);
+    },
+  };
+
+  #nextId = 1;
+  #nextSequence = 0;
+  readonly #pending = new Map<number, PendingTimer>();
+
+  constructor(startMs: bigint) {
+    this.nowMs = startMs;
+  }
+
+  get pendingCount(): number {
+    return this.#pending.size;
+  }
+
+  async advanceTo(
+    targetMs: bigint,
+    settle: () => Promise<void>,
+  ): Promise<void> {
+    for (let guard = 0; guard < 10_000; guard += 1) {
+      let due: PendingTimer | null = null;
+      for (const timer of this.#pending.values()) {
+        if (timer.dueMs > targetMs) continue;
+        if (
+          due === null ||
+          timer.dueMs < due.dueMs ||
+          (timer.dueMs === due.dueMs && timer.sequence < due.sequence)
+        )
+          due = timer;
+      }
+      if (due === null) break;
+      this.nowMs = due.dueMs;
+      this.#pending.delete(due.id);
+      await settle();
+      due.callback();
+      await settle();
+    }
+    this.nowMs = targetMs;
+    await settle();
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Two store processes, and a transport that records every request
+ * ------------------------------------------------------------------ */
+
+interface StoreProcess {
+  readonly core: PrototypeStoreCore;
+  readonly origin: string;
+  readonly stop: () => void;
+}
+
+const startStore = async (
+  scheduler: FakeScheduler,
+  options: { seed: Uint8Array; fault?: "withhold" | null },
+): Promise<StoreProcess> => {
+  let handler: ((request: Request) => Promise<Response>) | null = null;
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request: Request): Response | Promise<Response> =>
+      handler === null
+        ? new Response("not ready", { status: 503 })
+        : handler(request),
+  });
+  const origin = server.url.origin;
+  const core = await PrototypeStoreCore.create({
+    module,
+    seed: options.seed,
+    profile,
+    clock: { nowMs: (): bigint => scheduler.nowMs },
+    persistence: new MemoryStorePersistence(),
+    chainStartIngressWindow: CHAIN_START,
+    origin,
+    descriptorValidityMs: 2_592_000_000n,
+    fault: options.fault ?? null,
+  });
+  handler = createPrototypeStoreHandler({ core });
+  return {
+    core,
+    origin,
+    stop: (): void => {
+      void server.stop(true);
+    },
+  };
+};
+
+interface RequestRecord {
+  readonly path: string;
+  readonly method: string;
+  readonly atMs: bigint;
+  readonly body: Uint8Array | null;
+}
+
+interface Transport {
+  readonly log: RequestRecord[];
+  /** Flipped after `connect` so a store can go dark mid-run. */
+  down: boolean;
+  /** Replaces the answer to one route, so a store can lie about one thing. */
+  intercept: ((path: string, search: string) => Response | null) | null;
+  readonly fetch: typeof fetch;
+}
+
+const transportTo = (origin: string, scheduler: FakeScheduler): Transport => {
+  const transport: Transport = {
+    log: [],
+    down: false,
+    intercept: null,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const body =
+        init?.body === undefined || init.body === null
+          ? null
+          : new Uint8Array(init.body as ArrayBuffer);
+      transport.log.push({
+        path: url.pathname,
+        method: init?.method ?? "GET",
+        atMs: scheduler.nowMs,
+        body,
+      });
+      if (transport.down) throw new TypeError("this store is unreachable");
+      const intercepted = transport.intercept?.(url.pathname, url.search);
+      if (intercepted !== null && intercepted !== undefined) return intercepted;
+      return fetch(`${origin}${url.pathname}${url.search}`, init);
+    }) as typeof fetch,
+  };
+  return transport;
+};
+
+const connect = (
+  store: StoreProcess,
+  transport: Transport,
+  scheduler: FakeScheduler,
+): Promise<PrototypeStoreClient> =>
+  PrototypeStoreClient.connect({
+    origin: store.origin,
+    profile,
+    profileHash: PROFILE_HASH,
+    module,
+    fetch: transport.fetch,
+    nowMs: (): bigint => scheduler.nowMs,
+  });
+
+const countRequests = (
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+  method: string,
+  path: string,
+): number =>
+  transport.log.filter(
+    (request) =>
+      request.atMs >= fromMs &&
+      request.atMs < toMs &&
+      request.method === method &&
+      (request.path === path || request.path.startsWith(`${path}/`)),
+  ).length;
+
+/* ------------------------------------------------------------------ *
+ * Rooms
+ * ------------------------------------------------------------------ */
+
+interface Room {
+  readonly capability: Uint8Array;
+  readonly roomRoot: Uint8Array;
+  readonly validationContextAt: (
+    referenceLogicalWindow: bigint,
+  ) => OperationValidationContext;
+}
+
+const makeRoom = async (
+  capability: Uint8Array,
+  nowMs: bigint,
+): Promise<Room> => {
+  const digest = await policyHash(POLICY);
+  const base = await createOperationValidationContext(
+    capability,
+    POLICY,
+    nowMs / LOGICAL_WINDOW_MS,
+  );
+  return {
+    capability,
+    roomRoot: await roomRoot(capability, digest),
+    validationContextAt: (referenceLogicalWindow): OperationValidationContext =>
+      operationValidationContextAt(base, referenceLogicalWindow),
+  };
+};
+
+/** The presence helper never negotiates; it only needs a signed PRESENCE. */
+const idleTransport: TransportCandidateProvider = {
+  createOffer: (): Promise<Uint8Array> =>
+    Promise.reject(new Error("no negotiation in this test")),
+  acceptOffer: (): Promise<Uint8Array> =>
+    Promise.reject(new Error("no negotiation in this test")),
+  acceptAnswer: (): Promise<void> =>
+    Promise.reject(new Error("no negotiation in this test")),
+};
+
+/**
+ * One signed PRESENCE for `room`, minted by the real producer.
+ *
+ * `PairDriver.start()` is the only thing in the tree that builds a PRESENCE,
+ * and building one by hand here would prove the runtime carries a shape this
+ * test invented rather than the one the prototype publishes.
+ */
+const presenceFor = async (
+  capability: Uint8Array,
+  scheduler: FakeScheduler,
+): Promise<AuthenticatedRoomOperationV1> => {
+  const published: AuthenticatedRoomOperationV1[] = [];
+  const driver = new PairDriver({
+    module,
+    capability,
+    identity: {
+      ed25519PublicKey: sessionIdentity.ed25519PublicKey,
+      ed25519SecretKey: sessionIdentity.ed25519SecretKey,
+      x25519PublicKey: sessionIdentity.x25519PublicKey,
+      x25519CrossSignature: sessionIdentity.x25519CrossSignature,
+    },
+    publish: (operation) => published.push(operation),
+    transport: idleTransport,
+    clock: { nowMs: (): bigint => scheduler.nowMs },
+    random: randomBytes,
+  });
+  await driver.start();
+  if (published.length !== 1)
+    throw new Error("expected exactly one published presence");
+  return published[0];
+};
+
+/* ------------------------------------------------------------------ *
+ * The world one test runs in
+ * ------------------------------------------------------------------ */
+
+interface Carrier {
+  readonly runtime: CarrierRuntime;
+  readonly received: OuterValidatedIdentifiedOperationV1[];
+  readonly events: CarrierEvent[];
+  readonly clients: readonly PrototypeStoreClient[];
+}
+
+interface World {
+  readonly scheduler: FakeScheduler;
+  readonly stores: readonly StoreProcess[];
+  readonly transports: Transport[];
+  readonly carriers: Carrier[];
+  readonly advance: (toMs: bigint) => Promise<void>;
+  readonly stop: () => void;
+}
+
+const createWorld = async (
+  options: {
+    readonly faults?: readonly ("withhold" | null)[];
+  } = {},
+): Promise<World> => {
+  const scheduler = new FakeScheduler(START_MS);
+  const stores = [
+    await startStore(scheduler, {
+      seed: new Uint8Array(32).fill(0x0a),
+      fault: options.faults?.[0] ?? null,
+    }),
+    await startStore(scheduler, {
+      seed: new Uint8Array(32).fill(0x0b),
+      fault: options.faults?.[1] ?? null,
+    }),
+  ];
+  const transports: Transport[] = [];
+  const carriers: Carrier[] = [];
+  return {
+    scheduler,
+    stores,
+    transports,
+    carriers,
+    advance: (toMs: bigint): Promise<void> =>
+      scheduler.advanceTo(toMs, async () => {
+        for (const store of stores) await store.core.finalizeDue();
+        for (const carrier of carriers) await carrier.runtime.drain();
+      }),
+    stop: (): void => {
+      for (const carrier of carriers) carrier.runtime.stop();
+      for (const store of stores) store.stop();
+    },
+  };
+};
+
+/** Connect one client per named store and start one runtime over them. */
+const addCarrier = async (
+  world: World,
+  room: Room,
+  storeIndexes: readonly number[],
+): Promise<Carrier> => {
+  const clients: PrototypeStoreClient[] = [];
+  for (const index of storeIndexes) {
+    const transport = transportTo(world.stores[index].origin, world.scheduler);
+    world.transports.push(transport);
+    clients.push(
+      await connect(world.stores[index], transport, world.scheduler),
+    );
+  }
+  const received: OuterValidatedIdentifiedOperationV1[] = [];
+  const events: CarrierEvent[] = [];
+  const runtime = new CarrierRuntime({
+    module,
+    roomRoot: room.roomRoot,
+    profile,
+    profileHash: PROFILE_HASH,
+    stores: clients,
+    validationContextAt: room.validationContextAt,
+    logicalWindowMs: LOGICAL_WINDOW_MS,
+    clock: world.scheduler.clock,
+    timers: world.scheduler.timers,
+    onOperations: (fresh) => {
+      received.push(...fresh);
+    },
+    onEvent: (event) => events.push(event),
+  });
+  const carrier: Carrier = { runtime, received, events, clients };
+  world.carriers.push(carrier);
+  runtime.start();
+  return carrier;
+};
+
+/** The carrier envelopes this transport posted inside one window. */
+const appendedEnvelopes = (
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+): CarrierEnvelopeV1[] =>
+  transport.log
+    .filter(
+      (request) =>
+        request.path === PROTOTYPE_STORE_ROUTES.append &&
+        request.body !== null &&
+        request.atMs >= fromMs &&
+        request.atMs < toMs,
+    )
+    .map((request) =>
+      decodeCarrierEnvelope(
+        decodePublicAppendRequestV1(request.body as Uint8Array)
+          .exactFixedObject,
+      ),
+    );
+
+const openedOperationIds = async (
+  room: Room,
+  envelopes: readonly CarrierEnvelopeV1[],
+): Promise<string[]> => {
+  const identifiers: string[] = [];
+  for (const envelope of envelopes) {
+    const plaintext = await openCarrierEnvelope(room.roomRoot, envelope, AEAD);
+    if (plaintext === null) continue;
+    identifiers.push(
+      hex(await deriveOperationId(decodeOperation(plaintext.operationBytes))),
+    );
+  }
+  return identifiers;
+};
+
+const firstOpenable = async (
+  room: Room,
+  envelopes: readonly CarrierEnvelopeV1[],
+): Promise<CarrierEnvelopeV1> => {
+  for (const envelope of envelopes) {
+    const plaintext = await openCarrierEnvelope(room.roomRoot, envelope, AEAD);
+    if (plaintext !== null) return envelope;
+  }
+  throw new Error("no envelope in this window opens under the room root");
+};
+
+/* ------------------------------------------------------------------ *
+ * Tests
+ * ------------------------------------------------------------------ */
+
+const W1 = CHAIN_START + 1n;
+const W2 = CHAIN_START + 2n;
+const W3 = CHAIN_START + 3n;
+
+describe("prototype carrier runtime", () => {
+  test("runs the profile's fixed schedule against both stores on an empty outbox", async () => {
+    const world = await createWorld();
+    try {
+      const room = await makeRoom(new Uint8Array(32).fill(0x11), START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+
+      // Window W0 has no lease (its allocation is requested inside it, for
+      // W1), so the measured window is W1: the first fully scheduled one.
+      await world.advance(windowStartMs(W1));
+      const before = { ...carrier.runtime.counters };
+      await world.advance(windowStartMs(W2) - 1n);
+      const after = carrier.runtime.counters;
+
+      for (const transport of world.transports) {
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.token,
+          ),
+        ).toBe(1);
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.allocation,
+          ),
+        ).toBe(1);
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.append,
+          ),
+        ).toBe(APPENDS_PER_WINDOW);
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "GET",
+            PROTOTYPE_STORE_ROUTES.checkpoint,
+          ),
+        ).toBe(1);
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "GET",
+            PROTOTYPE_STORE_ROUTES.chunk,
+          ),
+        ).toBe(CHUNKS_PER_WINDOW);
+      }
+
+      expect(after.appendsReal - before.appendsReal).toBe(0);
+      expect(after.appendsDummy - before.appendsDummy).toBe(
+        APPENDS_PER_WINDOW * 2,
+      );
+      expect(after.scans - before.scans).toBe(2);
+      expect(carrier.runtime.storeTopology).toBe("multi-store-union");
+      expect(carrier.runtime.faults).toEqual([]);
+
+      // Every object of one size class is exactly that class's wire length,
+      // dummy or not, because both are built through the same encoder.
+      for (const transport of world.transports) {
+        for (const request of transport.log) {
+          if (request.path !== PROTOTYPE_STORE_ROUTES.append) continue;
+          if (request.body === null) continue;
+          const decoded = decodePublicAppendRequestV1(request.body);
+          expect(decoded.exactFixedObject.length).toBe(
+            carrierObjectWireBytes(
+              profile,
+              decoded.bucket.sizeClass,
+              PROFILE_HASH,
+            ),
+          );
+        }
+      }
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("replaces a dummy with a real object and seals it separately per store", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x22);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      await world.advance(windowStartMs(W1));
+      carrier.runtime.publish(presence, "PRESENCE");
+      const before = { ...carrier.runtime.counters };
+      await world.advance(windowStartMs(W2) - 1n);
+      const after = carrier.runtime.counters;
+
+      // The fixed request count is what hides an empty outbox from a store:
+      // one real object took one dummy's place, and nothing else moved.
+      for (const transport of world.transports)
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(W1),
+            windowStartMs(W2),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.append,
+          ),
+        ).toBe(APPENDS_PER_WINDOW);
+      expect(after.appendsReal - before.appendsReal).toBe(2);
+      expect(after.appendsDummy - before.appendsDummy).toBe(
+        APPENDS_PER_WINDOW * 2 - 2,
+      );
+
+      const perStore = world.transports.map((transport) =>
+        appendedEnvelopes(transport, windowStartMs(W1), windowStartMs(W2)),
+      );
+      const openedPerStore = [
+        await openedOperationIds(room, perStore[0]),
+        await openedOperationIds(room, perStore[1]),
+      ];
+      expect(openedPerStore[0]).toEqual([presenceId]);
+      expect(openedPerStore[1]).toEqual([presenceId]);
+
+      // The one operation, wrapped twice: different context, different nonce,
+      // different ciphertext. A store cannot recognize the other store's copy.
+      const sealedA = await firstOpenable(room, perStore[0]);
+      const sealedB = await firstOpenable(room, perStore[1]);
+      expect(hex(sealedA.carrierContextId)).not.toBe(
+        hex(sealedB.carrierContextId),
+      );
+      expect(envelopesAreCarrierSeparated(sealedA, sealedB)).toBe(true);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("unions both stores' copies into one delivery and covers for another room", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x33);
+      const room = await makeRoom(capability, START_MS);
+      const stranger = await makeRoom(new Uint8Array(32).fill(0x44), START_MS);
+
+      const publisher = await addCarrier(world, room, [0, 1]);
+      const reader = await addCarrier(world, room, [0, 1]);
+      const outsider = await addCarrier(world, stranger, [0, 1]);
+
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      // Both stores carried it; the reader must be handed it exactly once.
+      expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+        presenceId,
+      ]);
+      expect(reader.runtime.counters.operationsSeen).toBe(1);
+      // Two real appends over the whole run and no more: an entry both stores
+      // acknowledged leaves the outbox instead of going out again every window.
+      expect(publisher.runtime.counters.appendsReal).toBe(2);
+      expect(reader.runtime.storeTopology).toBe("multi-store-union");
+      // Every object of another room is cover to this one: it opens under no
+      // key this runtime holds, so it never becomes an operation.
+      expect(outsider.received).toEqual([]);
+      expect(outsider.runtime.counters.operationsSeen).toBe(0);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("keeps delivering through the surviving store when one goes dark", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x55);
+      const room = await makeRoom(capability, START_MS);
+      const publisher = await addCarrier(world, room, [0, 1]);
+      const reader = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      // Store 0 answers the descriptor, then every request it ever gets fails.
+      world.transports[0].down = true;
+      world.transports[2].down = true;
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+        presenceId,
+      ]);
+      expect(reader.runtime.storeTopology).toBe("single-carrier-dependent");
+      // Unreachable is not dishonesty: nothing about store 0 is proven here.
+      expect(reader.clients[0].inert).toBe(false);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("backfills an operation only one store carried to the store that missed it", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x66);
+      const room = await makeRoom(capability, START_MS);
+      // The publisher knows one store, so store 0 never sees this operation
+      // until the two-store reader replicates it there.
+      const publisher = await addCarrier(world, room, [1]);
+      const reader = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+        presenceId,
+      ]);
+      expect(reader.runtime.counters.backfills).toBe(1);
+
+      // The backfill goes out at the next state-replication slot of W2, and is
+      // readable once W2 finalizes.
+      await world.advance(windowStartMs(W3) + profile.publicReadOffsetMs + 1n);
+
+      const audit = transportTo(world.stores[0].origin, world.scheduler);
+      const client = await connect(world.stores[0], audit, world.scheduler);
+      const scan = await client.scanWindow(W2);
+      expect(scan.status).toBe("finalized");
+      const carried: string[] = [];
+      for (const object of scan.objects) {
+        // Slots nobody claimed are the store's own random cover and decode as
+        // no envelope at all, which is exactly what the runtime skips too.
+        let envelope: CarrierEnvelopeV1;
+        try {
+          envelope = decodeCarrierEnvelope(object);
+        } catch {
+          continue;
+        }
+        const plaintext = await openCarrierEnvelope(
+          room.roomRoot,
+          envelope,
+          AEAD,
+        );
+        if (plaintext === null) continue;
+        carried.push(
+          hex(
+            await deriveOperationId(decodeOperation(plaintext.operationBytes)),
+          ),
+        );
+      }
+      expect(carried).toContain(presenceId);
+
+      // Once per store, ever: a second read of the same window adds nothing.
+      expect(reader.runtime.counters.backfills).toBe(1);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("detects a withheld object as a custody breach and drops the store", async () => {
+    const world = await createWorld({ faults: ["withhold", null] });
+    try {
+      const capability = new Uint8Array(32).fill(0x77);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+
+      await world.advance(windowStartMs(W1));
+      carrier.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      const breaches = carrier.runtime.faults.filter(
+        (fault) => fault.kind === "custody-breach",
+      );
+      expect(breaches.length).toBeGreaterThan(0);
+      expect(breaches[0].storeIdHex).toBe(hex(world.stores[0].core.storeId));
+      expect(carrier.clients[0].inert).toBe(true);
+      expect(carrier.clients[1].inert).toBe(false);
+      // A store excluded from availability leaves one usable carrier.
+      expect(carrier.runtime.storeTopology).toBe("single-carrier-dependent");
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("records a checkpoint split-view hint when a store gossips another hash", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x88);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+
+      // Store 1 answers every witness read with one record that names store 0
+      // and a checkpoint hash store 0 never showed this client.
+      const witnessed = world.stores[0].core.storeId;
+      world.transports[1].intercept = (path): Response | null => {
+        if (!path.startsWith(`${PROTOTYPE_STORE_ROUTES.witness}/`)) return null;
+        const window = BigInt(path.slice(path.lastIndexOf("/") + 1));
+        const record: StoreWitnessRecordV1 = {
+          version: 1,
+          witnessedStoreId: witnessed,
+          deliveryProfileHash: PROFILE_HASH,
+          ingressWindow: window,
+          checkpointHash: new Uint8Array(32).fill(0xc1),
+        };
+        return new Response(asBody(encodeStoreWitnessRecordsV1([record])), {
+          status: 200,
+          headers: {
+            "x-p2party-store": "prototype-v0",
+            "content-type": PROTOTYPE_STORE_MEDIA_TYPES.witness,
+          },
+        });
+      };
+
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      const hints = carrier.runtime.faults.filter(
+        (fault) => fault.kind === "checkpoint-split-view-hint",
+      );
+      expect(hints.length).toBeGreaterThan(0);
+      expect(hints[0].storeIdHex).toBe(hex(witnessed));
+      // Gossip is not proof: a hint excludes nothing.
+      expect(carrier.clients[0].inert).toBe(false);
+      expect(carrier.runtime.storeTopology).toBe("multi-store-union");
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("refuses an object whose header does not match the bucket it came from", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0x99);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+
+      const honest = await presenceFor(capability, world.scheduler);
+      const relocated = await presenceFor(capability, world.scheduler);
+      const foreign = await presenceFor(capability, world.scheduler);
+
+      // A direct client of store 0, so these objects are placed exactly where
+      // a store that relocated them would place them.
+      const audit = transportTo(world.stores[0].origin, world.scheduler);
+      const client = await connect(world.stores[0], audit, world.scheduler);
+
+      await world.advance(windowStartMs(W1) + 1_000n);
+      const keyPair = await newKeyPair(module);
+      const lease = await client.allocate(W1, keyPair);
+      if (lease === null) throw new Error("expected a lease");
+
+      const sizeClass = profile.sizeClasses[0];
+      const place = async (
+        operation: AuthenticatedRoomOperationV1,
+        coordinates: {
+          readonly carrierContextId: Uint8Array;
+          readonly ingressWindow: bigint;
+        },
+        objectOrdinal: number,
+      ): Promise<void> => {
+        const envelope = await sealCarrierEnvelope(
+          room.roomRoot,
+          {
+            deliveryProfileHash: PROFILE_HASH,
+            carrierContextId: coordinates.carrierContextId,
+            ingressWindow: coordinates.ingressWindow,
+            sizeClass: sizeClass.id,
+          },
+          randomBytes(24),
+          buildCarrierPlaintext(
+            encodeOperation(operation),
+            sizeClass.fixedCarrierObjectBytes,
+          ),
+          AEAD,
+        );
+        const object = encodeCarrierEnvelope(envelope);
+        const result = await client.append(
+          W1,
+          sizeClass.id,
+          object,
+          await buildAppendAdmission(
+            lease,
+            keyPair.secretKey,
+            sizeClass.id,
+            objectOrdinal,
+            object,
+            module,
+          ),
+        );
+        expect(result?.status).toBe("stored");
+      };
+
+      await place(
+        honest,
+        { carrierContextId: client.carrierContextId, ingressWindow: W1 },
+        0,
+      );
+      // Same room, same key, but a header naming another window: this is what a
+      // store copying an object between buckets produces, and the AEAD alone
+      // would open it because the AEAD is bound to the header, not the bucket.
+      await place(
+        relocated,
+        { carrierContextId: client.carrierContextId, ingressWindow: W1 + 5n },
+        1,
+      );
+      // Same room, but the other store's carrier context.
+      await place(
+        foreign,
+        {
+          carrierContextId: carrier.clients[1].carrierContextId,
+          ingressWindow: W1,
+        },
+        2,
+      );
+
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+
+      expect(carrier.received.map((entry) => hex(entry.operationId))).toEqual([
+        hex(await deriveOperationId(honest)),
+      ]);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+});

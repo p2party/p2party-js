@@ -117,7 +117,33 @@ export interface StoreClientOptions {
   readonly nowMs: () => bigint;
 }
 
+/**
+ * What a scan or request found wrong with one store's answer.
+ *
+ * `unreachable` is a transport failure: a fetch that was rejected outright, a
+ * non-200 status, a missing or wrong `x-p2party-store` header, or bytes that
+ * do not even decode as the expected canonical type. None of these yields a
+ * signature this client could check, so none of them says anything about
+ * whether the store is honest — only that this attempt produced no usable
+ * answer, which a store that is merely switched off produces exactly as
+ * reliably as one that is actively cheating. It is therefore never grounds
+ * for `inert`: the store may come back.
+ *
+ * `signature-invalid` is reserved for an answer this client *could* judge:
+ * bytes that decoded as the expected type, carrying a signature, which either
+ * does not verify under the pinned descriptor key or verifies but names the
+ * wrong store, profile, window or version — a well-formed, signed answer to a
+ * different question than the one this client asked. A response that decodes
+ * and verifies but names the wrong coordinates is deliberately kept here
+ * rather than folded into `unreachable`: the store was reachable and spent a
+ * real signature over real bytes, which is closer to "signed something
+ * false" than to absence, even when the mistake reads as a mismatch rather
+ * than an outright forgery. What must never happen is the reverse — a store
+ * that said nothing at all ending up in the same bucket as one that signed a
+ * lie.
+ */
 export type StoreFaultKind =
+  | "unreachable"
   | "descriptor-invalid"
   | "signature-invalid"
   | "chain-fault"
@@ -993,11 +1019,14 @@ export class PrototypeStoreClient {
   /**
    * One GET or POST, reduced to bytes or `null`.
    *
-   * A non-200, a missing protocol header and a rejected fetch are one outcome
-   * here: this answer is not usable. They are recorded as `signature-invalid`
-   * because that is the fault class the design gives an unverifiable answer,
-   * and none of them makes the store inert — being unreachable is not evidence
-   * of dishonesty.
+   * A rejected fetch, a non-200 status, a missing protocol header and a body
+   * that cannot even be read off the wire are one outcome here: this attempt
+   * produced no usable answer. They are recorded as `unreachable`, not
+   * `signature-invalid` — none of them is a signature this client checked and
+   * found wanting, they are the absence of one, and a store merely switched
+   * off would produce every one of them. None of them makes the store inert:
+   * being unreachable is not evidence of dishonesty, and the store may come
+   * back.
    */
   async #request(
     path: string,
@@ -1009,7 +1038,7 @@ export class PrototypeStoreClient {
       response = await this.#fetch(`${this.origin}${path}`, init);
     } catch (error) {
       return this.#reject(
-        "signature-invalid",
+        "unreachable",
         window,
         `${path}: the request failed (${
           error instanceof Error ? error.name : "unknown error"
@@ -1019,7 +1048,7 @@ export class PrototypeStoreClient {
     }
     if (response.status !== 200)
       return this.#reject(
-        "signature-invalid",
+        "unreachable",
         window,
         `${path}: answered ${String(response.status)}`,
         null,
@@ -1028,7 +1057,7 @@ export class PrototypeStoreClient {
     // not come from a store, whatever is in its body.
     if (response.headers.get("x-p2party-store") !== PROTOTYPE_STORE_PROTOCOL)
       return this.#reject(
-        "signature-invalid",
+        "unreachable",
         window,
         `${path}: the answer is not from a prototype-v0 store`,
         null,
@@ -1037,7 +1066,7 @@ export class PrototypeStoreClient {
       return new Uint8Array(await response.arrayBuffer());
     } catch {
       return this.#reject(
-        "signature-invalid",
+        "unreachable",
         window,
         `${path}: the answer body could not be read`,
         null,
@@ -1072,7 +1101,10 @@ export class PrototypeStoreClient {
    *
    * `decodeCanonicalStrict` re-encodes, so a value that decodes here is the
    * unique encoding of itself — which is what makes a signature over these
-   * bytes mean anything.
+   * bytes mean anything. Bytes that fail to decode at all carry no signature
+   * this client could check — there is no claim here to call false, only
+   * garbage that never became one — so this is `unreachable`, the same class
+   * as the transport failures in `#request`, not `signature-invalid`.
    */
   #decode<T>(
     decoder: (bytes: Uint8Array) => T,
@@ -1084,7 +1116,7 @@ export class PrototypeStoreClient {
       return decoder(bytes);
     } catch (error) {
       return this.#reject(
-        "signature-invalid",
+        "unreachable",
         window,
         `the ${what} is not canonical: ${
           error instanceof Error ? error.message : "unknown error"

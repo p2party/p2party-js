@@ -39,10 +39,12 @@ import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import {
+  decodeAllocationTokenIssueResultV1,
   decodePublicAllocationRequestV1,
   decodePublicAllocationResultV1,
   decodePublicAppendRequestV1,
   decodePublicChunkReadV1,
+  encodeAllocationTokenIssueResultV1,
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
   encodePublicChunkReadV1,
@@ -809,13 +811,100 @@ describe("prototype store client", () => {
       // Unreachable is not evidence of dishonesty: it must not make the store
       // inert, only unusable for this event.
       expect(client.inert).toBe(false);
-      expect(client.faults.map((fault) => fault.kind)).toContain(
-        "signature-invalid",
-      );
+      // A non-200 status, a missing protocol header and undecodable bytes are
+      // all transport-shaped failures, not a signature this client judged and
+      // rejected — they must be `unreachable`, never `signature-invalid`.
+      expect(client.faults.map((fault) => fault.kind)).toContain("unreachable");
+      expect(
+        client.faults.every((fault) => fault.kind !== "signature-invalid"),
+      ).toBe(true);
 
       const keyPair = await newKeyPair(cryptoModule);
       expect(await client.allocate(CHAIN_START, keyPair)).toBeNull();
       expect(await client.issueToken(CHAIN_START)).toBe(false);
+    });
+  });
+
+  test("keeps an unreachable store live so it can come back", async () => {
+    await withStore(async (store, clock) => {
+      // The client's own transport, toggled from outside: this is what a
+      // store being switched off and switched back on again looks like from
+      // the browser's side, as opposed to a store that answered and lied.
+      let down = false;
+      const flaky: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        if (down) return Promise.reject(new TypeError("fetch failed"));
+        return fetch(String(input), init);
+      }) as typeof fetch;
+
+      const client = await connect(store.origin, clock, { fetch: flaky });
+      await appendObject(client, CHAIN_START, 0x9a);
+      clock.now = FINALIZE_AT;
+      await store.core.finalizeDue();
+
+      down = true;
+      const outage = await client.scanWindow(CHAIN_START);
+      expect(outage.status).toBe("unreachable");
+      expect(outage.objects).toEqual([]);
+      expect(client.inert).toBe(false);
+      expect(client.faults.map((fault) => fault.kind)).toContain("unreachable");
+      expect(
+        client.faults.every((fault) => fault.kind !== "signature-invalid"),
+      ).toBe(true);
+
+      // The store comes back, and it is still trusted: nothing about the
+      // outage was recorded as a breach, so nothing needed to be forgiven.
+      down = false;
+      const recovered = await client.scanWindow(CHAIN_START);
+      expect(recovered.status).toBe("finalized");
+      expect(recovered.objects.length).toBe(OBJECTS_PER_WINDOW);
+      expect(client.inert).toBe(false);
+    });
+  });
+
+  test("records a genuinely bad signature as signature-invalid, not unreachable", async () => {
+    await withStore(async (store, clock) => {
+      // The store answers, on time, over the wire, with its own protocol
+      // header — nothing here is a transport failure. Only the signature
+      // itself is wrong, which is the one thing `unreachable` cannot cover.
+      const tamperingToken: typeof fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        const response = await fetch(String(input), init);
+        if (url.pathname !== PROTOTYPE_STORE_ROUTES.token) return response;
+        const result = decodeAllocationTokenIssueResultV1(
+          new Uint8Array(await response.arrayBuffer()),
+        );
+        const storeSignature = Uint8Array.from(result.storeSignature);
+        storeSignature[0] ^= 0x01;
+        return new Response(
+          asBody(
+            encodeAllocationTokenIssueResultV1({
+              body: result.body,
+              storeSignature,
+            }),
+          ),
+          {
+            status: 200,
+            headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.tokenResult),
+          },
+        );
+      }) as typeof fetch;
+
+      const client = await connect(store.origin, clock, {
+        fetch: tamperingToken,
+      });
+      expect(await client.issueToken(CHAIN_START)).toBe(false);
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "signature-invalid",
+      ]);
+      // A bad signature is not a custody or chain breach either — it is
+      // evidence for the record, not grounds to exclude the store yet.
+      expect(client.inert).toBe(false);
     });
   });
 

@@ -23,9 +23,13 @@ import {
 } from "../../../src/blindRendezvous/prototype/profile";
 import {
   PrototypeStoreCore,
+  StoreConfigurationError,
   StoreRequestError,
 } from "../../../src/blindRendezvous/prototype/store/storeCore";
-import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
+import {
+  MemoryStorePersistence,
+  emptyStoreWindowState,
+} from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import {
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
@@ -98,17 +102,19 @@ const harness = async (
     fault?: "withhold" | null;
     persistence?: MemoryStorePersistence;
     now?: bigint;
+    chainStart?: bigint;
+    seed?: Uint8Array;
   } = {},
 ): Promise<Harness> => {
   let now = options.now ?? WINDOW_START;
   const persistence = options.persistence ?? new MemoryStorePersistence();
   const core = await PrototypeStoreCore.create({
     module: cryptoModule,
-    seed: SEED,
+    seed: options.seed ?? SEED,
     profile,
     clock: { nowMs: () => now },
     persistence,
-    chainStartIngressWindow: CHAIN_START,
+    chainStartIngressWindow: options.chainStart ?? CHAIN_START,
     origin: "http://127.0.0.1:5910",
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
@@ -334,6 +340,20 @@ describe("prototype store allocation", () => {
     expect(past.value.status).toBe("window-closed");
   });
 
+  test("accepts every window inside the open range", async () => {
+    const { core } = await harness();
+
+    for (
+      let ahead = 0n;
+      ahead <= BigInt(profile.maxFutureIngressWindows);
+      ahead += 1n
+    ) {
+      const { lease } = await leaseFor(core, CHAIN_START + ahead);
+      expect(lease.ingressWindow).toBe(CHAIN_START + ahead);
+      expect(lease.allocationOrdinal).toBe(0);
+    }
+  });
+
   test("refuses allocation into a finalized window", async () => {
     const { core, setNow } = await harness();
     setNow(FINALIZE_AT);
@@ -557,6 +577,58 @@ describe("prototype store finalization", () => {
     }
   });
 
+  test("places a size class 1 object at its own slot coordinates", async () => {
+    const { core, setNow } = await harness();
+    const sizeClass = profile.sizeClasses[1];
+    const objectBytes = carrierObjectWireBytes(
+      profile,
+      sizeClass.id,
+      PROFILE_HASH,
+    );
+
+    // Five leases, so the object lands in the second chunk of the class:
+    // globalObjectOrdinal = 4 * 2 + 1 = 9, with publicChunkObjectCount 8.
+    let last: { lease: PublicAllocationLeaseV1; secretKey: Uint8Array } | null =
+      null;
+    for (let index = 0; index < 5; index++) last = await leaseFor(core);
+    if (last === null) throw new Error("expected a lease");
+
+    const object = objectOf(0xbb, objectBytes);
+    expect(
+      await verifiedStatus(
+        core,
+        await core.append(
+          await appendRequest(
+            last.lease,
+            last.secretKey,
+            1,
+            object,
+            sizeClass.id,
+          ),
+        ),
+      ),
+    ).toBe("stored");
+
+    setNow(FINALIZE_AT);
+    await core.finalizeDue();
+
+    const slot = appendSlotCoordinates(
+      geometry,
+      sizeClass.id,
+      last.lease.allocationOrdinal,
+      1,
+    );
+    expect(slot.chunkIndex).toBe(1n);
+    const read = await core.readChunk(
+      bucketOf(CHAIN_START, sizeClass.id),
+      slot.chunkIndex,
+    );
+    if (read.kind !== "finalized") throw new Error("expected a chunk");
+    expect(hex(read.chunk.fixedObjects[slot.objectIndexWithinChunk])).toBe(
+      hex(object),
+    );
+  });
+
   test("signs a checkpoint whose root is the served chunk sequence", async () => {
     const { core, setNow } = await harness();
     setNow(FINALIZE_AT);
@@ -767,6 +839,90 @@ describe("prototype store restart", () => {
         ),
       ),
     );
+  });
+
+  test("refuses to boot on a chain start the persisted chain contradicts", async () => {
+    const persistence = new MemoryStorePersistence();
+    const first = await harness({ persistence });
+    first.setNow(FINALIZE_AT);
+    expect(await first.core.finalizeDue()).toEqual([CHAIN_START]);
+
+    await expect(
+      harness({ persistence, now: FINALIZE_AT, chainStart: CHAIN_START + 5n }),
+    ).rejects.toThrow(StoreConfigurationError);
+    await expect(
+      harness({ persistence, now: FINALIZE_AT, chainStart: CHAIN_START - 5n }),
+    ).rejects.toThrow(/the persisted chain starts at window/);
+
+    // Same chain start, different identity: the checkpoint's descriptorHash is
+    // the half that catches this one.
+    await expect(
+      harness({
+        persistence,
+        now: FINALIZE_AT,
+        seed: new Uint8Array(32).fill(0x77),
+      }),
+    ).rejects.toThrow(/signed under a different descriptor/);
+
+    // The same configuration still boots and still serves that checkpoint.
+    const resumed = await harness({ persistence, now: FINALIZE_AT });
+    expect(
+      (await resumed.core.readCheckpoint(PROFILE_HASH, CHAIN_START)).kind,
+    ).toBe("finalized");
+  });
+});
+
+describe("prototype store identity", () => {
+  test("hands out copies of the values its signatures are checked against", async () => {
+    const { core } = await harness();
+    const { lease, secretKey } = await leaseFor(core);
+
+    // Everything an in-process caller can reach, corrupted.
+    core.storeId.fill(0xff);
+    core.descriptorHash.fill(0xff);
+    core.profileHash.fill(0xff);
+    core.descriptor.storeIdentityEd25519Key.fill(0xff);
+    core.routes[0].opaqueLocator.fill(0xff);
+
+    expect(hex(core.storeId)).not.toBe(hex(new Uint8Array(32).fill(0xff)));
+    expect(hex(core.profileHash)).toBe(hex(PROFILE_HASH));
+    // The lease check reads the descriptor key, so a mutated copy would have
+    // turned this append into a signature failure.
+    expect(
+      await verifiedStatus(
+        core,
+        await core.append(
+          await appendRequest(lease, secretKey, 0, objectOf(4)),
+        ),
+      ),
+    ).toBe("stored");
+  });
+});
+
+describe("prototype store persistence", () => {
+  test("stores structured copies rather than the caller's buffers", async () => {
+    const persistence = new MemoryStorePersistence();
+    const state = emptyStoreWindowState(CHAIN_START);
+    const object = objectOf(0x5c);
+    state.slots.set("0:0:0", {
+      objectHash: new Uint8Array(32).fill(1),
+      object,
+    });
+    await persistence.saveWindow(state);
+
+    // Everything the caller still holds a reference to, mutated after the save.
+    object[0] ^= 0xff;
+    state.slots.set("0:0:1", {
+      objectHash: new Uint8Array(32).fill(2),
+      object,
+    });
+
+    const loaded = await persistence.loadWindow(CHAIN_START);
+    if (loaded === null) throw new Error("expected a stored window");
+    expect(loaded.slots.size).toBe(1);
+    const slot = loaded.slots.get("0:0:0");
+    if (slot === undefined) throw new Error("expected the bound slot");
+    expect(hex(slot.object)).toBe(hex(objectOf(0x5c)));
   });
 });
 

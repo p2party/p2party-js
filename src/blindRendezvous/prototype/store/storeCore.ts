@@ -63,6 +63,7 @@ import {
   storeId as computeStoreId,
   storeRouteSignedMessage,
   validateStoreDescriptor,
+  validateStoreRoute,
 } from "../../storeDescriptor";
 import {
   carrierObjectWireBytes,
@@ -78,6 +79,7 @@ import {
   copyLease,
   copyWitnessRecord,
   emptyStoreWindowState,
+  hexOf,
 } from "./storePersistence";
 
 import type { LibCrypto } from "../../../cryptography/libcrypto";
@@ -117,15 +119,34 @@ import type {
 } from "./storePersistence";
 
 export class StoreRequestError extends Error {
-  override readonly name = "StoreRequestError";
+  // Widened to `string` (unlike the other error classes here) so
+  // `StoreConfigurationError` can narrow it to its own name.
+  override readonly name: string = "StoreRequestError";
 
   constructor(message: string) {
     super(`storeCore: ${message}`);
   }
 }
 
+/**
+ * A start-up refusal: the options this process was given contradict what it
+ * already signed, or could not produce a servable identity.
+ *
+ * It extends `StoreRequestError` so a caller that catches the family still
+ * catches it, but it is a separate name because the two are acted on
+ * differently — a request error is one client's 400, and this one means the
+ * process must not run at all.
+ */
+export class StoreConfigurationError extends StoreRequestError {
+  override readonly name = "StoreConfigurationError";
+}
+
 const fail: (message: string) => never = (message) => {
   throw new StoreRequestError(message);
+};
+
+const failConfiguration: (message: string) => never = (message) => {
+  throw new StoreConfigurationError(message);
 };
 
 export interface StoreClock {
@@ -155,11 +176,16 @@ export interface PrototypeStoreCoreOptions {
 const RANDOM_SLICE_BYTES = 65_536;
 
 /**
- * Room for a store to catch up after downtime without letting a corrupt chain
- * start turn one call into an unbounded signing loop. Nothing is skipped: the
- * next `finalizeDue` continues from the same place.
+ * How far one `finalizeDue` will catch up.
+ *
+ * Every window costs a full profile's worth of CSPRNG bodies and one signature
+ * per chunk, and none of it yields to the event loop — at the pinned profile a
+ * window is roughly 1.4 MB and five signatures. A cap of 32 keeps the worst
+ * call to tens of megabytes rather than gigabytes, and the server's 250 ms tick
+ * means a catch-up of thousands of windows still completes in seconds. Nothing
+ * is skipped: the next call resumes at the same window.
  */
-const MAX_WINDOWS_FINALIZED_PER_CALL = 4_096;
+const MAX_WINDOWS_FINALIZED_PER_CALL = 32;
 
 /** The witness array's canonical cap (`storeWitnessRecordsV1Schema`). */
 const MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
@@ -167,8 +193,13 @@ const MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
 /** A route lease is the descriptor's; a route outliving it proves nothing. */
 const PROTOTYPE_ROUTE_FAMILY = 1;
 
+/** `storeRouteV1Schema`'s `opaqueLocator` bound. */
+const MAX_ROUTE_LOCATOR_BYTES = 2_048;
+
 /** Tolerance for a descriptor signed a moment after the clock was read. */
 const DESCRIPTOR_BACKDATE_MS = 60_000n;
+
+const U64_MAX = 0xffffffffffffffffn;
 
 const textEncoder = new TextEncoder();
 
@@ -179,24 +210,34 @@ const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
   return true;
 };
 
-const hexOf = (value: Uint8Array): string =>
-  [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
 /**
  * Reject coordinates that no signed answer could carry.
  *
  * Every status this store returns names the coordinates it was asked about, so
  * a request the status body cannot encode has no signable refusal — the
- * transport's one constant 400 is the only correct answer. The canonical
- * decoders already enforce these widths on the wire; this is the guard for the
- * in-process callers that do not go through them.
+ * transport's one constant 400 is the only correct answer. These bounds are
+ * the wire widths of the coordinate fields (`bytes32`, `u64`, `u8`); the
+ * canonical decoders already enforce them on requests that arrive over HTTP,
+ * and these guards are what stop an in-process caller from reaching the
+ * encoder and getting a `CanonicalSchemaError` instead.
  */
 const requireProfileHash = (value: Uint8Array): void => {
   if (value.length !== 32) fail("a delivery profile hash must be 32 bytes");
 };
 
 const requireWindow = (window: bigint): void => {
-  if (window < 0n) fail("an ingress window must not be negative");
+  if (window < 0n || window > U64_MAX)
+    fail("an ingress window must be an unsigned 64-bit integer");
+};
+
+const requireChunkIndex = (chunkIndex: bigint): void => {
+  if (chunkIndex < 0n || chunkIndex > U64_MAX)
+    fail("a chunk index must be an unsigned 64-bit integer");
+};
+
+const requireSizeClassId = (sizeClass: number): void => {
+  if (!Number.isSafeInteger(sizeClass) || sizeClass < 0 || sizeClass > 0xff)
+    fail("a size class id must be an unsigned byte");
 };
 
 /**
@@ -267,11 +308,12 @@ interface PreparedIdentity {
 }
 
 export class PrototypeStoreCore {
-  readonly storeId: Uint8Array;
-  readonly descriptor: StoreDescriptorV1;
-  readonly descriptorHash: Uint8Array;
-  readonly routes: readonly StoreRouteV1[];
-  readonly profileHash: Uint8Array;
+  readonly #storeId: Uint8Array;
+  readonly #descriptor: StoreDescriptorV1;
+  readonly #descriptorHash: Uint8Array;
+  readonly #routes: readonly StoreRouteV1[];
+  readonly #profileHash: Uint8Array;
+  readonly #storePublicKey: Uint8Array;
 
   readonly #module: LibCrypto;
   readonly #secretKey: Uint8Array;
@@ -292,11 +334,12 @@ export class PrototypeStoreCore {
     identity: PreparedIdentity,
     objectBytesByClass: ReadonlyMap<number, number>,
   ) {
-    this.storeId = identity.storeId;
-    this.descriptor = identity.descriptor;
-    this.descriptorHash = identity.descriptorHash;
-    this.routes = identity.routes;
-    this.profileHash = identity.profileHash;
+    this.#storeId = identity.storeId;
+    this.#descriptor = identity.descriptor;
+    this.#descriptorHash = identity.descriptorHash;
+    this.#routes = identity.routes;
+    this.#profileHash = identity.profileHash;
+    this.#storePublicKey = identity.descriptor.storeIdentityEd25519Key;
 
     this.#module = options.module;
     this.#secretKey = identity.secretKey;
@@ -314,15 +357,57 @@ export class PrototypeStoreCore {
     this.#objectBytesByClass = objectBytesByClass;
   }
 
+  /* ---------------------------------------------------------------- *
+   * Public identity
+   *
+   * Getters rather than fields: these are the values every signature this
+   * store makes is checked against, and `#append` verifies leases under the
+   * descriptor's key. An in-process caller that mutated a handed-out
+   * `Uint8Array` would silently repoint that check, so each read is a copy and
+   * the originals never leave.
+   * ---------------------------------------------------------------- */
+
+  get storeId(): Uint8Array {
+    return copyBytes(this.#storeId);
+  }
+
+  get descriptor(): StoreDescriptorV1 {
+    return copyDescriptor(this.#descriptor);
+  }
+
+  get descriptorHash(): Uint8Array {
+    return copyBytes(this.#descriptorHash);
+  }
+
+  get routes(): readonly StoreRouteV1[] {
+    return this.#routes.map(copyRoute);
+  }
+
+  get profileHash(): Uint8Array {
+    return copyBytes(this.#profileHash);
+  }
+
   static async create(
     options: PrototypeStoreCoreOptions,
   ): Promise<PrototypeStoreCore> {
     if (options.seed.length !== 32)
-      fail("the store identity seed must be exactly 32 bytes");
-    if (options.chainStartIngressWindow < 0n)
-      fail("chainStartIngressWindow must not be negative");
+      failConfiguration("the store identity seed must be exactly 32 bytes");
+    if (
+      options.chainStartIngressWindow < 0n ||
+      options.chainStartIngressWindow > U64_MAX
+    )
+      failConfiguration(
+        "chainStartIngressWindow must be an unsigned 64-bit integer",
+      );
     if (options.descriptorValidityMs <= 0n)
-      fail("descriptorValidityMs must be positive");
+      failConfiguration("descriptorValidityMs must be positive");
+    const opaqueLocator = textEncoder.encode(options.origin);
+    if (opaqueLocator.length === 0)
+      failConfiguration("origin must not be empty: it is the route's locator");
+    if (opaqueLocator.length > MAX_ROUTE_LOCATOR_BYTES)
+      failConfiguration(
+        `origin must encode to at most ${String(MAX_ROUTE_LOCATOR_BYTES)} UTF-8 bytes`,
+      );
     // A profile that has not passed §4.3's inequalities cannot be served:
     // every later offset comparison in this file assumes them.
     validateDeliveryProfileGeometry(options.profile);
@@ -385,7 +470,7 @@ export class PrototypeStoreCore {
       storeId: storeIdBytes,
       descriptorHash: descriptorHashBytes,
       routeFamily: PROTOTYPE_ROUTE_FAMILY,
-      opaqueLocator: textEncoder.encode(options.origin),
+      opaqueLocator,
       routePublicParameters: new Uint8Array(0),
       notBeforeUnixMs,
       notAfterUnixMs: descriptor.notAfterUnixMs,
@@ -400,7 +485,7 @@ export class PrototypeStoreCore {
       ),
     };
 
-    // Refuse to run rather than serve a descriptor no client would accept. The
+    // Refuse to run rather than serve an identity no client would accept. The
     // reachable failure here is expiry: a chain older than descriptorValidityMs
     // needs a new generation, which needs the per-window descriptor retention
     // this prototype's persistence port does not have.
@@ -410,9 +495,49 @@ export class PrototypeStoreCore {
       options.module,
     );
     if (!validity.valid)
-      fail(
+      failConfiguration(
         `the store descriptor it just signed is invalid: ${validity.reason}`,
       );
+    // The route is checked separately because it binds values the descriptor
+    // check never sees — the locator, the family, and its own lease — and a
+    // store that published an unusable route would be reachable by nobody.
+    const routeValidity = await validateStoreRoute(
+      route,
+      descriptor,
+      nowMs,
+      options.module,
+    );
+    if (!routeValidity.valid)
+      failConfiguration(
+        `the store route it just signed is invalid: ${routeValidity.reason}`,
+      );
+
+    // Refuse to boot on options that contradict the chain already signed.
+    //
+    // A checkpoint carries both `chainStartIngressWindow` and `descriptorHash`,
+    // and neither a chunk nor a checkpoint is ever re-signed. Resuming a chain
+    // over windows 100..200 with a chain start of 300 would append checkpoints
+    // that `StructurallyValidCheckpoint` rejects forever ("checkpoint precedes
+    // the declared chain start"), and a smaller start leaves a hole no later
+    // finalization can fill. Both are unrecoverable, so the only safe answer to
+    // a mismatch is to not run.
+    const lastFinalized = await options.persistence.lastFinalizedWindow();
+    if (lastFinalized !== null) {
+      const persisted = (await options.persistence.loadWindow(lastFinalized))
+        ?.finalized?.checkpoint;
+      if (persisted === undefined)
+        failConfiguration(
+          `persistence reports window ${String(lastFinalized)} finalized but holds no checkpoint for it`,
+        );
+      if (persisted.chainStartIngressWindow !== options.chainStartIngressWindow)
+        failConfiguration(
+          `the persisted chain starts at window ${String(persisted.chainStartIngressWindow)}, not the configured ${String(options.chainStartIngressWindow)}`,
+        );
+      if (!bytesEqual(persisted.descriptorHash, descriptorHashBytes))
+        failConfiguration(
+          "the persisted chain was signed under a different descriptor than this configuration produces",
+        );
+    }
 
     // One envelope encoding per class, at start: the wire length is fixed by
     // the profile, and recomputing it per append would burn the object length
@@ -440,8 +565,8 @@ export class PrototypeStoreCore {
 
   descriptorDocument(): PrototypeStoreDescriptorDocumentV1 {
     return {
-      descriptor: copyDescriptor(this.descriptor),
-      routes: this.routes.map(copyRoute),
+      descriptor: copyDescriptor(this.#descriptor),
+      routes: this.#routes.map(copyRoute),
     };
   }
 
@@ -528,7 +653,7 @@ export class PrototypeStoreCore {
     // is the honest one: in every allocation scheme the token is bound to the
     // profile, so a request naming another profile cannot carry a token this
     // store would ever accept.
-    if (!bytesEqual(request.deliveryProfileHash, this.profileHash))
+    if (!bytesEqual(request.deliveryProfileHash, this.#profileHash))
       return status("invalid-token");
 
     const target = request.ingressWindow;
@@ -556,8 +681,8 @@ export class PrototypeStoreCore {
 
     const leaseBody: PublicAllocationLeaseBodyV1 = {
       version: 1,
-      storeId: copyBytes(this.storeId),
-      deliveryProfileHash: copyBytes(this.profileHash),
+      storeId: copyBytes(this.#storeId),
+      deliveryProfileHash: copyBytes(this.#profileHash),
       ingressWindow: target,
       requestHash,
       allocationOrdinal,
@@ -585,7 +710,7 @@ export class PrototypeStoreCore {
   ): Promise<PublicAllocationResultV1> {
     const value: PublicAllocationStatusBodyV1 = {
       version: 1,
-      storeId: copyBytes(this.storeId),
+      storeId: copyBytes(this.#storeId),
       deliveryProfileHash: copyBytes(profileHashBytes),
       ingressWindow: target,
       requestHash,
@@ -636,6 +761,7 @@ export class PrototypeStoreCore {
       fail("unsupported append request version");
     requireProfileHash(privateRequest.bucket.deliveryProfileHash);
     requireWindow(privateRequest.bucket.ingressWindow);
+    requireSizeClassId(privateRequest.bucket.sizeClass);
 
     return this.#serialize(() => this.#append(privateRequest));
   }
@@ -643,7 +769,7 @@ export class PrototypeStoreCore {
   async #append(request: PublicAppendRequestV1): Promise<PublicAppendResultV1> {
     const { bucket, exactFixedObject, admission } = request;
 
-    if (!bytesEqual(bucket.deliveryProfileHash, this.profileHash))
+    if (!bytesEqual(bucket.deliveryProfileHash, this.#profileHash))
       fail(
         "the append bucket names a delivery profile this store does not serve",
       );
@@ -668,7 +794,7 @@ export class PrototypeStoreCore {
 
     if (admission.version !== 1) fail("unsupported append admission version");
     const { storeSignature, ...leaseBody } = admission.lease;
-    if (!bytesEqual(leaseBody.storeId, this.storeId))
+    if (!bytesEqual(leaseBody.storeId, this.#storeId))
       fail("the admission lease names another store");
     if (!bytesEqual(leaseBody.deliveryProfileHash, bucket.deliveryProfileHash))
       fail("the admission lease names another delivery profile");
@@ -678,7 +804,7 @@ export class PrototypeStoreCore {
     const leaseVerified = await verify(
       await publicAllocationLeaseSignedMessage(leaseBody),
       storeSignature,
-      this.descriptor.storeIdentityEd25519Key,
+      this.#storePublicKey,
       this.#module,
     );
     if (!leaseVerified) fail("the admission lease signature does not verify");
@@ -755,8 +881,8 @@ export class PrototypeStoreCore {
   ): Promise<PublicAppendResultV1> {
     const body: PublicAppendResultBodyV1 = {
       version: 1,
-      storeId: copyBytes(this.storeId),
-      descriptorHash: copyBytes(this.descriptorHash),
+      storeId: copyBytes(this.#storeId),
+      descriptorHash: copyBytes(this.#descriptorHash),
       bucket: copyBucket(bucket),
       requestHash,
       status,
@@ -844,7 +970,7 @@ export class PrototypeStoreCore {
         const body: PublicChunkBodyV1 = {
           version: 1,
           bucket: {
-            deliveryProfileHash: copyBytes(this.profileHash),
+            deliveryProfileHash: copyBytes(this.#profileHash),
             ingressWindow: window,
             sizeClass: sizeClass.id,
           },
@@ -886,9 +1012,9 @@ export class PrototypeStoreCore {
 
     const body: PublicStoreCheckpointBodyV1 = {
       version: 1,
-      storeId: copyBytes(this.storeId),
-      descriptorHash: copyBytes(this.descriptorHash),
-      deliveryProfileHash: copyBytes(this.profileHash),
+      storeId: copyBytes(this.#storeId),
+      descriptorHash: copyBytes(this.#descriptorHash),
+      deliveryProfileHash: copyBytes(this.#profileHash),
       ingressWindow: window,
       chainStartIngressWindow: this.#chainStart,
       previousCheckpointHash,
@@ -926,7 +1052,7 @@ export class PrototypeStoreCore {
 
     // A profile this store never served has no chain at all, which is a
     // different answer from "that window of my chain is not final yet".
-    if (!bytesEqual(requested, this.profileHash))
+    if (!bytesEqual(requested, this.#profileHash))
       return status("chain-unavailable");
     if (window < this.#chainStart) return status("out-of-range");
 
@@ -934,7 +1060,7 @@ export class PrototypeStoreCore {
     if (state?.finalized == null) return status("not-final");
     return {
       kind: "finalized",
-      descriptor: copyDescriptor(this.descriptor),
+      descriptor: copyDescriptor(this.#descriptor),
       checkpoint: copyCheckpoint(state.finalized.checkpoint),
     };
   }
@@ -946,7 +1072,7 @@ export class PrototypeStoreCore {
   ): Promise<PublicStoreCheckpointReadV1> {
     const value = {
       version: 1 as const,
-      storeId: copyBytes(this.storeId),
+      storeId: copyBytes(this.#storeId),
       deliveryProfileHash: deliveryProfileHashBytes,
       ingressWindow: window,
       status,
@@ -969,7 +1095,8 @@ export class PrototypeStoreCore {
     const requested = copyBucket(bucket);
     requireProfileHash(requested.deliveryProfileHash);
     requireWindow(requested.ingressWindow);
-    if (chunkIndex < 0n) fail("a chunk index must not be negative");
+    requireSizeClassId(requested.sizeClass);
+    requireChunkIndex(chunkIndex);
     const status = (
       kind: PublicChunkStatusKindV1,
     ): Promise<PublicChunkReadV1> =>
@@ -979,7 +1106,7 @@ export class PrototypeStoreCore {
     // unknown class and an index past the profile's count all answer with the
     // one out-of-range shape: none of them names a chunk this store can ever
     // hold, and the reader learns nothing extra from which of the three it was.
-    if (!bytesEqual(requested.deliveryProfileHash, this.profileHash))
+    if (!bytesEqual(requested.deliveryProfileHash, this.#profileHash))
       return status("out-of-range");
     const sizeClass = this.#profile.sizeClasses.find(
       (candidate) => candidate.id === requested.sizeClass,

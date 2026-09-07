@@ -195,7 +195,8 @@ export const copyStoreWindowState = (
  * In-memory implementation
  * ------------------------------------------------------------------ */
 
-const hexOf = (value: Uint8Array): string =>
+/** Shared with `storeCore.ts`, which keys its witness dedup the same way. */
+export const hexOf = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**

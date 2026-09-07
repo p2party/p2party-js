@@ -12,6 +12,7 @@
 //   window.__blind.audit()            // the room secrets the wire log must not hold
 //   window.__blind.topology()         // "multi-store-union" | ... , as observed
 //   window.__blind.faults()           // store faults, JSON-safe
+//   window.__blind.counters()         // carrier counters (appends, scans, backfills)
 //   window.__blind.events()           // every event so far, if the driver missed some
 //   window.__blind.stop()
 //
@@ -19,6 +20,7 @@
 // one; the page still works standalone when it did not.
 import { runBlindRendezvousPrototype } from "../../../src/blindRendezvous/prototype";
 
+import type { CarrierCounters } from "../../../src/blindRendezvous/prototype/carrierRuntime";
 import type {
   PrototypeRun,
   PrototypeRunAudit,
@@ -151,6 +153,15 @@ const faults = (): readonly BlindFaultJson[] =>
       detail: fault.detail,
     }));
 
+/**
+ * The carrier runtime's own counters, so a scenario can assert on replication
+ * rather than on a log line. `unreachable-b-for-one` needs `backfills`: it is
+ * the only observable that says the page which reached both stores really did
+ * carry the other page's operations to the store the other page never saw.
+ * Every field is a plain `number`, so this crosses the Playwright bridge as is.
+ */
+const counters = (): CarrierCounters => activeRun().runtime.counters;
+
 const stop = (): { stopped: true } => {
   active?.stop();
   return { stopped: true };
@@ -165,6 +176,7 @@ declare global {
       audit: () => PrototypeRunAudit;
       topology: () => string;
       faults: () => readonly BlindFaultJson[];
+      counters: () => CarrierCounters;
       events: () => readonly PrototypeRunEvent[];
       stop: () => { stopped: true };
     };
@@ -180,6 +192,7 @@ window.__blind = {
   audit,
   topology,
   faults,
+  counters,
   events: () => events,
   stop,
 };

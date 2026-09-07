@@ -79,6 +79,24 @@ afterAll(() => {
   rmSync(logRoot, { recursive: true, force: true });
 });
 
+/**
+ * A message with the shape of a real storage failure: a path, and a word the
+ * refusal vocabulary also uses. Neither may appear in the response or the log.
+ */
+const EXPLOSION_DETAIL =
+  "sqlite: disk image is malformed at /var/secret/p2party-store.sqlite";
+
+/**
+ * Reads fail the way a corrupt file does — with a plain `Error`, not a
+ * `StoreRequestError` and not a `CanonicalSchemaError`. That is the only way
+ * to reach the handler's last-resort branch.
+ */
+class ExplodingStorePersistence extends MemoryStorePersistence {
+  override async loadWindow(): Promise<never> {
+    throw new Error(EXPLOSION_DETAIL);
+  }
+}
+
 interface Harness {
   readonly core: PrototypeStoreCore;
   readonly base: string;
@@ -562,6 +580,55 @@ describe("prototype store HTTP handler", () => {
         window: String(CHAIN_START),
       });
     });
+  });
+
+  test("answers one constant 500 when the failure is not a parse failure", async () => {
+    const core = await PrototypeStoreCore.create({
+      module: cryptoModule,
+      seed: SEED,
+      profile,
+      clock: { nowMs: () => WINDOW_START },
+      persistence: new ExplodingStorePersistence(),
+      chainStartIngressWindow: CHAIN_START,
+      origin: "http://127.0.0.1:5910",
+      descriptorValidityMs: 2_592_000_000n,
+    });
+    const server = Bun.serve({
+      port: 0,
+      fetch: createPrototypeStoreHandler({ core }),
+    });
+
+    // Captured rather than silenced: the log line is half of what is under
+    // test, and letting it through would also dirty the suite's output.
+    const logged: string[] = [];
+    const realConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map((arg) => String(arg)).join(" "));
+    };
+
+    try {
+      const response = await fetch(
+        `${server.url.origin}${PROTOTYPE_STORE_ROUTES.checkpoint}/${PROFILE_HEX}/${String(CHAIN_START)}`,
+      );
+      expect(response.status).toBe(500);
+      // Not "malformed": telling a client its encoder is wrong when the store's
+      // own disk failed sends it hunting for a bug it does not have.
+      expect(await response.text()).toBe("error");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expectStoreHeader(response);
+    } finally {
+      console.error = realConsoleError;
+      void server.stop(true);
+    }
+
+    // Nothing about the failure reaches the client, and the log carries the
+    // error's name and the route class but never its message — a message can
+    // quote the bytes the store was handling.
+    expect(logged.length).toBe(1);
+    expect(logged[0]).toContain("Error");
+    expect(logged[0]).toContain("checkpoint");
+    expect(logged[0]).not.toContain(EXPLOSION_DETAIL);
+    expect(logged[0]).not.toContain("secret");
   });
 
   test("writes one hex line per POST only under the harness log path", async () => {

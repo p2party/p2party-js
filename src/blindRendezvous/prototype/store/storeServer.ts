@@ -206,11 +206,6 @@ const chainStartIngressWindow =
       ? BigInt(configuredChainStart)
       : ingressWindow(profile.deliveryWindowMs, BigInt(Date.now()));
 
-// Persisted before the first signature, so a crash during startup cannot leave
-// a signed chain whose anchor was never written down.
-persistence.saveMeta(META_CHAIN_START, String(chainStartIngressWindow));
-persistence.saveMeta(META_PROFILE_HASH, profileHashHex);
-
 const module = (await wasmLoader(
   new WebAssembly.Memory({
     initial: STORE_WASM_PAGES,
@@ -241,6 +236,18 @@ const core = await PrototypeStoreCore.create({
     }`,
   ),
 );
+
+// Anchored only now, and only because `create` succeeded.
+//
+// `create` writes nothing to persistence — it reads the last finalized window
+// and refuses rather than sign when the configuration contradicts it — so
+// there is no window in which a signature could exist without its anchor.
+// Committing the anchor first would durably record a chain start that was
+// never used: every later launch would then either refuse to move it ("cannot
+// move it") or reproduce the same failure forever, and the only way out would
+// be deleting a database that holds nothing.
+persistence.saveMeta(META_CHAIN_START, String(chainStartIngressWindow));
+persistence.saveMeta(META_PROFILE_HASH, profileHashHex);
 
 // A window closes on the clock, so the finalizer only has to catch up to it;
 // running far more often than the shortest window keeps the gap between "the
@@ -299,8 +306,11 @@ console.warn(
 
 let stopping = false;
 const shutdown = (signal: string): void => {
-  // A second Ctrl-C while the first stop is draining must not close the
-  // database out from under the requests still finishing.
+  // `stop(true)` terminates in-flight requests rather than draining them: a
+  // keep-alive connection would otherwise hold the process open, and a request
+  // cut short loses only its response — every write it made was committed
+  // (`synchronous = FULL`) before the answer was built. The guard is for a
+  // second Ctrl-C, which would otherwise close the database twice.
   if (stopping) return;
   stopping = true;
   clearInterval(finalizeTimer);

@@ -19,10 +19,13 @@
  *      derived from the driver, never guessed here.
  *   2. THE DTLS CHECK GATES THE SESSION. `verifyCertificates` runs after the
  *      connection reports `connected` and before `createSession`, against the
- *      fingerprints the pair transcript bound. A throw ends the run: a
- *      tripwire that cannot confirm must abort (`"unsupported"` — an engine
- *      with no certificate stats — is reported and allowed, exactly as
- *      `webrtcProvider.ts` documents).
+ *      fingerprints the pair transcript bound. A throw ends the run — not just
+ *      the session: the endpoint is stopped, so the peer connection closes and
+ *      the carrier schedule is disarmed against every store, and a
+ *      `run-stopped` event says so. A tripwire that cannot confirm must abort,
+ *      and an aborted edge must not leave a connection and a publisher behind
+ *      it. (`"unsupported"` — an engine with no certificate stats — is reported
+ *      and allowed, exactly as `webrtcProvider.ts` documents.)
  *   3. NOTHING HERE IS NODE. This module is bundled for the browser with
  *      `bun build --target=browser`, so it may not import `node:*`, the Redux
  *      layer, or anything under `prototype/store/` (which reaches for
@@ -201,45 +204,80 @@ const withTimeout = async <T>(
   }
 };
 
-const waitChannelOpen = (channel: RTCDataChannel): Promise<void> =>
+/**
+ * Both waits below own their own deadline rather than being wrapped in
+ * `withTimeout`. Wrapping settles the caller but leaves the listener and the
+ * timer attached to a `RTCDataChannel` or `RTCPeerConnection` that outlives
+ * them, so the timeout path has to be the one that unsubscribes.
+ */
+const waitChannelOpen = (
+  channel: RTCDataChannel,
+  timeoutMs: number,
+): Promise<void> =>
   channel.readyState === "open"
     ? Promise.resolve()
     : new Promise<void>((resolve, reject) => {
-        channel.addEventListener("open", () => resolve(), { once: true });
-        channel.addEventListener(
-          "close",
+        // `settle` closes over `timer`, `onOpen` and `onClose`, all declared
+        // below; nothing can call it before the executor finishes initializing
+        // them, because the listeners and the timer are all attached after.
+        const settle = (error?: PrototypeRunError): void => {
+          clearTimeout(timer);
+          channel.removeEventListener("open", onOpen);
+          channel.removeEventListener("close", onClose);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onOpen = (): void => settle();
+        const onClose = (): void =>
+          settle(
+            new PrototypeRunError(
+              "the bootstrap data channel closed before it opened",
+            ),
+          );
+        const timer = setTimeout(
           () =>
-            reject(
+            settle(
               new PrototypeRunError(
-                "the bootstrap data channel closed before it opened",
+                `the bootstrap data channel did not open within ${String(timeoutMs)}ms`,
               ),
             ),
-          { once: true },
+          timeoutMs,
         );
+        channel.addEventListener("open", onOpen);
+        channel.addEventListener("close", onClose);
+        if (channel.readyState === "open") settle();
       });
 
-const waitConnected = (peerConnection: RTCPeerConnection): Promise<void> =>
+const waitConnected = (
+  peerConnection: RTCPeerConnection,
+  timeoutMs: number,
+): Promise<void> =>
   peerConnection.connectionState === "connected"
     ? Promise.resolve()
     : new Promise<void>((resolve, reject) => {
+        const settle = (error?: PrototypeRunError): void => {
+          clearTimeout(timer);
+          peerConnection.removeEventListener("connectionstatechange", onChange);
+          if (error) reject(error);
+          else resolve();
+        };
         const onChange = (): void => {
           const state = peerConnection.connectionState;
-          if (state === "connected") {
-            peerConnection.removeEventListener(
-              "connectionstatechange",
-              onChange,
-            );
-            resolve();
-          } else if (state === "failed" || state === "closed") {
-            peerConnection.removeEventListener(
-              "connectionstatechange",
-              onChange,
-            );
-            reject(
+          if (state === "connected") settle();
+          else if (state === "failed" || state === "closed")
+            settle(
               new PrototypeRunError(`the peer connection went to "${state}"`),
             );
-          }
         };
+        const timer = setTimeout(
+          () =>
+            settle(
+              new PrototypeRunError(
+                `the peer connection did not connect within ${String(timeoutMs)}ms`,
+              ),
+            ),
+          timeoutMs,
+        );
         peerConnection.addEventListener("connectionstatechange", onChange);
         onChange();
       });
@@ -289,8 +327,12 @@ class LazyWebRtcTransport implements TransportCandidateProvider {
   }
 
   #open(role: "initiator" | "responder"): WebRtcCandidateProvider {
-    if (this.#provider !== null) return this.#provider;
+    // The closed check precedes the memo: after `close()` the memoized provider
+    // is a closed `RTCPeerConnection`, and handing it back would turn a stopped
+    // run into a confusing failure inside the provider instead of a clear one
+    // here.
     if (this.#closed) fail("the run was stopped before WebRTC was needed");
+    if (this.#provider !== null) return this.#provider;
     const provider = new WebRtcCandidateProvider({
       rtcConfig: this.rtcConfig,
       role,
@@ -411,13 +453,34 @@ class BlindRendezvousRun implements PrototypeRun {
   waitForPhase(phase: PairDriverPhase, timeoutMs: number): Promise<void> {
     if (this.#reached.has(phase)) return Promise.resolve();
     if (this.#failure !== null) return Promise.reject(this.#failure);
-    return withTimeout(
-      new Promise<void>((resolve, reject) => {
-        this.#phaseWaiters.push({ phase, resolve, reject });
-      }),
-      timeoutMs,
-      `phase "${phase}"`,
-    );
+    // Not `withTimeout`: that settles the caller but leaves the waiter on the
+    // list forever, and a long-lived run that polls for a phase it will never
+    // reach would then accumulate one dead waiter per call.
+    return new Promise<void>((resolve, reject) => {
+      // `waiter` closes over `timer` and the timer's callback over `waiter`;
+      // neither runs before both are initialized, because the waiter is only
+      // published to `#phaseWaiters` after the timer exists.
+      const waiter: PhaseWaiter = {
+        phase,
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.#dropWaiter(waiter);
+        reject(
+          new PrototypeRunError(
+            `phase "${phase}" did not arrive within ${String(timeoutMs)}ms`,
+          ),
+        );
+      }, timeoutMs);
+      this.#phaseWaiters.push(waiter);
+    });
   }
 
   /**
@@ -428,6 +491,13 @@ class BlindRendezvousRun implements PrototypeRun {
    * exactly `frameCount` messages, one uniform protocol-v4 chunk frame each.
    * The root is carried because `decrypt` authenticates it as additional data
    * and the frames alone do not contain it.
+   *
+   * NOT SERIALIZED. The framing is positional, so two overlapping calls would
+   * interleave one message's header with another's frames on the single app
+   * lane and both decrypts on the peer would fail. A caller that sends more
+   * than one message must await each before starting the next — which is what
+   * the prototype's harness does, and why this is documented rather than
+   * locked.
    */
   async sendMessage(bytes: Uint8Array): Promise<void> {
     const established = await this.#requireSession();
@@ -523,11 +593,19 @@ class BlindRendezvousRun implements PrototypeRun {
   /**
    * Idempotent teardown of the session, the WebRTC provider and the schedule.
    *
+   * After this the endpoint is inert: the peer connection is closed and the
+   * carrier schedule is disarmed, so nothing further is published to any store.
+   * It emits `run-stopped` so an observer can tell an endpoint that went quiet
+   * from one that is merely between windows.
+   *
    * The driver's own secrets are deliberately NOT wiped here: `auditSecrets`
    * is the harness's proof obligation and has to stay answerable after a run
    * has been stopped. Call `driver.destroy()` once the audit is done.
+   *
+   * `detail` is the internal teardown reason (a tripped DTLS gate, a failed
+   * handshake); a caller stopping its own run leaves it out.
    */
-  stop(): void {
+  stop(detail?: string): void {
     if (this.#stopped) return;
     this.#stopped = true;
 
@@ -543,6 +621,12 @@ class BlindRendezvousRun implements PrototypeRun {
     this.#closeGate?.(stopped);
     const waiters = this.#phaseWaiters.splice(0);
     for (const waiter of waiters) waiter.reject(stopped);
+    this.#emit("run-stopped", detail);
+  }
+
+  #dropWaiter(waiter: PhaseWaiter): void {
+    const index = this.#phaseWaiters.indexOf(waiter);
+    if (index >= 0) this.#phaseWaiters.splice(index, 1);
   }
 
   #requireSession(): Promise<EstablishedSession> {
@@ -558,16 +642,26 @@ class BlindRendezvousRun implements PrototypeRun {
       );
       this.#emit("session-failed", missing.message);
       this.#closeGate?.(missing);
+      this.stop(missing.message);
       return;
     }
     const started = this.#establishSession(handoff);
     // The gate adopts it, so everything already waiting to speak resolves with
-    // this session; the `catch` reports a failure once and marks the rejection
-    // handled, so it is one event rather than an unhandled rejection too.
+    // this session; the `catch` reports the failure once and marks the
+    // rejection handled, so it is one event rather than an unhandled rejection
+    // too.
     this.#sessionPromise = started;
     this.#openGate?.(started);
     void started.catch((error: unknown) => {
-      this.#emit("session-failed", detailOf(error));
+      const detail = detailOf(error);
+      this.#emit("session-failed", detail);
+      // A handoff that did not become a session is a dead edge, and this
+      // prototype's driver does not retry one. Leaving it up would hold an
+      // `RTCPeerConnection` open and keep publishing to both stores on a fixed
+      // schedule for a room that has nowhere left to go, so the whole endpoint
+      // comes down with it — which is what the DTLS tripwire above means when
+      // it says a mismatch ends the run.
+      this.stop(`session could not be established: ${detail}`);
     });
   }
 
@@ -581,22 +675,17 @@ class BlindRendezvousRun implements PrototypeRun {
       CHANNEL_TIMEOUT_MS,
       "bootstrap data channel",
     );
-    await withTimeout(
-      waitChannelOpen(channel),
-      CHANNEL_TIMEOUT_MS,
-      "bootstrap data channel open",
-    );
-    await withTimeout(
-      waitConnected(provider.peerConnection),
-      CONNECTED_TIMEOUT_MS,
-      "peer connection",
-    );
+    await waitChannelOpen(channel, CHANNEL_TIMEOUT_MS);
+    await waitConnected(provider.peerConnection, CONNECTED_TIMEOUT_MS);
     this.#emit("webrtc-connected", provider.role);
 
-    // The tripwire runs before the handshake and a throw ends the run: the
-    // fingerprints below are the ones the pair transcript signed, so a live
-    // certificate that disagrees means the SDP was rewritten after both peers
-    // authenticated it.
+    // The tripwire runs before the handshake, and a throw here ends the run:
+    // `#startSession` stops the endpoint on any rejection from this method, so
+    // the peer connection is closed and the schedule disarmed. The fingerprints
+    // below are the ones the pair transcript signed, so a live certificate that
+    // disagrees means the SDP was rewritten after both peers authenticated it.
+    // Note the ordering: `dataChannelTransport` is constructed only after the
+    // verdict, so a tripped gate has no lane for application bytes at all.
     const verdict = await provider.verifyCertificates(
       handoff.localFingerprint,
       handoff.remoteFingerprint,
@@ -802,7 +891,7 @@ export const runBlindRendezvousPrototype = async (
   } catch (error) {
     // A caller that never got a run cannot stop one, and an armed schedule
     // with nobody holding it would keep talking to both stores forever.
-    run.stop();
+    run.stop(`the local presence could not be published: ${detailOf(error)}`);
     throw error;
   }
   return run;

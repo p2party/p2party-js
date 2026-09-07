@@ -166,7 +166,7 @@ which excludes source anonymity and traffic patterns by definition):
 What no sweep found published together — and therefore the only thing this
 work may present as novel — is the *composition*: a capability-authenticated
 Byzantine grow-only set, fixed-scan reads, mutual transparency-log-style
-witnessing treated as evidence rather than validity, decorrelated replicated
+witnessing treated as evidence rather than validity, replicated
 writes, and browser-side cost measurements. That is a systems contribution
 for a flagged prototype, not a cryptographic result.
 

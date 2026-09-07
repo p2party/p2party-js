@@ -40,7 +40,7 @@ alongside the prototype directory below.
 
 ### `src/blindRendezvous/prototype/` — the flagged prototype (2026-09-08)
 
-Fifteen further modules, 10,411 lines, added on the branch
+Fifteen further modules, 10,412 lines, added on the branch
 `feat/blind-two-store-prototype`. **The directory boundary is the flag.**
 Nothing here is exported from `src/index.ts`, nothing outside the directory
 imports it, and the store process refuses to start without two environment

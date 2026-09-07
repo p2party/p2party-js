@@ -34,9 +34,12 @@ makes it interesting is also what makes it easy to overstate.
 defines a vocabulary of privacy tiers, threat models and release gates. None of
 its names are claimed here. They are named below only so that nobody has to
 guess whether an omission is an oversight, and only as the things this work does
-**not** earn: not the spec's single-store privacy baseline `S1`, not `R2-BEC`, not
-`SP1`, not its `L2` or `L3` control-compatibility statements, not "anonymous",
-not "censorship-resistant", not Byzantine fault tolerance, and not
+**not** earn: not `S1`, which the spec defines as its *single-carrier safety
+baseline* and which explicitly excludes availability, global completeness,
+traffic-source anonymity and omission tolerance; not `R2-BEC`; not `SP1`, the
+spec's *bounded measured public-store source unlinkability* package; not its
+`L2` or `L3` control-compatibility statements; not "anonymous"; not
+"censorship-resistant"; not Byzantine fault tolerance; and not
 `conformant`. It is likewise not the `v0.4` release surface: the specification
 says implementations "shall not independently invent release bytes and call
 them v0.4", so every route path and every media type in this prototype says
@@ -54,10 +57,17 @@ There is therefore no abuse control of any kind, and no Sybil or fairness claim
 follows from anything in the prototype.
 
 **Two stores buy availability, not privacy.** Either store may fail or withhold
-and the rendezvous still completes; that is what the scenarios show. Both stores
-see the same source address at the same instants, so two stores colluding learn
-nothing that one store did not already have. Adding the second store does not
-move any privacy statement.
+and the rendezvous still completes; that is what the scenarios show. Adding the
+second store moves no privacy statement in the other direction either — but which
+observer is meant matters, and the rest of this document is careful about it.
+*For the two stores themselves*, collusion gains nothing: both already see the
+same source address at the same instants, so the join they could perform on
+timing is redundant with the join they can already perform on the address. *For a
+network observer who holds both stores' request logs but not their clients'
+addresses*, it is not redundant at all — replicating one operation to two stores
+milliseconds apart is exactly what lets such an observer link the two logs, and
+§7 calls that the worst residual leak and reports it as unmitigated and measured.
+The two sentences are about different observers and neither dismisses the other.
 
 **Two store processes on one laptop are one fault domain.** They share a kernel,
 a disk, a clock, a power supply and an operator. Nothing in any recorded run is
@@ -114,7 +124,8 @@ One `--scenario=healthy` run, end to end:
    a `PRESENCE` operation to both stores; each discovers the other through
    either store; and the pair then completes `IDENTITY_HELLO` →
    `IDENTITY_ACCEPT` → `TRANSPORT_OFFER` → `TRANSPORT_ANSWER` as pair-sealed
-   operations that the stores carry without being able to open them.
+   operations the stores carry blind — the harness's own wording, and an
+   observation about the run rather than a claim about the AEAD.
 5. **A real WebRTC edge opens** from the exchanged SDP — complete ICE gathering,
    both connections reaching `connected`, over loopback host candidates.
 6. **DTLS is verified on both sides.** `verifyCertificates` compares the SHA-256
@@ -130,14 +141,15 @@ One `--scenario=healthy` run, end to end:
    of what arrived against the UTF-8 of what was sent.
 
 Nothing in that list is stubbed. The stores are real processes, the browsers are
-real browsers, the crypto is the shipped WASM module, and the session is the
-same one the released SDK uses.
+real browsers, the crypto is the development build of the shipped WASM module
+(§8 says why it must be that build and not the production one), and the session
+is the same one the released SDK uses.
 
 ---
 
 ## 3. How it is assembled
 
-Fifteen modules under `src/blindRendezvous/prototype/` (10,411 lines), with nine
+Fifteen modules under `src/blindRendezvous/prototype/` (10,412 lines), with nine
 test files behind them, built on top of the thirty-two release-candidate modules
 that already existed in `src/blindRendezvous/`.
 
@@ -151,7 +163,7 @@ that already existed in `src/blindRendezvous/`.
 | `store/storeHttp.ts` | The `Bun.serve` handler, the constant-shaped refusals, CORS for a cross-origin page, and the optional body log. |
 | `store/storeServer.ts` | The entrypoint and its two mandatory gate flags; the chain start is chosen once and then persisted. |
 | `storeClient.ts` | The browser-side adapter: descriptor validation, signature verification on every answer, checkpoint-root recomputation, chain verdicts, custody-breach detection, and the fault taxonomy. |
-| `carrierRuntime.ts` | The fixed schedule, one per store: token, allocation, appends at the profile's offsets, and the union read — real work and cover indistinguishable by construction. |
+| `carrierRuntime.ts` | The fixed schedule, one per store: token, allocation, appends at the profile's offsets, and the union read — real work and cover byte-shaped and latency-matched by construction. |
 | `pairDriver.ts` | Presence, HELLO/ACCEPT, OFFER/ANSWER, the pair ledger, the established root, and the handoff facts. |
 | `workKinds.ts`, `transportCandidates.ts` | The service-role classifier, and the strict SDP validator and candidate ordering. |
 | `webrtcProvider.ts` | The browser transport: complete-gathering offer/answer, the bootstrap data channel created before the offer, and `verifyCertificates` over `getStats()`. |
@@ -160,7 +172,7 @@ that already existed in `src/blindRendezvous/`.
 Three properties of the runtime are worth naming, because they are the ones an
 edit could quietly remove.
 
-**A real object and cover are the same bytes at the same instant.** Every
+**A real object and cover are the same size at the same instant.** Every
 scheduled append happens whether or not the outbox has anything to send. Cover
 is sealed through the same HKDF and AEAD path as a real object, over a fresh
 throwaway root that is wiped afterwards, so it is byte-shaped like a real object
@@ -217,13 +229,15 @@ Three things are worth reading off that run.
 
 **`kill-a` produced 264 fault records, all of kind `unreachable`, and zero of
 kind `signature-invalid`** (131 on page A, 133 on page B, all naming store A).
-That distinction is load-bearing and was a defect until recently: the client
-used to file a killed store's `ERR_CONNECTION_REFUSED` under the same kind as a
-store caught signing a lie, which meant a report built from the fault list would
-have read 269 accusations against a store that was simply switched off. A store
-that did not answer now files as `unreachable`; `signature-invalid` is reserved
-for an answer that arrived, decoded, carried a signature and failed to verify.
-Neither kind marks a store inert.
+That distinction is load-bearing, and it was a defect until `f1f5aa4`: before
+that commit the client filed a killed store's `ERR_CONNECTION_REFUSED` under the
+same kind as a store caught signing a lie, and a pre-`f1f5aa4` run of this same
+scenario produced 269 records that a report built from the fault list would have
+read as accusations against a store that was simply switched off. The 264 above
+are from a run after the fix and are a different run, not the same number
+recounted. A store that did not answer now files as `unreachable`;
+`signature-invalid` is reserved for an answer that arrived, decoded, carried a
+signature and failed to verify. Neither kind marks a store inert.
 
 **`withhold-a` shows the detection latency of the custody check: one delivery
 window.** Both pages reported `multi-store-union` at 3.8 s and dropped to
@@ -278,7 +292,7 @@ needles per run**: 14 secrets at 11 encodings each, less the 6 alignment
 variants of the 5-byte `v=0\r\n` marker whose stable cores fall below the
 8-character floor.
 
-Four things keep the result from being theatre:
+Five things keep the result from being theatre:
 
 - **A missing or empty log fails the scenario**, and so does a log with zero
   parsed bodies. A clean audit over nothing is not a clean audit.
@@ -290,6 +304,13 @@ Four things keep the result from being theatre:
   bytes `run.mjs` itself generated, so the needle is known to be the real secret
   rather than whatever the page felt like returning. A secret shorter than 32
   bytes, or an SDP under 64 bytes, is refused rather than quietly dropped.
+- **Short needles are refused, not searched.** `v=0` alone is three bytes and
+  turns up by chance roughly once per 16 MB of ciphertext, against logs of
+  6-8 MB. It is searched as `v=0\r\n`, which is what Chromium emits, and
+  anything under four bytes is dropped from the needle set rather than counted
+  as "not found". The same discipline is what subtracts six needles from the
+  count above: an 8-character floor on a base64 alignment core removes the six
+  alignment variants of that same 5-byte marker.
 - **The needle count is asserted, not printed.** A run that builds anything other
   than 148 needles fails, so an edit that drops a secret or an encoding cannot
   shrink the search and still report a clean audit.
@@ -388,11 +409,13 @@ window cannot append at all, while a 1,000 ms window at cohort 2 completes in
 **The knob that buys the latency is the one that sizes the shared bucket.**
 `cohortAllocationsPerWindow` is, by definition, how many allocations a store may
 hand out per window in one bucket, and the fixed scan is large precisely because
-it is that whole bucket. Moving it from 8 to 2 measured a 2.1× smaller scan and a
-3.8× faster rendezvous, and by definition also divides by four the number of
-allocations that share the bucket. **Those three ratios are three different
-quantities, not one.** What the change means for what a store can tell apart is
-**not** measured by any run here and is not claimed. The table is a cost
+it is that whole bucket. Moving it from 8 to 2 measured a 2.1× smaller scan and,
+at the same 4,000 ms window, a 1.7× faster rendezvous — 3.8× only if the shorter
+window that the smaller cohort makes possible is taken as well, which is a
+two-knob change and not a cohort effect. And by definition it also divides by
+four the number of allocations that share the bucket. **Those ratios are
+different quantities, not one.** What the change means for what a store can tell
+apart is **not** measured by any run here and is not claimed. The table is a cost
 measurement, not a recommendation: the pinned profile is 8, and moving it is a
 change to how much unrelated traffic a client's objects sit among.
 
@@ -413,6 +436,10 @@ this is the summary an outside reader needs, with the worst one in full.
 
 Writing the same operation to both stores milliseconds apart lets anyone who sees
 both request logs join them into one client, with no identifiers involved at all.
+The observer that matters here is one holding both logs but not the source
+addresses — for the stores themselves this join is redundant with the addresses
+they already have, which is the sense in which §1 says colluding stores gain
+nothing.
 
 **The runtime schedules both stores at the profile's offsets, and the measured
 separation between the two stores' writes of one operation is 0 ms — minimum,
@@ -427,7 +454,7 @@ than shipped**, because the profile has no room for one that would help:
 | | ms |
 | --- | ---: |
 | earliest a store's schedule may be shifted | −100 (the token offset reaches zero) |
-| latest | +499 (finalization at 2800, less 200 ms permitted skew, less the last append at 2100) |
+| latest | +499 (finalization at 2800, less 200 ms permitted skew, less the last append at 2100, less one — that inequality is strict, so 500 itself fails validation) |
 | widest separation of two stores | 599 |
 | delivery window | 4000 |
 | window boundaries a maximally delayed write crosses | 0 |
@@ -452,7 +479,7 @@ conforming drift — which is the very set a fixed schedule exists to create.
 **What would actually work needs no new geometry.** Hold the second store's copy
 of an operation for a whole number of windows drawn from a wide distribution, and
 let that store's slot carry cover meanwhile. Nothing changes on the wire, because
-a real object and cover are already the same bytes at the same instant, and the
+a real object and cover are already the same size at the same instant, and the
 schedule stays exactly fixed. The price is k windows (k × 4000 ms) of replication
 latency and a correspondingly longer stretch in which one store is the only
 carrier of that operation. That is a latency and fault-tolerance decision for the
@@ -618,9 +645,13 @@ could be mistaken for implemented.
   but any non-empty route sequence fails closed because the content-addressed
   route-family registry and its parsers do not exist. Store origins reach the
   prototype as run options.
-- **The spec's server-privacy profile**, which its own vocabulary calls `SP1` —
-  the tier that would hide source addresses. Both stores see every client IP on
-  every request today, and nothing here changes that.
+- **The spec's server-privacy profile**, which its own vocabulary calls `SP1`
+  and defines as *bounded measured public-store source unlinkability* — bounded,
+  measured, and scoped to one exact interval, profile, route set, corruption
+  model and cohort floor. The spec's own list of misreadings names "treating
+  `SP1` as protection against a global observer", so even where it exists it is
+  not the blanket the name suggests. Both stores see every client IP on every
+  request today, and nothing here changes that.
 - **Retention and garbage collection.** Windows accumulate; nothing expires.
 - **The frontend.** `p2party.com` vendors the SDK as a hash-verified tarball, and
   the blind modules are deliberately absent from the barrel. Reaching this from a

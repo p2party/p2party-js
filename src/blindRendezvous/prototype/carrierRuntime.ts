@@ -27,6 +27,12 @@
  *   either an opaque fixed-length object or public geometry. The room root,
  *   the operations, and the private `OperationId` union all stay here.
  *
+ * And one it is responsible for NOT doing: every store is scheduled at the
+ * same offsets, so the two stores' copies of one operation leave in the same
+ * millisecond (design doc §3a item 1, the prototype's worst disclosed leak).
+ * `#eventsForWindow` carries the measured reason a per-store phase offset was
+ * rejected rather than added.
+ *
  * Browser-safe by construction: like `storeClient.ts` it imports no `store/`
  * module (those reach for `node:fs` and `bun:sqlite`) and nothing Node-only.
  * It owns no wall clock either — the clock and the timer pair are injected, so
@@ -542,6 +548,49 @@ export class CarrierRuntime {
   /**
    * Every event of one window, in the design's
    * `(time, kindByte, class, slot, entry)` order.
+   *
+   * Every store gets the same offsets, which is the design's §3a item 1 leak:
+   * a party who sees both stores' request logs pairs their two copies of one
+   * operation by arrival time alone, with no identifiers involved. This is the
+   * one item on that list this scheduler could in principle fix, and it
+   * deliberately does not. The band was measured against the pinned profile —
+   * `carrierRuntime.test.ts`, "bounds the per-store phase offset this
+   * profile's geometry could pay for" — and it does not buy anything:
+   *
+   * - **It is too narrow to matter.** Moving a store's whole ingress schedule
+   *   earlier stops at 100 ms (the token offset reaches zero) and later at
+   *   499 ms (`chunkFinalizationOffsetMs` 2800, less `maxScheduleSkewMs` 200,
+   *   less the last append at 2100), so two stores can be separated by at most
+   *   599 ms of a 4000 ms window. No write crosses a window boundary, and an
+   *   observer joining two logs partitions them by window before anything
+   *   else, so the candidate set is identical with the offset and without it.
+   *   The literature's mitigation is a delay drawn WIDE against the epoch;
+   *   this geometry has nothing that wide to give.
+   * - **A phase derived from `carrierContextId` is public.** It is
+   *   `H(StoreId || DeliveryProfileHash)`: every client of a store shares it,
+   *   and anyone holding that store's published descriptor recomputes it. That
+   *   is not decorrelation, it is each store running the same grid under a
+   *   different name, and an observer subtracts one known constant.
+   * - **A per-client phase would be worse.** It breaks the translation, but it
+   *   is stable across windows by construction, so it is a timing fingerprint
+   *   each store alone can use to link one client's windows to each other, and
+   *   it puts that client outside the `maxScheduleSkewMs` band the profile
+   *   defines as conforming drift. The anonymity set of a fixed schedule is
+   *   everyone on the grid.
+   * - **A fresh phase per window per store** spreads no wider — it is the same
+   *   599 ms — and costs the fixed schedule itself: this client's own trace
+   *   would stop being the same every window, which is the property §4.5 and
+   *   the first bullet of this file's header exist to keep. Rejected for that
+   *   reason and not for the spread.
+   *
+   * What would work needs no new geometry at all: hold one store's copy for a
+   * whole number of windows drawn from a wide distribution and let its slot
+   * carry cover in the meantime. Nothing changes on the wire — a real object
+   * and cover are already the same bytes at the same instant — the schedule
+   * stays exactly fixed, and the delay is finally wide against the epoch. It
+   * costs k windows of replication latency and a longer window in which one
+   * store is the only carrier, which is a decision about latency and f=1
+   * exposure rather than about this scheduler.
    */
   #eventsForWindow(window: bigint): readonly ScheduledEvent[] {
     const startMs = ingressWindowStartMs(

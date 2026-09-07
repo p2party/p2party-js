@@ -95,9 +95,41 @@ which excludes source anonymity and traffic patterns by definition):
    both request logs join them into one client with no identifiers at all.
    The mitigation is an independent random per-store delay drawn wide
    against the window, and a measured linkage fraction; it trades directly
-   against rendezvous latency. The current runtime does **not** do this:
-   both stores share the profile's append offsets. Recorded as follow-up
-   work, not as a solved problem.
+   against rendezvous latency. **The runtime schedules both stores at the
+   profile's offsets, and the measured separation between the two stores'
+   writes of one operation is 0 ms — minimum, median and maximum** over
+   three operations in three consecutive windows
+   (`tests/blindRendezvous/prototype/carrierRuntime.test.ts`, "writes one
+   operation to both stores in the same millisecond, measured"; the clock
+   is injected, so 0 ms is the schedule's own contribution with network
+   jitter removed). A per-store phase offset was measured against this
+   profile and **rejected rather than shipped**, because the profile has no
+   room for one that would help. The geometry admits at most 100 ms earlier
+   (the token offset reaches zero) and 499 ms later
+   (`chunkFinalizationOffsetMs` 2800, less `maxScheduleSkewMs` 200, less
+   the last append at 2100): a 599 ms band against a 4000 ms window, 15% of
+   one epoch, crossing zero window boundaries. A join partitions both logs
+   by window before it does anything else, so a separation of 599 ms
+   against a 4000 ms window leaves the candidate set an observer works over
+   exactly as it was — it reduces the join by nothing measurable rather
+   than reducing it a little, and a wide draw would need a profile whose
+   append band is wide against the window rather than 15% of it. Two
+   further facts settle it: derived from the `PublicCarrierContextId` the
+   phase is `H(StoreId || DeliveryProfileHash)`, public and shared by every
+   client of that store, so it is the same grid under a different name and
+   an observer subtracts one known constant (129 ms, for the store pair and
+   derivation that test measures); derived per client instead it would be a
+   stable cross-window timing fingerprint at each store, and would put that
+   client outside the 200 ms band the profile itself defines as conforming
+   drift, which is the anonymity set a fixed schedule exists to create.
+   **What would work needs no new geometry:** hold the second store's copy
+   for a whole number of windows drawn from a wide distribution and let its
+   slot carry cover meanwhile — nothing changes on the wire, because a real
+   object and cover are already the same bytes at the same instant, and the
+   schedule stays exactly fixed; the price is k windows (k x 4000 ms) of
+   replication latency and a longer stretch in which one store is the only
+   carrier. Recorded as follow-up work with its numbers, not as a solved
+   problem.
 2. **Source addresses.** Both stores see the client's IP on every write and
    poll; a single store can recover a write-then-read pairing in a few
    rounds. The co-membership edge is hidden at the identifier level only.

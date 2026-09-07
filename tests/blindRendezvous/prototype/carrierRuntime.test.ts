@@ -640,6 +640,139 @@ const firstOpenable = async (
 };
 
 /* ------------------------------------------------------------------ *
+ * Per-store write decorrelation (design doc §3a item 1)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One profile with its whole ingress schedule — the token, the allocation and
+ * every append — moved by `deltaMs`, which is exactly what a per-store phase
+ * offset would do to one store's traffic.
+ *
+ * The read and `chunkFinalizationOffsetMs` stay put: the read is a union over
+ * both stores and fires once for the pair, and finalization is the store's own
+ * clock rather than the client's, so a client cannot move either.
+ */
+const shiftIngressSchedule = (
+  source: DeliveryProfileV1,
+  deltaMs: bigint,
+): DeliveryProfileV1 => ({
+  ...source,
+  tokenIssueOffsetMs: source.tokenIssueOffsetMs + deltaMs,
+  allocationRequestOffsetMs: source.allocationRequestOffsetMs + deltaMs,
+  sizeClasses: source.sizeClasses.map((sizeClass) => ({
+    ...sizeClass,
+    appendSchedule: sizeClass.appendSchedule.map((entry) => ({
+      ...entry,
+      offsetMs: entry.offsetMs + deltaMs,
+    })),
+  })),
+});
+
+const geometryAccepts = (candidate: DeliveryProfileV1): boolean => {
+  try {
+    validateDeliveryProfileGeometry(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The largest phase offset in one direction the geometry still accepts.
+ *
+ * Found by asking the real validator one millisecond at a time rather than by
+ * re-deriving its inequalities here: the number then tracks the profile, and a
+ * profile edit that widens or narrows the band shows up as a failure in the
+ * test below instead of as a stale constant in a design document.
+ */
+const largestAcceptedPhaseMs = (sign: bigint): bigint => {
+  let accepted = 0n;
+  for (let step = 1n; step <= profile.deliveryWindowMs; step += 1n) {
+    if (!geometryAccepts(shiftIngressSchedule(profile, sign * step))) break;
+    accepted = step;
+  }
+  return accepted;
+};
+
+const PHASE_EARLIER_MS = largestAcceptedPhaseMs(-1n);
+const PHASE_LATER_MS = largestAcceptedPhaseMs(1n);
+/** The widest separation two stores could be given: one store as early as the
+ * geometry allows, the other as late. */
+const PHASE_SPAN_MS = PHASE_EARLIER_MS + PHASE_LATER_MS;
+
+const LATEST_APPEND_OFFSET_MS = profile.sizeClasses.reduce(
+  (latest, sizeClass) =>
+    sizeClass.appendSchedule.reduce(
+      (inner, entry) => (entry.offsetMs > inner ? entry.offsetMs : inner),
+      latest,
+    ),
+  0n,
+);
+
+const absMs = (value: bigint): bigint => (value < 0n ? -value : value);
+
+const separationStats = (
+  samples: readonly bigint[],
+): { readonly min: bigint; readonly median: bigint; readonly max: bigint } => {
+  if (samples.length === 0)
+    throw new Error("a separation measurement needs at least one sample");
+  const sorted = [...samples].sort((left, right) =>
+    left === right ? 0 : left < right ? -1 : 1,
+  );
+  const middle = Math.floor(sorted.length / 2);
+  return {
+    min: sorted[0],
+    median:
+      sorted.length % 2 === 1
+        ? sorted[middle]
+        : (sorted[middle - 1] + sorted[middle]) / 2n,
+    max: sorted[sorted.length - 1],
+  };
+};
+
+/** The instant at which one transport posted each operation it carried, keyed
+ * by the OperationId, so the same operation can be found in both stores' logs
+ * and the two instants compared. */
+const realAppendInstants = async (
+  room: Room,
+  transport: Transport,
+): Promise<Map<string, bigint>> => {
+  const instants = new Map<string, bigint>();
+  for (const request of transport.log) {
+    if (request.path !== PROTOTYPE_STORE_ROUTES.append) continue;
+    if (request.body === null) continue;
+    const plaintext = await openCarrierEnvelope(
+      room.roomRoot,
+      decodeCarrierEnvelope(
+        decodePublicAppendRequestV1(request.body).exactFixedObject,
+      ),
+      AEAD,
+    );
+    if (plaintext === null) continue;
+    instants.set(
+      hex(await deriveOperationId(decodeOperation(plaintext.operationBytes))),
+      request.atMs,
+    );
+  }
+  return instants;
+};
+
+/** Every request one transport made in a window as `method path @offset`, so
+ * two stores' windows can be compared instant by instant. */
+const requestGrid = (
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+): string[] =>
+  transport.log
+    .filter((request) => request.atMs >= fromMs && request.atMs < toMs)
+    .map(
+      (request) =>
+        `${request.method} ${request.path} @${String(request.atMs - fromMs)}`,
+    )
+    .sort();
+
+/* ------------------------------------------------------------------ *
  * Tests
  * ------------------------------------------------------------------ */
 
@@ -1175,6 +1308,113 @@ describe("prototype carrier runtime", () => {
       expect(carrier.received.map((entry) => hex(entry.operationId))).toEqual([
         hex(await deriveOperationId(honest)),
       ]);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("bounds the per-store phase offset this profile's geometry could pay for", () => {
+    // Design doc §3a item 1 quotes these three numbers; they are measured
+    // against the real validator here rather than written down, so a profile
+    // edit that changes the band fails this test instead of quietly making the
+    // document wrong.
+    expect(PHASE_EARLIER_MS).toBe(100n);
+    expect(PHASE_LATER_MS).toBe(499n);
+    expect(PHASE_SPAN_MS).toBe(599n);
+
+    // One millisecond past either bound is a profile the validator refuses,
+    // which is what "compute the slack from the profile" has to mean: the band
+    // is the validator's, not this test's.
+    expect(
+      geometryAccepts(shiftIngressSchedule(profile, PHASE_LATER_MS + 1n)),
+    ).toBe(false);
+    expect(
+      geometryAccepts(shiftIngressSchedule(profile, -(PHASE_EARLIER_MS + 1n))),
+    ).toBe(false);
+
+    // And the property that decides against spending the band at all: the
+    // whole of it is a seventh of one delivery window, and the latest append a
+    // maximally delayed store could make still lands before this window ends.
+    // No write crosses a window boundary, so the set of writes an observer
+    // joins over — the ones this window carried at both stores — is exactly the
+    // same set with the offset as without it. The literature's mitigation is a
+    // delay drawn wide *against the epoch*; this profile has no such delay to
+    // give.
+    expect(PHASE_SPAN_MS).toBeLessThan(profile.deliveryWindowMs);
+    expect(
+      LATEST_APPEND_OFFSET_MS + PHASE_LATER_MS + profile.maxScheduleSkewMs,
+    ).toBeLessThan(profile.deliveryWindowMs);
+  });
+
+  test("writes one operation to both stores in the same millisecond, measured", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0xd1);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+      // PRESENCE is state-replication work and a PRESENCE is payload class 0,
+      // so exactly one of these leaves per window, at class 0's single
+      // state-replication slot: three operations measured over three windows.
+      const presences = [
+        await presenceFor(capability, world.scheduler),
+        await presenceFor(capability, world.scheduler),
+        await presenceFor(capability, world.scheduler),
+      ];
+
+      await world.advance(windowStartMs(W1));
+      for (const presence of presences)
+        carrier.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(CHAIN_START + 4n) - 1n);
+      expect(carrier.runtime.counters.appendsReal).toBe(presences.length * 2);
+
+      const atStoreA = await realAppendInstants(room, world.transports[0]);
+      const atStoreB = await realAppendInstants(room, world.transports[1]);
+      expect([...atStoreA.keys()].sort()).toEqual([...atStoreB.keys()].sort());
+      expect(atStoreA.size).toBe(presences.length);
+
+      const separations = [...atStoreA.entries()].map(([id, instant]) => {
+        const atTheOtherStore = atStoreB.get(id);
+        if (atTheOtherStore === undefined)
+          throw new Error("an operation reached only one of the two stores");
+        return absMs(instant - atTheOtherStore);
+      });
+      const measured = separationStats(separations);
+
+      // The measurement design doc §3a item 1 reports. The clock here is the
+      // injected one, so this is the schedule's own contribution with network
+      // jitter removed: the runtime aims both stores at the same instant, and
+      // whatever separation a real network adds is jitter the client neither
+      // chooses nor controls — and an observer can model it.
+      expect(measured.min).toBe(0n);
+      expect(measured.median).toBe(0n);
+      expect(measured.max).toBe(0n);
+
+      // Not only the appends: every request of a window lands on both stores
+      // at the same offset, so the join has the token and the allocation to
+      // work with even in a window that carries nothing.
+      expect(
+        requestGrid(world.transports[0], windowStartMs(W2), windowStartMs(W3)),
+      ).toEqual(
+        requestGrid(world.transports[1], windowStartMs(W2), windowStartMs(W3)),
+      );
+
+      // What the rejected mitigation would have produced, from the inputs it
+      // would have used. `PublicCarrierContextId` is `H(StoreId ||
+      // DeliveryProfileHash)`: every client of a store shares it and anyone
+      // holding the store's published descriptor recomputes it, so the phase it
+      // yields is a public constant per store — the same grid under a different
+      // name, and a translation an observer subtracts before joining. It is
+      // reported here for the record, not applied.
+      const phaseFor = (carrierContextId: Uint8Array): bigint =>
+        (BigInt(`0x${hex(carrierContextId.subarray(0, 8))}`) %
+          (PHASE_SPAN_MS + 1n)) -
+        PHASE_EARLIER_MS;
+      const wouldHaveSeparated = absMs(
+        phaseFor(carrier.clients[0].carrierContextId) -
+          phaseFor(carrier.clients[1].carrierContextId),
+      );
+      expect(wouldHaveSeparated).toBeLessThanOrEqual(PHASE_SPAN_MS);
+      expect(wouldHaveSeparated).toBeLessThan(profile.deliveryWindowMs);
     } finally {
       world.stop();
     }

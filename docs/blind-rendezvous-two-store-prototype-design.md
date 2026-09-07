@@ -422,7 +422,36 @@ Modified: `src/blindRendezvous/schemas.ts` (codecs), `derivations.ts`
 Untouched: `src/index.ts`, `src/session.ts`, the Redux/RTK layer, the
 signaling server, `p2party.com`.
 
-## 8. Open items the prototype leaves for the spec's phases
+## 8. Research extensions (FOSDEM 2027 track)
+
+The stated objective is a FOSDEM 2027 presentation of the findings and the
+implementation, and research-frontier variants are welcome. Two extensions
+are planned on top of the minimum, each measurable and each labelled for
+exactly what it is:
+
+- **Client-mediated cross-store witnessing.** After a client verifies store
+  A's checkpoint for window `w`, it posts a public
+  `StoreWitnessRecordV1 { witnessedStoreId, deliveryProfileHash,
+  ingressWindow, checkpointHash }` to every *other* store it uses, and reads
+  the witness records the other stores hold about A. A record whose hash
+  differs from the checkpoint A showed this client is a **split-view hint**:
+  it triggers a re-fetch and is logged as `checkpoint-split-view-hint`. It
+  is not a proof (the spec's conflict proof needs two checkpoints signed by
+  A); it is Certificate-Transparency-style gossip with the other store as
+  the gossip carrier and no witness network. Cost: one fixed POST and one
+  fixed GET per other store per window, so the trace stays fixed. Records
+  carry no room data.
+- **Custody-breach detection on the fixed scan.** A client that holds a
+  signed `stored` receipt for window `w` locates its own slot in the
+  finalized chunk and compares the object hash. A mismatch is exactly the
+  spec's `PublicCustodyBreachProofV1` contradiction; the prototype records
+  the fault and excludes the store from availability. The `withhold` fault
+  mode of the store exercises it in the E2E.
+- **Latency measurement.** The E2E prints time-to-connect for
+  `deliveryWindowMs ∈ {4000, 2000, 1000}` to quantify the fixed-schedule
+  cost of pre-SDP admission (five dependent flights).
+
+## 9. Open items the prototype leaves for the spec's phases
 
 Blind-RSA allocation tokens (RFC 9474/9578; `@cloudflare/blindrsa-ts` is a
 viable implementation), the reservation/trial/admission kernel and its

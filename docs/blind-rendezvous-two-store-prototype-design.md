@@ -67,6 +67,76 @@ literature shelf (`docs/rendezvous-prior-art.md`):
 is the only one of the three that delivers fault tolerance with two
 processes, and it reuses every primitive in the tree.
 
+## 3a. Why (A), and what it still leaks
+
+A literature sweep across eight angles (2024-2026, kept as the untracked
+shelf `docs/rendezvous-prior-art-delta-2026-09.md` beside the existing
+`docs/rendezvous-prior-art.md`) scored the three candidates 34, 28 and 18
+out of 40 and settled the question with one structural fact:
+
+> Two stores cannot buy fault tolerance **and** privacy beyond S1 from any
+> cryptographic family in the literature. Secret-shared writes (Express,
+> Sabre, Spectrum, Pepper) leave the survivor holding pseudorandom noise
+> when either store is down. Robust designs (Blinder, Trellis, Pudding,
+> Arke) need 3-4+ servers. Two-server private-read and detection schemes
+> (Myco, HomeRun, multi-server FMD) need both servers online, usually
+> talking to each other. Replicated self-authenticating logs give safety
+> against any number of Byzantine replicas for free and need one honest
+> reachable replica for liveness.
+
+So (A) is not a compromise that a bigger budget would improve at n = 2; it
+is the only shape that survives one store failing.
+
+**Residual leaks this prototype must disclose** (none is hidden by S1,
+which excludes source anonymity and traffic patterns by definition):
+
+1. **Replicated-write timing linkability — the worst one.** Writing the
+   same operation to both stores milliseconds apart lets anyone who sees
+   both request logs join them into one client with no identifiers at all.
+   The mitigation is an independent random per-store delay drawn wide
+   against the window, and a measured linkage fraction; it trades directly
+   against rendezvous latency. The current runtime does **not** do this:
+   both stores share the profile's append offsets. Recorded as follow-up
+   work, not as a solved problem.
+2. **Source addresses.** Both stores see the client's IP on every write and
+   poll; a single store can recover a write-then-read pairing in a few
+   rounds. The co-membership edge is hidden at the identifier level only.
+3. **Size and count** are visible; the fixed schedule pads both.
+4. **Polling shape** must stay schedule-shaped, never event-shaped: no
+   burst after a hit, no coordinated dial phase between stores.
+5. **Retry oracle.** Retrying at the surviving store after an omission is an
+   active cross-store tagging channel; retries happen only at the next
+   scheduled slot.
+6. **The witness channel is itself a beacon** — cross-store checkpoint
+   writes are replicated writes and are scheduled independently of user
+   traffic for that reason.
+7. **Detection, not prevention.** A client detects forged or altered
+   entries, replays, and set disagreement; omission evidence needs signed
+   checkpoints; a targeted split view needs a second observer. Both stores
+   colluding on omission is undetectable, as is a first-write omission
+   before any checkpoint exists.
+8. **Independence is a business fact**, not a cryptographic one: operator,
+   ASN, hosting, jurisdiction and funding must be stated and auditable. Two
+   processes on one laptop are one fault domain, and the E2E says so.
+9. **Key split-view.** Each store can serve a per-client descriptor to
+   partition the anonymity set; witnessing the descriptor digest mitigates
+   but does not solve it.
+10. **No uniqueness.** Two concurrent offers for one room in one window
+    cannot be prevented; the tie-break is part of the protocol.
+11. **Token and quota shape.** If two stores ever share a double-spend
+    database, redemptions become a cross-store membership edge.
+12. **Local forensics.** Persisted seen-sets and checkpoints are keyed by
+    per-store opaque ids, never by room-derived tags.
+13. **No labels.** Two stores give crash and omission tolerance with
+    detection, not Byzantine tolerance.
+
+What no sweep found published together — and therefore the only thing this
+work may present as novel — is the *composition*: a capability-authenticated
+Byzantine grow-only set, fixed-scan reads, mutual transparency-log-style
+witnessing treated as evidence rather than validity, decorrelated replicated
+writes, and browser-side cost measurements. That is a systems contribution
+for a flagged prototype, not a cryptographic result.
+
 ## 4. Components
 
 All new code lives under `src/blindRendezvous/prototype/` and is **not**

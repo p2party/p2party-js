@@ -111,6 +111,7 @@
     "test": "bun test tests",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "example:standalone": "bun run examples/standalone-e2ee.ts",
+    "store:prototype": "bun run src/blindRendezvous/prototype/store/storeServer.ts",
     "check": "npm-run-all -s lint format:check typecheck test example:standalone",
     "copy:wasm": "cp src/cryptography/libcrypto.wasm src/cryptography/libcrypto.provenance.json lib/",
     "gzip:js": "gzip -9 -n < lib/index.min.js > lib/p2party.min.js.gz",

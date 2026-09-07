@@ -1,0 +1,355 @@
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { encodeCanonical } from "../../../src/blindRendezvous/canonicalSchema";
+import {
+  publicChunkV1Schema,
+  publicStoreCheckpointV1Schema,
+} from "../../../src/blindRendezvous/schemas";
+import {
+  encodePublicAllocationLeaseBodyV1,
+  encodePublicAllocationLeaseV1,
+  encodeStoreWitnessRecordV1,
+} from "../../../src/blindRendezvous/prototype/storeWire";
+import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
+
+import type {
+  PublicAllocationLeaseV1,
+  StoreWitnessRecordV1,
+} from "../../../src/blindRendezvous/prototype/storeWire";
+import type {
+  PublicChunkV1,
+  PublicStoreCheckpointV1,
+} from "../../../src/blindRendezvous/publicWindow";
+import type {
+  StoreAllocationRecord,
+  StoreWindowState,
+} from "../../../src/blindRendezvous/prototype/store/storePersistence";
+
+const hex = (value: Uint8Array): string =>
+  [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const filled = (length: number, byte: number): Uint8Array =>
+  new Uint8Array(length).fill(byte);
+
+const root = mkdtempSync(join(tmpdir(), "p2party-store-sqlite-"));
+let databaseCounter = 0;
+
+/** One fresh database file per test; the port is a file, so reuse would leak
+ * one test's rows into the next. */
+const databasePath = (): string =>
+  join(root, `store-${String(databaseCounter++)}.sqlite`);
+
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+const leaseOf = (
+  ordinal: number,
+  ingressWindow: bigint,
+): PublicAllocationLeaseV1 => ({
+  version: 1,
+  storeId: filled(32, 0x11),
+  deliveryProfileHash: filled(32, 0x22),
+  ingressWindow,
+  requestHash: filled(32, 0x30 + ordinal),
+  allocationOrdinal: ordinal,
+  allocationEd25519PublicKey: filled(32, 0x40 + ordinal),
+  storeSignature: filled(64, 0x50 + ordinal),
+});
+
+/** Chunks here are deliberately tiny: the persistence port stores whatever
+ * the core hands it and never re-derives the profile geometry, so a
+ * profile-sized chunk would only make the test slow. */
+const chunkOf = (
+  sizeClass: number,
+  chunkIndex: bigint,
+  ingressWindow: bigint,
+): PublicChunkV1 => ({
+  version: 1,
+  bucket: {
+    deliveryProfileHash: filled(32, 0x22),
+    ingressWindow,
+    sizeClass,
+  },
+  chunkIndex,
+  previousChunkHash: filled(32, 0x60 + Number(chunkIndex)),
+  fixedObjects: [filled(8, 0x70 + sizeClass), filled(8, 0x71 + sizeClass)],
+  storeSignature: filled(64, 0x80 + sizeClass),
+});
+
+const checkpointOf = (ingressWindow: bigint): PublicStoreCheckpointV1 => ({
+  version: 1,
+  storeId: filled(32, 0x11),
+  descriptorHash: filled(32, 0x12),
+  deliveryProfileHash: filled(32, 0x22),
+  ingressWindow,
+  chainStartIngressWindow: 425_000_000n,
+  previousCheckpointHash: filled(32, 0x13),
+  finalizedChunkCount: 5,
+  finalizedChunkRoot: filled(32, 0x14),
+  storeSignature: filled(64, 0x15),
+});
+
+const witnessOf = (
+  ingressWindow: bigint,
+  checkpointByte: number,
+): StoreWitnessRecordV1 => ({
+  version: 1,
+  witnessedStoreId: filled(32, 0x91),
+  deliveryProfileHash: filled(32, 0x22),
+  ingressWindow,
+  checkpointHash: filled(32, checkpointByte),
+});
+
+const allocationOf = (
+  ordinal: number,
+  window: bigint,
+): StoreAllocationRecord => {
+  const { storeSignature: _storeSignature, ...leaseBody } = leaseOf(
+    ordinal,
+    window,
+  );
+  return {
+    leaseBody,
+    lease: leaseOf(ordinal, window),
+    requestHash: filled(32, 0x30 + ordinal),
+  };
+};
+
+const unfinalizedState = (window: bigint): StoreWindowState => ({
+  window,
+  allocations: new Map([
+    [0, allocationOf(0, window)],
+    [3, allocationOf(3, window)],
+  ]),
+  slots: new Map([
+    ["0:1:3", { objectHash: filled(32, 0xa1), object: filled(24, 0xa2) }],
+    ["1:0:7", { objectHash: filled(32, 0xb1), object: filled(24, 0xb2) }],
+  ]),
+  finalized: null,
+});
+
+const finalizedState = (window: bigint): StoreWindowState => ({
+  ...unfinalizedState(window),
+  finalized: {
+    chunks: new Map([
+      [0, [chunkOf(0, 0n, window), chunkOf(0, 1n, window)]],
+      [1, [chunkOf(1, 0n, window)]],
+    ]),
+    checkpoint: checkpointOf(window),
+  },
+});
+
+/**
+ * Everything a window state holds, projected through the canonical encoders.
+ * Comparing the encodings rather than the objects is what proves the stored
+ * rows are the same *values*, not merely structurally similar ones.
+ */
+const fingerprint = (state: StoreWindowState): string =>
+  JSON.stringify({
+    window: String(state.window),
+    allocations: [...state.allocations]
+      .map(
+        ([ordinal, record]) =>
+          [
+            ordinal,
+            hex(encodePublicAllocationLeaseBodyV1(record.leaseBody)),
+            hex(encodePublicAllocationLeaseV1(record.lease)),
+            hex(record.requestHash),
+          ] as const,
+      )
+      .sort((left, right) => left[0] - right[0]),
+    slots: [...state.slots]
+      .map(
+        ([key, slot]) => [key, hex(slot.objectHash), hex(slot.object)] as const,
+      )
+      .sort((left, right) => (left[0] < right[0] ? -1 : 1)),
+    finalized:
+      state.finalized === null
+        ? null
+        : {
+            checkpoint: hex(
+              encodeCanonical(
+                publicStoreCheckpointV1Schema,
+                state.finalized.checkpoint,
+              ),
+            ),
+            chunks: [...state.finalized.chunks]
+              .map(
+                ([sizeClass, chunks]) =>
+                  [
+                    sizeClass,
+                    chunks.map((chunk) =>
+                      hex(encodeCanonical(publicChunkV1Schema, chunk)),
+                    ),
+                  ] as const,
+              )
+              .sort((left, right) => left[0] - right[0]),
+          },
+  });
+
+describe("prototype store SQLite persistence", () => {
+  test("round-trips an unfinalized window across a reopen", async () => {
+    const path = databasePath();
+    const state = unfinalizedState(425_000_000n);
+
+    const writer = new SqliteStorePersistence(path);
+    try {
+      await writer.saveWindow(state);
+    } finally {
+      writer.close();
+    }
+
+    const reader = new SqliteStorePersistence(path);
+    try {
+      const loaded = await reader.loadWindow(425_000_000n);
+      expect(loaded).not.toBeNull();
+      expect(fingerprint(loaded as StoreWindowState)).toBe(fingerprint(state));
+      expect(await reader.lastFinalizedWindow()).toBeNull();
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("round-trips a finalized window and reports it as the last finalized", async () => {
+    const path = databasePath();
+    const state = finalizedState(425_000_001n);
+
+    const writer = new SqliteStorePersistence(path);
+    try {
+      // An earlier unfinalized window must not win MAX(), and a later one must
+      // not either: `lastFinalizedWindow` drives where finalization resumes.
+      await writer.saveWindow(unfinalizedState(425_000_000n));
+      await writer.saveWindow(state);
+      await writer.saveWindow(unfinalizedState(425_000_002n));
+    } finally {
+      writer.close();
+    }
+
+    const reader = new SqliteStorePersistence(path);
+    try {
+      const loaded = await reader.loadWindow(425_000_001n);
+      expect(loaded).not.toBeNull();
+      expect(fingerprint(loaded as StoreWindowState)).toBe(fingerprint(state));
+      expect(await reader.lastFinalizedWindow()).toBe(425_000_001n);
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("answers null for an unknown window and an empty chain", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    try {
+      expect(await persistence.loadWindow(7n)).toBeNull();
+      expect(await persistence.lastFinalizedWindow()).toBeNull();
+      expect(await persistence.loadWitnessRecords(7n)).toEqual([]);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("keeps windows beyond Number.MAX_SAFE_INTEGER lossless", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    const window = 9_007_199_254_740_993n;
+    try {
+      await persistence.saveWindow(finalizedState(window));
+      const loaded = await persistence.loadWindow(window);
+      expect(loaded?.window).toBe(window);
+      expect(await persistence.lastFinalizedWindow()).toBe(window);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("never aliases caller buffers in either direction", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    try {
+      const state = finalizedState(425_000_003n);
+      const expected = fingerprint(state);
+      await persistence.saveWindow(state);
+
+      // The core keeps mutating its working state after a save.
+      state.slots.get("0:1:3")?.object.fill(0xff);
+      state.finalized?.chunks.get(0)?.[0].fixedObjects[0].fill(0xff);
+      expect(fingerprint((await persistence.loadWindow(425_000_003n))!)).toBe(
+        expected,
+      );
+
+      // And a reader that scribbles on what it was handed must not rewrite a
+      // signed chunk for the next reader.
+      const loaded = (await persistence.loadWindow(425_000_003n))!;
+      loaded.finalized?.chunks.get(0)?.[0].fixedObjects[0].fill(0xee);
+      expect(fingerprint((await persistence.loadWindow(425_000_003n))!)).toBe(
+        expected,
+      );
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("witness records are idempotent on identical canonical bytes", async () => {
+    const path = databasePath();
+    const persistence = new SqliteStorePersistence(path);
+    try {
+      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc1));
+      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc1));
+      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc2));
+      await persistence.saveWitnessRecord(witnessOf(425_000_001n, 0xc1));
+
+      const first = await persistence.loadWitnessRecords(425_000_000n);
+      expect(first.length).toBe(2);
+      // Observation order is the witness's own, so the stored order is the
+      // order they arrived in.
+      expect(first.map((record) => hex(record.checkpointHash))).toEqual([
+        hex(filled(32, 0xc1)),
+        hex(filled(32, 0xc2)),
+      ]);
+      expect((await persistence.loadWitnessRecords(425_000_001n)).length).toBe(
+        1,
+      );
+    } finally {
+      persistence.close();
+    }
+
+    const reopened = new SqliteStorePersistence(path);
+    try {
+      const records = await reopened.loadWitnessRecords(425_000_000n);
+      expect(
+        records.map((record) => hex(encodeStoreWitnessRecordV1(record))),
+      ).toEqual([
+        hex(encodeStoreWitnessRecordV1(witnessOf(425_000_000n, 0xc1))),
+        hex(encodeStoreWitnessRecordV1(witnessOf(425_000_000n, 0xc2))),
+      ]);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test("meta rows survive a reopen, which is what pins the chain start", async () => {
+    const path = databasePath();
+    const writer = new SqliteStorePersistence(path);
+    try {
+      expect(writer.loadMeta("chainStartIngressWindow")).toBeNull();
+      writer.saveMeta("chainStartIngressWindow", "425000000");
+      writer.saveMeta("deliveryProfileHash", hex(filled(32, 0x22)));
+    } finally {
+      writer.close();
+    }
+
+    const reader = new SqliteStorePersistence(path);
+    try {
+      expect(reader.loadMeta("chainStartIngressWindow")).toBe("425000000");
+      expect(reader.loadMeta("deliveryProfileHash")).toBe(
+        hex(filled(32, 0x22)),
+      );
+      // Rewriting one key must replace it rather than add a second row.
+      reader.saveMeta("chainStartIngressWindow", "425000009");
+      expect(reader.loadMeta("chainStartIngressWindow")).toBe("425000009");
+    } finally {
+      reader.close();
+    }
+  });
+});

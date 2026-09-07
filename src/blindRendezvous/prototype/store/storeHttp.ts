@@ -146,6 +146,34 @@ const responseBody = (bytes: Uint8Array): ArrayBuffer => {
   return copy;
 };
 
+/**
+ * Cross-origin access, which a browser client is not optional about.
+ *
+ * The clients of this store are web pages, and a page is never served from the
+ * store's own origin — that is the whole shape of the design: one app origin,
+ * two independently operated stores. Without these headers no browser will let
+ * the client read a single answer, so their absence is not a hardening choice,
+ * it is a store no browser can use.
+ *
+ * `*` is the honest value here rather than a shortcut. Every route is public
+ * geometry, every answer is signed and verified against the pinned store key,
+ * and the family defines no cookie, no `authorization` header and no
+ * credential of any kind — so there is no ambient authority for a hostile page
+ * to ride, and `access-control-allow-credentials` is deliberately absent (with
+ * `*` the browser would refuse it anyway). What a hostile page can do with
+ * these headers is exactly what `curl` can already do: append cover to a public
+ * bucket and read chunks it cannot open.
+ *
+ * `x-p2party-store` has to be named explicitly: it is not one of the
+ * CORS-safelisted response headers, and the client refuses every answer that
+ * does not carry it, so an unexposed header would fail every cross-origin
+ * connect with a protocol error rather than a CORS one.
+ */
+const CORS_RESPONSE_HEADERS: Record<string, string> = {
+  "access-control-allow-origin": "*",
+  "access-control-expose-headers": "x-p2party-store",
+};
+
 const headersFor = (
   mediaType: string | null,
   cacheControl: string,
@@ -155,8 +183,32 @@ const headersFor = (
   // a 404 came from the store or from something in front of it.
   "x-p2party-store": PROTOTYPE_STORE_PROTOCOL,
   "cache-control": cacheControl,
+  ...CORS_RESPONSE_HEADERS,
   ...(mediaType === null ? {} : { "content-type": mediaType }),
 });
+
+/**
+ * The preflight every POST in this family triggers.
+ *
+ * The request media types are `application/p2party-*-prototype-v0`, which is
+ * not a CORS-safelisted `content-type`, so a browser sends `OPTIONS` first and
+ * never sends the POST at all if it is refused. It answers with no body and
+ * says nothing about whether the path it names exists: a preflight that
+ * distinguished a real route from a missing one would be a probe oracle for
+ * exactly the routes the constant 400/404 refusals exist to hide.
+ */
+const PREFLIGHT_MAX_AGE_SECONDS = "600";
+
+const preflight = (): Response =>
+  new Response(null, {
+    status: 204,
+    headers: {
+      ...headersFor(null, NO_STORE),
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "content-type",
+      "access-control-max-age": PREFLIGHT_MAX_AGE_SECONDS,
+    },
+  });
 
 const canonicalResponse = (
   body: Uint8Array,
@@ -350,6 +402,10 @@ export const createPrototypeStoreHandler = (
     const method = request.method;
     const path = new URL(request.url).pathname;
     try {
+      // Before routing: a preflight is a browser-level question about this
+      // origin, not a question about the resource, and answering it per-route
+      // would leak which routes exist.
+      if (method === "OPTIONS") return preflight();
       if (method === "GET") {
         if (path === PROTOTYPE_STORE_ROUTES.health) return health();
         if (path === PROTOTYPE_STORE_ROUTES.descriptor) return descriptor();

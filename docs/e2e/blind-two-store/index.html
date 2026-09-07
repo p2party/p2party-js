@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>p2party blind rendezvous — two-store end to end</title>
+    <script>
+      // Browser shim: the bundle (emscripten glue) references `process`.
+      // No versions.node, so the emscripten runtime treats this as a web env.
+      window.process = {
+        env: { NODE_ENV: "production" },
+        versions: {},
+        platform: "browser",
+        nextTick: (f) => setTimeout(f, 0),
+      };
+      window.global = window;
+    </script>
+  </head>
+  <body>
+    <!-- type="module": `bun build --target=browser` emits ESM, and the bundled
+         `src/cryptography/wasmLoader.ts` contains `import.meta.url` (in a
+         Node-only branch this page never takes), which a classic script cannot
+         even parse. Documented finding from the provider smoke; the shim above
+         is a classic inline script, so it still runs before this deferred
+         module. -->
+    <script type="module" src="./bundle.js"></script>
+  </body>
+</html>

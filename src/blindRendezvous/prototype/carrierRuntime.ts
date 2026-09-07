@@ -560,7 +560,8 @@ export class CarrierRuntime {
    * - **It is too narrow to matter.** Moving a store's whole ingress schedule
    *   earlier stops at 100 ms (the token offset reaches zero) and later at
    *   499 ms (`chunkFinalizationOffsetMs` 2800, less `maxScheduleSkewMs` 200,
-   *   less the last append at 2100), so two stores can be separated by at most
+   *   less the last append at 2100, less one — that inequality is strict, so
+   *   500 itself fails validation), so two stores can be separated by at most
    *   599 ms of a 4000 ms window. No write crosses a window boundary, and an
    *   observer joining two logs partitions them by window before anything
    *   else, so the candidate set is identical with the offset and without it.

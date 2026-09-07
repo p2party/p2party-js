@@ -684,6 +684,12 @@ const geometryAccepts = (candidate: DeliveryProfileV1): boolean => {
  * re-deriving its inequalities here: the number then tracks the profile, and a
  * profile edit that widens or narrows the band shows up as a failure in the
  * test below instead of as a stale constant in a design document.
+ *
+ * Stepping out from zero and stopping at the first rejection assumes the
+ * accepted region is contiguous in `deltaMs`, which holds because every
+ * inequality the validator applies to these offsets is affine in it. A
+ * validator that gained a non-monotonic rule would need this to scan the whole
+ * range and take the extremes instead.
  */
 const largestAcceptedPhaseMs = (sign: bigint): bigint => {
   let accepted = 0n;

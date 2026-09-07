@@ -106,9 +106,10 @@ which excludes source anonymity and traffic patterns by definition):
    profile and **rejected rather than shipped**, because the profile has no
    room for one that would help. The geometry admits at most 100 ms earlier
    (the token offset reaches zero) and 499 ms later
-   (`chunkFinalizationOffsetMs` 2800, less `maxScheduleSkewMs` 200, less
-   the last append at 2100): a 599 ms band against a 4000 ms window, 15% of
-   one epoch, crossing zero window boundaries. A join partitions both logs
+   (`chunkFinalizationOffsetMs` 2800, less `maxScheduleSkewMs` 200, less the
+   last append at 2100, less one — that inequality is strict, so 500 itself
+   fails validation): a 599 ms band against a 4000 ms window, 15% of one
+   epoch, crossing zero window boundaries. A join partitions both logs
    by window before it does anything else, so a separation of 599 ms
    against a 4000 ms window leaves the candidate set an observer works over
    exactly as it was — it reduces the join by nothing measurable rather

@@ -22,18 +22,22 @@
 //
 //   healthy               both stores honest and reachable throughout.
 //   kill-a                store A is SIGKILLed once both pages have published
-//                         presence and A has logged at least one request body.
+//                         presence and A has logged at least one request body;
+//                         the kill is confirmed, not assumed — the child's exit
+//                         is awaited and /health polled until it refuses.
 //   withhold-a            store A runs P2PARTY_STORE_FAULT=withhold: it answers
 //                         `stored` to every append and finalizes dummies.
 //   unreachable-b-for-one page B is given ONLY store A's origin; page A is
 //                         given both, so store B only ever sees page B's
 //                         operations as page A's backfill.
 //
-// What a run may claim is exactly what it measured: "on this run, neither
-// store's logged request bodies contained X", "the rendezvous completed with
-// store A killed / withholding", and "these are the measured times". Two store
-// processes on one laptop are ONE fault domain: nothing here is evidence of
-// independence, and nothing here earns a label.
+// What a run may claim is exactly what it measured: "on this run, none of the
+// audit's needles appeared in the N request bodies it searched" — N being the
+// count it prints, which is the corpus the search actually saw and not the
+// log's final size — "the rendezvous completed with store A killed /
+// withholding", and "these are the measured times". Two store processes on one
+// laptop are ONE fault domain: nothing here is evidence of independence, and
+// nothing here earns a label.
 import http from "node:http";
 import { spawn } from "node:child_process";
 import {
@@ -120,7 +124,7 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
  * a marker embedded in a larger base64 blob starts wherever its offset mod 3
  * puts it.
  *
- * Two properties keep this from being theatre:
+ * Three properties keep this from being theatre:
  *
  *  - a needle shorter than MIN_NEEDLE_BYTES is REFUSED, not searched. `v=0`
  *    alone is three bytes; a three-byte needle appears by chance about once per
@@ -130,10 +134,36 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
  *    delivery-profile hash is a field of every allocation-token request body,
  *    so it MUST be found. A run where it is not found has a broken audit, and
  *    the scenario fails rather than reporting a vacuous pass.
+ *  - the needle count is ASSERTED, not printed. A future edit that drops a
+ *    secret or an encoding shrinks the search silently otherwise.
+ *
+ * What the audit does NOT cover, and what the verdict line must therefore not
+ * imply:
+ *
+ *  - GET routes. The store's log call is inside the POST branch, so the chunk
+ *    and checkpoint reads — whose coordinates live in the URL path — are never
+ *    examined.
+ *  - Bodies logged after the audit ran. The logs are read once, right after
+ *    both pages report `message-verified` and before `stop()`, so the
+ *    scheduled traffic of the windows that follow is outside the corpus. The
+ *    verdict line reports the count the audit actually searched, which is why
+ *    that count is carried out of the loop rather than re-read afterwards.
  * ------------------------------------------------------------------ */
 
 /** Below this, a hit is as likely to be ciphertext as evidence. */
 const MIN_NEEDLE_BYTES = 4;
+
+/**
+ * How many distinct byte needles a complete audit builds, asserted per run.
+ *
+ * 14 secrets — 4 SDP markers plus, per page, the capability, the
+ * `RoomContextId`, the stable key and the two SDPs — at 11 encodings each
+ * (raw, ASCII hex lower and upper, ASCII base64 and base64url, and base64 and
+ * base64url at three alignments apiece), less the 6 alignment variants of the
+ * 5-byte `v=0\r\n` marker whose stable cores fall under 8 characters:
+ * 14 × 11 − 6 = 148.
+ */
+const EXPECTED_NEEDLE_COUNT = 148;
 
 /**
  * The base64 of `bytes` at each of the three byte alignments, trimmed to the
@@ -207,7 +237,7 @@ const searchBodies = (bodies, needles) => {
 const STORE_SERVER = "src/blindRendezvous/prototype/store/storeServer.ts";
 const COHORT_PRELOAD = path.join(dir, "cohortPreload.ts");
 
-const startStore = (workspace, name, port, options) => {
+const startStore = (workspace, name, port, options, onError) => {
   const env = {
     ...process.env,
     P2PARTY_STORE_PROTOTYPE: "1",
@@ -240,7 +270,38 @@ const startStore = (workspace, name, port, options) => {
   child.stderr.on("data", (chunk) =>
     say(`  [store ${name}!] ${String(chunk).trimEnd()}`),
   );
+  // Without a listener a spawn failure (no `bun` on PATH, EAGAIN) is an
+  // uncaught 'error' on the child: it escapes the scenario's try block, the
+  // per-scenario finally never runs, and the sibling store is leaked.
+  child.on("error", (error) =>
+    onError(`store ${name} could not be spawned: ${error.message}`),
+  );
   return child;
+};
+
+/**
+ * Kill a store and confirm it is gone.
+ *
+ * Sending the signal is not the same as the process having stopped answering,
+ * and the whole scenario after this point is a claim about a store that is not
+ * there. Both are observed: the child's exit, and `/health` refusing.
+ */
+const killStore = async (child, name, port) => {
+  const exited = new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    child.once("exit", () => resolve());
+  });
+  child.kill("SIGKILL");
+  await withTimeout(exited, 10_000, `store ${name} to exit after SIGKILL`);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await fetch(`http://127.0.0.1:${port}/health`);
+    } catch {
+      return; // The port refuses: the store really is gone.
+    }
+    await sleep(100);
+  }
+  throw new Error(`store ${name} still answered /health after SIGKILL`);
 };
 
 const waitHealthy = async (name, port) => {
@@ -444,8 +505,10 @@ const runScenario = async (name, index, profileInfo) => {
   );
 
   try {
-    children.push(startStore(workspace, "a", portA, { fault: config.faultA }));
-    children.push(startStore(workspace, "b", portB, { fault: null }));
+    children.push(
+      startStore(workspace, "a", portA, { fault: config.faultA }, note),
+    );
+    children.push(startStore(workspace, "b", portB, { fault: null }, note));
     const [storeIdA, storeIdB] = await Promise.all([
       waitHealthy("a", portA),
       waitHealthy("b", portB),
@@ -520,9 +583,10 @@ const runScenario = async (name, index, profileInfo) => {
         await sleep(100);
       }
       const carried = readBodyLog(logPaths.a).bodies.length;
-      children[0].kill("SIGKILL");
+      const pid = children[0].pid;
+      await killStore(children[0], "a", portA);
       say(
-        `${stamp()} SIGKILL store a (pid ${children[0].pid}) after both presence-published and ${carried} logged bodies`,
+        `${stamp()} SIGKILL store a (pid ${pid}) after both presence-published and ${carried} logged bodies; process exited and ${originA}/health now refuses`,
       );
     }
 
@@ -544,13 +608,26 @@ const runScenario = async (name, index, profileInfo) => {
     );
     connectedMs = Date.now() - armed;
 
-    if (gotAtB !== MESSAGE_AB)
+    /*
+     * Compared as bytes, not as strings.
+     *
+     * The page hands back the decoded text, so the comparison re-encodes it as
+     * UTF-8 and compares buffers. That is a genuine byte statement rather than
+     * a text one: UTF-8 encode/decode is injective on well-formed input, and
+     * bytes that were NOT well-formed would have decoded to U+FFFD and
+     * re-encoded to EF BF BD, which does not match. Equal buffers therefore
+     * mean the plaintext the peer decrypted was the plaintext that was sent.
+     * The receiver's own reported byte count is checked below as well.
+     */
+    const sentAB = Buffer.from(MESSAGE_AB, "utf8");
+    const sentBA = Buffer.from(MESSAGE_BA, "utf8");
+    if (!Buffer.from(gotAtB, "utf8").equals(sentAB))
       note(
-        `A->B was not byte-exact (${gotAtB.length} of ${MESSAGE_AB.length} chars)`,
+        `A->B was not byte-exact (${Buffer.byteLength(gotAtB, "utf8")} of ${sentAB.length} bytes)`,
       );
-    if (gotAtA !== MESSAGE_BA)
+    if (!Buffer.from(gotAtA, "utf8").equals(sentBA))
       note(
-        `B->A was not byte-exact (${gotAtA.length} of ${MESSAGE_BA.length} chars)`,
+        `B->A was not byte-exact (${Buffer.byteLength(gotAtA, "utf8")} of ${sentBA.length} bytes)`,
       );
 
     const [topologies, faults, counters, audits] = await Promise.all([
@@ -623,13 +700,19 @@ const runScenario = async (name, index, profileInfo) => {
         ["sdpLocal", audit.sdpLocalUtf8],
         ["sdpRemote", audit.sdpRemoteUtf8],
       ]) {
-        if (sdp === null) {
-          note(`page ${which} has no ${label} to audit`);
+        // Symmetric with pushSecret: a null, empty or implausibly short SDP is
+        // refused rather than filtered out of the needle set and audited clean.
+        // The smallest SDP Chromium emits for one data channel is ~600 bytes.
+        const bytes = sdp === null ? null : Buffer.from(sdp, "utf8");
+        if (bytes === null || bytes.length < 64) {
+          note(
+            `page ${which} has no usable ${label} to audit (${bytes === null ? "null" : `${bytes.length} bytes`})`,
+          );
           continue;
         }
         needles.push({
           name: `${which} ${label}`,
-          encodings: encodingsOf(Buffer.from(sdp, "utf8")),
+          encodings: encodingsOf(bytes),
         });
       }
     }
@@ -637,6 +720,12 @@ const runScenario = async (name, index, profileInfo) => {
       (total, needle) => total + needle.encodings.length,
       0,
     );
+    // Asserted rather than printed: an edit that drops a secret or an encoding
+    // would otherwise shrink the search and still report a clean audit.
+    if (needleCount !== EXPECTED_NEEDLE_COUNT)
+      note(
+        `the audit built ${needleCount} needles over ${needles.length} secrets, expected ${EXPECTED_NEEDLE_COUNT}`,
+      );
 
     const control = [
       {
@@ -648,6 +737,10 @@ const runScenario = async (name, index, profileInfo) => {
     ];
 
     const auditLines = [];
+    // The corpus the verdict line is allowed to talk about. Counted HERE, from
+    // the very buffers that were searched — a second read afterwards would
+    // include bodies logged while the audit ran, which nothing searched.
+    const audited = { a: 0, b: 0 };
     for (const [which, logPath] of [
       ["a", logPaths.a],
       ["b", logPaths.b],
@@ -669,6 +762,7 @@ const runScenario = async (name, index, profileInfo) => {
         );
       const hits = searchBodies(log.bodies, needles);
       for (const hit of hits) note(`store ${which} received ${hit}`);
+      audited[which] = log.bodies.length;
       auditLines.push(
         `  store ${which}: ${log.bodies.length} bodies (${log.bytes} log bytes), ` +
           `${needleCount} needles over ${needles.length} secrets, ${hits.length} found`,
@@ -747,17 +841,20 @@ const runScenario = async (name, index, profileInfo) => {
         faultsAgainst("B", storeIdA).length === 0
       )
         note("no page recorded a fault or an unreachable event for store a");
-      // Store b was honest and reachable for the whole run, so no fault may
-      // name it. Faults naming the killed store a are permitted here but are
-      // NOT evidence of misbehaviour: `storeClient.#request` files a transport
-      // failure as `signature-invalid` (reported as a `note` above), which is
-      // the finding, not the expectation.
+      // Asserted exactly, and this is now a sharp assertion rather than a
+      // permissive one. Since `f1f5aa4` a store that is merely switched off
+      // files as fault kind `unreachable`; `signature-invalid` is reserved for
+      // an answer that arrived, decoded and carried a signature this client
+      // could judge. A SIGKILLed store must therefore produce ONLY
+      // `unreachable`, and the honest store b must produce nothing at all — so
+      // any other kind here, or any fault naming b, is a real regression.
       const unexpected = allFaults.filter(
-        (fault) => fault.storeIdHex !== storeIdA,
+        (fault) =>
+          fault.storeIdHex !== storeIdA || fault.kind !== "unreachable",
       );
       if (unexpected.length !== 0)
         note(
-          `kill-a recorded faults not against store a: ${JSON.stringify(unexpected)}`,
+          `kill-a recorded faults other than "unreachable" against store a: ${JSON.stringify(unexpected)}`,
         );
     }
 
@@ -852,21 +949,20 @@ const runScenario = async (name, index, profileInfo) => {
     say(
       `store-missed events       A=${missed.A} B=${missed.B}   (browser "failed to load" lines A=${refused.A} B=${refused.B})`,
     );
-    // A transport failure is recorded by `storeClient.#request` as
-    // `signature-invalid`, not as absence. It does NOT mark the store inert, so
-    // liveness is unaffected — but it does put a blame-shaped record in the
-    // evidence a report would be built from. Named here so a reader of the run
-    // sees it rather than inferring misbehaviour from the fault list.
-    const absenceBlamed = [...faults[0], ...faults[1]].filter(
-      (fault) =>
-        fault.kind === "signature-invalid" &&
-        fault.detail.includes("the request failed"),
+    // Absence and misbehaviour are separate kinds since `f1f5aa4`, so the two
+    // populations are reported separately: a store that stopped answering is
+    // not being accused of anything, and neither kind marks a store inert.
+    const absent = [...faults[0], ...faults[1]].filter(
+      (fault) => fault.kind === "unreachable",
     );
-    if (absenceBlamed.length > 0)
+    const blamed = [...faults[0], ...faults[1]].filter(
+      (fault) => fault.kind === "signature-invalid",
+    );
+    if (absent.length > 0 || blamed.length > 0)
       say(
-        `note                      ${absenceBlamed.length} unreachable-store answers were recorded as ` +
-          `kind "signature-invalid" (storeClient.#request); absence is being blamed as misbehaviour, ` +
-          `though none of them marks the store inert`,
+        `note                      ${absent.length} record(s) of kind "unreachable" (a store that did not answer; ` +
+          `not an accusation, and does not mark it inert) and ${blamed.length} of "signature-invalid" ` +
+          `(an answer that arrived and did not verify)`,
       );
     say("privacy audit of the logged request bodies");
     for (const line of auditLines) say(line);
@@ -901,10 +997,7 @@ const runScenario = async (name, index, profileInfo) => {
       faults,
       counters,
       requests,
-      bodies: {
-        a: readBodyLog(logPaths.a).bodies.length,
-        b: readBodyLog(logPaths.b).bodies.length,
-      },
+      bodies: audited,
       needleCount,
     };
 
@@ -934,9 +1027,9 @@ const runScenario = async (name, index, profileInfo) => {
   say(
     ok
       ? `SCENARIO ${name} PASS in ${seconds(connectedMs ?? 0)} — ` +
-          `${MESSAGE_AB.length} bytes A→B and ${MESSAGE_BA.length} bytes B→A decrypted byte-exact; ` +
+          `${Buffer.byteLength(MESSAGE_AB)} bytes A→B and ${Buffer.byteLength(MESSAGE_BA)} bytes B→A decrypted byte-exact; ` +
           `topology A=${result.topologies[0]} B=${result.topologies[1]}; ` +
-          `0 of ${result.needleCount} needles found in ${result.bodies.a + result.bodies.b} logged request bodies`
+          `0 of ${result.needleCount} needles found in the ${result.bodies.a + result.bodies.b} request bodies the audit searched`
       : `SCENARIO ${name} FAIL — ${problems.join("; ")}`,
   );
 
@@ -954,6 +1047,10 @@ const runScenario = async (name, index, profileInfo) => {
  * Run
  * ------------------------------------------------------------------ */
 
+/** Bounded, because a `bun` that hangs here hangs the whole harness before a
+ * single scenario has started and nothing downstream has a deadline yet. */
+const BUN_TOOL_TIMEOUT_MS = 120_000;
+
 const bunJson = (argv, env) =>
   new Promise((resolve, reject) => {
     const child = spawn("bun", argv, {
@@ -963,15 +1060,30 @@ const bunJson = (argv, env) =>
     });
     let out = "";
     let err = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(
+        new Error(
+          `TIMEOUT bun ${argv.join(" ")} (${BUN_TOOL_TIMEOUT_MS}ms): ${err.trim()}`,
+        ),
+      );
+    }, BUN_TOOL_TIMEOUT_MS);
     child.stdout.on("data", (chunk) => (out += String(chunk)));
     child.stderr.on("data", (chunk) => (err += String(chunk)));
-    child.on("close", (code) =>
-      code === 0
-        ? resolve(out)
-        : reject(
-            new Error(`bun ${argv.join(" ")} failed (${code}): ${err.trim()}`),
-          ),
-    );
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(
+        new Error(`bun ${argv.join(" ")} could not start: ${error.message}`),
+      );
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out);
+      else
+        reject(
+          new Error(`bun ${argv.join(" ")} failed (${code}): ${err.trim()}`),
+        );
+    });
   });
 
 const PROFILE_TOOL = "docs/e2e/blind-two-store/profileTool.ts";
@@ -992,6 +1104,15 @@ try {
           `--window-ms=${WINDOW_MS}`,
         ];
   const profileInfo = JSON.parse(await bunJson(profileArgv, cohortEnv));
+
+  // The cohort override is a loader rewrite, not an option: if it silently did
+  // not apply, every number this run reports would be attributed to a geometry
+  // it never used. The rewrite is only trusted once the rebuilt profile says
+  // what was asked for.
+  if (COHORT !== null && profileInfo.cohortAllocationsPerWindow !== COHORT)
+    throw new Error(
+      `--cohort=${COHORT} did not take: the rebuilt profile carries cohortAllocationsPerWindow=${profileInfo.cohortAllocationsPerWindow}`,
+    );
 
   if (COHORT !== null) {
     bundleFile = path.join(dir, `bundle.cohort-${COHORT}.js`);

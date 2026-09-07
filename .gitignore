@@ -70,3 +70,13 @@ bun.lockb
 # caches into ./emsdk-cache). Tools that walk the tree must not see them.
 emsdk/
 emsdk-cache/
+
+# Build outputs of the blind-rendezvous browser harnesses
+# (docs/e2e/blind-two-store/build.sh, and `run.mjs --cohort=<n>` which builds a
+# second bundle per cohort). They are megabytes of generated bundle and a copy
+# of the development WASM; the READMEs say not to commit them and this is what
+# enforces it.
+docs/e2e/blind-two-store/bundle.js
+docs/e2e/blind-two-store/bundle.cohort-*.js
+docs/e2e/blind-two-store/provider-smoke-bundle.js
+docs/e2e/blind-two-store/libcrypto.wasm

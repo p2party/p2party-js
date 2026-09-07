@@ -146,12 +146,12 @@ not. The event vocabulary IS the pair driver's phase machine —
 node docs/e2e/blind-two-store/run.mjs --scenario=<name>
 ```
 
-| `--scenario`            | what is done to the stores                                                                             | what the run must still do                                                                                                                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `healthy`               | nothing                                                                                                | both pages `multi-store-union`, no faults, no `store-unreachable`                                                                                                                                           |
-| `kill-a`                | store A is `SIGKILL`ed once both pages have published presence **and** A has logged ≥ 1 request body   | both pages `message-verified` byte-exact each way, both end `single-carrier-dependent`, ≥ 1 fault or `store-missed` event naming A, no fault naming B                                                       |
-| `withhold-a`            | store A runs `P2PARTY_STORE_FAULT=withhold`: it answers `stored` to every append and finalizes dummies | both pages `message-verified` via B, ≥ 1 `custody-breach` against A, **no other fault of any kind**, and both pages drop to `single-carrier-dependent` — the observable consequence of A being marked inert |
-| `unreachable-b-for-one` | nothing; page B is _given_ only store A's origin                                                       | page A ends `multi-store-union`, page B `single-carrier-dependent`, page A's `counters.backfills ≥ 1`, and page B issues **zero** requests to store B                                                       |
+| `--scenario`            | what is done to the stores                                                                                                                                                                           | what the run must still do                                                                                                                                                                                                                     |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `healthy`               | nothing                                                                                                                                                                                              | both pages `multi-store-union`, no faults, no `store-unreachable`                                                                                                                                                                              |
+| `kill-a`                | store A is `SIGKILL`ed once both pages have published presence **and** A has logged ≥ 1 request body; the kill is then confirmed — the child's exit is awaited and `/health` polled until it refuses | both pages `message-verified` byte-exact each way, both end `single-carrier-dependent`, ≥ 1 fault or `store-missed` event naming A, and every recorded fault is kind `unreachable` against A — nothing naming B, and nothing of any other kind |
+| `withhold-a`            | store A runs `P2PARTY_STORE_FAULT=withhold`: it answers `stored` to every append and finalizes dummies                                                                                               | both pages `message-verified` via B, ≥ 1 `custody-breach` against A, **no other fault of any kind**, and both pages drop to `single-carrier-dependent` — the observable consequence of A being marked inert                                    |
+| `unreachable-b-for-one` | nothing; page B is _given_ only store A's origin                                                                                                                                                     | page A ends `multi-store-union`, page B `single-carrier-dependent`, page A's `counters.backfills ≥ 1`, and page B issues **zero** requests to store B                                                                                          |
 
 `--scenario=all` (the default) runs all four in order, each on its own port pair
 and its own temp database and key files, and prints one summary table. Every
@@ -178,7 +178,12 @@ fails.
    with the session role taken from the handoff facts;
 6. one encrypted application message each way, decrypted **byte-exact**:
    140,005 bytes A→B (3 uniform chunk frames) and 9,005 B→A (1 frame), so one
-   run covers both shapes of the app-lane framing;
+   run covers both shapes of the app-lane framing. The page hands back decoded
+   text, so the harness compares the UTF-8 re-encoding of what arrived against
+   the UTF-8 of what was sent — `Buffer.equals`, not string equality. Because
+   UTF-8 encode/decode is injective on well-formed input and malformed bytes
+   would have decoded to U+FFFD and re-encoded to `EF BF BD`, equal buffers do
+   mean the plaintext the peer decrypted was the plaintext that was sent;
 7. no `failed` phase and no `session-failed` on either page;
 8. the privacy audit below, on **both** stores;
 9. the per-scenario expectations in the table above — including the fault sets,
@@ -202,9 +207,11 @@ produced: the raw bytes, the ASCII of the lower-case hex, the ASCII of the
 upper-case hex, the ASCII of base64 and base64url, and — because a marker
 embedded in a larger base64 blob starts wherever its byte offset mod 3 puts it —
 base64 and base64url at all three alignments. That is 148 distinct byte
-needles per run in the current configuration, and the run prints the count.
+needles per run: 14 secrets at 11 encodings each, less the 6 alignment variants
+of the 5-byte `v=0\r\n` marker whose stable cores fall below the 8-character
+floor.
 
-Three things keep the result from being theatre:
+Five things keep the result from being theatre:
 
 - **A missing or empty log fails the scenario.** So does a log with zero parsed
   bodies. A clean audit over nothing is not a clean audit.
@@ -214,27 +221,41 @@ Three things keep the result from being theatre:
   and the scenario fails.
 - **The harness cross-checks the capability.** `audit().capabilityHex` must
   equal the 32 bytes `run.mjs` itself generated, so the needle is known to be
-  the real secret rather than whatever the page felt like returning.
+  the real secret rather than whatever the page felt like returning. A secret
+  shorter than 32 bytes, or an SDP under 64 bytes, is refused rather than
+  quietly dropped from the search.
 - **Short needles are refused, not searched.** `v=0` alone is three bytes and
   turns up by chance roughly once per 16 MB of ciphertext; these logs are
   6-8 MB. It is searched as `v=0\r\n`, which is what Chromium emits, and
   anything under four bytes is dropped from the needle set rather than counted
   as "not found".
+- **The needle count is asserted, not printed.** A run that builds anything
+  other than 148 needles fails, so an edit that drops a secret or an encoding
+  cannot shrink the search and still report a clean audit.
 
-**What the audit does not cover.** The store's body log sits inside the POST
-branch of the request handler, so it records request _bodies_ only. The GET
-routes — chunk reads and checkpoint reads — carry their coordinates in the URL
-path (`/chunk/<deliveryProfileHash>/<window>/<class>/<chunk>`) and are **not**
-examined by this audit at all. Those paths are public geometry by construction
-and hold no room-derived value, but this run does not check that; it checks the
-bodies. The audit also says nothing about source addresses, request timing, or
-sizes, all of which both stores see.
+**What the audit does not cover.** Three things, and the verdict line is worded
+so as not to imply any of them:
+
+1. **GET routes.** The store's body log sits inside the POST branch of the
+   request handler, so it records request _bodies_ only. The chunk and
+   checkpoint reads carry their coordinates in the URL path
+   (`/chunk/<deliveryProfileHash>/<window>/<class>/<chunk>`) and are **not**
+   examined by this audit at all. Those paths are public geometry by
+   construction and hold no room-derived value, but this run does not check
+   that; it checks the bodies.
+2. **Bodies logged after the audit ran.** Each log is read exactly once, right
+   after both pages report `message-verified` and **before** `stop()`, so the
+   scheduled traffic of the windows that follow is outside the corpus. The
+   counts the run prints are the counts the audit actually searched — they are
+   carried out of the search loop rather than re-read afterwards, so the
+   verdict line and the per-store audit line always name the same corpus.
+3. **Source addresses, request timing and sizes**, all of which both stores see.
 
 **What a run may therefore claim** is exactly: _on this run, none of the 148
 needles for the room capability, the `RoomContextId`, either stable Ed25519 key,
-either SDP blob, or those SDP markers appeared in any of the request bodies
-either store logged._ Nothing about what a store could infer, and nothing about
-independence.
+either SDP blob, or those SDP markers appeared in any of the N request bodies
+the audit searched_, where N is the number the run prints per store. Nothing
+about what a store could infer, and nothing about independence.
 
 ### Honesty
 
@@ -259,12 +280,16 @@ independence.
 - **In `kill-a`, store A's clean audit is about very few bytes.** The kill lands
   in the first delivery window, so A had logged 2 request bodies. The run says
   so (`store a: 2 bodies`); the honest statement is about those two bodies.
-- **A fault record is not always misbehaviour.** `storeClient.#request` records
-  a transport failure — a killed store's `ERR_CONNECTION_REFUSED` — as a fault
-  of kind `signature-invalid`. It does not mark the store inert, so liveness is
-  unaffected, but a report built from `faults()` would read 134 accusations of
-  a store that was simply switched off. The harness prints a `note` line
-  whenever it sees this, and it is listed as a finding rather than accepted.
+- **A fault record is not always misbehaviour, and the kinds now say which.**
+  Until `f1f5aa4` `storeClient.#request` filed every transport failure — a
+  killed store's `ERR_CONNECTION_REFUSED` included — as `signature-invalid`, so
+  `kill-a` produced 269 records indistinguishable from a store caught signing a
+  lie. That is fixed upstream: a store that did not answer now files as kind
+  `unreachable`, and `signature-invalid` is reserved for an answer that arrived,
+  decoded, carried a signature and failed to verify. Neither kind marks a store
+  inert. `kill-a` now asserts that store A's faults are **only** `unreachable`
+  and that store B's are empty, and every run prints the two populations
+  separately.
 
 ### Build and run
 
@@ -279,9 +304,11 @@ PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
     [--store-port-base=5910] [--page-port=5920]
 ```
 
-`bundle.js`, `bundle.cohort-<n>.js` and `libcrypto.wasm` are generated — do not
-commit them. Ports: `--store-port-base` and the next seven (one pair per
-scenario) plus 5920 for the page server; nothing binds below 5000.
+`bundle.js`, `bundle.cohort-<n>.js`, `provider-smoke-bundle.js` and
+`libcrypto.wasm` are generated and are covered by `.gitignore`, so "do not
+commit them" is enforced rather than remembered. Ports: `--store-port-base` and
+the next seven (one pair per scenario) plus 5920 for the page server; nothing
+binds below 5000.
 
 **`docs/e2e/**` is outside `tsconfig.json`.** Neither `entry.ts` nor
 `profileTool.ts` nor `cohortPreload.ts` is type-checked by
@@ -290,25 +317,9 @@ build here is not a type check.
 
 ### Recorded result (2026-09-08, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
 
-`node docs/e2e/blind-two-store/run.mjs --scenario=all`, three consecutive runs,
-all exit 0, 4 of 4 scenarios each. The second and third summaries — the third
-after a fresh `build.sh` against the tree at this commit:
-
-```
-scenario                 verdict   connect   A:peer→verified   B:peer→verified   topology A / B
-healthy                  PASS        36.6s        8.4s→36.5s        8.6s→36.6s   multi-store-union / multi-store-union
-kill-a                   PASS        39.6s        7.4s→39.5s        7.3s→39.5s   single-carrier-dependent / single-carrier-dependent
-withhold-a               PASS        39.5s        7.4s→39.5s        7.2s→39.5s   single-carrier-dependent / single-carrier-dependent
-unreachable-b-for-one    PASS        39.1s        7.3s→39.0s        7.3s→39.1s   multi-store-union / single-carrier-dependent
-
-healthy                  PASS        39.6s        7.6s→39.5s        7.6s→39.6s   multi-store-union / multi-store-union
-kill-a                   PASS        39.3s        7.1s→39.3s        7.3s→39.3s   single-carrier-dependent / single-carrier-dependent
-withhold-a               PASS        39.5s        7.4s→39.4s        7.4s→39.5s   single-carrier-dependent / single-carrier-dependent
-unreachable-b-for-one    PASS        35.4s        7.2s→35.3s        7.3s→35.4s   multi-store-union / single-carrier-dependent
-```
-
-The first, verbatim and in full, with the per-window `store-missed` cover lines
-and the store startup banners elided:
+`node docs/e2e/blind-two-store/run.mjs --scenario=all`, exit 0, 4 of 4
+scenarios. Verbatim, with the per-window `store-missed` cover lines, the
+`run-stopped` lines and the store startup banners elided:
 
 ```
 delivery profile: window 4000ms, cohort 8, chunks/window 3+2, hash 83a2261ee4c0f345…
@@ -316,146 +327,145 @@ per client per store per window: appends 172542 bytes, full scan 1380336 bytes
 page server on http://localhost:5920/
 
 === scenario healthy (window 4000ms, cohort 8, ports 5910/5911) ===
-store a healthy on 5910 (storeId bac7905bad4639c54c29c996556cc1b9b900c8141ed1ae862797196f6ab5e1f7)
-store b healthy on 5911 (storeId 415185c09dedeef4e422c03e69740127e6d534f2522a9d4221a9259016f12a3e)
-both pages loaded (capability 881ce5550d27c7e9…; A sees 2 store(s), B sees 2)
-    0.5s [A] store-connected — http://127.0.0.1:5910 storeId=bac7905bad4639c5…
-    0.5s [A] store-connected — http://127.0.0.1:5911 storeId=415185c09dedeef4…
-    0.5s [B] presence-published
-    0.5s [A] presence-published
+store a healthy on 5910 (storeId f27c7a022e90fb587e738b58cdfe270da6f6a0439293956121461dd2fe98ff13)
+store b healthy on 5911 (storeId 9324b1a430d7c3845eb6437926fa3e980f9ff7fc766d8c358a88702e91da7b14)
+both pages loaded (capability 40674e118172ac1f…; A sees 2 store(s), B sees 2)
+    0.5s [A] store-connected — http://127.0.0.1:5910 storeId=f27c7a022e90fb58…
+    0.5s [A] store-connected — http://127.0.0.1:5911 storeId=9324b1a430d7c384…
+    0.5s [A] presence-published            0.5s [B] presence-published
   0.5s both endpoints armed; delivery window 4000ms
-    2.2s [A] topology — multi-store-union
-   10.3s [A] peer-observed          10.3s [A] hello-sent
-   18.3s [B] hello-opened           18.3s [B] accepted
-   26.4s [A] accepted               26.6s [A] offer-sent
-   34.4s [B] offer-opened           34.4s [B] answered      34.4s [B] handoff
+    2.1s [A] topology — multi-store-union  2.1s [B] topology — multi-store-union
+   10.2s [A] peer-observed                10.2s [A] hello-sent
+   18.2s [B] hello-opened                 18.2s [B] accepted
+   26.1s [A] accepted                     26.2s [A] offer-sent
+   34.0s [B] offer-opened                 34.0s [B] answered      34.0s [B] handoff
    42.3s [A] handoff
-   42.3s [A] webrtc-connected — initiator   42.3s [B] webrtc-connected — responder
-   42.3s [A] dtls-verified                  42.3s [B] dtls-verified
-   42.3s [A] session-authenticated — responder
-   42.3s [B] session-authenticated — initiator
+   42.3s [A] webrtc-connected — initiator  42.3s [B] webrtc-connected — responder
+   42.3s [A] dtls-verified                 42.3s [B] dtls-verified
+   42.3s [A] session-authenticated — initiator
+   42.3s [B] session-authenticated — responder
    42.3s [A] message-sent — 140005 bytes in 3 frames
    42.3s [A] message-verified — 9005 bytes from 1 frames
-   42.4s [B] message-verified — 140005 bytes from 3 frames
+   42.3s [B] message-verified — 140005 bytes from 3 frames
 
 time from this page's own presence-published to each milestone
   page  peer-observed   handoff  session-authenticated  message-verified
-     A           9.8s     41.9s                  41.9s             41.9s
-     B          10.0s     34.0s                  41.9s             41.9s
+     A           9.7s     41.8s                  41.8s             41.8s
+     B           9.7s     33.5s                  41.8s             41.9s
 
-requests issued by page   A: a=163 b=164   B: a=163 b=163
+requests issued by page   A: a=162 b=163   B: a=163 b=164
 privacy audit of the logged request bodies
-  store a: 162 bodies (6973918 log bytes), 148 needles over 14 secrets, 0 found
-  store b: 174 bodies (7636914 log bytes), 148 needles over 14 secrets, 0 found
+  store a: 171 bodies (7636265 log bytes), 148 needles over 14 secrets, 0 found
+  store b: 174 bodies (7670938 log bytes), 148 needles over 14 secrets, 0 found
 topology                  A=multi-store-union B=multi-store-union
 faults                    A: none   B: none
 counters                  A={"appendsReal":8,"appendsDummy":100,"scans":22,"operationsSeen":6,"backfills":0}
-                          B={"appendsReal":8,"appendsDummy":100,"scans":20,"operationsSeen":5,"backfills":0}
+                          B={"appendsReal":8,"appendsDummy":100,"scans":22,"operationsSeen":6,"backfills":0}
 
-SCENARIO healthy PASS in 41.9s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=multi-store-union B=multi-store-union; 0 of 148 needles found in 351 logged request bodies
+SCENARIO healthy PASS in 41.9s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=multi-store-union B=multi-store-union; 0 of 148 needles found in the 345 request bodies the audit searched
 
 === scenario kill-a (window 4000ms, cohort 8, ports 5912/5913) ===
-store a healthy on 5912 (storeId 8a64fd63a4c2cb8b8ebeb7f78e77aeb6396804cc0abaae1cdd0e45cef2ed7a5d)
-store b healthy on 5913 (storeId 4af85d7ad40c59fd8b3712c12695f1f26b549aaa307a99bf6112df5c907757fb)
-both pages loaded (capability 4ea6a32f493c0829…; A sees 2 store(s), B sees 2)
+store a healthy on 5912 (storeId 26016191fa9e1efa13158f8421d3b7d6ba5724fe4b11841d825394a44c094c03)
+store b healthy on 5913 (storeId 7541edf4beed64d8286aa9b786e31f26aac9bf6277a0eed6c1f6d050f42388ea)
+both pages loaded (capability b09f5675b65e7a34…; A sees 2 store(s), B sees 2)
     0.4s [A] store-connected — http://127.0.0.1:5912 …
     0.4s [A] store-connected — http://127.0.0.1:5913 …
-    0.5s [B] presence-published            0.5s [A] presence-published
+    0.4s [A] presence-published            0.5s [B] presence-published
   0.5s both endpoints armed; delivery window 4000ms
-  0.5s SIGKILL store a (pid 22751) after both presence-published and 2 logged bodies
-    3.6s [A] topology — single-carrier-dependent
-    3.6s [B] topology — single-carrier-dependent
-    7.7s [B] peer-observed           7.7s [B] hello-sent
-   15.8s [A] hello-opened           15.8s [A] accepted
-   23.8s [B] accepted               23.9s [B] offer-sent
-   31.1s [A] offer-opened           31.2s [A] answered      31.2s [A] handoff
-   35.8s [B] handoff
-   35.8s [A] dtls-verified          35.8s [B] dtls-verified
-   35.8s [A] session-authenticated — responder
-   35.8s [B] session-authenticated — initiator
-   35.8s [A] message-verified — 9005 bytes from 1 frames
-   35.8s [B] message-verified — 140005 bytes from 3 frames
+  0.5s SIGKILL store a (pid 54781) after both presence-published and 2 logged bodies; process exited and http://127.0.0.1:5912/health now refuses
+    3.5s [A] topology — single-carrier-dependent
+    3.5s [B] topology — single-carrier-dependent
+    7.5s [A] peer-observed                  7.7s [B] hello-sent
+   15.6s [A] hello-opened                  15.6s [A] accepted
+   23.7s [B] accepted                      23.8s [B] offer-sent
+   31.0s [A] offer-opened                  31.0s [A] answered      31.0s [A] handoff
+   35.6s [B] handoff
+   35.6s [A] dtls-verified                 35.6s [B] dtls-verified
+   35.6s [A] session-authenticated — responder
+   35.6s [B] session-authenticated — initiator
+   35.6s [A] message-verified — 9005 bytes from 1 frames
+   35.6s [B] message-verified — 140005 bytes from 3 frames
 
 time from this page's own presence-published to each milestone
   page  peer-observed   handoff  session-authenticated  message-verified
-     A           7.4s     30.7s                  35.4s             35.4s
-     B           7.2s     35.4s                  35.4s             35.4s
+     A           7.1s     30.6s                  35.1s             35.2s
+     B           7.2s     35.1s                  35.1s             35.2s
 
-requests issued by page   A: a=136 b=118   B: a=136 b=118
-note                      269 unreachable-store answers were recorded as kind "signature-invalid" (storeClient.#request); absence is being blamed as misbehaviour, though none of them marks the store inert
+requests issued by page   A: a=133 b=117   B: a=135 b=117
+note                      264 record(s) of kind "unreachable" (a store that did not answer; not an accusation, and does not mark it inert) and 0 of "signature-invalid" (an answer that arrived and did not verify)
 privacy audit of the logged request bodies
   store a: 2 bodies (438 log bytes), 148 needles over 14 secrets, 0 found
-  store b: 126 bodies (6243242 log bytes), 148 needles over 14 secrets, 0 found
+  store b: 116 bodies (5580668 log bytes), 148 needles over 14 secrets, 0 found
 topology                  A=single-carrier-dependent B=single-carrier-dependent
-faults                    A: 134× signature-invalid vs 8a64fd63a4c2cb8b…   B: 135× signature-invalid vs 8a64fd63a4c2cb8b…
-  A first fault           w447205083: /p2party/prototype-v0/allocation-token: the request failed (TypeError)
-  B first fault           w447205082: /p2party/prototype-v0/allocation: the request failed (TypeError)
-counters                  A={"appendsReal":18,"appendsDummy":70,"scans":18,"operationsSeen":6,"backfills":6}
-                          B={"appendsReal":21,"appendsDummy":67,"scans":18,"operationsSeen":6,"backfills":6}
+faults                    A: 131× unreachable vs 26016191fa9e1efa…   B: 133× unreachable vs 26016191fa9e1efa…
+  A first fault           w447205564: /p2party/prototype-v0/allocation-token: the request failed (TypeError)
+  B first fault           w447205564: /p2party/prototype-v0/allocation-token: the request failed (TypeError)
+counters                  A={"appendsReal":18,"appendsDummy":68,"scans":16,"operationsSeen":5,"backfills":5}
+                          B={"appendsReal":21,"appendsDummy":65,"scans":18,"operationsSeen":6,"backfills":6}
 
-SCENARIO kill-a PASS in 35.4s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=single-carrier-dependent B=single-carrier-dependent; 0 of 148 needles found in 128 logged request bodies
+SCENARIO kill-a PASS in 35.2s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=single-carrier-dependent B=single-carrier-dependent; 0 of 148 needles found in the 118 request bodies the audit searched
 
 === scenario withhold-a (window 4000ms, cohort 8, ports 5914/5915) ===
-store a healthy on 5914 (storeId 7433e46ce6c8b34442e6a76efcc961cbaa9ce9120c3405117643e89d617e3ab6)
-store b healthy on 5915 (storeId c1bfe8391e531b24e814a83b4ed384a9d166d1c89c5feaf28f9dfd943a36663e)
-both pages loaded (capability ac8b9c9fbf27bac5…; A sees 2 store(s), B sees 2)
+store a healthy on 5914 (storeId ca64f93053d417ef8c07502c853e16206b1c2fd7ec7ed9dcbc3db6f3819e2cdf)
+store b healthy on 5915 (storeId ef65eef2d5dc5d538dfebb0081938b016286d1c8f51205b4c4189d5813fc3233)
+both pages loaded (capability 4867c022758a5f23…; A sees 2 store(s), B sees 2)
   0.4s both endpoints armed; delivery window 4000ms
-    3.7s [A] topology — multi-store-union
-    3.7s [B] topology — multi-store-union
-    7.7s [B] topology — single-carrier-dependent
+    3.8s [A] topology — multi-store-union
+    3.8s [B] topology — multi-store-union
     7.7s [A] topology — single-carrier-dependent
-    7.8s [A] peer-observed           7.8s [A] hello-sent
-   15.9s [B] hello-opened           15.9s [B] accepted
-   23.9s [A] accepted               24.0s [A] offer-sent
-   31.7s [B] offer-opened           31.7s [B] answered      31.7s [B] handoff
-   39.9s [A] handoff
-   39.9s [A] dtls-verified          39.9s [B] dtls-verified
-   39.9s [A] message-verified — 9005 bytes from 1 frames
-   40.0s [B] message-verified — 140005 bytes from 3 frames
+    7.8s [B] topology — single-carrier-dependent
+    8.0s [A] peer-observed                  8.0s [A] hello-sent
+   16.0s [B] hello-opened                 16.0s [B] accepted
+   24.0s [A] accepted                     24.2s [A] offer-sent
+   31.4s [B] offer-opened                 31.4s [B] answered      31.4s [B] handoff
+   36.0s [A] handoff
+   36.0s [A] dtls-verified                36.0s [B] dtls-verified
+   36.0s [A] message-verified — 9005 bytes from 1 frames
+   36.0s [B] message-verified — 140005 bytes from 3 frames
 
 time from this page's own presence-published to each milestone
   page  peer-observed   handoff  session-authenticated  message-verified
-     A           7.3s     39.5s                  39.5s             39.5s
-     B           7.4s     31.3s                  39.5s             39.5s
+     A           7.6s     35.6s                  35.6s             35.6s
+     B           7.6s     30.9s                  35.6s             35.6s
 
-requests issued by page   A: a=133 b=133   B: a=133 b=133
+requests issued by page   A: a=120 b=120   B: a=120 b=120
 privacy audit of the logged request bodies
-  store a: 142 bodies (6941138 log bytes), 148 needles over 14 secrets, 0 found
-  store b: 144 bodies (6975600 log bytes), 148 needles over 14 secrets, 0 found
+  store a: 128 bodies (6243664 log bytes), 148 needles over 14 secrets, 0 found
+  store b: 128 bodies (6243664 log bytes), 148 needles over 14 secrets, 0 found
 topology                  A=single-carrier-dependent B=single-carrier-dependent
-faults                    A: 8× custody-breach vs 7433e46ce6c8b344…   B: 8× custody-breach vs 7433e46ce6c8b344…
-  A first fault           w447205091: the object at class 0 chunk 0 slot 2 is not the one this store received
-  B first fault           w447205091: the object at class 0 chunk 0 slot 5 is not the one this store received
-counters                  A={"appendsReal":11,"appendsDummy":87,"scans":20,"operationsSeen":6,"backfills":6}
-                          B={"appendsReal":11,"appendsDummy":87,"scans":20,"operationsSeen":6,"backfills":6}
+faults                    A: 8× custody-breach vs ca64f93053d417ef…   B: 8× custody-breach vs ca64f93053d417ef…
+  A first fault           w447205572: the object at class 0 chunk 0 slot 5 is not the one this store received
+  B first fault           w447205572: the object at class 0 chunk 0 slot 2 is not the one this store received
+counters                  A={"appendsReal":11,"appendsDummy":77,"scans":18,"operationsSeen":6,"backfills":6}
+                          B={"appendsReal":11,"appendsDummy":77,"scans":18,"operationsSeen":6,"backfills":6}
 
-SCENARIO withhold-a PASS in 39.5s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=single-carrier-dependent B=single-carrier-dependent; 0 of 148 needles found in 288 logged request bodies
+SCENARIO withhold-a PASS in 35.6s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=single-carrier-dependent B=single-carrier-dependent; 0 of 148 needles found in the 256 request bodies the audit searched
 
 === scenario unreachable-b-for-one (window 4000ms, cohort 8, ports 5916/5917) ===
-store a healthy on 5916 (storeId 9bd2cf66f46525c5821d5442148e2014e871e7531d71286c0a992e11687a36c8)
-store b healthy on 5917 (storeId 66f4873bfeae3bad712a6f9350ac8c5ad0c2947b69fae19d9a04ed7a928cc3f1)
-both pages loaded (capability 9b07713a66aa115a…; A sees 2 store(s), B sees 1)
+store a healthy on 5916 (storeId 95acc8f846076c1367e68e5a9c7575a5a3967221f7b54df48ee95b6c9de31603)
+store b healthy on 5917 (storeId 99fc1f0b4ab2af9ad6f63d6339b9f2a788f3d13aeead5d90a93f18458f5351ce)
+both pages loaded (capability c08f92911b34a47e…; A sees 2 store(s), B sees 1)
     0.4s [B] store-connected — http://127.0.0.1:5916 …
     0.4s [A] store-connected — http://127.0.0.1:5916 …
     0.4s [A] store-connected — http://127.0.0.1:5917 …
   0.4s both endpoints armed; delivery window 4000ms
-    3.5s [A] topology — multi-store-union
-    3.5s [B] topology — single-carrier-dependent
-    7.6s [B] peer-observed           7.6s [B] hello-sent
-   15.8s [A] hello-opened           15.8s [A] accepted
-   23.8s [B] accepted               23.9s [B] offer-sent
-   31.1s [A] offer-opened           31.1s [A] answered      31.1s [A] handoff
-   35.7s [B] handoff
-   35.7s [A] dtls-verified          35.7s [B] dtls-verified
+    3.6s [A] topology — multi-store-union
+    3.6s [B] topology — single-carrier-dependent
+    7.7s [B] peer-observed                  7.7s [B] hello-sent
+   15.8s [A] hello-opened                 15.8s [A] accepted
+   23.8s [B] accepted                     23.9s [B] offer-sent
+   31.1s [A] offer-opened                 31.1s [A] answered      31.1s [A] handoff
+   35.8s [B] handoff
+   35.8s [A] dtls-verified                35.8s [B] dtls-verified
    35.8s [A] message-verified — 9005 bytes from 1 frames
    35.8s [B] message-verified — 140005 bytes from 3 frames
 
 time from this page's own presence-published to each milestone
   page  peer-observed   handoff  session-authenticated  message-verified
-     A           7.3s     30.6s                  35.3s             35.3s
-     B           7.2s     35.3s                  35.3s             35.3s
+     A           7.4s     30.7s                  35.3s             35.4s
+     B           7.2s     35.3s                  35.3s             35.4s
 
-requests issued by page   A: a=135 b=136   B: a=118 b=0
+requests issued by page   A: a=136 b=136   B: a=118 b=0
 privacy audit of the logged request bodies
   store a: 135 bodies (6245141 log bytes), 148 needles over 14 secrets, 0 found
   store b: 72 bodies (3123520 log bytes), 148 needles over 14 secrets, 0 found
@@ -464,34 +474,49 @@ faults                    A: none   B: none
 counters                  A={"appendsReal":9,"appendsDummy":79,"scans":18,"operationsSeen":6,"backfills":3}
                           B={"appendsReal":3,"appendsDummy":41,"scans":9,"operationsSeen":6,"backfills":0}
 
-SCENARIO unreachable-b-for-one PASS in 35.4s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=multi-store-union B=single-carrier-dependent; 0 of 148 needles found in 210 logged request bodies
+SCENARIO unreachable-b-for-one PASS in 35.4s — 140005 bytes A→B and 9005 bytes B→A decrypted byte-exact; topology A=multi-store-union B=single-carrier-dependent; 0 of 148 needles found in the 207 request bodies the audit searched
 
 === summary (window 4000ms, cohort 8, scan 1380336 B/store/window) ===
 scenario                 verdict   connect   A:peer→verified   B:peer→verified   topology A / B
-healthy                  PASS        41.9s        9.8s→41.9s       10.0s→41.9s   multi-store-union / multi-store-union
-kill-a                   PASS        35.4s        7.4s→35.4s        7.2s→35.4s   single-carrier-dependent / single-carrier-dependent
-withhold-a               PASS        39.5s        7.3s→39.5s        7.4s→39.5s   single-carrier-dependent / single-carrier-dependent
-unreachable-b-for-one    PASS        35.4s        7.3s→35.3s        7.2s→35.3s   multi-store-union / single-carrier-dependent
+healthy                  PASS        41.9s        9.7s→41.8s        9.7s→41.9s   multi-store-union / multi-store-union
+kill-a                   PASS        35.2s        7.1s→35.2s        7.2s→35.2s   single-carrier-dependent / single-carrier-dependent
+withhold-a               PASS        35.6s        7.6s→35.6s        7.6s→35.6s   single-carrier-dependent / single-carrier-dependent
+unreachable-b-for-one    PASS        35.4s        7.4s→35.4s        7.2s→35.4s   multi-store-union / single-carrier-dependent
 
 TWO-STORE E2E PASS (4 of 4 scenarios)
 ```
 
-Three things worth reading off that run:
+Every per-store body count above is the corpus the audit searched, and the
+verdict line's total is their sum — 171 + 174 = 345, 2 + 116 = 118,
+128 + 128 = 256, 135 + 72 = 207. Nothing logged after the audit ran is counted,
+because nothing logged after the audit ran was searched.
+
+Two things worth reading off that run:
 
 - `unreachable-b-for-one`: page B issued **0** requests to store B and still
-  reached `message-verified` byte-exact, while page A's `backfills: 3` is the
-  replication that put B's operations into a store B never spoke to. Page A ends
-  `multi-store-union`, page B `single-carrier-dependent` — each reporting only
-  what it read itself.
-- `withhold-a`: both pages reported `multi-store-union` at 3.7 s (A's first
+  reached `message-verified`, byte-exact both ways. Page A **queued 3 backfills
+  for store B** — `CarrierCounters.backfills` counts `(operation, store)` pairs
+  enqueued for replication, so it is evidence that page A decided store B was
+  missing those operations, not evidence that any of them was appended or
+  acknowledged; and nothing in store B's log distinguishes a backfilled object
+  from cover. Page A ends `multi-store-union`, page B
+  `single-carrier-dependent` — each reporting only what it read itself.
+- `withhold-a`: both pages reported `multi-store-union` at 3.8 s (A's first
   window was still consistent, because a client can only compare a receipt
   against a window after that window is finalized) and dropped to
-  `single-carrier-dependent` at 7.7 s, when the first custody comparison failed
-  and A was marked inert. That is the detection latency of the check: one
-  delivery window.
-- `kill-a` and `unreachable-b-for-one` finish _faster_ than `healthy` (35.4 s vs
-  41.9 s) because a page reading one store instead of two has half the fixed
-  scan to decrypt per window — which is the whole subject of the next section.
+  `single-carrier-dependent` at 7.7-7.8 s, when the first custody comparison
+  failed and A was marked inert. That is the detection latency of the check:
+  one delivery window.
+
+The four scenarios' wall-clock times differ by a few seconds in every direction
+and the ordering is **not** stable across runs: in the run above `healthy` was
+the slowest by 6.5 s, while in earlier runs of the same four scenarios
+`kill-a` came out slower than `healthy` (39.6 s vs 36.6 s) and then faster
+again (39.3 s vs 39.6 s). Read those differences as run-to-run variance —
+chiefly where in a delivery window each run happens to start — and not as a
+measurement of what reading one store instead of two costs. The section below
+measures that deliberately, by changing the geometry rather than by comparing
+scenarios.
 
 ### `--cohort=<n>`: window length and cohort size are exchangeable
 
@@ -548,15 +573,17 @@ Read it as three findings, all about this machine and nothing else:
    same 2,000 ms profile completes in 20.8 s, and at `--cohort=2` a 1,000 ms
    profile completes in 10.5 s with zero `window-finalized` misses. So design
    §8's table _is_ reachable — by moving both knobs, not one.
-3. **The knob that buys the latency is the one that pays in cover.**
-   `cohortAllocationsPerWindow` is how many allocations share a bucket in a
-   window; the fixed scan is large precisely because it is the whole bucket.
-   Shrinking it from 8 to 2 shrinks the scan by 2.1× and the rendezvous by 3.8×,
-   and shrinks the set of unrelated writers whose objects this client's traffic
-   is indistinguishable from by the same factor. This is a measurement of cost,
-   not a recommendation: the cheap configurations in the table are cheap because
-   they carry less cover, and the prototype's pinned profile is 8 for that
-   reason.
+3. **The knob that buys the latency is the one that sizes the shared bucket.**
+   `cohortAllocationsPerWindow` is, by definition, how many allocations a store
+   may hand out per window in one bucket; the fixed scan is large precisely
+   because it is that whole bucket. Moving it from 8 to 2 measured a 2.1×
+   smaller scan and a 3.8× faster rendezvous, and by definition it also
+   quarters the number of allocations that share the bucket — 8 to 2 is 4×, and
+   the three ratios are three different quantities, not one. What that means
+   for what a store can tell apart is **not** measured by any run here and is
+   not claimed. The table is a cost measurement, not a recommendation: the
+   pinned profile is 8, and moving it is a change to how much unrelated traffic
+   a client's objects sit among.
 
 Each row above is a real `--scenario=healthy` run with both stores honest;
 `bundle.cohort-<n>.js` is generated per cohort and is not committed. Note that

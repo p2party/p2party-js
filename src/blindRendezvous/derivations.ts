@@ -32,6 +32,8 @@ import {
   admissionGrantUnsignedV1Schema,
   admissionGrantV1Schema,
   admissionRevokeUnsignedV1Schema,
+  allocationTokenIssueRequestV1Schema,
+  allocationTokenIssueResultBodyV1Schema,
   authorityAdmissionStateDigestInputV1Schema,
   authenticatedRoomOperationUnsignedV1Schema,
   authenticatedRoomOperationV1Schema,
@@ -55,6 +57,13 @@ import {
   pairTransportCandidateV1Schema,
   presencePermitUnsignedV1Schema,
   presenceProofTranscriptV1Schema,
+  publicAllocationLeaseBodyV1Schema,
+  publicAllocationRequestV1Schema,
+  publicAllocationStatusBodyV1Schema,
+  publicAppendRequestV1Schema,
+  publicAppendResultBodyV1Schema,
+  publicChunkStatusBodyV1Schema,
+  publicStoreCheckpointStatusBodyV1Schema,
   resolvedAssumptionSetSchema,
   roomPolicyV4Schema,
   stableEdgeAttemptClaimUnsignedV1Schema,
@@ -1552,4 +1561,183 @@ export const formalProofResultDigest = async (
   hashWithDomain(
     "p2party/formal-proof-result/v1",
     canonical(formalProofResultV1Schema, result),
+  );
+
+/* ------------------------------------------------------------------ *
+ * ---- prototype-v0 store wire (not a release registry) ----
+ *
+ * The transcripts the prototype store and its client sign and verify. The
+ * formulas are the specification's Section 4.3/4.6 ones, but the values they
+ * cover are encoded by the prototype descriptors in `schemas.ts`, so nothing
+ * derived here is a published v0.4 artifact either.
+ * ------------------------------------------------------------------ */
+
+/**
+ * `AppendRequestHash =
+ *    H("p2party/public-append-request/v1" || Canonical(PublicAppendRequestV1))`
+ *
+ * The store echoes this in its result so a client can match an answer to the
+ * request it sent without the store holding any per-client state.
+ */
+export const publicAppendRequestHash = async (
+  request: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/public-append-request/v1",
+    canonical(publicAppendRequestV1Schema, request),
+  );
+
+/**
+ * `AppendResultSignedMessage =
+ *    "p2party/public-append-result/v1" ||
+ *    H(Canonical(PublicAppendResultBodyV1))`
+ */
+export const publicAppendResultSignedMessage = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/public-append-result/v1"),
+    await sha256(canonical(publicAppendResultBodyV1Schema, body)),
+  );
+
+/**
+ * `AllocationRequestHash = H("p2party/public-allocation-request/v1" ||
+ *    Canonical(PublicAllocationRequestV1))`
+ */
+export const publicAllocationRequestHash = async (
+  request: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/public-allocation-request/v1",
+    canonical(publicAllocationRequestV1Schema, request),
+  );
+
+/**
+ * `AllocationLeaseSignedMessage =
+ *    "p2party/public-allocation-lease-signature/v1" ||
+ *    H(Canonical(PublicAllocationLeaseBodyV1))`
+ *
+ * The body descriptor is shared with the signed lease, so adding a lease
+ * field cannot silently leave the signature projection.
+ */
+export const publicAllocationLeaseSignedMessage = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/public-allocation-lease-signature/v1"),
+    await sha256(canonical(publicAllocationLeaseBodyV1Schema, body)),
+  );
+
+/**
+ * `AllocationStatusSignedMessage =
+ *    "p2party/public-allocation-status-signature/v1" ||
+ *    H(Canonical(PublicAllocationStatusBodyV1))`
+ *
+ * A refusal is signed for the same reason a lease is: an unsigned refusal
+ * could be forged by the network to push a client onto one store.
+ */
+export const publicAllocationStatusSignedMessage = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/public-allocation-status-signature/v1"),
+    await sha256(canonical(publicAllocationStatusBodyV1Schema, body)),
+  );
+
+/**
+ * `TokenIssueRequestHash = H("p2party/allocation-token-issue-request/v1" ||
+ *    Canonical(AllocationTokenIssueRequestV1))`
+ */
+export const allocationTokenIssueRequestHash = async (
+  request: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/allocation-token-issue-request/v1",
+    canonical(allocationTokenIssueRequestV1Schema, request),
+  );
+
+/**
+ * `TokenIssueResultSignedMessage =
+ *    "p2party/allocation-token-issue-result-signature/v1" ||
+ *    H(Canonical(AllocationTokenIssueResultBodyV1))`
+ *
+ * The covered value is the union body, so the issued and refused answers can
+ * never share a transcript: the union tag byte is inside the hash.
+ */
+export const allocationTokenIssueResultSignedMessage = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  concatBytes(
+    domain("p2party/allocation-token-issue-result-signature/v1"),
+    await sha256(canonical(allocationTokenIssueResultBodyV1Schema, body)),
+  );
+
+/**
+ * `AllocationAppendSignedMessage =
+ *    "p2party/allocation-append-signature/v1" ||
+ *    H(Canonical(PublicAllocationLeaseBodyV1)) || Byte(sizeClass) ||
+ *    U32BE(objectOrdinalWithinAllocation) || H(exactFixedObject)`
+ *
+ * Signed by the lease's ephemeral allocation key, not the store key. Binding
+ * the size class and the ordinal alongside the object hash is what stops one
+ * admission being replayed into a different slot of the same allocation.
+ */
+export const allocationAppendSignedMessage = async (
+  leaseBody: unknown,
+  sizeClass: number,
+  objectOrdinalWithinAllocation: number,
+  exactFixedObject: Uint8Array,
+): Promise<Uint8Array> => {
+  if (!(exactFixedObject instanceof Uint8Array))
+    fail("exactFixedObject must be a Uint8Array");
+  return concatBytes(
+    domain("p2party/allocation-append-signature/v1"),
+    await sha256(canonical(publicAllocationLeaseBodyV1Schema, leaseBody)),
+    byteOf(sizeClass),
+    u32be(objectOrdinalWithinAllocation),
+    await sha256(exactFixedObject),
+  );
+};
+
+/**
+ * `ChunkStatusSigningHash = H("p2party/public-chunk-status/v1" ||
+ *    Canonical(PublicChunkStatusBodyV1))`
+ *
+ * A refused chunk read is signed so a store cannot deny a finalized chunk to
+ * one reader and serve it to another without leaving evidence.
+ */
+export const publicChunkStatusSigningHash = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/public-chunk-status/v1",
+    canonical(publicChunkStatusBodyV1Schema, body),
+  );
+
+/**
+ * `CheckpointStatusSigningHash = H("p2party/public-checkpoint-status/v1" ||
+ *    Canonical(PublicStoreCheckpointStatusBodyV1))`
+ */
+export const publicCheckpointStatusSigningHash = async (
+  body: unknown,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/public-checkpoint-status/v1",
+    canonical(publicStoreCheckpointStatusBodyV1Schema, body),
+  );
+
+/**
+ * `compatibilityHash = H("p2party/blind-store-prototype-v0/compatibility" ||
+ *    DeliveryProfileHash)`
+ *
+ * A prototype store advertises this in its descriptor. It is deliberately
+ * prototype-scoped: a client that expects release compatibility bytes will
+ * refuse a prototype store rather than half-speak to it.
+ */
+export const prototypeStoreCompatibilityHash = async (
+  deliveryProfileHashBytes: Uint8Array,
+): Promise<Uint8Array> =>
+  hashWithDomain(
+    "p2party/blind-store-prototype-v0/compatibility",
+    requireBytes("DeliveryProfileHash", deliveryProfileHashBytes, 32),
   );

@@ -844,6 +844,342 @@ export const storeRouteV1Schema = record("StoreRouteV1", [
 ]);
 
 /* ------------------------------------------------------------------ *
+ * ---- prototype-v0 store wire (not a release registry) ----
+ *
+ * The specification writes these store request/response types in Sections
+ * 4.3 and 4.6 as TypeScript, but never gave them canonical descriptors. The
+ * two-store prototype needs bytes on a socket, so they get descriptors here:
+ * the prototype store server and the client adapter must share one encoder,
+ * because a second authority for a wire field is exactly the drift this file
+ * exists to prevent.
+ *
+ * These belong to the `prototype-v0` route family. They are not part of any
+ * frozen registry and no hash over them is a v0.4 release artifact.
+ * ------------------------------------------------------------------ */
+
+const publicAllocationLeaseFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "storeId", type: bytes32 },
+  { name: "deliveryProfileHash", type: bytes32 },
+  { name: "ingressWindow", type: u64 },
+  { name: "requestHash", type: bytes32 },
+  { name: "allocationOrdinal", type: u32 },
+  { name: "allocationEd25519PublicKey", type: bytes32 },
+];
+
+/** The lease transcript a store signs: the body only, never the signed form. */
+export const publicAllocationLeaseBodyV1Schema = record(
+  "PublicAllocationLeaseBodyV1",
+  publicAllocationLeaseFields,
+);
+
+export const publicAllocationLeaseV1Schema = record("PublicAllocationLeaseV1", [
+  ...publicAllocationLeaseFields,
+  { name: "storeSignature", type: bytes64 },
+]);
+
+/**
+ * The lease plus the ordinal of one object within it, signed by the lease's
+ * ephemeral allocation key. The store checks two signatures per append: the
+ * lease under its own key, and this one under the lease's key.
+ */
+export const publicAppendAdmissionV1Schema = record("PublicAppendAdmissionV1", [
+  { name: "version", type: u8 },
+  { name: "lease", type: publicAllocationLeaseV1Schema },
+  { name: "objectOrdinalWithinAllocation", type: u32 },
+  { name: "allocationSignature", type: bytes64 },
+]);
+
+/**
+ * `admission` is absent for an unallocated cover append. A cover append is
+ * accepted and discarded, so the absent tag is a normal value here rather
+ * than a malformed request.
+ */
+export const publicAppendRequestV1Schema = record("PublicAppendRequestV1", [
+  { name: "version", type: u8 },
+  { name: "bucket", type: publicBucketV1Schema },
+  { name: "exactFixedObject", type: varBytes(1 << 20) },
+  { name: "admission", type: optional(publicAppendAdmissionV1Schema) },
+]);
+
+export const publicAppendStatusV1Schema = enumOf("PublicAppendStatusV1", [
+  "stored",
+  "already-present",
+  "slot-conflict",
+  "unallocated-cover",
+  "window-finalized",
+  "capacity-exhausted",
+]);
+
+const publicAppendResultFields: readonly FieldDescriptor[] = [
+  { name: "version", type: u8 },
+  { name: "storeId", type: bytes32 },
+  { name: "descriptorHash", type: bytes32 },
+  { name: "bucket", type: publicBucketV1Schema },
+  { name: "requestHash", type: bytes32 },
+  { name: "status", type: publicAppendStatusV1Schema },
+  // Reserved so a later status can carry a reason code without changing the
+  // result's length: an append result is the same size whatever the store
+  // answers, and an observer learns nothing from that size.
+  { name: "fixedStatusPadding", type: fixedBytes(16) },
+];
+
+export const publicAppendResultBodyV1Schema = record(
+  "PublicAppendResultBodyV1",
+  publicAppendResultFields,
+);
+
+export const publicAppendResultV1Schema = record("PublicAppendResultV1", [
+  ...publicAppendResultFields,
+  { name: "storeSignature", type: bytes64 },
+]);
+
+export const allocationTokenIssueRequestV1Schema = record(
+  "AllocationTokenIssueRequestV1",
+  [
+    { name: "version", type: u8 },
+    { name: "storeId", type: bytes32 },
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "ingressWindow", type: u64 },
+    { name: "privacyPassTokenRequest", type: varBytes(4096) },
+  ],
+);
+
+const allocationTokenIssuedV1Schema = record("AllocationTokenIssuedV1", [
+  {
+    name: "kind",
+    type: enumOf("AllocationTokenIssueResultIssuedKindV1", ["issued"]),
+  },
+  { name: "version", type: u8 },
+  { name: "requestHash", type: bytes32 },
+  { name: "privacyPassTokenResponse", type: varBytes(4096) },
+]);
+
+const allocationTokenIssueStatusV1Schema = record(
+  "AllocationTokenIssueStatusV1",
+  [
+    {
+      name: "kind",
+      type: enumOf("AllocationTokenIssueResultStatusKindV1", ["status"]),
+    },
+    { name: "version", type: u8 },
+    { name: "requestHash", type: bytes32 },
+    {
+      name: "status",
+      type: enumOf("AllocationTokenIssueStatusKindV1", [
+        "quota-denied",
+        "invalid-request",
+        "issuer-unavailable",
+      ]),
+    },
+    { name: "fixedErrorPadding", type: fixedBytes(32) },
+  ],
+);
+
+export const allocationTokenIssueResultBodyV1Schema = union(
+  "AllocationTokenIssueResultBodyV1",
+  "kind",
+  [
+    { tag: "issued", type: allocationTokenIssuedV1Schema },
+    { tag: "status", type: allocationTokenIssueStatusV1Schema },
+  ],
+);
+
+/**
+ * The specification writes this result as an intersection of the body with a
+ * store signature. A canonical union cannot carry a trailing field, so the
+ * signature wraps the body instead: `body` is exactly what the store signs.
+ */
+export const allocationTokenIssueResultV1Schema = record(
+  "AllocationTokenIssueResultV1",
+  [
+    { name: "body", type: allocationTokenIssueResultBodyV1Schema },
+    { name: "storeSignature", type: bytes64 },
+  ],
+);
+
+/**
+ * No storeId: the request is addressed to one store by the route it travels,
+ * and the lease the store returns is what names the store back to the client.
+ */
+export const publicAllocationRequestV1Schema = record(
+  "PublicAllocationRequestV1",
+  [
+    { name: "version", type: u8 },
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "ingressWindow", type: u64 },
+    { name: "allocationEd25519PublicKey", type: bytes32 },
+    { name: "privacyPassToken", type: varBytes(4096) },
+  ],
+);
+
+export const publicAllocationStatusBodyV1Schema = record(
+  "PublicAllocationStatusBodyV1",
+  [
+    { name: "version", type: u8 },
+    { name: "storeId", type: bytes32 },
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "ingressWindow", type: u64 },
+    { name: "requestHash", type: bytes32 },
+    {
+      name: "status",
+      type: enumOf("PublicAllocationStatusKindV1", [
+        "invalid-token",
+        "token-spent",
+        "capacity-exhausted",
+        "window-closed",
+      ]),
+    },
+    { name: "fixedErrorPadding", type: fixedBytes(32) },
+  ],
+);
+
+const publicAllocationAllocatedV1Schema = record(
+  "PublicAllocationAllocatedV1",
+  [
+    {
+      name: "kind",
+      type: enumOf("PublicAllocationResultAllocatedKindV1", ["allocated"]),
+    },
+    { name: "lease", type: publicAllocationLeaseV1Schema },
+  ],
+);
+
+const publicAllocationStatusResultV1Schema = record(
+  "PublicAllocationStatusResultV1",
+  [
+    {
+      name: "kind",
+      type: enumOf("PublicAllocationResultStatusKindV1", ["status"]),
+    },
+    { name: "value", type: publicAllocationStatusBodyV1Schema },
+    { name: "storeSignature", type: bytes64 },
+  ],
+);
+
+export const publicAllocationResultV1Schema = union(
+  "PublicAllocationResultV1",
+  "kind",
+  [
+    { tag: "allocated", type: publicAllocationAllocatedV1Schema },
+    { tag: "status", type: publicAllocationStatusResultV1Schema },
+  ],
+);
+
+export const publicStoreCheckpointStatusBodyV1Schema = record(
+  "PublicStoreCheckpointStatusBodyV1",
+  [
+    { name: "version", type: u8 },
+    { name: "storeId", type: bytes32 },
+    { name: "deliveryProfileHash", type: bytes32 },
+    { name: "ingressWindow", type: u64 },
+    {
+      name: "status",
+      type: enumOf("PublicStoreCheckpointStatusKindV1", [
+        "not-final",
+        "out-of-range",
+        "chain-unavailable",
+      ]),
+    },
+  ],
+);
+
+/**
+ * A finalized read carries the descriptor beside the checkpoint so the reader
+ * can bind the signature to a store identity without a second fetch.
+ */
+const publicStoreCheckpointFinalizedV1Schema = record(
+  "PublicStoreCheckpointFinalizedV1",
+  [
+    {
+      name: "kind",
+      type: enumOf("PublicStoreCheckpointReadFinalizedKindV1", ["finalized"]),
+    },
+    { name: "descriptor", type: storeDescriptorV1Schema },
+    { name: "checkpoint", type: publicStoreCheckpointV1Schema },
+  ],
+);
+
+const publicStoreCheckpointStatusV1Schema = record(
+  "PublicStoreCheckpointStatusV1",
+  [
+    {
+      name: "kind",
+      type: enumOf("PublicStoreCheckpointReadStatusKindV1", ["status"]),
+    },
+    { name: "value", type: publicStoreCheckpointStatusBodyV1Schema },
+    { name: "storeSignature", type: bytes64 },
+  ],
+);
+
+export const publicStoreCheckpointReadV1Schema = union(
+  "PublicStoreCheckpointReadV1",
+  "kind",
+  [
+    { tag: "finalized", type: publicStoreCheckpointFinalizedV1Schema },
+    { tag: "status", type: publicStoreCheckpointStatusV1Schema },
+  ],
+);
+
+export const publicChunkStatusBodyV1Schema = record("PublicChunkStatusBodyV1", [
+  { name: "version", type: u8 },
+  { name: "bucket", type: publicBucketV1Schema },
+  { name: "chunkIndex", type: u64 },
+  {
+    name: "status",
+    type: enumOf("PublicChunkStatusKindV1", ["not-final", "out-of-range"]),
+  },
+]);
+
+const publicChunkFinalizedV1Schema = record("PublicChunkFinalizedV1", [
+  {
+    name: "kind",
+    type: enumOf("PublicChunkReadFinalizedKindV1", ["finalized"]),
+  },
+  { name: "chunk", type: publicChunkV1Schema },
+]);
+
+const publicChunkStatusV1Schema = record("PublicChunkStatusV1", [
+  { name: "kind", type: enumOf("PublicChunkReadStatusKindV1", ["status"]) },
+  { name: "value", type: publicChunkStatusBodyV1Schema },
+  { name: "storeSignature", type: bytes64 },
+]);
+
+export const publicChunkReadV1Schema = union("PublicChunkReadV1", "kind", [
+  { tag: "finalized", type: publicChunkFinalizedV1Schema },
+  { tag: "status", type: publicChunkStatusV1Schema },
+]);
+
+/**
+ * What a prototype store publishes at its well-known descriptor path. Route
+ * order is the store's own preference order, so it is a sequence.
+ */
+export const prototypeStoreDescriptorDocumentV1Schema = record(
+  "PrototypeStoreDescriptorDocumentV1",
+  [
+    { name: "descriptor", type: storeDescriptorV1Schema },
+    { name: "routes", type: array(storeRouteV1Schema, 0xff, "sequence") },
+  ],
+);
+
+/** One store's observation of another store's checkpoint for a window. */
+export const storeWitnessRecordV1Schema = record("StoreWitnessRecordV1", [
+  { name: "version", type: u8 },
+  { name: "witnessedStoreId", type: bytes32 },
+  { name: "deliveryProfileHash", type: bytes32 },
+  { name: "ingressWindow", type: u64 },
+  { name: "checkpointHash", type: bytes32 },
+]);
+
+// Observation order is the witness's own, so this is a sequence rather than
+// a sorted set: reordering it would erase when each record was made.
+export const storeWitnessRecordsV1Schema = array(
+  storeWitnessRecordV1Schema,
+  4096,
+  "sequence",
+);
+
+/* ------------------------------------------------------------------ *
  * Sections 4.8/4.9 — admission, presence, leave, and store hints
  * ------------------------------------------------------------------ */
 

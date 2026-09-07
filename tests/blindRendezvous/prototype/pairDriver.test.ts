@@ -182,23 +182,38 @@ class FakeCarrier {
   }
 }
 
+interface PhaseRecord {
+  readonly phase: PairDriverPhase;
+  readonly detail: string | undefined;
+}
+
 interface Party {
   readonly name: string;
   readonly driver: PairDriver;
   readonly transport: FakeTransport;
   readonly phases: PairDriverPhase[];
+  readonly phaseRecords: PhaseRecord[];
 }
+
+/**
+ * The reason the driver gave for failing this edge, so a test cannot stay green
+ * on an unrelated failure.
+ */
+const failureDetail = (party: Party): string =>
+  party.phaseRecords.find((record) => record.phase === "failed")?.detail ?? "";
 
 const createParty = async (options: {
   readonly carrier: FakeCarrier;
   readonly name: string;
   readonly capability: Uint8Array;
   readonly sdp: Uint8Array;
+  readonly forgeOwnership?: boolean;
 }): Promise<Party> => {
   const identity = await generateSessionIdentity({ wasmBinary });
   identity.x25519SecretKey.fill(0);
   const transport = new FakeTransport(options.sdp);
   const phases: PairDriverPhase[] = [];
+  const phaseRecords: PhaseRecord[] = [];
   const driver = new PairDriver({
     module,
     capability: options.capability,
@@ -212,12 +227,14 @@ const createParty = async (options: {
     transport,
     clock,
     random,
-    onPhase: (phase) => {
+    onPhase: (phase, detail) => {
       phases.push(phase);
+      phaseRecords.push({ phase, detail });
     },
+    forgePresenceOwnershipForPrototypeTests: options.forgeOwnership,
   });
   options.carrier.register(options.name, driver);
-  return { name: options.name, driver, transport, phases };
+  return { name: options.name, driver, transport, phases, phaseRecords };
 };
 
 const runPairedRoom = async (options: {
@@ -392,6 +409,61 @@ describe("prototype pair driver", () => {
 
     expect(responder.driver.phase).toBe("failed");
     expect(responder.phases).toContain("failed");
+    expect(failureDetail(responder)).toContain("fork");
+  }, 120_000);
+
+  /*
+   * Place the forged presence in an exact rendezvous role. The role follows the
+   * bytewise order of two hashed presence operation IDs, so the only way to
+   * choose it is to build rooms until it lands.
+   */
+  const runForgedOwnership = async (
+    forgedRole: "initiator" | "responder",
+  ): Promise<{ readonly forger: Party; readonly honest: Party }> => {
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const carrier = new FakeCarrier();
+      const capability = new Uint8Array(32).fill(0x42);
+      const forger = await createParty({
+        carrier,
+        name: "forger",
+        capability,
+        sdp: sdpBytes("aaaa", 0xaa),
+        forgeOwnership: true,
+      });
+      const honest = await createParty({
+        carrier,
+        name: "honest",
+        capability,
+        sdp: sdpBytes("bbbb", 0xbb),
+      });
+      await forger.driver.start();
+      await honest.driver.start();
+      await carrier.pump(1);
+      const forgerIsInitiator = forger.driver.phase === "hello-sent";
+      if (forgerIsInitiator !== (forgedRole === "initiator")) continue;
+      await carrier.pump();
+      return { forger, honest };
+    }
+    throw new Error("could not place the forged presence in its role");
+  };
+
+  test("rejects a HELLO whose sender presence carries a forged ownership proof", async () => {
+    const { honest } = await runForgedOwnership("initiator");
+    expect(honest.driver.phase).toBe("failed");
+    expect(failureDetail(honest)).toContain("HELLO rejected");
+    expect(failureDetail(honest)).toContain("roomOperation payload:");
+    expect(honest.driver.handoff).toBeNull();
+  }, 120_000);
+
+  test("rejects an ACCEPT whose responder presence carries a forged ownership proof", async () => {
+    const { forger, honest } = await runForgedOwnership("responder");
+    // The forger opened the honest HELLO and answered it; the honest initiator
+    // is the side that must refuse.
+    expect(forger.driver.phase).toBe("accepted");
+    expect(honest.driver.phase).toBe("failed");
+    expect(failureDetail(honest)).toContain("ACCEPT rejected");
+    expect(failureDetail(honest)).toContain("roomOperation payload:");
+    expect(honest.driver.handoff).toBeNull();
   }, 120_000);
 
   test("fails before publishing an offer whose SDP exceeds the profile ceiling", async () => {
@@ -442,6 +514,27 @@ describe("prototype transport candidates", () => {
     expect(() => validateWebRtcSdp(twoFingerprints)).toThrow(
       "transportCandidates:",
     );
+  });
+
+  test("counts only the sha-256 line beside another hash algorithm", () => {
+    const sdp = sdpBytes("aaaa", 0xaa);
+    const expected = hex(validateWebRtcSdp(sdp).fingerprint);
+    const withSha384 = new TextEncoder().encode(
+      new TextDecoder().decode(sdp) +
+        "a=fingerprint:sha-384 " +
+        Array.from({ length: 48 }, () => "CD").join(":") +
+        "\r\n",
+    );
+    expect(hex(validateWebRtcSdp(withSha384).fingerprint)).toBe(expected);
+
+    // A mid-line occurrence is not a fingerprint attribute and must not count.
+    const midLine = new TextEncoder().encode(
+      "a=note:x a=fingerprint:sha-256 " +
+        fingerprintText(0xee) +
+        "\r\n" +
+        new TextDecoder().decode(sdp),
+    );
+    expect(hex(validateWebRtcSdp(midLine).fingerprint)).toBe(expected);
   });
 
   test("selects the webrtc candidate from a well-formed offer", async () => {

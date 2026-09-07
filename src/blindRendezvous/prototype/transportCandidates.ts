@@ -45,7 +45,13 @@ const fail = (message: string): never => {
  */
 const sdpDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-const FINGERPRINT_LINE = /a=fingerprint:sha-256\s+[0-9A-Fa-f:]+/g;
+/*
+ * Anchored to a line start, and the separator may not span a line break: an
+ * unanchored `\s+` would count an `a=fingerprint:sha-256` that appears mid-line
+ * or one whose value sits on the next line, and a second real fingerprint would
+ * then slip past the exactly-one rule.
+ */
+const FINGERPRINT_LINE = /^a=fingerprint:sha-256[ \t]+[0-9A-Fa-f:]+/gm;
 
 /**
  * Bytewise ordering shared by candidate sorting and the pair driver.
@@ -90,7 +96,9 @@ export const validateWebRtcSdp = (
   if (matches === null || matches.length !== 1)
     return fail("WebRTC SDP must declare exactly one sha-256 DTLS fingerprint");
   try {
-    return { fingerprint: parseFingerprintFromSdp(text) };
+    /* Parse the one counted line, not the document: the shared parser takes the
+     * first match anywhere, which need not be the line this rule accepted. */
+    return { fingerprint: parseFingerprintFromSdp(matches[0]) };
   } catch {
     return fail("WebRTC SDP declares a malformed sha-256 DTLS fingerprint");
   }

@@ -78,7 +78,11 @@ import {
   pairIdentityUnsignedProjectionV1,
 } from "../pairPlaintext";
 import { encodePairStepEnvelopeV1 } from "../pairStepEnvelope";
-import { copyBlindDefaultPolicy } from "../roomPolicyV4";
+import {
+  copyBlindDefaultPolicy,
+  decodeRoomPolicyV4,
+  encodeRoomPolicyV4,
+} from "../roomPolicyV4";
 import { RENDEZVOUS_HYBRID_KEM_PUBLIC_KEY_BYTES_V1 } from "../schemas";
 import { newKeyPair, sign, verify } from "../../cryptography/ed25519";
 import { deriveHpkeRecipientKeyPair } from "../../cryptography/hpke";
@@ -209,6 +213,20 @@ export interface PairDriverOptions {
   readonly clock: { nowMs(): bigint };
   readonly random: (length: number) => Uint8Array;
   readonly onPhase?: (phase: PairDriverPhase, detail?: string) => void;
+  /**
+   * Publish a PRESENCE whose `stableOwnershipSignature` is not the stable
+   * key's, so this prototype's own tests can prove that both identity
+   * validators verify that proof.
+   *
+   * The defect cannot be injected from outside the driver: both endpoints must
+   * agree on the exact presence operation IDs before either identity flight
+   * validates, so a presence forged by a third party is rejected on the
+   * endpoint tuple long before the ownership proof is reached. Never set this
+   * in a real room.
+   *
+   * @internal
+   */
+  readonly forgePresenceOwnershipForPrototypeTests?: boolean;
 }
 
 interface ObservedPresence {
@@ -469,6 +487,7 @@ export class PairDriver {
   private readonly clock: { nowMs(): bigint };
   private readonly random: (length: number) => Uint8Array;
   private readonly onPhase: PairDriverOptions["onPhase"];
+  private readonly forgePresenceOwnership: boolean;
 
   private initialization: Promise<void> | null = null;
   private baseContext: OperationValidationContext | null = null;
@@ -528,7 +547,15 @@ export class PairDriver {
     this.capability = Uint8Array.from(options.capability);
     if (this.capability.length !== 32)
       fail("room capability must be exactly 32 bytes");
-    this.roomPolicy = options.roomPolicy ?? copyBlindDefaultPolicy();
+    /*
+     * The policy is hashed into RoomContextId, so it must be byte-immutable for
+     * this room's lifetime. Encode-then-decode yields an owned, validated copy
+     * a caller can no longer mutate underneath PolicyHash.
+     */
+    this.roomPolicy =
+      options.roomPolicy === undefined
+        ? copyBlindDefaultPolicy()
+        : decodeRoomPolicyV4(encodeRoomPolicyV4(options.roomPolicy));
     this.identity = {
       ed25519PublicKey: Uint8Array.from(options.identity.ed25519PublicKey),
       ed25519SecretKey: Uint8Array.from(options.identity.ed25519SecretKey),
@@ -542,6 +569,8 @@ export class PairDriver {
     this.clock = options.clock;
     this.random = options.random;
     this.onPhase = options.onPhase;
+    this.forgePresenceOwnership =
+      options.forgePresenceOwnershipForPrototypeTests === true;
   }
 
   get phase(): PairDriverPhase {
@@ -647,6 +676,8 @@ export class PairDriver {
     } finally {
       ownershipMessage.fill(0);
     }
+    if (this.forgePresenceOwnership)
+      stableOwnershipSignature = new Uint8Array(64).fill(0xa5);
     const presence: PresenceV1 = {
       core,
       stableOwnershipSignature,
@@ -736,9 +767,13 @@ export class PairDriver {
   }
 
   /**
-   * Byte facts the browser harness greps its wire log for. They are hex of
-   * public identifiers plus the SDP the store must never see; no secret is
-   * exposed here.
+   * Byte facts the browser harness greps its wire log for, so it can prove a
+   * store never saw them.
+   *
+   * This deliberately exposes the room secret: `capabilityHex` is the room
+   * capability itself, and the two SDP strings carry the DTLS fingerprints.
+   * The audit is the only caller — the result must never be logged, persisted,
+   * or sent anywhere.
    */
   auditSecrets(): {
     readonly capabilityHex: string;
@@ -1455,6 +1490,22 @@ export class PairDriver {
     }
     if (!valid)
       return rejectAuthenticated("stable identity transcript signature");
+
+    /*
+     * Bind the responder presence — and therefore the rendezvous KEM key this
+     * endpoint encapsulated to — to the stable key that just signed the
+     * transcript, exactly as the HELLO validator does for the sender.
+     */
+    await validatePresenceOwnershipV1(
+      remote.operation,
+      remote.presence,
+      responderStableKey,
+      {
+        roomContextId: this.roomContextId,
+        roomPolicy: this.roomPolicy,
+      },
+      this.module,
+    );
     return Uint8Array.from(responderStableKey);
   }
 
@@ -1727,7 +1778,14 @@ export class PairDriver {
     }
     this.remoteSdp = remoteSdp;
     this.answerOperationId = Uint8Array.from(candidate.operationId);
-    await this.transport.acceptAnswer(remoteSdp);
+    try {
+      await this.transport.acceptAnswer(remoteSdp);
+    } catch (error) {
+      this.failEdge(
+        `local transport rejected the answer: ${errorDetail(error)}`,
+      );
+      return true;
+    }
     await this.completeHandoff();
     return true;
   }

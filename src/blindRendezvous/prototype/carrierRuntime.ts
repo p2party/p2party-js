@@ -65,6 +65,7 @@ import type { LibCrypto } from "../../cryptography/libcrypto";
 import type {
   CarrierAeadProvider,
   CarrierEnvelopeV1,
+  CarrierPlaintextV1,
 } from "../carrierEnvelope";
 import type { OuterValidatedIdentifiedOperationV1 } from "../coreReduce";
 import type {
@@ -112,9 +113,11 @@ export interface CarrierEvent {
  *
  * Deliberately not `ReturnType<typeof setTimeout>`: that is `number` in a
  * browser and `NodeJS.Timeout` under `@types/node`, and this file is bundled
- * for both.
+ * for both. It is `unknown` and not `{}` because `clearTimeout`'s overloads
+ * accept `undefined`, which `{}` excludes — the real global would then not be
+ * assignable to `CarrierTimers`, and every production caller would need a cast.
  */
-export type CarrierTimerHandle = NonNullable<unknown>;
+export type CarrierTimerHandle = unknown;
 
 /**
  * The timer pair, as call signatures rather than `typeof setTimeout`.
@@ -122,7 +125,8 @@ export type CarrierTimerHandle = NonNullable<unknown>;
  * The global carries engine-specific extras (`__promisify__` under
  * `@types/node`) that a substitute scheduler cannot supply, and a caller that
  * cannot substitute its own timers cannot drive this schedule
- * deterministically. The real globals remain assignable to this.
+ * deterministically. `{ setTimeout, clearTimeout }` — the real globals — is
+ * assignable to this; the test file asserts that with the compiler.
  */
 export interface CarrierTimers {
   setTimeout(callback: () => void, delayMs: number): CarrierTimerHandle;
@@ -359,8 +363,17 @@ export class CarrierRuntime {
     this.#roomRoot = Uint8Array.from(options.roomRoot);
     this.#profileHash = Uint8Array.from(options.profileHash);
     this.#module = options.module;
-    this.#profile = options.profile;
-    this.#classes = [...options.profile.sizeClasses].sort(
+    // Owned like the two byte strings above, and for the same reason: every
+    // event reads the geometry, so a caller that mutated a size class mid-run
+    // would move this client's traffic off the grid its stores expect.
+    this.#profile = {
+      ...options.profile,
+      sizeClasses: options.profile.sizeClasses.map((sizeClass) => ({
+        ...sizeClass,
+        appendSchedule: sizeClass.appendSchedule.map((entry) => ({ ...entry })),
+      })),
+    };
+    this.#classes = [...this.#profile.sizeClasses].sort(
       (left, right) => left.id - right.id,
     );
     this.#validationContextAt = options.validationContextAt;
@@ -416,6 +429,13 @@ export class CarrierRuntime {
           detail:
             "cold start past the allocation offset: this window's appends are unallocated cover",
         });
+        // The cold-start request *is* this window's allocation. Starting
+        // exactly on the offset would otherwise leave the queued event due at
+        // this instant as well, and two allocation requests for one target
+        // window are one more than the profile's fixed shape.
+        state.queue = state.queue.filter(
+          (event) => event.kindByte !== EVENT_ALLOCATION,
+        );
         this.#spawn(this.#allocate(state, window + 1n));
       }
       this.#arm(state);
@@ -440,14 +460,18 @@ export class CarrierRuntime {
    * delay another store's next event — so a caller that drives the clock
    * itself needs one way to await the work a tick released. It starts nothing
    * and arms nothing.
+   *
+   * Handlers start no handlers, so one pass settles everything. Returning
+   * quietly with work still in flight would make a harness that trusts this as
+   * its synchronisation point flake for no visible reason, so it throws.
    */
   async drain(): Promise<void> {
-    for (
-      let guard = 0;
-      guard < MAX_DRAIN_PASSES && this.#inFlight.size > 0;
-      guard += 1
-    )
+    for (let guard = 0; guard < MAX_DRAIN_PASSES; guard += 1) {
+      if (this.#inFlight.size === 0) return;
       await Promise.all([...this.#inFlight]);
+    }
+    if (this.#inFlight.size > 0)
+      fail("handlers are still in flight after the drain bound");
   }
 
   /* ---------------------------------------------------------------- *
@@ -709,20 +733,26 @@ export class CarrierRuntime {
     const objectOrdinal = event.roomSlot * schedule.length + event.entryIndex;
     const window = event.window;
 
-    const entry = this.#pendingEntry(
-      storeIdHex,
-      schedule[event.entryIndex].role,
-      sizeClass.id,
+    const built = await this.#buildObject(
+      state.store,
+      window,
+      sizeClass,
+      this.#pendingEntry(
+        storeIdHex,
+        schedule[event.entryIndex].role,
+        sizeClass.id,
+      ),
     );
-    const object =
-      entry === null
-        ? this.#dummyObject(state.store, window, sizeClass)
-        : await this.#sealObject(
-            state.store,
-            window,
-            sizeClass,
-            entry.operationBytes,
-          );
+    if (built === null) {
+      this.#emit({
+        kind: "missed",
+        storeIdHex,
+        window,
+        detail: "no carrier object could be built for this slot",
+      });
+      return;
+    }
+    const { object, entry } = built;
     // `stop` wipes the allocation secrets, so a runtime stopped while this
     // handler was sealing must not go on to sign an admission with zeroes.
     if (!this.#running) return;
@@ -794,14 +824,128 @@ export class CarrierRuntime {
    * Objects
    * ---------------------------------------------------------------- */
 
+  /**
+   * The object this slot will carry and the entry it consumed, or `null` when
+   * not even cover could be built.
+   *
+   * The slot is fixed; the entry is not. An operation that cannot be sealed
+   * into its size class — a profile whose class is too small for what this
+   * room publishes, say — must not take the slot down with it: unguarded, the
+   * throw would leave no request sent at all, and since `#pendingEntry` would
+   * select the same entry again next window, that (role, class) slot would go
+   * silent for every store forever. That is the exact inverse of the fixed
+   * schedule, so the entry is dropped and the slot carries cover instead.
+   */
+  async #buildObject(
+    store: PrototypeStoreClient,
+    window: bigint,
+    sizeClass: DeliverySizeClassV1,
+    entry: OutboxEntry | null,
+  ): Promise<{
+    readonly object: Uint8Array;
+    readonly entry: OutboxEntry | null;
+  } | null> {
+    if (entry !== null) {
+      try {
+        return {
+          object: await this.#sealObject(
+            store,
+            window,
+            sizeClass,
+            entry.operationBytes,
+          ),
+          entry,
+        };
+      } catch (error) {
+        // Not a store fault: the store did nothing here, and blaming it for
+        // what this client was handed would put a false record in the
+        // evidence this runtime collects about carriers.
+        if (this.#dropEntry(entry))
+          this.#emit({
+            kind: "missed",
+            storeIdHex: store.storeIdHex,
+            window,
+            detail: `an outbox entry could not be sealed into size class ${String(sizeClass.id)} and was dropped: ${detailOf(error)}`,
+          });
+      }
+    }
+    try {
+      return {
+        object: await this.#coverObject(store, window, sizeClass),
+        entry: null,
+      };
+    } catch {
+      // Cover this profile cannot build means its own geometry is unusable;
+      // there is nothing honest to put on the wire for this slot.
+      return null;
+    }
+  }
+
   async #sealObject(
     store: PrototypeStoreClient,
     window: bigint,
     sizeClass: DeliverySizeClassV1,
     operationBytes: Uint8Array,
   ): Promise<Uint8Array> {
-    const envelope = await sealCarrierEnvelope(
+    return this.#seal(
       this.#roomRoot,
+      store,
+      window,
+      sizeClass,
+      buildCarrierPlaintext(operationBytes, sizeClass.fixedCarrierObjectBytes),
+    );
+  }
+
+  /**
+   * Cover, sealed exactly the way a real object is.
+   *
+   * Filling `ciphertextAndTag` with random bytes would give the same wire
+   * result at the same cost in bytes — but not at the same cost in time: the
+   * real path awaits an HKDF and an AEAD before its POST and a synchronous
+   * path would not, so a store reading its own clock would see real appends
+   * land systematically later than cover. Doing the identical work over a
+   * one-off random root removes that difference by construction. The root is
+   * discarded here, so this object opens for nobody — not even for another
+   * member of this room, who could otherwise tell this client's cover apart
+   * from an unrelated room's traffic.
+   */
+  async #coverObject(
+    store: PrototypeStoreClient,
+    window: bigint,
+    sizeClass: DeliverySizeClassV1,
+  ): Promise<Uint8Array> {
+    const throwawayRoot = randomBytes(32);
+    try {
+      return await this.#seal(
+        throwawayRoot,
+        store,
+        window,
+        sizeClass,
+        buildCarrierPlaintext(
+          new Uint8Array(0),
+          sizeClass.fixedCarrierObjectBytes,
+        ),
+      );
+    } finally {
+      throwawayRoot.fill(0);
+    }
+  }
+
+  /**
+   * One sealed object: the same key schedule, the same AEAD call and the same
+   * plaintext length whatever the root is, so a class's exact wire length
+   * comes out by construction rather than from a constant that could drift
+   * away from the codec.
+   */
+  async #seal(
+    root: Uint8Array,
+    store: PrototypeStoreClient,
+    window: bigint,
+    sizeClass: DeliverySizeClassV1,
+    plaintext: CarrierPlaintextV1,
+  ): Promise<Uint8Array> {
+    const envelope = await sealCarrierEnvelope(
+      root,
       {
         deliveryProfileHash: this.#profileHash,
         carrierContextId: store.carrierContextId,
@@ -809,34 +953,9 @@ export class CarrierRuntime {
         sizeClass: sizeClass.id,
       },
       randomBytes(CARRIER_AEAD_SUITE_1_NONCE_BYTES),
-      buildCarrierPlaintext(operationBytes, sizeClass.fixedCarrierObjectBytes),
+      plaintext,
       this.#aead,
     );
-    return encodeCarrierEnvelope(envelope);
-  }
-
-  /**
-   * A dummy, built through the same encoder a real object goes through.
-   *
-   * Deriving the length from a constant would let the two drift apart on the
-   * next codec change; deriving it from the class's `fixedCarrierObjectBytes`
-   * — exactly what a sealed body ends up being — makes them the same length by
-   * construction. Everything a store sees is then identical but the bytes.
-   */
-  #dummyObject(
-    store: PrototypeStoreClient,
-    window: bigint,
-    sizeClass: DeliverySizeClassV1,
-  ): Uint8Array {
-    const envelope: CarrierEnvelopeV1 = {
-      version: 1,
-      deliveryProfileHash: this.#profileHash,
-      ingressWindow: window,
-      sizeClass: sizeClass.id,
-      carrierContextId: store.carrierContextId,
-      nonce: randomBytes(CARRIER_AEAD_SUITE_1_NONCE_BYTES),
-      ciphertextAndTag: randomBytes(sizeClass.fixedCarrierObjectBytes),
-    };
     return encodeCarrierEnvelope(envelope);
   }
 
@@ -901,7 +1020,18 @@ export class CarrierRuntime {
 
     if (fresh.length > 0) {
       this.#emit({ kind: "operations", window, count: fresh.length });
-      await this.#onOperations(fresh);
+      // Delivery is the caller's business; replication and witnessing are this
+      // runtime's, and a caller whose handler throws must not silently cost
+      // the pair a backfill.
+      try {
+        await this.#onOperations(fresh);
+      } catch (error) {
+        this.#emit({
+          kind: "missed",
+          window,
+          detail: `the operations handler threw: ${detailOf(error)}`,
+        });
+      }
       this.#queueBackfills(fresh, carriedBy, window);
     }
 
@@ -1015,9 +1145,14 @@ export class CarrierRuntime {
    *
    * This is the whole of the pair's fault tolerance: a store that was down,
    * refused an allocation, or dropped an object is caught up by any client
-   * that saw the operation elsewhere. It is bounded to once per operation per
-   * store for all time — an unbounded replication loop between two clients
-   * would be both a beacon and a flood.
+   * that saw the operation elsewhere. An unbounded replication loop between
+   * two clients would be both a beacon and a flood, so each
+   * `(operation, store)` pair is queued at most once for as long as this
+   * runtime remembers it: `#backfilled` keeps the most recent
+   * `MAX_BACKFILL_PAIRS`, and past that the oldest pairs are forgotten and
+   * could be replicated once more. That is bounded rework rather than a loop,
+   * because the operation must also be freshly seen and still absent from that
+   * store for a second one to be queued.
    */
   #queueBackfills(
     fresh: readonly OuterValidatedIdentifiedOperationV1[],
@@ -1148,9 +1283,12 @@ export class CarrierRuntime {
     return null;
   }
 
-  #dropEntry(entry: OutboxEntry): void {
+  /** True when this call was the one that removed it. */
+  #dropEntry(entry: OutboxEntry): boolean {
     const index = this.#outbox.indexOf(entry);
-    if (index >= 0) this.#outbox.splice(index, 1);
+    if (index < 0) return false;
+    this.#outbox.splice(index, 1);
+    return true;
   }
 
   /* ---------------------------------------------------------------- *
@@ -1181,17 +1319,18 @@ export class CarrierRuntime {
     };
   }
 
-  /** One hint per store per window: a store that gossips the same lie every
-   * window must not be able to fill this client's fault log. */
+  /**
+   * Record one split-view hint, once per store per window.
+   *
+   * It is the only fault this layer originates — everything else a store does
+   * wrong is the client adapter's to prove — and a store that gossips the same
+   * lie every window must not be able to fill this client's fault log with it.
+   */
   #hint(storeIdHex: string, window: bigint, detail: string): void {
     const key = `${storeIdHex}:${String(window)}`;
     if (this.#hinted.has(key)) return;
     this.#hinted.add(key);
     boundSet(this.#hinted, MAX_RECORDED_FAULTS);
-    this.#record(storeIdHex, window, detail);
-  }
-
-  #record(storeIdHex: string, window: bigint, detail: string): void {
     if (this.#faults.length >= MAX_RECORDED_FAULTS) return;
     this.#faults.push({
       storeIdHex,

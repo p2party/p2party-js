@@ -32,6 +32,7 @@ import { PairDriver } from "../../../src/blindRendezvous/prototype/pairDriver";
 import {
   PROTOTYPE_DELIVERY_PROFILE_V0,
   carrierObjectWireBytes,
+  validateDeliveryProfileGeometry,
   withDeliveryWindowMs,
 } from "../../../src/blindRendezvous/prototype/profile";
 import {
@@ -57,7 +58,11 @@ import type {
   AuthenticatedRoomOperationV1,
   OperationValidationContext,
 } from "../../../src/blindRendezvous/operation";
-import type { CarrierEvent } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import type {
+  CarrierEvent,
+  CarrierTimers,
+} from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import type { DeliveryProfileV1 } from "../../../src/blindRendezvous/prototype/profile";
 import type { TransportCandidateProvider } from "../../../src/blindRendezvous/prototype/pairDriver";
 import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
@@ -96,6 +101,31 @@ const CHUNKS_PER_WINDOW = profile.sizeClasses.reduce(
   (total, sizeClass) => total + sizeClass.publicChunksPerWindow,
   0,
 );
+
+/**
+ * The pinned profile with class 0 too small for a PRESENCE.
+ *
+ * It is a legitimate profile — `validateDeliveryProfileGeometry` accepts it,
+ * because the geometry rules say nothing about whether a class is big enough
+ * for the operations a room happens to publish — which is exactly how an
+ * operator would arrive at one.
+ */
+const undersizedProfile: DeliveryProfileV1 = {
+  ...profile,
+  sizeClasses: profile.sizeClasses.map((sizeClass) =>
+    sizeClass.id === 0
+      ? { ...sizeClass, fixedCarrierObjectBytes: 1_024 }
+      : sizeClass,
+  ),
+};
+validateDeliveryProfileGeometry(undersizedProfile);
+
+/**
+ * `CarrierTimers` claims the engine's own globals are assignable to it. This
+ * is that claim, checked by the compiler on every run: a production caller
+ * forced to cast here would mean the type had drifted.
+ */
+const realTimers: CarrierTimers = { setTimeout, clearTimeout };
 
 const hex = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -204,6 +234,7 @@ interface StoreProcess {
 
 const startStore = async (
   scheduler: FakeScheduler,
+  storeProfile: DeliveryProfileV1,
   options: { seed: Uint8Array; fault?: "withhold" | null },
 ): Promise<StoreProcess> => {
   let handler: ((request: Request) => Promise<Response>) | null = null;
@@ -218,7 +249,7 @@ const startStore = async (
   const core = await PrototypeStoreCore.create({
     module,
     seed: options.seed,
-    profile,
+    profile: storeProfile,
     clock: { nowMs: (): bigint => scheduler.nowMs },
     persistence: new MemoryStorePersistence(),
     chainStartIngressWindow: CHAIN_START,
@@ -279,17 +310,17 @@ const transportTo = (origin: string, scheduler: FakeScheduler): Transport => {
 };
 
 const connect = (
+  world: World,
   store: StoreProcess,
   transport: Transport,
-  scheduler: FakeScheduler,
 ): Promise<PrototypeStoreClient> =>
   PrototypeStoreClient.connect({
     origin: store.origin,
-    profile,
-    profileHash: PROFILE_HASH,
+    profile: world.profile,
+    profileHash: world.profileHash,
     module,
     fetch: transport.fetch,
-    nowMs: (): bigint => scheduler.nowMs,
+    nowMs: (): bigint => world.scheduler.nowMs,
   });
 
 const countRequests = (
@@ -392,6 +423,8 @@ interface Carrier {
 
 interface World {
   readonly scheduler: FakeScheduler;
+  readonly profile: DeliveryProfileV1;
+  readonly profileHash: Uint8Array;
   readonly stores: readonly StoreProcess[];
   readonly transports: Transport[];
   readonly carriers: Carrier[];
@@ -402,15 +435,18 @@ interface World {
 const createWorld = async (
   options: {
     readonly faults?: readonly ("withhold" | null)[];
+    readonly profile?: DeliveryProfileV1;
+    readonly startMs?: bigint;
   } = {},
 ): Promise<World> => {
-  const scheduler = new FakeScheduler(START_MS);
+  const worldProfile = options.profile ?? profile;
+  const scheduler = new FakeScheduler(options.startMs ?? START_MS);
   const stores = [
-    await startStore(scheduler, {
+    await startStore(scheduler, worldProfile, {
       seed: new Uint8Array(32).fill(0x0a),
       fault: options.faults?.[0] ?? null,
     }),
-    await startStore(scheduler, {
+    await startStore(scheduler, worldProfile, {
       seed: new Uint8Array(32).fill(0x0b),
       fault: options.faults?.[1] ?? null,
     }),
@@ -419,6 +455,8 @@ const createWorld = async (
   const carriers: Carrier[] = [];
   return {
     scheduler,
+    profile: worldProfile,
+    profileHash: await deliveryProfileHash(worldProfile),
     stores,
     transports,
     carriers,
@@ -444,17 +482,15 @@ const addCarrier = async (
   for (const index of storeIndexes) {
     const transport = transportTo(world.stores[index].origin, world.scheduler);
     world.transports.push(transport);
-    clients.push(
-      await connect(world.stores[index], transport, world.scheduler),
-    );
+    clients.push(await connect(world, world.stores[index], transport));
   }
   const received: OuterValidatedIdentifiedOperationV1[] = [];
   const events: CarrierEvent[] = [];
   const runtime = new CarrierRuntime({
     module,
     roomRoot: room.roomRoot,
-    profile,
-    profileHash: PROFILE_HASH,
+    profile: world.profile,
+    profileHash: world.profileHash,
     stores: clients,
     validationContextAt: room.validationContextAt,
     logicalWindowMs: LOGICAL_WINDOW_MS,
@@ -507,6 +543,91 @@ const openedOperationIds = async (
   return identifiers;
 };
 
+/**
+ * Every object one transport posted in a window, grouped by size class and
+ * split into the ones that open under the room root and the ones that do not.
+ */
+const appendedByClass = async (
+  room: Room,
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+): Promise<Map<number, { real: number[]; cover: number[] }>> => {
+  const byClass = new Map<number, { real: number[]; cover: number[] }>();
+  for (const request of transport.log) {
+    if (request.path !== PROTOTYPE_STORE_ROUTES.append) continue;
+    if (request.body === null) continue;
+    if (request.atMs < fromMs || request.atMs >= toMs) continue;
+    const decoded = decodePublicAppendRequestV1(request.body);
+    const bucket = byClass.get(decoded.bucket.sizeClass) ?? {
+      real: [],
+      cover: [],
+    };
+    const opened = await openCarrierEnvelope(
+      room.roomRoot,
+      decodeCarrierEnvelope(decoded.exactFixedObject),
+      AEAD,
+    );
+    (opened === null ? bucket.cover : bucket.real).push(
+      decoded.exactFixedObject.length,
+    );
+    byClass.set(decoded.bucket.sizeClass, bucket);
+  }
+  return byClass;
+};
+
+/** Every fixed request of one window, per route, for one transport. */
+const windowShape = (
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+): Record<string, number> => ({
+  token: countRequests(
+    transport,
+    fromMs,
+    toMs,
+    "POST",
+    PROTOTYPE_STORE_ROUTES.token,
+  ),
+  allocation: countRequests(
+    transport,
+    fromMs,
+    toMs,
+    "POST",
+    PROTOTYPE_STORE_ROUTES.allocation,
+  ),
+  append: countRequests(
+    transport,
+    fromMs,
+    toMs,
+    "POST",
+    PROTOTYPE_STORE_ROUTES.append,
+  ),
+  checkpoint: countRequests(
+    transport,
+    fromMs,
+    toMs,
+    "GET",
+    PROTOTYPE_STORE_ROUTES.checkpoint,
+  ),
+  chunk: countRequests(
+    transport,
+    fromMs,
+    toMs,
+    "GET",
+    PROTOTYPE_STORE_ROUTES.chunk,
+  ),
+});
+
+/** What every window of a running carrier must look like on the wire. */
+const FIXED_WINDOW_SHAPE = {
+  token: 1,
+  allocation: 1,
+  append: APPENDS_PER_WINDOW,
+  checkpoint: 1,
+  chunk: CHUNKS_PER_WINDOW,
+};
+
 const firstOpenable = async (
   room: Room,
   envelopes: readonly CarrierEnvelopeV1[],
@@ -540,53 +661,10 @@ describe("prototype carrier runtime", () => {
       await world.advance(windowStartMs(W2) - 1n);
       const after = carrier.runtime.counters;
 
-      for (const transport of world.transports) {
+      for (const transport of world.transports)
         expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "POST",
-            PROTOTYPE_STORE_ROUTES.token,
-          ),
-        ).toBe(1);
-        expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "POST",
-            PROTOTYPE_STORE_ROUTES.allocation,
-          ),
-        ).toBe(1);
-        expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "POST",
-            PROTOTYPE_STORE_ROUTES.append,
-          ),
-        ).toBe(APPENDS_PER_WINDOW);
-        expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "GET",
-            PROTOTYPE_STORE_ROUTES.checkpoint,
-          ),
-        ).toBe(1);
-        expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "GET",
-            PROTOTYPE_STORE_ROUTES.chunk,
-          ),
-        ).toBe(CHUNKS_PER_WINDOW);
-      }
+          windowShape(transport, windowStartMs(W1), windowStartMs(W2)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
 
       expect(after.appendsReal - before.appendsReal).toBe(0);
       expect(after.appendsDummy - before.appendsDummy).toBe(
@@ -605,9 +683,9 @@ describe("prototype carrier runtime", () => {
           const decoded = decodePublicAppendRequestV1(request.body);
           expect(decoded.exactFixedObject.length).toBe(
             carrierObjectWireBytes(
-              profile,
+              world.profile,
               decoded.bucket.sizeClass,
-              PROFILE_HASH,
+              world.profileHash,
             ),
           );
         }
@@ -632,22 +710,46 @@ describe("prototype carrier runtime", () => {
       await world.advance(windowStartMs(W2) - 1n);
       const after = carrier.runtime.counters;
 
-      // The fixed request count is what hides an empty outbox from a store:
+      // A full outbox must be the same window on the wire as an empty one:
       // one real object took one dummy's place, and nothing else moved.
       for (const transport of world.transports)
         expect(
-          countRequests(
-            transport,
-            windowStartMs(W1),
-            windowStartMs(W2),
-            "POST",
-            PROTOTYPE_STORE_ROUTES.append,
-          ),
-        ).toBe(APPENDS_PER_WINDOW);
+          windowShape(transport, windowStartMs(W1), windowStartMs(W2)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
       expect(after.appendsReal - before.appendsReal).toBe(2);
       expect(after.appendsDummy - before.appendsDummy).toBe(
         APPENDS_PER_WINDOW * 2 - 2,
       );
+
+      // The privacy claim itself: within a size class a real object and a
+      // dummy are the same number of bytes, so the one carrying an operation
+      // is not the one that stands out.
+      for (const transport of world.transports) {
+        const byClass = await appendedByClass(
+          room,
+          transport,
+          windowStartMs(W1),
+          windowStartMs(W2),
+        );
+        for (const sizeClass of world.profile.sizeClasses) {
+          const bucket = byClass.get(sizeClass.id);
+          expect(bucket).toBeDefined();
+          if (bucket === undefined) continue;
+          expect(bucket.real.length + bucket.cover.length).toBe(
+            sizeClass.appendSchedule.length,
+          );
+          expect([...new Set([...bucket.real, ...bucket.cover])]).toEqual([
+            carrierObjectWireBytes(
+              world.profile,
+              sizeClass.id,
+              world.profileHash,
+            ),
+          ]);
+        }
+        // A class-0 PRESENCE: one real object in class 0 and none in class 1.
+        expect(byClass.get(0)?.real.length).toBe(1);
+        expect(byClass.get(1)?.real.length).toBe(0);
+      }
 
       const perStore = world.transports.map((transport) =>
         appendedEnvelopes(transport, windowStartMs(W1), windowStartMs(W2)),
@@ -763,7 +865,7 @@ describe("prototype carrier runtime", () => {
       await world.advance(windowStartMs(W3) + profile.publicReadOffsetMs + 1n);
 
       const audit = transportTo(world.stores[0].origin, world.scheduler);
-      const client = await connect(world.stores[0], audit, world.scheduler);
+      const client = await connect(world, world.stores[0], audit);
       const scan = await client.scanWindow(W2);
       expect(scan.status).toBe("finalized");
       const carried: string[] = [];
@@ -867,6 +969,122 @@ describe("prototype carrier runtime", () => {
     }
   }, 180_000);
 
+  test("accepts the engine's own timers with no cast", () => {
+    // The type, not the value, is the assertion: `realTimers` is annotated
+    // `CarrierTimers` and built from the globals, so this file fails to
+    // compile if the handle type ever stops admitting them.
+    expect(typeof realTimers.setTimeout).toBe("function");
+    expect(typeof realTimers.clearTimeout).toBe("function");
+  });
+
+  test("issues one allocation when it starts exactly on the allocation offset", async () => {
+    // The cold-start branch is taken at `>=`, so at exactly the offset the
+    // window's own queued allocation event is due at this instant too. Both
+    // firing would put two allocation requests for one target window on the
+    // wire and wipe the first lease's secret.
+    const world = await createWorld({
+      startMs: windowStartMs(CHAIN_START) + profile.allocationRequestOffsetMs,
+    });
+    try {
+      const room = await makeRoom(new Uint8Array(32).fill(0xa1), START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+
+      await world.advance(windowStartMs(W1) - 1n);
+      for (const transport of world.transports)
+        expect(
+          countRequests(
+            transport,
+            windowStartMs(CHAIN_START),
+            windowStartMs(W1),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.allocation,
+          ),
+        ).toBe(1);
+
+      // The one lease it did take must still be usable: W1's appends are
+      // admitted rather than degraded to unallocated cover.
+      await world.advance(windowStartMs(W2) - 1n);
+      for (const transport of world.transports)
+        expect(
+          windowShape(transport, windowStartMs(W1), windowStartMs(W2)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+      expect(carrier.runtime.storeTopology).toBe("multi-store-union");
+      expect(carrier.runtime.faults).toEqual([]);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("keeps the schedule intact when an operation cannot be sealed into its class", async () => {
+    const world = await createWorld({ profile: undersizedProfile });
+    try {
+      const capability = new Uint8Array(32).fill(0xb2);
+      const room = await makeRoom(capability, START_MS);
+      const carrier = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+
+      await world.advance(windowStartMs(W1));
+      carrier.runtime.publish(presence, "PRESENCE");
+      const before = { ...carrier.runtime.counters };
+      await world.advance(windowStartMs(W2) - 1n);
+      const afterFirst = carrier.runtime.counters;
+
+      // The slot could not carry the operation, so it carried cover — the
+      // window on the wire is the profile's, unchanged.
+      for (const transport of world.transports) {
+        expect(
+          windowShape(transport, windowStartMs(W1), windowStartMs(W2)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+        const byClass = await appendedByClass(
+          room,
+          transport,
+          windowStartMs(W1),
+          windowStartMs(W2),
+        );
+        for (const sizeClass of world.profile.sizeClasses) {
+          const bucket = byClass.get(sizeClass.id);
+          expect(bucket?.real).toEqual([]);
+          expect([...new Set(bucket?.cover ?? [])]).toEqual([
+            carrierObjectWireBytes(
+              world.profile,
+              sizeClass.id,
+              world.profileHash,
+            ),
+          ]);
+        }
+      }
+      expect(afterFirst.appendsReal - before.appendsReal).toBe(0);
+      expect(afterFirst.appendsDummy - before.appendsDummy).toBe(
+        APPENDS_PER_WINDOW * 2,
+      );
+      expect(
+        carrier.events.some(
+          (event) =>
+            event.kind === "missed" &&
+            (event.detail ?? "").includes(
+              "could not be sealed into size class",
+            ),
+        ),
+      ).toBe(true);
+
+      // And the next window is unaffected: the entry was dropped, not left to
+      // be re-selected and to silence this (role, class) slot forever.
+      await world.advance(windowStartMs(W3) - 1n);
+      const afterSecond = carrier.runtime.counters;
+      for (const transport of world.transports)
+        expect(
+          windowShape(transport, windowStartMs(W2), windowStartMs(W3)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+      expect(afterSecond.appendsReal - afterFirst.appendsReal).toBe(0);
+      expect(afterSecond.appendsDummy - afterFirst.appendsDummy).toBe(
+        APPENDS_PER_WINDOW * 2,
+      );
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
   test("refuses an object whose header does not match the bucket it came from", async () => {
     const world = await createWorld();
     try {
@@ -881,14 +1099,14 @@ describe("prototype carrier runtime", () => {
       // A direct client of store 0, so these objects are placed exactly where
       // a store that relocated them would place them.
       const audit = transportTo(world.stores[0].origin, world.scheduler);
-      const client = await connect(world.stores[0], audit, world.scheduler);
+      const client = await connect(world, world.stores[0], audit);
 
       await world.advance(windowStartMs(W1) + 1_000n);
       const keyPair = await newKeyPair(module);
       const lease = await client.allocate(W1, keyPair);
       if (lease === null) throw new Error("expected a lease");
 
-      const sizeClass = profile.sizeClasses[0];
+      const sizeClass = world.profile.sizeClasses[0];
       const place = async (
         operation: AuthenticatedRoomOperationV1,
         coordinates: {
@@ -900,7 +1118,7 @@ describe("prototype carrier runtime", () => {
         const envelope = await sealCarrierEnvelope(
           room.roomRoot,
           {
-            deliveryProfileHash: PROFILE_HASH,
+            deliveryProfileHash: world.profileHash,
             carrierContextId: coordinates.carrierContextId,
             ingressWindow: coordinates.ingressWindow,
             sizeClass: sizeClass.id,

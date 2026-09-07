@@ -34,12 +34,11 @@
 import { appendFileSync } from "node:fs";
 
 import { CanonicalSchemaError } from "../../canonicalSchema";
+import { PROTOTYPE_ROUTE_PREFIX, PROTOTYPE_STORE_PROTOCOL } from "../profile";
 import {
-  PROTOTYPE_DESCRIPTOR_PATH,
-  PROTOTYPE_MEDIA_TYPE,
-  PROTOTYPE_ROUTE_PREFIX,
-  PROTOTYPE_STORE_PROTOCOL,
-} from "../profile";
+  PROTOTYPE_STORE_MEDIA_TYPES,
+  PROTOTYPE_STORE_ROUTES,
+} from "../storeRoutes";
 import {
   decodeAllocationTokenIssueRequestV1,
   decodePublicAllocationRequestV1,
@@ -67,34 +66,11 @@ export interface StoreHttpOptions {
   readonly logBodiesPath?: string;
 }
 
-export const PROTOTYPE_STORE_ROUTES = {
-  descriptor: PROTOTYPE_DESCRIPTOR_PATH,
-  token: `${PROTOTYPE_ROUTE_PREFIX}/allocation-token`,
-  allocation: `${PROTOTYPE_ROUTE_PREFIX}/allocation`,
-  append: `${PROTOTYPE_ROUTE_PREFIX}/append`,
-  checkpoint: `${PROTOTYPE_ROUTE_PREFIX}/checkpoint`,
-  chunk: `${PROTOTYPE_ROUTE_PREFIX}/chunk`,
-  witness: `${PROTOTYPE_ROUTE_PREFIX}/witness`,
-  health: "/health",
-} as const;
-
 /**
- * One media type per wire type, exported so the client adapter names the same
- * strings this handler requires rather than repeating the literals.
+ * Re-exported from `../storeRoutes`, where the browser-side client can import
+ * them without pulling this file's `node:fs` dependency in with them.
  */
-export const PROTOTYPE_STORE_MEDIA_TYPES = {
-  descriptor: PROTOTYPE_MEDIA_TYPE("store-descriptor"),
-  tokenRequest: PROTOTYPE_MEDIA_TYPE("allocation-token-request"),
-  tokenResult: PROTOTYPE_MEDIA_TYPE("allocation-token-result"),
-  allocationRequest: PROTOTYPE_MEDIA_TYPE("allocation-request"),
-  allocationResult: PROTOTYPE_MEDIA_TYPE("allocation-result"),
-  appendRequest: PROTOTYPE_MEDIA_TYPE("append-request"),
-  appendResult: PROTOTYPE_MEDIA_TYPE("append-result"),
-  checkpoint: PROTOTYPE_MEDIA_TYPE("checkpoint"),
-  chunk: PROTOTYPE_MEDIA_TYPE("chunk"),
-  witnessRecord: PROTOTYPE_MEDIA_TYPE("witness-record"),
-  witness: PROTOTYPE_MEDIA_TYPE("witness"),
-} as const;
+export { PROTOTYPE_STORE_MEDIA_TYPES, PROTOTYPE_STORE_ROUTES };
 
 /**
  * The largest body any prototype request has, plus headroom. The biggest is an

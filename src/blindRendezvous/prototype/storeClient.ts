@@ -635,7 +635,43 @@ export class PrototypeStoreClient {
         "the lease does not bind the allocation this client requested",
         null,
       );
+
+    // The ordinal is the one input to the slot mapping the *store* picks, and
+    // the wire carries it as a plain u32. Outside the cohort capacity it names
+    // no slot in any window, so a signature over it proves only that the store
+    // meant it: `appendSlotCoordinates` would throw on the first use, which is
+    // a store choosing when this client crashes. It is refused here instead.
+    if (!this.#ordinalWithinCohort(lease.allocationOrdinal))
+      return this.#reject(
+        "signature-invalid",
+        targetWindow,
+        "the lease names an allocation ordinal outside the cohort capacity",
+        null,
+      );
     return lease;
+  }
+
+  /** `0 <= allocationOrdinal < cohortAllocationsPerWindow`. */
+  #ordinalWithinCohort(allocationOrdinal: number): boolean {
+    return (
+      Number.isSafeInteger(allocationOrdinal) &&
+      allocationOrdinal >= 0 &&
+      allocationOrdinal < this.#profile.cohortAllocationsPerWindow
+    );
+  }
+
+  /** `0 <= objectOrdinal < roomSlotsPerClient × appendSchedule.length`. */
+  #ordinalWithinAllocation(sizeClass: number, objectOrdinal: number): boolean {
+    const found = this.#profile.sizeClasses.find(
+      (candidate) => candidate.id === sizeClass,
+    );
+    if (found === undefined) return false;
+    return (
+      Number.isSafeInteger(objectOrdinal) &&
+      objectOrdinal >= 0 &&
+      objectOrdinal <
+        this.#profile.roomSlotsPerClient * found.appendSchedule.length
+    );
   }
 
   /**
@@ -729,9 +765,14 @@ export class PrototypeStoreClient {
   /**
    * Remember what the store promised, until the window it names is scanned.
    *
-   * Validated eagerly: a receipt whose coordinates are outside the profile
-   * geometry is a caller bug, and discovering it inside a scan would turn it
-   * into a fault report against a store that did nothing wrong.
+   * Validated eagerly, and each coordinate against the half it comes from: the
+   * object ordinal is the caller's, so an out-of-range one is a caller bug and
+   * says so; the allocation ordinal is the store's, and `allocate` has already
+   * refused it if it named no slot — the check here is the belt to that brace,
+   * for a lease that reached this client by some other path. Either way the
+   * bounds are decided before `appendSlotCoordinates`, which throws, and a
+   * throw inside a scan would turn a bad coordinate into a fault report
+   * against a store that did nothing wrong.
    */
   recordReceipt(receipt: AppendReceipt): void {
     if (receipt.lease.ingressWindow !== receipt.window)
@@ -742,13 +783,12 @@ export class PrototypeStoreClient {
       fail("the receipt's lease names a different delivery profile");
     if (receipt.objectHash.length !== 32)
       fail("the receipt's object hash must be exactly 32 bytes");
-    // Throws `PublicWindowError` on coordinates the geometry has no slot for.
-    appendSlotCoordinates(
-      this.#geometry,
-      receipt.sizeClass,
-      receipt.lease.allocationOrdinal,
-      receipt.objectOrdinal,
-    );
+    if (!this.#ordinalWithinCohort(receipt.lease.allocationOrdinal))
+      fail("the receipt's lease names an ordinal outside the cohort capacity");
+    if (
+      !this.#ordinalWithinAllocation(receipt.sizeClass, receipt.objectOrdinal)
+    )
+      fail("the receipt's object ordinal is outside this allocation's slots");
 
     if (this.#receipts.length >= MAX_PENDING_RECEIPTS) this.#receipts.shift();
     this.#receipts.push({
@@ -1119,16 +1159,15 @@ export class PrototypeStoreClient {
 
     if (read.kind === "status") {
       const value = read.value;
-      if (
-        value.version !== 1 ||
-        !bytesEqual(value.storeId, this.#storeId) ||
-        !bytesEqual(value.deliveryProfileHash, this.#profileHash) ||
-        value.ingressWindow !== window
-      )
+      // The version is the only field read before the signature: it is the
+      // "is this a shape I can hash at all" question, and the transcript is
+      // the canonical encoding of exactly this type. Every other field is
+      // read after the signature over the whole body verifies.
+      if (value.version !== 1)
         return this.#reject(
           "signature-invalid",
           window,
-          "the checkpoint status does not name this store, profile and window",
+          "unsupported checkpoint status version",
           unusable,
         );
       const verified = await verify(
@@ -1142,6 +1181,17 @@ export class PrototypeStoreClient {
           "signature-invalid",
           window,
           "the checkpoint status signature does not verify",
+          unusable,
+        );
+      if (
+        !bytesEqual(value.storeId, this.#storeId) ||
+        !bytesEqual(value.deliveryProfileHash, this.#profileHash) ||
+        value.ingressWindow !== window
+      )
+        return this.#reject(
+          "signature-invalid",
+          window,
+          "the checkpoint status does not name this store, profile and window",
           unusable,
         );
       if (value.status === "not-final")
@@ -1159,6 +1209,9 @@ export class PrototypeStoreClient {
     }
 
     const { descriptor, checkpoint } = read;
+    // Which key may sign at all is the one question that has to precede
+    // verification: a signature checked under a key the same answer carried
+    // proves nothing about the store this client pinned.
     if (!bytesEqual(descriptor.storeIdentityEd25519Key, this.#storeKey))
       return this.#reject(
         "descriptor-invalid",
@@ -1166,18 +1219,26 @@ export class PrototypeStoreClient {
         "the checkpoint was served under a different store identity",
         unusable,
       );
-    // `structurallyValidCheckpoint` judges the chain start against the
-    // descriptor served beside the checkpoint, which is what keeps the
-    // evidence portable. This client also pinned one, and a checkpoint
-    // anchored elsewhere under the same key is a store restarting its chain —
-    // which, unobserved beside a second window, nothing downstream would see.
-    if (checkpoint.chainStartIngressWindow !== this.#chainStart)
+
+    // This is where the checkpoint signature is checked, so nothing below
+    // reads a field of an unverified body. The descriptor must have been
+    // valid when this window was finalized, not now: historical evidence must
+    // not depend on today's clock.
+    const validity = await structurallyValidCheckpoint(
+      descriptor,
+      checkpoint,
+      this.#geometry,
+      this.#finalizationInstantMs(window),
+      this.#module,
+    );
+    if (!validity.valid)
       return this.#reject(
-        "descriptor-invalid",
+        "signature-invalid",
         window,
-        "the checkpoint is anchored to a chain start this store did not pin",
+        `the checkpoint is not structurally valid: ${validity.reason}`,
         unusable,
       );
+
     if (checkpoint.version !== 1)
       return this.#reject(
         "signature-invalid",
@@ -1195,21 +1256,16 @@ export class PrototypeStoreClient {
         "the checkpoint names another window or delivery profile",
         unusable,
       );
-
-    // The descriptor must have been valid when this window was finalized, not
-    // now: historical evidence must not depend on today's clock.
-    const validity = await structurallyValidCheckpoint(
-      descriptor,
-      checkpoint,
-      this.#geometry,
-      this.#finalizationInstantMs(window),
-      this.#module,
-    );
-    if (!validity.valid)
+    // `structurallyValidCheckpoint` judges the chain start against the
+    // descriptor served beside the checkpoint, which is what keeps the
+    // evidence portable. This client also pinned one, and a checkpoint
+    // anchored elsewhere under the same key is a store restarting its chain —
+    // which, unobserved beside a second window, nothing downstream would see.
+    if (checkpoint.chainStartIngressWindow !== this.#chainStart)
       return this.#reject(
-        "signature-invalid",
+        "descriptor-invalid",
         window,
-        `the checkpoint is not structurally valid: ${validity.reason}`,
+        "the checkpoint is anchored to a chain start this store did not pin",
         unusable,
       );
     return { kind: "finalized", checkpoint, descriptor };
@@ -1223,6 +1279,11 @@ export class PrototypeStoreClient {
    * and the hash of the chunk before it. Everything a store could otherwise
    * do — relocate an object between classes or windows, shorten a chunk,
    * reorder the sequence — is one of those checks.
+   *
+   * The signature is checked first and the rest after, in both branches. The
+   * conjunction would be fail-closed either way, but a reader should not have
+   * to prove that: nothing here reads a field of a body whose signature has
+   * not verified.
    */
   async #readChunks(
     window: bigint,
@@ -1271,17 +1332,14 @@ export class PrototypeStoreClient {
 
         if (read.kind === "status") {
           const value = read.value;
-          if (
-            value.version !== 1 ||
-            !bytesEqual(value.bucket.deliveryProfileHash, this.#profileHash) ||
-            value.bucket.ingressWindow !== window ||
-            value.bucket.sizeClass !== sizeClass.id ||
-            value.chunkIndex !== BigInt(index)
-          )
+          // Version first and then the signature, for the same reason as the
+          // checkpoint status: the transcript is the canonical encoding of
+          // this exact type, and every other field is read after it verifies.
+          if (value.version !== 1)
             return this.#reject(
               "signature-invalid",
               window,
-              "the chunk status does not name the chunk that was requested",
+              "unsupported chunk status version",
               unusable,
             );
           const verified = await verify(
@@ -1297,6 +1355,18 @@ export class PrototypeStoreClient {
               "the chunk status signature does not verify",
               unusable,
             );
+          if (
+            !bytesEqual(value.bucket.deliveryProfileHash, this.#profileHash) ||
+            value.bucket.ingressWindow !== window ||
+            value.bucket.sizeClass !== sizeClass.id ||
+            value.chunkIndex !== BigInt(index)
+          )
+            return this.#reject(
+              "signature-invalid",
+              window,
+              "the chunk status does not name the chunk that was requested",
+              unusable,
+            );
           // A store that signed a checkpoint for this window and then refuses
           // one of the chunks it committed contradicts itself.
           return this.#reject(
@@ -1308,8 +1378,33 @@ export class PrototypeStoreClient {
         }
 
         const chunk = read.chunk;
+        if (chunk.version !== 1)
+          return this.#reject(
+            "signature-invalid",
+            window,
+            "unsupported chunk version",
+            unusable,
+          );
+        // The signature comes before every other question about this chunk:
+        // its coordinates, its object count, its object lengths and its link
+        // to the chunk before it are all claims, and an unsigned claim is not
+        // one this client should be reasoning about at all.
+        const { storeSignature, ...body } = chunk;
+        const verified = await verify(
+          await publicChunkSigningHash(body),
+          storeSignature,
+          this.#storeKey,
+          this.#module,
+        );
+        if (!verified)
+          return this.#reject(
+            "signature-invalid",
+            window,
+            "the chunk signature does not verify",
+            unusable,
+          );
+
         if (
-          chunk.version !== 1 ||
           !bytesEqual(chunk.bucket.deliveryProfileHash, this.#profileHash) ||
           chunk.bucket.ingressWindow !== window ||
           chunk.bucket.sizeClass !== sizeClass.id ||
@@ -1341,21 +1436,6 @@ export class PrototypeStoreClient {
             "signature-invalid",
             window,
             `chunk ${String(index)} of class ${String(sizeClass.id)} does not link to its predecessor`,
-            unusable,
-          );
-
-        const { storeSignature, ...body } = chunk;
-        const verified = await verify(
-          await publicChunkSigningHash(body),
-          storeSignature,
-          this.#storeKey,
-          this.#module,
-        );
-        if (!verified)
-          return this.#reject(
-            "signature-invalid",
-            window,
-            "the chunk signature does not verify",
             unusable,
           );
 

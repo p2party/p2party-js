@@ -2,9 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import libcrypto from "../../../src/cryptography/libcrypto";
-import { newKeyPair } from "../../../src/cryptography/ed25519";
+import {
+  keyPairFromSeed,
+  newKeyPair,
+  sign,
+} from "../../../src/cryptography/ed25519";
 import { sha256 } from "../../../src/cryptography/webCryptoSha256";
-import { deliveryProfileHash } from "../../../src/blindRendezvous/derivations";
+import {
+  deliveryProfileHash,
+  publicAllocationLeaseSignedMessage,
+  publicCheckpointStatusSigningHash,
+} from "../../../src/blindRendezvous/derivations";
 import {
   ingressWindowStartMs,
   publicStoreCheckpointHash,
@@ -32,10 +40,13 @@ import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/s
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import {
   decodePublicAllocationRequestV1,
+  decodePublicAllocationResultV1,
   decodePublicAppendRequestV1,
   decodePublicChunkReadV1,
   encodePrototypeStoreDescriptorDocumentV1,
+  encodePublicAllocationResultV1,
   encodePublicChunkReadV1,
+  encodePublicStoreCheckpointReadV1,
 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 import type { LibCrypto } from "../../../src/cryptography/libcrypto";
@@ -163,6 +174,15 @@ const chunkHeaders = {
   "x-p2party-store": "prototype-v0",
   "content-type": PROTOTYPE_STORE_MEDIA_TYPES.chunk,
 };
+
+const headersOf = (mediaType: string): Record<string, string> => ({
+  "x-p2party-store": "prototype-v0",
+  "content-type": mediaType,
+});
+
+/** The store's own signing key: the tests know the seed it was started from. */
+const storeSecretKey = async (): Promise<Uint8Array> =>
+  (await keyPairFromSeed(Uint8Array.from(SEED), cryptoModule)).secretKey;
 
 /** `lib.dom`'s `BufferSource` is narrower than the codecs' `Uint8Array`. */
 const asBody = (bytes: Uint8Array): ArrayBuffer => {
@@ -421,6 +441,16 @@ describe("prototype store client", () => {
 
       expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
       expect(client.inert).toBe(false);
+      const honestHash = client.checkpointHashFor(CHAIN_START);
+      const honestRead = await honest.core.readCheckpoint(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      if (honestRead.kind !== "finalized")
+        throw new Error("expected a checkpoint");
+      expect(hex(honestHash as Uint8Array)).toBe(
+        hex(await publicStoreCheckpointHash(honestRead.checkpoint)),
+      );
 
       // The same client now sees the other branch of the same store. Each
       // branch is internally consistent; only holding both proves the fault.
@@ -435,6 +465,11 @@ describe("prototype store client", () => {
           fault.detail.includes("checkpoint-conflict"),
         ),
       ).toBe(true);
+      // The hash this client would have witnessed to other stores is the one
+      // it saw first; the second branch is evidence, not a replacement.
+      expect(hex(client.checkpointHashFor(CHAIN_START) as Uint8Array)).toBe(
+        hex(honestHash as Uint8Array),
+      );
     } finally {
       honest.stop();
       equivocating.stop();
@@ -502,6 +537,147 @@ describe("prototype store client", () => {
       honest.stop();
       stranger.stop();
     }
+  });
+
+  test("refuses a lease whose ordinal names no slot in the geometry", async () => {
+    await withStore(async (store, clock) => {
+      const secretKey = await storeSecretKey();
+      const forging: typeof fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        const response = await fetch(
+          `${store.origin}${url.pathname}${url.search}`,
+          init,
+        );
+        if (url.pathname !== PROTOTYPE_STORE_ROUTES.allocation) return response;
+        const result = decodePublicAllocationResultV1(
+          new Uint8Array(await response.arrayBuffer()),
+        );
+        if (result.kind !== "allocated") throw new Error("expected a lease");
+        // One past the cohort capacity. The ordinal is a plain u32 the store
+        // picks, and the store signs it properly — so only a bounds check
+        // stands between it and `appendSlotCoordinates`, which throws.
+        const { storeSignature: _signature, ...leaseBody } = result.lease;
+        const forged = {
+          ...leaseBody,
+          allocationOrdinal: profile.cohortAllocationsPerWindow,
+        };
+        return new Response(
+          asBody(
+            encodePublicAllocationResultV1({
+              kind: "allocated",
+              lease: {
+                ...forged,
+                storeSignature: await sign(
+                  await publicAllocationLeaseSignedMessage(forged),
+                  secretKey,
+                  cryptoModule,
+                ),
+              },
+            }),
+          ),
+          {
+            status: 200,
+            headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.allocationResult),
+          },
+        );
+      }) as typeof fetch;
+
+      const client = await connect(store.origin, clock, { fetch: forging });
+      const keyPair = await newKeyPair(cryptoModule);
+      expect(await client.allocate(CHAIN_START, keyPair)).toBeNull();
+      expect(
+        client.faults.some((fault) =>
+          fault.detail.includes("outside the cohort capacity"),
+        ),
+      ).toBe(true);
+      // A store choosing a bad ordinal is a refusal, not a crash and not proof
+      // of a broken custody promise.
+      expect(client.inert).toBe(false);
+    });
+  });
+
+  test("refuses a signed chain-unavailable its own descriptor contradicts", async () => {
+    await withStore(async (store, clock) => {
+      const value = {
+        version: 1 as const,
+        storeId: store.core.storeId,
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: CHAIN_START,
+        status: "chain-unavailable" as const,
+      };
+      const body = encodePublicStoreCheckpointReadV1({
+        kind: "status",
+        value,
+        storeSignature: await sign(
+          await publicCheckpointStatusSigningHash(value),
+          await storeSecretKey(),
+          cryptoModule,
+        ),
+      });
+      const denying: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+          return Promise.resolve(
+            new Response(asBody(body), {
+              status: 200,
+              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+
+      const client = await connect(store.origin, clock, { fetch: denying });
+      const scan = await client.scanWindow(CHAIN_START);
+      expect(scan.status).toBe("unreachable");
+      expect(
+        client.faults.some((fault) =>
+          fault.detail.includes("denies a profile chain its own descriptor"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  test("refuses a chunk the store withholds from a window it finalized", async () => {
+    await withStore(async (store, clock) => {
+      const path = `${PROTOTYPE_STORE_ROUTES.chunk}/${PROFILE_HEX}/${String(CHAIN_START)}/0/0`;
+      // A genuine signed `not-final` for this exact chunk, taken while the
+      // window was open and replayed after the store finalized it.
+      const pending = new Uint8Array(
+        await (await fetch(`${store.origin}${path}`)).arrayBuffer(),
+      );
+      clock.now = FINALIZE_AT;
+      await store.core.finalizeDue();
+
+      const withholding: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (url.pathname === path)
+          return Promise.resolve(
+            new Response(asBody(pending), {
+              status: 200,
+              headers: chunkHeaders,
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+
+      const client = await connect(store.origin, clock, { fetch: withholding });
+      const scan = await client.scanWindow(CHAIN_START);
+      expect(scan.status).toBe("unreachable");
+      expect(
+        client.faults.some((fault) =>
+          fault.detail.includes("withholds chunk 0 of class 0"),
+        ),
+      ).toBe(true);
+    });
   });
 
   test("refuses a checkpoint anchored to another chain start", async () => {

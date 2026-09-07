@@ -2,7 +2,8 @@
 
 Status of the implementation of
 [`spec/spec-architecture-l2-blind-rendezvous.md`](../spec/spec-architecture-l2-blind-rendezvous.md)
-(v0.4-proposed) across the three repositories, as of 2026-07-28.
+(v0.4-proposed) across the three repositories, as of 2026-07-28, with the
+prototype additions of 2026-09-08 marked where they change a statement.
 
 **Nothing here is a conformance claim.** The specification requires that every
 acceptance criterion, vector, benchmark, deployment, and review be displayed as
@@ -32,6 +33,40 @@ exported from the package barrel:
 | `publicWindow.ts`     | Bucket/chunk/checkpoint hashing, append slot mapping, and RFC 9162 inclusion verification.                      |
 | `storeDescriptor.ts`  | Store/route identity, timeless authenticity and explicit-time activation, scopes, chain-start equivocation.     |
 | `normativeKernel.ts`  | Registry shape validators, now consuming the generated projections.                                             |
+
+That table names the modules documented at the 2026-07-28 snapshot; the
+directory has grown since and now holds thirty-two release-candidate modules
+alongside the prototype directory below.
+
+### `src/blindRendezvous/prototype/` — the flagged prototype (2026-09-08)
+
+Fifteen further modules, 10,411 lines, added on the branch
+`feat/blind-two-store-prototype`. **The directory boundary is the flag.**
+Nothing here is exported from `src/index.ts`, nothing outside the directory
+imports it, and the store process refuses to start without two environment
+flags. Every route and media type it defines says `prototype-v0`; those bytes
+are not the frozen §4.6 route family and are not a proposal for it. The whole
+artifact is described in
+[`blind-rendezvous-two-store-prototype.md`](blind-rendezvous-two-store-prototype.md),
+which states at length what it does not claim.
+
+| Module                        | Owns                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `profile.ts`                  | The pinned prototype delivery profile, the wire constants, and `validateDeliveryProfileGeometry` over the §4.3 arithmetic. |
+| `storeWire.ts`                | Typed strict-canonical encode/decode wrappers over the `schemas.ts` descriptors; a projection, never a second authority.  |
+| `storeRoutes.ts`              | The `prototype-v0` route table and media types, shared by the browser client and the server.                              |
+| `store/storeCore.ts`          | The per-window machine: allocation, append slot binding, finalization with dummies, the chunk and checkpoint chains.       |
+| `store/storePersistence.ts`   | The persistence port and its in-memory implementation.                                                                    |
+| `store/storeSqlite.ts`        | `bun:sqlite` persistence; a restarted store re-serves byte-identical signed objects.                                      |
+| `store/storeHttp.ts`          | The `Bun.serve` handler, constant-shaped refusals, cross-origin headers, and the optional pre-parse body log.             |
+| `store/storeServer.ts`        | The entrypoint, its two mandatory gate flags, and the once-chosen persisted chain start.                                   |
+| `storeClient.ts`              | Descriptor validation, per-answer signature verification, checkpoint-root recomputation, chain verdicts, fault taxonomy.  |
+| `carrierRuntime.ts`           | The fixed per-store schedule, the union across stores, backfill, and cover that is byte- and latency-identical to real work. |
+| `pairDriver.ts`               | Presence, HELLO/ACCEPT, OFFER/ANSWER, the pair ledger, the established root, and the handoff facts.                       |
+| `workKinds.ts`                | The §4.3 service-role classifier for outbox entries.                                                                     |
+| `transportCandidates.ts`      | The strict SDP validator and the derived transport-candidate ordering.                                                   |
+| `webrtcProvider.ts`           | The browser transport: complete-gathering offer/answer and `verifyCertificates` over `getStats()`.                       |
+| `index.ts`                    | The composition and the run's event vocabulary.                                                                          |
 
 The shared protocol-v4 frame-length/tag geometry lives in
 `src/handlers/handshakeFrame.ts`; both `pairPlaintext.ts` and the existing
@@ -102,9 +137,12 @@ Answer-to-offer candidate matching, adapter-registry validation, and strict
 SHA-256 SDP fingerprint parsing are also state/integration gates, not
 implemented by the intrinsic candidate shape/order checks.
 
-Verification for this snapshot: `bun test tests/blindRendezvous` — 259 pass,
-0 fail, 17 files; `bun test tests` — 834 pass, 0 fail, 109 files. Both
-TypeScript configurations, targeted ESLint, and `git diff --check` also pass.
+Verification, re-run on 2026-09-08 on the prototype branch:
+`bun test tests/blindRendezvous` — **580 pass, 0 fail, 3,390 assertions across
+40 files**, of which nine files are the prototype's own. Both TypeScript
+configurations, targeted ESLint, and `git diff --check` also pass. (The
+2026-07-28 snapshot this document was first written against reported 259 pass
+across 17 files.)
 
 ## Blockers
 
@@ -138,25 +176,47 @@ vector-tested, the design is architecture-complete but not wire-interoperable �
 and that implementations "shall not independently invent release bytes and call
 them v0.4". No release-registry hash has been computed or published.
 
-### B3 — the store wire protocol is not implemented anywhere
+### B3 — the frozen store wire protocol still does not exist; a prototype one now does
 
-`p2party-server` has no append, allocation, chunk, or checkpoint endpoint; its
-only entrypoint is the legacy WebSocket signaling server.
+**Narrowed on 2026-09-08.** This blocker used to read "the store wire protocol
+is not implemented anywhere". That is no longer literally true, and the
+distinction matters.
 
-The client has reusable verification primitives, not an end-to-end store:
-canonical descriptor/route authenticity and explicit-time lease checks,
-store/carrier/route-instance identity, window geometry and slot mapping, chunk
-and checkpoint hashing, RFC 9162 inclusion proofs, structural checkpoint
-validity, chain succession, and chain-start/same-window equivocation checks.
+`p2party-server` still has no append, allocation, chunk, or checkpoint endpoint;
+its only entrypoint is the legacy WebSocket signaling server. Nothing about the
+deployed server has changed.
 
-What remains is the Section 4.6 HTTP route family itself — and its exact
-request/response target lengths, status enum bytes, and signature transcripts
-are Phase-0 freeze items (B2). Writing them now would mean inventing the exact
-bytes the freeze exists to fix. The content-addressed route-family
-registry/parsers are also absent, so nonempty `STORE_HINT.routes` deliberately
-fails closed. The scheme-1 Privacy Pass allocation path (Section 4.3.12) is
-likewise unimplemented: it needs the frozen allocation registry, including the
-RFC 9578 token bytes and issuance vectors.
+What now exists is a **prototype store under `prototype-v0`**, entirely inside
+`src/blindRendezvous/prototype/store/`: a window machine, `bun:sqlite`
+persistence, a `Bun.serve` handler and an entrypoint that refuses to start
+without `P2PARTY_STORE_PROTOTYPE=1` and `P2PARTY_STORE_OPEN_ALLOCATION=1`. Two
+such processes have been driven end to end by two headless browsers against a
+matching browser-side client adapter, including under a killed store, a
+withholding store, and a client that can reach only one of the two. That work is
+described in
+[`blind-rendezvous-two-store-prototype.md`](blind-rendezvous-two-store-prototype.md).
+
+It is not the Section 4.6 route family and does not narrow B2. Its route paths
+and media types say `prototype-v0` precisely so that they cannot be mistaken for
+release bytes; the exact §4.6 request/response target lengths, status enum
+bytes, and signature transcripts remain Phase-0 freeze items, and writing them
+now would still mean inventing the exact bytes the freeze exists to fix. The
+content-addressed route-family registry and parsers are still absent, so
+nonempty `STORE_HINT.routes` deliberately fails closed and the prototype takes
+its store origins as run options instead. The scheme-1 Privacy Pass allocation
+path (Section 4.3.12) is still unimplemented: the prototype store runs open
+allocation, answering `issued` with 32 zero bytes and ignoring the token, so it
+carries no abuse-control, Sybil, or fairness claim at all.
+
+Beside the client's reusable verification primitives — canonical descriptor and
+route authenticity, explicit-time lease checks, store/carrier/route-instance
+identity, window geometry and slot mapping, chunk and checkpoint hashing, RFC
+9162 inclusion proofs, structural checkpoint validity, chain succession, and
+chain-start/same-window equivocation checks — the prototype adds a client that
+composes them against a live process: it recomputes the checkpoint root from the
+complete chunk set, verifies the chain, and compares a signed append receipt
+against the slot the finalized chunk actually published. Those are executable
+component facts on a flagged prototype, not wire interoperability.
 
 ### B4 — `p2party.com` cannot reach any of this
 
@@ -165,6 +225,11 @@ modules are deliberately absent from the package barrel, so the current
 production WebRTC correctness baseline cannot call them. Blind integration
 requires a reviewed public API, a new vendored artifact/hash, and coordinated
 frontend/server work; that should not be presented as interoperable before B2.
+
+The 2026-09-08 prototype does not change this in any respect. It is reached only
+from a test harness page that bundles the directory directly; the barrel, the
+`p2party/session` subpath, the vendored tarball and `connect()`'s rejection of
+every rendezvous mode other than `legacy-signaling` are all untouched.
 
 ## Defects found by adversarial review and fixed
 
@@ -266,8 +331,11 @@ remaining AC-035 every-body vector gate and are not described as a freeze.
   an unknown route family.
 - **Store wire profiles, allocation, and append.** The reference HTTP suffixes,
   media types, fixed target lengths, status/signature bytes, delivery profile
-  registry, Privacy Pass issuance/redemption, append admission signature, and
-  fixed client schedule are not implemented or frozen.
+  registry, Privacy Pass issuance/redemption, and append admission signature are
+  not frozen, and the release forms of them are not implemented. The
+  `prototype-v0` route family and its fixed client schedule execute (B3), under
+  their own prefix and behind two environment flags, and are neither
+  interoperable with the frozen family nor a proposal for it.
 - **SDK/frontend/server integration.** The blind modules remain outside the
   package barrel; no frontend room flow, pre-SDP gate, store transport, peer
   store role, or backend blind endpoint consumes them. The existing WebRTC path
@@ -287,6 +355,15 @@ of those requires evidence that does not exist: a deployed store, multi-client
 E2E, browser and non-IP runs, measured cohorts, classifier experiments, formal
 results, and external review. The only defensible statements today are that
 specific deterministic components execute and that their tests pass.
+
+The 2026-09-08 prototype adds one more defensible statement and no label: those
+components **compose**, in two real browsers against two prototype store
+processes with no signaling server, far enough to open a WebRTC edge with DTLS
+verified on both sides and to carry a protocol-v4 session over it. It is a
+demonstration of a shape; it establishes no property. It is not a deployed
+store, two store processes on one laptop are one fault domain, both stores still
+see every client address, and the run's privacy statement is about a searched
+corpus of request bodies on that run and nothing else.
 
 The specification now also records two successor boundaries without changing
 the executable v0.4 surface:

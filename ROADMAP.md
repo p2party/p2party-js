@@ -158,6 +158,22 @@ from `src/index.ts`, nothing outside that directory imports it, and
 unwired, held behind the spec's own release gates rather than behind missing
 code.
 
+Since September 2026 those components have also been shown to fit together. A
+flagged prototype in a further directory, `src/blindRendezvous/prototype/`, runs
+two headless browsers that share nothing but a 32-byte room capability against
+two store processes with no signaling server anywhere in the test: presence and
+the four pair flights are carried blind, a WebRTC edge opens from the exchanged
+SDP with DTLS verified on both sides, the existing protocol-v4 session runs over
+it, and messages round-trip byte-exact — including with one store killed, one
+store lying, and one browser able to reach only one of the two. It changes
+nothing above: the prototype is not exported either, its stores refuse to start
+without two environment flags, its bytes say `prototype-v0` rather than any
+release version, its admission and allocation are open, and two store processes
+on one laptop are one fault domain. It demonstrates a shape rather than
+establishing a property, and
+[`docs/blind-rendezvous-two-store-prototype.md`](docs/blind-rendezvous-two-store-prototype.md)
+opens by saying at length what it does not claim.
+
 **Finding peers across independently operated servers.** A room today lives on
 exactly one signaling service. Federating discovery is what makes self-hosting
 useful to anyone but the host, and it is also the precondition for the

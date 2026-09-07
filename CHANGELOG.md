@@ -4,6 +4,31 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+Nothing in this entry is part of the package. The SDK's public surface,
+protocol, wire format and behaviour are unchanged, and no released code path
+reaches any of it.
+
+### Added
+
+- An internal, flagged prototype of server-blind rendezvous over two stores,
+  under `src/blindRendezvous/prototype/`. It is not exported from
+  `src/index.ts`, nothing outside that directory imports it, its store process
+  refuses to start without two environment flags, and every route path and media
+  type it defines says `prototype-v0` — those bytes are not the specification's
+  frozen route family and are not a proposal for it. `connect()` still rejects
+  every rendezvous mode other than `legacy-signaling`.
+
+  It exists to demonstrate a shape end to end: two headless browsers sharing only
+  a 32-byte room capability, two store processes, no signaling server, presence
+  and the four pair flights carried blind, a real WebRTC edge with DTLS verified
+  on both sides, and the existing protocol-v4 session over it with messages
+  byte-exact. It demonstrates that the pieces compose; it establishes no privacy
+  or fault-tolerance property, and two store processes on one laptop are one
+  fault domain. `docs/blind-rendezvous-two-store-prototype.md` describes what it
+  is and, at length and first, what it does not claim.
+
 ## [0.14.7] — 2026-09-03
 
 Three recovery gaps left open by 0.14.5, each one a case where the software

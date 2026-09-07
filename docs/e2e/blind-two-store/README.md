@@ -510,13 +510,16 @@ Two things worth reading off that run:
 
 The four scenarios' wall-clock times differ by a few seconds in every direction
 and the ordering is **not** stable across runs: in the run above `healthy` was
-the slowest by 6.5 s, while in earlier runs of the same four scenarios
-`kill-a` came out slower than `healthy` (39.6 s vs 36.6 s) and then faster
-again (39.3 s vs 39.6 s). Read those differences as run-to-run variance —
-chiefly where in a delivery window each run happens to start — and not as a
-measurement of what reading one store instead of two costs. The section below
-measures that deliberately, by changing the geometry rather than by comparing
-scenarios.
+the slowest by 6.5 s, while across earlier `--scenario=all` runs of the same
+four scenarios `kill-a` came out slower than `healthy` in one and faster in the
+next. That ordering claim is deliberately qualitative — the multi-run tables it
+used to cite were removed by an earlier review, because printing three runs of
+single measurements invited exactly the causal reading this paragraph warns
+against, and no number is quoted here that this document does not print. Read
+the differences as run-to-run variance — chiefly where in a delivery window each
+run happens to start — and not as a measurement of what reading one store
+instead of two costs. The section below measures that deliberately, by changing
+the geometry rather than by comparing scenarios.
 
 ### `--cohort=<n>`: window length and cohort size are exchangeable
 

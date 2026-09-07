@@ -264,6 +264,103 @@ Verification after the final review edits:
 — 838 pass, 0 fail, 109 files. Both TypeScript configurations, targeted ESLint,
 and `git diff --check` also pass.
 
+## Two-store prototype on 2026-09-08
+
+Branch `feat/blind-two-store-prototype`, not merged, not pushed. Read
+[`blind-rendezvous-two-store-prototype.md`](blind-rendezvous-two-store-prototype.md)
+first — it is the document written for someone outside the project, and its
+first section is what the work does **not** claim.
+
+### What landed
+
+Fifteen modules under `src/blindRendezvous/prototype/` (10,411 lines) with nine
+test files behind them, plus a browser harness under
+`docs/e2e/blind-two-store/`. The directory boundary is the flag: nothing is
+exported from `src/index.ts`, nothing outside the directory imports it, and the
+store entrypoint refuses to start without two environment flags. Every route
+path and media type says `prototype-v0`; those are not the frozen §4.6 route
+family and are not a proposal for it.
+
+The demonstration is one reproducible run. Two headless Chromium contexts share
+nothing but a 32-byte room capability; two store processes run on separate ports
+with fresh databases and fresh identity keys; no signaling server runs anywhere
+in the test. Each page publishes `PRESENCE` to both stores, discovers the other
+through either, and the pair completes `IDENTITY_HELLO` → `IDENTITY_ACCEPT` →
+`TRANSPORT_OFFER` → `TRANSPORT_ANSWER` as pair-sealed operations the stores
+carry blind. A real WebRTC edge opens from the exchanged SDP with DTLS verified
+on both sides, the existing protocol-v4 `createSession` runs over the data
+channel, and 140,005 bytes A→B (3 frames) and 9,005 bytes B→A (1 frame)
+round-trip byte-exact.
+
+Four scenarios pass, recorded 2026-09-08 at the pinned 4,000 ms window and
+cohort 8: `healthy` (41.9 s, both pages `multi-store-union`, zero faults),
+`kill-a` (35.2 s, store A `SIGKILL`ed in the first window, 264 fault records all
+of kind `unreachable` against A and none against B), `withhold-a` (35.6 s, 8
+`custody-breach` records against A on each page and nothing else, A marked inert
+one delivery window after it began lying), and `unreachable-b-for-one` (35.4 s,
+page B issued zero requests to store B and still completed). The privacy audit
+searched 345 / 118 / 256 / 207 request bodies for 148 byte needles over 14
+secrets and found none.
+
+### How to run it
+
+```sh
+bun test tests/blindRendezvous          # 580 pass, 0 fail, 40 files
+
+bash docs/e2e/blind-two-store/build.sh
+PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
+  node docs/e2e/blind-two-store/run.mjs --scenario=all
+```
+
+Do **not** run `npm run predist` first: the harness runs against the development
+`libcrypto.wasm` that `wasmLoader.ts` is SRI-pinned to in a checkout, and
+`predist` overwrites it with the web-only production build. The generated
+bundles and the copied WASM are covered by `.gitignore`.
+
+A store alone:
+
+```sh
+P2PARTY_STORE_PROTOTYPE=1 P2PARTY_STORE_OPEN_ALLOCATION=1 \
+  P2PARTY_STORE_PORT=5910 bun run store:prototype
+```
+
+Both flags are required; the process names them when it refuses. The other
+variables are `P2PARTY_STORE_WINDOW_MS`, `P2PARTY_STORE_DB`,
+`P2PARTY_STORE_KEY_FILE`, `P2PARTY_STORE_CHAIN_START`, and the two test-only
+ones, `P2PARTY_STORE_LOG_BODIES` and `P2PARTY_STORE_FAULT=withhold`.
+
+Two environment facts the harness discovered, both load-bearing: headless
+Chromium needs `--disable-features=WebRtcHideLocalIpsWithMdns`, because the
+blind profile is complete-gathering and an unresolvable `.local` candidate is
+simply dropped, leaving ICE at `new` forever; and the page must load the bundle
+as `<script type="module">`, because a browser-target `bun build` emits ESM and
+the bundled `wasmLoader.ts` carries `import.meta.url` in a branch a classic
+script cannot even parse.
+
+### What is open
+
+- **The design's worst leak is unmitigated and measured.** The runtime writes the
+  same operation to both stores with a measured separation of 0 ms — min, median
+  and max, on an injected clock. A per-store phase offset was measured against
+  this profile and refused, because the geometry admits only a 599 ms band
+  against a 4,000 ms window, crossing no window boundary, so it would reduce a
+  cross-log join by nothing measurable. What would work is recorded with its
+  price: hold the second store's copy for a whole number of windows drawn wide,
+  with cover in its slot meanwhile.
+- **Admission and allocation are open.** No admission kernel, no Privacy Pass
+  issuer, therefore no abuse control and no fairness claim.
+- **Two store processes on one laptop are one fault domain.** The scenarios show
+  the client surviving one store stopping or lying. They are not evidence that
+  two stores would fail independently.
+- **B4 is unchanged.** The frontend cannot reach any of this, and nothing about
+  the deployed `p2party-server` changed.
+- **B2 is unchanged.** No release-registry freeze happened, which is exactly why
+  the bytes say `prototype-v0`.
+- Deferred with the work: persistent scheduler cursors and restart-safe outboxes,
+  `STORE_HINT` route discovery, retention and garbage collection, and moving the
+  cohort override out of the harness's build-time source rewrite into a run
+  option and a `P2PARTY_STORE_COHORT` variable.
+
 ## Repositories and branches
 
 | Repo             | Path                                | Branch   | Local state                                                                     |
@@ -529,6 +626,11 @@ tree agrees with an independent implementation.
 
 - `docs/blind-rendezvous-implementation-status.md` — status, blockers, the nine
   adversarially-confirmed defects that were fixed, and the labels not earned.
+- `docs/blind-rendezvous-two-store-prototype.md` — the flagged 2026-09-08
+  prototype: what one run demonstrates, the four scenarios, the privacy audit's
+  exact scope, the cohort measurement, and what it does not claim. Its design is
+  `docs/blind-rendezvous-two-store-prototype-design.md` and its harness is
+  `docs/e2e/blind-two-store/README.md`, which is where every number originates.
 - `spec/spec-architecture-l2-blind-rendezvous.md` — the normative source.
   §11 is the phase roadmap; §5 the acceptance criteria; §10 the validation gates.
 - Local `master` history explains _why_ for each incremental design decision;

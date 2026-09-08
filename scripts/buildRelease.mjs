@@ -260,6 +260,8 @@ const validateDocumentedVersions = () => {
   // naming an old version is correct and rewriting it would be a lie:
   // CHANGELOG.md, the two decision logs, and the browser results and original
   // desync investigation. Their historical version labels must stay intact.
+  // The dated prior-art report also pins third-party package versions that
+  // happen to overlap our own release numbers.
   // Vendored and submodule trees carry upstream's versions, not ours.
   const documentation = execFileSync(
     "git",
@@ -271,6 +273,7 @@ const validateDocumentedVersions = () => {
       ":!:docs/protocol-evolution-decision-log.md",
       ":!:docs/e2e/README.md",
       ":!:docs/e2e/desync-hunt-2026-09-07.md",
+      ":!:docs/rendezvous-prior-art-delta-2026-09.md",
       ":!:libsodium/**",
       ":!:src/cryptography/vendor/**",
     ],

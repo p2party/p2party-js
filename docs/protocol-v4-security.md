@@ -17,9 +17,9 @@ There are three different acknowledgements in the system:
 2. The protocol-v4 handshake runs over the open main channel. After HELLO,
    responder CONFIRM, initiator CONFIRM, and responder FINISH, the peers have
    authenticated the same hybrid root and initial ratchet keys.
-3. Authenticated 65-byte receipt frames acknowledge message chunks and final
-   transfer completion. They are delivery/reconciliation signals, not handshake
-   establishment.
+3. Immediate 65-byte receipts on authenticated message channels, or encrypted
+   scheduled control cells, acknowledge chunks and transfer completion. They
+   are delivery/reconciliation signals, not handshake establishment.
 
 An open data channel therefore is necessary transport readiness, not an
 established p2party crypto session.
@@ -66,14 +66,64 @@ byte so the sparse post-quantum healing epoch cannot wrap.
 
 The fixed frame geometry absorbs the ratchet and AEAD overhead into the cell
 budget. Random padding and decoy slots can hide the exact payload length within
-one transfer's chosen number of frames. Receipts have a distinct fixed 65-byte
-geometry. Handshake flights are suite- and step-dependent rather than
-65,490-byte cells.
+one transfer's chosen number of frames. Immediate receipts have a distinct
+65-byte geometry and immediate pause/cancel controls are 66 bytes. Scheduled
+receipt batches, terminal receipts and CANCELs occupy existing 65,490-byte
+cover slots. Handshake flights are suite- and step-dependent.
 
 Per-message channels give each transfer an independent lifecycle for
 cancellation, bounded channel accounting, receipts, selective retransmission,
 and reconnect resume. Channel isolation is a UX and reliability property; it
 does not make timing or channel count invisible.
+
+### Durable selective resume and cancellation
+
+A chunk acknowledgement becomes live only after its per-recipient outbox
+update commits. Receipt acceptance binds room, peer ID, peer public key,
+random transfer ID, Merkle root and original chunk index. Scheduled cells
+add direction, PQ epoch, AEAD and counter replay checks; their terminal token
+must equal the transfer root. Stale asynchronous storage responses cannot
+advance a replacement owner's live state. Recipient refusal is persisted
+separately from completion and stops only that recipient's retry.
+
+Scheduled chunk receipts use a separate encrypted subtype with up to 64 tokens
+per root. Existing subtype 3 remains terminal-only: older clients interpreted
+any token in that subtype as completion. Older protocol-v4 clients drop the
+new subtype and retain terminal-only scheduled delivery, including full replay
+when necessary. Selective scheduled resume therefore requires supporting peers.
+
+Have-set membership is O(1) in memory and does not allocate a set copy per
+scheduled slot. A resume scans indices once, sends missing real chunks and
+may send one completion probe. Storage lookup costs, initial file preparation
+and scanning remain; this is not a claim of sublinear total file processing.
+Batching and selective resume reduce real work within the existing schedule,
+whose observable cell count remains fixed.
+
+Immediate resume uses the channel protocol `p2party-resume-v1` and a capability
+echo to distinguish pause from explicit cancellation. Type-6 controls are
+authenticated by the concrete DTLS/SCTP channel and current identity gate,
+with an exact-root check; they do not have a separate application AEAD.
+Legacy peers retain close-as-cancel behavior. A fresh immediate attempt
+rebuilds its have-set from paced receiver receipts instead of assuming a
+legacy receiver retained its partial. Remote cancellation drains pending
+writes, then atomically checks room, sender and incomplete status before
+deleting receiver data; completed files and sender self-copies are preserved.
+
+### Sparse-PQ healing during scheduled sends
+
+Local healing waits for queued or admitted real jobs, message channels,
+derive-to-enqueue reservations and queued receive work to drain. An atomic
+application reservation closes the race between deriving a message key and
+admitting its scheduled producer. Dummy cover does not block healing.
+
+An incoming exchange blocks new admission and drains reservations, then
+persists its new epoch before adopting it. Epoch adoption invalidates old-key
+real producers on the same scheduler and wakes bounded sender recovery.
+Recovery requires an actual epoch advance when reusing that runtime and
+re-derives the missing chunks. If sealing was already in flight, its retired
+cell is wiped and the slot remains dummy; pending explicit CANCEL is resealed
+under the new epoch. Lane timing continues throughout this transition.
+Persistence failure leaves the prior live epoch unchanged for exact retry.
 
 ## Guarantees, assuming authenticated peer keys
 
@@ -128,7 +178,7 @@ receives its normalized value. A fragment is not a server-blind meeting point.
 
 ## Signaling and TURN correctness boundary
 
-SDK 0.14.8 makes legacy signaling state transitions correlated and bounded; it
+SDK 0.14.9 makes legacy signaling state transitions correlated and bounded; it
 does not make that signaling path blind.
 
 - A room response is accepted only for the exact current socket, room

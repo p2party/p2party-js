@@ -200,6 +200,10 @@ const makeEdge = (ratchetState: RatchetState): Edge => {
     policyHash: new Uint8Array(32),
     amInitiator: true,
     module,
+    receiptDependencies: {
+      getChunk: async () => undefined,
+      persist: async () => true,
+    },
   });
   // A fresh handshake replaces the gate; the sender's resume only adopts a
   // transport whose gate is open on its OWN lease.
@@ -387,6 +391,96 @@ const runSend = async (options: RunOptions) => {
 };
 
 describe("an in-flight scheduled send survives an edge replacement (C8)", () => {
+  test("a remote PQ exchange retires and re-derives a pending send on the same runtime", async () => {
+    const {
+      installPqHealingOrchestrator,
+      destroyPqHealingOrchestrator,
+      handleInboundPqControlFrame,
+      tickPqHealing,
+    } = await import("../../src/handlers/pqHealingOrchestrator");
+    const { PQ_HEAL_AFTER_MESSAGES } =
+      await import("../../src/handlers/pqHealingRuntime");
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(initRatchet(rand(32), true, bob.dhSelfPub, module));
+    const remotePq = makePq(false);
+    const remote = {
+      roomId: ROOM,
+      withPeerId: "self",
+      ratchetState: bob,
+      pqHealingState: remotePq,
+      messageChannels: new Set<IRTCDataChannel>(),
+    } as unknown as IRTCPeerConnection;
+    const toRemote: Uint8Array[] = [],
+      toLocal: Uint8Array[] = [];
+    let persisted = 0;
+    const failures: Error[] = [];
+    for (const [epc, wire] of [
+      [first.epc, toRemote],
+      [remote, toLocal],
+    ] as const) {
+      installPqHealingOrchestrator(epc, ROOM, {
+        tickMs: 0,
+        now: () => 1_000,
+        sendControlFrame: (frame) => {
+          wire.push(Uint8Array.from(frame));
+          return true;
+        },
+        failEdge: (error) => {
+          failures.push(error);
+        },
+        persistEdge: async (_epc, _state, _room, serialize) => {
+          serialize().fill(0);
+          persisted++;
+        },
+      });
+    }
+    cleanups.push(() => {
+      destroyPqHealingOrchestrator(first.epc);
+      destroyPqHealingOrchestrator(remote);
+      remotePq.destroy();
+    });
+    for (let i = 0; i < PQ_HEAL_AFTER_MESSAGES; i++)
+      first.pq.noteApplicationMessage();
+    await tickPqHealing(first.epc);
+    await handleInboundPqControlFrame(remote, ROOM, toRemote.shift()!);
+    await handleInboundPqControlFrame(first.epc, ROOM, toLocal.shift()!);
+    await handleInboundPqControlFrame(remote, ROOM, toRemote.shift()!);
+    expect(first.pq.epoch).toBe(1n);
+    const steppedOn: IRTCPeerConnection[] = [],
+      keys: Uint8Array[] = [],
+      keyHexes: string[] = [];
+    const result = await runSend({
+      peerConnections: [first.epc],
+      steppedOn,
+      keys,
+      keyHexes,
+      ratchet: { state: first.epc.ratchetState as RatchetState },
+      onWait: async (attempt) => {
+        if (attempt > 1) return true;
+        expect(first.runtime.hasPendingRealJobs()).toBe(true);
+        const before = coverEdgeGeneration(ROOM, PEER);
+        for (let i = 0; i < PQ_HEAL_AFTER_MESSAGES; i++)
+          remotePq.noteApplicationMessage();
+        await tickPqHealing(remote);
+        await handleInboundPqControlFrame(first.epc, ROOM, toLocal.shift()!);
+        await handleInboundPqControlFrame(remote, ROOM, toRemote.shift()!);
+        await handleInboundPqControlFrame(first.epc, ROOM, toLocal.shift()!);
+        expect(first.pq.epoch).toBe(2n);
+        expect(first.epc.coverRuntime).toBe(first.runtime);
+        expect(first.runtime.hasPendingRealJobs()).toBe(false);
+        expect(coverEdgeGeneration(ROOM, PEER)).toBeGreaterThan(before);
+        expect(keys[0].every((value) => value === 0)).toBe(true);
+        return false;
+      },
+    });
+    expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
+    expect(steppedOn).toEqual([first.epc, first.epc]);
+    expect(keyHexes).toHaveLength(2);
+    expect(keyHexes[0]).not.toBe(keyHexes[1]);
+    expect(persisted).toBe(8);
+    expect(failures).toHaveLength(0);
+  });
+
   test("the send is re-derived and re-enqueued on the replacement runtime", async () => {
     const bob = initRatchet(rand(32), false, null, module);
     const first = makeEdge(
@@ -758,7 +852,7 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
       keys: [],
       keyHexes: [],
       ratchet,
-      onWait: (attempt) => {
+      onWait: async (attempt) => {
         if (attempt === 1) {
           teardownCoverEdge(first.epc);
           peerConnections.splice(0, 1);
@@ -781,6 +875,9 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
         expect(
           peerConnections[0].coverRuntime!.processInboundCoverCell(cell),
         ).toBe(true);
+        // Receipt acceptance now crosses the durable outbox boundary before
+        // publishing completion to the live sender.
+        await new Promise((resolve) => setTimeout(resolve, 0));
         return isTransferComplete(ROOM, PEER, TRANSFER_ID);
       },
     });

@@ -61,6 +61,8 @@ export const COVER_CELL_PLAINTEXT_BYTES =
 export const COVER_CELL_BINDING_BYTES = RATCHET_DHPUB_LEN;
 export const COVER_CELL_ROOT_BYTES = 32;
 export const COVER_CELL_TOKEN_BYTES = crypto_hash_sha512_BYTES;
+/** Bound token lookup/persistence work per authenticated scheduled cell. */
+export const MAX_COVER_CHUNK_RECEIPTS = 64;
 
 const SUBTYPE_BYTES = 1;
 const PAYLOAD_LENGTH_BYTES = 4;
@@ -68,13 +70,10 @@ export const COVER_CELL_MAX_PAYLOAD_BYTES =
   COVER_CELL_PLAINTEXT_BYTES - SUBTYPE_BYTES - PAYLOAD_LENGTH_BYTES;
 
 const MAX_U64 = (1n << 64n) - 1n;
-const KEY_DOMAIN = new TextEncoder().encode(
-  "p2party/cover-cell/key/v1\u0000",
-);
+const KEY_DOMAIN = new TextEncoder().encode("p2party/cover-cell/key/v1\u0000");
 
 export type CoverCellDirection =
-  | "initiator-to-responder"
-  | "responder-to-initiator";
+  "initiator-to-responder" | "responder-to-initiator";
 
 export type CoverCellContent =
   | { readonly subtype: "dummy" }
@@ -91,6 +90,12 @@ export type CoverCellContent =
       readonly subtype: "receipt";
       readonly merkleRoot: Uint8Array;
       readonly token: Uint8Array;
+    }
+  | {
+      /** Subtype 4: old clients drop this unknown subtype, never treat it as completion. */
+      readonly subtype: "chunk-receipts";
+      readonly merkleRoot: Uint8Array;
+      readonly tokens: readonly Uint8Array[];
     };
 
 export type CoverCellErrorCode =
@@ -159,6 +164,7 @@ const subtypeTag = (subtype: CoverCellContent["subtype"]): number => {
   if (subtype === "dummy") return 1;
   if (subtype === "cancel") return 2;
   if (subtype === "receipt") return 3;
+  if (subtype === "chunk-receipts") return 4;
   return fail("invalid-cell", "cover-cell subtype is unknown");
 };
 
@@ -216,6 +222,25 @@ const encodeContent = (content: CoverCellContent): Uint8Array => {
     "receipt transfer root",
     COVER_CELL_TOKEN_BYTES,
   );
+  if (content.subtype === "chunk-receipts") {
+    if (
+      !Array.isArray(content.tokens) ||
+      content.tokens.length < 1 ||
+      content.tokens.length > MAX_COVER_CHUNK_RECEIPTS
+    )
+      fail("invalid-cell", "chunk receipt batch must contain 1..64 tokens");
+    const payload = new Uint8Array(
+      (content.tokens.length + 1) * COVER_CELL_TOKEN_BYTES,
+    );
+    payload.set(merkleRoot);
+    content.tokens.forEach((token, index) =>
+      payload.set(
+        requireBytes(token, "chunk receipt token", COVER_CELL_TOKEN_BYTES),
+        (index + 1) * COVER_CELL_TOKEN_BYTES,
+      ),
+    );
+    return payload;
+  }
   const token = requireBytes(
     content.token,
     "receipt token",
@@ -248,6 +273,29 @@ const decodeContent = (
       subtype: "receipt",
       merkleRoot: payload.slice(0, COVER_CELL_TOKEN_BYTES),
       token: payload.slice(COVER_CELL_TOKEN_BYTES),
+    };
+  }
+  if (subtype === 4) {
+    if (
+      payload.length % COVER_CELL_TOKEN_BYTES !== 0 ||
+      payload.length < 2 * COVER_CELL_TOKEN_BYTES ||
+      payload.length > (MAX_COVER_CHUNK_RECEIPTS + 1) * COVER_CELL_TOKEN_BYTES
+    )
+      fail(
+        "invalid-cell",
+        "chunk receipt payload must be root followed by 1..64 tokens",
+      );
+    const tokens: Uint8Array[] = [];
+    for (
+      let offset = COVER_CELL_TOKEN_BYTES;
+      offset < payload.length;
+      offset += COVER_CELL_TOKEN_BYTES
+    )
+      tokens.push(payload.slice(offset, offset + COVER_CELL_TOKEN_BYTES));
+    return {
+      subtype: "chunk-receipts",
+      merkleRoot: payload.slice(0, COVER_CELL_TOKEN_BYTES),
+      tokens,
     };
   }
   return fail("invalid-cell", "cover-cell subtype is unknown");
@@ -466,11 +514,7 @@ export const sealCoverCell = (options: SealCoverCellOptions): Uint8Array => {
 export const openCoverCell = (
   options: OpenCoverCellOptions,
 ): OpenedCoverCell => {
-  const frame = requireBytes(
-    options.frame,
-    "cover cell",
-    WIRE_CHUNK_FRAME_LEN,
-  );
+  const frame = requireBytes(options.frame, "cover cell", WIRE_CHUNK_FRAME_LEN);
   const binding = requireBytes(
     options.binding,
     "edge binding",

@@ -139,6 +139,30 @@ describe("signaling reconnect wiring", () => {
 });
 
 describe("signaling reconnect close-code policy", () => {
+  test("terminal remote refusal revokes send ownership; transient and local protective closes do not", async () => {
+    const { startOutboxSession } = await import("../../src/handlers/outbox");
+    for (const [code, selfInitiated, shouldAbort] of [
+      [1008, false, true],
+      [1003, false, true],
+      [1010, false, true],
+      [1006, false, false],
+      [1008, true, false],
+    ] as const) {
+      const owner = startOutboxSession(
+        { transferId: "transfer", owner: "tab", fence: 1 },
+        "room",
+        Date.now() + 60000,
+        new AbortController().signal,
+        () => true,
+      );
+      try {
+        noteSignalingSocketClose({ code, selfInitiated });
+        expect(owner.signal.aborted).toBe(shouldAbort);
+      } finally {
+        owner.finish();
+      }
+    }
+  });
   test("a server close the server means as final stops the ladder", () => {
     setSignalingReconnectHost(wantingHost());
     signalingReconnect.arm();

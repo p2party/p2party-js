@@ -6,32 +6,20 @@ import {
 import type { HandshakeRetryStatus } from "../handlers/handshakeFailure";
 
 /**
- * Bounded "is anyone still there?" retries for a room that has nobody in it.
- *
- * Every roster request this SDK sends is caused by an event: a room join, a
- * peer introduction from the server, an edge teardown that re-dials. That is
- * enough while events keep arriving, and nothing at all once they stop. A
- * socket can be connected and identity-verified, its room still active, and
- * its roster empty for good — no peer to hear from, no teardown left to fire,
- * so no event that would ask again. Both sides then sit in a healthy-looking
- * room, alone, until the user reloads the page.
- *
- * The property this restores is deliberately weak and deliberately bounded: a
- * verified socket in an active room with nobody authenticated on it asks the
- * server for its peer list again on a backoff, a capped number of times, and
- * stops the moment anything changes. It is not a keepalive and not a repair
- * loop — a peers request is idempotent at the server (it re-introduces this
- * client to the room's live members, which is exactly what a stranded room
- * needs) and the caller still owns whether one may be sent at all.
+ * Bounded discovery and missing-member retries after signaling events stop.
+ * Before a snapshot, the caller uses the room id as the discovery key. Once
+ * membership is known, each missing member has its own room/peer key so one
+ * offline member cannot exhaust another member's recovery budget. Healthy
+ * siblings do not cancel a missing member's retries.
  *
  * Store-free on purpose: the caller injects the timeout scheduler and decides,
- * at each attempt, whether the room is still stranded. Nothing here reads a
+ * at each attempt, whether that key still needs recovery. Nothing here reads a
  * clock, a store or a browser global, so the whole backoff is exercisable in
  * virtual time.
  */
 
 /**
- * Runs one reconciliation attempt for a room. Returns whether the room is
+ * Runs one reconciliation attempt for a room or room/peer key. Returns whether it is
  * still stranded and the backoff should continue; `false` retires it.
  */
 export type RoomRosterReconcileTick = (roomId: string) => boolean;
@@ -159,6 +147,8 @@ export interface ReconcilableRoom {
     readonly peerId: string;
     readonly peerPublicKey?: string;
   }[];
+  /** Last eligible membership snapshot; survives transport teardown. */
+  readonly knownPeers?: ReconcilableRoom["peers"];
   readonly handshakeStatusByPeer?: Readonly<
     Record<string, HandshakeRetryStatus | undefined>
   >;
@@ -174,8 +164,9 @@ export const hasOnlyTerminalPeerHandshakeFailures = (
   room: ReconcilableRoom,
 ): boolean => {
   const statuses = room.handshakeStatusByPeer ?? {};
-  if (room.peers.length > 0)
-    return room.peers.every((peer) =>
+  const members = room.knownPeers ?? room.peers;
+  if (members.length > 0)
+    return members.every((peer) =>
       hasTerminalPeerHandshakeFailure(
         statuses,
         peer.peerId,
@@ -206,10 +197,19 @@ export const isRoomRosterStranded = (
   if (!isUUID(room.id)) return false;
   if (hasOnlyTerminalPeerHandshakeFailures(room)) return false;
   const statuses = room.handshakeStatusByPeer ?? {};
-  if (
-    room.peers.some((peer) => statuses[peer.peerId]?.status === "authenticated")
-  )
-    return false;
+  if (room.knownPeers !== undefined)
+    return room.knownPeers.some(
+      (peer) =>
+        statuses[peer.peerId]?.status !== "authenticated" &&
+        !hasTerminalPeerHandshakeFailure(
+          statuses,
+          peer.peerId,
+          peer.peerPublicKey,
+        ),
+    );
+  // Until a snapshot arrives a healthy edge says nothing about undiscovered
+  // members. Legacy servers never reply with snapshots, so this discovery is
+  // deliberately subject to the same finite backoff budget.
   // Terminal authentication failures survive roster deletion. Re-introducing
   // that same identity cannot fix its PIN/policy, and must not consume another
   // PIN attempt every time the empty-room backoff fires.

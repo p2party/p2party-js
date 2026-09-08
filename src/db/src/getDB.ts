@@ -1,3 +1,8 @@
+import type {
+  OutboxManifest,
+  OutboxAckRecord,
+  ReceiveActivity,
+} from "../outboxTypes";
 import { openDB } from "idb";
 
 import type { DBSchema, IDBPDatabase } from "idb";
@@ -18,9 +23,28 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 19;
+export const dbVersion = 20;
 
 export interface RepoSchema extends DBSchema {
+  outbox: {
+    value: OutboxManifest;
+    key: string;
+    indexes: { senderPublicKey: string; roomId: string; expiresAt: number };
+  };
+  outboxTrees: {
+    value: { transferId: string; chunkHashes: ArrayBuffer };
+    key: string;
+  };
+  outboxAcks: {
+    value: OutboxAckRecord;
+    key: [string, string];
+    indexes: { transferId: string };
+  };
+  receiveActivity: {
+    value: ReceiveActivity;
+    key: string;
+    indexes: { lastActivityAt: number };
+  };
   addressBook: {
     value: AddressBook;
     key: [string];
@@ -89,6 +113,23 @@ export interface RepoSchema extends DBSchema {
 export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   return openDB<RepoSchema>(dbName, dbVersion, {
     upgrade(db, oldVersion, _newVersion, tx) {
+      if (!db.objectStoreNames.contains("outbox")) {
+        const outbox = db.createObjectStore("outbox", {
+          keyPath: "transferId",
+        });
+        outbox.createIndex("senderPublicKey", "senderPublicKey");
+        outbox.createIndex("roomId", "roomId");
+        outbox.createIndex("expiresAt", "expiresAt");
+        db.createObjectStore("outboxTrees", { keyPath: "transferId" });
+        const acks = db.createObjectStore("outboxAcks", {
+          keyPath: ["transferId", "publicKey"],
+        });
+        acks.createIndex("transferId", "transferId");
+        const activity = db.createObjectStore("receiveActivity", {
+          keyPath: "merkleRoot",
+        });
+        activity.createIndex("lastActivityAt", "lastActivityAt");
+      }
       if (!db.objectStoreNames.contains("addressBook")) {
         const addressBook = db.createObjectStore("addressBook", {
           keyPath: ["peerId"],
@@ -221,13 +262,9 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         newChunks.createIndex("transferId", "transferId", { unique: false });
         newChunks.createIndex("hash", "hash", { unique: false });
         newChunks.createIndex("merkleRoot", "merkleRoot", { unique: false });
-        newChunks.createIndex(
-          "receiptScope",
-          ["merkleRoot", "receiptToken"],
-          {
-            unique: false,
-          },
-        );
+        newChunks.createIndex("receiptScope", ["merkleRoot", "receiptToken"], {
+          unique: false,
+        });
       } else {
         const store = tx.objectStore("newChunks");
 
@@ -244,13 +281,9 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         }
 
         if (!store.indexNames.contains("receiptScope")) {
-          store.createIndex(
-            "receiptScope",
-            ["merkleRoot", "receiptToken"],
-            {
-              unique: false,
-            },
-          );
+          store.createIndex("receiptScope", ["merkleRoot", "receiptToken"], {
+            unique: false,
+          });
         }
       }
 
@@ -287,6 +320,32 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
       // PQ/outbox checkpoint. A v3 ratchet must never be interpreted as a v4
       // root. Both stores are cryptographic/transient state, so discard them
       // while preserving rooms, message history, and received chunks.
+      if (oldVersion > 0 && oldVersion < 20) {
+        // Old staging had no durable manifest/owner and could never resume after
+        // reload. Preserve received history while retiring those orphan bytes.
+        void tx.objectStore("newChunks").clear();
+        const migrationTime = Date.now();
+        const seedActivity = async () => {
+          let cursor = await tx.objectStore("messageData").openCursor();
+          while (cursor) {
+            const message = cursor.value;
+            if (
+              message.transferId === undefined &&
+              message.savedSize < message.totalSize
+            )
+              await tx
+                .objectStore("receiveActivity")
+                .put({
+                  merkleRoot: message.merkleRoot,
+                  roomId: message.roomId,
+                  fromPeerId: message.fromPeerId,
+                  lastActivityAt: migrationTime,
+                });
+            cursor = await cursor.continue();
+          }
+        };
+        void seedActivity();
+      }
       if (oldVersion > 0 && oldVersion < 19) {
         tx.objectStore("ratchetSessions").clear();
         tx.objectStore("sendQueue").clear();

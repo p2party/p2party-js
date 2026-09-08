@@ -66,9 +66,9 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
   });
 }
 
-describe("getDB — v17 -> v19 protocol-v4 migration", () => {
-  test("dbVersion is bumped to exactly 19", () => {
-    expect(dbVersion).toBe(19);
+describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
+  test("dbVersion is bumped to exactly 20", () => {
+    expect(dbVersion).toBe(20);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -146,7 +146,7 @@ describe("getDB — v17 -> v19 protocol-v4 migration", () => {
     expect(value).toEqual(fakeKey);
   });
 
-  test("opening at v19 fresh creates the complete schema", async () => {
+  test("opening at v20 fresh creates the complete schema", async () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
@@ -160,6 +160,10 @@ describe("getDB — v17 -> v19 protocol-v4 migration", () => {
     expect(db.objectStoreNames.contains("chunks")).toBe(true);
     expect(db.objectStoreNames.contains("newChunks")).toBe(true);
     expect(db.objectStoreNames.contains("sendQueue")).toBe(true);
+    expect(db.objectStoreNames.contains("outbox")).toBe(true);
+    expect(db.objectStoreNames.contains("outboxTrees")).toBe(true);
+    expect(db.objectStoreNames.contains("outboxAcks")).toBe(true);
+    expect(db.objectStoreNames.contains("receiveActivity")).toBe(true);
   });
 
   test("identical content stages independently and receipts are root-scoped", async () => {

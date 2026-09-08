@@ -4,6 +4,7 @@ import {
   buildScheduledSendJob,
   cancelScheduledTransfer,
   queueScheduledReceipt,
+  queueScheduledChunkReceipt,
   releaseScheduledReceipts,
   syntheticScheduledLabel,
 } from "../../src/handlers/coverTransfer";
@@ -71,20 +72,7 @@ const fakeRuntime = (capacity = 8): FakeRuntime => {
         // returns, so the caller is free to wipe its buffers straight after.
         // Snapshot here for the same reason, or an assertion later reads the
         // zeros the producer left behind rather than what was sealed.
-        sealed.push(
-          content.subtype === "dummy"
-            ? content
-            : content.subtype === "cancel"
-              ? {
-                  subtype: "cancel",
-                  merkleRoot: Uint8Array.from(content.merkleRoot),
-                }
-              : {
-                  subtype: "receipt",
-                  merkleRoot: Uint8Array.from(content.merkleRoot),
-                  token: Uint8Array.from(content.token),
-                },
-        );
+        sealed.push(structuredClone(content));
         return state.sealedCell ?? uniformCell(0xcc);
       },
       enqueue: (job: CoverJob) => {
@@ -106,6 +94,55 @@ const fakeEpc = (runtime?: CoverRuntime): IRTCPeerConnection =>
   ({ coverRuntime: runtime }) as unknown as IRTCPeerConnection;
 
 describe("scheduled-transfer send job", () => {
+  test("selective resume checks membership in O(1) and preserves original chunk indices", async () => {
+    const fake = fakeRuntime(8),
+      acked = new Set([0, 2]),
+      emitted: number[] = [];
+    const options = {
+      runtime: fake.runtime,
+      channelMessageLabel: LABEL,
+      totalChunks: 4,
+      merkleRoot: new Uint8Array(64),
+      isChunkAcked: (index: number) => acked.has(index),
+      getAckedChunks: (): ReadonlySet<number> => {
+        throw new Error("must not clone the have-set per cell");
+      },
+      sealSlotCell: (index: number) => {
+        emitted.push(index);
+        return uniformCell(index);
+      },
+    };
+    const initial = buildScheduledSendJob(options);
+    await initial.nextCell(fakeSlot());
+    acked.add(1);
+    const resumed = buildScheduledSendJob(options);
+    await resumed.nextCell(fakeSlot());
+    expect(await resumed.nextCell(fakeSlot())).toBeNull();
+    expect(resumed.exhausted?.()).toBe(true);
+    expect(emitted).toEqual([1, 3]);
+    expect([...acked]).toEqual([0, 2, 1]);
+  });
+  test("a failed asynchronous sealer retries the same missing index", async () => {
+    const fake = fakeRuntime(8);
+    const indices: number[] = [];
+    const job = buildScheduledSendJob({
+      runtime: fake.runtime,
+      channelMessageLabel: LABEL,
+      merkleRoot: new Uint8Array(64),
+      totalChunks: 3,
+      sealSlotCell: async (index) => {
+        indices.push(index);
+        if (indices.length === 1) throw new Error("temporary worker failure");
+        return uniformCell(index);
+      },
+    });
+    await expect(job.nextCell(fakeSlot())).rejects.toThrow(
+      "temporary worker failure",
+    );
+    await job.nextCell(fakeSlot());
+    expect(indices).toEqual([0, 0]);
+  });
+
   test("seals one chunk per slot in order and dummy-substitutes when exhausted", async () => {
     const fake = fakeRuntime(8);
     const sealed: number[] = [];
@@ -187,6 +224,49 @@ describe("scheduled-transfer send job", () => {
 });
 
 describe("scheduled receipts and cancellation", () => {
+  test("batches 64 chunk tokens per fixed slot and preserves root/token boundaries", async () => {
+    const fake = fakeRuntime(8),
+      epc = fakeEpc(fake.runtime),
+      root = new Uint8Array(64).fill(1);
+    for (let i = 0; i < 66; i++) {
+      const token = new Uint8Array(64);
+      new DataView(token.buffer).setUint32(0, i + 1);
+      expect(queueScheduledChunkReceipt(epc, root, token)).toBe(true);
+      expect(queueScheduledChunkReceipt(epc, root, token)).toBe(true);
+    }
+    expect(fake.enqueued).toHaveLength(1);
+    await fake.enqueued[0].nextCell(fakeSlot());
+    const first = fake.sealed[0];
+    expect(first.subtype).toBe("chunk-receipts");
+    if (first.subtype !== "chunk-receipts") throw new Error("wrong subtype");
+    expect(first.tokens).toHaveLength(64);
+    expect(first.merkleRoot).toEqual(root);
+    fake.settleCallbacks.get(fake.enqueued[0].id)!();
+    await fake.enqueued[1].nextCell(fakeSlot());
+    const second = fake.sealed[1];
+    if (second.subtype !== "chunk-receipts") throw new Error("wrong subtype");
+    expect(second.tokens).toHaveLength(2);
+    expect(new DataView(second.tokens[0].buffer).getUint32(0)).toBe(65);
+    releaseScheduledReceipts(epc);
+  });
+
+  test("chunk batches for different roots never merge", async () => {
+    const fake = fakeRuntime(),
+      epc = fakeEpc(fake.runtime),
+      token = new Uint8Array(64).fill(3);
+    queueScheduledChunkReceipt(epc, new Uint8Array(64).fill(1), token);
+    queueScheduledChunkReceipt(epc, new Uint8Array(64).fill(2), token);
+    await fake.enqueued[0].nextCell(fakeSlot());
+    fake.settleCallbacks.get(fake.enqueued[0].id)!();
+    await fake.enqueued[1].nextCell(fakeSlot());
+    expect(
+      fake.sealed.map((cell) =>
+        cell.subtype === "chunk-receipts" ? cell.merkleRoot[0] : -1,
+      ),
+    ).toEqual([1, 2]);
+    releaseScheduledReceipts(epc);
+  });
+
   test("receipts enqueue a control drain job that seals receipt cells one per slot", async () => {
     const fake = fakeRuntime(4);
     const epc = fakeEpc(fake.runtime);

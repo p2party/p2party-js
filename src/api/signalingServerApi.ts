@@ -53,6 +53,7 @@ import {
 import { randomUuidV4 } from "../utils/correlationId";
 
 import { newKeyPair } from "../cryptography/ed25519";
+import { stopOutboxOwners } from "../handlers/outbox";
 import { newX25519KeyPair } from "../cryptography/x25519";
 import {
   crossSignIdentityX25519,
@@ -168,6 +169,7 @@ export const noteSignalingSocketClose = (
 ): void => {
   signalingCloseIsPermanent =
     !close.selfInitiated && PERMANENT_SIGNALING_CLOSE_CODES.has(close.code);
+  if (signalingCloseIsPermanent) stopOutboxOwners("terminal signaling refusal");
 };
 
 /** Positive-only spread applied to every ladder rung. */

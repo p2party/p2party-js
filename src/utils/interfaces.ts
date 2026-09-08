@@ -118,6 +118,10 @@ export interface WebSocketMessagePeersRequest {
   fromPeerId: string;
   roomId: string;
   protocolVersion: number;
+  rosterRequestId?: string;
+  /** Terminal failures need deliberate retry; discovery must not re-introduce them. */
+  excludedPeerIds?: string[];
+  targetPeerIds?: string[];
 }
 
 export interface RoomPeer {
@@ -131,6 +135,9 @@ export interface WebSocketMessagePeersResponse {
   type: "peers";
   roomId: string;
   peers: RoomPeer[];
+  /** Missing kind is the legacy accepted-peer delta. Snapshots are discovery only. */
+  rosterKind?: "snapshot" | "delta";
+  rosterRequestId?: string;
   /** Optional only so missing/pre-v3 server responses fail closed at runtime. */
   protocolVersion?: number;
 }

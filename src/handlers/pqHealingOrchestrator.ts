@@ -58,12 +58,58 @@ interface OrchestratorState {
   /** Serializes orchestrator-level operations (tick vs inbound frame). */
   busy: boolean;
   /** An inbound control frame arrived; block new app sends until processed. */
-  inboundBlocked: boolean;
+  inboundBlocked: number;
+  localInitiating: boolean;
   destroyed: boolean;
   failed: boolean;
 }
 
 const orchestrators = new WeakMap<IRTCPeerConnection, OrchestratorState>();
+
+interface ApplicationReservations {
+  count: number;
+  readonly drained: Set<() => void>;
+}
+const applicationReservations = new WeakMap<
+  IRTCPeerConnection,
+  ApplicationReservations
+>();
+
+/**
+ * Atomically reserve the derive-to-enqueue gap after the caller's admission
+ * wait. null means a PQ transition won that race; retry admission. Existing
+ * reservations drain before an inbound transition changes the epoch.
+ */
+export const tryReservePqApplicationTraffic = (
+  epc: IRTCPeerConnection,
+): (() => void) | null => {
+  if (isPqApplicationTrafficBlocked(epc)) return null;
+  let reservation = applicationReservations.get(epc);
+  if (!reservation) {
+    reservation = { count: 0, drained: new Set() };
+    applicationReservations.set(epc, reservation);
+  }
+  reservation.count++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--reservation.count === 0) {
+      applicationReservations.delete(epc);
+      for (const notify of reservation.drained) notify();
+      reservation.drained.clear();
+    }
+  };
+};
+
+const waitForApplicationReservations = (
+  epc: IRTCPeerConnection,
+): Promise<void> => {
+  const reservation = applicationReservations.get(epc);
+  return reservation && reservation.count > 0
+    ? new Promise<void>((resolve) => reservation.drained.add(resolve))
+    : Promise.resolve();
+};
 
 const DEFAULT_TICK_MS = 1_000;
 
@@ -101,19 +147,26 @@ export const isPqApplicationTrafficBlocked = (
   epc: IRTCPeerConnection,
 ): boolean => {
   const state = orchestrators.get(epc);
-  if (state && (state.inboundBlocked || state.failed)) return true;
+  if (
+    state &&
+    (state.inboundBlocked > 0 || state.localInitiating || state.failed)
+  )
+    return true;
   return epc.pqHealingState?.trafficBlocked ?? false;
 };
 
 /**
  * Local initiation waits for a quiescent transfer boundary: no live
- * per-message channels and no queued/in-flight inbound frames on the edge.
+ * per-message channels, scheduled real producers, derive-to-enqueue reservations,
+ * or queued/in-flight inbound frames. Continuous dummy/control cover is idle.
  */
 const isEdgeQuiescentForHealing = (
   epc: IRTCPeerConnection,
   roomId: string,
 ): boolean =>
   (epc.messageChannels?.size ?? 0) === 0 &&
+  !(epc.coverRuntime?.hasPendingRealJobs() ?? false) &&
+  (applicationReservations.get(epc)?.count ?? 0) === 0 &&
   !hasQueuedEdgeReceiveWork(roomId, epc.withPeerId);
 
 /**
@@ -130,6 +183,7 @@ const mutatePqDurably = async (
   ) => Promise<{ dispatch: Uint8Array | null; persist: boolean }>,
 ): Promise<void> =>
   withEdgeCryptoMutationLock(epc, async () => {
+    if (state.destroyed || orchestrators.get(epc) !== state) return;
     const live = epc.pqHealingState;
     const ratchet = epc.ratchetState;
     if (!live || !ratchet)
@@ -147,14 +201,20 @@ const mutatePqDurably = async (
         } catch (persistError) {
           throw new PqPersistenceError(persistError);
         }
-        if (epc.pqHealingState !== live)
+        if (
+          epc.pqHealingState !== live ||
+          state.destroyed ||
+          orchestrators.get(epc) !== state
+        )
           throw new PqPersistenceError(
             new Error("live PQ runtime changed during persistence"),
           );
+        const previousEpoch = live.epoch;
         live.adopt(candidate);
         // adopt() moves the clone's active-key map INTO the live runtime, so
         // the per-edge cache alias must follow the new map object.
         epc.messageKeyCache = live.activeReceiveKeys;
+        if (live.epoch !== previousEpoch) epc.coverRuntime?.onPqEpochChanged();
       } else {
         candidate.destroy();
       }
@@ -192,7 +252,8 @@ export const installPqHealingOrchestrator = (
     persistEdge: hooks.persistEdge ?? defaultPersistEdge,
     interval: null,
     busy: false,
-    inboundBlocked: false,
+    inboundBlocked: 0,
+    localInitiating: false,
     destroyed: false,
     failed: false,
   };
@@ -204,9 +265,7 @@ export const installPqHealingOrchestrator = (
     }, tickMs);
 };
 
-export const destroyPqHealingOrchestrator = (
-  epc: IRTCPeerConnection,
-): void => {
+export const destroyPqHealingOrchestrator = (epc: IRTCPeerConnection): void => {
   const state = orchestrators.get(epc);
   if (!state) return;
   state.destroyed = true;
@@ -228,9 +287,7 @@ const failEdgeOnce = (state: OrchestratorState, reason: Error): void => {
  * the stable role owns the turn and the edge is at a quiescent boundary.
  * Exported for deterministic tests; the installed interval calls it.
  */
-export const tickPqHealing = async (
-  epc: IRTCPeerConnection,
-): Promise<void> => {
+export const tickPqHealing = async (epc: IRTCPeerConnection): Promise<void> => {
   const state = orchestrators.get(epc);
   const pq = epc.pqHealingState;
   if (!state || state.destroyed || state.failed || state.busy || !pq) return;
@@ -261,10 +318,18 @@ export const tickPqHealing = async (
     if (
       pq.healingDue(now) &&
       !pq.trafficBlocked &&
-      !state.inboundBlocked &&
+      state.inboundBlocked === 0 &&
       isEdgeQuiescentForHealing(epc, state.roomId)
     ) {
+      state.localInitiating = true;
       await mutatePqDurably(epc, state, async (candidate) => {
+        // Admission or a real job may have appeared while the crypto lock was
+        // held by another durable write. The gate above blocks later arrivals.
+        if (
+          !isEdgeQuiescentForHealing(epc, state.roomId) ||
+          state.inboundBlocked > 0
+        )
+          return { dispatch: null, persist: false };
         const frame = await candidate.prepareHealingOffer(now);
         candidate.markPendingDispatched(now);
         return { dispatch: frame, persist: true };
@@ -275,6 +340,7 @@ export const tickPqHealing = async (
     // later tick. Only exhaustion/forks fail the edge.
     console.error("pqHealingOrchestrator: tick transition failed", error);
   } finally {
+    state.localInitiating = false;
     state.busy = false;
   }
 };
@@ -303,8 +369,10 @@ export const handleInboundPqControlFrame = async (
     return;
   }
 
-  state.inboundBlocked = true;
+  state.inboundBlocked++;
   try {
+    await waitForApplicationReservations(epc);
+    if (state.destroyed || orchestrators.get(epc) !== state) return;
     // Old-epoch frames already queued decrypt against their cached keys after
     // the transition; new first-chunks must not race the epoch commit.
     await waitForEdgeReceiveQuiescence(roomId, epc.withPeerId);
@@ -314,8 +382,7 @@ export const handleInboundPqControlFrame = async (
         Uint8Array.from(frame),
         now,
       );
-      if (!result.changed)
-        return { dispatch: result.dispatch, persist: false };
+      if (!result.changed) return { dispatch: result.dispatch, persist: false };
       // A produced ADVANCE enters the retry schedule with its dispatch.
       if (result.dispatch !== null && candidate.pendingRetryAt !== null)
         candidate.markPendingDispatched(now);
@@ -325,7 +392,10 @@ export const handleInboundPqControlFrame = async (
     if (error instanceof PqPersistenceError) {
       // Live state is untouched; the peer's exact retransmit reprocesses the
       // same slot once storage recovers.
-      console.error("pqHealingOrchestrator: inbound transition not durable", error);
+      console.error(
+        "pqHealingOrchestrator: inbound transition not durable",
+        error,
+      );
       return;
     }
     failEdgeOnce(
@@ -336,6 +406,6 @@ export const handleInboundPqControlFrame = async (
       ),
     );
   } finally {
-    state.inboundBlocked = false;
+    state.inboundBlocked--;
   }
 };

@@ -220,6 +220,19 @@ describe("stranded-room predicate", () => {
   });
   const verified = { isConnected: true, isVerified: true };
 
+  test("a healthy A-B edge does not hide the missing A-C edge", () => {
+    expect(
+      isRoomRosterStranded(
+        room({
+          peers: [{ peerId: "b" }],
+          knownPeers: [{ peerId: "b" }, { peerId: "c" }],
+          handshakeStatusByPeer: { b: { status: "authenticated" } },
+        }),
+        verified,
+      ),
+    ).toBe(true);
+  });
+
   test("an active verified room with nobody in it is stranded", () => {
     expect(isRoomRosterStranded(room(), verified)).toBe(true);
   });
@@ -268,7 +281,7 @@ describe("stranded-room predicate", () => {
     ).toBe(true);
   });
 
-  test("one authenticated peer ends it", () => {
+  test("one authenticated peer cannot suppress discovery before a snapshot", () => {
     expect(
       isRoomRosterStranded(
         room({
@@ -280,7 +293,24 @@ describe("stranded-room predicate", () => {
         }),
         verified,
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  test("only missing nonterminal snapshot members need repair", () => {
+    const base = room({
+      knownPeers: [{ peerId: "b" }, { peerId: "c" }],
+      handshakeStatusByPeer: {
+        b: { status: "authenticated" },
+        c: { status: "failed", reason: "pin-mismatch" },
+      },
+    });
+    expect(isRoomRosterStranded(base, verified)).toBe(false);
+    expect(isRoomRosterStranded(room({ knownPeers: [] }), verified)).toBe(
+      false,
+    );
+    expect(
+      isRoomRosterStranded(room({ knownPeers: [{ peerId: "c" }] }), verified),
+    ).toBe(true);
   });
 
   test("never for an unverified or disconnected socket", () => {

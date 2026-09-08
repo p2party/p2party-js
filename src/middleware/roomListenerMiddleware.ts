@@ -1,4 +1,8 @@
 import { debugLog } from "../utils/debug";
+import {
+  hasTerminalPeerHandshakeFailure,
+  isTerminalHandshakeStatus,
+} from "../handlers/handshakeFailure";
 import { createListenerMiddleware, isAnyOf } from "@reduxjs/toolkit";
 import { isUUID } from "class-validator";
 
@@ -9,6 +13,7 @@ import {
   setMessage,
   deleteMessage,
   setPeer,
+  setKnownRoomPeers,
   deletePeer,
   setPeerHandshakeStatus,
   deleteRoom,
@@ -30,6 +35,12 @@ import {
   ROOM_ROSTER_RECONCILE_MAX_ATTEMPTS,
 } from "../utils/constants";
 import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebouncer";
+import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";
+import { stopOutboxOwners } from "../handlers/outbox";
+import {
+  discardRoomOutbox,
+  resumeRoomOutbox,
+} from "../handlers/outboxCoordinator";
 import {
   createRoomRosterReconciler,
   isRoomRosterStranded,
@@ -68,15 +79,9 @@ const browserTimeoutReconciler = (): RoomRosterReconciler =>
   });
 
 /**
- * Arms or retires the empty-room backoff for every room, from the state as it
- * stands after the action that just ran.
- *
- * Runs after EVERY listened action, including the ones this effect has no
- * other business with, because it is the only thing in the SDK that notices a
- * room going quiet rather than an event announcing it. Arming is idempotent
- * and retiring is total: a room that stops being stranded — a peer arrives, the
- * socket drops, the user leaves, the store is purged — is cancelled here, which
- * is also what gives it a fresh attempt budget the next time it strands.
+ * Reconcile discovery or each missing member independently after room changes.
+ * A recovered/removed member, socket loss or room leave cancels the relevant
+ * key. An unchanged offline member retains its exhausted budget.
  */
 const reconcileRoomRosters = (
   reconciler: RoomRosterReconciler,
@@ -87,25 +92,61 @@ const reconcileRoomRosters = (
   if (isUUID(keyPair.peerId))
     for (const room of rooms) {
       if (!isRoomRosterStranded(room, signalingServer)) continue;
-      stranded.add(room.id);
-      reconciler.arm(room.id, (roomId) => {
-        const state = listenerApi.getState() as State;
-        const target = state.rooms.find((room) => room.id === roomId);
-        if (
-          !target ||
-          !isUUID(state.keyPair.peerId) ||
-          !isRoomRosterStranded(target, state.signalingServer)
-        )
-          return false;
-        listenerApi.dispatch(
-          setConnectingToPeers({
-            roomId,
-            connectingToPeers: true,
-            reason: "reconcile",
-          }),
-        );
-        return true;
-      });
+      const members =
+        room.knownPeers === undefined
+          ? [undefined]
+          : room.knownPeers
+              .filter(
+                (peer) =>
+                  room.handshakeStatusByPeer?.[peer.peerId]?.status !==
+                    "authenticated" &&
+                  !hasTerminalPeerHandshakeFailure(
+                    room.handshakeStatusByPeer,
+                    peer.peerId,
+                    peer.peerPublicKey,
+                  ),
+              )
+              .map((peer) => peer.peerId);
+      for (const peerId of members) {
+        const key = peerId ? `${room.id}/${peerId}` : room.id;
+        stranded.add(key);
+        reconciler.arm(key, () => {
+          const state = listenerApi.getState() as State;
+          const target = state.rooms.find(
+            (candidate) => candidate.id === room.id,
+          );
+          if (
+            !target ||
+            !isUUID(state.keyPair.peerId) ||
+            !isRoomRosterStranded(target, state.signalingServer)
+          )
+            return false;
+          if (
+            peerId &&
+            (!target.knownPeers?.some(
+              (peer) =>
+                peer.peerId === peerId &&
+                !hasTerminalPeerHandshakeFailure(
+                  target.handshakeStatusByPeer,
+                  peer.peerId,
+                  peer.peerPublicKey,
+                ),
+            ) ||
+              target.handshakeStatusByPeer?.[peerId]?.status ===
+                "authenticated")
+          )
+            return false;
+          listenerApi.dispatch(
+            setConnectingToPeers({
+              roomId: room.id,
+              connectingToPeers: true,
+              reason: "reconcile",
+              peerId,
+            }),
+          );
+          return true;
+        });
+      }
     }
   for (const roomId of reconciler.armedRooms())
     if (!stranded.has(roomId)) reconciler.cancel(roomId);
@@ -114,6 +155,8 @@ const reconcileRoomRosters = (
 export const createRoomListenerMiddleware = (
   reconciler: RoomRosterReconciler = browserTimeoutReconciler(),
 ) => {
+  // null means a full discovery; sets coalesce simultaneous member retries.
+  const pendingTargets = new Map<string, Set<string> | null>();
   const roomListenerMiddleware = createListenerMiddleware();
   roomListenerMiddleware.startListening({
     matcher: isAnyOf(
@@ -123,6 +166,7 @@ export const createRoomListenerMiddleware = (
       setMessage,
       deleteMessage,
       setPeer,
+      setKnownRoomPeers,
       deletePeer,
       setPeerHandshakeStatus,
       deleteRoom,
@@ -138,13 +182,54 @@ export const createRoomListenerMiddleware = (
       // rejection in the host application — a library has no business taking a
       // page down because it could not cache a room.
       try {
+        if (deleteRoom.match(action)) {
+          const original = (listenerApi.getOriginalState() as State).rooms.find(
+            (r) => r.id === action.payload || r.url === action.payload,
+          );
+          if (original) {
+            signalingPeerRequestDebouncer.cancelRoom(original.id);
+            for (const kind of ["join", "empty-roster", "redial", "reconcile"])
+              pendingTargets.delete(`${kind}:${original.id}`);
+            if (isUUID(original.id)) {
+              stopOutboxOwners("room left", original.id);
+              await discardRoomOutbox(original.id);
+            }
+          }
+        } else if (purgeAllRooms.match(action)) {
+          stopOutboxOwners("rooms purged");
+          pendingTargets.clear();
+          signalingPeerRequestDebouncer.resetSocketLifecycle();
+        }
+        if (
+          setPeerHandshakeStatus.match(action) &&
+          action.payload.status === "authenticated"
+        ) {
+          const { roomId, peerId, peerPublicKey } = action.payload;
+          // Let the handshake finish installing its cover/PQ owners before a
+          // retained message asks those owners to resume.
+          void Promise.resolve()
+            .then(async () => {
+              const room = (listenerApi.getState() as State).rooms.find(
+                (r) => r.id === roomId,
+              );
+              const status = room?.handshakeStatusByPeer?.[peerId];
+              if (
+                room?.signalingActive !== false &&
+                status?.status === "authenticated" &&
+                status.peerPublicKey === peerPublicKey
+              )
+                await resumeRoomOutbox(roomId);
+            })
+            .catch((error: unknown) => debugLog("Outbox resume failed", error));
+        }
         if (
           signalingServerActions.startConnecting.match(action) ||
           signalingServerActions.disconnect.match(action)
         ) {
+          pendingTargets.clear();
           signalingPeerRequestDebouncer.resetSocketLifecycle();
         } else if (setConnectingToPeers.match(action)) {
-          const { roomId, connectingToPeers, reason } = action.payload;
+          const { roomId, connectingToPeers, reason, peerId } = action.payload;
           debugLog("[roomListenerMiddleware] setConnectingToPeers:", {
             roomId,
             connectingToPeers,
@@ -177,41 +262,101 @@ export const createRoomListenerMiddleware = (
               // rebuild was torn down after that join's peers request went out.
               // An empty-room reconcile gets a third, for the same reason in the
               // other direction: its whole point is to fire when nothing else is.
-              const now = Date.now();
               const kind: SignalingPeerRequestKind =
                 reason === "redial"
                   ? "redial"
                   : reason === "reconcile"
                     ? "reconcile"
                     : "join";
-              if (
-                !signalingPeerRequestDebouncer.shouldSend(
-                  kind,
-                  roomId,
-                  reason === "reconcile"
-                    ? ROOM_ROSTER_RECONCILE_DEBOUNCE_MS
-                    : PEERS_REQUEST_DEBOUNCE_MS,
-                  now,
-                )
-              ) {
-                debugLog(
-                  "[roomListenerMiddleware] Skipping peers request - debounced",
-                );
-              } else {
-                debugLog(
-                  "[roomListenerMiddleware] Sending peers request from setConnectingToPeers",
-                );
-                await listenerApi.dispatch(
-                  signalingServerApi.endpoints.sendMessage.initiate({
-                    content: {
-                      type: "peers",
-                      fromPeerId: keyPair.peerId,
-                      roomId,
-                      protocolVersion: PROTOCOL_VERSION,
-                    } as WebSocketMessagePeersRequest,
-                  }),
-                );
-              }
+              const targetKey = `${kind}:${roomId}`;
+              if (peerId && isUUID(peerId)) {
+                const pending = pendingTargets.get(targetKey);
+                if (pending !== null) {
+                  const targets = pending ?? new Set<string>();
+                  targets.add(peerId);
+                  pendingTargets.set(targetKey, targets);
+                }
+              } else pendingTargets.set(targetKey, null);
+              signalingPeerRequestDebouncer.request(
+                kind,
+                roomId,
+                reason === "reconcile"
+                  ? ROOM_ROSTER_RECONCILE_DEBOUNCE_MS
+                  : PEERS_REQUEST_DEBOUNCE_MS,
+                () => {
+                  // A trailing request runs after the listener effect ended:
+                  // read current state and never rejoin a left or failed room.
+                  const pending = pendingTargets.get(targetKey);
+                  pendingTargets.delete(targetKey);
+                  const state = listenerApi.getState() as State;
+                  const room = state.rooms.find((r) => r.id === roomId);
+                  if (
+                    !room ||
+                    room.signalingActive === false ||
+                    !state.signalingServer.isConnected ||
+                    !state.signalingServer.isVerified ||
+                    !isUUID(state.keyPair.peerId) ||
+                    hasOnlyTerminalPeerHandshakeFailures(room)
+                  )
+                    return;
+                  const excludedPeerIds = [
+                    ...new Set([
+                      ...(room.knownPeers ?? room.peers)
+                        .filter((peer) =>
+                          hasTerminalPeerHandshakeFailure(
+                            room.handshakeStatusByPeer,
+                            peer.peerId,
+                            peer.peerPublicKey,
+                          ),
+                        )
+                        .map((peer) => peer.peerId),
+                      ...Object.entries(room.handshakeStatusByPeer ?? {})
+                        .filter(([, status]) =>
+                          isTerminalHandshakeStatus(status),
+                        )
+                        .map(([peerId]) => peerId),
+                    ]),
+                  ].filter((peerId) => isUUID(peerId));
+                  // Legacy servers ignore exclusions. Never trigger a failed
+                  // peer's fresh-connection retry via an unrelated repair.
+                  if (
+                    excludedPeerIds.length > MAX_SIGNALING_ROOM_PEERS ||
+                    (Object.values(room.handshakeStatusByPeer ?? {}).some(
+                      isTerminalHandshakeStatus,
+                    ) &&
+                      !signalingPeerRequestDebouncer.supportsRosterSnapshots)
+                  )
+                    return;
+                  const targetPeerIds = pending
+                    ? [...pending].filter((id) =>
+                        room.knownPeers?.some(
+                          (peer) =>
+                            peer.peerId === id &&
+                            !excludedPeerIds.includes(id) &&
+                            room.handshakeStatusByPeer?.[id]?.status !==
+                              "authenticated",
+                        ),
+                      )
+                    : undefined;
+                  if (targetPeerIds?.length === 0) return;
+                  listenerApi.dispatch(
+                    signalingServerApi.endpoints.sendMessage.initiate({
+                      content: {
+                        type: "peers",
+                        fromPeerId: state.keyPair.peerId,
+                        roomId,
+                        rosterRequestId:
+                          signalingPeerRequestDebouncer.beginRosterRequest(
+                            roomId,
+                          ),
+                        excludedPeerIds,
+                        ...(targetPeerIds ? { targetPeerIds } : {}),
+                        protocolVersion: PROTOCOL_VERSION,
+                      } satisfies WebSocketMessagePeersRequest,
+                    }),
+                  );
+                },
+              );
             }
 
             listenerApi.dispatch(
@@ -282,29 +427,9 @@ export const createRoomListenerMiddleware = (
               },
             );
 
-            if (
-              signalingServer.isConnected &&
-              signalingServer.isVerified &&
-              isUUID(keyPair.peerId) &&
-              roomIndex > -1 &&
-              isUUID(rooms[roomIndex].id) &&
-              !hasOnlyTerminalPeerHandshakeFailures(rooms[roomIndex])
-            ) {
-              debugLog(
-                "[roomListenerMiddleware] Sending peers request for room:",
-                rooms[roomIndex].id,
-              );
-              await listenerApi.dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "peers",
-                    fromPeerId: keyPair.peerId,
-                    roomId: rooms[roomIndex].id,
-                    protocolVersion: PROTOCOL_VERSION,
-                  } as WebSocketMessagePeersRequest,
-                }),
-              );
-            }
+            listenerApi.dispatch(
+              setConnectingToPeers({ roomId: id, connectingToPeers: true }),
+            );
           }
         } else if (applyRoomResponse.match(action)) {
           const { roomUrl, roomId } = action.payload;

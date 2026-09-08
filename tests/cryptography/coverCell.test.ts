@@ -72,6 +72,61 @@ const expectCode = (
 };
 
 describe("authenticated cover cells", () => {
+  test("selective chunk receipts have their own authenticated batched subtype", () => {
+    const merkleRoot = new Uint8Array(64).fill(0xa1);
+    const tokens = [
+      new Uint8Array(64).fill(0xb2),
+      new Uint8Array(64).fill(0xc3),
+    ];
+    const frame = sealCoverCell(
+      sealDefaults({
+        content: { subtype: "chunk-receipts", merkleRoot, tokens },
+      }),
+    );
+    expect(frame).toHaveLength(WIRE_CHUNK_FRAME_LEN);
+    const opened = openCoverCell(openDefaults(frame));
+    expect(opened.content).toEqual({
+      subtype: "chunk-receipts",
+      merkleRoot,
+      tokens,
+    });
+  });
+
+  test("chunk receipt batches reject empty, oversized and malformed token lists", () => {
+    const merkleRoot = new Uint8Array(64);
+    for (const tokens of [
+      [],
+      Array.from({ length: 65 }, () => new Uint8Array(64)),
+      [new Uint8Array(63)],
+    ])
+      expectCode(
+        () =>
+          sealCoverCell(
+            sealDefaults({
+              content: { subtype: "chunk-receipts", merkleRoot, tokens },
+            }),
+          ),
+        "invalid-cell",
+      );
+    const tokens = Array.from({ length: 64 }, (_, i) =>
+      new Uint8Array(64).fill(i),
+    );
+    const opened = openCoverCell(
+      openDefaults(
+        sealCoverCell(
+          sealDefaults({
+            content: { subtype: "chunk-receipts", merkleRoot, tokens },
+          }),
+        ),
+      ),
+    );
+    expect(opened.content).toEqual({
+      subtype: "chunk-receipts",
+      merkleRoot,
+      tokens,
+    });
+  });
+
   test("dummy, CANCEL, and receipt subtypes round-trip inside one uniform 65,490-byte cell", () => {
     const merkleRoot = new Uint8Array(COVER_CELL_TOKEN_BYTES).fill(0xaa);
     const token = new Uint8Array(COVER_CELL_TOKEN_BYTES).fill(0xbb);
@@ -213,9 +268,7 @@ describe("authenticated cover cells", () => {
     );
     expectCode(
       () =>
-        openCoverCell(
-          openDefaults(new Uint8Array(WIRE_CHUNK_FRAME_LEN - 1)),
-        ),
+        openCoverCell(openDefaults(new Uint8Array(WIRE_CHUNK_FRAME_LEN - 1))),
       "invalid-cell",
     );
     const wrongType = sealCoverCell(sealDefaults());

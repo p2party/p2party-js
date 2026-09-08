@@ -1,3 +1,5 @@
+import type { ReceiveDeleteGuard } from "./types";
+import type { OutboxLease, OutboxRequest } from "./outboxTypes";
 import type {
   WorkerMessages,
   Chunk,
@@ -280,8 +282,17 @@ export const closeReceiveFile = (merkleRootHex: string) =>
  * write that was already in flight completes first and is then removed, while
  * later writes are stopped by the channel's AbortSignal.
  */
-export const deleteReceiveTransfer = (merkleRootHex: string) =>
-  callWorker("deleteReceiveTransfer", merkleRootHex);
+export function deleteReceiveTransfer(merkleRootHex: string): Promise<void>;
+export function deleteReceiveTransfer(
+  merkleRootHex: string,
+  guard: ReceiveDeleteGuard,
+): Promise<boolean>;
+export function deleteReceiveTransfer(
+  merkleRootHex: string,
+  guard?: ReceiveDeleteGuard,
+): Promise<boolean | void> {
+  return callWorker("deleteReceiveTransfer", merkleRootHex, guard);
+}
 
 export const getDBAllNewChunks = (selector: NewChunkSelector) =>
   callWorker("getDBAllNewChunks", selector);
@@ -289,8 +300,8 @@ export const getDBAllNewChunks = (selector: NewChunkSelector) =>
 export const getDBAllNewChunksCount = (transferId: string) =>
   callWorker("getDBAllNewChunksCount", transferId);
 
-export const setDBNewChunk = (chunk: NewChunk) =>
-  callWorker("setDBNewChunk", chunk);
+export const setDBNewChunk = (chunk: NewChunk, lease?: OutboxLease) =>
+  callWorker("setDBNewChunk", chunk, lease);
 
 export const setDBSendQueue = (item: SendQueue) =>
   callWorker("setDBSendQueue", item);
@@ -393,3 +404,9 @@ export const setIdentityDerivation = (derivation: IdentityDerivation) =>
 
 export const deleteIdentityDerivation = () =>
   callWorker("deleteIdentityDerivation");
+
+export const outboxRequest = (request: OutboxRequest) =>
+  callWorker("outboxRequest", request);
+export const sweepStaleReceives = () => callWorker("sweepStaleReceives");
+export const sweepStaleReceiveDetails = () =>
+  callWorker("sweepStaleReceiveDetails");

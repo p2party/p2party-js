@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { createCoverScheduler, validateCoverSchedule } from "../../src/handlers/coverScheduler";
+import {
+  createCoverScheduler,
+  validateCoverSchedule,
+} from "../../src/handlers/coverScheduler";
 
 import type {
   CoverClock,
@@ -199,6 +202,89 @@ const harness = (
 };
 
 describe("store-free scheduled cover core", () => {
+  test("real jobs remain pending while queued or admitted, but control/dummy cover never blocks healing", async () => {
+    const h = harness(schedule());
+    expect(h.scheduler.hasPendingRealJobs()).toBe(false);
+    h.scheduler.enqueue(job("control", "control", [1]));
+    expect(h.scheduler.hasPendingRealJobs()).toBe(false);
+    h.scheduler.enqueue(job("real", "real", [2, 3]));
+    expect(h.scheduler.hasPendingRealJobs()).toBe(true);
+    h.scheduler.start();
+    await h.clock.advanceTo(400);
+    expect(h.scheduler.hasPendingRealJobs()).toBe(true);
+    h.scheduler.invalidateRealJobsForRekey();
+    expect(h.scheduler.hasPendingRealJobs()).toBe(false);
+    await h.clock.advanceTo(800);
+    expect(h.scheduler.hasPendingRealJobs()).toBe(false);
+    h.scheduler.stop();
+  });
+
+  test("rekey during an asynchronous real-cell producer keeps the exact dummy schedule", async () => {
+    const h = harness(schedule());
+    let finish!: (cell: Uint8Array) => void;
+    h.scheduler.enqueue({
+      id: "old-epoch",
+      kind: "real",
+      declaredCellCount: 1,
+      nextCell: () =>
+        new Promise<Uint8Array>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    h.scheduler.start();
+    await h.clock.advanceTo(50);
+    expect(finish).toBeDefined();
+    h.scheduler.invalidateRealJobsForRekey();
+    const oldCell = bytes(0x11);
+    finish(oldCell);
+    await h.clock.advanceTo(400);
+    expect(h.trace.filter((line) => line.startsWith("send@"))).toEqual([
+      "send@50:d50:e0:l0:f0:dummy:221",
+      "send@150:d150:e0:l0:f1:dummy:221",
+      "send@250:d250:e0:l0:f2:dummy:221",
+      "send@350:d350:e0:l0:f3:dummy:221",
+    ]);
+    expect(oldCell[0]).toBe(0);
+    h.scheduler.stop();
+  });
+
+  test("an explicit CANCEL being sealed survives rekey and uses the new epoch in its original slot", async () => {
+    const h = harness(schedule());
+    let finishOldCancel!: (cell: Uint8Array) => void;
+    let cancelCalls = 0;
+    h.scheduler.enqueue({
+      ...job("cancel-during-rekey", "real", [0x11, 0x12]),
+      cancelCell: () => {
+        cancelCalls++;
+        return cancelCalls === 1
+          ? new Promise<Uint8Array>((resolve) => {
+              finishOldCancel = resolve;
+            })
+          : bytes(0xce);
+      },
+    });
+    h.scheduler.start();
+    await h.clock.advanceTo(50);
+    expect(h.scheduler.cancel("cancel-during-rekey")).toBe("cancel-pending");
+    await h.clock.advanceTo(150);
+    expect(finishOldCancel).toBeDefined();
+    h.scheduler.invalidateRealJobsForRekey();
+    expect(h.scheduler.hasPendingRealJobs()).toBe(true);
+    const staleCancel = bytes(0xcb);
+    finishOldCancel(staleCancel);
+    await h.clock.advanceTo(400);
+    expect(staleCancel[0]).toBe(0);
+    expect(cancelCalls).toBe(2);
+    expect(h.scheduler.hasPendingRealJobs()).toBe(false);
+    expect(h.trace.filter((line) => line.startsWith("send@"))).toEqual([
+      "send@50:d50:e0:l0:f0:real:17",
+      "send@150:d150:e0:l0:f1:cancel:206",
+      "send@250:d250:e0:l0:f2:dummy:221",
+      "send@350:d350:e0:l0:f3:dummy:221",
+    ]);
+    h.scheduler.stop();
+  });
+
   test("validates non-overlapping schedule geometry and declared capacity", () => {
     expect(() => validateCoverSchedule(schedule({ coverLanes: 17 }))).toThrow(
       "between 1 and 16",

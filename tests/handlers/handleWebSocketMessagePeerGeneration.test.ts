@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 
 import type { RTCPeerConnectionParams } from "../../src/api/webrtc/interfaces";
+import { signalingPeerRequestDebouncer } from "../../src/utils/signalingPeerRequestDebouncer";
 
 // The message handler imports the signaling API, which imports the Redux
 // store, whose identity slice reads localStorage at module initialization.
@@ -34,6 +35,7 @@ type Handler = typeof import("../../src/handlers/handleWebSocketMessage");
 let handleWebSocketMessage: Handler["default"];
 let connectParams: RTCPeerConnectionParams[];
 let restore: () => void;
+let blacklistLookup: () => Promise<boolean> = async () => false;
 
 beforeAll(async () => {
   await import("../../src/store");
@@ -42,7 +44,7 @@ beforeAll(async () => {
   // fail-closed blacklist lookup reports every peer as blocked and the roster
   // loop would skip the peer before it ever dialled.
   const blacklist = spyOn(dbApi, "getDBPeerIsBlacklisted").mockImplementation(
-    async () => false,
+    async () => blacklistLookup(),
   );
   const { default: webrtcApi } = await import("../../src/api/webrtc");
   connectParams = [];
@@ -128,5 +130,112 @@ describe("roster introductions carry the peer's socket generation", () => {
     expect(connectParams).toHaveLength(1);
     expect(connectParams[0].peerSocketGeneration).toBeUndefined();
     expect(connectParams[0].peerSocketGenerationSource).toBe("roster");
+  });
+});
+
+describe("correlated room membership snapshots", () => {
+  const deliverSnapshot = async (
+    requestId: unknown,
+    options: {
+      active?: boolean;
+      current?: () => boolean;
+      peers?: readonly unknown[];
+      kind?: string;
+    } = {},
+  ) => {
+    connectParams.length = 0;
+    const actions: { type: string; payload?: unknown }[] = [];
+    const state = {
+      keyPair: { peerId: SELF_PEER_ID, publicKey: SELF_PUBLIC_KEY },
+      rooms: [
+        {
+          id: ROOM_ID,
+          signalingActive: options.active ?? true,
+          peers: [],
+          rtcConfig: { iceServers: [] },
+        },
+      ],
+    };
+    await handleWebSocketMessage(
+      {
+        data: JSON.stringify({
+          type: "peers",
+          roomId: ROOM_ID,
+          protocolVersion: 4,
+          rosterKind: options.kind ?? "snapshot",
+          rosterRequestId: requestId,
+          peers: options.peers ?? [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY }],
+        }),
+      } as MessageEvent,
+      {} as WebSocket,
+      {
+        getState: () => state,
+        dispatch: (action: { type: string }) => {
+          actions.push(action);
+          return action;
+        },
+      } as never,
+      options.current ?? (() => true),
+    );
+    return actions;
+  };
+
+  test("snapshot learns a missing member without bypassing peer acceptance", async () => {
+    signalingPeerRequestDebouncer.resetSocketLifecycle();
+    const id = signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+    const actions = await deliverSnapshot(id);
+    expect(actions).toEqual([
+      {
+        type: "rooms/setKnownRoomPeers",
+        payload: {
+          roomId: ROOM_ID,
+          peers: [{ peerId: PEER_ID, peerPublicKey: PEER_PUBLIC_KEY }],
+        },
+      },
+    ]);
+    expect(connectParams).toEqual([]);
+    expect(signalingPeerRequestDebouncer.supportsRosterSnapshots).toBe(true);
+    expect(await deliverSnapshot(id, { peers: [] })).toEqual([]);
+  });
+
+  test("empty snapshot records an authoritative empty membership", async () => {
+    const id = signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+    const actions = await deliverSnapshot(id, { peers: [] });
+    expect(actions).toEqual([
+      {
+        type: "rooms/setKnownRoomPeers",
+        payload: { roomId: ROOM_ID, peers: [] },
+      },
+    ]);
+    expect(connectParams).toEqual([]);
+  });
+
+  test("unsolicited, obsolete, disconnected, left and malformed snapshots cannot revive members", async () => {
+    const old = signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+    const latest = signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+    for (const [id, options] of [
+      [undefined, {}],
+      [old, {}],
+      [latest, { active: false }],
+      [latest, { current: () => false }],
+      [latest, { peers: [{ id: "broken", publicKey: PEER_PUBLIC_KEY }] }],
+      [latest, { kind: "replacement" }],
+    ] as const)
+      expect(await deliverSnapshot(id, options)).toEqual([]);
+    signalingPeerRequestDebouncer.resetSocketLifecycle();
+    expect(await deliverSnapshot(latest)).toEqual([]);
+  });
+
+  test("a snapshot replaced during the blacklist await never commits its old membership", async () => {
+    const id = signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+    blacklistLookup = async () => {
+      signalingPeerRequestDebouncer.beginRosterRequest(ROOM_ID);
+      return false;
+    };
+    try {
+      expect(await deliverSnapshot(id)).toEqual([]);
+    } finally {
+      blacklistLookup = async () => false;
+    }
   });
 });

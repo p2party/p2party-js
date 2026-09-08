@@ -305,8 +305,11 @@ const mutateRatchetDurably = async <T>(
   roomId: string,
   stage: (candidate: RatchetState) => StagedRatchetMutation<T>,
   persist: PersistRatchetState,
+  precondition?: { check: () => Promise<boolean>; skipped: T },
 ): Promise<T> =>
   withEdgeCryptoMutationLock(epc, async () => {
+    if (precondition && !(await precondition.check()))
+      return precondition.skipped;
     const live = epc.ratchetState;
     if (!live) throw new Error("ratchet persistence: no live ratchet state");
 
@@ -538,13 +541,14 @@ export const decryptMessageChunkDurably = async (
  * completion, then erase the RAM cache copy. If persistence fails, both copies
  * remain usable for an idempotent retransmit/retry rather than diverging.
  */
-export const forgetReceiveMessageKeyDurably = async (
+export const forgetReceiveMessageKeyIfCurrentDurably = async (
   epc: IRTCPeerConnection,
   roomId: string,
   cache: Map<string, Uint8Array>,
   cacheKey: string,
+  canRetire: (() => Promise<boolean>) | undefined,
   persist: PersistRatchetState = persistRatchetState,
-): Promise<void> =>
+): Promise<boolean> =>
   mutateRatchetDurably(
     epc,
     roomId,
@@ -554,11 +558,11 @@ export const forgetReceiveMessageKeyDurably = async (
         // v4: retire the combined key from the STAGED active-key collection so
         // its removal is durable in the encrypted edge checkpoint before the
         // RAM copy is wiped. The classical skipped map never held it.
-        if (!cache.has(cacheKey)) return { value: undefined, advanced: false };
+        if (!cache.has(cacheKey)) return { value: true, advanced: false };
         const stagedCache = new Map(cache);
         stagedCache.delete(cacheKey);
         return {
-          value: undefined,
+          value: true,
           advanced: true,
           stageEdgeCryptoState: () => pq.serialize(stagedCache),
           commit: () => {
@@ -574,7 +578,7 @@ export const forgetReceiveMessageKeyDurably = async (
         durableMessageKey.fill(0);
       }
       return {
-        value: undefined,
+        value: true,
         advanced: durableMessageKey !== undefined,
         commit: () => {
           cache.get(cacheKey)?.fill(0);
@@ -583,7 +587,25 @@ export const forgetReceiveMessageKeyDurably = async (
       };
     },
     persist,
+    canRetire ? { check: canRetire, skipped: false } : undefined,
   );
+
+export const forgetReceiveMessageKeyDurably = async (
+  epc: IRTCPeerConnection,
+  roomId: string,
+  cache: Map<string, Uint8Array>,
+  cacheKey: string,
+  persist: PersistRatchetState = persistRatchetState,
+): Promise<void> => {
+  await forgetReceiveMessageKeyIfCurrentDurably(
+    epc,
+    roomId,
+    cache,
+    cacheKey,
+    undefined,
+    persist,
+  );
+};
 
 // Persist the peer's LIVE ratchet after it advances. The stable DB key is
 // (roomId, peerPublicKey); peerId is reconnect-local metadata.

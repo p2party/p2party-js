@@ -1,3 +1,4 @@
+import type { OutboxLease, OutboxRequest, OutboxResponse } from "./outboxTypes";
 import type { Peer } from "../reducers/roomSlice";
 import type { RatchetRootSuite } from "../utils/constants";
 // import type { MessageType } from "../utils/messageTypes";
@@ -113,6 +114,18 @@ export interface ReceiveChunk {
   data: ArrayBuffer;
   /** Text stays in IndexedDB; files use the OPFS-first receive path. */
   storage: "indexeddb" | "opfs";
+}
+
+export interface ExpiredReceiveTransfer {
+  merkleRoot: string;
+  roomId: string;
+  fromPeerId: string;
+}
+
+export interface ReceiveDeleteGuard {
+  roomId: string;
+  fromPeerId: string;
+  incompleteOnly: true;
 }
 
 export interface ReceiveChunkStoreResult {
@@ -276,6 +289,9 @@ export interface PinAttemptState {
 
 // Each method and its arguments/return type
 export type WorkerMessages =
+  | { id: number; method: "outboxRequest"; args: [request: OutboxRequest] }
+  | { id: number; method: "sweepStaleReceives"; args: [] }
+  | { id: number; method: "sweepStaleReceiveDetails"; args: [] }
   | {
       id: number;
       method: "getDBAddressBookEntry";
@@ -433,7 +449,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteReceiveTransfer";
-      args: [merkleRootHex: string];
+      args: [merkleRootHex: string, guard?: ReceiveDeleteGuard];
     }
   | {
       id: number;
@@ -445,7 +461,11 @@ export type WorkerMessages =
       method: "getDBAllNewChunksCount";
       args: [transferId: string];
     }
-  | { id: number; method: "setDBNewChunk"; args: [chunk: NewChunk] }
+  | {
+      id: number;
+      method: "setDBNewChunk";
+      args: [chunk: NewChunk, lease?: OutboxLease];
+    }
   | { id: number; method: "setDBSendQueue"; args: [item: SendQueue] }
   | {
       id: number;
@@ -567,6 +587,9 @@ export type WorkerMessages =
 
 // Return types for each method
 export interface WorkerMethodReturnTypes {
+  outboxRequest: OutboxResponse;
+  sweepStaleReceives: string[];
+  sweepStaleReceiveDetails: ExpiredReceiveTransfer[];
   getDBAddressBookEntry: UsernamedPeer | undefined;
   getAllDBAddressBookEntries: UsernamedPeer[];
   setDBAddressBookEntry: undefined;
@@ -595,7 +618,7 @@ export interface WorkerMethodReturnTypes {
   storeReceiveChunk: ReceiveChunkStoreResult;
   getReceiveFile: File | null;
   closeReceiveFile: undefined;
-  deleteReceiveTransfer: undefined;
+  deleteReceiveTransfer: boolean | undefined;
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
   setDBNewChunk: undefined;

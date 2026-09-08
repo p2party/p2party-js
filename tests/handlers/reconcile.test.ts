@@ -5,6 +5,8 @@ import {
   getAckedChunks,
   markTransferComplete,
   isTransferComplete,
+  markTransferCancelled,
+  isTransferCancelled,
   clearTransfer,
   getPeerTransferOutcome,
   getTransferAcks,
@@ -12,6 +14,29 @@ import {
 } from "../../src/handlers/reconcile";
 
 describe("reconcile state (selective retransmit / resume)", () => {
+  test("recipient refusal wakes completion waits without cancelling or completing sibling sends", async () => {
+    const room = "cancelled-room",
+      peer = "cancelled-peer",
+      transfer = "cancelled-transfer";
+    try {
+      const started = Date.now();
+      const waiting = waitForCompletion(room, peer, transfer, 10_000);
+      expect(markTransferCancelled(room, peer, transfer)).toBe(true);
+      expect(markTransferCancelled(room, peer, transfer)).toBe(false);
+      expect(await waiting).toBe(false);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(isTransferCancelled(room, peer, transfer)).toBe(true);
+      expect(isTransferCancelled(room, "other", transfer)).toBe(false);
+      expect(isTransferCancelled("other", peer, transfer)).toBe(false);
+      expect(isTransferCancelled(room, peer, "other")).toBe(false);
+      expect(markTransferComplete(room, peer, transfer)).toBe(false);
+      expect(markChunkAcked(room, peer, transfer, 0)).toBe(false);
+      expect(isTransferComplete(room, peer, transfer)).toBe(false);
+    } finally {
+      clearTransfer(room, peer, transfer);
+    }
+  });
+
   test("accumulates acked chunk indices per (peer, message)", () => {
     clearTransfer("r", "p", "h");
     expect(markChunkAcked("r", "p", "h", 0)).toBe(true);

@@ -9,10 +9,9 @@
 // The same operation serves live retransmit (timeout trigger) and resume
 // (reconnect trigger, where the receiver re-emits its receipts first).
 //
-// This state is disposable: rebuilt from receipts on reconnect. The durable
-// resend source is `newChunks` (IndexedDB, already persisted). No persistent
-// store and no wire change — receipts do all the work.
-type Edge = { acked: Set<number>; complete: boolean };
+// This live view is rebuilt from the durable outbox or verified receipts.
+// Chunk data and per-recipient outcomes are persisted before this view advances.
+type Edge = { acked: Set<number>; complete: boolean; cancelled: boolean };
 
 const edges = new Map<string, Edge>();
 const key = (roomId: string, peerId: string, transferId: string): string =>
@@ -22,7 +21,7 @@ const edge = (roomId: string, peerId: string, transferId: string): Edge => {
   const k = key(roomId, peerId, transferId);
   let e = edges.get(k);
   if (!e) {
-    e = { acked: new Set<number>(), complete: false };
+    e = { acked: new Set<number>(), complete: false, cancelled: false };
     edges.set(k, e);
   }
   return e;
@@ -34,7 +33,9 @@ export const markChunkAcked = (
   transferId: string,
   chunkIndex: number,
 ): boolean => {
-  const acked = edge(roomId, peerId, transferId).acked;
+  const state = edge(roomId, peerId, transferId);
+  if (state.cancelled) return false;
+  const acked = state.acked;
   const previousSize = acked.size;
   acked.add(chunkIndex);
   return acked.size !== previousSize;
@@ -47,6 +48,15 @@ export const getAckedChunks = (
   peerId: string,
   transferId: string,
 ): Set<number> => new Set(edge(roomId, peerId, transferId).acked);
+
+/** Constant-time membership without allocating one Set copy per scheduled cell. */
+export const hasChunkAcked = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  chunkIndex: number,
+): boolean =>
+  edges.get(key(roomId, peerId, transferId))?.acked.has(chunkIndex) ?? false;
 
 // Live size of the acked set, polled by the sender's receipt window without
 // copying the set on every tick.
@@ -62,7 +72,7 @@ export const markTransferComplete = (
   transferId: string,
 ): boolean => {
   const state = edge(roomId, peerId, transferId);
-  if (state.complete) return false;
+  if (state.complete || state.cancelled) return false;
   state.complete = true;
   return true;
 };
@@ -96,6 +106,24 @@ export const isTransferComplete = (
   peerId: string,
   transferId: string,
 ): boolean => edges.get(key(roomId, peerId, transferId))?.complete ?? false;
+
+/** A recipient's refusal is terminal only for this edge, never the whole send. */
+export const markTransferCancelled = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+): boolean => {
+  const state = edge(roomId, peerId, transferId);
+  if (state.cancelled || state.complete) return false;
+  state.cancelled = true;
+  return true;
+};
+
+export const isTransferCancelled = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+): boolean => edges.get(key(roomId, peerId, transferId))?.cancelled ?? false;
 
 export interface TransferAck {
   readonly peerId: string;
@@ -160,6 +188,7 @@ export const waitForCompletion = async (
   while (
     Date.now() < deadline &&
     !isTransferComplete(roomId, peerId, transferId) &&
+    !isTransferCancelled(roomId, peerId, transferId) &&
     !signal?.aborted
   ) {
     await new Promise((resolve) => setTimeout(resolve, 200));

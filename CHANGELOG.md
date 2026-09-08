@@ -29,6 +29,46 @@ reaches any of it.
   fault domain. `docs/blind-rendezvous-two-store-prototype.md` describes what it
   is and, at length and first, what it does not claim.
 
+## [0.14.9] — 2026-09-08
+
+Protocol version remains 4. Room membership snapshots and targeted repair use
+signaling server `0.1.3`; earlier servers keep their accepted-peer delta flow.
+
+### Added
+
+- A bounded IndexedDB sender outbox reuses staged chunks across sender reloads
+  and interruptions longer than the current attempt's retry budget. It binds
+  identity, room policy and original recipients; fenced leases prevent two
+  tabs from owning a send. `listPendingMessages`, `resumePendingMessages` and
+  `cancelPendingMessage` expose its state. Prepared sends expire after 24 hours;
+  abandoned preparation expires after one hour. Storage limits and browser
+  eviction still apply.
+- Authenticated scheduled chunk receipts make retries skip acknowledged real
+  chunks. One index-zero completion probe per attempt preserves liveness when
+  the terminal receipt was lost. Live ACK membership is constant-time; scanning
+  the staged index and the configured cover traffic remain linear.
+- Immediate message channels advertise pause support and echo it after
+  authentication. Explicit channel/root-bound CANCEL distinguishes a user
+  cancellation from a failed attempt; legacy peers retain their close behavior.
+
+### Fixed
+
+- Sparse-PQ healing waits for pending real scheduled jobs and key-derivation
+  reservations. An incoming committed epoch change retires obsolete producers
+  and resumes their transfer under fresh keys on the same runtime.
+- Correlated membership snapshots survive individual edge teardown. Each
+  missing member has an independent bounded repair budget; trailing redials
+  and authentication-triggered outbox passes cannot lose the final event.
+  PIN/policy failures remain terminal and repair preserves healthy mesh edges.
+- Remote cancellation is recipient-scoped and durable. Atomic receive cleanup
+  preserves completed files and local history even when a final chunk races
+  with CANCEL or stale-partial collection. Channel cleanup retains concrete
+  ownership across asynchronous work.
+
+Verification and compatibility limits are recorded in
+[the browser harness report](docs/e2e/README.md). Blind-rendezvous prototypes
+remain excluded from the public runtime. This change does not publish or deploy.
+
 ## [0.14.8] — 2026-09-08
 
 Protocol v4 remains unchanged. Socket replacement recovery uses the additive

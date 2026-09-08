@@ -1,7 +1,13 @@
-import { forgetReceiveMessageKeyDurably } from "./ratchetPersist";
+import {
+  forgetReceiveMessageKeyDurably,
+  forgetReceiveMessageKeyIfCurrentDurably,
+} from "./ratchetPersist";
+import { isRatchetGateOpen } from "./ratchetGate";
 
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { MessageData } from "../db/types";
+
+const bindingRevisions = new WeakMap<IRTCPeerConnection, Map<string, symbol>>();
 
 type ForgetReceiveMessageKey = typeof forgetReceiveMessageKeyDurably;
 type ReceiveProgress = Pick<MessageData, "savedSize" | "totalSize">;
@@ -22,6 +28,17 @@ export const bindReceiveMessageKey = (
 ): void => {
   epc.messageKeyByMerkleRoot ??= new Map<string, string>();
   epc.messageKeyByMerkleRoot.set(merkleRootHex, cacheKey);
+  let revisions = bindingRevisions.get(epc);
+  if (!revisions) {
+    revisions = new Map();
+    bindingRevisions.set(epc, revisions);
+  }
+  revisions.set(merkleRootHex, Symbol("receive-binding"));
+  // Bound stale revision metadata when the receive-cache eviction path removed
+  // mappings directly. Live mappings are already limited by its key budget.
+  if (revisions.size > epc.messageKeyByMerkleRoot.size + 16)
+    for (const root of revisions.keys())
+      if (!epc.messageKeyByMerkleRoot.has(root)) revisions.delete(root);
 };
 
 const isComplete = (progress: ReceiveProgress | undefined): boolean =>
@@ -84,4 +101,68 @@ export const forgetCompletedReceiveMessageKey = async (
 ): Promise<boolean> => {
   if (!isComplete(progress)) return false;
   return forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex, forget);
+};
+
+/** Capture BEFORE expiry touches storage; a later receive may reuse the root. */
+export const captureReceiveMessageKey = (
+  epc: IRTCPeerConnection,
+  merkleRootHex: string,
+) => {
+  const roomId = epc.roomId;
+  const peerId = epc.withPeerId;
+  const gate = epc.ratchetGateLease;
+  const ratchet = epc.ratchetState;
+  const cache = epc.messageKeyCache;
+  const cacheKey = epc.messageKeyByMerkleRoot?.get(merkleRootHex);
+  const messageKey = cacheKey ? cache?.get(cacheKey) : undefined;
+  const revision = bindingRevisions.get(epc)?.get(merkleRootHex);
+  if (!gate || !ratchet || !cache || !cacheKey || !messageKey) return undefined;
+  const sameBinding = () =>
+    epc.roomId === roomId &&
+    epc.withPeerId === peerId &&
+    epc.ratchetGateLease === gate &&
+    isRatchetGateOpen(roomId, peerId, gate) &&
+    epc.ratchetState === ratchet &&
+    epc.messageKeyCache === cache &&
+    epc.messageKeyByMerkleRoot?.get(merkleRootHex) === cacheKey &&
+    bindingRevisions.get(epc)?.get(merkleRootHex) === revision;
+  const isCurrent = () => sameBinding() && cache.get(cacheKey) === messageKey;
+  const clearBinding = () => {
+    if (sameBinding()) {
+      epc.messageKeyByMerkleRoot?.delete(merkleRootHex);
+      bindingRevisions.get(epc)?.delete(merkleRootHex);
+    }
+  };
+  return {
+    epc,
+    roomId,
+    peerId,
+    merkleRootHex,
+    cache,
+    cacheKey,
+    isCurrent,
+    clearBinding,
+  };
+};
+
+export type ReceiveMessageKeySnapshot = NonNullable<
+  ReturnType<typeof captureReceiveMessageKey>
+>;
+
+/** Absence and generation checks execute INSIDE the crypto mutation lock. */
+export const forgetExpiredReceiveMessageKey = async (
+  snapshot: ReceiveMessageKeySnapshot,
+  stillAbsent: () => Promise<boolean>,
+  forget = forgetReceiveMessageKeyIfCurrentDurably,
+): Promise<boolean> => {
+  if (!snapshot.isCurrent()) return false;
+  const retired = await forget(
+    snapshot.epc,
+    snapshot.roomId,
+    snapshot.cache,
+    snapshot.cacheKey,
+    async () => (await stillAbsent()) && snapshot.isCurrent(),
+  );
+  if (retired) snapshot.clearBinding();
+  return retired;
 };

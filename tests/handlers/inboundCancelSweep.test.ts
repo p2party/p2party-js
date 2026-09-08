@@ -140,6 +140,7 @@ const makeSweepSpy = (rows: Record<string, MessageData> = {}): SweepSpy => {
       deleteReceive: async (merkleRootHex: string) => {
         deleted.push(merkleRootHex);
         store.delete(merkleRootHex);
+        return true;
       },
     } as InboundTransferSweepDeps,
   };

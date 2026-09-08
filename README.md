@@ -33,7 +33,7 @@ Apache-2.0 · [LICENSE.md](LICENSE.md)
   decoy slots can hide a message's exact payload length within its transfer.
 - Each outbound message has its own transfer identity and data channel, a
   cancellable handle, authenticated receipts, selective retransmission, and
-  reconnect resume.
+  reconnect and sender-reload recovery from a bounded durable outbox.
 - Text and files up to the enforced 10 GiB application limit are supported.
   Browser builds use IndexedDB and, where available, OPFS for disk-backed large
   file receipt.
@@ -248,15 +248,14 @@ reconverge and exchange byte-exact messages 0.5–6.5 s after wake, and four
 in-flight 8 MiB transfer configurations finish byte-exact with the sender
 reporting `delivered`.
 
-Two limits, since they are as real as the fixes. Resume follows a live page: a
-send in flight does not survive reloading the sending page, though a reloaded
-receiver replays receipts for what it already holds so a still-live sender
-resends only the gaps. And when a frozen identity responder is carrying an
-in-flight transfer, reconvergence takes about 37 s rather than the usual 5–7 s
-— the surviving SCTP association accepts our new streams but not the peer's, so
-recovery waits out the 30 s handshake step timeout. The transfer completes
-correctly; the latency is a known open item on the
-[roadmap](ROADMAP.md#near-term).
+Prepared sends now survive sender reloads in the same browser storage and
+identity. Pending state and retry/cancel APIs are described in
+[durable transfer recovery](docs/getting-started.md). A failed `handle.done`
+reports the outcome of that attempt; it does not mean its pending data was
+removed. The outbox retains prepared sends for up to 24 hours and cannot recover
+an upload whose preparation never finished or whose browser storage was erased.
+Current measured recovery results and remaining compatibility limits are in
+[the browser report](docs/e2e/README.md).
 
 ## Wire format
 
@@ -795,14 +794,9 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.8` is not on the CDN yet.** The release pipeline uploads its objects
-> from the tarball it publishes, and that pipeline has not run for this
-> version: every path under `https://cdn.p2party.com/@0.14.8/` currently
-> answers 404, and npm still resolves `p2party` to an older release. The
-> snippet below is generated from this build and is what the release will
-> serve — until then, either pin the version `npm view p2party version` reports
-> (its objects are live) or self-host the bundle, which works today and is
-> described in the next section.
+> **`0.14.9` is a local release candidate.** This work does not publish npm
+> packages or CDN assets. The snippet names the candidate's intended release
+> path; use the generated local bundle until that version is published.
 
 A release publishes its browser bundle, its database worker and its
 cryptographic module as immutable, versioned CDN objects. The version is in the
@@ -815,7 +809,7 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.8/p2party.min.js"
+  src="https://cdn.p2party.com/@0.14.9/p2party.min.js"
   integrity="sha384-3j/sCIflFuqewZoHNVO3ncEipr3zfvvHDrp1hPU3XL3rnrPXzBx1IBAVjCXQ0o+H"
   crossorigin="anonymous"
 ></script>

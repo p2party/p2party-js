@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { configureStore } from "@reduxjs/toolkit";
+import { signalingPeerRequestDebouncer } from "../../src/utils/signalingPeerRequestDebouncer";
 
 import type { Middleware } from "@reduxjs/toolkit";
 import type { State } from "../../src/store";
@@ -41,6 +42,7 @@ let commonStateReducer: CommonSlice["default"];
 let roomReducer: RoomSlice["default"];
 let setConnectingToPeers: RoomSlice["setConnectingToPeers"];
 let setPeer: RoomSlice["setPeer"];
+let setKnownRoomPeers: RoomSlice["setKnownRoomPeers"];
 let setPeerHandshakeStatus: RoomSlice["setPeerHandshakeStatus"];
 let signalingServerReducer: SignalingSlice["default"];
 let keyPairReducer: KeyPairSlice["default"];
@@ -60,6 +62,7 @@ beforeAll(async () => {
     default: roomReducer,
     setConnectingToPeers,
     setPeer,
+    setKnownRoomPeers,
     setPeerHandshakeStatus,
   } = await import("../../src/reducers/roomSlice"));
   ({ default: signalingServerReducer } =
@@ -104,24 +107,50 @@ const testStore = (options: TestStoreOptions = {}) => {
   const roomId = options.roomId ?? ROOM_ID;
   let peersRequests = 0;
   let settled = 0;
+  const requestFrames: {
+    type?: string;
+    excludedPeerIds?: string[];
+    targetPeerIds?: string[];
+    rosterRequestId?: string;
+  }[] = [];
   const reasons: (string | undefined)[] = [];
+  const reconcileTargets: (string | undefined)[] = [];
   const recorder: Middleware = () => (next) => (action) => {
     const typed = action as {
       type?: string;
-      payload?: { connectingToPeers?: boolean; reason?: string };
-      meta?: { arg?: { originalArgs?: { content?: { type?: string } } } };
+      payload?: {
+        connectingToPeers?: boolean;
+        reason?: string;
+        peerId?: string;
+      };
+      meta?: {
+        arg?: {
+          originalArgs?: {
+            content?: {
+              type?: string;
+              excludedPeerIds?: string[];
+              targetPeerIds?: string[];
+              rosterRequestId?: string;
+            };
+          };
+        };
+      };
     };
     if (
       typed.type === setConnectingToPeers.type &&
       typed.payload?.connectingToPeers === true
-    )
+    ) {
       reasons.push(typed.payload.reason);
+      reconcileTargets.push(typed.payload.peerId);
+    }
     if (
       typed.type ===
         `${signalingServerApi.reducerPath}/executeMutation/pending` &&
       typed.meta?.arg?.originalArgs?.content?.type === "peers"
-    )
+    ) {
       peersRequests += 1;
+      requestFrames.push(typed.meta.arg!.originalArgs!.content!);
+    }
     // The listener ends every setConnectingToPeers(true) effect by resetting
     // the flag, so counting those is how a test waits for the effect.
     if (
@@ -188,6 +217,8 @@ const testStore = (options: TestStoreOptions = {}) => {
     store,
     roomId,
     peersRequests: () => peersRequests,
+    requestFrames,
+    reconcileTargets,
     settled: () => settled,
     reasons: () => [...reasons],
   };
@@ -292,6 +323,144 @@ const reconcilingStore = (options: TestStoreOptions = {}) => {
 };
 
 describe("roomListenerMiddleware empty-room reconciliation", () => {
+  test("the trailing retry includes every missing member queued in the burst", async () => {
+    const roomId = "00000000-0000-4000-8000-0000000000d5";
+    const { store, requestFrames, reconciler } = reconcilingStore({ roomId });
+    const peers = [2, 3, 4].map((n) => ({
+      peerId: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      peerPublicKey: String(n).repeat(64),
+    }));
+    try {
+      store.dispatch(setKnownRoomPeers({ roomId, peers }));
+      for (const peer of peers)
+        store.dispatch(
+          setConnectingToPeers({
+            roomId,
+            peerId: peer.peerId,
+            connectingToPeers: true,
+            reason: "redial",
+          }),
+        );
+      expect(requestFrames).toHaveLength(1);
+      expect(requestFrames[0].targetPeerIds).toEqual([peers[0].peerId]);
+      await new Promise((resolve) => setTimeout(resolve, 2050));
+      expect(requestFrames).toHaveLength(2);
+      expect(requestFrames[1].targetPeerIds).toEqual([
+        peers[1].peerId,
+        peers[2].peerId,
+      ]);
+      expect(requestFrames[1].rosterRequestId).not.toBe(
+        requestFrames[0].rosterRequestId,
+      );
+    } finally {
+      reconciler.cancelAll();
+      signalingPeerRequestDebouncer.cancelRoom(roomId);
+    }
+  });
+
+  test("three-member missing edge retries while its healthy sibling stays authenticated", async () => {
+    const roomId = "00000000-0000-4000-8000-0000000000d7";
+    const { store, timeouts, reconciler, peersRequests, settled } =
+      reconcilingStore({ roomId });
+    const b = { peerId: OTHER_PEER_ID, peerPublicKey: "22".repeat(32) };
+    const c = {
+      peerId: "00000000-0000-4000-8000-000000000003",
+      peerPublicKey: "33".repeat(32),
+    };
+    store.dispatch(setKnownRoomPeers({ roomId, peers: [b, c] }));
+    store.dispatch(setPeer({ roomId, ...b }));
+    store.dispatch(
+      setPeerHandshakeStatus({ roomId, ...b, status: "authenticated" }),
+    );
+    expect(reconciler.armedRooms()).toEqual([`${roomId}/${c.peerId}`]);
+    timeouts.advance(5000);
+    await waitFor(() => settled() === 1);
+    expect(peersRequests()).toBe(1);
+    expect(
+      store.getState().rooms[0].handshakeStatusByPeer?.[b.peerId]?.status,
+    ).toBe("authenticated");
+    store.dispatch(
+      setPeerHandshakeStatus({ roomId, ...c, status: "authenticated" }),
+    );
+    expect(reconciler.armedRooms()).toEqual([]);
+  });
+
+  test("one offline member cannot spend a later failed member's retry budget", async () => {
+    const roomId = "00000000-0000-4000-8000-0000000000d6";
+    const { store, timeouts, reconciler, reconcileTargets } = reconcilingStore({
+      roomId,
+    });
+    const b = { peerId: OTHER_PEER_ID, peerPublicKey: "22".repeat(32) };
+    const c = {
+      peerId: "00000000-0000-4000-8000-000000000003",
+      peerPublicKey: "33".repeat(32),
+    };
+    store.dispatch(
+      setPeerHandshakeStatus({ roomId, ...b, status: "authenticated" }),
+    );
+    store.dispatch(setKnownRoomPeers({ roomId, peers: [b, c] }));
+    timeouts.advance(600000);
+    expect(reconcileTargets.filter((id) => id === c.peerId)).toHaveLength(4);
+    store.dispatch(
+      setPeerHandshakeStatus({
+        roomId,
+        ...b,
+        status: "failed",
+        reason: "transport",
+      }),
+    );
+    timeouts.advance(5000);
+    expect(reconcileTargets.filter((id) => id === b.peerId)).toHaveLength(1);
+    expect(reconcileTargets.filter((id) => id === c.peerId)).toHaveLength(4);
+    reconciler.cancelAll();
+    signalingPeerRequestDebouncer.cancelRoom(roomId);
+  });
+
+  test("legacy mixed-terminal discovery is suppressed; negotiated discovery excludes the failed peer", async () => {
+    signalingPeerRequestDebouncer.resetSocketLifecycle();
+    const roomId = "00000000-0000-4000-8000-0000000000d8";
+    const { store, requestFrames, settled, reconciler } = reconcilingStore({
+      roomId,
+    });
+    const b = { peerId: OTHER_PEER_ID, peerPublicKey: "22".repeat(32) };
+    const c = {
+      peerId: "00000000-0000-4000-8000-000000000003",
+      peerPublicKey: "33".repeat(32),
+    };
+    const d = {
+      peerId: "00000000-0000-4000-8000-000000000004",
+      peerPublicKey: "44".repeat(32),
+    };
+    store.dispatch(setKnownRoomPeers({ roomId, peers: [b, c, d] }));
+    store.dispatch(
+      setPeerHandshakeStatus({ roomId, ...b, status: "authenticated" }),
+    );
+    store.dispatch(
+      setPeerHandshakeStatus({
+        roomId,
+        ...c,
+        status: "failed",
+        reason: "pin-mismatch",
+      }),
+    );
+    store.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+    await waitFor(() => settled() === 1);
+    expect(requestFrames).toEqual([]);
+    signalingPeerRequestDebouncer.confirmRosterSnapshots();
+    store.dispatch(
+      setConnectingToPeers({
+        roomId,
+        connectingToPeers: true,
+        reason: "redial",
+      }),
+    );
+    await waitFor(() => settled() === 2);
+    expect(requestFrames).toHaveLength(1);
+    expect(requestFrames[0].excludedPeerIds).toEqual([c.peerId]);
+    expect(requestFrames[0].rosterRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    reconciler.cancelAll();
+    signalingPeerRequestDebouncer.resetSocketLifecycle();
+  });
   test("a terminal PIN failure cancels the real middleware's scheduled roster retries", async () => {
     const roomId = "00000000-0000-4000-8000-0000000000d9";
     const { store, timeouts, reconciler, peersRequests, settled } =
@@ -359,7 +528,7 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
     expect(peersRequests()).toBe(afterJoin);
   });
 
-  test("an authenticated peer ends the reconciliation", async () => {
+  test("all eligible snapshot members authenticated ends reconciliation", async () => {
     const { store, timeouts, reconciler, peersRequests, settled } =
       reconcilingStore({ roomId: REJOINED_ROOM_ID });
 
@@ -386,6 +555,14 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
         peerId: OTHER_PEER_ID,
         peerPublicKey: `${"00".repeat(31)}02`,
         status: "authenticated",
+      }),
+    );
+    store.dispatch(
+      setKnownRoomPeers({
+        roomId: REJOINED_ROOM_ID,
+        peers: [
+          { peerId: OTHER_PEER_ID, peerPublicKey: `${"00".repeat(31)}02` },
+        ],
       }),
     );
     await waitFor(() => reconciler.armedRooms().length === 0);

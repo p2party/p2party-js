@@ -4,7 +4,7 @@ import { forgetMappedReceiveMessageKey } from "./receiveMessageKeyLifetime";
 import { waitForEdgeReceiveQuiescence } from "./handleMessageQueueing";
 
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
-import type { MessageData } from "../db/types";
+import type { MessageData, ReceiveDeleteGuard } from "../db/types";
 
 // ── the receiving half of a scheduled CANCEL ─────────────────────────────────
 //
@@ -59,7 +59,10 @@ export interface InboundTransferSweepDeps {
   readonly waitForReceiveIdle: typeof waitForEdgeReceiveQuiescence;
   readonly readProgress: typeof getDBMessageData;
   readonly forgetKey: typeof forgetMappedReceiveMessageKey;
-  readonly deleteReceive: typeof deleteReceiveTransfer;
+  readonly deleteReceive: (
+    root: string,
+    guard: ReceiveDeleteGuard,
+  ) => Promise<boolean>;
   /**
    * Drop the message from the LIVE room state. `deleteReceive` is the durable
    * half only — chunks, the messageData row and the pre-sized OPFS file — and
@@ -136,7 +139,12 @@ export const sweepCancelledInboundTransfer = async (
       return false;
 
     await deps.forgetKey(epc, roomId, merkleRootHex);
-    await deps.deleteReceive(merkleRootHex);
+    const removed = await deps.deleteReceive(merkleRootHex, {
+      roomId,
+      fromPeerId: epc.withPeerId,
+      incompleteOnly: true,
+    });
+    if (!removed) return false;
     await deps.dropStateRow(roomId, merkleRootHex);
 
     return true;

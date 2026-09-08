@@ -70,8 +70,7 @@ interface WorkerResponse {
 
 let nextId = 1;
 let lastDispatchedWorkerMessage:
-  | { id: number; method: string; args: unknown[] }
-  | undefined;
+  { id: number; method: string; args: unknown[] } | undefined;
 let lastWorkerTransferredBuffers: ArrayBuffer[] = [];
 
 // Dispatches a real message through db.worker.ts's actual `onmessage` handler
@@ -98,9 +97,7 @@ async function callWorker(
       Array.isArray(transferOrOptions)
         ? transferOrOptions
         : (transferOrOptions?.transfer ?? [])
-    ).filter(
-      (value): value is ArrayBuffer => value instanceof ArrayBuffer,
-    );
+    ).filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
     lastWorkerTransferredBuffers = transfer;
     captured = structuredClone(message, { transfer }) as WorkerResponse;
   };
@@ -162,7 +159,8 @@ async function callWorkersConcurrently(
 
   return ids.map((id) => {
     const response = responses.get(id);
-    if (!response) throw new Error(`worker did not respond to message id ${id}`);
+    if (!response)
+      throw new Error(`worker did not respond to message id ${id}`);
     return response;
   });
 }
@@ -446,6 +444,220 @@ describe("db.worker atomic receive progress", () => {
     data: Uint8Array.from(data).buffer,
     storage: "indexeddb",
     ...overrides,
+  });
+
+  test("stale receive expiry uses local activity, not attacker-controlled message timestamps", async () => {
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const chunk = receiveChunk(0, [1, 2, 3, 4, 5], {
+        timestamp: Number.MAX_SAFE_INTEGER,
+      });
+      expect(
+        (await callWorker("storeReceiveChunk", [chunk])).error,
+      ).toBeUndefined();
+      now += 24 * 60 * 60 * 1000 - 1;
+      expect((await callWorker("sweepStaleReceives", [])).result).toEqual([]);
+      now += 2;
+      expect((await callWorker("sweepStaleReceiveDetails", [])).result).toEqual([
+        { merkleRoot: chunk.merkleRoot, roomId: chunk.roomId, fromPeerId: chunk.fromPeerId },
+      ]);
+      expect(
+        (await callWorker("getDBAllChunksCount", [chunk.merkleRoot])).result,
+      ).toBe(0);
+      expect(
+        (await callWorker("getDBMessageData", [chunk.merkleRoot])).result,
+      ).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("stale sweep preserves completed messages, sender copies and another receive owner's data", async () => {
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const roots = ["31".repeat(64), "32".repeat(64), "33".repeat(64)];
+      for (const merkleRoot of roots)
+        expect(
+          (
+            await callWorker("storeReceiveChunk", [
+              receiveChunk(0, [1, 2, 3, 4, 5], { merkleRoot }),
+            ])
+          ).error,
+        ).toBeUndefined();
+      expect(
+        (
+          await callWorker("storeReceiveChunk", [
+            receiveChunk(1, [6, 7, 8, 9, 10], { merkleRoot: roots[0] }),
+          ])
+        ).error,
+      ).toBeUndefined();
+      const db = await getDB();
+      const self = (await db.getFromIndex(
+        "messageData",
+        "merkleRoot",
+        roots[1],
+      ))!;
+      await db.put("messageData", { ...self, transferId: "55".repeat(32) });
+      for (let index = 0; index < roots.length; index++)
+        await db.put("receiveActivity", {
+          merkleRoot: roots[index],
+          roomId: "room-1",
+          fromPeerId: index === 2 ? "wrong-peer" : "peer-1",
+          lastActivityAt: now,
+        });
+      db.close();
+      now += 24 * 60 * 60 * 1000 + 1;
+      expect((await callWorker("sweepStaleReceives", [])).result).toEqual([]);
+      for (const merkleRoot of roots)
+        expect(
+          (await callWorker("getDBAllChunksCount", [merkleRoot])).result,
+        ).toBeGreaterThan(0);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("a receive queued before cancellation cannot recreate the deleted partial", async () => {
+    const first = receiveChunk(0, [1, 2, 3, 4, 5], {
+      merkleRoot: "41".repeat(64),
+    });
+    const replies = await callWorkersConcurrently([
+      { method: "storeReceiveChunk", args: [first] },
+      { method: "deleteReceiveTransfer", args: [first.merkleRoot] },
+      {
+        method: "storeReceiveChunk",
+        args: [
+          receiveChunk(1, [6, 7, 8, 9, 10], { merkleRoot: first.merkleRoot }),
+        ],
+      },
+    ]);
+    expect(replies[0].error).toBeUndefined();
+    expect(replies[1].error).toBeUndefined();
+    expect(String(replies[2].error)).toContain("cancelled");
+    expect(
+      (await callWorker("getDBAllChunksCount", [first.merkleRoot])).result,
+    ).toBe(0);
+    expect(
+      (await callWorker("getDBMessageData", [first.merkleRoot])).result,
+    ).toBeUndefined();
+  });
+
+  test("a queued final chunk wins over stale collection and remains complete", async () => {
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const root = "42".repeat(64);
+      expect(
+        (
+          await callWorker("storeReceiveChunk", [
+            receiveChunk(0, [1, 2, 3, 4, 5], { merkleRoot: root }),
+          ])
+        ).error,
+      ).toBeUndefined();
+      now += 24 * 60 * 60 * 1000 + 1;
+      const replies = await callWorkersConcurrently([
+        {
+          method: "storeReceiveChunk",
+          args: [receiveChunk(1, [6, 7, 8, 9, 10], { merkleRoot: root })],
+        },
+        { method: "sweepStaleReceives", args: [] },
+      ]);
+      expect(replies[0].result).toEqual({
+        stored: true,
+        savedSize: 10,
+        complete: true,
+      });
+      expect(replies[1].result).toEqual([]);
+      expect((await callWorker("getDBAllChunksCount", [root])).result).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("a live cross-worker receive lease protects stale bytes until its queued storage commits", async () => {
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const root = "43".repeat(64);
+      expect(
+        (
+          await callWorker("storeReceiveChunk", [
+            receiveChunk(0, [1, 2, 3, 4, 5], { merkleRoot: root }),
+          ])
+        ).error,
+      ).toBeUndefined();
+      const db = await getDB();
+      const row = (await db.get("receiveActivity", root))!;
+      now += 24 * 60 * 60 * 1000 + 1;
+      await db.put("receiveActivity", {
+        ...row,
+        writeToken: "another-worker-opfs-write",
+        leaseUntil: now + 120_000,
+      });
+      db.close();
+      expect((await callWorker("sweepStaleReceives", [])).result).toEqual([]);
+      expect((await callWorker("getDBAllChunksCount", [root])).result).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("guarded remote cancel refuses another owner and a receive completed by the queued final chunk", async () => {
+    const root = "44".repeat(64);
+    expect(
+      (
+        await callWorker("storeReceiveChunk", [
+          receiveChunk(0, [1, 2, 3, 4, 5], { merkleRoot: root }),
+        ])
+      ).error,
+    ).toBeUndefined();
+    expect(
+      (
+        await callWorker("deleteReceiveTransfer", [
+          root,
+          { roomId: "room-1", fromPeerId: "wrong-peer", incompleteOnly: true },
+        ])
+      ).result,
+    ).toBe(false);
+    const replies = await callWorkersConcurrently([
+      {
+        method: "storeReceiveChunk",
+        args: [receiveChunk(1, [6, 7, 8, 9, 10], { merkleRoot: root })],
+      },
+      {
+        method: "deleteReceiveTransfer",
+        args: [
+          root,
+          { roomId: "room-1", fromPeerId: "peer-1", incompleteOnly: true },
+        ],
+      },
+    ]);
+    expect(replies[0].result).toEqual({
+      stored: true,
+      savedSize: 10,
+      complete: true,
+    });
+    expect(replies[1].result).toBe(false);
+    expect((await callWorker("getDBAllChunksCount", [root])).result).toBe(2);
+    const other = "45".repeat(64);
+    expect(
+      (
+        await callWorker("storeReceiveChunk", [
+          receiveChunk(0, [1, 2, 3, 4, 5], { merkleRoot: other }),
+        ])
+      ).error,
+    ).toBeUndefined();
+    expect(
+      (
+        await callWorker("deleteReceiveTransfer", [
+          other,
+          { roomId: "room-1", fromPeerId: "peer-1", incompleteOnly: true },
+        ])
+      ).result,
+    ).toBe(true);
+    expect((await callWorker("getDBAllChunksCount", [other])).result).toBe(0);
   });
 
   test("a duplicate chunk cannot falsely complete while another chunk is absent", async () => {
@@ -1521,7 +1733,9 @@ describe("getDBRoomStats", () => {
 
   test("a partially received message counts what arrived, not what was promised", async () => {
     // Otherwise an abandoned 10 GiB transfer would report 10 GiB received.
-    await seed([message({ fromPeerId: peerA, totalSize: 10_000, savedSize: 40 })]);
+    await seed([
+      message({ fromPeerId: peerA, totalSize: 10_000, savedSize: 40 }),
+    ]);
 
     const { result } = await callWorker("getDBRoomStats", [roomId]);
     expect((result as RoomStats).bytesReceived).toBe(40);

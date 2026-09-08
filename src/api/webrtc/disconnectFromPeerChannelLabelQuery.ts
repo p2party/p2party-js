@@ -1,3 +1,4 @@
+import { sendImmediateCancel } from "../../handlers/immediateDisposition";
 import webrtcApi from ".";
 
 import { deleteChannel, deleteMessage } from "../../reducers/roomSlice";
@@ -44,42 +45,40 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
 ) => {
   const { rooms, signalingServer } = api.getState() as State;
 
-  const channelIndex = dataChannels.findIndex(
-    (c) =>
-      (channel
-        ? c === channel
-        : c.label === label &&
-          c.withPeerId === peerId &&
-          c.roomIds.includes(roomId)),
+  const channelIndex = dataChannels.findIndex((c) =>
+    channel
+      ? c === channel
+      : c.label === label &&
+        c.withPeerId === peerId &&
+        c.roomIds.includes(roomId),
   );
 
-  if (channelIndex > -1 && dataChannels[channelIndex]) {
-    if (
-      alsoDeleteData &&
-      dataChannels[channelIndex].cancelReceiveTransfer
-    )
-      await dataChannels[channelIndex].cancelReceiveTransfer();
-    else dataChannels[channelIndex].releaseProtocolResources?.();
+  const targetChannel = dataChannels[channelIndex];
+  if (channelIndex > -1 && targetChannel) {
+    if (alsoDeleteData) await sendImmediateCancel(targetChannel);
+    if (alsoDeleteData && targetChannel.cancelReceiveTransfer)
+      await targetChannel.cancelReceiveTransfer();
+    else targetChannel.releaseProtocolResources?.();
     if (
       messageHash &&
       alsoSendFinishedMessage &&
       messageHash.length === crypto_hash_sha512_BYTES
     ) {
-      sendReceiptFrame(dataChannels[channelIndex], messageHash);
+      sendReceiptFrame(targetChannel, messageHash);
     }
 
-    dataChannels[channelIndex].onopen = null;
-    dataChannels[channelIndex].onclose = null;
-    dataChannels[channelIndex].onerror = null;
-    dataChannels[channelIndex].onclosing = null;
-    dataChannels[channelIndex].onmessage = null;
-    dataChannels[channelIndex].onbufferedamountlow = null;
+    targetChannel.onopen = null;
+    targetChannel.onclose = null;
+    targetChannel.onerror = null;
+    targetChannel.onclosing = null;
+    targetChannel.onmessage = null;
+    targetChannel.onbufferedamountlow = null;
     // Drain the send buffer before closing so any still-buffered frames are not
     // wiped by close() (objective 3) — mirrors disconnectFromChannelLabelQuery.
-    if (dataChannels[channelIndex].readyState === "open")
-      await drainAndClose(dataChannels[channelIndex]);
+    if (targetChannel.readyState === "open") await drainAndClose(targetChannel);
 
-    dataChannels.splice(channelIndex, 1);
+    const currentIndex = dataChannels.indexOf(targetChannel);
+    if (currentIndex !== -1) dataChannels.splice(currentIndex, 1);
 
     await deleteDBSendQueue(roomSendQueueLabel(roomId, label), peerId);
   }
@@ -87,8 +86,7 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
   // Check whether channel is a name or a message channel
   const { merkleRootHex } = await decompileChannelMessageLabel(label);
   if (merkleRootHex.length > 0) {
-    if (alsoDeleteData)
-      api.dispatch(deleteMessage({ roomId, merkleRootHex }));
+    if (alsoDeleteData) api.dispatch(deleteMessage({ roomId, merkleRootHex }));
 
     // `newChunks` is shared by every peer edge of one logical room send.
     // Never free it from a per-peer close/completion path: a fast peer may

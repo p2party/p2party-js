@@ -31,6 +31,25 @@ beforeAll(async () => {
   module = await loadTestModule();
 });
 
+test("explicit rekey invalidation ends a suspended attempt without spending its idle budget", async () => {
+  let now = 0;
+  expect(
+    await waitForScheduledDelivery({
+      isComplete: () => false,
+      progress: () => ({ state: "queued", queuePosition: 0, sentCells: 0 }),
+      isSuspended: () => true,
+      isInvalidated: () => now >= 200,
+      idleTimeoutMs: 600_000,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms;
+        if (now > 1000) throw new Error("rekey left a stale attempt waiting");
+      },
+    }),
+  ).toBe(false);
+  expect(now).toBe(200);
+});
+
 // ── fake clock (mirrors tests/handlers/coverRuntime.test.ts) ─────────────────
 
 interface FakeTimer {

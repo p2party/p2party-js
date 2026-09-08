@@ -125,8 +125,10 @@ their live transport wiring is not complete.
 
 ## Send, cancel, and read
 
-Wait until the room has peers before sending. Each logical send has a random
-transfer ID and opens a per-message data channel on every eligible peer edge.
+Wait until the room has known recipient identities before sending. Each logical
+send has a random transfer ID. Immediate mode opens a per-message data channel
+on each eligible edge; scheduled mode places its chunks into the existing
+fixed-cadence cover lanes.
 
 ```ts
 const handle = p2party.sendMessage("hello room", "chat", room.id);
@@ -155,8 +157,97 @@ void cancel; // Remove when a UI event uses it.
 
 `sendMessage()` returns a `MessageTransferHandle`, not a promise. `done`
 settles after all started peer sends and cleanup and reports ordered per-peer
-outcomes. A peer may be delivered, failed during setup/transfer, or skipped
-because it is disconnected, unauthenticated, or the transfer was cancelled.
+outcomes for that attempt. A peer may be delivered, failed during setup/transfer,
+or skipped because it is disconnected, unauthenticated, or the transfer was
+cancelled. A rejected attempt can still have a durable pending transfer: do not
+label it delivered, or assume that its resend source was discarded.
+
+The sender publishes its outbox record only after every staged chunk, the
+Merkle tree, and its local message copy have committed. A reload before that
+point cannot resume preparation; select the original file again. After
+publication, a reload or an exhausted reconnect budget retains the original
+transfer ID, Merkle root and staged bytes for retry. Nothing is rehashed or
+randomly repadded on a resumed send.
+
+```ts
+import type { PendingMessage } from "p2party";
+
+const pending: PendingMessage[] = await p2party.listPendingMessages(room.id);
+for (const message of pending) {
+  console.log(message.filename, message.phase, message.remainingRecipients);
+}
+
+// Use a deliberate retry button. It may take the room's scheduled delivery
+// time to settle; leave cancellation available while this promise is pending.
+try {
+  const attempts = await p2party.resumePendingMessages(room.id);
+  for (const attempt of attempts) console.table(attempt.outcomes);
+} catch (error) {
+  // AggregateError.errors contains failed attempts; their pending records stay
+  // available unless explicitly cancelled or expired.
+  console.error(error);
+}
+
+// Exact logical-send cancellation also works after the original handle was
+// lost to a reload. It fences queued writes before removing retained staging.
+if (pending[0])
+  await p2party.cancelPendingMessage(room.id, pending[0].transferId);
+```
+
+Authenticated-peer events trigger a serialized retry pass, including a bounded
+claim after an old tab's lease expires. A failed pass does not start an endless
+retry timer. Explicit retry requires verified signaling and a matching
+currently authenticated recipient; it never calls `connect()`, prompts for a
+passkey, or supplies a PIN. A PIN room must first be admitted with the user's
+current in-memory PIN. PIN and policy failures remain terminal until a deliberate
+authentication retry.
+
+The immutable outbox binds the sender's public key and durable identity
+revision, room capability and canonical policy, channel, and recipient public
+keys. Session peer IDs may change. Only one tab can own a transfer's 30-second
+lease at a time; it renews every 10 seconds. A stale tab cannot publish queued
+writes or renew a replacement owner's lease. Terminal signaling refusal stops
+its current owners, and switching identity invalidates the old outbox.
+
+Confirmed recipients are recorded separately and never retried. A recipient's
+explicit cancellation also ends retries to that recipient without cancelling
+other recipients. Immediate retries rebuild the have-set from authenticated
+receipt replay, so older receivers that discarded a closed channel's partial
+can still recover. Scheduled retries preserve the receipt bitmap and send
+missing chunks plus at most one already-received real chunk as a completion
+probe. The fixed cover cadence and lane count remain unchanged.
+
+Retention and admission have explicit limits:
+
+- Published pending transfers expire 24 hours after publication. Active owners
+  are protected while they run; a completed recipient is never reported as a
+  new delivery merely because staging remains.
+- Interrupted preparation expires after one hour. Its `phase` remains
+  `"staging"`; an expired `retryAfter` means its owner is gone, not that the
+  unfinished file can resume.
+- At most 32 pending transfers and 64 recipients per transfer are admitted.
+  Their aggregate storage reservation is capped at 12 GiB and charges padded
+  cells, metadata, proofs and the sender's local copy. Browser quota can impose
+  a smaller limit than the 10 GiB per-message protocol maximum. Admission
+  refuses excess work rather than evicting another pending send.
+- Incomplete received transfers expire after 24 hours without local receive
+  activity. Cleanup uses the device's activity clock, not the sender's message
+  timestamp. It protects active writes, completed messages and sender copies,
+  checks the room/receive owner, and fences writes queued before cancellation.
+
+Storage sweeps run when pending transfers are listed or an authentication event
+checks for resumable work. Maintenance runs immediately on the first check,
+then at most once every 30 seconds, and defers while receive queues are busy.
+Committed expiry also removes the old room view and retires its mapped receive
+key, preserving newer receives and connection generations.
+Cancelling or deleting a message removes its pending
+outbox; leaving a room discards that room's pending work. Successful completion
+removes resend staging while retaining completed local history.
+
+The outbox reuses the already-staged message bytes in browser storage; it is
+not a new encryption-at-rest guarantee for files or message history. It stores
+no PIN, passkey assertion, plaintext ratchet key or message key. A resumed send
+derives fresh message encryption state from the currently authenticated edge.
 
 For an inbound message, take `merkleRootHex` (and, if needed, `sha512Hex`) from
 the room's exported `messages` state:

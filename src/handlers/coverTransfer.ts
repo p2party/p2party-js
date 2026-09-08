@@ -1,5 +1,6 @@
 import { compileChannelMessageLabel } from "../utils/channelLabel";
-import { hexToUint8Array } from "../utils/uint8array";
+import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
+import { MAX_COVER_CHUNK_RECEIPTS } from "../cryptography/coverCell";
 import {
   SCHEDULED_DELIVERY_MARGIN_MS,
   WIRE_CHUNK_FRAME_LEN,
@@ -34,12 +35,17 @@ import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 interface PendingScheduledControlCell {
   readonly merkleRoot: Uint8Array;
   readonly token?: Uint8Array;
+  readonly tokens?: Uint8Array[];
+  readonly tokenKeys?: Set<string>;
 }
 
 interface ScheduledReceiptState {
   readonly pending: PendingScheduledControlCell[];
   drainJobActive: boolean;
   jobSequence: number;
+  released: boolean;
+  queuedTokens: number;
+  readonly latestBatchByRoot: Map<string, PendingScheduledControlCell>;
 }
 
 const receiptStates = new WeakMap<IRTCPeerConnection, ScheduledReceiptState>();
@@ -49,14 +55,82 @@ const MAX_PENDING_SCHEDULED_RECEIPTS = 4_096;
 const receiptState = (epc: IRTCPeerConnection): ScheduledReceiptState => {
   let state = receiptStates.get(epc);
   if (!state) {
-    state = { pending: [], drainJobActive: false, jobSequence: 0 };
+    state = {
+      pending: [],
+      drainJobActive: false,
+      jobSequence: 0,
+      released: false,
+      queuedTokens: 0,
+      latestBatchByRoot: new Map(),
+    };
     receiptStates.set(epc, state);
   }
   return state;
 };
 
+const removePendingControl = (
+  state: ScheduledReceiptState,
+): PendingScheduledControlCell | undefined => {
+  const next = state.pending.shift();
+  if (!next) return;
+  state.queuedTokens -= next.tokens?.length ?? 1;
+  const root = uint8ArrayToHex(next.merkleRoot);
+  if (state.latestBatchByRoot.get(root) === next)
+    state.latestBatchByRoot.delete(root);
+  return next;
+};
+
+const wipeControl = (entry: PendingScheduledControlCell): void => {
+  entry.merkleRoot.fill(0);
+  entry.token?.fill(0);
+  for (const token of entry.tokens ?? []) token.fill(0);
+  entry.tokenKeys?.clear();
+};
+
+const boundScheduledControls = (state: ScheduledReceiptState): void => {
+  while (state.queuedTokens > MAX_PENDING_SCHEDULED_RECEIPTS) {
+    const dropped = removePendingControl(state);
+    if (!dropped) break;
+    wipeControl(dropped);
+  }
+};
+
+/** Authenticated per-chunk tokens, batched only within the same transfer root. */
+export const queueScheduledChunkReceipt = (
+  epc: IRTCPeerConnection,
+  merkleRoot: Uint8Array,
+  token: Uint8Array,
+): boolean => {
+  const runtime = epc.coverRuntime;
+  if (!runtime || merkleRoot.length !== 64 || token.length !== 64) return false;
+  const state = receiptState(epc);
+  const rootKey = uint8ArrayToHex(merkleRoot),
+    tokenKey = uint8ArrayToHex(token);
+  let batch = state.latestBatchByRoot.get(rootKey);
+  if (batch?.tokenKeys?.has(tokenKey)) return true;
+  if (
+    !batch ||
+    !batch.tokens ||
+    batch.tokens.length >= MAX_COVER_CHUNK_RECEIPTS
+  ) {
+    batch = {
+      merkleRoot: Uint8Array.from(merkleRoot),
+      tokens: [],
+      tokenKeys: new Set(),
+    };
+    state.pending.push(batch);
+    state.latestBatchByRoot.set(rootKey, batch);
+  }
+  batch.tokens!.push(Uint8Array.from(token));
+  batch.tokenKeys!.add(tokenKey);
+  state.queuedTokens++;
+  boundScheduledControls(state);
+  ensureReceiptDrainJob(epc, runtime, state);
+  return true;
+};
+
 /**
- * Queue one scheduled receipt (per-cell ack or terminal completion token) for
+ * Queue one legacy scheduled terminal receipt (token equals transfer root) for
  * the next available reverse control slots. Returns false when the edge has no
  * cover runtime (immediate mode) so the caller falls back to immediate
  * receipts, and drops oldest-first beyond the flood bound.
@@ -74,8 +148,8 @@ export const queueScheduledReceipt = (
     merkleRoot: Uint8Array.from(merkleRoot),
     token: Uint8Array.from(token),
   });
-  while (state.pending.length > MAX_PENDING_SCHEDULED_RECEIPTS)
-    state.pending.shift();
+  state.queuedTokens++;
+  boundScheduledControls(state);
   ensureReceiptDrainJob(epc, runtime, state);
   return true;
 };
@@ -85,7 +159,8 @@ const ensureReceiptDrainJob = (
   runtime: CoverRuntime,
   state: ScheduledReceiptState,
 ): void => {
-  if (state.drainJobActive || state.pending.length === 0) return;
+  if (state.released || state.drainJobActive || state.pending.length === 0)
+    return;
   const capacity = runtime.cellsPerLanePerCycle();
   const declared = Math.min(state.pending.length, capacity);
   if (declared <= 0) return;
@@ -98,9 +173,15 @@ const ensureReceiptDrainJob = (
     kind: "control",
     declaredCellCount: declared,
     nextCell: () => {
-      const next = state.pending.shift();
+      const next = removePendingControl(state);
       if (!next) return null; // dummy substitution for an empty slot
       try {
+        if (next.tokens)
+          return runtime.sealCoverContent({
+            subtype: "chunk-receipts",
+            merkleRoot: next.merkleRoot,
+            tokens: next.tokens,
+          });
         return next.token
           ? runtime.sealCoverContent({
               subtype: "receipt",
@@ -112,8 +193,7 @@ const ensureReceiptDrainJob = (
               merkleRoot: next.merkleRoot,
             });
       } finally {
-        next.merkleRoot.fill(0);
-        next.token?.fill(0);
+        wipeControl(next);
       }
     },
   };
@@ -135,12 +215,12 @@ const ensureReceiptDrainJob = (
 export const releaseScheduledReceipts = (epc: IRTCPeerConnection): void => {
   const state = receiptStates.get(epc);
   if (!state) return;
-  for (const entry of state.pending) {
-    entry.merkleRoot.fill(0);
-    entry.token?.fill(0);
-  }
+  state.released = true;
+  for (const entry of state.pending) wipeControl(entry);
   state.pending.length = 0;
   state.drainJobActive = false;
+  state.queuedTokens = 0;
+  state.latestBatchByRoot.clear();
   receiptStates.delete(epc);
 };
 
@@ -188,8 +268,8 @@ export const queueScheduledCancel = (
   if (!merkleRoot) return false;
   const state = receiptState(epc);
   state.pending.push({ merkleRoot });
-  while (state.pending.length > MAX_PENDING_SCHEDULED_RECEIPTS)
-    state.pending.shift();
+  state.queuedTokens++;
+  boundScheduledControls(state);
   ensureReceiptDrainJob(epc, runtime, state);
   return true;
 };
@@ -263,12 +343,9 @@ export type ScheduledSendProgress = CoverJobProgress;
  * What this send has achieved so far, or undefined once the scheduler no
  * longer holds the job.
  *
- * Scheduled mode emits NO per-chunk receipts — handleMessageQueueing sends an
- * immediate receipt only when the edge has no cover runtime, and otherwise one
- * terminal receipt on completion — so `getAckedChunkCount` stays 0 for the
- * whole transfer and the receiver tells the sender nothing until the very end.
- * The sender's only evidence that the send is alive is therefore local: its
- * position in the admission queue moving up, and its cells reaching the wire.
+ * Batched chunk ACKs support selective resume, while older peers send only a
+ * terminal receipt. Local progress also covers time before reverse receipts
+ * can be admitted: the job moving up the queue and cells reaching the wire.
  */
 export const scheduledSendProgress = (
   runtime: ScheduledJobProgressSource | undefined,
@@ -348,6 +425,8 @@ export interface ScheduledDeliveryWaitOptions {
    * scheduledCoverIsSuspended; omitted, the budget always accrues.
    */
   readonly isSuspended?: () => boolean;
+  /** Explicit transport/PQ generation change retires this attempt immediately. */
+  readonly isInvalidated?: () => boolean;
   /**
    * How long this send may make NO observable progress before it is given up
    * on. An IDLE budget, never a total deadline.
@@ -413,6 +492,7 @@ export const waitForScheduledDelivery = async (
   for (;;) {
     if (options.signal?.aborted) return false;
     if (options.isComplete()) return true;
+    if (options.isInvalidated?.()) return false;
 
     // `undefined` is the job having left the scheduler, not a step backwards:
     // it stops the clock being reset, so the remaining wait is exactly the
@@ -449,6 +529,8 @@ export interface ScheduledSendJobOptions {
   readonly sealSlotCell: SealTransferSlotCell;
   /** Set of already-acked real chunk indices for reconcile skipping. */
   readonly getAckedChunks?: () => ReadonlySet<number>;
+  /** Live constant-time membership; preferred over repeated defensive copies. */
+  readonly isChunkAcked?: (chunkIndex: number) => boolean;
   /** Real chunk indices only (decoys never resend); default is all indices. */
   readonly realChunkIndices?: readonly number[];
 }
@@ -479,11 +561,13 @@ export const buildScheduledSendJob = (
   // job on a later cycle — never a burst inside this one.
   let cursor = 0;
   const nextRealIndex = (): number | null => {
-    const acked = options.getAckedChunks?.() ?? EMPTY_ACK_SET;
+    const acked = options.isChunkAcked
+      ? undefined
+      : (options.getAckedChunks?.() ?? EMPTY_ACK_SET);
     while (cursor < realIndices.length) {
       const index = realIndices[cursor];
+      if (!(options.isChunkAcked?.(index) ?? acked!.has(index))) return index;
       cursor += 1;
-      if (!acked.has(index)) return index;
     }
     return null;
   };
@@ -492,6 +576,7 @@ export const buildScheduledSendJob = (
     id: options.channelMessageLabel,
     kind: "real",
     declaredCellCount: options.totalChunks,
+    exhausted: () => cursor >= realIndices.length,
     nextCell: async (_slot: CoverJobSlot): Promise<Uint8Array | null> => {
       const index = nextRealIndex();
       if (index === null) return null; // dummy substitution: nothing left to send
@@ -501,6 +586,7 @@ export const buildScheduledSendJob = (
         throw new Error(
           "coverTransfer: sealed transfer cell is not the uniform length",
         );
+      cursor += 1;
       return cell;
     },
     cancelCell: async (_slot: CoverJobSlot): Promise<Uint8Array> => {

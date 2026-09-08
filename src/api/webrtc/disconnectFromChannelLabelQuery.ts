@@ -1,3 +1,4 @@
+import { sendImmediateCancel } from "../../handlers/immediateDisposition";
 import {
   // deleteChannel,
   deleteMessage,
@@ -33,18 +34,14 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
   },
   api,
 ) => {
-  const CHANNELS_LEN = dataChannels.length;
-  if (CHANNELS_LEN === 0) return { data: undefined };
-
-  for (let i = 0; i < CHANNELS_LEN; i++) {
-    if (
-      dataChannels[i]?.label !== label ||
-      !dataChannels[i].roomIds.includes(roomId) ||
-      dataChannels[i].readyState !== "open"
-    )
-      continue;
-
-    const targetChannel = dataChannels[i];
+  const targets = dataChannels.filter(
+    (channel) =>
+      channel.label === label &&
+      channel.roomIds.includes(roomId) &&
+      channel.readyState === "open",
+  );
+  for (const targetChannel of targets) {
+    if (alsoDeleteData) await sendImmediateCancel(targetChannel);
     if (alsoDeleteData && targetChannel.cancelReceiveTransfer)
       await targetChannel.cancelReceiveTransfer();
     else targetChannel.releaseProtocolResources?.();
@@ -53,11 +50,11 @@ const webrtcDisconnectFromChannelLabelQuery: BaseQueryFn<
       alsoSendFinishedMessage &&
       messageHash.length === crypto_hash_sha512_BYTES
     )
-      sendReceiptFrame(dataChannels[i], messageHash);
+      sendReceiptFrame(targetChannel, messageHash);
 
     // Drain the send buffer before closing so the just-queued finished-message
     // (and any still-buffered chunks) are not wiped by close().
-    await drainAndClose(dataChannels[i]);
+    await drainAndClose(targetChannel);
 
     if (alsoDeleteData) {
       const { merkleRootHex } = await decompileChannelMessageLabel(label);

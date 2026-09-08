@@ -11,9 +11,9 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.14.8` release candidate is verified locally and vendored in the site. The desync
-remediation requires the matching `0.1.2` signaling server for socket-generation
-recovery. Local verification results and remaining limits are recorded in
+The SDK `0.14.9` release candidate adds durable sender recovery, selective
+scheduled receipts, and sparse-PQ overlap handling. The matching `0.1.3`
+signaling server adds membership snapshots and targeted mesh repair. Local verification results and remaining limits are recorded in
 [the browser harness report](docs/e2e/README.md).
 
 This remediation does not publish, deploy, or push any repository. A site must
@@ -40,15 +40,12 @@ before the new recovery behavior can be claimed for that deployment.
   persist-before-dispatch and application traffic blocked mid-exchange;
 - room-wide scheduled timing cover — policy-pinned cadence, lanes, and frames
   per cell, emitted whether or not there is data to send;
-- reliable transfer — per-message channels, authenticated receipts, selective
-  retransmission, and resume across a replaced or re-authenticated peer
-  connection while the sending page stays alive. There is no sender-side
-  resume across a page reload: an in-flight send does not survive one. A
-  receiver does — on a fresh per-message channel it replays receipts for the
-  chunk leaf-hashes it durably holds (`handleOpenChannel.ts`), so a still-live
-  sender resends only the gaps. `MAX_MESSAGE_SIZE` enforces a 10 GiB ceiling
-  (`src/utils/constants.ts`) — an enforced limit, not a transfer that has been
-  demonstrated at that size;
+- reliable transfer — authenticated receipts, selective retries and a bounded
+  durable sender outbox. Prepared sends survive page reloads in the same browser
+  storage and identity; abandoned preparation does not. Per-recipient outcomes,
+  fenced ownership and explicit pause/cancel semantics preserve recovery while
+  limiting storage and retries. `MAX_MESSAGE_SIZE` enforces a 10 GiB ceiling,
+  an enforced limit rather than a demonstrated transfer size;
 - a store-free `p2party/session` API for non-browser transports.
 
 One caveat belongs here rather than in a footnote. The post-connect DTLS
@@ -65,25 +62,19 @@ transport terminates on the certificate the SDP advertised.
 
 ### Known open, in priority order
 
-1. **C6: sparse-PQ healing during a scheduled transfer.** Extend
-   `isEdgeQuiescentForHealing` to include pending real cover jobs. The new
-   scheduled-send registry provides the prerequisite, but healing still needs
-   its own regression scenario.
-2. **C11 and C9's roster protocol work.** Return the server's room roster and
-   reconcile each server-named member separately. Verify a blackholed edge in
-   an n=3 room; the present recovery harness has two peers.
-3. **C10: durable transfer recovery.** Resume-budget exhaustion can leave a
-   receiver partial. Add a durable sender outbox and a receive-side stale
-   partial sweep; sender recovery across a page reload is also outstanding.
-4. **Per-chunk scheduled receipts.** Scheduled resume currently re-sends all
-   chunks; selective replay needs authenticated scheduled chunk receipts.
-5. **C1 with a pre-generation signaling server.** Socket-generation recovery
-   needs server `0.1.2`. The bounded unnegotiated-transport watchdog limits
-   retries against older servers; it cannot provide the missing generation.
-6. **Existing limits.** Identity backup UI, import cycles, unexecuted ProVerif
-   verification, and Firefox's missing post-connect certificate statistics
-   remain. No sender survives a page reload. Recovery latency outside the
-   measured two-peer loopback scenarios is not established.
+1. **Compatibility with older signaling servers.** Socket-generation recovery
+   needs server `0.1.2` or newer; correlated membership and targeted per-member
+   repair need `0.1.3`. Older servers cannot supply those missing facts. Retry
+   ceilings bound failures without guaranteeing convergence.
+2. **Existing limits.** Import cycles, unexecuted ProVerif verification and
+   Firefox's missing post-connect certificate statistics remain. Recovery
+   latency outside the measured loopback scenarios is not established.
+
+C6, C9/C11, C10 and selective scheduled receipts are implemented in `0.14.9`.
+Their acceptance tests and explicit limits are tracked in the
+[browser report](docs/e2e/README.md). No general sublinear system cost is claimed:
+ACK membership checks are constant-time, but snapshot size, staged-index scans
+and fixed cover traffic still scale with their respective inputs.
 
 **Close the verification gaps.** Three properties are implemented and believed
 correct but still not demonstrated end to end: PIN backoff escalation under
@@ -103,8 +94,8 @@ complete its new handshake. In the current responder-freeze 8 MiB arm,
 mutual authentication returned at 12.023 seconds and bidirectional delivery
 verification completed at 15.497 seconds; the transfer was byte-exact and the
 sender reported delivery. These are measurements, not a general network bound.
-The harness remains n=2 on loopback, so it closes neither the n>2 nor the
-real-network verification gap.
+The new mesh scenario covers three browser peers on loopback. It does not
+establish traffic-analysis resistance or recovery bounds on real networks.
 
 **Independent security audit.** The protocol has had no third-party review.
 This is the single most valuable thing that could happen to the project, and
@@ -129,8 +120,9 @@ a recovery phrase, with tests over the ordering the swap depends on. See
 The derivation is one way, which is the residue: an identity generated randomly —
 every identity that existed before these calls — cannot be exported, only
 replaced, and replacing it is an identity-key change every contact sees. There
-is no migration for those users beyond that trade, and the p2party.com flow that
-puts it in front of them is tracked in that repository.
+is no migration for those users beyond that trade. The p2party.com application
+provides the create/restore flow and explains that replacing a random identity
+changes the key seen by contacts.
 
 ## Research directions
 

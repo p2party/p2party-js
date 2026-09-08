@@ -24,10 +24,7 @@ import {
 } from "../cryptography/coverCell";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 import { uint8ArrayToHex } from "../utils/uint8array";
-import {
-  MAX_BUFFERED_AMOUNT,
-  WIRE_CHUNK_FRAME_LEN,
-} from "../utils/constants";
+import { MAX_BUFFERED_AMOUNT, WIRE_CHUNK_FRAME_LEN } from "../utils/constants";
 
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
@@ -79,6 +76,8 @@ export interface CoverRuntimeOptions {
   readonly onStatusChange?: (change: CoverStatusChange) => void;
   readonly onJobResult?: (result: CoverJobResult) => void;
   readonly onJobInterrupted?: (interruption: CoverJobInterruption) => void;
+  /** Durable PQ epoch changed; senders may re-derive retired real producers. */
+  readonly onKeyEpochChanged?: () => void;
   /**
    * Real-timer drift tolerance. Defaults to just under one slot spacing so a
    * healthy browser's setTimeout jitter does not suspend cover; a larger slip
@@ -92,13 +91,18 @@ export interface CoverRuntimeOptions {
     merkleRootHex: string,
     token: Uint8Array,
   ) => void;
+  readonly onScheduledChunkReceipts?: (
+    merkleRootHex: string,
+    tokens: readonly Uint8Array[],
+  ) => void;
   readonly clock?: CoverClock;
 }
 
 const realClock: CoverClock = {
   now: () => Date.now(),
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (handle) => clearTimeout(handle as Parameters<typeof clearTimeout>[0]),
+  clearTimeout: (handle) =>
+    clearTimeout(handle as Parameters<typeof clearTimeout>[0]),
 };
 
 /**
@@ -265,6 +269,17 @@ export class CoverRuntime {
     return this.#scheduler.getQueuedJobIds();
   }
 
+  hasPendingRealJobs(): boolean {
+    return this.#scheduler.hasPendingRealJobs();
+  }
+
+  /** Called only after the new epoch is durable and adopted. */
+  onPqEpochChanged(): void {
+    this.#assertLive();
+    this.#scheduler.invalidateRealJobsForRekey();
+    this.#options.onKeyEpochChanged?.();
+  }
+
   /**
    * Live scheduler progress for one job, or undefined once it has settled.
    * Deliberately NOT `#assertLive()`-guarded: a delivery wait polls this and
@@ -315,6 +330,11 @@ export class CoverRuntime {
           uint8ArrayToHex(opened.content.merkleRoot),
           opened.content.token,
         );
+      else if (opened.content.subtype === "chunk-receipts")
+        this.#options.onScheduledChunkReceipts?.(
+          uint8ArrayToHex(opened.content.merkleRoot),
+          opened.content.tokens,
+        );
       return true;
     } catch {
       return false;
@@ -330,10 +350,7 @@ export class CoverRuntime {
   async makeDummyLaneLabel(): Promise<string> {
     const randomRoot = new Uint8Array(64);
     crypto.getRandomValues(randomRoot);
-    return compileChannelMessageLabel(
-      this.#options.laneLabelName,
-      randomRoot,
-    );
+    return compileChannelMessageLabel(this.#options.laneLabelName, randomRoot);
   }
 
   #admitInboundCounter(counter: bigint): boolean {
@@ -359,8 +376,7 @@ export class CoverRuntime {
 
   #seal(content: CoverCellContent): Uint8Array {
     const pq = this.#epc.pqHealingState;
-    if (!pq)
-      throw new Error("coverRuntime: edge has no live PQ runtime");
+    if (!pq) throw new Error("coverRuntime: edge has no live PQ runtime");
     const context = pq.currentMessageContext();
     const counter = this.#outboundCounter;
     this.#outboundCounter += 1n;
@@ -386,9 +402,7 @@ export class CoverRuntime {
     // Label construction is async only for real compile parity; the dummy
     // label is produced synchronously here to keep the lane factory sync.
     const label =
-      context.job !== null
-        ? context.job.id
-        : this.#syncDummyLaneLabel();
+      context.job !== null ? context.job.id : this.#syncDummyLaneLabel();
     const channel = this.#options.openLaneChannel(label);
     return {
       send: (request: CoverSendRequest): boolean => {

@@ -23,6 +23,7 @@ const {
   setIceServers,
   setChannel,
   setPeer,
+  setKnownRoomPeers,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
   setRoom,
@@ -33,6 +34,30 @@ const { MAX_SIGNALING_ROOM_PEERS } =
   await import("../../src/utils/signalingBounds");
 
 describe("room policy reducer boundary", () => {
+  test("member discovery survives transport teardown but replacement snapshots and leave remove it", () => {
+    const roomId = "00000000-0000-4000-8000-0000000000e6",
+      url = "e6".repeat(32);
+    const b = {
+      peerId: "00000000-0000-4000-8000-000000000002",
+      peerPublicKey: "22".repeat(32),
+    };
+    const c = {
+      peerId: "00000000-0000-4000-8000-000000000003",
+      peerPublicKey: "33".repeat(32),
+    };
+    let state = roomReducer(undefined, setRoom({ url, id: roomId }));
+    state = roomReducer(state, setKnownRoomPeers({ roomId, peers: [b, c] }));
+    state = roomReducer(state, setPeer({ roomId, ...c }));
+    state = roomReducer(state, deletePeer({ roomId, peerId: c.peerId }));
+    expect(state[0].peers).toEqual([]);
+    expect(state[0].knownPeers).toEqual([b, c]);
+    state = roomReducer(state, setKnownRoomPeers({ roomId, peers: [b] }));
+    expect(state[0].knownPeers).toEqual([b]);
+    state = roomReducer(state, deleteRoom(roomId));
+    state = roomReducer(state, setKnownRoomPeers({ roomId, peers: [b, c] }));
+    expect(state[0].knownPeers).toBeUndefined();
+    expect(state[0].signalingActive).toBe(false);
+  });
   test("deliberate retry clears failed handshakes and preserves authenticated peers", () => {
     const roomUrl = "e5".repeat(32);
     const roomId = "00000000-0000-4000-8000-0000000000e5";

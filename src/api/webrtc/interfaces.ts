@@ -185,7 +185,7 @@ export interface RTCOpenChannelParams {
 export interface RTCSendMessageParams {
   /** Random 32-byte lowercase-hex identity allocated by the public API. */
   transferId: string;
-  data: string | File;
+  data?: string | File;
   label: string;
   roomId: string;
   minChunks?: number;

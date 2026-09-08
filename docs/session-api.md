@@ -381,6 +381,15 @@ The bootstrap ML-KEM exchange protects the initial root. Healing periodically
 re-runs it so a later post-quantum compromise cannot unwind an old session.
 The session owns the state machine; the caller owns scheduling and transport.
 
+The browser SDK separately coordinates queued scheduled producers with epoch
+changes, persists per-recipient chunk receipts, and implements WebRTC pause and
+CANCEL controls. Those transport/outbox services are not part of
+`p2party/session`. A session integrator must coordinate its own pending output
+and recovery when `pqEpoch` changes; the session does not selectively resend
+previously returned frames or interpret cover receipt subtypes. See the
+[wire format](wire-format.md#scheduled-control-cells--65490-bytes) for the browser
+contract.
+
 Control frames are the same 65,490-byte size as chunk frames, so the outer
 framing MUST record which kind a record is — the session will reject a control
 frame handed to `decrypt()` and vice versa.

@@ -38,6 +38,10 @@ const peerConnections: IRTCPeerConnection[] = [];
 const iceCandidates: IRTCIceCandidate[] = [];
 const dataChannels: IRTCDataChannel[] = [];
 
+/** Internal lifecycle snapshot; callers must recheck each transport gate. */
+export const snapshotPeerConnections = (): readonly IRTCPeerConnection[] =>
+  [...peerConnections];
+
 const disconnectPeerThroughApi = (
   api: Pick<BaseQueryApi, "dispatch">,
 ): DisconnectPeerTransport => {

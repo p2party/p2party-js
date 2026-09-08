@@ -56,6 +56,8 @@ export interface CoverJob {
   readonly declaredCellCount: number;
   readonly priority?: number;
   nextCell(slot: CoverJobSlot): MaybePromise<Uint8Array | null>;
+  /** No further real cells after a selective producer skips its have-set. */
+  exhausted?(): boolean;
   cancelCell?(slot: CoverJobSlot): MaybePromise<Uint8Array>;
 }
 
@@ -100,7 +102,7 @@ export type CoverJobOutcome =
 export interface CoverJobResult {
   readonly jobId: string;
   readonly outcome: CoverJobOutcome;
-  readonly reason?: "capacity-exhausted" | "stopped";
+  readonly reason?: "capacity-exhausted" | "stopped" | "key-epoch-changed";
 }
 
 export interface CoverJobInterruption {
@@ -142,8 +144,8 @@ export type CoverCancelResult =
  * What one enqueued job has actually achieved so far.
  *
  * A scheduled sender has NO receiver-side progress signal to poll: scheduled
- * mode emits no per-chunk receipts (handleMessageQueueing sends them only when
- * `epc.coverRuntime` is undefined), just one terminal receipt on completion.
+ * mode can receive batched chunk receipts, but older peers emit only terminal
+ * completion. Local progress remains useful during admission and receipt lag.
  * This is therefore the only evidence a send is alive, and it is what
  * separates "still working" from "stuck" — a distinction a wall-clock bound
  * cannot make, because a job admitted only at a cycle open waits behind every
@@ -167,6 +169,7 @@ interface JobRuntime {
   cancelSent: boolean;
   completed: boolean;
   settled: boolean;
+  keyEpochVersion: number;
   pendingCell?: Uint8Array;
   pendingCancelCell?: Uint8Array;
 }
@@ -283,6 +286,36 @@ export class CoverScheduler {
     return [...this.queued].sort(compareQueuedJobs).map(({ job }) => job.id);
   }
 
+  /** Queued and admitted application jobs both hold old-epoch message keys. */
+  hasPendingRealJobs(): boolean {
+    for (const runtime of this.jobs.values())
+      if (!runtime.settled && runtime.job.kind === "real") return true;
+    return false;
+  }
+
+  /** Retire old-key producers while keeping this cycle's fixed dummy tail. */
+  invalidateRealJobsForRekey(): void {
+    for (const runtime of [...this.jobs.values()]) {
+      if (runtime.job.kind !== "real" || runtime.settled) continue;
+      runtime.keyEpochVersion++;
+      if (runtime.cancelRequested) {
+        // Explicit user cancellation still needs its control cell. Its producer
+        // uses the live epoch and no message key, so re-seal any cached cancel.
+        runtime.pendingCancelCell?.fill(0);
+        runtime.pendingCancelCell = undefined;
+        continue;
+      }
+      runtime.completed = true;
+      runtime.pendingCell?.fill(0);
+      runtime.pendingCell = undefined;
+      this.settle(runtime, {
+        jobId: runtime.job.id,
+        outcome: "failed",
+        reason: "key-epoch-changed",
+      });
+    }
+  }
+
   /**
    * Live progress for one job, or undefined once the scheduler no longer holds
    * it (settled: completed, cancelled or failed — `settle` drops it from the
@@ -326,6 +359,7 @@ export class CoverScheduler {
       cancelSent: false,
       completed: false,
       settled: false,
+      keyEpochVersion: 0,
     };
     this.jobs.set(job.id, runtime);
     this.queued.push(runtime);
@@ -754,9 +788,14 @@ export class CoverScheduler {
     if (runtime && !runtime.settled) {
       const withJob = this.jobSlot(runtime, slot);
       if (runtime.cancelRequested && !runtime.cancelSent) {
+        const keyEpochVersion = runtime.keyEpochVersion;
         const cell =
           runtime.pendingCancelCell ??
           assertCell("cancelCell", await runtime.job.cancelCell?.(withJob));
+        if (runtime.settled || keyEpochVersion !== runtime.keyEpochVersion) {
+          cell.fill(0);
+          return this.requestForSlot(lane, slot);
+        }
         return {
           cell,
           source: "cancel",
@@ -772,7 +811,11 @@ export class CoverScheduler {
       ) {
         const produced =
           runtime.pendingCell ?? (await runtime.job.nextCell(withJob));
-        if (produced !== null) {
+        // A durable PQ commit or explicit completion may retire this producer
+        // while its storage/sealing promise is pending. Never emit its old key.
+        if (runtime.settled || runtime.completed) {
+          produced?.fill(0);
+        } else if (produced !== null) {
           const cell = assertCell("nextCell", produced);
           return {
             cell,
@@ -781,6 +824,8 @@ export class CoverScheduler {
             jobId: runtime.job.id,
             jobCellIndex: runtime.sentCells,
           };
+        } else if (runtime.job.exhausted?.()) {
+          this.complete(runtime.job.id);
         }
       }
     }
@@ -820,7 +865,10 @@ export class CoverScheduler {
 
     runtime.pendingCell = undefined;
     runtime.sentCells++;
-    if (runtime.sentCells === runtime.job.declaredCellCount) {
+    if (
+      runtime.sentCells === runtime.job.declaredCellCount ||
+      runtime.job.exhausted?.()
+    ) {
       runtime.completed = true;
       this.settle(runtime, {
         jobId: runtime.job.id,

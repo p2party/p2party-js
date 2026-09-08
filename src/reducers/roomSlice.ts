@@ -231,6 +231,8 @@ export interface Room extends SetRoomArgs {
   /** False after deleteRoom so retained room metadata is not auto-rejoined. */
   signalingActive?: boolean;
   peers: Peer[];
+  /** Eligible signaling membership, independent of currently retained transports. */
+  knownPeers?: Peer[];
   channels: Channel[];
   messages: Message[];
   /**
@@ -708,6 +710,8 @@ const roomSlice = createSlice({
         // "redial" after an edge teardown and a "reconcile" of a room that has
         // nobody in it each have their own, independent of a room join.
         reason?: "redial" | "reconcile";
+        /** A per-member retry; the listener batches concurrent targets. */
+        peerId?: string;
       }>,
     ) => {
       const { roomId, connectingToPeers } = action.payload;
@@ -744,6 +748,17 @@ const roomSlice = createSlice({
         state[roomIndex].canBeConnectionRelay = canBeConnectionRelay;
     },
 
+    setKnownRoomPeers: (
+      state,
+      action: PayloadAction<{ roomId: string; peers: Peer[] }>,
+    ) => {
+      const room = state.find(
+        (r) => r.id === action.payload.roomId && r.signalingActive !== false,
+      );
+      if (room && action.payload.peers.length <= MAX_SIGNALING_ROOM_PEERS)
+        room.knownPeers = action.payload.peers.map((peer) => ({ ...peer }));
+    },
+
     setPeer: (state, action: PayloadAction<SetPeerArgs>) => {
       const { roomId, peerId, peerPublicKey } = action.payload;
 
@@ -760,6 +775,18 @@ const roomSlice = createSlice({
           state[roomIndex].peers.length < MAX_SIGNALING_ROOM_PEERS
         )
           state[roomIndex].peers.push({ peerId, peerPublicKey });
+        // Once a snapshot established membership, an accepted introduction is
+        // a new member too. Removing a transport must not erase this knowledge.
+        const known = state[roomIndex].knownPeers;
+        if (
+          known &&
+          known.length < MAX_SIGNALING_ROOM_PEERS &&
+          !known.some(
+            (peer) =>
+              peer.peerId === peerId || peer.peerPublicKey === peerPublicKey,
+          )
+        )
+          known.push({ peerId, peerPublicKey });
       }
     },
 
@@ -1262,6 +1289,7 @@ export const {
   deleteMessageStateOnly,
   deleteRoom,
   purgeAllRooms,
+  setKnownRoomPeers,
 } = roomSlice.actions;
 export const roomSelector = <TRoom extends Room>(state: {
   readonly rooms: TRoom[];

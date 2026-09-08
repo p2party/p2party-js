@@ -1,3 +1,5 @@
+import { outboxRequest } from "../../db/api";
+import type { State } from "../../store";
 import {
   handleSendMessage,
   MessageDeliveryError,
@@ -47,14 +49,29 @@ const webrtcMessageQuery: BaseQueryFn<
   const effectiveMinChunks = minChunks ?? 1;
   const effectiveChunkSize = chunkSize ?? CHUNK_LEN;
   const effectivePercentageFilledChunk = percentageFilledChunk ?? 0.9;
+  const pending =
+    data === undefined
+      ? (
+          await outboxRequest({
+            kind: "list",
+            senderPublicKey: (api.getState() as State).keyPair.publicKey,
+            roomId,
+          })
+        ).manifests?.find((row) => row.transferId === transferId)
+      : undefined;
+  if (data === undefined && !pending) return { data: undefined };
   const totalSize =
-    typeof data === "string" ? new TextEncoder().encode(data).length : data.size;
-  const totalChunks = planMessageChunkCount(
-    totalSize,
-    effectiveMinChunks,
-    effectiveChunkSize,
-    effectivePercentageFilledChunk,
-  );
+    typeof data === "string"
+      ? new TextEncoder().encode(data).length
+      : (data?.size ?? pending!.totalSize);
+  const totalChunks =
+    pending?.totalChunks ??
+    planMessageChunkCount(
+      totalSize,
+      effectiveMinChunks,
+      effectiveChunkSize,
+      effectivePercentageFilledChunk,
+    );
   const encryptionModule = await wasmLoader(cryptoMemory.protocolV3Memory());
   const merkleModule = await wasmLoader(
     cryptoMemory.getMerkleProofMemory(totalChunks),
@@ -75,23 +92,23 @@ const webrtcMessageQuery: BaseQueryFn<
 
   async function sendOrThrow() {
     return await handleSendMessage(
-    data,
-    api,
-    label,
-    roomId,
-    // Keep the live registry reference: reconnect/resume must observe a
-    // replacement PC pushed after this send began. The handler scopes every
-    // lookup by (roomId, peerId).
-    peerConnections,
-    dataChannels,
-    encryptionModule,
-    merkleModule,
-    transferId,
-    effectiveMinChunks,
-    effectiveChunkSize,
-    effectivePercentageFilledChunk,
-    metadataSchemaVersion,
-  );
+      data,
+      api,
+      label,
+      roomId,
+      // Keep the live registry reference: reconnect/resume must observe a
+      // replacement PC pushed after this send began. The handler scopes every
+      // lookup by (roomId, peerId).
+      peerConnections,
+      dataChannels,
+      encryptionModule,
+      merkleModule,
+      transferId,
+      effectiveMinChunks,
+      effectiveChunkSize,
+      effectivePercentageFilledChunk,
+      metadataSchemaVersion,
+    );
   }
 };
 

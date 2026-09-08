@@ -3,7 +3,10 @@ import { isUUID, isHexadecimal } from "class-validator";
 
 import { handleChallenge } from "./handleChallenge";
 import { establishSignaledConnection } from "./connectionSignal";
-import { mergePeerRosterDelta } from "./peerRosterDelta";
+import {
+  mergePeerRosterDelta,
+  parsePeerRosterSnapshot,
+} from "./peerRosterDelta";
 import {
   commitRoomResponsePlan,
   isExactExpiredTurnGeneration,
@@ -24,6 +27,7 @@ import signalingServerApi, {
 
 import {
   setPeer,
+  setKnownRoomPeers,
   setChannel,
   setConnectingToPeers,
   expireRoomTurnCredentials,
@@ -45,7 +49,6 @@ import type {
   WebSocketMessageError,
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
-  WebSocketMessagePeersRequest,
   WebSocketMessageRoomLeftResponse,
 } from "../utils/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
@@ -463,6 +466,59 @@ const handleWebSocketMessage = async (
         const roomIndex = findActiveSignalingRoomIndex(rooms, message.roomId);
 
         if (roomIndex > -1) {
+          if (message.rosterKind === "snapshot") {
+            const isCurrentSnapshot = () =>
+              isCurrentSocket() &&
+              signalingPeerRequestDebouncer.isCurrentRosterRequest(
+                message.roomId,
+                message.rosterRequestId,
+              ) &&
+              findActiveSignalingRoomIndex(
+                (api.getState() as State).rooms,
+                message.roomId,
+              ) !== -1;
+            if (!isCurrentSnapshot()) break;
+            const members = parsePeerRosterSnapshot(message.peers, keyPair);
+            const eligible = [];
+            for (const member of members) {
+              if (
+                await getDBPeerIsBlacklisted(
+                  member.peerId,
+                  member.peerPublicKey,
+                )
+              )
+                continue;
+              if (!isCurrentSnapshot()) return;
+              if (
+                rooms[roomIndex].onlyConnectWithKnownAddresses &&
+                !(await getDBAddressBookEntry(
+                  member.peerId,
+                  member.peerPublicKey,
+                ))
+              )
+                continue;
+              if (!isCurrentSnapshot()) return;
+              eligible.push(member);
+            }
+            if (
+              isCurrentSnapshot() &&
+              signalingPeerRequestDebouncer.completeRosterRequest(
+                message.roomId,
+                message.rosterRequestId,
+              )
+            ) {
+              signalingPeerRequestDebouncer.confirmRosterSnapshots();
+              api.dispatch(
+                setKnownRoomPeers({ roomId: message.roomId, peers: eligible }),
+              );
+            }
+            break;
+          }
+          if (
+            message.rosterKind !== undefined &&
+            message.rosterKind !== "delta"
+          )
+            break;
           // The server emits one accepted peer at a time. These are deltas,
           // never authoritative snapshots: an absent member is not a leave.
           const mergedPeers = mergePeerRosterDelta(
@@ -470,37 +526,8 @@ const handleWebSocketMessage = async (
             message.peers,
             keyPair,
           );
-          for (const peer of mergedPeers)
-            api.dispatch(setPeer({ roomId: message.roomId, ...peer }));
-
           const len = message.peers.length;
-          if (len === 0) {
-            const { signalingServer } = api.getState() as State;
-            const now = Date.now();
-            if (
-              signalingServer.isConnected &&
-              signalingServer.isVerified &&
-              isUUID(keyPair.peerId) &&
-              signalingPeerRequestDebouncer.shouldSend(
-                "empty-roster",
-                message.roomId,
-                5000,
-                now,
-              )
-            ) {
-              await api.dispatch(
-                signalingServerApi.endpoints.sendMessage.initiate({
-                  content: {
-                    type: "peers",
-                    fromPeerId: keyPair.peerId,
-                    roomId: message.roomId,
-                    protocolVersion: PROTOCOL_VERSION,
-                  } as WebSocketMessagePeersRequest,
-                }),
-              );
-            }
-            break;
-          }
+          if (len === 0) break;
 
           const canOnlyConnectToKnownPeers =
             rooms[roomIndex].onlyConnectWithKnownAddresses;
@@ -538,7 +565,21 @@ const handleWebSocketMessage = async (
               if (!p) continue;
             }
 
-            if (!isCurrentSocket()) return;
+            if (
+              !isCurrentSocket() ||
+              findActiveSignalingRoomIndex(
+                (api.getState() as State).rooms,
+                message.roomId,
+              ) === -1
+            )
+              return;
+            api.dispatch(
+              setPeer({
+                roomId: message.roomId,
+                peerId: message.peers[i].id,
+                peerPublicKey: message.peers[i].publicKey,
+              }),
+            );
             await api.dispatch(
               webrtcApi.endpoints.connectWithPeer.initiate({
                 roomId: message.roomId,

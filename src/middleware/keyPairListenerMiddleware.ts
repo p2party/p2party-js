@@ -11,6 +11,7 @@ import { signalingServerActions } from "../reducers/signalingServerSlice";
 
 import { sendRoomRequestMessage } from "../api/signalingServerApi";
 import { requestAllActiveRooms } from "../handlers/requestRoom";
+import { stopOutboxOwners } from "../handlers/outbox";
 import {
   markFreshSocketProof,
   resetRoomRequestLifecycle,
@@ -73,6 +74,7 @@ keyPairListenerMiddleware.startListening({
         await refreshActiveRooms();
       }
     } else if (resetIdentity.match(action)) {
+      stopOutboxOwners("identity reset");
       resetRoomRequestLifecycle("identity reset");
       console.trace("[keyPairListenerMiddleware] resetIdentity dispatched");
       localStorage.setItem("peerId", "");

@@ -6,18 +6,24 @@ import {
   setWasmSourceUrl,
   DEFAULT_ROOM_POLICY_V1,
   canonicalizeRoomPolicyV1,
-} from "~/Desktop/@p2party/p2party-js/src/index";
-import { setChannel } from "~/Desktop/@p2party/p2party-js/src/reducers/roomSlice";
-import { getDBPeerIsBlacklisted } from "~/Desktop/@p2party/p2party-js/src/db/api";
+} from "../../../src/index";
+import { setChannel } from "../../../src/reducers/roomSlice";
+import { getDBPeerIsBlacklisted } from "../../../src/db/api";
 import {
   hasRoomPeerMutex,
   getRoomPeerMutex,
   roomPeerMutexCount,
-} from "~/Desktop/@p2party/p2party-js/src/api/webrtc/negotiationLock";
-import { unnegotiatedTransportRebuilds, MAX_UNNEGOTIATED_TRANSPORT_REBUILDS } from "~/Desktop/@p2party/p2party-js/src/api/webrtc/unnegotiatedTransport";
-import type { RoomPolicyV1 } from "~/Desktop/@p2party/p2party-js/src/roomPolicy";
+} from "../../../src/api/webrtc/negotiationLock";
+import {
+  unnegotiatedTransportRebuilds,
+  MAX_UNNEGOTIATED_TRANSPORT_REBUILDS,
+} from "../../../src/api/webrtc/unnegotiatedTransport";
+import type { RoomPolicyV1 } from "../../../src/roomPolicy";
 
-const LOOPBACK_RTC: RTCConfiguration = { iceServers: [], iceCandidatePoolSize: 2 };
+const LOOPBACK_RTC: RTCConfiguration = {
+  iceServers: [],
+  iceCandidatePoolSize: 2,
+};
 
 declare global {
   interface Window {
@@ -59,14 +65,21 @@ const snapshot = (roomUrlHex: string): Record<string, unknown> => {
     me: st.keyPair.peerId.slice(0, 8),
     roomId: room?.id?.slice(0, 8) ?? "",
     ws: `${st.signalingServer.isEstablishingConnection ? "connecting" : st.signalingServer.isConnected ? "up" : "down"}${st.signalingServer.isVerified ? "+verified" : ""}`,
-    peers: (room?.peers ?? []).map((p) => p.peerId.slice(0, 8) + "/" + p.peerPublicKey.slice(0, 6)),
+    peers: (room?.peers ?? []).map(
+      (p) => p.peerId.slice(0, 8) + "/" + p.peerPublicKey.slice(0, 6),
+    ),
     hs,
     cover,
     channels,
     connecting: room?.connectingToPeers ?? false,
     connected: room?.connectedToPeers ?? false,
     pcs: window.__pcs
-      ? window.__pcs().map((p) => `#${String(p.id)}:${String(p.withPeerId).slice(0, 8)}:${String(p.connectionState)}/${String(p.iceConnectionState)}`)
+      ? window
+          .__pcs()
+          .map(
+            (p) =>
+              `#${String(p.id)}:${String(p.withPeerId).slice(0, 8)}:${String(p.connectionState)}/${String(p.iceConnectionState)}`,
+          )
       : [],
   };
 };
@@ -89,12 +102,18 @@ const dump = (roomUrlHex: string): Record<string, unknown> => {
           id: room.id,
           url: room.url,
           signalingActive: room.signalingActive,
-          peers: room.peers.map((p) => ({ peerId: p.peerId, peerPublicKey: p.peerPublicKey })),
+          peers: room.peers.map((p) => ({
+            peerId: p.peerId,
+            peerPublicKey: p.peerPublicKey,
+          })),
           handshakeStatusByPeer: room.handshakeStatusByPeer ?? {},
           coverStatusByPeer: room.coverStatusByPeer ?? {},
           connectedToPeers: room.connectedToPeers,
           connectingToPeers: room.connectingToPeers,
-          channels: room.channels.map((c) => ({ label: c.label, peerIds: c.peerIds })),
+          channels: room.channels.map((c) => ({
+            label: c.label,
+            peerIds: c.peerIds,
+          })),
           messages: room.messages.length,
         }
       : null,
@@ -147,7 +166,261 @@ const shortLabel = (label: string): string =>
     ? "MSG:" + label.split("~")[1].slice(0, 12)
     : label.slice(0, 16);
 
+// Test-only trace: correlate staged indices with real scheduled sends.
+import { CoverRuntime } from "../../../src/handlers/coverRuntime";
+import { tickPqHealing } from "../../../src/handlers/pqHealingOrchestrator";
+import { PQ_HEAL_AFTER_MESSAGES } from "../../../src/handlers/pqHealingRuntime";
+import { getAckedChunks } from "../../../src/handlers/reconcile";
+import type { CoverJob } from "../../../src/handlers/coverScheduler";
+import type { IRTCPeerConnection } from "../../../src/api/webrtc/interfaces";
+
+const scheduledProbe = (() => {
+  type Entry = Record<string, unknown>;
+  type Production = {
+    runtime: number;
+    attempt: number;
+    jobId: string;
+    pcId: number;
+    peerId: string;
+    epoch: number;
+    reads: number;
+    transferId?: string;
+    chunkIndex?: number;
+  };
+  const events: Entry[] = [];
+  const problems: string[] = [];
+  const copies: Array<{ bytes: Uint8Array; metadata: Entry }> = [];
+  const runtimeIds = new WeakMap<CoverRuntime, number>();
+  let runtimeSequence = 0,
+    sequence = 0,
+    attemptSequence = 0;
+  let producing: Production | undefined;
+  const edges = () =>
+    (
+      window as unknown as { __liveEdges(): IRTCPeerConnection[] }
+    ).__liveEdges();
+  const runtimeId = (runtime: CoverRuntime) => {
+    let id = runtimeIds.get(runtime);
+    if (id === undefined) {
+      id = ++runtimeSequence;
+      runtimeIds.set(runtime, id);
+    }
+    return id;
+  };
+  const problem = (message: string) => {
+    if (problems.length < 32) problems.push(message);
+  };
+  const record = (entry: Entry): number => {
+    const seq = ++sequence;
+    if (events.length < 10000) events.push({ seq, at: Date.now(), ...entry });
+    else problem("scheduled trace capacity exceeded");
+    return seq;
+  };
+  const owner = (runtime: CoverRuntime) =>
+    edges().find((edge) => edge.coverRuntime === runtime);
+  const nativePost = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (
+    message: unknown,
+    transfer?: Transferable[] | StructuredSerializeOptions,
+  ): void {
+    const frame = message as { method?: string; args?: unknown[] };
+    if (producing && frame?.method === "getDBNewChunk") {
+      producing.reads++;
+      const [transferId, chunkIndex] = frame.args ?? [];
+      if (
+        typeof transferId === "string" &&
+        typeof chunkIndex === "number" &&
+        Number.isSafeInteger(chunkIndex)
+      ) {
+        producing.transferId = transferId;
+        producing.chunkIndex = chunkIndex;
+      } else problem("malformed scheduled staging read");
+    }
+    Reflect.apply(nativePost, this, [message, transfer ?? []]);
+  };
+  const nativeEnqueue = CoverRuntime.prototype.enqueue;
+  CoverRuntime.prototype.enqueue = function (job: CoverJob): void {
+    if (job.kind !== "real") return nativeEnqueue.call(this, job);
+    const edge = owner(this);
+    const metadata = {
+      runtime: runtimeId(this),
+      attempt: ++attemptSequence,
+      jobId: job.id,
+      pcId: (edge as unknown as { __pcId?: number })?.__pcId ?? -1,
+      peerId: edge?.withPeerId ?? "",
+      epoch: Number(edge?.pqHealingState?.epoch ?? -1n),
+      declaredCellCount: job.declaredCellCount,
+    };
+    record({ event: "enqueued", ...metadata });
+    const wrapped: CoverJob = {
+      ...job,
+      nextCell: async (slot) => {
+        const context: Production = { ...metadata, reads: 0 };
+        const outer = producing;
+        producing = context;
+        let pending;
+        try {
+          pending = job.nextCell(slot);
+        } finally {
+          producing = outer;
+        }
+        const cell = await pending;
+        if (cell === null) return null;
+        if (
+          context.reads !== 1 ||
+          context.chunkIndex === undefined ||
+          context.transferId === undefined
+        )
+          problem("real cell lacks exactly one original staging-index read");
+        const produced = {
+          ...metadata,
+          transferId: context.transferId,
+          chunkIndex: context.chunkIndex,
+          jobCellIndex: slot.jobCellIndex,
+        };
+        record({ event: "produced", ...produced });
+        if (copies.length >= 128) {
+          copies.shift()?.bytes.fill(0);
+          problem("scheduled frame-copy capacity exceeded");
+        }
+        copies.push({ bytes: Uint8Array.from(cell), metadata: produced });
+        return cell;
+      },
+    };
+    nativeEnqueue.call(this, wrapped);
+  };
+  const nativeSend = RTCDataChannel.prototype.send;
+  RTCDataChannel.prototype.send = function (data: unknown): void {
+    const bytes =
+      data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : null;
+    if (bytes?.length !== 65490 || bytes[0] !== 2)
+      return Reflect.apply(nativeSend, this, [data]);
+    const index = copies.findIndex(
+      (copy) =>
+        copy.bytes.length === bytes.length &&
+        copy.bytes.every((byte, i) => byte === bytes[i]),
+    );
+    // Record only a send accepted by the real RTCDataChannel. Production may
+    // reject/backpressure a producer; producing alone is not emission evidence.
+    Reflect.apply(nativeSend, this, [data]);
+    if (index === -1) {
+      problem("uncorrelated real scheduled RTC send");
+      return;
+    }
+    const [copy] = copies.splice(index, 1);
+    record({ event: "sent", ...copy.metadata });
+    copy.bytes.fill(0);
+  };
+  const nativeEpoch = CoverRuntime.prototype.onPqEpochChanged;
+  CoverRuntime.prototype.onPqEpochChanged = function (): void {
+    const edge = owner(this);
+    record({
+      event: "epoch-change",
+      runtime: runtimeId(this),
+      pcId: (edge as unknown as { __pcId?: number })?.__pcId ?? -1,
+      peerId: edge?.withPeerId,
+      epoch: Number(edge?.pqHealingState?.epoch ?? -1n),
+      pendingRealBefore: this.hasPendingRealJobs(),
+    });
+    nativeEpoch.call(this);
+  };
+  return {
+    edges,
+    runtimeId,
+    record,
+    snapshot: () => ({
+      events: events.map((entry) => ({ ...entry })),
+      problems: [...problems],
+      pendingFrameCopies: copies.length,
+    }),
+  };
+})();
+
+const scheduledProbeMethods = {
+  scheduledTrace() {
+    return scheduledProbe.snapshot();
+  },
+  scheduledMark(label: string) {
+    return scheduledProbe.record({ event: "mark", label });
+  },
+  scheduledState(roomUrlHex: string, transferId?: string) {
+    const roomId = roomIdFor(roomUrlHex);
+    return scheduledProbe
+      .edges()
+      .filter((edge) => edge.roomId === roomId)
+      .map((edge) => ({
+        peerId: edge.withPeerId,
+        pcId: (edge as unknown as { __pcId?: number }).__pcId ?? -1,
+        runtime: edge.coverRuntime
+          ? scheduledProbe.runtimeId(edge.coverRuntime)
+          : null,
+        status: edge.coverRuntime?.status,
+        pendingReal: edge.coverRuntime?.hasPendingRealJobs() ?? false,
+        queuedJobs: edge.coverRuntime?.getQueuedJobIds() ?? [],
+        epoch: edge.pqHealingState ? Number(edge.pqHealingState.epoch) : null,
+        nextOfferer: edge.pqHealingState?.nextOfferer ?? null,
+        blocked: edge.pqHealingState?.trafficBlocked ?? null,
+        due: edge.pqHealingState?.healingDue() ?? null,
+        acked: transferId
+          ? [...getAckedChunks(roomId, edge.withPeerId, transferId)].sort(
+              (a, b) => a - b,
+            )
+          : [],
+      }));
+  },
+  async forcePqDue(roomUrlHex: string) {
+    const roomId = roomIdFor(roomUrlHex);
+    const edge = scheduledProbe
+      .edges()
+      .find((candidate) => candidate.roomId === roomId);
+    const pq = edge?.pqHealingState;
+    if (!edge || !pq || !edge.coverRuntime)
+      throw new Error("No scheduled PQ edge for fault injection");
+    const before = {
+      epoch: Number(pq.epoch),
+      nextOfferer: pq.nextOfferer,
+      pendingReal: edge.coverRuntime.hasPendingRealJobs(),
+    };
+    // Trigger the existing message threshold; cadence, phase, ciphertext and
+    // OFFER/ADVANCE/ACK exchange remain the real production implementation.
+    for (
+      let i = 0;
+      pq.messagesSinceHealing < PQ_HEAL_AFTER_MESSAGES &&
+      i <= PQ_HEAL_AFTER_MESSAGES;
+      i++
+    )
+      pq.noteApplicationMessage();
+    const due = pq.healingDue();
+    await tickPqHealing(edge);
+    const result = {
+      before,
+      due,
+      after: {
+        epoch: edge.pqHealingState ? Number(edge.pqHealingState.epoch) : null,
+        pendingReal: edge.coverRuntime.hasPendingRealJobs(),
+        blocked: edge.pqHealingState?.trafficBlocked,
+      },
+    };
+    scheduledProbe.record({ event: "forced-due", ...result });
+    return result;
+  },
+};
+
 const api = {
+  ...scheduledProbeMethods,
+  listPendingMessages(roomUrlHex: string) {
+    return p2party.listPendingMessages(roomIdFor(roomUrlHex));
+  },
+  resumePendingMessages(roomUrlHex: string) {
+    return p2party.resumePendingMessages(roomIdFor(roomUrlHex));
+  },
+  cancelPendingMessage(roomUrlHex: string, transferId: string) {
+    return p2party.cancelPendingMessage(roomIdFor(roomUrlHex), transferId);
+  },
   boot(wasmUrl: string): void {
     setWasmSourceUrl(wasmUrl);
   },
@@ -179,11 +452,16 @@ const api = {
         coverDurationEpochs: 1,
       });
     } else if (opts.mode === "pin") {
-      policy = canonicalizeRoomPolicyV1({ ...DEFAULT_ROOM_POLICY_V1, authMode: "pin" });
+      policy = canonicalizeRoomPolicyV1({
+        ...DEFAULT_ROOM_POLICY_V1,
+        authMode: "pin",
+      });
     }
     const pin =
       opts.mode === "pin" && opts.pinHex
-        ? Uint8Array.from(opts.pinHex.match(/.{2}/g)!.map((h) => parseInt(h, 16)))
+        ? Uint8Array.from(
+            opts.pinHex.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+          )
         : undefined;
     log({ event: "connect()", room: roomUrlHex.slice(0, 8) });
     await p2party.connect(roomUrlHex, wsUrl, LOOPBACK_RTC, { policy, pin });
@@ -198,9 +476,11 @@ const api = {
   async focusReconnect(roomUrlHex: string, wsUrl: string): Promise<string> {
     const st = store.getState();
     if (st.signalingServer.isConnected) return "skipped: isConnected";
-    if (st.signalingServer.isEstablishingConnection) return "skipped: isEstablishingConnection";
+    if (st.signalingServer.isEstablishingConnection)
+      return "skipped: isEstablishingConnection";
     const room = st.rooms.find((r) => r.url === roomUrlHex);
-    const policy = room?.policy ?? canonicalizeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1);
+    const policy =
+      room?.policy ?? canonicalizeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1);
     log({ event: "focusReconnect()", room: roomUrlHex.slice(0, 8) });
     try {
       await p2party.connect(roomUrlHex, wsUrl, LOOPBACK_RTC, { policy });
@@ -295,7 +575,9 @@ const api = {
             args: {
               peerId: String(args?.peerId ?? "").slice(0, 8),
               type: content.type,
-              descriptionType: (args?.description as { type?: string } | undefined)?.type,
+              descriptionType: (
+                args?.description as { type?: string } | undefined
+              )?.type,
               label: args?.label,
             },
           });
@@ -304,17 +586,23 @@ const api = {
     }
     const peerIds = new Set<string>();
     for (const p of room?.peers ?? []) peerIds.add(p.peerId);
-    for (const k of Object.keys(room?.handshakeStatusByPeer ?? {})) peerIds.add(k);
+    for (const k of Object.keys(room?.handshakeStatusByPeer ?? {}))
+      peerIds.add(k);
     for (const p of window.__pcs ? window.__pcs() : [])
-      if (typeof p.withPeerId === "string" && p.withPeerId) peerIds.add(p.withPeerId);
+      if (typeof p.withPeerId === "string" && p.withPeerId)
+        peerIds.add(p.withPeerId);
     const mutexes: Record<string, boolean> = {};
     for (const pid of peerIds) {
       // Check existence before retrieving: diagnostics must not create a mutex.
-      mutexes[pid] = hasRoomPeerMutex(roomId, pid) && !getRoomPeerMutex(roomId, pid).isIdle();
+      mutexes[pid] =
+        hasRoomPeerMutex(roomId, pid) &&
+        !getRoomPeerMutex(roomId, pid).isIdle();
     }
     const dbStart = Date.now();
     const dbProbe = await Promise.race([
-      getDBPeerIsBlacklisted([...peerIds][0]).then((v) => `resolved:${String(v)}`),
+      getDBPeerIsBlacklisted([...peerIds][0]).then(
+        (v) => `resolved:${String(v)}`,
+      ),
       new Promise<string>((r) => setTimeout(() => r("TIMEOUT 3000ms"), 3000)),
     ]);
     return {
@@ -323,7 +611,12 @@ const api = {
       mutationCounts: counts,
       roomPeerMutexes: mutexes,
       roomPeerMutexCount: roomPeerMutexCount(),
-      unnegotiatedTransportRebuilds: Object.fromEntries([...peerIds].map((pid) => [pid, unnegotiatedTransportRebuilds(roomId, pid)])),
+      unnegotiatedTransportRebuilds: Object.fromEntries(
+        [...peerIds].map((pid) => [
+          pid,
+          unnegotiatedTransportRebuilds(roomId, pid),
+        ]),
+      ),
       maxUnnegotiatedTransportRebuilds: MAX_UNNEGOTIATED_TRANSPORT_REBUILDS,
       dbProbe,
       dbProbeMs: Date.now() - dbStart,
@@ -351,7 +644,9 @@ const api = {
     const st = store.getState();
     const room = st.rooms.find((r) => r.url === roomUrlHex);
     const hs = room?.handshakeStatusByPeer ?? {};
-    return (room?.peers ?? []).filter((p) => hs[p.peerId]?.status === "authenticated").length;
+    return (room?.peers ?? []).filter(
+      (p) => hs[p.peerId]?.status === "authenticated",
+    ).length;
   },
 
   async send(
@@ -365,7 +660,9 @@ const api = {
     try {
       const handle = p2party.sendMessage(text, channel, roomId);
       const result = await handle.done;
-      const outcomes = (result?.outcomes ?? []) as Array<Record<string, unknown>>;
+      const outcomes = (result?.outcomes ?? []) as Array<
+        Record<string, unknown>
+      >;
       const out = {
         ok: outcomes.some((o) => o.status === "delivered"),
         ms: Date.now() - started,
@@ -380,7 +677,9 @@ const api = {
       log({ event: "send-result", ...out });
       return out;
     } catch (error) {
-      const e = error as Error & { result?: { outcomes?: Array<Record<string, unknown>> } };
+      const e = error as Error & {
+        result?: { outcomes?: Array<Record<string, unknown>> };
+      };
       const out = {
         ok: false,
         ms: Date.now() - started,
@@ -404,18 +703,27 @@ const api = {
     const room = st.rooms.find((r) => r.id === roomId);
     if (!room) return;
     for (const peer of room.peers)
-      store.dispatch(setChannel({ roomId, label: channel, peerId: peer.peerId }));
+      store.dispatch(
+        setChannel({ roomId, label: channel, peerId: peer.peerId }),
+      );
   },
 
   /** Most recent complete message authored by another peer. */
-  latestIncoming(roomUrlHex: string): { merkleRootHex: string; from: string } | null {
+  latestIncoming(
+    roomUrlHex: string,
+  ): { merkleRootHex: string; from: string } | null {
     const st = store.getState();
     const me = st.keyPair.peerId;
     const room = st.rooms.find((r) => r.url === roomUrlHex);
     if (!room) return null;
     for (let i = room.messages.length - 1; i >= 0; i--) {
       const m = room.messages[i];
-      if (m.fromPeerId !== me && m.merkleRootHex && m.totalSize > 0 && m.savedSize >= m.totalSize)
+      if (
+        m.fromPeerId !== me &&
+        m.merkleRootHex &&
+        m.totalSize > 0 &&
+        m.savedSize >= m.totalSize
+      )
         return { merkleRootHex: m.merkleRootHex, from: m.fromPeerId };
     }
     return null;
@@ -427,7 +735,10 @@ const api = {
 
   // ---------------------------------------------------------------- big transfer
   /** Generate + hash the payload ahead of the fault (no network, no SDK call). */
-  async prepareTransfer(id: string, mib: number): Promise<Record<string, unknown>> {
+  async prepareTransfer(
+    id: string,
+    mib: number,
+  ): Promise<Record<string, unknown>> {
     const bytes = Math.round(mib * 1024 * 1024);
     const buf = new Uint8Array(bytes);
     for (let off = 0; off < bytes; off += 65536)
@@ -455,12 +766,18 @@ const api = {
    * handle.done is retained and settled into the record; it is NEVER awaited
    * here, so the caller can freeze the page microseconds later.
    */
-  startTransfer(roomUrlHex: string, channel: string, id: string): Record<string, unknown> {
+  startTransfer(
+    roomUrlHex: string,
+    channel: string,
+    id: string,
+  ): Record<string, unknown> {
     const rec = transfers[id];
     const data = preparedPayloads[id];
-    if (!rec || !data) return { started: false, error: "payload not prepared: " + id };
+    if (!rec || !data)
+      return { started: false, error: "payload not prepared: " + id };
     const roomId = roomIdFor(roomUrlHex);
-    if (!roomId) return { started: false, error: "no room for " + roomUrlHex.slice(0, 8) };
+    if (!roomId)
+      return { started: false, error: "no room for " + roomUrlHex.slice(0, 8) };
     const file = new File([data as BlobPart], rec.filename, {
       type: "application/octet-stream",
     });
@@ -486,7 +803,10 @@ const api = {
       })
       .catch((error: unknown) => {
         const e = error as Error & {
-          result?: { outcomes?: Array<Record<string, unknown>>; merkleRootHex?: string };
+          result?: {
+            outcomes?: Array<Record<string, unknown>>;
+            merkleRootHex?: string;
+          };
         };
         rec.settledAt = Date.now();
         rec.outcome = "rejected";
@@ -527,7 +847,10 @@ const api = {
   },
 
   /** Sender's own history row for the big message (carries `retransmits`). */
-  outgoingBig(roomUrlHex: string, minBytes: number): Record<string, unknown> | null {
+  outgoingBig(
+    roomUrlHex: string,
+    minBytes: number,
+  ): Record<string, unknown> | null {
     const st = store.getState();
     const me = st.keyPair.peerId;
     const room = st.rooms.find((r) => r.url === roomUrlHex);
@@ -551,7 +874,10 @@ const api = {
   },
 
   /** Receiver view: progress + telemetry of the big inbound message. */
-  incomingBig(roomUrlHex: string, minBytes: number): Record<string, unknown> | null {
+  incomingBig(
+    roomUrlHex: string,
+    minBytes: number,
+  ): Record<string, unknown> | null {
     const st = store.getState();
     const me = st.keyPair.peerId;
     const room = st.rooms.find((r) => r.url === roomUrlHex);
@@ -579,7 +905,9 @@ const api = {
   },
 
   /** Materialize the received message and hash it (byte-exactness check). */
-  async verifyReceived(merkleRootHex: string): Promise<Record<string, unknown>> {
+  async verifyReceived(
+    merkleRootHex: string,
+  ): Promise<Record<string, unknown>> {
     const res = await p2party.readMessage(merkleRootHex);
     const body = res.message;
     let sha256 = "";
@@ -614,7 +942,10 @@ const api = {
   dcStats(): Record<string, unknown> {
     const pcs = window.__pcs ? window.__pcs() : [];
     const perPc = pcs.map((p) => {
-      const channels = (p.channels ?? []) as Array<{ label: string; readyState: string }>;
+      const channels = (p.channels ?? []) as Array<{
+        label: string;
+        readyState: string;
+      }>;
       return {
         pc: p.id,
         connectionState: p.connectionState,

@@ -1,3 +1,9 @@
+import { outboxRequest } from "./db/api";
+import { pendingMessageView, discardPendingSelection } from "./handlers/outbox";
+import { createExpiredReceiveMaintenance } from "./handlers/expiredReceiveProjection";
+import type { PendingMessage } from "./handlers/outbox";
+import { registerOutboxResume } from "./handlers/outboxCoordinator";
+export type { PendingMessage } from "./handlers/outbox";
 import { isUUID } from "class-validator";
 import pkg from "../package.json";
 
@@ -100,7 +106,7 @@ import signalingServerApi, {
   requestCurrentSocketRoomLeave,
   sendRoomRequestMessage,
 } from "./api/signalingServerApi";
-import webrtcApi from "./api/webrtc";
+import webrtcApi, { snapshotPeerConnections } from "./api/webrtc";
 import {
   getRoomIceConfigurationMutex,
   releaseRoomIceConfigurationMutex,
@@ -120,6 +126,7 @@ import {
   clearPeerHandshakeFailures,
   setOnlyConnectWithKnownPeers,
   deleteMessage,
+  deleteMessageStateOnly,
   deleteRoom,
   purgeAllRooms,
 } from "./reducers/roomSlice";
@@ -926,6 +933,122 @@ const sendMessage = (
   };
 };
 
+const maintainExpiredReceives = createExpiredReceiveMaintenance({
+  getRooms: () => store.getState().rooms,
+  getPeers: snapshotPeerConnections,
+  dropMessage: (roomId, merkleRootHex) => {
+    dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+  },
+});
+
+/** Metadata only; the durable outbox never exposes or stores a PIN or ratchet key. */
+const listPendingMessages = async (
+  roomId?: string,
+): Promise<PendingMessage[]> => {
+  await maintainExpiredReceives();
+  const { keyPair } = store.getState();
+  const result = await outboxRequest({
+    kind: "list",
+    senderPublicKey: keyPair.publicKey,
+    roomId,
+  });
+  return (result.manifests ?? []).map(pendingMessageView);
+};
+
+const resumeAttempts = new Map<string, Promise<SendMessageResult[]>>();
+/** Retry retained bytes on matching authenticated edges; never connects or supplies credentials. */
+const resumePendingMessages = (
+  roomId: string,
+): Promise<SendMessageResult[]> => {
+  const active = resumeAttempts.get(roomId);
+  if (active) return active;
+  const run = async (): Promise<SendMessageResult[]> => {
+    if (!store.getState().signalingServer.isVerified) return [];
+    const pending = await listPendingMessages(roomId);
+    const results: SendMessageResult[] = [];
+    const failures: unknown[] = [];
+    for (const message of pending) {
+      const currentState = store.getState();
+      const room = currentState.rooms.find((r) => r.id === roomId);
+      if (
+        !currentState.signalingServer.isVerified ||
+        !room ||
+        room.signalingActive === false
+      )
+        break;
+      if (!message.retryable || message.retryAfter > Date.now()) continue;
+      const hasRecipient = Object.values(room.handshakeStatusByPeer ?? {}).some(
+        (status) =>
+          status.status === "authenticated" &&
+          message.remainingRecipients.some(
+            (peer) => peer.publicKey === status.peerPublicKey,
+          ),
+      );
+      if (!hasRecipient) continue;
+      try {
+        const result = await dispatch(
+          webrtcApi.endpoints.sendMessage.initiate({
+            transferId: message.transferId,
+            roomId,
+            label: message.channelLabel,
+          }),
+        ).unwrap();
+        if (result) results.push(result);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length)
+      throw new AggregateError(
+        failures,
+        "Some pending messages remain undelivered",
+      );
+    return results;
+  };
+  const work = run().finally(() => {
+    resumeAttempts.delete(roomId);
+  });
+  resumeAttempts.set(roomId, work);
+  return work;
+};
+
+const cancelPendingMessage = async (
+  roomId: string,
+  transferId: string,
+): Promise<void> => {
+  const row = (await listPendingMessages(roomId)).find(
+    (message) => message.transferId === transferId,
+  );
+  await cancelMessage(
+    roomId,
+    row?.channelLabel ?? "main",
+    undefined,
+    undefined,
+    transferId,
+  );
+};
+
+const leaseRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+registerOutboxResume(async (roomId) => {
+  await resumePendingMessages(roomId);
+  // A reload may authenticate before the previous tab's lease expires. One
+  // delayed claim follows this authentication event; failure never rearms it.
+  if (leaseRetryTimers.has(roomId)) return;
+  const pending = await listPendingMessages(roomId);
+  const deadlines = pending
+    .filter((message) => message.retryable && message.retryAfter > Date.now())
+    .map((message) => message.retryAfter);
+  if (!deadlines.length) return;
+  const timer = setTimeout(
+    () => {
+      leaseRetryTimers.delete(roomId);
+      void resumePendingMessages(roomId).catch((error) => console.error(error));
+    },
+    Math.min(31_000, Math.max(0, Math.min(...deadlines) - Date.now()) + 100),
+  );
+  leaseRetryTimers.set(roomId, timer);
+});
+
 const readMessage = async (
   merkleRootHex: string,
   hashHex?: string,
@@ -1211,11 +1334,22 @@ const cancelMessage = async (
         ? uint8ArrayToHex(hash)
         : "";
 
-  abortTransfer(roomId, {
-    transferId,
-    merkleRootHex: merkleRootHex || undefined,
-    hashHex: hashHex || undefined,
-  });
+  await discardPendingSelection(
+    {
+      roomId,
+      senderPublicKey: store.getState().keyPair.publicKey,
+      transferId,
+      merkleRootHex: merkleRootHex || undefined,
+      hashHex: hashHex || undefined,
+    },
+    () => {
+      abortTransfer(roomId, {
+        transferId,
+        merkleRootHex: merkleRootHex || undefined,
+        hashHex: hashHex || undefined,
+      });
+    },
+  );
 
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((room) => room.id === roomId);
@@ -1308,10 +1442,20 @@ const deleteMsg = async (
         ? uint8ArrayToHex(hash)
         : "";
 
-  abortTransfer(roomId, {
-    merkleRootHex: merkleRootHex || undefined,
-    hashHex: hashHex || undefined,
-  });
+  await discardPendingSelection(
+    {
+      roomId,
+      senderPublicKey: store.getState().keyPair.publicKey,
+      merkleRootHex: merkleRootHex || undefined,
+      hashHex: hashHex || undefined,
+    },
+    () => {
+      abortTransfer(roomId, {
+        merkleRootHex: merkleRootHex || undefined,
+        hashHex: hashHex || undefined,
+      });
+    },
+  );
 
   const { rooms } = store.getState();
   const roomIndex = rooms.findIndex((room) => room.id === roomId);
@@ -1706,6 +1850,9 @@ export const p2party = {
   getRoomStats: getDBRoomStats,
   // openChannel,
   sendMessage,
+  listPendingMessages,
+  resumePendingMessages,
+  cancelPendingMessage,
   readMessage,
   // Live outbound progress for one logical send: per peer, how many chunks
   // that peer has receipted so far. Pair it with the message row's totalChunks

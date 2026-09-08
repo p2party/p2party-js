@@ -1,6 +1,22 @@
 import { CoverRuntime, type CoverLaneChannel } from "./coverRuntime";
-import { buildScheduledSendJob, queueScheduledCancel } from "./coverTransfer";
-import { markTransferComplete } from "./reconcile";
+import {
+  buildScheduledSendJob,
+  queueScheduledCancel,
+  releaseScheduledReceipts,
+} from "./coverTransfer";
+import {
+  createReceiptProcessingQueue,
+  enqueueReceipt,
+  releaseQueuedReceipts,
+} from "./handleMessageQueueing";
+import {
+  acceptScheduledReceipt,
+  acceptScheduledCancellation,
+  type ScheduledReceiptDependencies,
+  type ScheduledReceiptOwner,
+} from "./scheduledReceiptAcceptance";
+import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
+import type { ReceiptProcessingQueue } from "./handleMessageQueueing";
 import { registerCoverChannelUntilClose } from "./coverChannelRegistry";
 import { sweepCancelledInboundTransfer } from "./inboundTransferSweep";
 
@@ -17,7 +33,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 //
 // In a scheduled room there are NO separate per-message DataChannels. Each
 // endpoint opens exactly `coverLanes` outbound cover lanes per peer edge at
-// every cycle boundary; real message chunks, PQ control cells, receipts, and
+// every cycle boundary; real message chunks, receipts, and
 // CANCEL substitute into already-scheduled slots as cells, and dummy cover
 // cells fill the rest. This module owns the production lane wiring: the
 // CoverRuntime's `openLaneChannel` creates real `RTCDataChannel`s via
@@ -28,19 +44,22 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 
 const LANE_LABEL_NAME = "p2party-cover";
 
-/** Map a fully-received transfer root back to the sender's transferId so a
- * terminal scheduled receipt can settle the local send. */
+/** Bind authenticated chunk/completion receipts to this exact outbound owner. */
 const transferIdByRoot = new WeakMap<
   IRTCPeerConnection,
-  Map<string, { transferId: string; peerId: string; roomId: string }>
+  Map<string, ScheduledReceiptOwner>
+>();
+const scheduledReceiptQueues = new WeakMap<
+  IRTCPeerConnection,
+  ReceiptProcessingQueue
 >();
 
 // ── per-edge cover generation ────────────────────────────────────────────────
 //
 // A monotonic counter per (roomId, peerId) that is bumped by, and only by, a
-// successfully installed cover runtime. It is the sender's evidence that the
-// runtime its in-flight job was admitted to has been REPLACED, which is the one
-// condition under which resuming that job is both possible and sound (C8).
+// successfully installed cover runtime or a durable PQ epoch change. Both
+// retire old-key producers; the sender may re-derive on a replacement runtime
+// or after its current runtime's epoch changed (C6/C8).
 //
 // It is deliberately NOT the job's progress: `CoverScheduler.getJobProgress`
 // stops moving whenever the scheduler is suspended (a hidden tab, pagehide,
@@ -106,9 +125,8 @@ const ensureCoverEdgeState = (
 };
 
 /**
- * How many scheduled-cover runtimes this edge has had installed. 0 before the
- * first one, and for every immediate-mode edge (installCoverEdge returns
- * without installing anything there, so nothing is ever published).
+ * Monotonic scheduled-attempt generation: runtime installation or committed
+ * PQ rekey. Zero before the first install and for immediate-mode edges.
  */
 export const coverEdgeGeneration = (roomId: string, peerId: string): number =>
   coverEdgeGenerations.get(coverEdgeKey(roomId, peerId))?.generation ?? 0;
@@ -118,8 +136,8 @@ export const coverEdgeGeneration = (roomId: string, peerId: string): number =>
  * the unchanged current generation if none is installed within `timeoutMs`.
  *
  * A caller compares the result with what it passed in: strictly greater means a
- * replacement runtime exists and the caller's retired job may be re-derived
- * onto it; equal means nothing replaced anything.
+ * runtime or key epoch changed; the sender checks which current runtime/epoch
+ * owns that change before re-deriving. Equal means this attempt is unchanged.
  *
  * `signal` ends the wait early with the CURRENT generation, i.e. with "nothing
  * replaced anything" unless something actually did. A cancelled send must not
@@ -188,6 +206,7 @@ export interface InstallCoverEdgeOptions {
    * production Worker-backed functions.
    */
   readonly inboundSweepDeps?: InboundTransferSweepDeps;
+  readonly receiptDependencies?: ScheduledReceiptDependencies;
 }
 
 /**
@@ -198,6 +217,11 @@ export interface InstallCoverEdgeOptions {
  * on an edge that never had a runtime.
  */
 export const teardownCoverEdge = (epc: IRTCPeerConnection): void => {
+  const queue = scheduledReceiptQueues.get(epc);
+  if (queue) releaseQueuedReceipts(queue);
+  scheduledReceiptQueues.delete(epc);
+  transferIdByRoot.delete(epc);
+  releaseScheduledReceipts(epc);
   if (epc.coverRuntime) {
     epc.coverRuntime.destroy();
     epc.coverRuntime = undefined;
@@ -220,6 +244,51 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
   if (policy.coverMode !== "scheduled") return;
   teardownCoverEdge(epc);
   epc.coverChannels ??= new Set<IRTCDataChannel>();
+
+  const receiptQueue = createReceiptProcessingQueue(roomId, epc.withPeerId);
+  scheduledReceiptQueues.set(epc, receiptQueue);
+  const processReceipt = async (packed: Uint8Array): Promise<void> => {
+    const merkleRootHex = uint8ArrayToHex(packed.subarray(1, 65));
+    const owner = transferIdByRoot.get(epc)?.get(merkleRootHex);
+    if (!owner) return;
+    const isCurrent = (): boolean =>
+      !receiptQueue.released &&
+      transferIdByRoot.get(epc)?.get(merkleRootHex) === owner &&
+      owner.roomId === roomId &&
+      epc.roomId === roomId &&
+      owner.peerId === epc.withPeerId &&
+      owner.peerPublicKey === epc.withPeerPublicKey;
+    if (packed[0] === 2) {
+      if (
+        await acceptScheduledCancellation(
+          owner,
+          isCurrent,
+          options.receiptDependencies,
+        )
+      )
+        options.onRemoteCancel?.(merkleRootHex);
+      return;
+    }
+    await acceptScheduledReceipt(
+      owner,
+      packed.subarray(65),
+      packed[0] === 1 ? "chunk" : "terminal",
+      isCurrent,
+      options.receiptDependencies,
+    );
+  };
+  const queueReceipt = (
+    root: string,
+    token: Uint8Array,
+    kind: 0 | 1 | 2,
+  ): void => {
+    if (token.length !== 64 || !/^[0-9a-f]{128}$/.test(root)) return;
+    const packed = new Uint8Array(129);
+    packed[0] = kind;
+    packed.set(hexToUint8Array(root), 1);
+    packed.set(token, 65);
+    enqueueReceipt(packed, receiptQueue, processReceipt);
+  };
 
   const runtime = new CoverRuntime({
     epc,
@@ -263,14 +332,14 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
       };
     },
     onStatusChange: options.onStatusChange,
+    onKeyEpochChanged: () => advanceCoverEdgeGeneration(roomId, epc.withPeerId),
     onRemoteCancel: (merkleRootHex) => {
-      // A CANCEL is about ONE transfer root, and that root can be in flight in
-      // either direction. The caller's hook aborts our outbound send of it
-      // (abortTransfer, which only ever searches the outbound registry); the
-      // sweep below drops the partial we are RECEIVING for it, which nothing
-      // did before — the receiver kept an unfillable N/M transfer, its OPFS
-      // file and its state row forever.
-      options.onRemoteCancel?.(merkleRootHex);
+      // Persist a recipient's refusal before waking its sender. The inbound
+      // sweep is independent: never await it inside the receipt queue that it
+      // drains, and never abort the other recipients of this logical send.
+      if (transferIdByRoot.get(epc)?.has(merkleRootHex))
+        queueReceipt(merkleRootHex, hexToUint8Array(merkleRootHex), 2);
+      else options.onRemoteCancel?.(merkleRootHex);
       void sweepCancelledInboundTransfer(
         epc,
         roomId,
@@ -278,12 +347,9 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
         options.inboundSweepDeps,
       );
     },
-    onScheduledReceipt: (merkleRootHex) => {
-      // A terminal scheduled receipt confirms the whole message landed; settle
-      // the matching local send so its waiter resolves.
-      const entry = transferIdByRoot.get(epc)?.get(merkleRootHex);
-      if (entry)
-        markTransferComplete(entry.roomId, entry.peerId, entry.transferId);
+    onScheduledReceipt: (root, token) => queueReceipt(root, token, 0),
+    onScheduledChunkReceipts: (root, tokens) => {
+      for (const token of tokens) queueReceipt(root, token, 1);
     },
   });
   epc.coverRuntime = runtime;
@@ -308,7 +374,23 @@ export const trackScheduledSend = (
     map = new Map();
     transferIdByRoot.set(epc, map);
   }
-  map.set(merkleRootHex, { transferId, peerId, roomId });
+  map.set(merkleRootHex, {
+    transferId,
+    peerId,
+    roomId,
+    peerPublicKey: epc.withPeerPublicKey,
+    merkleRootHex,
+  });
+};
+
+export const untrackScheduledSend = (
+  epc: IRTCPeerConnection,
+  merkleRootHex: string,
+  transferId: string,
+): void => {
+  const map = transferIdByRoot.get(epc);
+  if (map?.get(merkleRootHex)?.transferId === transferId)
+    map.delete(merkleRootHex);
 };
 
 export interface ScheduledSendParams {
@@ -319,6 +401,7 @@ export interface ScheduledSendParams {
   readonly merkleRoot: Uint8Array;
   readonly sealSlotCell: (chunkIndex: number) => Promise<Uint8Array | null>;
   readonly getAckedChunks?: () => ReadonlySet<number>;
+  readonly isChunkAcked?: (chunkIndex: number) => boolean;
 }
 
 /**
@@ -335,6 +418,7 @@ export const enqueueScheduledSend = (params: ScheduledSendParams): boolean => {
     merkleRoot: params.merkleRoot,
     sealSlotCell: params.sealSlotCell,
     getAckedChunks: params.getAckedChunks,
+    isChunkAcked: params.isChunkAcked,
   });
   runtime.enqueue(job);
   return true;

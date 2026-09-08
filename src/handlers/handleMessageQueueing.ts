@@ -2,12 +2,12 @@ import {
   handleReceiveMessage,
   type ReceiveMessageResult,
 } from "./handleReceiveMessage";
-import {
-  getRatchetGate,
-  isCurrentRatchetGateLease,
-} from "./ratchetGate";
+import { getRatchetGate, isCurrentRatchetGateLease } from "./ratchetGate";
 import { sendReceiptFrame } from "./receiptFrame";
-import { queueScheduledReceipt } from "./coverTransfer";
+import {
+  queueScheduledReceipt,
+  queueScheduledChunkReceipt,
+} from "./coverTransfer";
 
 import { closeReceiveFile } from "../db/api";
 
@@ -57,9 +57,7 @@ export const hasQueuedEdgeReceiveWork = (
   peerId: string,
 ): boolean => {
   const key = edgeQueueKey(roomId, peerId);
-  return (
-    (queuedBytesByEdge.get(key) ?? 0) > 0 || processingLocks.has(key)
-  );
+  return (queuedBytesByEdge.get(key) ?? 0) > 0 || processingLocks.has(key);
 };
 
 export const waitForEdgeReceiveQuiescence = async (
@@ -128,7 +126,10 @@ const adjustQueuedBytes = (
   peerId: string,
   delta: number,
 ): void => {
-  const nextChannel = Math.max(0, (queuedBytesByChannel.get(queue) ?? 0) + delta);
+  const nextChannel = Math.max(
+    0,
+    (queuedBytesByChannel.get(queue) ?? 0) + delta,
+  );
   if (nextChannel === 0) queuedBytesByChannel.delete(queue);
   else queuedBytesByChannel.set(queue, nextChannel);
 
@@ -209,9 +210,7 @@ const adjustQueuedReceipts = (
   else queuedReceiptsByEdge.set(key, next);
 };
 
-export const releaseQueuedReceipts = (
-  state: ReceiptProcessingQueue,
-): void => {
+export const releaseQueuedReceipts = (state: ReceiptProcessingQueue): void => {
   if (state.released) return;
   state.released = true;
   const count = state.pending.length;
@@ -278,8 +277,7 @@ export const enqueueReceipt = (
   state.seen.add(fingerprint);
   // Keep flood-dedup memory finite. Receipt semantics remain independently
   // idempotent in reconcile.ts when an old token is observed again.
-  if (state.seen.size > MAX_QUEUED_RECEIPTS_PER_CHANNEL * 2)
-    state.seen.clear();
+  if (state.seen.size > MAX_QUEUED_RECEIPTS_PER_CHANNEL * 2) state.seen.clear();
 
   state.pending.push(receipt);
   adjustQueuedReceipts(state, 1);
@@ -332,9 +330,7 @@ const processMessage = async (
   if (epc) {
     try {
       const transportGateLease = epc.ratchetGateLease;
-      if (
-        !isCurrentRatchetGateLease(roomId, peerId, transportGateLease)
-      )
+      if (!isCurrentRatchetGateLease(roomId, peerId, transportGateLease))
         return { receivedFullSize: false };
       // Do not decrypt until the PACE + Double-Ratchet handshake has seeded the
       // per-peer ratchet (the `main` channel opens this gate). A chunk that
@@ -342,9 +338,7 @@ const processMessage = async (
       // failed handshake rejects the gate, caught below.
       await getRatchetGate(roomId, peerId);
       if (signal?.aborted) return { receivedFullSize: false };
-      if (
-        !isCurrentRatchetGateLease(roomId, peerId, transportGateLease)
-      )
+      if (!isCurrentRatchetGateLease(roomId, peerId, transportGateLease))
         return { receivedFullSize: false };
 
       const receiveResult = await handleReceiveMessage(
@@ -372,8 +366,16 @@ const processMessage = async (
 
       // Immediate mode acks each frame with a 65-byte receipt on its channel.
       // Scheduled mode never uses immediate receipts: acknowledgement rides a
-      // cover slot instead (a terminal receipt on completion, below).
-      if (!epc?.coverRuntime) sendReceiveFrameReceipt(receiveResult, extChannel);
+      // cover slot instead: bounded chunk-token batches plus terminal completion.
+      if (!epc?.coverRuntime)
+        sendReceiveFrameReceipt(receiveResult, extChannel);
+      else if (
+        receiveResult.chunkHash.length === crypto_hash_sha512_BYTES &&
+        chunkIndex >= 0 &&
+        chunkSize > 0 &&
+        totalSize > 0
+      )
+        queueScheduledChunkReceipt(epc, merkleRoot, receiveResult.chunkHash);
 
       const hashHex = uint8ArrayToHex(messageHash);
 
@@ -505,11 +507,7 @@ const drain = async (
     }
   } finally {
     drainingRef.value = false;
-    if (
-      queue.length > 0 &&
-      !drainingRef.released &&
-      !signal?.aborted
-    )
+    if (queue.length > 0 && !drainingRef.released && !signal?.aborted)
       void drain(
         queue,
         seen,

@@ -1,3 +1,5 @@
+import { outboxRequest } from "../db/api";
+import type { OutboxLease } from "../db/outboxTypes";
 import { getMessageType, getMimeType, MessageType } from "./messageTypes";
 import { uint8ArrayToHex } from "./uint8array";
 import { hashMerkleLeaf } from "./leafHash";
@@ -59,9 +61,7 @@ export const planMessageChunkCount = (
       `Message exceeds the ${String(MAX_MESSAGE_SIZE)} byte protocol limit`,
     );
 
-  const maxRealBytesPerChunk = Math.ceil(
-    chunkSize * percentageFilledChunk,
-  );
+  const maxRealBytesPerChunk = Math.ceil(chunkSize * percentageFilledChunk);
   const realChunks = Math.ceil(totalSize / maxRealBytesPerChunk);
 
   return Math.max(minChunks, realChunks);
@@ -90,10 +90,7 @@ export const estimateOutboundStagingBytes = (
   const estimate =
     totalSize +
     totalChunks *
-      (chunkSize +
-        METADATA_LEN +
-        PROOF_LEN +
-        OUTBOUND_CHUNK_RECORD_OVERHEAD);
+      (chunkSize + METADATA_LEN + PROOF_LEN + OUTBOUND_CHUNK_RECORD_OVERHEAD);
   return Number.isSafeInteger(estimate) ? estimate : Number.POSITIVE_INFINITY;
 };
 
@@ -115,10 +112,9 @@ export const splitToChunks = async (
   label: string,
   room: Room,
   merkleModule: LibCrypto,
-  transfer: Pick<
-    TransferAbortHandle,
-    "transferId" | "signal" | "bindHash"
-  >,
+  transfer: Pick<TransferAbortHandle, "transferId" | "signal" | "bindHash"> & {
+    outboxLease?: OutboxLease;
+  },
   minChunks = 1,
   chunkSize = CHUNK_LEN,
   percentageFilledChunk = 0.9,
@@ -261,17 +257,20 @@ export const splitToChunks = async (
 
     // A failed staging write is fatal. Sending a partial tree would make the
     // transfer unrecoverable while presenting misleading progress to the UI.
-    await setDBNewChunk({
-      transferId: transfer.transferId,
-      hash: sha512Hex,
-      merkleRoot: "",
-      chunkIndex: i,
-      leafHash,
-      receiptToken: "",
-      data: chunk.slice().buffer,
-      metadata: mSerialized.buffer as ArrayBuffer,
-      merkleProof: new Uint8Array().buffer,
-    });
+    await setDBNewChunk(
+      {
+        transferId: transfer.transferId,
+        hash: sha512Hex,
+        merkleRoot: "",
+        chunkIndex: i,
+        leafHash,
+        receiptToken: "",
+        data: chunk.slice().buffer,
+        metadata: mSerialized.buffer as ArrayBuffer,
+        merkleProof: new Uint8Array().buffer,
+      },
+      transfer.outboxLease,
+    );
 
     api.dispatch(
       setMessage({
@@ -293,7 +292,8 @@ export const splitToChunks = async (
   }
 
   if (transfer.signal.aborted) {
-    await deleteDBNewChunk({ transferId: transfer.transferId });
+    if (!transfer.outboxLease)
+      await deleteDBNewChunk({ transferId: transfer.transferId });
     api.dispatch(
       deleteMessage({ roomId: room.id, transferId: transfer.transferId }),
     );
@@ -326,7 +326,7 @@ export const splitToChunks = async (
       const metadata = deserializeMetadata(new Uint8Array(staged.metadata));
       const realLen = metadata.chunkEndIndex - metadata.chunkStartIndex;
       if (realLen <= 0 || realLen > metadata.totalSize) continue;
-      await setDBChunk({
+      const selfChunk = {
         merkleRoot: merkleRootHex,
         hash: sha512Hex,
         chunkIndex: metadata.chunkIndex,
@@ -335,15 +335,23 @@ export const splitToChunks = async (
           metadata.chunkEndIndex,
         ),
         mimeType,
-      });
+      };
+      if (transfer.outboxLease)
+        await outboxRequest({
+          kind: "selfChunk",
+          lease: transfer.outboxLease,
+          chunk: selfChunk,
+        });
+      else await setDBChunk(selfChunk);
     }
   } catch (error) {
-    await deleteReceiveTransfer(merkleRootHex);
+    if (!transfer.outboxLease) await deleteReceiveTransfer(merkleRootHex);
     throw error;
   }
   if (transfer.signal.aborted) {
-    await deleteDBNewChunk({ transferId: transfer.transferId });
-    await deleteReceiveTransfer(merkleRootHex);
+    if (!transfer.outboxLease)
+      await deleteDBNewChunk({ transferId: transfer.transferId });
+    if (!transfer.outboxLease) await deleteReceiveTransfer(merkleRootHex);
     api.dispatch(
       deleteMessage({ roomId: room.id, transferId: transfer.transferId }),
     );
@@ -362,21 +370,40 @@ export const splitToChunks = async (
   // Do not claim a fully durable local message until every self-copy write
   // above succeeded. IndexedDB quota/write failures propagate to the caller.
   try {
-    await setDBRoomMessageData(
-      room.id,
-      merkleRootHex,
-      sha512Hex,
-      keyPair.peerId,
-      totalSize,
-      totalSize,
-      messageType,
-      name,
-      label,
-      date.getTime(),
-      transfer.transferId,
-    );
+    if (transfer.outboxLease)
+      await outboxRequest({
+        kind: "selfMessage",
+        lease: transfer.outboxLease,
+        message: {
+          roomId: room.id,
+          merkleRoot: merkleRootHex,
+          hash: sha512Hex,
+          fromPeerId: keyPair.peerId,
+          savedSize: totalSize,
+          totalSize,
+          messageType,
+          filename: name,
+          channelLabel: label,
+          timestamp: date.getTime(),
+          transferId: transfer.transferId,
+        },
+      });
+    else
+      await setDBRoomMessageData(
+        room.id,
+        merkleRootHex,
+        sha512Hex,
+        keyPair.peerId,
+        totalSize,
+        totalSize,
+        messageType,
+        name,
+        label,
+        date.getTime(),
+        transfer.transferId,
+      );
   } catch (error) {
-    await deleteReceiveTransfer(merkleRootHex);
+    if (!transfer.outboxLease) await deleteReceiveTransfer(merkleRootHex);
     throw error;
   }
 

@@ -1,3 +1,5 @@
+import { executeOutbox, storeOutboxChunk } from "./outboxStore";
+import type { OutboxLease } from "./outboxTypes";
 import { deleteDB } from "idb";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
@@ -23,6 +25,8 @@ import type {
   ChunkLeafHash,
   ReceiveChunk,
   ReceiveChunkStoreResult,
+  ReceiveDeleteGuard,
+  ExpiredReceiveTransfer,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
@@ -1038,7 +1042,10 @@ async function withReceiveLock<T>(
   receiveLocks.set(key, mine);
   await prev;
   try {
-    return await fn();
+    const locks = globalThis.navigator?.locks;
+    return locks
+      ? await locks.request(`p2party:receive:${key}`, fn)
+      : await fn();
   } finally {
     release();
     if (receiveLocks.get(key) === mine) receiveLocks.delete(key);
@@ -1190,6 +1197,7 @@ async function placeReceiveChunk(
 // a duplicate can never be mistaken for the chunk that completed a message.
 async function storeReceiveChunkLocked(
   chunk: ReceiveChunk,
+  writeToken: string,
 ): Promise<ReceiveChunkStoreResult> {
   const {
     schemaVersion,
@@ -1402,9 +1410,18 @@ async function storeReceiveChunkLocked(
   const db = await getDB();
   try {
     const tx = db.transaction(
-      ["chunks", "messageData", "uniqueRoom"],
+      ["chunks", "messageData", "uniqueRoom", "receiveActivity"],
       "readwrite",
     );
+    const activity = await tx.objectStore("receiveActivity").get(merkleRoot);
+    if (
+      activity?.writeToken !== writeToken ||
+      activity.deletedAt !== undefined
+    ) {
+      tx.abort();
+      await tx.done.catch(() => undefined);
+      throw new Error("Receive write was fenced by cancellation or expiry");
+    }
     const store = tx.objectStore("chunks");
     const existing = await store.getKey([merkleRoot, chunkIndex]);
     let stored = false;
@@ -1463,10 +1480,138 @@ async function storeReceiveChunkLocked(
   }
 }
 
+export const INCOMPLETE_RECEIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const RECEIVE_WRITE_LEASE_MS = 120_000;
+
 async function fnStoreReceiveChunk(
   chunk: ReceiveChunk,
+  admittedAt: number,
 ): Promise<ReceiveChunkStoreResult> {
-  return storeReceiveChunkLocked(chunk);
+  if (
+    !/^[0-9a-f]{128}$/.test(chunk.merkleRoot) ||
+    !chunk.roomId ||
+    !chunk.fromPeerId
+  )
+    throw new Error("Invalid receive identity");
+  const token = crypto.randomUUID();
+  const db = await getDB();
+  try {
+    const tx = db.transaction(["receiveActivity", "messageData"], "readwrite");
+    const store = tx.objectStore("receiveActivity");
+    const current = await store.get(chunk.merkleRoot);
+    const prior = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(chunk.merkleRoot);
+    if (
+      (current &&
+        (current.roomId !== chunk.roomId ||
+          current.fromPeerId !== chunk.fromPeerId)) ||
+      (prior &&
+        (prior.roomId !== chunk.roomId ||
+          prior.fromPeerId !== chunk.fromPeerId ||
+          prior.transferId !== undefined)) ||
+      (current?.deletedAt !== undefined && admittedAt <= current.deletedAt)
+    ) {
+      tx.abort();
+      await tx.done.catch(() => undefined);
+      throw new Error("Receive transfer ownership conflicts or was cancelled");
+    }
+    if (current?.writeToken && (current.leaseUntil ?? 0) > Date.now()) {
+      tx.abort();
+      await tx.done.catch(() => undefined);
+      throw new Error("Receive transfer is active in another worker");
+    }
+    await store.put({
+      merkleRoot: chunk.merkleRoot,
+      roomId: chunk.roomId,
+      fromPeerId: chunk.fromPeerId,
+      lastActivityAt: Date.now(),
+      writeToken: token,
+      leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+    });
+    await tx.done;
+  } finally {
+    db.close();
+  }
+  try {
+    return await storeReceiveChunkLocked(chunk, token);
+  } finally {
+    const db = await getDB();
+    try {
+      const tx = db.transaction(
+        ["receiveActivity", "messageData"],
+        "readwrite",
+      );
+      const row = await tx.objectStore("receiveActivity").get(chunk.merkleRoot);
+      if (row?.writeToken === token) {
+        const message = await tx
+          .objectStore("messageData")
+          .index("merkleRoot")
+          .get(chunk.merkleRoot);
+        if (message && message.savedSize >= message.totalSize)
+          await tx.objectStore("receiveActivity").delete(chunk.merkleRoot);
+        else
+          await tx.objectStore("receiveActivity").put({
+            ...row,
+            writeToken: undefined,
+            leaseUntil: 0,
+            lastActivityAt: Date.now(),
+          });
+      }
+      await tx.done;
+    } finally {
+      db.close();
+    }
+  }
+}
+
+async function fnSweepStaleReceives(): Promise<ExpiredReceiveTransfer[]> {
+  const cutoff = Date.now() - INCOMPLETE_RECEIVE_RETENTION_MS;
+  const db = await getDB();
+  let candidates;
+  try {
+    candidates = await db.getAllFromIndex(
+      "receiveActivity",
+      "lastActivityAt",
+      IDBKeyRange.upperBound(cutoff),
+      64,
+    );
+  } finally {
+    db.close();
+  }
+  const removed: ExpiredReceiveTransfer[] = [];
+  for (const row of candidates) {
+    if (row.deletedAt !== undefined) {
+      // Tombstones carry no payload. Keep them through one receive retention window
+      // so pre-cancel queued writes cannot recreate abandoned rows.
+      const db = await getDB();
+      try {
+        const tx = db.transaction("receiveActivity", "readwrite");
+        const latest = await tx.store.get(row.merkleRoot);
+        if (latest?.deletedAt === row.deletedAt && latest.deletedAt! <= cutoff)
+          await tx.store.delete(row.merkleRoot);
+        await tx.done;
+      } finally {
+        db.close();
+      }
+      continue;
+    }
+    if ((row.leaseUntil ?? 0) > Date.now()) continue;
+    let deletedScope: ExpiredReceiveTransfer | undefined;
+    const deleted = await withReceiveLock(row.merkleRoot, () =>
+      fnDeleteReceiveTransferLocked(
+        row.merkleRoot,
+        cutoff,
+        undefined,
+        (scope) => {
+          deletedScope = scope;
+        },
+      ),
+    );
+    if (deleted && deletedScope) removed.push(deletedScope);
+  }
+  return removed;
 }
 
 // Flush + close the open write handle for a transfer so the finished file can be
@@ -1738,13 +1883,11 @@ async function fnGetDBAllNewChunksCount(transferId: string): Promise<number> {
   }
 }
 
-async function fnSetDBNewChunk(chunk: NewChunk): Promise<void> {
-  const db = await getDB();
-  try {
-    await db.put("newChunks", chunk);
-  } finally {
-    db.close();
-  }
+async function fnSetDBNewChunk(
+  chunk: NewChunk,
+  lease?: OutboxLease,
+): Promise<void> {
+  await storeOutboxChunk(chunk, lease);
 }
 
 async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
@@ -2781,7 +2924,10 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
  */
 async function fnDeleteReceiveTransferLocked(
   merkleRootHex: string,
-): Promise<void> {
+  staleBefore?: number,
+  guard?: ReceiveDeleteGuard,
+  onDeleted?: (scope: ExpiredReceiveTransfer) => void,
+): Promise<boolean> {
   if (
     merkleRootHex.length !== crypto_hash_sha512_BYTES * 2 ||
     !/^[0-9a-f]+$/.test(merkleRootHex)
@@ -2793,9 +2939,50 @@ async function fnDeleteReceiveTransferLocked(
   const db = await getDB();
   try {
     const tx = db.transaction(
-      ["chunks", "messageData", "uniqueRoom"],
+      ["chunks", "messageData", "uniqueRoom", "receiveActivity"],
       "readwrite",
     );
+    const activityStore = tx.objectStore("receiveActivity");
+    const activity = await activityStore.get(merkleRootHex);
+    const previous = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(merkleRootHex);
+    if (
+      guard &&
+      (!previous ||
+        guard.incompleteOnly !== true ||
+        previous.transferId !== undefined ||
+        previous.roomId !== guard.roomId ||
+        previous.fromPeerId !== guard.fromPeerId ||
+        previous.savedSize >= previous.totalSize)
+    ) {
+      await tx.done;
+      return false;
+    }
+    if (
+      staleBefore !== undefined &&
+      (!activity ||
+        activity.deletedAt !== undefined ||
+        activity.lastActivityAt > staleBefore ||
+        (activity.leaseUntil ?? 0) > Date.now() ||
+        (previous &&
+          (previous.transferId !== undefined ||
+            previous.roomId !== activity.roomId ||
+            previous.fromPeerId !== activity.fromPeerId ||
+            previous.savedSize >= previous.totalSize)))
+    ) {
+      await tx.done;
+      return false;
+    }
+    if (activity || previous)
+      await activityStore.put({
+        merkleRoot: merkleRootHex,
+        roomId: activity?.roomId ?? previous!.roomId,
+        fromPeerId: activity?.fromPeerId ?? previous!.fromPeerId,
+        lastActivityAt: Date.now(),
+        deletedAt: Date.now(),
+      });
     const chunkStore = tx.objectStore("chunks");
     const messageStore = tx.objectStore("messageData");
     const roomStore = tx.objectStore("uniqueRoom");
@@ -2834,11 +3021,20 @@ async function fnDeleteReceiveTransferLocked(
     }
 
     await tx.done;
+    // Capture ownership from the SAME transaction that authorized deletion.
+    // A later main-thread projection must never infer it from another room.
+    if (activity || previous)
+      onDeleted?.({
+        merkleRoot: merkleRootHex,
+        roomId: activity?.roomId ?? previous!.roomId,
+        fromPeerId: activity?.fromPeerId ?? previous!.fromPeerId,
+      });
   } finally {
     db.close();
   }
 
   await fnDeleteOPFSFile(merkleRootHex);
+  return true;
 }
 
 async function fnDeleteDB(): Promise<void> {
@@ -2883,6 +3079,15 @@ onmessage = async (e: MessageEvent) => {
   try {
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
+      case "outboxRequest":
+        result = await executeOutbox(...message.args);
+        break;
+      case "sweepStaleReceives":
+        result = (await fnSweepStaleReceives()).map((row) => row.merkleRoot);
+        break;
+      case "sweepStaleReceiveDetails":
+        result = await fnSweepStaleReceives();
+        break;
       case "getDBAddressBookEntry":
         result = await fnGetDBAddressBookEntry(...message.args);
         break;
@@ -2965,9 +3170,10 @@ onmessage = async (e: MessageEvent) => {
         result = undefined;
         break;
       case "storeReceiveChunk": {
+        const admittedAt = Date.now();
         const chunk = message.args[0];
         result = await withReceiveLock(chunk.merkleRoot, () =>
-          fnStoreReceiveChunk(chunk),
+          fnStoreReceiveChunk(chunk, admittedAt),
         );
         break;
       }
@@ -2984,12 +3190,14 @@ onmessage = async (e: MessageEvent) => {
         );
         result = undefined;
         break;
-      case "deleteReceiveTransfer":
-        await withReceiveLock(message.args[0], () =>
-          fnDeleteReceiveTransferLocked(...message.args),
+      case "deleteReceiveTransfer": {
+        const [root, guard] = message.args;
+        const removed = await withReceiveLock(root, () =>
+          fnDeleteReceiveTransferLocked(root, undefined, guard),
         );
-        result = undefined;
+        result = guard ? removed : undefined;
         break;
+      }
       case "getDBAllNewChunks":
         result = await fnGetDBAllNewChunks(...message.args);
         break;

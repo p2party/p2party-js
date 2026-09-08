@@ -1,4 +1,12 @@
 import { debugLog } from "../utils/debug";
+import {
+  IMMEDIATE_RESUME_PROTOCOL,
+  FRAME_TYPE_IMMEDIATE_DISPOSITION,
+  bindImmediateDisposition,
+  immediateCloseMeansPause,
+  acceptImmediateDisposition,
+  sendImmediateResumeCapability,
+} from "./immediateDisposition";
 import { handleReadReceipt } from "./handleReadReceipt";
 import {
   createReceiptProcessingQueue,
@@ -42,7 +50,6 @@ import {
   installPqHealingOrchestrator,
 } from "./pqHealingOrchestrator";
 import { installCoverEdge } from "./coverEdge";
-import { abortTransfer } from "./transferAbort";
 import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
 
 import webrtcApi from "../api/webrtc";
@@ -232,7 +239,10 @@ export const handleOpenChannel = async (
     typeof channel === "string"
       ? epc.createDataChannel(channel, {
           ordered: channel === "main",
-          protocol: "raw",
+          protocol:
+            channel.includes("~") && epc.coverRuntime === undefined
+              ? IMMEDIATE_RESUME_PROTOCOL
+              : "raw",
           // negotiated: true,
           // id: dataChannelsWithPeer.length + 1,
           // maxRetransmits: 3,
@@ -319,6 +329,10 @@ export const handleOpenChannel = async (
     throw labelError;
   }
   const { channelLabel, merkleRoot, merkleRootHex } = parsedLabel;
+  if (!isCoverLane && merkleRootHex !== "")
+    bindImmediateDisposition(extChannel, merkleRoot, incoming, () =>
+      isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease),
+    );
   if (isCoverLane && extChannel.readyState === "closed") {
     unregisterConcreteCoverChannel();
     releaseQueuedReceipts(receiptQueue);
@@ -346,7 +360,8 @@ export const handleOpenChannel = async (
 
   let cancellationRequested = false;
   let cancellationPromise: Promise<void> | undefined;
-  const cancelReceiveTransfer = (): Promise<void> => {
+  let cancellationRemoved = false;
+  const cancelReceiveTransfer = (remote = false): Promise<void> => {
     if (cancellationPromise) return cancellationPromise;
     cancellationRequested = true;
     releaseProtocolResources();
@@ -357,13 +372,24 @@ export const handleOpenChannel = async (
       await waitForQueuedMessageFrames(queue, drainingRef);
       if (merkleRootHex === "") return;
 
-      await forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex);
-      await deleteReceiveTransfer(merkleRootHex);
+      if (remote) {
+        cancellationRemoved = await deleteReceiveTransfer(merkleRootHex, {
+          roomId,
+          fromPeerId: epc.withPeerId,
+          incompleteOnly: true,
+        });
+        if (cancellationRemoved)
+          await forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex);
+      } else {
+        await forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex);
+        await deleteReceiveTransfer(merkleRootHex);
+        cancellationRemoved = true;
+      }
     })();
     return cancellationPromise;
   };
   if (extChannel.label !== "main")
-    extChannel.cancelReceiveTransfer = cancelReceiveTransfer;
+    extChannel.cancelReceiveTransfer = () => cancelReceiveTransfer();
 
   // extChannel.onclosing = () => {
   //   debugLog(`Channel with label ${extChannel.label} is closing.`);
@@ -452,7 +478,7 @@ export const handleOpenChannel = async (
       if (cancellationRequested) {
         try {
           await cancellationPromise;
-          deleteIncompleteReceive = true;
+          deleteIncompleteReceive = cancellationRemoved;
         } catch (error) {
           console.error(error);
         }
@@ -485,6 +511,7 @@ export const handleOpenChannel = async (
           //   is. Only an immediate-mode live-edge close means remote cancel.
           deleteIncompleteReceive =
             !wasChannelClosedLocally(extChannel) &&
+            !immediateCloseMeansPause(extChannel) &&
             epc.coverRuntime === undefined &&
             (isRemoteCancelClose(
               receiveProgress,
@@ -505,7 +532,8 @@ export const handleOpenChannel = async (
       }
       if (deleteIncompleteReceive) {
         try {
-          await cancelReceiveTransfer();
+          await cancelReceiveTransfer(true);
+          deleteIncompleteReceive = cancellationRemoved;
         } catch (error) {
           console.error(error);
           deleteIncompleteReceive = false;
@@ -636,6 +664,26 @@ export const handleOpenChannel = async (
     }
 
     const classified = classifyFrame(data);
+    if (classified.type === FRAME_TYPE_IMMEDIATE_DISPOSITION) {
+      if (
+        !isCoverLane &&
+        merkleRootHex !== "" &&
+        acceptImmediateDisposition(extChannel, data) === "cancel"
+      ) {
+        // The sender observes the channel-scoped flag when close wakes its
+        // reconcile loop. Do not abort other recipients of the same send.
+        try {
+          // The worker rechecks after queued writes drain: a completed file or
+          // a local self-copy is never removable by a remote cancellation.
+          await cancelReceiveTransfer(true);
+        } catch (error) {
+          console.error("Could not retire cancelled incoming transfer", error);
+        } finally {
+          if (extChannel.readyState !== "closed") extChannel.close();
+        }
+      }
+      return;
+    }
     if (extChannel.label !== "main" && classified.type === FRAME_TYPE_RECEIPT) {
       const accepted = enqueueReceipt(
         classified.payload,
@@ -935,15 +983,6 @@ export const handleOpenChannel = async (
                 }),
               );
             },
-            onRemoteCancel: (merkleRootHex) => {
-              // An authenticated remote CANCEL cover cell aborts the local
-              // receive/send of exactly that transfer.
-              try {
-                abortTransfer(roomId, { merkleRootHex });
-              } catch (cancelError) {
-                console.error("scheduled CANCEL abort failed", cancelError);
-              }
-            },
           });
           if (pinRoom)
             await clearPinAttempts(roomId, epc.withPeerPublicKey).catch(
@@ -1087,6 +1126,14 @@ export const handleOpenChannel = async (
           pin?.fill(0);
         }
       })();
+    }
+
+    if (incoming && !isCoverLane && merkleRootHex !== "") {
+      void awaitAuthenticatedTransport()
+        .then((authenticated) => {
+          if (authenticated) sendImmediateResumeCapability(extChannel);
+        })
+        .catch((error) => console.error(error));
     }
 
     // Resume-on-reconnect (receiver side): a full reconnect hands us a brand-new

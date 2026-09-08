@@ -11,6 +11,30 @@ export interface SelfPeerIdentity {
   publicKey: string;
 }
 
+/** Validate the whole snapshot before replacing prior membership. */
+export const parsePeerRosterSnapshot = (
+  peers: readonly RoomPeer[],
+  self: SelfPeerIdentity,
+): Peer[] => {
+  if (peers.length > MAX_SIGNALING_ROOM_PEERS)
+    throw new Error("Signaling peer roster exceeds the room edge cap");
+  const ids = new Set<string>(),
+    keys = new Set<string>();
+  for (const peer of peers) {
+    if (
+      !peer ||
+      !isUUID(peer.id) ||
+      !isCanonicalEd25519Identity(peer.publicKey) ||
+      ids.has(peer.id) ||
+      keys.has(peer.publicKey)
+    )
+      throw new Error("Malformed membership snapshot");
+    ids.add(peer.id);
+    keys.add(peer.publicKey);
+  }
+  return mergePeerRosterDelta([], peers, self);
+};
+
 /**
  * Server `peers` messages are accepted-peer deltas, not room snapshots.
  * Preserve prior members and upsert only canonical, non-conflicting additions.

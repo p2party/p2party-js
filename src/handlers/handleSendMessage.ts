@@ -1,3 +1,23 @@
+import {
+  immediateCloseMeansPause,
+  hasImmediateRemoteCancel,
+  sendImmediateCancel,
+} from "./immediateDisposition";
+import { outboxRequest } from "../db/api";
+import {
+  startOutboxSession,
+  persistOutboundReceipt,
+  persistOutboundCancellation,
+  OutboxOwnershipLostError,
+} from "./outbox";
+import type { OutboxSession } from "./outbox";
+import type { OutboxLease, OutboxManifest } from "../db/outboxTypes";
+import { encodeRoomPolicyV1 } from "../roomPolicy";
+import { createTransferId } from "./transferAbort";
+import {
+  planMessageChunkCount,
+  estimateOutboundStagingBytes,
+} from "../utils/splitToChunks";
 import { debugLog } from "../utils/debug";
 import { handleOpenChannel } from "./handleOpenChannel";
 
@@ -21,12 +41,15 @@ import {
   decompileChannelMessageLabel,
 } from "../utils/channelLabel";
 import { waitForOpen } from "../utils/waitForOpen";
-import { deleteMessage, incrementMessageStats } from "../reducers/roomSlice";
+import { incrementMessageStats } from "../reducers/roomSlice";
 import {
   clearTransfer,
   isTransferComplete,
+  isTransferCancelled,
   waitForCompletion,
   getAckedChunks,
+  markChunkAcked,
+  hasChunkAcked,
   getAckedChunkCount,
 } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
@@ -40,16 +63,21 @@ import {
   markChannelClosedLocally,
   wasChannelClosedLocally,
 } from "../api/webrtc/localChannelClose";
-import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
+import {
+  isPqApplicationTrafficBlocked,
+  tryReservePqApplicationTraffic,
+} from "./pqHealingOrchestrator";
 import {
   cancelScheduledSend,
   coverEdgeGeneration,
   enqueueScheduledSend,
   trackScheduledSend,
+  untrackScheduledSend,
   waitForCoverEdgeGeneration,
 } from "./coverEdge";
 import {
   scheduledCoverIsSuspended,
+  queueScheduledCancel,
   scheduledDeliveryTimeoutMs,
   scheduledSendProgress,
   waitForScheduledDelivery,
@@ -75,13 +103,7 @@ import {
   CHANNEL_OPEN_POLL_MS,
 } from "../utils/constants";
 
-import {
-  deleteDBNewChunk,
-  deleteReceiveTransfer,
-  deleteDBSendQueue,
-  getDBNewChunk,
-  setDBNewChunk,
-} from "../db/api";
+import { deleteDBSendQueue, getDBNewChunk, setDBNewChunk } from "../db/api";
 import { roomSendQueueLabel } from "../utils/sendQueueKey";
 
 import type {
@@ -171,6 +193,7 @@ const sendChunks = async (
   // Live count of receipted chunks for this transfer edge; enables the
   // sender-side receipt window. Absent → legacy SCTP-only pacing.
   getAckedRealCount?: () => number,
+  outboxLease?: OutboxLease,
 ) => {
   throwIfTransferAborted(signal);
   const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
@@ -264,17 +287,20 @@ const sendChunks = async (
       unencryptedChunk.merkleRoot !== merkleRootHex ||
       unencryptedChunk.receiptToken !== receiptToken
     ) {
-      await setDBNewChunk({
-        transferId,
-        hash: hashHex,
-        merkleRoot: merkleRootHex,
-        leafHash: unencryptedChunk.leafHash,
-        receiptToken,
-        chunkIndex: iRandom,
-        data: unencryptedChunk.data,
-        metadata: unencryptedChunk.metadata,
-        merkleProof: merkleProof.buffer,
-      });
+      await setDBNewChunk(
+        {
+          transferId,
+          hash: hashHex,
+          merkleRoot: merkleRootHex,
+          leafHash: unencryptedChunk.leafHash,
+          receiptToken,
+          chunkIndex: iRandom,
+          data: unencryptedChunk.data,
+          metadata: unencryptedChunk.metadata,
+          merkleProof: merkleProof.buffer,
+        },
+        outboxLease,
+      );
     }
 
     if (
@@ -680,6 +706,8 @@ export const isAuthenticatedPeerCancel = (
   // routine — the gate opens a moment later, every test below then passes, and
   // the sender reports a cancel nobody sent (C7).
   !wasChannelClosedLocally(currentChannel) &&
+  (hasImmediateRemoteCancel(currentChannel) ||
+    !immediateCloseMeansPause(currentChannel)) &&
   currentEpc.connectionState === "connected" &&
   transferGateLease !== undefined &&
   isCurrentRatchetGateLease(roomId, peerId, transferGateLease) &&
@@ -934,6 +962,7 @@ const sendWithReconcile = async (
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
   signal?: AbortSignal,
+  outboxLease?: OutboxLease,
 ): Promise<void> => {
   throwIfTransferAborted(signal);
   clearTransfer(roomId, peerId, transferId);
@@ -1023,6 +1052,7 @@ const sendWithReconcile = async (
       signal,
       undefined,
       () => getAckedChunkCount(roomId, peerId, transferId),
+      outboxLease,
     );
 
     let retries = 0;
@@ -1067,11 +1097,22 @@ const sendWithReconcile = async (
             transportGateLease,
             currentChannel,
           )
-        )
+        ) {
+          await persistOutboundCancellation({
+            roomId,
+            peerId,
+            peerPublicKey: currentEpc.withPeerPublicKey,
+            transferId,
+            merkleRootHex: uint8ArrayToHex(merkleRoot),
+          });
           throw new Error("Message transfer cancelled by peer");
+        }
 
         if (resumeAttempts >= MAX_RESUME_ATTEMPTS) break;
         resumeAttempts++;
+        // A legacy receiver deletes partial data on channel close. Rebuild its
+        // have-set from the reopened channel instead of trusting prior receipts.
+        clearTransfer(roomId, peerId, transferId);
         const resumed = await resumeChannel(
           api,
           roomId,
@@ -1158,6 +1199,7 @@ const sendWithReconcile = async (
         signal,
         getAckedChunks(roomId, peerId, transferId),
         () => getAckedChunkCount(roomId, peerId, transferId),
+        outboxLease,
       );
       retries++;
 
@@ -1170,7 +1212,20 @@ const sendWithReconcile = async (
       throw new Error("Message transfer ended without receiver confirmation");
   };
   try {
-    await runWithTerminalChannelClose(() => currentChannel, runTransfer);
+    await runWithTerminalChannelClose(
+      () => currentChannel,
+      async () => {
+        try {
+          await runTransfer();
+        } finally {
+          if (
+            signal?.aborted &&
+            !(signal.reason instanceof OutboxOwnershipLostError)
+          )
+            await sendImmediateCancel(currentChannel);
+        }
+      },
+    );
   } finally {
     // The message key + owned PQ context copy are dead once every retransmit
     // round for this message is done (or given up) — wipe them. The ratchet
@@ -1197,8 +1252,11 @@ const makeScheduledSlotSealer =
     pqContext: PqMessageKeyContext | null,
     encryptionModule: LibCrypto,
     merkleModule: LibCrypto,
+    outboxLease?: OutboxLease,
+    signal?: AbortSignal,
   ) =>
   async (chunkIndex: number): Promise<Uint8Array | null> => {
+    throwIfTransferAborted(signal);
     const unencryptedChunk = await getDBNewChunk(transferId, chunkIndex);
     if (!unencryptedChunk) return null;
     const metadataArray = new Uint8Array(unencryptedChunk.metadata);
@@ -1233,17 +1291,20 @@ const makeScheduledSlotSealer =
       unencryptedChunk.merkleRoot !== merkleRootHex ||
       unencryptedChunk.receiptToken !== receiptToken
     ) {
-      await setDBNewChunk({
-        transferId,
-        hash: hashHex,
-        merkleRoot: merkleRootHex,
-        leafHash: unencryptedChunk.leafHash,
-        receiptToken,
-        chunkIndex,
-        data: unencryptedChunk.data,
-        metadata: unencryptedChunk.metadata,
-        merkleProof: merkleProof.buffer,
-      });
+      await setDBNewChunk(
+        {
+          transferId,
+          hash: hashHex,
+          merkleRoot: merkleRootHex,
+          leafHash: unencryptedChunk.leafHash,
+          receiptToken,
+          chunkIndex,
+          data: unencryptedChunk.data,
+          metadata: unencryptedChunk.metadata,
+          merkleProof: merkleProof.buffer,
+        },
+        outboxLease,
+      );
     }
 
     const chunk = await concatUint8Arrays([
@@ -1251,6 +1312,7 @@ const makeScheduledSlotSealer =
       merkleProof,
       new Uint8Array(unencryptedChunk.data),
     ]);
+    throwIfTransferAborted(signal);
     return sealChunk(
       messageKey,
       header,
@@ -1337,6 +1399,7 @@ export const sendScheduled = async (
    */
   peerConnections: readonly IRTCPeerConnection[] = [],
   dependencies: ScheduledSendDependencies = {},
+  outboxLease?: OutboxLease,
 ): Promise<PeerSendFanoutResult> => {
   const waitForGate = dependencies.waitForGate ?? waitForRatchetGate;
   const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
@@ -1445,8 +1508,20 @@ export const sendScheduled = async (
         await waitForGate(roomId, target.peerId, signal);
         if (!currentEpc.ratchetState)
           throw new Error("v4 scheduled send: no ratchet state");
-        await waitForPqTrafficAdmission(currentEpc, signal);
-        const stepped = await ratchetStep(currentEpc, roomId, encryptionModule);
+        let releasePq: (() => void) | null = null;
+        while (!releasePq) {
+          await waitForPqTrafficAdmission(currentEpc, signal);
+          throwIfTransferAborted(signal);
+          releasePq = tryReservePqApplicationTraffic(currentEpc);
+        }
+        let stepped: Awaited<ReturnType<DurableRatchetStep>>;
+        try {
+          stepped = await ratchetStep(currentEpc, roomId, encryptionModule);
+        } catch (error) {
+          releasePq();
+          throw error;
+        }
+        const pqEpoch = currentEpc.pqHealingState?.epoch;
         const sealer = makeScheduledSlotSealer(
           transferId,
           hashHex,
@@ -1458,6 +1533,8 @@ export const sendScheduled = async (
           stepped.pqContext,
           encryptionModule,
           merkleModule,
+          outboxLease,
+          signal,
         );
         // The sealer closure above holds `stepped.messageKey` and the PQ
         // context root for exactly as long as the scheduler can still ask this
@@ -1479,14 +1556,16 @@ export const sendScheduled = async (
         };
         const runtime = currentEpc.coverRuntime;
         try {
+          throwIfTransferAborted(signal);
           const enqueued = enqueueScheduledSend({
             epc: currentEpc,
             channelMessageLabel,
             totalChunks,
             merkleRoot,
             sealSlotCell: sealer,
-            getAckedChunks: () =>
-              getAckedChunks(roomId, target.peerId, transferId),
+            isChunkAcked: (index) =>
+              index !== 0 &&
+              hasChunkAcked(roomId, target.peerId, transferId, index),
           });
           if (!enqueued)
             throw new Error("v4 scheduled send: edge has no cover runtime");
@@ -1497,6 +1576,8 @@ export const sendScheduled = async (
           // Nothing ever holds the sealer, so its secrets die here.
           wipeMessageSecrets();
           throw enqueueError;
+        } finally {
+          releasePq();
         }
         admitted = true;
         // Re-registered on EVERY attempt, not just the first: the root →
@@ -1524,6 +1605,9 @@ export const sendScheduled = async (
         delivered = await waitForDelivery({
           isComplete: () =>
             isTransferComplete(roomId, target.peerId, transferId),
+          isInvalidated: () =>
+            isTransferCancelled(roomId, target.peerId, transferId) ||
+            coverEdgeGeneration(roomId, target.peerId) > generation,
           progress: () =>
             scheduledSendProgress(currentEpc.coverRuntime, channelMessageLabel),
           // A backgrounded tab, a pagehide, a freeze or an offline event
@@ -1535,7 +1619,12 @@ export const sendScheduled = async (
           idleTimeoutMs: deliveryIdleTimeoutMs,
           signal,
         });
-        if (delivered || signal?.aborted) break;
+        if (
+          delivered ||
+          signal?.aborted ||
+          isTransferCancelled(roomId, target.peerId, transferId)
+        )
+          break;
         if (resumes >= MAX_SCHEDULED_SEND_RESUMES) break;
 
         // The budget expired with nothing confirmed. That is a resumable event
@@ -1569,7 +1658,12 @@ export const sendScheduled = async (
         );
         if (
           !nextEpc ||
-          nextEpc.coverRuntime === runtime ||
+          (nextEpc.coverRuntime === runtime &&
+            !(
+              pqEpoch !== undefined &&
+              nextEpc.pqHealingState &&
+              nextEpc.pqHealingState.epoch > pqEpoch
+            )) ||
           !coverRuntimeAdmitsScheduledJobs(nextEpc.coverRuntime)
         )
           break;
@@ -1587,13 +1681,22 @@ export const sendScheduled = async (
         currentEpc = nextEpc;
         resumes += 1;
       }
-      if (!delivered) {
+      if (
+        !delivered &&
+        !isTransferCancelled(roomId, target.peerId, transferId)
+      ) {
         // Tell the receiver, before anything else destroys what could still
         // fill its partial. Without this the sender reported failure while the
         // receiver kept an unfillable N/M transfer forever — a re-send cannot
         // fill it, because decoy chunks are fresh randomness and the Merkle
         // root differs (C3).
-        cancelScheduledSend(currentEpc, channelMessageLabel);
+        if (
+          outboxLease &&
+          (!signal?.aborted ||
+            signal.reason instanceof OutboxOwnershipLostError)
+        )
+          currentEpc.coverRuntime?.complete(channelMessageLabel);
+        else cancelScheduledSend(currentEpc, channelMessageLabel);
       }
       outcomes.push(
         delivered
@@ -1602,16 +1705,26 @@ export const sendScheduled = async (
               peerId: target.peerId,
               status: "failed",
               phase: "transfer",
-              reason: new Error("scheduled delivery not confirmed"),
+              reason: new Error(
+                isTransferCancelled(roomId, target.peerId, transferId)
+                  ? "Message transfer cancelled by peer"
+                  : "scheduled delivery not confirmed",
+              ),
             },
       );
     } catch (reason) {
       // A throw after the job was admitted (a resume whose durable ratchet
       // advance fails, say) leaves the receiver holding a partial that only our
       // CANCEL can clear — the same C3 obligation the timeout path has.
-      if (admitted) {
+      if (admitted && !isTransferCancelled(roomId, target.peerId, transferId)) {
         try {
-          cancelScheduledSend(currentEpc, channelMessageLabel);
+          if (
+            outboxLease &&
+            (!signal?.aborted ||
+              signal.reason instanceof OutboxOwnershipLostError)
+          )
+            currentEpc.coverRuntime?.complete(channelMessageLabel);
+          else cancelScheduledSend(currentEpc, channelMessageLabel);
         } catch (cancelError) {
           console.error(cancelError);
         }
@@ -1622,13 +1735,21 @@ export const sendScheduled = async (
         phase: "transfer",
         reason,
       });
+    } finally {
+      if (
+        outboxLease &&
+        signal?.aborted &&
+        !(signal.reason instanceof OutboxOwnershipLostError)
+      )
+        queueScheduledCancel(currentEpc, channelMessageLabel);
+      untrackScheduledSend(currentEpc, merkleRootHex, transferId);
     }
   }
   return { outcomes, startedTransfers };
 };
 
 export const handleSendMessage = async (
-  data: string | File,
+  data: string | File | undefined,
   api: BaseQueryApi,
   label: string,
   roomId: string,
@@ -1643,87 +1764,202 @@ export const handleSendMessage = async (
   metadataSchemaVersion = 1,
 ): Promise<SendMessageResult | undefined> => {
   const transfer = claimTransfer(roomId, transferId);
-  let merkleRootForFailureCleanup = "";
-  let localMessageCommitted = false;
-  let wireWorkStarted = false;
+  let session: OutboxSession | undefined;
+  let prepared = false;
+  let failure: unknown;
   try {
-    throwIfTransferAborted(transfer.signal);
-    const { rooms } = api.getState() as State;
-
-    const roomIndex = rooms.findIndex((r) => r.id === roomId);
-    if (roomIndex === -1) throw new Error("No room with id " + roomId);
-
-    if (roomIndex > -1) {
-      const channelIndex = rooms[roomIndex].channels.findIndex(
-        (c) => c.label === label,
-      );
-      if (channelIndex === -1)
-        throw new Error("No channel with label " + label);
-
-      const { merkleRoot, merkleRootHex, hashHex, totalChunks, chunkHashes } =
-        await splitToChunks(
-          data,
-          api,
-          label,
-          rooms[roomIndex],
-          merkleModule,
-          transfer,
-          minChunks,
-          chunkSize,
-          percentageFilledChunk,
-          metadataSchemaVersion,
-        );
-
-      transfer.bindMerkleRoot(merkleRootHex);
-      merkleRootForFailureCleanup = merkleRootHex;
-      throwIfTransferAborted(transfer.signal);
-
+    const state = api.getState() as State;
+    const room = state.rooms.find((r) => r.id === roomId);
+    if (!room || room.signalingActive === false)
+      throw new Error("No active room with id " + roomId);
+    const senderPublicKey = state.keyPair.publicKey;
+    const policyHex = uint8ArrayToHex(encodeRoomPolicyV1(room.policy));
+    let manifest: OutboxManifest;
+    let chunkHashes: Uint8Array;
+    const ackedByPublicKey = new Map<string, number[]>();
+    const owner = createTransferId();
+    if (data === undefined) {
+      const claimed = await outboxRequest({
+        kind: "claim",
+        transferId,
+        owner,
+        senderPublicKey,
+        roomId,
+        roomUrl: room.url,
+        policyHex,
+      });
       if (
-        merkleRoot.length === 0 ||
-        hashHex.length === 0 ||
-        totalChunks === 0 ||
-        chunkHashes.length === 0
+        !claimed.accepted ||
+        !claimed.manifest ||
+        !claimed.lease ||
+        !claimed.chunkHashes
       )
         return;
-      localMessageCommitted = true;
-
-      const channelMessageLabel = await compileChannelMessageLabel(
-        label,
-        merkleRootHex,
+      manifest = claimed.manifest;
+      prepared = true;
+      chunkHashes = new Uint8Array(claimed.chunkHashes);
+      for (const ack of claimed.acknowledgments ?? []) {
+        const indexes: number[] = [];
+        for (let i = 0; i < manifest.totalChunks; i++)
+          if (ack.bitmap[i >>> 3] & (1 << (i & 7))) indexes.push(i);
+        ackedByPublicKey.set(ack.publicKey, indexes);
+      }
+      session = startOutboxSession(
+        claimed.lease,
+        roomId,
+        manifest.leaseUntil,
+        transfer.signal,
+        stillAuthorized,
       );
-
-      const targets = rooms[roomIndex].channels[channelIndex].peerIds.map(
-        (peerId): PeerSendTarget => ({
-          peerId,
-          epc: peerConnections.find(
-            (candidate) =>
-              candidate.roomId === roomId && candidate.withPeerId === peerId,
+    } else {
+      const channel = room.channels.find((c) => c.label === label);
+      if (!channel) throw new Error("No channel with label " + label);
+      const membership = [...room.peers, ...(room.knownPeers ?? [])];
+      const recipients = channel.peerIds
+        .map((peerId) => {
+          const publicKey =
+            membership.find((p) => p.peerId === peerId)?.peerPublicKey ??
+            peerConnections.find(
+              (p) => p.roomId === roomId && p.withPeerId === peerId,
+            )?.withPeerPublicKey;
+          if (!publicKey)
+            throw new Error("Outbound recipient identity is unknown");
+          return { peerId, publicKey };
+        })
+        .filter(
+          (peer, index, peers) =>
+            peers.findIndex((p) => p.publicKey === peer.publicKey) === index,
+        );
+      const totalSize =
+        typeof data === "string"
+          ? new TextEncoder().encode(data).length
+          : data.size;
+      const totalChunks = planMessageChunkCount(
+        totalSize,
+        minChunks,
+        chunkSize,
+        percentageFilledChunk,
+      );
+      const created = await outboxRequest({
+        kind: "create",
+        input: {
+          transferId,
+          owner,
+          senderPublicKey,
+          roomId,
+          roomUrl: room.url,
+          policyHex,
+          channelLabel: label,
+          filename:
+            typeof data === "string" ? "message" : data.name.slice(0, 255),
+          totalSize,
+          totalChunks,
+          stagedBytes: estimateOutboundStagingBytes(
+            totalSize,
+            totalChunks,
+            chunkSize,
           ),
-        }),
+          recipients,
+        },
+      });
+      if (!created.manifest || !created.lease)
+        throw new Error("Unable to reserve durable sender staging");
+      manifest = created.manifest;
+      session = startOutboxSession(
+        created.lease,
+        roomId,
+        manifest.leaseUntil,
+        transfer.signal,
+        stillAuthorized,
       );
-
-      const scheduledRoom = rooms[roomIndex].policy.coverMode === "scheduled";
-      const fanout = scheduledRoom
+      const split = await splitToChunks(
+        data,
+        api,
+        label,
+        room,
+        merkleModule,
+        { ...transfer, signal: session.signal, outboxLease: session.lease },
+        minChunks,
+        chunkSize,
+        percentageFilledChunk,
+        metadataSchemaVersion,
+      );
+      throwIfTransferAborted(session.signal);
+      const published = await outboxRequest({
+        kind: "publish",
+        lease: session.lease,
+        merkleRootHex: split.merkleRootHex,
+        hashHex: split.hashHex,
+        chunkHashes: split.chunkHashes.buffer as ArrayBuffer,
+      });
+      if (!published.manifest)
+        throw new Error("Unable to publish complete outbound staging");
+      manifest = published.manifest;
+      chunkHashes = split.chunkHashes;
+      prepared = true;
+    }
+    function stillAuthorized(): boolean {
+      const latest = api.getState() as State;
+      const currentRoom = latest.rooms.find((r) => r.id === roomId);
+      return (
+        latest.keyPair.publicKey === senderPublicKey &&
+        !!currentRoom &&
+        currentRoom.signalingActive !== false &&
+        currentRoom.url === room!.url &&
+        uint8ArrayToHex(encodeRoomPolicyV1(currentRoom.policy)) === policyHex
+      );
+    }
+    if (manifest.channelLabel !== label)
+      throw new Error("Pending message channel binding changed");
+    const signal = session.signal;
+    throwIfTransferAborted(signal);
+    const { merkleRootHex, hashHex, totalChunks } = manifest;
+    const merkleRoot = hexToUint8Array(merkleRootHex);
+    transfer.bindMerkleRoot(merkleRootHex);
+    transfer.bindHash(hashHex);
+    const targets: PeerSendTarget[] = manifest.recipients
+      .filter((r) => !r.delivered && !r.cancelled)
+      .map((recipient) => {
+        const epc = peerConnections.find(
+          (p) =>
+            p.roomId === roomId &&
+            p.withPeerPublicKey === recipient.publicKey &&
+            p.connectionState !== "closed" &&
+            p.connectionState !== "failed",
+        );
+        return { peerId: epc?.withPeerId ?? recipient.peerId, epc };
+      });
+    for (const target of targets) {
+      clearTransfer(roomId, target.peerId, transferId);
+      for (const index of room.policy.coverMode === "scheduled"
+        ? (ackedByPublicKey.get(target.epc?.withPeerPublicKey ?? "") ?? [])
+        : [])
+        markChunkAcked(roomId, target.peerId, transferId, index);
+    }
+    const channelMessageLabel = await compileChannelMessageLabel(
+      label,
+      merkleRootHex,
+    );
+    const fanout =
+      room.policy.coverMode === "scheduled"
         ? await sendScheduled(
             roomId,
             label,
-            rooms[roomIndex].policy,
+            room.policy,
             targets,
             totalChunks,
             chunkHashes,
             merkleRoot,
             merkleRootHex,
-            transfer.transferId,
+            transferId,
             hashHex,
             encryptionModule,
             merkleModule,
-            transfer.signal,
-            () => {
-              wireWorkStarted = true;
-            },
-            // The LIVE array, so a send whose edge is replaced mid-flight can
-            // find the transport that replaced it (C8).
+            signal,
+            undefined,
             peerConnections,
+            {},
+            session.lease,
           )
         : await runPeerSendFanout(
             targets,
@@ -1732,8 +1968,8 @@ export const handleSendMessage = async (
                 { channel: channelMessageLabel, epc, roomId, dataChannels },
                 api,
               ),
-            ({ peerId, epc }, channel) =>
-              sendWithReconcile(
+            async ({ peerId, epc }, channel) => {
+              await sendWithReconcile(
                 channel,
                 api,
                 roomId,
@@ -1741,68 +1977,79 @@ export const handleSendMessage = async (
                 totalChunks,
                 chunkHashes,
                 merkleRoot,
-                transfer.transferId,
+                transferId,
                 hashHex,
                 peerId,
                 encryptionModule,
                 merkleModule,
                 peerConnections,
                 dataChannels,
-                transfer.signal,
-              ),
-            transfer.signal,
-            () => {
-              wireWorkStarted = true;
+                signal,
+                session!.lease,
+              );
+              await persistOutboundReceipt({
+                roomId,
+                peerId,
+                peerPublicKey: epc.withPeerPublicKey,
+                transferId,
+                merkleRootHex,
+              });
             },
+            signal,
           );
-      const result: SendMessageResult = {
-        transferId: transfer.transferId,
-        merkleRootHex,
-        ...fanout,
-      };
-
-      throwIfTransferAborted(transfer.signal);
-      const delivered = result.outcomes.filter(
-        (outcome) => outcome.status === "delivered",
-      ).length;
-      if (result.startedTransfers === 0)
-        throw new MessageDeliveryError(
-          result,
-          "No authenticated connected peers accepted the send",
-        );
-      if (delivered === 0)
-        throw new MessageDeliveryError(
-          result,
-          "Message was not delivered to any peer",
-        );
-
-      // Mixed success is a completed room send, not a reason to erase the
-      // sender's history. The caller can surface every peer's setup/transfer
-      // outcome and decide whether to retry only the failed edges.
-      return result;
+    for (const outcome of fanout.outcomes) {
+      if (outcome.status !== "delivered") continue;
+      const recipient = targets.find(
+        (target) => target.peerId === outcome.peerId,
+      );
+      if (recipient?.epc)
+        await persistOutboundReceipt({
+          roomId,
+          peerId: outcome.peerId,
+          peerPublicKey: recipient.epc.withPeerPublicKey,
+          transferId,
+          merkleRootHex,
+        });
     }
-    return undefined;
-  } catch (error) {
+    const result: SendMessageResult = { transferId, merkleRootHex, ...fanout };
+    throwIfTransferAborted(signal);
     if (
-      shouldDeleteLocalMessageAfterFailure(
-        localMessageCommitted,
-        wireWorkStarted,
-        transfer.signal.aborted,
-      )
-    ) {
-      if (merkleRootForFailureCleanup.length > 0) {
-        await deleteReceiveTransfer(merkleRootForFailureCleanup);
-      }
-      api.dispatch(deleteMessage({ roomId, transferId: transfer.transferId }));
-    }
-    if (transfer.signal.aborted)
-      throw transfer.signal.reason instanceof Error
-        ? transfer.signal.reason
-        : new Error("Message transfer cancelled");
-    console.trace(error);
+      targets.length > 0 &&
+      !result.outcomes.some((outcome) => outcome.status === "delivered")
+    )
+      throw new MessageDeliveryError(
+        result,
+        "Message is pending; no recipient confirmed delivery in this attempt",
+      );
+    return result;
+  } catch (error) {
+    failure = error;
     throw error;
   } finally {
-    await deleteDBNewChunk({ transferId: transfer.transferId });
+    session?.finish();
+    if (session) {
+      try {
+        if (!prepared || transfer.signal.aborted)
+          await outboxRequest({
+            kind: "remove",
+            transferId,
+            lease: session.lease,
+          });
+        else
+          await outboxRequest({
+            kind: "release",
+            lease: session.lease,
+            lastError:
+              failure instanceof Error
+                ? failure.message
+                : failure
+                  ? String(failure)
+                  : undefined,
+          });
+      } catch (error) {
+        debugLog(error);
+      }
+    }
     transfer.finish();
   }
 };

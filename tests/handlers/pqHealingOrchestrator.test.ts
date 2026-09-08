@@ -14,7 +14,9 @@ import {
   installPqHealingOrchestrator,
   isPqApplicationTrafficBlocked,
   tickPqHealing,
+  tryReservePqApplicationTraffic,
 } from "../../src/handlers/pqHealingOrchestrator";
+import { withEdgeCryptoMutationLock } from "../../src/handlers/ratchetPersist";
 import { RATCHET_ROOT_SUITE_MLKEM512 } from "../../src/utils/constants";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
@@ -66,10 +68,7 @@ const makeEdgePair = (): { a: Peer; b: Peer } => {
   );
   const binding = new Uint8Array(32).fill(0x42);
 
-  const makePeer = (
-    amInitiator: boolean,
-    ratchet: typeof ratchetA,
-  ): Peer => {
+  const makePeer = (amInitiator: boolean, ratchet: typeof ratchetA): Peer => {
     const runtime = new SparsePqHealingState({
       module,
       pqMode: "hybrid-mlkem512",
@@ -156,6 +155,97 @@ const destroyPair = (pair: { a: Peer; b: Peer }): void => {
 };
 
 describe("live sparse-healing orchestrator (two in-memory peers)", () => {
+  test("a derive-to-enqueue reservation blocks local healing and is released once", async () => {
+    const pair = makeEdgePair();
+    makeDue(pair.a);
+    const release = tryReservePqApplicationTraffic(pair.a.epc)!;
+    await tickPqHealing(pair.a.epc);
+    expect(pair.a.sent).toHaveLength(0);
+    release();
+    release();
+    await tickPqHealing(pair.a.epc);
+    expect(pair.a.sent).toHaveLength(1);
+    expect(tryReservePqApplicationTraffic(pair.a.epc)).toBeNull();
+    destroyPair(pair);
+  });
+
+  test("incoming healing drains reservations and invalidates old real jobs only after durable rekey", async () => {
+    const pair = makeEdgePair();
+    let retired = 0;
+    pair.b.epc.coverRuntime = {
+      hasPendingRealJobs: () => true,
+      onPqEpochChanged: () => {
+        expect(pair.b.persisted.length).toBeGreaterThan(0);
+        expect(pair.b.runtime.epoch).toBe(1n);
+        retired++;
+      },
+    } as unknown as NonNullable<IRTCPeerConnection["coverRuntime"]>;
+    const release = tryReservePqApplicationTraffic(pair.b.epc)!;
+    makeDue(pair.a);
+    await tickPqHealing(pair.a.epc);
+    const offer = drop(pair.a);
+    const processing = handleInboundPqControlFrame(pair.b.epc, ROOM, offer);
+    await Promise.resolve();
+    expect(pair.b.sent).toHaveLength(0);
+    expect(pair.b.runtime.epoch).toBe(0n);
+    expect(tryReservePqApplicationTraffic(pair.b.epc)).toBeNull();
+    release();
+    await processing;
+    expect(retired).toBe(1);
+    await deliver(pair.b, pair.a);
+    await deliver(pair.a, pair.b);
+    expect(retired).toBe(1);
+    expect(pair.b.edgeFailures).toHaveLength(0);
+    destroyPair(pair);
+  });
+
+  test("rechecks scheduled work after waiting for the durable mutation lock", async () => {
+    const pair = makeEdgePair();
+    let release!: () => void;
+    let pending = false;
+    pair.a.epc.coverRuntime = {
+      hasPendingRealJobs: () => pending,
+    } as unknown as NonNullable<IRTCPeerConnection["coverRuntime"]>;
+    const held = withEdgeCryptoMutationLock(
+      pair.a.epc,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    for (let i = 0; i < 8 && !release; i++) await Promise.resolve();
+    makeDue(pair.a);
+    const ticking = tickPqHealing(pair.a.epc);
+    pending = true;
+    release();
+    await held;
+    await ticking;
+    expect(pair.a.sent).toHaveLength(0);
+    expect(isPqApplicationTrafficBlocked(pair.a.epc)).toBe(false);
+    destroyPair(pair);
+  });
+
+  test("does not heal while scheduled real work waits for its first slot", async () => {
+    const pair = makeEdgePair();
+    let pending = true;
+    pair.a.epc.coverRuntime = {
+      hasPendingRealJobs: () => pending,
+      onPqEpochChanged: () => {},
+    } as unknown as NonNullable<IRTCPeerConnection["coverRuntime"]>;
+    makeDue(pair.a);
+    await tickPqHealing(pair.a.epc);
+    expect(pair.a.sent).toHaveLength(0);
+    expect(pair.a.runtime.epoch).toBe(0n);
+    pending = false;
+    await tickPqHealing(pair.a.epc);
+    expect(pair.a.sent).toHaveLength(1);
+    await deliver(pair.a, pair.b);
+    await deliver(pair.b, pair.a);
+    await deliver(pair.a, pair.b);
+    expect(pair.a.runtime.epoch).toBe(1n);
+    destroyPair(pair);
+  });
+
   test("a due exchange completes OFFER → ADVANCE → ACK with persist-before-send at every hop", async () => {
     const pair = makeEdgePair();
     const { a, b } = pair;

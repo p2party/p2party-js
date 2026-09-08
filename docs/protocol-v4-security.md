@@ -128,7 +128,7 @@ receives its normalized value. A fragment is not a server-blind meeting point.
 
 ## Signaling and TURN correctness boundary
 
-SDK 0.14.7 makes legacy signaling state transitions correlated and bounded; it
+SDK 0.14.8 makes legacy signaling state transitions correlated and bounded; it
 does not make that signaling path blind.
 
 - A room response is accepted only for the exact current socket, room

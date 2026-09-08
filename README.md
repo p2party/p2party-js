@@ -795,9 +795,9 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.7` is not on the CDN yet.** The release pipeline uploads its objects
+> **`0.14.8` is not on the CDN yet.** The release pipeline uploads its objects
 > from the tarball it publishes, and that pipeline has not run for this
-> version: every path under `https://cdn.p2party.com/@0.14.7/` currently
+> version: every path under `https://cdn.p2party.com/@0.14.8/` currently
 > answers 404, and npm still resolves `p2party` to an older release. The
 > snippet below is generated from this build and is what the release will
 > serve — until then, either pin the version `npm view p2party version` reports
@@ -815,7 +815,7 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.7/p2party.min.js"
+  src="https://cdn.p2party.com/@0.14.8/p2party.min.js"
   integrity="sha384-Wh2Pxka9YN2oAZmzYgaoyLmfKQMXsMO4AfUmshluGmYjfS0+ahOZGCTBGHtKTcC9"
   crossorigin="anonymous"
 ></script>

@@ -80,3 +80,10 @@ docs/e2e/blind-two-store/bundle.js
 docs/e2e/blind-two-store/bundle.cohort-*.js
 docs/e2e/blind-two-store/provider-smoke-bundle.js
 docs/e2e/blind-two-store/libcrypto.wasm
+
+# Regenerated desync browser bundles and raw per-run diagnostics. Compact
+# acceptance results are recorded in docs/e2e/README.md.
+docs/e2e/desync/app-bundle.js
+docs/e2e/desync/worker-inject.js
+docs/e2e/desync/libcrypto.wasm
+docs/e2e/runs/

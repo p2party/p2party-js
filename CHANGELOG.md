@@ -29,6 +29,44 @@ reaches any of it.
   fault domain. `docs/blind-rendezvous-two-store-prototype.md` describes what it
   is and, at length and first, what it does not claim.
 
+## [0.14.8] — 2026-09-08
+
+Protocol v4 remains unchanged. Socket replacement recovery uses the additive
+socket-generation fields provided by signaling server `0.1.2`.
+
+### Fixed
+
+- **C4, signaling reconnect:** an unexpected socket close starts a bounded
+  reconnect controller without requiring a browser focus event. The matching
+  site change re-arms room auto-connect after a connection drops.
+- **C1, replaced signaling sessions:** peer introductions carry a fresh socket
+  generation. A changed generation retires the old peer transport; an
+  unnegotiated responder transport has a bounded rebuild watchdog.
+- **C2, terminal handshake failures:** PIN, policy, and suite failures remain
+  terminal when their main channel closes, so transport retries do not erase
+  the failure or repeat an impossible handshake.
+- **C7, transfer cancellation:** resumed channels wait for the current ratchet
+  gate. A locally closed channel cannot masquerade as an authenticated peer
+  CANCEL, and a frame that exhausts its pre-auth wait is dropped without
+  destroying the transfer.
+- **C5, scheduled cover:** late boundary timers and rejected timer handlers
+  degrade and re-arm the scheduler instead of leaving it suspended forever.
+- **C3, scheduled delivery:** the delivery budget follows the configured
+  cadence, advances only on forward progress, and pauses while cover is
+  suspended. Authenticated cancellation removes an incomplete receive from
+  durable storage and the live room view.
+- **C8, scheduled resume:** a retained send is re-derived and re-offered on
+  the replacement authenticated runtime, with bounded generations and retries.
+  A completion receipt arriving during the replacement wait still wins.
+
+### Verification and limits
+
+The browser matrix and actual site/server verification are recorded in
+[the E2E report](docs/e2e/README.md). C6, C10, C11, C9's roster protocol half,
+per-chunk scheduled receipts, and old-server socket-replacement recovery remain
+explicit follow-ups in [ROADMAP.md](ROADMAP.md). This is a local release
+candidate; no package, CDN asset, or deployment is published by this change.
+
 ## [0.14.7] — 2026-09-03
 
 Three recovery gaps left open by 0.14.5, each one a case where the software

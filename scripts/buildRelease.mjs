@@ -258,8 +258,9 @@ const validateDocumentedVersions = () => {
   //
   // The exemptions are the files whose purpose is to record history, where
   // naming an old version is correct and rewriting it would be a lie:
-  // CHANGELOG.md and the two decision logs. Vendored and submodule trees carry
-  // upstream's versions, not ours.
+  // CHANGELOG.md, the two decision logs, and the browser results and original
+  // desync investigation. Their historical version labels must stay intact.
+  // Vendored and submodule trees carry upstream's versions, not ours.
   const documentation = execFileSync(
     "git",
     [
@@ -268,6 +269,8 @@ const validateDocumentedVersions = () => {
       ":!:CHANGELOG.md",
       ":!:docs/design-decisions-and-security-findings.md",
       ":!:docs/protocol-evolution-decision-log.md",
+      ":!:docs/e2e/README.md",
+      ":!:docs/e2e/desync-hunt-2026-09-07.md",
       ":!:libsodium/**",
       ":!:src/cryptography/vendor/**",
     ],

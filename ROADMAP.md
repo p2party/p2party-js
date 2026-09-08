@@ -11,18 +11,14 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-Implemented and verified in the `0.14.7` SDK release candidate:
+The SDK is being prepared as the `0.14.8` release candidate. The desync
+remediation requires the matching `0.1.2` signaling server for socket-generation
+recovery. Local verification results and remaining limits are recorded in
+[the browser harness report](docs/e2e/README.md).
 
-> The deployed service does not run this build yet. As observed on 2026-09-02,
-> `https://p2party.com` serves the bundle of the release it vendors — the
-> `libcrypto.wasm` it self-hosts is byte-identical to the one inside that
-> vendored tarball — and `https://signaling.p2party.com/health` answers
-> `{"status":"ok","protocolVersion":4,"version":"0.1.1"}`, which is the server
-> this SDK requires and already the deployed one. What is outstanding is
-> distribution plus a frontend re-vendor, not a server change: `0.14.7` is not
-> on npm (`npm view p2party version` answers an older release), nothing is
-> uploaded under `https://cdn.p2party.com/@0.14.7/`, and the local commits in
-> all three repositories are unpushed.
+This remediation does not publish, deploy, or push any repository. A site must
+vendor the tested SDK tarball and the deployed signaling server must be upgraded
+before the new recovery behavior can be claimed for that deployment.
 
 - protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets
   are combined by `HKDF-Extract` over a fixed-order concatenation —
@@ -66,6 +62,28 @@ transcript both peers reject. What is lost is the narrower check that the DTLS
 transport terminates on the certificate the SDP advertised.
 
 ## Near term
+
+### Known open, in priority order
+
+1. **C6: sparse-PQ healing during a scheduled transfer.** Extend
+   `isEdgeQuiescentForHealing` to include pending real cover jobs. The new
+   scheduled-send registry provides the prerequisite, but healing still needs
+   its own regression scenario.
+2. **C11 and C9's roster protocol work.** Return the server's room roster and
+   reconcile each server-named member separately. Verify a blackholed edge in
+   an n=3 room; the present recovery harness has two peers.
+3. **C10: durable transfer recovery.** Resume-budget exhaustion can leave a
+   receiver partial. Add a durable sender outbox and a receive-side stale
+   partial sweep; sender recovery across a page reload is also outstanding.
+4. **Per-chunk scheduled receipts.** Scheduled resume currently re-sends all
+   chunks; selective replay needs authenticated scheduled chunk receipts.
+5. **C1 with a pre-generation signaling server.** Socket-generation recovery
+   needs server `0.1.2`. The bounded unnegotiated-transport watchdog limits
+   retries against older servers; it cannot provide the missing generation.
+6. **Existing limits.** Retain the historical slow responder-freeze recovery
+   case until the current matrix establishes its latency, identity backup UI,
+   import cycles, unexecuted ProVerif verification, and Firefox's missing
+   post-connect certificate statistics. No sender survives a page reload.
 
 **Close the verification gaps.** Three properties are implemented and believed
 correct but still not demonstrated end to end: PIN backoff escalation under

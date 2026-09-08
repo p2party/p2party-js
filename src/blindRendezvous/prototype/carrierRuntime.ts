@@ -13,12 +13,14 @@
  * - **The schedule is fixed, not event-driven.** The same number of
  *   same-sized requests leave for every store in every window whether the
  *   outbox is empty or full: one token, one allocation, one append per
- *   `appendSchedule` entry, and one read. A real object simply takes a dummy's
- *   place. A store therefore cannot learn from traffic shape whether this
- *   client had anything to say, and a missed event stays missed — retrying
- *   inside a window would make the shape event-driven again, and retrying at
- *   the surviving store after an omission would be an active cross-store
- *   tagging channel.
+ *   `appendSchedule` entry, and one read — thirteen requests, always. The
+ *   witness pair is the one exception: it is conditional on the other
+ *   store's scan, not fixed (design doc §3a item 14). A real object simply
+ *   takes a dummy's place. A store therefore cannot learn from traffic shape
+ *   whether this client had anything to say, and a missed event stays
+ *   missed — retrying inside a window would make the shape event-driven
+ *   again, and retrying at the surviving store after an omission would be an
+ *   active cross-store tagging channel.
  * - **The two stores never receive the same bytes.** Each publication is
  *   sealed separately under that store's `carrierContextId` with a fresh
  *   24-byte nonce, so one store cannot recognize the other's copy of an
@@ -1245,7 +1247,9 @@ export class CarrierRuntime {
 
   /**
    * Gossip every verified checkpoint to the other stores and read theirs back
-   * (design doc §8).
+   * (design doc §8). This is the route design doc §3a item 14 names as the
+   * cross-store status oracle: it fires only when this client's scan of the
+   * witnessed store came back `finalized` and neither store is inert.
    *
    * A record that names a store this client verified, carrying a different
    * checkpoint hash than that store showed this client, is a

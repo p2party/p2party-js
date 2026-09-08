@@ -377,10 +377,10 @@ offsets (`ingressWindowStartMs` + offset, wall clock via an injected clock):
 - at each `appendSchedule[c][i].offsetMs`: exactly one append per room slot,
   real if the outbox holds a compatible operation for that role, else a
   dummy with the exact header and random body;
-- at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`, and — after
-  the union — a witness POST and a witness GET to each *other* store, which is
-  the one part of the shape that is **conditional** rather than fixed (§3a item
-  14, counted in §5).
+- at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`;
+- once that scan's union resolves — no fixed offset — a witness POST and a
+  witness GET to each *other* store, which is the one part of the shape that
+  is **conditional** rather than fixed (§3a item 14, counted in §5).
 
 Missed events are missed (no same-window retry). Outbox: operations queue
 with their `ServiceWorkKindV1`; role mapping and ordering follow

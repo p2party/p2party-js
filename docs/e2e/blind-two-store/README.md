@@ -357,7 +357,10 @@ build here is not a type check.
 ### Recorded result (2026-09-08, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
 
 `node docs/e2e/blind-two-store/run.mjs --scenario=all`, exit 0, 4 of 4
-scenarios. Verbatim, with the per-window `store-missed` cover lines, the
+scenarios. Recorded from a build before the request deadline
+(`requestDeadlineMs`, `15fe5cc`) landed; the confirming run after that fix
+reported the same 4 of 4, exit 0, with no deadline fault on any healthy or
+killed store. Verbatim, with the per-window `store-missed` cover lines, the
 `run-stopped` lines and the store startup banners elided:
 
 ```
@@ -631,10 +634,20 @@ Read it as three findings, all about this machine and nothing else:
    much unrelated traffic a client's objects sit among.
 
 Each row above is a real `--scenario=healthy` run with both stores honest;
-`bundle.cohort-<n>.js` is generated per cohort and is not committed. Note that
-the numbers are wall clock on one laptop running two Chromium contexts and two
-`bun` stores at once — they are an upper bound on what two real clients on two
-machines would see, not a protocol constant.
+`bundle.cohort-<n>.js` is generated per cohort and is not committed. The table
+is **not monotone**: at the same 4,000 ms window, cohort 4 (22.3 s) is
+*faster* than cohort 2 (23.8 s) — the smaller cover set is the slower row, by
+1.07×. That step is a single measurement in each direction and sits inside
+run-to-run variance; on its own it shows nothing. What survives is the
+separation between the extreme rows — 1.7× at a fixed 4,000 ms window
+(39.9 → 23.8 s) and 3.8× once the shorter window is taken too (39.9 → 10.5 s)
+— both far outside that variance. The mechanism behind them (a smaller cover
+set means fewer objects to scan) is carried by the scan-byte column, which
+*is* monotone (1,380,336 → 723,344 → 656,992 as the cohort halves from 8 to
+2), not by the timings alone. Note that the numbers are wall clock on one
+laptop running two Chromium contexts and two `bun` stores at once — they are
+an upper bound on what two real clients on two machines would see, not a
+protocol constant.
 
 ### Environment facts the harness depends on
 

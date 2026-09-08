@@ -261,9 +261,10 @@ const MAX_PENDING_RECEIPTS = 1_024;
  * geometry, so `--window-ms=1000` gives a 1,000 ms deadline rather than a
  * constant that silently stops fitting.
  *
- * One value for every route, deliberately: a per-route deadline would put the
- * route back into something a store can read off connection lifetimes, and the
- * whole point of the fixed schedule is that it must not.
+ * One value for every route, deliberately: the profile sets no per-route
+ * budget for appends, chunks, or checkpoints, so there is no geometry to
+ * derive a per-route deadline from, and one value is simpler than inventing
+ * budgets that would need their own justification.
  *
  * Without a deadline, a store that accepts the connection and never answers
  * holds `scanWindow` open forever, and because the carrier runtime joins both
@@ -1034,8 +1035,11 @@ export class PrototypeStoreClient {
    * Offer this store one observation of another store's checkpoint.
    *
    * Certificate-Transparency-style gossip with the other store as the carrier
-   * and no witness network: one fixed POST per other store per window, so the
-   * trace stays the profile's fixed shape.
+   * and no witness network. Unlike every other route here, this one is not a
+   * fixed per-window POST: the caller invokes it only when its scan of the
+   * *other* store came back `finalized` and neither store is inert, which
+   * makes it the cross-store status oracle disclosed in design doc §3a item
+   * 14.
    */
   async postWitness(record: StoreWitnessRecordV1): Promise<boolean> {
     const bytes = await this.#post(

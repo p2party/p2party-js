@@ -273,7 +273,7 @@ first section is what the work does **not** claim.
 
 ### What landed
 
-Fifteen modules under `src/blindRendezvous/prototype/` (10,412 lines) with nine
+Fifteen modules under `src/blindRendezvous/prototype/` (10,508 lines) with nine
 test files behind them, plus a browser harness under
 `docs/e2e/blind-two-store/`. The directory boundary is the flag: nothing is
 exported from `src/index.ts`, nothing outside the directory imports it, and the

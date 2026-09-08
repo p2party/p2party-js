@@ -159,7 +159,7 @@ is the same one the released SDK uses.
 
 ## 3. How it is assembled
 
-Fifteen modules under `src/blindRendezvous/prototype/` (10,506 lines), with nine
+Fifteen modules under `src/blindRendezvous/prototype/` (10,508 lines), with nine
 test files behind them, built on top of the thirty-two release-candidate modules
 that already existed in `src/blindRendezvous/`.
 
@@ -226,10 +226,11 @@ callback *before* the handler runs, so a slow store cannot shift its own
 following request off the grid. There is no same-window retry, because retrying
 at the surviving store after an omission would be an active cross-store tagging
 channel. Every request also carries a deadline of one delivery window
-(`storeClient.ts`, `requestDeadlineMs`) — the same value on every route, so the
-deadline is not itself something a store can read a route off — because the
-union read joins both stores under one `Promise.all` and an unbounded request
-to one of them would stall the other's objects too.
+(`storeClient.ts`, `requestDeadlineMs`) — the same value on every route,
+because the profile sets no per-route budget for appends, chunks, or
+checkpoints to derive one from, and it exists because the union read joins
+both stores under one `Promise.all` and an unbounded request to one of them
+would stall the other's objects too.
 
 **A store's topology verdict is local and unlabelled.** The runtime reports
 `multi-store-union`, `single-carrier-dependent` or `no-usable-carrier`, computed
@@ -463,9 +464,17 @@ apart is **not** measured by any run here and is not claimed. The table is a cos
 measurement, not a recommendation: the pinned profile is 8, and moving it is a
 change to how much unrelated traffic a client's objects sit among.
 
-Each row is a single `--scenario=healthy` run with both stores honest. The rows
-are separated by 1.7–3.8×, far outside the run-to-run variance of §4, but they
-are single measurements, not repeated ones. And they are wall clock on one laptop
+Each row is a single `--scenario=healthy` run with both stores honest, and the
+table is **not monotone**: at the same 4,000 ms window, cohort 4 (22.3 s) is
+*faster* than cohort 2 (23.8 s) — the smaller cover set is the slower row, by
+1.07×. That step is a single measurement in each direction and sits inside
+the run-to-run variance of §4; on its own it shows nothing. What survives is
+the separation between the extreme rows — 1.7× at a fixed 4,000 ms window
+(39.9 → 23.8 s) and 3.8× once the shorter window is taken too (39.9 → 10.5 s)
+— both far outside that variance. The mechanism behind them (a smaller cover
+set means fewer objects to scan) is carried by the scan-byte column, which
+*is* monotone (1,380,336 → 723,344 → 656,992 as the cohort halves from 8 to
+2), not by the timings alone. And the timings are wall clock on one laptop
 running two Chromium contexts and two `bun` stores at once — an upper bound on
 what two real clients on two machines would see, not a protocol constant.
 

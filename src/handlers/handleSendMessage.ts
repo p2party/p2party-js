@@ -677,7 +677,19 @@ export type PeerDeliveryOutcome =
   | {
       peerId: string;
       status: "skipped";
-      reason: "not-connected" | "unauthenticated" | "cancelled";
+      // "not-connected": the transport itself never reached (or fell back out
+      // of) "connected" within the admission wait -- a remote condition that
+      // may never resolve.
+      // "cover-unavailable": the transport IS connected, but this edge's
+      // scheduled-cover runtime cannot currently admit a job (missing,
+      // suspended -- e.g. a backgrounded tab, or stopped). That is local and
+      // typically temporary: it resolves on its own once the tab is
+      // foregrounded/online again, unlike a dead peer.
+      reason:
+        | "not-connected"
+        | "cover-unavailable"
+        | "unauthenticated"
+        | "cancelled";
     };
 
 export interface PeerSendFanoutResult {
@@ -1226,7 +1238,7 @@ export const coverRuntimeAdmitsScheduledJobs = (
  * per slot into the already-running cover lanes; the tail is dummy. Delivery is
  * confirmed by the receiver's terminal scheduled receipt (markTransferComplete).
  */
-const sendScheduled = async (
+export const sendScheduled = async (
   roomId: string,
   channelLabel: string,
   policy: RoomPolicyV1,
@@ -1268,13 +1280,25 @@ const sendScheduled = async (
     const epc = target.epc;
     if (
       !epc ||
-      !(await waitForConnectedEdge(epc, PEER_ADMISSION_WAIT_MS, signal)) ||
-      !coverRuntimeAdmitsScheduledJobs(epc.coverRuntime)
+      !(await waitForConnectedEdge(epc, PEER_ADMISSION_WAIT_MS, signal))
     ) {
       outcomes.push({
         peerId: target.peerId,
         status: "skipped",
         reason: "not-connected",
+      });
+      continue;
+    }
+    // The transport is connected, so this is not a dead peer -- it is this
+    // edge's own scheduled-cover pipeline (missing, suspended, e.g. a
+    // backgrounded tab, or stopped) refusing to admit a job. Report that
+    // distinctly: it is a local condition the caller can expect to clear on
+    // its own, not a reason to give up on the peer.
+    if (!coverRuntimeAdmitsScheduledJobs(epc.coverRuntime)) {
+      outcomes.push({
+        peerId: target.peerId,
+        status: "skipped",
+        reason: "cover-unavailable",
       });
       continue;
     }

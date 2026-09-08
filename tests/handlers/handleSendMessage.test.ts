@@ -6,6 +6,7 @@ import type {
 } from "../../src/api/webrtc/interfaces";
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type { RatchetHeader } from "../../src/cryptography/ratchet";
+import { DEFAULT_ROOM_POLICY_V1, type RoomPolicyV1 } from "../../src/roomPolicy";
 
 // The live send orchestration imports the Redux store, whose browser identity
 // slice reads localStorage at module initialization. Install the minimal browser
@@ -39,6 +40,7 @@ let shouldDeleteLocalMessageAfterFailure: typeof import("../../src/handlers/hand
 let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")["waitForReceiptWindow"];
 let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
 let coverRuntimeAdmitsScheduledJobs: typeof import("../../src/handlers/handleSendMessage")["coverRuntimeAdmitsScheduledJobs"];
+let sendScheduled: typeof import("../../src/handlers/handleSendMessage")["sendScheduled"];
 let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
 let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
 let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
@@ -56,6 +58,7 @@ beforeAll(async () => {
     isResumableRebindFailure,
     runPeerSendFanout,
     runWithTerminalChannelClose,
+    sendScheduled,
     shouldDeleteLocalMessageAfterFailure,
     waitForReceiptWindow,
   } = await import("../../src/handlers/handleSendMessage"));
@@ -685,5 +688,60 @@ describe("scheduled send admission reads the cover runtime's liveness", () => {
     expect(coverRuntimeAdmitsScheduledJobs({ status: "degraded" })).toBe(true);
     expect(coverRuntimeAdmitsScheduledJobs({ status: "starting" })).toBe(true);
     expect(coverRuntimeAdmitsScheduledJobs({ status: "active" })).toBe(true);
+  });
+});
+
+const scheduledPolicy = (): RoomPolicyV1 => ({
+  ...DEFAULT_ROOM_POLICY_V1,
+  coverMode: "scheduled",
+  coverCadenceMs: 400,
+  coverLanes: 2,
+  coverFramesPerCell: 2,
+  coverDurationEpochs: 1,
+});
+
+describe("sendScheduled's own admission guard (the real call site, not the predicate alone)", () => {
+  test("a connected edge whose cover runtime cannot admit is skipped as cover-unavailable, distinctly from a dead peer", async () => {
+    // The edge itself is "connected" -- waitForConnectedEdge admits it -- so a
+    // "not-connected" outcome here would be a lie about the cause. What
+    // actually blocks the job is this edge's own cover runtime (here: none
+    // installed yet), which is local and typically transient, unlike a dead
+    // peer.
+    const epc = {
+      ...fakeConnection("peer-cover-down"),
+      roomId: "room",
+      connectionState: "connected",
+      coverRuntime: undefined,
+    } as IRTCPeerConnection;
+
+    let started = 0;
+    const result = await sendScheduled(
+      "room",
+      "chat",
+      scheduledPolicy(),
+      [{ peerId: "peer-cover-down", epc }],
+      1,
+      new Uint8Array(0),
+      new Uint8Array(0),
+      "root-hex",
+      "transfer-id",
+      "hash-hex",
+      {} as unknown as LibCrypto,
+      {} as unknown as LibCrypto,
+      undefined,
+      () => {
+        started += 1;
+      },
+    );
+
+    expect(result.startedTransfers).toBe(0);
+    expect(started).toBe(0);
+    expect(result.outcomes).toEqual([
+      {
+        peerId: "peer-cover-down",
+        status: "skipped",
+        reason: "cover-unavailable",
+      },
+    ]);
   });
 });

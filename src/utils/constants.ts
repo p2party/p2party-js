@@ -230,12 +230,36 @@ export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 // RATCHET_GATE_WAIT_TIMEOUT_MS, so a genuinely dead edge is still failed by the
 // send path's own budget rather than by this guard.
 export const PRE_AUTH_FRAME_PARK_MS = 10_000;
-// Parking is bounded in frames as well as in time. The guard it replaces closed
+// Parking is bounded in BYTES as well as in time. The guard it replaces closed
 // the channel on the FIRST unauthenticated frame, so an unauthenticated peer
-// could pin at most one frame's memory; without a count bound it could pin an
-// unbounded number for the whole park window. Well above any legitimate
-// receipt-replay burst that could precede a gate by a single persist.
+// could pin at most one frame's memory; without a bound it could pin an
+// unbounded amount for the whole park window.
+//
+// Bytes, not frames, because the two things that arrive early differ in size by
+// three orders of magnitude. A reconnect receipt replay is 65-byte frames, one
+// per stored chunk, unbounded and paced 32 every 10 ms — a partial of only a few
+// megabytes crosses a 64-FRAME ceiling in about 20 ms, and every frame past it
+// is lost work: the sender never learns that chunk is held and resends it, so a
+// 100 MiB resume would re-send essentially the whole file. The DoS case is the
+// opposite shape: full 65,490-byte cells, where 64 is already 4 MiB of pinned
+// memory. Bounding the resource itself keeps the flooder to exactly the 64 cells
+// the frame count allowed — the memory ceiling is unchanged by construction —
+// while giving the receipt replay orders of magnitude more room (see the
+// per-frame overhead charge below for the number it actually gets).
 export const MAX_PARKED_PRE_AUTH_FRAMES = 64;
+export const MAX_PARKED_PRE_AUTH_BYTES =
+  MAX_PARKED_PRE_AUTH_FRAMES * WIRE_CHUNK_FRAME_LEN; // 4,191,360 (~4 MiB)
+// A parked frame pins more than its own bytes: the suspended handler, the
+// promise chain it awaits on and one park timer. For a 65,490-byte cell that
+// overhead is noise, but for a 65-byte receipt it is all of the cost, and
+// charging only the payload would let a flood of tiny frames pin a thousand
+// times more parked continuations than the frame count it replaces ever
+// allowed. Every parked frame is therefore charged at least this much, which
+// leaves the flooder the same ~4 MiB ceiling in either frame size while still
+// giving a legitimate receipt replay ~4,000 slots — a partial of ~256 MiB,
+// against the ~4 MiB a 64-frame ceiling allowed. Conservatively rounded up
+// from the engine's real per-suspension cost.
+export const PARKED_PRE_AUTH_FRAME_OVERHEAD_BYTES = 1024;
 
 // Head-room over the arithmetic floor of a scheduled confirmation: the sealer
 // runs on the main thread, a boundary can be degraded, and the receipt job

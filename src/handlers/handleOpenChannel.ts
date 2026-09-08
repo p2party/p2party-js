@@ -29,7 +29,10 @@ import {
   rejectRatchetGate,
 } from "./ratchetGate";
 import { admitPreAuthenticatedFrame } from "./ratchetGateWait";
-import { markChannelClosedLocally } from "../api/webrtc/localChannelClose";
+import {
+  markChannelClosedLocally,
+  wasChannelClosedLocally,
+} from "../api/webrtc/localChannelClose";
 import {
   classifyHandshakeFailure,
   isTerminalHandshakeFailure,
@@ -76,6 +79,7 @@ import {
   FRAME_TYPE_HANDSHAKE,
   FRAME_TYPE_PQ_CONTROL,
   FRAME_TYPE_RECEIPT,
+  PARKED_PRE_AUTH_FRAME_OVERHEAD_BYTES,
   PRE_AUTH_FRAME_PARK_MS,
   WIRE_CHUNK_FRAME_LEN,
 } from "../utils/constants";
@@ -102,6 +106,7 @@ import type {
 } from "../api/webrtc/interfaces";
 import type { HandshakeLease } from "./handleHandshake";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { PreAuthFrameDecision } from "./ratchetGateWait";
 
 export const MAX_MESSAGE_CHANNELS_PER_EDGE = 64;
 const ROOM_CHANNEL_CONTEXT_DOMAIN = new TextEncoder().encode(
@@ -461,27 +466,36 @@ export const handleOpenChannel = async (
               epc.withPeerId,
               transportGateLease,
             );
-          // In scheduled-cover mode a lane closes at every fixed cycle
-          // boundary regardless of transfer state, so a channel close is NEVER
-          // the cancel signal — an explicit encrypted CANCEL cover cell is.
-          // Only an immediate-mode live-edge close means remote cancel.
+          // ONE assignment, deliberately: both reasons to call a close a cancel
+          // share the same two disqualifiers, and a second branch that set this
+          // flag independently is how the local-close test came to be missing
+          // from one of them.
+          //
+          // - A close THIS side performed is never the peer cancelling. Our own
+          //   guards close this channel (pre-authentication, receipt-queue
+          //   budget, receive-queue budget) and the sender already refuses to
+          //   read those as a cancel (isAuthenticatedPeerCancel); the receiver
+          //   must refuse too, or our own guard deletes our own partial file.
+          //   This is the one direction the marker CAN discriminate: it is
+          //   RAM-local and never transmitted, so it says nothing about a close
+          //   the PEER performed.
+          // - In scheduled-cover mode a lane closes at every fixed cycle
+          //   boundary regardless of transfer state, so a channel close is
+          //   NEVER the cancel signal — an explicit encrypted CANCEL cover cell
+          //   is. Only an immediate-mode live-edge close means remote cancel.
           deleteIncompleteReceive =
+            !wasChannelClosedLocally(extChannel) &&
             epc.coverRuntime === undefined &&
-            isRemoteCancelClose(
+            (isRemoteCancelClose(
               receiveProgress,
               epc.withPeerId,
               authenticatedTransportStillAlive,
-            );
-          // An authenticated key may have advanced before the first storage
-          // write. A live-edge close still cancels that zero-byte transfer —
-          // but only in immediate mode, where a close IS the cancel signal.
-          if (
-            epc.coverRuntime === undefined &&
-            !receiveProgress &&
-            authenticatedTransportStillAlive &&
-            epc.messageKeyByMerkleRoot?.has(merkleRootHex)
-          )
-            deleteIncompleteReceive = true;
+            ) ||
+              // An authenticated key may have advanced before the first storage
+              // write. A live-edge close still cancels that zero-byte transfer.
+              (!receiveProgress &&
+                authenticatedTransportStillAlive &&
+                (epc.messageKeyByMerkleRoot?.has(merkleRootHex) ?? false)));
         } catch (error) {
           // Preserve partial state on storage uncertainty; a reconnect can still
           // resume it, while deleting here would be irreversible.
@@ -566,11 +580,13 @@ export const handleOpenChannel = async (
     requestPeersAfterEdgeTeardown(api, roomId);
   };
 
-  // Frames currently parked waiting for this transport's gate to settle. The
-  // guard below used to close on the FIRST early frame, so an unauthenticated
-  // peer could pin one frame's memory; parking must not turn that into an
-  // unbounded amount.
-  let parkedPreAuthFrames = 0;
+  // Bytes currently pinned by frames parked waiting for this transport's gate
+  // to settle. The guard below used to close on the FIRST early frame, so an
+  // unauthenticated peer could pin one frame's memory; parking must not turn
+  // that into an unbounded amount. Counted in bytes because the frames that
+  // legitimately arrive early are 65-byte receipts by the thousand while the
+  // frames a flooder would send are 65,490-byte cells.
+  let parkedPreAuthBytes = 0;
   extChannel.onmessage = async (e) => {
     const data = new Uint8Array(e.data as ArrayBuffer);
     if (
@@ -583,22 +599,34 @@ export const handleOpenChannel = async (
       // the initiator completes on RECEIVING it. Closing here was read back as
       // the peer's CANCEL and destroyed both sides' partial transfer (C7), so
       // park a frame whose gate is merely pending. A stale lease, a rejected
-      // gate, an exhausted park budget and an exhausted frame bound all still
-      // close, exactly as before.
-      parkedPreAuthFrames++;
-      let admitted: boolean;
+      // gate and an exhausted park budget all still close, exactly as before;
+      // an exhausted park CEILING drops the frame instead, because a close
+      // there would be the same deletion by another route (C-1).
+      //
+      // What parking THIS frame costs: its own bytes, or the fixed cost of a
+      // suspended handler and its timer, whichever is larger.
+      const parkCost = Math.max(
+        data.length,
+        PARKED_PRE_AUTH_FRAME_OVERHEAD_BYTES,
+      );
+      parkedPreAuthBytes += parkCost;
+      let decision: PreAuthFrameDecision;
       try {
-        admitted = await admitPreAuthenticatedFrame(
+        decision = await admitPreAuthenticatedFrame(
           roomId,
           epc.withPeerId,
           transportGateLease,
           PRE_AUTH_FRAME_PARK_MS,
-          parkedPreAuthFrames - 1,
+          parkedPreAuthBytes,
         );
       } finally {
-        parkedPreAuthFrames--;
+        parkedPreAuthBytes -= parkCost;
       }
-      if (!admitted) {
+      // Dropping bounds the pinned memory exactly as closing did, without
+      // emitting anything the peer can mistake for a cancellation. The peer
+      // resends whatever this frame carried.
+      if (decision === "drop") return;
+      if (decision === "close") {
         console.error("Rejected application data before peer authentication");
         releaseProtocolResources();
         markChannelClosedLocally(extChannel);

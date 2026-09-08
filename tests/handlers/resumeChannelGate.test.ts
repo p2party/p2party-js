@@ -17,7 +17,7 @@ import {
   markChannelClosedLocally,
   wasChannelClosedLocally,
 } from "../../src/api/webrtc/localChannelClose";
-import { MAX_PARKED_PRE_AUTH_FRAMES } from "../../src/utils/constants";
+import { MAX_PARKED_PRE_AUTH_BYTES } from "../../src/utils/constants";
 
 import type {
   IRTCDataChannel,
@@ -161,7 +161,7 @@ describe("the pre-authentication frame guard admits only what it should", () => 
     // on the park in any way, so an ordinary frame's handling is unchanged.
     expect(
       await admitPreAuthenticatedFrame(ROOM_ID, PEER_ID, lease, 0, 0),
-    ).toBe(true);
+    ).toBe("admit");
   });
 
   test("a rejected gate closes immediately instead of burning the budget", async () => {
@@ -170,7 +170,7 @@ describe("the pre-authentication frame guard admits only what it should", () => 
     const started = Date.now();
     expect(
       await admitPreAuthenticatedFrame(ROOM_ID, PEER_ID, lease, 60_000, 0),
-    ).toBe(false);
+    ).toBe("close");
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
@@ -180,31 +180,33 @@ describe("the pre-authentication frame guard admits only what it should", () => 
     const started = Date.now();
     expect(
       await admitPreAuthenticatedFrame(ROOM_ID, PEER_ID, stale, 60_000, 0),
-    ).toBe(false);
+    ).toBe("close");
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  test("the park is bounded in frames, not only in time", async () => {
+  test("the park is bounded in bytes, not only in time — and the bound DROPS", async () => {
     const lease = claimRatchetGate(ROOM_ID, PEER_ID);
     // A pending gate would otherwise park every arriving frame for the whole
     // budget: an unauthenticated peer must not be able to pin arbitrary memory
-    // on this channel for ten seconds.
+    // on this channel for ten seconds. The bound must not CLOSE, though — a
+    // close on a healthy authenticating edge is read by the peer as a cancel
+    // and deletes its partial file, which is C7 by another route (C-1).
     expect(
       await admitPreAuthenticatedFrame(
         ROOM_ID,
         PEER_ID,
         lease,
         60_000,
-        MAX_PARKED_PRE_AUTH_FRAMES,
+        MAX_PARKED_PRE_AUTH_BYTES + 1,
       ),
-    ).toBe(false);
+    ).toBe("drop");
   });
 
   test("a gate that never settles closes when the park runs out", async () => {
     const lease = claimRatchetGate(ROOM_ID, PEER_ID);
     expect(
       await admitPreAuthenticatedFrame(ROOM_ID, PEER_ID, lease, 30, 0),
-    ).toBe(false);
+    ).toBe("close");
   });
 });
 
@@ -497,14 +499,14 @@ const replayResumedEarlyReceipt = async (
   // 1. handleOpenChannel's pre-authentication frame guard, on that receipt.
   let guardClosedTheChannel = false;
   if (!isRatchetGateOpen(ROOM_ID, PEER_ID, lease)) {
-    const admitted = await admitPreAuthenticatedFrame(
+    const decision = await admitPreAuthenticatedFrame(
       ROOM_ID,
       PEER_ID,
       lease,
       parkMs,
       0,
     );
-    if (!admitted) {
+    if (decision === "close") {
       markChannelClosedLocally(channel);
       channel.close();
       guardClosedTheChannel = true;

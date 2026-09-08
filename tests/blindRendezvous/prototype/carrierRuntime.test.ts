@@ -85,9 +85,15 @@ const POLICY = copyBlindDefaultPolicy();
 const LOGICAL_WINDOW_MS = POLICY.protocolLimits.logicalWindowMs;
 const AEAD = createCarrierAeadProvider(module);
 
-/** 1_800_000_000_000 / 4_000 is exact, so the run starts on a window edge. */
+/** 1_800_000_000_000 / 4_000 is exact, so the run starts on a window edge. It
+ * divides the shorter window used by the stall test below exactly too. */
 const START_MS = 1_800_000_000_000n;
-const CHAIN_START = START_MS / profile.deliveryWindowMs;
+/** The chain start of a world running `worldProfile`: whichever window
+ * `START_MS` falls on, so a world at any window length starts on its own edge
+ * rather than on the pinned profile's. */
+const chainStartOf = (worldProfile: DeliveryProfileV1): bigint =>
+  START_MS / worldProfile.deliveryWindowMs;
+const CHAIN_START = chainStartOf(profile);
 const windowStartMs = (window: bigint): bigint =>
   ingressWindowStartMs(window, profile.deliveryWindowMs);
 
@@ -119,6 +125,23 @@ const undersizedProfile: DeliveryProfileV1 = {
   ),
 };
 validateDeliveryProfileGeometry(undersizedProfile);
+
+/**
+ * The pinned geometry rescaled to a 1,000 ms window, for the stall test alone.
+ *
+ * A stalled request is settled by its own deadline, and that deadline is one
+ * delivery window (`storeClient.ts`, `requestDeadlineMs`), so the window length
+ * is literally what a stall costs this file in wall clock. `withDeliveryWindowMs`
+ * re-validates every geometry inequality, and `START_MS` divides by 1,000
+ * exactly, so this world still starts on a window edge like every other.
+ */
+const stalledStoreProfile = withDeliveryWindowMs(
+  PROTOTYPE_DELIVERY_PROFILE_V0,
+  1_000n,
+);
+const STALL_CHAIN_START = chainStartOf(stalledStoreProfile);
+const stallWindowStartMs = (window: bigint): bigint =>
+  ingressWindowStartMs(window, stalledStoreProfile.deliveryWindowMs);
 
 /**
  * `CarrierTimers` claims the engine's own globals are assignable to it. This
@@ -252,7 +275,7 @@ const startStore = async (
     profile: storeProfile,
     clock: { nowMs: (): bigint => scheduler.nowMs },
     persistence: new MemoryStorePersistence(),
-    chainStartIngressWindow: CHAIN_START,
+    chainStartIngressWindow: chainStartOf(storeProfile),
     origin,
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
@@ -278,6 +301,17 @@ interface Transport {
   readonly log: RequestRecord[];
   /** Flipped after `connect` so a store can go dark mid-run. */
   down: boolean;
+  /**
+   * Flipped after `connect` so a store can accept the connection and then
+   * never answer — the fault mode a refusal does not cover and the cheapest
+   * attack on a two-store design.
+   *
+   * The returned promise settles only when the request's own deadline aborts
+   * it. A client that sent no deadline would wait here forever, which is
+   * exactly the defect the deadline exists to close; the test below would then
+   * hang rather than fail, and that is the honest RED for this one.
+   */
+  stalled: boolean;
   /** Replaces the answer to one route, so a store can lie about one thing. */
   intercept: ((path: string, search: string) => Response | null) | null;
   readonly fetch: typeof fetch;
@@ -287,6 +321,7 @@ const transportTo = (origin: string, scheduler: FakeScheduler): Transport => {
   const transport: Transport = {
     log: [],
     down: false,
+    stalled: false,
     intercept: null,
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -301,6 +336,20 @@ const transportTo = (origin: string, scheduler: FakeScheduler): Transport => {
         body,
       });
       if (transport.down) throw new TypeError("this store is unreachable");
+      if (transport.stalled)
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal ?? null;
+          if (signal === null) return;
+          if (signal.aborted) {
+            reject(signal.reason as Error);
+            return;
+          }
+          signal.addEventListener(
+            "abort",
+            () => reject(signal.reason as Error),
+            { once: true },
+          );
+        });
       const intercepted = transport.intercept?.(url.pathname, url.search);
       if (intercepted !== null && intercepted !== undefined) return intercepted;
       return fetch(`${origin}${url.pathname}${url.search}`, init);
@@ -977,6 +1026,74 @@ describe("prototype carrier runtime", () => {
       world.stop();
     }
   }, 180_000);
+
+  test("keeps delivering through the other store when one stalls and answers nothing", async () => {
+    // A store that refuses the connection is not the hard case: the fetch
+    // rejects and the union moves on. The hard case is a store that ACCEPTS
+    // the connection and then answers nothing, because `CarrierRuntime.#read`
+    // joins both stores' scans under one `Promise.all` — without a per-request
+    // deadline that store holds the union open and takes the honest store's
+    // objects down with it. Neither E2E scenario covers this one: a SIGKILLed
+    // store refuses, and `withhold` lies at full speed.
+    const world = await createWorld({ profile: stalledStoreProfile });
+    try {
+      const capability = new Uint8Array(32).fill(0x5a);
+      const room = await makeRoom(capability, START_MS);
+      // The publisher speaks only to store 1, so the operation the reader must
+      // still receive exists in exactly one place: the store that answers.
+      const publisher = await addCarrier(world, room, [1]);
+      const reader = await addCarrier(world, room, [0, 1]);
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      const w1 = STALL_CHAIN_START + 1n;
+      const w2 = STALL_CHAIN_START + 2n;
+      await world.advance(stallWindowStartMs(w1));
+      publisher.runtime.publish(presence, "PRESENCE");
+
+      // Let w1's appends land, then take store 0 dark in the way a refusal
+      // does not model: every request from here on is accepted and never
+      // answered. The flip is before w1's finalization offset, so nothing this
+      // client already sent is disturbed.
+      await world.advance(
+        stallWindowStartMs(w1) +
+          stalledStoreProfile.chunkFinalizationOffsetMs -
+          1n,
+      );
+      // `world.transports[1]` is the reader's client of store 0: the publisher
+      // took index 0 for store 1, the reader indexes 1 and 2 for stores 0, 1.
+      world.transports[1].stalled = true;
+
+      // The read at w2 unions w1. Store 0's half of it never answers.
+      await world.advance(
+        stallWindowStartMs(w2) + stalledStoreProfile.publicReadOffsetMs + 1n,
+      );
+
+      expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+        presenceId,
+      ]);
+      expect(reader.runtime.storeTopology).toBe("single-carrier-dependent");
+
+      const stalledFaults = reader.clients[0].faults;
+      expect(stalledFaults.length).toBeGreaterThan(0);
+      // Every one of them is absence, not blame: a store that said nothing
+      // must never file in the same class as one caught signing a lie.
+      expect([...new Set(stalledFaults.map((fault) => fault.kind))]).toEqual([
+        "unreachable",
+      ]);
+      expect(
+        stalledFaults.some((fault) =>
+          fault.detail.includes(
+            `no answer within the ${String(stalledStoreProfile.deliveryWindowMs)} ms request deadline`,
+          ),
+        ),
+      ).toBe(true);
+      // And it stays a carrier this client may come back to.
+      expect(reader.clients[0].inert).toBe(false);
+    } finally {
+      world.stop();
+    }
+  }, 120_000);
 
   test("backfills an operation only one store carried to the store that missed it", async () => {
     const world = await createWorld();

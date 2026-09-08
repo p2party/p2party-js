@@ -15,9 +15,14 @@
  *   allocation key and opaque fixed-length bytes. There is no room, member,
  *   peer or invitation value in any path or body, which is what lets unrelated
  *   rooms share a bucket and cover for each other.
- * - **A scan never throws.** A store that is unreachable, malformed, or
- *   lying must degrade one event for one store, not abort the caller's whole
- *   window. Faults are recorded and the scan answers `unreachable`.
+ * - **A scan never throws, and never waits forever.** A store that is
+ *   unreachable, malformed, or lying must degrade one event for one store, not
+ *   abort the caller's whole window. Faults are recorded and the scan answers
+ *   `unreachable`. Every request also carries a deadline (see
+ *   `requestDeadlineMs`), so a store that accepts the connection and then
+ *   answers nothing degrades exactly the way one that refused the connection
+ *   does — otherwise it would hold the carrier runtime's union open and stall
+ *   the *other* store's objects with its own.
  * - **Blame is separated from absence.** `chain-fault`, `root-mismatch` and
  *   `custody-breach` mark the store **inert** — its objects are still returned
  *   so the caller can union every observed branch, but it is out of the
@@ -121,7 +126,8 @@ export interface StoreClientOptions {
  * What a scan or request found wrong with one store's answer.
  *
  * `unreachable` is a transport failure: a fetch that was rejected outright, a
- * non-200 status, a missing or wrong `x-p2party-store` header, or bytes that
+ * request that outlived its own deadline (`requestDeadlineMs`), a non-200
+ * status, a missing or wrong `x-p2party-store` header, or bytes that
  * do not even decode as the expected canonical type. None of these yields a
  * signature this client could check, so none of them says anything about
  * whether the store is honest — only that this attempt produced no usable
@@ -158,6 +164,25 @@ export interface StoreFaultRecord {
   readonly detail: string;
 }
 
+/**
+ * What one fixed scan of one window came back with.
+ *
+ * `status` is deliberately **not** the `StoreFaultKind` taxonomy, and the two
+ * are not in one-to-one correspondence. `unreachable` here means only "this
+ * scan produced no usable window", and it is what a switched-off store, a
+ * stalled store, a malformed answer *and* a proved `root-mismatch` breach all
+ * come back as — see the `#breach` call in `scanWindow`. The `f1f5aa4` split
+ * between absence and blame lives in `StoreFaultKind` and in `inert`, which is
+ * where every consumer reads it: a breach records `root-mismatch` and sets
+ * `inert` permanently, while absence records `unreachable` and sets nothing.
+ * Nothing in the tree branches on this field to decide blame — the carrier
+ * runtime uses it only as `status === "finalized"` to count usable carriers
+ * and to gate a witness post — so a fourth status would add a value with no
+ * reader. Recorded here rather than fixed, because a taxonomy documented in
+ * one place and contradicted in another is the defect; if a consumer ever does
+ * need to tell a breached window from an absent one, it should read `inert`
+ * and the fault list, not this string.
+ */
 export interface WindowScan {
   readonly window: bigint;
   readonly status: "finalized" | "not-final" | "out-of-range" | "unreachable";
@@ -214,6 +239,47 @@ const MAX_OBSERVED_CHECKPOINTS = 256;
 
 /** Receipts are consumed by the scan of their window; this bounds the rest. */
 const MAX_PENDING_RECEIPTS = 1_024;
+
+/**
+ * How long one request to this store may stay outstanding, in milliseconds.
+ *
+ * **One delivery window**, taken from the profile rather than pinned as a
+ * number, because the schedule is what makes the value meaningful. Every
+ * request this client sends belongs to exactly one ingress window, and the
+ * fixed schedule reissues the identical request one window later; an answer
+ * that arrives after its own successor was due can no longer change anything.
+ * A read has by then been superseded by the next window's read. An
+ * append is long past `chunkFinalizationOffsetMs` — 2,800 ms of 4,000
+ * in the pinned profile — so the store would answer `window-finalized` to it
+ * anyway. A token or an allocation names a window whose appends have already
+ * gone out as unallocated cover.
+ *
+ * It is also strictly longer than every budget the profile itself sets for an
+ * answer (`tokenIssueResponseBudgetMs` and `allocationResponseBudgetMs`, 300 ms
+ * each in the pinned profile, plus `maxScheduleSkewMs` 200), so it can never
+ * abort a request the profile considers on time; and it scales with the
+ * geometry, so `--window-ms=1000` gives a 1,000 ms deadline rather than a
+ * constant that silently stops fitting.
+ *
+ * One value for every route, deliberately: a per-route deadline would put the
+ * route back into something a store can read off connection lifetimes, and the
+ * whole point of the fixed schedule is that it must not.
+ *
+ * Without a deadline, a store that accepts the connection and never answers
+ * holds `scanWindow` open forever, and because the carrier runtime joins both
+ * stores' scans under one `Promise.all` that stalls the honest store's objects
+ * too — the cheapest way to falsify "either store may fail and the rendezvous
+ * still completes", and the one fault mode neither E2E scenario exercises
+ * (a killed store refuses the connection, and `withhold` lies at full speed).
+ */
+const requestDeadlineMs = (profile: DeliveryProfileV1): number => {
+  const deadline = Number(profile.deliveryWindowMs);
+  if (!Number.isSafeInteger(deadline) || deadline <= 0)
+    fail(
+      "the delivery profile's window length is not a usable request deadline",
+    );
+  return deadline;
+};
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -320,6 +386,7 @@ export class PrototypeStoreClient {
   readonly #storeKey: Uint8Array;
   readonly #chainStart: bigint;
   readonly #objectBytesByClass: ReadonlyMap<number, number>;
+  readonly #requestDeadlineMs: number;
 
   #inert = false;
   readonly #faults: StoreFaultRecord[] = [];
@@ -355,6 +422,7 @@ export class PrototypeStoreClient {
     this.#storeKey = copyBytes(pinned.descriptor.storeIdentityEd25519Key);
     this.#chainStart = pinned.chainStart;
     this.#objectBytesByClass = pinned.objectBytesByClass;
+    this.#requestDeadlineMs = requestDeadlineMs(options.profile);
   }
 
   /**
@@ -379,16 +447,25 @@ export class PrototypeStoreClient {
     const profileHash = copyBytes(options.profileHash);
     const transport = transportOf(options);
 
+    // The descriptor fetch is bounded like every later request, and for the
+    // same reason: a store that accepts this connection and then says nothing
+    // would otherwise leave the caller's whole composition waiting on one
+    // origin before the run has begun.
+    const deadlineMs = requestDeadlineMs(options.profile);
+    const deadline = AbortSignal.timeout(deadlineMs);
     let response: Response;
     try {
       response = await transport(
         `${options.origin}${PROTOTYPE_STORE_ROUTES.descriptor}`,
+        { signal: deadline },
       );
     } catch (error) {
       return fail(
-        `the store descriptor could not be fetched: ${
-          error instanceof Error ? error.name : "unknown error"
-        }`,
+        deadline.aborted
+          ? `the store descriptor did not arrive within the ${String(deadlineMs)} ms request deadline`
+          : `the store descriptor could not be fetched: ${
+              error instanceof Error ? error.name : "unknown error"
+            }`,
       );
     }
     if (response.status !== 200)
@@ -887,6 +964,12 @@ export class PrototypeStoreClient {
     const recomputedRoot = await rfc9162MerkleTreeHash(
       await checkpointLeafEntries(this.#geometry, chunks.hashesByClass),
     );
+    // The fault kind is `root-mismatch` and the store is inert from here on;
+    // the *scan status* is `unreachable`, the same string a switched-off store
+    // gets. That is deliberate and not the `f1f5aa4` taxonomy leaking back in:
+    // `WindowScan["status"]` answers "is there a usable window here", which is
+    // "no" either way, while the blame lives in the fault record and in
+    // `inert`. See the docblock on `WindowScan`.
     if (!bytesEqual(recomputedRoot, checkpoint.finalizedChunkRoot))
       return this.#breach(
         "root-mismatch",
@@ -1019,30 +1102,39 @@ export class PrototypeStoreClient {
   /**
    * One GET or POST, reduced to bytes or `null`.
    *
-   * A rejected fetch, a non-200 status, a missing protocol header and a body
-   * that cannot even be read off the wire are one outcome here: this attempt
-   * produced no usable answer. They are recorded as `unreachable`, not
-   * `signature-invalid` — none of them is a signature this client checked and
-   * found wanting, they are the absence of one, and a store merely switched
-   * off would produce every one of them. None of them makes the store inert:
-   * being unreachable is not evidence of dishonesty, and the store may come
-   * back.
+   * A rejected fetch, a request that outlived its deadline, a non-200 status,
+   * a missing protocol header and a body that cannot even be read off the wire
+   * are one outcome here: this attempt produced no usable answer. They are
+   * recorded as `unreachable`, not `signature-invalid` — none of them is a
+   * signature this client checked and found wanting, they are the absence of
+   * one, and a store merely switched off would produce every one of them. None
+   * of them makes the store inert: being unreachable is not evidence of
+   * dishonesty, and the store may come back.
+   *
+   * The deadline is the reason a store that answers *nothing* lands in this
+   * same class rather than hanging: `requestDeadlineMs` explains the value.
    */
   async #request(
     path: string,
     window: bigint | null,
     init?: RequestInit,
   ): Promise<Uint8Array | null> {
+    const deadline = AbortSignal.timeout(this.#requestDeadlineMs);
     let response: Response;
     try {
-      response = await this.#fetch(`${this.origin}${path}`, init);
+      response = await this.#fetch(`${this.origin}${path}`, {
+        ...init,
+        signal: deadline,
+      });
     } catch (error) {
       return this.#reject(
         "unreachable",
         window,
-        `${path}: the request failed (${
-          error instanceof Error ? error.name : "unknown error"
-        })`,
+        deadline.aborted
+          ? `${path}: no answer within the ${String(this.#requestDeadlineMs)} ms request deadline`
+          : `${path}: the request failed (${
+              error instanceof Error ? error.name : "unknown error"
+            })`,
         null,
       );
     }
@@ -1065,10 +1157,14 @@ export class PrototypeStoreClient {
     try {
       return new Uint8Array(await response.arrayBuffer());
     } catch {
+      // The deadline covers the body too: a store that sends headers and then
+      // stops writing is the same stall as one that never answered at all.
       return this.#reject(
         "unreachable",
         window,
-        `${path}: the answer body could not be read`,
+        deadline.aborted
+          ? `${path}: the answer body did not arrive within the ${String(this.#requestDeadlineMs)} ms request deadline`
+          : `${path}: the answer body could not be read`,
         null,
       );
     }

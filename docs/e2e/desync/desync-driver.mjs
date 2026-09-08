@@ -5,8 +5,10 @@
 //
 //   PLAYWRIGHT_BROWSERS_PATH=$HOME/Library/Caches/ms-playwright \
 //   node desync-driver.mjs <scenario> <role> [--peerid=stable|fresh] [--n=1] [--observe=120] [--socket=evict|close2s] [--refocus=0]
+//                                           [--mode=immediate|scheduled|pin] [--cadence=<ms>] [--cpuslow=<A|B>:<rate>]
+//                                           [--pin=<hex>] [--pinb=<hex>] [--port=5810]
 //
-//   scenario: baseline | ws-drop | ws-drop-nofocus | freeze-ws-90 | offline-60 | freeze-20 | proc-freeze-<seconds>
+//   scenario: baseline | ws-drop | ws-drop-nofocus | pin-typo | cover-stall | freeze-ws-90 | offline-60 | freeze-20 | proc-freeze-<seconds>
 //   role:     initiator | responder   (which identity role the FAULTED page A has;
 //             Ed25519 role = lexically lower hex pubkey is the initiator)
 //   FOCUS EMULATION: after the fault clears, every scenario except "baseline"
@@ -66,6 +68,32 @@
 //             per-message data channels each side created. While the transfer is
 //             unfinished the I4 round trips and the asymmetric probe sends are
 //             held back so they cannot confound it.
+//   --mode:   room policy both pages connect() with. "immediate" (default) is the
+//             stock policy; "scheduled" turns on the scheduled cover scheduler --
+//             the arm "cover-stall" needs; "pin" turns on PIN key confirmation.
+//   --cadence=<ms>: the scheduled cover cadence (only meaningful with
+//             --mode=scheduled, and REFUSED otherwise). The slot spacing is
+//             cadence / (lanes x frames) = cadence/32, and the runtime's drift
+//             tolerance is min(floor(spacing) - 1, 500) ms, so the cadence is how a
+//             scenario chooses a tolerance it can deliberately overrun.
+//   --cpuslow=<A|B>:<rate>: CDP Emulation.setCPUThrottlingRate on that page, applied
+//             at the last instant before the fault and released 20 s after t=0. It
+//             is what skews two otherwise-identical loopback machines so one side's
+//             persist lands last (the C7 window).
+//   --pin=<hex> / --pinb=<hex>: pin-typo only. The two PINs P1 and P2 join with;
+//             they differ by default so key confirmation fails by construction.
+//   --port=<n>: base TCP port (static server = n, relay = n+1). Default 5810.
+//
+//   scenario pin-typo:    both pages join the same PIN room with DIFFERENT PINs, so
+//             both fail key confirmation. C2: a terminal handshake failure must stop
+//             the re-dial loop -- exactly one transport per side and one join-time
+//             peers request, with status=failed/reason=pin-mismatch left on the
+//             roster for a UI to show. No fault is injected; the loop IS the bug.
+//   scenario cover-stall: C5. A 1.5 s main-thread stall on A spanning a scheduled
+//             cover boundary. The stalled boundary timer used to park the scheduler
+//             in "suspended" with nothing armed to leave it, while both handshakes
+//             still read "authenticated" -- the edge looks perfect while cover is
+//             dead. Requires --mode=scheduled.
 //
 // proc-freeze-<s> = "phone asleep": A's WHOLE Chromium process tree (browser
 // pid + every descendant) is SIGSTOPped for <s> seconds, so JS, the WebSocket
@@ -93,43 +121,119 @@ const { chromium } = pw.default ?? pw;
 const argv = process.argv.slice(2);
 const positional = argv.filter((a) => !a.startsWith("--"));
 const flags = Object.fromEntries(argv.filter((a) => a.startsWith("--")).map((a) => { const [k, v] = a.slice(2).split("="); return [k, v ?? "1"]; }));
+const die = (msg) => { console.error(msg); process.exit(2); };
+
+// Every flag this driver understands. An argument that is not on this list is
+// REFUSED rather than ignored. Three separate tasks independently discovered that
+// --mode, --cadence and --cpuslow were dropped on the floor: each of their harness
+// steps applied no configuration and no throttling at all and then reported a
+// confident pass. A harness that silently discards an argument is worse than one
+// that refuses it, so the allow-list is closed and typos exit 2.
+const KNOWN_FLAGS = ["peerid", "n", "observe", "socket", "refocus", "udpflood", "transfer", "transferdeadline", "mode", "cadence", "cpuslow", "pin", "pinb", "port"];
+const unknownFlags = Object.keys(flags).filter((k) => !KNOWN_FLAGS.includes(k));
+if (unknownFlags.length) die(`unknown flag(s) ${unknownFlags.map((f) => "--" + f).join(" ")}; known: ${KNOWN_FLAGS.map((f) => "--" + f).join(" ")}`);
+if (positional.length > 2) die(`unexpected positional argument(s): ${positional.slice(2).join(" ")} (usage: <scenario> <role> [--flags])`);
+
 const scenario = positional[0] ?? "baseline";
 const role = positional[1] ?? "initiator";
-const PEERID_MODE = flags.peerid === "fresh" ? "fresh" : "stable";
-const OBSERVE_S = Number(flags.observe ?? 120);
-const SOCKET_MODE =
-  flags.socket === "close2s"
-    ? "close2s"
-    : flags.socket === "keep"
-      ? "keep"
-      : flags.socket === "stranded"
-        ? "stranded"
-        : "evict";
-const REFOCUS_S = Number(flags.refocus ?? 0);
-const UDP_FLOOD = flags.udpflood === "1" || flags.udpflood === "true";
+const SCENARIOS = ["baseline", "ws-drop", "ws-drop-nofocus", "pin-typo", "cover-stall", "freeze-ws-90", "offline-60", "freeze-20"];
+const procFreezeMatch = scenario.match(/^proc-freeze-(\d+)$/);
+const PROC_FREEZE_S = procFreezeMatch ? Number(procFreezeMatch[1]) : 0;
+if (!SCENARIOS.includes(scenario) && !procFreezeMatch) die(`unknown scenario ${scenario}; one of ${SCENARIOS.join("|")}|proc-freeze-<seconds>`);
+if (!["initiator", "responder"].includes(role)) die("role must be initiator|responder");
+
+// A numeric flag whose value did not parse used to become NaN and then silently
+// disable the very thing it configures: `--observe=x` made `Date.now() < obsEnd`
+// false on the first iteration, so the observation window never ran and the run
+// still exited 0. Refuse the value instead of quietly reinterpreting it.
+const num = (name, dflt) => {
+  if (flags[name] === undefined) return dflt;
+  const v = Number(flags[name]);
+  if (!Number.isFinite(v)) die(`--${name} must be a number, got "${flags[name]}"`);
+  return v;
+};
+const oneOf = (name, allowed, dflt) => {
+  if (flags[name] === undefined) return dflt;
+  if (!allowed.includes(flags[name])) die(`--${name} must be one of ${allowed.join("|")}, got "${flags[name]}"`);
+  return flags[name];
+};
+const bool = (name, dflt) => {
+  if (flags[name] === undefined) return dflt;
+  if (["1", "true", "yes"].includes(flags[name])) return true;
+  if (["0", "false", "no"].includes(flags[name])) return false;
+  return die(`--${name} must be 1|0|true|false, got "${flags[name]}"`);
+};
+// A flag whose scenario cannot act on it is a lie about what the run did.
+const onlyFor = (name, ok, why) => { if (flags[name] !== undefined && !ok) die(`--${name} has no effect for scenario "${scenario}": ${why}`); };
+
+const PEERID_MODE = oneOf("peerid", ["stable", "fresh"], "stable");
+const OBSERVE_S = num("observe", 120);
+if (OBSERVE_S <= 0) die(`--observe must be > 0 seconds, got "${flags.observe}"`);
+onlyFor("socket", !!procFreezeMatch, "the socket policy is applied inside the proc-freeze arm only");
+onlyFor("refocus", !!procFreezeMatch, "the periodic focus-handler re-run is armed inside the proc-freeze arm only");
+onlyFor("udpflood", !!procFreezeMatch, "the UDP receive-buffer flood is fired right after the SIGSTOP, which only proc-freeze does");
+const SOCKET_MODE = oneOf("socket", ["evict", "close2s", "keep", "stranded"], "evict");
+const REFOCUS_S = num("refocus", 0);
+if (REFOCUS_S < 0) die(`--refocus must be >= 0 seconds (0 = off), got "${flags.refocus}"`);
+const UDP_FLOOD = bool("udpflood", false);
 const TRANSFER = (() => {
   if (!flags.transfer) return null;
   const m = String(flags.transfer).match(/^(A2B|B2A):([0-9]+(?:\.[0-9]+)?)$/i);
-  if (!m) { console.error(`--transfer must be <A2B|B2A>:<MiB>, got "${flags.transfer}"`); process.exit(2); }
+  if (!m) die(`--transfer must be <A2B|B2A>:<MiB>, got "${flags.transfer}"`);
   return { spec: String(flags.transfer), dir: m[1].toUpperCase(), mib: Number(m[2]) };
 })();
 // Verification budget for the big transfer, measured from t=0 (thaw / fault cleared).
-const TRANSFER_DEADLINE_S = Number(flags.transferdeadline ?? 90);
-const SCENARIOS = ["baseline", "ws-drop", "ws-drop-nofocus", "freeze-ws-90", "offline-60", "freeze-20"];
-const procFreezeMatch = scenario.match(/^proc-freeze-(\d+)$/);
-const PROC_FREEZE_S = procFreezeMatch ? Number(procFreezeMatch[1]) : 0;
-if (!SCENARIOS.includes(scenario) && !procFreezeMatch) { console.error(`unknown scenario ${scenario}; one of ${SCENARIOS.join("|")}|proc-freeze-<seconds>`); process.exit(2); }
-if (!["initiator", "responder"].includes(role)) { console.error("role must be initiator|responder"); process.exit(2); }
+const TRANSFER_DEADLINE_S = num("transferdeadline", 90);
+onlyFor("transferdeadline", !!TRANSFER, "there is no transfer to time without --transfer");
+// Room policy both pages connect() with. "scheduled" is the arm the cover
+// scenarios need: the cadence sets the slot spacing (cadence / (lanes*frames)),
+// and the runtime's drift tolerance is min(floor(spacing) - 1, 500) ms.
+const CONNECT_MODE = oneOf("mode", ["immediate", "scheduled", "pin"], "immediate");
+if (scenario === "pin-typo" && flags.mode !== undefined) die(`--mode is fixed to "pin" by the pin-typo scenario; drop it (use --pin/--pinb to choose the two PINs)`);
+if (scenario === "cover-stall" && CONNECT_MODE !== "scheduled") die(`cover-stall needs --mode=scheduled: with the immediate cover preset there is no boundary timer to overrun, so the run would pass vacuously`);
+const CONNECT_CADENCE_MS = num("cadence", undefined);
+if (CONNECT_CADENCE_MS !== undefined && CONNECT_MODE !== "scheduled") die(`--cadence only configures the scheduled cover preset; got --mode=${CONNECT_MODE}`);
+if (CONNECT_CADENCE_MS !== undefined && CONNECT_CADENCE_MS <= 0) die(`--cadence must be > 0 ms, got "${flags.cadence}"`);
+const CONNECT_OPTS = { mode: CONNECT_MODE, ...(CONNECT_CADENCE_MS === undefined ? {} : { coverCadenceMs: CONNECT_CADENCE_MS }) };
+// pin-typo: the two pages join the same PIN room with DIFFERENT PINs, so both
+// sides fail key confirmation by construction. Overridable so a run can also
+// pin-typo with matching PINs as a control.
+const pinHex = (name, dflt) => {
+  if (flags[name] === undefined) return dflt;
+  if (!/^([0-9a-fA-F]{2})+$/.test(flags[name])) die(`--${name} must be an even-length hex string, got "${flags[name]}"`);
+  return String(flags[name]).toLowerCase();
+};
+onlyFor("pin", scenario === "pin-typo", "only pin-typo connects with a PIN");
+onlyFor("pinb", scenario === "pin-typo", "only pin-typo connects with a PIN");
+const PIN_A = pinHex("pin", "01020304");
+const PIN_B = pinHex("pinb", "01020305");
+// CDP CPU throttling on one page: the only way to skew two identical loopback
+// machines so one side's persist reliably lands last.
+const CPU_SLOW = (() => {
+  if (flags.cpuslow === undefined) return null;
+  const m = String(flags.cpuslow).match(/^(A|B):([0-9]+(?:\.[0-9]+)?)$/i);
+  if (!m) return die(`--cpuslow must be <A|B>:<rate>, got "${flags.cpuslow}"`);
+  const rate = Number(m[2]);
+  if (!(rate >= 1)) die(`--cpuslow rate must be >= 1 (1 = no throttling), got "${m[2]}"`);
+  return { page: m[1].toUpperCase(), rate };
+})();
+// Released this many seconds after t=0, so the recovery is measured unthrottled.
+const CPU_SLOW_RELEASE_S = 20;
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const runsDir = path.join(dir, "..", "runs");
 mkdirSync(runsDir, { recursive: true });
-let n = Number(flags.n ?? 0);
+let n = num("n", 0);
+if (!Number.isInteger(n) || n < 0) die(`--n must be a non-negative integer run number, got "${flags.n}"`);
 if (!n) { n = 1; while (existsSync(path.join(runsDir, `${scenario}-${role}-${n}.json`))) n++; }
 const outBase = path.join(runsDir, `${scenario}-${role}-${n}`);
 
-const HTTP_PORT = 5810;
-const RELAY_PORT = 5811;
+// Several agents share this laptop, so the port pair is selectable. Nothing below
+// 5000 may ever be bound here (5432 is a live PostgreSQL).
+const PORT_BASE = num("port", 5810);
+if (!Number.isInteger(PORT_BASE) || PORT_BASE < 5001 || PORT_BASE > 65534) die(`--port must be an integer in 5001..65534 (never below 5000 on this host), got "${flags.port}"`);
+const HTTP_PORT = PORT_BASE;
+const RELAY_PORT = PORT_BASE + 1;
 const wsUrl = `ws://localhost:${RELAY_PORT}/ws`;
 const ctlUrl = `http://localhost:${RELAY_PORT}/ctl`;
 const wasmUrl = `http://localhost:${HTTP_PORT}/libcrypto.wasm`;
@@ -225,6 +329,22 @@ relay.stderr.on("data", (d) => onRelayData("[relay-err] " + String(d)));
 await sleep(900);
 const ctl = async (p) => { const r = await fetch(`${ctlUrl}/${p}`, { method: p.startsWith("registry") || p.startsWith("log") ? "GET" : "POST" }); return r.json(); };
 const registry = () => ctl("registry");
+/**
+ * How many `peers` requests each identity has sent to the relay. The relay logs
+ * one line per request as `peers <short(peerId)>->srv room=… members=[…]`
+ * (relay.ts:392). Before C2 a mismatched-PIN pair produced tens of these — one
+ * per re-dial — because every failed handshake tore the edge down and asked for
+ * the roster again.
+ */
+const peersFrameCounts = async (peerIds) => {
+  const lines = await ctl("log").catch(() => []);
+  const out = {};
+  for (const id of peerIds) {
+    const short = String(id).slice(0, 8);
+    out[short] = lines.filter((l) => typeof l === "string" && l.includes(`peers ${short}`) && l.includes("->srv")).length;
+  }
+  return out;
+};
 
 // ---------------------------------------------------------------- browsers (one Chromium instance per page)
 const CHROMIUM_ARGS = ["--no-sandbox", "--disable-features=WebRtcHideLocalIpsWithMdns"];
@@ -353,8 +473,57 @@ const evalInvariants = (dA, dB, reg, preFault) => {
   };
 };
 
+// ---------------------------------------------------------------- invariant expectations
+// WHICH invariants must actually hold for a scenario to pass. Until this table
+// existed NOTHING in the observation loop could fail a run: `failed` was set only
+// by a driver exception or the big-transfer verdict, so every one of I1..I7 was
+// decorative. The archived pre-fix ws-drop-nofocus-initiator-1.json is the proof --
+// it recorded I6 "never" and heldAtEnd false, carried problems: [] and exited 0 --
+// and proc-freeze-20-responder-1.json did the same for I7.
+//
+//   I1 exactly one roster entry for the other identity, on both sides
+//   I2 both authenticated, or both absent (no half-open view)
+//   I3 exactly one live RTCPeerConnection per side
+//   I4 a byte-exact round trip in BOTH directions after the fault clears
+//   I5 no handshake/cover entry for a peerId that is not on the roster
+//   I6 every roster entry is a client the relay registry still knows
+//   I7 the pre-fault transport is kept or replaced SYMMETRICALLY
+const ALL_INVARIANTS = ["I1", "I2", "I3", "I4", "I5", "I6", "I7"];
+const INVARIANT_EXEMPTIONS = {
+  // A mismatched-PIN pair must NEVER authenticate, so the invariants that describe
+  // a healthy authenticated edge cannot apply. What pin-typo asserts instead is
+  // results.pinTypo.end.verdict (one transport per side, both sides reporting
+  // pin-mismatch, the roster not emptied).
+  "pin-typo": ["I2", "I3", "I4", "I7"],
+};
+const REQUIRED_INVARIANTS = ALL_INVARIANTS.filter((k) => !(INVARIANT_EXEMPTIONS[scenario] ?? []).includes(k));
+
+// pin-typo's transport budget. Mirrors src/utils/constants.ts
+// ROOM_ROSTER_RECONCILE_DELAYS_MS / ROOM_ROSTER_RECONCILE_MAX_ATTEMPTS: a room
+// the SDK sees as stranded re-asks for its roster on a 5/10/20/40/60 s ladder,
+// at most 8 times, and each of those legitimately builds one fresh transport.
+// C2 stopped the HOT loop (a rebuild every 3-5 s, forever, walking the PIN
+// backoff to its 300 s cap); it did NOT stop this bounded ladder, and task 5's
+// report -- written before the ladder landed -- asserted exactly one transport
+// per side, which no post-fix run can satisfy. The budget below is what the
+// ladder itself can produce in the window plus one, so a hot loop (12-20
+// transports in 60 s) still fails it by a wide margin.
+const ROSTER_RECONCILE_LADDER_MS = [5_000, 10_000, 20_000, 40_000, 60_000];
+const ROSTER_RECONCILE_MAX_ATTEMPTS = 8;
+const rosterReconcileAttemptsWithin = (windowMs) => {
+  let elapsed = 0, attempts = 0;
+  while (attempts < ROSTER_RECONCILE_MAX_ATTEMPTS) {
+    elapsed += ROSTER_RECONCILE_LADDER_MS[Math.min(attempts, ROSTER_RECONCILE_LADDER_MS.length - 1)];
+    if (elapsed > windowMs) break;
+    attempts++;
+  }
+  return attempts;
+};
+// 1 transport at join + one per reconcile rung that fits in the run + 1 slack.
+const PIN_TYPO_TRANSPORT_BUDGET = 1 + rosterReconcileAttemptsWithin(OBSERVE_S * 1000 + 5_000) + 1;
+
 // ---------------------------------------------------------------- run
-const results = { scenario, role, n, peerIdMode: PEERID_MODE, socketMode: SOCKET_MODE, procFreezeS: PROC_FREEZE_S, udpFlood: UDP_FLOOD, transferSpec: TRANSFER?.spec ?? null, startedAt: new Date(T0).toISOString(), driverPid: process.pid, browsers: {}, baseline: {}, fault: {}, invariants: {}, samples: [], sends: [], probeSends: [], transfer: null, problems: [] };
+const results = { scenario, role, n, peerIdMode: PEERID_MODE, socketMode: SOCKET_MODE, procFreezeS: PROC_FREEZE_S, udpFlood: UDP_FLOOD, transferSpec: TRANSFER?.spec ?? null, connectMode: CONNECT_MODE, coverCadenceMs: CONNECT_CADENCE_MS ?? null, cpuSlow: CPU_SLOW, pins: scenario === "pin-typo" ? { P1: PIN_A, P2: PIN_B } : null, ports: { http: HTTP_PORT, relay: RELAY_PORT }, observeS: OBSERVE_S, requiredInvariants: REQUIRED_INVARIANTS, startedAt: new Date(T0).toISOString(), driverPid: process.pid, browsers: {}, baseline: {}, fault: {}, invariants: {}, samples: [], sends: [], probeSends: [], transfer: null, problems: [] };
 let failed = false;
 let P1, P2, A, B;
 
@@ -366,23 +535,55 @@ try {
   for (const P of [P1, P2]) await P.eval((r) => window.__app.watch(r), ROOM);
 
   // ---- 6. baseline
-  say("--- baseline: both connect(), wait mutual authenticated, round trip both ways");
-  await P1.eval(([r, w]) => window.__app.connect(r, w, {}), [ROOM, wsUrl], 20000);
-  await P2.eval(([r, w]) => window.__app.connect(r, w, {}), [ROOM, wsUrl], 20000);
+  const PIN_TYPO = scenario === "pin-typo";
+  const connectOpts = PIN_TYPO
+    ? [{ mode: "pin", pinHex: PIN_A }, { mode: "pin", pinHex: PIN_B }]
+    : [CONNECT_OPTS, CONNECT_OPTS];
+  say(PIN_TYPO
+    ? "--- baseline: both connect() with MISMATCHED PINs; no authenticated edge is expected"
+    : "--- baseline: both connect(), wait mutual authenticated, round trip both ways");
+  await P1.eval(([r, w, o]) => window.__app.connect(r, w, o), [ROOM, wsUrl, connectOpts[0]], 20000);
+  await P2.eval(([r, w, o]) => window.__app.connect(r, w, o), [ROOM, wsUrl, connectOpts[1]], 20000);
+  say(`  connect opts: P1=${JSON.stringify(connectOpts[0])} P2=${JSON.stringify(connectOpts[1])}`);
   await poll(P1, () => window.__app.isVerified(), null, 15000, "P1 verified");
   await poll(P2, () => window.__app.isVerified(), null, 15000, "P2 verified");
   say(`  verified: P1=${(await P1.eval(() => window.__app.myPeerId())).slice(0, 8)} P2=${(await P2.eval(() => window.__app.myPeerId())).slice(0, 8)}`);
-  await poll(P1, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P1 sees P2 authenticated");
-  await poll(P2, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P2 sees P1 authenticated");
-  say("  both sides authenticated");
-  const rt12 = await roundTrip(P1, P2, "baseline");
-  say(`  round trip P1->P2: ${JSON.stringify(rt12)}`);
-  const rt21 = await roundTrip(P2, P1, "baseline");
-  say(`  round trip P2->P1: ${JSON.stringify(rt21)}`);
-  const d1 = await P1.dump(), d2 = await P2.dump();
-  results.baseline = { rt12, rt21, passed: rt12.ok && rt21.ok, P1: { peerId: d1.keyPair.peerId, publicKey: d1.keyPair.publicKey }, P2: { peerId: d2.keyPair.peerId, publicKey: d2.keyPair.publicKey }, invariants: evalInvariants(d1, d2, await registry(), null) };
-  if (!results.baseline.passed) throw new Error("baseline round trip failed");
-  say(`  BASELINE PASSED (I1=${results.baseline.invariants.I1} I2=${results.baseline.invariants.I2} I3=${results.baseline.invariants.I3} I5=${results.baseline.invariants.I5} I6=${results.baseline.invariants.I6} fpAgree=${results.baseline.invariants.fpAgree})`);
+  // Hoisted above the branch: pin-typo has no round trip to dump after. The
+  // non-pin branch re-dumps after its round trips, so the state the role control
+  // and preFault PC ids are read from is unchanged from before this split.
+  let d1 = await P1.dump(), d2 = await P2.dump();
+  if (PIN_TYPO) {
+    // There is no authenticated edge to wait for and no round trip to make.
+    // Record the identities and the relay's peers-request count at t0 so the
+    // observation window below can measure the DELTA.
+    results.baseline = {
+      skipped: "pin-typo: mismatched PINs cannot authenticate",
+      passed: true,
+      P1: { peerId: d1.keyPair.peerId, publicKey: d1.keyPair.publicKey },
+      P2: { peerId: d2.keyPair.peerId, publicKey: d2.keyPair.publicKey },
+    };
+    results.pinTypo = {
+      pins: { P1: PIN_A, P2: PIN_B },
+      t0: {
+        pcCountP1: (d1.pcs ?? []).length,
+        pcCountP2: (d2.pcs ?? []).length,
+        peersFrames: await peersFrameCounts([d1.keyPair.peerId, d2.keyPair.peerId]),
+      },
+    };
+    say(`  pin-typo t0: PCs P1=${results.pinTypo.t0.pcCountP1} P2=${results.pinTypo.t0.pcCountP2}; peers frames ${JSON.stringify(results.pinTypo.t0.peersFrames)}`);
+  } else {
+    await poll(P1, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P1 sees P2 authenticated");
+    await poll(P2, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P2 sees P1 authenticated");
+    say("  both sides authenticated");
+    const rt12 = await roundTrip(P1, P2, "baseline");
+    say(`  round trip P1->P2: ${JSON.stringify(rt12)}`);
+    const rt21 = await roundTrip(P2, P1, "baseline");
+    say(`  round trip P2->P1: ${JSON.stringify(rt21)}`);
+    d1 = await P1.dump(); d2 = await P2.dump();
+    results.baseline = { rt12, rt21, passed: rt12.ok && rt21.ok, P1: { peerId: d1.keyPair.peerId, publicKey: d1.keyPair.publicKey }, P2: { peerId: d2.keyPair.peerId, publicKey: d2.keyPair.publicKey }, invariants: evalInvariants(d1, d2, await registry(), null) };
+    if (!results.baseline.passed) throw new Error("baseline round trip failed");
+    say(`  BASELINE PASSED (I1=${results.baseline.invariants.I1} I2=${results.baseline.invariants.I2} I3=${results.baseline.invariants.I3} I5=${results.baseline.invariants.I5} I6=${results.baseline.invariants.I6} fpAgree=${results.baseline.invariants.fpAgree})`);
+  }
 
   // ---- 4. role control: A = faulted page
   const initiatorIsP1 = d1.keyPair.publicKey < d2.keyPair.publicKey;
@@ -409,7 +610,7 @@ try {
     const id = `${TRANSFER.dir.toLowerCase()}${n}`;
     const t0prep = Date.now();
     const prep = await sender.eval(([i, mib]) => window.__app.prepareTransfer(i, mib), [id, TRANSFER.mib], 180000);
-    XF = { id, sender, receiver, bytes: prep.bytes, sha256: prep.sha256, filename: prep.filename, minBytes: Math.floor(prep.bytes * 0.5), verified: null, firstSeen: null, completeAt: null, senderSettled: null, progress: [] };
+    XF = { id, sender, receiver, bytes: prep.bytes, sha256: prep.sha256, filename: prep.filename, minBytes: Math.floor(prep.bytes * 0.5), verified: null, firstSeen: null, completeAt: null, senderSettled: null, progress: [], chunkSeries: [] };
     results.transfer = {
       spec: TRANSFER.spec, dir: TRANSFER.dir, mib: TRANSFER.mib, id,
       sender: sender.name, senderRole: sender.role, senderIsFaulted: sender === A,
@@ -417,7 +618,7 @@ try {
       bytes: prep.bytes, sha256: prep.sha256, filename: prep.filename,
       prepMs: Date.now() - t0prep,
       deadlineS: TRANSFER_DEADLINE_S,
-      progress: XF.progress, problems: [],
+      progress: XF.progress, chunkCountSeries: XF.chunkSeries, problems: [],
     };
     say(`--- transfer: prepared ${prep.bytes} B (${TRANSFER.mib} MiB) on ${sender.name}=${sender === A ? "A(faulted)" : "B(untouched)"} ${sender.role} -> ${receiver.name} ${receiver.role}; sha256=${String(prep.sha256).slice(0, 16)}… file=${prep.filename} (prep ${Date.now() - t0prep}ms)`);
   }
@@ -427,6 +628,14 @@ try {
     const s = { t: rel(), label };
     if (!XF.sender.frozen) { try { s.sender = await XF.sender.eval((i) => window.__app.transferState(i), XF.id, 8000); } catch (e) { s.sender = { err: e.message }; } }
     if (!XF.receiver.frozen) { try { s.receiver = await XF.receiver.eval(([r, mb]) => window.__app.incomingBig(r, mb), [ROOM, XF.minBytes], 8000); } catch (e) { s.receiver = { err: e.message }; } }
+    // The receiver's real (non-retransmit) chunk count must never go BACKWARDS.
+    // A drop to 0 is cancelReceiveTransfer deleting the partial mid-flight, which
+    // is exactly what C7 did when a side read its own pre-auth close as a peer
+    // cancel. Only samples up to and including the first complete one count: what
+    // the store does with the row after materialization is not this assertion's
+    // business.
+    if (!XF.completeAt && s.receiver && !s.receiver.err && typeof s.receiver.chunksReceivedReal === "number")
+      XF.chunkSeries.push({ t: s.t, label, real: s.receiver.chunksReceivedReal, total: s.receiver.chunksReceivedTotal, savedSize: s.receiver.savedSize, complete: !!s.receiver.complete });
     XF.progress.push(s);
     return s;
   };
@@ -443,6 +652,17 @@ try {
     say(`  ${P.name}.focusReconnect -> ${r}`);
     return r;
   };
+  // --cpuslow: CDP CPU throttling on one page. Applied at the last instant before
+  // the fault and released CPU_SLOW_RELEASE_S after t=0, so the recovery itself is
+  // measured unthrottled. rate 1 = no throttling, rate 6 = six times slower.
+  const setCpuThrottle = async (P, rate) => {
+    P.cdp ??= await P.ctx.newCDPSession(P.page);
+    await P.cdp.send("Emulation.setCPUThrottlingRate", { rate });
+    say(`  ${P.name}: CPU throttling rate ${rate}`);
+  };
+  const cpuSlowPage = () => (CPU_SLOW ? (CPU_SLOW.page === "A" ? A : B) : null);
+  let cpuSlowApplied = false, cpuSlowReleased = false;
+
   const faultStart = Date.now();
   results.fault.startedAt = rel(faultStart);
   const pcStateOf = async (P, otherPub) => { const d = await P.dump(); return d.pcs ? d.pcs.filter((p) => p.withPeerPublicKey === otherPub).map((p) => `#${p.id}:${p.connectionState}/${p.iceConnectionState}`) : [`unreachable: ${d.unreachable}`]; };
@@ -463,6 +683,9 @@ try {
       const reg = await registry().catch(() => ({ clients: [] }));
       const sample = { t: rel(tick), sinceFault: +((tick - faultStart) / 1000).toFixed(1), label, B: { ws: bd.signalingServer?.isConnected, roster: bd.room?.peers.map((p) => p.peerId), hs: Object.fromEntries(Object.entries(bd.room?.handshakeStatusByPeer ?? {}).map(([k, v]) => [k.slice(0, 8), v.status])), connecting: bd.room?.connectingToPeers, pcs: bPcCompact(bd) }, A: a, registry: reg.clients?.map((c) => `${c.peerId.slice(0, 8)}:sock${c.sock}:${c.isAlive ? "alive" : "noPong"}`) };
       results.fault.probes ??= []; results.fault.probes.push(sample);
+      // C5: handshake "authenticated" and a connected transport say nothing
+      // about whether the cover scheduler is still running. Record it.
+      sample.cover = { A: A.frozen ? null : await A.eval((r) => window.__app.coverStatus(r), ROOM, 8000).catch(() => null), B: await B.eval((r) => window.__app.coverStatus(r), ROOM, 8000).catch(() => null) };
       onSample?.(sample);
       let xf = null;
       if (XF && XF.startedAt) { xf = await xfSample(`${label} +${sample.sinceFault}s`); sample.transfer = xf; }
@@ -482,10 +705,77 @@ try {
     if (!st.started) { results.transfer.problems.push("startTransfer refused: " + st.error); results.problems.push("transfer never started: " + st.error); }
   }
 
+  if (CPU_SLOW) {
+    await setCpuThrottle(cpuSlowPage(), CPU_SLOW.rate);
+    cpuSlowApplied = true;
+    results.fault.cpuSlow = { page: CPU_SLOW.page, pageName: cpuSlowPage().name, rate: CPU_SLOW.rate, appliedAt: rel(), releaseAtSinceClear: CPU_SLOW_RELEASE_S };
+  }
+
   say(`--- fault: ${scenario} on ${A.name}`);
   let thawAt = null;
   if (scenario === "baseline") {
     say("  (no fault) observing for stability");
+  } else if (scenario === "pin-typo") {
+    // Both sides fail key-confirmation by construction. Before C2 the catch's
+    // channel close fired main.onclose, which re-dialled unconditionally: the
+    // pair rebuilt PC + ICE + DTLS + main every 3-5 s and walked the PIN
+    // backoff to its 300 s cap. Nothing to inject; just watch.
+    say("  (no fault) mismatched PINs; counting transports and re-dials");
+  } else if (scenario === "cover-stall") {
+    // C5: a main-thread stall that spans a cycle boundary. At cadence 10 s with
+    // 2 lanes x 16 frames the slot spacing is 10000/32 = 312.5 ms, so the
+    // runtime's drift tolerance is min(floor(312.5) - 1, 500) = 311 ms: any
+    // stall longer than that which overlaps a due boundary overran it. Before
+    // the fix that called setStatus("suspended","timer-drift") and armed
+    // nothing, and only visibilitychange->visible or online could ever leave
+    // that state -- neither of which a visible, online tab fires. Both
+    // handshakes stay "authenticated" throughout in BOTH runs; the flip is
+    // cover status and the round trips.
+    // The stall must span a CYCLE BOUNDARY, not merely a slot: handleLateTimer
+    // only parks on kind === "boundary" (a late slot always degraded). A fixed
+    // 1.5 s stall at cadence 10 s overlaps a boundary about one run in seven --
+    // measured: a run with the C5 park deliberately restored still passed,
+    // because no boundary timer was late. Making the stall one cadence longer
+    // than a full cycle puts a boundary inside it by construction, so the
+    // scenario reproduces every time instead of one time in seven.
+    const cadenceMs = CONNECT_CADENCE_MS ?? 2000;
+    const stallMs = cadenceMs + 1500;
+    results.fault.note = `cover-stall: ${stallMs} ms main-thread stall on A (cadence ${cadenceMs} ms + 1.5 s), which spans a scheduled cover cycle boundary by construction`;
+    results.fault.stallMs = stallMs;
+    const spins = await A.eval((ms) => window.__app.stallMainThread(ms), stallMs, stallMs + 20000);
+    say(`  ${A.name}.stallMainThread(${stallMs}) -> ${spins} spins`);
+    await probeDuring("post-stall", 30);
+    // "A late timer must not park the cover scheduler forever." Parking under
+    // the label "suspended" is only ONE way to park, and -- measured, twice --
+    // the one a main-thread stall cannot reach: a late SLOT timer fires first,
+    // and degrade() disarms the pending boundary timer, so handleLateTimer's
+    // boundary branch (everything C5 changed) never runs from this fault. With
+    // that branch's pre-C5 `setStatus("suspended","timer-drift")` deliberately
+    // restored, this scenario still passed at cadence 3 s and 10 s.
+    //
+    // What the stall DOES reach is degrade(), and degrade()'s re-arm is the
+    // thing that must hold. So the assertion is LIVENESS, not a label: the
+    // stalled side must be back to "active" within a few cycles. A scheduler
+    // that stops re-arming fails this whatever status it wears.
+    const coverAllActive = (s) => { const v = Object.values(s ?? {}); return v.length > 0 && v.every((x) => x === "active"); };
+    const coverDeadlineMs = Math.max(4 * cadenceMs, 20_000);
+    const coverDeadline = Date.now() + coverDeadlineMs;
+    let coverA = await A.eval((r) => window.__app.coverStatus(r), ROOM, 8000);
+    const coverTrail = [{ sinceFault: +((Date.now() - faultStart) / 1000).toFixed(1), status: coverA }];
+    while (Date.now() < coverDeadline && !coverAllActive(coverA)) {
+      await sleep(1000);
+      coverA = await A.eval((r) => window.__app.coverStatus(r), ROOM, 8000).catch(() => coverA);
+      const lastTrail = coverTrail.at(-1);
+      if (JSON.stringify(lastTrail.status) !== JSON.stringify(coverA)) coverTrail.push({ sinceFault: +((Date.now() - faultStart) / 1000).toFixed(1), status: coverA });
+    }
+    say(`  A.coverStatus after stall: ${JSON.stringify(coverA)} (trail ${JSON.stringify(coverTrail)})`);
+    results.fault.coverAfterStall = coverA;
+    results.fault.coverTrail = coverTrail;
+    results.fault.coverRecoveryDeadlineMs = coverDeadlineMs;
+    if (Object.values(coverA).some((s) => s === "suspended" || s === "stopped"))
+      results.problems.push("cover parked after a stall: " + JSON.stringify(coverA));
+    else if (!coverAllActive(coverA))
+      results.problems.push(`cover never returned to "active" within ${coverDeadlineMs} ms of the stall: ${JSON.stringify(coverA)} (trail ${JSON.stringify(coverTrail)})`);
   } else if (scenario === "ws-drop") {
     await closeSocket(A, dA0.keyPair.peerId);
     await probeDuring("ws-drop wait 5s", 5);
@@ -620,7 +910,9 @@ try {
     say(`  fault cleared at ${results.fault.endedAt}; PCs now A=${JSON.stringify(results.fault.pcsAfterFault.A)} B=${JSON.stringify(results.fault.pcsAfterFault.B)}`);
     // ws-drop-nofocus withholds the poke on purpose: the SDK's own bounded
     // reconnect ladder (C4) has to be what brings A's socket back.
-    if (scenario !== "baseline" && scenario !== "ws-drop-nofocus")
+    // baseline / pin-typo / cover-stall never drop the socket, so there is nothing
+    // for a focus handler to reconnect.
+    if (!["baseline", "ws-drop-nofocus", "pin-typo", "cover-stall"].includes(scenario))
       results.fault.focusReconnect = await focusReconnect(A);
     else results.fault.focusReconnect = "skipped: " + scenario;
   }
@@ -741,6 +1033,11 @@ try {
     } else {
       say(`  [${sample.sinceClear}s] invariants unknown: A=${dA.unreachable ?? (dA.room ? "ok" : "no room")} B=${dB.unreachable ?? (dB.room ? "ok" : "no room")}`);
     }
+    if (cpuSlowApplied && !cpuSlowReleased && sinceClear(tick) >= CPU_SLOW_RELEASE_S) {
+      cpuSlowReleased = true;
+      await setCpuThrottle(cpuSlowPage(), 1).catch((e) => say(`  cpu throttle release failed: ${e.message}`));
+      results.fault.cpuSlow.releasedAtSinceClear = sinceClear();
+    }
     if (REFOCUS_S && procFreezeMatch && tick - lastRefocus >= REFOCUS_S * 1000) {
       lastRefocus = tick;
       const r = await focusReconnect(A, 5000).catch((e) => "error: " + e.message);
@@ -750,10 +1047,29 @@ try {
   }
   if (sendInFlight) await withTimeout(sendInFlight, 65000, "final I4").catch(() => {});
   if (probeInFlight) await withTimeout(probeInFlight, 65000, "final probe").catch(() => {});
-  if (!i4ok && first.I2 === null) results.problems.push("I4 never attempted: I2 (both authenticated) never held during observation");
+  // Only a problem where I4 is actually required: pin-typo must never authenticate.
+  if (REQUIRED_INVARIANTS.includes("I4") && !i4ok && first.I2 === null) results.problems.push("I4 never attempted: I2 (both authenticated) never held during observation");
   const fin = results.samples.at(-1)?.inv;
-  results.invariants = { firstSatisfiedSinceClear: Object.fromEntries(Object.entries(first).map(([k, v]) => [k, v ? v.sinceClear : "never"])), heldAtEnd: { ...last, I4: i4ok }, finalSample: fin };
+  results.invariants = { firstSatisfiedSinceClear: Object.fromEntries(Object.entries(first).map(([k, v]) => [k, v ? v.sinceClear : "never"])), heldAtEnd: { ...last, I4: i4ok }, finalSample: fin, required: REQUIRED_INVARIANTS, exempt: INVARIANT_EXEMPTIONS[scenario] ?? [] };
   say(`--- RESULT first-satisfied (s after t=0): ${JSON.stringify(results.invariants.firstSatisfiedSinceClear)}; held at end: ${JSON.stringify(results.invariants.heldAtEnd)}`);
+  // THE ARMING. Every required invariant must have been satisfied at least once in
+  // the observation window AND still hold at its end. Without these two pushes
+  // I1..I7 are decorative: they are computed, logged and archived, and the process
+  // still exits 0 with problems: [] (see ws-drop-nofocus-initiator-1.json for I6
+  // and proc-freeze-20-responder-1.json for I7, both recorded exactly that way).
+  for (const k of REQUIRED_INVARIANTS) {
+    const firstAt = results.invariants.firstSatisfiedSinceClear[k];
+    if (firstAt === "never") results.problems.push(`${k} NEVER held in the ${OBSERVE_S}s observation window (scenario ${scenario} role ${role})`);
+    else if (results.invariants.heldAtEnd[k] !== true) results.problems.push(`${k} first held at ${firstAt}s but NOT at the end of the observation window (scenario ${scenario} role ${role})`);
+  }
+  // fpAgree was the last thing the driver computed, logged, archived and never
+  // asserted. It is null unless BOTH sides hold exactly one live transport, so
+  // only an explicit false is evidence: two live transports that disagree about
+  // each other's DTLS fingerprint are two different sessions each believing it
+  // is paired with the other -- a desync no roster or handshake field shows.
+  if (fin && !fin.unknown && fin.fpAgree === false)
+    results.problems.push(`DTLS fingerprints disagree between the two live transports at the end of the window: A=${JSON.stringify(fin.A.livePcs)} B=${JSON.stringify(fin.B.livePcs)}`);
+  say(`--- INVARIANT VERDICT required=${JSON.stringify(REQUIRED_INVARIANTS)}${(INVARIANT_EXEMPTIONS[scenario] ?? []).length ? ` exempt-for-${scenario}=${JSON.stringify(INVARIANT_EXEMPTIONS[scenario])}` : ""} fpAgree=${fin && !fin.unknown ? fin.fpAgree : "n/a"} -> ${results.problems.length ? "PROBLEMS" : "all held"}`);
   if (fin && !fin.unknown) {
     const aLive = fin.A.livePcIds, bLive = fin.B.livePcIds;
     say(`--- FINAL: A roster=${JSON.stringify(fin.A.roster)} hs=${JSON.stringify(fin.A.hsOfRoster)} livePC=${JSON.stringify(aLive)} (pre-fault #${preFault.A}${fin.aHoldsPreFault ? " STILL HELD" : ""}) | B roster=${JSON.stringify(fin.B.roster)} hs=${JSON.stringify(fin.B.hsOfRoster)} livePC=${JSON.stringify(bLive)} (pre-fault #${preFault.B}${fin.bHoldsPreFault ? " STILL HELD" : ""}) | fpAgree=${fin.fpAgree}`);
@@ -770,7 +1086,15 @@ try {
     const st = results.transfer.senderSettled;
     const delivered = !!st && st.outcome === "resolved" && (st.outcomes ?? []).some((o) => o.status === "delivered");
     const inTime = results.transfer.receiverCompleteSinceClear !== undefined && results.transfer.receiverCompleteSinceClear <= TRANSFER_DEADLINE_S;
-    results.transfer.pass = !!(XF.hashMatch && inTime && delivered);
+    // Monotonicity of the receiver's real chunk count (see xfSample). A drop is a
+    // partial that was deleted under the receiver mid-flight.
+    const series = XF.chunkSeries;
+    let regression = null;
+    for (let i = 1; i < series.length && !regression; i++)
+      if (series[i].real < series[i - 1].real) regression = { from: series[i - 1], to: series[i] };
+    results.transfer.chunkCountMonotonic = !regression;
+    if (regression) results.transfer.problems.push(`receiver chunk count went BACKWARDS: real ${regression.from.real} at ${regression.from.t} -> ${regression.to.real} at ${regression.to.t} (${regression.to.label})`);
+    results.transfer.pass = !!(XF.hashMatch && inTime && delivered && !regression);
     results.transfer.verdict = {
       receiverByteExact: !!XF.hashMatch,
       receiverCompleteSinceClear: results.transfer.receiverCompleteSinceClear ?? null,
@@ -778,11 +1102,49 @@ try {
       senderResolvedDelivered: delivered,
       senderOutcome: st ? (st.outcome === "resolved" ? `resolved (${(st.outcomes ?? []).map((o) => o.status).join(",") || "no outcomes"})` : `rejected: ${st.error}`) : "NEVER SETTLED",
       senderSettledSinceClear: st?.sinceClear ?? null,
+      chunkCountMonotonic: !regression,
+      chunkSeriesSamples: series.length,
       chunks: results.transfer.receiverTelemetry ?? null,
     };
     say(`--- TRANSFER ${results.transfer.pass ? "PASS" : "FAIL"} ${TRANSFER.spec} (${XF.sender.name}=${XF.sender === A ? "A" : "B"} -> ${XF.receiver.name}): ${JSON.stringify(results.transfer.verdict)}`);
     say(`--- TRANSFER data channels: A=${JSON.stringify(results.transfer.dataChannels.A?.perPc ?? results.transfer.dataChannels.A)} | B=${JSON.stringify(results.transfer.dataChannels.B?.perPc ?? results.transfer.dataChannels.B)}`);
     if (!results.transfer.pass) { failed = true; results.problems.push("TRANSFER FAILED: " + JSON.stringify(results.transfer.verdict)); }
+  }
+
+  // ---- pin-typo verdict (measured at the end of the observation window, with
+  // both pages still alive; the report's anchor put it in the finally block, but a
+  // driver failure must not be masked by a second round of page evaluation).
+  if (results.pinTypo) {
+    const [dEndA, dEndB] = await Promise.all([P1.dump(), P2.dump()]);
+    const hsOf = (d) => Object.values(d.room?.handshakeStatusByPeer ?? {});
+    results.pinTypo.end = {
+      pcCountP1: (dEndA.pcs ?? []).length,
+      pcCountP2: (dEndB.pcs ?? []).length,
+      peersFrames: await peersFrameCounts([dEndA.keyPair.peerId, dEndB.keyPair.peerId]),
+      handshakeP1: hsOf(dEndA),
+      handshakeP2: hsOf(dEndB),
+      rosterP1: (dEndA.room?.peers ?? []).length,
+      rosterP2: (dEndB.room?.peers ?? []).length,
+    };
+    // The assertion that flips. Pre-fix: > 10 PCs per side over 120 s (a rebuild
+    // every 3-5 s) and tens of peers requests per identity. Post-fix: exactly one
+    // PC per side and one join-time peers request, with the failure still on the
+    // roster so a UI can show it.
+    const e = results.pinTypo.end;
+    const failedWith = (rows) => rows.filter((r) => r.status === "failed" && r.reason === "pin-mismatch").length;
+    e.transportBudget = PIN_TYPO_TRANSPORT_BUDGET;
+    e.verdict = {
+      transportsWithinBudget: e.pcCountP1 <= PIN_TYPO_TRANSPORT_BUDGET && e.pcCountP2 <= PIN_TYPO_TRANSPORT_BUDGET,
+      transportBudget: PIN_TYPO_TRANSPORT_BUDGET,
+      transportsPerSide: { P1: e.pcCountP1, P2: e.pcCountP2 },
+      bothReportPinMismatch: failedWith(e.handshakeP1) >= 1 && failedWith(e.handshakeP2) >= 1,
+      rosterNotEmptied: e.rosterP1 >= 1 && e.rosterP2 >= 1,
+      peersFrames: e.peersFrames,
+    };
+    if (!e.verdict.transportsWithinBudget) results.problems.push(`pin-typo re-dialled past the roster-reconcile ladder: P1=${e.pcCountP1} P2=${e.pcCountP2} transports in ${OBSERVE_S}s, budget ${PIN_TYPO_TRANSPORT_BUDGET}`);
+    if (!e.verdict.bothReportPinMismatch) results.problems.push("pin-typo: a side never reported status=failed reason=pin-mismatch");
+    if (!e.verdict.rosterNotEmptied) results.problems.push("pin-typo: the roster was emptied, so the failure has nobody to attach to");
+    say(`  pin-typo verdict: ${JSON.stringify(e.verdict)}`);
   }
 
 } catch (e) {
@@ -808,6 +1170,15 @@ try {
     if (EA) results.diag = { A: await grab(EA, () => window.__app.diag("de".repeat(32)), "A.diag"), B: EB ? await grab(EB, () => window.__app.diag("de".repeat(32)), "B.diag") : null };
     if (results.diag) say(`--- DIAG A=${JSON.stringify(results.diag.A)} | B=${JSON.stringify(results.diag.B)}`);
   } catch (e) { results.problems.push("evidence dump failed: " + e.message); }
+  // A RECORDED PROBLEM IS A FAILURE. Until this line `failed` came only from a
+  // driver exception or the big-transfer verdict, so a run could archive a
+  // non-empty results.problems -- a violated invariant, an unstarted transfer, a
+  // SIGSTOP that did not take -- and still exit 0. Every problem push above is a
+  // real assertion now.
+  if (results.problems.length > 0) failed = true;
+  results.failed = failed;
+  if (results.problems.length) { say(`--- FAILED with ${results.problems.length} problem(s):`); for (const p of results.problems) say(`    * ${p}`); }
+  else say("--- PASSED: no problems recorded");
   results.relayLog = relayLog;
   results.consoles = { A: A ? pageConsoles.get(A.name) : pageConsoles.get("P1"), B: B ? pageConsoles.get(B.name) : pageConsoles.get("P2"), names: { A: A?.name, B: B?.name } };
   results.driverLog = logLines;

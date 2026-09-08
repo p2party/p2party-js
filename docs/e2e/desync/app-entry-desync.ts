@@ -11,8 +11,10 @@ import { setChannel } from "~/Desktop/@p2party/p2party-js/src/reducers/roomSlice
 import { getDBPeerIsBlacklisted } from "~/Desktop/@p2party/p2party-js/src/db/api";
 import {
   hasRoomPeerMutex,
+  getRoomPeerMutex,
   roomPeerMutexCount,
 } from "~/Desktop/@p2party/p2party-js/src/api/webrtc/negotiationLock";
+import { unnegotiatedTransportRebuilds, MAX_UNNEGOTIATED_TRANSPORT_REBUILDS } from "~/Desktop/@p2party/p2party-js/src/api/webrtc/unnegotiatedTransport";
 import type { RoomPolicyV1 } from "~/Desktop/@p2party/p2party-js/src/roomPolicy";
 
 const LOOPBACK_RTC: RTCConfiguration = { iceServers: [], iceCandidatePoolSize: 2 };
@@ -306,7 +308,10 @@ const api = {
     for (const p of window.__pcs ? window.__pcs() : [])
       if (typeof p.withPeerId === "string" && p.withPeerId) peerIds.add(p.withPeerId);
     const mutexes: Record<string, boolean> = {};
-    for (const pid of peerIds) mutexes[pid.slice(0, 8)] = hasRoomPeerMutex(roomId, pid);
+    for (const pid of peerIds) {
+      // Check existence before retrieving: diagnostics must not create a mutex.
+      mutexes[pid] = hasRoomPeerMutex(roomId, pid) && !getRoomPeerMutex(roomId, pid).isIdle();
+    }
     const dbStart = Date.now();
     const dbProbe = await Promise.race([
       getDBPeerIsBlacklisted([...peerIds][0]).then((v) => `resolved:${String(v)}`),
@@ -318,6 +323,8 @@ const api = {
       mutationCounts: counts,
       roomPeerMutexes: mutexes,
       roomPeerMutexCount: roomPeerMutexCount(),
+      unnegotiatedTransportRebuilds: Object.fromEntries([...peerIds].map((pid) => [pid, unnegotiatedTransportRebuilds(roomId, pid)])),
+      maxUnnegotiatedTransportRebuilds: MAX_UNNEGOTIATED_TRANSPORT_REBUILDS,
       dbProbe,
       dbProbeMs: Date.now() - dbStart,
     };

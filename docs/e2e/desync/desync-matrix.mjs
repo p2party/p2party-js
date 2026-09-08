@@ -192,16 +192,19 @@ async function runArm(id, slot) {
     },
     (observe + freeze + 300) * 1000,
   );
-  entry.exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      entry.signal = signal;
-      resolve(code);
+  try {
+    entry.exitCode = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => {
+        entry.signal = signal;
+        resolve(code);
+      });
     });
-  });
-  clearTimeout(deadline);
-  active.delete(child);
-  log.end();
+  } finally {
+    clearTimeout(deadline);
+    active.delete(child);
+    log.end();
+  }
   entry.finished = new Date().toISOString();
   const artifact = path.join(runs, `${stem}.json`);
   if (existsSync(artifact)) {
@@ -223,15 +226,22 @@ async function runArm(id, slot) {
     `DONE arm ${id}: ${entry.pass ? "PASS" : entry.expectedResidual ? "NON-PASS (inspect expected residual)" : "FAIL"}; I2=${entry.invariants?.firstSatisfiedSinceClear?.I2} I4=${entry.invariants?.firstSatisfiedSinceClear?.I4}; ${(entry.problems ?? []).join(" | ")}`,
   );
 }
-await Promise.all(
-  Array.from({ length: jobs }, (_, slot) =>
-    (async () => {
-      while (queue.length) await runArm(queue.shift(), slot);
-    })(),
-  ),
+const workers = Array.from({ length: jobs }, (_, slot) =>
+  (async () => {
+    while (queue.length) await runArm(queue.shift(), slot);
+  })(),
 );
-// Keep the CPU-throttling measurement isolated from other browser arms.
-if (!interrupted && selected.includes(21)) await runArm(21, 0);
+try {
+  await Promise.all(workers);
+  // Keep the CPU-throttling measurement isolated from other browser arms.
+  if (!interrupted && selected.includes(21)) await runArm(21, 0);
+} catch (error) {
+  interrupted = true;
+  queue.length = 0;
+  report.fatalError = String(error?.stack ?? error);
+  for (const child of active) child.kill("SIGTERM");
+  await Promise.allSettled(workers);
+}
 report.finished = new Date().toISOString();
 report.inputsUnchanged =
   JSON.stringify(hashes()) === JSON.stringify(report.inputs);

@@ -128,14 +128,15 @@ PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
   node desync-driver.mjs <scenario> <role> [flags]
 ```
 
-`scenario` = `baseline` | `ws-drop` | `ws-drop-nofocus` | `freeze-ws-90` |
-`offline-60` | `freeze-20` | `proc-freeze-<seconds>`. `role` = `initiator` |
+`scenario` = `baseline` | `ws-drop` | `ws-drop-nofocus` | `two-tabs` |
+`pin-typo` | `cover-stall` | `freeze-ws-90` | `offline-60` | `freeze-20` |
+`proc-freeze-<seconds>`. `role` = `initiator` |
 `responder`, and says which identity role the **faulted** page A holds (the
 Ed25519 initiator is the lexically lower hex public key) — the bug is
 role-asymmetric, so both must be run.
 
 **Focus emulation, and the one scenario without it.** After the fault clears,
-every scenario except `baseline` and `ws-drop-nofocus` calls
+every transport-fault scenario except `ws-drop-nofocus` calls
 `window.__app.focusReconnect()` on A — the site's `ChatLayout`
 focus/visibilitychange/pageshow/online handler, which calls `connect(roomUrl)`
 iff `!isConnected`. That poke is not something a **focused** desktop tab ever
@@ -147,6 +148,17 @@ than the driver's. Any new recovery scenario should say explicitly which of the
 two it is; a fault arm that only recovers because the driver poked it is not
 evidence about the SDK.
 
+`two-tabs` opens a second page in A's existing browser context. The new page
+must adopt A's persisted identity, replace its signaling socket with a new
+generation, then authenticate and exchange byte-exact messages with B within
+20 s of `connect()`. A's original tab stays open so the run also checks that it
+stays disconnected and does not reclaim the socket. No focus event is injected.
+`pin-typo` uses different PINs for the same room and requires a visible, stable
+PIN mismatch with exactly one transport per side and no roster requests after
+the terminal failure. `cover-stall` injects a main
+thread stall spanning a scheduled cover boundary and checks resumed cover
+traffic. These three scenarios and `baseline` also omit focus emulation.
+
 `proc-freeze-<s>` is the "phone asleep" fault: A's whole Chromium process tree
 is SIGSTOPped for `<s>` seconds; the driver never touches A while frozen (no
 `evaluate`, no CDP), polling only B and the relay every 1 s. Thaw is SIGCONT,
@@ -156,6 +168,15 @@ and `t=0` is the thaw instant. 1 s after thaw the driver emulates the
 
 Flags:
 
+- `--mode=immediate|scheduled|pin` selects the room policy; `pin-typo` fixes this
+  to `pin`. `--cadence=<ms>` configures scheduled mode only. `cover-stall`
+  requires `--mode=scheduled`.
+- `--cpuslow=<A|B>:<rate>` applies Chromium CPU throttling to that page before
+  the fault and releases it 20 s after `t=0`.
+- `--pin=<hex>` / `--pinb=<hex>` select the two PINs for `pin-typo` only.
+- `--port=<n>` selects static HTTP port `n` and relay port `n+1` (default
+  5810/5811). Unknown flags, invalid numeric values and flags that cannot affect
+  the chosen scenario are rejected before starting either listener.
 - `--udpflood=1` — **"radio off"**, and the flag that makes the bug reproduce.
   Right after the SIGSTOP, the driver fills the kernel receive buffer of every
   UDP host-candidate socket of A's live peer connections with junk datagrams,
@@ -225,12 +246,17 @@ Evaluated every second from `t=0` and recorded as
 - **fpAgree** — the two live transports' DTLS fingerprints match pairwise
   (each side's local fingerprint is the other's remote).
 
-A run counts as a pass when I1/I2/I3/I4/I5/I6 all hold at the end, I4 was ever
-satisfied, `fpAgree` and `bothAuthenticated` hold in the final sample, the
-diagnostics show no pending RTK mutations and no held per-peer mutexes, the
-driver recorded no problems — and, for a freeze scenario, **I2 is first
+A run counts as a pass when I1/I2/I3/I5/I6/I7 all hold in the actual final
+sample and I4 was ever satisfied, `fpAgree` and `bothAuthenticated` hold in the final sample, the
+diagnostics show no pending RTK mutations, no held per-peer mutexes, a drained
+mutex registry, and an IndexedDB round trip under 3000 ms; the driver recorded no problems — and, for a freeze scenario, **I2 is first
 satisfied within 15 s of thaw** (a split that only heals on a 30 s+ timeout is
-not a fix). With `--transfer`, additionally: the receiver's bytes are
+not a fix). The first mutually authenticated edge must also meet that bound:
+two empty rosters satisfy I2's consistency definition but cannot count as
+restored communication. Missing final state, fingerprints, or diagnostics fail
+the run. `pin-typo` instead requires I1/I5/I6, both `failed/pin-mismatch` states,
+exactly one transport per side, and no peers requests after terminal failure; successful authentication is not its
+expected outcome. With `--transfer`, additionally: the receiver's bytes are
 SHA-256-identical to the sender's payload, it completed within the transfer
 deadline, and the sender's `handle.done` resolved with a `delivered` outcome.
 

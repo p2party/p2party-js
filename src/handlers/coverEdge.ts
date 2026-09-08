@@ -35,6 +35,96 @@ const transferIdByRoot = new WeakMap<
   Map<string, { transferId: string; peerId: string; roomId: string }>
 >();
 
+// ── per-edge cover generation ────────────────────────────────────────────────
+//
+// A monotonic counter per (roomId, peerId) that is bumped by, and only by, a
+// successfully installed cover runtime. It is the sender's evidence that the
+// runtime its in-flight job was admitted to has been REPLACED, which is the one
+// condition under which resuming that job is both possible and sound (C8).
+//
+// It is deliberately NOT the job's progress: `CoverScheduler.getJobProgress`
+// stops moving whenever the scheduler is suspended (a hidden tab, pagehide,
+// freeze, offline) while the job is perfectly healthy, so a resume gated on
+// progress would fire for an ordinary backgrounded tab. It is also deliberately
+// not a teardown counter: an edge that only died has no replacement runtime to
+// re-offer the message on, and re-offering it onto nothing would burn the
+// sender's resume budget for free.
+//
+// Keyed by the EDGE, never by the RTCPeerConnection: a replacement connection
+// and an in-place re-bind both keep the same room/peer identity, and the
+// connection object is exactly what does not survive. The map holds two numbers
+// per edge and no object references, so it retains nothing.
+interface CoverEdgeGenerationState {
+  generation: number;
+  readonly waiters: Set<(generation: number) => void>;
+}
+
+const coverEdgeGenerations = new Map<string, CoverEdgeGenerationState>();
+
+const coverEdgeKey = (roomId: string, peerId: string): string =>
+  `${roomId}\u0000${peerId}`;
+
+const ensureCoverEdgeState = (
+  roomId: string,
+  peerId: string,
+): CoverEdgeGenerationState => {
+  const key = coverEdgeKey(roomId, peerId);
+  let state = coverEdgeGenerations.get(key);
+  if (!state) {
+    state = { generation: 0, waiters: new Set() };
+    coverEdgeGenerations.set(key, state);
+  }
+  return state;
+};
+
+/**
+ * How many scheduled-cover runtimes this edge has had installed. 0 before the
+ * first one, and for every immediate-mode edge (installCoverEdge returns
+ * without installing anything there, so nothing is ever published).
+ */
+export const coverEdgeGeneration = (roomId: string, peerId: string): number =>
+  coverEdgeGenerations.get(coverEdgeKey(roomId, peerId))?.generation ?? 0;
+
+/**
+ * Resolve with this edge's cover generation once it is past `since`, or with
+ * the unchanged current generation if none is installed within `timeoutMs`.
+ *
+ * A caller compares the result with what it passed in: strictly greater means a
+ * replacement runtime exists and the caller's retired job may be re-derived
+ * onto it; equal means nothing replaced anything.
+ */
+export const waitForCoverEdgeGeneration = (
+  roomId: string,
+  peerId: string,
+  since: number,
+  timeoutMs: number,
+): Promise<number> => {
+  const state = ensureCoverEdgeState(roomId, peerId);
+  if (state.generation > since) return Promise.resolve(state.generation);
+  if (!(timeoutMs > 0)) return Promise.resolve(state.generation);
+  return new Promise<number>((resolve) => {
+    const waiter = (generation: number): void => {
+      clearTimeout(timer);
+      state.waiters.delete(waiter);
+      resolve(generation);
+    };
+    const timer = setTimeout(() => {
+      state.waiters.delete(waiter);
+      resolve(state.generation);
+    }, timeoutMs);
+    state.waiters.add(waiter);
+  });
+};
+
+/** Publish a newly installed runtime as this edge's next cover generation. */
+const advanceCoverEdgeGeneration = (roomId: string, peerId: string): void => {
+  const state = ensureCoverEdgeState(roomId, peerId);
+  state.generation += 1;
+  const generation = state.generation;
+  // Copy first: a waiter removes itself from the set as it settles.
+  for (const waiter of [...state.waiters]) waiter(generation);
+};
+
 export interface InstallCoverEdgeOptions {
   readonly epc: IRTCPeerConnection;
   readonly roomId: string;
@@ -149,6 +239,11 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
   });
   epc.coverRuntime = runtime;
   runtime.start();
+  // Publish the replacement LAST, once the runtime is installed and started, so
+  // a sender woken by the bump always finds an admitting runtime on the edge.
+  // Synchronous: nothing here awaits, and the handshake path that calls this
+  // must not gain a suspension point.
+  advanceCoverEdgeGeneration(roomId, epc.withPeerId);
 };
 
 /** Record the root→transferId mapping so a terminal receipt settles the send. */

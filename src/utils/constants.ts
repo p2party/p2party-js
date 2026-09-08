@@ -270,6 +270,18 @@ export const PARKED_PRE_AUTH_FRAME_OVERHEAD_BYTES = 1024;
 // possible confirmation is 301.2 s (C3).
 export const SCHEDULED_DELIVERY_MARGIN_MS = 20_000;
 
+// Every recovery path destroys the edge's cover runtime, which settles and
+// deletes every job it held; the replacement runtime starts empty, so an
+// in-flight scheduled send used to die with no resume and no notification (C8).
+// The sender re-derives on the replacement generation and re-offers the
+// message, but scheduled mode emits no per-chunk receipts — getAckedChunks is
+// always empty there — so a resumed job re-offers EVERY chunk. The receiver
+// dedups by leaf hash, so that is correct, but it is a full re-send: a flapping
+// edge must not do it indefinitely. Matches MAX_RESUME_ATTEMPTS' role on the
+// immediate-mode path, one lower because each scheduled attempt already costs a
+// whole schedule-derived idle budget.
+export const MAX_SCHEDULED_SEND_RESUMES = 2;
+
 // Signaling liveness. The server pings every 10 s (p2party-server
 // src/utils/handleInterval.ts PING_INTERVAL). When a mobile browser freezes
 // the page with its radio off, the WebSocket can come back half-open: the

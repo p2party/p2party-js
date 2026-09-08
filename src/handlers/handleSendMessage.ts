@@ -31,7 +31,10 @@ import {
 } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { sealChunk } from "./messageChunkCrypto";
-import { isRatchetGateWaitTimeout, waitForRatchetGate } from "./ratchetGateWait";
+import {
+  isRatchetGateWaitTimeout,
+  waitForRatchetGate,
+} from "./ratchetGateWait";
 import { isCurrentRatchetGateLease, isRatchetGateOpen } from "./ratchetGate";
 import {
   markChannelClosedLocally,
@@ -40,8 +43,10 @@ import {
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
 import {
   cancelScheduledSend,
+  coverEdgeGeneration,
   enqueueScheduledSend,
   trackScheduledSend,
+  waitForCoverEdgeGeneration,
 } from "./coverEdge";
 import {
   scheduledDeliveryTimeoutMs,
@@ -65,6 +70,7 @@ import {
   RECONNECT_RESUME_TIMEOUT_MS,
   RECONNECT_RESUME_POLL_MS,
   MAX_RESUME_ATTEMPTS,
+  MAX_SCHEDULED_SEND_RESUMES,
   CHANNEL_OPEN_POLL_MS,
 } from "../utils/constants";
 
@@ -85,6 +91,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { ScheduledDeliveryWaitOptions } from "./coverTransfer";
 import type { CoverSchedulerStatus } from "./coverScheduler";
 import type { RoomPolicyV1 } from "../roomPolicy";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -732,10 +739,7 @@ export type PeerDeliveryOutcome =
       // typically temporary: it resolves on its own once the tab is
       // foregrounded/online again, unlike a dead peer.
       reason:
-        | "not-connected"
-        | "cover-unavailable"
-        | "unauthenticated"
-        | "cancelled";
+        "not-connected" | "cover-unavailable" | "unauthenticated" | "cancelled";
     };
 
 export interface PeerSendFanoutResult {
@@ -1279,11 +1283,35 @@ export const coverRuntimeAdmitsScheduledJobs = (
   runtime.status !== "stopped";
 
 /**
+ * Test/fault-injection seams for `sendScheduled`. Production passes none of
+ * them; they exist so the resume loop can be driven without a durable ratchet
+ * write, a real gate, or a schedule-derived wall-clock wait. Same shape as
+ * `bindTransferCipherToConnection`'s trailing defaults.
+ */
+export interface ScheduledSendDependencies {
+  readonly waitForGate?: WaitForRatchetGate;
+  readonly ratchetStep?: DurableRatchetStep;
+  readonly waitForDelivery?: (
+    options: ScheduledDeliveryWaitOptions,
+  ) => Promise<boolean>;
+  /** How long to watch for a replacement cover runtime before giving up (C8). */
+  readonly resumeWaitMs?: number;
+}
+
+/**
  * Scheduled-cover send: instead of opening a per-message DataChannel and
  * bursting, step the ratchet once for the message and enqueue a lazy cover job
  * on each peer edge's cover runtime. The scheduler substitutes one chunk cell
  * per slot into the already-running cover lanes; the tail is dummy. Delivery is
  * confirmed by the receiver's terminal scheduled receipt (markTransferComplete).
+ *
+ * A send survives its edge being replaced. Every recovery path destroys the
+ * cover runtime, which settles and deletes every job it holds and (since C3)
+ * wipes the message key at that settlement; the replacement runtime starts
+ * empty. So the retired job cannot be carried across — its key is already zero,
+ * and even a live one belongs to a ratchet generation the peer has thrown away.
+ * The send is instead RE-DERIVED on the replacement generation and re-offered,
+ * exactly as `bindTransferCipherToConnection` does for immediate mode (C8).
  */
 export const sendScheduled = async (
   roomId: string,
@@ -1300,7 +1328,20 @@ export const sendScheduled = async (
   merkleModule: LibCrypto,
   signal?: AbortSignal,
   onTransferStarted?: () => void,
+  /**
+   * The room's LIVE connection array. A replacement RTCPeerConnection is a
+   * different object, so `target.epc` is stale the moment the edge is rebuilt;
+   * this is where the resume finds the transport that replaced it, exactly as
+   * `resumeChannel` does on the immediate-mode path.
+   */
+  peerConnections: readonly IRTCPeerConnection[] = [],
+  dependencies: ScheduledSendDependencies = {},
 ): Promise<PeerSendFanoutResult> => {
+  const waitForGate = dependencies.waitForGate ?? waitForRatchetGate;
+  const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
+  const waitForDelivery =
+    dependencies.waitForDelivery ?? waitForScheduledDelivery;
+  const resumeWaitMs = dependencies.resumeWaitMs ?? RECONNECT_RESUME_TIMEOUT_MS;
   const outcomes: PeerDeliveryOutcome[] = [];
   let startedTransfers = 0;
   // Derived from the room's authenticated policy, never a fixed constant: a
@@ -1353,88 +1394,162 @@ export const sendScheduled = async (
       });
       continue;
     }
+    let currentEpc = epc;
+    let channelMessageLabel = "";
+    let admitted = false;
     try {
-      await waitForRatchetGate(roomId, target.peerId, signal);
-      if (!epc.ratchetState)
-        throw new Error("v4 scheduled send: no ratchet state");
-      await waitForPqTrafficAdmission(epc, signal);
-      const stepped = await ratchetEncryptDurably(
-        epc,
-        roomId,
-        encryptionModule,
-      );
-      const channelMessageLabel = await compileChannelMessageLabel(
+      channelMessageLabel = await compileChannelMessageLabel(
         channelLabel,
         merkleRootHex,
       );
-      const sealer = makeScheduledSlotSealer(
-        transferId,
-        hashHex,
-        chunkHashes,
-        merkleRoot,
-        merkleRootHex,
-        stepped.messageKey,
-        stepped.header,
-        stepped.pqContext,
-        encryptionModule,
-        merkleModule,
-      );
-      // The sealer closure above holds `stepped.messageKey` and the PQ context
-      // root for exactly as long as the scheduler can still ask this job for a
-      // cell. Wiping them on the delivery timeout — what this did before C3 —
-      // did not stop the still-admitted job: it kept emitting cells sealed
-      // under an all-zero key, which the receiver can never open and a re-send
-      // can never replace. The wipe therefore belongs to job settlement, the
-      // one moment after which nextCell is never called again.
-      let wiped = false;
-      const wipeMessageSecrets = (): void => {
-        if (wiped) return;
-        wiped = true;
-        stepped.messageKey.fill(0);
-        stepped.pqContext?.rootKey.fill(0);
-      };
-      try {
-        const enqueued = enqueueScheduledSend({
-          epc,
-          channelMessageLabel,
-          totalChunks,
+      let delivered = false;
+      let resumes = 0;
+      for (;;) {
+        // Read BEFORE the enqueue. A replacement runtime installed while this
+        // attempt is still being admitted must read as an advance; capturing
+        // afterwards would swallow exactly that race and lose the send.
+        const generation = coverEdgeGeneration(roomId, target.peerId);
+
+        await waitForGate(roomId, target.peerId, signal);
+        if (!currentEpc.ratchetState)
+          throw new Error("v4 scheduled send: no ratchet state");
+        await waitForPqTrafficAdmission(currentEpc, signal);
+        const stepped = await ratchetStep(currentEpc, roomId, encryptionModule);
+        const sealer = makeScheduledSlotSealer(
+          transferId,
+          hashHex,
+          chunkHashes,
           merkleRoot,
-          sealSlotCell: sealer,
-          getAckedChunks: () =>
-            getAckedChunks(roomId, target.peerId, transferId),
+          merkleRootHex,
+          stepped.messageKey,
+          stepped.header,
+          stepped.pqContext,
+          encryptionModule,
+          merkleModule,
+        );
+        // The sealer closure above holds `stepped.messageKey` and the PQ
+        // context root for exactly as long as the scheduler can still ask this
+        // job for a cell. Wiping them on the delivery timeout — what this did
+        // before C3 — did not stop the still-admitted job: it kept emitting
+        // cells sealed under an all-zero key, which the receiver can never open
+        // and a re-send can never replace. The wipe therefore belongs to job
+        // settlement, the one moment after which nextCell is never called
+        // again. That is also why a resume cannot carry this sealer across the
+        // edge: the teardown that causes the resume settles the job, so by then
+        // this key is already zero. Each attempt owns its own generation's
+        // secrets and its own wipe.
+        let wiped = false;
+        const wipeMessageSecrets = (): void => {
+          if (wiped) return;
+          wiped = true;
+          stepped.messageKey.fill(0);
+          stepped.pqContext?.rootKey.fill(0);
+        };
+        const runtime = currentEpc.coverRuntime;
+        try {
+          const enqueued = enqueueScheduledSend({
+            epc: currentEpc,
+            channelMessageLabel,
+            totalChunks,
+            merkleRoot,
+            sealSlotCell: sealer,
+            getAckedChunks: () =>
+              getAckedChunks(roomId, target.peerId, transferId),
+          });
+          if (!enqueued)
+            throw new Error("v4 scheduled send: edge has no cover runtime");
+          // Registered synchronously with the enqueue, so the job cannot settle
+          // in between and leave the message key alive for the page's lifetime.
+          runtime?.onJobSettled(channelMessageLabel, wipeMessageSecrets);
+        } catch (enqueueError) {
+          // Nothing ever holds the sealer, so its secrets die here.
+          wipeMessageSecrets();
+          throw enqueueError;
+        }
+        admitted = true;
+        // Re-registered on EVERY attempt, not just the first: the root →
+        // transferId map that turns the receiver's terminal receipt into
+        // markTransferComplete hangs off the RTCPeerConnection, and a
+        // replacement connection has none. Without this a resumed send that
+        // arrives perfectly is still reported as a failure.
+        trackScheduledSend(
+          currentEpc,
+          roomId,
+          target.peerId,
+          merkleRootHex,
+          transferId,
+        );
+        if (resumes === 0) {
+          startedTransfers += 1;
+          onTransferStarted?.();
+        }
+        // Delivery confirmation: over reliable ordered lanes the receiver
+        // signals completion with a terminal scheduled receipt. Bound the wait
+        // by this send's own PROGRESS, not by elapsed time — a job admitted
+        // only at a cycle open, behind every other job in the room, is not a
+        // failed job, and cancelling it now deletes a partial that is still
+        // filling.
+        delivered = await waitForDelivery({
+          isComplete: () =>
+            isTransferComplete(roomId, target.peerId, transferId),
+          progressToken: () =>
+            scheduledSendProgressToken(
+              currentEpc.coverRuntime,
+              channelMessageLabel,
+            ),
+          idleTimeoutMs: deliveryIdleTimeoutMs,
+          signal,
         });
-        if (!enqueued)
-          throw new Error("v4 scheduled send: edge has no cover runtime");
-        // Registered synchronously with the enqueue, so the job cannot settle
-        // in between and leave the message key alive for the page's lifetime.
-        epc.coverRuntime?.onJobSettled(channelMessageLabel, wipeMessageSecrets);
-      } catch (enqueueError) {
-        // Nothing ever holds the sealer, so its secrets die here.
-        wipeMessageSecrets();
-        throw enqueueError;
+        if (delivered || signal?.aborted) break;
+        if (resumes >= MAX_SCHEDULED_SEND_RESUMES) break;
+
+        // The budget expired with nothing confirmed. That is a resumable event
+        // only if this edge's cover runtime was REPLACED under the job — the
+        // one condition in which a fresh generation exists to re-derive onto.
+        // Nothing else qualifies: a suspended runtime still holds the job, and
+        // a torn-down edge with no replacement has nothing to re-offer on.
+        const nextGeneration = await waitForCoverEdgeGeneration(
+          roomId,
+          target.peerId,
+          generation,
+          resumeWaitMs,
+        );
+        if (nextGeneration === generation) break;
+        const nextEpc = peerConnections.find((candidate) =>
+          isResumableAuthenticatedTransport(candidate, roomId, target.peerId),
+        );
+        if (
+          !nextEpc ||
+          nextEpc.coverRuntime === runtime ||
+          !coverRuntimeAdmitsScheduledJobs(nextEpc.coverRuntime)
+        )
+          break;
+        // Settle the retired job so nothing can ask it for another cell, and so
+        // its message key is wiped even on the paths that replace an edge
+        // without destroying the previous runtime. `complete` adds no frame and
+        // emits no wire CANCEL — a CANCEL here would delete the very partial
+        // this resume exists to finish filling.
+        try {
+          runtime?.complete(channelMessageLabel);
+        } catch (settleError) {
+          // Already destroyed by the teardown that caused this resume.
+          debugLog(settleError);
+        }
+        // The receipt may have landed while we were finding the replacement.
+        if (isTransferComplete(roomId, target.peerId, transferId)) {
+          delivered = true;
+          break;
+        }
+        currentEpc = nextEpc;
+        resumes += 1;
       }
-      trackScheduledSend(epc, roomId, target.peerId, merkleRootHex, transferId);
-      startedTransfers += 1;
-      onTransferStarted?.();
-      // Delivery confirmation: over reliable ordered lanes the receiver signals
-      // completion with a terminal scheduled receipt. Bound the wait by this
-      // send's own PROGRESS, not by elapsed time — a job admitted only at a
-      // cycle open, behind every other job in the room, is not a failed job,
-      // and cancelling it now deletes a partial that is still filling.
-      const delivered = await waitForScheduledDelivery({
-        isComplete: () => isTransferComplete(roomId, target.peerId, transferId),
-        progressToken: () =>
-          scheduledSendProgressToken(epc.coverRuntime, channelMessageLabel),
-        idleTimeoutMs: deliveryIdleTimeoutMs,
-        signal,
-      });
       if (!delivered) {
         // Tell the receiver, before anything else destroys what could still
         // fill its partial. Without this the sender reported failure while the
         // receiver kept an unfillable N/M transfer forever — a re-send cannot
         // fill it, because decoy chunks are fresh randomness and the Merkle
         // root differs (C3).
-        cancelScheduledSend(epc, channelMessageLabel);
+        cancelScheduledSend(currentEpc, channelMessageLabel);
       }
       outcomes.push(
         delivered
@@ -1447,6 +1562,16 @@ export const sendScheduled = async (
             },
       );
     } catch (reason) {
+      // A throw after the job was admitted (a resume whose durable ratchet
+      // advance fails, say) leaves the receiver holding a partial that only our
+      // CANCEL can clear — the same C3 obligation the timeout path has.
+      if (admitted) {
+        try {
+          cancelScheduledSend(currentEpc, channelMessageLabel);
+        } catch (cancelError) {
+          console.error(cancelError);
+        }
+      }
       outcomes.push({
         peerId: target.peerId,
         status: "failed",
@@ -1552,6 +1677,9 @@ export const handleSendMessage = async (
             () => {
               wireWorkStarted = true;
             },
+            // The LIVE array, so a send whose edge is replaced mid-flight can
+            // find the transport that replaced it (C8).
+            peerConnections,
           )
         : await runPeerSendFanout(
             targets,

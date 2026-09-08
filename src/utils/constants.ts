@@ -292,3 +292,15 @@ export const ROOM_ROSTER_RECONCILE_MAX_ATTEMPTS = 8;
 // delay, so it never suppresses a scheduled attempt — it only bounds a room
 // observed as stranded by two different code paths in the same instant.
 export const ROOM_ROSTER_RECONCILE_DEBOUNCE_MS = 4_000;
+
+// A signaling socket that closes without a browser wake event is otherwise
+// terminal: settleClosedSocket dispatches disconnect() and nothing schedules
+// another attempt, while the site's auto-connect is one-shot per room URL. A
+// focused desktop tab therefore never reconnects, and every introduction the
+// server routes toward that peer is dropped (its membership row keeps
+// serverId=null). These are the retry delays for exactly that state. The last
+// rung repeats: a server that is down for an hour must still be found when it
+// returns, and a 30 s poll is cheap enough to run indefinitely.
+export const SIGNALING_RECONNECT_DELAYS_MS = [
+  1_000, 2_000, 4_000, 8_000, 15_000, 30_000,
+];

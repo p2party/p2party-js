@@ -32,6 +32,15 @@ describe("desync browser acceptance", () => {
     input.firstAuthenticatedSinceClear = 30;
     expect(verdict(input)).toEqual([expect.stringContaining("authenticated edge did not recover")]);
   });
+  test("a reauthenticated responder rebind need not replace both connection objects", () => {
+    const input = healthy();
+    input.required = input.required.filter((key) => key !== "I7");
+    input.finalSample.I7 = false;
+    input.firstSatisfiedSinceClear.I7 = "never";
+    expect(verdict(input)).toEqual([]);
+    input.finalSample.fpAgree = false;
+    expect(verdict(input)).toEqual([expect.stringContaining("DTLS fingerprint agreement is not established")]);
+  });
   test("an unknown final sample cannot reuse previously true state", () => {
     const input = healthy();
     input.finalSample = { unknown: true };

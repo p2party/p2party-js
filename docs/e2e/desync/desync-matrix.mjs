@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { desyncProbeBudget } from "./desync-probe-budget.mjs";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const runs = path.resolve(dir, "../runs");
@@ -106,6 +107,7 @@ const inputs = [
   "libcrypto.wasm",
   "desync-driver.mjs",
   "desync-verdict.mjs",
+  "desync-probe-budget.mjs",
   "relay.ts",
   "app.html",
   "plain.html",
@@ -183,6 +185,16 @@ async function runArm(id, slot) {
     args.find((a) => a.startsWith("--observe="))?.split("=")[1] ?? 120,
   );
   const freeze = Number(args[0].match(/^proc-freeze-(\d+)$/)?.[1] ?? 0);
+  const mode =
+    args.find((a) => a.startsWith("--mode="))?.split("=")[1] ?? "immediate";
+  const cadence = Number(
+    args.find((a) => a.startsWith("--cadence="))?.split("=")[1] ?? 2000,
+  );
+  const probe = desyncProbeBudget(mode, cadence);
+  const overheadMs = Math.max(
+    300000,
+    2 * probe.roundTripMs + probe.finalI4DrainMs + 120000,
+  );
   // Startup, healthy-link probes, final diagnostic budgets and cleanup are
   // separate from the advertised observation window. A hang still terminates.
   const deadline = setTimeout(
@@ -190,7 +202,7 @@ async function runArm(id, slot) {
       entry.timedOut = true;
       child.kill("SIGTERM");
     },
-    (observe + freeze + 300) * 1000,
+    (observe + freeze) * 1000 + overheadMs,
   );
   try {
     entry.exitCode = await new Promise((resolve, reject) => {

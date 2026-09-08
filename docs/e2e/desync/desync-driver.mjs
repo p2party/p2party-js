@@ -112,6 +112,7 @@ import dgram from "node:dgram";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
+import { desyncProbeBudget, lateI4Problem } from "./desync-probe-budget.mjs";
 import { STATE_INVARIANTS, transportFingerprintAgreement, endInvariantState, invariantProblems, diagnosticProblems } from "./desync-verdict.mjs";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
@@ -196,6 +197,7 @@ const CONNECT_CADENCE_MS = num("cadence", undefined);
 if (CONNECT_CADENCE_MS !== undefined && CONNECT_MODE !== "scheduled") die(`--cadence only configures the scheduled cover preset; got --mode=${CONNECT_MODE}`);
 if (CONNECT_CADENCE_MS !== undefined && CONNECT_CADENCE_MS <= 0) die(`--cadence must be > 0 ms, got "${flags.cadence}"`);
 const CONNECT_OPTS = { mode: CONNECT_MODE, ...(CONNECT_CADENCE_MS === undefined ? {} : { coverCadenceMs: CONNECT_CADENCE_MS }) };
+const { roundTripMs: ROUND_TRIP_BUDGET_MS, finalI4DrainMs: FINAL_I4_DRAIN_MS } = desyncProbeBudget(CONNECT_MODE, CONNECT_CADENCE_MS ?? 2000);
 // pin-typo: the two pages join the same PIN room with DIFFERENT PINs, so both
 // sides fail key confirmation by construction. Overridable so a run can also
 // pin-typo with matching PINs as a control.
@@ -414,16 +416,18 @@ const poll = async (P, fn, arg, ms, label) => {
 };
 
 // A message round trip from -> to, byte-exact, or a failure description.
-const roundTrip = async (from, to, tag, ms = 30000) => {
+const roundTrip = async (from, to, tag, ms = ROUND_TRIP_BUDGET_MS) => {
   const text = `${tag} ${from.name}->${to.name} ${Date.now()} ` + "z".repeat(300);
   const started = Date.now();
+  // Scheduled probes use one total budget across send/receive/materialization.
+  const remaining = () => CONNECT_MODE === "scheduled" ? Math.max(1, ms - (Date.now() - started)) : ms;
   try {
     // The app sends on "main" (p2party.com useRoom.tsx:87 selectedChannel default), a channel the SDK
     // itself populates per peer; a harness-only label would be wiped by deletePeer/deleteChannel.
     const sent = await withTimeout(from.eval(([r, t]) => window.__app.send(r, "main", t), [ROOM, text], ms + 1000), ms, `${tag} send`);
     if (!sent.ok) return { ok: false, ms: Date.now() - started, stage: "send", sent };
-    const got = await withTimeout(poll(to, ([r, root]) => { const m = window.__app.latestIncoming(r); return m && m.merkleRootHex === root ? m : null; }, [ROOM, sent.merkleRootHex], ms, `${tag} receive`), ms, `${tag} receive`);
-    const body = await to.eval((root) => window.__app.read(root), got.merkleRootHex, 10000);
+    const got = await withTimeout(poll(to, ([r, root]) => { const m = window.__app.latestIncoming(r); return m && m.merkleRootHex === root ? m : null; }, [ROOM, sent.merkleRootHex], remaining(), `${tag} receive`), remaining(), `${tag} receive`);
+    const body = await to.eval((root) => window.__app.read(root), got.merkleRootHex, Math.min(10000, remaining()));
     return { ok: body === text, ms: Date.now() - started, stage: body === text ? "done" : "mismatch", sent };
   } catch (e) { return { ok: false, ms: Date.now() - started, stage: "error", error: e.message }; }
 };
@@ -511,7 +515,10 @@ const INVARIANT_EXEMPTIONS = {
   // pin-mismatch, the roster not emptied).
   "pin-typo": ["I2", "I3", "I4", "I7"],
 };
-const REQUIRED_INVARIANTS = ALL_INVARIANTS.filter((k) => !(INVARIANT_EXEMPTIONS[scenario] ?? []).includes(k));
+// I7 describes object replacement symmetry, which a safe authenticated
+// responder reset-in-place intentionally violates. Keep it as a diagnostic;
+// current authentication, fingerprint agreement and byte-exact I4 remain required.
+const REQUIRED_INVARIANTS = ALL_INVARIANTS.filter((k) => k !== "I7" && !(INVARIANT_EXEMPTIONS[scenario] ?? []).includes(k));
 
 // A terminal PIN mismatch is not a transport fault. The initial transport is
 // the only attempt; neither a hot reconnect loop nor the room roster ladder may
@@ -519,7 +526,7 @@ const REQUIRED_INVARIANTS = ALL_INVARIANTS.filter((k) => !(INVARIANT_EXEMPTIONS[
 const PIN_TYPO_TRANSPORT_BUDGET = 1;
 
 // ---------------------------------------------------------------- run
-const results = { scenario, role, n, peerIdMode: PEERID_MODE, socketMode: SOCKET_MODE, procFreezeS: PROC_FREEZE_S, udpFlood: UDP_FLOOD, transferSpec: TRANSFER?.spec ?? null, connectMode: CONNECT_MODE, coverCadenceMs: CONNECT_CADENCE_MS ?? null, cpuSlow: CPU_SLOW, pins: scenario === "pin-typo" ? { P1: PIN_A, P2: PIN_B } : null, ports: { http: HTTP_PORT, relay: RELAY_PORT }, observeS: OBSERVE_S, requiredInvariants: REQUIRED_INVARIANTS, startedAt: new Date(T0).toISOString(), driverPid: process.pid, browsers: {}, baseline: {}, fault: {}, invariants: {}, samples: [], sends: [], probeSends: [], transfer: null, problems: [] };
+const results = { scenario, role, n, peerIdMode: PEERID_MODE, socketMode: SOCKET_MODE, procFreezeS: PROC_FREEZE_S, udpFlood: UDP_FLOOD, transferSpec: TRANSFER?.spec ?? null, connectMode: CONNECT_MODE, roundTripBudgetMs: ROUND_TRIP_BUDGET_MS, finalI4DrainMs: FINAL_I4_DRAIN_MS, coverCadenceMs: CONNECT_CADENCE_MS ?? null, cpuSlow: CPU_SLOW, pins: scenario === "pin-typo" ? { P1: PIN_A, P2: PIN_B } : null, ports: { http: HTTP_PORT, relay: RELAY_PORT }, observeS: OBSERVE_S, requiredInvariants: REQUIRED_INVARIANTS, startedAt: new Date(T0).toISOString(), driverPid: process.pid, browsers: {}, baseline: {}, fault: {}, invariants: {}, samples: [], sends: [], probeSends: [], transfer: null, problems: [] };
 let failed = false;
 let P1, P2, A, B, replacedTab;
 
@@ -571,9 +578,10 @@ try {
     await poll(P1, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P1 sees P2 authenticated");
     await poll(P2, (r) => window.__app.authenticatedCount(r) >= 1, ROOM, 60000, "P2 sees P1 authenticated");
     say("  both sides authenticated");
-    const rt12 = await roundTrip(P1, P2, "baseline");
+    const [rt12, rt21] = CONNECT_MODE === "scheduled"
+      ? await Promise.all([roundTrip(P1, P2, "baseline"), roundTrip(P2, P1, "baseline")])
+      : [await roundTrip(P1, P2, "baseline"), await roundTrip(P2, P1, "baseline")];
     say(`  round trip P1->P2: ${JSON.stringify(rt12)}`);
-    const rt21 = await roundTrip(P2, P1, "baseline");
     say(`  round trip P2->P1: ${JSON.stringify(rt21)}`);
     d1 = await P1.dump(); d2 = await P2.dump();
     results.baseline = { rt12, rt21, passed: rt12.ok && rt21.ok, P1: { peerId: d1.keyPair.peerId, publicKey: d1.keyPair.publicKey }, P2: { peerId: d2.keyPair.peerId, publicKey: d2.keyPair.publicKey }, invariants: evalInvariants(d1, d2, await registry(), null) };
@@ -1035,8 +1043,9 @@ try {
         const attemptStart = tick;
         say(`  [${sample.sinceClear}s] I2 holds -> I4 attempt ${sendAttempts}: round trips A->B and B->A`);
         sendInFlight = (async () => {
-          const ab = await roundTrip(A, B, `I4#${sendAttempts}`, 30000);
-          const ba = await roundTrip(B, A, `I4#${sendAttempts}`, 30000);
+          const [ab, ba] = CONNECT_MODE === "scheduled"
+            ? await Promise.all([roundTrip(A, B, `I4#${sendAttempts}`), roundTrip(B, A, `I4#${sendAttempts}`)])
+            : [await roundTrip(A, B, `I4#${sendAttempts}`, 30000), await roundTrip(B, A, `I4#${sendAttempts}`, 30000)];
           const ok = ab.ok && ba.ok;
           results.sends.push({ attempt: sendAttempts, startedAt: rel(attemptStart), sinceClear: sinceClear(attemptStart), ab, ba, ok });
           say(`  [${sinceClear()}s] I4 attempt ${sendAttempts}: A->B ${ab.ok ? "OK" : "FAIL"} (${ab.ms}ms ${ab.stage ?? ""} ${ab.error ?? ""} ${ab.sent && !ab.ok ? JSON.stringify(ab.sent).slice(0, 200) : ""}) | B->A ${ba.ok ? "OK" : "FAIL"} (${ba.ms}ms ${ba.stage ?? ""} ${ba.error ?? ""} ${ba.sent && !ba.ok ? JSON.stringify(ba.sent).slice(0, 200) : ""})`);
@@ -1082,7 +1091,7 @@ try {
     }
     await sleep(Math.max(0, 1000 - (Date.now() - tick)));
   }
-  if (sendInFlight) await withTimeout(sendInFlight, 65000, "final I4").catch(() => {});
+  if (sendInFlight) await withTimeout(sendInFlight, FINAL_I4_DRAIN_MS, "final I4").catch(() => {});
   if (probeInFlight) await withTimeout(probeInFlight, 65000, "final probe").catch(() => {});
   // Only a problem where I4 is actually required: pin-typo must never authenticate.
   if (REQUIRED_INVARIANTS.includes("I4") && !i4ok && first.I2 === null) results.problems.push("I4 never attempted: I2 (both authenticated) never held during observation");
@@ -1095,6 +1104,8 @@ try {
   };
   say(`--- RESULT first-satisfied (s after t=0): ${JSON.stringify(results.invariants.firstSatisfiedSinceClear)}; held at end: ${JSON.stringify(results.invariants.heldAtEnd)}`);
   results.problems.push(...invariantProblems({ ...results.invariants, scenario, role, observeS: OBSERVE_S }));
+  const lateI4 = lateI4Problem(results.invariants.firstSatisfiedSinceClear.I4, OBSERVE_S);
+  if (lateI4) results.problems.push(lateI4);
   if (replacedTab) {
     results.twoTabs.originalAtEnd = await replacedTab.dump();
     results.twoTabs.originalTimeline = await replacedTab.eval(() => window.__app.timeline());

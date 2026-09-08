@@ -239,15 +239,17 @@ Evaluated every second from `t=0` and recorded as
   succeeds **in both directions** (retried up to 3×, 15 s apart).
 - **I5** — no handshake or cover entries left for peerIds not in the roster.
 - **I6** — every roster peerId is still live in the relay registry.
-- **I7** — the pre-fault connection instances are kept or replaced
-  _symmetrically_. A holding its pre-fault instance while B has replaced its
-  own **is** the stale-transport reuse: this is the invariant that failed
-  before the fix.
+- **I7 (diagnostic)** — whether the pre-fault connection objects were kept or
+  replaced symmetrically. A responder can safely retain its connection object
+  while resetting authentication for a new remote certificate; this is the
+  intentional `reset-in-place` path. I7 can therefore be false in a healthy
+  recovered session. Final mutual authentication, pairwise fingerprints and
+  byte-exact I4 determine whether that rebind succeeded.
 - **fpAgree** — the two live transports' DTLS fingerprints match pairwise
   (each side's local fingerprint is the other's remote).
 
-A run counts as a pass when I1/I2/I3/I5/I6/I7 all hold in the actual final
-sample and I4 was ever satisfied, `fpAgree` and `bothAuthenticated` hold in the final sample, the
+A run counts as a pass when I1/I2/I3/I5/I6 all hold in the actual final
+sample and I4 completed within the observation window, `fpAgree` and `bothAuthenticated` hold in the final sample, the
 diagnostics show no pending RTK mutations, no held per-peer mutexes, a drained
 mutex registry, and an IndexedDB round trip under 3000 ms; the driver recorded no problems — and, for a freeze scenario, **I2 is first
 satisfied within 15 s of thaw** (a split that only heals on a 30 s+ timeout is
@@ -259,6 +261,16 @@ exactly one transport per side, and no peers requests after terminal failure; su
 expected outcome. With `--transfer`, additionally: the receiver's bytes are
 SHA-256-identical to the sender's payload, it completed within the transfer
 deadline, and the sender's `handle.done` resolved with a `delivered` outcome.
+
+Scheduled text probes use a schedule-derived total budget. For the harness's
+2-lane, 16-cell, 1-epoch preset and cadence `C` milliseconds, it is
+`max(30000, 2*C + ceil(3*C/64) + 20000 + 10000)`: the SDK's two-cycle receipt
+bound and margin, plus 10 s for browser IPC and materialization. At a 70 s
+cadence this is **173.282 s**. Baseline and I4 probe both directions concurrently
+in scheduled mode; immediate-mode probes keep their existing order and 30 s
+budget. The final await allows the scheduled budget plus 5 s for cleanup, but
+an I4 completion after `--observe` still fails. Freeze recovery stays bounded
+by 15 s, and `--transferdeadline` is unchanged.
 
 ### Rebuild
 

@@ -9,6 +9,12 @@
 //     assumption).
 //   * registry: verified sockets keyed by peerId; a successor socket for the
 //     same peerId replaces + closes the predecessor (socketAuth.registerVerifiedSocket).
+//   * per-socket generation: each socket is named by the uuid it is handed as
+//     its challengeId (socketAuth.consumeSocketChallenge keeps it as
+//     socketGeneration), and that name rides on the two introductions that
+//     start a WebRTC exchange: peers[].socketGeneration and
+//     connection.fromPeerSocketGeneration. Same identity, second tab => same
+//     peerId, different generation. Visible in GET /ctl/registry.
 //   * join flow: "room" -> roomId; "peers" from X -> every OTHER live member
 //     gets {peerConnection, peer:X}; "peerConnection"{from:M,to:X} -> X gets
 //     {peers:[M]}; "connection"/"description"/"candidate" routed by toPeerId.
@@ -38,6 +44,12 @@ interface WsData {
   peerId: string;
   publicKey: string;
   challengeNonce: string;
+  // socketAuth.SocketAuthState.socketGeneration: minted when this socket is
+  // marked verified, empty before that. The same identity reconnecting (a
+  // second tab, mode=stable) keeps its peerId but gets a new generation, which
+  // is the only thing on the wire that says the session behind that peerId
+  // changed.
+  socketGeneration: string;
   isVerified: boolean;
   isAlive: boolean;
   pingInterval?: ReturnType<typeof setInterval>;
@@ -154,6 +166,7 @@ const registry = () => ({
     peerId: ws.data.peerId,
     publicKey: ws.data.publicKey,
     sock: ws.data.sock,
+    socketGeneration: ws.data.socketGeneration,
     verified: ws.data.isVerified,
     readyState: ws.readyState,
     isAlive: ws.data.isAlive,
@@ -165,6 +178,7 @@ const registry = () => ({
     sock: ws.data.sock,
     peerId: ws.data.peerId,
     publicKey: ws.data.publicKey.slice(0, 8),
+    socketGeneration: ws.data.socketGeneration,
     verified: ws.data.isVerified,
     readyState: ws.readyState,
     current: clients.get(ws.data.peerId) === ws,
@@ -247,6 +261,7 @@ Bun.serve<WsData, undefined>({
         peerId: "",
         publicKey,
         challengeNonce: "",
+        socketGeneration: "",
         isVerified: false,
         isAlive: true,
         blackholeUntil: 0,
@@ -322,15 +337,19 @@ Bun.serve<WsData, undefined>({
             return;
           }
           // Signature not verified (test relay). registerVerifiedSocket:
+          // consumeSocketChallenge mints one uuid, hands it to the client as
+          // the challengeId and keeps it as this socket's generation.
+          const challengeId = crypto.randomUUID();
+          ws.data.socketGeneration = challengeId;
           ws.data.isVerified = true;
           const predecessor = clients.get(ws.data.peerId);
           clients.set(ws.data.peerId, ws);
           if (predecessor && predecessor !== ws) {
-            log(`REGISTER ${from} sock#${ws.data.sock} REPLACES sock#${predecessor.data.sock} (predecessor closed)`);
+            log(`REGISTER ${from} sock#${ws.data.sock} REPLACES sock#${predecessor.data.sock} (predecessor closed; gen ${short(predecessor.data.socketGeneration)} -> ${short(challengeId)})`);
             predecessor.data.isVerified = false;
             predecessor.close();
-          } else log(`REGISTER ${from} sock#${ws.data.sock} verified`);
-          sendTo(ws, { type: "challenge", challengeId: crypto.randomUUID(), protocolVersion: PROTO }, "srv");
+          } else log(`REGISTER ${from} sock#${ws.data.sock} verified (gen ${short(challengeId)})`);
+          sendTo(ws, { type: "challenge", challengeId, protocolVersion: PROTO }, "srv");
           return;
         }
         case "room": {
@@ -378,14 +397,16 @@ Bun.serve<WsData, undefined>({
             ws.close();
             return;
           }
-          route(toPeerId, { type: "peers", roomId, peers: [{ id: ws.data.peerId, publicKey: ws.data.publicKey }], protocolVersion: PROTO }, from);
+          // handlePeerAcceptsConnection: the introduction names the accepting
+          // socket, not just its peerId.
+          route(toPeerId, { type: "peers", roomId, peers: [{ id: ws.data.peerId, publicKey: ws.data.publicKey, socketGeneration: ws.data.socketGeneration }], protocolVersion: PROTO }, from);
           return;
         }
         case "connection": {
           const roomId = String(msg.roomId);
           const toPeerId = String(msg.toPeerId);
           if (!bothInRoom(roomId, ws.data.peerId, toPeerId)) { log(`connection ${from}->${short(toPeerId)} REJECT(not both in room)`); return; }
-          route(toPeerId, { type: "connection", roomId, fromPeerId: ws.data.peerId, fromPeerPublicKey: ws.data.publicKey, labels: msg.labels, protocolVersion: PROTO }, from);
+          route(toPeerId, { type: "connection", roomId, fromPeerId: ws.data.peerId, fromPeerPublicKey: ws.data.publicKey, fromPeerSocketGeneration: ws.data.socketGeneration, labels: msg.labels, protocolVersion: PROTO }, from);
           return;
         }
         case "description": {

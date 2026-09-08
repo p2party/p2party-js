@@ -132,15 +132,36 @@ const fixture = () => {
       { sinceClear: 299.2, inv: { ...invariant } },
     ],
     invariants: {
-      firstAuthenticatedSinceClear: null,
-      firstSatisfiedSinceClear: { I4: null },
-      heldAtEnd: { I4: false },
+      firstAuthenticatedSinceClear: "never",
+      firstSatisfiedSinceClear: {
+        I1: 1,
+        I2: "never",
+        I3: 1,
+        I4: "never",
+        I5: 1,
+        I6: 1,
+        I7: 1,
+      },
+      heldAtEnd: {
+        I1: true,
+        I2: false,
+        I3: true,
+        I4: false,
+        I5: true,
+        I6: true,
+        I7: true,
+      },
       finalSample: invariant,
     },
     diag: { A: cleanDiag(), B: cleanDiag() },
     problems: [
-      "I2 NEVER held in the 300s observation window",
       "I4 never attempted: I2 (both authenticated) never held during observation",
+      "I2 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+      "I4 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+      "both peers are not authenticated in the final sample (scenario two-tabs role responder)",
+      "DTLS fingerprint agreement is not established in the final sample: fpAgree=null (scenario two-tabs role responder)",
+      "replacement tab did not authenticate within 20s of connect: first=nevers (scenario two-tabs role responder)",
+      "replacement tab did not exchange messages within 20s of connect: first=nevers (scenario two-tabs role responder)",
     ],
   };
 };
@@ -166,6 +187,16 @@ describe("pre-generation-server residual evidence", () => {
         observedAfterConnectLowerBoundMs: 300_154,
       },
     });
+  });
+  test("requires the completed driver's never sentinel for both historical milestones", () => {
+    for (const value of [null, undefined, 0, 1, "unknown"]) {
+      const auth = fixture();
+      auth.invariants.firstAuthenticatedSinceClear = value;
+      rejected(auth, "Neither authentication nor successful delivery");
+      const delivered = fixture();
+      delivered.invariants.firstSatisfiedSinceClear.I4 = value;
+      rejected(delivered, "Neither authentication nor successful delivery");
+    }
   });
   test("a fourth attempt cannot hide behind a final counter of three", () => {
     const r = fixture();

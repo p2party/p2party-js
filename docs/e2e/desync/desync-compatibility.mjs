@@ -204,8 +204,10 @@ export function evaluateOldServerResidual(input, matrixEntry, inputsUnchanged) {
     ), "Live samples must reach the last second of the 300-second window without authentication or unknown state");
   const inv = object(r.invariants),
     final = object(inv.finalSample);
-  require(inv.firstAuthenticatedSinceClear === null &&
-    inv.firstSatisfiedSinceClear?.I4 === null &&
+  // The driver serializes unsatisfied historical milestones as "never".
+  // null is its internal accumulator, not a completed evidence artifact.
+  require(inv.firstAuthenticatedSinceClear === "never" &&
+    inv.firstSatisfiedSinceClear?.I4 === "never" &&
     inv.heldAtEnd?.I4 === false &&
     final.bothAuthenticated === false &&
     final.fpAgree ===

@@ -173,7 +173,9 @@ fails.
 4. **`dtls-verified` on both pages.** `verifyCertificates` returned `verified`
    against the fingerprints the pair transcript bound. A run where both pages
    reported `dtls-unsupported` fails; before Task 9 it printed a dash and
-   exited 0;
+   exited 0. Note where that gate lives: it is **this driver** that fails such
+   a run. The library emits `dtls-unsupported` and proceeds to `createSession`
+   — see the Honesty section below;
 5. `session-authenticated` on both pages — a real protocol-v4 `createSession`,
    with the session role taken from the handoff facts;
 6. one encrypted application message each way, decrypted **byte-exact**:
@@ -290,6 +292,43 @@ about what a store could infer, and nothing about independence.
   inert. `kill-a` now asserts that store A's faults are **only** `unreachable`
   and that store B's are empty, and every run prints the two populations
   separately.
+- **Two fault modes are covered here, and a third is not.** `kill-a` refuses
+  the connection and `withhold-a` lies at full speed — both fail fast. A store
+  that *accepts* the connection and then answers nothing is the cheapest attack
+  on a two-store design, because the client's union read joins both stores
+  under one `Promise.all`. That path is now bounded in the library (every
+  request carries a deadline of one delivery window,
+  `src/blindRendezvous/prototype/storeClient.ts`, `requestDeadlineMs`) and
+  covered by a unit test in
+  `tests/blindRendezvous/prototype/carrierRuntime.test.ts` — and by **no
+  scenario in this harness**. A `stall-a` scenario is follow-up work.
+- **The per-window trace is thirteen fixed requests plus a conditional pair.**
+  Per client, per store, per window: one allocation-token POST, one allocation
+  POST, five append POSTs, one checkpoint GET and five chunk GETs, all of them
+  sent whether the client is idle or mid-rendezvous. The witness POST and
+  witness GET are **not** fixed: a store gets both or neither, and it gets them
+  only when the *other* store's scan of that window came back `finalized` and
+  neither store is inert — so their absence in a healthy store's log is a
+  direct readout of the other store's behaviour towards this client.
+  Design §3a item 14 discloses that in full. The run's own printed
+  per-store counts are not equal either (`A: a=162 b=163` in the run below),
+  and the harness attributes that difference to nothing — it prints the counts,
+  it does not explain them.
+- **The DTLS tripwire is fail-closed here and fail-open in the library.** A
+  genuine fingerprint mismatch throws and ends the run wherever it happens, but
+  an engine that reports no certificate statistics yields `unsupported`, and
+  `src/blindRendezvous/prototype/index.ts` emits `dtls-unsupported` and goes on
+  to `createSession`. It is `run.mjs` that turns that into a failed run. "DTLS
+  verified on both sides" is therefore a statement about these runs, not an
+  unconditional one about the composition.
+- **A store costs about 2.76 MB of disk per window and nothing sweeps it.** An
+  idle store — no client, no real append — was measured at 2,763,134 bytes of
+  state per finalized window, because every window is padded to the profile's
+  full geometry regardless (seven consecutive all-dummy windows, 19,390,464
+  bytes of SQLite between them). At `--window-ms=4000` that is 21,600 windows a
+  day, about 59.7 GB per store per day. The harness's own stores are in a temp
+  directory that is deleted per scenario, so a run never shows it; anyone
+  starting a store by hand should know before they do.
 
 ### Build and run
 
@@ -580,13 +619,16 @@ Read it as three findings, all about this machine and nothing else:
    `cohortAllocationsPerWindow` is, by definition, how many allocations a store
    may hand out per window in one bucket; the fixed scan is large precisely
    because it is that whole bucket. Moving it from 8 to 2 measured a 2.1×
-   smaller scan and a 3.8× faster rendezvous, and by definition it also
-   quarters the number of allocations that share the bucket — 8 to 2 is 4×, and
-   the three ratios are three different quantities, not one. What that means
-   for what a store can tell apart is **not** measured by any run here and is
-   not claimed. The table is a cost measurement, not a recommendation: the
-   pinned profile is 8, and moving it is a change to how much unrelated traffic
-   a client's objects sit among.
+   smaller scan (1,380,336 → 656,992 B) and, **at the same 4,000 ms window, a
+   1.7× faster rendezvous** (39.9 → 23.8 s). The 3.8× (39.9 → 10.5 s) in the
+   last row is a **two-knob** change: it takes the shorter window the smaller
+   cohort makes possible as well, and is not a cohort effect. And by definition
+   the same move divides by four the number of allocations that share the
+   bucket — 8 to 2 is 4×. **Those ratios are different quantities, not one.**
+   What the change means for what a store can tell apart is **not** measured by
+   any run here and is not claimed. The table is a cost measurement, not a
+   recommendation: the pinned profile is 8, and moving it is a change to how
+   much unrelated traffic a client's objects sit among.
 
 Each row above is a real `--scenario=healthy` run with both stores honest;
 `bundle.cohort-<n>.js` is generated per cohort and is not committed. Note that

@@ -33,8 +33,19 @@ The spec (line 3392) permits prototypes behind internal flags and forbids
 inventing release bytes and calling them v0.4. Therefore:
 
 - Every new wire byte lives under a route prefix and media types that say
-  `prototype-v0`. Nothing here is interoperable with, or a proposal for, the
-  frozen §4.6 route family.
+  `prototype-v0`. **No route path and no media type here is interoperable
+  with, or a proposal for, the frozen §4.6 route family.** The *signed
+  artifacts* are a narrower statement and the sentence above must not be read
+  over them: §4.1 signs under the specification's own frozen transcript domain
+  strings, so a lease, an append result, a chunk and a checkpoint carry exactly
+  the transcripts the spec defines, and only `prototypeStoreCompatibilityHash`
+  is prototype-scoped. That is deliberate — a codec tested against strings this
+  prototype invented would be testing nothing — and the mitigation is at the
+  door rather than in the bytes: `PrototypeStoreClient.connect` refuses any
+  descriptor whose `compatibilityHash` is not the prototype hash for this
+  profile, before it reads a window, a chunk or a checkpoint. A store
+  advertising release compatibility bytes is not half-spoken to; it is not
+  spoken to at all.
 - The prototype earns **no** label: not S1, not R2-BEC, not SP1, not L2, not
   "anonymous", not "censorship-resistant", not "BFT". The only claim its
   README may make is the wire-log fact in §1 item 7, stated as "on this run".
@@ -142,7 +153,8 @@ which excludes source anonymity and traffic patterns by definition):
    scheduled slot.
 6. **The witness channel is itself a beacon** — cross-store checkpoint
    writes are replicated writes and are scheduled independently of user
-   traffic for that reason.
+   traffic for that reason. Their *timing* is independent of user traffic;
+   their *presence* is not, which is item 14.
 7. **Detection, not prevention.** A client detects forged or altered
    entries, replays, and set disagreement; omission evidence needs signed
    checkpoints; a targeted split view needs a second observer. Both stores
@@ -162,6 +174,34 @@ which excludes source anonymity and traffic patterns by definition):
     per-store opaque ids, never by room-derived tags.
 13. **No labels.** Two stores give crash and omission tolerance with
     detection, not Byzantine tolerance.
+14. **The witness channel is a cross-store status oracle.** Item 6 is about
+    when the witness writes happen; this is about whether they happen at all.
+    `#witness` (`carrierRuntime.ts`) posts a record about store A to store B
+    **only if** A's scan of that window came back `finalized` and neither store
+    is inert, and reads B's records back in the same condition. So store B
+    learns, directly off its own request log and with no cooperation from
+    anyone, whether store A served this client a finalized window. Count it per
+    store: a store receives **one witness POST and one witness GET, or
+    neither** — never one of the two — and it receives them exactly when the
+    *other* store's scan of that window came back `finalized` and neither store
+    is inert. Both stores healthy: each receives the pair. One store's scan
+    degrades: the pair to the **healthy** store disappears, and its absence is
+    the signal — the healthy store is the one that reads it. Either store goes
+    inert: the traffic stops in both directions. It is the only part of the
+    per-window trace that is not fixed — §5 counts it as the conditional
+    pair — and it points the wrong way: the shape of what this client sends to
+    one store varies with the other store's behaviour towards it. Nothing in
+    the test suite would notice a change here: `windowShape()` in
+    `tests/blindRendezvous/prototype/carrierRuntime.test.ts` counts five
+    hardcoded routes (token, allocation, append, checkpoint, chunk) and does
+    **not** include the witness route, so the fixed-shape invariance test would
+    pass unchanged if witness traffic varied arbitrarily. That is the test's
+    scope, and a reader comparing the test against the claim deserves to know
+    it. **What would fix it** is one sentence and is not attempted here: post a
+    witness record to every other store every window regardless, carrying cover
+    when there is nothing to witness, exactly as an append slot carries cover
+    when the outbox is empty. Making the traffic unconditional is a design
+    change with its own cost, so it is disclosed rather than done.
 
 What no sweep found published together — and therefore the only thing this
 work may present as novel — is the *composition*: a capability-authenticated
@@ -289,7 +329,11 @@ default), unchanged.
   (32-byte Ed25519 seed, generated on first start), `P2PARTY_STORE_DB`,
   `P2PARTY_STORE_OPEN_ALLOCATION=1` (required today; the only allocation
   mode implemented), `P2PARTY_STORE_FAULT=withhold` (test-only: accept
-  appends, finalize all-dummy chunks). Script: `bun run store:prototype`.
+  appends, finalize all-dummy chunks — `withhold` is its only value), and
+  `P2PARTY_STORE_LOG_BODIES=<path>` (test-only, a separate variable: the hex
+  of every accepted POST body, written before parsing). Script:
+  `bun run store:prototype`. A finalized window costs about 2.76 MB of state;
+  §9 carries what that means for anyone who runs one.
 
 The descriptor is signed at start with `storeDescriptorSignedMessage`;
 `compatibilityHash = H("p2party/blind-store-prototype-v0/compatibility" ||
@@ -304,7 +348,12 @@ Implements the spec's `PublicStoreOperationCarrierAdapter` shape over
 `fetch` for the prototype route family. On construction it fetches and
 validates the descriptor (`validateStoreDescriptor`, prototype
 `compatibilityHash`, profile support) and pins `storeId` and the signing key.
-Every signed response is verified under that key or rejected.
+Every signed response is verified under that key or rejected. Every request —
+the descriptor fetch included — carries an `AbortSignal.timeout` of one
+delivery window (`requestDeadlineMs`), the same value on every route: a
+request that has not answered by the time the fixed schedule reissues it can
+change nothing, and without a bound a store that accepts the connection and
+answers nothing would stall the union described in §4.5.
 
 `reconcile({kind:"public-fixed-scan", window w})` issues the checkpoint GET
 and every chunk GET for `w` without awaiting, then: verifies each chunk
@@ -328,7 +377,10 @@ offsets (`ingressWindowStartMs` + offset, wall clock via an injected clock):
 - at each `appendSchedule[c][i].offsetMs`: exactly one append per room slot,
   real if the outbox holds a compatible operation for that role, else a
   dummy with the exact header and random body;
-- at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`.
+- at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`, and — after
+  the union — a witness POST and a witness GET to each *other* store, which is
+  the one part of the shape that is **conditional** rather than fixed (§3a item
+  14, counted in §5).
 
 Missed events are missed (no same-window retry). Outbox: operations queue
 with their `ServiceWorkKindV1`; role mapping and ordering follow
@@ -423,12 +475,28 @@ presence, an in-memory `pairLedger`, and one edge record.
     RendezvousChannelId, localFingerprint, remoteFingerprint }, mode:
     "nopin", pqMode })`, then `verifyDtlsFingerprints` semantics via
     `getStats()` where available. Bootstrap secrets are wiped after the
-    session exists.
+    session exists. **The tripwire is fail-closed only in the harness.** A
+    genuine mismatch throws and ends the run, but an engine that reports no
+    certificate statistics yields `unsupported`: `index.ts` emits
+    `dtls-unsupported` and proceeds to `createSession` anyway, and it is
+    `run.mjs` — not the library — that treats a run without `dtls-verified` on
+    both pages as failed. So "DTLS verified on both sides" is a statement about
+    the recorded runs, never an unconditional property of the composition.
 11. **Message**: `session.encrypt(bytes)` → frames over the channel →
     `session.decrypt` on the peer; the E2E asserts byte equality both ways.
 
 Duplicate delivery from two stores is idempotent by construction: identical
 op ids merge in `mergeOperationCandidateSets` and replay in the ledger.
+
+**The pair ledger guards half the exchange, and only half.** Fork detection
+runs over the identity flights: step 4 previews and step 5 records the HELLO
+slot in `pairLedger`, so a second HELLO id landing in that slot fails the edge.
+`TRANSPORT_OFFER` and `TRANSPORT_ANSWER` are not recorded and not previewed
+(`pairDriver.ts`, `handleIncomingOffer` and `handleIncomingAnswer`) — they are
+guarded instead by being sealed under `EstablishedPairRoot`, which only a peer
+that already completed HELLO/ACCEPT holds. That is not a hole, but it is not
+the same property either, and the difference belongs on the record: the
+prototype detects a fork at the identity slot, not at the transport slots.
 
 ### 4.7 Browser entry and E2E harness (`docs/e2e/blind-two-store/`)
 
@@ -449,8 +517,10 @@ op ids merge in `mergeOperationCandidateSets` and replay in the ledger.
   and `unreachable-b-for-one` (browser B is given only store A's origin —
   proves union plus backfill through browser A). Each asserts
   `message-verified` within a deadline and prints per-store request counts.
-- Wire-log check: the stores run with `P2PARTY_STORE_FAULT=logbodies` only
-  in the harness, writing every request body to a file; the harness asserts
+- Wire-log check: the stores run with `P2PARTY_STORE_LOG_BODIES=<path>` only
+  in the harness — its own variable, separate from `P2PARTY_STORE_FAULT`,
+  whose only value is `withhold` — writing every request body to a file
+  **before parsing**; the harness asserts
   that neither file contains the capability, `RoomContextId`, either stable
   Ed25519 public key, or any `a=fingerprint` / `v=0` SDP substring. This is
   the only privacy statement the run supports.
@@ -470,7 +540,11 @@ op ids merge in `mergeOperationCandidateSets` and replay in the ledger.
 - `carrierRuntime.test.ts` — fixed event count per window with and without
   outbox work (object counts identical), per-store envelope separation,
   union of two divergent stores, backfill once per store, one store failing
-  every request while the other carries the room.
+  every request while the other carries the room, and one store *stalling*
+  every request (accepted, never answered) while the other carries the room.
+  Note the scope of the invariance check: `windowShape()` counts five
+  hardcoded routes — token, allocation, append, checkpoint, chunk — and not
+  the witness route, so it cannot see the conditional traffic of §3a item 14.
 - `pairDriver.test.ts` — two in-memory drivers through a fake carrier:
   the full HELLO/ACCEPT/OFFER/ANSWER sequence with a stubbed transport
   candidate, fork detection when a second HELLO id lands in the slot,
@@ -490,14 +564,64 @@ A: OFFER(SDP_A) ──► S1,S2 ──► B: ANSWER(SDP_B) ──► S1,S2 ─�
    RTCPeerConnection ⇄ DataChannel ⇄ createSession (v4) ⇄ encrypted message
 ```
 
-Stores see, per client per window: one allocation, five appends of
-8,192 or 73,728 ciphertext bytes plus headers, five chunk reads and one
-checkpoint read — regardless of whether anything real was sent.
+### What a store sees, per client, per window
+
+Counted from `carrierRuntime.ts` — `#eventsForWindow` for the scheduled events
+and `storeClient.scanWindow` for what one read expands into — at the pinned
+profile, and stated as fixed and conditional rather than as one number.
+
+**Thirteen fixed requests**, issued whether or not anything real was sent:
+
+| Count | Request | Route | Offset in the window |
+|---:|---|---|---|
+| 1 | allocation-token issue | POST `…/allocation-token` | `tokenIssueOffsetMs` = 100 |
+| 1 | allocation | POST `…/allocation` | `allocationRequestOffsetMs` = 700 |
+| 5 | append | POST `…/append` | class 0 at 1300, 1700, 2100; class 1 at 1500, 1900 |
+| 1 | checkpoint read | GET `…/checkpoint/…` | `publicReadOffsetMs` = 600 |
+| 5 | chunk read | GET `…/chunk/…` | `publicReadOffsetMs` = 600 |
+
+Five appends is Σ over the size classes of `appendSchedule.length` at one room
+slot (3 + 2); five chunk reads is Σ over the size classes of
+`publicChunksPerWindow` (3 + 2). Each append carries 8,192 or 73,728
+ciphertext bytes plus the envelope header. The token-issue POST is part of the
+fixed shape even though open mode issues no authority — a client that skipped
+it would be distinguishable from one that did not (`#issueToken`).
+
+**Two conditional requests, or none** — one witness POST and one witness GET
+(`…/witness`), never one without the other. A store receives that pair in a
+window exactly when the *other* store's scan of that window came back
+`finalized` and neither store is inert:
+
+| Situation | This store receives |
+|---|---:|
+| both stores healthy, the other's scan `finalized` | 2 |
+| the other store's scan not `finalized` | 0 |
+| either store inert | 0 |
+
+Which of the two it is, is a fact about the *other* store, not about this one.
+That conditioning is a cross-store status oracle and is disclosed as §3a item
+14; it is the only part of this trace that is not fixed.
+
+The descriptor GET is once per store per session, not per window. Every one of
+these requests is bounded by a deadline of one delivery window
+(`storeClient.ts`, `requestDeadlineMs`), so a store that accepts a connection
+and never answers cannot hold the union — or this trace — open.
 
 ## 6. Error handling
 
 - Store unreachable or signature invalid → event missed for that store;
   runtime keeps the other; `storeTopology` degrades honestly.
+- Store accepts the connection and then answers nothing → the same outcome as
+  above, because every request carries a deadline of one delivery window
+  (`storeClient.ts`, `requestDeadlineMs`): an `unreachable` fault, no `inert`,
+  no throw out of the scan, and the union completes on the other store's
+  objects. Without it that store would hold `#read`'s `Promise.all` open and
+  take the honest store's objects down with its own. The path is defended in
+  code and exercised by a unit test (`carrierRuntime.test.ts`, "keeps
+  delivering through the other store when one stalls and answers nothing");
+  **no end-to-end scenario covers it yet** — `kill-a` refuses the connection
+  and `withhold` lies at full speed, so both of the harness's fault modes fail
+  fast. A stall scenario for `run.mjs` is follow-up work, not done here.
 - Envelope fails to open → cover, silently.
 - Operation fails validation → dropped with a counter, never reduced.
 - HELLO/ACCEPT authenticated but malformed → edge failed (spec: rejected
@@ -561,3 +685,25 @@ viable implementation), the reservation/trial/admission kernel and its
 IndexedDB ports, persistent scheduler cursors and restart-safe outboxes,
 `STORE_HINT` discovery, SP1, assurance derivation, retention garbage
 collection, the frontend (B4), and every release-registry freeze.
+
+Retention is the one of those that bites an operator immediately, so it gets a
+number. Every finalized window is padded to the profile's full geometry whether
+or not anything real was appended, and nothing ever deletes one. A store left
+running with no traffic at all was measured at **2,763,134 bytes of state per
+finalized window** (seven consecutive all-dummy windows, every row identical;
+19,390,464 bytes of SQLite file for the seven). At the pinned 4,000 ms window
+that is 21,600 windows a day, so **about 59.7 GB per store per day** — and the
+profile's own `carrierRetentionWindows` of 160,000, roughly 7.4 days, would be
+about 442 GB even once a sweep exists to enforce it. Reproduce with:
+
+```sh
+P2PARTY_STORE_PROTOTYPE=1 P2PARTY_STORE_OPEN_ALLOCATION=1 \
+  P2PARTY_STORE_PORT=5931 P2PARTY_STORE_DB=/tmp/storage.sqlite \
+  P2PARTY_STORE_KEY_FILE=/tmp/storage.key bun run store:prototype
+# after ~25 s, stop it and read the per-window state size:
+# select window, length(state) from window;
+```
+
+A stall scenario for the E2E harness (a store that accepts connections and
+answers nothing) belongs on this list too: the path is defended in code and
+covered by a unit test, and by no end-to-end run.

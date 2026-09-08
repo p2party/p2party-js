@@ -57,7 +57,11 @@ There is therefore no abuse control of any kind, and no Sybil or fairness claim
 follows from anything in the prototype.
 
 **Two stores buy availability, not privacy.** Either store may fail or withhold
-and the rendezvous still completes; that is what the scenarios show. Adding the
+and the rendezvous still completes; that is what the scenarios show — and they
+show exactly two fault modes, both of which fail fast. A third, a store that
+accepts the connection and then answers nothing, is defended in code (every
+request carries a deadline; §3) and covered by a unit test, and by **no
+end-to-end scenario**. Adding one is follow-up work. Adding the
 second store moves no privacy statement in the other direction either — but which
 observer is meant matters, and the rest of this document is careful about it.
 *For the two stores themselves*, collusion gains nothing: both already see the
@@ -128,10 +132,16 @@ One `--scenario=healthy` run, end to end:
    observation about the run rather than a claim about the AEAD.
 5. **A real WebRTC edge opens** from the exchanged SDP — complete ICE gathering,
    both connections reaching `connected`, over loopback host candidates.
-6. **DTLS is verified on both sides.** `verifyCertificates` compares the SHA-256
-   fingerprint parsed out of each side's exact SDP bytes against the live
-   certificate that `getStats()` reports, and both pages report `dtls-verified`.
-   A run where both pages report `dtls-unsupported` fails.
+6. **DTLS is verified on both sides — on these runs.** `verifyCertificates`
+   compares the SHA-256 fingerprint parsed out of each side's exact SDP bytes
+   against the live certificate that `getStats()` reports, and both pages
+   report `dtls-verified`. Read that as an observation and not as a property of
+   the composition, because **the tripwire is fail-closed in the harness and
+   fail-open in the library**: a genuine mismatch throws and ends the run, but
+   an engine that reports no certificate statistics yields `unsupported`, and
+   `index.ts:689-693` then emits `dtls-unsupported` and proceeds to
+   `createSession` regardless. It is `run.mjs`, not the SDK, that treats a run
+   without `dtls-verified` on both pages as failed.
 7. **The existing protocol-v4 session runs over the data channel.** A real
    `createSession` on both sides — hybrid 3DH + ML-KEM, Double Ratchet — with
    the session role taken from the handoff facts rather than from who dialled.
@@ -149,7 +159,7 @@ is the same one the released SDK uses.
 
 ## 3. How it is assembled
 
-Fifteen modules under `src/blindRendezvous/prototype/` (10,412 lines), with nine
+Fifteen modules under `src/blindRendezvous/prototype/` (10,506 lines), with nine
 test files behind them, built on top of the thirty-two release-candidate modules
 that already existed in `src/blindRendezvous/`.
 
@@ -176,16 +186,50 @@ edit could quietly remove.
 scheduled append happens whether or not the outbox has anything to send. Cover
 is sealed through the same HKDF and AEAD path as a real object, over a fresh
 throwaway root that is wiped afterwards, so it is byte-shaped like a real object
-and latency-matched to one, and it opens for nobody. A store sees, per client
-per window, exactly one allocation, five appends and the same set of reads,
-whether the client is idle or mid-rendezvous.
+and latency-matched to one, and it opens for nobody.
+
+**What a store actually sees, per client, per window: thirteen fixed requests,
+plus a conditional pair that is either both or neither.** Counted from
+`carrierRuntime.ts` —
+`#eventsForWindow` for the schedule, `storeClient.scanWindow` for what one read
+expands into. The thirteen go out whether the client is idle or mid-rendezvous:
+
+| Count | Request | Offset in the window |
+| ---: | --- | --- |
+| 1 | allocation-token issue (POST) | `tokenIssueOffsetMs` = 100 |
+| 1 | allocation (POST) | `allocationRequestOffsetMs` = 700 |
+| 5 | append (POST) | class 0 at 1300/1700/2100, class 1 at 1500/1900 |
+| 1 | checkpoint read (GET) | `publicReadOffsetMs` = 600 |
+| 5 | chunk read (GET) | `publicReadOffsetMs` = 600 |
+
+Five appends is the sum over the two size classes of `appendSchedule.length` at
+one room slot (3 + 2); five chunk reads is the sum of `publicChunksPerWindow`
+(3 + 2). The token-issue POST is part of the shape even though open mode issues
+no authority — skipping it would make this client distinguishable from one that
+did not. The descriptor GET is once per store per session, not per window.
+
+The **conditional** pair is a witness POST and a witness GET, and it is the only
+part of this trace that is not fixed. A store receives both or neither — never
+one — and it receives them exactly when the *other* store's scan of that window
+came back `finalized` and neither store is inert. Both stores healthy: each gets
+the pair. One store's scan degrades: the pair to the **healthy** store
+disappears, so its absence is a direct readout of the other store's behaviour
+towards this client, sitting in the healthy store's own request log. Either
+store inert: the traffic stops both ways. It is disclosed as design §3a item 14,
+and the runtime's own invariance test does not cover it — `windowShape()` counts
+five hardcoded routes and not the witness route, so that test would pass
+unchanged if witness traffic varied arbitrarily.
 
 **The schedule is fixed, and a missed event stays missed.** One `setTimeout` per
 store holds only the next due event, and the next one is armed inside the timer
 callback *before* the handler runs, so a slow store cannot shift its own
 following request off the grid. There is no same-window retry, because retrying
 at the surviving store after an omission would be an active cross-store tagging
-channel.
+channel. Every request also carries a deadline of one delivery window
+(`storeClient.ts`, `requestDeadlineMs`) — the same value on every route, so the
+deadline is not itself something a store can read a route off — because the
+union read joins both stores under one `Promise.all` and an unbounded request
+to one of them would stall the other's objects too.
 
 **A store's topology verdict is local and unlabelled.** The runtime reports
 `multi-store-union`, `single-carrier-dependent` or `no-usable-carrier`, computed
@@ -429,8 +473,8 @@ what two real clients on two machines would see, not a protocol constant.
 
 ## 7. The residual leaks
 
-The design enumerates thirteen residual leaks. All thirteen are disclosed there;
-this is the summary an outside reader needs, with the worst one in full.
+The design enumerates fourteen residual leaks. All fourteen are disclosed
+there; this is the summary an outside reader needs, with the worst one in full.
 
 ### 1. Replicated-write timing linkability — unmitigated, and measured
 
@@ -486,7 +530,7 @@ carrier of that operation. That is a latency and fault-tolerance decision for th
 maintainer, so it is recorded as follow-up work with its numbers, not presented
 as a solved problem.
 
-### 2–13, in brief
+### 2–14, in brief
 
 - **Source addresses.** Both stores see the client's IP on every write and poll;
   a single store can recover a write-then-read pairing in a few rounds. The
@@ -499,7 +543,7 @@ as a solved problem.
   scheduled slot.
 - **The witness channel is itself a beacon.** Cross-store checkpoint writes are
   replicated writes, and are scheduled independently of user traffic for that
-  reason.
+  reason. That is their *timing*; their *presence* is the next item.
 - **Detection, not prevention** — see §1.
 - **Independence is a business fact**, not a cryptographic one. Two processes on
   one laptop are one fault domain.
@@ -513,6 +557,18 @@ as a solved problem.
 - **Local forensics.** Persisted seen-sets and checkpoints are keyed by per-store
   opaque ids, never by room-derived tags.
 - **No labels.** Two stores give crash and omission tolerance with detection.
+- **The witness channel is a cross-store status oracle** — the one part of the
+  per-window trace that is conditional rather than fixed. A witness POST and a
+  witness GET reach a store only when the *other* store's scan of that window
+  came back `finalized` and neither is inert, so each store reads off its own
+  request log whether the other served this client a finalized window: the pair
+  while both are healthy, nothing for the healthy store once the other one
+  degrades, nothing either way once either goes inert.
+  §3 counts it; design §3a item 14 discloses it in full, including that
+  the runtime's fixed-shape test does not cover the witness route. Making the
+  traffic unconditional — a witness post every window regardless, carrying
+  cover when there is nothing to witness — is what would fix it, and is a
+  design change rather than a correction, so it is not attempted here.
 
 What no literature sweep found published together — and therefore the only thing
 this work may present as novel — is the *composition*: a capability-authenticated,
@@ -533,7 +589,7 @@ architectures.
 bun test tests/blindRendezvous
 ```
 
-580 pass, 0 fail, 3,390 assertions across 40 files, as of this commit. Nine of
+581 pass, 0 fail, 3,396 assertions across 40 files, as of this commit. Nine of
 those files are the prototype's own: the profile geometry, the store wire codecs,
 the store core, its SQLite persistence, its HTTP handler, its server entrypoint,
 the store client, the carrier runtime and the pair driver.
@@ -551,6 +607,15 @@ P2PARTY_STORE_PROTOTYPE=1 P2PARTY_STORE_OPEN_ALLOCATION=1 \
 Both gate flags are required and the process refuses to start without both,
 naming them. The refusal is deliberate: nobody should be able to point at a
 running instance as evidence of the specified store.
+
+**Before running one anywhere but a scratch disk, read the storage number.**
+Every window is padded to the profile's full geometry whether or not anything
+real was appended, and nothing ever deletes one. A store left running with no
+traffic at all was measured at **2,763,134 bytes of state per finalized
+window** — seven consecutive all-dummy windows, every row byte-identical in
+size, 19,390,464 bytes of SQLite file for the seven. At the pinned 4,000 ms
+window that is 21,600 windows a day, so **about 59.7 GB per store per day, with
+no retention sweep to stop it**. §9 says what a next stage owes here.
 
 | Variable | Meaning |
 | --- | --- |
@@ -652,7 +717,24 @@ could be mistaken for implemented.
   `SP1` as protection against a global observer", so even where it exists it is
   not the blanket the name suggests. Both stores see every client IP on every
   request today, and nothing here changes that.
-- **Retention and garbage collection.** Windows accumulate; nothing expires.
+- **Retention and garbage collection.** Windows accumulate; nothing expires,
+  and the bill is measurable rather than theoretical. An idle store — no
+  client, no real append — was measured at **2,763,134 bytes of state per
+  finalized window** (seven consecutive all-dummy windows, 19,390,464 bytes of
+  SQLite file between them), because every window is padded to the profile's
+  full geometry regardless. At the pinned 4,000 ms geometry that is 21,600
+  windows a day and **about 59.7 GB per store per day**. The profile's own
+  `carrierRetentionWindows` is 160,000 — roughly 7.4 days — which is about
+  442 GB even once something exists to enforce it. Reproduce it by starting one
+  store with the §8 command, stopping it after ~25 s, and reading
+  `select window, length(state) from window;` out of its SQLite file. Anyone
+  who runs a store for real needs the sweep first, and a size class or a window
+  length chosen with this number in front of them.
+- **An end-to-end scenario for a stalled store.** The library now bounds every
+  request (§3), and a unit test covers a store that accepts connections and
+  answers nothing. `run.mjs` does not: its two fault modes, `kill-a` and
+  `withhold-a`, both fail fast. A `stall-a` scenario is cheap and is not done
+  here.
 - **The frontend.** `p2party.com` vendors the SDK as a hash-verified tarball, and
   the blind modules are deliberately absent from the barrel. Reaching this from a
   real application needs a reviewed public API, a new vendored artifact and hash,

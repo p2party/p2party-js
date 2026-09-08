@@ -1,5 +1,5 @@
 import { CoverRuntime, type CoverLaneChannel } from "./coverRuntime";
-import { buildScheduledSendJob } from "./coverTransfer";
+import { buildScheduledSendJob, queueScheduledCancel } from "./coverTransfer";
 import { markTransferComplete } from "./reconcile";
 import { registerCoverChannelUntilClose } from "./coverChannelRegistry";
 
@@ -150,6 +150,8 @@ export interface ScheduledSendParams {
   readonly epc: IRTCPeerConnection;
   readonly channelMessageLabel: string;
   readonly totalChunks: number;
+  /** This transfer's 64-byte Merkle root; the job's wire CANCEL is scoped to it. */
+  readonly merkleRoot: Uint8Array;
   readonly sealSlotCell: (chunkIndex: number) => Promise<Uint8Array | null>;
   readonly getAckedChunks?: () => ReadonlySet<number>;
 }
@@ -165,9 +167,41 @@ export const enqueueScheduledSend = (params: ScheduledSendParams): boolean => {
     runtime,
     channelMessageLabel: params.channelMessageLabel,
     totalChunks: params.totalChunks,
+    merkleRoot: params.merkleRoot,
     sealSlotCell: params.sealSlotCell,
     getAckedChunks: params.getAckedChunks,
   });
   runtime.enqueue(job);
   return true;
+};
+
+/**
+ * Ask the runtime to emit this transfer's wire CANCEL in its next slot.
+ *
+ * A job the scheduler still holds carries its own `cancelCell`. A job that has
+ * already settled — the usual state once a delivery bound expires, because the
+ * cells were all emitted and only the receipt is missing — answers "not-found",
+ * and before C3 that is where the receiver was abandoned: it kept an unfillable
+ * N/M partial forever while the sender deleted the only thing that could have
+ * filled it. That case falls back to a standalone CANCEL control cell, which
+ * substitutes into an already-scheduled slot exactly as a receipt does, so it
+ * changes nothing observable about the room's fixed schedule.
+ */
+export const cancelScheduledSend = (
+  epc: IRTCPeerConnection,
+  channelMessageLabel: string,
+): "not-found" | "cancelled-before-admission" | "cancel-pending" => {
+  const runtime = epc.coverRuntime;
+  if (!runtime) return "not-found";
+  let routed: ReturnType<CoverRuntime["cancel"]>;
+  try {
+    routed = runtime.cancel(channelMessageLabel);
+  } catch (error) {
+    console.error("coverEdge: could not cancel a scheduled send", error);
+    routed = "not-found";
+  }
+  if (routed !== "not-found") return routed;
+  return queueScheduledCancel(epc, channelMessageLabel)
+    ? "cancel-pending"
+    : "not-found";
 };

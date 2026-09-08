@@ -220,6 +220,15 @@ export const MAX_RESUME_ATTEMPTS = 3;
 // channel open + first step to start.
 export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 
+// Head-room over the arithmetic floor of a scheduled confirmation: the sealer
+// runs on the main thread, a boundary can be degraded, and the receipt job
+// itself competes for a lane. Only head-room — the floor is derived from the
+// schedule by coverTransfer.scheduledDeliveryTimeoutMs, never guessed. The
+// fixed 120 s bound this replaces was unrelated to the room's cadence and
+// rejected 100% of sends in the shipped "5 min cycles" preset, whose minimum
+// possible confirmation is 301.2 s (C3).
+export const SCHEDULED_DELIVERY_MARGIN_MS = 20_000;
+
 // Signaling liveness. The server pings every 10 s (p2party-server
 // src/utils/handleInterval.ts PING_INTERVAL). When a mobile browser freezes
 // the page with its radio off, the WebSocket can come back half-open: the

@@ -135,6 +135,7 @@ describe("scheduled cover edge (installCoverEdge)", () => {
         epc,
         channelMessageLabel: `${"00".repeat(32)}~${"11".repeat(64)}`,
         totalChunks: 3, // > F×D=2
+        merkleRoot: new Uint8Array(64).fill(0x11),
         sealSlotCell: async () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
       }),
     ).toThrow(/exceeds the room/);
@@ -144,6 +145,7 @@ describe("scheduled cover edge (installCoverEdge)", () => {
         epc,
         channelMessageLabel: `${"00".repeat(32)}~${"22".repeat(64)}`,
         totalChunks: 2,
+        merkleRoot: new Uint8Array(64).fill(0x22),
         sealSlotCell: async () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
       }),
     ).toBe(true);

@@ -7,7 +7,9 @@ import {
   releaseScheduledReceipts,
   syntheticScheduledLabel,
 } from "../../src/handlers/coverTransfer";
+import { cancelScheduledSend } from "../../src/handlers/coverEdge";
 import { compileChannelMessageLabel } from "../../src/utils/channelLabel";
+import { uint8ArrayToHex } from "../../src/utils/uint8array";
 import { WIRE_CHUNK_FRAME_LEN } from "../../src/utils/constants";
 
 import type { CoverRuntime } from "../../src/handlers/coverRuntime";
@@ -17,6 +19,11 @@ import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
 
 const uniformCell = (fill: number): Uint8Array =>
   new Uint8Array(WIRE_CHUNK_FRAME_LEN).fill(fill);
+
+// A compiled channel-message label: 32-byte name element, separator, 64-byte
+// transfer root. The label IS the scheduled-send job id.
+const LABEL_ROOT_HEX = "7c".repeat(64);
+const LABEL = `${"00".repeat(32)}~${LABEL_ROOT_HEX}`;
 
 const fakeSlot = (): CoverJobSlot =>
   ({
@@ -41,6 +48,8 @@ interface FakeRuntime {
   readonly cancels: string[];
   settleCallbacks: Map<string, () => void>;
   cancelResult: "not-found" | "cancelled-before-admission" | "cancel-pending";
+  /** Override what sealCoverContent returns (non-uniform-length cases). */
+  sealedCell?: Uint8Array;
 }
 
 const fakeRuntime = (capacity = 8): FakeRuntime => {
@@ -58,8 +67,25 @@ const fakeRuntime = (capacity = 8): FakeRuntime => {
       cellsPerLanePerCycle: () => capacity,
       randomLaneLabel: () => `${"00".repeat(32)}~${"11".repeat(64)}`,
       sealCoverContent: (content: CoverCellContent) => {
-        sealed.push(content);
-        return uniformCell(0xcc);
+        // The real runtime serializes the content into the frame before it
+        // returns, so the caller is free to wipe its buffers straight after.
+        // Snapshot here for the same reason, or an assertion later reads the
+        // zeros the producer left behind rather than what was sealed.
+        sealed.push(
+          content.subtype === "dummy"
+            ? content
+            : content.subtype === "cancel"
+              ? {
+                  subtype: "cancel",
+                  merkleRoot: Uint8Array.from(content.merkleRoot),
+                }
+              : {
+                  subtype: "receipt",
+                  merkleRoot: Uint8Array.from(content.merkleRoot),
+                  token: Uint8Array.from(content.token),
+                },
+        );
+        return state.sealedCell ?? uniformCell(0xcc);
       },
       enqueue: (job: CoverJob) => {
         enqueued.push(job);
@@ -86,6 +112,7 @@ describe("scheduled-transfer send job", () => {
     const job = buildScheduledSendJob({
       runtime: fake.runtime,
       channelMessageLabel: "msg-label",
+      merkleRoot: new Uint8Array(64),
       totalChunks: 3,
       sealSlotCell: (index) => {
         sealed.push(index);
@@ -114,6 +141,7 @@ describe("scheduled-transfer send job", () => {
       buildScheduledSendJob({
         runtime: fake.runtime,
         channelMessageLabel: "too-big",
+        merkleRoot: new Uint8Array(64),
         totalChunks: 3,
         sealSlotCell: () => uniformCell(1),
       }),
@@ -127,6 +155,7 @@ describe("scheduled-transfer send job", () => {
     const job = buildScheduledSendJob({
       runtime: fake.runtime,
       channelMessageLabel: "reconcile",
+      merkleRoot: new Uint8Array(64),
       totalChunks: 3,
       getAckedChunks: () => acked,
       sealSlotCell: (index) => {
@@ -149,12 +178,11 @@ describe("scheduled-transfer send job", () => {
     const job = buildScheduledSendJob({
       runtime: fake.runtime,
       channelMessageLabel: "bad",
+      merkleRoot: new Uint8Array(64),
       totalChunks: 1,
       sealSlotCell: () => new Uint8Array(10),
     });
-    await expect(job.nextCell(fakeSlot())).rejects.toThrow(
-      /uniform length/,
-    );
+    await expect(job.nextCell(fakeSlot())).rejects.toThrow(/uniform length/);
   });
 });
 
@@ -183,19 +211,23 @@ describe("scheduled receipts and cancellation", () => {
   test("immediate-mode edges reject scheduled receipts so the caller falls back", () => {
     const epc = fakeEpc(undefined);
     expect(
-      queueScheduledReceipt(
-        epc,
-        new Uint8Array(64),
-        new Uint8Array(64),
-      ),
+      queueScheduledReceipt(epc, new Uint8Array(64), new Uint8Array(64)),
     ).toBe(false);
   });
 
   test("a settled drain job re-arms while receipts remain queued", async () => {
     const fake = fakeRuntime(1); // one receipt per cycle
     const epc = fakeEpc(fake.runtime);
-    queueScheduledReceipt(epc, new Uint8Array(64).fill(1), new Uint8Array(64).fill(2));
-    queueScheduledReceipt(epc, new Uint8Array(64).fill(3), new Uint8Array(64).fill(4));
+    queueScheduledReceipt(
+      epc,
+      new Uint8Array(64).fill(1),
+      new Uint8Array(64).fill(2),
+    );
+    queueScheduledReceipt(
+      epc,
+      new Uint8Array(64).fill(3),
+      new Uint8Array(64).fill(4),
+    );
     // Capacity 1 → the first job declares one cell; the second receipt waits.
     expect(fake.enqueued).toHaveLength(1);
     const firstJob = fake.enqueued[0];
@@ -211,7 +243,10 @@ describe("scheduled receipts and cancellation", () => {
     const merkleRootHex = "ab".repeat(64);
     const routed = await cancelScheduledTransfer(epc, "chat", merkleRootHex);
     expect(routed).toBe(true);
-    const expectedLabel = await compileChannelMessageLabel("chat", merkleRootHex);
+    const expectedLabel = await compileChannelMessageLabel(
+      "chat",
+      merkleRootHex,
+    );
     expect(fake.cancels).toEqual([expectedLabel]);
 
     // An immediate-mode edge does not route a scheduled cancel.
@@ -224,13 +259,115 @@ describe("scheduled receipts and cancellation", () => {
     const fake = fakeRuntime();
     fake.cancelResult = "not-found";
     const epc = fakeEpc(fake.runtime);
-    expect(
-      await cancelScheduledTransfer(epc, "chat", "cd".repeat(64)),
-    ).toBe(false);
+    expect(await cancelScheduledTransfer(epc, "chat", "cd".repeat(64))).toBe(
+      false,
+    );
   });
 
   test("synthetic scheduled label carries the merkle root for receipt routing", () => {
     const label = syntheticScheduledLabel("ef".repeat(64));
     expect(label).toBe(`${"00".repeat(32)}~${"ef".repeat(64)}`);
+  });
+
+  test("a scheduled send job can be cancelled after admission", async () => {
+    // Before C3, buildScheduledSendJob defined no cancelCell, so
+    // CoverScheduler.cancel threw for any admitted job and the failure path
+    // could not tell the receiver anything: it kept an unfillable partial
+    // forever while the sender deleted its only resend source.
+    const fake = fakeRuntime();
+    const merkleRoot = new Uint8Array(64).fill(0x5a);
+    const job = buildScheduledSendJob({
+      runtime: fake.runtime,
+      channelMessageLabel: LABEL,
+      totalChunks: 4,
+      sealSlotCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
+      merkleRoot,
+    });
+    expect(typeof job.cancelCell).toBe("function");
+    const cell = await job.cancelCell!(fakeSlot());
+    expect(cell.length).toBe(WIRE_CHUNK_FRAME_LEN);
+    expect(fake.sealed[0].subtype).toBe("cancel");
+    expect((fake.sealed[0] as { merkleRoot: Uint8Array }).merkleRoot).toEqual(
+      merkleRoot,
+    );
+  });
+
+  test("a cancel cell that is not the uniform length never reaches the lane", async () => {
+    const fake = fakeRuntime();
+    fake.sealedCell = new Uint8Array(9);
+    const job = buildScheduledSendJob({
+      runtime: fake.runtime,
+      channelMessageLabel: LABEL,
+      totalChunks: 1,
+      sealSlotCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
+      merkleRoot: new Uint8Array(64),
+    });
+    await expect(job.cancelCell!(fakeSlot())).rejects.toThrow(
+      /sealed cancel cell is not the uniform length/,
+    );
+  });
+});
+
+describe("cancelling a scheduled send that the scheduler no longer holds", () => {
+  test("an admitted job's cancel rides its own next slot", () => {
+    const fake = fakeRuntime();
+    fake.cancelResult = "cancel-pending";
+    const epc = fakeEpc(fake.runtime);
+    expect(cancelScheduledSend(epc, LABEL)).toBe("cancel-pending");
+    expect(fake.cancels).toEqual([LABEL]);
+    // Nothing extra is enqueued: the job's own cancelCell carries the CANCEL.
+    expect(fake.enqueued).toHaveLength(0);
+  });
+
+  test("a job cancelled before admission emitted nothing, so nothing is queued", () => {
+    const fake = fakeRuntime();
+    fake.cancelResult = "cancelled-before-admission";
+    const epc = fakeEpc(fake.runtime);
+    expect(cancelScheduledSend(epc, LABEL)).toBe("cancelled-before-admission");
+    expect(fake.enqueued).toHaveLength(0);
+  });
+
+  test("a settled job still gets its CANCEL to the receiver on a control cell", () => {
+    // The dominant C3 failure: by the time the delivery bound expires the send
+    // job has usually emitted every declared cell and settled "completed", so
+    // CoverScheduler.cancel answers "not-found" and the job's own cancelCell
+    // can never run. Without a standalone CANCEL the receiver keeps its
+    // partial forever — a re-send cannot fill it, because decoy chunks are
+    // fresh randomness and the Merkle root differs.
+    const fake = fakeRuntime();
+    fake.cancelResult = "not-found";
+    const epc = fakeEpc(fake.runtime);
+    expect(cancelScheduledSend(epc, LABEL)).toBe("cancel-pending");
+    expect(fake.enqueued).toHaveLength(1);
+    expect(fake.enqueued[0].kind).toBe("control");
+    releaseScheduledReceipts(epc);
+  });
+
+  test("the standalone CANCEL carries the transfer root parsed from the job label", async () => {
+    const fake = fakeRuntime();
+    fake.cancelResult = "not-found";
+    const epc = fakeEpc(fake.runtime);
+    expect(cancelScheduledSend(epc, LABEL)).toBe("cancel-pending");
+    const cell = await fake.enqueued[0].nextCell(fakeSlot());
+    expect(cell).toHaveLength(WIRE_CHUNK_FRAME_LEN);
+    expect(fake.sealed[0].subtype).toBe("cancel");
+    expect(
+      uint8ArrayToHex(
+        (fake.sealed[0] as { merkleRoot: Uint8Array }).merkleRoot,
+      ),
+    ).toBe(LABEL_ROOT_HEX);
+    releaseScheduledReceipts(epc);
+  });
+
+  test("an immediate-mode edge has nothing to cancel", () => {
+    expect(cancelScheduledSend(fakeEpc(undefined), LABEL)).toBe("not-found");
+  });
+
+  test("a label with no transfer root cannot be turned into a wire CANCEL", () => {
+    const fake = fakeRuntime();
+    fake.cancelResult = "not-found";
+    const epc = fakeEpc(fake.runtime);
+    expect(cancelScheduledSend(epc, "not-a-compiled-label")).toBe("not-found");
+    expect(fake.enqueued).toHaveLength(0);
   });
 });

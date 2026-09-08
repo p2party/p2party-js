@@ -33,7 +33,12 @@ import { sealChunk } from "./messageChunkCrypto";
 import { isRatchetGateWaitTimeout, waitForRatchetGate } from "./ratchetGateWait";
 import { isCurrentRatchetGateLease } from "./ratchetGate";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
-import { enqueueScheduledSend, trackScheduledSend } from "./coverEdge";
+import {
+  cancelScheduledSend,
+  enqueueScheduledSend,
+  trackScheduledSend,
+} from "./coverEdge";
+import { scheduledDeliveryTimeoutMs } from "./coverTransfer";
 import { ratchetEncryptDurably } from "./ratchetPersist";
 import {
   claimTransfer,
@@ -71,6 +76,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { RoomPolicyV1 } from "../roomPolicy";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 
@@ -1200,6 +1206,7 @@ const makeScheduledSlotSealer =
 const sendScheduled = async (
   roomId: string,
   channelLabel: string,
+  policy: RoomPolicyV1,
   targets: readonly PeerSendTarget[],
   totalChunks: number,
   chunkHashes: Uint8Array,
@@ -1214,6 +1221,17 @@ const sendScheduled = async (
 ): Promise<PeerSendFanoutResult> => {
   const outcomes: PeerDeliveryOutcome[] = [];
   let startedTransfers = 0;
+  // Derived from the room's authenticated policy, never a fixed constant: a
+  // job is admitted only at a cycle open and the receiver's terminal receipt is
+  // itself a job admitted at the boundary after that, so the floor scales with
+  // the cadence. The 120 s constant this replaces rejected every send in a
+  // "5 min cycles" room, whose minimum confirmation is 301.2 s (C3).
+  const deliveryTimeoutMs = scheduledDeliveryTimeoutMs({
+    coverCadenceMs: policy.coverCadenceMs,
+    coverLanes: policy.coverLanes,
+    coverFramesPerCell: policy.coverFramesPerCell,
+    coverDurationEpochs: policy.coverDurationEpochs,
+  });
 
   for (const target of targets) {
     if (signal?.aborted) {
@@ -1263,15 +1281,40 @@ const sendScheduled = async (
         encryptionModule,
         merkleModule,
       );
-      const enqueued = enqueueScheduledSend({
-        epc,
-        channelMessageLabel,
-        totalChunks,
-        sealSlotCell: sealer,
-        getAckedChunks: () => getAckedChunks(roomId, target.peerId, transferId),
-      });
-      if (!enqueued)
-        throw new Error("v4 scheduled send: edge has no cover runtime");
+      // The sealer closure above holds `stepped.messageKey` and the PQ context
+      // root for exactly as long as the scheduler can still ask this job for a
+      // cell. Wiping them on the delivery timeout — what this did before C3 —
+      // did not stop the still-admitted job: it kept emitting cells sealed
+      // under an all-zero key, which the receiver can never open and a re-send
+      // can never replace. The wipe therefore belongs to job settlement, the
+      // one moment after which nextCell is never called again.
+      let wiped = false;
+      const wipeMessageSecrets = (): void => {
+        if (wiped) return;
+        wiped = true;
+        stepped.messageKey.fill(0);
+        stepped.pqContext?.rootKey.fill(0);
+      };
+      try {
+        const enqueued = enqueueScheduledSend({
+          epc,
+          channelMessageLabel,
+          totalChunks,
+          merkleRoot,
+          sealSlotCell: sealer,
+          getAckedChunks: () =>
+            getAckedChunks(roomId, target.peerId, transferId),
+        });
+        if (!enqueued)
+          throw new Error("v4 scheduled send: edge has no cover runtime");
+        // Registered synchronously with the enqueue, so the job cannot settle
+        // in between and leave the message key alive for the page's lifetime.
+        epc.coverRuntime?.onJobSettled(channelMessageLabel, wipeMessageSecrets);
+      } catch (enqueueError) {
+        // Nothing ever holds the sealer, so its secrets die here.
+        wipeMessageSecrets();
+        throw enqueueError;
+      }
       trackScheduledSend(epc, roomId, target.peerId, merkleRootHex, transferId);
       startedTransfers += 1;
       onTransferStarted?.();
@@ -1281,12 +1324,17 @@ const sendScheduled = async (
         roomId,
         target.peerId,
         transferId,
-        SCHEDULED_DELIVERY_TIMEOUT_MS,
+        deliveryTimeoutMs,
         signal,
       );
-      // The message key/context are dead once the job's cells are all sealed.
-      stepped.messageKey.fill(0);
-      stepped.pqContext?.rootKey.fill(0);
+      if (!delivered) {
+        // Tell the receiver, before anything else destroys what could still
+        // fill its partial. Without this the sender reported failure while the
+        // receiver kept an unfillable N/M transfer forever — a re-send cannot
+        // fill it, because decoy chunks are fresh randomness and the Merkle
+        // root differs (C3).
+        cancelScheduledSend(epc, channelMessageLabel);
+      }
       outcomes.push(
         delivered
           ? { peerId: target.peerId, status: "delivered" }
@@ -1308,8 +1356,6 @@ const sendScheduled = async (
   }
   return { outcomes, startedTransfers };
 };
-
-const SCHEDULED_DELIVERY_TIMEOUT_MS = 120_000;
 
 export const handleSendMessage = async (
   data: string | File,
@@ -1391,6 +1437,7 @@ export const handleSendMessage = async (
         ? await sendScheduled(
             roomId,
             label,
+            rooms[roomIndex].policy,
             targets,
             totalChunks,
             chunkHashes,

@@ -89,7 +89,10 @@ A recipient's CANCEL records refusal only for that recipient.
 
 Receipts and CANCELs replace dummy slots in the existing schedule. The pending
 outbound control queue is bounded to 4,096 token/control units; dropping a
-queued acknowledgement may require a later retransmission. Live have-set
+queued acknowledgement may require a later retransmission. A terminal receipt
+supersedes unsent chunk acknowledgements for the same root, preserving the
+first available reverse slot for completion even at long cadences. Other roots
+and queued CANCEL controls retain their order. Live have-set
 membership uses an O(1) `Set` lookup without copying the set per slot. A resumed
 producer scans original indices once and emits missing chunks. It also selects
 index zero once per attempt to recover a lost terminal receipt: if that index

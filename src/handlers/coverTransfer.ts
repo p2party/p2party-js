@@ -133,7 +133,8 @@ export const queueScheduledChunkReceipt = (
  * Queue one legacy scheduled terminal receipt (token equals transfer root) for
  * the next available reverse control slots. Returns false when the edge has no
  * cover runtime (immediate mode) so the caller falls back to immediate
- * receipts, and drops oldest-first beyond the flood bound.
+ * receipts, and drops oldest-first beyond the flood bound. Completion replaces
+ * this root's unsent chunk ACKs so they cannot consume an extra reverse cycle.
  */
 export const queueScheduledReceipt = (
   epc: IRTCPeerConnection,
@@ -143,7 +144,31 @@ export const queueScheduledReceipt = (
   const runtime = epc.coverRuntime;
   if (!runtime) return false;
   if (merkleRoot.length !== 64 || token.length !== 64) return false;
+  const rootKey = uint8ArrayToHex(merkleRoot);
+  if (uint8ArrayToHex(token) !== rootKey) return false;
   const state = receiptState(epc);
+  let retained = 0;
+  let terminalQueued = false;
+  for (const entry of state.pending) {
+    if (uint8ArrayToHex(entry.merkleRoot) === rootKey) {
+      if (entry.tokens) {
+        state.queuedTokens -= entry.tokens.length;
+        if (state.latestBatchByRoot.get(rootKey) === entry)
+          state.latestBatchByRoot.delete(rootKey);
+        wipeControl(entry);
+        continue;
+      }
+      if (entry.token && uint8ArrayToHex(entry.token) === rootKey)
+        terminalQueued = true;
+    }
+    // Other transfers and CANCEL controls keep their existing FIFO order.
+    state.pending[retained++] = entry;
+  }
+  state.pending.length = retained;
+  if (terminalQueued) {
+    ensureReceiptDrainJob(epc, runtime, state);
+    return true;
+  }
   state.pending.push({
     merkleRoot: Uint8Array.from(merkleRoot),
     token: Uint8Array.from(token),

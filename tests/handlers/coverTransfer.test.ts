@@ -5,6 +5,7 @@ import {
   cancelScheduledTransfer,
   queueScheduledReceipt,
   queueScheduledChunkReceipt,
+  queueScheduledCancel,
   releaseScheduledReceipts,
   syntheticScheduledLabel,
 } from "../../src/handlers/coverTransfer";
@@ -12,9 +13,14 @@ import { cancelScheduledSend } from "../../src/handlers/coverEdge";
 import { compileChannelMessageLabel } from "../../src/utils/channelLabel";
 import { uint8ArrayToHex } from "../../src/utils/uint8array";
 import { WIRE_CHUNK_FRAME_LEN } from "../../src/utils/constants";
+import { createCoverScheduler } from "../../src/handlers/coverScheduler";
 
 import type { CoverRuntime } from "../../src/handlers/coverRuntime";
-import type { CoverJob, CoverJobSlot } from "../../src/handlers/coverScheduler";
+import type {
+  CoverClock,
+  CoverJob,
+  CoverJobSlot,
+} from "../../src/handlers/coverScheduler";
 import type { CoverCellContent } from "../../src/cryptography/coverCell";
 import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
 
@@ -92,6 +98,36 @@ const fakeRuntime = (capacity = 8): FakeRuntime => {
 
 const fakeEpc = (runtime?: CoverRuntime): IRTCPeerConnection =>
   ({ coverRuntime: runtime }) as unknown as IRTCPeerConnection;
+
+class ReceiptClock implements CoverClock {
+  private time = 0;
+  private sequence = 0;
+  private timers = new Map<number, { at: number; callback: () => void }>();
+
+  now = (): number => this.time;
+  setTimeout = (callback: () => void, delay: number): number => {
+    const id = ++this.sequence;
+    this.timers.set(id, { at: this.time + delay, callback });
+    return id;
+  };
+  clearTimeout = (id: unknown): void => {
+    this.timers.delete(id as number);
+  };
+
+  async advanceTo(target: number): Promise<void> {
+    while (true) {
+      for (let i = 0; i < 16; i++) await Promise.resolve();
+      const next = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!next) break;
+      this.time = next[1].at;
+      this.timers.delete(next[0]);
+      next[1].callback();
+    }
+    this.time = target;
+  }
+}
 
 describe("scheduled-transfer send job", () => {
   test("selective resume checks membership in O(1) and preserves original chunk indices", async () => {
@@ -224,6 +260,147 @@ describe("scheduled-transfer send job", () => {
 });
 
 describe("scheduled receipts and cancellation", () => {
+  test.each([1, 16])(
+    "completion supersedes its chunk ACK in the first reverse cycle at 70s cadence, F%d",
+    async (frames) => {
+      const fake = fakeRuntime(frames),
+        epc = fakeEpc(fake.runtime),
+        root = new Uint8Array(64).fill(1),
+        clock = new ReceiptClock(),
+        wire: { at: number; source: string }[] = [];
+      const scheduler = createCoverScheduler({
+        schedule: {
+          phaseOffsetMs: 0,
+          coverCadenceMs: 70_000,
+          coverLanes: 1,
+          coverFramesPerCell: frames,
+          coverDurationEpochs: 1,
+        },
+        clock,
+        makeDummy: () => uniformCell(0xdd),
+        laneFactory: () => ({
+          send: (request) => {
+            wire.push({ at: clock.now(), source: request.source });
+          },
+          close: () => undefined,
+        }),
+        onJobResult: ({ jobId }) => fake.settleCallbacks.get(jobId)?.(),
+      });
+      fake.runtime.enqueue = (job) => {
+        fake.enqueued.push(job);
+        scheduler.enqueue(job);
+      };
+      scheduler.start();
+      try {
+        await clock.advanceTo(1_000);
+        // The receive path queues a chunk ACK immediately before discovering
+        // terminal completion. Both must use the already queued reverse job.
+        queueScheduledChunkReceipt(epc, root, new Uint8Array(64).fill(2));
+        queueScheduledReceipt(epc, root, root);
+        expect(fake.enqueued).toHaveLength(1);
+        expect(fake.enqueued[0].declaredCellCount).toBe(1);
+        await clock.advanceTo(140_000);
+        expect(fake.sealed.map((cell) => cell.subtype)).toEqual(["receipt"]);
+        expect(wire.filter((cell) => cell.source === "control")).toEqual([
+          { at: 70_000 + Math.floor(35_000 / frames), source: "control" },
+        ]);
+        await clock.advanceTo(210_000);
+        expect(fake.enqueued).toHaveLength(1);
+        expect(fake.sealed).toHaveLength(1);
+        expect(wire).toHaveLength(3 * frames);
+      } finally {
+        releaseScheduledReceipts(epc);
+        scheduler.stop();
+      }
+    },
+  );
+
+  test("terminal supersession clears every batch, deduplicates completion and preserves other roots and CANCEL order", async () => {
+    const fake = fakeRuntime(1),
+      epc = fakeEpc(fake.runtime),
+      root = new Uint8Array(64).fill(1),
+      other = new Uint8Array(64).fill(2),
+      token = (index: number): Uint8Array => {
+        const value = new Uint8Array(64);
+        new DataView(value.buffer).setUint32(0, index);
+        return value;
+      };
+    for (let i = 0; i < 130; i++)
+      queueScheduledChunkReceipt(epc, root, token(i));
+    queueScheduledChunkReceipt(epc, other, token(200));
+    queueScheduledCancel(epc, syntheticScheduledLabel(uint8ArrayToHex(root)));
+    queueScheduledReceipt(epc, root, root);
+    queueScheduledReceipt(epc, root, root);
+    for (let i = 0; i < 3; i++) {
+      await fake.enqueued[i].nextCell(fakeSlot());
+      fake.settleCallbacks.get(fake.enqueued[i].id)!();
+    }
+    expect(
+      fake.sealed.map((cell) => [
+        cell.subtype,
+        cell.subtype === "dummy" ? -1 : cell.merkleRoot[0],
+      ]),
+    ).toEqual([
+      ["chunk-receipts", 2],
+      ["cancel", 1],
+      ["receipt", 1],
+    ]);
+    expect(fake.enqueued).toHaveLength(3);
+    // A later retry must create a live batch, never append to a removed one.
+    queueScheduledChunkReceipt(epc, root, token(201));
+    await fake.enqueued[3].nextCell(fakeSlot());
+    expect(fake.sealed[3].subtype).toBe("chunk-receipts");
+    expect(root[0]).toBe(1);
+    releaseScheduledReceipts(epc);
+  });
+
+  test("superseded token accounting preserves other receipts at the flood bound", async () => {
+    const fake = fakeRuntime(1),
+      epc = fakeEpc(fake.runtime),
+      completed = new Uint8Array(64).fill(1),
+      survivor = new Uint8Array(64).fill(2),
+      later = new Uint8Array(64).fill(3);
+    const add = (root: Uint8Array, count: number): void => {
+      for (let i = 0; i < count; i++) {
+        const token = new Uint8Array(64);
+        new DataView(token.buffer).setUint32(0, i);
+        queueScheduledChunkReceipt(epc, root, token);
+      }
+    };
+    add(completed, 4095);
+    add(survivor, 1);
+    queueScheduledReceipt(epc, completed, completed);
+    add(later, 4094); // one survivor + one completion + 4094 = the 4096 cap
+    for (let i = 0; i < 2; i++) {
+      await fake.enqueued[i].nextCell(fakeSlot());
+      fake.settleCallbacks.get(fake.enqueued[i].id)!();
+    }
+    expect(
+      fake.sealed.map((cell) => [
+        cell.subtype,
+        cell.subtype === "dummy" ? -1 : cell.merkleRoot[0],
+      ]),
+    ).toEqual([
+      ["chunk-receipts", 2],
+      ["receipt", 1],
+    ]);
+    releaseScheduledReceipts(epc);
+  });
+
+  test("a mismatched terminal token cannot discard valid selective receipts", async () => {
+    const fake = fakeRuntime(1),
+      epc = fakeEpc(fake.runtime),
+      root = new Uint8Array(64).fill(1),
+      token = new Uint8Array(64).fill(2);
+    queueScheduledChunkReceipt(epc, root, token);
+    expect(queueScheduledReceipt(epc, root, token)).toBe(false);
+    await fake.enqueued[0].nextCell(fakeSlot());
+    expect(fake.sealed[0].subtype).toBe("chunk-receipts");
+    fake.settleCallbacks.get(fake.enqueued[0].id)!();
+    expect(fake.enqueued).toHaveLength(1);
+    releaseScheduledReceipts(epc);
+  });
+
   test("batches 64 chunk tokens per fixed slot and preserves root/token boundaries", async () => {
     const fake = fakeRuntime(8),
       epc = fakeEpc(fake.runtime),
@@ -271,7 +448,7 @@ describe("scheduled receipts and cancellation", () => {
     const fake = fakeRuntime(4);
     const epc = fakeEpc(fake.runtime);
     const root = new Uint8Array(64).fill(0xaa);
-    const token = new Uint8Array(64).fill(0xbb);
+    const token = Uint8Array.from(root);
 
     expect(queueScheduledReceipt(epc, root, token)).toBe(true);
     expect(fake.enqueued).toHaveLength(1);
@@ -301,12 +478,12 @@ describe("scheduled receipts and cancellation", () => {
     queueScheduledReceipt(
       epc,
       new Uint8Array(64).fill(1),
-      new Uint8Array(64).fill(2),
+      new Uint8Array(64).fill(1),
     );
     queueScheduledReceipt(
       epc,
       new Uint8Array(64).fill(3),
-      new Uint8Array(64).fill(4),
+      new Uint8Array(64).fill(3),
     );
     // Capacity 1 → the first job declares one cell; the second receipt waits.
     expect(fake.enqueued).toHaveLength(1);

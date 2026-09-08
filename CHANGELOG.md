@@ -56,6 +56,8 @@ signaling server `0.1.3`; earlier servers keep their accepted-peer delta flow.
 - Sparse-PQ healing waits for pending real scheduled jobs and key-derivation
   reservations. An incoming committed epoch change retires obsolete producers
   and resumes their transfer under fresh keys on the same runtime.
+- Scheduled completion supersedes its queued chunk acknowledgements, avoiding
+  an extra reverse cycle and delivery timeouts at long cover cadences.
 - Correlated membership snapshots survive individual edge teardown. Each
   missing member has an independent bounded repair budget; trailing redials
   and authentication-triggered outbox passes cannot lose the final event.

@@ -2,7 +2,9 @@ import { CoverRuntime, type CoverLaneChannel } from "./coverRuntime";
 import { buildScheduledSendJob, queueScheduledCancel } from "./coverTransfer";
 import { markTransferComplete } from "./reconcile";
 import { registerCoverChannelUntilClose } from "./coverChannelRegistry";
+import { sweepCancelledInboundTransfer } from "./inboundTransferSweep";
 
+import type { InboundTransferSweepDeps } from "./inboundTransferSweep";
 import type { CoverStatusChange } from "./coverScheduler";
 import type {
   IRTCDataChannel,
@@ -42,6 +44,11 @@ export interface InstallCoverEdgeOptions {
   readonly module: LibCrypto;
   readonly onRemoteCancel?: (merkleRootHex: string) => void;
   readonly onStatusChange?: (change: CoverStatusChange) => void;
+  /**
+   * Storage seam for the inbound half of a remote CANCEL. Defaults to the
+   * production Worker-backed functions.
+   */
+  readonly inboundSweepDeps?: InboundTransferSweepDeps;
 }
 
 /**
@@ -117,7 +124,21 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
       };
     },
     onStatusChange: options.onStatusChange,
-    onRemoteCancel: options.onRemoteCancel,
+    onRemoteCancel: (merkleRootHex) => {
+      // A CANCEL is about ONE transfer root, and that root can be in flight in
+      // either direction. The caller's hook aborts our outbound send of it
+      // (abortTransfer, which only ever searches the outbound registry); the
+      // sweep below drops the partial we are RECEIVING for it, which nothing
+      // did before — the receiver kept an unfillable N/M transfer, its OPFS
+      // file and its state row forever.
+      options.onRemoteCancel?.(merkleRootHex);
+      void sweepCancelledInboundTransfer(
+        epc,
+        roomId,
+        merkleRootHex,
+        options.inboundSweepDeps,
+      );
+    },
     onScheduledReceipt: (merkleRootHex) => {
       // A terminal scheduled receipt confirms the whole message landed; settle
       // the matching local send so its waiter resolves.

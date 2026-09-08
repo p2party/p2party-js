@@ -6,7 +6,11 @@ import {
 } from "../utils/constants";
 import { coverSlotSpacingMs } from "./coverScheduler";
 
-import type { CoverJob, CoverJobSlot } from "./coverScheduler";
+import type {
+  CoverJob,
+  CoverJobProgress,
+  CoverJobSlot,
+} from "./coverScheduler";
 import type { CoverRuntime } from "./coverRuntime";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 
@@ -244,6 +248,103 @@ export const scheduledDeliveryTimeoutMs = (
     Math.max(spacingMs, lastLaneFirstSlotMs) +
     SCHEDULED_DELIVERY_MARGIN_MS
   );
+};
+
+/** The scheduler surface a delivery wait polls; `CoverRuntime` satisfies it. */
+export interface ScheduledJobProgressSource {
+  getJobProgress(jobId: string): CoverJobProgress | undefined;
+}
+
+/**
+ * A token that changes whenever this send made observable progress, and is
+ * undefined once the scheduler no longer holds the job.
+ *
+ * Scheduled mode emits NO per-chunk receipts — handleMessageQueueing sends an
+ * immediate receipt only when the edge has no cover runtime, and otherwise one
+ * terminal receipt on completion — so `getAckedChunkCount` stays 0 for the
+ * whole transfer and the receiver tells the sender nothing until the very end.
+ * The sender's only evidence that the send is alive is therefore local: its
+ * position in the admission queue moving up, and its cells reaching the wire.
+ */
+export const scheduledSendProgressToken = (
+  runtime: ScheduledJobProgressSource | undefined,
+  jobId: string,
+): string | undefined => {
+  const progress = runtime?.getJobProgress(jobId);
+  if (!progress) return undefined;
+
+  return `${progress.state}:${String(progress.queuePosition)}:${String(progress.sentCells)}`;
+};
+
+export interface ScheduledDeliveryWaitOptions {
+  /** True once the receiver's terminal scheduled receipt has settled the send. */
+  readonly isComplete: () => boolean;
+  /** See scheduledSendProgressToken. */
+  readonly progressToken: () => string | undefined;
+  /**
+   * How long this send may make NO observable progress before it is given up
+   * on. An IDLE budget, never a total deadline.
+   */
+  readonly idleTimeoutMs: number;
+  readonly pollMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly signal?: AbortSignal;
+}
+
+const SCHEDULED_DELIVERY_POLL_MS = 200;
+
+/**
+ * Wait for one scheduled send to be confirmed, giving up only when it stops
+ * making progress.
+ *
+ * `scheduledDeliveryTimeoutMs` derives the arithmetic FLOOR of a confirmation:
+ * two cycles plus the receipt's wait inside its own cycle. That floor assumes
+ * this send is admitted at the very next cycle open — but only `coverLanes`
+ * jobs are admitted per cycle (CoverScheduler.openCycle dequeues exactly that
+ * many), so a third concurrent message on a two-lane five-minute edge is not
+ * admitted for cycles and legitimately needs many times the floor. Treating
+ * the floor as a total deadline therefore failed healthy sends, and — once an
+ * inbound CANCEL sweeps the receiver's partial — that spurious failure DELETES
+ * a transfer that was still arriving.
+ *
+ * Widening the arithmetic cannot fix this: the queue depth is not knowable
+ * when the bound is computed and keeps changing while the send waits. So the
+ * same derived number is used as an idle budget instead. A send that is still
+ * climbing the queue or still emitting cells is never abandoned however long
+ * it takes in total; a send that has genuinely stopped is abandoned exactly
+ * one floor after its last sign of life.
+ */
+export const waitForScheduledDelivery = async (
+  options: ScheduledDeliveryWaitOptions,
+): Promise<boolean> => {
+  const now = options.now ?? (() => Date.now());
+  const sleep =
+    options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = options.pollMs ?? SCHEDULED_DELIVERY_POLL_MS;
+  if (!Number.isFinite(options.idleTimeoutMs) || options.idleTimeoutMs <= 0)
+    throw new Error("coverTransfer: delivery idle budget must be positive");
+
+  let lastToken = options.progressToken();
+  let lastProgressAt = now();
+  for (;;) {
+    if (options.signal?.aborted) return false;
+    if (options.isComplete()) return true;
+
+    const token = options.progressToken();
+    // `undefined` is the job having left the scheduler, not a step backwards:
+    // it stops the clock being reset, so the remaining wait is exactly the
+    // receipt window. Anything else that CHANGED is a step forward.
+    if (token !== undefined && token !== lastToken) {
+      lastToken = token;
+      lastProgressAt = now();
+    }
+    if (now() - lastProgressAt >= options.idleTimeoutMs) break;
+    await sleep(pollMs);
+  }
+
+  return !options.signal?.aborted && options.isComplete();
 };
 
 /** Seal exactly one already-staged chunk into its uniform 65,490-byte cell. */

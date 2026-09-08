@@ -24,6 +24,7 @@ import { waitForOpen } from "../utils/waitForOpen";
 import { deleteMessage, incrementMessageStats } from "../reducers/roomSlice";
 import {
   clearTransfer,
+  isTransferComplete,
   waitForCompletion,
   getAckedChunks,
   getAckedChunkCount,
@@ -42,7 +43,11 @@ import {
   enqueueScheduledSend,
   trackScheduledSend,
 } from "./coverEdge";
-import { scheduledDeliveryTimeoutMs } from "./coverTransfer";
+import {
+  scheduledDeliveryTimeoutMs,
+  scheduledSendProgressToken,
+  waitForScheduledDelivery,
+} from "./coverTransfer";
 import { ratchetEncryptDurably } from "./ratchetPersist";
 import {
   claimTransfer,
@@ -1303,7 +1308,11 @@ export const sendScheduled = async (
   // itself a job admitted at the boundary after that, so the floor scales with
   // the cadence. The 120 s constant this replaces rejected every send in a
   // "5 min cycles" room, whose minimum confirmation is 301.2 s (C3).
-  const deliveryTimeoutMs = scheduledDeliveryTimeoutMs({
+  // Used as an IDLE budget, not a total deadline: it is the arithmetic floor
+  // of one confirmation and assumes admission at the very next cycle open,
+  // which only holds while fewer than `coverLanes` other jobs are ahead. See
+  // waitForScheduledDelivery.
+  const deliveryIdleTimeoutMs = scheduledDeliveryTimeoutMs({
     coverCadenceMs: policy.coverCadenceMs,
     coverLanes: policy.coverLanes,
     coverFramesPerCell: policy.coverFramesPerCell,
@@ -1408,14 +1417,17 @@ export const sendScheduled = async (
       startedTransfers += 1;
       onTransferStarted?.();
       // Delivery confirmation: over reliable ordered lanes the receiver signals
-      // completion with a terminal scheduled receipt. Bound the wait.
-      const delivered = await waitForCompletion(
-        roomId,
-        target.peerId,
-        transferId,
-        deliveryTimeoutMs,
+      // completion with a terminal scheduled receipt. Bound the wait by this
+      // send's own PROGRESS, not by elapsed time — a job admitted only at a
+      // cycle open, behind every other job in the room, is not a failed job,
+      // and cancelling it now deletes a partial that is still filling.
+      const delivered = await waitForScheduledDelivery({
+        isComplete: () => isTransferComplete(roomId, target.peerId, transferId),
+        progressToken: () =>
+          scheduledSendProgressToken(epc.coverRuntime, channelMessageLabel),
+        idleTimeoutMs: deliveryIdleTimeoutMs,
         signal,
-      );
+      });
       if (!delivered) {
         // Tell the receiver, before anything else destroys what could still
         // fill its partial. Without this the sender reported failure while the

@@ -4,6 +4,7 @@ import {
   type CoverClock,
   type CoverJob,
   type CoverJobInterruption,
+  type CoverJobProgress,
   type CoverJobResult,
   type CoverLane,
   type CoverLaneCloseContext,
@@ -262,6 +263,16 @@ export class CoverRuntime {
 
   getQueuedJobIds(): readonly string[] {
     return this.#scheduler.getQueuedJobIds();
+  }
+
+  /**
+   * Live scheduler progress for one job, or undefined once it has settled.
+   * Deliberately NOT `#assertLive()`-guarded: a delivery wait polls this and
+   * must keep answering (with "gone") after the edge is destroyed rather than
+   * throwing into the sender's loop.
+   */
+  getJobProgress(jobId: string): CoverJobProgress | undefined {
+    return this.#scheduler.getJobProgress(jobId);
   }
 
   /**

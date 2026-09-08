@@ -138,6 +138,25 @@ export interface CoverSchedulerOptions {
 export type CoverCancelResult =
   "not-found" | "cancelled-before-admission" | "cancel-pending";
 
+/**
+ * What one enqueued job has actually achieved so far.
+ *
+ * A scheduled sender has NO receiver-side progress signal to poll: scheduled
+ * mode emits no per-chunk receipts (handleMessageQueueing sends them only when
+ * `epc.coverRuntime` is undefined), just one terminal receipt on completion.
+ * This is therefore the only evidence a send is alive, and it is what
+ * separates "still working" from "stuck" — a distinction a wall-clock bound
+ * cannot make, because a job admitted only at a cycle open waits behind every
+ * other job in the room.
+ */
+export interface CoverJobProgress {
+  readonly state: "queued" | "admitted" | "terminal";
+  /** Index in the admission order, or -1 once admitted (nothing to wait for). */
+  readonly queuePosition: number;
+  /** Cells this job has put on the wire and had accepted. */
+  readonly sentCells: number;
+}
+
 interface JobRuntime {
   readonly job: CoverJob;
   readonly sequence: number;
@@ -262,6 +281,22 @@ export class CoverScheduler {
 
   getQueuedJobIds(): readonly string[] {
     return [...this.queued].sort(compareQueuedJobs).map(({ job }) => job.id);
+  }
+
+  /**
+   * Live progress for one job, or undefined once the scheduler no longer holds
+   * it (settled: completed, cancelled or failed — `settle` drops it from the
+   * map). Read-only: polling it never perturbs the fixed schedule.
+   */
+  getJobProgress(jobId: string): CoverJobProgress | undefined {
+    const runtime = this.jobs.get(jobId);
+    if (!runtime) return undefined;
+
+    return {
+      state: runtime.state,
+      queuePosition: [...this.queued].sort(compareQueuedJobs).indexOf(runtime),
+      sentCells: runtime.sentCells,
+    };
   }
 
   enqueue(job: CoverJob): void {

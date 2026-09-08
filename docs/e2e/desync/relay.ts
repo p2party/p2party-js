@@ -362,8 +362,11 @@ Bun.serve<WsData, undefined>({
             if (memberId === ws.data.peerId) continue;
             const target = clients.get(memberId);
             const intro = { type: "peerConnection", roomId, peer: { id: ws.data.peerId, publicKey: ws.data.publicKey }, protocolVersion: PROTO };
-            if (target && isCurrentVerified(target) && target.data.isAlive) sendTo(target, intro, from);
-            else log(`peerConnection ${from}->${short(memberId)} UNDELIVERABLE(member has no live verified socket)`);
+            // Mirrors p2party-server handlePeers.ts: no isAlive conjunct. That
+            // flag is false for the whole round trip of every ping, and route()
+            // never checked it either, so it was never a transport requirement.
+            if (target && isCurrentVerified(target)) sendTo(target, intro, from);
+            else log(`peerConnection ${from}->${short(memberId)} UNDELIVERABLE(member has no current verified socket)`);
           }
           return;
         }

@@ -86,6 +86,24 @@ export const isRatchetGateOpen = (
   );
 };
 
+/**
+ * The lease is current AND the gate has not settled either way.
+ *
+ * `isRatchetGateOpen` cannot distinguish "still handshaking" from "rejected"
+ * or "replaced", which is why the pre-authentication frame guard used to close
+ * a channel that was merely early (C7). Only a gate that is still pending on
+ * the caller's own lease is worth waiting for.
+ */
+export const isRatchetGatePending = (
+  roomId: string,
+  peerId: string,
+  lease: RatchetGateLease | undefined,
+): boolean => {
+  if (lease === undefined) return false;
+  const gate = gates.get(gateKey(roomId, peerId));
+  return gate !== undefined && gate.lease === lease && !gate.settled;
+};
+
 export const openRatchetGate = (
   roomId: string,
   peerId: string,

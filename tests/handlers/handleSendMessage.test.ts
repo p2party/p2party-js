@@ -133,6 +133,7 @@ describe("per-message DataChannel close semantics", () => {
         "room",
         "cancel-live",
         lease,
+        undefined,
       ),
     ).toBe(true);
   });
@@ -158,6 +159,7 @@ describe("per-message DataChannel close semantics", () => {
         "room",
         "cancel-replaced",
         lease,
+        undefined,
       ),
     ).toBe(false);
   });
@@ -187,6 +189,7 @@ describe("per-message DataChannel close semantics", () => {
         "room",
         "cancel-rebound",
         openedUnder,
+        undefined,
       ),
     ).toBe(false);
   });
@@ -211,6 +214,7 @@ describe("per-message DataChannel close semantics", () => {
         "room",
         "cancel-unregistered",
         lease,
+        undefined,
       ),
     ).toBe(false);
   });
@@ -233,6 +237,7 @@ describe("per-message DataChannel close semantics", () => {
         [current],
         "room",
         "cancel-leaseless",
+        undefined,
         undefined,
       ),
     ).toBe(false);

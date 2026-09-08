@@ -31,7 +31,11 @@ import {
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { sealChunk } from "./messageChunkCrypto";
 import { isRatchetGateWaitTimeout, waitForRatchetGate } from "./ratchetGateWait";
-import { isCurrentRatchetGateLease } from "./ratchetGate";
+import { isCurrentRatchetGateLease, isRatchetGateOpen } from "./ratchetGate";
+import {
+  markChannelClosedLocally,
+  wasChannelClosedLocally,
+} from "../api/webrtc/localChannelClose";
 import { isPqApplicationTrafficBlocked } from "./pqHealingOrchestrator";
 import {
   cancelScheduledSend,
@@ -398,6 +402,33 @@ const waitForConnectedEdge = (
   });
 };
 
+/**
+ * Is this connection a transport a resumed transfer may open its per-message
+ * channel on?
+ *
+ * `connectionState === "connected"` alone means DTLS is complete — it says
+ * nothing about the main-channel handshake. Opening the per-message channel on
+ * such a transport is what let the peer's replayed receipts arrive ahead of
+ * THIS side's ratchet gate: the identity responder authenticates on SENDING
+ * finish and replays immediately, while the initiator authenticates on
+ * RECEIVING it, one IndexedDB persist later (C7). Requiring the gate to be
+ * open, on this connection's own lease, removes that window at its source
+ * instead of relying on the receiving guard to park the early frame.
+ *
+ * Not finding one is not fatal: the caller polls until its resume budget runs
+ * out, which is exactly what it already did for a transport that had not
+ * reconnected yet.
+ */
+export const isResumableAuthenticatedTransport = (
+  candidate: IRTCPeerConnection,
+  roomId: string,
+  peerId: string,
+): boolean =>
+  candidate.roomId === roomId &&
+  candidate.withPeerId === peerId &&
+  candidate.connectionState === "connected" &&
+  isRatchetGateOpen(roomId, peerId, candidate.ratchetGateLease);
+
 const resumeChannel = async (
   api: BaseQueryApi,
   roomId: string,
@@ -414,11 +445,8 @@ const resumeChannel = async (
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     throwIfTransferAborted(signal);
-    const epc = peerConnections.find(
-      (p) =>
-        p.roomId === roomId &&
-        p.withPeerId === peerId &&
-        p.connectionState === "connected",
+    const epc = peerConnections.find((p) =>
+      isResumableAuthenticatedTransport(p, roomId, peerId),
     );
     if (!epc) {
       await new Promise((resolve) =>
@@ -485,6 +513,12 @@ interface TransferCipher {
  * the SCTP stream is still connecting and has not entered `dataChannels`.
  */
 export const closeTransferChannel = (channel: IRTCDataChannel): void => {
+  // Record the close as OURS before performing it. sendWithReconcile reads the
+  // very channel it closed on its next loop iteration, and without this marker
+  // an entirely local retirement is reported as the peer cancelling — which
+  // deletes the sender's staging and, via the close the peer observes, the
+  // receiver's partial file (C7).
+  markChannelClosedLocally(channel);
   channel.releaseProtocolResources?.();
   if (channel.readyState !== "closed") channel.close();
 };
@@ -625,7 +659,14 @@ export const isAuthenticatedPeerCancel = (
   roomId: string,
   peerId: string,
   transferGateLease: RatchetGateLease | undefined,
+  currentChannel: IRTCDataChannel | undefined,
 ): boolean =>
+  // A channel THIS side closed is never the peer's cancel signal, however
+  // healthy every other check looks. The pre-authentication frame guard closes
+  // a channel whose gate has not settled yet, and on a resumed edge that is
+  // routine — the gate opens a moment later, every test below then passes, and
+  // the sender reports a cancel nobody sent (C7).
+  !wasChannelClosedLocally(currentChannel) &&
   currentEpc.connectionState === "connected" &&
   transferGateLease !== undefined &&
   isCurrentRatchetGateLease(roomId, peerId, transferGateLease) &&
@@ -1014,6 +1055,7 @@ const sendWithReconcile = async (
             roomId,
             peerId,
             transportGateLease,
+            currentChannel,
           )
         )
           throw new Error("Message transfer cancelled by peer");

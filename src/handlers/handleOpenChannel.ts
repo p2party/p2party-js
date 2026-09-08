@@ -28,6 +28,8 @@ import {
   isRatchetGateOpen,
   rejectRatchetGate,
 } from "./ratchetGate";
+import { admitPreAuthenticatedFrame } from "./ratchetGateWait";
+import { markChannelClosedLocally } from "../api/webrtc/localChannelClose";
 import {
   classifyHandshakeFailure,
   isTerminalHandshakeFailure,
@@ -74,6 +76,7 @@ import {
   FRAME_TYPE_HANDSHAKE,
   FRAME_TYPE_PQ_CONTROL,
   FRAME_TYPE_RECEIPT,
+  PRE_AUTH_FRAME_PARK_MS,
   WIRE_CHUNK_FRAME_LEN,
 } from "../utils/constants";
 import {
@@ -563,16 +566,45 @@ export const handleOpenChannel = async (
     requestPeersAfterEdgeTeardown(api, roomId);
   };
 
+  // Frames currently parked waiting for this transport's gate to settle. The
+  // guard below used to close on the FIRST early frame, so an unauthenticated
+  // peer could pin one frame's memory; parking must not turn that into an
+  // unbounded amount.
+  let parkedPreAuthFrames = 0;
   extChannel.onmessage = async (e) => {
     const data = new Uint8Array(e.data as ArrayBuffer);
     if (
       extChannel.label !== "main" &&
       !isRatchetGateOpen(roomId, epc.withPeerId, transportGateLease)
     ) {
-      console.error("Rejected application data before peer authentication");
-      releaseProtocolResources();
-      if (extChannel.readyState !== "closed") extChannel.close();
-      return;
+      // A resumed channel can carry the peer's replayed receipts before THIS
+      // side's gate has settled: both gates open inside an async IndexedDB
+      // persist, and the identity responder completes on SENDING finish while
+      // the initiator completes on RECEIVING it. Closing here was read back as
+      // the peer's CANCEL and destroyed both sides' partial transfer (C7), so
+      // park a frame whose gate is merely pending. A stale lease, a rejected
+      // gate, an exhausted park budget and an exhausted frame bound all still
+      // close, exactly as before.
+      parkedPreAuthFrames++;
+      let admitted: boolean;
+      try {
+        admitted = await admitPreAuthenticatedFrame(
+          roomId,
+          epc.withPeerId,
+          transportGateLease,
+          PRE_AUTH_FRAME_PARK_MS,
+          parkedPreAuthFrames - 1,
+        );
+      } finally {
+        parkedPreAuthFrames--;
+      }
+      if (!admitted) {
+        console.error("Rejected application data before peer authentication");
+        releaseProtocolResources();
+        markChannelClosedLocally(extChannel);
+        if (extChannel.readyState !== "closed") extChannel.close();
+        return;
+      }
     }
 
     const classified = classifyFrame(data);
@@ -597,6 +629,7 @@ export const handleOpenChannel = async (
           "Closing message DataChannel: receipt queue budget exceeded",
         );
         releaseProtocolResources();
+        markChannelClosedLocally(extChannel);
         if (extChannel.readyState !== "closed") extChannel.close();
       }
 
@@ -631,6 +664,7 @@ export const handleOpenChannel = async (
           "Closing message DataChannel: receive queue budget exceeded",
         );
         releaseProtocolResources();
+        markChannelClosedLocally(extChannel);
         if (extChannel.readyState !== "closed") extChannel.close();
       }
 

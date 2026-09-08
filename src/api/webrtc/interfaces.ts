@@ -114,6 +114,13 @@ export interface IRTCDataChannel extends RTCDataChannel {
    * delete its storage artifacts after the active handler reaches quiescence.
    */
   cancelReceiveTransfer?: () => Promise<void>;
+  /**
+   * Set by any close THIS side initiated (the pre-authentication frame guard,
+   * the transfer's terminal-close runner, the resume path's cleanup). Read by
+   * `isAuthenticatedPeerCancel` so our own close is never reported as the peer
+   * cancelling the transfer (C7).
+   */
+  closedLocally?: boolean;
 }
 
 export interface IRTCMessage {

@@ -220,6 +220,23 @@ export const MAX_RESUME_ATTEMPTS = 3;
 // channel open + first step to start.
 export const RATCHET_GATE_WAIT_TIMEOUT_MS = 45_000;
 
+// A per-message frame can legitimately arrive before THIS side's ratchet gate
+// has finished settling: gates open inside an async IndexedDB persist, and the
+// identity responder completes the handshake on SENDING finish (and replays its
+// receipts at once) while the initiator completes on RECEIVING it. Park such a
+// frame for this long rather than closing its channel — a self-inflicted close
+// was read back as a peer CANCEL and destroyed BOTH sides' partial transfer
+// (C7). Far longer than any persist, far shorter than
+// RATCHET_GATE_WAIT_TIMEOUT_MS, so a genuinely dead edge is still failed by the
+// send path's own budget rather than by this guard.
+export const PRE_AUTH_FRAME_PARK_MS = 10_000;
+// Parking is bounded in frames as well as in time. The guard it replaces closed
+// the channel on the FIRST unauthenticated frame, so an unauthenticated peer
+// could pin at most one frame's memory; without a count bound it could pin an
+// unbounded number for the whole park window. Well above any legitimate
+// receipt-replay burst that could precede a gate by a single persist.
+export const MAX_PARKED_PRE_AUTH_FRAMES = 64;
+
 // Head-room over the arithmetic floor of a scheduled confirmation: the sealer
 // runs on the main thread, a boundary can be degraded, and the receipt job
 // itself competes for a lane. Only head-room — the floor is derived from the

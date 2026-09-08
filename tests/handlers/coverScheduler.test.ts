@@ -23,6 +23,14 @@ class FakeClock implements CoverClock {
   private nextId = 1;
   private readonly timers = new Map<number, FakeTimer>();
 
+  /**
+   * One-shot: refuse the next timer request, the way a host under memory
+   * pressure can. `CoverScheduler.openCycle` contains no `await`, so a refused
+   * slot timer is the only way its promise rejects — which is exactly the
+   * route into the boundary-handler catch that used to park the scheduler.
+   */
+  failNextSetTimeout = false;
+
   constructor(now = 0) {
     this.time = now;
   }
@@ -32,6 +40,10 @@ class FakeClock implements CoverClock {
   }
 
   setTimeout(callback: () => void, delayMs: number): number {
+    if (this.failNextSetTimeout) {
+      this.failNextSetTimeout = false;
+      throw new Error("fake clock refused a timer");
+    }
     const id = this.nextId++;
     this.timers.set(id, {
       id,
@@ -43,6 +55,20 @@ class FakeClock implements CoverClock {
 
   clearTimeout(handle: unknown): void {
     if (typeof handle === "number") this.timers.delete(handle);
+  }
+
+  /** How many timers the scheduler is holding. Zero means it is parked. */
+  armedTimerCount(): number {
+    return this.timers.size;
+  }
+
+  /** Absolute deadline of the soonest armed timer. */
+  nextTimerDeadline(): number {
+    const soonest = [...this.timers.values()].sort(
+      (left, right) => left.at - right.at || left.id - right.id,
+    )[0];
+    if (!soonest) throw new Error("fake clock holds no armed timer");
+    return soonest.at;
   }
 
   private nextDue(target: number): FakeTimer | undefined {
@@ -119,6 +145,8 @@ interface Harness {
   readonly clock: FakeClock;
   readonly trace: string[];
   readonly statuses: CoverSchedulerStatus[];
+  /** Positional companion of `statuses`; "-" where a change carried none. */
+  readonly statusReasons: string[];
   readonly interruptions: string[];
   readonly scheduler: ReturnType<typeof createCoverScheduler>;
 }
@@ -134,6 +162,7 @@ const harness = (
   const clock = new FakeClock(startAt);
   const trace: string[] = [];
   const statuses: CoverSchedulerStatus[] = [];
+  const statusReasons: string[] = [];
   const interruptions: string[] = [];
 
   const scheduler = createCoverScheduler({
@@ -158,14 +187,15 @@ const harness = (
         },
       };
     },
-    onStatusChange({ status }) {
+    onStatusChange({ status, reason }) {
       statuses.push(status);
+      statusReasons.push(reason ?? "-");
     },
     onJobInterrupted({ jobId, reason }) {
       interruptions.push(`${jobId}:${reason}`);
     },
   });
-  return { clock, trace, statuses, interruptions, scheduler };
+  return { clock, trace, statuses, statusReasons, interruptions, scheduler };
 };
 
 describe("store-free scheduled cover core", () => {
@@ -352,5 +382,156 @@ describe("store-free scheduled cover core", () => {
       "open@200:c1:l0:late",
     ]);
     expect(statuses).toEqual(["starting", "active", "degraded", "active"]);
+  });
+});
+
+// C5: a boundary timer that fired past its own drift tolerance used to call
+// setStatus("suspended", "timer-drift") and arm NOTHING, with `running` still
+// true. resume() is the only exit from "suspended", and its only callers are a
+// public method no src/ file calls, visibilitychange -> visible, and online --
+// none of which a visible, online tab will ever fire. So a single 500 ms stall
+// over a boundary parked scheduled cover permanently while both handshakes
+// stayed authenticated and the transport stayed connected, and every send in
+// both directions then failed at its delivery budget. Same park through the
+// two boundary-handler rejection catches.
+describe("a late boundary degrades and re-arms instead of parking (C5)", () => {
+  test("a late cycle boundary degrades, closes the dead cycle, and re-arms", async () => {
+    const { clock, trace, scheduler, statuses, statusReasons } = harness(
+      schedule(),
+      0,
+    );
+    scheduler.start();
+    await clock.advanceTo(350);
+    expect(scheduler.getStatus()).toBe("active");
+    const boundary = clock.nextTimerDeadline();
+    expect(boundary).toBe(400);
+
+    // Fire the cycle boundary five seconds late: a stall the browser imposed.
+    await clock.jumpTo(boundary + 5_000);
+
+    expect(scheduler.getStatus()).toBe("degraded");
+    expect(statuses).not.toContain("suspended");
+    expect(statusReasons).toContain("timer-drift");
+    // The gap is closed and never claimed...
+    expect(trace.at(-1)).toBe("close@5400:c0:l0:late-cleanup");
+    // ...and exactly one boundary is armed, strictly after the moment it fired.
+    expect(clock.armedTimerCount()).toBe(1);
+    expect(clock.nextTimerDeadline()).toBeGreaterThan(boundary + 5_000);
+
+    // It really runs again, which is the whole point.
+    await clock.advanceTo(5_600);
+    expect(scheduler.getStatus()).toBe("active");
+    expect(trace).toContain("open@5600:c14:l0:-");
+  });
+
+  test("a late open boundary degrades and re-arms too", async () => {
+    const { clock, trace, scheduler, statuses } = harness(schedule(), 10);
+    scheduler.start();
+    expect(clock.nextTimerDeadline()).toBe(400);
+
+    await clock.jumpTo(5_400);
+
+    expect(scheduler.getStatus()).toBe("degraded");
+    expect(statuses).not.toContain("suspended");
+    expect(trace).toEqual([]);
+    expect(clock.armedTimerCount()).toBe(1);
+    expect(clock.nextTimerDeadline()).toBe(5_600);
+
+    await clock.advanceTo(5_600);
+    expect(trace).toEqual(["open@5600:c14:l0:-"]);
+    expect(scheduler.getStatus()).toBe("active");
+  });
+
+  test("an open-boundary handler that rejects degrades and keeps the schedule", async () => {
+    const { clock, trace, scheduler, statuses } = harness(schedule(), 0);
+    scheduler.enqueue(job("waiting", "control", [0xc0]));
+    scheduler.start();
+    // start() consumed one timer request; refuse the slot timer openCycle arms
+    // last, so its promise rejects into the arm-site catch.
+    clock.failNextSetTimeout = true;
+    await clock.advanceTo(0);
+
+    expect(scheduler.getStatus()).toBe("degraded");
+    expect(statuses).not.toContain("suspended");
+    // The cycle it failed inside is still closed at its authenticated
+    // boundary, not early, so the failure is invisible on the wire.
+    expect(clock.armedTimerCount()).toBe(1);
+    expect(clock.nextTimerDeadline()).toBe(400);
+
+    await clock.advanceTo(1_200);
+    expect(trace.filter((entry) => entry.startsWith("open@"))).toEqual([
+      "open@0:c0:l0:waiting",
+      "open@400:c1:l0:waiting",
+      "open@800:c2:l0:-",
+      "open@1200:c3:l0:-",
+    ]);
+  });
+
+  test("a cycle-boundary reopen that rejects degrades and keeps the schedule", async () => {
+    const { clock, trace, scheduler, statuses } = harness(schedule(), 0);
+    scheduler.start();
+    await clock.advanceTo(350);
+    // Refuse the slot timer of the cycle the BOUNDARY handler opens, so the
+    // rejection lands in handleCycleBoundary's own catch instead.
+    clock.failNextSetTimeout = true;
+    await clock.advanceTo(400);
+
+    expect(scheduler.getStatus()).toBe("degraded");
+    expect(statuses).not.toContain("suspended");
+
+    await clock.advanceTo(800);
+    expect(trace).toContain("close@800:c1:l0:boundary");
+    expect(trace).toContain("open@800:c2:l0:-");
+    expect(scheduler.getStatus()).toBe("active");
+  });
+
+  test("a late slot still only degrades, under its own reason", async () => {
+    const { clock, scheduler, statusReasons } = harness(
+      schedule({ coverCadenceMs: 200, coverFramesPerCell: 2 }),
+      0,
+    );
+    scheduler.start();
+    await clock.advanceTo(0);
+    await clock.jumpTo(60);
+
+    expect(scheduler.getStatus()).toBe("degraded");
+    expect(statusReasons).toEqual(["-", "-", "missed-deadline"]);
+    expect(statusReasons).not.toContain("timer-drift");
+  });
+
+  test("a late boundary on a suspended scheduler waits for its wake event", async () => {
+    const { clock, trace, scheduler, statuses } = harness(schedule(), 0);
+    scheduler.start();
+    await clock.advanceTo(50);
+    expect(scheduler.suspend("page-hidden")).toBe(true);
+
+    await clock.jumpTo(5_400);
+
+    // "suspended" is the one status a browser event is guaranteed to lift.
+    // Degrading here would resurrect cover on a hidden page and claim a gap
+    // the runtime has deliberately refused to claim.
+    expect(scheduler.getStatus()).toBe("suspended");
+    expect(statuses).not.toContain("degraded");
+    expect(clock.armedTimerCount()).toBe(0);
+    expect(trace.at(-1)).toBe("close@5400:c0:l0:late-cleanup");
+
+    expect(scheduler.resume()).toBe(true);
+    await clock.advanceTo(5_600);
+    expect(scheduler.getStatus()).toBe("active");
+  });
+
+  test("a late boundary on a stopped scheduler stays stopped and arms nothing", async () => {
+    const { clock, trace, scheduler, statuses } = harness(schedule(), 0);
+    scheduler.start();
+    await clock.advanceTo(50);
+    expect(scheduler.stop()).toBe(true);
+    expect(clock.armedTimerCount()).toBe(1);
+
+    await clock.jumpTo(5_400);
+
+    expect(scheduler.getStatus()).toBe("stopped");
+    expect(statuses).not.toContain("degraded");
+    expect(clock.armedTimerCount()).toBe(0);
+    expect(trace.at(-1)).toBe("close@5400:c0:l0:late-cleanup");
   });
 });

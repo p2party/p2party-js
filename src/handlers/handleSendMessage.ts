@@ -76,6 +76,7 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { CoverSchedulerStatus } from "./coverScheduler";
 import type { RoomPolicyV1 } from "../roomPolicy";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -1197,6 +1198,28 @@ const makeScheduledSlotSealer =
   };
 
 /**
+ * Can this edge's cover runtime still admit a scheduled job?
+ *
+ * A scheduled job is dequeued only at a cycle open, and `CoverScheduler`
+ * refuses to open one while suspended or stopped. Enqueuing into either and
+ * then awaiting the schedule-derived delivery bound burns that whole budget —
+ * 321 s on the shipped "5 min cycles" preset — for a job nothing was going to
+ * send, and `sendScheduled` fans out serially, so it stalls every later peer
+ * in the room behind it.
+ *
+ * "starting" and "degraded" both still open every subsequent cycle and both
+ * still admit. Since C5 "degraded" is where a late or failed boundary lands,
+ * so rejecting it here would turn one browser stall into a room that can never
+ * send again — the same outcome, moved one layer up.
+ */
+export const coverRuntimeAdmitsScheduledJobs = (
+  runtime: { readonly status: CoverSchedulerStatus } | undefined,
+): boolean =>
+  runtime !== undefined &&
+  runtime.status !== "suspended" &&
+  runtime.status !== "stopped";
+
+/**
  * Scheduled-cover send: instead of opening a per-message DataChannel and
  * bursting, step the ratchet once for the message and enqueue a lazy cover job
  * on each peer edge's cover runtime. The scheduler substitutes one chunk cell
@@ -1246,7 +1269,7 @@ const sendScheduled = async (
     if (
       !epc ||
       !(await waitForConnectedEdge(epc, PEER_ADMISSION_WAIT_MS, signal)) ||
-      !epc.coverRuntime
+      !coverRuntimeAdmitsScheduledJobs(epc.coverRuntime)
     ) {
       outcomes.push({
         peerId: target.peerId,

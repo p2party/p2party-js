@@ -38,6 +38,7 @@ let runPeerSendFanout: typeof import("../../src/handlers/handleSendMessage")["ru
 let shouldDeleteLocalMessageAfterFailure: typeof import("../../src/handlers/handleSendMessage")["shouldDeleteLocalMessageAfterFailure"];
 let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")["waitForReceiptWindow"];
 let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
+let coverRuntimeAdmitsScheduledJobs: typeof import("../../src/handlers/handleSendMessage")["coverRuntimeAdmitsScheduledJobs"];
 let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
 let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
 let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
@@ -50,6 +51,7 @@ beforeAll(async () => {
   ({
     bindTransferCipherToConnection,
     closeTransferChannel,
+    coverRuntimeAdmitsScheduledJobs,
     isAuthenticatedPeerCancel,
     isResumableRebindFailure,
     runPeerSendFanout,
@@ -654,5 +656,34 @@ describe("sender receipt-window flow control", () => {
         params({ inFlight: () => 10, signal: controller.signal }),
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("scheduled send admission reads the cover runtime's liveness", () => {
+  // A scheduled job is dequeued only at a cycle open, and CoverScheduler
+  // refuses to open one while suspended or stopped. Enqueuing into either and
+  // then awaiting the schedule-derived delivery bound burns the whole budget
+  // for a job nothing was ever going to send -- 321 s on the shipped 5-minute
+  // preset -- and sendScheduled fans out serially, so it stalls every later
+  // peer in the room behind it.
+  test("an edge with no cover runtime at all is not admitted", () => {
+    expect(coverRuntimeAdmitsScheduledJobs(undefined)).toBe(false);
+  });
+
+  test("a suspended or stopped runtime is not admitted", () => {
+    expect(coverRuntimeAdmitsScheduledJobs({ status: "suspended" })).toBe(
+      false,
+    );
+    expect(coverRuntimeAdmitsScheduledJobs({ status: "stopped" })).toBe(false);
+  });
+
+  test("starting, active and degraded all still admit", () => {
+    // C5 makes "degraded" the state a late or failed boundary lands in, and a
+    // degraded scheduler still opens every subsequent cycle. Rejecting it here
+    // would turn one browser stall into a room that can never send again --
+    // the same outcome C5 fixed, moved one layer up.
+    expect(coverRuntimeAdmitsScheduledJobs({ status: "degraded" })).toBe(true);
+    expect(coverRuntimeAdmitsScheduledJobs({ status: "starting" })).toBe(true);
+    expect(coverRuntimeAdmitsScheduledJobs({ status: "active" })).toBe(true);
   });
 });

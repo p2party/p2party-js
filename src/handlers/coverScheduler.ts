@@ -529,7 +529,10 @@ export class CoverScheduler {
         }
         void Promise.resolve(handler(generation)).catch(() => {
           if (kind === "slot") this.degrade("cell-production-failed");
-          else this.suspend("boundary-handler-failed");
+          // Never suspend: "suspended" is only left by resume(), whose callers
+          // are all browser wake events, so a boundary handler that rejected on
+          // a visible, online tab parked cover forever (C5).
+          else this.degrade("lane-open-failed", "boundary-handler-failed");
         });
       }, delayMs);
     };
@@ -555,6 +558,24 @@ export class CoverScheduler {
     );
   }
 
+  /**
+   * A timer that fired past its own drift tolerance.
+   *
+   * The cycle it belonged to is over: it must be closed and it must NOT be
+   * claimed. What must not happen is parking. Before C5 a late boundary called
+   * setStatus("suspended", "timer-drift") and armed nothing while `running`
+   * stayed true, and "suspended" is left only by resume(), whose callers are
+   * the public method (no src/ caller), visibilitychange -> visible, and
+   * online. A visible, online tab that stalled 500 ms over a boundary
+   * therefore parked scheduled cover permanently: both handshakes stayed
+   * authenticated and the transport stayed connected while every send in both
+   * directions failed at its delivery budget. Degrading instead re-arms, which
+   * is what coverRuntime's own drift comment already promised.
+   *
+   * A scheduler that is already suspended or stopped keeps its state: those
+   * are deliberate, and each has an event or a caller that will leave it. Only
+   * their dead cycle is swept, exactly as before.
+   */
   private handleLateTimer(
     kind: TimerKind,
     _deadlineMs: number,
@@ -565,11 +586,14 @@ export class CoverScheduler {
       return;
     }
 
-    if (this.cycle) {
-      this.interruptCycle("suspended");
-      this.closeCurrentCycle("late-cleanup");
+    if (this.status === "stopped" || this.status === "suspended") {
+      if (this.cycle) {
+        this.interruptCycle("suspended");
+        this.closeCurrentCycle("late-cleanup");
+      }
+      return;
     }
-    if (this.status !== "stopped") this.setStatus("suspended", "timer-drift");
+    this.degrade("missed-deadline", "timer-drift");
   }
 
   private async openCycle(
@@ -826,10 +850,23 @@ export class CoverScheduler {
     }
   }
 
-  private degrade(reason: CoverJobInterruption["reason"]): void {
+  /**
+   * Degrade honestly and keep the schedule alive: the cycle closes at its own
+   * authenticated boundary when there still is one, otherwise the gap is swept
+   * and the next strictly-future boundary is armed. This is the only recovery
+   * path a late or failed boundary is allowed to take (C5).
+   *
+   * `statusReason` is the free-form CoverStatusChange reason, which is not the
+   * same vocabulary as the CoverJobInterruption reason handed to requeued jobs;
+   * it defaults to it where they do coincide.
+   */
+  private degrade(
+    reason: CoverJobInterruption["reason"],
+    statusReason: string = reason,
+  ): void {
     if (this.status === "stopped" || this.status === "suspended") return;
     this.disarm();
-    this.setStatus("degraded", reason);
+    this.setStatus("degraded", statusReason);
 
     const now = this.assertClockNow();
     if (this.cycle) {
@@ -909,7 +946,9 @@ export class CoverScheduler {
     )
       return;
     this.openCycle(boundaryMs, this.generation).catch(() => {
-      this.suspend("boundary-handler-failed");
+      // Suspending here parked the scheduler: this very method is the only
+      // thing that reopens a cycle, and it returns early while suspended (C5).
+      this.degrade("lane-open-failed", "boundary-handler-failed");
     });
   }
 }

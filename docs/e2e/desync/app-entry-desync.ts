@@ -153,14 +153,25 @@ const api = {
   async connect(
     roomUrlHex: string,
     wsUrl: string,
-    opts: { mode?: "immediate" | "scheduled" | "pin"; pinHex?: string } = {},
+    opts: {
+      mode?: "immediate" | "scheduled" | "pin";
+      pinHex?: string;
+      /**
+       * Cover cadence for the scheduled preset. The slot spacing is
+       * cadence / (lanes x frames), and the runtime's drift tolerance is
+       * min(floor(spacing) - 1, 500) ms — so a scenario that wants to stall
+       * past a boundary picks the cadence that makes that tolerance small
+       * enough to overrun deliberately.
+       */
+      coverCadenceMs?: number;
+    } = {},
   ): Promise<void> {
     let policy: RoomPolicyV1 = canonicalizeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1);
     if (opts.mode === "scheduled") {
       policy = canonicalizeRoomPolicyV1({
         ...DEFAULT_ROOM_POLICY_V1,
         coverMode: "scheduled",
-        coverCadenceMs: 2000,
+        coverCadenceMs: opts.coverCadenceMs ?? 2000,
         coverLanes: 2,
         coverFramesPerCell: 16,
         coverDurationEpochs: 1,
@@ -196,6 +207,27 @@ const api = {
       log({ event: "focusReconnect-error", error: String(error) });
       return "connect() threw: " + String(error);
     }
+  },
+
+  /**
+   * Block the main thread for `ms`, the way a long GC pause or a huge paint
+   * does. Every timer the cover scheduler holds fires late by roughly this
+   * much, which is the C5 trigger: a boundary timer that overruns the
+   * runtime's drift tolerance used to park the scheduler in "suspended" with
+   * nothing armed to leave it.
+   */
+  stallMainThread(ms: number): number {
+    const until = Date.now() + ms;
+    let spins = 0;
+    while (Date.now() < until) spins++;
+    log({ event: "stallMainThread", ms, spins });
+    return spins;
+  },
+
+  /** Live per-peer CoverSchedulerStatus for a room: the C5 liveness signal. */
+  coverStatus(roomUrlHex: string): Record<string, string> {
+    const room = store.getState().rooms.find((r) => r.url === roomUrlHex);
+    return { ...(room?.coverStatusByPeer ?? {}) } as Record<string, string>;
   },
 
   /** Record every change of the room's peer/handshake/pc view. */

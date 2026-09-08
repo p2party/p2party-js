@@ -261,6 +261,7 @@ live in the relay registry) is the invariant that flips.
 | --------------------------- | ----------------------------- | ------------ | -------- | ---- | ------ | ------- |
 | ws-drop-nofocus-initiator-1 | ws-drop-nofocus **(pre-fix)** | initiator    | —        | +0 s | +0.5 s | `never` |
 | ws-drop-nofocus-initiator-2 | ws-drop-nofocus               | initiator    | —        | +0 s | +0.5 s | +0 s    |
+| ws-drop-nofocus-initiator-3 | ws-drop-nofocus               | initiator    | —        | +0 s | +0.5 s | +0 s    |
 | ws-drop-nofocus-responder-1 | ws-drop-nofocus               | responder    | —        | +0 s | +0.5 s | +0 s    |
 | ws-drop-initiator-1         | ws-drop                       | initiator    | —        | +0 s | +0.5 s | +0 s    |
 | proc-freeze-20-initiator-2  | proc-freeze-20 `--udpflood=1` | initiator    | evict    | +2 s | +2.5 s | +1 s    |
@@ -271,7 +272,9 @@ The pre-fix run is the whole point of the arm: `I6` is `never`, A's
 **no second `OPEN sock`** for A after the close — the peer stays a room member
 the server cannot reach. Post-fix, the relay records A opening a new socket
 1.1–1.2 s after the close (the ladder's first 1 s rung plus jitter plus the
-handshake), re-registering under the same peerId and re-joining the room.
+handshake), re-registering under the same peerId and re-joining the room. Run
+`initiator-3` is the same arm re-run against the exact committed bundle, after
+the last source edit, so the recorded pass corresponds to what shipped.
 
 `I2` and `I4` do **not** discriminate here, contrary to the plan's prediction:
 this fault kills only the signaling socket, so the already-established WebRTC

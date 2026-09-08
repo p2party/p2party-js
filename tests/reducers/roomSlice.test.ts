@@ -33,6 +33,37 @@ const { MAX_SIGNALING_ROOM_PEERS } =
   await import("../../src/utils/signalingBounds");
 
 describe("room policy reducer boundary", () => {
+  test("deliberate retry clears failed handshakes and preserves authenticated peers", () => {
+    const roomUrl = "e5".repeat(32);
+    const roomId = "00000000-0000-4000-8000-0000000000e5";
+    let state = roomReducer(undefined, setRoom({ url: roomUrl, id: roomId }));
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId: "failed-peer",
+        status: "failed",
+        reason: "pin-mismatch",
+      }),
+    );
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId: "healthy-peer",
+        status: "authenticated",
+      }),
+    );
+    const retried = roomReducer(state, {
+      type: "rooms/clearPeerHandshakeFailures",
+      payload: roomUrl,
+    });
+    expect(retried[0].handshakeStatusByPeer?.["failed-peer"]).toBeUndefined();
+    expect(retried[0].handshakeStatusByPeer?.["healthy-peer"]?.status).toBe(
+      "authenticated",
+    );
+  });
+
   test("new rooms receive the mandatory hybrid-v3 default", () => {
     const roomUrl = "a".repeat(64);
     const state = roomReducer(undefined, setRoom({ url: roomUrl, id: "" }));

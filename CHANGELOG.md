@@ -38,13 +38,14 @@ socket-generation fields provided by signaling server `0.1.2`.
 
 - **C4, signaling reconnect:** an unexpected socket close starts a bounded
   reconnect controller without requiring a browser focus event. The matching
-  site change re-arms room auto-connect after a connection drops.
+  site change latches room admission and leaves reconnect backoff and permanent
+  socket refusal to the SDK.
 - **C1, replaced signaling sessions:** peer introductions carry a fresh socket
   generation. A changed generation retires the old peer transport; an
   unnegotiated responder transport has a bounded rebuild watchdog.
 - **C2, terminal handshake failures:** PIN, policy, and suite failures remain
-  terminal when their main channel closes, so transport retries do not erase
-  the failure or repeat an impossible handshake.
+  terminal when their main channel closes. Room reconciliation no longer
+  repeats an impossible handshake; a deliberate retry can still correct the PIN.
 - **C7, transfer cancellation:** resumed channels wait for the current ratchet
   gate. A locally closed channel cannot masquerade as an authenticated peer
   CANCEL, and a frame that exhausts its pre-auth wait is dropped without

@@ -109,6 +109,14 @@ bytes are deliberately absent from the public policy, Redux, persistent room
 records, and logs. PIN mode adds CPace authentication to the identity and
 ML-KEM handshake; it does not replace identity possession.
 
+The SDK retries an unexpectedly closed signaling socket with bounded backoff.
+Let that controller own recovery: do not call `connect()` on every disconnected
+render or browser focus event. Call it for initial admission and a deliberate
+retry, such as entering a corrected PIN. Terminal PIN or policy failures stay
+visible and do not trigger automatic peer discovery or transport retries.
+A fresh connection request from the other peer can retry that peer's failed
+edge; the existing PIN-attempt throttle still applies.
+
 Scheduled timing cover is wired as of 0.14: a policy may pin `coverMode:
 "scheduled"` with a cadence, lane count, and frames per cell, and every edge in
 the room then emits fixed-size cells on that schedule whether or not data is

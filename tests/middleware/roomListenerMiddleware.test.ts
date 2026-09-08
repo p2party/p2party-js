@@ -292,6 +292,36 @@ const reconcilingStore = (options: TestStoreOptions = {}) => {
 };
 
 describe("roomListenerMiddleware empty-room reconciliation", () => {
+  test("a terminal PIN failure cancels the real middleware's scheduled roster retries", async () => {
+    const roomId = "00000000-0000-4000-8000-0000000000d9";
+    const { store, timeouts, reconciler, peersRequests, settled } =
+      reconcilingStore({ roomId });
+    store.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+    await waitFor(() => settled() === 1);
+    const afterJoin = peersRequests();
+    store.dispatch(
+      setPeerHandshakeStatus({
+        roomId,
+        peerId: OTHER_PEER_ID,
+        status: "failed",
+        reason: "pin-mismatch",
+      }),
+    );
+    store.dispatch(
+      setConnectingToPeers({
+        roomId,
+        connectingToPeers: true,
+        reason: "redial",
+      }),
+    );
+    store.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
+    await waitFor(() => settled() === 3);
+    timeouts.advance(600_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(peersRequests()).toBe(afterJoin);
+    expect(reconciler.armedRooms()).toEqual([]);
+  });
+
   test("an active room with nobody in it is asked again on the backoff", async () => {
     const { store, timeouts, reconciler, peersRequests, settled, reasons } =
       reconcilingStore({ roomId: EMPTY_ROOM_ID });

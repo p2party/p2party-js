@@ -3,6 +3,7 @@ import { isUUID } from "class-validator";
 
 import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
+import { hasTerminalPeerHandshakeFailure } from "./handshakeFailure";
 
 import signalingServerApi, {
   sendRoomRequestMessage,
@@ -87,6 +88,16 @@ export const handleConnectToPeer = async (
       if (!room)
         throw new Error(
           "Cannot create a WebRTC transport for an inactive room",
+        );
+      if (
+        hasTerminalPeerHandshakeFailure(
+          room.handshakeStatusByPeer,
+          peerId,
+          peerPublicKey,
+        )
+      )
+        throw new Error(
+          "Terminal peer authentication failure requires deliberate retry",
         );
       return room;
     };

@@ -224,6 +224,35 @@ describe("stranded-room predicate", () => {
     expect(isRoomRosterStranded(room(), verified)).toBe(true);
   });
 
+  test("terminal failures stop reconciliation even after their roster entries are deleted", () => {
+    for (const reason of ["pin-mismatch", "pin-throttled", "policy"])
+      for (const peers of [[], [{ peerId: "p1" }]])
+        expect(
+          isRoomRosterStranded(
+            room({
+              peers,
+              handshakeStatusByPeer: { p1: { status: "failed", reason } },
+            }),
+            verified,
+          ),
+        ).toBe(false);
+  });
+
+  test("another recoverable peer keeps reconciliation alive beside a terminal failure", () => {
+    expect(
+      isRoomRosterStranded(
+        room({
+          peers: [{ peerId: "p1" }, { peerId: "p2" }],
+          handshakeStatusByPeer: {
+            p1: { status: "failed", reason: "pin-mismatch" },
+            p2: { status: "failed", reason: "transport" },
+          },
+        }),
+        verified,
+      ),
+    ).toBe(true);
+  });
+
   test("peers that are all still authenticating are still nobody to talk to", () => {
     expect(
       isRoomRosterStranded(

@@ -10,6 +10,10 @@ import {
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
+  PeerHandshakeStatus,
+  ManagedRoom,
+} from "../../../src/reducers/roomSlice";
+import type {
   IRTCDataChannel,
   IRTCPeerConnection,
 } from "../../../src/api/webrtc/interfaces";
@@ -93,9 +97,11 @@ let webrtcBaseQuery: BaseQuery["default"];
 let clearRetiredPeerSocketGenerations: PeerSocketGeneration["clearRetiredPeerSocketGenerations"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
 let restoreBlacklist: () => void;
+let roomReducer: (typeof import("../../../src/reducers/roomSlice"))["default"];
 
 beforeAll(async () => {
   await import("../../../src/store");
+  ({ default: roomReducer } = await import("../../../src/reducers/roomSlice"));
   // The database worker bundle is not inlined under `bun test`, so the
   // fail-closed blacklist lookup would report every peer as blocked and
   // baseQuery would return before it ever looked at a transport.
@@ -121,7 +127,9 @@ afterEach(() => {
   clearRetiredPeerSocketGenerations(ROOM_ID, PEER_ID);
 });
 
-const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
+const fakeApi = (
+  handshakeStatusByPeer: Record<string, PeerHandshakeStatus> = {},
+): { api: BaseQueryApi; dispatched: unknown[] } => {
   const dispatched: unknown[] = [];
   const state = {
     keyPair: {
@@ -141,6 +149,7 @@ const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
         url: ROOM_URL,
         rtcConfig: { iceServers: [] },
         signalingActive: true,
+        handshakeStatusByPeer,
         peers: [],
         channels: [],
         messages: [],
@@ -160,6 +169,12 @@ const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
         return Object.assign(Promise.resolve({ data: undefined }), {
           unwrap: async () => undefined,
         });
+      Object.assign(state, {
+        rooms: roomReducer(
+          state.rooms as unknown as ManagedRoom[],
+          action as { type: string },
+        ),
+      });
       return action;
     },
     getState: () => state,
@@ -228,6 +243,38 @@ const run = async (
 };
 
 describe("baseQuery reacts to a peer's socket generation", () => {
+  test("a fresh remote connection retries only that identity after a terminal PIN failure", async () => {
+    const { api } = fakeApi({
+      [PEER_ID]: {
+        status: "failed",
+        reason: "pin-mismatch",
+        peerPublicKey: LOWER_PUBLIC_KEY,
+      },
+      other: {
+        status: "failed",
+        reason: "policy",
+        peerPublicKey: "ab".repeat(32),
+      },
+    });
+    const peers: IRTCPeerConnection[] = [];
+    await expect(
+      run(api, peers, {
+        peerSocketGenerationSource: "roster",
+        peerSocketGeneration: G1,
+      }),
+    ).rejects.toThrow("requires deliberate retry");
+    expect(peers).toHaveLength(0);
+    await run(api, peers, {
+      peerSocketGenerationSource: "connection",
+      peerSocketGeneration: G2,
+    });
+    expect(peers).toHaveLength(1);
+    const room = (api.getState() as { rooms: ManagedRoom[] }).rooms[0];
+    expect(room.handshakeStatusByPeer?.[PEER_ID]).toBeUndefined();
+    expect(room.handshakeStatusByPeer?.other?.reason).toBe("policy");
+    peers[0].close();
+  });
+
   // C1: the peer's identity reappeared on a second socket, the server evicted
   // the first, and this transport is bound to a socket that no longer exists.
   // Nothing on it will ever fail, so only the generation can retire it.

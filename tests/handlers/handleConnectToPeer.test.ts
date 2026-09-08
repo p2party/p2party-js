@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, jest, test } from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
+import type { PeerHandshakeStatus } from "../../src/reducers/roomSlice";
 
 // handleConnectToPeer imports the signaling API, which imports the Redux
 // store, whose identity slice reads localStorage at module initialization.
@@ -124,6 +125,7 @@ const HIGHER_PUBLIC_KEY = "ff".repeat(32);
 
 const fakeApi = (
   selfPublicKey: string = LOWER_PUBLIC_KEY,
+  handshakeStatusByPeer: Record<string, PeerHandshakeStatus> = {},
 ): { api: BaseQueryApi; dispatched: unknown[] } => {
   const dispatched: unknown[] = [];
   const state = {
@@ -141,6 +143,7 @@ const fakeApi = (
         url: ROOM_URL,
         rtcConfig: { iceServers: [] },
         signalingActive: true,
+        handshakeStatusByPeer,
         peers: [],
         channels: [],
         messages: [],
@@ -232,6 +235,49 @@ const redials = (dispatched: unknown[]): unknown[] =>
   );
 
 describe("handleConnectToPeer edge teardown follow-up", () => {
+  test.each(["pin-mismatch", "pin-throttled", "policy"] as const)(
+    "%s cannot create another transport until deliberate retry",
+    async (reason) => {
+      const { api } = fakeApi(LOWER_PUBLIC_KEY, {
+        [PEER_ID]: {
+          status: "failed",
+          reason,
+          peerPublicKey: HIGHER_PUBLIC_KEY,
+        },
+      });
+      await expect(connect(api)).rejects.toThrow("requires deliberate retry");
+    },
+  );
+
+  test("a new signaling peerId cannot bypass the same identity's terminal failure", async () => {
+    const { api } = fakeApi(LOWER_PUBLIC_KEY, {
+      "old-peer-id": {
+        status: "failed",
+        reason: "pin-mismatch",
+        peerPublicKey: HIGHER_PUBLIC_KEY,
+      },
+    });
+    await expect(connect(api)).rejects.toThrow("requires deliberate retry");
+  });
+
+  test("transport failure and a different identity's failure still allow recovery", async () => {
+    const { api } = fakeApi(LOWER_PUBLIC_KEY, {
+      [PEER_ID]: {
+        status: "failed",
+        reason: "transport",
+        peerPublicKey: HIGHER_PUBLIC_KEY,
+      },
+      "other-peer": {
+        status: "failed",
+        reason: "pin-mismatch",
+        peerPublicKey: "aa".repeat(32),
+      },
+    });
+    const { epc } = await connect(api);
+    expect(epc.withPeerPublicKey).toBe(HIGHER_PUBLIC_KEY);
+    epc.close();
+  });
+
   test("an edge that had connected re-dials the room after a failed teardown", async () => {
     const { api, dispatched } = fakeApi();
     const { epc } = await connect(api);

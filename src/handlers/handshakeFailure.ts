@@ -1,4 +1,39 @@
-import type { PeerHandshakeFailureReason } from "../reducers/roomSlice";
+import type {
+  PeerHandshakeFailureReason,
+  PeerHandshakeStatus,
+} from "../reducers/roomSlice";
+
+export type HandshakeRetryStatus = Pick<
+  PeerHandshakeStatus,
+  "reason" | "peerPublicKey"
+> & {
+  readonly status: string;
+};
+
+export const isTerminalHandshakeStatus = (
+  status: HandshakeRetryStatus | undefined,
+): boolean =>
+  status?.status === "failed" &&
+  status.reason !== undefined &&
+  isTerminalHandshakeFailure(status.reason);
+
+/** A new socket or peerId cannot repair a PIN or policy mismatch. */
+export const hasTerminalPeerHandshakeFailure = (
+  statuses:
+    Readonly<Record<string, HandshakeRetryStatus | undefined>> | undefined,
+  peerId: string,
+  peerPublicKey?: string,
+): boolean =>
+  Object.entries(statuses ?? {}).some(
+    ([failedPeerId, status]) =>
+      isTerminalHandshakeStatus(status) &&
+      ((failedPeerId === peerId &&
+        (peerPublicKey === undefined ||
+          status?.peerPublicKey === undefined ||
+          status.peerPublicKey === peerPublicKey)) ||
+        (peerPublicKey !== undefined &&
+          status?.peerPublicKey === peerPublicKey)),
+  );
 
 /**
  * A handshake failure that already knows why it failed.

@@ -33,6 +33,7 @@ import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebo
 import {
   createRoomRosterReconciler,
   isRoomRosterStranded,
+  hasOnlyTerminalPeerHandshakeFailures,
 } from "../utils/roomRosterReconciler";
 
 import {
@@ -167,7 +168,8 @@ export const createRoomListenerMiddleware = (
               signalingServer.isVerified &&
               isUUID(keyPair.peerId) &&
               roomIndex > -1 &&
-              isUUID(rooms[roomIndex].id)
+              isUUID(rooms[roomIndex].id) &&
+              !hasOnlyTerminalPeerHandshakeFailures(rooms[roomIndex])
             ) {
               // Debounce peers requests to prevent rapid re-requests. A re-dial
               // after an edge teardown gets its own budget: it may land inside
@@ -285,7 +287,8 @@ export const createRoomListenerMiddleware = (
               signalingServer.isVerified &&
               isUUID(keyPair.peerId) &&
               roomIndex > -1 &&
-              isUUID(rooms[roomIndex].id)
+              isUUID(rooms[roomIndex].id) &&
+              !hasOnlyTerminalPeerHandshakeFailures(rooms[roomIndex])
             ) {
               debugLog(
                 "[roomListenerMiddleware] Sending peers request for room:",

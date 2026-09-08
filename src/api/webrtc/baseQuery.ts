@@ -22,6 +22,7 @@ import type {
   IRTCDataChannel,
 } from "./interfaces";
 import type { State } from "../../store";
+import { allowPeerHandshakeRetry } from "../../reducers/roomSlice";
 
 export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
@@ -83,6 +84,14 @@ const webrtcBaseQuery: BaseQueryFn<
 
     const blacklisted = await getDBPeerIsBlacklisted(peerId);
     if (blacklisted) return { data: undefined };
+
+    // A server `connection` follows the peer building a fresh transport. It
+    // allows a corrected PIN on just that peer to retry our failed edge.
+    // Advisory roster repeats do not carry this intent. The current wire does
+    // not distinguish manual remote retries from remote socket reconnects;
+    // both remain subject to the existing durable PIN attempt throttle.
+    if (peerSocketGenerationSource === "connection")
+      api.dispatch(allowPeerHandshakeRetry({ roomId, peerId, peerPublicKey }));
 
     const connectionIndex = findRoomPeerConnectionIndex(
       peerConnections,

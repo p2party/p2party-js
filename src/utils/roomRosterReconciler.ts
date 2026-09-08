@@ -1,4 +1,9 @@
 import { isUUID } from "class-validator";
+import {
+  hasTerminalPeerHandshakeFailure,
+  isTerminalHandshakeStatus,
+} from "../handlers/handshakeFailure";
+import type { HandshakeRetryStatus } from "../handlers/handshakeFailure";
 
 /**
  * Bounded "is anyone still there?" retries for a room that has nobody in it.
@@ -150,9 +155,12 @@ export const createRoomRosterReconciler = <Handle>(
 export interface ReconcilableRoom {
   readonly id: string;
   readonly signalingActive?: boolean;
-  readonly peers: readonly { readonly peerId: string }[];
+  readonly peers: readonly {
+    readonly peerId: string;
+    readonly peerPublicKey?: string;
+  }[];
   readonly handshakeStatusByPeer?: Readonly<
-    Record<string, { readonly status: string } | undefined>
+    Record<string, HandshakeRetryStatus | undefined>
   >;
 }
 
@@ -160,6 +168,23 @@ export interface ReconcilableSocket {
   readonly isConnected: boolean;
   readonly isVerified: boolean;
 }
+
+/** Known peers all need a deliberate authentication retry, not another roster. */
+export const hasOnlyTerminalPeerHandshakeFailures = (
+  room: ReconcilableRoom,
+): boolean => {
+  const statuses = room.handshakeStatusByPeer ?? {};
+  if (room.peers.length > 0)
+    return room.peers.every((peer) =>
+      hasTerminalPeerHandshakeFailure(
+        statuses,
+        peer.peerId,
+        peer.peerPublicKey,
+      ),
+    );
+  const known = Object.values(statuses);
+  return known.length > 0 && known.every(isTerminalHandshakeStatus);
+};
 
 /**
  * Whether a room is worth asking about again.
@@ -179,9 +204,14 @@ export const isRoomRosterStranded = (
   if (!socket.isConnected || !socket.isVerified) return false;
   if (room.signalingActive === false) return false;
   if (!isUUID(room.id)) return false;
-  if (room.peers.length === 0) return true;
+  if (hasOnlyTerminalPeerHandshakeFailures(room)) return false;
   const statuses = room.handshakeStatusByPeer ?? {};
-  return !room.peers.some(
-    (peer) => statuses[peer.peerId]?.status === "authenticated",
-  );
+  if (
+    room.peers.some((peer) => statuses[peer.peerId]?.status === "authenticated")
+  )
+    return false;
+  // Terminal authentication failures survive roster deletion. Re-introducing
+  // that same identity cannot fix its PIN/policy, and must not consume another
+  // PIN attempt every time the empty-room backoff fires.
+  return true;
 };

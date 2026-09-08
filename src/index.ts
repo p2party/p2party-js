@@ -117,6 +117,7 @@ import {
   rtcConfigurationsEqual,
   setConnectionRelay,
   setRoom,
+  clearPeerHandshakeFailures,
   setOnlyConnectWithKnownPeers,
   deleteMessage,
   deleteRoom,
@@ -447,6 +448,10 @@ const connect = async (
         deleteRoomPin(roomUrl);
         pinChanged = true;
       }
+      // connect() is the application's deliberate retry boundary. Automatic
+      // socket/roster recovery never calls it, so a terminal PIN/policy failure
+      // stays stopped until the caller accepts this room's settings again.
+      dispatch(clearPeerHandshakeFailures(roomUrl));
       completeSignalingRoomJoin(roomUrl, normalizedRequestedUrl);
     } catch (error) {
       if (pinChanged) {

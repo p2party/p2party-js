@@ -813,6 +813,30 @@ const roomSlice = createSlice({
       }
     },
 
+    /** Explicit connect() retry; ordinary signaling refreshes never clear failures. */
+    clearPeerHandshakeFailures: (state, action: PayloadAction<string>) => {
+      const room = state.find((candidate) => candidate.url === action.payload);
+      if (!room?.handshakeStatusByPeer) return;
+      for (const [peerId, status] of Object.entries(room.handshakeStatusByPeer))
+        if (status.status === "failed")
+          delete room.handshakeStatusByPeer[peerId];
+    },
+
+    allowPeerHandshakeRetry: (state, action: PayloadAction<SetPeerArgs>) => {
+      const { roomId, peerId, peerPublicKey } = action.payload;
+      const room = state.find((candidate) => candidate.id === roomId);
+      if (!room?.handshakeStatusByPeer) return;
+      for (const [failedPeerId, status] of Object.entries(
+        room.handshakeStatusByPeer,
+      ))
+        if (
+          status.status === "failed" &&
+          (status.peerPublicKey === peerPublicKey ||
+            (status.peerPublicKey === undefined && failedPeerId === peerId))
+        )
+          delete room.handshakeStatusByPeer[failedPeerId];
+    },
+
     setPeerHandshakeStatus: (
       state,
       action: PayloadAction<SetPeerHandshakeStatusArgs>,
@@ -1225,6 +1249,8 @@ export const {
   setPeer,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
+  clearPeerHandshakeFailures,
+  allowPeerHandshakeRetry,
   setChannel,
   setIceServers,
   setMessage,

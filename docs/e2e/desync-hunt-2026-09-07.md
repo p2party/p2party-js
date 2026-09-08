@@ -112,3 +112,42 @@ SDK `p2party-js` @ `3c7f169`, `p2party-server`, `p2party.com`. 35 findings → *
 **Folded as duplicates** (same trigger, chain and end state; no distinct sub-mechanism): 9, 12, 16, 18, 24 → C1 · 11 → C2 · 34 → C3 · 29 → C4 · 32 → C5 · 22, 33 → C8 · 19 → C9 · 30 → P1. Findings 1 and 17 fold into C1 as its socket-re-take sub-mechanism (both fully verified); 8 into C2 as its policy/suite trigger (mechanism confirmed, realism weaker than a PIN typo); 15 into C4 as a genuinely distinct *server-side* trigger whose consequence is C4's root cause (its own trigger narrows: only `purgeRoom` sends `leaveRoom`, `index.ts:1632-1633`, so it needs a deliberate purge ~100–500 ms after a join — the DB-error arm is the realistic one).
 
 **Corrections to the findings' own claims** (none change a verdict): finding 12's "the TURN refresh is a no-op" is wrong — it is C1's ≈55 min heal path. Finding 7's "≈4–5 min to the PIN cap" is ≈8.5 min of real attempts, since throttled iterations record nothing. Finding 23's "3 attempts ≈ 90 s" is wrong — `:1014` breaks on the first null resume. Finding 32's "coverRuntime tests use drift 0" is wrong (`coverRuntime.test.ts:147-152` yields 99 ms; the *scheduler* tests pass 0). Finding 29's navbar-without-onClick point is moot — `buttons/signalingServerNavbar.tsx` is imported nowhere. Finding 31's "937 ms slot spacing on the default preset" is 1875 ms.
+
+## 5. Implementation outcome
+
+The accepted remediation takes C1–C5, C7–C8, and C9's introduction gate.
+The original investigation above is preserved; the entries below describe the
+implementation and its deliberately smaller scope. Current acceptance evidence
+is in [the browser results](README.md).
+
+| Cluster | Implementation                                                                                                                                                                                                                                             |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1      | SDK `f0ad86e`, `3140880`; server `d7f2939`, `79e025e`, `3b20bd8`: carry and validate socket generations, replace predecessor transports, bound unnegotiated rebuilds. Old servers cannot provide this generation; see ROADMAP.                             |
+| C2      | `3dc9e83`, `cb93bd7`, `7e09188`: terminal handshake classification, channel-close suppression, terminal-only discovery gating, and one-sided deliberate retry. Site `9415419` leaves permanent-close/backoff ownership to the SDK.                         |
+| C3      | `8a3ab01`, `a21fcc7`, `ff1c2a6`: schedule-derived progress budget, suspension handling, authenticated CANCEL, durable and live-state receive cleanup, room scope, and queued-completion protection.                                                        |
+| C4      | SDK `35252fd`, `b19a170`; server `15af423` and subsequent fault-handling reviews: bounded autonomous signaling reconnect and request-local handling of recoverable failures. The site must let the SDK own reconnect backoff and permanent close handling. |
+| C5      | `a00ce39`, `59d264f`: degrade and re-arm late scheduled boundaries; distinguish suspended cover from a dead peer.                                                                                                                                          |
+| C6      | Deferred: sparse-PQ healing must include pending real scheduled jobs. See [ROADMAP](../../ROADMAP.md).                                                                                                                                                     |
+| C7      | `ccec9f9`, `d18112c`: wait for current authentication on resumed channels, distinguish local closure from peer CANCEL, and drop an exhausted pre-auth frame without closing the transfer.                                                                  |
+| C8      | `47d4691`, `ff1c2a6`: retain send state, re-derive and re-offer on a replacement runtime, retain generation waiters under churn, and honor completion during a generation wait.                                                                            |
+| C9      | Server `15af423`: introductions are allowed during the ping-to-pong window. The roster reply/protocol half is deferred with C11; see ROADMAP.                                                                                                              |
+| C10     | Deferred: durable sender outbox and stale receive-partial sweep. See ROADMAP.                                                                                                                                                                              |
+| C11     | Deferred: per-member reconciliation and an n=3 blackhole harness. See ROADMAP.                                                                                                                                                                             |
+
+Three corrections established while implementing the original report:
+
+- A verified socket cannot use `challengeId` directly as its generation:
+  verification clears that field. The server preserves the successfully consumed
+  value separately as `socketGeneration`.
+- Server handlers are in `src/utils/`, including `handleConnection.ts`;
+  references above to `src/handlers/` and the old socket-eviction line numbers
+  are historical and should not be used as current navigation.
+- The immediate send loop does have a `MAX_RESUME_ATTEMPTS` cap. Its first null
+  resume can still break the loop earlier; the deferred C10 persistence problem
+  is not evidence that no attempt cap exists.
+
+The historical “151/151 chunks, zero retransmits” observation is delivery
+coverage, not evidence that selective resume executed. Current transfer results
+record byte equality, sender outcome and chunk-count monotonicity; selective
+scheduled resume remains deferred because scheduled per-chunk receipts do not
+exist.

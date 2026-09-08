@@ -1,0 +1,1041 @@
+{
+  "date": "2026-09-08",
+  "scope": "Accepted C1-C5, C7-C8 and minimal C9 remediation; deferred clusters remain in ROADMAP.md",
+  "environment": "macOS, headless Chromium, two peers over loopback; CPU-throttled arm runs alone",
+  "sdkVersion": "0.14.8",
+  "serverVersion": "0.1.2",
+  "productionSdkCommit": "7e09188",
+  "siteCommit": "f88cd39",
+  "serverCommit": "b901278",
+  "sdkArtifactSha256": "631bdc04b1b3591b644d48a0d63d35d20bf60af7f1d6c817e869015e7bbbc076",
+  "matrixCoverage": {
+    "arms": 23,
+    "driverPasses": 22,
+    "boundedNonConvergenceResiduals": 1
+  },
+  "provenance": {
+    "1200": {
+      "manifest": "docs/e2e/runs/matrix-1200.json",
+      "manifestSha256": "1cd8d84266e00eff0b180a6ba9dc8d70b1f842403e078f104770155c36465b2a",
+      "inputs": {
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "desync-driver.mjs": "2fa50a4b3238cc1ef68fafe0b056ac93a93948bfb8045af46ee46196fd965a87",
+        "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+        "relay.ts": "3a725f23ee4801331ac9f513972a6d78d1536fda9c7597cfc5d9cffb1d7d898e",
+        "app.html": "cb11eb3c05c19333d0505deff2ec1b27f969189e9aa521572848ca23290d7160",
+        "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+      },
+      "inputsUnchanged": true,
+      "interrupted": "SIGTERM",
+      "acceptedArms": [1, 2, 3, 5, 6, 7]
+    },
+    "1400": {
+      "manifest": "docs/e2e/runs/matrix-1400.json",
+      "manifestSha256": "74c1e6de9e86d9ba8d3b22224cc854702248c6b56d0d2eccdc06415a87af1f12",
+      "inputs": {
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+        "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+        "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+        "relay.ts": "3a725f23ee4801331ac9f513972a6d78d1536fda9c7597cfc5d9cffb1d7d898e",
+        "app.html": "cb11eb3c05c19333d0505deff2ec1b27f969189e9aa521572848ca23290d7160",
+        "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+      },
+      "inputsUnchanged": true,
+      "interrupted": null,
+      "acceptedArms": [
+        4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23
+      ]
+    },
+    "1500": {
+      "manifest": "docs/e2e/runs/matrix-1500.json",
+      "manifestSha256": "05e338771d3f9530a2ed084d6782edbdf91e6ab3a6c8b55b6c85a5a841d2987b",
+      "inputs": {
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+        "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+        "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+        "relay.ts": "3a725f23ee4801331ac9f513972a6d78d1536fda9c7597cfc5d9cffb1d7d898e",
+        "app.html": "cb11eb3c05c19333d0505deff2ec1b27f969189e9aa521572848ca23290d7160",
+        "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+      },
+      "inputsUnchanged": true,
+      "interrupted": null,
+      "acceptedArms": [21]
+    }
+  },
+  "evidenceSelection": "1200 was interrupted after its first eight arms finished: six unaffected immediate-mode passes are retained; object-symmetry-only failures 4/8 and interrupted 9/10 are replaced by 1400. Production inputs match. The final driver keeps object symmetry diagnostic, budgets scheduled probes for cadence, and rejects I4 after the unchanged observation window. No interrupted arm is accepted. Arm1421 failed its15-second recovery bound because the host slept for22 seconds immediately after thaw (pmset confirms16:00:04-16:00:26UTC); preserve that failed result. Arm1521 reruns it unchanged under a confirmed caffeinate idle-sleep assertion.",
+  "excludedCpuRun": {
+    "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1421.json",
+    "sourceSha256": "4fbb5f9ad06a049a71078fa693d916f5d113ccff8685b71864e7af27f0172946",
+    "driverPass": false,
+    "problems": [
+      "I2 did not recover within 15s of thaw: first=21.886s (scenario proc-freeze-20 role responder)",
+      "authenticated edge did not recover within 15s of thaw: first=22.877s (scenario proc-freeze-20 role responder)"
+    ],
+    "hostSleepStartUTC": "2026-09-08T16:00:04Z",
+    "hostSleepEndUTC": "2026-09-08T16:00:26Z",
+    "powerLog": "docs/e2e/runs/desync-host-sleep-2026-09-08.log",
+    "powerLogSha256": "d7da7c1063b7381579c414832165c113146e2b494afeafd51dbe312cee68fe1d",
+    "rerun": 1521
+  },
+  "runs": [
+    {
+      "arm": 1,
+      "run": 1201,
+      "args": ["baseline", "initiator", "--port=5860", "--n=1201"],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/baseline-initiator-1201.json",
+      "sourceSha256": "03b25ed5186f4ae18c44fb5bc9130cdc416d44e41d540cb323a573b5a9228f69",
+      "observationSeconds": 120,
+      "I2Seconds": 0.008,
+      "authenticatedSeconds": 0.008,
+      "I4Seconds": 0.466,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 2,
+      "run": 1202,
+      "args": ["ws-drop", "initiator", "--port=5862", "--n=1202"],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/ws-drop-initiator-1202.json",
+      "sourceSha256": "35e29af4055d00903e4fad6ea4045a771b633660efac3a84c807adc838a6aa4b",
+      "observationSeconds": 120,
+      "I2Seconds": 0.008,
+      "authenticatedSeconds": 0.008,
+      "I4Seconds": 0.877,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 3,
+      "run": 1203,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--port=5860",
+        "--n=1203"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1203.json",
+      "sourceSha256": "dbf3de6376a3c14ffbd110481351d4cc35431839c7ef67ef5dcebc78c809fe2f",
+      "observationSeconds": 120,
+      "I2Seconds": 2.011,
+      "authenticatedSeconds": 2.011,
+      "I4Seconds": 2.473,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 4,
+      "run": 1404,
+      "args": [
+        "proc-freeze-20",
+        "responder",
+        "--udpflood=1",
+        "--port=5860",
+        "--n=1404"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1404.json",
+      "sourceSha256": "c5a7782ea2afa2bd614de09d4e63b9388b96a9af841338465831d05ad4e82359",
+      "observationSeconds": 120,
+      "I2Seconds": 3.01,
+      "authenticatedSeconds": 3.01,
+      "I4Seconds": 3.465,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": false,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 5,
+      "run": 1205,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--socket=keep",
+        "--port=5860",
+        "--n=1205"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1205.json",
+      "sourceSha256": "88c89fe48af27a5573ae29691e47ea64861b7a98f42a23ffd200fa6d9ec79a27",
+      "observationSeconds": 120,
+      "I2Seconds": 6.013,
+      "authenticatedSeconds": 6.013,
+      "I4Seconds": 6.493,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 6,
+      "run": 1206,
+      "args": [
+        "proc-freeze-20",
+        "responder",
+        "--udpflood=1",
+        "--socket=keep",
+        "--port=5862",
+        "--n=1206"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1206.json",
+      "sourceSha256": "6619bac67ff7b2dcd2945cd65455836536430987bbad63ecbc63e4b93c6b77ab",
+      "observationSeconds": 120,
+      "I2Seconds": 1.008,
+      "authenticatedSeconds": 1.008,
+      "I4Seconds": 1.465,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 7,
+      "run": 1207,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--socket=stranded",
+        "--port=5860",
+        "--n=1207"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1207.json",
+      "sourceSha256": "4bb88adf82ef0864c84c4b9fc22298622ae3f7e76970237419a1e3ac6dfc318d",
+      "observationSeconds": 120,
+      "I2Seconds": 6.015,
+      "authenticatedSeconds": 6.015,
+      "I4Seconds": 6.483,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 8,
+      "run": 1408,
+      "args": [
+        "proc-freeze-20",
+        "responder",
+        "--udpflood=1",
+        "--socket=stranded",
+        "--port=5862",
+        "--n=1408"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1408.json",
+      "sourceSha256": "000bc0ecaf5928d14af4dfaedf1258c56036aaad8996f79f6e37fbf9154c9559",
+      "observationSeconds": 120,
+      "I2Seconds": 6.011,
+      "authenticatedSeconds": 6.011,
+      "I4Seconds": 6.478,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": false,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 9,
+      "run": 1409,
+      "args": [
+        "proc-freeze-45",
+        "initiator",
+        "--udpflood=1",
+        "--port=5864",
+        "--n=1409"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-45-initiator-1409.json",
+      "sourceSha256": "449b7a5cc3d0139fdea75de54b29867a7f3e690b5232f052e4e4d637e243ca65",
+      "observationSeconds": 120,
+      "I2Seconds": 1.014,
+      "authenticatedSeconds": 2.015,
+      "I4Seconds": 2.486,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 10,
+      "run": 1410,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--transfer=A2B:8",
+        "--port=5860",
+        "--n=1410"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1410.json",
+      "sourceSha256": "d1e736f8a029eaf15a0b44faf7d6b6418642730b05b1cf491de8045d3652b58e",
+      "observationSeconds": 120,
+      "I2Seconds": 2.013,
+      "authenticatedSeconds": 2.013,
+      "I4Seconds": 7.493,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": {
+        "spec": "A2B:8",
+        "bytes": 8388608,
+        "byteExact": true,
+        "receiverCompleteSeconds": 7.018,
+        "senderDeliveredSeconds": 7.018,
+        "chunkCountMonotonic": true,
+        "receiverChunks": 151,
+        "senderRetransmits": 2,
+        "receiverRetransmits": 0
+      }
+    },
+    {
+      "arm": 11,
+      "run": 1411,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--transfer=B2A:8",
+        "--port=5862",
+        "--n=1411"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1411.json",
+      "sourceSha256": "3bac9e5cb9488dff003c8ca3be6d773aec28122021a2fd94ed8ac810c80bbbe0",
+      "observationSeconds": 120,
+      "I2Seconds": 2.015,
+      "authenticatedSeconds": 2.015,
+      "I4Seconds": 5.521,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": {
+        "spec": "B2A:8",
+        "bytes": 8388608,
+        "byteExact": true,
+        "receiverCompleteSeconds": 5.021,
+        "senderDeliveredSeconds": 5.021,
+        "chunkCountMonotonic": true,
+        "receiverChunks": 151,
+        "senderRetransmits": 2,
+        "receiverRetransmits": 0
+      }
+    },
+    {
+      "arm": 12,
+      "run": 1412,
+      "args": [
+        "proc-freeze-20",
+        "responder",
+        "--udpflood=1",
+        "--transfer=A2B:8",
+        "--port=5864",
+        "--n=1412"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1412.json",
+      "sourceSha256": "915520673280bae56548f7c99e199f14c160dfba43313d72685ba93ee17d59df",
+      "observationSeconds": 120,
+      "I2Seconds": 12.023,
+      "authenticatedSeconds": 12.023,
+      "I4Seconds": 15.497,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": {
+        "spec": "A2B:8",
+        "bytes": 8388608,
+        "byteExact": true,
+        "receiverCompleteSeconds": 15.024,
+        "senderDeliveredSeconds": 15.024,
+        "chunkCountMonotonic": true,
+        "receiverChunks": 151,
+        "senderRetransmits": 2,
+        "receiverRetransmits": 0
+      }
+    },
+    {
+      "arm": 13,
+      "run": 1413,
+      "args": [
+        "ws-drop-nofocus",
+        "initiator",
+        "--observe=150",
+        "--port=5860",
+        "--n=1413"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-initiator-1413.json",
+      "sourceSha256": "c508bc6a95e73abdfb14eef797d1eb47c9c9c9ed3ff160e0ee03879e661df02a",
+      "observationSeconds": 150,
+      "I2Seconds": 0.01,
+      "authenticatedSeconds": 0.01,
+      "I4Seconds": 0.479,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 14,
+      "run": 1414,
+      "args": [
+        "ws-drop-nofocus",
+        "responder",
+        "--observe=150",
+        "--port=5862",
+        "--n=1414"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-responder-1414.json",
+      "sourceSha256": "8a6f3262fa5f36f31a10fc7ec911831917e9529ce9bdfc54ac78f5c7e14fa476",
+      "observationSeconds": 150,
+      "I2Seconds": 0.008,
+      "authenticatedSeconds": 0.008,
+      "I4Seconds": 0.479,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 15,
+      "run": 1415,
+      "args": [
+        "pin-typo",
+        "initiator",
+        "--observe=120",
+        "--port=5864",
+        "--n=1415"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/pin-typo-initiator-1415.json",
+      "sourceSha256": "cbbbe224c9ded594af702fc6db7f91be94a21f8b1753dd93becd0532f1b600e3",
+      "observationSeconds": 120,
+      "I2Seconds": "never",
+      "authenticatedSeconds": "never",
+      "I4Seconds": "never",
+      "heldAtEnd": {
+        "I1": true,
+        "I2": false,
+        "I3": false,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": false
+      },
+      "finalBothAuthenticated": false,
+      "finalFingerprintAgreement": null,
+      "transfer": null,
+      "pin": {
+        "transportBudget": 1,
+        "transportsPerSide": {
+          "P1": 1,
+          "P2": 1
+        },
+        "bothReportPinMismatch": true,
+        "noPeersRequestsAfterTerminalFailure": true
+      }
+    },
+    {
+      "arm": 16,
+      "run": 1416,
+      "args": [
+        "two-tabs",
+        "responder",
+        "--observe=300",
+        "--port=5864",
+        "--n=1416"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/two-tabs-responder-1416.json",
+      "sourceSha256": "4350432ce67bfd358c6d2b7a6de583d42ee294c426707c088ab904f20c8af815",
+      "observationSeconds": 300,
+      "I2Seconds": 0.221,
+      "authenticatedSeconds": 0.221,
+      "I4Seconds": 0.684,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 17,
+      "run": 1417,
+      "args": [
+        "two-tabs",
+        "initiator",
+        "--observe=300",
+        "--port=5862",
+        "--n=1417"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/two-tabs-initiator-1417.json",
+      "sourceSha256": "fb31cc39ec4c01aaa0ce5389557f6040f80e8d1d20d72621091144a93a146cf9",
+      "observationSeconds": 300,
+      "I2Seconds": 0.221,
+      "authenticatedSeconds": 0.221,
+      "I4Seconds": 0.687,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 18,
+      "run": 1418,
+      "args": [
+        "cover-stall",
+        "initiator",
+        "--mode=scheduled",
+        "--cadence=10000",
+        "--observe=180",
+        "--port=5860",
+        "--n=1418"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/cover-stall-initiator-1418.json",
+      "sourceSha256": "8ce1888c36554ceffcb073e1f5448c186869294cd6aa59f09de73005dac01aca",
+      "observationSeconds": 180,
+      "I2Seconds": 0.009,
+      "authenticatedSeconds": 0.009,
+      "I4Seconds": 18.582,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 19,
+      "run": 1419,
+      "args": [
+        "baseline",
+        "initiator",
+        "--mode=scheduled",
+        "--cadence=70000",
+        "--observe=300",
+        "--port=5860",
+        "--n=1419"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/baseline-initiator-1419.json",
+      "sourceSha256": "5d20e9fc9cb8ab979b3b32e039076ede6f32169b7f72ee8122c8098c91eccee9",
+      "observationSeconds": 300,
+      "I2Seconds": 0.008,
+      "authenticatedSeconds": 0.008,
+      "I4Seconds": 139.916,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 20,
+      "run": 1420,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--mode=scheduled",
+        "--cadence=10000",
+        "--transfer=A2B:0.5",
+        "--observe=240",
+        "--transferdeadline=200",
+        "--port=5864",
+        "--n=1420"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1420.json",
+      "sourceSha256": "48496ee0a89cffbb417142813548c659bb2665b4683cb143581bdac9773ab2ce",
+      "observationSeconds": 240,
+      "I2Seconds": 2.023,
+      "authenticatedSeconds": 2.023,
+      "I4Seconds": 79.732,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": {
+        "spec": "A2B:0.5",
+        "bytes": 524288,
+        "byteExact": true,
+        "receiverCompleteSeconds": 56.106,
+        "senderDeliveredSeconds": 60.109,
+        "chunkCountMonotonic": true,
+        "receiverChunks": 10,
+        "senderRetransmits": null,
+        "receiverRetransmits": 0
+      }
+    },
+    {
+      "arm": 21,
+      "run": 1521,
+      "args": [
+        "proc-freeze-20",
+        "responder",
+        "--udpflood=1",
+        "--transfer=A2B:8",
+        "--cpuslow=A:6",
+        "--observe=180",
+        "--transferdeadline=150",
+        "--port=5860",
+        "--n=1521"
+      ],
+      "stripSocketGeneration": false,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-1521.json",
+      "sourceSha256": "793dd6a3bbbe63dc2cb0a28f55fe0758bf2451094e61af895349bca2a2e997ab",
+      "observationSeconds": 180,
+      "I2Seconds": 3.024,
+      "authenticatedSeconds": 3.024,
+      "I4Seconds": 5.92,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": false,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": {
+        "spec": "A2B:8",
+        "bytes": 8388608,
+        "byteExact": true,
+        "receiverCompleteSeconds": 4.025,
+        "senderDeliveredSeconds": 5.023,
+        "chunkCountMonotonic": true,
+        "receiverChunks": 151,
+        "senderRetransmits": null,
+        "receiverRetransmits": 0
+      }
+    },
+    {
+      "arm": 22,
+      "run": 1422,
+      "args": [
+        "proc-freeze-20",
+        "initiator",
+        "--udpflood=1",
+        "--port=5862",
+        "--n=1422"
+      ],
+      "stripSocketGeneration": true,
+      "result": "PASS",
+      "driverPass": true,
+      "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-1422.json",
+      "sourceSha256": "90838a85623f615a342e187f20bf9d9a79f6cb82c585d745d98d596fe0342c9f",
+      "observationSeconds": 120,
+      "I2Seconds": 2.028,
+      "authenticatedSeconds": 2.028,
+      "I4Seconds": 2.534,
+      "heldAtEnd": {
+        "I1": true,
+        "I2": true,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": true
+      },
+      "finalBothAuthenticated": true,
+      "finalFingerprintAgreement": true,
+      "transfer": null
+    },
+    {
+      "arm": 23,
+      "run": 1423,
+      "args": [
+        "two-tabs",
+        "responder",
+        "--observe=300",
+        "--port=5862",
+        "--n=1423"
+      ],
+      "stripSocketGeneration": true,
+      "result": "bounded non-convergence",
+      "driverPass": false,
+      "sourceArtifact": "docs/e2e/runs/two-tabs-responder-1423.json",
+      "sourceSha256": "9eb9a3c37c5db310372d39b1f21395d240299e9dfb7614e57a83f5ecc5942b3d",
+      "observationSeconds": 300,
+      "I2Seconds": "never",
+      "authenticatedSeconds": "never",
+      "I4Seconds": "never",
+      "heldAtEnd": {
+        "I1": true,
+        "I2": false,
+        "I3": true,
+        "I5": true,
+        "I6": true,
+        "I7": true,
+        "I4": false
+      },
+      "finalBothAuthenticated": false,
+      "finalFingerprintAgreement": null,
+      "transfer": null,
+      "compatibility": {
+        "status": "residual-established",
+        "driverPass": false,
+        "evidence": {
+          "rebuilds": 3,
+          "configuredCap": 3,
+          "finalRebuildCount": 3,
+          "exhaustionEvents": 1,
+          "observedAfterConnectLowerBoundMs": 300479,
+          "observedAfterExhaustionMs": 240439
+        },
+        "problems": []
+      }
+    }
+  ],
+  "actualStack": {
+    "sourceArtifact": "logs/desync/2026-09-08T15-47-27.597Z/result.json",
+    "sourceSha256": "013e801a6e72a9483526ed4e364db8435dfe8563fd849640bc695df69911ec74",
+    "passed": true,
+    "browserPageErrors": 0,
+    "sdk": {
+      "version": "0.14.8",
+      "artifact": "vendor/p2party-0.14.8.tgz",
+      "artifactSha256": "631bdc04b1b3591b644d48a0d63d35d20bf60af7f1d6c817e869015e7bbbc076",
+      "wasmPath": "/vendor/p2party-0.14.8/libcrypto.wasm",
+      "wasmSha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+    },
+    "scenarios": {
+      "roomExchange": {
+        "passed": true
+      },
+      "pageReload": {
+        "passed": true,
+        "rejoinMs": 882
+      },
+      "serverRestart": {
+        "passed": true,
+        "reconnectMs": 3536,
+        "counters": [
+          {
+            "pcCreated": 1,
+            "dcSends": 4,
+            "wsOpened": 2,
+            "roomReplies": 2,
+            "wsCloses": [
+              {
+                "code": 1006,
+                "at": 1788882451251
+              },
+              {
+                "code": 1006,
+                "at": 1788882452432
+              },
+              {
+                "code": 1006,
+                "at": 1788882454646
+              }
+            ],
+            "pcStates": ["connected"]
+          },
+          {
+            "pcCreated": 2,
+            "dcSends": 9,
+            "wsOpened": 2,
+            "roomReplies": 2,
+            "wsCloses": [
+              {
+                "code": 1006,
+                "at": 1788882451251
+              },
+              {
+                "code": 1006,
+                "at": 1788882452370
+              },
+              {
+                "code": 1006,
+                "at": 1788882454512
+              }
+            ],
+            "pcStates": ["closed", "connected"]
+          }
+        ]
+      },
+      "secondTab": {
+        "passed": true,
+        "replacedRole": "responder",
+        "authenticationMs": 886,
+        "oldTab": {
+          "pcCreated": 2,
+          "dcSends": 10,
+          "wsOpened": 2,
+          "roomReplies": 2,
+          "wsCloses": [
+            {
+              "code": 1006,
+              "at": 1788882451251
+            },
+            {
+              "code": 1006,
+              "at": 1788882452370
+            },
+            {
+              "code": 1006,
+              "at": 1788882454512
+            },
+            {
+              "code": 1008,
+              "at": 1788882460408
+            }
+          ],
+          "pcStates": ["closed", "closed"]
+        }
+      },
+      "wrongPin": {
+        "passed": true,
+        "observedMs": 120601,
+        "samples": 120,
+        "pcCreated": [1, 1]
+      },
+      "correctedPin": {
+        "passed": true
+      }
+    }
+  },
+  "checks": {
+    "sdkProductionSuite": {
+      "tests": 1674,
+      "assertions": 23986,
+      "files": 176,
+      "failures": 0,
+      "includesUncommittedPrototypeTests": true
+    },
+    "finalHarnessSuite": {
+      "tests": 50,
+      "assertions": 134,
+      "files": 3,
+      "failures": 0,
+      "overlapsProductionSuite": true
+    },
+    "serverSuite": {
+      "tests": 120,
+      "assertions": 442,
+      "failures": 0
+    },
+    "siteSuite": {
+      "tests": 116,
+      "assertions": 410,
+      "failures": 0
+    }
+  }
+}

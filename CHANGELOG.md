@@ -40,9 +40,10 @@ socket-generation fields provided by signaling server `0.1.2`.
   reconnect controller without requiring a browser focus event. The matching
   site change latches room admission and leaves reconnect backoff and permanent
   socket refusal to the SDK.
-- **C1, replaced signaling sessions:** peer introductions carry a fresh socket
-  generation. A changed generation retires the old peer transport; an
-  unnegotiated responder transport has a bounded rebuild watchdog.
+- **C1, replaced signaling sessions:** peer introductions carry a socket
+  generation. A fresh peer connection with a changed generation retires its
+  predecessor transport; advisory roster updates preserve a live transport.
+  An unnegotiated responder transport has a bounded rebuild watchdog.
 - **C2, terminal handshake failures:** PIN, policy, and suite failures remain
   terminal when their main channel closes. Room reconciliation no longer
   repeats an impossible handshake; a deliberate retry can still correct the PIN.

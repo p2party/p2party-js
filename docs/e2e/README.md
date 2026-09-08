@@ -288,6 +288,145 @@ As with the other harnesses here, this runs against the **development** WASM
 (`src/cryptography/libcrypto.wasm`, SRI-pinned in `wasmLoader.ts`); do not run
 `npm run predist` first.
 
+### Recorded results (2026-09-08, completed remediation)
+
+The accepted C1–C5, C7–C8 and minimal C9 remediation is verified locally with
+SDK **0.14.8**, server **0.1.2**, and the built site vendoring the tested SDK.
+There are **22 passing arms and one established old-server non-convergence
+residual**. This is macOS/headless Chromium, two peers over loopback; it does
+not establish recovery across arbitrary networks or multi-peer rooms.
+
+The [machine-readable record](desync-results-2026-09-08.json) contains every
+arm's arguments, metrics, final invariants, raw-evidence hashes, matrix input
+hashes, and actual-stack result. Raw JSON and console logs remain locally under
+ignored `docs/e2e/runs/` and the site's `logs/desync/`.
+
+Production SDK source is `7e09188`. The final browser bundle SHA-256 is
+`ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f`.
+The packaged SDK tarball vendored in site `f88cd39` has SHA-256
+`631bdc04b1b3591b644d48a0d63d35d20bf60af7f1d6c817e869015e7bbbc076`.
+It was built from a committed SDK snapshot in an ignored nested release clone,
+so release preparation did not overwrite the active checkout's development
+WASM or include the unrelated dirty prototype work. Later harness and
+measurement documentation commits do not change that production source.
+
+The table combines six completed, unaffected immediate-mode arms from matrix
+1200 (1, 2, 3, 5, 6, 7) with sixteen arms from matrix 1400 and CPU-throttled arm 1521 from matrix 1500.
+All three manifests attest unchanged production inputs. Matrix 1200 was interrupted
+after its first eight arms finished; its interrupted arms 9/10 are excluded.
+Its responder arms 4/8 failed only the obsolete I7 object-replacement symmetry
+assertion and were rerun in 1400. The responder can retain its connection
+object while authenticating a new remote certificate: I7 remains recorded as a
+diagnostic, with mutual authentication, matching fingerprints, delivery,
+cleanup and the 15-second freeze recovery bound still required.
+
+The final driver also budgets scheduled probes for their legal cadence instead
+of a fixed 30 seconds. It rejects delivery after the original observation
+window. The six retained immediate-mode runs already met these unchanged
+bounds. Matrix 1100, occupied-relay smoke 801, exploratory drivers and the
+superseded site run with hydration errors are excluded from acceptance.
+
+CPU-throttled run 1421 remains a recorded **failure**: authentication took
+22.877 s after thaw. The system power log independently shows the whole host
+entered idle sleep at 16:00:04 UTC and woke at 16:00:26 UTC, immediately after
+the browser thaw; the driver and relay heartbeat both stopped during that gap.
+Run 1521 repeats the exact arm with the same input hashes under a confirmed
+`caffeinate -i` assertion. Its original 15-second bound is unchanged. The raw
+failed run and matching power-log hashes are retained in the result record.
+
+Times below are seconds after fault clearance; for `two-tabs` they start when
+the replacement connects. `I2` measures roster consistency and can hold with
+empty rosters, so the separate mutually authenticated milestone is mandatory
+for recovery. `I4` requires byte-exact text delivery in both directions.
+
+| Arm / run | Scenario and faulted role                                                                                                        |     I2 | Authenticated |      I4 | Outcome                                                         |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------- | -----: | ------------: | ------: | --------------------------------------------------------------- |
+| 1 / 1201  | `baseline initiator`                                                                                                             |  0.008 |         0.008 |   0.466 | PASS                                                            |
+| 2 / 1202  | `ws-drop initiator`                                                                                                              |  0.008 |         0.008 |   0.877 | PASS                                                            |
+| 3 / 1203  | `proc-freeze-20 initiator --udpflood=1`                                                                                          |  2.011 |         2.011 |   2.473 | PASS                                                            |
+| 4 / 1404  | `proc-freeze-20 responder --udpflood=1`                                                                                          |   3.01 |          3.01 |   3.465 | PASS                                                            |
+| 5 / 1205  | `proc-freeze-20 initiator --udpflood=1 --socket=keep`                                                                            |  6.013 |         6.013 |   6.493 | PASS                                                            |
+| 6 / 1206  | `proc-freeze-20 responder --udpflood=1 --socket=keep`                                                                            |  1.008 |         1.008 |   1.465 | PASS                                                            |
+| 7 / 1207  | `proc-freeze-20 initiator --udpflood=1 --socket=stranded`                                                                        |  6.015 |         6.015 |   6.483 | PASS                                                            |
+| 8 / 1408  | `proc-freeze-20 responder --udpflood=1 --socket=stranded`                                                                        |  6.011 |         6.011 |   6.478 | PASS                                                            |
+| 9 / 1409  | `proc-freeze-45 initiator --udpflood=1`                                                                                          |  1.014 |         2.015 |   2.486 | PASS                                                            |
+| 10 / 1410 | `proc-freeze-20 initiator --udpflood=1 --transfer=A2B:8`                                                                         |  2.013 |         2.013 |   7.493 | PASS; byte-exact, receiver +7.018s / sender delivered +7.018s   |
+| 11 / 1411 | `proc-freeze-20 initiator --udpflood=1 --transfer=B2A:8`                                                                         |  2.015 |         2.015 |   5.521 | PASS; byte-exact, receiver +5.021s / sender delivered +5.021s   |
+| 12 / 1412 | `proc-freeze-20 responder --udpflood=1 --transfer=A2B:8`                                                                         | 12.023 |        12.023 |  15.497 | PASS; byte-exact, receiver +15.024s / sender delivered +15.024s |
+| 13 / 1413 | `ws-drop-nofocus initiator --observe=150`                                                                                        |   0.01 |          0.01 |   0.479 | PASS                                                            |
+| 14 / 1414 | `ws-drop-nofocus responder --observe=150`                                                                                        |  0.008 |         0.008 |   0.479 | PASS                                                            |
+| 15 / 1415 | `pin-typo initiator --observe=120`                                                                                               |  never |         never |   never | PASS; stable PIN failure, one transport per side                |
+| 16 / 1416 | `two-tabs responder --observe=300`                                                                                               |  0.221 |         0.221 |   0.684 | PASS                                                            |
+| 17 / 1417 | `two-tabs initiator --observe=300`                                                                                               |  0.221 |         0.221 |   0.687 | PASS                                                            |
+| 18 / 1418 | `cover-stall initiator --mode=scheduled --cadence=10000 --observe=180`                                                           |  0.009 |         0.009 |  18.582 | PASS                                                            |
+| 19 / 1419 | `baseline initiator --mode=scheduled --cadence=70000 --observe=300`                                                              |  0.008 |         0.008 | 139.916 | PASS                                                            |
+| 20 / 1420 | `proc-freeze-20 initiator --udpflood=1 --mode=scheduled --cadence=10000 --transfer=A2B:0.5 --observe=240 --transferdeadline=200` |  2.023 |         2.023 |  79.732 | PASS; byte-exact, receiver +56.106s / sender delivered +60.109s |
+| 21 / 1521 | `proc-freeze-20 responder --udpflood=1 --transfer=A2B:8 --cpuslow=A:6 --observe=180 --transferdeadline=150`                      |  3.024 |         3.024 |    5.92 | PASS; byte-exact, receiver +4.025s / sender delivered +5.023s   |
+| 22 / 1422 | `old server: proc-freeze-20 initiator --udpflood=1`                                                                              |  2.028 |         2.028 |   2.534 | PASS                                                            |
+| 23 / 1423 | `old server: two-tabs responder --observe=300`                                                                                   |  never |         never |   never | bounded non-convergence                                         |
+
+All five transfer arms were byte-exact, had monotonic received chunk counts,
+and ended with sender outcome `delivered` within their transfer deadlines.
+The historical “151/151 chunks, zero retransmits” was a delivery measurement,
+not proof that selective resume ran. In run 1412 the sender recorded two
+retransmits while the receiver recorded zero; these are different counters.
+Scheduled resume still re-sends every chunk because scheduled per-chunk
+receipts remain deferred.
+
+The intentionally wrong-PIN arm passed its failure-state criteria for 120 s:
+one transport on each side, both reporting PIN mismatch, and no additional
+peer requests after terminal failure. It is not an authenticated connection.
+
+Against a pre-generation server, the responder replacement arm 1423 **did not
+converge**. Its independent evidence checker established exactly three
+rebuilds, one exhaustion warning and four total replacement-page transports;
+no transport was created or rebuilt after exhaustion. The final signaling and
+cleanup diagnostics remained sound. The measured lower bound after replacement
+connect was 300.479 s, including
+240.439 s after budget exhaustion. This limits churn; it does not repair
+C1 against server 0.1.1. The compatibility checker returns
+`residual-established` with `driverPass: false`. A full matrix reports this
+expected non-pass through exit 1; matrix 1400 also recorded the failed
+host-sleep-affected CPU arm described above.
+
+Reproduce the complete matrix from `docs/e2e/desync/` after rebuilding above:
+
+```sh
+# On macOS, keep the host awake while browsers deliberately drop their wake locks.
+caffeinate -i node desync-matrix.mjs --jobs=3 --runbase=1600 --portbase=5860
+node desync-compatibility.mjs ../runs/two-tabs-responder-1623.json ../runs/matrix-1600.json
+```
+
+Arm 21 runs alone so the sixfold CPU-throttle observation is not confounded by
+other matrix browsers. Matrix 1400 was invoked with
+`--arms=4,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23`; its raw manifest and
+all retained 1200 arm hashes are in the machine-readable record. The final
+CPU rerun used `--jobs=1 --runbase=1500 --portbase=5860 --arms=21`.
+
+The actual built site (`f88cd39`) and server (`b901278`) were also tested through
+the UI with isolated PostgreSQL on port 6543. Initial messaging, remembered
+consent after reload (882 ms), unattended server-restart recovery (3,536 ms),
+responder replacement (886 ms, then 10 s without competing socket opens),
+120.6 s of stable visible PIN failure, and delivery after one-sided PIN
+correction all passed. There were zero browser page errors, and every context
+fetched the vendored WASM from the site's origin. The saved-preference hydration
+regression passed navigation and reload on both `/r` and `/rooms` without an
+unrequested connection. See the site's `e2e/desync-local-stack.mjs`,
+`e2e/room-hydration.mjs`, and README for reproduction commands.
+
+Final production checks: SDK **1,674 tests / 23,986 assertions** and both
+TypeScript configurations; server **120 / 442** and TypeScript; site
+**116 / 410**, TypeScript, lint, build, clean offline install and provenance.
+The final three harness test files passed **50 tests / 134 assertions**.
+Those counts overlap the full SDK run; the full SDK run also includes the
+uncommitted prototype tests and is not a desync-only count. Negative controls
+failed for missing final evidence, late recovery, bad diagnostics, PIN churn,
+invalid compatibility evidence and the former scheduled probe deadline.
+
+C6, C10, C11, C9's roster protocol half, per-chunk scheduled receipts and
+old-server socket replacement remain in [ROADMAP](../../ROADMAP.md). No push,
+package publication or deployment is part of this local verification.
+
 ### Recorded results (2026-09-08, C4 bounded signaling reconnect)
 
 `ws-drop-nofocus` is the new arm: A's socket is closed server-side and the

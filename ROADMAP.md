@@ -11,7 +11,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK is being prepared as the `0.14.8` release candidate. The desync
+The SDK `0.14.8` release candidate is verified locally and vendored in the site. The desync
 remediation requires the matching `0.1.2` signaling server for socket-generation
 recovery. Local verification results and remaining limits are recorded in
 [the browser harness report](docs/e2e/README.md).
@@ -80,10 +80,10 @@ transport terminates on the certificate the SDP advertised.
 5. **C1 with a pre-generation signaling server.** Socket-generation recovery
    needs server `0.1.2`. The bounded unnegotiated-transport watchdog limits
    retries against older servers; it cannot provide the missing generation.
-6. **Existing limits.** Retain the historical slow responder-freeze recovery
-   case until the current matrix establishes its latency, identity backup UI,
-   import cycles, unexecuted ProVerif verification, and Firefox's missing
-   post-connect certificate statistics. No sender survives a page reload.
+6. **Existing limits.** Identity backup UI, import cycles, unexecuted ProVerif
+   verification, and Firefox's missing post-connect certificate statistics
+   remain. No sender survives a page reload. Recovery latency outside the
+   measured two-peer loopback scenarios is not established.
 
 **Close the verification gaps.** Three properties are implemented and believed
 correct but still not demonstrated end to end: PIN backoff escalation under
@@ -91,28 +91,20 @@ repeated wrong PINs, packet-trace indistinguishability at n > 2, and cover
 behaviour across a real network rather than loopback. Claims stay out of the
 README until a harness demonstrates them.
 
-The reconnect work in this cycle closed a fourth gap and left a fifth. What it
-demonstrated: two separate headless-Chromium processes against a Bun relay
-mirroring the signaling server, one process SIGSTOPped whole-tree with its UDP
-host-candidate buffers flooded — a phone asleep with the radio off. Across a
-seven-scenario matrix (baseline, socket drop, a 20 s freeze in each identity
-role with the socket dropped and with it kept, and a 45 s freeze) both sides
-reconverge and exchange byte-exact messages 0.5–6.5 s after wake, and four
-in-flight 8 MiB transfer configurations finish byte-exact with the sender
-reporting `delivered` — including the one that previously failed
-deterministically, now 3/3.
+The recovery harness is committed at `docs/e2e/desync/`. It uses separate
+Chromium processes and floods the frozen peer's UDP receive buffers, so a
+process freeze also exercises the lost network traffic that made the original
+split reproducible. Current results, including in-flight immediate and scheduled
+transfers, are recorded in [the E2E report](docs/e2e/README.md).
 
-What it did not do: this is n = 2 on loopback, so it moves neither the n > 2
-gap nor the real-network gap. And the harness itself is not in the repository —
-it was built in a scratch directory, so nobody can re-run it from a clone.
-Committing it is the near-term task; the behaviour it covers is meanwhile held
-by the unit suite, which the same commits extended test-first.
-
-One known follow-up, recorded rather than fixed: when a frozen _identity
-responder_ is carrying an in-flight transfer, convergence takes ~37 s instead
-of the ~5–7 s the other configurations show. The surviving transport's SCTP
-association accepts our new streams but not the peer's, so recovery waits out
-the 30 s handshake step timeout. The outcome is correct; the latency is not.
+The historical responder-transfer case took roughly 37 seconds to reconverge.
+The rebind authentication deadline now rebuilds an association that cannot
+complete its new handshake. In the current responder-freeze 8 MiB arm,
+mutual authentication returned at 12.023 seconds and bidirectional delivery
+verification completed at 15.497 seconds; the transfer was byte-exact and the
+sender reported delivery. These are measurements, not a general network bound.
+The harness remains n=2 on loopback, so it closes neither the n>2 nor the
+real-network verification gap.
 
 **Independent security audit.** The protocol has had no third-party review.
 This is the single most valuable thing that could happen to the project, and

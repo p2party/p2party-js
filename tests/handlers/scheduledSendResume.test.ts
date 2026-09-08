@@ -18,6 +18,7 @@ import {
   METADATA_LEN,
   PROOF_LEN,
   RATCHET_ROOT_SUITE_MLKEM512,
+  WIRE_CHUNK_FRAME_LEN,
 } from "../../src/utils/constants";
 import {
   DEFAULT_ROOM_POLICY_V1,
@@ -31,6 +32,7 @@ import type {
   IRTCPeerConnection,
 } from "../../src/api/webrtc/interfaces";
 import type { CoverRuntime } from "../../src/handlers/coverRuntime";
+import type { ScheduledDeliveryWaitOptions } from "../../src/handlers/coverTransfer";
 
 // The live send orchestration imports the Redux store, whose browser identity
 // slice reads localStorage at module initialization. Install the minimal
@@ -66,6 +68,7 @@ let openRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["openRatc
 let resetRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["resetRatchetGate"];
 let clearTransfer: (typeof import("../../src/handlers/reconcile"))["clearTransfer"];
 let isTransferComplete: (typeof import("../../src/handlers/reconcile"))["isTransferComplete"];
+let markTransferComplete: (typeof import("../../src/handlers/reconcile"))["markTransferComplete"];
 let sealChunk: (typeof import("../../src/handlers/messageChunkCrypto"))["sealChunk"];
 let decryptMessageChunk: (typeof import("../../src/handlers/messageChunkCrypto"))["decryptMessageChunk"];
 let handleReceiveMessage: (typeof import("../../src/handlers/handleReceiveMessage"))["handleReceiveMessage"];
@@ -84,7 +87,7 @@ beforeAll(async () => {
   ({ sendScheduled } = await import("../../src/handlers/handleSendMessage"));
   ({ claimRatchetGate, openRatchetGate, resetRatchetGate } =
     await import("../../src/handlers/ratchetGate"));
-  ({ clearTransfer, isTransferComplete } =
+  ({ clearTransfer, isTransferComplete, markTransferComplete } =
     await import("../../src/handlers/reconcile"));
   ({ decryptMessageChunk, sealChunk } =
     await import("../../src/handlers/messageChunkCrypto"));
@@ -265,6 +268,42 @@ describe("the cover edge publishes a generation the sender can watch", () => {
     expect(await waitForCoverEdgeGeneration(ROOM, PEER, now, 40)).toBe(now);
   });
 
+  test("an aborted send stops watching immediately, answering 'no replacement'", async () => {
+    // The watch is up to RECONNECT_RESUME_TIMEOUT_MS long and the fan-out is
+    // serial, so a cancelled send sitting here charges that wait to every later
+    // peer as well. Abort must end it at once — and with the CURRENT
+    // generation, which is the answer that makes the caller stop rather than
+    // re-derive onto an edge nobody is waiting for.
+    const since = coverEdgeGeneration(ROOM, PEER);
+    const controller = new AbortController();
+    const started = Date.now();
+    const watched = waitForCoverEdgeGeneration(
+      ROOM,
+      PEER,
+      since,
+      30_000,
+      controller.signal,
+    );
+    setTimeout(() => {
+      controller.abort();
+    }, 10);
+    expect(await watched).toBe(since);
+    expect(Date.now() - started).toBeLessThan(5_000);
+
+    // An already-aborted signal never even arms the timer.
+    const preAborted = new AbortController();
+    preAborted.abort();
+    expect(
+      await waitForCoverEdgeGeneration(
+        ROOM,
+        PEER,
+        since,
+        30_000,
+        preAborted.signal,
+      ),
+    ).toBe(since);
+  });
+
   test("a generation that already advanced resolves without waiting", async () => {
     // The sender reaches this call one whole delivery idle budget after the
     // replacement usually happened, so the advance is nearly always already
@@ -283,6 +322,15 @@ describe("the cover edge publishes a generation the sender can watch", () => {
 interface RunOptions {
   /** Called before each injected delivery wait resolves false/true. */
   readonly onWait: (attempt: number) => Promise<boolean> | boolean;
+  /** Runs inside the ratchet gate wait, i.e. BEFORE this attempt is enqueued. */
+  readonly onGate?: (attempt: number) => void;
+  /** The options `sendScheduled` actually handed the delivery wait. */
+  readonly onWaitOptions?: (
+    options: ScheduledDeliveryWaitOptions,
+    attempt: number,
+  ) => void;
+  /** Defaults to `scheduledPolicy()`; the derived idle budget comes from it. */
+  readonly policy?: RoomPolicyV1;
   readonly peerConnections: IRTCPeerConnection[];
   readonly steppedOn: IRTCPeerConnection[];
   /** LIVE message-key buffers, so a wipe is observable through them. */
@@ -294,10 +342,11 @@ interface RunOptions {
 
 const runSend = async (options: RunOptions) => {
   let attempt = 0;
+  let gateCalls = 0;
   return sendScheduled(
     ROOM,
     "chat",
-    scheduledPolicy(),
+    options.policy ?? scheduledPolicy(),
     [{ peerId: PEER, epc: options.peerConnections[0] }],
     2,
     new Uint8Array(0),
@@ -311,7 +360,11 @@ const runSend = async (options: RunOptions) => {
     undefined,
     options.peerConnections,
     {
-      waitForGate: async () => undefined,
+      waitForGate: async () => {
+        gateCalls += 1;
+        options.onGate?.(gateCalls);
+        return undefined;
+      },
       ratchetStep: async (epc) => {
         options.steppedOn.push(epc);
         const stepped = ratchetEncrypt(options.ratchet.state, module);
@@ -323,8 +376,9 @@ const runSend = async (options: RunOptions) => {
           pqContext: null,
         };
       },
-      waitForDelivery: async () => {
+      waitForDelivery: async (waitOptions) => {
         attempt += 1;
+        options.onWaitOptions?.(waitOptions, attempt);
         return await options.onWait(attempt);
       },
       resumeWaitMs: 300,
@@ -380,6 +434,47 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     expect(keyHexes[0]).not.toBe(keyHexes[1]);
     // ...and actually re-offered on the replacement runtime.
     expect(second!.runtime.getQueuedJobIds()).toContain(label);
+  });
+
+  test("a replacement installed BEFORE this attempt is enqueued is still a replacement", async () => {
+    // The generation is read three awaits before it is compared, and that is
+    // the SAFE direction. An edge replaced during the gate wait, the PQ
+    // admission wait or the durable ratchet step must still read as an advance:
+    // reading it next to the enqueue folds that replacement into the baseline,
+    // and the send is abandoned with a CANCEL instead of re-derived onto the
+    // live edge. The opposite error — over-reporting an advance — costs one
+    // guarded trip round the resume check and re-sends nothing.
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections: IRTCPeerConnection[] = [first.epc];
+    const steppedOn: IRTCPeerConnection[] = [];
+    const ratchet = { state: first.epc.ratchetState as RatchetState };
+    let second: Edge | undefined;
+
+    const result = await runSend({
+      peerConnections,
+      steppedOn,
+      keys: [],
+      keyHexes: [],
+      ratchet,
+      onGate: (call) => {
+        if (call !== 1 || second) return;
+        // The previous runtime is left alive, so this attempt still enqueues
+        // onto it — a job sitting on a superseded edge, which is exactly the
+        // state a resume exists for.
+        second = makeEdge(
+          initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+        );
+        peerConnections.splice(0, peerConnections.length, second.epc);
+      },
+      onWait: (attempt) => attempt > 1,
+    });
+
+    expect(second).toBeDefined();
+    expect(steppedOn).toEqual([first.epc, second!.epc]);
+    expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
   });
 
   test("the retired job is settled and its key wiped before the resume enqueues", async () => {
@@ -593,6 +688,39 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     expect(result.outcomes[0].status).toBe("failed");
   });
 
+  test("eviction is not a generation advance onto an older sibling transport", async () => {
+    const bob = initRatchet(rand(32), false, null, module);
+    const sibling = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections = [first.epc];
+    const steppedOn: IRTCPeerConnection[] = [];
+    const result = await runSend({
+      peerConnections,
+      steppedOn,
+      keys: [],
+      keyHexes: [],
+      ratchet: { state: first.epc.ratchetState as RatchetState },
+      onWait: async () => {
+        for (let i = 0; i < 700; i++)
+          await waitForCoverEdgeGeneration(
+            `resume-eviction-${String(i)}`,
+            PEER,
+            0,
+            0,
+          );
+        makeCurrent(sibling.epc);
+        peerConnections.splice(0, 1, sibling.epc);
+        return false;
+      },
+    });
+    expect(steppedOn).toEqual([first.epc]);
+    expect(result.outcomes[0].status).toBe("failed");
+  });
+
   test("the replacement edge's terminal receipt still settles the send", async () => {
     const bob = initRatchet(rand(32), false, null, module);
     const first = makeEdge(
@@ -658,6 +786,205 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     });
 
     expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
+  });
+});
+
+// ── finding 3: the delivery-wait seam itself ────────────────────────────────
+//
+// Nothing in the suite crossed the joint between `sendScheduled` and the
+// progress-gated wait: reverting that call to the old
+// `waitForCompletion(roomId, peerId, transferId, budget)` left 1578 pass /
+// 23,692 expects, byte-identical to baseline. The whole of finding A could be
+// deleted invisibly. These fixtures fail the moment it is.
+
+describe("sendScheduled confirms delivery through the progress-gated wait (finding 3)", () => {
+  test("the wait is handed a probe bound to THIS send's live scheduler job", async () => {
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections: IRTCPeerConnection[] = [first.epc];
+    const seen: ScheduledDeliveryWaitOptions[] = [];
+    const label = jobLabel();
+
+    const result = await runSend({
+      peerConnections,
+      steppedOn: [],
+      keys: [],
+      keyHexes: [],
+      ratchet: { state: first.epc.ratchetState as RatchetState },
+      onWaitOptions: (waitOptions) => seen.push(waitOptions),
+      onWait: () => true,
+    });
+
+    expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
+    // A delivery wait that is not progress-gated is handed no probe at all.
+    expect(seen).toHaveLength(1);
+    const probe = seen[0].progress;
+    expect(typeof probe).toBe("function");
+
+    // ...and the probe reads the REAL job, not a captured constant: pushing a
+    // control job in front of it (jobTier ranks control ahead of real) moves
+    // this send's admission position, and the probe moves with it.
+    const atHead = probe();
+    expect(atHead).toBeDefined();
+    first.runtime.enqueue({
+      id: first.runtime.randomLaneLabel(),
+      kind: "control",
+      declaredCellCount: 1,
+      nextCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
+    });
+    const behindControl = probe();
+    expect(behindControl).toBeDefined();
+    expect(atHead).toEqual({ state: "queued", queuePosition: 0, sentCells: 0 });
+    expect(behindControl).toEqual({
+      state: "queued",
+      queuePosition: 1,
+      sentCells: 0,
+    });
+
+    expect(seen[0].isSuspended?.()).toBe(false);
+    first.runtime.suspend("page-hidden");
+    expect(seen[0].isSuspended?.()).toBe(true);
+    first.runtime.resume();
+    expect(seen[0].isSuspended?.()).toBe(false);
+
+    // ...and it reports the job leaving the scheduler, which is the only other
+    // thing the wait can learn locally.
+    first.runtime.complete(label);
+    expect(probe()).toBeUndefined();
+  });
+
+  test("the idle budget it is given is derived from the room's schedule", async () => {
+    // A fixed constant — the 120 s bound this replaced — cannot move with the
+    // policy. Two runs, one with twice the cycle, and the budget must widen by
+    // exactly the two extra cycles the confirmation floor now needs.
+    const bob = initRatchet(rand(32), false, null, module);
+    const budgets: number[] = [];
+    const runWith = async (policy: RoomPolicyV1): Promise<void> => {
+      const edge = makeEdge(
+        initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+      );
+      await runSend({
+        policy,
+        peerConnections: [edge.epc],
+        steppedOn: [],
+        keys: [],
+        keyHexes: [],
+        ratchet: { state: edge.epc.ratchetState as RatchetState },
+        onWaitOptions: (waitOptions) => budgets.push(waitOptions.idleTimeoutMs),
+        onWait: () => true,
+      });
+      clearTransfer(ROOM, PEER, TRANSFER_ID);
+    };
+
+    const base = scheduledPolicy();
+    await runWith(base);
+    await runWith({ ...base, coverDurationEpochs: 2 });
+
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]).toBeGreaterThan(0);
+    expect(budgets[1] - budgets[0]).toBe(2 * base.coverCadenceMs);
+  });
+});
+
+// ── finding 5: the up-to-30 s generation watch is a delivery window ──────────
+//
+// waitForCoverEdgeGeneration blocks for up to RECONNECT_RESUME_TIMEOUT_MS. A
+// terminal scheduled receipt can land at any instant inside it, and both of the
+// commonest exits after that await used to leave the loop WITHOUT re-reading
+// completion: the send then reported `failed` and issued a wire CANCEL for a
+// message the peer had already assembled. Before 47d4691 the window was
+// effectively zero, so this is a regression that commit introduced.
+
+describe("a receipt inside the resume watch is a delivery, not a failure (finding 5)", () => {
+  test("no replacement is published: the receipt still settles the send", async () => {
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections: IRTCPeerConnection[] = [first.epc];
+    const ratchet = { state: first.epc.ratchetState as RatchetState };
+    const label = jobLabel();
+
+    const result = await runSend({
+      peerConnections,
+      steppedOn: [],
+      keys: [],
+      keyHexes: [],
+      ratchet,
+      onWait: () => {
+        // The idle budget expired, so the send enters the generation watch.
+        // Nothing replaces anything — but the receiver's terminal receipt
+        // arrives 50 ms into that watch (resumeWaitMs is 300 ms here).
+        setTimeout(() => markTransferComplete(ROOM, PEER, TRANSFER_ID), 50);
+        return false;
+      },
+    });
+
+    expect(isTransferComplete(ROOM, PEER, TRANSFER_ID)).toBe(true);
+    expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
+    // ...and no wire CANCEL was raised for a message that actually arrived: a
+    // cancel of this still-queued job would have dropped it from the scheduler.
+    expect(first.runtime.getQueuedJobIds()).toContain(label);
+  });
+
+  test("a replacement with no adoptable transport: the receipt still settles the send", async () => {
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections: IRTCPeerConnection[] = [first.epc];
+    const ratchet = { state: first.epc.ratchetState as RatchetState };
+    const label = jobLabel();
+
+    const result = await runSend({
+      peerConnections,
+      steppedOn: [],
+      keys: [],
+      keyHexes: [],
+      ratchet,
+      onWait: () => {
+        // The receipt lands, a replacement generation IS published, but the
+        // peer has no transport this send can adopt — the SECOND early exit,
+        // which skipped the completeness re-check just as the first one did.
+        markTransferComplete(ROOM, PEER, TRANSFER_ID);
+        makeEdge(
+          initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+        );
+        peerConnections.splice(0, peerConnections.length);
+        return false;
+      },
+    });
+
+    expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
+    expect(first.runtime.getQueuedJobIds()).toContain(label);
+  });
+
+  test("a send that really did NOT arrive is still failed and still cancelled", async () => {
+    // The paired negative: the re-check must not turn every give-up into a
+    // success. Same shape, no receipt.
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const peerConnections: IRTCPeerConnection[] = [first.epc];
+    const ratchet = { state: first.epc.ratchetState as RatchetState };
+    const label = jobLabel();
+
+    const result = await runSend({
+      peerConnections,
+      steppedOn: [],
+      keys: [],
+      keyHexes: [],
+      ratchet,
+      onWait: () => false,
+    });
+
+    expect(isTransferComplete(ROOM, PEER, TRANSFER_ID)).toBe(false);
+    expect(result.outcomes[0].status).toBe("failed");
+    // The CANCEL the receiver needs: the still-queued job left the scheduler.
+    expect(first.runtime.getQueuedJobIds()).not.toContain(label);
   });
 });
 
@@ -862,5 +1189,82 @@ describe("a resumed send is idempotent at the receiver", () => {
 
     expect(result.chunkAlreadyExists).toBe(true);
     expect(result.receivedFullSize).toBe(true);
+  });
+});
+
+// ── the per-edge generation map is bounded ───────────────────────────────────
+//
+// Placed last on purpose: it deliberately evicts entries, which is exactly what
+// every earlier test in this file would rather it did not do to theirs.
+
+describe("the cover generation map does not grow without bound", () => {
+  const installThrowawayEdge = (room: string, peer: string): void => {
+    const pq = makePq(true);
+    const epc = {
+      roomId: room,
+      withPeerId: peer,
+      pqHealingState: pq,
+      createDataChannel: (label: string) =>
+        new FakeChannel(label) as unknown as IRTCDataChannel,
+    } as unknown as IRTCPeerConnection;
+    installCoverEdge({
+      epc,
+      roomId: room,
+      policy: scheduledPolicy(),
+      policyHash: new Uint8Array(32),
+      amInitiator: true,
+      module,
+    });
+    cleanups.push(() => {
+      teardownCoverEdge(epc);
+      pq.destroy();
+    });
+  };
+
+  test("an edge installed while every older entry has a waiter wakes its own waiter", async () => {
+    const controller = new AbortController();
+    const watchers = Array.from({ length: 513 }, (_, i) =>
+      waitForCoverEdgeGeneration(
+        `busy-prune-${String(i)}`,
+        "peer",
+        0,
+        30_000,
+        controller.signal,
+      ),
+    );
+    try {
+      installThrowawayEdge("busy-prune-512", "peer");
+      const advanced = await Promise.race([
+        watchers[512],
+        new Promise<number>((resolve) => setTimeout(() => resolve(-1), 100)),
+      ]);
+      expect(advanced).toBeGreaterThan(0);
+    } finally {
+      controller.abort();
+      await Promise.all(watchers);
+    }
+  });
+
+  test("idle entries are evicted, and eviction can never forge an advance", async () => {
+    const room = "prune-room";
+    const peer = "prune-peer";
+    installThrowawayEdge(room, peer);
+    const before = coverEdgeGeneration(room, peer);
+    expect(before).toBeGreaterThan(0);
+
+    // Fill the map well past its cap with idle edges. A zero timeout creates
+    // the entry and answers immediately, which is all this needs.
+    for (let i = 0; i < 700; i++)
+      await waitForCoverEdgeGeneration(`prune-filler-${String(i)}`, peer, 0, 0);
+
+    // The oldest idle entries are gone, ours among them.
+    expect(coverEdgeGeneration(room, peer)).toBe(0);
+
+    // ...and because the published number comes from one process-wide counter,
+    // the next install on that same edge is still strictly above the value it
+    // had before eviction. A caller holding the old `since` cannot be handed a
+    // recycled number and read it as a replacement.
+    installThrowawayEdge(room, peer);
+    expect(coverEdgeGeneration(room, peer)).toBeGreaterThan(before);
   });
 });

@@ -49,8 +49,9 @@ import {
   waitForCoverEdgeGeneration,
 } from "./coverEdge";
 import {
+  scheduledCoverIsSuspended,
   scheduledDeliveryTimeoutMs,
-  scheduledSendProgressToken,
+  scheduledSendProgress,
   waitForScheduledDelivery,
 } from "./coverTransfer";
 import { ratchetEncryptDurably } from "./ratchetPersist";
@@ -1360,6 +1361,23 @@ export const sendScheduled = async (
     coverDurationEpochs: policy.coverDurationEpochs,
   });
 
+  // DISCLOSED: this fan-out is SERIAL, so every peer waits behind the one
+  // before it, and one peer's worst case is not one idle budget. It is up to
+  // (1 + MAX_SCHEDULED_SEND_RESUMES) budgets plus as many resume watches
+  // (RECONNECT_RESUME_TIMEOUT_MS each) — three budgets and two watches on the
+  // shipped cap — before the next peer is even attempted. On the "5 min cycles"
+  // preset that is about thirty-two minutes for one peer.
+  //
+  // And with the suspension hold above it has no upper bound at all while the
+  // page stays hidden. That is deliberate and it is not per-peer starvation:
+  // visibilitychange / pagehide / freeze / offline are PAGE-wide, so every edge
+  // in the room is suspended together — there is no peer being starved of a
+  // schedule that is running for someone else. The wait ends when the tab comes
+  // back, or when `signal` aborts.
+  //
+  // Each edge has its own scheduler, so serial fan-out adds latency for later
+  // peers even when their own lanes have capacity. Concurrent per-peer sends
+  // remain a separate scheduling change.
   for (const target of targets) {
     if (signal?.aborted) {
       outcomes.push({
@@ -1405,9 +1423,23 @@ export const sendScheduled = async (
       let delivered = false;
       let resumes = 0;
       for (;;) {
-        // Read BEFORE the enqueue. A replacement runtime installed while this
-        // attempt is still being admitted must read as an advance; capturing
-        // afterwards would swallow exactly that race and lose the send.
+        // Read BEFORE the enqueue, and deliberately three awaits before it is
+        // compared. The two directions are NOT symmetric:
+        //
+        //  - read early, and a replacement installed during the gate wait, the
+        //    PQ admission wait or the durable ratchet step reads as an advance
+        //    that this attempt may not have needed. The cost is one extra trip
+        //    round the resume check, which the `nextEpc.coverRuntime === runtime`
+        //    guard below turns into a `break` without re-sending anything.
+        //  - read late (next to the enqueue), and exactly that replacement is
+        //    swallowed: the generation would already include it, the comparison
+        //    would say "nothing replaced anything", and a send whose job is
+        //    sitting on a superseded runtime would be abandoned with a CANCEL
+        //    instead of re-derived onto the live edge.
+        //
+        // One direction costs a guarded no-op and the other loses the send, so
+        // the read stays here. `installCoverEdge` publishes its bump
+        // synchronously after installing, so nothing can slip between them.
         const generation = coverEdgeGeneration(roomId, target.peerId);
 
         await waitForGate(roomId, target.peerId, signal);
@@ -1492,11 +1524,14 @@ export const sendScheduled = async (
         delivered = await waitForDelivery({
           isComplete: () =>
             isTransferComplete(roomId, target.peerId, transferId),
-          progressToken: () =>
-            scheduledSendProgressToken(
-              currentEpc.coverRuntime,
-              channelMessageLabel,
-            ),
+          progress: () =>
+            scheduledSendProgress(currentEpc.coverRuntime, channelMessageLabel),
+          // A backgrounded tab, a pagehide, a freeze or an offline event
+          // suspends this edge's scheduler while it KEEPS the job. The signal
+          // above freezes, but the send is healthy: charging the idle budget
+          // through that gap cancels it, and the CANCEL deletes the partial the
+          // peer is still holding. Suspension is not a stall.
+          isSuspended: () => scheduledCoverIsSuspended(currentEpc.coverRuntime),
           idleTimeoutMs: deliveryIdleTimeoutMs,
           signal,
         });
@@ -1513,8 +1548,22 @@ export const sendScheduled = async (
           target.peerId,
           generation,
           resumeWaitMs,
+          signal,
         );
-        if (nextGeneration === generation) break;
+        // That await is up to RECONNECT_RESUME_TIMEOUT_MS long, and a terminal
+        // scheduled receipt can land at any instant inside it. Re-read
+        // completion HERE, above every exit below: leaving without it reports a
+        // delivered message as `failed` and, worse, sends the receiver a CANCEL
+        // for a file it has already finished assembling. Nothing between this
+        // point and the end of the iteration suspends, so one re-read covers
+        // all of them.
+        if (isTransferComplete(roomId, target.peerId, transferId)) {
+          delivered = true;
+          break;
+        }
+        // An evicted idle entry can read as zero. Only a strictly newer
+        // publication authorizes a resume, never an unknown or older value.
+        if (nextGeneration <= generation) break;
         const nextEpc = peerConnections.find((candidate) =>
           isResumableAuthenticatedTransport(candidate, roomId, target.peerId),
         );
@@ -1534,11 +1583,6 @@ export const sendScheduled = async (
         } catch (settleError) {
           // Already destroyed by the teardown that caused this resume.
           debugLog(settleError);
-        }
-        // The receipt may have landed while we were finding the replacement.
-        if (isTransferComplete(roomId, target.peerId, transferId)) {
-          delivered = true;
-          break;
         }
         currentEpc = nextEpc;
         resumes += 1;

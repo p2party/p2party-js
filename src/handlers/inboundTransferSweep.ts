@@ -1,5 +1,7 @@
 import { deleteReceiveTransfer, getDBMessageData } from "../db/api";
+import { deleteMessageStateOnly } from "../reducers/roomSlice";
 import { forgetMappedReceiveMessageKey } from "./receiveMessageKeyLifetime";
+import { waitForEdgeReceiveQuiescence } from "./handleMessageQueueing";
 
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { MessageData } from "../db/types";
@@ -54,24 +56,61 @@ export const shouldSweepCancelledInboundTransfer = (
  * durable retirement.
  */
 export interface InboundTransferSweepDeps {
+  readonly waitForReceiveIdle: typeof waitForEdgeReceiveQuiescence;
   readonly readProgress: typeof getDBMessageData;
   readonly forgetKey: typeof forgetMappedReceiveMessageKey;
   readonly deleteReceive: typeof deleteReceiveTransfer;
+  /**
+   * Drop the message from the LIVE room state. `deleteReceive` is the durable
+   * half only — chunks, the messageData row and the pre-sized OPFS file — and
+   * both immediate-mode cancels do this second half too
+   * (disconnectFromPeerChannelLabelQuery, disconnectFromChannelLabelQuery both
+   * dispatch deleteMessage). Without it the user is left looking at a partial
+   * whose bytes no longer exist and which no re-send can ever fill.
+   */
+  readonly dropStateRow: (
+    roomId: string,
+    merkleRootHex: string,
+  ) => void | Promise<void>;
 }
 
+/**
+ * The store is reached through a lazy import, never a module-level one: this
+ * module is pulled in by installCoverEdge, and store.ts initializes the browser
+ * identity slice from localStorage at import time. `deleteMessageStateOnly` is
+ * the reducer-only twin, which is exactly right here — the durable deletion has
+ * already been awaited by the time this runs.
+ */
+const dispatchStateRowDeletion = async (
+  roomId: string,
+  merkleRootHex: string,
+): Promise<void> => {
+  const { dispatch } = await import("../store");
+  dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+};
+
 export const productionInboundTransferSweepDeps: InboundTransferSweepDeps = {
+  waitForReceiveIdle: waitForEdgeReceiveQuiescence,
   readProgress: getDBMessageData,
   forgetKey: forgetMappedReceiveMessageKey,
   deleteReceive: deleteReceiveTransfer,
+  dropStateRow: dispatchStateRowDeletion,
 };
 
 /**
  * Drop the partial WE are receiving for one cancelled transfer root.
  *
- * Mirrors `handleOpenChannel`'s immediate-mode `cancelReceiveTransfer`: retire
- * the mapped receive key first (so no key outlives the data it opens), then
- * delete the receive transfer, which is what owns the chunks, the messageData
- * row and the pre-sized OPFS file.
+ * The immediate-mode cancel is TWO deletions, and this is both of them:
+ * `cancelReceiveTransfer` in the Worker (chunks, the messageData row, the
+ * pre-sized OPFS file), and then `deleteMessage` on the room state — which is
+ * what `disconnectFromPeerChannelLabelQuery` and `disconnectFromChannelLabelQuery`
+ * each dispatch alongside it. Doing only the durable half leaves the user
+ * looking at an N/M partial whose bytes are already gone.
+ *
+ * Order matters and is the same as immediate mode's: retire the mapped receive
+ * key first (so no key outlives the data it opens), then the durable data, and
+ * the state row last — it is the only remaining evidence the partial exists, so
+ * it must not go while anything a reconnect could still resume is on disk.
  *
  * Never throws: it runs from a cover-cell handler on the fixed schedule, and
  * an observer must not be able to perturb that. Storage uncertainty leaves the
@@ -85,12 +124,20 @@ export const sweepCancelledInboundTransfer = async (
 ): Promise<boolean> => {
   if (!MERKLE_ROOT_HEX_SHAPE.test(merkleRootHex)) return false;
   try {
+    // Cover control cells bypass the chunk queue. Let already queued frames
+    // finish first, including a final chunk that turns this into a delivered
+    // file. The completion predicate must see their durable result.
+    await deps.waitForReceiveIdle(roomId, epc.withPeerId);
     const progress = await deps.readProgress(merkleRootHex);
-    if (!shouldSweepCancelledInboundTransfer(progress, epc.withPeerId))
+    if (
+      progress?.roomId !== roomId ||
+      !shouldSweepCancelledInboundTransfer(progress, epc.withPeerId)
+    )
       return false;
 
     await deps.forgetKey(epc, roomId, merkleRootHex);
     await deps.deleteReceive(merkleRootHex);
+    await deps.dropStateRow(roomId, merkleRootHex);
 
     return true;
   } catch (error) {

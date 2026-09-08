@@ -61,6 +61,30 @@ interface CoverEdgeGenerationState {
 
 const coverEdgeGenerations = new Map<string, CoverEdgeGenerationState>();
 
+// The map is keyed by (room, peer), so a long-lived page that meets many peers
+// across many rooms grows it without bound. Each entry holds two numbers and no
+// object references, so this is a slow leak rather than a retention bug — but
+// unbounded is unbounded, so it is capped.
+//
+// Eviction is only sound because a published generation now comes from ONE
+// process-wide monotonic counter instead of a per-edge one. A re-created entry
+// restarts at 0, which is below every number ever issued, so a caller still
+// holding an old `since` can never read a recycled value as an advance; and the
+// next install on that edge publishes a strictly larger number than anything
+// that edge ever had. An entry with a waiter is never evicted: someone is on it.
+const MAX_TRACKED_COVER_EDGES = 512;
+let lastPublishedCoverGeneration = 0;
+
+const pruneCoverEdgeGenerations = (reservedKey?: string): void => {
+  if (coverEdgeGenerations.size <= MAX_TRACKED_COVER_EDGES) return;
+  // A Map iterates in insertion order, so this drops the oldest idle edges.
+  for (const [key, state] of coverEdgeGenerations) {
+    if (coverEdgeGenerations.size <= MAX_TRACKED_COVER_EDGES) return;
+    if (key !== reservedKey && state.waiters.size === 0)
+      coverEdgeGenerations.delete(key);
+  }
+};
+
 const coverEdgeKey = (roomId: string, peerId: string): string =>
   `${roomId}\u0000${peerId}`;
 
@@ -73,6 +97,10 @@ const ensureCoverEdgeState = (
   if (!state) {
     state = { generation: 0, waiters: new Set() };
     coverEdgeGenerations.set(key, state);
+    // The caller is about to attach a waiter or publish a generation on this
+    // state. If every older entry has waiters, evicting this new entry would
+    // detach that caller from all future publications for its edge.
+    pruneCoverEdgeGenerations(key);
   }
   return state;
 };
@@ -92,34 +120,55 @@ export const coverEdgeGeneration = (roomId: string, peerId: string): number =>
  * A caller compares the result with what it passed in: strictly greater means a
  * replacement runtime exists and the caller's retired job may be re-derived
  * onto it; equal means nothing replaced anything.
+ *
+ * `signal` ends the wait early with the CURRENT generation, i.e. with "nothing
+ * replaced anything" unless something actually did. A cancelled send must not
+ * sit here for the whole resume budget — the fan-out is serial, so that budget
+ * is charged to every later peer as well — and answering "no replacement" is
+ * the answer that makes the caller stop rather than re-derive onto an edge
+ * nobody is waiting for any more.
  */
 export const waitForCoverEdgeGeneration = (
   roomId: string,
   peerId: string,
   since: number,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<number> => {
   const state = ensureCoverEdgeState(roomId, peerId);
   if (state.generation > since) return Promise.resolve(state.generation);
+  if (signal?.aborted === true) return Promise.resolve(state.generation);
   if (!(timeoutMs > 0)) return Promise.resolve(state.generation);
   return new Promise<number>((resolve) => {
-    const waiter = (generation: number): void => {
+    const settle = (generation: number): void => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       state.waiters.delete(waiter);
+      pruneCoverEdgeGenerations();
       resolve(generation);
     };
+    const waiter = (generation: number): void => {
+      settle(generation);
+    };
+    const onAbort = (): void => {
+      settle(state.generation);
+    };
     const timer = setTimeout(() => {
-      state.waiters.delete(waiter);
-      resolve(state.generation);
+      settle(state.generation);
     }, timeoutMs);
     state.waiters.add(waiter);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 };
 
 /** Publish a newly installed runtime as this edge's next cover generation. */
 const advanceCoverEdgeGeneration = (roomId: string, peerId: string): void => {
   const state = ensureCoverEdgeState(roomId, peerId);
-  state.generation += 1;
+  // Process-wide monotonic, not per-edge: see MAX_TRACKED_COVER_EDGES. It is
+  // still strictly increasing for every individual edge, which is the only
+  // property `since` comparisons rely on.
+  lastPublishedCoverGeneration += 1;
+  state.generation = lastPublishedCoverGeneration;
   const generation = state.generation;
   // Copy first: a waiter removes itself from the set as it settles.
   for (const waiter of [...state.waiters]) waiter(generation);

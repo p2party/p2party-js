@@ -4,7 +4,8 @@ import { CoverRuntime } from "../../src/handlers/coverRuntime";
 import { createCoverScheduler } from "../../src/handlers/coverScheduler";
 import {
   buildScheduledSendJob,
-  scheduledSendProgressToken,
+  isForwardScheduledProgress,
+  scheduledSendProgress,
   waitForScheduledDelivery,
 } from "../../src/handlers/coverTransfer";
 import { SparsePqHealingState } from "../../src/handlers/pqHealingRuntime";
@@ -142,7 +143,7 @@ const cellJob = (id: string, cells: number): CoverJob => ({
   nextCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
 });
 
-describe("scheduledSendProgressToken (what the sender can actually observe)", () => {
+describe("scheduledSendProgress (what the sender can actually observe)", () => {
   test("moves when the job's queue position moves and when it emits a cell, and vanishes at settlement", async () => {
     const clock = new FakeClock(0);
     const scheduler = createCoverScheduler({
@@ -163,41 +164,45 @@ describe("scheduledSendProgressToken (what the sender can actually observe)", ()
       getJobProgress: (jobId: string) => scheduler.getJobProgress(jobId),
     };
 
-    const queued = scheduledSendProgressToken(runtimeView, mine);
-    expect(queued).toBeDefined();
+    const queued = scheduledSendProgress(runtimeView, mine);
+    expect(queued).toEqual({ state: "queued", queuePosition: 2, sentCells: 0 });
     scheduler.start();
 
     // Cycle 0 admits the first two; ours advances to the head of the queue.
+    // Compared by VALUE, never by identity: getJobProgress builds a fresh
+    // object per call, so `not.toBe` would pass for two identical readings.
     await clock.advanceTo(399);
-    const atHead = scheduledSendProgressToken(runtimeView, mine);
-    expect(atHead).toBeDefined();
-    expect(atHead).not.toBe(queued);
+    const atHead = scheduledSendProgress(runtimeView, mine);
+    expect(atHead).toEqual({ state: "queued", queuePosition: 0, sentCells: 0 });
+    expect(isForwardScheduledProgress(queued, atHead!)).toBe(true);
 
-    // Cycle 1 admits ours; every emitted cell moves the token again.
+    // Cycle 1 admits ours; every emitted cell moves the reading again.
     await clock.advanceTo(500);
-    const admitted = scheduledSendProgressToken(runtimeView, mine);
-    expect(admitted).toBeDefined();
-    expect(admitted).not.toBe(atHead);
+    const admitted = scheduledSendProgress(runtimeView, mine);
+    expect(admitted?.state).toBe("admitted");
+    expect(isForwardScheduledProgress(atHead, admitted!)).toBe(true);
 
     // Within the admitted phase nothing but the cell count can move: the state
     // is "admitted" and the queue position is already -1. This is the term that
     // dates the receipt window from the LAST cell rather than from admission.
     await clock.advanceTo(650);
-    const oneMoreCell = scheduledSendProgressToken(runtimeView, mine);
+    const oneMoreCell = scheduledSendProgress(runtimeView, mine);
     expect(oneMoreCell).toBeDefined();
-    expect(oneMoreCell).not.toBe(admitted);
+    expect(oneMoreCell).not.toEqual(admitted!);
+    expect(oneMoreCell!.sentCells).toBeGreaterThan(admitted!.sentCells);
+    expect(isForwardScheduledProgress(admitted, oneMoreCell!)).toBe(true);
     expect(scheduler.getJobProgress(mine)?.state).toBe("admitted");
     expect(scheduler.getJobProgress(mine)?.queuePosition).toBe(-1);
 
     // Once every declared cell is out the job settles and the scheduler drops
     // it: no local progress signal remains, only the receipt can end the wait.
     await clock.advanceTo(1_200);
-    expect(scheduledSendProgressToken(runtimeView, mine)).toBeUndefined();
+    expect(scheduledSendProgress(runtimeView, mine)).toBeUndefined();
     scheduler.stop();
   });
 
   test("an edge with no cover runtime has no progress signal at all", () => {
-    expect(scheduledSendProgressToken(undefined, label("44"))).toBeUndefined();
+    expect(scheduledSendProgress(undefined, label("44"))).toBeUndefined();
   });
 });
 
@@ -224,7 +229,7 @@ describe("waitForScheduledDelivery (idle budget, not a total deadline)", () => {
     const wait = virtualWait(
       {
         isComplete: () => complete,
-        progressToken: () => undefined,
+        progress: () => undefined,
         idleTimeoutMs: 10_000,
         pollMs: 100,
       },
@@ -240,7 +245,11 @@ describe("waitForScheduledDelivery (idle budget, not a total deadline)", () => {
       await virtualWait(
         {
           isComplete: () => false,
-          progressToken: () => "frozen",
+          progress: () => ({
+            state: "queued" as const,
+            queuePosition: 0,
+            sentCells: 0,
+          }),
           idleTimeoutMs: 1_000,
           pollMs: 100,
         },
@@ -258,7 +267,11 @@ describe("waitForScheduledDelivery (idle budget, not a total deadline)", () => {
       await virtualWait(
         {
           isComplete: () => true,
-          progressToken: () => "moving",
+          progress: () => ({
+            state: "admitted" as const,
+            queuePosition: -1,
+            sentCells: 1,
+          }),
           idleTimeoutMs: 1_000,
           pollMs: 100,
           signal: controller.signal,
@@ -276,9 +289,13 @@ describe("waitForScheduledDelivery (idle budget, not a total deadline)", () => {
     const delivered = await virtualWait(
       {
         isComplete: () => clock.now >= 90_000,
-        progressToken: () => {
+        progress: () => {
           ticks = Math.floor(clock.now / 900);
-          return `cell-${String(ticks)}`;
+          return {
+            state: "admitted" as const,
+            queuePosition: -1,
+            sentCells: ticks,
+          };
         },
         idleTimeoutMs: 1_000,
         pollMs: 100,
@@ -287,6 +304,135 @@ describe("waitForScheduledDelivery (idle budget, not a total deadline)", () => {
     );
     expect(delivered).toBe(true);
     expect(clock.now).toBeGreaterThanOrEqual(90_000);
+  });
+});
+
+// ── finding 2: only FORWARD movement is progress ─────────────────────────────
+//
+// The progress signal is not monotone. A control job jumps the admission queue
+// (jobTier puts `control` ahead of `real`), which pushes a waiting real job's
+// position BACKWARDS, and every requeue — backpressure, a missed deadline, a
+// suspension — sends an admitted job back to "queued". Counting any CHANGE as
+// progress means an oscillating signal resets the budget forever: the send is
+// never abandoned, and because `sendScheduled` fans out serially, every later
+// peer in the room waits behind it with no bound at all.
+
+describe("only forward movement resets the idle budget (finding 2)", () => {
+  const virtualWait = (
+    options: Omit<
+      Parameters<typeof waitForScheduledDelivery>[0],
+      "now" | "sleep"
+    >,
+    clock: { now: number },
+  ) =>
+    waitForScheduledDelivery({
+      ...options,
+      now: () => clock.now,
+      sleep: async (ms: number) => {
+        clock.now += ms;
+        await Promise.resolve();
+      },
+    });
+
+  // Far past any budget under test: a wait that reaches it never tripped.
+  const RUNAWAY_MS = 10_000_000;
+  const BUDGET_MS = 8_000;
+
+  test("a token that oscillates between two positions still trips the budget", async () => {
+    const clock = { now: 0 };
+    let flip = false;
+    const delivered = await virtualWait(
+      {
+        // A hard stop: without the fix this wait does not end on its own.
+        isComplete: () => clock.now >= RUNAWAY_MS,
+        progress: () => {
+          flip = !flip;
+          return {
+            state: "queued" as const,
+            queuePosition: flip ? 3 : 4,
+            sentCells: 0,
+          };
+        },
+        idleTimeoutMs: BUDGET_MS,
+        pollMs: 100,
+      },
+      clock,
+    );
+    expect(delivered).toBe(false);
+    expect(clock.now).toBeLessThan(2 * BUDGET_MS);
+  });
+
+  test("a token that only moves backwards still trips the budget", async () => {
+    const clock = { now: 0 };
+    let position = 1;
+    const delivered = await virtualWait(
+      {
+        isComplete: () => clock.now >= RUNAWAY_MS,
+        // Control jobs keep arriving, so this send keeps losing ground.
+        progress: () => ({
+          state: "queued" as const,
+          queuePosition: position++,
+          sentCells: 0,
+        }),
+        idleTimeoutMs: BUDGET_MS,
+        pollMs: 100,
+      },
+      clock,
+    );
+    expect(delivered).toBe(false);
+    expect(clock.now).toBeLessThan(2 * BUDGET_MS);
+  });
+
+  test("a send climbing the queue, then admitted, then emitting is never abandoned", async () => {
+    // The other direction, which matters just as much: every genuine advance —
+    // queue position DOWN, then queued → admitted, then cells UP — must reset
+    // the budget, across a run many times longer than the budget itself.
+    const clock = { now: 0 };
+    const STEP_MS = 900;
+    const step = (): number => Math.floor(clock.now / STEP_MS);
+    const delivered = await virtualWait(
+      {
+        isComplete: () => clock.now >= 54_000,
+        progress: () => {
+          const n = step();
+          return n < 20
+            ? { state: "queued" as const, queuePosition: 20 - n, sentCells: 0 }
+            : {
+                state: "admitted" as const,
+                queuePosition: -1,
+                sentCells: n - 20,
+              };
+        },
+        idleTimeoutMs: 1_000,
+        pollMs: 100,
+      },
+      clock,
+    );
+    expect(delivered).toBe(true);
+    // Fifty-four budgets' worth of run, none of them spent.
+    expect(clock.now).toBeGreaterThanOrEqual(54_000);
+  });
+
+  test("a token frozen at the head of the queue trips exactly one budget later", async () => {
+    // The genuinely stuck case must still be caught: nothing about this send
+    // moves, in any component.
+    const clock = { now: 0 };
+    const delivered = await virtualWait(
+      {
+        isComplete: () => clock.now >= RUNAWAY_MS,
+        progress: () => ({
+          state: "queued" as const,
+          queuePosition: 0,
+          sentCells: 0,
+        }),
+        idleTimeoutMs: BUDGET_MS,
+        pollMs: 100,
+      },
+      clock,
+    );
+    expect(delivered).toBe(false);
+    expect(clock.now).toBeGreaterThanOrEqual(BUDGET_MS);
+    expect(clock.now).toBeLessThan(2 * BUDGET_MS);
   });
 });
 
@@ -347,7 +493,7 @@ describe("queue contention on a real scheduler (finding A, end to end)", () => {
     let receiptLanded = false;
     const delivered = await waitForScheduledDelivery({
       isComplete: () => receiptLanded,
-      progressToken: () => scheduledSendProgressToken(runtime, mineLabel),
+      progress: () => scheduledSendProgress(runtime, mineLabel),
       idleTimeoutMs: IDLE_BUDGET_MS,
       pollMs: 50,
       now: () => clock.now(),
@@ -415,7 +561,7 @@ describe("queue contention on a real scheduler (finding A, end to end)", () => {
     const RECEIPT_AT_MS = 1_400;
     const delivered = await waitForScheduledDelivery({
       isComplete: () => clock.now() >= RECEIPT_AT_MS,
-      progressToken: () => scheduledSendProgressToken(runtime, mineLabel),
+      progress: () => scheduledSendProgress(runtime, mineLabel),
       idleTimeoutMs: FLOOR_MS,
       pollMs: 25,
       now: () => clock.now(),

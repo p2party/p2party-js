@@ -1,5 +1,27 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
+// The production state-row deletion dispatches into the real Redux store,
+// whose browser identity slice reads localStorage at module initialization.
+// Only the one test that drives the shipped default imports it, and it does so
+// dynamically — but the shim has to exist before that import runs.
+const localStorageMemory: Record<string, string> = {};
+(globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
+  getItem: (key: string) =>
+    key in localStorageMemory ? localStorageMemory[key] : null,
+  setItem: (key: string, value: string) => {
+    localStorageMemory[key] = String(value);
+  },
+  removeItem: (key: string) => {
+    delete localStorageMemory[key];
+  },
+  clear: () => {
+    for (const key of Object.keys(localStorageMemory))
+      delete localStorageMemory[key];
+  },
+  key: () => null,
+  length: 0,
+} as Storage;
+
 import {
   cancelScheduledSend,
   installCoverEdge,
@@ -8,10 +30,12 @@ import {
 import { CoverRuntime } from "../../src/handlers/coverRuntime";
 import {
   buildScheduledSendJob,
-  scheduledSendProgressToken,
+  scheduledCoverIsSuspended,
+  scheduledSendProgress,
   waitForScheduledDelivery,
 } from "../../src/handlers/coverTransfer";
 import {
+  productionInboundTransferSweepDeps,
   shouldSweepCancelledInboundTransfer,
   sweepCancelledInboundTransfer,
 } from "../../src/handlers/inboundTransferSweep";
@@ -35,6 +59,7 @@ import type {
   IRTCPeerConnection,
 } from "../../src/api/webrtc/interfaces";
 import type { MessageData } from "../../src/db/types";
+import { waitForEdgeReceiveQuiescence } from "../../src/handlers/handleMessageQueueing";
 
 let module: LibCrypto;
 beforeAll(async () => {
@@ -62,6 +87,8 @@ interface SweepSpy {
   readonly reads: (string | undefined)[];
   readonly deleted: string[];
   readonly forgotten: string[];
+  /** (roomId, merkleRootHex) pairs handed to the in-memory state deletion. */
+  readonly stateDropped: string[];
 }
 
 const rowFor = (overrides: Partial<MessageData> = {}): MessageData => ({
@@ -83,12 +110,18 @@ const makeSweepSpy = (rows: Record<string, MessageData> = {}): SweepSpy => {
   const reads: (string | undefined)[] = [];
   const deleted: string[] = [];
   const forgotten: string[] = [];
+  const stateDropped: string[] = [];
   return {
     rows: store,
     reads,
     deleted,
     forgotten,
+    stateDropped,
     deps: {
+      waitForReceiveIdle: async () => undefined,
+      dropStateRow: (roomId: string, merkleRootHex: string) => {
+        stateDropped.push(`${roomId}/${merkleRootHex}`);
+      },
       readProgress: async (merkleRootHex?: string) => {
         reads.push(merkleRootHex);
 
@@ -318,6 +351,47 @@ describe("shouldSweepCancelledInboundTransfer (what a CANCEL may destroy)", () =
 });
 
 describe("sweepCancelledInboundTransfer", () => {
+  test("a final chunk already being processed completes before cancellation is assessed", async () => {
+    const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
+    const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
+    let release: () => void = () => undefined;
+    const pendingReceive = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const drains: string[] = [];
+    const deps = {
+      ...spy.deps,
+      waitForReceiveIdle: async (roomId: string, peerId: string) => {
+        drains.push(`${roomId}/${peerId}`);
+        await pendingReceive;
+        spy.rows.set(ROOT_HEX, rowFor({ savedSize: 100 }));
+      },
+    };
+    const swept = sweepCancelledInboundTransfer(epc, ROOM_ID, ROOT_HEX, deps);
+    await flush();
+    const readsWhileReceiving = [...spy.reads];
+    release();
+    expect(await swept).toBe(false);
+    expect(readsWhileReceiving).toEqual([]);
+    expect(drains).toEqual([`${ROOM_ID}/${PEER_ID}`]);
+    expect(spy.deleted).toEqual([]);
+    expect(spy.forgotten).toEqual([]);
+    expect(productionInboundTransferSweepDeps.waitForReceiveIdle).toBe(
+      waitForEdgeReceiveQuiescence,
+    );
+  });
+
+  test("never deletes the same peer's partial in a different room", async () => {
+    const spy = makeSweepSpy({ [ROOT_HEX]: rowFor({ roomId: "other-room" }) });
+    const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
+    expect(
+      await sweepCancelledInboundTransfer(epc, ROOM_ID, ROOT_HEX, spy.deps),
+    ).toBe(false);
+    expect(spy.forgotten).toEqual([]);
+    expect(spy.deleted).toEqual([]);
+    expect(spy.stateDropped).toEqual([]);
+  });
+
   test("forgets the receive key before deleting the partial", async () => {
     const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
     const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
@@ -326,6 +400,93 @@ describe("sweepCancelledInboundTransfer", () => {
     ).toBe(true);
     expect(spy.forgotten).toEqual([ROOT_HEX]);
     expect(spy.deleted).toEqual([ROOT_HEX]);
+  });
+
+  // ── finding 4: parity with immediate mode is the WHOLE deletion ────────────
+  //
+  // Both immediate-mode cancels do two things: the worker's cancelReceiveTransfer
+  // removes chunks, the messageData row and the pre-sized OPFS file, and the
+  // caller then dispatches deleteMessage so the in-memory room state loses the
+  // message too (disconnectFromPeerChannelLabelQuery, disconnectFromChannelLabelQuery).
+  // Doing only the durable half leaves the user looking at a partial whose
+  // bytes no longer exist and which no re-send can ever fill.
+  test("the in-memory state row goes too, exactly as immediate mode does", async () => {
+    const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
+    const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
+    expect(
+      await sweepCancelledInboundTransfer(epc, ROOM_ID, ROOT_HEX, spy.deps),
+    ).toBe(true);
+    expect(spy.stateDropped).toEqual([`${ROOM_ID}/${ROOT_HEX}`]);
+  });
+
+  test("a refused sweep leaves the state row exactly where it is", async () => {
+    // Deletion is irreversible in the store as well as on disk: every refusal
+    // in shouldSweepCancelledInboundTransfer must cover BOTH halves.
+    const spy = makeSweepSpy({
+      [ROOT_HEX]: rowFor({ savedSize: 100, totalSize: 100 }),
+    });
+    const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
+    expect(
+      await sweepCancelledInboundTransfer(epc, ROOM_ID, ROOT_HEX, spy.deps),
+    ).toBe(false);
+    expect(spy.deleted).toEqual([]);
+    expect(spy.stateDropped).toEqual([]);
+  });
+
+  test("a durable delete that throws never drops the state row", async () => {
+    // The state row is the last thing to go, because it is the only remaining
+    // evidence a partial exists: a reconnect can still resume what is on disk.
+    const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
+    const failing: InboundTransferSweepDeps = {
+      ...spy.deps,
+      deleteReceive: () => Promise.reject(new Error("worker is gone")),
+    };
+    const epc = { withPeerId: PEER_ID } as unknown as IRTCPeerConnection;
+    expect(
+      await sweepCancelledInboundTransfer(epc, ROOM_ID, ROOT_HEX, failing),
+    ).toBe(false);
+    // It really did get as far as the durable delete before failing, so the
+    // empty list below is a refusal and not a path that never ran.
+    expect(spy.forgotten).toEqual([ROOT_HEX]);
+    expect(spy.stateDropped).toEqual([]);
+  });
+
+  test("the PRODUCTION dropStateRow really removes the message from live state", async () => {
+    // The deps seam exists so a test can watch the sweep; it must not be the
+    // reason the shipped path does nothing. This drives the default straight
+    // into the real store.
+    const { store } = await import("../../src/store");
+    const { setMessage, setRoom } =
+      await import("../../src/reducers/roomSlice");
+    const roomUrl = "5".repeat(64);
+    store.dispatch(setRoom({ url: roomUrl, id: "" }));
+    const roomId = store
+      .getState()
+      .rooms.find(({ url }) => url === roomUrl)?.id;
+    expect(typeof roomId).toBe("string");
+    store.dispatch(
+      setMessage({
+        roomId: roomId!,
+        merkleRootHex: ROOT_HEX,
+        sha512Hex: "ab".repeat(64),
+        chunkSize: 1,
+        totalSize: 100,
+        // setMessage refuses a non-UUID sender.
+        fromPeerId: "11111111-1111-4111-8111-111111111111",
+        filename: "big.bin",
+        messageType: 1,
+        channelLabel: "chat",
+      }),
+    );
+    const holdsMessage = (): boolean =>
+      store
+        .getState()
+        .rooms.find(({ id }) => id === roomId)
+        ?.messages.some((m) => m.merkleRootHex === ROOT_HEX) === true;
+
+    expect(holdsMessage()).toBe(true);
+    await productionInboundTransferSweepDeps.dropStateRow(roomId!, ROOT_HEX);
+    expect(holdsMessage()).toBe(false);
   });
 
   test("a malformed root is never handed to storage", async () => {
@@ -361,6 +522,8 @@ describe("an authenticated remote CANCEL sweeps the inbound partial (finding B)"
     expect(receiver.outboundAborts).toEqual([ROOT_HEX]);
     expect(spy.deleted).toEqual([ROOT_HEX]);
     expect(spy.rows.has(ROOT_HEX)).toBe(false);
+    // ...and the in-memory row goes with it, exactly as immediate mode does.
+    expect(spy.stateDropped).toEqual([`${ROOM_ID}/${ROOT_HEX}`]);
 
     receiver.destroy();
     sender.runtime.destroy();
@@ -516,8 +679,7 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
     let receiptLanded = false;
     const delivered = await waitForScheduledDelivery({
       isComplete: () => receiptLanded,
-      progressToken: () =>
-        scheduledSendProgressToken(rig.runtime, rig.jobLabel),
+      progress: () => scheduledSendProgress(rig.runtime, rig.jobLabel),
       idleTimeoutMs: ARITHMETIC_FLOOR_MS,
       pollMs: 50,
       now: () => rig.clock.now(),
@@ -560,7 +722,7 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
     const delivered = await waitForScheduledDelivery({
       isComplete: () => false,
       // The pre-fix bound: elapsed time only, blind to the job's own advance.
-      progressToken: () => undefined,
+      progress: () => undefined,
       idleTimeoutMs: ARITHMETIC_FLOOR_MS,
       pollMs: 50,
       now: () => rig.clock.now(),
@@ -590,5 +752,141 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
     rig.runtime.destroy();
     rig.pq.destroy();
     receiver.destroy();
+  });
+
+  // ── finding 1: a suspended job is not a stalled job ────────────────────────
+  //
+  // CoverRuntime suspends the scheduler on visibilitychange→hidden, pagehide,
+  // freeze and offline. `CoverScheduler.suspend` REQUEUES but KEEPS the job, so
+  // the sender's only progress signal freezes while the send is perfectly
+  // healthy. Spending the idle budget through that gap abandons a live send,
+  // and `sendScheduled`'s CANCEL then deletes the receiver's partial — an
+  // ordinary user action (backgrounding a tab) destroying the peer's download.
+  describe("a backgrounded tab is not a stalled send (finding 1)", () => {
+    // Three whole budgets hidden: far beyond anything the idle bound tolerates
+    // when it cannot tell "paused" from "stuck".
+    const HIDDEN_MS = 3 * ARITHMETIC_FLOOR_MS;
+
+    /** Every cell this send's lanes have put on the wire, across all cycles. */
+    const jobCellsOnWire = (rig: SendRig): number =>
+      rig.lanes
+        .filter((lane) => lane.label === rig.jobLabel)
+        .reduce((total, lane) => total + lane.sent.length, 0);
+
+    interface HiddenTabRun {
+      readonly delivered: boolean;
+      readonly hiddenUntilMs: number;
+      readonly cellsAtResume: number;
+    }
+
+    /**
+     * Admit the send, emit part of it, background the tab, and wait. The tab
+     * returns to the foreground HIDDEN_MS later, from inside the wait's own
+     * sleep — so a wait that gave up before then never saw it come back.
+     */
+    const runHiddenTab = async (
+      rig: SendRig,
+      isSuspended: () => boolean,
+    ): Promise<HiddenTabRun> => {
+      // Cycle 0 and 1 admit the four fillers; ours is admitted at cycle 2 and
+      // is part-way through emitting when the tab is hidden.
+      await rig.clock.advanceTo(2 * CYCLE_MS + Math.floor(CYCLE_MS / 2));
+      const midFlight = rig.runtime.getJobProgress(rig.jobLabel);
+      expect(midFlight?.state).toBe("admitted");
+      expect(midFlight!.sentCells).toBeGreaterThan(0);
+      expect(midFlight!.sentCells).toBeLessThan(CELLS);
+
+      rig.runtime.suspend("page-hidden");
+      expect(rig.runtime.status).toBe("suspended");
+      // Suspension keeps the job: this is a live send, not a lost one.
+      expect(rig.runtime.getJobProgress(rig.jobLabel)).toBeDefined();
+
+      const hiddenUntilMs = rig.clock.now() + HIDDEN_MS;
+      let cellsAtResume = -1;
+      let receiptLanded = false;
+      const delivered = await waitForScheduledDelivery({
+        isComplete: () => receiptLanded,
+        progress: () => scheduledSendProgress(rig.runtime, rig.jobLabel),
+        isSuspended,
+        idleTimeoutMs: ARITHMETIC_FLOOR_MS,
+        pollMs: 50,
+        now: () => rig.clock.now(),
+        sleep: async (ms) => {
+          await rig.clock.advanceTo(rig.clock.now() + ms);
+          if (
+            rig.clock.now() >= hiddenUntilMs &&
+            rig.runtime.status === "suspended"
+          ) {
+            cellsAtResume = jobCellsOnWire(rig);
+            rig.runtime.resume();
+          }
+          // The terminal receipt cannot exist before every cell is out; model
+          // it as the job leaving the scheduler.
+          if (rig.runtime.getJobProgress(rig.jobLabel) === undefined)
+            receiptLanded = true;
+        },
+      });
+      return { delivered, hiddenUntilMs, cellsAtResume };
+    };
+
+    test("the send survives the hidden interval and the receiver keeps its partial", async () => {
+      const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
+      const receiver = makeReceiver(spy);
+      const rig = makeSendRig();
+
+      const run = await runHiddenTab(rig, () =>
+        scheduledCoverIsSuspended(rig.runtime),
+      );
+
+      expect(run.delivered).toBe(true);
+      // It waited out the whole hidden interval instead of giving up inside it.
+      expect(rig.clock.now()).toBeGreaterThan(run.hiddenUntilMs);
+      // ...and the transfer really did continue once the tab came back.
+      expect(run.cellsAtResume).toBeGreaterThan(0);
+      expect(jobCellsOnWire(rig)).toBeGreaterThan(run.cellsAtResume);
+
+      // Production cancels only when delivery was NOT confirmed. It was, so
+      // every cell this send emitted reaches the receiver and none is a CANCEL.
+      feedEverythingSent(rig, receiver);
+      await flush();
+      expect(receiver.outboundAborts).toEqual([]);
+      expect(spy.deleted).toEqual([]);
+      expect(spy.rows.get(ROOT_HEX)?.savedSize).toBe(40);
+
+      rig.runtime.destroy();
+      rig.pq.destroy();
+      receiver.destroy();
+    });
+
+    test("CONTROL: without the suspension gate the budget expires, and the returning tab's CANCEL destroys the partial", async () => {
+      const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
+      const receiver = makeReceiver(spy);
+      const rig = makeSendRig();
+
+      // The ONE expression under repair, flipped back: the budget accrues
+      // through a browser-imposed suspension exactly as it did before.
+      const run = await runHiddenTab(rig, () => false);
+      expect(run.delivered).toBe(false);
+      // It gave up while the tab was still hidden and the job still healthy.
+      expect(rig.clock.now()).toBeLessThan(run.hiddenUntilMs);
+      expect(rig.runtime.status).toBe("suspended");
+
+      // Exactly what sendScheduled does on a failed delivery. The scheduler is
+      // suspended, so the CANCEL cell does not fly until the tab comes back —
+      // which is when the user's peer loses the file.
+      expect(cancelScheduledSend(rig.epc, rig.jobLabel)).toBe("cancel-pending");
+      rig.runtime.resume();
+      await rig.clock.advanceTo(rig.clock.now() + 2 * CYCLE_MS);
+
+      feedEverythingSent(rig, receiver);
+      await flush();
+      expect(receiver.outboundAborts).toEqual([ROOT_HEX]);
+      expect(spy.deleted).toEqual([ROOT_HEX]);
+      expect(spy.rows.has(ROOT_HEX)).toBe(false);
+
+      rig.runtime.destroy();
+      rig.pq.destroy();
+      receiver.destroy();
+    });
   });
 });

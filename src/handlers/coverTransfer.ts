@@ -10,6 +10,7 @@ import type {
   CoverJob,
   CoverJobProgress,
   CoverJobSlot,
+  CoverSchedulerStatus,
 } from "./coverScheduler";
 import type { CoverRuntime } from "./coverRuntime";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
@@ -255,9 +256,12 @@ export interface ScheduledJobProgressSource {
   getJobProgress(jobId: string): CoverJobProgress | undefined;
 }
 
+/** What one scheduled send has achieved; `CoverJobProgress` verbatim. */
+export type ScheduledSendProgress = CoverJobProgress;
+
 /**
- * A token that changes whenever this send made observable progress, and is
- * undefined once the scheduler no longer holds the job.
+ * What this send has achieved so far, or undefined once the scheduler no
+ * longer holds the job.
  *
  * Scheduled mode emits NO per-chunk receipts — handleMessageQueueing sends an
  * immediate receipt only when the edge has no cover runtime, and otherwise one
@@ -266,21 +270,84 @@ export interface ScheduledJobProgressSource {
  * The sender's only evidence that the send is alive is therefore local: its
  * position in the admission queue moving up, and its cells reaching the wire.
  */
-export const scheduledSendProgressToken = (
+export const scheduledSendProgress = (
   runtime: ScheduledJobProgressSource | undefined,
   jobId: string,
-): string | undefined => {
-  const progress = runtime?.getJobProgress(jobId);
-  if (!progress) return undefined;
+): ScheduledSendProgress | undefined => runtime?.getJobProgress(jobId);
 
-  return `${progress.state}:${String(progress.queuePosition)}:${String(progress.sentCells)}`;
+/** queued → admitted → terminal, and never back again for a given attempt. */
+const ADMISSION_STAGE: Readonly<
+  Record<ScheduledSendProgress["state"], number>
+> = { queued: 0, admitted: 1, terminal: 2 };
+
+/**
+ * Whether `next` is genuinely AHEAD of the best this send has managed so far.
+ *
+ * The progress signal is NOT monotone, so "it changed" is not "it advanced".
+ * `CoverScheduler.sortQueue` ranks a cancel-pending job first and a `control`
+ * job ahead of every `real` one (jobTier), so a receipt-drain job admitted
+ * while this send waits pushes its queue position BACKWARDS; and every requeue
+ * — backpressure, a lane that failed to open, a missed deadline, a suspension —
+ * sends an admitted job back to "queued". Counting either as progress lets an
+ * oscillating signal reset the budget forever: the send is never abandoned, the
+ * receiver's partial is never cancelled, and because `sendScheduled` fans out
+ * serially, every later peer in the room waits behind it unboundedly.
+ *
+ * So exactly three things count, in this order:
+ *
+ *  - the admission stage rising (queued → admitted → terminal);
+ *  - within one stage, the queue position falling, which is a job climbing
+ *    towards admission (-1 means "not queued at all", which the stage already
+ *    carries, so it is never compared as a position);
+ *  - cells accepted onto the wire rising — the one component the scheduler
+ *    itself only ever increments.
+ *
+ * `sentCells` survives a requeue, so a job knocked back to the queue and
+ * re-admitted has to emit past its own high-water mark to count again. That is
+ * deliberate: a job that is requeued every cycle and never emits anything IS
+ * stuck, and must still be caught.
+ */
+export const isForwardScheduledProgress = (
+  previous: ScheduledSendProgress | undefined,
+  next: ScheduledSendProgress,
+): boolean => {
+  if (previous === undefined) return true;
+  const stage = ADMISSION_STAGE[next.state] - ADMISSION_STAGE[previous.state];
+  if (stage !== 0) return stage > 0;
+  if (next.queuePosition !== previous.queuePosition)
+    return (
+      next.queuePosition >= 0 &&
+      previous.queuePosition >= 0 &&
+      next.queuePosition < previous.queuePosition
+    );
+  return next.sentCells > previous.sentCells;
 };
+
+/**
+ * True while this edge's cover scheduler is SUSPENDED: a browser-imposed gap
+ * (a hidden tab, pagehide, freeze, offline) in which the schedule is not
+ * running at all.
+ *
+ * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
+ * one are NOT this: they are conditions the idle budget must still expire on,
+ * so the send can reach its resume — or, failing that, tell the receiver.
+ * Only the state that both keeps the job alive and makes progress impossible
+ * holds the clock.
+ */
+export const scheduledCoverIsSuspended = (
+  runtime: { readonly status: CoverSchedulerStatus } | undefined,
+): boolean => runtime?.status === "suspended";
 
 export interface ScheduledDeliveryWaitOptions {
   /** True once the receiver's terminal scheduled receipt has settled the send. */
   readonly isComplete: () => boolean;
-  /** See scheduledSendProgressToken. */
-  readonly progressToken: () => string | undefined;
+  /** See scheduledSendProgress. */
+  readonly progress: () => ScheduledSendProgress | undefined;
+  /**
+   * True while progress is IMPOSSIBLE rather than merely absent. See
+   * scheduledCoverIsSuspended; omitted, the budget always accrues.
+   */
+  readonly isSuspended?: () => boolean;
   /**
    * How long this send may make NO observable progress before it is given up
    * on. An IDLE budget, never a total deadline.
@@ -314,6 +381,21 @@ const SCHEDULED_DELIVERY_POLL_MS = 200;
  * climbing the queue or still emitting cells is never abandoned however long
  * it takes in total; a send that has genuinely stopped is abandoned exactly
  * one floor after its last sign of life.
+ *
+ * The budget measures time in which progress was POSSIBLE and did not happen.
+ * `CoverRuntime` suspends the scheduler on visibilitychange→hidden, pagehide,
+ * freeze and offline, and `CoverScheduler.suspend` requeues but KEEPS the job:
+ * the signal freezes while the send is perfectly healthy. Spending the budget
+ * through that gap abandons a live send, and the CANCEL that follows deletes a
+ * partial the peer is still holding — so the clock is held while the scheduler
+ * is suspended AND still holds this job. It is deliberately not held for a
+ * runtime that is merely gone: only the state that makes progress impossible
+ * without ending the job counts, so a genuinely stalled send is still caught.
+ *
+ * The boundary of holding the clock is a page that is hidden and never comes
+ * back: this wait then does not return until it does, or until `signal` aborts.
+ * That is the direction the peer can survive — the job stays queued and still
+ * has every cell to give — where giving up would destroy its partial for good.
  */
 export const waitForScheduledDelivery = async (
   options: ScheduledDeliveryWaitOptions,
@@ -326,19 +408,23 @@ export const waitForScheduledDelivery = async (
   if (!Number.isFinite(options.idleTimeoutMs) || options.idleTimeoutMs <= 0)
     throw new Error("coverTransfer: delivery idle budget must be positive");
 
-  let lastToken = options.progressToken();
+  let best = options.progress();
   let lastProgressAt = now();
   for (;;) {
     if (options.signal?.aborted) return false;
     if (options.isComplete()) return true;
 
-    const token = options.progressToken();
     // `undefined` is the job having left the scheduler, not a step backwards:
     // it stops the clock being reset, so the remaining wait is exactly the
-    // receipt window. Anything else that CHANGED is a step forward.
-    if (token !== undefined && token !== lastToken) {
-      lastToken = token;
-      lastProgressAt = now();
+    // receipt window — and it is also what makes a torn-down edge expire.
+    const current = options.progress();
+    if (current !== undefined) {
+      if (isForwardScheduledProgress(best, current)) {
+        best = current;
+        lastProgressAt = now();
+      } else if (options.isSuspended?.() === true) {
+        lastProgressAt = now();
+      }
     }
     if (now() - lastProgressAt >= options.idleTimeoutMs) break;
     await sleep(pollMs);

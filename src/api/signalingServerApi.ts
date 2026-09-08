@@ -126,11 +126,14 @@ let signalingReconnectHost: SignalingReconnectHost | null = null;
  * Close codes after which reconnecting to the same URL with this build asks the
  * same refused question again. p2party-server 0.1.1 ends EVERY rejection it has
  * — failed verification, socket replacement, ping timeout, handler error — with
- * a bare `ws.close()`, which reaches the browser as `CloseEvent.code` 1005, so
- * nothing the current server sends is in this set; it exists so a policy gate in
- * front of the server (or a later server that says what it means) is not retried
- * every 30 s forever. 1002 is deliberately absent: a protocol error can be one
- * mangled frame from a proxy, which the next socket does not repeat.
+ * a bare `ws.close()`, which reaches the browser as `CloseEvent.code` 1000
+ * (measured, 20/20 runs, against a real Bun WebSocket server on Bun 1.3.14 —
+ * Bun's behaviour, not a protocol guarantee, so another runtime may still send
+ * 1005 "no status received" for the same bare close()), so nothing the current
+ * server sends is in this set; it exists so a policy gate in front of the
+ * server (or a later server that says what it means) is not retried every 30 s
+ * forever. 1002 is deliberately absent: a protocol error can be one mangled
+ * frame from a proxy, which the next socket does not repeat.
  */
 const PERMANENT_SIGNALING_CLOSE_CODES: ReadonlySet<number> = new Set([
   1003, // unsupported data — a build mismatch, identical on the next socket

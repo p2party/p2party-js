@@ -18,6 +18,13 @@ import {
   resetRatchetGate,
 } from "../../src/handlers/ratchetGate";
 import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
+import {
+  createReceiptProcessingQueue,
+  enqueueReceipt,
+  hasQueuedEdgeReceiveWork,
+  releaseQueuedReceipts,
+  waitForEdgeReceiveQuiescence,
+} from "../../src/handlers/handleMessageQueueing";
 import type { Message } from "../../src/reducers/roomSlice";
 import type { MessageData } from "../../src/db/types";
 import type { RatchetState } from "../../src/cryptography/ratchet";
@@ -86,6 +93,127 @@ const realRetirement: typeof forgetExpiredReceiveMessageKey = (
   );
 
 describe("expired receive projection", () => {
+  test("a handler paused after binding but before storage prevents expiry admission", async () => {
+    const roomId = `expiry-in-flight-${++sequence}`;
+    const current = edge(roomId);
+    const rooms = [{ id: roomId, messages: [message()] }];
+    const queue = createReceiptProcessingQueue(roomId, "peer");
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let sweeps = 0,
+      retirements = 0,
+      drops = 0;
+    // Chunk and receipt handlers share this production edge processing lock.
+    // Pause at the post-decrypt boundary: a bound root, no worker write lease.
+    enqueueReceipt(new Uint8Array(64).fill(1), queue, async () => {
+      bindReceiveMessageKey(current.peer, ROOT, current.cacheKey);
+      entered();
+      await paused;
+    });
+    try {
+      await started;
+      expect(queue.pending).toHaveLength(0);
+      expect(hasQueuedEdgeReceiveWork(roomId, "peer")).toBe(true);
+      await sweepExpiredReceiveState({
+        getRooms: () => rooms,
+        getPeers: () => [current.peer],
+        sweep: async () => {
+          sweeps++;
+          return [{ merkleRoot: ROOT, roomId, fromPeerId: "peer" }];
+        },
+        readProgress: async () => undefined,
+        forgetKey: async () => {
+          retirements++;
+          return true;
+        },
+        dropMessage: () => {
+          drops++;
+        },
+      });
+      expect({ sweeps, retirements, drops }).toEqual({
+        sweeps: 0,
+        retirements: 0,
+        drops: 0,
+      });
+      expect(current.key[0]).toBe(7);
+      expect(current.peer.messageKeyByMerkleRoot!.get(ROOT)).toBe(
+        current.cacheKey,
+      );
+      expect(rooms[0]!.messages).toHaveLength(1);
+    } finally {
+      resume();
+      await waitForEdgeReceiveQuiescence(roomId, "peer");
+      releaseQueuedReceipts(queue);
+      resetRatchetGate(roomId, "peer");
+    }
+  });
+
+  test("a receive starting during outbox maintenance prevents the subsequent worker receive sweep", async () => {
+    const outboxPath = new URL("../../src/handlers/outbox.ts", import.meta.url)
+      .pathname;
+    const queuePath = new URL(
+      "../../src/handlers/handleMessageQueueing.ts",
+      import.meta.url,
+    ).pathname;
+    // Isolate Worker initialization; no mock or environment change reaches other tests.
+    const source = `
+      process.env.INDEXEDDB_WORKER_JS = "test-worker";
+      const methods = [];
+      let releaseOutbox, notifyOutbox;
+      const outboxStarted = new Promise(resolve => { notifyOutbox = resolve; });
+      globalThis.Worker = class {
+        postMessage(message) {
+          methods.push(message.method);
+          if (message.method === "outboxRequest") {
+            releaseOutbox = () => this.onmessage({ data: { id: message.id, result: { accepted: true } } });
+            notifyOutbox();
+          } else this.onmessage({ data: { id: message.id, result: [] } });
+        }
+      };
+      const { sweepTransferStorageDetails } = await import(${JSON.stringify(outboxPath)});
+      const { createReceiptProcessingQueue, enqueueReceipt, hasQueuedEdgeReceiveWork,
+        releaseQueuedReceipts, waitForEdgeReceiveQuiescence } = await import(${JSON.stringify(queuePath)});
+      const room = "expiry-after-outbox", peer = "peer";
+      const result = sweepTransferStorageDetails(() => !hasQueuedEdgeReceiveWork(room, peer));
+      await outboxStarted;
+      const queue = createReceiptProcessingQueue(room, peer);
+      let resume, enter;
+      const paused = new Promise(resolve => { resume = resolve; });
+      const entered = new Promise(resolve => { enter = resolve; });
+      enqueueReceipt(new Uint8Array(64), queue, async () => { enter(); await paused; });
+      await entered;
+      const inFlight = hasQueuedEdgeReceiveWork(room, peer);
+      releaseOutbox();
+      const deleted = await result;
+      resume();
+      await waitForEdgeReceiveQuiescence(room, peer);
+      releaseQueuedReceipts(queue);
+      console.log(JSON.stringify({ inFlight, methods, deleted }));
+    `;
+    const child = Bun.spawn([process.execPath, "-e", source], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exit).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      inFlight: true,
+      methods: ["outboxRequest"],
+      deleted: [],
+    });
+  });
+
   test("frequent metadata polling coalesces maintenance and avoids repeated key scans", async () => {
     let now = 100;
     let snapshots = 0;

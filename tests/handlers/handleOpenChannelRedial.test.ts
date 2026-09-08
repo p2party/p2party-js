@@ -371,12 +371,16 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       expect(pc.closes.count).toBe(1);
       expect(redials(afterOpen)).toEqual([]);
       expect(pc.epc.handshakeTerminalFailure).toBe("pin-throttled");
-      // Detached BEFORE the close, exactly as disconnectFromPeerQuery does.
-      // onclose additionally consults handshakeTerminalFailure, but onerror has
-      // no such guard: a later error event on a channel whose handler survived
-      // would run disconnectFromPeer and re-dial the edge anyway.
-      expect(channel.onclose).toBeNull();
-      expect(channel.onerror).toBeNull();
+      // onclose's detach is redundant with the main.onclose terminal guard
+      // (pinned by the "neither tears down nor re-dials" test below), so it
+      // needs no assertion of its own here. onerror has no such guard, so its
+      // detach is the only thing standing between a later error event and a
+      // re-dial: prove that behaviourally rather than asserting the handler's
+      // shape, so this survives a refactor that guards inside onerror instead
+      // of detaching it.
+      const beforeErrorEvent = dispatched.length;
+      await channel.onerror?.call(channel, new Event("error") as RTCErrorEvent);
+      expect(dispatched.slice(beforeErrorEvent)).toEqual([]);
     } finally {
       deleteRoomPin(PIN_ROOM_URL);
       resetRatchetGate(PIN_ROOM_ID, PEER_ID);
@@ -414,8 +418,13 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     expect(failed.payload.reason).toBe("policy");
     expect(redials(afterOpen)).toEqual([]);
     expect(pc.epc.handshakeTerminalFailure).toBe("policy");
-    expect(channel.onclose).toBeNull();
-    expect(channel.onerror).toBeNull();
+    // See the PIN-throttled test above: onclose's detach is redundant with
+    // the main.onclose terminal guard, already pinned elsewhere; onerror has
+    // no such guard, so prove its detach behaviourally instead of asserting
+    // its shape.
+    const beforeErrorEvent = dispatched.length;
+    await channel.onerror?.call(channel, new Event("error") as RTCErrorEvent);
+    expect(dispatched.slice(beforeErrorEvent)).toEqual([]);
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });

@@ -999,7 +999,16 @@ export const handleOpenChannel = async (
             // not replace that lease, so the guard passed and :422 re-dialled
             // unconditionally, walking the PIN backoff to its 300 s cap.
             epc.handshakeTerminalFailure = failureReason;
+            // This onclose detach has no falsifying test of its own: the
+            // main.onclose guard above (`epc.handshakeTerminalFailure !==
+            // undefined`) already covers the case where onclose fires after
+            // this line, and that guard's behaviour is pinned by its own
+            // test. Kept anyway as defence in depth — if the guard is ever
+            // removed or broken, losing this line too means the edge
+            // re-dials forever against a peer that can never accept.
             extChannel.onclose = null;
+            // onerror has no equivalent guard, so this detach is load-bearing
+            // on its own; it is covered by a behavioural test.
             extChannel.onerror = null;
           }
           if (extChannel.readyState !== "closed") extChannel.close();

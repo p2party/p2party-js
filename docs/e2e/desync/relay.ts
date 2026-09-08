@@ -43,6 +43,12 @@ const STRIP_SOCKET_GENERATION = process.env.RELAY_STRIP_SOCKET_GENERATION === "1
 const gen = (value: string): { socketGeneration?: string } => STRIP_SOCKET_GENERATION ? {} : { socketGeneration: value };
 const fromGen = (value: string): { fromPeerSocketGeneration?: string } => STRIP_SOCKET_GENERATION ? {} : { fromPeerSocketGeneration: value };
 const PROTO = 4;
+// p2party-server socketAuth.ts PERMANENT_CLOSE_CODE. A bare close() reaches the
+// client as 1005, which its reconnect ladder deliberately retries, so an evicted
+// predecessor would reconnect, evict whoever displaced it, and the two sockets
+// would evict each other forever. Reproducing that here would show the OLD
+// server, not the one this scenario is meant to exercise.
+const PERMANENT_CLOSE_CODE = 1008;
 const PING_INTERVAL = 10000;
 const PONG_TIMEOUT = 5000;
 
@@ -352,9 +358,9 @@ Bun.serve<WsData, undefined>({
           const predecessor = clients.get(ws.data.peerId);
           clients.set(ws.data.peerId, ws);
           if (predecessor && predecessor !== ws) {
-            log(`REGISTER ${from} sock#${ws.data.sock} REPLACES sock#${predecessor.data.sock} (predecessor closed; gen ${short(predecessor.data.socketGeneration)} -> ${short(challengeId)})`);
+            log(`REGISTER ${from} sock#${ws.data.sock} REPLACES sock#${predecessor.data.sock} (predecessor closed ${PERMANENT_CLOSE_CODE}; gen ${short(predecessor.data.socketGeneration)} -> ${short(challengeId)})`);
             predecessor.data.isVerified = false;
-            predecessor.close();
+            predecessor.close(PERMANENT_CLOSE_CODE, "Replaced by a newer session for this identity");
           } else log(`REGISTER ${from} sock#${ws.data.sock} verified (gen ${short(challengeId)})`);
           sendTo(ws, { type: "challenge", challengeId, protocolVersion: PROTO }, "srv");
           return;

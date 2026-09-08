@@ -70,6 +70,35 @@ describe("retired peer socket generations", () => {
     expect(isPeerSocketGenerationRetired(ROOM, PEER, "")).toBe(false);
     expect(isPeerSocketGenerationRetired(ROOM, PEER, undefined)).toBe(false);
   });
+
+  // The bound is load-bearing in both directions and is pinned to a LITERAL
+  // here. Too small and the memory of an eviction burst — handlePeerConnection
+  // delivers each introduction twice, and the roster is re-sent on join, on
+  // re-dial and on reconcile — falls out before the last stale frame lands, so
+  // the replacement is torn down again. Too large and a long-lived edge keeps
+  // growing a set it never reads. A test that read the constant back would
+  // move with any edit to it and could never fail.
+  test("an edge remembers exactly eight retired generations", () => {
+    const generation = (n: number): string =>
+      `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+
+    for (let i = 0; i < 8; i++)
+      markPeerSocketGenerationRetired(ROOM, PEER, generation(i));
+    for (let i = 0; i < 8; i++)
+      expect(isPeerSocketGenerationRetired(ROOM, PEER, generation(i))).toBe(
+        true,
+      );
+
+    // The ninth evicts the OLDEST, and only the oldest.
+    markPeerSocketGenerationRetired(ROOM, PEER, generation(8));
+    expect(isPeerSocketGenerationRetired(ROOM, PEER, generation(0))).toBe(
+      false,
+    );
+    for (let i = 1; i <= 8; i++)
+      expect(isPeerSocketGenerationRetired(ROOM, PEER, generation(i))).toBe(
+        true,
+      );
+  });
 });
 
 describe("shouldRetireTransportForSocketGeneration", () => {
@@ -108,15 +137,32 @@ describe("shouldRetireTransportForSocketGeneration", () => {
   });
 
   // The stranded responder of C1: no channel, no description, nothing watching.
+  // "disconnected" is deliberately absent -- see the grace-window test below.
   test("a roster frame naming a new generation retires a transport that is not connected", () => {
     for (const connectionState of [
       "new",
       "connecting",
-      "disconnected",
       "failed",
       "closed",
     ] as RTCPeerConnectionState[])
       expect(observe({ source: "roster", connectionState })).toBe(true);
+  });
+
+  // "disconnected" is not a dead edge. handleConnectToPeer answers it with an
+  // ICE restart and only tears the transport down if it is STILL disconnected
+  // 8 s later, and that repair usually succeeds. A peer's ordinary signaling
+  // reconnect lands a changed roster generation constantly, so acting on one
+  // inside that window would discard a transport that was about to heal itself
+  // -- the same over-eagerness as C4, one state further along.
+  test("a roster frame leaves a transport inside the ICE-repair grace window alone", () => {
+    expect(observe({ source: "roster", connectionState: "disconnected" })).toBe(
+      false,
+    );
+    // A `connection` frame still retires it: that one proves the peer really
+    // did build a fresh transport, so there is nothing left to repair.
+    expect(
+      observe({ source: "connection", connectionState: "disconnected" }),
+    ).toBe(true);
   });
 
   test("an absent or malformed generation never retires anything", () => {

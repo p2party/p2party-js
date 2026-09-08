@@ -53,10 +53,14 @@ const webrtcApi = createApi({
   baseQuery: webrtcBaseQuery,
   endpoints: (builder) => ({
     connectWithPeer: builder.mutation<undefined, RTCPeerConnectionParams>({
+      // Forward the caller's parameters WHOLE and only default `rtcConfig`.
+      // A transform that re-lists the fields it passes on silently drops every
+      // one it forgets, and an optional field dropped here type-checks: that is
+      // how `peerSocketGeneration`/`peerSocketGenerationSource` reached
+      // baseQuery as `undefined` on every dispatch, leaving the C1 rebuild dead
+      // in production while both sides of this seam stayed green. The rest
+      // spread through, so a future parameter cannot be lost the same way.
       query: ({
-        peerId,
-        peerPublicKey,
-        roomId,
         rtcConfig = {
           iceServers: [
             {
@@ -67,10 +71,9 @@ const webrtcApi = createApi({
           // Pre-allocate ICE candidates for faster connection setup
           iceCandidatePoolSize: 2,
         },
+        ...params
       }) => ({
-        peerId,
-        peerPublicKey,
-        roomId,
+        ...params,
         rtcConfig,
         peerConnections,
         dataChannels,

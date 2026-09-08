@@ -125,6 +125,11 @@ export interface PeerSocketGenerationObservation {
  * edge must survive an ordinary signaling reconnect (C4). And a generation
  * this edge has already retired never triggers a second teardown, however it
  * arrives.
+ *
+ * "not working" excludes "disconnected". handleConnectToPeer answers that state
+ * with an ICE restart and only tears the edge down if it is still disconnected
+ * 8 s later, and the restart usually succeeds — so a roster frame arriving in
+ * that window would replace a transport that was about to heal itself.
  */
 export const shouldRetireTransportForSocketGeneration = ({
   roomId,
@@ -138,5 +143,5 @@ export const shouldRetireTransportForSocketGeneration = ({
     return false;
   if (isPeerSocketGenerationRetired(roomId, peerId, observed)) return false;
   if (source === "connection") return true;
-  return connectionState !== "connected";
+  return connectionState !== "connected" && connectionState !== "disconnected";
 };

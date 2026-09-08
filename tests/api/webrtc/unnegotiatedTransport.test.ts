@@ -69,6 +69,25 @@ describe("un-negotiated responder transport", () => {
     expect(mayRebuildUnnegotiatedTransport(ROOM, PEER)).toBe(false);
   });
 
+  // The test above loops UP TO the constant, so it follows any edit to it and
+  // can never notice one. This is what actually holds the budget at three: a
+  // literal, and the two boundaries around it. Three is deliberate — enough to
+  // survive a peer that is slow to dial, few enough that against a
+  // pre-generation server (which never rebuilds its own side) the churn stops
+  // instead of re-dialling every PENDING_OFFER_TIMEOUT_MS forever.
+  test("the rebuild budget is exactly three", () => {
+    expect(MAX_UNNEGOTIATED_TRANSPORT_REBUILDS).toBe(3);
+
+    recordUnnegotiatedTransportRebuild(ROOM, PEER);
+    recordUnnegotiatedTransportRebuild(ROOM, PEER);
+    // Two spent, one still owed.
+    expect(mayRebuildUnnegotiatedTransport(ROOM, PEER)).toBe(true);
+
+    recordUnnegotiatedTransportRebuild(ROOM, PEER);
+    // The third exhausts it.
+    expect(mayRebuildUnnegotiatedTransport(ROOM, PEER)).toBe(false);
+  });
+
   test("a negotiated transport clears the count", () => {
     recordUnnegotiatedTransportRebuild(ROOM, PEER);
     clearUnnegotiatedTransportRebuilds(ROOM, PEER);

@@ -15,9 +15,15 @@ import {
 } from "../api/webrtc/roomPeer";
 import { assertRoomEdgeBudget } from "../api/webrtc/roomEdgeBudget";
 import {
+  hasNoNegotiatedDescription,
   hasUnansweredFirstOffer,
   PENDING_OFFER_TIMEOUT_MS,
 } from "../api/webrtc/pendingOffer";
+import {
+  clearUnnegotiatedTransportRebuilds,
+  mayRebuildUnnegotiatedTransport,
+  recordUnnegotiatedTransportRebuild,
+} from "../api/webrtc/unnegotiatedTransport";
 import {
   getRoomIdentityMutex,
   getRoomIceConfigurationMutex,
@@ -30,7 +36,10 @@ import cryptoMemory from "../cryptography/memory";
 import { wasmLoader } from "../cryptography/wasmLoader";
 import { resetRatchetGate } from "./ratchetGate";
 import { claimRatchetPersistence } from "./ratchetPersist";
-import { assertCanonicalEd25519Identity } from "../utils/identityRole";
+import {
+  assertCanonicalEd25519Identity,
+  isIdentityInitiator,
+} from "../utils/identityRole";
 import { assertTransportIdentityCurrent } from "../utils/transportIdentity";
 import { PROTOCOL_VERSION } from "../utils/constants";
 import { requestRoomFromSignaling } from "./requestRoom";
@@ -278,6 +287,52 @@ export const handleConnectToPeer = async (
       }, PENDING_OFFER_TIMEOUT_MS);
     };
 
+    // A protocol RESPONDER creates no channel on a fresh transport, so nothing
+    // negotiates and nothing watches it: no description means no ICE, no
+    // failure and no rebind deadline. That is the state a second session for
+    // one identity is stranded in (C1). Bounded, because against a
+    // pre-generation server the peer will not rebuild its own side, and an
+    // uncapped watchdog would then churn every PENDING_OFFER_TIMEOUT_MS
+    // forever. Disjoint from the offer watchdog above: that one requires a
+    // local offer, this one requires the absence of every description.
+    let unnegotiatedWatchdog: ReturnType<typeof setTimeout> | undefined;
+    const clearUnnegotiatedTransportWatchdog = (): void => {
+      if (unnegotiatedWatchdog) clearTimeout(unnegotiatedWatchdog);
+      unnegotiatedWatchdog = undefined;
+    };
+    const armUnnegotiatedTransportWatchdog = (): void => {
+      clearUnnegotiatedTransportWatchdog();
+      unnegotiatedWatchdog = setTimeout(() => {
+        unnegotiatedWatchdog = undefined;
+        if (!peerConnections.includes(epc) || !hasNoNegotiatedDescription(epc))
+          return;
+        if (!mayRebuildUnnegotiatedTransport(roomId, peerId)) {
+          console.warn(
+            `p2party: transport with ${peerId} in room ${roomId} never negotiated and its rebuild budget is spent`,
+          );
+          return;
+        }
+        recordUnnegotiatedTransportRebuild(roomId, peerId);
+        console.warn(
+          `p2party: transport with ${peerId} in room ${roomId} never negotiated; rebuilding`,
+        );
+        void api
+          .dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
+          )
+          .then(() => {
+            requestPeersAfterEdgeTeardown(api, roomId);
+          });
+      }, PENDING_OFFER_TIMEOUT_MS);
+    };
+    if (
+      !isIdentityInitiator(
+        (api.getState() as State).keyPair.publicKey,
+        peerPublicKey,
+      )
+    )
+      armUnnegotiatedTransportWatchdog();
+
     epc.onnegotiationneeded = async () => {
       // Don't start a new negotiation if we're already making an offer or not in stable state
       if (epc.makingOffer || epc.signalingState !== "stable") {
@@ -452,6 +507,7 @@ export const handleConnectToPeer = async (
           clearTimeout(disconnectTimeout);
           disconnectTimeout = undefined;
         }
+        clearUnnegotiatedTransportWatchdog();
 
         await api.dispatch(
           webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
@@ -470,6 +526,11 @@ export const handleConnectToPeer = async (
 
         if (epc.connectionState === "connected") {
           wasConnected = true;
+          // This transport negotiated and reached the peer: it is not the
+          // stranded responder the budget exists for, so the edge starts from
+          // a clean budget the next time it is rebuilt.
+          clearUnnegotiatedTransportWatchdog();
+          clearUnnegotiatedTransportRebuilds(roomId, peerId);
           api.dispatch(setPeer({ roomId, peerId, peerPublicKey }));
 
           debugLog(

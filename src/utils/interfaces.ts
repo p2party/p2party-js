@@ -123,6 +123,8 @@ export interface WebSocketMessagePeersRequest {
 export interface RoomPeer {
   id: string;
   publicKey: string;
+  /** Per-socket generation from a generation-aware server; absent on 0.1.1. */
+  socketGeneration?: string;
 }
 
 export interface WebSocketMessagePeersResponse {
@@ -164,6 +166,8 @@ export interface WebSocketMessagePeerConnectionResponse {
   fromPeerId: string;
   fromPeerPublicKey: string;
   labels: string[];
+  /** The dialling peer's per-socket generation; absent on a 0.1.1 server. */
+  fromPeerSocketGeneration?: string;
   /** Optional only so a pre-v3/malformed server response can be rejected. */
   protocolVersion?: number;
 }

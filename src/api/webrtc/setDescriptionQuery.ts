@@ -78,11 +78,33 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
   return runRoomPeerExclusive(roomId, peerId, async () => {
     const { keyPair } = api.getState() as State;
 
-    const connectionIndex = findRoomPeerConnectionIndex(
+    let connectionIndex = findRoomPeerConnectionIndex(
       peerConnections,
       roomId,
       peerId,
     );
+
+    // A CLOSED transport can never hold a description again, and reusing it
+    // drops the frame on the floor: awaitPcOperation abandons every session
+    // description operation on a closed PC, and the `signalingState ===
+    // "closed"` check below simply returns. Nothing owns the follow-up either
+    // — a terminal handshake failure detaches `main`'s close handler on
+    // purpose and leaves the closed transport in the registry (C2) — so a peer
+    // that corrects a mistyped PIN and re-offers on a FRESH transport stays
+    // stranded until an unrelated signaling reconnect happens to rebuild the
+    // edge. Retire it here, exactly as the certificate-change "replace" path
+    // does, so this description lands on a transport that can hold it.
+    if (
+      connectionIndex > -1 &&
+      isTransportClosed(peerConnections[connectionIndex])
+    ) {
+      await disconnectPeer({ roomId, peerId });
+      connectionIndex = findRoomPeerConnectionIndex(
+        peerConnections,
+        roomId,
+        peerId,
+      );
+    }
 
     // An ANSWER produced on a remote transport this side has already retired
     // is refused before anything is built or applied.

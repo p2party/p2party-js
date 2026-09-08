@@ -35,6 +35,13 @@
 // Every routed frame is logged as "t=+s.s type from->to".
 const PORT = Number(process.env.RELAY_PORT ?? "5811");
 const PEERID_MODE = process.env.RELAY_PEERID_MODE === "fresh" ? "fresh" : "stable";
+// A 0.1.1 server: the introductions carry no per-socket generation at all.
+// Set RELAY_STRIP_SOCKET_GENERATION=1 to prove the generation-aware client is
+// safe against a server that has never heard of one -- it must behave exactly
+// as 0.14.7 did, with no extra teardowns and no watchdog churn.
+const STRIP_SOCKET_GENERATION = process.env.RELAY_STRIP_SOCKET_GENERATION === "1";
+const gen = (value: string): { socketGeneration?: string } => STRIP_SOCKET_GENERATION ? {} : { socketGeneration: value };
+const fromGen = (value: string): { fromPeerSocketGeneration?: string } => STRIP_SOCKET_GENERATION ? {} : { fromPeerSocketGeneration: value };
 const PROTO = 4;
 const PING_INTERVAL = 10000;
 const PONG_TIMEOUT = 5000;
@@ -399,14 +406,14 @@ Bun.serve<WsData, undefined>({
           }
           // handlePeerAcceptsConnection: the introduction names the accepting
           // socket, not just its peerId.
-          route(toPeerId, { type: "peers", roomId, peers: [{ id: ws.data.peerId, publicKey: ws.data.publicKey, socketGeneration: ws.data.socketGeneration }], protocolVersion: PROTO }, from);
+          route(toPeerId, { type: "peers", roomId, peers: [{ id: ws.data.peerId, publicKey: ws.data.publicKey, ...gen(ws.data.socketGeneration) }], protocolVersion: PROTO }, from);
           return;
         }
         case "connection": {
           const roomId = String(msg.roomId);
           const toPeerId = String(msg.toPeerId);
           if (!bothInRoom(roomId, ws.data.peerId, toPeerId)) { log(`connection ${from}->${short(toPeerId)} REJECT(not both in room)`); return; }
-          route(toPeerId, { type: "connection", roomId, fromPeerId: ws.data.peerId, fromPeerPublicKey: ws.data.publicKey, fromPeerSocketGeneration: ws.data.socketGeneration, labels: msg.labels, protocolVersion: PROTO }, from);
+          route(toPeerId, { type: "connection", roomId, fromPeerId: ws.data.peerId, fromPeerPublicKey: ws.data.publicKey, ...fromGen(ws.data.socketGeneration), labels: msg.labels, protocolVersion: PROTO }, from);
           return;
         }
         case "description": {

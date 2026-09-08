@@ -14,12 +14,14 @@ import type { WebSocketMessagePeerConnectionResponse } from "../../src/utils/int
 const signal = (
   peerId: string,
   peerPublicKey: string,
+  fromPeerSocketGeneration?: string,
 ): WebSocketMessagePeerConnectionResponse => ({
   type: "connection",
   roomId: "room",
   fromPeerId: peerId,
   fromPeerPublicKey: peerPublicKey,
   labels: ["main"],
+  fromPeerSocketGeneration,
   protocolVersion: 4,
 });
 
@@ -54,6 +56,49 @@ describe("accepted connection signaling", () => {
     expect(connections.every((params) => params.rtcConfig === rtcConfig)).toBe(
       true,
     );
+  });
+
+  // C1. This frame is emitted only after the peer built a FRESH transport, so
+  // it is the one introduction allowed to retire a live edge. It must reach the
+  // transport layer with that provenance attached, or the generation is inert.
+  test("the dialling socket's generation reaches the transport as a connection-frame observation", async () => {
+    const connections: RTCPeerConnectionParams[] = [];
+    const generation = "11111111-1111-4111-8111-111111111111";
+
+    await establishSignaledConnection(
+      signal("peer-a", "11".repeat(32), generation),
+      {},
+      {
+        recordPeer: () => undefined,
+        recordChannel: () => undefined,
+        ensureConnection: async (params) => {
+          connections.push(params);
+        },
+      },
+    );
+
+    expect(connections).toHaveLength(1);
+    expect(connections[0].peerSocketGeneration).toBe(generation);
+    expect(connections[0].peerSocketGenerationSource).toBe("connection");
+  });
+
+  test("a pre-generation server leaves the generation absent, not invented", async () => {
+    const connections: RTCPeerConnectionParams[] = [];
+
+    await establishSignaledConnection(
+      signal("peer-a", "11".repeat(32)),
+      {},
+      {
+        recordPeer: () => undefined,
+        recordChannel: () => undefined,
+        ensureConnection: async (params) => {
+          connections.push(params);
+        },
+      },
+    );
+
+    expect(connections[0].peerSocketGeneration).toBeUndefined();
+    expect(connections[0].peerSocketGenerationSource).toBe("connection");
   });
 
   test("a rejected transport admission publishes no peer or channel metadata", async () => {

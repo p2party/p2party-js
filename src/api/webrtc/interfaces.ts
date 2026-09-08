@@ -4,12 +4,20 @@ import type { RatchetGateLease } from "../../handlers/ratchetGate";
 import type { CoverRuntime } from "../../handlers/coverRuntime";
 import type { SparsePqHealingState } from "../../handlers/pqHealingRuntime";
 import type { PeerHandshakeFailureReason } from "../../reducers/roomSlice";
+import type { PeerSocketGenerationSource } from "./peerSocketGeneration";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
   /** The room this transport belongs to. A room/peer pair owns one PC. */
   roomId: string;
   withPeerId: string;
   withPeerPublicKey: string;
+  /**
+   * The peer signaling socket this transport was built against. A different
+   * generation for the same peerId means the peer's session was replaced, and
+   * this transport can never be signalled again (C1). Absent against a
+   * pre-generation server, where it must never be read as a change.
+   */
+  peerSocketGeneration?: string;
   makingOffer: boolean;
   ignoreOffer: boolean;
   receiveMessageModule: LibCrypto;
@@ -127,6 +135,15 @@ export interface RTCPeerConnectionParams {
   peerPublicKey: string;
   roomId: string;
   rtcConfig?: RTCConfiguration;
+  /** The peer's signaling-socket generation, as last named by the server. */
+  peerSocketGeneration?: string;
+  /**
+   * Which inbound frame named that generation. Only a `connection` frame
+   * proves a fresh remote transport; a roster introduction is record-only
+   * while this side's transport is connected (see peerSocketGeneration).
+   * Omitted means advisory.
+   */
+  peerSocketGenerationSource?: PeerSocketGenerationSource;
 }
 
 export interface RTCSetDescriptionParams {

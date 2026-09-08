@@ -32,3 +32,24 @@ export const hasUnansweredFirstOffer = (
   epc: Pick<IRTCPeerConnection, "signalingState" | "remoteDescription">,
 ): boolean =>
   epc.signalingState === "have-local-offer" && epc.remoteDescription == null;
+
+/**
+ * True iff this transport has negotiated nothing at all: no local offer was
+ * ever made and no remote description ever arrived. Only a protocol RESPONDER
+ * reaches this state on a healthy edge — it creates no channel, so
+ * onnegotiationneeded never fires — and it is exactly the state a second
+ * session for one identity is stranded in (C1).
+ *
+ * Disjoint from hasUnansweredFirstOffer by construction: that one requires a
+ * local offer, this one requires the absence of every description. No
+ * transport can be watched by both watchdogs at once.
+ */
+export const hasNoNegotiatedDescription = (
+  epc: Pick<
+    IRTCPeerConnection,
+    "signalingState" | "localDescription" | "remoteDescription"
+  >,
+): boolean =>
+  epc.signalingState === "stable" &&
+  epc.localDescription == null &&
+  epc.remoteDescription == null;

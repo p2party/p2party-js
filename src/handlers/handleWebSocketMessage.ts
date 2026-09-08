@@ -544,6 +544,14 @@ const handleWebSocketMessage = async (
                 roomId: message.roomId,
                 peerId: message.peers[i].id,
                 peerPublicKey: message.peers[i].publicKey,
+                // Read RAW, not from mergedPeers: that projection drops the
+                // field and skips peer ids it already knows. Advisory only —
+                // the roster is re-sent on join, on re-dial and on reconcile,
+                // and a signaling socket now reconnects on its own, so a
+                // healthy edge routinely sees a changed generation here and
+                // must survive it (C4).
+                peerSocketGeneration: message.peers[i].socketGeneration,
+                peerSocketGenerationSource: "roster",
                 rtcConfig: rooms[roomIndex].rtcConfig,
               }),
             );

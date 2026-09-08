@@ -36,6 +36,12 @@ export const establishSignaledConnection = async (
     roomId: message.roomId,
     peerId: message.fromPeerId,
     peerPublicKey: message.fromPeerPublicKey,
+    // This frame is emitted only after the peer built a FRESH transport, so a
+    // generation that differs from the one our transport was built against
+    // names a signaling session that replaced the one we are bound to. It is
+    // the only introduction that may retire a live edge (C1).
+    peerSocketGeneration: message.fromPeerSocketGeneration,
+    peerSocketGenerationSource: "connection",
     rtcConfig,
   });
 

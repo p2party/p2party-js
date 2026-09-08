@@ -8,6 +8,11 @@ import { attachDataChannelHandler } from "./dataChannelHandler";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import { runRoomPeerExclusive } from "./negotiationLock";
 import { retireRemoteTransport } from "./retiredRemoteTransports";
+import {
+  isCanonicalSocketGeneration,
+  markPeerSocketGenerationRetired,
+  shouldRetireTransportForSocketGeneration,
+} from "./peerSocketGeneration";
 import { isIdentityInitiator } from "../../utils/identityRole";
 
 import type { BaseQueryFn } from "@reduxjs/toolkit/query";
@@ -58,7 +63,16 @@ const webrtcBaseQuery: BaseQueryFn<
   RTCPeerConnectionParamsExtend,
   undefined
 > = async (
-  { peerId, peerPublicKey, roomId, rtcConfig, peerConnections, dataChannels },
+  {
+    peerId,
+    peerPublicKey,
+    roomId,
+    rtcConfig,
+    peerSocketGeneration,
+    peerSocketGenerationSource,
+    peerConnections,
+    dataChannels,
+  },
   api,
 ) => {
   return runRoomPeerExclusive(roomId, peerId, async () => {
@@ -78,10 +92,33 @@ const webrtcBaseQuery: BaseQueryFn<
 
     if (connectionIndex > -1) {
       const epc = peerConnections[connectionIndex];
+      // The peer's identity can reappear on a SECOND signaling socket (another
+      // tab, a phrase-restored device): the server keeps the peerId and evicts
+      // the old socket, so this transport is bound to a socket that no longer
+      // exists. It will never fail on its own — no SDP, no ICE, no event — so
+      // the generation is the only thing that can retire it (C1).
+      const retiresForGeneration = shouldRetireTransportForSocketGeneration({
+        roomId,
+        peerId,
+        recorded: epc.peerSocketGeneration,
+        observed: peerSocketGeneration,
+        source: peerSocketGenerationSource,
+        connectionState: epc.connectionState,
+      });
       if (
+        !retiresForGeneration &&
         epc.connectionState !== "closed" &&
         epc.connectionState !== "failed"
       ) {
+        // Adopt a generation we did not have: the first frame that names one
+        // establishes the baseline this comparison needs. A generation that
+        // DIFFERS is never adopted here — that would erase the very evidence
+        // the peer's next `connection` frame has to act on.
+        if (
+          epc.peerSocketGeneration === undefined &&
+          isCanonicalSocketGeneration(peerSocketGeneration)
+        )
+          epc.peerSocketGeneration = peerSocketGeneration;
         if (
           opensMain &&
           (!epc.mainChannel ||
@@ -91,6 +128,16 @@ const webrtcBaseQuery: BaseQueryFn<
           await openMainChannel(epc, dataChannels, api);
         return { data: undefined };
       }
+
+      // Remember the generation this transport was bound to, so a duplicate or
+      // out-of-order introduction naming it cannot tear the REPLACEMENT down
+      // on the way back: a UUIDv4 says nothing about which name is newer.
+      if (retiresForGeneration)
+        markPeerSocketGenerationRetired(
+          roomId,
+          peerId,
+          epc.peerSocketGeneration,
+        );
 
       // A replaced edge must stop claiming cover, same as a disconnected one,
       // and the remote certificate it was bound to is retired with it: an
@@ -110,6 +157,8 @@ const webrtcBaseQuery: BaseQueryFn<
     );
     attachDataChannelHandler(epc, dataChannels, api);
     if (!peerConnections.includes(epc)) peerConnections.push(epc);
+    if (isCanonicalSocketGeneration(peerSocketGeneration))
+      epc.peerSocketGeneration = peerSocketGeneration;
 
     if (opensMain) await openMainChannel(epc, dataChannels, api);
 

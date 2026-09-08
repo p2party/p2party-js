@@ -79,11 +79,17 @@ type HandleConnectToPeer =
   typeof import("../../src/handlers/handleConnectToPeer");
 type RoomSlice = typeof import("../../src/reducers/roomSlice");
 type PendingOffer = typeof import("../../src/api/webrtc/pendingOffer");
+type UnnegotiatedTransport =
+  typeof import("../../src/api/webrtc/unnegotiatedTransport");
 
 let handleConnectToPeer: HandleConnectToPeer["handleConnectToPeer"];
 let setConnectingToPeers: RoomSlice["setConnectingToPeers"];
 let setPeer: RoomSlice["setPeer"];
 let PENDING_OFFER_TIMEOUT_MS: PendingOffer["PENDING_OFFER_TIMEOUT_MS"];
+let MAX_UNNEGOTIATED_TRANSPORT_REBUILDS: UnnegotiatedTransport["MAX_UNNEGOTIATED_TRANSPORT_REBUILDS"];
+let clearUnnegotiatedTransportRebuilds: UnnegotiatedTransport["clearUnnegotiatedTransportRebuilds"];
+let recordUnnegotiatedTransportRebuild: UnnegotiatedTransport["recordUnnegotiatedTransportRebuild"];
+let unnegotiatedTransportRebuilds: UnnegotiatedTransport["unnegotiatedTransportRebuilds"];
 
 beforeAll(async () => {
   // Enter the store/API cycle through its normal application root so every
@@ -95,10 +101,17 @@ beforeAll(async () => {
     await import("../../src/reducers/roomSlice"));
   ({ PENDING_OFFER_TIMEOUT_MS } =
     await import("../../src/api/webrtc/pendingOffer"));
+  ({
+    MAX_UNNEGOTIATED_TRANSPORT_REBUILDS,
+    clearUnnegotiatedTransportRebuilds,
+    recordUnnegotiatedTransportRebuild,
+    unnegotiatedTransportRebuilds,
+  } = await import("../../src/api/webrtc/unnegotiatedTransport"));
 });
 
 afterEach(() => {
   jest.useRealTimers();
+  clearUnnegotiatedTransportRebuilds(ROOM_ID, PEER_ID);
 });
 
 const ROOM_ID = "00000000-0000-4000-8000-0000000000bb";
@@ -109,12 +122,14 @@ const PEER_ID = "00000000-0000-4000-8000-000000000002";
 const LOWER_PUBLIC_KEY = `${"00".repeat(31)}01`;
 const HIGHER_PUBLIC_KEY = "ff".repeat(32);
 
-const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
+const fakeApi = (
+  selfPublicKey: string = LOWER_PUBLIC_KEY,
+): { api: BaseQueryApi; dispatched: unknown[] } => {
   const dispatched: unknown[] = [];
   const state = {
     keyPair: {
       peerId: SELF_PEER_ID,
-      publicKey: LOWER_PUBLIC_KEY,
+      publicKey: selfPublicKey,
       secretKey: "",
       challengeId: "",
       challenge: "",
@@ -157,15 +172,16 @@ const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
 
 const connect = async (
   api: BaseQueryApi,
+  peerPublicKey: string = HIGHER_PUBLIC_KEY,
+  peerConnections: IRTCPeerConnection[] = [],
 ): Promise<{
   epc: IRTCPeerConnection;
   peerConnections: IRTCPeerConnection[];
 }> => {
-  const peerConnections: IRTCPeerConnection[] = [];
   const epc = await handleConnectToPeer(
     {
       peerId: PEER_ID,
-      peerPublicKey: HIGHER_PUBLIC_KEY,
+      peerPublicKey,
       roomId: ROOM_ID,
       peerConnections,
     },
@@ -173,6 +189,15 @@ const connect = async (
   );
   return { epc, peerConnections };
 };
+
+/**
+ * The protocol RESPONDER side of an edge: the higher identity holds it, and it
+ * creates no data channel, so its fresh transport negotiates nothing at all.
+ */
+const connectAsResponder = (
+  api: BaseQueryApi,
+  peerConnections: IRTCPeerConnection[] = [],
+) => connect(api, LOWER_PUBLIC_KEY, peerConnections);
 
 const driveConnectionState = async (
   epc: IRTCPeerConnection,
@@ -290,5 +315,91 @@ describe("handleConnectToPeer edge teardown follow-up", () => {
     jest.advanceTimersByTime(PENDING_OFFER_TIMEOUT_MS);
     await flushMicrotasks();
     expect(dispatched.slice(afterRemoval)).toEqual([]);
+  });
+});
+
+// C1, client half. A responder builds no channel, so onnegotiationneeded never
+// fires: the transport holds no description of any kind, no ICE runs, nothing
+// fails, and neither the offer watchdog nor the rebind deadline watches it. It
+// is the state the second session of one identity is stranded in.
+describe("handleConnectToPeer un-negotiated responder transport", () => {
+  test("a responder transport nobody ever dials is torn down and re-dialled", async () => {
+    // The watchdog is armed while the transport is built, so the clock has to
+    // be fake before that: nothing in this path awaits a timer.
+    jest.useFakeTimers();
+    const { api, dispatched } = fakeApi(HIGHER_PUBLIC_KEY);
+    const { epc, peerConnections } = await connectAsResponder(api);
+    const afterConnect = dispatched.length;
+    expect(epc.signalingState).toBe("stable");
+    expect(epc.localDescription).toBeNull();
+    expect(epc.remoteDescription).toBeNull();
+
+    jest.advanceTimersByTime(PENDING_OFFER_TIMEOUT_MS - 1);
+    await flushMicrotasks();
+    expect(dispatched.slice(afterConnect)).toEqual([]);
+
+    jest.advanceTimersByTime(1);
+    await flushMicrotasks();
+    const followUp = dispatched.slice(afterConnect);
+    expect(followUp).toHaveLength(2);
+    expect(typeof followUp[0]).toBe("function");
+    expect(followUp[1]).toEqual(REDIAL());
+    expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(1);
+    expect(peerConnections).toContain(epc);
+  });
+
+  test("a responder transport that received a description is left alone", async () => {
+    jest.useFakeTimers();
+    const { api, dispatched } = fakeApi(HIGHER_PUBLIC_KEY);
+    const { epc } = await connectAsResponder(api);
+    await epc.setRemoteDescription({ type: "offer", sdp: "v=0\r\n" });
+    const afterOffer = dispatched.length;
+
+    jest.advanceTimersByTime(PENDING_OFFER_TIMEOUT_MS * 2);
+    await flushMicrotasks();
+    expect(dispatched.slice(afterOffer)).toEqual([]);
+    expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(0);
+  });
+
+  // The initiator's un-answered first offer is the OTHER watchdog's job; both
+  // firing on one transport would double every teardown.
+  test("an initiator transport is not watched by the un-negotiated watchdog", async () => {
+    jest.useFakeTimers();
+    const { api, dispatched } = fakeApi();
+    await connect(api);
+    const afterConnect = dispatched.length;
+
+    jest.advanceTimersByTime(PENDING_OFFER_TIMEOUT_MS * 2);
+    await flushMicrotasks();
+    expect(dispatched.slice(afterConnect)).toEqual([]);
+    expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(0);
+  });
+
+  // Against a PRE-generation server the peer never rebuilds its own side, so
+  // an uncapped watchdog would tear this edge down every 15 s forever.
+  test("a spent rebuild budget stops the churn instead of re-dialling", async () => {
+    jest.useFakeTimers();
+    for (let i = 0; i < MAX_UNNEGOTIATED_TRANSPORT_REBUILDS; i++)
+      recordUnnegotiatedTransportRebuild(ROOM_ID, PEER_ID);
+    const { api, dispatched } = fakeApi(HIGHER_PUBLIC_KEY);
+    await connectAsResponder(api);
+    const afterConnect = dispatched.length;
+
+    jest.advanceTimersByTime(PENDING_OFFER_TIMEOUT_MS);
+    await flushMicrotasks();
+    expect(dispatched.slice(afterConnect)).toEqual([]);
+    expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(
+      MAX_UNNEGOTIATED_TRANSPORT_REBUILDS,
+    );
+  });
+
+  test("an edge that reaches connected starts from a clean budget again", async () => {
+    jest.useFakeTimers();
+    recordUnnegotiatedTransportRebuild(ROOM_ID, PEER_ID);
+    const { api } = fakeApi(HIGHER_PUBLIC_KEY);
+    const { epc } = await connectAsResponder(api);
+
+    await driveConnectionState(epc, "connected");
+    expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(0);
   });
 });

@@ -27,6 +27,10 @@ import {
   type HandshakeCoreParams,
   type HandshakeTransport,
 } from "../../src/handlers/handshakeCore";
+import {
+  HandshakeFailure,
+  isTerminalHandshakeFailure,
+} from "../../src/handlers/handshakeFailure";
 
 // Only the WebRTC orchestration module imports the Redux store/db worker. Bare
 // `bun test` has no localStorage, so shim it before dynamically importing that
@@ -55,6 +59,7 @@ let setHandshakeChannel: HS["setHandshakeChannel"];
 let clearHandshakeChannel: HS["clearHandshakeChannel"];
 let deliverHandshakeFrame: HS["deliverHandshakeFrame"];
 let runHandshake: HS["runHandshake"];
+let transportForPeer: HS["transportForPeer"];
 let createHandshakePqRuntime: HS["createHandshakePqRuntime"];
 let persistAndActivateEdgeCrypto: HS["persistAndActivateEdgeCrypto"];
 let claimRatchetPersistence: RP["claimRatchetPersistence"];
@@ -68,6 +73,7 @@ beforeAll(async () => {
     clearHandshakeChannel,
     deliverHandshakeFrame,
     runHandshake,
+    transportForPeer,
     createHandshakePqRuntime,
     persistAndActivateEdgeCrypto,
   } = m);
@@ -1332,6 +1338,38 @@ describe("runHandshake wiring (inbox + channel registry)", () => {
         orderedLease,
       ),
     ).toBe(false);
+  });
+
+  test("a framing rejection reaches the parked handshake as a typed policy failure", async () => {
+    // A pq-suite or policy disagreement between two immutable room policies
+    // arrives as a frame that does not match the expected step, and is rejected
+    // here. Before C2 that rejection was a plain Error whose message matched
+    // neither of handleOpenChannel's regexes, so it was classified "transport"
+    // and the edge re-dialled forever without ever reporting "policy".
+    const lease = setHandshakeChannel("room-policy", "peer-policy", {
+      send: () => {},
+    });
+    // runHandshake parks on recv exactly like this before the peer's first
+    // flight; the rejection is only observable through that parked waiter.
+    const parked = transportForPeer("room-policy", "peer-policy", lease).recv();
+    const observed = parked.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    const surplus = new Uint8Array(1 + 32 + 64);
+    surplus[0] = HS_STEP_CONFIRM;
+    expect(
+      deliverHandshakeFrame("room-policy", "peer-policy", surplus, lease),
+    ).toBe(false);
+
+    const error = (await observed) as HandshakeFailure;
+    expect(error).toBeInstanceOf(HandshakeFailure);
+    expect(error.reason).toBe("policy");
+    expect(isTerminalHandshakeFailure(error.reason)).toBe(true);
+    expect(error.message).toBe(
+      "Malformed, surplus, or out-of-order handshake frame",
+    );
   });
 
   test("stale inbox completion cannot clear or receive frames for a replacement main channel", () => {

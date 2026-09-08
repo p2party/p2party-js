@@ -3,6 +3,7 @@ import type { RatchetState } from "../../cryptography/ratchet";
 import type { RatchetGateLease } from "../../handlers/ratchetGate";
 import type { CoverRuntime } from "../../handlers/coverRuntime";
 import type { SparsePqHealingState } from "../../handlers/pqHealingRuntime";
+import type { PeerHandshakeFailureReason } from "../../reducers/roomSlice";
 
 export interface IRTCPeerConnection extends RTCPeerConnection {
   /** The room this transport belongs to. A room/peer pair owns one PC. */
@@ -17,6 +18,13 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
   mainChannel?: IRTCDataChannel;
   /** Gate ownership captured when this concrete transport is created. */
   ratchetGateLease: RatchetGateLease;
+  /**
+   * Set when this edge's handshake failed for a reason a fresh transport
+   * cannot fix (a wrong PIN, a PIN throttle, a policy/suite mismatch). The
+   * `main` channel's close handler consults it so a terminal failure is never
+   * followed by a re-dial. Cleared only by building a new transport.
+   */
+  handshakeTerminalFailure?: PeerHandshakeFailureReason;
   /**
    * How many times this RTCPeerConnection has been re-bound IN PLACE onto a
    * new remote DTLS certificate since it last authenticated. The re-bind

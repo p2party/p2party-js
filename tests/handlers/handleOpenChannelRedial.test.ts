@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
+import { HandshakeFailure } from "../../src/handlers/handshakeFailure";
+
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
   IRTCDataChannel,
@@ -52,15 +54,14 @@ let MAX_ROOM_PIN_FAILURES_PER_WINDOW: RoomPinAttempts["MAX_ROOM_PIN_FAILURES_PER
 
 beforeAll(async () => {
   await import("../../src/store");
-  ({ handleOpenChannel } = await import("../../src/handlers/handleOpenChannel"));
+  ({ handleOpenChannel } =
+    await import("../../src/handlers/handleOpenChannel"));
   ({ default: webrtcDisconnectPeerQuery } =
     await import("../../src/api/webrtc/disconnectFromPeerQuery"));
-  ({ resetEdgeAuthenticationForNewRemoteTransport } = await import(
-    "../../src/api/webrtc/remoteTransportChange"
-  ));
-  ({ resetRatchetGate, isCurrentRatchetGateLease } = await import(
-    "../../src/handlers/ratchetGate"
-  ));
+  ({ resetEdgeAuthenticationForNewRemoteTransport } =
+    await import("../../src/api/webrtc/remoteTransportChange"));
+  ({ resetRatchetGate, isCurrentRatchetGateLease } =
+    await import("../../src/handlers/ratchetGate"));
   ({ setConnectingToPeers, setPeerHandshakeStatus } =
     await import("../../src/reducers/roomSlice"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy"));
@@ -100,7 +101,16 @@ const fakeMain = (): FakeMain => {
     send: () => undefined,
     close: () => {
       closes.count += 1;
+      if (state === "closed") return;
       state = "closed";
+      // A real RTCDataChannel dispatches `close`. The previous fake only
+      // flipped readyState, so ":293-340" passed while the browser ran
+      // main.onclose and re-dialled anyway (C2).
+      const handler = (
+        channel as unknown as { onclose?: (event: Event) => unknown }
+      ).onclose;
+      if (typeof handler === "function")
+        void handler.call(channel, new Event("close"));
     },
   } as unknown as IRTCDataChannel;
   return { channel, closes };
@@ -164,6 +174,28 @@ const fakePeerConnection = (
     connectionState: RTCPeerConnectionState;
   };
   return { epc, closes };
+};
+
+/**
+ * Force the next handshake attempt on `pc` to reject with `error`.
+ *
+ * runHandshake's first await is verifyDtlsFingerprints' getStats call, so a
+ * rejecting getStats is how this file drives a chosen handshake outcome — the
+ * error travels the identical path a framing rejection takes in the browser:
+ * runHandshake's own catch rejects the ratchet gate with it and re-throws, and
+ * handleOpenChannel's catch classifies whatever comes out. The throttle path
+ * above forces its outcome through real production state
+ * (recordRoomPinAggregateFailure); nothing equivalent exists for a policy/suite
+ * mismatch, whose only producer is deliverHandshakeFrame rejecting a frame into
+ * a parked recv — unreachable here, because this runtime has no database worker
+ * and so never gets past getIdentityX25519.
+ */
+const failNextHandshakeWith = (
+  pc: FakePeerConnection,
+  error: unknown,
+): void => {
+  (pc.epc as unknown as { getStats: () => Promise<RTCStatsReport> }).getStats =
+    () => Promise.reject(error);
 };
 
 const activeRoom = (id: string) => ({
@@ -274,8 +306,13 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     ]);
     expect(main.closes.count).toBe(1);
     expect(pc.closes.count).toBe(1);
-    // The re-dial comes after the failure status and the closes.
-    expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID)]);
+    // The re-dial comes after the failure status and the closes. A transient
+    // failure deliberately keeps its handlers attached (only a terminal one
+    // detaches them), so the close the catch performs also runs main.onclose
+    // and that path re-dials too — two dispatches the "redial" debounce key
+    // collapses into one roster request. The old fake dispatched no close
+    // event at all and so showed only the catch's own re-dial.
+    expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID), REDIAL(ROOM_ID)]);
     const failedIndex = afterOpen.findIndex(
       (action) =>
         (action as { payload?: { status?: string } }).payload?.status ===
@@ -333,10 +370,79 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       expect(main.closes.count).toBe(1);
       expect(pc.closes.count).toBe(1);
       expect(redials(afterOpen)).toEqual([]);
+      expect(pc.epc.handshakeTerminalFailure).toBe("pin-throttled");
+      // Detached BEFORE the close, exactly as disconnectFromPeerQuery does.
+      // onclose additionally consults handshakeTerminalFailure, but onerror has
+      // no such guard: a later error event on a channel whose handler survived
+      // would run disconnectFromPeer and re-dial the edge anyway.
+      expect(channel.onclose).toBeNull();
+      expect(channel.onerror).toBeNull();
     } finally {
       deleteRoomPin(PIN_ROOM_URL);
       resetRatchetGate(PIN_ROOM_ID, PEER_ID);
     }
+  });
+
+  test("a policy/suite mismatch is reported as policy and never re-dials", async () => {
+    // deliverHandshakeFrame's framing rejection is what a pq-suite mismatch
+    // hits. Before C2 it matched neither regex, was classified "transport",
+    // and the catch itself re-dialled forever without ever reporting "policy".
+    const pc = fakePeerConnection(ROOM_ID);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([activeRoom(ROOM_ID)]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    const beforeOpen = dispatched.length;
+    failNextHandshakeWith(
+      pc,
+      new HandshakeFailure(
+        "Malformed, surplus, or out-of-order handshake frame",
+        "policy",
+      ),
+    );
+    channel.onopen?.call(channel, new Event("open"));
+    await settle();
+
+    const afterOpen = dispatched.slice(beforeOpen);
+    const failed = handshakeStatuses(afterOpen).at(-1) as {
+      payload: { status: string; reason?: string };
+    };
+    expect(failed.payload.status).toBe("failed");
+    expect(failed.payload.reason).toBe("policy");
+    expect(redials(afterOpen)).toEqual([]);
+    expect(pc.epc.handshakeTerminalFailure).toBe("policy");
+    expect(channel.onclose).toBeNull();
+    expect(channel.onerror).toBeNull();
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
+  });
+
+  test("a main close on an edge with a terminal handshake failure neither tears down nor re-dials", async () => {
+    // The catch detaches the handlers before closing, so its OWN close never
+    // reaches here. This is the belt-and-braces arm: a close that arrives from
+    // anywhere else on an edge already marked terminal — the remote side
+    // closing its main, or a second main whose own catch has not run yet.
+    // Without the guard the only test is the ratchet-gate lease, and
+    // rejectRatchetGate never replaces that lease, so it passes and the edge is
+    // deleted and re-dialled: the C2 loop.
+    const pc = fakePeerConnection(ROOM_ID);
+    const main = fakeMain();
+    const { api, dispatched } = fakeApi([]);
+
+    const channel = await handleOpenChannel(
+      { channel: main.channel, epc: pc.epc, roomId: ROOM_ID, dataChannels: [] },
+      api,
+    );
+    pc.epc.handshakeTerminalFailure = "pin-mismatch";
+    const beforeClose = dispatched.length;
+    await channel.onclose?.call(channel, new Event("close"));
+
+    expect(dispatched.slice(beforeClose)).toEqual([]);
+
+    resetRatchetGate(ROOM_ID, PEER_ID);
   });
 
   test("a main channel that closes tears the edge down and re-dials under the redial budget", async () => {
@@ -466,7 +572,10 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     expect(failed.payload.reason).toBe("transport");
     expect(main.closes.count).toBe(1);
     expect(pc.closes.count).toBe(1);
-    expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID)]);
+    // Transient: the handlers stay attached, so the catch's close runs
+    // main.onclose and both paths re-dial (see the first test).
+    expect(redials(afterOpen)).toEqual([REDIAL(ROOM_ID), REDIAL(ROOM_ID)]);
+    expect(pc.epc.handshakeTerminalFailure).toBeUndefined();
 
     resetRatchetGate(ROOM_ID, PEER_ID);
   });
@@ -540,10 +649,7 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       api,
     );
     const beforeError = dispatched.length;
-    await channel.onerror?.call(
-      channel,
-      new Event("error") as RTCErrorEvent,
-    );
+    await channel.onerror?.call(channel, new Event("error") as RTCErrorEvent);
 
     const afterError = dispatched.slice(beforeError);
     expect(afterError).toHaveLength(2);
@@ -564,10 +670,7 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     );
     resetRatchetGate(ROOM_ID, PEER_ID);
     const beforeError = dispatched.length;
-    await channel.onerror?.call(
-      channel,
-      new Event("error") as RTCErrorEvent,
-    );
+    await channel.onerror?.call(channel, new Event("error") as RTCErrorEvent);
 
     expect(dispatched.slice(beforeError)).toEqual([]);
 

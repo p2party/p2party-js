@@ -13,6 +13,7 @@ import {
   type RollbackInitialRatchetState,
 } from "./ratchetPersist";
 import { SparsePqHealingState } from "./pqHealingRuntime";
+import { HandshakeFailure } from "./handshakeFailure";
 import { FRAME_TYPE_HANDSHAKE } from "../utils/constants";
 import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { isIdentityInitiator } from "../utils/identityRole";
@@ -243,7 +244,13 @@ export const deliverHandshakeFrame = (
     clearHandshakeChannel(
       roomId,
       peerId,
-      new Error("Malformed, surplus, or out-of-order handshake frame"),
+      new HandshakeFailure(
+        "Malformed, surplus, or out-of-order handshake frame",
+        // A frame that does not match the expected step for this pq mode is a
+        // policy/suite disagreement between two immutable room policies, not a
+        // transport fault: it fails identically on every fresh transport.
+        "policy",
+      ),
       lease,
     );
     return false;
@@ -260,7 +267,12 @@ export const deliverHandshakeFrame = (
   return true;
 };
 
-const transportForPeer = (
+/**
+ * The send/recv pair runHandshake drives the inbox with. Exported so the frame
+ * bounds — including the framing rejection's typed failure, which is only ever
+ * observable through a parked recv — can be exercised without a full handshake.
+ */
+export const transportForPeer = (
   roomId: string,
   peerId: string,
   lease: HandshakeLease,

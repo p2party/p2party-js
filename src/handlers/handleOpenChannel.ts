@@ -29,6 +29,10 @@ import {
   rejectRatchetGate,
 } from "./ratchetGate";
 import {
+  classifyHandshakeFailure,
+  isTerminalHandshakeFailure,
+} from "./handshakeFailure";
+import {
   handleInboundPqControlFrame,
   installPqHealingOrchestrator,
 } from "./pqHealingOrchestrator";
@@ -44,8 +48,6 @@ import {
   setPeerCoverStatus,
   setPeerHandshakeStatus,
 } from "../reducers/roomSlice";
-
-import type { PeerHandshakeFailureReason } from "../reducers/roomSlice";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
@@ -392,6 +394,14 @@ export const handleOpenChannel = async (
 
     if (extChannel.label === "main") {
       releaseProtocolResources();
+      if (epc.handshakeTerminalFailure !== undefined) {
+        // The handshake failed for a reason no fresh transport can fix, and the
+        // catch has already closed both the channel and the transport. Tearing
+        // the edge down here would additionally deletePeer, which is what drops
+        // a rejected joiner from the roster before the app can attach the
+        // failure to anyone.
+        return;
+      }
       if (
         ratchetGateLease &&
         !isCurrentRatchetGateLease(roomId, epc.withPeerId, ratchetGateLease)
@@ -932,35 +942,26 @@ export const handleOpenChannel = async (
               },
             );
           }
-          // Surface WHY the edge failed so a UI never shows an eternal
-          // waiting state: throttle carries its retry deadline; a failed
-          // confirmation is a wrong PIN (or differing policy) on a PIN room
-          // and can only be a policy/transcript mismatch on a nopin room.
-          let failureReason: PeerHandshakeFailureReason = "transport";
-          let retryAfter: number | undefined;
-          const throttleMatch = /throttled until (\S+)/.exec(
-            handshakeError.message,
-          );
-          if (throttleMatch) {
-            failureReason = "pin-throttled";
-            const parsed = Date.parse(throttleMatch[1]);
-            if (Number.isFinite(parsed)) retryAfter = parsed;
-          } else if (
-            handshakeStarted &&
-            /key-confirmation/i.test(handshakeError.message)
-          ) {
-            failureReason = pinRoom ? "pin-mismatch" : "policy";
-            if (pinRoom) {
-              try {
-                const attemptState = await getPinAttemptState(
-                  roomId,
-                  epc.withPeerPublicKey,
-                );
-                if (attemptState && attemptState.retryAfter > Date.now())
-                  retryAfter = attemptState.retryAfter;
-              } catch {
-                // Backoff state is advisory; the failure reason still lands.
-              }
+          // Surface WHY the edge failed so a UI never shows an eternal waiting
+          // state, and do it from a typed reason rather than a message regex:
+          // the framing rejection in deliverHandshakeFrame is a policy/suite
+          // disagreement, not a transport fault (C2).
+          const { reason: failureReason, retryAfter: classifiedRetryAfter } =
+            classifyHandshakeFailure(handshakeError, {
+              handshakeStarted,
+              pinRoom,
+            });
+          let retryAfter = classifiedRetryAfter;
+          if (failureReason === "pin-mismatch" && pinRoom) {
+            try {
+              const attemptState = await getPinAttemptState(
+                roomId,
+                epc.withPeerPublicKey,
+              );
+              if (attemptState && attemptState.retryAfter > Date.now())
+                retryAfter = attemptState.retryAfter;
+            } catch {
+              // Backoff state is advisory; the failure reason still lands.
             }
           }
           if (!transportAlreadyClosed)
@@ -989,6 +990,18 @@ export const handleOpenChannel = async (
               handshakeLease,
             );
           console.error("protocol-v4 handshake failed:", handshakeError);
+          if (isTerminalHandshakeFailure(failureReason)) {
+            // A PIN or policy mismatch fails identically on every fresh
+            // transport, so this teardown must not produce a re-dial. Detach
+            // the handlers BEFORE closing, exactly as disconnectFromPeerQuery
+            // does: with them attached the close event ran main.onclose, whose
+            // only guard is the ratchet-gate lease — and rejectRatchetGate does
+            // not replace that lease, so the guard passed and :422 re-dialled
+            // unconditionally, walking the PIN backoff to its 300 s cap.
+            epc.handshakeTerminalFailure = failureReason;
+            extChannel.onclose = null;
+            extChannel.onerror = null;
+          }
           if (extChannel.readyState !== "closed") extChannel.close();
           if (epc.connectionState !== "closed") epc.close();
           // pc.close() fires no connectionstatechange, so no transport-level

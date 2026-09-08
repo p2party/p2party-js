@@ -6,9 +6,18 @@
 //   PLAYWRIGHT_BROWSERS_PATH=$HOME/Library/Caches/ms-playwright \
 //   node desync-driver.mjs <scenario> <role> [--peerid=stable|fresh] [--n=1] [--observe=120] [--socket=evict|close2s] [--refocus=0]
 //
-//   scenario: baseline | ws-drop | freeze-ws-90 | offline-60 | freeze-20 | proc-freeze-<seconds>
+//   scenario: baseline | ws-drop | ws-drop-nofocus | freeze-ws-90 | offline-60 | freeze-20 | proc-freeze-<seconds>
 //   role:     initiator | responder   (which identity role the FAULTED page A has;
 //             Ed25519 role = lexically lower hex pubkey is the initiator)
+//   FOCUS EMULATION: after the fault clears, every scenario except "baseline"
+//             and "ws-drop-nofocus" runs window.__app.focusReconnect(), which is
+//             the site's ChatLayout focus/visibilitychange/pageshow/online
+//             handler. That poke is the reason the recorded ws-drop pass was
+//             ever a pass: a FOREGROUND desktop tab whose socket dies gets none
+//             of those events, so nothing calls connect. "ws-drop-nofocus" is
+//             identical to "ws-drop" with the poke withheld, and is therefore
+//             the arm that tests the SDK's own C4 reconnect ladder rather than
+//             the driver's.
 //   --peerid: relay peerId policy on reconnect. "stable" (default) mirrors the
 //             real server (Peer.publicKey is @unique; handleConnection upserts by
 //             publicKey, so the same peerId is reissued); "fresh" issues a new
@@ -106,7 +115,7 @@ const TRANSFER = (() => {
 })();
 // Verification budget for the big transfer, measured from t=0 (thaw / fault cleared).
 const TRANSFER_DEADLINE_S = Number(flags.transferdeadline ?? 90);
-const SCENARIOS = ["baseline", "ws-drop", "freeze-ws-90", "offline-60", "freeze-20"];
+const SCENARIOS = ["baseline", "ws-drop", "ws-drop-nofocus", "freeze-ws-90", "offline-60", "freeze-20"];
 const procFreezeMatch = scenario.match(/^proc-freeze-(\d+)$/);
 const PROC_FREEZE_S = procFreezeMatch ? Number(procFreezeMatch[1]) : 0;
 if (!SCENARIOS.includes(scenario) && !procFreezeMatch) { console.error(`unknown scenario ${scenario}; one of ${SCENARIOS.join("|")}|proc-freeze-<seconds>`); process.exit(2); }
@@ -480,6 +489,15 @@ try {
   } else if (scenario === "ws-drop") {
     await closeSocket(A, dA0.keyPair.peerId);
     await probeDuring("ws-drop wait 5s", 5);
+  } else if (scenario === "ws-drop-nofocus") {
+    // Identical to ws-drop, but the driver never emulates the site's focus
+    // handler. A focused desktop tab gets no focus/visibilitychange/pageshow/
+    // online event when its socket dies, so this is what a real foreground
+    // client experiences. Before the C4 reconnect landed, A stayed
+    // disconnected indefinitely and the server dropped every introduction
+    // routed toward it.
+    await closeSocket(A, dA0.keyPair.peerId);
+    await probeDuring("ws-drop-nofocus wait 5s", 5);
   } else if (scenario === "freeze-ws-90") {
     await freeze(A, "frozen");
     await sleep(2000);
@@ -600,7 +618,11 @@ try {
     results.fault.aReachableAfter = !(await A.dump()).unreachable;
     results.fault.pcsAfterFault = { A: await pcStateOf(A, dB0.keyPair.publicKey), B: await pcStateOf(B, dA0.keyPair.publicKey) };
     say(`  fault cleared at ${results.fault.endedAt}; PCs now A=${JSON.stringify(results.fault.pcsAfterFault.A)} B=${JSON.stringify(results.fault.pcsAfterFault.B)}`);
-    if (scenario !== "baseline") results.fault.focusReconnect = await focusReconnect(A);
+    // ws-drop-nofocus withholds the poke on purpose: the SDK's own bounded
+    // reconnect ladder (C4) has to be what brings A's socket back.
+    if (scenario !== "baseline" && scenario !== "ws-drop-nofocus")
+      results.fault.focusReconnect = await focusReconnect(A);
+    else results.fault.focusReconnect = "skipped: " + scenario;
   }
 
   // ---- 7. observe, evaluate invariants every 1 s

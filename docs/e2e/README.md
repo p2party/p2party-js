@@ -128,11 +128,24 @@ PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
   node desync-driver.mjs <scenario> <role> [flags]
 ```
 
-`scenario` = `baseline` | `ws-drop` | `freeze-ws-90` | `offline-60` |
-`freeze-20` | `proc-freeze-<seconds>`. `role` = `initiator` | `responder`, and
-says which identity role the **faulted** page A holds (the Ed25519 initiator is
-the lexically lower hex public key) — the bug is role-asymmetric, so both must
-be run.
+`scenario` = `baseline` | `ws-drop` | `ws-drop-nofocus` | `freeze-ws-90` |
+`offline-60` | `freeze-20` | `proc-freeze-<seconds>`. `role` = `initiator` |
+`responder`, and says which identity role the **faulted** page A holds (the
+Ed25519 initiator is the lexically lower hex public key) — the bug is
+role-asymmetric, so both must be run.
+
+**Focus emulation, and the one scenario without it.** After the fault clears,
+every scenario except `baseline` and `ws-drop-nofocus` calls
+`window.__app.focusReconnect()` on A — the site's `ChatLayout`
+focus/visibilitychange/pageshow/online handler, which calls `connect(roomUrl)`
+iff `!isConnected`. That poke is not something a **focused** desktop tab ever
+receives: when its signaling socket dies underneath it, no focus,
+`visibilitychange`, `pageshow` or `online` event fires, so nothing calls
+connect. `ws-drop-nofocus` is byte-for-byte `ws-drop` with the poke withheld,
+and is therefore the arm that tests the SDK's own bounded reconnect (C4) rather
+than the driver's. Any new recovery scenario should say explicitly which of the
+two it is; a fault arm that only recovers because the driver poked it is not
+evidence about the SDK.
 
 `proc-freeze-<s>` is the "phone asleep" fault: A's whole Chromium process tree
 is SIGSTOPped for `<s>` seconds; the driver never touches A while frozen (no
@@ -236,6 +249,40 @@ bun build app-entry-desync.ts --target=browser --outfile=app-bundle.js --define:
 As with the other harnesses here, this runs against the **development** WASM
 (`src/cryptography/libcrypto.wasm`, SRI-pinned in `wasmLoader.ts`); do not run
 `npm run predist` first.
+
+### Recorded results (2026-09-08, C4 bounded signaling reconnect)
+
+`ws-drop-nofocus` is the new arm: A's socket is closed server-side and the
+driver never emulates the site's focus handler, so only the SDK can recover.
+`I2`/`I4` are seconds after the fault cleared; `I6` (every roster peerId still
+live in the relay registry) is the invariant that flips.
+
+| run                         | scenario                      | faulted role | socket   | I2   | I4     | I6      |
+| --------------------------- | ----------------------------- | ------------ | -------- | ---- | ------ | ------- |
+| ws-drop-nofocus-initiator-1 | ws-drop-nofocus **(pre-fix)** | initiator    | —        | +0 s | +0.5 s | `never` |
+| ws-drop-nofocus-initiator-2 | ws-drop-nofocus               | initiator    | —        | +0 s | +0.5 s | +0 s    |
+| ws-drop-nofocus-responder-1 | ws-drop-nofocus               | responder    | —        | +0 s | +0.5 s | +0 s    |
+| ws-drop-initiator-1         | ws-drop                       | initiator    | —        | +0 s | +0.5 s | +0 s    |
+| proc-freeze-20-initiator-2  | proc-freeze-20 `--udpflood=1` | initiator    | evict    | +2 s | +2.5 s | +1 s    |
+| proc-freeze-20-responder-1  | proc-freeze-20 `--udpflood=1` | responder    | stranded | +6 s | +6.5 s | +1 s    |
+
+The pre-fix run is the whole point of the arm: `I6` is `never`, A's
+`signalingServer.isConnected` is false for all 150 s, and the relay log shows
+**no second `OPEN sock`** for A after the close — the peer stays a room member
+the server cannot reach. Post-fix, the relay records A opening a new socket
+1.1–1.2 s after the close (the ladder's first 1 s rung plus jitter plus the
+handshake), re-registering under the same peerId and re-joining the room.
+
+`I2` and `I4` do **not** discriminate here, contrary to the plan's prediction:
+this fault kills only the signaling socket, so the already-established WebRTC
+edge stays `authenticated` and messages keep round-tripping in both directions
+throughout. `I6` is what the lost socket actually breaks. The last two rows are
+the existing matrix, re-run to confirm no regression against runs 967 and 965
+(+2 s/+2.5 s and +6 s/+6.9 s respectively).
+
+Side effect worth noting: in `ws-drop` the driver's focus emulation now reports
+`skipped by driver: isConnected=true at focus time` — by the time the poke
+would land, the SDK has already reconnected on its own.
 
 ### Recorded results (2026-09-03, at the 0.14.7 branch tip)
 

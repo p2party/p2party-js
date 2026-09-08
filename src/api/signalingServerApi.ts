@@ -36,9 +36,11 @@ import {
   type SignalingHeartbeatWatchdogEnv,
   type SignalingWakeEventName,
 } from "../utils/signalingHeartbeatWatchdog";
+import { createSignalingReconnectController } from "../utils/signalingReconnectController";
 import {
   SIGNALING_HEARTBEAT_CHECK_MS,
   SIGNALING_HEARTBEAT_TIMEOUT_MS,
+  SIGNALING_RECONNECT_DELAYS_MS,
 } from "../utils/constants";
 import {
   acknowledgeRoomLeft,
@@ -109,6 +111,123 @@ const stopCurrentHeartbeatWatchdog = (): void => {
   wsHeartbeatWatchdog = null;
 };
 
+/**
+ * The host the reconnect controller reads Redux state from and dispatches
+ * through. Bound on every connect attempt; the tests rebind it directly. It is
+ * NOT the store import, so this module keeps its existing dependency edges.
+ */
+type SignalingReconnectHost = {
+  dispatch: (action: unknown) => unknown;
+  getState: () => unknown;
+};
+let signalingReconnectHost: SignalingReconnectHost | null = null;
+
+/**
+ * Close codes after which reconnecting to the same URL with this build asks the
+ * same refused question again. p2party-server 0.1.1 ends EVERY rejection it has
+ * — failed verification, socket replacement, ping timeout, handler error — with
+ * a bare `ws.close()`, which reaches the browser as `CloseEvent.code` 1005, so
+ * nothing the current server sends is in this set; it exists so a policy gate in
+ * front of the server (or a later server that says what it means) is not retried
+ * every 30 s forever. 1002 is deliberately absent: a protocol error can be one
+ * mangled frame from a proxy, which the next socket does not repeat.
+ */
+const PERMANENT_SIGNALING_CLOSE_CODES: ReadonlySet<number> = new Set([
+  1003, // unsupported data — a build mismatch, identical on the next socket
+  1008, // policy violation — the standard "your credentials are refused"
+  1010, // mandatory extension missing — this build asks for it every time
+]);
+
+/**
+ * Set by the close handler when the SERVER ended the socket with a code it
+ * means as final. Cleared whenever a host is bound (a deliberate connect is
+ * never blocked by an earlier refusal) and whenever a socket reaches `open`
+ * (the endpoint is evidently not refusing this client).
+ */
+let signalingCloseIsPermanent = false;
+
+export const setSignalingReconnectHost = (
+  host: SignalingReconnectHost | null,
+): void => {
+  signalingReconnectHost = host;
+  signalingCloseIsPermanent = false;
+};
+
+/**
+ * Record how a socket ended, so the reconnect ladder can refuse a close the
+ * server means as final. `selfInitiated` is what keeps the SDK's own protective
+ * closes out of the policy: `onOverflow` closes with 1008 when this tab's
+ * ingress backlog is exceeded, and local overload is exactly what bounded
+ * backoff is for.
+ */
+export const noteSignalingSocketClose = (
+  close: Readonly<{ code: number; selfInitiated: boolean }>,
+): void => {
+  signalingCloseIsPermanent =
+    !close.selfInitiated && PERMANENT_SIGNALING_CLOSE_CODES.has(close.code);
+};
+
+/** Positive-only spread applied to every ladder rung. */
+const SIGNALING_RECONNECT_JITTER_FRACTION = 0.25;
+
+/**
+ * A ladder rung is a floor, never shortened, and at most 25 % longer. Without
+ * this every client a server restart disconnected walks the identical
+ * 1/2/4/8 s ladder and re-handshakes in lockstep, which is the same stampede
+ * the restart caused. The spread lives here rather than in the controller
+ * because the controller's ladder is exact by contract and its tests assert
+ * exact delays; the scheduler this module injects is the seam that perturbs it.
+ */
+export const signalingReconnectDelayWithJitter = (delayMs: number): number => {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.getRandomValues !== "function") return delayMs;
+  const word = cryptoApi.getRandomValues(new Uint32Array(1))[0];
+  return (
+    delayMs +
+    Math.round(
+      (delayMs * SIGNALING_RECONNECT_JITTER_FRACTION * word) / 0xffff_ffff,
+    )
+  );
+};
+
+/**
+ * C4: a socket close that carries no browser wake event is otherwise terminal.
+ * `settleClosedSocket` detects; this reconnects. Shared by the close handler,
+ * the error handler and the heartbeat watchdog, so a peer whose socket died
+ * while its edges stayed authenticated is found again within 1-30 s instead of
+ * never.
+ */
+export const signalingReconnect = createSignalingReconnectController({
+  delaysMs: SIGNALING_RECONNECT_DELAYS_MS,
+  schedule: {
+    setTimeout: (callback, delayMs) =>
+      setTimeout(callback, signalingReconnectDelayWithJitter(delayMs)),
+    clearTimeout: (handle) => {
+      clearTimeout(handle);
+    },
+  },
+  shouldReconnect: () => {
+    const host = signalingReconnectHost;
+    if (!host) return false;
+    if (signalingCloseIsPermanent) return false;
+    const { rooms, signalingServer } = host.getState() as State;
+    if (signalingServer.isConnected || signalingServer.isEstablishingConnection)
+      return false;
+    if (signalingServer.serverUrl.length === 0) return false;
+    return rooms.some((room) => room.signalingActive !== false);
+  },
+  reconnect: () => {
+    const host = signalingReconnectHost;
+    if (!host) return;
+    const { signalingServer } = host.getState() as State;
+    void host.dispatch(
+      signalingServerApi.endpoints.connectWebSocket.initiate(
+        signalingServer.serverUrl,
+      ),
+    );
+  },
+});
+
 /** Wake events the browser fires when a frozen/backgrounded page resumes. */
 const browserWakeEnv = (): SignalingHeartbeatWatchdogEnv | undefined => {
   if (typeof window === "undefined" || typeof document === "undefined")
@@ -175,6 +294,9 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
   api.dispatch(
     signalingServerActions.startConnecting(normalizedSignalingServerUrl),
   );
+  // C4: the reconnect ladder reads room/socket state and re-dispatches connect
+  // through this exact api handle, so it is rebound on every attempt.
+  setSignalingReconnectHost(api);
   const { token: attempt, cancelled } = lifecycleAttempt;
   const attemptCancelled = cancelled.then((): WebSocketBaseResult => ({
     error: "WebSocket connection attempt was cancelled",
@@ -362,6 +484,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
             invalidateSocketIngress("ingress-rejected");
             if (!ownsSocketAttempt()) return;
             socket.onmessage = null;
+            selfInitiatedClose = true;
             socket.close(1008, "signaling ingress backlog exceeded");
           },
           onTaskError: (error) => {
@@ -406,6 +529,10 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         // event until TCP gives up, so the bookkeeping runs synchronously
         // here and the close handshake is merely started.
         let socketSettled = false;
+        // True once THIS SDK closed the socket to protect the tab. Those closes
+        // reuse standard codes (1008 in particular), so only a code the server
+        // chose may be read as a permanent refusal.
+        let selfInitiatedClose = false;
         const settleClosedSocket = (
           close?: Readonly<{ code: number; reason: string }>,
         ): void => {
@@ -423,12 +550,30 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           signalingAttemptLifecycle.clear(attempt);
 
           api.dispatch(signalingServerActions.disconnect());
+          // C4: every settle here is a close the SDK did not initiate —
+          // websocketDisconnectQuery nulls onclose before closing, so a
+          // deliberate disconnect never reaches this function. The heartbeat
+          // watchdog's own close routes here too: it detects a dead socket, it
+          // does not repair one.
+          signalingReconnect.schedule("socket-closed");
           resolveOnce({ data: undefined });
         };
         // This socket's own instance: a beat that lands after the socket was
         // replaced hits a stopped watchdog (a no-op), never the successor's.
         let heartbeatWatchdog: SignalingHeartbeatWatchdog | null = null;
-        const noteHeartbeat = (): void => heartbeatWatchdog?.beat();
+        let heartbeatSeen = false;
+        const noteHeartbeat = (): void => {
+          if (!heartbeatSeen) {
+            // The server pings from its connection handler before any proof, so
+            // the first heartbeat is the earliest honest evidence that THIS
+            // socket is a fresh start rather than another failed attempt. Reset
+            // the ladder here, not on `open`: a socket that opens and is closed
+            // straight back must keep backing off.
+            heartbeatSeen = true;
+            signalingReconnect.succeeded();
+          }
+          heartbeatWatchdog?.beat();
+        };
         try {
           socket.onopen = () => {
             if (!isCurrentSocket()) return;
@@ -457,6 +602,12 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
             heartbeatWatchdog = watchdog;
             wsHeartbeatWatchdog = watchdog;
             api.dispatch(signalingServerActions.connectionEstablished());
+            // C4: a socket that reached `open` proves the endpoint is not
+            // refusing this client, and makes every later unsolicited close
+            // worth retrying. Re-armed on EVERY open, not only the first: a
+            // refused fire leaves the controller armed with nothing pending.
+            signalingCloseIsPermanent = false;
+            signalingReconnect.arm();
             signalingAttemptLifecycle.disarmCancellation(attempt);
             resolveOnce({ data: undefined });
           };
@@ -476,6 +627,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
             signalingAttemptLifecycle.clear(attempt);
 
             api.dispatch(signalingServerActions.disconnect());
+            signalingReconnect.schedule("socket-error");
 
             rejectOnce(new Error("WebSocket connection failed"));
           };
@@ -494,6 +646,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
               invalidateSocketIngress("ingress-rejected");
               ingressQueue.close();
               socket.onmessage = null;
+              selfInitiatedClose = true;
               socket.close(1009, "signaling frame too large");
               return;
             }
@@ -534,6 +687,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
               invalidateSocketIngress("ingress-rejected");
               ingressQueue.close();
               socket.onmessage = null;
+              selfInitiatedClose = true;
               socket.close(1011, "signaling heartbeat failed");
               return;
             }
@@ -550,8 +704,14 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
             );
           };
 
-          socket.onclose = () => {
+          socket.onclose = (event) => {
             if (!ownsSocketAttempt()) return;
+            // Classify before settling: settleClosedSocket schedules the retry
+            // and the ladder's predicate reads this.
+            noteSignalingSocketClose({
+              code: event.code,
+              selfInitiated: selfInitiatedClose,
+            });
             settleClosedSocket();
             debugLog("WebSocket disconnected");
           };
@@ -596,6 +756,14 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
       if (ownsAttempt) {
         signalingAttemptLifecycle.clear(attempt);
         api.dispatch(signalingServerActions.disconnect());
+        // C4: an attempt that died in the identity bootstrap never created a
+        // socket, so no close or error event will ever arrive to carry the
+        // ladder forward. Without this the ladder stalls armed-but-idle and
+        // only an explicit connect() can revive it — the dead end this whole
+        // fix exists to remove. A cancelled attempt does not own the lifecycle
+        // and never reaches here, and a ladder that was never armed (no socket
+        // has opened yet) still declines.
+        signalingReconnect.schedule("socket-error");
       }
       if (
         !(error instanceof Error) ||
@@ -614,6 +782,9 @@ const websocketDisconnectQuery: BaseQueryFn<undefined, undefined> = (
   _: undefined,
   api,
 ) => {
+  // C4: the app is disconnecting on purpose. Disarm before anything can close,
+  // so no ladder rung outlives the intent.
+  signalingReconnect.cancel();
   const socket = ws;
   const ingressLease = wsIngressLease;
   ws = null;

@@ -11,9 +11,10 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.14.9` release candidate adds durable sender recovery, selective
-scheduled receipts, and sparse-PQ overlap handling. The matching `0.1.3`
-signaling server adds membership snapshots and targeted mesh repair. Local verification results and remaining limits are recorded in
+The SDK `0.14.10` includes durable sender recovery, selective scheduled receipts,
+sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
+Signaling server `0.1.3` or newer provides membership snapshots and targeted mesh
+repair. Local verification results and remaining limits are recorded in
 [the browser harness report](docs/e2e/README.md).
 
 This remediation does not publish, deploy, or push any repository. A site must
@@ -70,7 +71,7 @@ transport terminates on the certificate the SDP advertised.
    Firefox's missing post-connect certificate statistics remain. Recovery
    latency outside the measured loopback scenarios is not established.
 
-C6, C9/C11, C10 and selective scheduled receipts are implemented in `0.14.9`.
+C6, C9/C11, C10 and selective scheduled receipts are implemented in the current SDK.
 Their acceptance tests and explicit limits are tracked in the
 [browser report](docs/e2e/README.md). No general sublinear system cost is claimed:
 ACK membership checks are constant-time, but snapshot size, staged-index scans

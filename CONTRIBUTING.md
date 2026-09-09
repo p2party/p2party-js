@@ -64,9 +64,13 @@ Security reports belong at `security@p2party.com`, not in a public issue.
 
 ## Public history
 
-Public publication needs a fresh or squashed history authored with
-`@p2party.com` identities. Preparing that public history is a release-owner
-operation and is not part of an ordinary contribution.
+`master` carries the public history. Publish from this repository root with
+`git push`; a separate export checkout is not needed. Push a release tag
+explicitly when ready: the `v*` workflow publishes the SDK to npm and the CDN.
+
+Start public changes from `master`. Keep older private research histories on
+their existing branches, and bring reviewed changes across with selected
+cherry-picks rather than merging private history into the public branch.
 
 By contributing, you agree that your contribution is licensed under
 Apache-2.0.

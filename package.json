@@ -124,7 +124,7 @@
     "integrity:wasm": "openssl dgst -sha384 -binary lib/libcrypto.wasm | openssl base64 -A > lib/libcrypto.wasm.integrity",
     "integrity": "npm run integrity:js && npm run integrity:worker && npm run integrity:wasm",
     "integrity:cleanup": "rm -f lib/p2party.min.js.integrity lib/db.worker.js.integrity lib/libcrypto.wasm.integrity",
-    "prepare:uploadcdn": "npm run copy:wasm && npm run gzip:js && npm run gzip:worker",
+    "prepare:uploadcdn": "npm run gzip:js && npm run gzip:worker && npm run gzip:wasm",
     "actual:uploadcdn": "node --env-file-if-exists=.env scripts/uploadToCDN.mjs",
     "verify:cdn": "node scripts/verifyCDN.mjs",
     "cleanup:uploadcdn": "npm run gzip:cleanup && npm run integrity:cleanup",

@@ -17,6 +17,10 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  preparePackageDeclarations,
+  validatePackageDeclarations,
+} from "./packageDeclarations.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
@@ -474,7 +478,7 @@ const validateSessionSurface = async () => {
   }
 };
 
-const validatePackList = (packResult) => {
+const validatePackList = (packResult, declarationPaths) => {
   const paths = new Set(packResult.files.map(({ path: filePath }) => filePath));
   const required = [
     "package.json",
@@ -498,6 +502,7 @@ const validatePackList = (packResult) => {
     "lib/db.worker.js",
     "lib/libcrypto.wasm",
     "lib/libcrypto.provenance.json",
+    ...declarationPaths,
   ];
   for (const requiredPath of required)
     if (!paths.has(requiredPath)) fail(`tarball is missing ${requiredPath}`);
@@ -505,7 +510,6 @@ const validatePackList = (packResult) => {
   const exactFiles = new Set(required);
   for (const filePath of paths) {
     if (exactFiles.has(filePath)) continue;
-    if (/^lib\/.+\.d\.ts$/u.test(filePath)) continue;
     fail(`tarball unexpectedly contains ${filePath}`);
   }
 };
@@ -675,6 +679,15 @@ try {
     path.join(stageRoot, "examples", "standalone-e2ee.ts"),
   );
 
+  const declarationResult = preparePackageDeclarations({
+    packageRoot: stageRoot,
+    sourceRoot: path.join(projectRoot, "src"),
+  });
+  console.log(
+    `Public declarations: ${declarationResult.retained.length} retained, ` +
+      `${declarationResult.removed} unreachable files removed (${declarationResult.removedBytes} bytes)`,
+  );
+
   for (const target of exportedTargets(packageJson.exports)) {
     if (!target.startsWith("./"))
       fail(`package export is not relative: ${target}`);
@@ -708,12 +721,23 @@ try {
   const [packResult] = JSON.parse(packJson);
   if (!packResult || packResult.version !== packageJson.version)
     fail("npm pack reported an unexpected package version");
-  validatePackList(packResult);
+  validatePackList(packResult, declarationResult.retained);
 
   console.log(
     "[7/7] Verify archived bytes and publish the validated artifacts",
   );
   const stagedTarball = path.join(packedRoot, packResult.filename);
+  const extractedRoot = path.join(releaseRoot, "extracted");
+  mkdirSync(extractedRoot);
+  run("tar", ["-xzf", stagedTarball, "-C", extractedRoot]);
+  validatePackageDeclarations({
+    packageRoot: path.join(extractedRoot, "package"),
+    projectRoot,
+    consumerRoot: path.join(releaseRoot, "type-consumer"),
+  });
+  console.log(
+    "Strict ES2022/DOM consumer types passed with and without ambient Emscripten types",
+  );
   const archivedWasm = execFileSync(
     "tar",
     ["-xOf", stagedTarball, "package/lib/libcrypto.wasm"],

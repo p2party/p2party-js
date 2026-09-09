@@ -68,9 +68,10 @@ const assets = [
     contentEncoding: "gzip",
   },
   {
-    source: path.join("lib", "libcrypto.wasm"),
+    source: path.join("lib", "libcrypto.wasm.gz"),
     keyName: "libcrypto.wasm",
     contentType: "application/wasm",
+    contentEncoding: "gzip",
   },
 ];
 
@@ -97,10 +98,10 @@ const headObject = async (key) => {
  * Confirm a republish carries the same artifact, comparing what the browser
  * would actually execute rather than the bytes we happen to have stored.
  *
- * The stored form is gzip, and a gzip stream embeds an MTIME in its header, so
- * two runs over byte-identical input produce different gzip bytes. Comparing
- * the compressed hash therefore reported a mismatch on every re-run of an
- * already-published tag -- an immutability violation that had not happened.
+ * Current assets use deterministic gzip. Older objects can be raw WASM or
+ * gzip with a different MTIME header, so identical decoded content need not
+ * have identical stored bytes. Keep that existing representation untouched;
+ * this comparison permits a safe rerun, never an overwrite of a versioned key.
  *
  * Fetching and decoding the object costs one GET per asset and answers the
  * question that matters: is the published artifact the one this build made?

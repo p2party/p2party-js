@@ -31,7 +31,8 @@ reaches any of it.
 
 ## [0.14.10] — 2026-09-09
 
-Protocol version remains 4; the signaling server remains compatible at `0.1.3`.
+Protocol version remains 4; compatible signaling servers include `0.1.3` and
+the hardened `0.1.4` release.
 
 ### Security
 
@@ -50,6 +51,16 @@ Protocol version remains 4; the signaling server remains compatible at `0.1.3`.
 - Remove `class-validator` and its phone-number/validation dependency tree.
 - Replace the sequential task-runner dependency with npm script chaining.
   Keep `cross-env` for environment assignments across supported shells.
+- Gzip new CDN WASM uploads, reducing the current artifact from 211,350 to
+  91,616 transferred bytes while preserving its decoded bytes and SRI. Existing
+  immutable objects keep their published representation.
+- Include the missing public `LibCrypto` declaration and its module-scoped
+  Emscripten types without requiring an ambient development dependency.
+  Release packaging strictly checks both public entry points with ES2022/DOM
+  libraries, including coexistence with upstream Emscripten types.
+- Package only declarations reachable from the public entry points, removing
+  172 unused declaration files while retaining all public types. This reduces
+  the npm archive by about 131 KiB without changing JavaScript or WASM bytes.
 
 ## [0.14.9] — 2026-09-08
 

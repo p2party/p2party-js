@@ -1,4 +1,4 @@
-/// <reference types="emscripten" />
+import type { EmscriptenModule, EmscriptenModuleFactory } from "./emscripten";
 
 export interface LibCrypto extends EmscriptenModule {
   wasmMemory: WebAssembly.Memory;

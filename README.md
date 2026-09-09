@@ -889,7 +889,7 @@ immutable, versioned path, so a URL names exactly one build and is safe to
 cache forever:
 
 ```sh
-curl -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
+curl --compressed -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
 ```
 
 Two caveats, both current as of this release. The CDN carries only three
@@ -899,6 +899,14 @@ objects — `p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the
 the tarball. And nothing is uploaded for this release yet, which is why the
 command above asks npm for a version that is actually published instead of
 naming this one.
+
+New CDN uploads gzip all three objects; WASM keeps `Content-Type:
+application/wasm` and uses `Content-Encoding: gzip`. Browsers decode it before
+SRI verification, and `curl --compressed` saves those same decoded bytes for
+the checks below. Existing raw WASM objects remain untouched when their decoded
+content matches; enabling compression never overwrites a published version.
+Upload preparation compresses the validated artifacts already in `lib/`; it
+does not replace them from a local development crypto build.
 
 Check what you downloaded before you serve it. The SHA-256 and the SRI value
 are both recorded in the provenance file:

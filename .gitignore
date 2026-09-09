@@ -1,0 +1,89 @@
+# Dependencies and build output
+node_modules/
+lib/
+dist/
+build/Release/
+*.tgz
+*.map
+*.tsbuildinfo
+src/cryptography/libcrypto.wasm
+
+# Test and tool output
+coverage/
+*.lcov
+.nyc_output/
+.cache/
+.npm/
+.eslintcache
+.rpt2_cache*/
+.vscode-test/
+
+# Logs, diagnostics, and runtime state
+*.log
+report.*.*.*.*.json
+pids/
+*.pid
+*.pid.lock
+*.seed
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Package-manager/editor/OS state
+.pnpm-debug.log*
+.pnpm-store/
+.yarn/
+.pnp.*
+.idea/
+.DS_Store
+.aider*
+
+# Framework caches
+.parcel-cache/
+.next/
+out/
+.nuxt/
+.temp/
+.docusaurus/
+.serverless/
+.dynamodb/
+
+# Internal working notes: agent handoffs, design specs, and live defect
+# triage lists. Kept on disk, never published — they are addressed to
+# maintainers, go stale immediately, and name unfixed issues.
+docs/HANDOFF.md
+docs/superpowers/
+docs/e2e/frontend-audit-report.md
+
+# Release-tarball unpack dir used by the CDN upload step in CI.
+.release-stage/
+
+# bun is used only as the test runner and to invoke prettier; npm and
+# package-lock.json are authoritative here (CI runs `npm ci`). A second
+# lockfile would silently diverge from it.
+bun.lock
+bun.lockb
+
+# Emscripten SDK checkouts inside the workspace (the release workflow
+# caches into ./emsdk-cache). Tools that walk the tree must not see them.
+emsdk/
+emsdk-cache/
+
+# Build outputs of the blind-rendezvous browser harnesses
+# (docs/e2e/blind-two-store/build.sh, and `run.mjs --cohort=<n>` which builds a
+# second bundle per cohort). They are megabytes of generated bundle and a copy
+# of the development WASM; the READMEs say not to commit them and this is what
+# enforces it.
+docs/e2e/blind-two-store/bundle.js
+docs/e2e/blind-two-store/bundle.cohort-*.js
+docs/e2e/blind-two-store/provider-smoke-bundle.js
+docs/e2e/blind-two-store/libcrypto.wasm
+
+# Regenerated desync browser bundles and raw per-run diagnostics. Compact
+# acceptance results are recorded in docs/e2e/README.md.
+docs/e2e/desync/app-bundle.js
+docs/e2e/desync/worker-inject.js
+docs/e2e/desync/libcrypto.wasm
+docs/e2e/runs/

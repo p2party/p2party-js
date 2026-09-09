@@ -1,0 +1,51 @@
+#ifndef pake_ratchet_H
+#define pake_ratchet_H
+
+#include <stdint.h>
+#include <string.h>
+
+#include "utils.h"
+
+#include <sodium.h>
+
+void cpace_ristretto255_from_hash(
+    uint8_t out[crypto_core_ristretto255_BYTES],
+    const uint8_t hash[crypto_core_ristretto255_HASHBYTES]);
+int cpace_ristretto255_scalarmult(
+    uint8_t out[crypto_core_ristretto255_BYTES],
+    const uint8_t scalar[crypto_core_ristretto255_SCALARBYTES],
+    const uint8_t point[crypto_core_ristretto255_BYTES]);
+void cpace_ristretto255_scalar_random(
+    uint8_t out[crypto_core_ristretto255_SCALARBYTES]);
+
+int x25519_keypair(uint8_t pk[crypto_scalarmult_curve25519_BYTES],
+                   uint8_t sk[crypto_scalarmult_curve25519_SCALARBYTES]);
+int x25519_dh(uint8_t shared[crypto_scalarmult_curve25519_BYTES],
+              const uint8_t sk[crypto_scalarmult_curve25519_SCALARBYTES],
+              const uint8_t pk[crypto_scalarmult_curve25519_BYTES]);
+
+int hkdf_sha512_extract(uint8_t prk[crypto_auth_hmacsha512_BYTES],
+                        const uint8_t *salt, const unsigned int salt_len,
+                        const uint8_t *ikm, const unsigned int ikm_len);
+int hkdf_sha512_expand(uint8_t *out, const unsigned int out_len,
+                       const uint8_t prk[crypto_auth_hmacsha512_BYTES],
+                       const uint8_t *info, const unsigned int info_len);
+
+int encrypt_chachapoly_symmetric(
+    uint8_t *out, const uint8_t *data, const unsigned int data_len,
+    const uint8_t key[crypto_aead_chacha20poly1305_ietf_KEYBYTES],
+    const uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES],
+    const uint8_t *aad, const unsigned int aad_len);
+
+int decrypt_chachapoly_symmetric(
+    uint8_t *out, const uint8_t *in, const unsigned int in_len,
+    const uint8_t key[crypto_aead_chacha20poly1305_ietf_KEYBYTES],
+    const uint8_t nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES],
+    const uint8_t *aad, const unsigned int aad_len);
+
+int receive_message_with_key(
+    uint8_t decrypted[DECRYPTED_LEN], const uint8_t message[MESSAGE_LEN],
+    const uint8_t merkle_root[crypto_hash_sha512_BYTES],
+    const uint8_t message_key[crypto_aead_chacha20poly1305_ietf_KEYBYTES]);
+
+#endif

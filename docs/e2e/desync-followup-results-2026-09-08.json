@@ -1,0 +1,3808 @@
+{
+  "publicationRedaction": "Absolute workstation path prefixes in diagnostic failure text were replaced with <workspace>. Recorded outcomes, artifact hashes, and acceptance scope are unchanged.",
+  "schemaVersion": 1,
+  "date": "2026-09-08",
+  "status": "accepted",
+  "scope": "C6 scheduled PQ overlap; C9/C11 roster snapshots and per-member reconciliation; C10 durable sender recovery and lifecycle; selective scheduled resume.",
+  "historicalReport": {
+    "path": "docs/e2e/desync-results-2026-09-08.json",
+    "sha256": "09aaaff0c334f289426d82dc894de17a56f7cdaf96e3caee3a9921ce3c93a303",
+    "sdkVersion": "0.14.8",
+    "preserved": true,
+    "note": "Prior acceptance and its retained old-server residual remain historical evidence; no prior arm is relabeled as a 0.14.9 run."
+  },
+  "candidate": {
+    "sdkVersion": "0.14.9",
+    "serverVersion": "0.1.3",
+    "sourceCommit": "78067ce",
+    "status": "validated-local-release-artifact",
+    "sdkArtifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+    "publishedOrDeployed": false,
+    "runtimeSourceCommit": "78067ce",
+    "productionWasmBytes": 211350,
+    "productionWasmSha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+    "releasePackageChecks": {
+      "passed": 7,
+      "failed": 0,
+      "evidenceKind": "reported command result"
+    }
+  },
+  "finalHarnessProvenance": {
+    "sourceArtifact": "docs/e2e/runs/followups-2026-09-08/final-harness-inputs.json",
+    "sourceSha256": "894a8fc42b3e7ec8a91d44e08ef7c6b42272a31e8c77ae04f2330ccca0052968",
+    "frozenAt": "2026-09-08T21:12:44.649150+00:00",
+    "sourceCommit": "78067ce",
+    "packageSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+    "inputs": {
+      "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+      "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+      "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+      "app-entry-desync.ts": "620b52a7f588e911d6bc3c54d92fca7c42bcf0d862ced04b4e4121777fdbdf0f",
+      "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+      "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+      "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+      "mesh-recovery.mjs": "bc8c0169661374403e5e1f0bb1f8cc8122a576329e1457148d58b3a18017673b",
+      "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a",
+      "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246",
+      "desync-matrix.mjs": "4aa1c68355b3ca43fffd6955054dbe3a4f2f6241dd8054fb2253b3a677dfd9e9",
+      "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+      "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+      "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+      "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+    }
+  },
+  "environment": "macOS, headless Chromium, loopback signaling relay and two or three local peers. These measurements do not establish WAN or mobile performance.",
+  "followups": [
+    {
+      "id": "C6",
+      "implemented": "Real scheduled jobs and admission reservations survive local due-healing deferral and an incoming PQ epoch change; dummy cover does not indefinitely defer healing.",
+      "negativeControlIds": [],
+      "exploratoryEvidenceIds": ["scheduled-pq-after-1"],
+      "finalRequiredCases": ["scheduled-pq"],
+      "finalStatus": "PASS",
+      "finalCompletedCases": ["scheduled-pq"]
+    },
+    {
+      "id": "C9/C11",
+      "implemented": "Correlated authoritative roster snapshots, separate eligible known membership, bounded per-member repair, and coalesced trailing redial. Healthy siblings and terminal PIN failure suppression are preserved.",
+      "negativeControlIds": [
+        "mesh-recovery-before-3",
+        "leading-only-redial-mutation"
+      ],
+      "exploratoryEvidenceIds": ["mesh-recovery-after-1"],
+      "finalRequiredCases": ["mesh-recovery"],
+      "finalStatus": "PASS",
+      "finalCompletedCases": ["mesh-recovery"]
+    },
+    {
+      "id": "C10",
+      "implemented": "Fenced durable sender manifests reuse staged chunks after reload or an exhausted in-memory attempt. Room, identity, policy and original recipient admission, finite retention/quota, cancellation and receive-expiry cleanup bound the lifecycle.",
+      "negativeControlIds": ["sender-recovery-before-reload-immediate-1"],
+      "exploratoryEvidenceIds": [
+        "sender-recovery-after-reload-immediate-1",
+        "sender-recovery-after-reload-scheduled-1",
+        "sender-recovery-after-cancel-immediate-1",
+        "sender-recovery-after-mixed-immediate-1",
+        "sender-recovery-after-mixed-scheduled-1"
+      ],
+      "finalRequiredCases": [
+        "sender-reload-immediate",
+        "sender-reload-scheduled",
+        "sender-long-loss-immediate",
+        "sender-cancel-immediate",
+        "sender-mixed-reload-immediate",
+        "sender-mixed-reload-scheduled"
+      ],
+      "finalStatus": "PASS",
+      "finalCompletedCases": [
+        "sender-reload-immediate",
+        "sender-reload-scheduled",
+        "sender-long-loss-immediate",
+        "sender-cancel-immediate",
+        "sender-mixed-reload-immediate",
+        "sender-mixed-reload-scheduled"
+      ]
+    },
+    {
+      "id": "selective-scheduled-resume",
+      "implemented": "Authenticated bounded batched chunk receipts plus a distinct terminal receipt allow resumed real work to skip acknowledged nonzero chunk indices, with at most one index-zero completion probe.",
+      "negativeControlIds": [],
+      "exploratoryEvidenceIds": ["scheduled-selective-after-1"],
+      "finalRequiredCases": ["scheduled-selective"],
+      "finalStatus": "PASS",
+      "finalCompletedCases": ["scheduled-selective"]
+    }
+  ],
+  "negativeControls": [
+    {
+      "id": "mesh-recovery-before-3",
+      "sourceArtifact": "docs/e2e/runs/mesh-recovery-before-3.json",
+      "sourceSha256": "7b87b38d41915642505e07d4b62dcc3bed44ec1cde5f3cb451dc363e64ee7f89",
+      "driverPass": false,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:26:53.138Z",
+      "finished": "2026-09-08T18:28:09.890Z",
+      "flags": {
+        "port": "5880",
+        "run": "before-3",
+        "before": "1",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "0205d66df989d2368a1c0ce67e2ebaffc8abb8d81462e46bfcea0a5ae20b6060",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "mesh-recovery.mjs": "7ef6843f80318fd6caf105df9ea4c944fd14ee763fdd54c2b389f1c5e33d12a7"
+      },
+      "pageErrorCount": 0,
+      "error": "AssertionError [ERR_ASSERTION]: Missing A-C must recover while its other edges remain healthy",
+      "classification": "valid-old-code-negative-control",
+      "followups": ["C9/C11"],
+      "archivedSdkVersion": "0.14.8",
+      "fault": {
+        "closedEdge": "A-C",
+        "pairSignalingBlackholeMs": 12000
+      },
+      "observed": {
+        "samples": 143,
+        "observationSinceFaultMs": 71826,
+        "healthySiblingsThroughout": true,
+        "missingEdgeEverRecovered": false,
+        "lastRosters": [1, 2, 1]
+      }
+    },
+    {
+      "id": "sender-recovery-before-reload-immediate-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-before-reload-immediate-1.json",
+      "sourceSha256": "a63f299b1d228b2efc14fc2ae8fd8d747db9ff04b1ee6c9847a655fdb4d7f2f7",
+      "driverPass": false,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:51:49.945Z",
+      "finished": "2026-09-08T18:52:52.204Z",
+      "flags": {
+        "port": "5880",
+        "run": "before-reload-immediate-1",
+        "before": "1",
+        "mode": "immediate",
+        "fault": "reload",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "f505cc947b79b47eb1f4f4d21c20963633ba12d024bf341e0deaf4bf8db329d5",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "sender-recovery.mjs": "6acf857d0292668368dce0d77818ccfeb663451fa93930f30064e08e9b91a849"
+      },
+      "pageErrorCount": 0,
+      "error": "Error: original payload automatically completes timed out after 60000ms; last={\"merkleRootHex\":\"cf6ca261d23e7d17b00a3faf6961d046f7657ed2925a3a9c03b24a3cf4ec3ee9420f45eebcb310ac884a258c36d4c7808c53273c1039a6ec4dece6dc2f467b42\",\"from\":\"df88a871\",\"filename\":\"xfer-durable.bin\",\"savedSize\":222884,\"totalSize\":8388608,\"percent\":2,\"complete\":false,\"chunksCreated\":0,\"totalChunks\":0,\"chunksReceivedTotal\":4,\"chunksReceivedReal\":4}",
+      "classification": "valid-old-code-negative-control",
+      "followups": ["C10"],
+      "archivedSdkVersion": "0.14.8",
+      "fault": "sender page reload after partial reception",
+      "payloadBytes": 8388608,
+      "partialBytes": 222884,
+      "automaticCompletionObservationMs": 60000,
+      "originalPayloadCompleted": false
+    },
+    {
+      "id": "leading-only-redial-mutation",
+      "classification": "isolated-old-behavior-negative-control",
+      "followups": ["C9/C11"],
+      "sourceArtifact": "docs/e2e/runs/roster-negative/redial-negative.log",
+      "sourceSha256": "381da0326a4ae7c0c590d296ba6ff670e29983e10c69b08ff9f0cd940c55fb70",
+      "command": "bun test docs/e2e/runs/roster-negative/redial-negative.test.ts --test-name-pattern 'last redial in a burst'",
+      "exitCode": 1,
+      "passedTests": 0,
+      "failedTests": 1,
+      "assertions": 2,
+      "expectedCalls": [1, 3],
+      "actualCalls": [1],
+      "note": "Copied implementation with leading-only behavior; production source was not mutated."
+    }
+  ],
+  "exploratoryRuns": [
+    {
+      "id": "mesh-recovery-after-1",
+      "sourceArtifact": "docs/e2e/runs/mesh-recovery-after-1.json",
+      "sourceSha256": "810699b7cba525f0ab3b7b106e27da530243205e8d253a7cdf4b3c05b4a7788f",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:40:50.313Z",
+      "finished": "2026-09-08T18:42:07.297Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-1",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "1d35331fb06f7919c9e26d33d669162c4a1ddcdfdd5572c3660094224e6a30ee",
+        "worker-inject.js": "6ab373f7be83af3568a4fe9f8977cc8c156cc24ecf10c09ad489594cfd2b3b58",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "f505cc947b79b47eb1f4f4d21c20963633ba12d024bf341e0deaf4bf8db329d5",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "mesh-recovery.mjs": "7ef6843f80318fd6caf105df9ea4c944fd14ee763fdd54c2b389f1c5e33d12a7"
+      },
+      "pageErrorCount": 0,
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C9/C11"],
+      "fault": {
+        "closedEdge": "A-C",
+        "pairSignalingBlackholeMs": 12000
+      },
+      "observed": {
+        "recoveryAfterFaultClearMs": 3259,
+        "samples": 142,
+        "healthySiblingsThroughout": true,
+        "lastSampleSinceFaultMs": 71669,
+        "lastRosters": [2, 2, 2],
+        "deliveryPassed": true
+      }
+    },
+    {
+      "id": "sender-recovery-after-reload-immediate-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-reload-immediate-1.json",
+      "sourceSha256": "71d6956b1758d8ba0267774e009afc4ceb63797921c8c05301488c4825df1b01",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:55:16.427Z",
+      "finished": "2026-09-08T18:55:53.689Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-reload-immediate-1",
+        "mode": "immediate",
+        "fault": "reload",
+        "observe": "120000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "89b093b508b4f34bcb4e439ca87e17794a3e859f3039c570ac582f50f4e48ca4",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "f505cc947b79b47eb1f4f4d21c20963633ba12d024bf341e0deaf4bf8db329d5",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "sender-recovery.mjs": "6acf857d0292668368dce0d77818ccfeb663451fa93930f30064e08e9b91a849"
+      },
+      "pageErrorCount": 0,
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C10"],
+      "payloadBytes": 8388608,
+      "partialBytes": 55721,
+      "recoveryMs": 35135,
+      "recoveryClock": "From fault injection (including reload), not from authentication recovery.",
+      "byteExact": true,
+      "payloadSha256": "8e8f0361f3d1c518cefb46390ec34b9f429a3268fd28696deb0008d319bd0560",
+      "pendingAfter": []
+    },
+    {
+      "id": "sender-recovery-after-reload-scheduled-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-reload-scheduled-1.json",
+      "sourceSha256": "4b32d16d5063bc6e5e37e1b099b8592ba1ffad538cf230209602b3ddddec2b12",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:57:00.339Z",
+      "finished": "2026-09-08T18:57:38.665Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-reload-scheduled-1",
+        "mode": "scheduled",
+        "fault": "reload",
+        "observe": "120000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "89b093b508b4f34bcb4e439ca87e17794a3e859f3039c570ac582f50f4e48ca4",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "f505cc947b79b47eb1f4f4d21c20963633ba12d024bf341e0deaf4bf8db329d5",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "sender-recovery.mjs": "6acf857d0292668368dce0d77818ccfeb663451fa93930f30064e08e9b91a849"
+      },
+      "pageErrorCount": 0,
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C10"],
+      "payloadBytes": 524288,
+      "partialBytes": 111442,
+      "recoveryMs": 30735,
+      "recoveryClock": "From fault injection (including reload), not from authentication recovery.",
+      "byteExact": true,
+      "payloadSha256": "ce8d6e740bd5720f37cb19b15e9de83e5b57baa45ce6a0c07ae4779dffc64179",
+      "pendingAfter": []
+    },
+    {
+      "id": "sender-recovery-after-cancel-immediate-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-cancel-immediate-1.json",
+      "sourceSha256": "939f22a8721b6a3b5453804d13d5910fefb6d42dcd54fbd02e88145ec98338cf",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T20:26:51.619Z",
+      "finished": "2026-09-08T20:26:53.681Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-cancel-immediate-1",
+        "mode": "immediate",
+        "fault": "cancel",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+        "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+        "sender-recovery.mjs": "4a6ee18d212dc01cb2c55b9cbce4a4d20338d3bbcc2bdd03acbdfb214af1321b"
+      },
+      "pageErrorCount": 0,
+      "peerAssets": {
+        "A": {
+          "assetUrl": "http://127.0.0.1:5880",
+          "archived": false,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+            "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        },
+        "B": {
+          "assetUrl": "http://127.0.0.1:5880",
+          "archived": false,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+            "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        }
+      },
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C10"],
+      "payloadBytes": 8388608,
+      "partialBytes": 55721,
+      "cancelled": true,
+      "observed": "Public cancellation removed the pending sender transfer and receiver partial."
+    },
+    {
+      "id": "sender-recovery-after-mixed-immediate-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-mixed-immediate-1.json",
+      "sourceSha256": "90ecbdf6e0b8df01b66d116ef6f74cc5918d4f07a8e33b5b50404166d14b74a0",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T20:28:24.338Z",
+      "finished": "2026-09-08T20:29:02.751Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-mixed-immediate-1",
+        "mode": "immediate",
+        "fault": "reload",
+        "legacy": "receiver",
+        "observe": "120000"
+      },
+      "inputs": {
+        "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "legacy/app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "legacy/app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "legacy/worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "legacy/libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+        "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+        "sender-recovery.mjs": "4a6ee18d212dc01cb2c55b9cbce4a4d20338d3bbcc2bdd03acbdfb214af1321b"
+      },
+      "pageErrorCount": 0,
+      "peerAssets": {
+        "A": {
+          "assetUrl": "http://127.0.0.1:5880",
+          "archived": false,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+            "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        },
+        "B": {
+          "assetUrl": "http://127.0.0.1:5880/legacy",
+          "archived": true,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+            "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        }
+      },
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C10"],
+      "payloadBytes": 8388608,
+      "partialBytes": 167163,
+      "recoveryMs": 36269,
+      "recoveryClock": "From fault injection (including reload), not from authentication recovery.",
+      "byteExact": true,
+      "payloadSha256": "35266dfadf79c2b14ec2834f789ea1d3c871762bae964241311853e0a6ad6001",
+      "pendingAfter": [],
+      "compatibilityScope": "Current sender reload to an archived 0.14.8 receiver; byte-exact delivery is demonstrated. This does not prove every chunk was resent."
+    },
+    {
+      "id": "sender-recovery-after-mixed-scheduled-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-mixed-scheduled-1.json",
+      "sourceSha256": "8fb3482fdebe33a91f60ae8c380e7d4dc5f354d93e5144abae894dd3c67b814e",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T20:32:43.449Z",
+      "finished": "2026-09-08T20:33:20.604Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-mixed-scheduled-1",
+        "mode": "scheduled",
+        "fault": "reload",
+        "legacy": "receiver",
+        "observe": "120000"
+      },
+      "inputs": {
+        "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "legacy/app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "legacy/app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "legacy/worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "legacy/libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+        "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+        "sender-recovery.mjs": "4a6ee18d212dc01cb2c55b9cbce4a4d20338d3bbcc2bdd03acbdfb214af1321b"
+      },
+      "pageErrorCount": 0,
+      "peerAssets": {
+        "A": {
+          "assetUrl": "http://127.0.0.1:5880",
+          "archived": false,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+            "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        },
+        "B": {
+          "assetUrl": "http://127.0.0.1:5880/legacy",
+          "archived": true,
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+            "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+          }
+        }
+      },
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C10"],
+      "payloadBytes": 524288,
+      "partialBytes": 55721,
+      "recoveryMs": 30765,
+      "recoveryClock": "From fault injection (including reload), not from authentication recovery.",
+      "byteExact": true,
+      "payloadSha256": "5ec8442cdef57ea2d3ff385a61bd8f0f10cc8be2d5175de72700f61cda8644db",
+      "pendingAfter": [],
+      "compatibilityScope": "Current sender reload to an archived 0.14.8 receiver; byte-exact delivery is demonstrated. This does not prove every chunk was resent."
+    },
+    {
+      "id": "scheduled-selective-after-1",
+      "sourceArtifact": "docs/e2e/runs/scheduled-selective-after-1.json",
+      "sourceSha256": "74c7f5cd408bdbc9fc4c12becfb12b39506d64ab2b542cf6088a98be6d06eade",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T20:17:28.872Z",
+      "finished": "2026-09-08T20:17:57.763Z",
+      "flags": {
+        "case": "selective",
+        "port": "5880",
+        "run": "after-1"
+      },
+      "inputs": {
+        "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+        "recovery-harness.mjs": "4e5f8b50b3585a5a1436e92b2bc3938ace22797233ad12494989aa2768505441",
+        "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246"
+      },
+      "pageErrorCount": 0,
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["selective-scheduled-resume"],
+      "payloadBytes": 524288,
+      "policy": {
+        "mode": "scheduled",
+        "coverCadenceMs": 4000
+      },
+      "observed": {
+        "acked": [0, 1, 2, 3],
+        "missing": [4, 5, 6, 7, 8, 9],
+        "emittedIndices": [0, 4, 5, 6, 7, 8, 9],
+        "completionProbeAllowance": 1,
+        "resumedRealCells": 7,
+        "maximumRealCells": 7
+      },
+      "byteExact": true,
+      "efficiencyMeasure": "Authenticated ACK set compared with actual resumed real-cell indices; excludes fixed cover wire traffic."
+    },
+    {
+      "id": "scheduled-pq-after-1",
+      "sourceArtifact": "docs/e2e/runs/scheduled-pq-after-1.json",
+      "sourceSha256": "5f7bcd6523d5eb95df352a3c5f6030769042d26bded882472ffa3f1d89908423",
+      "driverPass": true,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T20:18:23.216Z",
+      "finished": "2026-09-08T20:18:49.795Z",
+      "flags": {
+        "case": "pq",
+        "port": "5880",
+        "run": "after-1"
+      },
+      "inputs": {
+        "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+        "app-bundle.js": "a39089f9663fcfe440a59a884de1f8080c6e6cfca209646192f7784983b55583",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+        "recovery-harness.mjs": "4e5f8b50b3585a5a1436e92b2bc3938ace22797233ad12494989aa2768505441",
+        "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246"
+      },
+      "pageErrorCount": 0,
+      "classification": "exploratory-after-fix",
+      "countsTowardFinalAcceptance": false,
+      "followups": ["C6"],
+      "policy": {
+        "mode": "scheduled",
+        "coverCadenceMs": 4000
+      },
+      "observed": {
+        "localDueDeferredWhileRealPending": true,
+        "localDueEpochBefore": 0,
+        "localDueEpochAfterDelivery": [1, 1],
+        "incomingEpochBefore": 1,
+        "incomingEpochAfter": 2,
+        "incomingRealWorkPendingAtEpochChange": true,
+        "incomingPcIdBefore": 1,
+        "incomingPcIdAfter": 1,
+        "incomingRuntimeBefore": 1,
+        "incomingRuntimeAfter": 1,
+        "byteExactLocal": true,
+        "byteExactIncoming": true,
+        "simultaneousCounterDueInjection": true
+      },
+      "faultInjectionScope": "Application-message due counters only; normal cover cadence and real PQ offer/advance/ack exchange remain active."
+    }
+  ],
+  "excludedRuns": [
+    {
+      "id": "mesh-recovery-before-1",
+      "sourceArtifact": "docs/e2e/runs/mesh-recovery-before-1.json",
+      "sourceSha256": "d6dbcbf0e404c77227cb39ad5d27e257f31ba14dc4793a900d356f17358095be",
+      "driverPass": false,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:23:53.355Z",
+      "finished": "2026-09-08T18:23:54.115Z",
+      "flags": {
+        "port": "5880",
+        "run": "before-1",
+        "before": "1",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "0205d66df989d2368a1c0ce67e2ebaffc8abb8d81462e46bfcea0a5ae20b6060",
+        "recovery-harness.mjs": "221fd40bde9a1854908f35c28194f373150f7deb439446b2de656e5b0a6b5338",
+        "mesh-recovery.mjs": "642ae95bcacce760164743b8f48f8a00384c0f335389df45ddb77c943df929c3"
+      },
+      "pageErrorCount": 0,
+      "error": "TypeError: Cannot read properties of undefined (reading 'launch')",
+      "classification": "excluded",
+      "reason": "Fixture startup failed before browser launch; no product behavior was tested.",
+      "countsTowardFinalAcceptance": false
+    },
+    {
+      "id": "mesh-recovery-before-2",
+      "sourceArtifact": "docs/e2e/runs/mesh-recovery-before-2.json",
+      "sourceSha256": "c29d044d9e21112a8efacc78c00de7ccb86c3eb49e933435edb1b69dfaf3b638",
+      "driverPass": false,
+      "inputsUnchanged": true,
+      "started": "2026-09-08T18:24:30.387Z",
+      "finished": "2026-09-08T18:24:31.604Z",
+      "flags": {
+        "port": "5880",
+        "run": "before-2",
+        "before": "1",
+        "observe": "60000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+        "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "0205d66df989d2368a1c0ce67e2ebaffc8abb8d81462e46bfcea0a5ae20b6060",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "mesh-recovery.mjs": "642ae95bcacce760164743b8f48f8a00384c0f335389df45ddb77c943df929c3"
+      },
+      "pageErrorCount": 0,
+      "error": "AssertionError [ERR_ASSERTION]: A-B and B-C must stay authenticated while A-C is repaired",
+      "classification": "excluded",
+      "reason": "Fixture fault injection ran before the intended stable healthy sibling baseline; excluded as an ordering control.",
+      "countsTowardFinalAcceptance": false
+    },
+    {
+      "id": "sender-recovery-after-long-loss-immediate-1",
+      "sourceArtifact": "docs/e2e/runs/sender-recovery-after-long-loss-immediate-1.json",
+      "sourceSha256": "dbe5a2edb3baeb0c73ca9786e94c0a9216b7494e1edddc4df1e7da4a586b61e8",
+      "driverPass": false,
+      "inputsUnchanged": false,
+      "started": "2026-09-08T19:42:32.794Z",
+      "finished": "2026-09-08T19:44:55.039Z",
+      "flags": {
+        "port": "5880",
+        "run": "after-long-loss-immediate-1",
+        "mode": "immediate",
+        "fault": "long-loss",
+        "observe": "120000"
+      },
+      "inputs": {
+        "app.html": "59310757670351c518efd52262a7217c2e02e02e657f9b74a340b7d0c3a7e939",
+        "app-bundle.js": "89b093b508b4f34bcb4e439ca87e17794a3e859f3039c570ac582f50f4e48ca4",
+        "worker-inject.js": "d535b445245f34218369f190224751a81979059ab09f8f30c9cbfc79e783358b",
+        "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "relay.ts": "f505cc947b79b47eb1f4f4d21c20963633ba12d024bf341e0deaf4bf8db329d5",
+        "recovery-harness.mjs": "eb72bc5933dbaf57e9b91ac49c8fbe2fd2932fc64af24e6d4e465069da3850ae",
+        "sender-recovery.mjs": "6acf857d0292668368dce0d77818ccfeb663451fa93930f30064e08e9b91a849"
+      },
+      "pageErrorCount": 0,
+      "classification": "excluded",
+      "reason": "Harness inputs changed during the run (inputsUnchanged=false); byte-exact delivery cannot be accepted for a frozen candidate.",
+      "countsTowardFinalAcceptance": false,
+      "observedButNotAccepted": {
+        "recoveryMs": 139902,
+        "includesPairSignalingBlackholeMs": 100000,
+        "byteExact": true
+      }
+    },
+    {
+      "id": "pending-ui-2026-09-08T21-00-12.770Z",
+      "classification": "excluded-site-fixture-startup",
+      "sourceArtifact": "../p2party.com/logs/desync/pending-ui-2026-09-08T21-00-12.770Z.json",
+      "sourceSha256": "4030048e805567f0881f219f12ead2fb3a73aa74a580be72f816a6456d13da8f",
+      "driverPass": false,
+      "countsTowardFinalAcceptance": false,
+      "reason": "Sandbox denied the owned loopback listener before browser startup.",
+      "failure": "Error: listen EPERM: operation not permitted 127.0.0.1:5841\n    at Server.setupListenHandle [as _listen2] (node:net:2306:21)\n    at listenInCluster (node:net:2437:12)\n    at node:net:2666:7\n    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)",
+      "completedBrowserScenarios": 0,
+      "wasmResponseCount": 0
+    },
+    {
+      "id": "pending-ui-2026-09-09T05-58-40.766Z",
+      "classification": "excluded-site-fixture-startup",
+      "sourceArtifact": "../p2party.com/logs/desync/pending-ui-2026-09-09T05-58-40.766Z.json",
+      "sourceSha256": "237235b92ae855f0383d9f5c2ae918d3f201a266b03fffbefa85784eb876ac81",
+      "driverPass": false,
+      "countsTowardFinalAcceptance": false,
+      "reason": "Owned signaling server exited before readiness; root diagnosed the local Postgres SSL fixture configuration. No browser scenario ran.",
+      "failure": "AssertionError [ERR_ASSERTION]: Owned server exited before readiness\n\n1 !== null\n\n    at <workspace>/p2party.com/e2e/pending-transfers-live.mjs:96:14\n    at until (<workspace>/p2party.com/e2e/pending-transfers-live.mjs:57:20)\n    at async startServer (<workspace>/p2party.com/e2e/pending-transfers-live.mjs:93:3)\n    at async <workspace>/p2party.com/e2e/pending-transfers-live.mjs:201:3",
+      "completedBrowserScenarios": 0,
+      "wasmResponseCount": 0
+    }
+  ],
+  "finalAcceptance": {
+    "status": "accepted",
+    "newScenarioCountRequired": 9,
+    "newScenarioResults": [
+      {
+        "id": "mesh-recovery-final-2",
+        "sourceArtifact": "docs/e2e/runs/mesh-recovery-final-2.json",
+        "sourceSha256": "674bfb634be9522474257ff3b770a3785207a0334b931fb790f00aa343fc4b69",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "port": "5880",
+          "run": "final-2",
+          "observe": "60000"
+        },
+        "started": "2026-09-08T21:14:16.792Z",
+        "finished": "2026-09-08T21:15:33.683Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "mesh-recovery.mjs": "bc8c0169661374403e5e1f0bb1f8cc8122a576329e1457148d58b3a18017673b"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "mesh-recovery",
+        "recoveryAfterFaultClearMs": 3270,
+        "samples": 142,
+        "healthySiblingsThroughout": true,
+        "healthyTransportTokensUnchanged": true,
+        "pairSignalingBlackholeMs": 12000,
+        "deliveryPassed": true,
+        "summary": "A-C recovered 3.270s after blackhole clearance; healthy siblings unchanged in 142 samples."
+      },
+      {
+        "id": "scheduled-pq-final-1",
+        "sourceArtifact": "docs/e2e/runs/scheduled-pq-final-1.json",
+        "sourceSha256": "1eed9896ae31ecef794b5e5e7e73cb7ae30979f35194819af4dffe24a237a515",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "case": "pq",
+          "run": "final-1",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:15:33.671Z",
+        "finished": "2026-09-08T21:15:53.757Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "scheduled-pq",
+        "policy": {
+          "mode": "scheduled",
+          "coverCadenceMs": 4000
+        },
+        "localDueDeferred": true,
+        "localEpochBefore": 0,
+        "localEpochAfter": 1,
+        "incomingEpochBefore": 1,
+        "incomingEpochAfter": 2,
+        "incomingPendingAtTransition": true,
+        "samePcAndRuntime": true,
+        "simultaneousDueOnlyOneOffer": true,
+        "byteExactLocal": true,
+        "byteExactIncoming": true,
+        "summary": "Local due healing deferred; incoming epoch 1 to 2 overlapped real work on the same PC/runtime; both payloads byte-exact."
+      },
+      {
+        "id": "scheduled-selective-final-1",
+        "sourceArtifact": "docs/e2e/runs/scheduled-selective-final-1.json",
+        "sourceSha256": "06daf7ef9a0273efbee9f32fe1e5b057fccb1c533814962eaf1c509dc97cd2d1",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "case": "selective",
+          "run": "final-1",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:14:39.241Z",
+        "finished": "2026-09-08T21:15:02.004Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "scheduled-selective",
+        "policy": {
+          "mode": "scheduled",
+          "coverCadenceMs": 4000
+        },
+        "payloadBytes": 524288,
+        "byteExact": true,
+        "originalRootReused": true,
+        "selectivity": {
+          "acked": [0, 1, 2, 3],
+          "missing": [4, 5, 6, 7, 8, 9],
+          "emittedIndices": [0, 4, 5, 6, 7, 8, 9],
+          "completionProbeAllowance": 1,
+          "resumedRealCells": 7,
+          "maximumRealCells": 7
+        },
+        "actualSentTraceMatchesReportedIndices": true,
+        "summary": "ACKed [0, 1, 2, 3]; resumed [0, 4, 5, 6, 7, 8, 9]: six missing plus one completion probe; byte-exact."
+      },
+      {
+        "id": "sender-recovery-final-cancel-immediate-1",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-cancel-immediate-1.json",
+        "sourceSha256": "c6087aaf83d1ddb3255befd7e083429f816961d0c761bfbb15021f258d64abc8",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "mode": "immediate",
+          "fault": "cancel",
+          "run": "final-cancel-immediate-1",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:16:40.191Z",
+        "finished": "2026-09-08T21:16:42.222Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-cancel-immediate",
+        "payloadBytes": 8388608,
+        "partialBytes": 222884,
+        "originalRoot": "06dd34507079124d694a6bd4d2f34ad30def8c9b28b0ac5644fcf3871c91333cfc90ab378a5f6dd296c7e4e687978c5ad091deef82b51ad84dad771ff2448ff9",
+        "cancelled": true,
+        "cancellationEvidence": "Frozen driver asserts sender pending transfer and receiver partial were removed.",
+        "summary": "Public cancellation removed the sender pending transfer and receiver partial."
+      },
+      {
+        "id": "sender-recovery-final-mixed-immediate-1",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-mixed-immediate-1.json",
+        "sourceSha256": "ba61dc78905cb4697eef615df8965114f442db7257de896dba93f9da667c2409",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "mode": "immediate",
+          "fault": "reload",
+          "legacy": "receiver",
+          "run": "final-mixed-immediate-1",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:17:08.134Z",
+        "finished": "2026-09-08T21:17:44.835Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "legacy/app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "legacy/app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+          "legacy/worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+          "legacy/libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-mixed-reload-immediate",
+        "payloadBytes": 8388608,
+        "partialBytes": 222884,
+        "originalRoot": "8115f0960a71cc932cb23c18a281ddededf7d3650b2c048ab4ba16792003cfb7ae951de7f7dd36cc343bd954a9abcd1b044c2e8ea35992603a225eb07e22fc77",
+        "payloadSha256": "63aed48cc81f7e3a1a1f18e0d292a10987808d2af8d9f8fac059c882ab2a1ad1",
+        "originalRootReused": true,
+        "rootEvidence": "Frozen driver asserts restored root equals the pre-fault root.",
+        "byteExact": true,
+        "recoveryMs": 34772,
+        "recoveryClock": "From fault injection, including reload or the full interruption.",
+        "pendingAfter": [],
+        "peerAssets": {
+          "A": {
+            "assetUrl": "http://127.0.0.1:5882",
+            "archived": false,
+            "inputs": {
+              "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+              "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+              "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+              "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+            }
+          },
+          "B": {
+            "assetUrl": "http://127.0.0.1:5882/legacy",
+            "archived": true,
+            "inputs": {
+              "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+              "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+              "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+              "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+            }
+          }
+        },
+        "receiverSdkVersion": "0.14.8",
+        "compatibilityScope": "Byte-exact reload recovery; does not prove every chunk was resent.",
+        "summary": "Original 8 MiB payload/root recovered byte-exactly in 34.772s; outbox cleared. Archived SDK0.14.8 receiver."
+      },
+      {
+        "id": "sender-recovery-final-reload-scheduled-1",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-reload-scheduled-1.json",
+        "sourceSha256": "c86b682e7e418bf3d849e354ad61a9a959ce6e99c111c59a841d11e0b21bc0ef",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "mode": "scheduled",
+          "fault": "reload",
+          "run": "final-reload-scheduled-1",
+          "observe": "120000",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:13:35.212Z",
+        "finished": "2026-09-08T21:14:10.622Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-reload-scheduled",
+        "payloadBytes": 524288,
+        "partialBytes": 55721,
+        "originalRoot": "4a2c12e994201e5304c3353ea57b20cb542252dd85ac914fb6faffb70415d4fe08f7770b0ca053103d5a767d062d41a82665a53127bcc2159d4b1fc8f0097111",
+        "payloadSha256": "ef5164b0ed40b340e908740c23bb30360f6e69bc22bbbe0f84ea7750d4d2f003",
+        "originalRootReused": true,
+        "rootEvidence": "Frozen driver asserts restored root equals the pre-fault root.",
+        "byteExact": true,
+        "recoveryMs": 30657,
+        "recoveryClock": "From fault injection, including reload or the full interruption.",
+        "pendingAfter": [],
+        "summary": "Original 0.5 MiB payload/root recovered byte-exactly in 30.657s; outbox cleared."
+      },
+      {
+        "id": "sender-recovery-final-mixed-scheduled-1",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-mixed-scheduled-1.json",
+        "sourceSha256": "0c5400a2b78ba8b5f62cb6f59702a3c15f43faa581a48e70c346513f6c380b5a",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "mode": "scheduled",
+          "fault": "reload",
+          "legacy": "receiver",
+          "run": "final-mixed-scheduled-1",
+          "port": "5882"
+        },
+        "started": "2026-09-08T21:18:05.162Z",
+        "finished": "2026-09-08T21:18:40.578Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "legacy/app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "legacy/app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+          "legacy/worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+          "legacy/libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-mixed-reload-scheduled",
+        "payloadBytes": 524288,
+        "partialBytes": 111442,
+        "originalRoot": "a0bd5fa1b98f8aa99573539d00df5d24f4a682e2a0f82e1bb78274a38566588a9570c22e59e9b170c2c6c38d0976c3094d27e4af3d812c7e1150cc54fac8cfc4",
+        "payloadSha256": "e4a10b6f947332cec27a45ee837b29598f7d1c6284d0873ec749132c536a9288",
+        "originalRootReused": true,
+        "rootEvidence": "Frozen driver asserts restored root equals the pre-fault root.",
+        "byteExact": true,
+        "recoveryMs": 30668,
+        "recoveryClock": "From fault injection, including reload or the full interruption.",
+        "pendingAfter": [],
+        "peerAssets": {
+          "A": {
+            "assetUrl": "http://127.0.0.1:5882",
+            "archived": false,
+            "inputs": {
+              "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+              "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+              "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+              "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+            }
+          },
+          "B": {
+            "assetUrl": "http://127.0.0.1:5882/legacy",
+            "archived": true,
+            "inputs": {
+              "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+              "app-bundle.js": "ed5a62adfc169a25eeee6afc94853e2aedf1a989567690f510ffd192adb6323f",
+              "worker-inject.js": "3c0b24b73547ee810722ec7060083a4c78a33169f001726aca4fce604a0b838e",
+              "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+            }
+          }
+        },
+        "receiverSdkVersion": "0.14.8",
+        "compatibilityScope": "Byte-exact reload recovery; does not prove every chunk was resent.",
+        "summary": "Original 0.5 MiB payload/root recovered byte-exactly in 30.668s; outbox cleared. Archived SDK0.14.8 receiver."
+      },
+      {
+        "id": "sender-recovery-final-reload-immediate-2",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-reload-immediate-2.json",
+        "sourceSha256": "98703788e7fdbec2e63ce8978160647b83a783c323ac1bb40430384b322df14e",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "port": "5880",
+          "run": "final-reload-immediate-2",
+          "mode": "immediate",
+          "fault": "reload",
+          "observe": "120000"
+        },
+        "started": "2026-09-09T05:59:59.255Z",
+        "finished": "2026-09-09T06:00:35.986Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-reload-immediate",
+        "payloadBytes": 8388608,
+        "partialBytes": 222884,
+        "originalRoot": "25ad38608d735a9e7d88303e68cf9021eb7499d3eee46a63e2c1ad6d39a3759d3376acb755d254a38885696e48fea9c20123b74f99f7b7004a0e1ab1ed88d507",
+        "payloadSha256": "a0cc888d9a5f2257ac08d00c3a0734e59610e01e9e52efd530e188dd59015cfc",
+        "originalRootReused": true,
+        "rootEvidence": "Frozen driver asserts restored root equals the pre-fault root.",
+        "byteExact": true,
+        "recoveryMs": 34591,
+        "recoveryClock": "From fault injection, including reload or the full interruption.",
+        "pendingAfter": [],
+        "summary": "Original 8 MiB payload/root recovered byte-exactly in 34.591s; outbox cleared."
+      },
+      {
+        "id": "sender-recovery-final-long-loss-immediate-2",
+        "sourceArtifact": "docs/e2e/runs/sender-recovery-final-long-loss-immediate-2.json",
+        "sourceSha256": "f56d5fcc93a50ac2d3cd28cabe6add1db4b7ba2ddb08912a42a058939a38cab1",
+        "result": "PASS",
+        "driverPass": true,
+        "inputsUnchanged": true,
+        "matchesFrozenInputs": true,
+        "flags": {
+          "port": "5880",
+          "run": "final-long-loss-immediate-2",
+          "mode": "immediate",
+          "fault": "long-loss",
+          "observe": "120000"
+        },
+        "started": "2026-09-09T06:01:52.055Z",
+        "finished": "2026-09-09T06:04:14.311Z",
+        "inputs": {
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+        },
+        "finalAuthenticatedMesh": true,
+        "finalFingerprintAgreement": true,
+        "cleanFinalDiagnostics": true,
+        "pageErrorCount": 0,
+        "case": "sender-long-loss-immediate",
+        "payloadBytes": 8388608,
+        "partialBytes": 222884,
+        "originalRoot": "b5ffde22e7e48c8c4eda10f32d20446b01a65e3787bb95c106f690d21d126f0acf7e05a5930d0199ce69f413cac072ce55066bc0b797e5aaa0916b731139d99a",
+        "payloadSha256": "11957e6c90b8fd44139eccf055c1391adba892583233d82d6d30029938bc3cc3",
+        "originalRootReused": true,
+        "rootEvidence": "Frozen driver asserts restored root equals the pre-fault root.",
+        "byteExact": true,
+        "recoveryMs": 140127,
+        "recoveryClock": "From fault injection, including reload or the full interruption.",
+        "pendingAfter": [],
+        "pairSignalingBlackholeMs": 100000,
+        "originalAttemptRejected": true,
+        "originalAttemptDurationMs": 32936,
+        "durableManifestRetainedAfterAttemptFailure": true,
+        "summary": "Original 8 MiB payload/root recovered byte-exactly in 140.127s; outbox cleared. Includes the 100s fault and exhausted original attempt."
+      }
+    ],
+    "regressionMatrix": {
+      "status": "accepted-with-bounded-compatibility-residual",
+      "plannedArms": 23,
+      "runs": [
+        {
+          "arm": 1,
+          "args": ["baseline", "initiator", "--port=5860", "--n=2001"],
+          "sourceArtifact": "docs/e2e/runs/baseline-initiator-2001.json",
+          "sourceSha256": "a0ed52b48e5041886ec152bfa3792cc58aba271620dcba60ba56b8fd2f1804e2",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:41:44.976Z",
+          "finished": "2026-09-08T20:43:47.903Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.008,
+            "I2": 0.008,
+            "I3": 0.008,
+            "I4": 0.493,
+            "I5": 0.008,
+            "I6": 0.008,
+            "I7": 0.008
+          },
+          "firstAuthenticatedSinceClear": 0.008,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 2,
+          "args": ["ws-drop", "initiator", "--port=5862", "--n=2002"],
+          "sourceArtifact": "docs/e2e/runs/ws-drop-initiator-2002.json",
+          "sourceSha256": "768136fd08471e8b3830c74634da3b9150714fba67bfd010c00543ffc8c416c0",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:41:44.980Z",
+          "finished": "2026-09-08T20:43:52.906Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.012,
+            "I2": 0.012,
+            "I3": 0.012,
+            "I4": 0.51,
+            "I5": 0.012,
+            "I6": 0.012,
+            "I7": 0.012
+          },
+          "firstAuthenticatedSinceClear": 0.012,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 3,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--port=5864",
+            "--n=2003"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2003.json",
+          "sourceSha256": "bc26cf317e0722743d985a89ab4d518b9fd6d2efda992016ff83d2561ffd15b2",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:41:44.982Z",
+          "finished": "2026-09-08T20:44:08.171Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.014,
+            "I2": 2.014,
+            "I3": 2.014,
+            "I4": 2.494,
+            "I5": 1.011,
+            "I6": 1.011,
+            "I7": 2.014
+          },
+          "firstAuthenticatedSinceClear": 2.014,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 4,
+          "args": [
+            "proc-freeze-20",
+            "responder",
+            "--udpflood=1",
+            "--port=5860",
+            "--n=2004"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2004.json",
+          "sourceSha256": "2b41ca7b5e5547dfb7bf13eb360a6111ececb6d68287e131da02aadfcca08b32",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:43:47.908Z",
+          "finished": "2026-09-08T20:46:10.902Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.021,
+            "I2": 3.02,
+            "I3": 2.021,
+            "I4": 3.958,
+            "I5": 1.015,
+            "I6": 1.015,
+            "I7": "never"
+          },
+          "firstAuthenticatedSinceClear": 3.02,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": false,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 5,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--socket=keep",
+            "--port=5862",
+            "--n=2005"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2005.json",
+          "sourceSha256": "a985b8614ad4f13014dec93083ff86d2c9d27cbd647a4a31d0cd2a8d248d5bd1",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:43:52.911Z",
+          "finished": "2026-09-08T20:46:15.852Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 1.009,
+            "I2": 6.018,
+            "I3": 1.009,
+            "I4": 6.545,
+            "I5": 1.009,
+            "I6": 1.009,
+            "I7": 5.014
+          },
+          "firstAuthenticatedSinceClear": 6.018,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 6,
+          "args": [
+            "proc-freeze-20",
+            "responder",
+            "--udpflood=1",
+            "--socket=keep",
+            "--port=5864",
+            "--n=2006"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2006.json",
+          "sourceSha256": "e7aa5016d0a54667911cf784d154b262ef8e37946e538582f1cbfc8d7fb9eb6e",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:44:08.176Z",
+          "finished": "2026-09-08T20:46:31.072Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 1.019,
+            "I2": 1.019,
+            "I3": 1.019,
+            "I4": 1.531,
+            "I5": 1.019,
+            "I6": 1.019,
+            "I7": 1.019
+          },
+          "firstAuthenticatedSinceClear": 1.019,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 7,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--socket=stranded",
+            "--port=5860",
+            "--n=2007"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2007.json",
+          "sourceSha256": "1139c2606503a8ea868060e786e80bc8691111c86fb7a1483b501c999f197c1e",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:46:10.907Z",
+          "finished": "2026-09-08T20:48:33.890Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 5.019,
+            "I2": 6.025,
+            "I3": 5.019,
+            "I4": 6.546,
+            "I5": 1.016,
+            "I6": 1.016,
+            "I7": 5.019
+          },
+          "firstAuthenticatedSinceClear": 6.025,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 8,
+          "args": [
+            "proc-freeze-20",
+            "responder",
+            "--udpflood=1",
+            "--socket=stranded",
+            "--port=5862",
+            "--n=2008"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2008.json",
+          "sourceSha256": "bf0507990e0017464176056257fc5bcdc96f7f88090e9effaf2050f272010581",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:46:15.857Z",
+          "finished": "2026-09-08T20:48:38.812Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 6.021,
+            "I2": 6.021,
+            "I3": 6.021,
+            "I4": 6.497,
+            "I5": 1.017,
+            "I6": 1.017,
+            "I7": "never"
+          },
+          "firstAuthenticatedSinceClear": 6.021,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": false,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 9,
+          "args": [
+            "proc-freeze-45",
+            "initiator",
+            "--udpflood=1",
+            "--port=5864",
+            "--n=2009"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-45-initiator-2009.json",
+          "sourceSha256": "5fc73cec4884c65ea20d52f978349b57f8aeef15fb55e9105bab14220c667a0f",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:46:31.077Z",
+          "finished": "2026-09-08T20:49:19.004Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.012,
+            "I2": 1.01,
+            "I3": 2.012,
+            "I4": 2.496,
+            "I5": 1.01,
+            "I6": 1.01,
+            "I7": 1.01
+          },
+          "firstAuthenticatedSinceClear": 2.012,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 10,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--transfer=A2B:8",
+            "--port=5860",
+            "--n=2010"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2010.json",
+          "sourceSha256": "21e23aa60f672ef578c89ec4470a60a2f8ada22068ee85d1ebad15fa7598602c",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:48:33.896Z",
+          "finished": "2026-09-08T20:50:56.886Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 1.01,
+            "I2": 2.018,
+            "I3": 1.01,
+            "I4": 7.536,
+            "I5": 1.01,
+            "I6": 1.01,
+            "I7": 2.018
+          },
+          "firstAuthenticatedSinceClear": 2.018,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "transfer": {
+            "receiverByteExact": true,
+            "receiverCompleteSinceClear": 7.022,
+            "withinDeadline": true,
+            "senderResolvedDelivered": true,
+            "senderOutcome": "resolved (delivered)",
+            "senderSettledSinceClear": 7.022,
+            "chunkCountMonotonic": true,
+            "chunkSeriesSamples": 2,
+            "chunks": {
+              "chunksReceivedReal": 151,
+              "chunksReceivedTotal": 151,
+              "totalChunks": 0,
+              "chunksCreated": 0,
+              "savedSize": 8388608,
+              "totalSize": 8388608
+            }
+          },
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 11,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--transfer=B2A:8",
+            "--port=5862",
+            "--n=2011"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2011.json",
+          "sourceSha256": "9f0dd91f75bbac8f87b925ee76580b46f9fbe8fa904c7f4c62a187359c9f96ad",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:48:38.818Z",
+          "finished": "2026-09-08T20:51:01.881Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.022,
+            "I2": 2.022,
+            "I3": 2.022,
+            "I4": 5.526,
+            "I5": 1.021,
+            "I6": 1.021,
+            "I7": 2.022
+          },
+          "firstAuthenticatedSinceClear": 2.022,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "transfer": {
+            "receiverByteExact": true,
+            "receiverCompleteSinceClear": 5.024,
+            "withinDeadline": true,
+            "senderResolvedDelivered": true,
+            "senderOutcome": "resolved (delivered)",
+            "senderSettledSinceClear": 5.024,
+            "chunkCountMonotonic": true,
+            "chunkSeriesSamples": 2,
+            "chunks": {
+              "chunksReceivedReal": 151,
+              "chunksReceivedTotal": 151,
+              "totalChunks": 0,
+              "chunksCreated": 0,
+              "savedSize": 8388608,
+              "totalSize": 8388608
+            }
+          },
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 12,
+          "args": [
+            "proc-freeze-20",
+            "responder",
+            "--udpflood=1",
+            "--transfer=A2B:8",
+            "--port=5864",
+            "--n=2012"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2012.json",
+          "sourceSha256": "f370e548c0cc6a969ff269c22847a03644afeb1353081917ab0255e299bd1799",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:49:19.009Z",
+          "finished": "2026-09-08T20:51:42.044Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.028,
+            "I2": 12.048,
+            "I3": 2.028,
+            "I4": 15.603,
+            "I5": 1.022,
+            "I6": 1.022,
+            "I7": 12.048
+          },
+          "firstAuthenticatedSinceClear": 12.048,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "transfer": {
+            "receiverByteExact": true,
+            "receiverCompleteSinceClear": 15.052,
+            "withinDeadline": true,
+            "senderResolvedDelivered": true,
+            "senderOutcome": "resolved (delivered)",
+            "senderSettledSinceClear": 15.052,
+            "chunkCountMonotonic": true,
+            "chunkSeriesSamples": 2,
+            "chunks": {
+              "chunksReceivedReal": 151,
+              "chunksReceivedTotal": 151,
+              "totalChunks": 0,
+              "chunksCreated": 0,
+              "savedSize": 8388608,
+              "totalSize": 8388608
+            }
+          },
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 13,
+          "args": [
+            "ws-drop-nofocus",
+            "initiator",
+            "--observe=150",
+            "--port=5860",
+            "--n=2013"
+          ],
+          "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-initiator-2013.json",
+          "sourceSha256": "d7d659e63758956b38b16a839ac053dd0f21a8786fe1aed714a8aa0801dee283",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:50:56.893Z",
+          "finished": "2026-09-08T20:53:34.569Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.007,
+            "I2": 0.007,
+            "I3": 0.007,
+            "I4": 0.496,
+            "I5": 0.007,
+            "I6": 0.007,
+            "I7": 0.007
+          },
+          "firstAuthenticatedSinceClear": 0.007,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 14,
+          "args": [
+            "ws-drop-nofocus",
+            "responder",
+            "--observe=150",
+            "--port=5862",
+            "--n=2014"
+          ],
+          "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-responder-2014.json",
+          "sourceSha256": "f37e37c5df16eb4672b11efe361ef3a7083674e115894db1a87da948b60e71ff",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:51:01.888Z",
+          "finished": "2026-09-08T20:53:39.578Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.015,
+            "I2": 0.015,
+            "I3": 0.015,
+            "I4": 0.52,
+            "I5": 0.015,
+            "I6": 0.015,
+            "I7": 0.015
+          },
+          "firstAuthenticatedSinceClear": 0.015,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 15,
+          "args": [
+            "pin-typo",
+            "initiator",
+            "--observe=120",
+            "--port=5864",
+            "--n=2015"
+          ],
+          "sourceArtifact": "docs/e2e/runs/pin-typo-initiator-2015.json",
+          "sourceSha256": "5f45451cfb6c5ecd87048c780b5a4b9f3eed25110a932bfa03fb1c03d2bd8a33",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:51:42.050Z",
+          "finished": "2026-09-08T20:53:44.207Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.005,
+            "I2": "never",
+            "I3": "never",
+            "I4": "never",
+            "I5": 0.005,
+            "I6": 0.005,
+            "I7": 0.005
+          },
+          "firstAuthenticatedSinceClear": "never",
+          "heldAtEnd": {
+            "I1": true,
+            "I2": false,
+            "I3": false,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": false
+          },
+          "requiredInvariants": ["I1", "I5", "I6"],
+          "finalAuthenticated": false,
+          "finalFingerprintAgreement": null,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 16,
+          "args": [
+            "two-tabs",
+            "responder",
+            "--observe=300",
+            "--port=5860",
+            "--n=2016"
+          ],
+          "sourceArtifact": "docs/e2e/runs/two-tabs-responder-2016.json",
+          "sourceSha256": "fdabe59243f3b7685b35b88e34e3d3fcd5987d6bf850a8459d49d3b5b458c2e6",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:53:34.575Z",
+          "finished": "2026-09-08T20:58:37.655Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.227,
+            "I2": 0.227,
+            "I3": 0.227,
+            "I4": 0.742,
+            "I5": 0.227,
+            "I6": 0.227,
+            "I7": 0.227
+          },
+          "firstAuthenticatedSinceClear": 0.227,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 17,
+          "args": [
+            "two-tabs",
+            "initiator",
+            "--observe=300",
+            "--port=5862",
+            "--n=2017"
+          ],
+          "sourceArtifact": "docs/e2e/runs/two-tabs-initiator-2017.json",
+          "sourceSha256": "e8936b7056b664bdf9beb4367e6a5c424eb4d4fbf2d1e65f293320ceaf4168fe",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:53:39.583Z",
+          "finished": "2026-09-08T20:58:42.663Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.223,
+            "I2": 0.223,
+            "I3": 0.223,
+            "I4": 0.73,
+            "I5": 0.223,
+            "I6": 0.223,
+            "I7": 0.223
+          },
+          "firstAuthenticatedSinceClear": 0.223,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 18,
+          "args": [
+            "cover-stall",
+            "initiator",
+            "--mode=scheduled",
+            "--cadence=10000",
+            "--observe=180",
+            "--port=5860",
+            "--n=2118"
+          ],
+          "sourceArtifact": "docs/e2e/runs/cover-stall-initiator-2118.json",
+          "sourceSha256": "ad88e0024c9e0af4905c50ae5d9072c07104a22225c0f92af8a03d775d47e5fe",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T21:12:44.752Z",
+          "finished": "2026-09-08T21:16:44.871Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.01,
+            "I2": 0.01,
+            "I3": 0.01,
+            "I4": 18.439,
+            "I5": 0.01,
+            "I6": 0.01,
+            "I7": 0.01
+          },
+          "firstAuthenticatedSinceClear": 0.01,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+          "sourceManifest": "docs/e2e/runs/matrix-2100.json"
+        },
+        {
+          "arm": 19,
+          "args": [
+            "baseline",
+            "initiator",
+            "--mode=scheduled",
+            "--cadence=70000",
+            "--observe=300",
+            "--port=5862",
+            "--n=2119"
+          ],
+          "sourceArtifact": "docs/e2e/runs/baseline-initiator-2119.json",
+          "sourceSha256": "0368e142110dcdb9ba56fb0a9456f2fe1ef7d1957aa9feabe25cd09f52a3e087",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T21:12:44.755Z",
+          "finished": "2026-09-08T21:19:59.159Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.007,
+            "I2": 0.007,
+            "I3": 0.007,
+            "I4": 140.005,
+            "I5": 0.007,
+            "I6": 0.007,
+            "I7": 0.007
+          },
+          "firstAuthenticatedSinceClear": 0.007,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+          "sourceManifest": "docs/e2e/runs/matrix-2100.json",
+          "unchangedTimingBudgets": {
+            "roundTripBudgetMs": 173282,
+            "finalI4DrainMs": 178282,
+            "coverCadenceMs": 70000,
+            "observeS": 300
+          },
+          "baselineSendMs": {
+            "rt12": 131746,
+            "rt21": 131607
+          }
+        },
+        {
+          "arm": 20,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--mode=scheduled",
+            "--cadence=10000",
+            "--transfer=A2B:0.5",
+            "--observe=240",
+            "--transferdeadline=200",
+            "--port=5864",
+            "--n=2120"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2120.json",
+          "sourceSha256": "684ce1cd34c63ef67d7826d39cc7eb9a77c30aa1238d621f7c2a8c3769edc4f4",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T21:12:44.757Z",
+          "finished": "2026-09-08T21:17:23.650Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.028,
+            "I2": 2.028,
+            "I3": 2.028,
+            "I4": 39.886,
+            "I5": 1.021,
+            "I6": 1.021,
+            "I7": 2.028
+          },
+          "firstAuthenticatedSinceClear": 2.028,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+          "sourceManifest": "docs/e2e/runs/matrix-2100.json",
+          "transfer": {
+            "receiverByteExact": true,
+            "receiverCompleteSinceClear": 16.038,
+            "withinDeadline": true,
+            "senderResolvedDelivered": true,
+            "senderOutcome": "resolved (delivered)",
+            "senderSettledSinceClear": 20.04,
+            "chunkCountMonotonic": true,
+            "chunkSeriesSamples": 7,
+            "chunks": {
+              "chunksReceivedReal": 10,
+              "chunksReceivedTotal": 10,
+              "totalChunks": 0,
+              "chunksCreated": 0,
+              "savedSize": 524288,
+              "totalSize": 524288
+            }
+          }
+        },
+        {
+          "arm": 21,
+          "args": [
+            "proc-freeze-20",
+            "responder",
+            "--udpflood=1",
+            "--transfer=A2B:8",
+            "--cpuslow=A:6",
+            "--observe=180",
+            "--transferdeadline=150",
+            "--port=5860",
+            "--n=2021"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2021.json",
+          "sourceSha256": "b233b1e01463bf433b70216bf32cf8500fe20eff4ae40fd181071b02fdc72304",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T21:05:53.390Z",
+          "finished": "2026-09-08T21:09:16.683Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.023,
+            "I2": 2.023,
+            "I3": 2.023,
+            "I4": 3.551,
+            "I5": 1.024,
+            "I6": 1.024,
+            "I7": "never"
+          },
+          "firstAuthenticatedSinceClear": 2.023,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": false,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "transfer": {
+            "receiverByteExact": true,
+            "receiverCompleteSinceClear": 3.024,
+            "withinDeadline": true,
+            "senderResolvedDelivered": true,
+            "senderOutcome": "resolved (delivered)",
+            "senderSettledSinceClear": 3.024,
+            "chunkCountMonotonic": true,
+            "chunkSeriesSamples": 2,
+            "chunks": {
+              "chunksReceivedReal": 151,
+              "chunksReceivedTotal": 151,
+              "totalChunks": 0,
+              "chunksCreated": 0,
+              "savedSize": 8388608,
+              "totalSize": 8388608
+            }
+          },
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 22,
+          "args": [
+            "proc-freeze-20",
+            "initiator",
+            "--udpflood=1",
+            "--port=5862",
+            "--n=2022"
+          ],
+          "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2022.json",
+          "sourceSha256": "72b142ee626c8a33a2c61da979040885345bc6e6c477279463cdde6fe17979cf",
+          "driverPass": true,
+          "exitCode": 0,
+          "expectedResidual": false,
+          "result": "PASS",
+          "problems": [],
+          "started": "2026-09-08T20:58:42.670Z",
+          "finished": "2026-09-08T21:01:05.593Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 2.029,
+            "I2": 2.029,
+            "I3": 2.029,
+            "I4": 2.542,
+            "I5": 1.022,
+            "I6": 1.022,
+            "I7": 2.029
+          },
+          "firstAuthenticatedSinceClear": 2.029,
+          "heldAtEnd": {
+            "I1": true,
+            "I2": true,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": true
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": true,
+          "finalFingerprintAgreement": true,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        },
+        {
+          "arm": 23,
+          "args": [
+            "two-tabs",
+            "responder",
+            "--observe=300",
+            "--port=5864",
+            "--n=2023"
+          ],
+          "sourceArtifact": "docs/e2e/runs/two-tabs-responder-2023.json",
+          "sourceSha256": "ef3c00ffd70c8fdeeb21db3164679d9667bef4b04d9d4f58a148e312c6a44fd4",
+          "driverPass": false,
+          "exitCode": 1,
+          "expectedResidual": true,
+          "result": "residual-established",
+          "problems": [
+            "I4 never attempted: I2 (both authenticated) never held during observation",
+            "I2 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+            "I4 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+            "both peers are not authenticated in the final sample (scenario two-tabs role responder)",
+            "DTLS fingerprint agreement is not established in the final sample: fpAgree=null (scenario two-tabs role responder)",
+            "replacement tab did not authenticate within 20s of connect: first=nevers (scenario two-tabs role responder)",
+            "replacement tab did not exchange messages within 20s of connect: first=nevers (scenario two-tabs role responder)"
+          ],
+          "started": "2026-09-08T21:00:50.196Z",
+          "finished": "2026-09-08T21:05:53.382Z",
+          "firstSatisfiedSinceClear": {
+            "I1": 0.22,
+            "I2": "never",
+            "I3": 0.22,
+            "I4": "never",
+            "I5": 0.22,
+            "I6": 0.22,
+            "I7": 0.22
+          },
+          "firstAuthenticatedSinceClear": "never",
+          "heldAtEnd": {
+            "I1": true,
+            "I2": false,
+            "I3": true,
+            "I5": true,
+            "I6": true,
+            "I7": true,
+            "I4": false
+          },
+          "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+          "finalAuthenticated": false,
+          "finalFingerprintAgreement": null,
+          "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "sourceManifest": "docs/e2e/runs/matrix-2000.json",
+          "retainedUnaffectedPriorCandidateEvidence": true
+        }
+      ],
+      "requiredRerunArms": [18, 19, 20],
+      "selectionPolicy": "Retain completed unaffected matrix-2000 evidence with its prior package/hash provenance; rerun scheduled arms18/19/20 on the receipt-priority fix. Do not count the failed arm2019 as a pass.",
+      "retainedPriorCandidateArms": [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23
+      ],
+      "rerunManifest": "docs/e2e/runs/matrix-2100.json",
+      "arms": 23,
+      "driverPasses": 22,
+      "boundedNonConvergenceResiduals": 1,
+      "rerunProvenance": {
+        "sourceArtifact": "docs/e2e/runs/matrix-2100.json",
+        "sourceSha256": "76be5c093c11fb44df53482213a39774671d1de00b2a1965af84200b466c1ff0",
+        "inputs": {
+          "app-bundle.js": "a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+          "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+          "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+        },
+        "inputsUnchanged": true,
+        "started": "2026-09-08T21:12:44.746Z",
+        "finished": "2026-09-08T21:19:59.168Z",
+        "rerunArms": [18, 19, 20]
+      },
+      "retainedProvenance": {
+        "sourceArtifact": "docs/e2e/runs/matrix-2000.json",
+        "sourceSha256": "b9b78c610110b09e6904837ba2318491b62409810895443d002d8d4a9d407aac",
+        "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5"
+      }
+    },
+    "actualSiteAndServer": {
+      "status": "PASS",
+      "pendingTransferUi": {
+        "status": "PASS",
+        "sourceArtifact": "../p2party.com/logs/desync/pending-ui-2026-09-09T06-03-40.989Z.json",
+        "sourceSha256": "d5630ede65109dee5b5fc01e125b28027fcffd03c35795d9129de715c09b414b",
+        "sdkVersion": "0.14.9",
+        "sdkArtifact": "vendor/p2party-0.14.9.tgz",
+        "sdkArtifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+        "localPackageHashMatchesReport": true,
+        "serverHealth": {
+          "status": "ok",
+          "protocolVersion": 4,
+          "version": "0.1.3",
+          "serverId": "a7c799df-e0df-431d-9aa0-8e529f5f9b0f"
+        },
+        "payloadBytes": 1048576,
+        "partialBytes": 222884,
+        "sameOriginalTransferAndRootAcrossAttempts": true,
+        "automaticResumeEmittedRealFramesAfterReload": true,
+        "visiblePendingRowAfterReload": true,
+        "manualRetryEmittedAdditionalRealFrames": true,
+        "cancelledWhileManualRetryInFlight": true,
+        "navigationKeptCancelUsable": true,
+        "senderOutboxAndReceiverPartialRemoved": true,
+        "lifecycleEvidence": "The live UI driver asserts both stores clear after clicking Cancel; this intentionally interrupted case does not claim completed payload delivery.",
+        "pageErrorCount": 0,
+        "wasmResponseCount": 23,
+        "versionedWasm200ForBothPeers": true,
+        "localPublicWasmSha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "localPublicWasmBytes": 211350
+      },
+      "existingSiteStackRegression": {
+        "status": "PASS",
+        "sourceArtifact": "../p2party.com/logs/desync/2026-09-09T06-30-31.903Z/result.json",
+        "sourceSha256": "a13ea86a705f78075b18cb10a850e3c997c5f3a2b899e4d3327b43e626457441",
+        "started": "2026-09-09T06:30:31.903Z",
+        "finished": "2026-09-09T06:32:58.803Z",
+        "sdk": {
+          "version": "0.14.9",
+          "artifact": "vendor/p2party-0.14.9.tgz",
+          "artifactSha256": "61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e",
+          "wasmPath": "/vendor/p2party-0.14.9/libcrypto.wasm",
+          "wasmSha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+        },
+        "initialServerHealth": {
+          "status": "ok",
+          "protocolVersion": 4,
+          "version": "0.1.3",
+          "serverId": "832912ab-d22a-4727-ae77-9474563c35bf"
+        },
+        "restartedServerHealth": {
+          "status": "ok",
+          "protocolVersion": 4,
+          "version": "0.1.3",
+          "serverId": "1592dda0-be76-4d55-a111-b7b8a64b5d96"
+        },
+        "serverInstanceChangedOnRestart": true,
+        "roomExchange": {
+          "passed": true
+        },
+        "rememberedConsentReload": {
+          "passed": true,
+          "rejoinMs": 890
+        },
+        "serverRestartReconnect": {
+          "passed": true,
+          "reconnectMs": 3547
+        },
+        "secondTabReplacement": {
+          "passed": true,
+          "replacedRole": "responder",
+          "authenticationMs": 683,
+          "oldOwnerReceived1008AndClosed": true
+        },
+        "wrongPin": {
+          "passed": true,
+          "observedMs": 120945,
+          "samples": 120,
+          "pcCreated": [1, 1]
+        },
+        "explicitCorrectedPinRetryAndMessage": {
+          "passed": true
+        },
+        "errors": [],
+        "successfulWasmResponses": 60
+      }
+    },
+    "newScenarioCountPassed": 9,
+    "newScenariosStatus": "PASS"
+  },
+  "validation": {
+    "isolatedProductionSdkUnitSuite": {
+      "status": "PASS",
+      "command": "bun test",
+      "sourceCommit": "0f13382",
+      "exitCode": 0,
+      "passedTests": 1766,
+      "failedTests": 0,
+      "assertions": 24546,
+      "testFiles": 183,
+      "durationSeconds": 28.04,
+      "evidenceKind": "reported command result",
+      "completeRawLogArchived": false,
+      "note": "Run in the isolated release checkout. Tool output was truncated; the successful exit and summary were recorded. Existing uncommitted prototype edits/tests were excluded.",
+      "candidateScope": "Superseded candidate before commit78067ce; preserved as prior validation, not a post-fix full-suite claim."
+    },
+    "earlierActiveCheckoutSdkSuite": {
+      "status": "PASS",
+      "passedTests": 1783,
+      "assertions": 24611,
+      "scope": "Includes preserved preexisting uncommitted prototype changes; not the production release count."
+    },
+    "correctedProductionSdkUnitSuite": {
+      "status": "PASS",
+      "command": "bun test",
+      "sourceCommit": "78067ce",
+      "exitCode": 0,
+      "passedTests": 1771,
+      "failedTests": 0,
+      "assertions": 24568,
+      "testFiles": 183,
+      "durationSeconds": 27.8,
+      "evidenceKind": "reported command result",
+      "rawLogPath": null,
+      "note": "Isolated production release checkout; excludes preexisting uncommitted prototype changes. No raw log path was supplied for this report."
+    }
+  },
+  "limits": [
+    "Only missing real-cell transmission is reduced: resumed work is missing chunks plus at most one index-zero completion probe. Full roster snapshots, staged-index scans, storage, and fixed cover traffic do not have a general sublinear bound.",
+    "Bounded roster retries can exhaust for an offline member. A fresh authorized event can restart eligible repair; the implementation does not promise endless polling or guaranteed recovery of permanently unavailable peers.",
+    "Advanced roster snapshots and targeted repair require server 0.1.3. Older-server fallback cannot supply the same membership proof; automatic repair with terminal PIN failures must remain suppressed.",
+    "The generation-suppressed old-server compatibility arm remains a bounded non-convergence residual, not a convergence pass.",
+    "Mixed-version browser delivery to 0.14.8 receivers does not establish that every chunk is resent: legacy receipt replay can provide partial progress.",
+    "No blind rendezvous, proof-of-work, passkey or Sybil-resistance implementation is accepted by this desync report.",
+    "These local checks are not a cryptographic audit or a production deployment."
+  ],
+  "supersededCandidates": [
+    {
+      "id": "receipt-delay-candidate",
+      "status": "superseded-after-regression-failure",
+      "candidate": {
+        "sdkVersion": "0.14.9",
+        "serverVersion": "0.1.3",
+        "sourceCommit": "0f13382",
+        "runtimeSourceCommit": "a9de0ef",
+        "sdkArtifactSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+        "productionWasmBytes": 211350,
+        "productionWasmSha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+        "releasePackageChecks": {
+          "passed": 7,
+          "failed": 0,
+          "evidenceKind": "reported command result"
+        },
+        "publishedOrDeployed": false
+      },
+      "harnessProvenance": {
+        "sourceArtifact": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/harness-inputs.json",
+        "sourceSha256": "d4e35006cb4bb713fb2074fe9f9b3d68f72245b63162cdfd273db563f1ba593f",
+        "frozenAt": "2026-09-08T20:42:36.183484+00:00",
+        "sourceCommit": "0f13382",
+        "packageSha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+        "inputs": {
+          "app-bundle.js": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "app-entry-desync.ts": "620b52a7f588e911d6bc3c54d92fca7c42bcf0d862ced04b4e4121777fdbdf0f",
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+          "mesh-recovery.mjs": "bc8c0169661374403e5e1f0bb1f8cc8122a576329e1457148d58b3a18017673b",
+          "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a",
+          "scheduled-recovery.mjs": "eec489c162efca954230d44522fef48bb05c5abc48dca572c29e444667043246",
+          "desync-matrix.mjs": "4aa1c68355b3ca43fffd6955054dbe3a4f2f6241dd8054fb2253b3a677dfd9e9",
+          "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+          "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+          "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+          "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+        }
+      },
+      "preservedArtifacts": [
+        {
+          "path": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/app-bundle.js",
+          "sha256": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+          "bytes": 2021680
+        },
+        {
+          "path": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/harness-inputs.json",
+          "sha256": "d4e35006cb4bb713fb2074fe9f9b3d68f72245b63162cdfd273db563f1ba593f",
+          "bytes": 1568
+        },
+        {
+          "path": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/libcrypto.wasm",
+          "sha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "bytes": 211350
+        },
+        {
+          "path": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/p2party-0.14.9.tgz",
+          "sha256": "6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5",
+          "bytes": 869324
+        },
+        {
+          "path": "docs/e2e/runs/followups-2026-09-08/receipt-delay-candidate/worker-inject.js",
+          "sha256": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "bytes": 72224
+        }
+      ],
+      "followupRuns": [
+        {
+          "case": "sender-long-loss-immediate",
+          "id": "sender-recovery-sender-recovery-final-long-loss-immediate-1",
+          "sourceArtifact": "docs/e2e/runs/sender-recovery-sender-recovery-final-long-loss-immediate-1.json",
+          "sourceSha256": "1df65d08fc1777cebb62fb709f9bfc461e24ca746a38f2a022240f41fd2ece53",
+          "result": "PASS",
+          "driverPass": true,
+          "inputsUnchanged": true,
+          "matchesFrozenInputs": true,
+          "flags": {
+            "port": "5880",
+            "run": "sender-recovery-final-long-loss-immediate-1",
+            "mode": "immediate",
+            "fault": "long-loss",
+            "observe": "120000"
+          },
+          "started": "2026-09-08T20:52:10.536Z",
+          "finished": "2026-09-08T20:54:32.636Z",
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+            "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+            "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+            "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+            "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+          },
+          "payloadBytes": 8388608,
+          "payloadSha256": "2808136227f186eefa2154f2b9f3d40d4f042058685cf9458d69b87432e5e517",
+          "partialBytes": 222884,
+          "originalRoot": "465393ef17f770510a7e67459bb631500f16683597187bbb47a879e1656fb3c8b1802fe28ba79fc28c931fde1f02c5a0b8dcdf8cfbdfab5312bb827d50d2a5dc",
+          "originalRootReused": true,
+          "rootEvidence": "Frozen driver asserts restored receiver root equals the pre-fault root before setting passed=true.",
+          "byteExact": true,
+          "recoveryMs": 139949,
+          "recoveryClock": "From fault injection, including the 100000ms pair signaling blackhole; not a general recovery latency bound.",
+          "pairSignalingBlackholeMs": 100000,
+          "interruptionSamples": 100,
+          "originalAttemptRejected": true,
+          "originalAttemptDurationMs": 33065,
+          "durableManifestRetainedAfterAttemptFailure": true,
+          "pendingAfter": [],
+          "finalAuthenticatedMesh": true,
+          "finalFingerprintAgreement": true,
+          "cleanFinalDiagnostics": true,
+          "pageErrorCount": 0,
+          "classification": "passed-superseded-candidate",
+          "countsTowardFinalFollowupAcceptance": false
+        },
+        {
+          "case": "mesh-recovery",
+          "id": "mesh-recovery-final-1",
+          "sourceArtifact": "docs/e2e/runs/mesh-recovery-final-1.json",
+          "sourceSha256": "051561c005de50886cfc35650b0d854923800d62e7bfad0ab01c469d222ac568",
+          "result": "PASS",
+          "driverPass": true,
+          "inputsUnchanged": true,
+          "matchesFrozenInputs": true,
+          "flags": {
+            "port": "5880",
+            "run": "final-1",
+            "observe": "60000"
+          },
+          "started": "2026-09-08T20:54:50.526Z",
+          "finished": "2026-09-08T20:56:07.779Z",
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+            "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+            "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+            "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+            "mesh-recovery.mjs": "bc8c0169661374403e5e1f0bb1f8cc8122a576329e1457148d58b3a18017673b"
+          },
+          "fault": {
+            "closedEdge": "A-C",
+            "pairSignalingBlackholeMs": 12000
+          },
+          "recoveryAfterFaultClearMs": 3242,
+          "samples": 143,
+          "lastSampleSinceFaultMs": 71994,
+          "healthySiblingsThroughout": true,
+          "healthyTransportTokensUnchanged": true,
+          "tokenEvidence": "Frozen driver compares each healthy edge against pre-fault tokens at every sample.",
+          "finalRosterSizes": [2, 2, 2],
+          "deliveryPassed": true,
+          "finalAuthenticatedMesh": true,
+          "finalFingerprintAgreement": true,
+          "cleanFinalDiagnostics": true,
+          "pageErrorCount": 0,
+          "classification": "passed-superseded-candidate",
+          "countsTowardFinalFollowupAcceptance": false
+        },
+        {
+          "case": "sender-reload-immediate",
+          "id": "sender-recovery-final-reload-immediate-1",
+          "sourceArtifact": "docs/e2e/runs/sender-recovery-final-reload-immediate-1.json",
+          "sourceSha256": "c3de4d0d91640e6192429e8a1c3cedfe2c47379791d7ba11f5c577f1b322861e",
+          "result": "PASS",
+          "driverPass": true,
+          "inputsUnchanged": true,
+          "matchesFrozenInputs": true,
+          "flags": {
+            "port": "5880",
+            "run": "final-reload-immediate-1",
+            "mode": "immediate",
+            "fault": "reload",
+            "observe": "120000"
+          },
+          "started": "2026-09-08T20:56:55.544Z",
+          "finished": "2026-09-08T20:57:33.030Z",
+          "inputs": {
+            "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+            "app-bundle.js": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+            "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+            "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+            "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+            "recovery-harness.mjs": "410974845a16261cd04f3a2c9d0f04b94481ca9089d7977859b22b8e7f90892a",
+            "sender-recovery.mjs": "68a9abafbaf2f67e5f02883b7e9e5ccf321717d288db845873fd12616c5e699a"
+          },
+          "payloadBytes": 8388608,
+          "payloadSha256": "85e6f275dbfa6b60b8cfbadcb472b451c79187dd7068fdac08bac4464c230376",
+          "partialBytes": 222884,
+          "originalRoot": "151aeb8dce594889dd6a03abdee0f7b30921897275d4f4e0fb38dd97844f9ca1b18c033079ea06e2f787eaffe2d944deafd273f1491e02dd938a277d5dc62167",
+          "originalRootReused": true,
+          "rootEvidence": "Frozen driver asserts restored receiver root equals the pre-fault root before setting passed=true.",
+          "byteExact": true,
+          "recoveryMs": 35069,
+          "recoveryClock": "From the start of sender page reload, not from authentication recovery.",
+          "pendingBeforeOriginalManifest": true,
+          "pendingAfter": [],
+          "finalAuthenticatedMesh": true,
+          "finalFingerprintAgreement": true,
+          "cleanFinalDiagnostics": true,
+          "pageErrorCount": 0,
+          "classification": "passed-superseded-candidate",
+          "countsTowardFinalFollowupAcceptance": false
+        }
+      ],
+      "regressionMatrix": {
+        "sourceArtifact": "docs/e2e/runs/matrix-2000.json",
+        "sourceSha256": "b9b78c610110b09e6904837ba2318491b62409810895443d002d8d4a9d407aac",
+        "status": "complete-with-one-regression-and-one-expected-residual",
+        "started": "2026-09-08T20:41:44.971Z",
+        "finished": "2026-09-08T21:09:16.704Z",
+        "inputs": {
+          "app-bundle.js": "d634c071d57e08e2d8075fd7c621f936222e9d2d9903340f461f7e9c9aeb8d2a",
+          "worker-inject.js": "30d756a6c789f54db8837f2588fdc3451976e5519945d619ec83c02e21c274c7",
+          "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
+          "desync-driver.mjs": "ba46d8f96b6352fc4188bc91ef52af02dc9c9f92dbbb70dad6890b7ff8a8a4d4",
+          "desync-verdict.mjs": "a6c1d8b4f8982d9316bf9129fbf80592cfe88c5dbe6886b05ab33b72b8ba86cd",
+          "desync-probe-budget.mjs": "2cff683b274ed6c2bba11119a112c5108c3ceafd303de9bbdc92045247d7ee3f",
+          "relay.ts": "2cdc177163a397f7f7c7820c8de5b380fedf9388d638e408510d7cb577fb0505",
+          "app.html": "117ec759cf801d5a63d9cd59a544149181a654493b71750958d1481c462f068b",
+          "plain.html": "ae8add0e10f3888b1acfabd5340c61a8be2d807423a42f39b4621fcb0d9df11f"
+        },
+        "inputsUnchanged": true,
+        "arms": 23,
+        "driverPasses": 21,
+        "unexpectedFailures": 1,
+        "boundedNonConvergenceResiduals": 1,
+        "runs": [
+          {
+            "arm": 1,
+            "args": ["baseline", "initiator", "--port=5860", "--n=2001"],
+            "sourceArtifact": "docs/e2e/runs/baseline-initiator-2001.json",
+            "sourceSha256": "a0ed52b48e5041886ec152bfa3792cc58aba271620dcba60ba56b8fd2f1804e2",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:41:44.976Z",
+            "finished": "2026-09-08T20:43:47.903Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.008,
+              "I2": 0.008,
+              "I3": 0.008,
+              "I4": 0.493,
+              "I5": 0.008,
+              "I6": 0.008,
+              "I7": 0.008
+            },
+            "firstAuthenticatedSinceClear": 0.008,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 2,
+            "args": ["ws-drop", "initiator", "--port=5862", "--n=2002"],
+            "sourceArtifact": "docs/e2e/runs/ws-drop-initiator-2002.json",
+            "sourceSha256": "768136fd08471e8b3830c74634da3b9150714fba67bfd010c00543ffc8c416c0",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:41:44.980Z",
+            "finished": "2026-09-08T20:43:52.906Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.012,
+              "I2": 0.012,
+              "I3": 0.012,
+              "I4": 0.51,
+              "I5": 0.012,
+              "I6": 0.012,
+              "I7": 0.012
+            },
+            "firstAuthenticatedSinceClear": 0.012,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 3,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--port=5864",
+              "--n=2003"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2003.json",
+            "sourceSha256": "bc26cf317e0722743d985a89ab4d518b9fd6d2efda992016ff83d2561ffd15b2",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:41:44.982Z",
+            "finished": "2026-09-08T20:44:08.171Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.014,
+              "I2": 2.014,
+              "I3": 2.014,
+              "I4": 2.494,
+              "I5": 1.011,
+              "I6": 1.011,
+              "I7": 2.014
+            },
+            "firstAuthenticatedSinceClear": 2.014,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 4,
+            "args": [
+              "proc-freeze-20",
+              "responder",
+              "--udpflood=1",
+              "--port=5860",
+              "--n=2004"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2004.json",
+            "sourceSha256": "2b41ca7b5e5547dfb7bf13eb360a6111ececb6d68287e131da02aadfcca08b32",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:43:47.908Z",
+            "finished": "2026-09-08T20:46:10.902Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.021,
+              "I2": 3.02,
+              "I3": 2.021,
+              "I4": 3.958,
+              "I5": 1.015,
+              "I6": 1.015,
+              "I7": "never"
+            },
+            "firstAuthenticatedSinceClear": 3.02,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": false,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 5,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--socket=keep",
+              "--port=5862",
+              "--n=2005"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2005.json",
+            "sourceSha256": "a985b8614ad4f13014dec93083ff86d2c9d27cbd647a4a31d0cd2a8d248d5bd1",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:43:52.911Z",
+            "finished": "2026-09-08T20:46:15.852Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 1.009,
+              "I2": 6.018,
+              "I3": 1.009,
+              "I4": 6.545,
+              "I5": 1.009,
+              "I6": 1.009,
+              "I7": 5.014
+            },
+            "firstAuthenticatedSinceClear": 6.018,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 6,
+            "args": [
+              "proc-freeze-20",
+              "responder",
+              "--udpflood=1",
+              "--socket=keep",
+              "--port=5864",
+              "--n=2006"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2006.json",
+            "sourceSha256": "e7aa5016d0a54667911cf784d154b262ef8e37946e538582f1cbfc8d7fb9eb6e",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:44:08.176Z",
+            "finished": "2026-09-08T20:46:31.072Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 1.019,
+              "I2": 1.019,
+              "I3": 1.019,
+              "I4": 1.531,
+              "I5": 1.019,
+              "I6": 1.019,
+              "I7": 1.019
+            },
+            "firstAuthenticatedSinceClear": 1.019,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 7,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--socket=stranded",
+              "--port=5860",
+              "--n=2007"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2007.json",
+            "sourceSha256": "1139c2606503a8ea868060e786e80bc8691111c86fb7a1483b501c999f197c1e",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:46:10.907Z",
+            "finished": "2026-09-08T20:48:33.890Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 5.019,
+              "I2": 6.025,
+              "I3": 5.019,
+              "I4": 6.546,
+              "I5": 1.016,
+              "I6": 1.016,
+              "I7": 5.019
+            },
+            "firstAuthenticatedSinceClear": 6.025,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 8,
+            "args": [
+              "proc-freeze-20",
+              "responder",
+              "--udpflood=1",
+              "--socket=stranded",
+              "--port=5862",
+              "--n=2008"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2008.json",
+            "sourceSha256": "bf0507990e0017464176056257fc5bcdc96f7f88090e9effaf2050f272010581",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:46:15.857Z",
+            "finished": "2026-09-08T20:48:38.812Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 6.021,
+              "I2": 6.021,
+              "I3": 6.021,
+              "I4": 6.497,
+              "I5": 1.017,
+              "I6": 1.017,
+              "I7": "never"
+            },
+            "firstAuthenticatedSinceClear": 6.021,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": false,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 9,
+            "args": [
+              "proc-freeze-45",
+              "initiator",
+              "--udpflood=1",
+              "--port=5864",
+              "--n=2009"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-45-initiator-2009.json",
+            "sourceSha256": "5fc73cec4884c65ea20d52f978349b57f8aeef15fb55e9105bab14220c667a0f",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:46:31.077Z",
+            "finished": "2026-09-08T20:49:19.004Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.012,
+              "I2": 1.01,
+              "I3": 2.012,
+              "I4": 2.496,
+              "I5": 1.01,
+              "I6": 1.01,
+              "I7": 1.01
+            },
+            "firstAuthenticatedSinceClear": 2.012,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 10,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--transfer=A2B:8",
+              "--port=5860",
+              "--n=2010"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2010.json",
+            "sourceSha256": "21e23aa60f672ef578c89ec4470a60a2f8ada22068ee85d1ebad15fa7598602c",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:48:33.896Z",
+            "finished": "2026-09-08T20:50:56.886Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 1.01,
+              "I2": 2.018,
+              "I3": 1.01,
+              "I4": 7.536,
+              "I5": 1.01,
+              "I6": 1.01,
+              "I7": 2.018
+            },
+            "firstAuthenticatedSinceClear": 2.018,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true,
+            "transfer": {
+              "receiverByteExact": true,
+              "receiverCompleteSinceClear": 7.022,
+              "withinDeadline": true,
+              "senderResolvedDelivered": true,
+              "senderOutcome": "resolved (delivered)",
+              "senderSettledSinceClear": 7.022,
+              "chunkCountMonotonic": true,
+              "chunkSeriesSamples": 2,
+              "chunks": {
+                "chunksReceivedReal": 151,
+                "chunksReceivedTotal": 151,
+                "totalChunks": 0,
+                "chunksCreated": 0,
+                "savedSize": 8388608,
+                "totalSize": 8388608
+              }
+            }
+          },
+          {
+            "arm": 11,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--transfer=B2A:8",
+              "--port=5862",
+              "--n=2011"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2011.json",
+            "sourceSha256": "9f0dd91f75bbac8f87b925ee76580b46f9fbe8fa904c7f4c62a187359c9f96ad",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:48:38.818Z",
+            "finished": "2026-09-08T20:51:01.881Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.022,
+              "I2": 2.022,
+              "I3": 2.022,
+              "I4": 5.526,
+              "I5": 1.021,
+              "I6": 1.021,
+              "I7": 2.022
+            },
+            "firstAuthenticatedSinceClear": 2.022,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true,
+            "transfer": {
+              "receiverByteExact": true,
+              "receiverCompleteSinceClear": 5.024,
+              "withinDeadline": true,
+              "senderResolvedDelivered": true,
+              "senderOutcome": "resolved (delivered)",
+              "senderSettledSinceClear": 5.024,
+              "chunkCountMonotonic": true,
+              "chunkSeriesSamples": 2,
+              "chunks": {
+                "chunksReceivedReal": 151,
+                "chunksReceivedTotal": 151,
+                "totalChunks": 0,
+                "chunksCreated": 0,
+                "savedSize": 8388608,
+                "totalSize": 8388608
+              }
+            }
+          },
+          {
+            "arm": 12,
+            "args": [
+              "proc-freeze-20",
+              "responder",
+              "--udpflood=1",
+              "--transfer=A2B:8",
+              "--port=5864",
+              "--n=2012"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2012.json",
+            "sourceSha256": "f370e548c0cc6a969ff269c22847a03644afeb1353081917ab0255e299bd1799",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:49:19.009Z",
+            "finished": "2026-09-08T20:51:42.044Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.028,
+              "I2": 12.048,
+              "I3": 2.028,
+              "I4": 15.603,
+              "I5": 1.022,
+              "I6": 1.022,
+              "I7": 12.048
+            },
+            "firstAuthenticatedSinceClear": 12.048,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true,
+            "transfer": {
+              "receiverByteExact": true,
+              "receiverCompleteSinceClear": 15.052,
+              "withinDeadline": true,
+              "senderResolvedDelivered": true,
+              "senderOutcome": "resolved (delivered)",
+              "senderSettledSinceClear": 15.052,
+              "chunkCountMonotonic": true,
+              "chunkSeriesSamples": 2,
+              "chunks": {
+                "chunksReceivedReal": 151,
+                "chunksReceivedTotal": 151,
+                "totalChunks": 0,
+                "chunksCreated": 0,
+                "savedSize": 8388608,
+                "totalSize": 8388608
+              }
+            }
+          },
+          {
+            "arm": 13,
+            "args": [
+              "ws-drop-nofocus",
+              "initiator",
+              "--observe=150",
+              "--port=5860",
+              "--n=2013"
+            ],
+            "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-initiator-2013.json",
+            "sourceSha256": "d7d659e63758956b38b16a839ac053dd0f21a8786fe1aed714a8aa0801dee283",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:50:56.893Z",
+            "finished": "2026-09-08T20:53:34.569Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.007,
+              "I2": 0.007,
+              "I3": 0.007,
+              "I4": 0.496,
+              "I5": 0.007,
+              "I6": 0.007,
+              "I7": 0.007
+            },
+            "firstAuthenticatedSinceClear": 0.007,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 14,
+            "args": [
+              "ws-drop-nofocus",
+              "responder",
+              "--observe=150",
+              "--port=5862",
+              "--n=2014"
+            ],
+            "sourceArtifact": "docs/e2e/runs/ws-drop-nofocus-responder-2014.json",
+            "sourceSha256": "f37e37c5df16eb4672b11efe361ef3a7083674e115894db1a87da948b60e71ff",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:51:01.888Z",
+            "finished": "2026-09-08T20:53:39.578Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.015,
+              "I2": 0.015,
+              "I3": 0.015,
+              "I4": 0.52,
+              "I5": 0.015,
+              "I6": 0.015,
+              "I7": 0.015
+            },
+            "firstAuthenticatedSinceClear": 0.015,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 15,
+            "args": [
+              "pin-typo",
+              "initiator",
+              "--observe=120",
+              "--port=5864",
+              "--n=2015"
+            ],
+            "sourceArtifact": "docs/e2e/runs/pin-typo-initiator-2015.json",
+            "sourceSha256": "5f45451cfb6c5ecd87048c780b5a4b9f3eed25110a932bfa03fb1c03d2bd8a33",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:51:42.050Z",
+            "finished": "2026-09-08T20:53:44.207Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.005,
+              "I2": "never",
+              "I3": "never",
+              "I4": "never",
+              "I5": 0.005,
+              "I6": 0.005,
+              "I7": 0.005
+            },
+            "firstAuthenticatedSinceClear": "never",
+            "heldAtEnd": {
+              "I1": true,
+              "I2": false,
+              "I3": false,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": false
+            },
+            "requiredInvariants": ["I1", "I5", "I6"],
+            "finalAuthenticated": false,
+            "finalFingerprintAgreement": null
+          },
+          {
+            "arm": 16,
+            "args": [
+              "two-tabs",
+              "responder",
+              "--observe=300",
+              "--port=5860",
+              "--n=2016"
+            ],
+            "sourceArtifact": "docs/e2e/runs/two-tabs-responder-2016.json",
+            "sourceSha256": "fdabe59243f3b7685b35b88e34e3d3fcd5987d6bf850a8459d49d3b5b458c2e6",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:53:34.575Z",
+            "finished": "2026-09-08T20:58:37.655Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.227,
+              "I2": 0.227,
+              "I3": 0.227,
+              "I4": 0.742,
+              "I5": 0.227,
+              "I6": 0.227,
+              "I7": 0.227
+            },
+            "firstAuthenticatedSinceClear": 0.227,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 17,
+            "args": [
+              "two-tabs",
+              "initiator",
+              "--observe=300",
+              "--port=5862",
+              "--n=2017"
+            ],
+            "sourceArtifact": "docs/e2e/runs/two-tabs-initiator-2017.json",
+            "sourceSha256": "e8936b7056b664bdf9beb4367e6a5c424eb4d4fbf2d1e65f293320ceaf4168fe",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:53:39.583Z",
+            "finished": "2026-09-08T20:58:42.663Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.223,
+              "I2": 0.223,
+              "I3": 0.223,
+              "I4": 0.73,
+              "I5": 0.223,
+              "I6": 0.223,
+              "I7": 0.223
+            },
+            "firstAuthenticatedSinceClear": 0.223,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 18,
+            "args": [
+              "cover-stall",
+              "initiator",
+              "--mode=scheduled",
+              "--cadence=10000",
+              "--observe=180",
+              "--port=5864",
+              "--n=2018"
+            ],
+            "sourceArtifact": "docs/e2e/runs/cover-stall-initiator-2018.json",
+            "sourceSha256": "23e6004a8d93362877442aed98692902ad624993511d80c55fc52d60bff3b50f",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:53:44.212Z",
+            "finished": "2026-09-08T20:57:54.764Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.007,
+              "I2": 0.007,
+              "I3": 0.007,
+              "I4": 28.493,
+              "I5": 0.007,
+              "I6": 0.007,
+              "I7": 0.007
+            },
+            "firstAuthenticatedSinceClear": 0.007,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 19,
+            "args": [
+              "baseline",
+              "initiator",
+              "--mode=scheduled",
+              "--cadence=70000",
+              "--observe=300",
+              "--port=5864",
+              "--n=2019"
+            ],
+            "sourceArtifact": "docs/e2e/runs/baseline-initiator-2019.json",
+            "sourceSha256": "11ff9f8a145ee99e7d5a773c963d1a80b72220e66bd791c01a35ff7a8d3fb0aa",
+            "driverPass": false,
+            "exitCode": 1,
+            "expectedResidual": false,
+            "result": "FAIL",
+            "problems": [
+              "DRIVER FAILURE: baseline round trip failed",
+              "A has pending RTK mutations at the end: [{\"slice\":\"webrtcApi\",\"requestId\":\"KyCzZtfc2fcvPpxc2vXuA\",\"endpointName\":\"sendMessage\",\"startedTimeStamp\":1788901076839,\"ageMs\":173314,\"args\":{\"peerId\":\"\"}}]",
+              "B has pending RTK mutations at the end: [{\"slice\":\"webrtcApi\",\"requestId\":\"6jVJDj97PMqpWU0SAUyMv\",\"endpointName\":\"sendMessage\",\"startedTimeStamp\":1788901076839,\"ageMs\":173316,\"args\":{\"peerId\":\"\"}}]"
+            ],
+            "started": "2026-09-08T20:57:54.781Z",
+            "finished": "2026-09-08T21:00:50.193Z"
+          },
+          {
+            "arm": 20,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--mode=scheduled",
+              "--cadence=10000",
+              "--transfer=A2B:0.5",
+              "--observe=240",
+              "--transferdeadline=200",
+              "--port=5860",
+              "--n=2020"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2020.json",
+            "sourceSha256": "2413ebcc5c277a84c10c56cc72a2399bfb041ba7d0f994086ded25078cb2c9ed",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:58:37.664Z",
+            "finished": "2026-09-08T21:03:23.773Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.03,
+              "I2": 2.03,
+              "I3": 2.03,
+              "I4": 59.662,
+              "I5": 1.025,
+              "I6": 1.025,
+              "I7": 2.03
+            },
+            "firstAuthenticatedSinceClear": 2.03,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true,
+            "transfer": {
+              "receiverByteExact": true,
+              "receiverCompleteSinceClear": 16.043,
+              "withinDeadline": true,
+              "senderResolvedDelivered": true,
+              "senderOutcome": "resolved (delivered)",
+              "senderSettledSinceClear": 30.05,
+              "chunkCountMonotonic": true,
+              "chunkSeriesSamples": 7,
+              "chunks": {
+                "chunksReceivedReal": 10,
+                "chunksReceivedTotal": 10,
+                "totalChunks": 0,
+                "chunksCreated": 0,
+                "savedSize": 524288,
+                "totalSize": 524288
+              }
+            }
+          },
+          {
+            "arm": 21,
+            "args": [
+              "proc-freeze-20",
+              "responder",
+              "--udpflood=1",
+              "--transfer=A2B:8",
+              "--cpuslow=A:6",
+              "--observe=180",
+              "--transferdeadline=150",
+              "--port=5860",
+              "--n=2021"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-responder-2021.json",
+            "sourceSha256": "b233b1e01463bf433b70216bf32cf8500fe20eff4ae40fd181071b02fdc72304",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T21:05:53.390Z",
+            "finished": "2026-09-08T21:09:16.683Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.023,
+              "I2": 2.023,
+              "I3": 2.023,
+              "I4": 3.551,
+              "I5": 1.024,
+              "I6": 1.024,
+              "I7": "never"
+            },
+            "firstAuthenticatedSinceClear": 2.023,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": false,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true,
+            "transfer": {
+              "receiverByteExact": true,
+              "receiverCompleteSinceClear": 3.024,
+              "withinDeadline": true,
+              "senderResolvedDelivered": true,
+              "senderOutcome": "resolved (delivered)",
+              "senderSettledSinceClear": 3.024,
+              "chunkCountMonotonic": true,
+              "chunkSeriesSamples": 2,
+              "chunks": {
+                "chunksReceivedReal": 151,
+                "chunksReceivedTotal": 151,
+                "totalChunks": 0,
+                "chunksCreated": 0,
+                "savedSize": 8388608,
+                "totalSize": 8388608
+              }
+            }
+          },
+          {
+            "arm": 22,
+            "args": [
+              "proc-freeze-20",
+              "initiator",
+              "--udpflood=1",
+              "--port=5862",
+              "--n=2022"
+            ],
+            "sourceArtifact": "docs/e2e/runs/proc-freeze-20-initiator-2022.json",
+            "sourceSha256": "72b142ee626c8a33a2c61da979040885345bc6e6c477279463cdde6fe17979cf",
+            "driverPass": true,
+            "exitCode": 0,
+            "expectedResidual": false,
+            "result": "PASS",
+            "problems": [],
+            "started": "2026-09-08T20:58:42.670Z",
+            "finished": "2026-09-08T21:01:05.593Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 2.029,
+              "I2": 2.029,
+              "I3": 2.029,
+              "I4": 2.542,
+              "I5": 1.022,
+              "I6": 1.022,
+              "I7": 2.029
+            },
+            "firstAuthenticatedSinceClear": 2.029,
+            "heldAtEnd": {
+              "I1": true,
+              "I2": true,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": true
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": true,
+            "finalFingerprintAgreement": true
+          },
+          {
+            "arm": 23,
+            "args": [
+              "two-tabs",
+              "responder",
+              "--observe=300",
+              "--port=5864",
+              "--n=2023"
+            ],
+            "sourceArtifact": "docs/e2e/runs/two-tabs-responder-2023.json",
+            "sourceSha256": "ef3c00ffd70c8fdeeb21db3164679d9667bef4b04d9d4f58a148e312c6a44fd4",
+            "driverPass": false,
+            "exitCode": 1,
+            "expectedResidual": true,
+            "result": "residual-established",
+            "problems": [
+              "I4 never attempted: I2 (both authenticated) never held during observation",
+              "I2 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+              "I4 NEVER held in the 300s observation window (scenario two-tabs role responder)",
+              "both peers are not authenticated in the final sample (scenario two-tabs role responder)",
+              "DTLS fingerprint agreement is not established in the final sample: fpAgree=null (scenario two-tabs role responder)",
+              "replacement tab did not authenticate within 20s of connect: first=nevers (scenario two-tabs role responder)",
+              "replacement tab did not exchange messages within 20s of connect: first=nevers (scenario two-tabs role responder)"
+            ],
+            "started": "2026-09-08T21:00:50.196Z",
+            "finished": "2026-09-08T21:05:53.382Z",
+            "firstSatisfiedSinceClear": {
+              "I1": 0.22,
+              "I2": "never",
+              "I3": 0.22,
+              "I4": "never",
+              "I5": 0.22,
+              "I6": 0.22,
+              "I7": 0.22
+            },
+            "firstAuthenticatedSinceClear": "never",
+            "heldAtEnd": {
+              "I1": true,
+              "I2": false,
+              "I3": true,
+              "I5": true,
+              "I6": true,
+              "I7": true,
+              "I4": false
+            },
+            "requiredInvariants": ["I1", "I2", "I3", "I4", "I5", "I6"],
+            "finalAuthenticated": false,
+            "finalFingerprintAgreement": null
+          }
+        ],
+        "compatibilityCheck": {
+          "command": "node docs/e2e/desync/desync-compatibility.mjs docs/e2e/runs/two-tabs-responder-2023.json docs/e2e/runs/matrix-2000.json",
+          "exitCode": 0,
+          "status": "residual-established",
+          "driverPass": false,
+          "evidence": {
+            "rebuilds": 3,
+            "configuredCap": 3,
+            "finalRebuildCount": 3,
+            "exhaustionEvents": 1,
+            "observedAfterConnectLowerBoundMs": 300506,
+            "observedAfterExhaustionMs": 240420
+          },
+          "problems": []
+        }
+      },
+      "failure": {
+        "arm": 19,
+        "run": 2019,
+        "sourceArtifact": "docs/e2e/runs/baseline-initiator-2019.json",
+        "sourceSha256": "11ff9f8a145ee99e7d5a773c963d1a80b72220e66bd791c01a35ff7a8d3fb0aa",
+        "driverPass": false,
+        "classification": "valid-candidate-regression",
+        "connectMode": "scheduled",
+        "coverCadenceMs": 70000,
+        "observationSecondsPlanned": 300,
+        "observationStarted": false,
+        "roundTripBudgetMs": 173282,
+        "baselineDirections": {
+          "rt12": {
+            "ok": false,
+            "elapsedMs": 173281,
+            "error": "TIMEOUT baseline send (173282ms)"
+          },
+          "rt21": {
+            "ok": false,
+            "elapsedMs": 173281,
+            "error": "TIMEOUT baseline send (173282ms)"
+          }
+        },
+        "baselineAuthenticated": true,
+        "baselineFingerprintAgreement": true,
+        "problems": [
+          "DRIVER FAILURE: baseline round trip failed",
+          "A has pending RTK mutations at the end: [{\"slice\":\"webrtcApi\",\"requestId\":\"KyCzZtfc2fcvPpxc2vXuA\",\"endpointName\":\"sendMessage\",\"startedTimeStamp\":1788901076839,\"ageMs\":173314,\"args\":{\"peerId\":\"\"}}]",
+          "B has pending RTK mutations at the end: [{\"slice\":\"webrtcApi\",\"requestId\":\"6jVJDj97PMqpWU0SAUyMv\",\"endpointName\":\"sendMessage\",\"startedTimeStamp\":1788901076839,\"ageMs\":173316,\"args\":{\"peerId\":\"\"}}]"
+        ],
+        "diagnosis": "A queued chunk-ACK batch started the first reverse receipt job; a terminal receipt enqueued behind it required a third 70-second cycle and missed the unchanged 173282ms baseline send budget.",
+        "diagnosisEvidence": "Runtime trace and focused real-scheduler virtual-cadence regressions reviewed by the implementation owner and root."
+      }
+    }
+  ],
+  "finalReceiptPriorityFix": {
+    "sourceCommit": "78067ce",
+    "status": "code-frozen",
+    "change": "A terminal receipt supersedes unsent same-root chunk-ACK batches before the reverse receipt job is produced. Other-root receipts are retained.",
+    "unchanged": [
+      "cover cadence",
+      "scheduled frame counts",
+      "driver timing budgets"
+    ],
+    "negativeControls": "Before the fix, real-scheduler virtual 70-second cadence tests failed first-reverse-cycle terminal delivery for both F1 and F16, plus mixed-root ordering.",
+    "focusedValidation": {
+      "passedTests": 94,
+      "assertions": 503,
+      "finalOwnedPassedTests": 27,
+      "finalOwnedAssertions": 216,
+      "countsOverlap": true,
+      "sourceAndTestTypecheck": "PASS",
+      "ownedESLint": "PASS",
+      "ownedPrettier": "PASS",
+      "diffCheck": "PASS",
+      "evidenceKind": "reported command results"
+    }
+  },
+  "earlierSiteUiPass": {
+    "sourceArtifact": "../p2party.com/logs/desync/pending-ui-2026-09-09T06-01-26.738Z.json",
+    "sourceSha256": "33704490df223d5fd8cc7b2731bae5f9e1471c09c255145230f5d0f2127b20f0",
+    "driverPass": true,
+    "countsTowardFinalAcceptance": false,
+    "reason": "Superseded for final evidence by the unchanged-application rerun that also records SDK package SHA256 and asserts exact real-server health/version."
+  },
+  "completedAt": "2026-09-09T06:32:58.803Z",
+  "verificationDatesUTC": ["2026-09-08", "2026-09-09"]
+}

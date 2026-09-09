@@ -1,0 +1,31 @@
+// Standalone ICE sanity probe: two contexts, manual SDP/ICE exchange, no SDK.
+import http from "node:http"; import { readFileSync } from "node:fs"; import path from "node:path"; import os from "node:os"; import { fileURLToPath } from "node:url";
+if (process.platform === "darwin")
+  process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
+const { chromium } = (await import("../../../../p2party.com/node_modules/playwright-core/index.js")).default;
+const dir = path.dirname(fileURLToPath(import.meta.url));
+const page = process.argv[2] ?? "plain.html";
+const server = http.createServer((req, res) => { const n = req.url === "/" ? "/plain.html" : req.url.split("?")[0]; try { res.writeHead(200, { "content-type": n.endsWith(".js") ? "text/javascript" : n.endsWith(".wasm") ? "application/wasm" : "text/html" }); res.end(readFileSync(path.join(dir, n))); } catch { res.writeHead(404); res.end(); } });
+await new Promise((r) => server.listen(5812, r));
+const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-features=WebRtcHideLocalIpsWithMdns"] });
+const mk = async () => { const ctx = await browser.newContext(); const p = await ctx.newPage(); await p.goto(`http://localhost:5812/${page}`); await p.evaluate(() => { window.cands = []; window.pc = new RTCPeerConnection({ iceServers: [], iceCandidatePoolSize: 2 }); window.states = []; pc.onicecandidate = (e) => { if (e.candidate) window.cands.push(e.candidate.toJSON()); }; pc.oniceconnectionstatechange = () => window.states.push("ice:" + pc.iceConnectionState); pc.onconnectionstatechange = () => window.states.push("cs:" + pc.connectionState); }); return p; };
+const a = await mk(), b = await mk();
+await a.evaluate(async () => { window.dc = pc.createDataChannel("main"); await pc.setLocalDescription(); });
+await new Promise((r) => setTimeout(r, 800));
+const offer = await a.evaluate(() => pc.localDescription.toJSON());
+await b.evaluate(async (o) => { pc.ondatachannel = (e) => { window.dcin = e.channel; }; await pc.setRemoteDescription(o); await pc.setLocalDescription(); }, offer);
+await new Promise((r) => setTimeout(r, 800));
+const answer = await b.evaluate(() => pc.localDescription.toJSON());
+await a.evaluate((an) => pc.setRemoteDescription(an), answer);
+const ca = await a.evaluate(() => window.cands), cb = await b.evaluate(() => window.cands);
+console.log("A candidates:", JSON.stringify(ca.map((c) => c.candidate)));
+console.log("B candidates:", JSON.stringify(cb.map((c) => c.candidate)));
+const addRes = { a: [], b: [] };
+for (const c of cb) addRes.a.push(await a.evaluate(async (c) => { try { await pc.addIceCandidate(c); return "ok"; } catch (e) { return "ERR " + e.message; } }, c));
+for (const c of ca) addRes.b.push(await b.evaluate(async (c) => { try { await pc.addIceCandidate(c); return "ok"; } catch (e) { return "ERR " + e.message; } }, c));
+console.log("addIceCandidate results:", JSON.stringify(addRes));
+await new Promise((r) => setTimeout(r, 4000));
+console.log("A states:", JSON.stringify(await a.evaluate(() => window.states)), "final", await a.evaluate(() => pc.connectionState + "/" + pc.iceConnectionState));
+console.log("B states:", JSON.stringify(await b.evaluate(() => window.states)), "final", await b.evaluate(() => pc.connectionState + "/" + pc.iceConnectionState));
+console.log("RTCPeerConnection is instrumented:", await a.evaluate(() => RTCPeerConnection.name));
+await browser.close(); server.close();

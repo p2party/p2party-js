@@ -1,0 +1,5 @@
+lib
+libsodium
+**/**/*.[ch]
+libcrypto.js
+LICENSE.md

@@ -1,0 +1,86 @@
+export const crypto_auth_hmacsha512_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_auth_hmacsha512_KEYBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_hash_sha512_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+// sizeof(crypto_hash_sha512_state) = uint64_t state[8] (64) + uint64_t count[2]
+// (16) + uint8_t buf[128] (128) = 208 bytes; the JS side mallocs this for the
+// streaming-hash state passed to _sha512_init/update/final.
+export const crypto_hash_sha512_STATEBYTES = 208;
+export const crypto_sign_ed25519_BYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_sign_ed25519_SEEDBYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_sign_ed25519_PUBLICKEYBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_sign_ed25519_SECRETKEYBYTES =
+  64 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_secretbox_KEYBYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_secretbox_NONCEBYTES = 24 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_chacha20poly1305_ietf_KEYBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_chacha20poly1305_ietf_NPUBBYTES =
+  12 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_chacha20poly1305_ietf_ABYTES =
+  16 * Uint8Array.BYTES_PER_ELEMENT;
+// XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha-03) — the blind-rendezvous
+// carrier envelope suite. The 24-byte nonce is why the IETF ChaCha20 export
+// above cannot serve it.
+export const crypto_aead_xchacha20poly1305_ietf_KEYBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_xchacha20poly1305_ietf_NPUBBYTES =
+  24 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_aead_xchacha20poly1305_ietf_ABYTES =
+  16 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_pwhash_argon2id_SALTBYTES =
+  16 * Uint8Array.BYTES_PER_ELEMENT;
+// Ristretto255 (CPace / PAKE) — byte sizes for the wasm exports in
+// pake_ratchet.c; mirror libsodium crypto_core_ristretto255.h /
+// crypto_scalarmult_ristretto255.h.
+export const crypto_core_ristretto255_BYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_core_ristretto255_HASHBYTES =
+  64 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_core_ristretto255_SCALARBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_scalarmult_ristretto255_BYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+// X25519 DH-ratchet — mirror libsodium crypto_scalarmult_curve25519.h.
+export const crypto_scalarmult_curve25519_BYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+export const crypto_scalarmult_curve25519_SCALARBYTES =
+  32 * Uint8Array.BYTES_PER_ELEMENT;
+// ML-KEM-768 (FIPS 203). The deterministic WASM boundary takes caller-supplied
+// coins so entropy is sourced once, by WebCrypto, in the TypeScript layer.
+export const mlkem768_PUBLICKEYBYTES = 1184 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_SECRETKEYBYTES = 2400 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_CIPHERTEXTBYTES = 1088 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_BYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_KEYPAIRCOINBYTES = 64 * Uint8Array.BYTES_PER_ELEMENT;
+export const mlkem768_ENCAPSCOINBYTES = 32 * Uint8Array.BYTES_PER_ELEMENT;
+
+export interface SignKeyPair {
+  publicKey: Uint8Array;
+  secretKey: Uint8Array;
+}
+
+export default {
+  crypto_hash_sha512_BYTES,
+  crypto_sign_ed25519_BYTES,
+  crypto_sign_ed25519_SEEDBYTES,
+  crypto_sign_ed25519_PUBLICKEYBYTES,
+  crypto_sign_ed25519_SECRETKEYBYTES,
+  crypto_secretbox_KEYBYTES,
+  crypto_secretbox_NONCEBYTES,
+  crypto_aead_chacha20poly1305_ietf_KEYBYTES,
+  crypto_aead_chacha20poly1305_ietf_NPUBBYTES,
+  crypto_aead_chacha20poly1305_ietf_ABYTES,
+  crypto_core_ristretto255_BYTES,
+  crypto_core_ristretto255_HASHBYTES,
+  crypto_core_ristretto255_SCALARBYTES,
+  crypto_scalarmult_ristretto255_BYTES,
+  crypto_scalarmult_curve25519_BYTES,
+  crypto_scalarmult_curve25519_SCALARBYTES,
+  mlkem768_PUBLICKEYBYTES,
+  mlkem768_SECRETKEYBYTES,
+  mlkem768_CIPHERTEXTBYTES,
+  mlkem768_BYTES,
+  mlkem768_KEYPAIRCOINBYTES,
+  mlkem768_ENCAPSCOINBYTES,
+};

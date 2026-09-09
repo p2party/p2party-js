@@ -1,0 +1,184 @@
+import {
+  deleteChannel,
+  deleteMessage,
+  deletePeer,
+} from "../../reducers/roomSlice";
+import { wipeRatchet } from "../../cryptography/ratchet";
+import { clearHandshakeChannel } from "../../handlers/handleHandshake";
+import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
+import { releaseScheduledReceipts } from "../../handlers/coverTransfer";
+import { teardownCoverEdge } from "../../handlers/coverEdge";
+import { rejectRatchetGate } from "../../handlers/ratchetGate";
+import { releaseRoomPeerMutex } from "./negotiationLock";
+import { discardPendingIceCandidates } from "./pendingIceCandidates";
+import { clearRebindAuthenticationDeadline } from "./rebindDeadline";
+import { retireRemoteTransport } from "./retiredRemoteTransports";
+
+import type { BaseQueryFn } from "@reduxjs/toolkit/query";
+import type {
+  IRTCDataChannel,
+  IRTCIceCandidate,
+  IRTCPeerConnection,
+  RTCDisconnectFromPeerParams,
+} from "./interfaces";
+import type { State } from "../../store";
+
+export interface RTCDisconnectFromPeerParamsExtension extends RTCDisconnectFromPeerParams {
+  peerConnections: IRTCPeerConnection[];
+  dataChannels: IRTCDataChannel[];
+  iceCandidates: IRTCIceCandidate[];
+}
+
+const webrtcDisconnectPeerQuery: BaseQueryFn<
+  RTCDisconnectFromPeerParamsExtension,
+  undefined
+> = (
+  {
+    peerId,
+    roomId,
+    alsoDeleteData,
+    peerConnections,
+    dataChannels,
+    iceCandidates,
+  },
+  api,
+) => {
+  const terminalRoomIds = new Set<string>();
+  for (let i = peerConnections.length - 1; i >= 0; i--) {
+    const connection = peerConnections[i];
+    if (
+      connection.withPeerId !== peerId ||
+      (roomId !== undefined && connection.roomId !== roomId)
+    )
+      continue;
+    terminalRoomIds.add(connection.roomId);
+
+    // This side stops believing in the remote transport this connection was
+    // bound to. The peer may still hold it (its ICE consent survived a freeze
+    // this side gave up on) and answer an offer it queued before the
+    // teardown; that answer would otherwise land on the replacement
+    // transport, which has no remote description to compare a fingerprint
+    // against, and bind it to a certificate we just retired. An offer from
+    // the same transport is still accepted — it proves the peer negotiates
+    // there — and un-retires it (see retiredRemoteTransports).
+    retireRemoteTransport(
+      connection.roomId,
+      connection.withPeerId,
+      connection.remoteDescription?.sdp,
+    );
+
+    const teardownError = new Error(
+      `Room/peer transport closed (${connection.roomId}, ${connection.withPeerId})`,
+    );
+    clearHandshakeChannel(
+      connection.roomId,
+      connection.withPeerId,
+      teardownError,
+    );
+    rejectRatchetGate(
+      connection.roomId,
+      connection.withPeerId,
+      teardownError,
+    );
+    if (connection.ratchetState) {
+      wipeRatchet(connection.ratchetState);
+      connection.ratchetState = undefined;
+    }
+    // Stop scheduled cover first: its timers and lane channels must not fire
+    // against a torn-down edge, and any queued scheduled receipts are wiped.
+    teardownCoverEdge(connection);
+    releaseScheduledReceipts(connection);
+    // Destroy the sparse-PQ runtime with the ratchet: its machine, message
+    // root, sealed outbox, replay/ACK caches, and active combined receive keys
+    // are all wiped by destroy(). The edge serializer hook dies with it so a
+    // late persistence call cannot serialize a destroyed runtime. The
+    // orchestrator's timers and admission gate die first.
+    destroyPqHealingOrchestrator(connection);
+    if (connection.pqHealingState) {
+      connection.pqHealingState.destroy();
+      connection.pqHealingState = undefined;
+    }
+    connection.serializeEdgeCryptoState = undefined;
+    if (connection.messageKeyCache) {
+      for (const messageKey of connection.messageKeyCache.values())
+        messageKey.fill(0);
+      connection.messageKeyCache.clear();
+      connection.messageKeyCache = undefined;
+    }
+    connection.messageKeyByMerkleRoot?.clear();
+    connection.messageKeyByMerkleRoot = undefined;
+    connection.messageChannels?.clear();
+    connection.messageChannels = undefined;
+    connection.mainChannel = undefined;
+    // A transport being torn down here can carry an armed in-place re-bind
+    // deadline (remoteTransportChange). Release it with everything else this
+    // connection owns: the edge is going away now, and the deadline's own job
+    // — tearing it down and re-dialling — is exactly what is happening.
+    clearRebindAuthenticationDeadline(connection);
+
+    connection.ontrack = null;
+    connection.ondatachannel = null;
+    connection.onicecandidate = null;
+    connection.onicecandidateerror = null;
+    connection.onnegotiationneeded = null;
+    connection.onsignalingstatechange = null;
+    connection.onconnectionstatechange = null;
+    connection.onicegatheringstatechange = null;
+    connection.oniceconnectionstatechange = null;
+    if (connection.connectionState !== "closed") connection.close();
+    peerConnections.splice(i, 1);
+  }
+
+  if (roomId !== undefined) terminalRoomIds.add(roomId);
+  for (const terminalRoomId of terminalRoomIds) {
+    discardPendingIceCandidates(iceCandidates, terminalRoomId, peerId);
+    releaseRoomPeerMutex(terminalRoomId, peerId);
+  }
+
+  // Omitting roomId is the explicitly peer-wide operation.
+  api.dispatch(deletePeer({ peerId, roomId }));
+  api.dispatch(deleteChannel({ peerId, roomId }));
+
+  for (let i = dataChannels.length - 1; i >= 0; i--) {
+    const channel = dataChannels[i];
+    if (
+      channel.withPeerId !== peerId ||
+      (roomId !== undefined && !channel.roomIds.includes(roomId))
+    )
+      continue;
+
+    channel.releaseProtocolResources?.();
+    channel.onopen = null;
+    channel.onclose = null;
+    channel.onerror = null;
+    channel.onclosing = null;
+    channel.onmessage = null;
+    channel.onbufferedamountlow = null;
+    if (channel.readyState !== "closed") channel.close();
+    dataChannels.splice(i, 1);
+  }
+
+  if (alsoDeleteData) {
+    const { rooms } = api.getState() as State;
+    const roomsLen = rooms.length;
+    for (let i = 0; i < roomsLen; i++) {
+      if (roomId !== undefined && rooms[i].id !== roomId) continue;
+
+      const messagesLen = rooms[i].messages.length;
+      for (let j = 0; j < messagesLen; j++) {
+        if (rooms[i].messages[j].fromPeerId === peerId) {
+          api.dispatch(
+            deleteMessage({
+              roomId: rooms[i].id,
+              merkleRootHex: rooms[i].messages[j].merkleRootHex,
+            }),
+          );
+        }
+      }
+    }
+  }
+
+  return { data: undefined };
+};
+
+export default webrtcDisconnectPeerQuery;

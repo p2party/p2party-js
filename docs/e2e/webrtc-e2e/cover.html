@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>p2party v4 scheduled cover</title>
+<script>
+  window.process = { env: { NODE_ENV: "production" }, versions: {}, platform: "browser", nextTick: (f) => setTimeout(f, 0) };
+  window.global = window;
+  // Headless Chromium reports the page as hidden; the CoverRuntime correctly
+  // refuses to claim cover while hidden. For this transport test, present a
+  // visible page so the schedule runs.
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+</script>
+</head><body><script src="./bundle-cover.js"></script></body></html>

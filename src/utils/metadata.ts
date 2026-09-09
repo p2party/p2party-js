@@ -1,0 +1,206 @@
+// import { MessageType } from "./messageTypes";
+import { MAX_MESSAGE_SIZE, METADATA_LEN } from "./constants";
+
+import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
+
+export interface BasicMetadata {
+  schemaVersion: number; // 8 bytes
+  messageType: number; // MessageType; // 1 byte
+  hash: Uint8Array; // 64 bytes, uint8
+  totalSize: number; // 8 bytes, number of bytes, max file totalSize 10 GiB
+  date: Date; // 8 bytes
+  name: string; // 256 bytes, serialized string
+  chunkStartIndex: number; // 8 bytes, uint64
+  chunkEndIndex: number; // 8 bytes, uint64
+}
+
+export interface Metadata extends BasicMetadata {
+  chunkIndex: number; // 8 bytes, uint64
+}
+
+/**
+ * Validate the authenticated metadata profile before any offsets are used or
+ * storage is allocated. All numeric wire fields are uint64s; converting a
+ * value above 2^53-1 to Number loses precision, so those values fail closed.
+ */
+export const assertMetadataV1 = (metadata: Metadata): void => {
+  if (metadata.schemaVersion !== 1)
+    throw new Error("Unsupported metadata schema version");
+  if (
+    !Number.isSafeInteger(metadata.messageType) ||
+    metadata.messageType < 1 ||
+    metadata.messageType > 64
+  )
+    throw new Error("Invalid metadata message type");
+  if (metadata.hash.length !== crypto_hash_sha512_BYTES)
+    throw new Error("Invalid metadata hash");
+  if (
+    !Number.isSafeInteger(metadata.totalSize) ||
+    metadata.totalSize < 1 ||
+    metadata.totalSize > MAX_MESSAGE_SIZE
+  )
+    throw new Error("Invalid metadata total size");
+  if (!Number.isSafeInteger(metadata.date.getTime()))
+    throw new Error("Invalid metadata timestamp");
+  for (const [name, value] of [
+    ["chunkStartIndex", metadata.chunkStartIndex],
+    ["chunkEndIndex", metadata.chunkEndIndex],
+    ["chunkIndex", metadata.chunkIndex],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Invalid metadata ${name}`);
+  }
+  if (metadata.chunkEndIndex < metadata.chunkStartIndex)
+    throw new Error("Invalid metadata chunk range");
+};
+
+export const formatSize = (size: number): string => {
+  if (size >= 1 << 30) {
+    return (size / (1 << 30)).toFixed(2) + " GB";
+  } else if (size >= 1 << 20) {
+    return (size / (1 << 20)).toFixed(2) + " MB";
+  } else if (size >= 1 << 10) {
+    return (size / (1 << 10)).toFixed(2) + " KB";
+  } else {
+    return String(size) + " bytes";
+  }
+};
+
+export const serializeMetadata = (metadata: Metadata): Uint8Array => {
+  const buffer = new Uint8Array(METADATA_LEN);
+  let offset = 0;
+
+  // schemaVersion (8 bytes)
+  const schemaVersionView = new DataView(buffer.buffer, offset, 8);
+  schemaVersionView.setBigUint64(0, BigInt(metadata.schemaVersion), false); // Big-endian
+  offset += 8;
+
+  // messageType (1 byte)
+  buffer[offset] = metadata.messageType;
+  offset += 1;
+
+  // hash (64 bytes)
+  buffer.set(metadata.hash, offset);
+  offset += crypto_hash_sha512_BYTES;
+
+  // totalSize (8 bytes)
+  const totalSizeView = new DataView(buffer.buffer, offset, 8);
+  totalSizeView.setBigUint64(0, BigInt(metadata.totalSize), false); // Big-endian
+  offset += 8;
+
+  const dateView = new DataView(buffer.buffer, offset, 8);
+  dateView.setBigInt64(0, BigInt(metadata.date.getTime()), false);
+  offset += 8;
+
+  // name (256 bytes)
+  const nameBytes = new TextEncoder().encode(metadata.name);
+  const namePadded = new Uint8Array(256);
+  namePadded.set(nameBytes.subarray(0, Math.min(256, nameBytes.length)));
+  buffer.set(namePadded, offset);
+  offset += 256;
+
+  // chunkStartIndex (8 bytes)
+  const chunkStartIndexView = new DataView(buffer.buffer, offset, 8);
+  chunkStartIndexView.setBigUint64(0, BigInt(metadata.chunkStartIndex), false); // Big-endian
+  offset += 8;
+
+  // chunkEndIndex (8 bytes)
+  const chunkEndIndexView = new DataView(buffer.buffer, offset, 8);
+  chunkEndIndexView.setBigUint64(0, BigInt(metadata.chunkEndIndex), false); // Big-endian
+  offset += 8;
+
+  // chunkIndex (8 bytes)
+  const chunkIndexView = new DataView(buffer.buffer, offset, 8);
+  chunkIndexView.setBigUint64(0, BigInt(metadata.chunkIndex), false); // Big-endian
+
+  return buffer;
+};
+
+export const deserializeMetadata = (buffer: Uint8Array): Metadata => {
+  if (buffer.length !== METADATA_LEN) {
+    throw new Error("Invalid metadata buffer totalSize");
+  }
+
+  let offset = 0;
+
+  // schemaVersion (8 bytes)
+  const schemaVersionView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset + offset,
+    8,
+  );
+  const schemaVersion = Number(schemaVersionView.getBigUint64(0, false)); // Big-endian
+  offset += 8;
+
+  // messageType (1 byte)
+  const messageType = buffer[offset];
+  offset += 1;
+
+  // hash (64 bytes)
+  const hash = buffer.slice(offset, offset + crypto_hash_sha512_BYTES);
+  offset += crypto_hash_sha512_BYTES;
+
+  // totalSize (8 bytes)
+  const totalSizeView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset + offset,
+    8,
+  );
+  const totalSize = Number(totalSizeView.getBigUint64(0, false)); // Big-endian
+  offset += 8;
+
+  // lastModified (8 bytes)
+  const dateView = new DataView(buffer.buffer, buffer.byteOffset + offset, 8);
+  const dateTime = Number(dateView.getBigUint64(0, false)); // Big-endian
+  const date = new Date(dateTime);
+  offset += 8;
+
+  // name (256 bytes)
+  const nameBytes = buffer.slice(offset, offset + 256);
+  let name = new TextDecoder().decode(nameBytes).replace(/\0+$/, "");
+  // Sanitize filename: strip path separators, control chars, and HTML-dangerous chars
+  name = name
+    .replace(/[/\\]/g, "_") // path separators
+    .replace(/[<>:"'|?*]/g, "_") // shell/HTML-dangerous chars
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ""); // control characters
+  offset += 256;
+
+  // chunkStartIndex (8 bytes)
+  const chunkStartIndexView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset + offset,
+    8,
+  );
+  const chunkStartIndex = Number(chunkStartIndexView.getBigUint64(0, false)); // Big-endian
+  offset += 8;
+
+  // chunkEndIndex (8 bytes)
+  const chunkEndIndexView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset + offset,
+    8,
+  );
+  const chunkEndIndex = Number(chunkEndIndexView.getBigUint64(0, false)); // Big-endian
+  offset += 8;
+
+  // chunkIndex (8 bytes)
+  const chunkIndexView = new DataView(
+    buffer.buffer,
+    buffer.byteOffset + offset,
+    8,
+  );
+  const chunkIndex = Number(chunkIndexView.getBigUint64(0, false)); // Big-endian
+
+  return {
+    schemaVersion,
+    messageType,
+    hash,
+    totalSize,
+    date,
+    name,
+    chunkStartIndex,
+    chunkEndIndex,
+    chunkIndex,
+  };
+};

@@ -811,7 +811,7 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 
 <script
   src="https://cdn.p2party.com/@0.14.10/p2party.min.js"
-  integrity="sha384-HvHlNJJ4/jLkQ/WdLqUgbzDx0u4nmzae9iuPsp3D5omK3HmgjAXRfHXuT2v9eXpb"
+  integrity="sha384-z5PjsRDKjtPcQ9JhEwkPyr/7zthzQgjjh6pSTdjTmhZrwVhhhFS/KhRkGtmJwqJX"
   crossorigin="anonymous"
 ></script>
 

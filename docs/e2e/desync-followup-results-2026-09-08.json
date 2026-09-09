@@ -1,4 +1,5 @@
 {
+  "publicationRedaction": "Absolute workstation path prefixes in diagnostic failure text were replaced with <workspace>. Recorded outcomes, artifact hashes, and acceptance scope are unchanged.",
   "schemaVersion": 1,
   "date": "2026-09-08",
   "status": "accepted",
@@ -703,7 +704,7 @@
       "driverPass": false,
       "countsTowardFinalAcceptance": false,
       "reason": "Owned signaling server exited before readiness; root diagnosed the local Postgres SSL fixture configuration. No browser scenario ran.",
-      "failure": "AssertionError [ERR_ASSERTION]: Owned server exited before readiness\n\n1 !== null\n\n    at file://~/Desktop/@p2party/p2party.com/e2e/pending-transfers-live.mjs:96:14\n    at until (file://~/Desktop/@p2party/p2party.com/e2e/pending-transfers-live.mjs:57:20)\n    at async startServer (file://~/Desktop/@p2party/p2party.com/e2e/pending-transfers-live.mjs:93:3)\n    at async file://~/Desktop/@p2party/p2party.com/e2e/pending-transfers-live.mjs:201:3",
+      "failure": "AssertionError [ERR_ASSERTION]: Owned server exited before readiness\n\n1 !== null\n\n    at <workspace>/p2party.com/e2e/pending-transfers-live.mjs:96:14\n    at until (<workspace>/p2party.com/e2e/pending-transfers-live.mjs:57:20)\n    at async startServer (<workspace>/p2party.com/e2e/pending-transfers-live.mjs:93:3)\n    at async <workspace>/p2party.com/e2e/pending-transfers-live.mjs:201:3",
       "completedBrowserScenarios": 0,
       "wasmResponseCount": 0
     }

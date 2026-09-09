@@ -1,4 +1,4 @@
-import { isUUID } from "class-validator";
+import { isUUID } from "../utils/formatValidation";
 
 import {
   currentRoomRequestLifecycleEpoch,

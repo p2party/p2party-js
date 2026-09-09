@@ -416,11 +416,6 @@ The browser bundle and/or installed runtime dependency graph includes:
 - `redux-thunk` 3.1.0 — Copyright (c) 2015-present Dan Abramov
 - `reselect` 5.1.1 — Copyright (c) 2015-2018 Reselect Contributors
 - `immer` 11.1.15 — Copyright (c) 2017 Michel Weststrate
-- `class-validator` 0.15.1 — Copyright (c) 2015-2020 TypeStack
-- `validator` 13.15.23 — Copyright (c) 2018 Chris O'Hara
-  `<cohara87@gmail.com>`
-- `libphonenumber-js` 1.12.27 — Copyright (c) 2016 @catamphetamine
-  `<purecatamphetamine@gmail.com>`
 
 Each component above is MIT-licensed. Verbatim grant and disclaimer:
 

@@ -1,5 +1,5 @@
 import { createSlice } from "@reduxjs/toolkit";
-import { isUUID } from "class-validator";
+import { isUUID } from "../utils/formatValidation";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import {

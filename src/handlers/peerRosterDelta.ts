@@ -1,4 +1,4 @@
-import { isUUID } from "class-validator";
+import { isUUID } from "../utils/formatValidation";
 
 import { isCanonicalEd25519Identity } from "../utils/identityRole";
 import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";

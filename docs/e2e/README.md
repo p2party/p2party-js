@@ -2,10 +2,13 @@
 
 Real headless-Chromium E2E harnesses used to verify protocol v4 over **real
 WebRTC** (real `RTCPeerConnection` + DTLS/SCTP DataChannels). Preserved here
-from the session scratchpad so they survive. They reference absolute paths on
-the author's machine (`~/Desktop/@p2party/...`) and the
-`playwright-core` + cached Chromium under `p2party.com/node_modules` and
-`~/Library/Caches/ms-playwright`; adjust paths if the tree moves.
+as reproducible development fixtures. Keep `p2party-js`, `p2party-server`, and
+`p2party.com` in sibling directories. The drivers resolve `playwright-core`
+from `p2party.com/node_modules`; install the frontend dependencies with `npm ci`
+and its Chromium browser with `npx playwright install chromium` before running
+them. These are local, disposable test environments; use no production data or
+credentials. Historical results below describe the exact versions originally
+tested and do not certify later releases.
 
 All runs use the **development** WASM (`src/cryptography/libcrypto.wasm`,
 `ENVIRONMENT=web,worker,node`, SRI-pinned in `wasmLoader.ts`). Do NOT run

@@ -4,7 +4,7 @@ import { createExpiredReceiveMaintenance } from "./handlers/expiredReceiveProjec
 import type { PendingMessage } from "./handlers/outbox";
 import { registerOutboxResume } from "./handlers/outboxCoordinator";
 export type { PendingMessage } from "./handlers/outbox";
-import { isUUID } from "class-validator";
+import { isUUID } from "./utils/formatValidation";
 import pkg from "../package.json";
 
 import { store, dispatch } from "./store";

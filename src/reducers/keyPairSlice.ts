@@ -1,5 +1,5 @@
 import { createSlice } from "@reduxjs/toolkit";
-import { isHexadecimal, isUUID } from "class-validator";
+import { isHexadecimal, isUUID } from "../utils/formatValidation";
 
 import type { PayloadAction } from "@reduxjs/toolkit";
 

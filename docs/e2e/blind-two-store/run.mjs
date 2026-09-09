@@ -50,7 +50,7 @@ import {
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import pw from "~/Desktop/@p2party/p2party.com/node_modules/playwright-core/index.js";
+import pw from "../../../../p2party.com/node_modules/playwright-core/index.js";
 const { chromium } = pw;
 
 const dir = path.dirname(fileURLToPath(import.meta.url));

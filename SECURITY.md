@@ -44,3 +44,14 @@ away: the legacy signaling operator can observe room membership, identity
 public keys, peer IDs, network metadata and timing; and an `RTCDataChannel`
 becoming open proves transport readiness, not completion of the protocol-v4
 identity and key-confirmation transcript.
+
+## Browser diagnostics and local state
+
+The browser store holds identity secrets and room capabilities in memory.
+Redux DevTools integration is disabled in every build so those values are not
+copied into extension action/state history. Applications must also avoid
+logging SDK state, identity material, recovery phrases, and room capabilities.
+This does not protect against a compromised page, browser extension with page
+access, or device. File history and durable outbox data have no separate
+encryption-at-rest guarantee; see the
+[storage boundary](docs/getting-started.md#send-cancel-and-read).

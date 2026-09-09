@@ -29,6 +29,28 @@ reaches any of it.
   fault domain. `docs/blind-rendezvous-two-store-prototype.md` describes what it
   is and, at length and first, what it does not claim.
 
+## [0.14.10] — 2026-09-09
+
+Protocol version remains 4; the signaling server remains compatible at `0.1.3`.
+
+### Security
+
+- Disable Redux DevTools integration in every browser build. Identity actions
+  and state contain the signing secret and must not enter extension history.
+  A production-mode regression verifies that an installed extension hook
+  receives neither the store nor synthetic identity material.
+- Update the development-only filesystem and glob dependencies to patched
+  versions.
+- Replace the general validation dependency with local UUID and hexadecimal
+  format checks. Existing version, variant, case and prefix acceptance is
+  preserved; fields with trailing line terminators now fail validation.
+
+### Changed
+
+- Remove `class-validator` and its phone-number/validation dependency tree.
+- Replace the sequential task-runner dependency with npm script chaining.
+  Keep `cross-env` for environment assignments across supported shells.
+
 ## [0.14.9] — 2026-09-08
 
 Protocol version remains 4. Room membership snapshots and targeted repair use

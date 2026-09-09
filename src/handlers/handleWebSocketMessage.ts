@@ -1,5 +1,5 @@
 import { debugLog } from "../utils/debug";
-import { isUUID, isHexadecimal } from "class-validator";
+import { isUUID, isHexadecimal } from "../utils/formatValidation";
 
 import { handleChallenge } from "./handleChallenge";
 import { establishSignaledConnection } from "./connectionSignal";

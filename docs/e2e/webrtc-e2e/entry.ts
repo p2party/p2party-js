@@ -7,7 +7,7 @@ import {
   type P2PartySession,
   type GeneratedSessionIdentity,
   type HandshakeTransport,
-} from "~/Desktop/@p2party/p2party-js/src/session";
+} from "../../../src/session";
 
 const te = new TextEncoder();
 const td = new TextDecoder();

@@ -12,6 +12,9 @@ import roomListenerMiddleware from "./middleware/roomListenerMiddleware";
 import keyPairListenerMiddleware from "./middleware/keyPairListenerMiddleware";
 
 export const store = configureStore({
+  // Identity secrets and room capabilities live in this store. Do not forward
+  // actions or state to browser extensions, even in development builds.
+  devTools: false,
   reducer: {
     commonState: commonStateReducer,
     keyPair: keyPairReducer,

@@ -4,7 +4,7 @@ import {
   isTerminalHandshakeStatus,
 } from "../handlers/handshakeFailure";
 import { createListenerMiddleware, isAnyOf } from "@reduxjs/toolkit";
-import { isUUID } from "class-validator";
+import { isUUID } from "../utils/formatValidation";
 
 import {
   setConnectingToPeers,

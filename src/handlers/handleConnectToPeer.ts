@@ -1,5 +1,5 @@
 import { debugLog } from "../utils/debug";
-import { isUUID } from "class-validator";
+import { isUUID } from "../utils/formatValidation";
 
 import { handleQueuedIceCandidates } from "./handleQueuedIceCandidates";
 import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";

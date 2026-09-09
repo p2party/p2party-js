@@ -1,35 +1,35 @@
 // Real-WebRTC scheduled-cover lane test: drives the ACTUAL CoverRuntime over
 // real RTCDataChannels and verifies fixed C×F×D authenticated cover cells per
 // cycle, plus a real (non-dummy) cell substituting into a slot.
-import { CoverRuntime } from "~/Desktop/@p2party/p2party-js/src/handlers/coverRuntime";
-import { SparsePqHealingState } from "~/Desktop/@p2party/p2party-js/src/handlers/pqHealingRuntime";
-import libcrypto from "~/Desktop/@p2party/p2party-js/src/cryptography/libcrypto";
+import { CoverRuntime } from "../../../src/handlers/coverRuntime";
+import { SparsePqHealingState } from "../../../src/handlers/pqHealingRuntime";
+import libcrypto from "../../../src/cryptography/libcrypto";
 import {
   RATCHET_ROOT_SUITE_MLKEM512,
   METADATA_LEN,
   PROOF_LEN,
   CHUNK_LEN,
   DECRYPTED_LEN,
-} from "~/Desktop/@p2party/p2party-js/src/utils/constants";
+} from "../../../src/utils/constants";
 import {
   initRatchet,
   ratchetEncrypt,
   type RatchetState,
-} from "~/Desktop/@p2party/p2party-js/src/cryptography/ratchet";
+} from "../../../src/cryptography/ratchet";
 import {
   sealChunk,
   decryptMessageChunk,
-} from "~/Desktop/@p2party/p2party-js/src/handlers/messageChunkCrypto";
-import { parseChunkFrameHeader } from "~/Desktop/@p2party/p2party-js/src/handlers/chunkFrame";
+} from "../../../src/handlers/messageChunkCrypto";
+import { parseChunkFrameHeader } from "../../../src/handlers/chunkFrame";
 import {
   getMerkleRoot,
   getMerkleProof,
-} from "~/Desktop/@p2party/p2party-js/src/cryptography/merkle";
-import { hashMerkleLeafWasm } from "~/Desktop/@p2party/p2party-js/src/utils/leafHash";
+} from "../../../src/cryptography/merkle";
+import { hashMerkleLeafWasm } from "../../../src/utils/leafHash";
 import {
   compileChannelMessageLabel,
   decompileChannelMessageLabel,
-} from "~/Desktop/@p2party/p2party-js/src/utils/channelLabel";
+} from "../../../src/utils/channelLabel";
 
 const FRAME_TYPE_CHUNK = 2;
 const b64e = (u: Uint8Array): string => btoa(String.fromCharCode(...u));

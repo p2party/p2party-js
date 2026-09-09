@@ -1,4 +1,4 @@
-import { isUUID } from "class-validator";
+import { isUUID } from "./formatValidation";
 
 import { setChannel, setPeer } from "../reducers/roomSlice";
 import { isCanonicalEd25519Identity } from "./identityRole";

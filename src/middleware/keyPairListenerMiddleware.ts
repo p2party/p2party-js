@@ -1,5 +1,5 @@
 import { createListenerMiddleware, isAnyOf } from "@reduxjs/toolkit";
-import { isUUID, isHexadecimal } from "class-validator";
+import { isUUID, isHexadecimal } from "../utils/formatValidation";
 
 import {
   setKeyPair,

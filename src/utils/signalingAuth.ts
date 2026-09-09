@@ -1,4 +1,4 @@
-import { isUUID } from "class-validator";
+import { isUUID } from "./formatValidation";
 
 import { isProtocolVersionCompatible } from "./protocolVersion";
 

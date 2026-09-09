@@ -115,8 +115,9 @@ import os from "node:os";
 import { desyncProbeBudget, lateI4Problem } from "./desync-probe-budget.mjs";
 import { STATE_INVARIANTS, transportFingerprintAgreement, endInvariantState, invariantProblems, diagnosticProblems } from "./desync-verdict.mjs";
 
-process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
-const pw = await import("~/Desktop/@p2party/p2party.com/node_modules/playwright-core/index.js");
+if (process.platform === "darwin")
+  process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
+const pw = await import("../../../../p2party.com/node_modules/playwright-core/index.js");
 const { chromium } = pw.default ?? pw;
 
 // ---------------------------------------------------------------- args

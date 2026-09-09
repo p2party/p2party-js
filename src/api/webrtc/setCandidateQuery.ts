@@ -20,7 +20,6 @@ import type {
   IRTCIceCandidate,
 } from "./interfaces";
 import type { State } from "../../store";
-// import { isUUID } from "class-validator";
 
 export interface RTCSetCandidateParamsExtention extends RTCSetCandidateParams {
   peerConnections: IRTCPeerConnection[];

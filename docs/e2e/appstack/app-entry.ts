@@ -5,9 +5,9 @@ import {
   setWasmSourceUrl,
   DEFAULT_ROOM_POLICY_V1,
   canonicalizeRoomPolicyV1,
-} from "~/Desktop/@p2party/p2party-js/src/index";
-import { setChannel } from "~/Desktop/@p2party/p2party-js/src/reducers/roomSlice";
-import type { RoomPolicyV1 } from "~/Desktop/@p2party/p2party-js/src/roomPolicy";
+} from "../../../src/index";
+import { setChannel } from "../../../src/reducers/roomSlice";
+import type { RoomPolicyV1 } from "../../../src/roomPolicy";
 
 // Loopback WebRTC: host candidates suffice, no STUN/TURN reachability needed.
 const LOOPBACK_RTC: RTCConfiguration = { iceServers: [], iceCandidatePoolSize: 2 };

@@ -1,7 +1,8 @@
 // Standalone ICE sanity probe: two contexts, manual SDP/ICE exchange, no SDK.
 import http from "node:http"; import { readFileSync } from "node:fs"; import path from "node:path"; import os from "node:os"; import { fileURLToPath } from "node:url";
-process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
-const { chromium } = (await import("~/Desktop/@p2party/p2party.com/node_modules/playwright-core/index.js")).default;
+if (process.platform === "darwin")
+  process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(os.homedir(), "Library/Caches/ms-playwright");
+const { chromium } = (await import("../../../../p2party.com/node_modules/playwright-core/index.js")).default;
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const page = process.argv[2] ?? "plain.html";
 const server = http.createServer((req, res) => { const n = req.url === "/" ? "/plain.html" : req.url.split("?")[0]; try { res.writeHead(200, { "content-type": n.endsWith(".js") ? "text/javascript" : n.endsWith(".wasm") ? "application/wasm" : "text/html" }); res.end(readFileSync(path.join(dir, n))); } catch { res.writeHead(404); res.end(); } });

@@ -11,10 +11,11 @@ import { fileURLToPath } from "node:url";
 import { diagnosticProblems } from "./desync-verdict.mjs";
 
 export const dir = path.dirname(fileURLToPath(import.meta.url));
-process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(
-  os.homedir(),
-  "Library/Caches/ms-playwright",
-);
+if (process.platform === "darwin")
+  process.env.PLAYWRIGHT_BROWSERS_PATH ??= path.join(
+    os.homedir(),
+    "Library/Caches/ms-playwright",
+  );
 const playwright = await import(
   new URL(
     "../../../../p2party.com/node_modules/playwright-core/index.js",

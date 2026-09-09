@@ -9,7 +9,8 @@
 Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC
 room mesh.
 
-Apache-2.0 · [LICENSE.md](LICENSE.md)
+Apache-2.0 · [License](LICENSE.md) · [Getting started](docs/getting-started.md) ·
+[Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)
 
 > Status: protocol v4 is an intentional wire break — v3 peers and persisted v3
 > crypto rows are not resumed. The current code has not completed an
@@ -794,7 +795,7 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.9` is a local release candidate.** This work does not publish npm
+> **`0.14.10` is a local release candidate.** This work does not publish npm
 > packages or CDN assets. The snippet names the candidate's intended release
 > path; use the generated local bundle until that version is published.
 
@@ -809,7 +810,7 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.9/p2party.min.js"
+  src="https://cdn.p2party.com/@0.14.10/p2party.min.js"
   integrity="sha384-HvHlNJJ4/jLkQ/WdLqUgbzDx0u4nmzae9iuPsp3D5omK3HmgjAXRfHXuT2v9eXpb"
   crossorigin="anonymous"
 ></script>

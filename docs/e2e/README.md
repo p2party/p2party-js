@@ -538,3 +538,205 @@ It is the one arm of this matrix that misses the 15 s convergence bar above.
 ## `frontend-audit-report.md`
 
 The synthesized multi-agent UI/UX + v3/v4-wiring audit of `p2party.com`.
+
+
+## Desync follow-ups (2026-09-08, SDK 0.14.9)
+
+SDK **0.14.9** with server **0.1.3** passed the four follow-up acceptance checks
+on September 8–9, 2026: all nine new browser cases, the scoped regression
+selection, and both actual site/server tests. The isolated production SDK suite
+passed **1,771 tests / 24,568 assertions**. The validated package SHA-256 is
+`61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e`.
+
+This section records the follow-ups implemented after the 0.14.8 report above.
+The historical report and
+[its machine-readable results](desync-results-2026-09-08.json) are preserved;
+the earlier list of deferred follow-ups describes that release. The new
+[evidence ledger](desync-followup-results-2026-09-08.json) separates valid
+negative controls, exploratory results, excluded runs and final acceptance. No
+exploratory pass is counted as a final release result.
+
+| Follow-up                  | Implemented behavior                                                                                                                                                                              | Final browser evidence required                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| C6                         | Pending real scheduled work defers local PQ healing; an incoming epoch change retires the old producer and resumes under the new epoch.                                                           | Local and incoming due-healing overlap, actual epoch advancement and byte-exact payloads.                                               |
+| C9/C11                     | Correlated roster snapshots keep eligible membership separate from live transports; bounded per-member repair and trailing redial recover a missing edge while healthy siblings remain connected. | Three peers, A-C interruption plus a 12-second signaling blackhole, unchanged healthy A-B/B-C edges.                                    |
+| C10                        | A fenced durable outbox retains the original staged payload across reload or exhausted in-memory retries, with bounded storage and cancellation/expiry cleanup.                                   | Immediate and scheduled reload, interruption longer than the original attempt budget, cancellation, and reload to an archived receiver. |
+| Selective scheduled resume | Authenticated chunk receipts skip acknowledged nonzero indices; a single index-zero completion probe remains permitted.                                                                           | Compare actual emitted real-cell indices with the pre-fault ACK set, then verify the original payload and Merkle root.                  |
+
+The first SDK **0.14.9** candidate with server **0.1.3** was superseded after
+its 70-second scheduled-cadence regression failed. Its package SHA-256 was
+`6bc7301e880b844d855bcdbdcad926566d34e01abbaefe1a4225874e3fa27fb5`. The package,
+browser bundle, worker, production WASM and input manifest are preserved under
+`runs/followups-2026-09-08/receipt-delay-candidate/`, with hashes in the ledger.
+Production WASM is 211,350 bytes, SHA-256
+`7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76`.
+
+That candidate's isolated SDK suite at `0f13382` (runtime source `a9de0ef`)
+passed **1,766 tests / 24,546 assertions**, with zero failures across 183 files.
+The command exit and summary were recorded; a complete raw test log was not
+archived. The earlier active-checkout count of 1,783 tests includes preserved,
+unrelated prototype changes and is not the production package count. All seven
+package checks passed for the superseded artifact; these results do not replace
+final validation of the corrected package.
+
+Commit `78067ce` fixes the receipt ordering. Its focused tests passed **94 tests
+/ 503 assertions**; the final owned-file run after test-only type narrowing
+passed **27 / 216**, overlapping the focused count. Source/test type checks and
+scoped lint/format checks passed. Real-scheduler virtual 70-second cadence
+regressions failed before the fix for F1, F16 and mixed-root ordering, then
+passed after it. The corrected SDK 0.14.9 package at `78067ce` passed all seven
+release checks, SHA-256
+`61a719a28652704d1e6d599c9eed0cf394e1805d1a344e0e71320eb2423a917e`. Its frozen
+browser bundle hash is
+`a555f9070c8478f919e3eec55db20fc139960605b981fa0c2db9bd43abecd642`; the worker
+and production WASM match the preserved prior-candidate assets. The ledger
+records the complete new input manifest. The post-fix isolated SDK suite passed
+**1,771 tests / 24,568 assertions** with zero failures across 183 files in 27.80
+seconds. This is a reported command result; no raw log path was supplied. Both
+final site/server browser checks passed.
+
+The valid old-code browser controls use archived SDK 0.14.8. In
+`mesh-recovery-before-3`, A-C never recovered through 71.826 seconds after the
+fault, while all 143 samples retained healthy A-B and B-C edges. In
+`sender-recovery-before-reload-immediate-1`, the original 8 MiB transfer
+remained at 222,884 received bytes after sender reload and a 60-second
+completion window. Both drivers correctly failed with unchanged inputs and no
+page errors. An isolated leading-only debounce mutation also failed the trailing
+redial regression: calls `[1]` instead of `[1, 3]`. That mutation used a copied
+implementation and did not change production source.
+
+The exploratory results established the following behavior before the final
+release inputs were frozen:
+
+| Run                                                                   | Observed result                                                                                                                                                                                       |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mesh-recovery-after-1`                                               | A-C recovered 3.259 seconds after the 12-second blackhole cleared; both healthy sibling edges survived all 142 samples.                                                                               |
+| `sender-recovery-after-reload-immediate-1`                            | Original 8 MiB payload completed byte-exactly 35.135 seconds after reload began; pending outbox entry cleared.                                                                                        |
+| `sender-recovery-after-reload-scheduled-1`                            | Original 0.5 MiB scheduled payload completed byte-exactly in 30.735 seconds; pending entry cleared.                                                                                                   |
+| `sender-recovery-after-cancel-immediate-1`                            | Public cancellation removed both the pending sender transfer and the receiver partial.                                                                                                                |
+| `sender-recovery-after-mixed-immediate-1` / `after-mixed-scheduled-1` | Current sender reloaded against an archived 0.14.8 receiver; original immediate/scheduled payloads completed byte-exactly in 36.269 / 30.765 seconds.                                                 |
+| `scheduled-selective-after-1`                                         | ACK set `[0,1,2,3]`; resumed real indices `[0,4,5,6,7,8,9]`: six missing chunks plus one completion probe, with final byte-exact delivery.                                                            |
+| `scheduled-pq-after-1`                                                | Local due healing deferred until real work drained; an incoming exchange advanced epoch 1 to 2 during pending work on the same PC and cover runtime, then completed the 0.5 MiB payload byte-exactly. |
+
+These exploratory runs passed with unchanged inputs and no page errors.
+`mesh-recovery-before-1` and `before-2` are excluded fixture startup/ordering
+failures. `sender-recovery-after-long-loss-immediate-1` is also **excluded**: it
+delivered after 139.902 seconds, including a 100-second interruption, but
+`inputsUnchanged=false` because harness files changed during the run. The failed
+result remains recorded and cannot satisfy final acceptance.
+
+The following three runs passed against the **superseded candidate**. Their
+filenames contain `final`, but they do not count toward final acceptance of the
+receipt fix:
+
+| Prior-candidate artifact                                      | Observed result                                                                                                                                                                                                                                               |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sender-recovery-sender-recovery-final-long-loss-immediate-1` | PASS: 100-second pair signaling blackhole; original attempt rejected after 33.065 seconds while its durable manifest remained pending; the original 8 MiB payload and Merkle root recovered automatically, byte-exact, 139.949 seconds after the fault began. |
+| `mesh-recovery-final-1`                                       | PASS: A-C recovered 3.242 seconds after the 12-second blackhole cleared; healthy A-B and B-C transports stayed authenticated and unchanged through all 143 samples.                                                                                           |
+| `sender-recovery-final-reload-immediate-1`                    | PASS: original 8 MiB payload and root recovered automatically, byte-exact, 35.069 seconds after sender reload began.                                                                                                                                          |
+
+All three used unchanged inputs and passed final authentication, reciprocal
+fingerprints and cleanup diagnostics; the sender runs cleared their outbox
+entries. The long-loss clock includes the 100-second interruption and does not
+establish a general latency bound. Its duplicated filename prefix is retained
+exactly as generated.
+
+**Retained candidate failure:** `baseline-initiator-2019`, matrix arm 19, failed
+both baseline directions at 173.281 seconds with a 173.282-second budget and
+70-second cover cadence. Authentication and reciprocal fingerprints were
+healthy; terminal receipts were delayed behind queued chunk-ACK work, leaving
+both send mutations pending. The 300-second observation phase never started.
+Commit `78067ce` makes a terminal receipt supersede unsent chunk-ACK batches for
+the same root, allowing it into the first reverse receipt job. Cover cadence,
+frame counts and harness budgets are unchanged.
+
+Matrix 2000 completed all 23 arms on the earlier candidate with unchanged
+inputs: **21 driver passes, the real arm 19 failure, and the expected arm 23
+old-server non-convergence**. The compatibility checker established the latter
+as a bounded residual: three rebuilds at the cap of three, one exhaustion event,
+at least 300.506 seconds observed after connect and 240.420 seconds after
+exhaustion. The underlying arm still has driver exit 1.
+
+All 23 prior raw-result hashes and their original package/input provenance are
+preserved in the ledger. Matrix 2100 passed all three affected scheduled arms
+with unchanged inputs and budgets: arm 18 I4 = 18.439 seconds, arm 19 I4 =
+140.005 seconds, and arm 20 I4 = 39.886 seconds. At 70-second cadence, arm 19's
+initial sends completed in 131.746 / 131.607 seconds under the same
+173.282-second budget; its observation window remained 300 seconds.
+
+The combined regression selection contains **22 driver passes and one bounded
+old-server residual** across all 23 arms. It retains unaffected arms 1–17 and
+21–23 with their prior-candidate provenance and replaces only arms 18–20 with
+the corrected-package runs. This is a scoped selection, not a claim that all 23
+arms ran on the new package. The genuine earlier arm 19 failure remains
+recorded. Corrected-package follow-up and site/server results are listed below.
+
+Two site fixture startup failures are excluded: the September 8 attempt was
+blocked from binding its loopback listener, and the September 9 05:58 UTC
+attempt's owned server exited before readiness (the reported cause was local
+Postgres SSL configuration). Neither executed a browser scenario or fetched
+WASM; neither is counted as a product failure or an acceptance pass. No failed,
+invalid or old-server bounded non-convergence result is relabeled as a
+convergence pass.
+
+<!-- final-followup-cases:start -->
+
+Corrected-package follow-up cases: **9 / 9 passed**. Each recorded case matches
+the frozen candidate, has no page errors and passes final authentication,
+reciprocal fingerprints and cleanup diagnostics.
+
+| Corrected-package artifact                    | Result                                                                                                                                        |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mesh-recovery-final-2`                       | PASS: A-C recovered 3.270s after blackhole clearance; healthy siblings unchanged in 142 samples.                                              |
+| `scheduled-pq-final-1`                        | PASS: Local due healing deferred; incoming epoch 1 to 2 overlapped real work on the same PC/runtime; both payloads byte-exact.                |
+| `scheduled-selective-final-1`                 | PASS: ACKed [0, 1, 2, 3]; resumed [0, 4, 5, 6, 7, 8, 9]: six missing plus one completion probe; byte-exact.                                   |
+| `sender-recovery-final-cancel-immediate-1`    | PASS: Public cancellation removed the sender pending transfer and receiver partial.                                                           |
+| `sender-recovery-final-mixed-immediate-1`     | PASS: Original 8 MiB payload/root recovered byte-exactly in 34.772s; outbox cleared. Archived SDK0.14.8 receiver.                             |
+| `sender-recovery-final-reload-scheduled-1`    | PASS: Original 0.5 MiB payload/root recovered byte-exactly in 30.657s; outbox cleared.                                                        |
+| `sender-recovery-final-mixed-scheduled-1`     | PASS: Original 0.5 MiB payload/root recovered byte-exactly in 30.668s; outbox cleared. Archived SDK0.14.8 receiver.                           |
+| `sender-recovery-final-reload-immediate-2`    | PASS: Original 8 MiB payload/root recovered byte-exactly in 34.591s; outbox cleared.                                                          |
+| `sender-recovery-final-long-loss-immediate-2` | PASS: Original 8 MiB payload/root recovered byte-exactly in 140.127s; outbox cleared. Includes the 100s fault and exhausted original attempt. |
+
+<!-- final-followup-cases:end -->
+
+The built site's pending-transfer UI passed against the real signaling server:
+`p2party.com/logs/desync/pending-ui-2026-09-09T06-03-40.989Z.json` records the
+corrected SDK package hash and server **0.1.3 / protocol 4**. A partial 1 MiB
+transfer remained visible after sender reload; automatic resume and a user retry
+emitted new real frames for the same transfer/root. While that manual retry was
+still active, navigation away and back preserved the enabled Cancel button;
+cancellation removed both the sender outbox entry and receiver partial. This
+case deliberately retains a frame fault and tests lifecycle behavior, not
+completed delivery. Both peers fetched the versioned WASM URL successfully;
+there were zero page errors. The local public WASM hash also matches the release
+artifact. The earlier 06:01 UTC UI pass is retained but the stricter 06:03 UTC
+report supplies final evidence.
+
+The existing site-stack regression also passed:
+`p2party.com/logs/desync/2026-09-09T06-30-31.903Z/result.json` records the same
+SDK package/WASM hashes and real server 0.1.3 before and after restart. It
+verified UI chat, remembered-consent reload (0.890 seconds), automatic recovery
+after server restart (3.547 seconds), and second-tab replacement (0.683 seconds)
+with the old owner closed by code 1008. Wrong-PIN observation lasted 120.945
+seconds across 120 samples with exactly one PC created on each side; an explicit
+corrected-PIN retry then authenticated and exchanged a message. There were no
+captured errors and all 60 observed WASM responses returned 200. These local
+timings describe the recorded runs and are not general bounds.
+
+The new drivers are [mesh-recovery.mjs](desync/mesh-recovery.mjs),
+[sender-recovery.mjs](desync/sender-recovery.mjs) and
+[scheduled-recovery.mjs](desync/scheduled-recovery.mjs). Their `--run` value
+names the output artifact. The sender driver selects `--fault=reload`,
+`--fault=long-loss` or `--fault=cancel`, and `--mode=immediate` or
+`--mode=scheduled`. `--legacy=receiver` archives only B; `--before=1` archives
+both peers. The scheduled driver selects `--case=pq` or `--case=selective`.
+
+The efficiency evidence concerns **real resumed cells**, bounded by missing
+chunks plus one completion probe. Fixed cover traffic remains fixed; full roster
+snapshots, staged-index scans and total system costs have no general sublinear
+guarantee. Advanced roster behavior requires server 0.1.3, and bounded retries
+do not make an indefinitely offline member recover. These are
+macOS/headless-Chromium loopback checks; WAN/mobile behavior and a cryptographic
+audit remain outside this evidence. Blind rendezvous, PoW, passkeys and
+Sybil-resistance work are outside this release. Nothing in this report records a
+package publication or deployment.

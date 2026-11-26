@@ -25,9 +25,12 @@
  *   the surviving store after an omission would be an active cross-store
  *   tagging channel. `#takeDue` holds the one bound on lateness.
  * - **The application never holds the schedule.** Fresh operations are
- *   handed to `onOperations` one call at a time, outside every scheduled
- *   event, so a callback that is slow, throws or never returns moves no
- *   request (`#deliver`).
+ *   handed to `onOperations` one call at a time and never awaited by a
+ *   scheduled event, so a callback that is slow, throws or never returns
+ *   moves no request (`#deliver`).
+ * - **A suspension is caught up, not replayed.** Reads more than a window
+ *   late are read one window at a time per store, in the gaps of the
+ *   schedule (`#catchUp`); uploads that late are not sent.
  * - **The two stores never receive the same bytes.** Each publication is
  *   sealed separately under that store's `carrierContextId` with a fresh
  *   24-byte nonce, so one store cannot recognize the other's copy of an
@@ -281,6 +284,12 @@ interface HeldLease {
   readonly secretKey: Uint8Array;
 }
 
+/** One window a store still owes a read of, and which attempt is next. */
+interface CatchUpRead {
+  readonly window: bigint;
+  readonly attempt: 1 | 2;
+}
+
 /** What one store keeps. Every store runs the same events at the same
  * instants, so the schedule itself is the runtime's, not a store's. */
 interface StoreSchedulerState {
@@ -288,17 +297,36 @@ interface StoreSchedulerState {
   /** Leases by the ingress window they admit, keyed by `String(window)`. */
   readonly leases: Map<string, HeldLease>;
   lastScanStatus: WindowScan["status"] | null;
+  /** Reads released more than a delivery window late, newest first; a
+   * retry goes to the back. `#catchUp` works through them one at a time. */
+  readonly catchUp: CatchUpRead[];
+  catchingUp: boolean;
+  /** Scheduled handlers in flight for this store. Catch-up waits for zero. */
+  busy: number;
+  readonly idleWaiters: (() => void)[];
 }
 
 /** One window's union across the stores, built by their reads of it. */
 interface WindowRead {
   /** Stores whose read of this window has not settled yet. */
   pending: number;
+  /** Settled reads that came back `finalized`, and that failed. */
+  finalized: number;
+  failed: number;
   /** OperationId hex → the stores whose scan carried it. */
   readonly carriedBy: Map<string, Set<string>>;
   /** Operations this window's reads delivered for the first time. */
   readonly fresh: Map<string, OuterValidatedIdentifiedOperationV1>;
 }
+
+/** A read made on the schedule, a catch-up read that may still be retried,
+ * and a catch-up read that is the window's last chance at this store. */
+type ReadAttempt = "scheduled" | "catch-up-first" | "catch-up-last";
+
+/** A scan that came back with something this client can stand on: a
+ * finalized window, or one below the chain start that holds nothing. */
+const readSucceeded = (status: WindowScan["status"]): boolean =>
+  status === "finalized" || status === "out-of-range";
 
 interface OutboxEntry {
   /** The exact canonical bytes both stores carry, identical across carriers. */
@@ -387,9 +415,10 @@ export class CarrierRuntime {
 
   /** Keyed by `String(window)`. */
   readonly #windowReads = new Map<string, WindowRead>();
-  /** Each store's scan status per window (`readKey`), settled when the scan
-   * returns: what that window's witness event waits for. */
-  readonly #scanOutcomes = new Map<string, Promise<WindowScan["status"]>>();
+  /** Each store's scan status per window (`readKey`): `pending` from the
+   * moment the scan is issued until it answers. The witness event reads it
+   * at its own instant and waits for nothing. */
+  readonly #scanStatuses = new Map<string, WindowScan["status"] | "pending">();
 
   /** Operations waiting for the application callback to return. */
   readonly #undelivered: OuterValidatedIdentifiedOperationV1[] = [];
@@ -450,6 +479,10 @@ export class CarrierRuntime {
       store,
       leases: new Map<string, HeldLease>(),
       lastScanStatus: null,
+      catchUp: [],
+      catchingUp: false,
+      busy: 0,
+      idleWaiters: [],
     }));
   }
 
@@ -511,6 +544,9 @@ export class CarrierRuntime {
     for (const state of this.#schedulers) {
       for (const held of state.leases.values()) held.secretKey.fill(0);
       state.leases.clear();
+      // A catch-up loop waiting for the store to go idle ends here.
+      state.catchUp.length = 0;
+      for (const wake of state.idleWaiters.splice(0)) wake();
     }
   }
 
@@ -757,44 +793,75 @@ export class CarrierRuntime {
    * The next event is armed before any work runs, so a slow store shifts
    * nothing: its own next request still leaves on the profile's grid. Every
    * store's events are released together, in schedule order and then store
-   * order, so a witness never runs ahead of the reads it reports on.
+   * order, so a witness always runs after the reads it reports on.
    */
   #fire(): void {
     this.#handle = null;
     if (!this.#running) return;
-    const due = this.#takeDue(this.#clock.nowMs());
+    const { due, catchUp } = this.#takeDue(this.#clock.nowMs());
     this.#arm();
     for (const event of due)
       for (const state of this.#schedulers)
-        this.#spawn(this.#runEvent(state, event));
+        this.#spawnScheduled(state, this.#runEvent(state, event));
+    for (const state of this.#schedulers) {
+      // Newest first, and ahead of whatever an earlier resume left queued:
+      // the windows nearest the present are the ones the room is acting on
+      // now, and if the catch-up is cut short it is the oldest that go, the
+      // same ones the reach gives up first.
+      state.catchUp.unshift(
+        ...[...catchUp]
+          .reverse()
+          .map((window): CatchUpRead => ({ window, attempt: 1 })),
+      );
+      if (!state.catchingUp && state.catchUp.length > 0) {
+        state.catchingUp = true;
+        this.#spawn(this.#catchUp(state));
+      }
+    }
+  }
+
+  /** Count a scheduled handler against its store until it settles, so
+   * catch-up can wait for the store to have nothing scheduled in flight. */
+  #spawnScheduled(state: StoreSchedulerState, work: Promise<void>): void {
+    state.busy += 1;
+    this.#spawn(
+      work.finally(() => {
+        state.busy -= 1;
+        if (state.busy === 0)
+          for (const wake of state.idleWaiters.splice(0)) wake();
+      }),
+    );
   }
 
   /**
    * Every event due at `nowMs`, in schedule order, including the ones a late
-   * timer held back.
+   * timer held back, and the windows whose reads are to be caught up.
    *
    * An engine delivers a timer late whenever its main thread is busy, and a
    * background tab gets its timers clamped to whole seconds. Dropping what a
    * late timer covered would change how many requests leave in the window —
    * the shape this schedule exists to fix — and would drop reads, which
-   * nothing re-makes. So a late event fires late. The store may refuse a late
-   * append; that answer is the store's, and the entry stays queued for its
-   * next slot.
+   * nothing re-makes. So an event at most one delivery window late fires
+   * late. The store may refuse a late append; that answer is the store's, and
+   * the entry stays queued for its next slot.
    *
-   * Two bounds stop a page that was suspended for minutes from coming back as
-   * a burst, and both are reported as `missed`:
+   * Further behind than that, the page was suspended or frozen, and firing
+   * everything at once would come back as a burst. So:
    *
    * - An upload event (token, allocation, append, witness) more than one
-   *   delivery window late is not sent. The window it was for is over: the
-   *   store would refuse an allocation for a window already running and an
-   *   append to a window already finalized.
+   *   delivery window late is not sent, and is reported `missed`. The window
+   *   it was for is over: the store would refuse an allocation for a window
+   *   already running and an append to a window already finalized.
+   * - A read more than one delivery window late is not dropped and not fired
+   *   either: its window goes to each store's catch-up queue (`#catchUp`),
+   *   which reads one window at a time.
    * - The schedule never reaches further back than `MAX_READ_WINDOWS`
-   *   windows; older windows are given up whole.
-   *
-   * Inside that reach a read is always made, however late: a window not read
-   * is a window whose operations this client never sees.
+   *   windows; older windows are given up whole and reported `missed`.
    */
-  #takeDue(nowMs: bigint): ScheduledEvent[] {
+  #takeDue(nowMs: bigint): {
+    readonly due: ScheduledEvent[];
+    readonly catchUp: bigint[];
+  } {
     const deliveryWindowMs = this.#profile.deliveryWindowMs;
     const oldest =
       ingressWindow(deliveryWindowMs, nowMs) - BigInt(MAX_READ_WINDOWS);
@@ -812,17 +879,17 @@ export class CarrierRuntime {
     }
 
     const due: ScheduledEvent[] = [];
+    const catchUp: bigint[] = [];
     const tooLate = new Map<bigint, number>();
     for (let released = 0; released < MAX_EVENTS_PER_TIMER; released += 1) {
       const event = this.#peek();
       if (event.timeMs > nowMs) break;
       this.#index += 1;
-      if (
-        event.kindByte === EVENT_READ ||
-        nowMs - event.timeMs <= deliveryWindowMs
-      )
-        due.push(event);
-      else tooLate.set(event.window, (tooLate.get(event.window) ?? 0) + 1);
+      if (nowMs - event.timeMs <= deliveryWindowMs) due.push(event);
+      else if (event.kindByte === EVENT_READ) {
+        // `publicReadLagWindows` is 1, as in `#runEvent`.
+        if (event.window > 0n) catchUp.push(event.window - 1n);
+      } else tooLate.set(event.window, (tooLate.get(event.window) ?? 0) + 1);
     }
     for (const [window, count] of tooLate)
       for (const state of this.#schedulers)
@@ -834,7 +901,76 @@ export class CarrierRuntime {
           detail:
             "scheduled uploads more than one delivery window late were not sent",
         });
-    return due;
+    return { due, catchUp };
+  }
+
+  /**
+   * Read, one window at a time, what this store owes reads of.
+   *
+   * One catch-up scan is in flight per store at most, and none starts while
+   * the store has a scheduled handler in flight: catch-up runs in the gaps of
+   * the schedule and never ahead of it, so the current window's requests
+   * share the store's connections with at most one catch-up scan. A catch-up
+   * read that fails is retried once, after the rest of the queue; if it fails
+   * again, or the window has left the catch-up reach by the time its turn
+   * comes, the window is reported `missed` for that store.
+   */
+  async #catchUp(state: StoreSchedulerState): Promise<void> {
+    try {
+      while (this.#running) {
+        while (state.busy > 0 && this.#running)
+          await new Promise<void>((resolve) => state.idleWaiters.push(resolve));
+        if (!this.#running) return;
+        const next = state.catchUp.shift();
+        if (next === undefined) return;
+
+        // The same reach as `#takeDue`'s, counted in read windows, which lag
+        // the schedule's windows by `publicReadLagWindows`.
+        const reach = this.#currentWindow() - BigInt(MAX_READ_WINDOWS) - 1n;
+        if (next.window < reach) {
+          this.#emit({
+            kind: "missed",
+            storeIdHex: state.store.storeIdHex,
+            window: next.window,
+            detail:
+              "a caught-up read left the catch-up reach before its turn; this window was not read at this store",
+          });
+          this.#abandonRead(next.window);
+          continue;
+        }
+
+        const status = await this.#read(
+          state,
+          next.window,
+          next.attempt === 1 ? "catch-up-first" : "catch-up-last",
+        );
+        if (readSucceeded(status) || next.attempt === 2) {
+          if (!readSucceeded(status))
+            this.#emit({
+              kind: "missed",
+              storeIdHex: state.store.storeIdHex,
+              window: next.window,
+              detail: `a catch-up read failed twice (${status}); this window was not read at this store`,
+            });
+          continue;
+        }
+        if (state.store.inert) {
+          // A store proven dishonest is not asked again.
+          this.#emit({
+            kind: "missed",
+            storeIdHex: state.store.storeIdHex,
+            window: next.window,
+            detail:
+              "a catch-up read failed at an inert store and is not retried; this window was not read at this store",
+          });
+          this.#abandonRead(next.window);
+          continue;
+        }
+        state.catchUp.push({ window: next.window, attempt: 2 });
+      }
+    } finally {
+      state.catchingUp = false;
+    }
   }
 
   async #runEvent(
@@ -853,7 +989,8 @@ export class CarrierRuntime {
         // `publicReadLagWindows` is 1; a window below the first has no
         // predecessor to read.
         if (event.window === 0n) return;
-        return this.#read(state, event.window - 1n);
+        await this.#read(state, event.window - 1n, "scheduled");
+        return;
       case EVENT_WITNESS:
         if (event.window === 0n) return;
         return this.#witness(state, event.window - 1n);
@@ -1171,33 +1308,37 @@ export class CarrierRuntime {
   /**
    * One store's read of one window, folded into that window's union.
    *
-   * Each store's read event scans that store and no other, so what leaves for
-   * a store at its read instant is exactly its own fixed scan, whatever the
-   * other store is doing. The stores' reads of one window are released
-   * together and meet in `#windowReads`: an operation is delivered by
-   * whichever read opens it first and never again, and once every store's
-   * read has settled the union decides what to backfill.
+   * Each store's read scans that store and no other, so what leaves for a
+   * store at its read instant is exactly its own fixed scan, whatever the
+   * other store is doing. The stores' reads of one window meet in
+   * `#windowReads`: an operation is delivered by whichever read opens it
+   * first and never again, and once every store's read has settled the union
+   * decides what to backfill and whether the window was read at all.
    *
-   * Nothing marks a window read. Each store has one read event per window,
-   * so there is no second event to suppress, and a scan that fails leaves no
-   * record that would stop another read of that window. None is scheduled:
-   * a re-read would be six more requests in a later window.
+   * Nothing marks a window read. A scheduled read is made once and not
+   * retried: a re-read would be six more requests in a later window. A
+   * caught-up read may be retried once by `#catchUp`, so a first catch-up
+   * attempt that fails leaves its store's part of the union open.
    */
-  async #read(state: StoreSchedulerState, window: bigint): Promise<void> {
+  async #read(
+    state: StoreSchedulerState,
+    window: bigint,
+    attempt: ReadAttempt,
+  ): Promise<WindowScan["status"]> {
     const store = state.store;
+    const key = readKey(store.storeIdHex, window);
     const union = this.#windowRead(window);
+    let status: WindowScan["status"] = "unreachable";
+    this.#rememberScanStatus(key, "pending");
     try {
-      const scanning = store.scanWindow(window);
-      // What this window's witness event waits for: the scan alone, never the
-      // opening of its objects nor the application's handling of them.
-      this.#rememberScanOutcome(
-        readKey(store.storeIdHex, window),
-        scanning.then(
-          (scan) => scan.status,
-          () => "unreachable" as const,
-        ),
-      );
-      const scan = await scanning;
+      let scan: WindowScan;
+      try {
+        scan = await store.scanWindow(window);
+      } catch {
+        return status;
+      }
+      status = scan.status;
+      this.#rememberScanStatus(key, status);
       this.#count({ scans: 1 });
       state.lastScanStatus = scan.status;
       this.#emit({
@@ -1207,10 +1348,10 @@ export class CarrierRuntime {
         detail: scan.status,
         count: scan.objects.length,
       });
-      if (!this.#running) return;
+      if (!this.#running) return status;
 
       const observed = await this.#openObjects(store, window, scan.objects);
-      if (!this.#running) return;
+      if (!this.#running) return status;
       const fresh: OuterValidatedIdentifiedOperationV1[] = [];
       for (const candidate of observed) {
         const idHex = hexOf(candidate.operationId);
@@ -1223,29 +1364,58 @@ export class CarrierRuntime {
         fresh.push(candidate);
       }
       boundSet(this.#seen, MAX_SEEN_OPERATION_IDS);
-      if (fresh.length === 0) return;
-      this.#count({ operationsSeen: fresh.length });
-      this.#emit({
-        kind: "operations",
-        storeIdHex: store.storeIdHex,
-        window,
-        count: fresh.length,
-      });
-      this.#deliver(fresh);
-    } finally {
-      // Replication is this runtime's business and delivery the caller's, so
-      // the backfill depends on the scans alone and never waits for a caller.
-      union.pending -= 1;
-      if (union.pending === 0) {
-        this.#windowReads.delete(String(window));
-        if (this.#running)
-          this.#queueBackfills(
-            [...union.fresh.values()],
-            union.carriedBy,
-            window,
-          );
+      if (fresh.length > 0) {
+        this.#count({ operationsSeen: fresh.length });
+        this.#emit({
+          kind: "operations",
+          storeIdHex: store.storeIdHex,
+          window,
+          count: fresh.length,
+        });
+        this.#deliver(fresh);
       }
+      return status;
+    } finally {
+      if (this.#scanStatuses.get(key) === "pending")
+        this.#rememberScanStatus(key, status);
+      if (readSucceeded(status) || attempt !== "catch-up-first")
+        this.#settleRead(window, union, status);
     }
+  }
+
+  /** A store's read of `window` that will not be made after all. */
+  #abandonRead(window: bigint): void {
+    this.#settleRead(window, this.#windowRead(window), "unreachable");
+  }
+
+  /**
+   * One store's last word on `window`. When it is the last store's, the
+   * union is complete: backfill what only some stores carried, and report a
+   * window no store served — its operations were not seen by this client.
+   *
+   * Replication is this runtime's business and delivery the caller's, so the
+   * backfill depends on the scans alone and never waits for a caller.
+   */
+  #settleRead(
+    window: bigint,
+    union: WindowRead,
+    status: WindowScan["status"],
+  ): void {
+    if (status === "finalized") union.finalized += 1;
+    else if (status !== "out-of-range") union.failed += 1;
+    union.pending -= 1;
+    if (union.pending > 0) return;
+    const key = String(window);
+    if (this.#windowReads.get(key) === union) this.#windowReads.delete(key);
+    if (!this.#running) return;
+    if (union.finalized === 0 && union.failed > 0)
+      this.#emit({
+        kind: "missed",
+        window,
+        detail:
+          "no store served a finalized read of this window; its operations were not seen",
+      });
+    this.#queueBackfills([...union.fresh.values()], union.carriedBy, window);
   }
 
   /** The union of `window` across the stores, opened by its first read. */
@@ -1255,13 +1425,16 @@ export class CarrierRuntime {
     if (existing !== undefined) return existing;
     const created: WindowRead = {
       pending: this.#schedulers.length,
+      finalized: 0,
+      failed: 0,
       carriedBy: new Map<string, Set<string>>(),
       fresh: new Map<string, OuterValidatedIdentifiedOperationV1>(),
     };
     this.#windowReads.set(key, created);
-    // Every store reads every window it is released for, so an entry only
-    // lingers when the runtime stopped mid-read; the oldest goes first.
-    while (this.#windowReads.size > MAX_READ_WINDOWS) {
+    // Every store settles every window it reads, so an entry only lingers
+    // when the runtime stopped mid-read; a catch-up can hold one open per
+    // window of the reach, hence the room. The oldest goes first.
+    while (this.#windowReads.size > 2 * MAX_READ_WINDOWS) {
       const oldest = this.#windowReads.keys().next();
       if (oldest.done) break;
       this.#windowReads.delete(oldest.value);
@@ -1269,24 +1442,27 @@ export class CarrierRuntime {
     return created;
   }
 
-  #rememberScanOutcome(
+  #rememberScanStatus(
     key: string,
-    outcome: Promise<WindowScan["status"]>,
+    status: WindowScan["status"] | "pending",
   ): void {
-    this.#scanOutcomes.set(key, outcome);
+    this.#scanStatuses.delete(key);
+    this.#scanStatuses.set(key, status);
     while (
-      this.#scanOutcomes.size >
+      this.#scanStatuses.size >
       MAX_READ_WINDOWS * this.#schedulers.length
     ) {
-      const oldest = this.#scanOutcomes.keys().next();
+      const oldest = this.#scanStatuses.keys().next();
       if (oldest.done) break;
-      this.#scanOutcomes.delete(oldest.value);
+      this.#scanStatuses.delete(oldest.value);
     }
   }
 
   /**
    * Hand fresh operations to the application: one call at a time, in the
-   * order they were read, and never from inside a scheduled event.
+   * order they were read, and never awaited by a scheduled event. (The call
+   * itself can start inside the read that found the operations; what that
+   * read does not do is wait for it.)
    *
    * In the composition the callback is `PairDriver.ingest`, which is not
    * reentrant and can wait for ICE gathering longer than a delivery window.
@@ -1514,9 +1690,15 @@ export class CarrierRuntime {
    * cross-store status oracle: the pair about a store is sent only when this
    * client's scan of that store came back `finalized` and neither store is
    * inert. When it is sent, it is sent at the schedule's instant, whatever the
-   * read found and however long the application took with it: the only thing
-   * waited for is the witnessed store's scan, which the read released at its
-   * own fixed instant.
+   * read found and however long the application took with it.
+   *
+   * Nothing is waited for. What decides is each witnessed store's scan status
+   * as it stands at this instant: a scan that has not answered yet means the
+   * pair about that store is skipped for this window and reported `missed`.
+   * Waiting would let the witnessed store choose when this client's requests
+   * reach the other store, by answering late: a cross-store timing channel.
+   * Skipping leaves an absence the other store can see, which is the same
+   * conditional-presence bit design doc §3a item 14 already discloses.
    *
    * A record that names a store this client verified, carrying a different
    * checkpoint hash than that store showed this client, is a
@@ -1527,14 +1709,28 @@ export class CarrierRuntime {
    * re-fetch, or a second observer, can turn a hint into evidence.
    */
   async #witness(carrier: StoreSchedulerState, window: bigint): Promise<void> {
-    for (const witnessed of this.#schedulers) {
-      if (witnessed === carrier) continue;
-      const outcome = this.#scanOutcomes.get(
-        readKey(witnessed.store.storeIdHex, window),
-      );
+    // Every status is taken now, before the first request goes out, so a
+    // scan that answers while this pair is in flight changes nothing.
+    const settled = this.#schedulers
+      .filter((witnessed) => witnessed !== carrier)
+      .map((witnessed) => ({
+        witnessed,
+        status: this.#scanStatuses.get(
+          readKey(witnessed.store.storeIdHex, window),
+        ),
+      }));
+    for (const { witnessed, status } of settled) {
       // A runtime that started after this window's read has nothing to say.
-      if (outcome === undefined) continue;
-      const status = await outcome;
+      if (status === undefined) continue;
+      if (status === "pending") {
+        this.#emit({
+          kind: "missed",
+          storeIdHex: carrier.store.storeIdHex,
+          window,
+          detail: `the witness pair about store ${witnessed.store.storeIdHex} was not sent: its scan of this window had not answered by the witness instant`,
+        });
+        continue;
+      }
       if (!this.#running) return;
       if (
         status !== "finalized" ||

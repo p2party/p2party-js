@@ -194,7 +194,9 @@ and latency-matched to one, and it opens for nobody.
 plus a conditional pair that is either both or neither.** Counted from
 `carrierRuntime.ts` —
 `#eventsForWindow` for the schedule, `storeClient.scanWindow` for what one read
-expands into. The thirteen go out whether the client is idle or mid-rendezvous:
+expands into. The thirteen go out whether the client is idle or mid-rendezvous,
+while its timers fire within one delivery window of their instants; what late
+timers and suspensions change is the last item of "2–15, in brief" below:
 
 | Count | Request | Offset in the window |
 | ---: | --- | --- |
@@ -213,7 +215,10 @@ did not. The descriptor GET is once per store per session, not per window.
 The **conditional** pair is a witness POST and a witness GET, and it is the only
 part of this trace that is not fixed. A store receives both or neither — never
 one — and it receives them exactly when the *other* store's scan of that window
-came back `finalized` and neither store is inert. Both stores healthy: each gets
+had come back `finalized` by the witness instant (2600 ms into the next window)
+and neither store is inert. A scan still out at that instant is not waited for:
+the pair is skipped for the window, so a slow store can take the pair away from
+the other store but cannot move it in time. Both stores healthy: each gets
 the pair. One store's scan degrades: the pair to the **healthy** store
 disappears, so its absence is a direct readout of the other store's behaviour
 towards this client, sitting in the healthy store's own request log. Either
@@ -229,17 +234,20 @@ cannot shift its own following request off the grid. A timer the engine
 delivers late (a busy main thread, a background tab's one-second clamp)
 releases every event it held back at the late instant, so the count per window
 does not change; the store may refuse an append that arrives after
-finalization. Uploads more than one delivery window late are not sent, reads
-are made however late within a 64-window reach, and both bounds are reported as
-`missed` (`#takeDue`). There is no same-window retry, because retrying at the
-surviving store after an omission would be an active cross-store tagging
-channel. The application callback is called one batch at a time and never
-from inside a scheduled event, so a slow, throwing or hung callback moves no
-request. Every request also carries a deadline of one delivery window
-(`storeClient.ts`, `requestDeadlineMs`) — the same value on every route,
-because the profile sets no per-route budget for appends, chunks, or
-checkpoints to derive one from, and it exists because the witness event waits
-for the other store's scan, which an unbounded request would hold open.
+finalization. Uploads more than one delivery window late are not sent and are
+reported `missed` (`#takeDue`). Reads more than one delivery window late are
+caught up (`#catchUp`): one scan in flight per store, newest first, none
+started while one of the current window's requests to that store is in
+flight, each failed one retried once after the rest, reaching back at most 64
+windows. A scheduled read is not retried: there is no same-window retry,
+because retrying at the surviving store after an omission would be an active
+cross-store tagging channel. The application callback is called one batch at a
+time and never awaited by a scheduled event, so a slow, throwing or hung
+callback moves no request. Every request also carries a deadline of one
+delivery window (`storeClient.ts`, `requestDeadlineMs`) — the same value on
+every route, because the profile sets no per-route budget for appends, chunks,
+or checkpoints to derive one from, and it exists because an unbounded request
+to a silent store would hold that store's part of the window's union open.
 
 **A store's topology verdict is local and unlabelled.** The runtime reports
 `multi-store-union`, `single-carrier-dependent` or `no-usable-carrier`, computed
@@ -548,14 +556,17 @@ carrier of that operation. That is a latency and fault-tolerance decision for th
 maintainer, so it is recorded as follow-up work with its numbers, not presented
 as a solved problem.
 
-### 2–14, in brief
+### 2–15, in brief
 
 - **Source addresses.** Both stores see the client's IP on every write and poll;
   a single store can recover a write-then-read pairing in a few rounds. The
   co-membership edge is hidden at the identifier level only.
 - **Size and count** are visible; the fixed schedule pads both.
 - **Polling shape** must stay schedule-shaped and never event-shaped: no burst
-  after a hit, no coordinated dial phase between stores.
+  after a hit, no coordinated dial phase between stores. The prototype keeps
+  to this only while its timers fire within a delivery window of their
+  instants; after a longer suspension it catches up the reads it owes, which
+  a store sees as a silence followed by a run of extra scans (the last item).
 - **Retry oracle.** Retrying at the surviving store after an omission would be an
   active cross-store tagging channel, so retries happen only at the next
   scheduled slot.
@@ -578,7 +589,8 @@ as a solved problem.
 - **The witness channel is a cross-store status oracle** — the one part of the
   per-window trace that is conditional rather than fixed. A witness POST and a
   witness GET reach a store only when the *other* store's scan of that window
-  came back `finalized` and neither is inert, so each store reads off its own
+  came back `finalized` by the witness instant and neither is inert, so each
+  store reads off its own
   request log whether the other served this client a finalized window: the pair
   while both are healthy, nothing for the healthy store once the other one
   degrades, nothing either way once either goes inert.
@@ -587,6 +599,21 @@ as a solved problem.
   traffic unconditional — a witness post every window regardless, carrying
   cover when there is nothing to witness — is what would fix it, and is a
   design change rather than a correction, so it is not attempted here.
+- **Late timers and suspension change the trace** (design §3a item 15). A late
+  timer releases what it held back at the late instant, so requests leave off
+  the profile's offsets and several at once (a background tab's token, read
+  and allocation together on a whole-second boundary). That puts the client
+  outside the 200 ms band the first item's argument rests on, at an offset
+  that repeats from window to window, so a store can link its windows by it.
+  Uploads more than a window late are not sent, so that window's count drops
+  below thirteen. Reads more than a window late are caught up one scan at a
+  time per store, newest first: a silence, then a run of extra scans. The
+  witness pair about a store whose scan had not answered by the witness
+  instant is skipped. And by arithmetic on the pinned profile, a background
+  tab whose whole-second timer alignment falls in [0, 100) or [800, 1000) ms
+  of the window — 30% of phases — has its class-0 state-replication append
+  (due at 2100) refused after finalization at 2800, so its presence never
+  reaches a store.
 
 What no literature sweep found published together — and therefore the only thing
 this work may present as novel — is the *composition*: a capability-authenticated,

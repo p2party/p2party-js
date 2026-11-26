@@ -43,7 +43,7 @@ const recordingStore = (
       calls.scans.push(window);
       return Promise.resolve({
         window,
-        status: "not-final",
+        status: "finalized",
         objects: [],
         checkpointHash: null,
       });
@@ -168,9 +168,11 @@ describe("carrier timer delivery", () => {
       // Window 0's and window 1's token and allocation are reported, not sent.
       expect(tooLate(harness, 0n)).toHaveLength(1);
       expect(tooLate(harness, 1n)).toHaveLength(1);
-      // A read is made however late: the reads due at 600 (of window -1,
-      // which does not exist) and at 4,600 and 8,600 (of windows 0 and 1).
-      expect(harness.calls.scans).toEqual([0n, 1n]);
+      // No read is dropped. The read due at 8,600 is half a second late and
+      // is made at once; the one due at 4,600 is more than a window late and
+      // is caught up after it. (The read due at 600 is of window -1, which
+      // does not exist.)
+      expect(harness.calls.scans).toEqual([1n, 0n]);
       expect(harness.pending.size).toBe(1);
       for (const next of harness.pending.values())
         expect(next.atMs).toBeGreaterThanOrEqual(harness.nowMs);
@@ -194,11 +196,14 @@ describe("carrier timer delivery", () => {
       expect(givenUp).toHaveLength(1);
       expect(givenUp[0].window).toBe(0n);
       // The clock is in window 100; the reach is 64 windows, so the schedule
-      // resumes at window 36 and reads windows 35 to 98 on the way.
+      // resumes at window 36. The read of window 98 is due within the last
+      // window and is made at once; windows 97 down to 35 are caught up,
+      // newest first.
       expect(givenUp[0].count).toBe(36);
       expect(harness.calls.scans).toHaveLength(64);
-      expect(harness.calls.scans[0]).toBe(35n);
-      expect(harness.calls.scans[63]).toBe(98n);
+      expect(harness.calls.scans[0]).toBe(98n);
+      expect(harness.calls.scans[1]).toBe(97n);
+      expect(harness.calls.scans[63]).toBe(35n);
       expect(harness.pending.size).toBe(1);
     } finally {
       harness.runtime.stop();

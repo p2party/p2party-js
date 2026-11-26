@@ -55,8 +55,6 @@ import {
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
   encodePublicAppendResultV1,
-  encodePublicChunkReadV1,
-  encodePublicStoreCheckpointReadV1,
   encodeStoreWitnessRecordsV1,
 } from "../storeWire";
 import {
@@ -327,11 +325,14 @@ export const createPrototypeStoreHandler = (
       const profileHash = parseProfileHash(rest[0]);
       const window = parseU64(rest[1]);
       if (profileHash === null || window === null) return malformed();
-      const read = await core.readCheckpoint(profileHash, window);
+      // Encoded rather than structured: a finalized window's response bytes
+      // were fixed when it was signed, so this route serves one stored row
+      // when there is one and decodes the window only when there is not.
+      const read = await core.readCheckpointEncoded(profileHash, window);
       return canonicalResponse(
-        encodePublicStoreCheckpointReadV1(read),
+        read.bytes,
         PROTOTYPE_STORE_MEDIA_TYPES.checkpoint,
-        read.kind === "finalized" ? IMMUTABLE : NO_STORE,
+        read.finalized ? IMMUTABLE : NO_STORE,
       );
     }
 
@@ -348,14 +349,14 @@ export const createPrototypeStoreHandler = (
         chunkIndex === null
       )
         return malformed();
-      const read = await core.readChunk(
+      const read = await core.readChunkEncoded(
         { deliveryProfileHash: profileHash, ingressWindow, sizeClass },
         chunkIndex,
       );
       return canonicalResponse(
-        encodePublicChunkReadV1(read),
+        read.bytes,
         PROTOTYPE_STORE_MEDIA_TYPES.chunk,
-        read.kind === "finalized" ? IMMUTABLE : NO_STORE,
+        read.finalized ? IMMUTABLE : NO_STORE,
       );
     }
 

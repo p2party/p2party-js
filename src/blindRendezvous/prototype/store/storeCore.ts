@@ -28,7 +28,9 @@
  *   shown, from its own words, to contradict its descriptor
  *   (`signedStatusProvesFault` in the client), and a client that blames each
  *   of the four when it does contradict the descriptor never blames this
- *   store, whatever its clock reads.
+ *   store, whatever its clock reads. A finalized answer may come from a
+ *   precomputed row, but only once that reading has let the read through,
+ *   so a row never answers for a window the clock refuses.
  * - A finalized window is never re-signed. Signing two different chunk bodies
  *   for one index, or two checkpoints for one window, is a permanent fault
  *   proof against the store — so `#finalizeWindow` returns early rather than
@@ -106,6 +108,10 @@ import {
   profileGeometry,
   validateDeliveryProfileGeometry,
 } from "../profile";
+import {
+  encodePublicChunkReadV1,
+  encodePublicStoreCheckpointReadV1,
+} from "../storeWire";
 import {
   copyBucket,
   copyBytes,
@@ -281,6 +287,16 @@ export interface StoreRetentionSweep {
 }
 
 /** The one secret a store process holds; the server writes it to a key file. */
+/**
+ * A read as the bytes the route answers with, and whether they are a
+ * finalized window (which never changes) rather than a signed status (which
+ * names the store's window at the time of the request).
+ */
+export interface StoreEncodedRead {
+  readonly bytes: Uint8Array;
+  readonly finalized: boolean;
+}
+
 export interface StoreIdentityFiles {
   seed: Uint8Array;
 }
@@ -1473,16 +1489,122 @@ export class PrototypeStoreCore {
       finalized: { chunks, checkpoint },
     });
     this.#openWindows.delete(String(window));
+    await this.#saveFinalizedResponses(window, chunks, checkpoint);
+  }
+
+  /**
+   * Precompute what this window will be read back as, strictly after the
+   * finalization has committed.
+   *
+   * The order matters. A crash or a failed write between the two leaves the
+   * rows absent, and the reads then answer from the window row. The reverse
+   * order would leave rows describing a finalization that never committed,
+   * and re-finalizing draws fresh cover for the unoccupied slots, so those
+   * rows would be another window's bytes under this window's name. A failure
+   * here rejects `finalizeDue` like any failed write, with the window already
+   * final; the next call resumes after it.
+   *
+   * A persistence port that does not offer the rows is not an error: it is
+   * how `MemoryStorePersistence` and every test that uses it run.
+   */
+  async #saveFinalizedResponses(
+    window: bigint,
+    chunks: ReadonlyMap<number, readonly PublicChunkV1[]>,
+    checkpoint: PublicStoreCheckpointV1,
+  ): Promise<void> {
+    if (this.#persistence.saveFinalizedResponses === undefined) return;
+    const bodies: {
+      sizeClass: number;
+      chunkIndex: bigint;
+      body: Uint8Array;
+    }[] = [];
+    for (const [sizeClass, signed] of chunks)
+      signed.forEach((chunk, chunkIndex) => {
+        bodies.push({
+          sizeClass,
+          chunkIndex: BigInt(chunkIndex),
+          body: encodePublicChunkReadV1({ kind: "finalized", chunk }),
+        });
+      });
+    await this.#persistence.saveFinalizedResponses({
+      window,
+      descriptorHash: copyBytes(this.#descriptorHash),
+      checkpoint: encodePublicStoreCheckpointReadV1({
+        kind: "finalized",
+        descriptor: this.#descriptor,
+        checkpoint,
+      }),
+      chunks: bodies,
+    });
   }
 
   /* ---------------------------------------------------------------- *
    * Reads
+   *
+   * Each read is decided first, from one reading of the clock and nothing
+   * stored: a signed status, or "this window is finalized and retained".
+   * Only then is anything loaded. The two GET routes take the encoded form:
+   * a finalized window's response bytes were fixed when it was signed, so
+   * they come from one precomputed row when there is one, and otherwise from
+   * the window row, which is the only path a window finalized without rows
+   * has. Both forms produce identical bytes; that equality is what the tests
+   * assert, because a difference between them would be a difference in what
+   * this store's signature covers. A status is never precomputed: it names
+   * the store's window at the time of the request.
    * ---------------------------------------------------------------- */
 
   async readCheckpoint(
     deliveryProfileHashBytes: Uint8Array,
     window: bigint,
   ): Promise<PublicStoreCheckpointReadV1> {
+    const decided = await this.#decideCheckpointRead(
+      deliveryProfileHashBytes,
+      window,
+    );
+    if (decided !== null) return decided;
+    return {
+      kind: "finalized",
+      descriptor: copyDescriptor(this.#descriptor),
+      checkpoint: copyCheckpoint(await this.#finalizedCheckpoint(window)),
+    };
+  }
+
+  async readCheckpointEncoded(
+    deliveryProfileHashBytes: Uint8Array,
+    window: bigint,
+  ): Promise<StoreEncodedRead> {
+    const decided = await this.#decideCheckpointRead(
+      deliveryProfileHashBytes,
+      window,
+    );
+    if (decided !== null)
+      return {
+        bytes: encodePublicStoreCheckpointReadV1(decided),
+        finalized: false,
+      };
+    const row = await this.#persistence.loadCheckpointResponse?.(
+      window,
+      this.#descriptorHash,
+    );
+    if (row != null) return { bytes: row, finalized: true };
+    return {
+      bytes: encodePublicStoreCheckpointReadV1({
+        kind: "finalized",
+        descriptor: this.#descriptor,
+        checkpoint: await this.#finalizedCheckpoint(window),
+      }),
+      finalized: true,
+    };
+  }
+
+  /**
+   * The signed status a checkpoint read gets, or `null` when the window is
+   * finalized on the clock and retained, so its checkpoint is the answer.
+   */
+  async #decideCheckpointRead(
+    deliveryProfileHashBytes: Uint8Array,
+    window: bigint,
+  ): Promise<PublicStoreCheckpointReadV1 | null> {
     const requested = copyBytes(deliveryProfileHashBytes);
     requireProfileHash(requested);
     requireWindow(window);
@@ -1501,21 +1623,22 @@ export class PrototypeStoreCore {
     if (!bytesEqual(requested, this.#profileHash))
       return status("chain-unavailable");
     // Past retention it is out of range whether or not a sweep has deleted
-    // the row yet: the answer follows the clock, not the sweep's progress.
+    // the rows yet: the answer follows the clock, not the sweep's progress.
     if (window < this.#chainStart || !this.#readable(window, current))
       return status("out-of-range");
     // Before its finalization instant no window can be final: the clock
     // answers, and an unauthenticated read decodes no row.
     if (!this.#closedOnClock(window, nowMs)) return status("not-final");
+    return null;
+  }
 
+  /** A window the clock says is final: its checkpoint, or an unsigned 503
+   * while the finalizer has not signed it yet. */
+  async #finalizedCheckpoint(window: bigint): Promise<PublicStoreCheckpointV1> {
     const state = await this.#persistence.loadWindow(window);
     if (state?.finalized == null)
       throw new StoreFinalizationPendingError(window);
-    return {
-      kind: "finalized",
-      descriptor: copyDescriptor(this.#descriptor),
-      checkpoint: copyCheckpoint(state.finalized.checkpoint),
-    };
+    return state.finalized.checkpoint;
   }
 
   async #checkpointStatus(
@@ -1555,18 +1678,78 @@ export class PrototypeStoreCore {
     bucket: PublicBucketV1,
     chunkIndex: bigint,
   ): Promise<PublicChunkReadV1> {
+    const decided = await this.#decideChunkRead(bucket, chunkIndex);
+    if (decided.kind === "status") return decided.read;
+    return {
+      kind: "finalized",
+      chunk: copyChunk(
+        await this.#finalizedChunk(
+          decided.window,
+          decided.sizeClass,
+          chunkIndex,
+        ),
+      ),
+    };
+  }
+
+  async readChunkEncoded(
+    bucket: PublicBucketV1,
+    chunkIndex: bigint,
+  ): Promise<StoreEncodedRead> {
+    const decided = await this.#decideChunkRead(bucket, chunkIndex);
+    if (decided.kind === "status")
+      return { bytes: encodePublicChunkReadV1(decided.read), finalized: false };
+    const row = await this.#persistence.loadChunkResponse?.(
+      decided.window,
+      decided.sizeClass,
+      chunkIndex,
+    );
+    if (row != null) return { bytes: row, finalized: true };
+    return {
+      bytes: encodePublicChunkReadV1({
+        kind: "finalized",
+        chunk: await this.#finalizedChunk(
+          decided.window,
+          decided.sizeClass,
+          chunkIndex,
+        ),
+      }),
+      finalized: true,
+    };
+  }
+
+  /**
+   * The signed status a chunk read gets, or the coordinates of a chunk the
+   * profile defines in a window that is finalized on the clock and retained.
+   */
+  async #decideChunkRead(
+    bucket: PublicBucketV1,
+    chunkIndex: bigint,
+  ): Promise<
+    | { readonly kind: "status"; readonly read: PublicChunkReadV1 }
+    | {
+        readonly kind: "finalized";
+        readonly window: bigint;
+        readonly sizeClass: number;
+      }
+  > {
     const requested = copyBucket(bucket);
     requireProfileHash(requested.deliveryProfileHash);
     requireWindow(requested.ingressWindow);
     requireSizeClassId(requested.sizeClass);
     requireChunkIndex(chunkIndex);
-    // One reading of the clock, as in `readCheckpoint`.
+    // One reading of the clock, as in `#decideCheckpointRead`.
     const nowMs = this.#clock.nowMs();
     const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
-    const status = (
+    const status = async (
       kind: PublicChunkStatusKindV1,
-    ): Promise<PublicChunkReadV1> =>
-      this.#chunkStatus(requested, chunkIndex, current, kind);
+    ): Promise<{
+      readonly kind: "status";
+      readonly read: PublicChunkReadV1;
+    }> => ({
+      kind: "status",
+      read: await this.#chunkStatus(requested, chunkIndex, current, kind),
+    });
 
     // Coordinates no window of this store can hold, whatever the window:
     // an unserved profile, an unknown class, an index past the class's
@@ -1588,20 +1771,31 @@ export class PrototypeStoreCore {
       return status("out-of-range");
     if (!this.#closedOnClock(requested.ingressWindow, nowMs))
       return status("not-final");
+    return {
+      kind: "finalized",
+      window: requested.ingressWindow,
+      sizeClass: sizeClass.id,
+    };
+  }
 
-    const state = await this.#persistence.loadWindow(requested.ingressWindow);
+  /** One chunk of a window the clock says is final, or an unsigned 503 while
+   * the finalizer has not signed it yet. */
+  async #finalizedChunk(
+    window: bigint,
+    sizeClass: number,
+    chunkIndex: bigint,
+  ): Promise<PublicChunkV1> {
+    const state = await this.#persistence.loadWindow(window);
     if (state?.finalized == null)
-      throw new StoreFinalizationPendingError(requested.ingressWindow);
-    const chunk = state.finalized.chunks.get(sizeClass.id)?.[
-      Number(chunkIndex)
-    ];
+      throw new StoreFinalizationPendingError(window);
+    const chunk = state.finalized.chunks.get(sizeClass)?.[Number(chunkIndex)];
     // Finalization signs every index of every class, so this is a damaged
     // row: an internal failure, never a signed status.
     if (chunk === undefined)
       throw new Error(
-        `storeCore: finalized window ${String(requested.ingressWindow)} has no chunk ${String(chunkIndex)} of class ${String(sizeClass.id)}`,
+        `storeCore: finalized window ${String(window)} has no chunk ${String(chunkIndex)} of class ${String(sizeClass)}`,
       );
-    return { kind: "finalized", chunk: copyChunk(chunk) };
+    return chunk;
   }
 
   async #chunkStatus(
@@ -1721,9 +1915,9 @@ export class PrototypeStoreCore {
    * passed its retention check never loads a row this call is removing.
    * Window rows go only below the last finalized window: that one is the chain
    * tip the next checkpoint links to, and anything after it may still owe its
-   * slots to a chunk. A deleted row takes its allocation records, and their
-   * admission quota keys, with it; a deleted witness window takes its per-key
-   * counts.
+   * slots to a chunk. A deleted row takes its allocation records, their
+   * admission quota keys and its precomputed responses with it; a deleted
+   * witness window takes its per-key counts.
    *
    * It runs beside requests rather than on the mutation queue: allocation
    * and append name open windows and finalization names the windows after the

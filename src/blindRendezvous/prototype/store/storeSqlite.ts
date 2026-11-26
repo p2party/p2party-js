@@ -51,6 +51,7 @@ import type {
   PublicStoreCheckpointV1,
 } from "../../publicWindow";
 import type {
+  StoreFinalizedResponses,
   StorePersistencePort,
   StoreWindowState,
   StoreWitnessBounds,
@@ -291,6 +292,21 @@ const textDecoder = new TextDecoder();
  * checkpoint already signed would name a `descriptorHash` the running store no
  * longer serves, and a client would mark the store inert.
  *
+ * `chunk_response` and `checkpoint_response` hold the exact response bodies a
+ * finalized window is read back as. A finalized window is immutable, so those
+ * bytes are fixed the instant it is signed, and serving them is one row lookup
+ * instead of decoding a multi-megabyte document per request. They are a cache
+ * in the only sense that matters here: **the window row remains the source of
+ * truth**, a read falls back to it whenever a row is missing, and the sweep
+ * deletes them with their window, in one transaction. The price is disk: they
+ * hold the finalized objects a second time. At the pinned profile one window
+ * measured 3,450,684 B in the `window` row (hex, and holding each object
+ * twice: once bound to its slot, once inside the chunk it was finalized into)
+ * against 1,377,756 B of response rows (raw, each object once), so +40 % per
+ * window (`docs/rendezvous-latency-2026-09/stage-1-fixround-report.md`). A checkpoint
+ * row carries the descriptor hash it was written under, so a process serving
+ * another descriptor ignores the row rather than replaying it.
+ *
  * `window` is a SQLite keyword (window functions), so it is quoted everywhere.
  */
 const SCHEMA = `
@@ -318,11 +334,27 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chunk_response (
+  "window" INTEGER NOT NULL,
+  size_class INTEGER NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  body BLOB NOT NULL,
+  PRIMARY KEY ("window", size_class, chunk_index)
+);
+CREATE TABLE IF NOT EXISTS checkpoint_response (
+  "window" INTEGER PRIMARY KEY,
+  descriptor_hash BLOB NOT NULL,
+  body BLOB NOT NULL
+);
 `;
 
+/** The tables a window's rows live in, deleted together by the sweep. */
+const WINDOW_TABLES = ['"window"', "chunk_response", "checkpoint_response"];
+
 /**
- * `PRAGMA user_version` of the schema above. Builds before it left the field
- * at 0 and kept witness rows without the counts that bound them.
+ * `PRAGMA user_version` of the schema above. Schema 0 (builds that left the
+ * field unset) kept witness rows without the counts that bound them; schema 1
+ * had no precomputed response tables.
  */
 const STORE_SQLITE_SCHEMA_VERSION = PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION;
 
@@ -356,10 +388,12 @@ export class SqliteStorePersistence implements StorePersistencePort {
     this.#db.transaction(() => {
       this.#db.exec(SCHEMA);
       if (version < STORE_SQLITE_SCHEMA_VERSION) {
-        // An older build's witness rows have no counts, so no bound could be
+        // Schema 0's witness rows have no counts, so no bound could be
         // enforced over them; they are unauthenticated hints, and discarding
-        // them loses no part of the chain. Windows and meta are kept.
-        this.#db.exec("DELETE FROM witness");
+        // them loses no part of the chain. Schema 1 lacks only the response
+        // tables, which `SCHEMA` has just created empty: its finalized
+        // windows are read from their window rows. Windows and meta are kept.
+        if (version < 1) this.#db.exec("DELETE FROM witness");
         this.#db.exec(
           `PRAGMA user_version = ${String(STORE_SQLITE_SCHEMA_VERSION)}`,
         );
@@ -408,14 +442,99 @@ export class SqliteStorePersistence implements StorePersistencePort {
     );
   }
 
+  /** One transaction: a window row and the responses built from it go
+   * together, so no reader meets a response for a window already gone. */
   async deleteWindowsBefore(window: bigint, limit: number): Promise<number> {
-    const result = this.#db
-      .query<unknown, [bigint, number]>(
-        'DELETE FROM "window" WHERE "window" IN' +
-          ' (SELECT "window" FROM "window" WHERE "window" < ? ORDER BY "window" LIMIT ?)',
+    return this.#db.transaction((): number => {
+      const doomed = this.#db
+        .query<{ window: bigint }, [bigint, number]>(
+          'SELECT "window" FROM "window" WHERE "window" < ? ORDER BY "window" LIMIT ?',
+        )
+        .all(window, Math.max(0, limit));
+      for (const { window: each } of doomed)
+        for (const table of WINDOW_TABLES)
+          this.#db
+            .query<unknown, [bigint]>(`DELETE FROM ${table} WHERE "window" = ?`)
+            .run(each);
+      return doomed.length;
+    })();
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Precomputed finalized responses
+   *
+   * One transaction, so a reader never meets a window whose checkpoint row
+   * landed and whose chunk rows did not. `INSERT OR REPLACE` rather than a
+   * plain insert: re-finalizing a window that never committed its state row
+   * must overwrite these, not collide with them.
+   * ---------------------------------------------------------------- */
+
+  async saveFinalizedResponses(
+    responses: StoreFinalizedResponses,
+  ): Promise<void> {
+    const chunk = this.#db.query<unknown, [bigint, bigint, bigint, Uint8Array]>(
+      'INSERT OR REPLACE INTO chunk_response ("window", size_class,' +
+        " chunk_index, body) VALUES (?, ?, ?, ?)",
+    );
+    const checkpoint = this.#db.query<
+      unknown,
+      [bigint, Uint8Array, Uint8Array]
+    >(
+      'INSERT OR REPLACE INTO checkpoint_response ("window", descriptor_hash,' +
+        " body) VALUES (?, ?, ?)",
+    );
+    this.#db.transaction(() => {
+      for (const entry of responses.chunks)
+        chunk.run(
+          responses.window,
+          BigInt(entry.sizeClass),
+          entry.chunkIndex,
+          entry.body,
+        );
+      checkpoint.run(
+        responses.window,
+        responses.descriptorHash,
+        responses.checkpoint,
+      );
+    })();
+  }
+
+  async loadChunkResponse(
+    window: bigint,
+    sizeClass: number,
+    chunkIndex: bigint,
+  ): Promise<Uint8Array | null> {
+    return (
+      this.#db
+        .query<{ body: Uint8Array }, [bigint, bigint, bigint]>(
+          'SELECT body FROM chunk_response WHERE "window" = ?' +
+            " AND size_class = ? AND chunk_index = ?",
+        )
+        .get(window, BigInt(sizeClass), chunkIndex)?.body ?? null
+    );
+  }
+
+  async loadCheckpointResponse(
+    window: bigint,
+    descriptorHash: Uint8Array,
+  ): Promise<Uint8Array | null> {
+    const row = this.#db
+      .query<{ descriptor_hash: Uint8Array; body: Uint8Array }, [bigint]>(
+        'SELECT descriptor_hash, body FROM checkpoint_response WHERE "window" = ?',
       )
-      .run(window, Math.max(0, limit));
-    return Number(result.changes);
+      .get(window);
+    if (row === null) return null;
+    // A row written under another descriptor is not this store's answer: the
+    // checkpoint response carries the descriptor, and replaying a stale one
+    // would hide a configuration change behind a self-consistent pair.
+    if (
+      row.descriptor_hash.length !== descriptorHash.length ||
+      !row.descriptor_hash.every(
+        (byte, index) => byte === descriptorHash[index],
+      )
+    )
+      return null;
+    return row.body;
   }
 
   /* ---------------------------------------------------------------- *

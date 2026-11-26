@@ -15,9 +15,10 @@
  * implementation (`storeSqlite.ts`) sits behind this same interface.
  *
  * Every row is deletable by window: a window row carries its own allocation
- * records (and their admission quota keys), and a witness window carries its
- * records and the per-key counts that bound them, so the retention sweep
- * removes a window's bookkeeping by removing the window.
+ * records (and their admission quota keys) and goes with the precomputed
+ * responses built from it, and a witness window carries its records and the
+ * per-key counts that bound them, so the retention sweep removes a window's
+ * bookkeeping by removing the window.
  *
  * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
  * registry.
@@ -68,6 +69,30 @@ export interface StoreWindowState {
   finalized: StoreFinalizedWindow | null;
 }
 
+/**
+ * The exact response bodies a finalized window is read back as.
+ *
+ * A finalized window never changes, so the bytes a chunk GET and a checkpoint
+ * GET answer with once the clock has let the read through are fixed the
+ * instant the window is signed: nothing in them depends on when the request
+ * arrives. Keeping them lets such a read return one row instead of decoding
+ * the whole window. Every signed status, which names the store's window at
+ * the time of the request, is still built per request. `descriptorHash` is
+ * carried because the checkpoint response embeds the store's descriptor: a
+ * row written under another descriptor than the one this process serves is
+ * ignored rather than replayed.
+ */
+export interface StoreFinalizedResponses {
+  readonly window: bigint;
+  readonly descriptorHash: Uint8Array;
+  readonly checkpoint: Uint8Array;
+  readonly chunks: readonly {
+    readonly sizeClass: number;
+    readonly chunkIndex: bigint;
+    readonly body: Uint8Array;
+  }[];
+}
+
 /** How much one witness insert may fill. */
 export interface StoreWitnessBounds {
   /** Distinct records one window may hold, from every caller together. */
@@ -107,7 +132,9 @@ export interface StorePersistencePort {
   ): Promise<StoreWitnessInsertOutcome>;
   /**
    * Delete up to `limit` window rows below `window`, smallest first, and
-   * answer how many went. Each row takes its allocation records with it.
+   * answer how many went. Each row takes its allocation records and its
+   * precomputed responses with it, in the same step: a response row that
+   * outlived its window would be the only trace of it left.
    */
   deleteWindowsBefore(window: bigint, limit: number): Promise<number>;
   /**
@@ -116,6 +143,33 @@ export interface StorePersistencePort {
    * windows went.
    */
   deleteWitnessRecordsBefore(window: bigint, limit: number): Promise<number>;
+
+  /* ---------------------------------------------------------------- *
+   * Precomputed finalized responses: optional, and the store answers the
+   * same bytes without them.
+   *
+   * They are an accelerator, not a source of truth. An implementation may
+   * omit them (`MemoryStorePersistence` does), and a window finalized before
+   * they were written, or whose rows failed to save, has none; the core then
+   * answers from `loadWindow`. They are consulted only after the clock has
+   * decided that the read is of a finalized, retained window, so a row never
+   * answers for a window the clock refuses.
+   * ---------------------------------------------------------------- */
+
+  /** Called after `saveWindow` has committed the finalization, never before:
+   * a row that outlived a finalization that did not commit would be replayed
+   * against a re-finalized window whose cover bytes are different. */
+  saveFinalizedResponses?(responses: StoreFinalizedResponses): Promise<void>;
+  loadChunkResponse?(
+    window: bigint,
+    sizeClass: number,
+    chunkIndex: bigint,
+  ): Promise<Uint8Array | null>;
+  /** Null unless a row exists *and* was written under `descriptorHash`. */
+  loadCheckpointResponse?(
+    window: bigint,
+    descriptorHash: Uint8Array,
+  ): Promise<Uint8Array | null>;
 }
 
 export const emptyStoreWindowState = (window: bigint): StoreWindowState => ({

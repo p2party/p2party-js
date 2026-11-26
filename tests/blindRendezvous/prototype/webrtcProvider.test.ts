@@ -129,6 +129,10 @@ const turn = (): Promise<void> =>
     setImmediate(resolve);
   });
 
+/** `promise`'s value if it settles within one turn, else "still pending". */
+const withinOneTurn = (promise: Promise<string>): Promise<string> =>
+  Promise.race([promise, turn().then(() => "still pending")]);
+
 const fingerprintA = new Uint8Array(32).fill(0xa1);
 const fingerprintB = new Uint8Array(32).fill(0xb2);
 const stats = (local: Uint8Array, remote: Uint8Array): RTCStatsReport =>
@@ -327,8 +331,19 @@ describe("prototype WebRTC bootstrap transport", () => {
     const blockedApp = reasonOf(() => transport.recvApp());
     const blockedControl = reasonOf(() => transport.recv());
     channel.close();
-    expect(await blockedApp).toBe("closed");
-    expect(await blockedControl).toBe("closed");
+    // Bounded: a reader the close does not reach fails here, by assertion.
+    expect(await withinOneTurn(blockedApp)).toBe("closed");
+    expect(await withinOneTurn(blockedControl)).toBe("closed");
+  });
+
+  test("a send before the channel opens is refused as connecting", async () => {
+    const channel = new FakeChannel();
+    channel.readyState = "connecting";
+    const transport = dataChannelTransport(channel.asRtc());
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([1])))).toBe(
+      "connecting",
+    );
+    expect(channel.sent).toHaveLength(0);
   });
 
   test("frames delivered before a channel error are still read", async () => {

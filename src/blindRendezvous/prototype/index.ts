@@ -220,6 +220,15 @@ export class PrototypeSessionEndedError extends PrototypeRunError {
   }
 }
 
+/**
+ * A `recvMessage` called while another is still reading. Reads are one at a
+ * time — the app lane is positional — so the second call is refused at once
+ * and takes nothing; the first goes on unaffected.
+ */
+export class PrototypeReadInProgressError extends PrototypeRunError {
+  override readonly name = "PrototypeReadInProgressError";
+}
+
 const fail: (message: string) => never = (message) => {
   throw new PrototypeRunError(message);
 };
@@ -298,8 +307,10 @@ export interface PrototypeRun {
   /**
    * Receive one message. Rejects with `PrototypeRunTimeoutError`, taking
    * nothing, if no frame of a message arrived within `timeoutMs`; a deadline
-   * that passes part-way through a message ends the session and rejects with
-   * `PrototypeSessionEndedError`.
+   * that passes part-way through a message, or a header or frame that does
+   * not parse, ends the session and rejects with `PrototypeSessionEndedError`.
+   * Reads are one at a time: a call made while another is still reading
+   * rejects at once with `PrototypeReadInProgressError` and takes nothing.
    */
   recvMessage(timeoutMs: number): Promise<Uint8Array>;
   auditSecrets(): PrototypeRunAudit;
@@ -317,11 +328,12 @@ export interface PrototypeRun {
 /**
  * How a `stop()` left the frames this endpoint had queued:
  *   - `"drained"`: every frame left the data channel's send buffer before the
- *     channel closed, or there was no session to send on.
+ *     channel closed, or the run never had frames to send.
  *   - `"undrained"`: the channel closed with frames possibly still queued —
  *     the buffer did not drain within `PROTOTYPE_STOP_DRAIN_TIMEOUT_MS`, the
- *     peer closed first, or the channel refused a frame. Those frames may
- *     never reach the peer.
+ *     peer closed first, the channel refused a frame, or a session that had
+ *     already ended (`PrototypeSessionEndedError`) took buffered frames with
+ *     it. Those frames may never reach the peer.
  * "Left the buffer" is the browser's handover to its SCTP stack, not the
  * peer's receipt.
  */
@@ -645,6 +657,10 @@ export class BlindRendezvousRun implements PrototypeRun {
   #stopping: Promise<PrototypeStopOutcome> | null = null;
   /** Set once, when a call ended the established session; see the class. */
   #sessionEnded: PrototypeSessionEndedError | null = null;
+  /** Set when an ended session took frames with it that had not left. */
+  #sessionLeftFrames = false;
+  /** True while a `recvMessage` is reading: reads are one at a time. */
+  #reading = false;
 
   constructor(parts: RunParts) {
     this.driver = parts.driver;
@@ -809,6 +825,9 @@ export class BlindRendezvousRun implements PrototypeRun {
       );
     } catch (error) {
       void handedOff.catch(() => undefined);
+      // Another call that met the same failure first has ended the session:
+      // this one reports that end rather than a second one of its own.
+      if (this.#sessionEnded !== null) throw this.#sessionEnded;
       const misframed: readonly [PrototypeSessionEndReason, string] | null =
         error instanceof PrototypeRunTimeoutError
           ? [
@@ -854,8 +873,27 @@ export class BlindRendezvousRun implements PrototypeRun {
    * ratchet header. Each means the lane's positions can no longer be trusted,
    * so nothing more is read from it. These are the session's own structural
    * checks, made as each frame arrives instead of after the last one.
+   *
+   * ONE READ AT A TIME. The lane is positional, so two overlapping reads
+   * would split one message's frames between them. A call made while another
+   * is still reading is refused at once with `PrototypeReadInProgressError`
+   * and takes nothing.
    */
   async recvMessage(timeoutMs: number): Promise<Uint8Array> {
+    requireDeadline(timeoutMs, "recvMessage");
+    if (this.#reading)
+      throw new PrototypeReadInProgressError(
+        "recvMessage was called while another recvMessage is still reading; reads are one at a time",
+      );
+    this.#reading = true;
+    try {
+      return await this.#readMessage(timeoutMs);
+    } finally {
+      this.#reading = false;
+    }
+  }
+
+  async #readMessage(timeoutMs: number): Promise<Uint8Array> {
     const deadlineMs = this.#clock.nowMs() + BigInt(Math.ceil(timeoutMs));
     const remaining = (): number =>
       Math.max(1, Number(deadlineMs - this.#clock.nowMs()));
@@ -895,6 +933,7 @@ export class BlindRendezvousRun implements PrototypeRun {
           this.#timers,
         );
       } catch (error) {
+        if (this.#sessionEnded !== null) throw this.#sessionEnded;
         if (!(error instanceof PrototypeRunTimeoutError))
           throw this.#asCallFailure(error);
         const ended = new PrototypeSessionEndedError(
@@ -976,6 +1015,14 @@ export class BlindRendezvousRun implements PrototypeRun {
    */
   stop(detail?: string): Promise<PrototypeStopOutcome> {
     if (this.#stopping !== null) return this.#stopping;
+    // Published before anything below runs: an observer that calls stop()
+    // from one of the events this teardown emits gets this same promise, not
+    // a second teardown.
+    let settle!: (outcome: PrototypeStopOutcome) => void;
+    const stopping = new Promise<PrototypeStopOutcome>((resolve) => {
+      settle = resolve;
+    });
+    this.#stopping = stopping;
     this.#stopped = true;
 
     const session = this.#session;
@@ -992,8 +1039,8 @@ export class BlindRendezvousRun implements PrototypeRun {
     for (const waiter of waiters) waiter.reject(stopped);
     this.#emit("run-stopped", detail);
 
-    this.#stopping = this.#closeWhenSent(leaving);
-    return this.#stopping;
+    void this.#closeWhenSent(leaving).then(settle, () => settle("undrained"));
+    return stopping;
   }
 
   /** The graceful half of `stop()`; synchronous when nothing is to drain. */
@@ -1001,6 +1048,15 @@ export class BlindRendezvousRun implements PrototypeRun {
     leaving: Promise<void> | null,
   ): Promise<PrototypeStopOutcome> {
     let outcome: PrototypeStopOutcome = "drained";
+    if (this.#sessionLeftFrames) {
+      // There is no session to drain any more, but the one that ended took
+      // frames with it that callers had been told were sent.
+      outcome = "undrained";
+      this.#emit(
+        "stop-undrained",
+        "the session had ended with frames still in the send buffer",
+      );
+    }
     if (leaving !== null) {
       try {
         await withTimeout(
@@ -1054,6 +1110,7 @@ export class BlindRendezvousRun implements PrototypeRun {
    * frame that breaks its own framing.
    */
   #endMisframed(detail: string): never {
+    if (this.#sessionEnded !== null) throw this.#sessionEnded;
     const ended = new PrototypeSessionEndedError(
       "protocol",
       `recvMessage: ${detail}; the app lane cannot be framed past it, and the session was ended`,
@@ -1109,7 +1166,10 @@ export class BlindRendezvousRun implements PrototypeRun {
     const session = this.#session;
     this.#session = null;
     if (session !== null) void session.destroy().catch(() => undefined);
-    this.#appTransport?.close();
+    const appTransport = this.#appTransport;
+    appTransport?.close();
+    if (appTransport?.hasUnsentFrames() === true)
+      this.#sessionLeftFrames = true;
     this.#appTransport = null;
     this.#transport.close();
   }

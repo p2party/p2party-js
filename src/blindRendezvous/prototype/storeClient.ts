@@ -38,6 +38,12 @@
  */
 
 import { sign, verify } from "../../cryptography/ed25519";
+import {
+  PROTOTYPE_READ_BACK_WINDOWS,
+  PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES,
+  PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS,
+  PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS,
+} from "../../utils/constants";
 import { bytesEqual } from "../canonicalSchema";
 import {
   allocationAppendSignedMessage,
@@ -55,6 +61,7 @@ import {
   ZERO32,
   appendSlotCoordinates,
   checkpointLeafEntries,
+  ingressWindow,
   ingressWindowStartMs,
   publicChunkHash,
   publicChunkSigningHash,
@@ -173,6 +180,17 @@ export interface StoreClientOptions {
  * reliably as one that is actively cheating. It is therefore never grounds
  * for `inert`: the store may come back.
  *
+ * `retention-breach` is blame: the store signed `out-of-range` for a window at
+ * or after its chain start that is inside the retention its signed
+ * descriptor states, measured on this client's clock with one window of
+ * allowance for a store clock running ahead. It sets `inert`, and the record
+ * keeps the signed answer as `evidence`. The same answer for a window past
+ * that retention is expiry, not blame: the scan says `beyond-retention`.
+ *
+ * `custody-unchecked` is a report: receipts for a window this client could not
+ * read back (expired or withheld) were not checked, rather than dropped
+ * without a word.
+ *
  * `custody-unacknowledged` is a report, not blame: an append with a lease was
  * still unanswered when this client read its window. It never sets `inert`.
  * If the store later signs `stored` for it, that receipt is judged against the
@@ -199,7 +217,9 @@ export type StoreFaultKind =
   | "chain-fault"
   | "root-mismatch"
   | "custody-breach"
+  | "retention-breach"
   | "custody-unacknowledged"
+  | "custody-unchecked"
   | "checkpoint-split-view-hint";
 
 export interface StoreFaultRecord {
@@ -207,7 +227,17 @@ export interface StoreFaultRecord {
   readonly kind: StoreFaultKind;
   readonly window: bigint | null;
   readonly detail: string;
+  /** The store's own signed answer, canonical bytes, when one proves the fault. */
+  readonly evidence?: Uint8Array;
 }
+
+/** Faults that make a store inert; they never compete with reports for room. */
+const BLAME_FAULT_KINDS: ReadonlySet<StoreFaultKind> = new Set([
+  "chain-fault",
+  "root-mismatch",
+  "custody-breach",
+  "retention-breach",
+]);
 
 /**
  * What one fixed scan of one window came back with.
@@ -230,7 +260,12 @@ export interface StoreFaultRecord {
  */
 export interface WindowScan {
   readonly window: bigint;
-  readonly status: "finalized" | "not-final" | "out-of-range" | "unreachable";
+  readonly status:
+    | "finalized"
+    | "not-final"
+    | "out-of-range"
+    | "beyond-retention"
+    | "unreachable";
   readonly objects: readonly Uint8Array[];
   readonly checkpointHash: Uint8Array | null;
 }
@@ -268,17 +303,29 @@ export class StoreAdmissionTokenError extends StoreClientError {
   override readonly name = "StoreAdmissionTokenError";
 }
 
+/**
+ * The store's signed descriptor states a retention shorter than this client
+ * reads back (`PROTOTYPE_READ_BACK_WINDOWS`). A client that used it would ask
+ * for windows the store has let expire, so `connect` refuses it.
+ */
+export class StoreRetentionError extends StoreClientError {
+  override readonly name = "StoreRetentionError";
+}
+
 const fail: (message: string) => never = (message) => {
   throw new StoreClientError(message);
 };
 
 /**
- * How many faults one client remembers.
+ * How many faults one client remembers, of each of two kinds.
  *
  * The earliest faults are the evidence — every one that matters is acted on
- * (`inert`) the instant it is recorded — so the cap keeps the first ones and
+ * (`inert`) the instant it is recorded — so each cap keeps the first ones and
  * drops later repetitions rather than the other way round. A browser tab that
  * scans a store for hours must not accumulate one record per failed fetch.
+ * Blame (`BLAME_FAULT_KINDS`) and reports have separate caps, so no number of
+ * reports — a slow honest store's `custody-unacknowledged`, a flaky network's
+ * `unreachable` — can crowd out a breach.
  */
 const MAX_RECORDED_FAULTS = 512;
 
@@ -295,19 +342,20 @@ const MAX_OBSERVED_CHECKPOINTS = 256;
 /** Receipts are consumed by the scan of their window; this bounds the rest. */
 const MAX_PENDING_RECEIPTS = 1_024;
 
-/** Appends with a lease still waiting for their answer; bounded the same way. */
-const MAX_IN_FLIGHT_APPENDS = MAX_PENDING_RECEIPTS;
+/** Appends with a lease still waiting for their answer. */
+const MAX_IN_FLIGHT_APPENDS = PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS;
 
 /**
  * Scanned windows whose slot hashes are kept for receipts that arrive after
  * the scan. An answer can arrive at most one request deadline (one window)
  * after its append was sent, and a window is read the window after it, so a
  * receipt is late by a couple of windows at most; sixteen is margin, at about
- * 1.3 KB a window in the pinned profile.
+ * 1.3 KB a window in the pinned profile. The same bound applies to the windows
+ * remembered as unreadable, whose late receipts are reported unchecked.
  */
-const MAX_SCANNED_WINDOWS = 16;
+const MAX_SCANNED_WINDOWS = PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS;
 
-const ADMISSION_TOKEN_BYTES = 32;
+const ADMISSION_TOKEN_BYTES = PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES;
 
 /**
  * How long one request to this store may stay outstanding, in milliseconds.
@@ -475,8 +523,26 @@ export class PrototypeStoreClient {
   readonly #requestDeadlineMs: number;
   readonly #admissionTokens: StoreAdmissionTokenProvider | undefined;
 
+  readonly #nowMs: () => bigint;
+  readonly #retentionWindows: number;
+
   #inert = false;
-  readonly #faults: StoreFaultRecord[] = [];
+  /** Recorded faults with their arrival order, blame and reports apart. */
+  readonly #blame: {
+    readonly order: number;
+    readonly fault: StoreFaultRecord;
+  }[] = [];
+  readonly #reports: {
+    readonly order: number;
+    readonly fault: StoreFaultRecord;
+  }[] = [];
+  #faultOrder = 0;
+  /**
+   * Windows this client could not read back from this store — expired or
+   * withheld — so a receipt for one is reported unchecked, never held for a
+   * scan that cannot come. Bounded like the scanned windows.
+   */
+  readonly #unreadable = new Set<string>();
   /** Sorted by ingress window; the input to `verifyStoreCheckpointChain`. */
   readonly #observed: ObservedStoreCheckpoint[] = [];
   readonly #checkpointHashes = new Map<string, Uint8Array>();
@@ -521,6 +587,8 @@ export class PrototypeStoreClient {
     this.#objectBytesByClass = pinned.objectBytesByClass;
     this.#requestDeadlineMs = requestDeadlineMs(options.profile);
     this.#admissionTokens = options.admissionTokens;
+    this.#nowMs = options.nowMs;
+    this.#retentionWindows = pinned.descriptor.retentionWindows;
   }
 
   /**
@@ -532,10 +600,12 @@ export class PrototypeStoreClient {
    * push that decision to a caller with less context. Everything after this
    * point degrades instead.
    *
-   * `nowMs` is read here and only here. The descriptor and route leases are
-   * about now, but every later check is anchored to the instant the window it
-   * concerns was finalized — historical evidence must not change meaning
-   * because the wall clock moved.
+   * `nowMs` is read here, and once more for one judgment only: whether a
+   * signed `out-of-range` names a window inside the retention the store
+   * states, which is a question about now. The descriptor and route leases are
+   * about now too, but every other later check is anchored to the instant the
+   * window it concerns was finalized — historical evidence must not change
+   * meaning because the wall clock moved.
    */
   static async connect(
     options: StoreClientOptions,
@@ -595,6 +665,13 @@ export class PrototypeStoreClient {
     );
     if (!validity.valid)
       fail(`the store descriptor is invalid: ${validity.reason}`);
+
+    // Signed with the rest of the descriptor, so this is the store's own
+    // statement of how far back it serves.
+    if (descriptor.retentionWindows < PROTOTYPE_READ_BACK_WINDOWS)
+      throw new StoreRetentionError(
+        `storeClient: the store states a retention of ${String(descriptor.retentionWindows)} windows, and this client reads up to ${String(PROTOTYPE_READ_BACK_WINDOWS)} back`,
+      );
 
     // Prototype compatibility is deliberately its own hash: a store that
     // advertises release compatibility bytes is refused rather than
@@ -677,7 +754,13 @@ export class PrototypeStoreClient {
   }
 
   get faults(): readonly StoreFaultRecord[] {
-    return this.#faults.map((fault) => ({ ...fault }));
+    return [...this.#blame, ...this.#reports]
+      .sort((left, right) => left.order - right.order)
+      .map(({ fault }) =>
+        fault.evidence === undefined
+          ? { ...fault }
+          : { ...fault, evidence: copyBytes(fault.evidence) },
+      );
   }
 
   /* ---------------------------------------------------------------- *
@@ -1020,6 +1103,10 @@ export class PrototypeStoreClient {
       objectHash: copyBytes(receipt.objectHash),
       result: { ...receipt.result },
     };
+    if (this.#unreadable.has(String(receipt.window))) {
+      this.#reportUnchecked(receipt.window, 1);
+      return;
+    }
     // A promise that arrived after its window was read is evidence all the
     // same: the slot it names either held these bytes in that read or not.
     const scanned = this.#scannedSlots.get(String(receipt.window));
@@ -1079,11 +1166,12 @@ export class PrototypeStoreClient {
       checkpointBytes,
     );
     if (checkpointStatus.kind !== "finalized")
-      return empty(checkpointStatus.status);
+      return this.#unreadableOutcome(window, empty(checkpointStatus.status));
     const { checkpoint, descriptor } = checkpointStatus;
 
     const chunks = await this.#readChunks(window, classes, chunkBytes);
-    if (chunks.kind !== "finalized") return empty(chunks.status);
+    if (chunks.kind !== "finalized")
+      return this.#unreadableOutcome(window, empty(chunks.status));
 
     // The chunks are only *this store's* claim until the checkpoint commits
     // them: recompute the root over the complete profile-fixed sequence and
@@ -1465,13 +1553,23 @@ export class PrototypeStoreClient {
     }
   }
 
-  #record(kind: StoreFaultKind, window: bigint | null, detail: string): void {
-    if (this.#faults.length >= MAX_RECORDED_FAULTS) return;
-    this.#faults.push({
-      storeIdHex: this.storeIdHex,
-      kind,
-      window,
-      detail,
+  #record(
+    kind: StoreFaultKind,
+    window: bigint | null,
+    detail: string,
+    evidence?: Uint8Array,
+  ): void {
+    const list = BLAME_FAULT_KINDS.has(kind) ? this.#blame : this.#reports;
+    if (list.length >= MAX_RECORDED_FAULTS) return;
+    list.push({
+      order: this.#faultOrder++,
+      fault: {
+        storeIdHex: this.storeIdHex,
+        kind,
+        window,
+        detail,
+        ...(evidence === undefined ? {} : { evidence: copyBytes(evidence) }),
+      },
     });
   }
 
@@ -1568,7 +1666,10 @@ export class PrototypeStoreClient {
       if (value.status === "not-final")
         return { kind: "status", status: "not-final" };
       if (value.status === "out-of-range")
-        return { kind: "status", status: "out-of-range" };
+        return {
+          kind: "status",
+          status: this.#judgeOutOfRange(window, bytes, "the checkpoint"),
+        };
       // `chain-unavailable` contradicts the descriptor this client pinned,
       // which named this profile and a chain start for it.
       return this.#reject(
@@ -1738,8 +1839,20 @@ export class PrototypeStoreClient {
               "the chunk status does not name the chunk that was requested",
               unusable,
             );
-          // A store that signed a checkpoint for this window and then refuses
-          // one of the chunks it committed contradicts itself.
+          // Out of range: the window may have passed the stated retention
+          // between the checkpoint and this chunk, which is expiry; inside it,
+          // it is the store withholding.
+          if (value.status === "out-of-range")
+            return {
+              kind: "status",
+              status: this.#judgeOutOfRange(
+                window,
+                bytes,
+                `chunk ${String(index)} of class ${String(sizeClass.id)}`,
+              ),
+            };
+          // A store that signed a checkpoint for this window and then calls
+          // one of the chunks it committed not final contradicts itself.
           return this.#reject(
             "signature-invalid",
             window,
@@ -1940,6 +2053,78 @@ export class PrototypeStoreClient {
         `the append to slot ${entry.slotKey} was still unanswered when this window was read`,
       );
     }
+  }
+
+  /**
+   * Classify a signed `out-of-range` for `window`, which is at or after this
+   * store's chain start (below it, no request is made).
+   *
+   * An honest store answers it only once `current - window > retentionWindows`
+   * on its own clock. A store clock less than one window ahead of this one
+   * counts at most one window more, so an honest answer means
+   * `current - window >= retentionWindows` here, read after the answer
+   * arrived. Anything less is the store refusing a window it states it
+   * serves: blame, with the signed answer kept. Either way the window will
+   * not be read back from this store.
+   */
+  #judgeOutOfRange(
+    window: bigint,
+    evidence: Uint8Array,
+    what: string,
+  ): "beyond-retention" | "unreachable" {
+    this.#markUnreadable(window);
+    const current = ingressWindow(
+      this.#profile.deliveryWindowMs,
+      this.#nowMs(),
+    );
+    if (current - window >= BigInt(this.#retentionWindows))
+      return "beyond-retention";
+    this.#inert = true;
+    this.#record(
+      "retention-breach",
+      window,
+      `the store signed out-of-range for ${what} of a window inside the ${String(this.#retentionWindows)}-window retention its descriptor states`,
+      evidence,
+    );
+    return "unreachable";
+  }
+
+  #markUnreadable(window: bigint): void {
+    const key = String(window);
+    if (this.#unreadable.has(key)) return;
+    this.#unreadable.add(key);
+    while (this.#unreadable.size > MAX_SCANNED_WINDOWS) {
+      const oldest = this.#unreadable.values().next();
+      if (oldest.done) break;
+      this.#unreadable.delete(oldest.value);
+    }
+  }
+
+  /**
+   * After a scan that will never read `window` back from this store, report
+   * the receipts held for it as unchecked instead of keeping them for a scan
+   * that cannot come. A receipt that arrives later is reported on arrival
+   * (`recordReceipt`); an append that is never answered promised nothing.
+   */
+  #unreadableOutcome(window: bigint, scan: WindowScan): WindowScan {
+    if (!this.#unreadable.has(String(window))) return scan;
+    const claimed = this.#receipts.filter(
+      (receipt) => receipt.window === window,
+    ).length;
+    this.#receipts = this.#receipts.filter(
+      (receipt) => receipt.window !== window,
+    );
+    this.#reportUnchecked(window, claimed);
+    return scan;
+  }
+
+  #reportUnchecked(window: bigint, count: number): void {
+    if (count === 0) return;
+    this.#record(
+      "custody-unchecked",
+      window,
+      `${String(count)} append receipt(s) for a window this store will not serve back were not checked`,
+    );
   }
 
   /** Keep one window's slot hashes, dropping the oldest window past the cap. */

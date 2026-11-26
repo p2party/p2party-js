@@ -391,8 +391,6 @@ const withSkipped = (count: number): RatchetSession => ({
   })),
 });
 
-const hex = (value: ArrayBuffer | null): string | null =>
-  value === null ? null : Buffer.from(new Uint8Array(value)).toString("hex");
 const buffer = (value: string): ArrayBuffer =>
   Uint8Array.from(Buffer.from(value, "hex")).buffer;
 const nullableBuffer = (value: string | null): ArrayBuffer | null =>
@@ -431,29 +429,6 @@ const decodeSession = (s: FixtureSession): RatchetSession => ({
     messageKey: buffer(k.messageKey),
   })),
   edgeCryptoState: nullableBuffer(s.edgeCryptoState),
-});
-
-const encodeSession = (s: RatchetSession): FixtureSession => ({
-  rootSuite: s.rootSuite,
-  roomId: s.roomId,
-  peerPublicKey: s.peerPublicKey,
-  peerId: s.peerId,
-  rootKey: hex(s.rootKey)!,
-  sendingChainKey: hex(s.sendingChainKey),
-  receivingChainKey: hex(s.receivingChainKey),
-  dhSelfPub: hex(s.dhSelfPub)!,
-  dhSelfSec: hex(s.dhSelfSec)!,
-  dhRemotePub: hex(s.dhRemotePub),
-  Ns: s.Ns,
-  Nr: s.Nr,
-  PN: s.PN,
-  skippedMessageKeys: s.skippedMessageKeys.map((k) => ({
-    dhPub: hex(k.dhPub)!,
-    n: k.n,
-    messageKey: hex(k.messageKey)!,
-  })),
-  edgeCryptoState: hex(s.edgeCryptoState),
-  updatedAt: s.updatedAt,
 });
 
 const envelopesOf = (s: RatchetSession): ArrayBuffer[] =>
@@ -511,7 +486,31 @@ const loadReleaseFixture = async (): Promise<{
   return { key, wrapVersion: fixture.wrapVersion, sessions: fixture.sessions };
 };
 
-describe("ratchet wrap cost is linear in the skipped-key count", () => {
+// Dispatch one request through db.worker.ts's real `onmessage` handler, across
+// a structured-clone boundary as a Worker would, and return its reply.
+let nextWorkerCallId = 1_000_000;
+const callWorker = async (
+  method: string,
+  args: unknown[],
+): Promise<{ result?: unknown; error?: unknown }> => {
+  await import("../../src/db/db.worker");
+  const id = nextWorkerCallId++;
+  let reply: { id: number; result?: unknown; error?: unknown } | undefined;
+  (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
+    (message: unknown) => {
+      reply = structuredClone(message) as typeof reply;
+    };
+  const handler = (
+    globalThis as unknown as { onmessage: (e: MessageEvent) => Promise<void> }
+  ).onmessage;
+  await handler({
+    data: structuredClone({ id, method, args }),
+  } as MessageEvent);
+  if (reply?.id !== id) throw new Error(`worker did not answer ${method}`);
+  return reply;
+};
+
+describe("ratchet wrap: linear cost, and old rows discarded", () => {
   test("wrap serializes the skipped list once", async () => {
     const key = await getWrapKey();
     const none = await observeHashing(() =>
@@ -558,107 +557,85 @@ describe("ratchet wrap cost is linear in the skipped-key count", () => {
     ).toBe(true);
   });
 
-  test("unwraps a 0.14.10 wrapped session", async () => {
+  test("an old-format wrapped session is discarded cleanly", async () => {
     const fixture = await loadReleaseFixture();
     expect(fixture.wrapVersion).toBe(2);
     expect(fixture.sessions.map((s) => s.name)).toEqual(["full", "minimal"]);
 
-    for (const record of fixture.sessions) {
-      const stored = decodeSession(record.wrapped);
-      for (const envelope of envelopesOf(stored))
-        expect(envelopeVersion(envelope)).toBe(2);
-
-      const guard = new RatchetRollbackGuard();
-      const restored = await unwrapRatchetSession(stored, fixture.key, guard);
-      expect(encodeSession(restored)).toEqual(record.plaintext);
-
-      // The release envelope still authenticates every public field.
-      await expect(
-        unwrapRatchetSession({ ...stored, Ns: stored.Ns + 1 }, fixture.key),
-      ).rejects.toBeDefined();
-      await expect(
-        unwrapRatchetSession({ ...stored, peerId: "other" }, fixture.key),
-      ).rejects.toBeDefined();
-
-      // The next persist writes the current envelope version, which unwraps
-      // to the same session and moves the guard past the release record.
-      const rewritten = await wrapRatchetSession(
-        { ...restored, updatedAt: restored.updatedAt + 1 },
-        fixture.key,
-      );
-      for (const envelope of envelopesOf(rewritten))
-        expect(envelopeVersion(envelope)).toBe(RATCHET_WRAP_VERSION);
-      expect(RATCHET_WRAP_VERSION).toBeGreaterThan(2);
-      await guard.rememberTrustedWrite(rewritten);
-      expect(
-        encodeSession(await unwrapRatchetSession(rewritten, fixture.key)),
-      ).toEqual({
-        ...record.plaintext,
-        updatedAt: record.plaintext.updatedAt + 1,
-      });
-      await expect(
-        unwrapRatchetSession(stored, fixture.key, guard),
-      ).rejects.toThrow("rollback detected");
-    }
-  });
-
-  test("rejects relabelled and mixed envelope versions", async () => {
-    const fixture = await loadReleaseFixture();
-    const release = decodeSession(fixture.sessions[0].wrapped);
+    // A 0.14.10 row, and a current row relabelled to version 2, are refused
+    // on the version byte: no field is ever decrypted, so no key material is
+    // produced, and no rollback watermark moves.
     const current = await wrapRatchetSession(
       decodeSession(fixture.sessions[0].plaintext),
       fixture.key,
     );
-
-    // A current envelope relabelled as the release version, and the reverse,
-    // fail authentication: the version selects the additional data.
-    await expect(
-      unwrapRatchetSession(
-        {
-          ...current,
-          rootKey: withEnvelopeVersion(current.rootKey, 2),
-          sendingChainKey: withEnvelopeVersion(current.sendingChainKey!, 2),
-          receivingChainKey: withEnvelopeVersion(current.receivingChainKey!, 2),
-          dhSelfSec: withEnvelopeVersion(current.dhSelfSec, 2),
-          skippedMessageKeys: current.skippedMessageKeys.map((k) => ({
-            ...k,
-            messageKey: withEnvelopeVersion(k.messageKey, 2),
-          })),
-          edgeCryptoState: withEnvelopeVersion(current.edgeCryptoState!, 2),
-        },
-        fixture.key,
-      ),
-    ).rejects.toBeDefined();
-    await expect(
-      unwrapRatchetSession(
-        {
-          ...release,
-          rootKey: withEnvelopeVersion(release.rootKey, RATCHET_WRAP_VERSION),
-        },
-        fixture.key,
-      ),
-    ).rejects.toBeDefined();
-
-    // One row never mixes versions, even with matching record IDs.
-    await expect(
-      unwrapRatchetSession(
-        {
-          ...release,
-          dhSelfSec: withEnvelopeVersion(
-            release.dhSelfSec,
-            RATCHET_WRAP_VERSION,
-          ),
-        },
-        fixture.key,
-      ),
-    ).rejects.toThrow("Unsupported or malformed ratchet wrap envelope");
+    const relabelled: RatchetSession = {
+      ...current,
+      rootKey: withEnvelopeVersion(current.rootKey, 2),
+    };
+    const oldRows = [
+      ...fixture.sessions.map((record) => decodeSession(record.wrapped)),
+      relabelled,
+    ];
     const guard = new RatchetRollbackGuard();
+    for (const row of oldRows) {
+      const decrypt = spyOn(crypto.subtle, "decrypt");
+      try {
+        await expect(
+          unwrapRatchetSession(row, fixture.key, guard),
+        ).rejects.toThrow("Unsupported or malformed ratchet wrap envelope");
+        await expect(guard.rememberTrustedWrite(row)).rejects.toThrow(
+          "Unsupported or malformed ratchet wrap envelope",
+        );
+        expect(decrypt).not.toHaveBeenCalled();
+      } finally {
+        decrypt.mockRestore();
+      }
+    }
+    expect(envelopeVersion(current.rootKey)).toBe(RATCHET_WRAP_VERSION);
     await expect(
-      guard.rememberTrustedWrite({
-        ...current,
-        dhSelfSec: withEnvelopeVersion(current.dhSelfSec, 2),
-      }),
-    ).rejects.toThrow("Unsupported or malformed ratchet wrap envelope");
+      unwrapRatchetSession(current, fixture.key, guard),
+    ).resolves.toBeDefined();
+
+    // The worker's load path answers "no session" instead of throwing, so the
+    // edge re-handshakes; its first persist replaces the row with version 3.
+    const stale = decodeSession(fixture.sessions[0].wrapped);
+    const db = await getDB();
+    await db.put("ratchetSessions", stale);
+    db.close();
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const loaded = await callWorker("getRatchetSession", [
+        stale.roomId,
+        stale.peerPublicKey,
+      ]);
+      expect(loaded.error).toBeUndefined();
+      expect(loaded.result).toBeUndefined();
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    const fresh = {
+      ...sampleSession(),
+      roomId: stale.roomId,
+      peerPublicKey: stale.peerPublicKey,
+      peerId: stale.peerId,
+    };
+    expect(
+      (await callWorker("setRatchetSession", [fresh])).error,
+    ).toBeUndefined();
+    const reread = await getDB();
+    const onDisk = (await reread.get("ratchetSessions", [
+      stale.roomId,
+      stale.peerPublicKey,
+    ])) as RatchetSession;
+    reread.close();
+    for (const envelope of envelopesOf(onDisk))
+      expect(envelopeVersion(envelope)).toBe(RATCHET_WRAP_VERSION);
+    const restored = (
+      await callWorker("getRatchetSession", [stale.roomId, stale.peerPublicKey])
+    ).result as RatchetSession;
+    expect(eq(restored.rootKey, fresh.rootKey)).toBe(true);
   });
 });
 

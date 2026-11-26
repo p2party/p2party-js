@@ -16,23 +16,18 @@ type OwnedBytes = Uint8Array<ArrayBuffer>;
 // reject before WebCrypto sees attacker-controlled layout.
 //
 // Version 3 binds each field to a SHA-512 digest of the row's canonical
-// metadata, computed once per row. Version 2, which 0.14.10 wrote, put the
-// whole metadata (every skipped key's dhPub and n included) into every
-// field's AAD, so a row with N skipped keys hashed the list N + 5 times. A
-// version 2 row still unwraps; every write produces version 3.
+// metadata, computed once per row. Version 2 (0.14.10) put the whole metadata,
+// every skipped key's dhPub and n included, into every field's AAD, so a row
+// with N skipped keys hashed the list N + 5 times. A version 2 row is not
+// unwrapped: it fails the version check before any decryption, and the edge
+// re-handshakes and writes a version 3 row.
 export const RATCHET_WRAP_VERSION = 3;
-const RATCHET_WRAP_VERSION_V2 = 2;
-type RatchetWrapVersion =
-  typeof RATCHET_WRAP_VERSION | typeof RATCHET_WRAP_VERSION_V2;
 const RATCHET_WRAP_MAGIC = Uint8Array.of(0x50, 0x32, 0x52, 0x57); // "P2RW"
 const RATCHET_WRAP_HEADER_BYTES =
   RATCHET_WRAP_MAGIC.byteLength + 1 + RATCHET_RECORD_ID_BYTES + GCM_IV_BYTES;
 /** Bounded canonical v4 PQ/outbox/active-key checkpoint (plaintext bytes). */
 export const MAX_EDGE_CRYPTO_STATE_BYTES = 256 * 1024;
-const RATCHET_AAD_DOMAIN_V2 = new TextEncoder().encode(
-  "p2party-edge-crypto-at-rest-aad-v2",
-);
-const RATCHET_AAD_DOMAIN_V3 = new TextEncoder().encode(
+const RATCHET_AAD_DOMAIN = new TextEncoder().encode(
   "p2party-edge-crypto-at-rest-aad-v3",
 );
 const MAX_AAD_STRING_BYTES = 1 << 20;
@@ -278,33 +273,27 @@ const canonicalRatchetMetadata = (s: RatchetMetadata): OwnedBytes => {
 
 /** The part of the AAD shared by every field envelope of one row. */
 interface RatchetRowAad {
-  readonly version: RatchetWrapVersion;
   readonly recordId: OwnedBytes;
-  /** v3: length-prefixed SHA-512 of the metadata. v2: the metadata itself. */
-  readonly metadataBinding: OwnedBytes;
+  /** Length-prefixed SHA-512 of the row's canonical metadata. */
+  readonly metadataDigest: OwnedBytes;
 }
 
 const ratchetRowAad = async (
   s: RatchetMetadata,
   recordId: OwnedBytes,
-  version: RatchetWrapVersion,
 ): Promise<RatchetRowAad> => {
   validateMetadata(s);
   if (recordId.byteLength !== RATCHET_RECORD_ID_BYTES)
     throw new Error("ratchet wrap: invalid record ID");
-  const metadata = canonicalRatchetMetadata(s);
-  if (version === RATCHET_WRAP_VERSION_V2)
-    return { version, recordId, metadataBinding: metadata };
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-512", metadata),
+    await crypto.subtle.digest("SHA-512", canonicalRatchetMetadata(s)),
   );
-  return { version, recordId, metadataBinding: lengthPrefixed(digest) };
+  return { recordId, metadataDigest: lengthPrefixed(digest) };
 };
 
 /**
  * AAD of one field envelope: domain ‖ version ‖ field ‖ record ID ‖ field
- * index ‖ the row's metadata binding. For version 2 these are the exact bytes
- * 0.14.10 authenticated.
+ * index ‖ the row's metadata digest. Constant size, whatever the row holds.
  */
 const ratchetFieldAad = (
   row: RatchetRowAad,
@@ -312,32 +301,23 @@ const ratchetFieldAad = (
   fieldIndex = 0,
 ): OwnedBytes =>
   concatBytes([
-    lengthPrefixed(
-      row.version === RATCHET_WRAP_VERSION_V2
-        ? RATCHET_AAD_DOMAIN_V2
-        : RATCHET_AAD_DOMAIN_V3,
-    ),
-    Uint8Array.of(row.version, field),
+    lengthPrefixed(RATCHET_AAD_DOMAIN),
+    Uint8Array.of(RATCHET_WRAP_VERSION, field),
     lengthPrefixed(row.recordId),
     encodeU32(fieldIndex),
-    row.metadataBinding,
+    row.metadataDigest,
   ]);
 
-interface RatchetEnvelopeHeader {
-  readonly version: RatchetWrapVersion;
-  readonly recordId: OwnedBytes;
-}
-
 /**
- * Parse and bound one field envelope's header. `expected`, when given, is the
- * row's root-key header: every envelope of a row must carry the same version
- * and record ID.
+ * Bound one field envelope's shape and version and return its record ID.
+ * `expectedRecordId`, when given, is the row's root-key record ID: every
+ * envelope of a row must carry it.
  */
-const ratchetEnvelopeHeader = (
+const ratchetEnvelopeRecordId = (
   blob: ArrayBuffer,
   expectedPlaintextBytes: number | null = 32,
-  expected?: RatchetEnvelopeHeader,
-): RatchetEnvelopeHeader => {
+  expectedRecordId?: OwnedBytes,
+): OwnedBytes => {
   const view = new Uint8Array(blob);
   const minimumLength = RATCHET_WRAP_HEADER_BYTES + 1 + GCM_TAG_BYTES;
   const maximumLength =
@@ -358,11 +338,7 @@ const ratchetEnvelopeHeader = (
     if (view[i] !== RATCHET_WRAP_MAGIC[i])
       throw new Error("Unsupported or malformed ratchet wrap envelope");
   }
-  const version = view[RATCHET_WRAP_MAGIC.byteLength];
-  if (
-    (version !== RATCHET_WRAP_VERSION && version !== RATCHET_WRAP_VERSION_V2) ||
-    (expected !== undefined && version !== expected.version)
-  )
+  if (view[RATCHET_WRAP_MAGIC.byteLength] !== RATCHET_WRAP_VERSION)
     throw new Error("Unsupported or malformed ratchet wrap envelope");
   const recordId = Uint8Array.from(
     view.subarray(
@@ -370,9 +346,9 @@ const ratchetEnvelopeHeader = (
       RATCHET_WRAP_MAGIC.byteLength + 1 + RATCHET_RECORD_ID_BYTES,
     ),
   );
-  if (expected !== undefined && !equalBytes(recordId, expected.recordId))
+  if (expectedRecordId !== undefined && !equalBytes(recordId, expectedRecordId))
     throw new Error("Ratchet wrap record ID mismatch");
-  return { version, recordId };
+  return recordId;
 };
 
 const wrapRatchetField = async (
@@ -419,11 +395,11 @@ const unwrapRatchetField = async (
   key: CryptoKey,
   envelope: ArrayBuffer,
   aad: OwnedBytes,
-  row: RatchetEnvelopeHeader,
+  expectedRecordId: OwnedBytes,
   expectedPlaintextBytes: number | null = 32,
 ): Promise<ArrayBuffer> => {
   requireBuffer(envelope, "ratchet wrapped secret");
-  ratchetEnvelopeHeader(envelope, expectedPlaintextBytes, row);
+  ratchetEnvelopeRecordId(envelope, expectedPlaintextBytes, expectedRecordId);
   const view = new Uint8Array(envelope);
   const plaintext = await crypto.subtle.decrypt(
     {
@@ -458,7 +434,7 @@ const ratchetEnvelopeFingerprint = async (
   s: RatchetSession,
 ): Promise<OwnedBytes> => {
   validateMetadata(s);
-  const header = ratchetEnvelopeHeader(s.rootKey);
+  const recordId = ratchetEnvelopeRecordId(s.rootKey);
   const otherEnvelopes = [
     s.sendingChainKey,
     s.receivingChainKey,
@@ -466,11 +442,11 @@ const ratchetEnvelopeFingerprint = async (
     ...s.skippedMessageKeys.map((skipped) => skipped.messageKey),
   ];
   for (const envelope of otherEnvelopes) {
-    if (envelope !== null) ratchetEnvelopeHeader(envelope, 32, header);
+    if (envelope !== null) ratchetEnvelopeRecordId(envelope, 32, recordId);
   }
   if (s.edgeCryptoState !== null)
-    ratchetEnvelopeHeader(s.edgeCryptoState, null, header);
-  const row = await ratchetRowAad(s, header.recordId, header.version);
+    ratchetEnvelopeRecordId(s.edgeCryptoState, null, recordId);
+  const row = await ratchetRowAad(s, recordId);
   const parts: OwnedBytes[] = [
     ratchetFieldAad(row, RatchetSecretField.RootKey),
     lengthPrefixed(new Uint8Array(s.rootKey)),
@@ -679,7 +655,7 @@ export async function wrapRatchetSession(
     const recordId = crypto.getRandomValues(
       new Uint8Array(RATCHET_RECORD_ID_BYTES),
     );
-    const row = await ratchetRowAad(snapshot, recordId, RATCHET_WRAP_VERSION);
+    const row = await ratchetRowAad(snapshot, recordId);
     const rootKey = await wrapRatchetField(
       key,
       snapshot.rootKey,
@@ -754,15 +730,15 @@ export async function unwrapRatchetSession(
   validateMetadata(snapshot);
   const plaintexts: ArrayBuffer[] = [];
   try {
-    // The root key's envelope fixes the row's version and record ID; every
-    // other envelope must repeat both.
-    const header = ratchetEnvelopeHeader(snapshot.rootKey);
-    const row = await ratchetRowAad(snapshot, header.recordId, header.version);
+    // Every envelope must carry the current version and the root key's
+    // record ID; an older row is refused here, before any decryption.
+    const recordId = ratchetEnvelopeRecordId(snapshot.rootKey);
+    const row = await ratchetRowAad(snapshot, recordId);
     const rootKey = await unwrapRatchetField(
       key,
       snapshot.rootKey,
       ratchetFieldAad(row, RatchetSecretField.RootKey),
-      header,
+      recordId,
     );
     plaintexts.push(rootKey);
     const sendingChainKey = snapshot.sendingChainKey
@@ -770,7 +746,7 @@ export async function unwrapRatchetSession(
           key,
           snapshot.sendingChainKey,
           ratchetFieldAad(row, RatchetSecretField.SendingChainKey),
-          header,
+          recordId,
         )
       : null;
     if (sendingChainKey) plaintexts.push(sendingChainKey);
@@ -779,7 +755,7 @@ export async function unwrapRatchetSession(
           key,
           snapshot.receivingChainKey,
           ratchetFieldAad(row, RatchetSecretField.ReceivingChainKey),
-          header,
+          recordId,
         )
       : null;
     if (receivingChainKey) plaintexts.push(receivingChainKey);
@@ -787,7 +763,7 @@ export async function unwrapRatchetSession(
       key,
       snapshot.dhSelfSec,
       ratchetFieldAad(row, RatchetSecretField.DhSelfSecret),
-      header,
+      recordId,
     );
     plaintexts.push(dhSelfSec);
 
@@ -798,7 +774,7 @@ export async function unwrapRatchetSession(
         key,
         skipped.messageKey,
         ratchetFieldAad(row, RatchetSecretField.SkippedMessageKey, index),
-        header,
+        recordId,
       );
       plaintexts.push(messageKey);
       skippedMessageKeys.push({
@@ -812,7 +788,7 @@ export async function unwrapRatchetSession(
           key,
           snapshot.edgeCryptoState,
           ratchetFieldAad(row, RatchetSecretField.EdgeCryptoState),
-          header,
+          recordId,
           null,
         )
       : null;

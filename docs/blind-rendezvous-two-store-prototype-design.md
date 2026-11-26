@@ -378,12 +378,17 @@ offsets (`ingressWindowStartMs` + offset, wall clock via an injected clock):
   real if the outbox holds a compatible operation for that role, else a
   dummy with the exact header and random body;
 - at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`;
-- once that scan's union resolves — no fixed offset — a witness POST and a
-  witness GET to each *other* store, which is the one part of the shape that
-  is **conditional** rather than fixed (§3a item 14, counted in §5).
+- at `chunkFinalizationOffsetMs - maxScheduleSkewMs` (2600 at the pinned
+  profile), waiting for nothing but the other store's scan of `w-1`: a
+  witness POST and a witness GET to each *other* store, which is the one
+  part of the shape that is **conditional** rather than fixed (§3a item 14,
+  counted in §5). Its timing does not depend on what the read decrypted or
+  on the application's handling of it.
 
-Missed events are missed (no same-window retry). Outbox: operations queue
-with their `ServiceWorkKindV1`; role mapping and ordering follow
+A timer delivered late fires its events late rather than dropping them;
+uploads more than one delivery window late are not sent and are reported
+`missed` (`#takeDue`). Nothing is retried (no same-window retry). Outbox:
+operations queue with their `ServiceWorkKindV1`; role mapping and ordering follow
 `OperationServiceRole`/`OperationServiceOrder` from §4.3. Each publication
 wraps the **same operation bytes** per store with `sealCarrierEnvelope`
 under `carrierContextId = PublicCarrierContextId(storeId, profileHash)` and
@@ -476,8 +481,10 @@ presence, an in-memory `pairLedger`, and one edge record.
     "nopin", pqMode })`, then `verifyDtlsFingerprints` semantics via
     `getStats()` where available. Bootstrap secrets are wiped after the
     session exists. **The tripwire is fail-closed only in the harness.** A
-    genuine mismatch throws and ends the run, but an engine that reports no
-    certificate statistics yields `unsupported`: `index.ts` emits
+    genuine mismatch throws and ends the session (the peer connection
+    closes; the carrier schedule runs on until the run is stopped), but an
+    engine that reports no certificate statistics yields `unsupported`:
+    `index.ts` emits
     `dtls-unsupported` and proceeds to `createSession` anyway, and it is
     `run.mjs` — not the library — that treats a run without `dtls-verified` on
     both pages as failed. So "DTLS verified on both sides" is a statement about
@@ -615,8 +622,10 @@ and never answers cannot hold the union — or this trace — open.
   above, because every request carries a deadline of one delivery window
   (`storeClient.ts`, `requestDeadlineMs`): an `unreachable` fault, no `inert`,
   no throw out of the scan, and the union completes on the other store's
-  objects. Without it that store would hold `#read`'s `Promise.all` open and
-  take the honest store's objects down with its own. The path is defended in
+  objects. Each store's read is its own handler, so the honest store's
+  objects are delivered without waiting for the silent one; without the
+  deadline, the silent store's scan would never settle and the witness event
+  that waits for it would never finish. The path is defended in
   code and exercised by a unit test (`carrierRuntime.test.ts`, "keeps
   delivering through the other store when one stalls and answers nothing");
   **no end-to-end scenario covers it yet** — `kill-a` refuses the connection

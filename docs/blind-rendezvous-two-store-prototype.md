@@ -137,11 +137,13 @@ One `--scenario=healthy` run, end to end:
    against the live certificate that `getStats()` reports, and both pages
    report `dtls-verified`. Read that as an observation and not as a property of
    the composition, because **the tripwire is fail-closed in the harness and
-   fail-open in the library**: a genuine mismatch throws and ends the run, but
-   an engine that reports no certificate statistics yields `unsupported`, and
-   `index.ts:689-693` then emits `dtls-unsupported` and proceeds to
-   `createSession` regardless. It is `run.mjs`, not the SDK, that treats a run
-   without `dtls-verified` on both pages as failed.
+   fail-open in the library**: a genuine mismatch throws and ends the session
+   (the peer connection closes; the carrier schedule runs on until the run is
+   stopped), but an engine that reports no certificate statistics yields
+   `unsupported`, and `#establishSession` in `index.ts` then emits
+   `dtls-unsupported` and proceeds to `createSession` regardless. It is
+   `run.mjs`, not the SDK, that treats a run without `dtls-verified` on both
+   pages as failed.
 7. **The existing protocol-v4 session runs over the data channel.** A real
    `createSession` on both sides — hybrid 3DH + ML-KEM, Double Ratchet — with
    the session role taken from the handoff facts rather than from who dialled.
@@ -220,17 +222,24 @@ and the runtime's own invariance test does not cover it — `windowShape()` coun
 five hardcoded routes and not the witness route, so that test would pass
 unchanged if witness traffic varied arbitrarily.
 
-**The schedule is fixed, and a missed event stays missed.** One `setTimeout` per
-store holds only the next due event, and the next one is armed inside the timer
-callback *before* the handler runs, so a slow store cannot shift its own
-following request off the grid. There is no same-window retry, because retrying
-at the surviving store after an omission would be an active cross-store tagging
-channel. Every request also carries a deadline of one delivery window
+**The schedule is fixed, and a late event is sent late.** One `setTimeout`
+holds the runtime's next due instant for every store, and the next one is
+armed inside the timer callback *before* any handler runs, so a slow store
+cannot shift its own following request off the grid. A timer the engine
+delivers late (a busy main thread, a background tab's one-second clamp)
+releases every event it held back at the late instant, so the count per window
+does not change; the store may refuse an append that arrives after
+finalization. Uploads more than one delivery window late are not sent, reads
+are made however late within a 64-window reach, and both bounds are reported as
+`missed` (`#takeDue`). There is no same-window retry, because retrying at the
+surviving store after an omission would be an active cross-store tagging
+channel. The application callback is called one batch at a time and never
+from inside a scheduled event, so a slow, throwing or hung callback moves no
+request. Every request also carries a deadline of one delivery window
 (`storeClient.ts`, `requestDeadlineMs`) — the same value on every route,
 because the profile sets no per-route budget for appends, chunks, or
-checkpoints to derive one from, and it exists because the union read joins
-both stores under one `Promise.all` and an unbounded request to one of them
-would stall the other's objects too.
+checkpoints to derive one from, and it exists because the witness event waits
+for the other store's scan, which an unbounded request would hold open.
 
 **A store's topology verdict is local and unlabelled.** The runtime reports
 `multi-store-union`, `single-carrier-dependent` or `no-usable-carrier`, computed

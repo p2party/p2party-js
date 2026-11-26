@@ -19,13 +19,14 @@
  *      derived from the driver, never guessed here.
  *   2. THE DTLS CHECK GATES THE SESSION. `verifyCertificates` runs after the
  *      connection reports `connected` and before `createSession`, against the
- *      fingerprints the pair transcript bound. A throw ends the run — not just
- *      the session: the endpoint is stopped, so the peer connection closes and
- *      the carrier schedule is disarmed against every store, and a
- *      `run-stopped` event says so. A tripwire that cannot confirm must abort,
- *      and an aborted edge must not leave a connection and a publisher behind
- *      it. (`"unsupported"` — an engine with no certificate stats — is reported
- *      and allowed, exactly as `webrtcProvider.ts` documents.)
+ *      fingerprints the pair transcript bound. A throw ends the session: the
+ *      peer connection is closed and a `session-failed` event says why. It
+ *      does NOT end the carrier schedule. Both endpoints of a pair reach their
+ *      handoff together, so a schedule that stopped with the session would
+ *      put both of them silent at an instant the pair's handshake chose, which
+ *      a store joins across its log. The schedule runs until the caller stops
+ *      the run. (`"unsupported"` — an engine with no certificate stats — is
+ *      reported and allowed, exactly as `webrtcProvider.ts` documents.)
  *   3. NOTHING HERE IS NODE. This module is bundled for the browser with
  *      `bun build --target=browser`, so it may not import `node:*`, the Redux
  *      layer, or anything under `prototype/store/` (which reaches for
@@ -80,6 +81,11 @@ const WASM_PAGES = 1024;
  * can possibly read it and call `setRemoteDescription`, so the responder's
  * connection legitimately sits in `connecting` for that window. A short
  * deadline here would fail a run that was working.
+ *
+ * The protocol-v4 handshake that follows is the last step of making the
+ * transport usable and gets the connection's budget: once both ends are
+ * connected it needs round trips, not windows, so a handshake still pending
+ * after this long is a peer that stopped answering.
  */
 const CHANNEL_TIMEOUT_MS = 60_000;
 const CONNECTED_TIMEOUT_MS = 60_000;
@@ -96,11 +102,21 @@ const CONNECTED_TIMEOUT_MS = 60_000;
 const MAX_APP_FRAMES = 65_536;
 
 export class PrototypeRunError extends Error {
-  override readonly name = "PrototypeRunError";
+  override readonly name: string = "PrototypeRunError";
 
   constructor(message: string) {
     super(`blindRendezvousPrototype: ${message}`);
   }
+}
+
+/**
+ * A deadline passed before the awaited step finished: a phase that did not
+ * arrive, a session that was not established, a handshake that stalled, a
+ * message that did not come. Distinct from every other run failure, so a
+ * caller can tell "the peer was too slow" from "the edge is broken".
+ */
+export class PrototypeRunTimeoutError extends PrototypeRunError {
+  override readonly name = "PrototypeRunTimeoutError";
 }
 
 const fail: (message: string) => never = (message) => {
@@ -166,7 +182,13 @@ export interface PrototypeRun {
    * caller that just wants to talk should wait for.
    */
   waitForPhase(phase: PairDriverPhase, timeoutMs: number): Promise<void>;
-  sendMessage(bytes: Uint8Array): Promise<void>;
+  /**
+   * Send one message once the session exists. Rejects with
+   * `PrototypeRunTimeoutError` if there is still no session `timeoutMs` after
+   * the call, and with the failure itself if the session could not be
+   * established.
+   */
+  sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void>;
   recvMessage(timeoutMs: number): Promise<Uint8Array>;
   auditSecrets(): PrototypeRunAudit;
   storeTopology(): StoreTopology;
@@ -178,6 +200,22 @@ export interface PrototypeRun {
  * Small async helpers
  * ------------------------------------------------------------------ */
 
+const timedOut = (label: string, timeoutMs: number): PrototypeRunTimeoutError =>
+  new PrototypeRunTimeoutError(
+    `${label} did not complete within ${String(timeoutMs)}ms`,
+  );
+
+/** A deadline the caller supplies must be one `setTimeout` honours as given:
+ * `undefined` would fire at once and read as a timeout that never happened. */
+const requireDeadline = (timeoutMs: number, label: string): void => {
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < 0
+  )
+    fail(`${label} needs a finite, non-negative deadline in milliseconds`);
+};
+
 const withTimeout = async <T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -188,15 +226,7 @@ const withTimeout = async <T>(
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new PrototypeRunError(
-                `${label} did not complete within ${String(timeoutMs)}ms`,
-              ),
-            ),
-          timeoutMs,
-        );
+        timer = setTimeout(() => reject(timedOut(label, timeoutMs)), timeoutMs);
       }),
     ]);
   } finally {
@@ -237,7 +267,7 @@ const waitChannelOpen = (
         const timer = setTimeout(
           () =>
             settle(
-              new PrototypeRunError(
+              new PrototypeRunTimeoutError(
                 `the bootstrap data channel did not open within ${String(timeoutMs)}ms`,
               ),
             ),
@@ -277,7 +307,7 @@ const waitConnected = (
         const timer = setTimeout(
           () =>
             settle(
-              new PrototypeRunError(
+              new PrototypeRunTimeoutError(
                 `the peer connection did not connect within ${String(timeoutMs)}ms`,
               ),
             ),
@@ -363,24 +393,55 @@ interface PhaseWaiter {
   readonly reject: (error: Error) => void;
 }
 
-interface RunParts {
+/**
+ * What a run needs from the WebRTC provider once the driver has opened one.
+ *
+ * @internal
+ */
+export type SessionTransportProvider = Pick<
+  WebRtcCandidateProvider,
+  "role" | "peerConnection" | "channel" | "verifyCertificates"
+>;
+
+/**
+ * The run's handle on its WebRTC transport: the provider, once the driver
+ * needed one, and teardown.
+ *
+ * @internal
+ */
+export interface RunTransport {
+  readonly provider: SessionTransportProvider | null;
+  close(): void;
+}
+
+/** @internal */
+export interface RunParts {
   readonly driver: PairDriver;
   readonly runtime: CarrierRuntime;
-  readonly transport: LazyWebRtcTransport;
+  readonly transport: RunTransport;
   readonly identity: GeneratedSessionIdentity;
   readonly pqMode: RoomPqMode;
   readonly wasmBinary: ArrayBuffer;
+  /** The deadline `createSession` runs under once the transport is up. */
+  readonly handshakeTimeoutMs: number;
   readonly emit: (kind: string, detail?: string) => void;
 }
 
-class BlindRendezvousRun implements PrototypeRun {
+/**
+ * One endpoint of a run. Exported for the composition tests only; a page gets
+ * one from `runBlindRendezvousPrototype`.
+ *
+ * @internal
+ */
+export class BlindRendezvousRun implements PrototypeRun {
   readonly driver: PairDriver;
   readonly runtime: CarrierRuntime;
 
-  readonly #transport: LazyWebRtcTransport;
+  readonly #transport: RunTransport;
   readonly #identity: GeneratedSessionIdentity;
   readonly #pqMode: RoomPqMode;
   readonly #wasmBinary: ArrayBuffer;
+  readonly #handshakeTimeoutMs: number;
   readonly #emit: (kind: string, detail?: string) => void;
 
   readonly #reached = new Set<PairDriverPhase>();
@@ -410,6 +471,7 @@ class BlindRendezvousRun implements PrototypeRun {
     this.#identity = parts.identity;
     this.#pqMode = parts.pqMode;
     this.#wasmBinary = parts.wasmBinary;
+    this.#handshakeTimeoutMs = parts.handshakeTimeoutMs;
     this.#emit = parts.emit;
     this.#sessionGate = new Promise<EstablishedSession>((resolve, reject) => {
       this.#openGate = resolve;
@@ -479,7 +541,7 @@ class BlindRendezvousRun implements PrototypeRun {
       const timer = setTimeout(() => {
         this.#dropWaiter(waiter);
         reject(
-          new PrototypeRunError(
+          new PrototypeRunTimeoutError(
             `phase "${phase}" did not arrive within ${String(timeoutMs)}ms`,
           ),
         );
@@ -503,9 +565,18 @@ class BlindRendezvousRun implements PrototypeRun {
    * than one message must await each before starting the next — which is what
    * the prototype's harness does, and why this is documented rather than
    * locked.
+   *
+   * `timeoutMs` bounds the wait for the session, the one step here that
+   * depends on the peer: encryption and framing are local work, and
+   * `sendApp` queues without waiting.
    */
-  async sendMessage(bytes: Uint8Array): Promise<void> {
-    const established = await this.#requireSession();
+  async sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void> {
+    requireDeadline(timeoutMs, "sendMessage");
+    const established = await withTimeout(
+      this.#requireSession(),
+      timeoutMs,
+      "session handoff",
+    );
     const message = await established.session.encrypt(bytes);
 
     const header = new Uint8Array(4 + message.root.length + 4);
@@ -607,8 +678,9 @@ class BlindRendezvousRun implements PrototypeRun {
    * is the harness's proof obligation and has to stay answerable after a run
    * has been stopped. Call `driver.destroy()` once the audit is done.
    *
-   * `detail` is the internal teardown reason (a tripped DTLS gate, a failed
-   * handshake); a caller stopping its own run leaves it out.
+   * `detail` is the internal teardown reason (a presence that could not be
+   * published); a caller stopping its own run leaves it out. A failed session
+   * is not one: it ends the session alone (`#endSession`).
    */
   stop(detail?: string): void {
     if (this.#stopped) return;
@@ -645,9 +717,9 @@ class BlindRendezvousRun implements PrototypeRun {
       const missing = new PrototypeRunError(
         "the driver reported handoff without handoff facts",
       );
-      this.#emit("session-failed", missing.message);
-      this.#closeGate?.(missing);
-      this.stop(missing.message);
+      this.#sessionPromise = Promise.reject(missing);
+      void this.#sessionPromise.catch(() => undefined);
+      this.#endSession(missing);
       return;
     }
     const started = this.#establishSession(handoff);
@@ -658,16 +730,34 @@ class BlindRendezvousRun implements PrototypeRun {
     this.#sessionPromise = started;
     this.#openGate?.(started);
     void started.catch((error: unknown) => {
-      const detail = detailOf(error);
-      this.#emit("session-failed", detail);
-      // A handoff that did not become a session is a dead edge, and this
-      // prototype's driver does not retry one. Leaving it up would hold an
-      // `RTCPeerConnection` open and keep publishing to both stores on a fixed
-      // schedule for a room that has nowhere left to go, so the whole endpoint
-      // comes down with it — which is what the DTLS tripwire above means when
-      // it says a mismatch ends the run.
-      this.stop(`session could not be established: ${detail}`);
+      this.#endSession(error);
     });
+  }
+
+  /**
+   * A handoff that did not become a session: report it, and take down what
+   * belonged to that session and nothing else.
+   *
+   * This prototype's driver does not retry a dead edge, so the peer connection
+   * and any half-built session go. The carrier schedule stays: both ends of a
+   * pair reach their handoff together, and a schedule that stopped with the
+   * session would put both of them silent at an instant their handshake chose
+   * — an instant a store can join across its log. The schedule's lifetime is
+   * the run's, which the caller ends with `stop()`.
+   */
+  #endSession(error: unknown): void {
+    this.#emit("session-failed", detailOf(error));
+    // Already settled when the gate adopted a failed establishment; settles
+    // it for a handoff that never got that far.
+    this.#closeGate?.(
+      error instanceof Error ? error : new PrototypeRunError(detailOf(error)),
+    );
+    const session = this.#session;
+    this.#session = null;
+    if (session !== null) void session.destroy().catch(() => undefined);
+    this.#appTransport?.close();
+    this.#appTransport = null;
+    this.#transport.close();
   }
 
   async #establishSession(handoff: HandoffFacts): Promise<EstablishedSession> {
@@ -684,10 +774,10 @@ class BlindRendezvousRun implements PrototypeRun {
     await waitConnected(provider.peerConnection, CONNECTED_TIMEOUT_MS);
     this.#emit("webrtc-connected", provider.role);
 
-    // The tripwire runs before the handshake, and a throw here ends the run:
-    // `#startSession` stops the endpoint on any rejection from this method, so
-    // the peer connection is closed and the schedule disarmed. The fingerprints
-    // below are the ones the pair transcript signed, so a live certificate that
+    // The tripwire runs before the handshake, and a throw here ends the
+    // session: `#startSession` hands any rejection from this method to
+    // `#endSession`, which closes the peer connection. The fingerprints below
+    // are the ones the pair transcript signed, so a live certificate that
     // disagrees means the SDP was rewritten after both peers authenticated it.
     // The provider already buffers bounded raw input, since a faster peer may
     // send its HELLO while getStats() is pending. Session processing still
@@ -701,7 +791,7 @@ class BlindRendezvousRun implements PrototypeRun {
 
     const transport = dataChannelTransport(channel);
     this.#appTransport = transport;
-    const session = await createSession({
+    const handshake = createSession({
       transport,
       role: handoff.sessionRole,
       identity: this.#identity,
@@ -715,6 +805,25 @@ class BlindRendezvousRun implements PrototypeRun {
       mode: "nopin",
       crypto: { wasmBinary: this.#wasmBinary },
     });
+    // A peer that stops answering mid-handshake would otherwise hold this
+    // await, and every caller waiting on the session gate, forever. At the
+    // deadline `#endSession` closes the transport, which unblocks the
+    // handshake's pending receive; one that completes anyway after its
+    // deadline is destroyed rather than kept.
+    let session: P2PartySession;
+    try {
+      session = await withTimeout(
+        handshake,
+        this.#handshakeTimeoutMs,
+        "session handshake",
+      );
+    } catch (error) {
+      void handshake.then(
+        (late) => late.destroy().catch(() => undefined),
+        () => undefined,
+      );
+      throw error;
+    }
     // stop() closes pending receives, but a handshake that already consumed
     // its last frame can finish async cryptography afterwards. It must never
     // publish an authenticated session or retain its keys after teardown.
@@ -872,6 +981,9 @@ export const runBlindRendezvousPrototype = async (
       clearTimeout: (handle) =>
         clearTimeout(handle as ReturnType<typeof setTimeout>),
     },
+    // The runtime calls this one batch at a time and never from inside a
+    // scheduled event, which is what keeps the non-reentrant `ingest` from
+    // overlapping itself when an ICE wait outlives a delivery window.
     onOperations: (fresh) => driver.ingest(fresh),
     onEvent: (event) => {
       const where = event.storeIdHex ?? "runtime";
@@ -896,17 +1008,22 @@ export const runBlindRendezvousPrototype = async (
     identity,
     pqMode: decodeRoomPolicyV1(driver.roomPolicy.sessionPolicyV1).pqMode,
     wasmBinary: options.wasmBinary,
+    handshakeTimeoutMs: CONNECTED_TIMEOUT_MS,
     emit,
   });
 
-  runtime.start();
+  // The presence first, the schedule after. `start()` and `ingest()` must not
+  // overlap, and the runtime's first read can deliver operations before a
+  // presence still being built would be ready for them; publishing only
+  // queues, so nothing leaves before the schedule's own slot either way.
   try {
     await driver.start();
   } catch (error) {
-    // A caller that never got a run cannot stop one, and an armed schedule
-    // with nobody holding it would keep talking to both stores forever.
+    // A caller that never got a run cannot stop one, so the half-built one is
+    // stopped here and its schedule is never armed.
     run.stop(`the local presence could not be published: ${detailOf(error)}`);
     throw error;
   }
+  runtime.start();
   return run;
 };

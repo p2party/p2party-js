@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
+import { keyPairFromSeed, sign } from "../../../src/cryptography/ed25519";
 import { loadTestModule } from "../../../src/cryptography/testModule";
 import {
   deliveryProfileHash,
   policyHash,
+  publicCheckpointStatusSigningHash,
   roomRoot,
 } from "../../../src/blindRendezvous/derivations";
 import {
@@ -19,6 +21,8 @@ import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store
 import { PROTOTYPE_MAX_READ_WINDOWS } from "../../../src/utils/constants";
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
+import { PROTOTYPE_STORE_ROUTES } from "../../../src/blindRendezvous/prototype/storeRoutes";
+import { encodePublicStoreCheckpointReadV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 import type { CarrierEvent } from "../../../src/blindRendezvous/prototype/carrierRuntime";
 import type { WindowScan } from "../../../src/blindRendezvous/prototype/storeClient";
@@ -90,8 +94,16 @@ const harnessFor = (
   return Object.assign(harness, { runtime });
 };
 
-/** Fire every armed timer due by `untilMs`, in order, at its own instant. */
-const fireUntil = async (harness: Harness, untilMs: bigint): Promise<void> => {
+/**
+ * Fire every armed timer due by `untilMs`, in order, at its own instant.
+ * `beforeEach` runs once the clock is at that instant and before the timer
+ * fires: where a test's store does its own timed work.
+ */
+const fireUntil = async (
+  harness: Harness,
+  untilMs: bigint,
+  beforeEach: () => Promise<void> = () => Promise.resolve(),
+): Promise<void> => {
   for (;;) {
     let next: [number, { atMs: bigint; callback(): void }] | undefined;
     for (const entry of harness.pending)
@@ -99,6 +111,7 @@ const fireUntil = async (harness: Harness, untilMs: bigint): Promise<void> => {
     if (next === undefined || next[1].atMs > untilMs) return;
     harness.pending.delete(next[0]);
     if (harness.nowMs < next[1].atMs) harness.nowMs = next[1].atMs;
+    await beforeEach();
     next[1].callback();
     await harness.runtime.drain();
   }
@@ -399,4 +412,284 @@ describe("carrier runtime and store retention", () => {
       void server.stop(true);
     }
   }, 60_000);
+
+  test("a not-final for a window the client's clock says is long final is a clock disagreement, not a wait", async () => {
+    // The re-review's four runs, with the real client and the real core over
+    // HTTP under the runtime: the chain-start window W is finalized, and its
+    // checkpoint is answered with a `not-final` the store's key signed.
+    const seed = new Uint8Array(32).fill(0x5d);
+    const secretKey = (await keyPairFromSeed(Uint8Array.from(seed), module))
+      .secretKey;
+    const W = CHAIN_START;
+    const profileHex = [...profileHash]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const runs: {
+      readonly name: string;
+      /** The window the store states as its own in the `not-final`. */
+      readonly stated: bigint;
+      /** `null`: the scheduled read. Otherwise the window a suspended page
+       * resumes in, which reads W as a catch-up. */
+      readonly resumeWindow: bigint | null;
+    }[] = [
+      { name: "the scheduled read at W + 1", stated: W, resumeWindow: null },
+      { name: "a catch-up at W + 10", stated: W, resumeWindow: W + 10n },
+      { name: "a catch-up at W + 60", stated: W, resumeWindow: W + 60n },
+      {
+        name: "a window a thousand back stated at the scheduled read",
+        stated: W - 1_000n,
+        resumeWindow: null,
+      },
+    ];
+
+    for (const run of runs) {
+      const clock = {
+        now:
+          run.resumeWindow === null
+            ? windowStart(W)
+            : windowStart(W + 1n) + 50n,
+      };
+      let handler: ((request: Request) => Promise<Response>) | null = null;
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request: Request): Response | Promise<Response> =>
+          handler === null
+            ? new Response("not ready", { status: 503 })
+            : handler(request),
+      });
+      try {
+        expect(server.port ?? 0).toBeGreaterThan(5000);
+        const origin = server.url.origin;
+        const core = await PrototypeStoreCore.create({
+          module,
+          seed,
+          profile,
+          clock: { nowMs: (): bigint => clock.now },
+          persistence: new MemoryStorePersistence(),
+          chainStartIngressWindow: W,
+          origin,
+          descriptorValidityMs: 2_592_000_000n,
+        });
+        handler = createPrototypeStoreHandler({ core });
+
+        const value = {
+          version: 1 as const,
+          storeId: core.storeId,
+          descriptorHash: core.descriptorHash,
+          deliveryProfileHash: profileHash,
+          ingressWindow: W,
+          storeIngressWindow: run.stated,
+          status: "not-final" as const,
+        };
+        const notFinal = encodePublicStoreCheckpointReadV1({
+          kind: "status",
+          value,
+          storeSignature: await sign(
+            await publicCheckpointStatusSigningHash(value),
+            secretKey,
+            module,
+          ),
+        });
+        const body = new ArrayBuffer(notFinal.byteLength);
+        new Uint8Array(body).set(notFinal);
+        let stalled = 0;
+        const stalling: typeof fetch = ((
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ) => {
+          const url = new URL(String(input));
+          if (
+            url.pathname ===
+            `${PROTOTYPE_STORE_ROUTES.checkpoint}/${profileHex}/${String(W)}`
+          ) {
+            stalled += 1;
+            return Promise.resolve(
+              new Response(body.slice(0), {
+                status: 200,
+                headers: { "x-p2party-store": "prototype-v0" },
+              }),
+            );
+          }
+          return fetch(`${origin}${url.pathname}${url.search}`, init);
+        }) as typeof fetch;
+        const store = await PrototypeStoreClient.connect({
+          origin,
+          profile,
+          profileHash,
+          module,
+          fetch: stalling,
+          nowMs: () => clock.now,
+        });
+
+        const harness = harnessFor([store], clock.now);
+        const finalize = async (): Promise<void> => {
+          clock.now = harness.nowMs;
+          while ((await core.finalizeDue()).length > 0);
+        };
+        harness.runtime.start();
+        try {
+          if (run.resumeWindow === null) {
+            // Through the read of W, made in the window after it.
+            await fireUntil(
+              harness,
+              windowStart(W + 1n) + profile.publicReadOffsetMs,
+              finalize,
+            );
+          } else {
+            // Suspended from the start: no timer fires until the page
+            // resumes, and W is first read then, as a catch-up.
+            harness.nowMs =
+              windowStart(run.resumeWindow) + profile.publicReadOffsetMs;
+            await finalize();
+            const first = [...harness.pending.entries()].sort((left, right) =>
+              left[1].atMs < right[1].atMs ? -1 : 1,
+            )[0];
+            if (first === undefined)
+              throw new Error("the schedule was not armed");
+            harness.pending.delete(first[0]);
+            first[1].callback();
+            await harness.runtime.drain();
+          }
+
+          // W is finalized at the store: only the stalled answer says not.
+          const direct = await core.readCheckpoint(profileHash, W);
+          expect([run.name, direct.kind]).toEqual([run.name, "finalized"]);
+          const attempts = run.resumeWindow === null ? 1 : 2;
+          expect([run.name, stalled]).toEqual([run.name, attempts]);
+
+          // The scan is never `not-final`: each attempt is a disagreement.
+          const scans = harness.events
+            .filter((event) => event.kind === "scan" && event.window === W)
+            .map((event) => event.detail);
+          expect([run.name, scans]).toEqual([
+            run.name,
+            Array.from({ length: attempts }, () => "clock-disagreement"),
+          ]);
+          // A fault record at the client for each, and no blame.
+          expect([
+            run.name,
+            store.faults.map((fault) => [fault.kind, fault.window]),
+          ]).toEqual([
+            run.name,
+            Array.from({ length: attempts }, () => [
+              "store-clock-disagreement",
+              W,
+            ]),
+          ]);
+          expect(store.inert).toBe(false);
+          // And the window reported missed at this store each time.
+          const missed = missedAt(harness.events, W, store.storeIdHex).map(
+            (event) => event.detail ?? "",
+          );
+          expect([
+            run.name,
+            missed.filter((detail) => detail.includes("signed clock disagrees"))
+              .length,
+          ]).toEqual([run.name, attempts]);
+          expect([
+            run.name,
+            missed.filter((detail) =>
+              detail.includes(
+                "a catch-up read failed twice (clock-disagreement)",
+              ),
+            ).length,
+          ]).toEqual([run.name, run.resumeWindow === null ? 0 : 1]);
+          expect(
+            missedAt(harness.events, W).some((event) =>
+              (event.detail ?? "").includes("no store served a finalized read"),
+            ),
+          ).toBe(true);
+          // Every later window the run read came back finalized.
+          const others = harness.events.filter(
+            (event) => event.kind === "scan" && event.window > W,
+          );
+          expect(
+            others.filter((event) => event.detail !== "finalized"),
+          ).toEqual([]);
+          if (run.resumeWindow !== null)
+            expect(others.length).toBeGreaterThan(
+              Number(run.resumeWindow - W) - 3,
+            );
+        } finally {
+          await harness.runtime.stop();
+        }
+      } finally {
+        void server.stop(true);
+      }
+    }
+  }, 60_000);
+
+  test("a read outside the pinned descriptor's validity is reported missed at its store and not retried", async () => {
+    const storeIdHex = "dd".repeat(32);
+    const scans = new Map<bigint, number>();
+    const lapsed = {
+      storeIdHex,
+      storeId: new Uint8Array(32).fill(0xdd),
+      carrierContextId: new Uint8Array(32).fill(0xdd),
+      inert: false,
+      faults: [],
+      issueToken: (): Promise<boolean> => Promise.resolve(true),
+      allocate: (): Promise<null> => Promise.resolve(null),
+      append: (): Promise<null> => Promise.resolve(null),
+      scanWindow: (window: bigint): Promise<WindowScan> => {
+        scans.set(window, (scans.get(window) ?? 0) + 1);
+        return Promise.resolve({
+          window,
+          status: "descriptor-out-of-validity",
+          objects: [],
+          checkpointHash: null,
+        });
+      },
+      recordReceipt: (): void => undefined,
+      checkpointHashFor: (): null => null,
+    } as unknown as PrototypeStoreClient;
+    // Suspended from the start and resumed five windows later: the oldest
+    // windows are read as catch-ups, the newest on the schedule.
+    const harness = harnessFor([lapsed], windowStart(CHAIN_START + 1n) + 50n);
+    harness.runtime.start();
+    try {
+      harness.nowMs =
+        windowStart(CHAIN_START + 6n) + profile.publicReadOffsetMs;
+      const first = [...harness.pending.entries()].sort((left, right) =>
+        left[1].atMs < right[1].atMs ? -1 : 1,
+      )[0];
+      if (first === undefined) throw new Error("the schedule was not armed");
+      harness.pending.delete(first[0]);
+      first[1].callback();
+      await harness.runtime.drain();
+
+      const read = [...scans.keys()].sort((left, right) =>
+        left < right ? -1 : 1,
+      );
+      expect(read.length).toBeGreaterThan(3);
+      expect(read[0]).toBe(CHAIN_START);
+      for (const window of read) {
+        // Once each, catch-up or scheduled: the answer cannot change.
+        expect([window, scans.get(window)]).toEqual([window, 1]);
+        const missed = missedAt(harness.events, window, storeIdHex).map(
+          (event) => event.detail ?? "",
+        );
+        expect([
+          window,
+          missed.filter((detail) =>
+            detail.includes(
+              "outside the validity of the store descriptor this client pinned",
+            ),
+          ).length,
+        ]).toEqual([window, 1]);
+        expect(
+          missed.filter((detail) => detail.includes("failed twice")),
+        ).toEqual([]);
+        // Never an empty success: the window as a whole is reported too.
+        expect(
+          missedAt(harness.events, window).some((event) =>
+            (event.detail ?? "").includes("no store served a finalized read"),
+          ),
+        ).toBe(true);
+      }
+    } finally {
+      await harness.runtime.stop();
+    }
+  });
 });

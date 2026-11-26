@@ -333,6 +333,15 @@ type ReadAttempt = "scheduled" | "catch-up-first" | "catch-up-last";
 const readSucceeded = (status: WindowScan["status"]): boolean =>
   status === "finalized" || status === "out-of-range";
 
+/** A scan the catch-up does not retry, and which `#read` has already reported
+ * missed at its store: the store's retention has passed, or the read fell
+ * outside the validity of the descriptor the client pinned. Retention does
+ * not run backwards and neither does a descriptor's end. A refusal stated in
+ * the window a descriptor's validity begins in is the one case a later read
+ * could change; it is reported like the rest and not asked for again. */
+const readIsLost = (status: WindowScan["status"]): boolean =>
+  status === "beyond-retention" || status === "descriptor-out-of-validity";
+
 interface OutboxEntry {
   /** The exact canonical bytes both stores carry, identical across carriers. */
   readonly operationBytes: Uint8Array;
@@ -949,14 +958,11 @@ export class CarrierRuntime {
           next.window,
           next.attempt === 1 ? "catch-up-first" : "catch-up-last",
         );
-        // An expired window stays expired: retrying it would only spend six
-        // more requests on the same answer, and `#read` already reported it.
-        if (
-          readSucceeded(status) ||
-          status === "beyond-retention" ||
-          next.attempt === 2
-        ) {
-          if (!readSucceeded(status) && status !== "beyond-retention")
+        // An expired window stays expired, and so does a descriptor
+        // (`readIsLost`): retrying either would only spend six more requests
+        // on the same answer, and `#read` already reported it.
+        if (readSucceeded(status) || readIsLost(status) || next.attempt === 2) {
+          if (!readSucceeded(status) && !readIsLost(status))
             this.#emit({
               kind: "missed",
               storeIdHex: state.store.storeIdHex,
@@ -1378,6 +1384,17 @@ export class CarrierRuntime {
           detail:
             "the store's signed clock disagrees with this client's beyond the profile's skew; this window was not read at this store this time",
         });
+      // The descriptor the client pinned is the store's lease to be read.
+      // Outside it nothing the store says is believed or served, short of a
+      // refusal that proves a fault, which the client blames first.
+      if (scan.status === "descriptor-out-of-validity")
+        this.#emit({
+          kind: "missed",
+          storeIdHex: store.storeIdHex,
+          window,
+          detail:
+            "the read fell outside the validity of the store descriptor this client pinned; this window was not read at this store",
+        });
       if (!this.#running) return status;
 
       const observed = await this.#openObjects(store, window, scan.objects);
@@ -1410,7 +1427,7 @@ export class CarrierRuntime {
         this.#rememberScanStatus(key, status);
       if (
         readSucceeded(status) ||
-        status === "beyond-retention" ||
+        readIsLost(status) ||
         attempt !== "catch-up-first"
       )
         this.#settleRead(window, union, status);

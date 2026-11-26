@@ -4,13 +4,14 @@ import { describe, expect, test } from "bun:test";
 
 import { loadTestModule } from "../../../src/cryptography/testModule";
 import { bytesEqual } from "../../../src/blindRendezvous/canonicalSchema";
-import { ingressWindow } from "../../../src/blindRendezvous/publicWindow";
+import { ingressWindowStartMs } from "../../../src/blindRendezvous/publicWindow";
 import { runBlindRendezvousPrototype } from "../../../src/blindRendezvous/prototype/index";
 import { PROTOTYPE_DELIVERY_PROFILE_V0 } from "../../../src/blindRendezvous/prototype/profile";
 import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store/storeCore";
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 
+import type { CarrierTimers } from "../../../src/blindRendezvous/prototype/carrierRuntime";
 import type { StoreAdmissionRequestV1 } from "../../../src/blindRendezvous/prototype/store/storeCore";
 import type { StoreAdmissionTokenRequest } from "../../../src/blindRendezvous/prototype/storeClient";
 
@@ -24,46 +25,67 @@ new Uint8Array(wasmBinary).set(wasmFileBytes);
 
 const profile = PROTOTYPE_DELIVERY_PROFILE_V0;
 
-/** Resolve with the first value a callback is handed, or fail after a bound. */
-const firstCall = <T>(
-  boundMs: number,
+/** 1_800_000_000_000 / 4_000 is exact: the run starts on a window edge. */
+const CHAIN_START = 450_000_000n;
+
+/**
+ * One clock for the store and the run, and a timer pair that fires only when
+ * the test says so: the run's time is the test's, and nothing waits on the
+ * wall clock.
+ */
+const fakeTime = (
+  startMs: bigint,
 ): {
-  readonly called: Promise<T>;
-  readonly record: (value: T) => void;
-  readonly cancel: () => void;
+  readonly clock: { nowMs(): bigint };
+  readonly timers: CarrierTimers;
+  /** Fire the earliest armed timer at its own instant; false if none. */
+  readonly fireNext: () => boolean;
 } => {
-  let resolve!: (value: T) => void;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const called = new Promise<T>((settle, reject) => {
-    resolve = settle;
-    timer = setTimeout(() => {
-      reject(new Error(`not called within ${String(boundMs)} ms`));
-    }, boundMs);
-  });
+  let nowMs = startMs;
+  let nextId = 0;
+  const pending = new Map<number, { atMs: bigint; callback: () => void }>();
   return {
-    called,
-    record: (value) => {
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
-      resolve(value);
+    clock: { nowMs: () => nowMs },
+    timers: {
+      setTimeout: (callback, delayMs) => {
+        nextId += 1;
+        pending.set(nextId, { atMs: nowMs + BigInt(delayMs), callback });
+        return nextId;
+      },
+      clearTimeout: (handle) => {
+        pending.delete(handle as number);
+      },
     },
-    cancel: () => {
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
+    fireNext: () => {
+      let earliest: [number, { atMs: bigint; callback: () => void }] | null =
+        null;
+      for (const entry of pending)
+        if (earliest === null || entry[1].atMs < earliest[1].atMs)
+          earliest = entry;
+      if (earliest === null) return false;
+      pending.delete(earliest[0]);
+      if (earliest[1].atMs > nowMs) nowMs = earliest[1].atMs;
+      earliest[1].callback();
+      return true;
     },
   };
+};
+
+/** Bounded event-loop turns, never a wall-clock wait. */
+const until = async (condition: () => boolean, rounds = 2_000) => {
+  for (let round = 0; round < rounds && !condition(); round += 1)
+    await new Promise<void>((resolve) => setImmediate(resolve));
 };
 
 describe("prototype public entry point", () => {
   test("an admission token provider given at the entry point reaches the store client", async () => {
     const token = new Uint8Array(32).fill(0x7e);
     const quotaKey = new Uint8Array(32).fill(0x7f);
-    // The first window of a run asks for its first token within a delivery
-    // window of starting (the allocation offset, or at once on a cold start
-    // past it); two windows is the bound, not a measurement.
-    const bound = Number(profile.deliveryWindowMs) * 2;
-    const asked = firstCall<StoreAdmissionTokenRequest>(bound);
-    const admitted = firstCall<StoreAdmissionRequestV1>(bound);
+    const time = fakeTime(
+      ingressWindowStartMs(CHAIN_START, profile.deliveryWindowMs),
+    );
+    const asked: StoreAdmissionTokenRequest[] = [];
+    const admitted: StoreAdmissionRequestV1[] = [];
 
     let handler: ((request: Request) => Promise<Response>) | null = null;
     const server = Bun.serve({
@@ -81,19 +103,16 @@ describe("prototype public entry point", () => {
         module,
         seed: new Uint8Array(32).fill(0x3c),
         profile,
-        clock: { nowMs: () => BigInt(Date.now()) },
+        clock: time.clock,
         persistence: new MemoryStorePersistence(),
-        chainStartIngressWindow: ingressWindow(
-          profile.deliveryWindowMs,
-          BigInt(Date.now()),
-        ),
+        chainStartIngressWindow: CHAIN_START,
         origin,
         descriptorValidityMs: 2_592_000_000n,
         // Admits only a request that presents the provider's token.
         allocationAdmission: {
           authorize: (request) => {
             if (!bytesEqual(request.privacyPassToken, token)) return null;
-            admitted.record(request);
+            admitted.push(request);
             return quotaKey;
           },
         },
@@ -105,27 +124,36 @@ describe("prototype public entry point", () => {
         storeOrigins: [origin],
         wasmBinary,
         rtcConfig: { iceServers: [] },
+        clock: time.clock,
+        timers: time.timers,
         admissionTokens: (request) => {
-          asked.record(request);
+          asked.push(request);
           return { storeId: request.storeId, token };
         },
         onEvent: () => {},
       });
       try {
-        const request = await asked.called;
+        // Started on a window edge: the token request is due at 100 ms and
+        // the allocation, the first request that presents a token, at 700.
+        for (let fired = 0; fired < 8 && asked.length === 0; fired += 1) {
+          expect(time.fireNext()).toBe(true);
+          await until(() => asked.length > 0, 50);
+        }
+        expect(asked.length).toBeGreaterThan(0);
+        const request = asked[0];
         expect(bytesEqual(request.storeId, core.storeId)).toBe(true);
         expect(request.origin).toBe(origin);
-        expect(["allocation", "append"]).toContain(request.route);
+        expect(request.route).toBe("allocation");
+        expect(request.ingressWindow).toBe(CHAIN_START + 1n);
         // And the store saw the token the provider returned.
-        const seen = await admitted.called;
-        expect(bytesEqual(seen.privacyPassToken, token)).toBe(true);
+        await until(() => admitted.length > 0);
+        expect(admitted.length).toBeGreaterThan(0);
+        expect(bytesEqual(admitted[0].privacyPassToken, token)).toBe(true);
       } finally {
         await run.stop();
       }
     } finally {
-      asked.cancel();
-      admitted.cancel();
       await server.stop(true);
     }
-  }, 30_000);
+  });
 });

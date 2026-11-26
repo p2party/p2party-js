@@ -12,7 +12,12 @@
  * unit the specification makes atomic — allocation ordinals, slot bindings and
  * the finalization that freezes both — so a single `saveWindow` is the
  * smallest transaction that can never publish half a finalization. The SQLite
- * implementation lands in a later task behind this same interface.
+ * implementation (`storeSqlite.ts`) sits behind this same interface.
+ *
+ * Every row is deletable by window: a window row carries its own allocation
+ * records (and their admission quota keys), and a witness window carries its
+ * records and the per-key counts that bound them, so the retention sweep
+ * removes a window's bookkeeping by removing the window.
  *
  * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
  * registry.
@@ -63,14 +68,54 @@ export interface StoreWindowState {
   finalized: StoreFinalizedWindow | null;
 }
 
+/** How much one witness insert may fill. */
+export interface StoreWitnessBounds {
+  /** Distinct records one window may hold, from every caller together. */
+  readonly maxRecordsPerWindow: number;
+  /**
+   * The admission quota key the record is offered under, exactly 32 bytes,
+   * or `null` when the store runs open admission and has no key to charge.
+   */
+  readonly quotaKey32: Uint8Array | null;
+  /** New records one quota key may add to one window. */
+  readonly maxRecordsPerQuotaKey: number;
+}
+
+/**
+ * `present`: those exact canonical bytes are already held for the window, and
+ * nothing was charged to anybody. `window-full` and `quota-full`: nothing was
+ * written.
+ */
+export type StoreWitnessInsertOutcome =
+  "added" | "present" | "window-full" | "quota-full";
+
 export interface StorePersistencePort {
   loadWindow(window: bigint): Promise<StoreWindowState | null>;
   /** Whole-window replace; the implementation must not alias caller buffers. */
   saveWindow(state: StoreWindowState): Promise<void>;
   lastFinalizedWindow(): Promise<bigint | null>;
   loadWitnessRecords(window: bigint): Promise<StoreWitnessRecordV1[]>;
-  /** Idempotent on identical canonical bytes. */
-  saveWitnessRecord(record: StoreWitnessRecordV1): Promise<void>;
+  /**
+   * Add one record if its window and the offering key both have room, in one
+   * atomic step. Idempotent on identical canonical bytes, and constant work in
+   * the number of records the window already holds: an implementation keeps
+   * counts rather than reading the window's records to decide.
+   */
+  addWitnessRecord(
+    record: StoreWitnessRecordV1,
+    bounds: StoreWitnessBounds,
+  ): Promise<StoreWitnessInsertOutcome>;
+  /**
+   * Delete up to `limit` window rows below `window`, smallest first, and
+   * answer how many went. Each row takes its allocation records with it.
+   */
+  deleteWindowsBefore(window: bigint, limit: number): Promise<number>;
+  /**
+   * Delete the witness records of up to `limit` windows below `window`,
+   * smallest first, with the counts that bound them, and answer how many
+   * windows went.
+   */
+  deleteWitnessRecordsBefore(window: bigint, limit: number): Promise<number>;
 }
 
 export const emptyStoreWindowState = (window: bigint): StoreWindowState => ({
@@ -200,9 +245,26 @@ export const copyStoreWindowState = (
  * In-memory implementation
  * ------------------------------------------------------------------ */
 
-/** Shared with `storeCore.ts`, which keys its witness dedup the same way. */
 export const hexOf = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+/** One window's witness records, keyed by canonical bytes, and per-key counts. */
+interface MemoryWitnessWindow {
+  readonly records: Map<string, StoreWitnessRecordV1>;
+  readonly recordsByQuotaKey: Map<string, number>;
+}
+
+/** The `limit` smallest keys below `floor`, as the windows they name. */
+const smallestBelow = (
+  keys: Iterable<string>,
+  floor: bigint,
+  limit: number,
+): bigint[] =>
+  [...keys]
+    .map((key) => BigInt(key))
+    .filter((window) => window < floor)
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+    .slice(0, Math.max(0, limit));
 
 /**
  * Volatile store state for tests and for a store started without a database
@@ -213,7 +275,7 @@ export const hexOf = (value: Uint8Array): string =>
 export class MemoryStorePersistence implements StorePersistencePort {
   // Windows are u64, so a decimal string is the only lossless Map key.
   readonly #windows = new Map<string, StoreWindowState>();
-  readonly #witnesses = new Map<string, Map<string, StoreWitnessRecordV1>>();
+  readonly #witnesses = new Map<string, MemoryWitnessWindow>();
 
   async loadWindow(window: bigint): Promise<StoreWindowState | null> {
     const stored = this.#windows.get(String(window));
@@ -237,18 +299,49 @@ export class MemoryStorePersistence implements StorePersistencePort {
     const stored = this.#witnesses.get(String(window));
     return stored === undefined
       ? []
-      : [...stored.values()].map(copyWitnessRecord);
+      : [...stored.records.values()].map(copyWitnessRecord);
   }
 
-  async saveWitnessRecord(record: StoreWitnessRecordV1): Promise<void> {
+  /** No `await` between the checks and the writes, so the step is atomic. */
+  async addWitnessRecord(
+    record: StoreWitnessRecordV1,
+    bounds: StoreWitnessBounds,
+  ): Promise<StoreWitnessInsertOutcome> {
     const key = String(record.ingressWindow);
-    const existing = this.#witnesses.get(key) ?? new Map();
     // Keyed by the canonical encoding, which is what makes a re-offer of the
     // same observation a no-op rather than a second row.
-    existing.set(
-      hexOf(encodeStoreWitnessRecordV1(record)),
-      copyWitnessRecord(record),
-    );
-    this.#witnesses.set(key, existing);
+    const encoded = hexOf(encodeStoreWitnessRecordV1(record));
+    const held = this.#witnesses.get(key) ?? {
+      records: new Map<string, StoreWitnessRecordV1>(),
+      recordsByQuotaKey: new Map<string, number>(),
+    };
+    if (held.records.has(encoded)) return "present";
+    if (held.records.size >= bounds.maxRecordsPerWindow) return "window-full";
+    const quotaKey =
+      bounds.quotaKey32 === null ? null : hexOf(bounds.quotaKey32);
+    const charged =
+      quotaKey === null ? 0 : (held.recordsByQuotaKey.get(quotaKey) ?? 0);
+    if (quotaKey !== null && charged >= bounds.maxRecordsPerQuotaKey)
+      return "quota-full";
+
+    held.records.set(encoded, copyWitnessRecord(record));
+    if (quotaKey !== null) held.recordsByQuotaKey.set(quotaKey, charged + 1);
+    this.#witnesses.set(key, held);
+    return "added";
+  }
+
+  async deleteWindowsBefore(window: bigint, limit: number): Promise<number> {
+    const doomed = smallestBelow(this.#windows.keys(), window, limit);
+    for (const each of doomed) this.#windows.delete(String(each));
+    return doomed.length;
+  }
+
+  async deleteWitnessRecordsBefore(
+    window: bigint,
+    limit: number,
+  ): Promise<number> {
+    const doomed = smallestBelow(this.#witnesses.keys(), window, limit);
+    for (const each of doomed) this.#witnesses.delete(String(each));
+    return doomed.length;
   }
 }

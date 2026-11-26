@@ -35,7 +35,10 @@ import {
   StoreClientError,
   buildAppendAdmission,
 } from "../../../src/blindRendezvous/prototype/storeClient";
-import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store/storeCore";
+import {
+  PrototypeStoreCore,
+  type PrototypeStoreCoreOptions,
+} from "../../../src/blindRendezvous/prototype/store/storeCore";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import {
@@ -52,6 +55,7 @@ import {
 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 import type { LibCrypto } from "../../../src/cryptography/libcrypto";
+import type { StoreClientOptions } from "../../../src/blindRendezvous/prototype/storeClient";
 import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 const hex = (value: Uint8Array): string =>
@@ -113,6 +117,11 @@ const startStore = async (
     seed?: Uint8Array;
     fault?: "withhold" | null;
     chainStart?: bigint;
+    allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
+    /** Wraps the store's handler, e.g. to answer some routes another way. */
+    wrap?: (
+      handler: (request: Request) => Promise<Response>,
+    ) => (request: Request) => Promise<Response>;
   } = {},
 ): Promise<StoreProcess> => {
   let handler: ((request: Request) => Promise<Response>) | null = null;
@@ -134,8 +143,11 @@ const startStore = async (
     origin,
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
+    allocationAdmission: options.allocationAdmission,
   });
-  handler = createPrototypeStoreHandler({ core });
+  const storeHandler = createPrototypeStoreHandler({ core });
+  handler =
+    options.wrap === undefined ? storeHandler : options.wrap(storeHandler);
   return {
     core,
     origin,
@@ -161,7 +173,11 @@ const withStore = async (
 const connect = async (
   origin: string,
   clock: Clock,
-  overrides: { profileHash?: Uint8Array; fetch?: typeof fetch } = {},
+  overrides: {
+    profileHash?: Uint8Array;
+    fetch?: typeof fetch;
+    admissionTokens?: StoreClientOptions["admissionTokens"];
+  } = {},
 ): Promise<PrototypeStoreClient> =>
   PrototypeStoreClient.connect({
     origin,
@@ -170,6 +186,7 @@ const connect = async (
     module: cryptoModule,
     fetch: overrides.fetch,
     nowMs: () => clock.now,
+    admissionTokens: overrides.admissionTokens,
   });
 
 const chunkHeaders = {
@@ -1135,5 +1152,326 @@ describe("prototype store client", () => {
       expect(partial.faults).toEqual([]);
       expect(partial.inert).toBe(false);
     });
+  });
+});
+
+describe("prototype store client admission tokens", () => {
+  const witnessRecordFor = (window: bigint): StoreWitnessRecordV1 => ({
+    version: 1,
+    witnessedStoreId: new Uint8Array(32).fill(0x91),
+    deliveryProfileHash: PROFILE_HASH,
+    ingressWindow: window,
+    checkpointHash: new Uint8Array(32).fill(0xc5),
+  });
+  const routeByte = { allocation: 0xa1, append: 0xa2, witness: 0xa3 } as const;
+
+  /** POST paths a client sent, and the authorization header on each. */
+  const recordingFetch = (sent: string[]): typeof fetch =>
+    ((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST")
+        sent.push(
+          `${new URL(String(input)).pathname} ${
+            new Headers(init.headers).get("authorization") ?? "-"
+          }`,
+        );
+      return fetch(input, init);
+    }) as typeof fetch;
+
+  test("client presents provider tokens", async () => {
+    const seen: string[] = [];
+    const clock: Clock = { now: WINDOW_START };
+    const store = await startStore(clock, {
+      allocationAdmission: {
+        authorize: (request) => {
+          seen.push(`${request.route}:${hex(request.privacyPassToken)}`);
+          return request.privacyPassToken;
+        },
+      },
+    });
+    try {
+      const asked: string[] = [];
+      const client = await connect(store.origin, clock, {
+        admissionTokens: (request) => {
+          asked.push(
+            `${request.route} ${hex(request.storeId)} ${request.origin} ${String(request.ingressWindow)}`,
+          );
+          return {
+            storeId: request.storeId,
+            token: new Uint8Array(32).fill(routeByte[request.route]),
+          };
+        },
+      });
+      const { lease, secretKey } = await leaseFor(client, CHAIN_START);
+      const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x51);
+      const admission = await buildAppendAdmission(
+        lease,
+        secretKey,
+        0,
+        0,
+        object,
+        cryptoModule,
+      );
+      expect(
+        (await client.append(CHAIN_START, 0, object, admission))?.status,
+      ).toBe("stored");
+      expect((await client.append(CHAIN_START, 0, object, null))?.status).toBe(
+        "unallocated-cover",
+      );
+      expect(await client.postWitness(witnessRecordFor(CHAIN_START))).toBe(
+        true,
+      );
+
+      const tokenHex = (route: keyof typeof routeByte): string =>
+        hex(new Uint8Array(32).fill(routeByte[route]));
+      expect(seen).toEqual([
+        `allocation:${tokenHex("allocation")}`,
+        `append:${tokenHex("append")}`,
+        `append:${tokenHex("append")}`,
+        `witness:${tokenHex("witness")}`,
+      ]);
+      const pinned = `${hex(store.core.storeId)} ${store.origin} ${String(CHAIN_START)}`;
+      expect(asked).toEqual([
+        `allocation ${pinned}`,
+        `append ${pinned}`,
+        `append ${pinned}`,
+        `witness ${pinned}`,
+      ]);
+
+      // Open admission stays the default: no provider, no header, zero token.
+      seen.length = 0;
+      const sent: string[] = [];
+      const open = await connect(store.origin, clock, {
+        fetch: recordingFetch(sent),
+      });
+      await open.append(CHAIN_START, 0, object, null);
+      expect(sent).toEqual([`${PROTOTYPE_STORE_ROUTES.append} -`]);
+      expect(seen).toEqual([`append:${hex(new Uint8Array(32))}`]);
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("a token issued for another store is never sent", async () => {
+    await withStore(async (store, clock) => {
+      const sent: string[] = [];
+      const client = await connect(store.origin, clock, {
+        fetch: recordingFetch(sent),
+        admissionTokens: () => ({
+          storeId: new Uint8Array(32).fill(0xee),
+          token: new Uint8Array(32).fill(1),
+        }),
+      });
+      const keyPair = await newKeyPair(cryptoModule);
+      const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x52);
+      await expect(client.allocate(CHAIN_START, keyPair)).rejects.toMatchObject(
+        { name: "StoreAdmissionTokenError" },
+      );
+      await expect(
+        client.append(CHAIN_START, 0, object, null),
+      ).rejects.toMatchObject({ name: "StoreAdmissionTokenError" });
+      await expect(
+        client.postWitness(witnessRecordFor(CHAIN_START)),
+      ).rejects.toMatchObject({ name: "StoreAdmissionTokenError" });
+      expect(sent).toEqual([]);
+    });
+  });
+
+  test("a failing token provider fails the operation instead of sending without a token", async () => {
+    await withStore(async (store, clock) => {
+      for (const provider of [
+        () => {
+          throw new Error("provider down");
+        },
+        () => Promise.reject(new Error("provider down")),
+        (request: { storeId: Uint8Array }) => ({
+          storeId: request.storeId,
+          token: new Uint8Array(31),
+        }),
+        () => null,
+      ] as unknown as NonNullable<StoreClientOptions["admissionTokens"]>[]) {
+        const sent: string[] = [];
+        const client = await connect(store.origin, clock, {
+          fetch: recordingFetch(sent),
+          admissionTokens: provider,
+        });
+        const keyPair = await newKeyPair(cryptoModule);
+        const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x53);
+        await expect(
+          client.allocate(CHAIN_START, keyPair),
+        ).rejects.toMatchObject({ name: "StoreAdmissionTokenError" });
+        await expect(
+          client.append(CHAIN_START, 0, object, null),
+        ).rejects.toMatchObject({ name: "StoreAdmissionTokenError" });
+        await expect(
+          client.postWitness(witnessRecordFor(CHAIN_START)),
+        ).rejects.toMatchObject({ name: "StoreAdmissionTokenError" });
+        expect(sent).toEqual([]);
+      }
+    });
+  });
+
+  test("a redirect never carries an admission token to another origin", async () => {
+    const reached: string[] = [];
+    const sink = Bun.serve({
+      port: 0,
+      fetch: (request: Request): Response => {
+        reached.push(`${request.method} ${new URL(request.url).pathname}`);
+        return new Response("sink");
+      },
+    });
+    const clock: Clock = { now: WINDOW_START };
+    // Every POST is answered with a redirect to another origin; the
+    // descriptor and reads are served normally so the client can connect.
+    const store = await startStore(clock, {
+      wrap: (handler) => async (request) =>
+        request.method === "POST"
+          ? new Response(null, {
+              status: 307,
+              headers: {
+                location: `${sink.url.origin}${new URL(request.url).pathname}`,
+                "x-p2party-store": "prototype-v0",
+              },
+            })
+          : handler(request),
+    });
+    try {
+      const client = await connect(store.origin, clock, {
+        admissionTokens: (request) => ({
+          storeId: request.storeId,
+          token: new Uint8Array(32).fill(0x77),
+        }),
+      });
+      const keyPair = await newKeyPair(cryptoModule);
+      const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x54);
+      expect(await client.allocate(CHAIN_START, keyPair)).toBeNull();
+      expect(await client.append(CHAIN_START, 0, object, null)).toBeNull();
+      expect(await client.postWitness(witnessRecordFor(CHAIN_START))).toBe(
+        false,
+      );
+      expect(reached).toEqual([]);
+      expect(client.inert).toBe(false);
+    } finally {
+      store.stop();
+      void sink.stop(true);
+    }
+  });
+});
+
+describe("prototype store client late acknowledgements", () => {
+  /**
+   * The store answers the append at once; the answer is held from the client
+   * until released. Nothing about the store's own behaviour is faked.
+   */
+  const holdAppendAnswers = (): {
+    readonly fetch: typeof fetch;
+    readonly answered: Promise<void>;
+    readonly release: () => void;
+  } => {
+    let markAnswered!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      markAnswered = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetch(input, init);
+      if (
+        init?.method !== "POST" ||
+        new URL(String(input)).pathname !== PROTOTYPE_STORE_ROUTES.append
+      )
+        return response;
+      const bytes = await response.arrayBuffer();
+      markAnswered();
+      await released;
+      return new Response(bytes, {
+        status: response.status,
+        headers: response.headers,
+      });
+    }) as typeof fetch;
+    return { fetch: holding, answered, release };
+  };
+
+  const appendHeldPastScan = async (
+    store: StoreProcess,
+    clock: Clock,
+    fill: number,
+  ): Promise<{
+    readonly client: PrototypeStoreClient;
+    readonly receipt: Parameters<PrototypeStoreClient["recordReceipt"]>[0];
+  }> => {
+    const held = holdAppendAnswers();
+    const client = await connect(store.origin, clock, { fetch: held.fetch });
+    const { lease, secretKey } = await leaseFor(client, CHAIN_START);
+    const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(fill);
+    const admission = await buildAppendAdmission(
+      lease,
+      secretKey,
+      0,
+      0,
+      object,
+      cryptoModule,
+    );
+    const pending = client.append(CHAIN_START, 0, object, admission);
+    await held.answered;
+
+    clock.now = FINALIZE_AT;
+    await store.core.finalizeDue();
+    expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
+    expect(
+      client.faults.map((fault) => [fault.kind, fault.window] as const),
+    ).toEqual([["custody-unacknowledged", CHAIN_START]]);
+    expect(client.inert).toBe(false);
+
+    held.release();
+    const result = await pending;
+    if (result === null) throw new Error("expected an append result");
+    expect(result.status).toBe("stored");
+    return {
+      client,
+      receipt: {
+        window: CHAIN_START,
+        sizeClass: 0,
+        lease,
+        objectOrdinal: 0,
+        objectHash: await sha256(object),
+        result,
+      },
+    };
+  };
+
+  test("late acknowledgement is reported unacknowledged", async () => {
+    await withStore(async (store, clock) => {
+      const { client, receipt } = await appendHeldPastScan(store, clock, 0x41);
+      // The store did hold the object, so the late receipt checks out.
+      client.recordReceipt(receipt);
+      expect(client.inert).toBe(false);
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "custody-unacknowledged",
+      ]);
+    });
+  });
+
+  test("a slot missing from the scan is evidence when its acknowledgement arrives late", async () => {
+    await withStore(
+      async (store, clock) => {
+        const { client, receipt } = await appendHeldPastScan(
+          store,
+          clock,
+          0x42,
+        );
+        // No rescan: the receipt is judged against the scan already made.
+        client.recordReceipt(receipt);
+        expect(client.inert).toBe(true);
+        expect(
+          client.faults.map((fault) => [fault.kind, fault.window] as const),
+        ).toEqual([
+          ["custody-unacknowledged", CHAIN_START],
+          ["custody-breach", CHAIN_START],
+        ]);
+      },
+      { fault: "withhold" },
+    );
   });
 });

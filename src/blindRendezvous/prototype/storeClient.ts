@@ -112,6 +112,32 @@ import type {
   StoreWitnessRecordV1,
 } from "./storeWire";
 
+/** The routes a store may gate behind its admission hook. */
+export type StoreAdmissionRoute = "allocation" | "append" | "witness";
+
+/** What a token provider is asked for: one token, for one request. */
+export interface StoreAdmissionTokenRequest {
+  /** The identity this client pinned at `connect`: the token's audience. */
+  readonly storeId: Uint8Array;
+  readonly origin: string;
+  readonly route: StoreAdmissionRoute;
+  readonly ingressWindow: bigint;
+}
+
+export interface StoreAdmissionToken {
+  /**
+   * The store this token was issued for. The client presents it to that store
+   * and no other: a token naming another identity fails the request.
+   */
+  readonly storeId: Uint8Array;
+  /** Exactly 32 bytes. */
+  readonly token: Uint8Array;
+}
+
+export type StoreAdmissionTokenProvider = (
+  request: StoreAdmissionTokenRequest,
+) => StoreAdmissionToken | Promise<StoreAdmissionToken>;
+
 export interface StoreClientOptions {
   readonly origin: string;
   readonly profile: DeliveryProfileV1;
@@ -120,6 +146,18 @@ export interface StoreClientOptions {
   /** Injected so a test, a worker or a proxy can supply its own transport. */
   readonly fetch?: typeof fetch;
   readonly nowMs: () => bigint;
+  /**
+   * Admission tokens for a store that gates its routes. Absent, the client
+   * runs open admission: 32 zero bytes in the allocation body and no
+   * `authorization` header. Present, every allocation, append and witness
+   * offer asks it first and presents what it returns — in the allocation
+   * body's `privacyPassToken`, and as `authorization: Bearer <hex>` on append
+   * and witness. A provider that fails, or returns a token issued for another
+   * store or of the wrong length, fails that request with
+   * `StoreAdmissionTokenError` before anything is sent; it never falls back
+   * to an unauthenticated request.
+   */
+  readonly admissionTokens?: StoreAdmissionTokenProvider;
 }
 
 /**
@@ -134,6 +172,12 @@ export interface StoreClientOptions {
  * answer, which a store that is merely switched off produces exactly as
  * reliably as one that is actively cheating. It is therefore never grounds
  * for `inert`: the store may come back.
+ *
+ * `custody-unacknowledged` is a report, not blame: an append with a lease was
+ * still unanswered when this client read its window. It never sets `inert`.
+ * If the store later signs `stored` for it, that receipt is judged against the
+ * read already made, and a slot that did not hold the object is a
+ * `custody-breach` however late the promise arrived.
  *
  * `signature-invalid` is reserved for an answer this client *could* judge:
  * bytes that decoded as the expected type, carrying a signature, which either
@@ -155,6 +199,7 @@ export type StoreFaultKind =
   | "chain-fault"
   | "root-mismatch"
   | "custody-breach"
+  | "custody-unacknowledged"
   | "checkpoint-split-view-hint";
 
 export interface StoreFaultRecord {
@@ -206,11 +251,21 @@ export interface AppendReceipt {
 }
 
 export class StoreClientError extends Error {
-  override readonly name = "StoreClientError";
+  // Widened to `string` so `StoreAdmissionTokenError` can narrow it.
+  override readonly name: string = "StoreClientError";
 
   constructor(message: string) {
     super(`storeClient: ${message}`);
   }
+}
+
+/**
+ * A request this client refused to send because its admission token could
+ * not be had: the provider failed, or returned a token for another store or of
+ * the wrong length. The message never quotes a token.
+ */
+export class StoreAdmissionTokenError extends StoreClientError {
+  override readonly name = "StoreAdmissionTokenError";
 }
 
 const fail: (message: string) => never = (message) => {
@@ -239,6 +294,20 @@ const MAX_OBSERVED_CHECKPOINTS = 256;
 
 /** Receipts are consumed by the scan of their window; this bounds the rest. */
 const MAX_PENDING_RECEIPTS = 1_024;
+
+/** Appends with a lease still waiting for their answer; bounded the same way. */
+const MAX_IN_FLIGHT_APPENDS = MAX_PENDING_RECEIPTS;
+
+/**
+ * Scanned windows whose slot hashes are kept for receipts that arrive after
+ * the scan. An answer can arrive at most one request deadline (one window)
+ * after its append was sent, and a window is read the window after it, so a
+ * receipt is late by a couple of windows at most; sixteen is margin, at about
+ * 1.3 KB a window in the pinned profile.
+ */
+const MAX_SCANNED_WINDOWS = 16;
+
+const ADMISSION_TOKEN_BYTES = 32;
 
 /**
  * How long one request to this store may stay outstanding, in milliseconds.
@@ -314,6 +383,22 @@ const copyLease = (
   storeSignature: copyBytes(lease.storeSignature),
 });
 
+/** `${sizeClass}:${chunkIndex}:${objectIndexWithinChunk}` */
+const slotKeyOf = (
+  sizeClass: number,
+  chunkIndex: bigint,
+  objectIndexWithinChunk: number,
+): string =>
+  `${String(sizeClass)}:${String(chunkIndex)}:${String(objectIndexWithinChunk)}`;
+
+/** An append with a lease, sent and not yet answered. */
+interface InFlightAppend {
+  readonly window: bigint;
+  readonly slotKey: string;
+  /** Set once the window's scan has reported it unacknowledged. */
+  reported: boolean;
+}
+
 const copyWitnessRecord = (
   record: StoreWitnessRecordV1,
 ): StoreWitnessRecordV1 => ({
@@ -388,6 +473,7 @@ export class PrototypeStoreClient {
   readonly #chainStart: bigint;
   readonly #objectBytesByClass: ReadonlyMap<number, number>;
   readonly #requestDeadlineMs: number;
+  readonly #admissionTokens: StoreAdmissionTokenProvider | undefined;
 
   #inert = false;
   readonly #faults: StoreFaultRecord[] = [];
@@ -395,6 +481,16 @@ export class PrototypeStoreClient {
   readonly #observed: ObservedStoreCheckpoint[] = [];
   readonly #checkpointHashes = new Map<string, Uint8Array>();
   #receipts: AppendReceipt[] = [];
+  readonly #inFlight = new Set<InFlightAppend>();
+  /**
+   * The hash of every object of each scanned window, by slot, from the first
+   * finalized scan of that window: what a receipt arriving after the scan is
+   * judged against. Keyed `String(window)`.
+   */
+  readonly #scannedSlots = new Map<
+    string,
+    { readonly window: bigint; readonly hashes: Map<string, Uint8Array> }
+  >();
 
   private constructor(
     options: StoreClientOptions,
@@ -424,6 +520,7 @@ export class PrototypeStoreClient {
     this.#chainStart = pinned.chainStart;
     this.#objectBytesByClass = pinned.objectBytesByClass;
     this.#requestDeadlineMs = requestDeadlineMs(options.profile);
+    this.#admissionTokens = options.admissionTokens;
   }
 
   /**
@@ -653,16 +750,21 @@ export class PrototypeStoreClient {
     allocationKey: { publicKey: Uint8Array; secretKey: Uint8Array },
   ): Promise<PublicAllocationLeaseV1 | null> {
     const allocationEd25519PublicKey = copyBytes(allocationKey.publicKey);
+    const token =
+      (await this.#admissionToken("allocation", targetWindow)) ??
+      new Uint8Array(ADMISSION_TOKEN_BYTES);
+    const body = encodePublicAllocationRequestV1({
+      version: 1,
+      deliveryProfileHash: copyBytes(this.#profileHash),
+      ingressWindow: targetWindow,
+      allocationEd25519PublicKey,
+      privacyPassToken: token,
+    });
+    token.fill(0);
     const bytes = await this.#post(
       PROTOTYPE_STORE_ROUTES.allocation,
       PROTOTYPE_STORE_MEDIA_TYPES.allocationRequest,
-      encodePublicAllocationRequestV1({
-        version: 1,
-        deliveryProfileHash: copyBytes(this.#profileHash),
-        ingressWindow: targetWindow,
-        allocationEd25519PublicKey,
-        privacyPassToken: new Uint8Array(32),
-      }),
+      body,
       targetWindow,
     );
     if (bytes === null) return null;
@@ -783,6 +885,10 @@ export class PrototypeStoreClient {
    *
    * `admission === null` is a deliberate unallocated cover append: the store
    * accepts it, answers the one fixed status, and discards it.
+   *
+   * An append with a lease is tracked from the moment it is sent until its
+   * answer arrives: a scan of its window that finds it still unanswered
+   * reports `custody-unacknowledged` (see `StoreFaultKind`).
    */
   async append(
     window: bigint,
@@ -790,6 +896,7 @@ export class PrototypeStoreClient {
     exactFixedObject: Uint8Array,
     admission: PublicAppendAdmissionV1 | null,
   ): Promise<PublicAppendResultV1 | null> {
+    // Every caller-controlled byte is owned before the first await.
     const request: PublicAppendRequestV1 = {
       version: 1,
       bucket: {
@@ -810,12 +917,21 @@ export class PrototypeStoreClient {
             },
     };
 
-    const bytes = await this.#post(
-      PROTOTYPE_STORE_ROUTES.append,
-      PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
-      encodePublicAppendRequestV1(request),
-      window,
-    );
+    const token = await this.#admissionToken("append", window);
+    const inFlight = this.#trackInFlight(window, sizeClass, request.admission);
+    let bytes: Uint8Array | null;
+    try {
+      bytes = await this.#post(
+        PROTOTYPE_STORE_ROUTES.append,
+        PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
+        encodePublicAppendRequestV1(request),
+        window,
+        token,
+      );
+    } finally {
+      if (inFlight !== null) this.#inFlight.delete(inFlight);
+      token?.fill(0);
+    }
     if (bytes === null) return null;
 
     const result = this.#decode(
@@ -867,7 +983,9 @@ export class PrototypeStoreClient {
   }
 
   /**
-   * Remember what the store promised, until the window it names is scanned.
+   * Remember what the store promised, until the window it names is scanned —
+   * or, when that window was already scanned, judge it now against the slot
+   * hashes that scan kept.
    *
    * Validated eagerly, and each coordinate against the half it comes from: the
    * object ordinal is the caller's, so an out-of-range one is a caller bug and
@@ -894,15 +1012,23 @@ export class PrototypeStoreClient {
     )
       fail("the receipt's object ordinal is outside this allocation's slots");
 
-    if (this.#receipts.length >= MAX_PENDING_RECEIPTS) this.#receipts.shift();
-    this.#receipts.push({
+    const privateReceipt: AppendReceipt = {
       window: receipt.window,
       sizeClass: receipt.sizeClass,
       lease: copyLease(receipt.lease),
       objectOrdinal: receipt.objectOrdinal,
       objectHash: copyBytes(receipt.objectHash),
       result: { ...receipt.result },
-    });
+    };
+    // A promise that arrived after its window was read is evidence all the
+    // same: the slot it names either held these bytes in that read or not.
+    const scanned = this.#scannedSlots.get(String(receipt.window));
+    if (scanned !== undefined) {
+      this.#judgeReceipt(privateReceipt, scanned.hashes);
+      return;
+    }
+    if (this.#receipts.length >= MAX_PENDING_RECEIPTS) this.#receipts.shift();
+    this.#receipts.push(privateReceipt);
   }
 
   /* ---------------------------------------------------------------- *
@@ -1042,13 +1168,23 @@ export class PrototypeStoreClient {
    * 14.
    */
   async postWitness(record: StoreWitnessRecordV1): Promise<boolean> {
-    const bytes = await this.#post(
-      PROTOTYPE_STORE_ROUTES.witness,
-      PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
-      encodeStoreWitnessRecordV1(copyWitnessRecord(record)),
-      record.ingressWindow,
+    const privateRecord = copyWitnessRecord(record);
+    const token = await this.#admissionToken(
+      "witness",
+      privateRecord.ingressWindow,
     );
-    return bytes !== null;
+    try {
+      const bytes = await this.#post(
+        PROTOTYPE_STORE_ROUTES.witness,
+        PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
+        encodeStoreWitnessRecordV1(privateRecord),
+        privateRecord.ingressWindow,
+        token,
+      );
+      return bytes !== null;
+    } finally {
+      token?.fill(0);
+    }
   }
 
   /**
@@ -1178,11 +1314,19 @@ export class PrototypeStoreClient {
     return this.#request(path, window);
   }
 
+  /**
+   * One POST. A redirect is refused outright rather than followed: every POST
+   * may carry an admission token, in the allocation body or the
+   * `authorization` header, and a store that redirected one would have it
+   * replayed to an origin it was never issued for. The store never redirects,
+   * so a redirect is an unusable answer like any other.
+   */
   async #post(
     path: string,
     mediaType: string,
     body: Uint8Array,
     window: bigint | null,
+    admissionToken: Uint8Array | null = null,
   ): Promise<Uint8Array | null> {
     // `lib.dom`'s `BodyInit` is narrower than the codecs' `Uint8Array`, and a
     // copy is owed anyway: the request must not be able to change under the
@@ -1191,9 +1335,104 @@ export class PrototypeStoreClient {
     new Uint8Array(buffer).set(body);
     return this.#request(path, window, {
       method: "POST",
-      headers: { "content-type": mediaType },
+      redirect: "error",
+      headers:
+        admissionToken === null
+          ? { "content-type": mediaType }
+          : {
+              "content-type": mediaType,
+              authorization: `Bearer ${hexOf(admissionToken)}`,
+            },
       body: buffer,
     });
+  }
+
+  /**
+   * The token to present for one request, or `null` under open admission.
+   *
+   * Asked for before anything is sent, so a provider that fails costs no
+   * request and never turns into an unauthenticated one; the token must name
+   * the store this client pinned, so it reaches no other.
+   */
+  async #admissionToken(
+    route: StoreAdmissionRoute,
+    window: bigint,
+  ): Promise<Uint8Array | null> {
+    const provider = this.#admissionTokens;
+    if (provider === undefined) return null;
+    let issued: unknown;
+    try {
+      issued = await provider({
+        storeId: copyBytes(this.#storeId),
+        origin: this.origin,
+        route,
+        ingressWindow: window,
+      });
+    } catch (error) {
+      throw new StoreAdmissionTokenError(
+        `the admission token provider failed for the ${route} route (${
+          error instanceof Error ? error.name : "unknown error"
+        })`,
+      );
+    }
+    const candidate = issued as Partial<StoreAdmissionToken> | null;
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      !(candidate.storeId instanceof Uint8Array) ||
+      !bytesEqual(candidate.storeId, this.#storeId)
+    )
+      throw new StoreAdmissionTokenError(
+        `the admission token for the ${route} route was not issued for this store`,
+      );
+    if (
+      !(candidate.token instanceof Uint8Array) ||
+      candidate.token.length !== ADMISSION_TOKEN_BYTES
+    )
+      throw new StoreAdmissionTokenError(
+        `the admission token for the ${route} route is not exactly ${String(ADMISSION_TOKEN_BYTES)} bytes`,
+      );
+    return copyBytes(candidate.token);
+  }
+
+  /**
+   * Start tracking an append with a lease, or `null` for cover and for
+   * ordinals no slot answers to (the store refuses those as malformed).
+   */
+  #trackInFlight(
+    window: bigint,
+    sizeClass: number,
+    admission: PublicAppendAdmissionV1 | null,
+  ): InFlightAppend | null {
+    if (admission === null) return null;
+    const allocationOrdinal = admission.lease.allocationOrdinal;
+    const objectOrdinal = admission.objectOrdinalWithinAllocation;
+    if (
+      !this.#ordinalWithinCohort(allocationOrdinal) ||
+      !this.#ordinalWithinAllocation(sizeClass, objectOrdinal)
+    )
+      return null;
+    const coordinates = appendSlotCoordinates(
+      this.#geometry,
+      sizeClass,
+      allocationOrdinal,
+      objectOrdinal,
+    );
+    const entry: InFlightAppend = {
+      window,
+      slotKey: slotKeyOf(
+        sizeClass,
+        coordinates.chunkIndex,
+        coordinates.objectIndexWithinChunk,
+      ),
+      reported: false,
+    };
+    if (this.#inFlight.size >= MAX_IN_FLIGHT_APPENDS) {
+      const oldest = this.#inFlight.values().next();
+      if (!oldest.done) this.#inFlight.delete(oldest.value);
+    }
+    this.#inFlight.add(entry);
+    return entry;
   }
 
   /**
@@ -1651,64 +1890,113 @@ export class PrototypeStoreClient {
 
   /**
    * Compare every receipt for this window against the slot the geometry says
-   * it must occupy.
+   * it must occupy, and report every append to it still unanswered.
    *
    * This is exactly the specification's custody-breach contradiction: the
    * store signed that it stored these bytes at coordinates derived only from
    * public values, and the window it finalized says otherwise.
+   *
+   * Every object is hashed first, and only then — with no `await` from there
+   * to the end — are this window's receipts claimed and the hashes kept. So a
+   * receipt recorded or an answer arriving while the hashes were computed is
+   * seen exactly once: by this claim, or by `recordReceipt` judging it against
+   * the kept hashes afterwards.
    */
   async #verifyCustody(
     window: bigint,
     chunksByClass: ReadonlyMap<number, readonly PublicChunkV1[]>,
   ): Promise<void> {
-    // Claim this window's receipts before the first await. Other window scans
-    // and newly arriving append acknowledgements may run while hashing; none
-    // may restore consumed receipts or overwrite additions to the live queue.
+    const hashes = new Map<string, Uint8Array>();
+    for (const [sizeClass, chunks] of chunksByClass)
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        const objects = chunks[chunkIndex].fixedObjects;
+        for (let index = 0; index < objects.length; index++)
+          hashes.set(
+            slotKeyOf(sizeClass, BigInt(chunkIndex), index),
+            await sha256(objects[index]),
+          );
+      }
+
+    // The first finalized scan's hashes are the ones kept: a later branch of
+    // an equivocating store is the chain verifier's evidence, not a second
+    // custody baseline.
+    if (!this.#scannedSlots.has(String(window)))
+      this.#keepScannedSlots(window, hashes);
+
     const receipts = this.#receipts.filter(
       (receipt) => receipt.window === window,
     );
     this.#receipts = this.#receipts.filter(
       (receipt) => receipt.window !== window,
     );
-    for (const receipt of receipts) {
-      // Only a promise of custody can be breached: a refused or unallocated
-      // append committed the store to nothing. Allocated client cover that
-      // received `stored` carries exactly the same promise as real data.
-      if (
-        receipt.result.status !== "stored" &&
-        receipt.result.status !== "already-present"
-      )
-        continue;
+    for (const receipt of receipts) this.#judgeReceipt(receipt, hashes);
 
-      const coordinates = appendSlotCoordinates(
-        this.#geometry,
-        receipt.sizeClass,
-        receipt.lease.allocationOrdinal,
-        receipt.objectOrdinal,
+    for (const entry of this.#inFlight) {
+      if (entry.window !== window || entry.reported) continue;
+      entry.reported = true;
+      this.#record(
+        "custody-unacknowledged",
+        window,
+        `the append to slot ${entry.slotKey} was still unanswered when this window was read`,
       );
-      const chunk = chunksByClass.get(receipt.sizeClass)?.[
-        Number(coordinates.chunkIndex)
-      ];
-      if (chunk === undefined) {
-        this.#breach(
-          "custody-breach",
-          window,
-          "the window holds no chunk for a slot this store signed a receipt for",
-          undefined,
-        );
-        continue;
-      }
-      const held = await sha256(
-        chunk.fixedObjects[coordinates.objectIndexWithinChunk],
-      );
-      if (!bytesEqual(held, receipt.objectHash))
-        this.#breach(
-          "custody-breach",
-          window,
-          `the object at class ${String(receipt.sizeClass)} chunk ${String(coordinates.chunkIndex)} slot ${String(coordinates.objectIndexWithinChunk)} is not the one this store received`,
-          undefined,
-        );
     }
+  }
+
+  /** Keep one window's slot hashes, dropping the oldest window past the cap. */
+  #keepScannedSlots(window: bigint, hashes: Map<string, Uint8Array>): void {
+    this.#scannedSlots.set(String(window), { window, hashes });
+    while (this.#scannedSlots.size > MAX_SCANNED_WINDOWS) {
+      let oldest: { readonly window: bigint } | null = null;
+      for (const held of this.#scannedSlots.values())
+        if (oldest === null || held.window < oldest.window) oldest = held;
+      if (oldest === null) break;
+      this.#scannedSlots.delete(String(oldest.window));
+    }
+  }
+
+  /** One receipt against one scan's slot hashes; synchronous by design. */
+  #judgeReceipt(
+    receipt: AppendReceipt,
+    hashes: ReadonlyMap<string, Uint8Array>,
+  ): void {
+    // Only a promise of custody can be breached: a refused or unallocated
+    // append committed the store to nothing. Allocated client cover that
+    // received `stored` carries exactly the same promise as real data.
+    if (
+      receipt.result.status !== "stored" &&
+      receipt.result.status !== "already-present"
+    )
+      return;
+
+    const coordinates = appendSlotCoordinates(
+      this.#geometry,
+      receipt.sizeClass,
+      receipt.lease.allocationOrdinal,
+      receipt.objectOrdinal,
+    );
+    const held = hashes.get(
+      slotKeyOf(
+        receipt.sizeClass,
+        coordinates.chunkIndex,
+        coordinates.objectIndexWithinChunk,
+      ),
+    );
+    if (held === undefined) {
+      this.#breach(
+        "custody-breach",
+        receipt.window,
+        "the window holds no chunk for a slot this store signed a receipt for",
+        undefined,
+      );
+      return;
+    }
+    if (!bytesEqual(held, receipt.objectHash))
+      this.#breach(
+        "custody-breach",
+        receipt.window,
+        `the object at class ${String(receipt.sizeClass)} chunk ${String(coordinates.chunkIndex)} slot ${String(coordinates.objectIndexWithinChunk)} is not the one this store received`,
+        undefined,
+      );
   }
 
   /** `IngressWindowStart(w) + chunkFinalizationOffsetMs`. */

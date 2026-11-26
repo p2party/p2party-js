@@ -52,6 +52,8 @@ import type {
 import type {
   StorePersistencePort,
   StoreWindowState,
+  StoreWitnessBounds,
+  StoreWitnessInsertOutcome,
 } from "./storePersistence";
 
 export class StorePersistenceError extends Error {
@@ -105,11 +107,13 @@ const quotaKeyFrom = (value: unknown): Uint8Array => {
   return bytesFrom(value as string, "admission quota key");
 };
 
-const quotaKeyHex = (value: Uint8Array): string => {
+const quotaKeyBytes = (value: Uint8Array): Uint8Array => {
   if (!(value instanceof Uint8Array) || value.length !== 32)
     fail("admission quota key must be exactly 32 bytes");
-  return hexOf(value);
+  return Uint8Array.from(value);
 };
+
+const quotaKeyHex = (value: Uint8Array): string => hexOf(quotaKeyBytes(value));
 
 interface StoredSlotV1 {
   key: string;
@@ -244,6 +248,10 @@ const textDecoder = new TextDecoder();
  * `witness` makes the canonical record bytes half of the primary key, so
  * "idempotent on identical canonical bytes" is enforced by the database
  * rather than by a read-then-write the store would have to get right.
+ * `witness_window` and `witness_quota` count what a window holds and what
+ * each admission quota key added to it, so an insert checks its bounds with
+ * two point lookups instead of reading the window's records. All three are
+ * written in one transaction and deleted together by window.
  *
  * `meta` holds `chainStartIngressWindow`. The descriptor's validity interval
  * is anchored to the chain start so a restart re-derives byte-identical
@@ -264,11 +272,27 @@ CREATE TABLE IF NOT EXISTS witness (
   record BLOB NOT NULL,
   PRIMARY KEY ("window", record)
 );
+CREATE TABLE IF NOT EXISTS witness_window (
+  "window" INTEGER PRIMARY KEY,
+  records INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS witness_quota (
+  "window" INTEGER NOT NULL,
+  quota_key BLOB NOT NULL,
+  records INTEGER NOT NULL,
+  PRIMARY KEY ("window", quota_key)
+);
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 `;
+
+/**
+ * `PRAGMA user_version` of the schema above. Builds before it left the field
+ * at 0 and kept witness rows without the counts that bound them.
+ */
+const STORE_SQLITE_SCHEMA_VERSION = 1;
 
 export class SqliteStorePersistence implements StorePersistencePort {
   readonly #db: Database;
@@ -282,12 +306,33 @@ export class SqliteStorePersistence implements StorePersistencePort {
       readwrite: true,
       safeIntegers: true,
     });
+    const version = Number(
+      this.#db.query<{ user_version: bigint }, []>("PRAGMA user_version").get()
+        ?.user_version ?? 0n,
+    );
+    if (version > STORE_SQLITE_SCHEMA_VERSION) {
+      this.#db.close();
+      fail(
+        `the database was written by a newer build (schema ${String(version)}); this build reads schema ${String(STORE_SQLITE_SCHEMA_VERSION)}`,
+      );
+    }
     // WAL keeps a reader (a chunk GET) from blocking the finalizer's writes.
     this.#db.exec("PRAGMA journal_mode = WAL");
     // See the file header: losing a committed finalization is the store
     // equivocating, not merely losing data, so this stays FULL.
     this.#db.exec("PRAGMA synchronous = FULL");
-    this.#db.exec(SCHEMA);
+    this.#db.transaction(() => {
+      this.#db.exec(SCHEMA);
+      if (version < STORE_SQLITE_SCHEMA_VERSION) {
+        // An older build's witness rows have no counts, so no bound could be
+        // enforced over them; they are unauthenticated hints, and discarding
+        // them loses no part of the chain. Windows and meta are kept.
+        this.#db.exec("DELETE FROM witness");
+        this.#db.exec(
+          `PRAGMA user_version = ${String(STORE_SQLITE_SCHEMA_VERSION)}`,
+        );
+      }
+    })();
   }
 
   close(): void {
@@ -331,6 +376,16 @@ export class SqliteStorePersistence implements StorePersistencePort {
     );
   }
 
+  async deleteWindowsBefore(window: bigint, limit: number): Promise<number> {
+    const result = this.#db
+      .query<unknown, [bigint, number]>(
+        'DELETE FROM "window" WHERE "window" IN' +
+          ' (SELECT "window" FROM "window" WHERE "window" < ? ORDER BY "window" LIMIT ?)',
+      )
+      .run(window, Math.max(0, limit));
+    return Number(result.changes);
+  }
+
   /* ---------------------------------------------------------------- *
    * Witness records
    * ---------------------------------------------------------------- */
@@ -347,12 +402,76 @@ export class SqliteStorePersistence implements StorePersistencePort {
       .map((row) => decodeStoreWitnessRecordV1(row.record));
   }
 
-  async saveWitnessRecord(record: StoreWitnessRecordV1): Promise<void> {
-    this.#db
-      .query<unknown, [bigint, Uint8Array]>(
-        'INSERT OR IGNORE INTO witness ("window", record) VALUES (?, ?)',
-      )
-      .run(record.ingressWindow, encodeStoreWitnessRecordV1(record));
+  async addWitnessRecord(
+    record: StoreWitnessRecordV1,
+    bounds: StoreWitnessBounds,
+  ): Promise<StoreWitnessInsertOutcome> {
+    const window = record.ingressWindow;
+    const encoded = encodeStoreWitnessRecordV1(record);
+    const quotaKey =
+      bounds.quotaKey32 === null ? null : quotaKeyBytes(bounds.quotaKey32);
+    return this.#db.transaction((): StoreWitnessInsertOutcome => {
+      const present = this.#db
+        .query<{ held: bigint }, [bigint, Uint8Array]>(
+          'SELECT 1 AS held FROM witness WHERE "window" = ? AND record = ?',
+        )
+        .get(window, encoded);
+      if (present !== null) return "present";
+      const held =
+        this.#db
+          .query<{ records: bigint }, [bigint]>(
+            'SELECT records FROM witness_window WHERE "window" = ?',
+          )
+          .get(window)?.records ?? 0n;
+      if (held >= BigInt(bounds.maxRecordsPerWindow)) return "window-full";
+      if (quotaKey !== null) {
+        const charged =
+          this.#db
+            .query<{ records: bigint }, [bigint, Uint8Array]>(
+              'SELECT records FROM witness_quota WHERE "window" = ? AND quota_key = ?',
+            )
+            .get(window, quotaKey)?.records ?? 0n;
+        if (charged >= BigInt(bounds.maxRecordsPerQuotaKey))
+          return "quota-full";
+        this.#db
+          .query<unknown, [bigint, Uint8Array]>(
+            'INSERT INTO witness_quota ("window", quota_key, records) VALUES (?, ?, 1)' +
+              ' ON CONFLICT("window", quota_key) DO UPDATE SET records = records + 1',
+          )
+          .run(window, quotaKey);
+      }
+      this.#db
+        .query<unknown, [bigint, Uint8Array]>(
+          'INSERT INTO witness ("window", record) VALUES (?, ?)',
+        )
+        .run(window, encoded);
+      this.#db
+        .query<unknown, [bigint]>(
+          'INSERT INTO witness_window ("window", records) VALUES (?, 1)' +
+            ' ON CONFLICT("window") DO UPDATE SET records = records + 1',
+        )
+        .run(window);
+      return "added";
+    })();
+  }
+
+  async deleteWitnessRecordsBefore(
+    window: bigint,
+    limit: number,
+  ): Promise<number> {
+    return this.#db.transaction((): number => {
+      const doomed = this.#db
+        .query<{ window: bigint }, [bigint, number]>(
+          'SELECT "window" FROM witness_window WHERE "window" < ? ORDER BY "window" LIMIT ?',
+        )
+        .all(window, Math.max(0, limit));
+      for (const { window: each } of doomed)
+        for (const table of ["witness", "witness_quota", "witness_window"])
+          this.#db
+            .query<unknown, [bigint]>(`DELETE FROM ${table} WHERE "window" = ?`)
+            .run(each);
+      return doomed.length;
+    })();
   }
 
   /* ---------------------------------------------------------------- *

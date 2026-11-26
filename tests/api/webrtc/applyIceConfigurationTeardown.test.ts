@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import { applyRoomIceConfiguration } from "../../../src/api/webrtc/applyIceConfiguration";
 
@@ -108,5 +108,40 @@ describe("an ICE configuration that cannot be held retires its transport", () =>
     ).toBe(1);
 
     expect(retired).toEqual([]);
+  });
+});
+
+describe("a retire that throws", () => {
+  test("every transport is still retired and the configuration error is the one reported", () => {
+    const first = edge("always");
+    const second = edge("always");
+    const retired: IRTCPeerConnection[] = [];
+    const retire = (connection: IRTCPeerConnection) => {
+      retired.push(connection);
+      if (connection === first.epc) throw new Error("teardown failed");
+    };
+    const consoleError = spyOn(console, "error").mockImplementation(
+      () => undefined,
+    );
+    try {
+      for (const failurePolicy of ["close", "rollback"] as const) {
+        retired.length = 0;
+        expect(() =>
+          applyRoomIceConfiguration(
+            [first.epc, second.epc],
+            ROOM_ID,
+            { iceServers: [{ urls: "turn:new.example" }] },
+            false,
+            failurePolicy,
+            retire,
+          ),
+        ).toThrow("configuration rejected");
+        expect(retired).toEqual([first.epc, second.epc]);
+      }
+      // The teardown failure is not lost either.
+      expect(consoleError).toHaveBeenCalledTimes(2);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

@@ -45,6 +45,20 @@ export const applyRoomIceConfiguration = (
       (connection.signalingState as string) !== "closed",
   );
   const iceServers = (rtcConfig.iceServers ?? []).map(cloneIceServer);
+
+  // Every transport that must go is retired, even if retiring one throws: a
+  // failed teardown is reported and the next connection is still torn down,
+  // and the configuration error that started it stays the one thrown.
+  const retireOne = (connection: IRTCPeerConnection): void => {
+    try {
+      retire(connection);
+    } catch (retireError) {
+      console.error(
+        "p2party: could not retire a transport that cannot hold the room's ICE configuration",
+        retireError,
+      );
+    }
+  };
   const snapshots = live.map((connection) => ({
     connection,
     configuration: connection.getConfiguration(),
@@ -60,7 +74,7 @@ export const applyRoomIceConfiguration = (
         // A room must never retain a mixture of old and new relay
         // generations. If authoritative restoration is impossible, retire
         // that transport and let normal room signaling recreate it.
-        retire(connection);
+        retireOne(connection);
       }
     }
   };
@@ -77,7 +91,7 @@ export const applyRoomIceConfiguration = (
         if (hasStartedNegotiation(connection)) connection.restartIce();
   } catch (error) {
     if (failurePolicy === "close")
-      for (const { connection } of snapshots) retire(connection);
+      for (const { connection } of snapshots) retireOne(connection);
     else rollbackOrClose();
     throw error;
   }

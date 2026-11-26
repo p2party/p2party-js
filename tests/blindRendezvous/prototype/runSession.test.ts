@@ -4,6 +4,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import {
   BlindRendezvousRun,
+  PrototypeReadInProgressError,
+  PrototypeRunError,
   PrototypeRunTimeoutError,
   PrototypeSessionEndedError,
 } from "../../../src/blindRendezvous/prototype/index";
@@ -221,6 +223,8 @@ interface Endpoint {
   readonly channel: LinkedChannel;
   readonly events: { readonly kind: string; readonly detail?: string }[];
   readonly reached: (kind: string) => Promise<string | undefined>;
+  /** Called with each event after it is recorded, as a page observer is. */
+  observer: ((kind: string) => void) | null;
 }
 
 const endpoint = (
@@ -264,9 +268,10 @@ const endpoint = (
       for (const waiter of waiters.splice(0))
         if (waiter.kind === kind) waiter.resolve(detail);
         else waiters.push(waiter);
+      subject.observer?.(kind);
     },
   });
-  return {
+  const subject: Endpoint = {
     run,
     connection,
     channel: connection.channel,
@@ -276,7 +281,9 @@ const endpoint = (
       if (seen !== undefined) return Promise.resolve(seen.detail);
       return new Promise((resolve) => waiters.push({ kind, resolve }));
     },
+    observer: null,
   };
+  return subject;
 };
 
 interface Pair {
@@ -548,8 +555,11 @@ describe("prototype run session", () => {
       expect(initiator.channel.readyState).toBe("open");
 
       initiator.channel.drain();
-      await stopping;
+      // Bounded: a stop that does not settle on this drain fails here, by
+      // assertion, instead of hanging.
+      await turn();
       expect(outcome).toBe("drained");
+      await stopping;
       expect(initiator.channel.readyState).toBe("closed");
       expect(await responder.run.recvMessage(1_000)).toEqual(payload);
     } finally {
@@ -587,6 +597,181 @@ describe("prototype run session", () => {
       // The peer never gets the message: the close reaches it instead.
       const received = await settled(responder.run.recvMessage(1_000));
       expect(reasonOf(received)).toBe("closed");
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("an observer that calls stop from the run-stopped event gets the same promise and one event", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator } = both;
+    try {
+      let inner: Promise<unknown> | null = null;
+      initiator.observer = (kind) => {
+        if (kind === "run-stopped") inner = initiator.run.stop();
+      };
+      const outer = initiator.run.stop();
+      expect(inner as unknown).toBe(outer as unknown);
+      expect(
+        kinds(initiator).filter((kind) => kind === "run-stopped"),
+      ).toHaveLength(1);
+      expect(await afterOneTurn(outer)).toBe("drained");
+    } finally {
+      initiator.observer = null;
+      both.stop();
+    }
+  }, 30_000);
+
+  test("stop reports undrained after a session that ended with frames still buffered", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      // A message the responder was told it sent is still in its buffer ...
+      responder.channel.holding = true;
+      await responder.run.sendMessage(text("told it was sent"), 1_000);
+      expect(responder.channel.bufferedAmount).toBeGreaterThan(0);
+      // ... when its session ends over it: a read times out mid-message.
+      initiator.channel.holding = true;
+      await initiator.run.sendMessage(
+        pattern(2 * CHUNK_PLAINTEXT_BYTES + 1),
+        1_000,
+      );
+      initiator.channel.release(2);
+      const reading = settled(responder.run.recvMessage(100));
+      await turn();
+      time.advanceTo(time.nowMs + 100n);
+      expect(await reading).toBeInstanceOf(PrototypeSessionEndedError);
+
+      expect(await afterOneTurn(responder.run.stop())).toBe("undrained");
+      expect(
+        responder.events.find((event) => event.kind === "stop-undrained")
+          ?.detail,
+      ).toContain("still in the send buffer");
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a refusal that fails two overlapping sends ends the session once, with one error", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator } = both;
+    try {
+      initiator.channel.holding = true;
+      const transport = dataChannelTransport(
+        initiator.channel as unknown as RTCDataChannel,
+      );
+      const sendApp = transport.sendApp;
+      let headers = 0;
+      const bothQueued = new Promise<void>((resolve) => {
+        transport.sendApp = (bytes) => {
+          const queued = sendApp(bytes);
+          if (bytes.length < 1_024 && (headers += 1) === 2) resolve();
+          return queued;
+        };
+      });
+      const first = initiator.run.sendMessage(
+        pattern(20 * CHUNK_PLAINTEXT_BYTES),
+        60_000,
+      );
+      const second = initiator.run.sendMessage(text("second"), 60_000);
+      await bothQueued;
+      await turn();
+      // The next frame the channel is handed, it refuses; that one flush
+      // fails what is left of both messages.
+      initiator.channel.refuseNextSend = true;
+      initiator.channel.drain();
+      const [outcomeFirst, outcomeSecond] = await Promise.all([
+        afterOneTurn(first),
+        afterOneTurn(second),
+      ]);
+
+      expect(outcomeFirst).toBeInstanceOf(PrototypeSessionEndedError);
+      expect((outcomeFirst as PrototypeSessionEndedError).reason).toBe(
+        "refused",
+      );
+      expect(outcomeSecond).toBe(outcomeFirst as Error);
+      expect(
+        kinds(initiator).filter((kind) => kind === "session-failed"),
+      ).toHaveLength(1);
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a send deadline and a read deadline that pass together end the session once, with one error", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      // Part of the initiator's message reaches the responder ...
+      initiator.channel.holding = true;
+      await initiator.run.sendMessage(
+        pattern(2 * CHUNK_PLAINTEXT_BYTES + 1),
+        1_000,
+      );
+      initiator.channel.release(2);
+      // ... while the responder's own large message waits on its buffer.
+      responder.channel.holding = true;
+      const leaving = firstAppFrame(responder.channel);
+      const sending = responder.run.sendMessage(
+        pattern(20 * CHUNK_PLAINTEXT_BYTES),
+        100,
+      );
+      await leaving;
+      const reading = responder.run.recvMessage(100);
+      await turn();
+      // One advance passes both deadlines.
+      time.advanceTo(time.nowMs + 100n);
+      const [sent, read] = await Promise.all([
+        afterOneTurn(sending),
+        afterOneTurn(reading),
+      ]);
+
+      expect(sent).toBeInstanceOf(PrototypeSessionEndedError);
+      expect(read).toBe(sent as Error);
+      expect(
+        kinds(responder).filter((kind) => kind === "session-failed"),
+      ).toHaveLength(1);
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a recvMessage without a usable deadline is refused", async () => {
+    const time = new FakeTime();
+    const both = await pair(time);
+    try {
+      const outcome = await afterOneTurn(
+        both.responder.run.recvMessage(Number.NaN),
+      );
+      expect(outcome).toBeInstanceOf(PrototypeRunError);
+      expect(String(outcome)).toContain("deadline");
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a second recvMessage while one is reading is refused", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      const first = responder.run.recvMessage(1_000);
+      const second = await afterOneTurn(responder.run.recvMessage(1_000));
+      expect(second).toBeInstanceOf(PrototypeReadInProgressError);
+
+      // The first read goes on and takes the next message whole ...
+      const payload = pattern(CHUNK_PLAINTEXT_BYTES + 1);
+      await initiator.run.sendMessage(payload, 1_000);
+      expect(await first).toEqual(payload);
+      // ... and once it is done, the next read is accepted.
+      await initiator.run.sendMessage(text("again"), 1_000);
+      expect(
+        new TextDecoder().decode(await responder.run.recvMessage(1_000)),
+      ).toBe("again");
     } finally {
       both.stop();
     }
@@ -913,6 +1098,7 @@ describe("prototype run session", () => {
         drains += 1;
         await turn();
       }
+      expect(done).toBe(true);
       await sending;
       expect(drains).toBeGreaterThan(0);
       expect(firstBatch.length).toBeLessThan(
@@ -963,6 +1149,7 @@ describe("prototype run session", () => {
         initiator.channel.drain();
         await turn();
       }
+      expect(done).toBe(true);
       await sending;
       initiator.channel.drain();
       expect(await responder.run.recvMessage(1_000)).toEqual(first);

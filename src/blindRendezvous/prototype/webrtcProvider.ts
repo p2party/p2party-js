@@ -105,6 +105,8 @@ const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
  *     the reader fell too far behind its peer.
  *   - `"refused"`: the open channel refused a frame (`send()` threw); no later
  *     frame may follow it.
+ *   - `"connecting"`: a frame was to be sent before the data channel opened;
+ *     nothing was queued.
  *   - `"undrained"`: an orderly close ended with frames still unsent.
  *   - `"cancelled"`: a receive was withdrawn by its caller before it took a
  *     frame.
@@ -119,6 +121,7 @@ export type WebRtcProviderErrorReason =
   | "protocol"
   | "overflow"
   | "refused"
+  | "connecting"
   | "undrained"
   | "cancelled"
   | "certificate"
@@ -562,6 +565,14 @@ export interface DataChannelTransport extends HandshakeTransport {
    * not delivery. Frames of both lanes enter the channel in call order,
    * whether or not each call is awaited; a call made while the buffer is above
    * `MAX_BUFFERED_AMOUNT` waits for it to drain.
+   *
+   * A frame is `bytes` plus the one-byte lane tag, and must fit the channel's
+   * `RTCSctpTransport.maxMessageSize`. Measured in headless Chromium 159
+   * (2026-11-26): both peers' SDP set `max-message-size:262144`, so `bytes`
+   * may be at most 262,143 bytes; a frame one byte larger made `send()` throw
+   * `TypeError` ("Trying to send message larger than max-message-size"), which
+   * rejects with reason `"refused"` and, since nothing may follow a lost
+   * frame, refuses every later send. A uniform chunk frame is 65,490 bytes.
    */
   send(bytes: Uint8Array): Promise<void>;
   sendApp(bytes: Uint8Array): Promise<void>;
@@ -590,6 +601,13 @@ export interface DataChannelTransport extends HandshakeTransport {
    * and send, and closes the underlying channel at once.
    */
   close(): void;
+  /**
+   * Whether frames this transport accepted are not all out of the channel's
+   * send buffer — still queued, still buffered, or lost to a refusal — or,
+   * once the transport has ended, whether it ended so. After `close()` it
+   * says whether that abort left frames behind.
+   */
+  hasUnsentFrames(): boolean;
 }
 
 interface Lane {
@@ -924,7 +942,7 @@ export const dataChannelTransport = (
     if (channel.readyState !== "open")
       return Promise.reject(
         new WebRtcProviderError(
-          "closed",
+          channel.readyState === "connecting" ? "connecting" : "closed",
           `data channel is "${channel.readyState}", not "open"`,
         ),
       );
@@ -1020,6 +1038,7 @@ export const dataChannelTransport = (
     close: (): void => {
       abort(new WebRtcProviderError("aborted", "transport closed"));
     },
+    hasUnsentFrames: (): boolean => (ended === null ? unsent() : unsentAtEnd),
   };
   channelTransports.set(channel, transport);
   return transport;

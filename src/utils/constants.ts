@@ -299,6 +299,10 @@ export const RECEIVE_VERIFY_START_RETRY_WINDOW_MS =
 // listed files up this many per read transaction, so a directory of any size
 // costs a bounded transaction each time.
 export const RECEIVE_RECONCILE_BATCH_FILES = 64;
+// Requests that create, read or remove a file wait for that pass, for at most
+// this long. A pass that takes longer (a file system call that never
+// settles, or a very large directory) goes on while the requests are served.
+export const RECEIVE_RECONCILE_GATE_MS = 5_000;
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

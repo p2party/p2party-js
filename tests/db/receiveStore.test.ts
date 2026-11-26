@@ -1278,18 +1278,30 @@ describe("no failure leaves a verification behind", () => {
     const files = new Map<string, Uint8Array>();
     const opfs = installOpfs(files);
     const root = "6f".repeat(64);
+    const room = "00000000-0000-4000-8000-000000000a05";
     await holdFile(root);
     const readsBefore = opfs.reads.length;
-    await deleteRoomDataTerminal(
-      "00000000-0000-4000-8000-000000000a05",
-      () => undefined,
-      workerRoomDelete,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    // Its rows were read to delete them, and nothing was hashed or settled.
-    expect(opfs.reads.length).toBe(readsBefore);
-    expect(notices).toEqual([]);
+    await deleteRoomDataTerminal(room, () => undefined, workerRoomDelete);
     expect(opfs.list()).toEqual([]);
+
+    // Held files are verified through one queue for the whole worker, in
+    // order. A second held file, queued by a room load, is verified after
+    // anything the delete could have put in that queue: once its outcome is
+    // posted, the queue has run past the delete.
+    const after = "4e".repeat(64);
+    await holdFile(after);
+    await callWorker("getDBRoomMessageData", [room, { verifyHeld: true }]);
+    expect(await untilTurns(() => notices.length > 0)).toBe(true);
+    // The delete read the room's rows to delete them, and nothing of its file
+    // was hashed or settled: the only file read back and the only outcome
+    // posted are the second file's.
+    expect(notices).toMatchObject([{ merkleRoot: after, verdict: "match" }]);
+    expect(opfs.reads.slice(readsBefore).map((read) => read.name)).toEqual([
+      after,
+      after,
+      after,
+    ]);
+    expect(opfs.list()).toEqual([after]);
   });
 
   test("verification never creates a file", async () => {
@@ -1459,10 +1471,20 @@ describe("held files are verified at the next start", () => {
       savedSize: 0,
       integrityFailed: true,
     });
-    // A later load verifies nothing again.
+    // A later load verifies nothing again. Held files are verified through
+    // one queue, in order: a third file, held now and queued by one more
+    // load, is verified after anything those loads put in the queue, and its
+    // outcome is the only one posted.
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(notices.length).toBe(2);
+    const third = "4f".repeat(64);
+    await holdFile(third);
+    const readsBeforeThird = opfs.reads.length;
+    await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
+    await waitForNotices(3);
+    expect(notices[2]).toMatchObject({ merkleRoot: third, verdict: "match" });
+    expect(opfs.reads.slice(readsBeforeThird).map((read) => read.name)).toEqual(
+      [third, third, third],
+    );
   });
 
   test("a start does not verify a file another tab is verifying", async () => {

@@ -20,7 +20,12 @@ const memory = new Map<string, string>();
   length: 0,
 };
 
-const realDb = await import("../../src/db/api");
+// The module's own functions, copied before anything is replaced.
+// mock.module patches the module object in place for everyone who imported
+// it, this file included: a stand-in that called through the module object
+// would call itself, and putting the module object "back" would leave the
+// stand-ins installed for every test file that runs after this one.
+const realDb = { ...(await import("../../src/db/api")) };
 const rows = new Map<string, Partial<MessageData>>();
 const files = new Map<string, File>();
 mock.module("../../src/db/api", () => ({
@@ -66,7 +71,8 @@ const received = (merkleRootHex: string, chunkSize: number) =>
   });
 
 // Put back everything this file changed for the rest of the run: the real
-// database API module, its room in the shared store, and the global.
+// database API module (its own functions, from the copy above), its room in
+// the shared store, and the global.
 afterAll(() => {
   store.dispatch(deleteRoom(ROOM));
   mock.module("../../src/db/api", () => realDb);
@@ -132,5 +138,24 @@ describe("readMessage and whole-file verification", () => {
     rows.set(arriving, { savedSize: 5, totalSize: 8 });
     const partial = await p2party.readMessage(arriving);
     expect(partial.percentage).toBe(62);
+  });
+
+  test("a root these tests do not stand in for reaches the real database module", async () => {
+    // Whatever the real module answers here (in a unit run its worker bundle
+    // is missing, so it rejects), the stand-in passed the call on once: it
+    // did not call itself until the stack ran out.
+    const db = await import("../../src/db/api");
+    const settled = await db.getDBMessageData("e4".repeat(64)).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(settled).not.toBeInstanceOf(RangeError);
+    const file = await db
+      .getReceiveFile("e4".repeat(64), 8, "a.png", "image/png")
+      .then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+    expect(file).not.toBeInstanceOf(RangeError);
   });
 });

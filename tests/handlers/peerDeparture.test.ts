@@ -459,7 +459,7 @@ describe("peerLeft: reason offline", () => {
 
 describe("peerLeft: the server cannot end an edge", () => {
   test("a peerLeft frame never closes a connected edge", async () => {
-    for (const reason of ["left", "offline"])
+    for (const reason of ["left", "offline"] as const)
       for (const state of ["connected", "disconnected"] as const) {
         const { store } = await joined(state);
 

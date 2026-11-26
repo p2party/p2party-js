@@ -48,6 +48,7 @@ import { bytesEqual } from "../canonicalSchema";
 import {
   allocationAppendSignedMessage,
   allocationTokenIssueResultSignedMessage,
+  deliveryProfileHash,
   prototypeStoreCompatibilityHash,
   publicAllocationLeaseSignedMessage,
   publicAllocationStatusSignedMessage,
@@ -72,6 +73,7 @@ import {
 } from "../publicWindow";
 import {
   descriptorChainStart,
+  descriptorHash as computeDescriptorHash,
   descriptorSupportsProfile,
   publicCarrierContextId,
   storeDescriptorAuthentic,
@@ -184,11 +186,19 @@ export interface StoreClientOptions {
  * `retention-breach` is blame: the store signed `out-of-range` for a window at
  * or after its chain start, and the answer's own signed current window puts
  * that window inside the retention the store's signed descriptor states. It
- * is decided from the store's two signed statements alone, never from this
- * client's clock, so the record's `evidence` (the signed answer) proves it to
- * anyone holding the descriptor (`outOfRangeProvesWithholding`). It sets
- * `inert`. The same answer for a window the store's own window puts past
- * that retention is expiry, not blame: the scan says `beyond-retention`.
+ * is decided from the store's signed statements alone, never from this
+ * client's clock, so the record's `evidence` (the signed answer) with its
+ * `descriptor` (the one the answer names by hash) proves it to anyone
+ * (`signedStatusProvesFault`). It sets `inert`. The same answer for a window
+ * the store's own window puts past that retention is expiry, not blame: the
+ * scan says `beyond-retention`.
+ *
+ * `finalization-breach` is blame of the same kind: the store signed
+ * `not-final` for a window at or after its chain start when its own signed
+ * window began at or after that window's finalization instant
+ * (`chunkFinalizationOffsetMs` into it), the instant from which the store's
+ * rule (`#closedOnClock`) no longer lets it say so. The record keeps the same
+ * evidence and descriptor.
  *
  * `store-clock-disagreement` is a report: an `out-of-range` answer whose
  * signed current window lies further from this client's clock than the
@@ -230,6 +240,7 @@ export type StoreFaultKind =
   | "root-mismatch"
   | "custody-breach"
   | "retention-breach"
+  | "finalization-breach"
   | "store-clock-disagreement"
   | "custody-unacknowledged"
   | "custody-unchecked"
@@ -240,8 +251,18 @@ export interface StoreFaultRecord {
   readonly kind: StoreFaultKind;
   readonly window: bigint | null;
   readonly detail: string;
-  /** The store's own signed answer, canonical bytes, when one proves the fault. */
-  readonly evidence?: Uint8Array;
+  /**
+   * The store's own signed answers, canonical bytes, when they prove the
+   * fault or stand against each other: one status for a `retention-breach` or
+   * `finalization-breach`; the finalized checkpoint read and the chunk status
+   * that denies one of its chunks for a `signature-invalid` of that kind.
+   */
+  readonly evidence?: readonly Uint8Array[];
+  /**
+   * The descriptor the answers name by `descriptorHash`, kept with them so the
+   * evidence is checkable without anything this client might later drop.
+   */
+  readonly descriptor?: StoreDescriptorV1;
 }
 
 /** Faults that make a store inert; they never compete with reports for room. */
@@ -250,6 +271,7 @@ const BLAME_FAULT_KINDS: ReadonlySet<StoreFaultKind> = new Set([
   "root-mismatch",
   "custody-breach",
   "retention-breach",
+  "finalization-breach",
 ]);
 
 /**
@@ -400,62 +422,179 @@ export const outOfRangeContradictsRetention = (
   (window > storeWindow || storeWindow - window <= BigInt(retentionWindows));
 
 /**
- * Check `retention-breach` evidence with nothing but the store's descriptor
- * and the signed answer: the descriptor is the store's own, the answer is a
- * signed `out-of-range` (checkpoint or chunk) under the descriptor's key, and
- * the answer's two windows put the requested one inside the descriptor's
- * retention and at or after its chain start. No clock is consulted, so the
- * verdict is the same for anyone, at any time.
+ * Whether a signed `not-final` for `window`, given when the store's own
+ * current window was `storeWindow`, contradicts the store's rule for it: a
+ * window at or after the chain start is final from
+ * `IngressWindowStart(window) + chunkFinalizationOffsetMs`, and a store whose
+ * window has begun at or after that instant has no moment left in it at
+ * which `not-final` was true (`#closedOnClock` in the store core). At the
+ * pinned profile that is any `storeWindow` past `window`.
  */
-export const outOfRangeProvesWithholding = async (
+export const notFinalContradictsFinalization = (
+  window: bigint,
+  storeWindow: bigint,
+  chainStart: bigint,
+  profile: DeliveryProfileV1,
+): boolean =>
+  window >= chainStart &&
+  ingressWindowStartMs(storeWindow, profile.deliveryWindowMs) >=
+    ingressWindowStartMs(window, profile.deliveryWindowMs) +
+      profile.chunkFinalizationOffsetMs;
+
+/**
+ * Whether `descriptor` was valid at every instant of `window`, so at
+ * whichever one a store signed an answer stating that window. Validity is
+ * half-open, `[notBeforeUnixMs, notAfterUnixMs)`, as `storeDescriptorActiveAt`
+ * decides it.
+ */
+export const descriptorValidThroughWindow = (
   descriptor: StoreDescriptorV1,
+  window: bigint,
+  deliveryWindowMs: bigint,
+): boolean =>
+  descriptor.notBeforeUnixMs <=
+    ingressWindowStartMs(window, deliveryWindowMs) &&
+  ingressWindowStartMs(window + 1n, deliveryWindowMs) <=
+    descriptor.notAfterUnixMs;
+
+/** The faults a store's own signed status can prove against it. */
+export type StoreEvidenceFaultKind = "retention-breach" | "finalization-breach";
+
+/** What a signed status states, read after its signature verified. */
+export interface SignedStoreStatusStatement {
+  readonly status: string;
+  readonly deliveryProfileHash: Uint8Array;
+  readonly window: bigint;
+  readonly storeWindow: bigint;
+}
+
+/**
+ * The fault a verified status proves against the descriptor it names, or
+ * `null`. One rule for this client's own judgment and for
+ * `signedStatusProvesFault`, so the client never blames what a third party
+ * would not: the descriptor must declare a chain for the statement's profile
+ * and have been valid through the window the store states, and then
+ * `out-of-range` contradicts the stated retention or `not-final` the
+ * finalization instant, each decided from the statement's two windows.
+ */
+export const signedStatusContradiction = (
+  statement: SignedStoreStatusStatement,
+  descriptor: StoreDescriptorV1,
+  profile: DeliveryProfileV1,
+): StoreEvidenceFaultKind | null => {
+  const chainStart = descriptorChainStart(
+    descriptor,
+    statement.deliveryProfileHash,
+  );
+  if (chainStart === null) return null;
+  if (
+    !descriptorValidThroughWindow(
+      descriptor,
+      statement.storeWindow,
+      profile.deliveryWindowMs,
+    )
+  )
+    return null;
+  if (
+    statement.status === "out-of-range" &&
+    outOfRangeContradictsRetention(
+      statement.window,
+      statement.storeWindow,
+      chainStart,
+      descriptor.retentionWindows,
+    )
+  )
+    return "retention-breach";
+  if (
+    statement.status === "not-final" &&
+    notFinalContradictsFinalization(
+      statement.window,
+      statement.storeWindow,
+      chainStart,
+      profile,
+    )
+  )
+    return "finalization-breach";
+  return null;
+};
+
+/**
+ * Check a signed status as evidence with nothing but the store's descriptor
+ * and the delivery profile: the descriptor is authentic, the answer is a
+ * signed checkpoint or chunk status under its key that names this descriptor
+ * by hash and this profile, a chunk status names a chunk the profile defines,
+ * and `signedStatusContradiction` holds. Returns the fault proved, or `null`.
+ * No clock is consulted, so the verdict is the same for anyone, at any time.
+ *
+ * `no-such-chunk` and `chain-unavailable` never prove anything here: they do
+ * not say the window is outside what the store keeps.
+ */
+export const signedStatusProvesFault = async (
+  descriptor: StoreDescriptorV1,
+  profile: DeliveryProfileV1,
   evidence: Uint8Array,
   module: LibCrypto,
-): Promise<boolean> => {
-  if (!(await storeDescriptorAuthentic(descriptor, module)).valid) return false;
+): Promise<StoreEvidenceFaultKind | null> => {
+  if (!(await storeDescriptorAuthentic(descriptor, module)).valid) return null;
+  const profileHashBytes = await deliveryProfileHash(profile);
+  const descriptorHashBytes = await computeDescriptorHash(descriptor);
   const storeIdBytes = await computeStoreId(descriptor.storeIdentityEd25519Key);
-  let statement: {
-    readonly profile: Uint8Array;
-    readonly window: bigint;
-    readonly storeWindow: bigint;
-    readonly message: Uint8Array;
-    readonly signature: Uint8Array;
-  } | null = null;
+  let statement:
+    | (SignedStoreStatusStatement & {
+        readonly descriptorHash: Uint8Array;
+        readonly message: Uint8Array;
+        readonly signature: Uint8Array;
+      })
+    | null = null;
   try {
     const read = decodePublicStoreCheckpointReadV1(evidence);
     if (
       read.kind === "status" &&
       read.value.version === 1 &&
-      read.value.status === "out-of-range" &&
       bytesEqual(read.value.storeId, storeIdBytes)
     )
       statement = {
-        profile: read.value.deliveryProfileHash,
+        status: read.value.status,
+        deliveryProfileHash: read.value.deliveryProfileHash,
         window: read.value.ingressWindow,
         storeWindow: read.value.storeIngressWindow,
+        descriptorHash: read.value.descriptorHash,
         message: await publicCheckpointStatusSigningHash(read.value),
         signature: read.storeSignature,
       };
   } catch {
     try {
       const read = decodePublicChunkReadV1(evidence);
-      if (
-        read.kind === "status" &&
-        read.value.version === 1 &&
-        read.value.status === "out-of-range"
-      )
-        statement = {
-          profile: read.value.bucket.deliveryProfileHash,
-          window: read.value.bucket.ingressWindow,
-          storeWindow: read.value.storeIngressWindow,
-          message: await publicChunkStatusSigningHash(read.value),
-          signature: read.storeSignature,
-        };
+      if (read.kind === "status" && read.value.version === 1) {
+        // A chunk the profile does not define is never withheld, whatever
+        // the store calls its absence.
+        const sizeClass = profile.sizeClasses.find(
+          (candidate) => candidate.id === read.value.bucket.sizeClass,
+        );
+        if (
+          sizeClass !== undefined &&
+          read.value.chunkIndex < BigInt(sizeClass.publicChunksPerWindow)
+        )
+          statement = {
+            status: read.value.status,
+            deliveryProfileHash: read.value.bucket.deliveryProfileHash,
+            window: read.value.bucket.ingressWindow,
+            storeWindow: read.value.storeIngressWindow,
+            descriptorHash: read.value.descriptorHash,
+            message: await publicChunkStatusSigningHash(read.value),
+            signature: read.storeSignature,
+          };
+      }
     } catch {
-      return false;
+      return null;
     }
   }
-  if (statement === null) return false;
+  if (statement === null) return null;
+  if (
+    !bytesEqual(statement.deliveryProfileHash, profileHashBytes) ||
+    !bytesEqual(statement.descriptorHash, descriptorHashBytes)
+  )
+    return null;
   if (
     !(await verify(
       statement.message,
@@ -464,16 +603,29 @@ export const outOfRangeProvesWithholding = async (
       module,
     ))
   )
-    return false;
-  const chainStart = descriptorChainStart(descriptor, statement.profile);
-  if (chainStart === null) return false;
-  return outOfRangeContradictsRetention(
-    statement.window,
-    statement.storeWindow,
-    chainStart,
-    descriptor.retentionWindows,
-  );
+    return null;
+  return signedStatusContradiction(statement, descriptor, profile);
 };
+
+const copyDescriptor = (descriptor: StoreDescriptorV1): StoreDescriptorV1 => ({
+  version: descriptor.version,
+  storeIdentityEd25519Key: copyBytes(descriptor.storeIdentityEd25519Key),
+  allocationIssuerPublicKeyDer: copyBytes(
+    descriptor.allocationIssuerPublicKeyDer,
+  ),
+  descriptorGeneration: descriptor.descriptorGeneration,
+  compatibilityHash: copyBytes(descriptor.compatibilityHash),
+  supportedDeliveryProfileHashes:
+    descriptor.supportedDeliveryProfileHashes.map(copyBytes),
+  checkpointChainStarts: descriptor.checkpointChainStarts.map((start) => ({
+    deliveryProfileHash: copyBytes(start.deliveryProfileHash),
+    chainStartIngressWindow: start.chainStartIngressWindow,
+  })),
+  retentionWindows: descriptor.retentionWindows,
+  notBeforeUnixMs: descriptor.notBeforeUnixMs,
+  notAfterUnixMs: descriptor.notAfterUnixMs,
+  descriptorSignature: copyBytes(descriptor.descriptorSignature),
+});
 
 /**
  * How long one request to this store may stay outstanding, in milliseconds.
@@ -644,6 +796,8 @@ export class PrototypeStoreClient {
   readonly #nowMs: () => bigint;
   readonly #retentionWindows: number;
   readonly #clockToleranceWindows: bigint;
+  /** `DescriptorHash` of the pinned descriptor, which every status must name. */
+  readonly #descriptorHash: Uint8Array;
 
   #inert = false;
   /** Recorded faults with their arrival order, blame and reports apart. */
@@ -682,6 +836,7 @@ export class PrototypeStoreClient {
     pinned: {
       readonly storeId: Uint8Array;
       readonly descriptor: StoreDescriptorV1;
+      readonly descriptorHash: Uint8Array;
       readonly carrierContextId: Uint8Array;
       readonly chainStart: bigint;
       readonly profileHash: Uint8Array;
@@ -709,6 +864,7 @@ export class PrototypeStoreClient {
     this.#nowMs = options.nowMs;
     this.#retentionWindows = pinned.descriptor.retentionWindows;
     this.#clockToleranceWindows = storeClockToleranceWindows(options.profile);
+    this.#descriptorHash = copyBytes(pinned.descriptorHash);
   }
 
   /**
@@ -862,6 +1018,7 @@ export class PrototypeStoreClient {
     return new PrototypeStoreClient(options, {
       storeId: storeIdBytes,
       descriptor,
+      descriptorHash: await computeDescriptorHash(descriptor),
       carrierContextId: await publicCarrierContextId(storeIdBytes, profileHash),
       chainStart,
       profileHash,
@@ -877,11 +1034,15 @@ export class PrototypeStoreClient {
   get faults(): readonly StoreFaultRecord[] {
     return [...this.#blame, ...this.#reports]
       .sort((left, right) => left.order - right.order)
-      .map(({ fault }) =>
-        fault.evidence === undefined
-          ? { ...fault }
-          : { ...fault, evidence: copyBytes(fault.evidence) },
-      );
+      .map(({ fault }) => ({
+        ...fault,
+        ...(fault.evidence === undefined
+          ? {}
+          : { evidence: fault.evidence.map(copyBytes) }),
+        ...(fault.descriptor === undefined
+          ? {}
+          : { descriptor: copyDescriptor(fault.descriptor) }),
+      }));
   }
 
   /* ---------------------------------------------------------------- *
@@ -1235,7 +1396,18 @@ export class PrototypeStoreClient {
       this.#judgeReceipt(privateReceipt, scanned.hashes);
       return;
     }
-    if (this.#receipts.length >= MAX_PENDING_RECEIPTS) this.#receipts.shift();
+    // Never dropped without a word: a receipt pushed out to make room is one
+    // whose window this client will not check, as after a read that ended in
+    // a clock disagreement and was not made again.
+    if (this.#receipts.length >= MAX_PENDING_RECEIPTS) {
+      const evicted = this.#receipts.shift();
+      if (evicted !== undefined)
+        this.#record(
+          "custody-unchecked",
+          evicted.window,
+          `an append receipt for this window was not checked: it waited for a read of the window past the ${String(MAX_PENDING_RECEIPTS)} receipts this client holds`,
+        );
+    }
     this.#receipts.push(privateReceipt);
   }
 
@@ -1299,6 +1471,7 @@ export class PrototypeStoreClient {
       classes,
       chunkBytes,
       sentWindow,
+      checkpointBytes ?? new Uint8Array(0),
     );
     if (chunks.kind !== "finalized")
       return this.#unreadableOutcome(window, empty(chunks.status));
@@ -1687,7 +1860,7 @@ export class PrototypeStoreClient {
     kind: StoreFaultKind,
     window: bigint | null,
     detail: string,
-    evidence?: Uint8Array,
+    evidence?: readonly Uint8Array[],
   ): void {
     const list = BLAME_FAULT_KINDS.has(kind) ? this.#blame : this.#reports;
     if (list.length >= MAX_RECORDED_FAULTS) return;
@@ -1698,7 +1871,13 @@ export class PrototypeStoreClient {
         kind,
         window,
         detail,
-        ...(evidence === undefined ? {} : { evidence: copyBytes(evidence) }),
+        // Kept with the descriptor the answers name, which `connect` pinned.
+        ...(evidence === undefined
+          ? {}
+          : {
+              evidence: evidence.map(copyBytes),
+              descriptor: copyDescriptor(this.descriptor),
+            }),
       },
     });
   }
@@ -1711,6 +1890,18 @@ export class PrototypeStoreClient {
     value: T,
   ): T {
     this.#record(kind, window, detail);
+    return value;
+  }
+
+  /** `#reject`, keeping the store's signed answers with the record. */
+  #rejectWithEvidence<T>(
+    kind: StoreFaultKind,
+    window: bigint,
+    detail: string,
+    evidence: readonly Uint8Array[],
+    value: T,
+  ): T {
+    this.#record(kind, window, detail, evidence);
     return value;
   }
 
@@ -1794,8 +1985,25 @@ export class PrototypeStoreClient {
           "the checkpoint status does not name this store, profile and window",
           unusable,
         );
+      // Judged against the descriptor it names and no other: one this client
+      // does not hold could state any retention.
+      if (!bytesEqual(value.descriptorHash, this.#descriptorHash))
+        return this.#reject(
+          "signature-invalid",
+          window,
+          "the checkpoint status names a descriptor other than the one this client pinned",
+          unusable,
+        );
       if (value.status === "not-final")
-        return { kind: "status", status: "not-final" };
+        return {
+          kind: "status",
+          status: this.#judgeNotFinal(
+            window,
+            value.storeIngressWindow,
+            bytes,
+            "the checkpoint",
+          ),
+        };
       if (value.status === "out-of-range")
         return {
           kind: "status",
@@ -1902,6 +2110,7 @@ export class PrototypeStoreClient {
     }[],
     chunkBytes: readonly (readonly (Uint8Array | null)[])[],
     sentWindow: bigint,
+    checkpointBytes: Uint8Array,
   ): Promise<
     | {
         readonly kind: "finalized";
@@ -1977,6 +2186,14 @@ export class PrototypeStoreClient {
               "the chunk status does not name the chunk that was requested",
               unusable,
             );
+          if (!bytesEqual(value.descriptorHash, this.#descriptorHash))
+            return this.#reject(
+              "signature-invalid",
+              window,
+              "the chunk status names a descriptor other than the one this client pinned",
+              unusable,
+            );
+          const what = `chunk ${String(index)} of class ${String(sizeClass.id)}`;
           // Out of range: the window may have passed the stated retention
           // between the checkpoint and this chunk, which is expiry; inside it,
           // it is the store withholding.
@@ -1987,16 +2204,41 @@ export class PrototypeStoreClient {
                 window,
                 value.storeIngressWindow,
                 bytes,
-                `chunk ${String(index)} of class ${String(sizeClass.id)}`,
+                what,
                 sentWindow,
               ),
             };
+          if (
+            value.status === "not-final" &&
+            this.#judgeNotFinal(
+              window,
+              value.storeIngressWindow,
+              bytes,
+              what,
+            ) === "unreachable"
+          )
+            return unusable;
+          // Every chunk asked for here is one the profile defines (the scan
+          // derives each request from it), so the store's checkpoint for this
+          // window commits to it. `no-such-chunk` then denies a chunk the
+          // store signed for, and both statements are kept. A `no-such-chunk`
+          // for coordinates the profile does not define would be true and no
+          // fault, but this client never asks for one.
+          if (value.status === "no-such-chunk")
+            return this.#rejectWithEvidence(
+              "signature-invalid",
+              window,
+              `the store withholds ${what} from a window it finalized: it signed no-such-chunk for a chunk its checkpoint commits to`,
+              [checkpointBytes, bytes],
+              unusable,
+            );
           // A store that signed a checkpoint for this window and then calls
-          // one of the chunks it committed not final contradicts itself.
+          // one of the chunks it committed not final contradicts itself, but
+          // at the close itself the two answers can race, so it is reported.
           return this.#reject(
             "signature-invalid",
             window,
-            `the store withholds chunk ${String(index)} of class ${String(sizeClass.id)} from a window it finalized`,
+            `the store withholds ${what} from a window it finalized`,
             unusable,
           );
         }
@@ -2224,12 +2466,16 @@ export class PrototypeStoreClient {
     sentWindow: bigint,
   ): "beyond-retention" | "clock-disagreement" | "unreachable" {
     if (
-      outOfRangeContradictsRetention(
-        window,
-        storeWindow,
-        this.#chainStart,
-        this.#retentionWindows,
-      )
+      signedStatusContradiction(
+        {
+          status: "out-of-range",
+          deliveryProfileHash: this.#profileHash,
+          window,
+          storeWindow,
+        },
+        this.descriptor,
+        this.#profile,
+      ) === "retention-breach"
     ) {
       this.#markUnreadable(window);
       this.#inert = true;
@@ -2237,7 +2483,7 @@ export class PrototypeStoreClient {
         "retention-breach",
         window,
         `the store signed out-of-range for ${what} at its own window ${String(storeWindow)}, which puts this window inside the ${String(this.#retentionWindows)}-window retention its descriptor states`,
-        evidence,
+        [evidence],
       );
       return "unreachable";
     }
@@ -2256,6 +2502,44 @@ export class PrototypeStoreClient {
     }
     this.#markUnreadable(window);
     return "beyond-retention";
+  }
+
+  /**
+   * Classify a signed `not-final` for `window`, signed when the store's own
+   * window was `storeWindow`, by the store's rule alone: if that window began
+   * at or after this window's finalization instant, the store said not final
+   * of a window its own clock had closed, and the signed answer proves it
+   * (`finalization-breach`). Otherwise it is the honest answer for a window
+   * not yet final, and nothing is recorded.
+   */
+  #judgeNotFinal(
+    window: bigint,
+    storeWindow: bigint,
+    evidence: Uint8Array,
+    what: string,
+  ): "not-final" | "unreachable" {
+    if (
+      signedStatusContradiction(
+        {
+          status: "not-final",
+          deliveryProfileHash: this.#profileHash,
+          window,
+          storeWindow,
+        },
+        this.descriptor,
+        this.#profile,
+      ) !== "finalization-breach"
+    )
+      return "not-final";
+    this.#markUnreadable(window);
+    this.#inert = true;
+    this.#record(
+      "finalization-breach",
+      window,
+      `the store signed not-final for ${what} at its own window ${String(storeWindow)}, which begins after this window's finalization instant`,
+      [evidence],
+    );
+    return "unreachable";
   }
 
   #markUnreadable(window: bigint): void {

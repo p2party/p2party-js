@@ -36,9 +36,11 @@ import {
 import {
   PrototypeStoreCore,
   StoreConfigurationError,
+  StoreFinalizationPendingError,
   StoreRequestError,
   type PrototypeStoreCoreOptions,
 } from "../../../src/blindRendezvous/prototype/store/storeCore";
+import { signedStatusProvesFault } from "../../../src/blindRendezvous/prototype/storeClient";
 import {
   MemoryStorePersistence,
   emptyStoreWindowState,
@@ -49,6 +51,7 @@ import { validateStoreDescriptor } from "../../../src/blindRendezvous/storeDescr
 import {
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
+  encodePublicChunkReadV1,
   encodePublicStoreCheckpointReadV1,
 } from "../../../src/blindRendezvous/prototype/storeWire";
 import {
@@ -974,12 +977,21 @@ describe("prototype store reads", () => {
       bucketOf(CHAIN_START, 0),
       BigInt(profile.sizeClasses[0].publicChunksPerWindow),
     );
+    // Coordinates no window can hold are their own status: `out-of-range`
+    // says only that the window is outside what the store keeps.
     if (pastEnd.kind !== "status") throw new Error("expected a status");
-    expect(pastEnd.value.status).toBe("out-of-range");
+    expect(pastEnd.value.status).toBe("no-such-chunk");
 
     const unknownClass = await core.readChunk(bucketOf(CHAIN_START, 9), 0n);
     if (unknownClass.kind !== "status") throw new Error("expected a status");
-    expect(unknownClass.value.status).toBe("out-of-range");
+    expect(unknownClass.value.status).toBe("no-such-chunk");
+
+    const foreignChunk = await core.readChunk(
+      { ...bucketOf(CHAIN_START, 0), deliveryProfileHash: OTHER_PROFILE_HASH },
+      0n,
+    );
+    if (foreignChunk.kind !== "status") throw new Error("expected a status");
+    expect(foreignChunk.value.status).toBe("no-such-chunk");
 
     const beforeChainStart = await core.readChunk(
       bucketOf(CHAIN_START - 1n, 0),
@@ -997,6 +1009,81 @@ describe("prototype store reads", () => {
     expect((await core.readChunk(bucketOf(CHAIN_START, 0), 0n)).kind).toBe(
       "finalized",
     );
+  });
+
+  test("a backward step of the clock cannot make an honest store sign against itself", async () => {
+    // Armed, the clock reads `decided` once and `stepped` (two windows back)
+    // on every later reading: a wall-clock step inside one answer.
+    const window = CHAIN_START;
+    const decided = ingressWindowStartMs(
+      window + BigInt(PROTOTYPE_STORE_MIN_RETENTION_WINDOWS) + 1n,
+      profile.deliveryWindowMs,
+    );
+    const stepped = decided - 2n * profile.deliveryWindowMs;
+    let armed = false;
+    let readings = 0;
+    const core = await PrototypeStoreCore.create({
+      module: cryptoModule,
+      seed: SEED,
+      profile,
+      clock: {
+        nowMs: () => {
+          if (!armed) return WINDOW_START;
+          readings += 1;
+          return readings === 1 ? decided : stepped;
+        },
+      },
+      persistence: new MemoryStorePersistence(),
+      chainStartIngressWindow: CHAIN_START,
+      origin: "http://127.0.0.1:5910",
+      descriptorValidityMs: 2_592_000_000n,
+      retentionWindows: PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
+    });
+    const reads: (() => Promise<{
+      readonly status: string | null;
+      readonly storeWindow: bigint | null;
+      readonly bytes: Uint8Array;
+    }>)[] = [
+      async () => {
+        const read = await core.readCheckpoint(PROFILE_HASH, window);
+        return {
+          status: read.kind === "status" ? read.value.status : null,
+          storeWindow:
+            read.kind === "status" ? read.value.storeIngressWindow : null,
+          bytes: encodePublicStoreCheckpointReadV1(read),
+        };
+      },
+      async () => {
+        const read = await core.readChunk(bucketOf(window, 0), 0n);
+        return {
+          status: read.kind === "status" ? read.value.status : null,
+          storeWindow:
+            read.kind === "status" ? read.value.storeIngressWindow : null,
+          bytes: encodePublicChunkReadV1(read),
+        };
+      },
+    ];
+    for (const read of reads) {
+      armed = true;
+      readings = 0;
+      const answer = await read();
+      armed = false;
+      // One reading decided the answer and is the window it states: past
+      // the retention, and so no evidence against the store.
+      expect(readings).toBe(1);
+      expect(answer.status).toBe("out-of-range");
+      expect(answer.storeWindow).toBe(
+        window + BigInt(PROTOTYPE_STORE_MIN_RETENTION_WINDOWS) + 1n,
+      );
+      expect(
+        await signedStatusProvesFault(
+          core.descriptor,
+          profile,
+          answer.bytes,
+          cryptoModule,
+        ),
+      ).toBeNull();
+    }
   });
 
   test("throws on coordinates no signed status could name", async () => {
@@ -2652,11 +2739,12 @@ describe("prototype store restart from disk", () => {
       "injected saveWindow failure",
     );
     // A checkpoint served now and a different one signed after a restart
-    // would be the store equivocating, so nothing uncommitted may be served.
-    const served = await before.core.readCheckpoint(PROFILE_HASH, CHAIN_START);
-    expect(served.kind === "status" ? served.value.status : served.kind).toBe(
-      "not-final",
-    );
+    // would be the store equivocating, so nothing uncommitted may be served;
+    // and the window has closed on the clock, so a signed `not-final` would
+    // contradict the store's own clock. The answer is an unsigned busy.
+    await expect(
+      before.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+    ).rejects.toThrow(StoreFinalizationPendingError);
   });
 
   test("failed save leaves finalize state unchanged after restart", async () => {
@@ -2677,13 +2765,9 @@ describe("prototype store restart from disk", () => {
       expect((await disk.loadWindow(CHAIN_START))?.finalized).toBeNull();
       expect(await disk.lastFinalizedWindow()).toBeNull();
       const restarted = await harness({ persistence: disk, now: FINALIZE_AT });
-      const served = await restarted.core.readCheckpoint(
-        PROFILE_HASH,
-        CHAIN_START,
-      );
-      expect(served.kind === "status" ? served.value.status : served.kind).toBe(
-        "not-final",
-      );
+      await expect(
+        restarted.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+      ).rejects.toThrow(StoreFinalizationPendingError);
       expect(await restarted.core.finalizeDue()).toEqual([CHAIN_START]);
     } finally {
       disk.close();

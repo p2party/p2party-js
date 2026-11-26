@@ -1,9 +1,27 @@
 import { describe, expect, test } from "bun:test";
 
-import webrtcDisconnectPeerQuery from "../../../src/api/webrtc/disconnectFromPeerQuery";
-
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
-import type { IRTCDataChannel, IRTCPeerConnection } from "../../../src/api/webrtc/interfaces";
+import type {
+  IRTCDataChannel,
+  IRTCPeerConnection,
+} from "../../../src/api/webrtc/interfaces";
+
+// disconnectFromPeerQuery's module graph reaches the Redux store (through the
+// handshake module), whose identity slice reads localStorage at module
+// initialization (src/reducers/keyPairSlice.ts). This file installs its own
+// shim and imports after it, so it does not depend on another test file
+// having installed one first.
+(globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
+  getItem: () => null,
+  setItem: () => undefined,
+  removeItem: () => undefined,
+  clear: () => undefined,
+  key: () => null,
+  length: 0,
+} as Storage;
+
+const { default: webrtcDisconnectPeerQuery } =
+  await import("../../../src/api/webrtc/disconnectFromPeerQuery");
 
 const connection = (
   roomId: string,

@@ -30,8 +30,9 @@ SDP/ICE relay via `page.exposeFunction`.
   RTCDataChannel lanes: fixed C×F×D authenticated dummy cover cells, a real
   receipt-subtype cover cell, and a real ratchet+PQ **message chunk decrypted
   byte-exact** over a cover slot. `cover.html` stubs `document.visibilityState`
-  because headless Chromium reports the page hidden (which the runtime
-  correctly treats as a cover gap).
+  because headless Chromium reports the page hidden. The runtime keeps cover
+  armed on a hidden page, but a browser may throttle a hidden page's timers and
+  late cells degrade the cycle; the stub keeps the run off that path.
 - `diag.mjs` / `index.html` — a minimal single-edge diagnostic and the shared
   page shell (process shim + bundle).
 

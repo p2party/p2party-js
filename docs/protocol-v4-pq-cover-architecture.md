@@ -132,6 +132,12 @@ cover suspended/degraded. Missed epochs are skipped. Resume begins only at a
 future cycle boundary. The API exposes this status so the UI cannot claim cover
 during a browser-imposed gap.
 
+A hidden page is not suspended: its schedule stays armed, so tab visibility is
+not readable off the wire, and the cycles its throttled timers miss are marked
+degraded. While the page is hidden, a scheduled send's delivery idle budget is
+held exactly as it is while cover is suspended, so a send that genuinely stalls
+while the page is hidden is detected when the page is visible again.
+
 ## Alternatives rejected
 
 - **Keep the one-byte epoch:** creates an unspecified wrap/replay window and

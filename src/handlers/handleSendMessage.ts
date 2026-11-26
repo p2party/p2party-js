@@ -51,7 +51,10 @@ import {
   markChunkAcked,
   hasChunkAcked,
   getAckedChunkCount,
+  onTransferProgress,
+  transferWaitClock,
 } from "./reconcile";
+import type { TransferWaitClock } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
 import { createMessageChunkSealer } from "./messageChunkCrypto";
 import {
@@ -100,7 +103,9 @@ import {
   RECONNECT_RESUME_POLL_MS,
   MAX_RESUME_ATTEMPTS,
   MAX_SCHEDULED_SEND_RESUMES,
-  CHANNEL_OPEN_POLL_MS,
+  RECEIPT_WINDOW_FALLBACK_MS,
+  SEND_BUFFER_FALLBACK_MS,
+  SEND_BUFFER_LOW_THRESHOLD,
 } from "../utils/constants";
 
 import { deleteDBSendQueue, getDBNewChunk, setDBNewChunk } from "../db/api";
@@ -141,35 +146,108 @@ export const SEND_WINDOW_STALL_MS = 10_000;
 export interface ReceiptWindowParams {
   readonly windowSize: number;
   readonly stallTimeoutMs: number;
-  readonly pollMs: number;
+  /** The longest the wait goes without re-checking on its own. */
+  readonly fallbackMs: number;
   readonly isOpen: () => boolean;
   readonly inFlight: () => number;
+  /**
+   * Subscribe `wake` to what can end the wait — a receipt on this edge, the
+   * channel leaving "open" — and return the unsubscribe.
+   */
+  readonly subscribe: (wake: () => void) => () => void;
   readonly signal?: AbortSignal;
+  readonly clock?: TransferWaitClock;
 }
 
 /**
  * Resolve once in-flight drops below the window, the channel leaves "open",
  * or receipt progress stalls for stallTimeoutMs. Any receipt progress while
  * still over the window resets the stall clock. Throws only on transfer abort.
+ *
+ * Woken by `subscribe` (a receipt, a close) and by the abort signal; its one
+ * timer fires only at the stall deadline or after fallbackMs without a
+ * wake-up, never on a polling cadence.
  */
 export const waitForReceiptWindow = async (
   params: ReceiptWindowParams,
 ): Promise<void> => {
-  let lastInFlight = params.inFlight();
-  let lastProgressAt = Date.now();
-  while (params.isOpen() && params.inFlight() >= params.windowSize) {
-    throwIfTransferAborted(params.signal);
-    const inFlight = params.inFlight();
-    if (inFlight < lastInFlight) {
-      lastInFlight = inFlight;
-      lastProgressAt = Date.now();
-    }
-    if (Date.now() - lastProgressAt >= params.stallTimeoutMs) return;
-    await new Promise((resolve) => setTimeout(resolve, params.pollMs));
-    throwIfTransferAborted(params.signal);
-  }
   throwIfTransferAborted(params.signal);
+  if (!params.isOpen() || params.inFlight() < params.windowSize) return;
+  const clock = params.clock ?? transferWaitClock;
+
+  await new Promise<void>((resolve, reject) => {
+    let lastInFlight = params.inFlight();
+    let lastProgressAt = clock.now();
+    let done = false;
+    let timer: unknown;
+    let unsubscribe = (): void => undefined;
+    const finish = (settle: () => void): void => {
+      done = true;
+      if (timer !== undefined) clock.clearTimeout(timer);
+      unsubscribe();
+      params.signal?.removeEventListener("abort", check);
+      settle();
+    };
+    const check = (): void => {
+      if (done) return;
+      if (params.signal?.aborted) {
+        finish(() => {
+          try {
+            throwIfTransferAborted(params.signal);
+          } catch (error) {
+            reject(error);
+          }
+        });
+        return;
+      }
+      const inFlight = params.inFlight();
+      if (!params.isOpen() || inFlight < params.windowSize) {
+        finish(resolve);
+        return;
+      }
+      if (inFlight < lastInFlight) {
+        lastInFlight = inFlight;
+        lastProgressAt = clock.now();
+      }
+      if (clock.now() - lastProgressAt >= params.stallTimeoutMs)
+        finish(resolve);
+    };
+    const arm = (): void => {
+      const untilStall = lastProgressAt + params.stallTimeoutMs - clock.now();
+      timer = clock.setTimeout(
+        onTimer,
+        Math.max(0, Math.min(params.fallbackMs, untilStall)),
+      );
+    };
+    const onTimer = (): void => {
+      timer = undefined;
+      check();
+      if (!done) arm();
+    };
+    // Registered before the state is checked again, so a receipt between the
+    // first check and the subscription cannot be missed.
+    unsubscribe = params.subscribe(check);
+    params.signal?.addEventListener("abort", check);
+    check();
+    if (!done) arm();
+  });
 };
+
+/** One edge's receipt count, and a way to be woken when it changes. */
+export interface ReceiptProgress {
+  readonly count: () => number;
+  readonly subscribe: (wake: () => void) => () => void;
+}
+
+/** The receipts of one transfer edge, as reconcile records them. */
+export const edgeReceiptProgress = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+): ReceiptProgress => ({
+  count: () => getAckedChunkCount(roomId, peerId, transferId),
+  subscribe: (wake) => onTransferProgress(roomId, peerId, transferId, wake),
+});
 
 /**
  * Where a sender's staged plaintext cells live: the durable `newChunks` store
@@ -440,13 +518,6 @@ export const withOutboundMessage = async <T>(
   }
 };
 
-// A full send buffer (MAX_BUFFERED_AMOUNT) is waited out until it drains to
-// half, so one wake-up refills about eight frames instead of one.
-export const SEND_BUFFER_LOW_THRESHOLD = MAX_BUFFERED_AMOUNT / 2;
-// Re-check a full buffer this often in case `bufferedamountlow` is never
-// delivered. It is a fallback, not the pacing: the event resumes the send.
-export const SEND_BUFFER_FALLBACK_MS = 250;
-
 /** The part of a data channel the send-buffer wait reads and listens to. */
 export interface SendBufferChannel {
   readonly readyState: string;
@@ -468,11 +539,12 @@ const sendBufferTimers: SendBufferTimers = {
   },
 };
 
+// The events after which a data channel can no longer be sent on.
+const CHANNEL_END_EVENTS = ["close", "closing", "error"] as const;
+
 const SEND_BUFFER_WAKE_EVENTS = [
   "bufferedamountlow",
-  "close",
-  "closing",
-  "error",
+  ...CHANNEL_END_EVENTS,
 ] as const;
 
 /**
@@ -566,9 +638,9 @@ export const sendChunks = async (
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
   // real chunks — skip decoys and already-acked reals.
   reconcileAcked?: Set<number>,
-  // Live count of receipted chunks for this transfer edge; enables the
+  // This transfer edge's receipts (live count + wake-up); enables the
   // sender-side receipt window. Absent → legacy SCTP-only pacing.
-  getAckedRealCount?: () => number,
+  receipts?: ReceiptProgress,
   outboxLease?: OutboxLease,
 ): Promise<void> => {
   throwIfTransferAborted(signal);
@@ -578,7 +650,7 @@ export const sendChunks = async (
 
   // Receipts landing during this pass shrink the window; acks that predate the
   // pass (resume replays) must not count against frames sent in this pass.
-  const ackedAtPassStart = getAckedRealCount?.() ?? 0;
+  const ackedAtPassStart = receipts?.count() ?? 0;
   let sentRealThisPass = 0;
 
   const indexes = Array.from({ length: message.totalChunks }, (_, i) => i);
@@ -604,15 +676,24 @@ export const sendChunks = async (
 
     // Hold real frames inside the receipt window so a fast link cannot outrun
     // the receiver's decrypt+store drain into its queue-budget channel close.
-    if (staged.real && getAckedRealCount) {
+    if (staged.real && receipts) {
       await waitForReceiptWindow({
         windowSize: SEND_RECEIPT_WINDOW,
         stallTimeoutMs: SEND_WINDOW_STALL_MS,
-        pollMs: CHANNEL_OPEN_POLL_MS,
+        fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
         isOpen: () => (channel.readyState as string) === "open",
         inFlight: () =>
-          sentRealThisPass -
-          Math.max(0, getAckedRealCount() - ackedAtPassStart),
+          sentRealThisPass - Math.max(0, receipts.count() - ackedAtPassStart),
+        subscribe: (wake) => {
+          const unsubscribe = receipts.subscribe(wake);
+          for (const type of CHANNEL_END_EVENTS)
+            channel.addEventListener(type, wake);
+          return () => {
+            unsubscribe();
+            for (const type of CHANNEL_END_EVENTS)
+              channel.removeEventListener(type, wake);
+          };
+        },
         signal,
       });
     }
@@ -1050,9 +1131,10 @@ export type PeerDeliveryOutcome =
       // may never resolve.
       // "cover-unavailable": the transport IS connected, but this edge's
       // scheduled-cover runtime cannot currently admit a job (missing,
-      // suspended -- e.g. a backgrounded tab, or stopped). That is local and
-      // typically temporary: it resolves on its own once the tab is
-      // foregrounded/online again, unlike a dead peer.
+      // suspended -- by a pagehide, a freeze or going offline -- or stopped).
+      // A hidden page does not suspend it. That is local and typically
+      // temporary: it resolves on its own once the page is restored or back
+      // online, unlike a dead peer.
       reason:
         "not-connected" | "cover-unavailable" | "unauthenticated" | "cancelled";
     };
@@ -1335,7 +1417,7 @@ const sendWithReconcile = async (
       message,
       signal,
       undefined,
-      () => getAckedChunkCount(roomId, peerId, transferId),
+      edgeReceiptProgress(roomId, peerId, transferId),
       outboxLease,
     );
 
@@ -1487,7 +1569,7 @@ const sendWithReconcile = async (
         message,
         signal,
         getAckedChunks(roomId, peerId, transferId),
-        () => getAckedChunkCount(roomId, peerId, transferId),
+        edgeReceiptProgress(roomId, peerId, transferId),
         outboxLease,
       );
       retries++;
@@ -1534,20 +1616,27 @@ const makeScheduledSlotSealer =
   (
     message: OutboundMessage,
     chunkSealer: MessageChunkSealer,
+    jobRetired: () => boolean,
     outboxLease?: OutboxLease,
     signal?: AbortSignal,
   ) =>
   async (chunkIndex: number): Promise<Uint8Array | null> => {
-    throwIfTransferAborted(signal);
-    // The delivery this job served has ended (a job confirmed delivered is
-    // not settled by the sender), so nothing is left to send: a dummy cell,
-    // and no proof levels rebuilt for a message nobody is sending.
-    if (message.closed) return null;
-    const staged = await message.read(chunkIndex, signal);
-    if (!staged) return null;
-    const chunk = await message.cellPlaintext(staged, outboxLease, signal);
-    throwIfTransferAborted(signal);
-    return chunkSealer.seal(chunk, message.merkleRoot);
+    try {
+      const staged = await message.read(chunkIndex, signal);
+      if (!staged) return null;
+      const chunk = await message.cellPlaintext(staged, outboxLease, signal);
+      return chunkSealer.seal(chunk, message.merkleRoot);
+    } catch (error) {
+      // Nothing is left to send once the delivery this job served has ended
+      // (confirmed, cancelled, timed out) or the job has settled and its key
+      // was wiped, and any await above can outlive that moment: the closed
+      // message, the abort and the wiped sealer each throw. The answer is a
+      // dummy cell. Throwing makes the scheduler degrade the whole edge
+      // (cell-production-failed), which stops cover for every job on it right
+      // after a transfer ends.
+      if (signal?.aborted || message.closed || jobRetired()) return null;
+      throw error;
+    }
   };
 
 /**
@@ -1653,12 +1742,13 @@ export const sendScheduled = async (
   // shipped cap — before the next peer is even attempted. On the "5 min cycles"
   // preset that is about thirty-two minutes for one peer.
   //
-  // And with the suspension hold above it has no upper bound at all while the
-  // page stays hidden. That is deliberate and it is not per-peer starvation:
-  // visibilitychange / pagehide / freeze / offline are PAGE-wide, so every edge
-  // in the room is suspended together — there is no peer being starved of a
-  // schedule that is running for someone else. The wait ends when the tab comes
-  // back, or when `signal` aborts.
+  // And with the idle-budget hold below (scheduledCoverIsSuspended) it has no
+  // upper bound at all while the page stays hidden or suspended. That is
+  // deliberate and it is not per-peer starvation: a hidden page, pagehide,
+  // freeze and offline are PAGE-wide, so every edge in the room is held
+  // together — there is no peer being starved of a schedule that is running
+  // for someone else. The wait ends when the page is visible and running
+  // again, or when `signal` aborts.
   //
   // Each edge has its own scheduler, so serial fan-out adds latency for later
   // peers even when their own lanes have capacity. Concurrent per-peer sends
@@ -1685,8 +1775,8 @@ export const sendScheduled = async (
       continue;
     }
     // The transport is connected, so this is not a dead peer -- it is this
-    // edge's own scheduled-cover pipeline (missing, suspended, e.g. a
-    // backgrounded tab, or stopped) refusing to admit a job. Report that
+    // edge's own scheduled-cover pipeline (missing, suspended by a pagehide,
+    // a freeze or going offline, or stopped) refusing to admit a job. Report that
     // distinctly: it is a local condition the caller can expect to clear on
     // its own, not a reason to give up on the peer.
     if (!coverRuntimeAdmitsScheduledJobs(epc.coverRuntime)) {
@@ -1700,6 +1790,8 @@ export const sendScheduled = async (
     let currentEpc = epc;
     let channelMessageLabel = "";
     let admitted = false;
+    // The runtime holding this target's latest job; settled on delivery.
+    let jobRuntime: IRTCPeerConnection["coverRuntime"];
     try {
       channelMessageLabel = await compileChannelMessageLabel(
         channelLabel,
@@ -1760,9 +1852,11 @@ export const sendScheduled = async (
           releasePq();
           throw error;
         }
+        let wiped = false;
         const sealer = makeScheduledSlotSealer(
           message,
           chunkSealer,
+          () => wiped,
           outboxLease,
           signal,
         );
@@ -1778,7 +1872,6 @@ export const sendScheduled = async (
         // edge: the teardown that causes the resume settles the job, so by then
         // this key is already zero. Each attempt owns its own generation's
         // secrets and its own wipe.
-        let wiped = false;
         const wipeMessageSecrets = (): void => {
           if (wiped) return;
           wiped = true;
@@ -1787,6 +1880,7 @@ export const sendScheduled = async (
           stepped.pqContext?.rootKey.fill(0);
         };
         const runtime = currentEpc.coverRuntime;
+        jobRuntime = runtime;
         try {
           throwIfTransferAborted(signal);
           const enqueued = enqueueScheduledSend({
@@ -1842,11 +1936,13 @@ export const sendScheduled = async (
             coverEdgeGeneration(roomId, target.peerId) > generation,
           progress: () =>
             scheduledSendProgress(currentEpc.coverRuntime, channelMessageLabel),
-          // A backgrounded tab, a pagehide, a freeze or an offline event
-          // suspends this edge's scheduler while it KEEPS the job. The signal
-          // above freezes, but the send is healthy: charging the idle budget
-          // through that gap cancels it, and the CANCEL deletes the partial the
-          // peer is still holding. Suspension is not a stall.
+          // A pagehide, a freeze or an offline event suspends this edge's
+          // scheduler; on a hidden page the schedule stays armed, but
+          // throttled timers degrade its cycles. Either way the scheduler
+          // KEEPS the job and the signal above freezes while the send is
+          // healthy: charging the idle budget through that gap cancels it, and
+          // the CANCEL deletes the partial the peer is still holding. The
+          // predicate holds the budget in both cases; neither is a stall.
           isSuspended: () => scheduledCoverIsSuspended(currentEpc.coverRuntime),
           idleTimeoutMs: deliveryIdleTimeoutMs,
           signal,
@@ -1913,10 +2009,19 @@ export const sendScheduled = async (
         currentEpc = nextEpc;
         resumes += 1;
       }
-      if (
-        !delivered &&
-        !isTransferCancelled(roomId, target.peerId, transferId)
-      ) {
+      if (delivered) {
+        // Confirmed. The job may still hold cells it never needs to send:
+        // settle it now (`complete` emits no frame), so it stops asking for
+        // them and its message key and PQ root are wiped at delivery, not at
+        // the cycle boundary that would otherwise retire it as
+        // capacity-exhausted.
+        try {
+          jobRuntime?.complete(channelMessageLabel);
+        } catch (settleError) {
+          // Already destroyed: its teardown settled the job.
+          debugLog(settleError);
+        }
+      } else if (!isTransferCancelled(roomId, target.peerId, transferId)) {
         // Tell the receiver, before anything else destroys what could still
         // fill its partial. Without this the sender reported failure while the
         // receiver kept an unfillable N/M transfer forever — a re-send cannot

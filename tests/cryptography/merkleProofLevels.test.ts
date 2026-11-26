@@ -10,6 +10,7 @@ import {
 import { crypto_hash_sha512_BYTES } from "../../src/cryptography/interfaces";
 import { hashMerkleLeafWasm } from "../../src/utils/leafHash";
 import { PROOF_LEN } from "../../src/utils/constants";
+import { uint8ArrayToHex } from "../../src/utils/uint8array";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 
@@ -109,6 +110,39 @@ describe("Merkle proof levels", () => {
     ).toEqual(wasmFramed.subarray(0, 4 + length));
     levels.release();
   }, 60_000);
+
+  test("every proofFixedLen is framed, left raw or refused exactly as getMerkleProof does", async () => {
+    // getMerkleProof frames a single-leaf proof whenever proofFixedLen is set
+    // and a larger tree's only when proofFixedLen >= its length; a length
+    // that leaves no room for the 4-byte prefix is refused by both.
+    const outcome = async (
+      prove: () => Promise<Uint8Array> | Uint8Array,
+    ): Promise<string> => {
+      try {
+        const proof = await prove();
+        return `${String(proof.length)}:${uint8ArrayToHex(proof.subarray(0, 4))}`;
+      } catch (error) {
+        return `throws ${(error as Error).name}`;
+      }
+    };
+    for (const leafCount of [1, 2, 3, 5]) {
+      const { leaves } = makeTree(leafCount);
+      const levels = buildMerkleProofLevels(leaves, module);
+      for (let index = 0; index < leafCount; index++) {
+        const leaf = leafAt(leaves, index);
+        const raw = await getMerkleProof(leaves, leaf, module);
+        for (let fixed = 1; fixed <= raw.length + 8; fixed++) {
+          const expected = await outcome(() =>
+            getMerkleProof(leaves, leaf, module, fixed),
+          );
+          expect(await outcome(() => levels.proof(index, leaf, fixed))).toBe(
+            expected,
+          );
+        }
+      }
+      levels.release();
+    }
+  });
 
   test("the tree is hashed once: N − 1 node hashes, no per-proof rebuild", () => {
     for (const leafCount of LEAF_COUNTS) {

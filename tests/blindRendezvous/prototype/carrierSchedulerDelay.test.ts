@@ -294,7 +294,7 @@ const until = async (condition: () => boolean, rounds = 500): Promise<void> => {
 };
 
 describe("carrier catch-up gate", () => {
-  test("a catch-up requested while one runs is refused and reported, not queued twice", async () => {
+  test("a catch-up requested while one runs joins it, and each window is scanned and reported once", async () => {
     const held = heldStore();
     const events: CarrierEvent[] = [];
     const pending = new Map<number, { atMs: bigint; callback(): void }>();

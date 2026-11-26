@@ -2652,7 +2652,11 @@ export class PrototypeStoreClient {
     const run = this.#verified;
     // Whatever the run says, a window this client already observed under
     // another checkpoint is a matter for the full verifier: it is the one
-    // that names the equivocation.
+    // that names the equivocation. Under the invariant `#verified` states
+    // (a non-null run holds exactly the observed windows, under the same
+    // hashes) this guard and the `held` comparison below decide the same
+    // thing; it is kept as a second line, so that losing either one alone
+    // still sends a second checkpoint for a window to the full verifier.
     const observedHere = this.#observed.filter(
       (held) => held.checkpoint.ingressWindow === window,
     );

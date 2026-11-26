@@ -837,6 +837,120 @@ describe("prototype store SQLite persistence", () => {
     }
   });
 
+  test("precomputed responses are kept by window and deleted with it", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    const base = 425_000_000n;
+    const descriptorHash = filled(32, 0x12);
+    const responsesOf = (window: bigint, fill: number) => ({
+      window,
+      descriptorHash,
+      checkpoint: everyByteFrom(fill, 300),
+      chunks: [
+        { sizeClass: 0, chunkIndex: 0n, body: everyByteFrom(fill + 1, 400) },
+        { sizeClass: 1, chunkIndex: 1n, body: everyByteFrom(fill + 2, 500) },
+      ],
+    });
+    try {
+      for (let offset = 0n; offset < 4n; offset++) {
+        await persistence.saveWindow(finalizedState(base + offset));
+        await persistence.saveFinalizedResponses(
+          responsesOf(base + offset, Number(offset)),
+        );
+      }
+      expect(hex((await persistence.loadChunkResponse(base, 1, 1n))!)).toBe(
+        hex(everyByteFrom(2, 500)),
+      );
+      // Only what was written: no other coordinate answers.
+      expect(await persistence.loadChunkResponse(base, 1, 0n)).toBeNull();
+      expect(await persistence.loadChunkResponse(base + 9n, 0, 0n)).toBeNull();
+      expect(
+        hex((await persistence.loadCheckpointResponse(base, descriptorHash))!),
+      ).toBe(hex(everyByteFrom(0, 300)));
+      expect(
+        await persistence.loadCheckpointResponse(base, filled(32, 0x13)),
+      ).toBeNull();
+
+      // A second write for one window replaces the first, as a re-finalized
+      // window that never committed its state row must.
+      await persistence.saveFinalizedResponses(responsesOf(base, 77));
+      expect(hex((await persistence.loadChunkResponse(base, 0, 0n))!)).toBe(
+        hex(everyByteFrom(78, 400)),
+      );
+
+      expect(await persistence.deleteWindowsBefore(base + 2n, 16)).toBe(2);
+      const kept: string[] = [];
+      for (let offset = 0n; offset < 4n; offset++)
+        kept.push(
+          [
+            (await persistence.loadWindow(base + offset)) === null ? "-" : "w",
+            (await persistence.loadChunkResponse(base + offset, 0, 0n)) === null
+              ? "-"
+              : "c",
+            (await persistence.loadCheckpointResponse(
+              base + offset,
+              descriptorHash,
+            )) === null
+              ? "-"
+              : "k",
+          ].join(""),
+        );
+      expect(kept).toEqual(["---", "---", "wck", "wck"]);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("a schema-1 database gains the response tables and keeps its windows and witness rows", async () => {
+    const path = databasePath();
+    const window = 425_000_000n;
+    const bounds = {
+      maxRecordsPerWindow: 2,
+      quotaKey32: filled(32, 9),
+      maxRecordsPerQuotaKey: 2,
+    };
+    const seeded = new SqliteStorePersistence(path);
+    try {
+      await seeded.saveWindow(finalizedState(window));
+      expect(await seeded.addWitnessRecord(witnessOf(window, 1), bounds)).toBe(
+        "added",
+      );
+    } finally {
+      seeded.close();
+    }
+    // What the previous schema left: no response tables, version 1.
+    withRawDatabase(path, (db) => {
+      db.exec(
+        "DROP TABLE chunk_response; DROP TABLE checkpoint_response; PRAGMA user_version = 1",
+      );
+    });
+
+    const reopened = new SqliteStorePersistence(path);
+    try {
+      expect(fingerprint((await reopened.loadWindow(window))!)).toBe(
+        fingerprint(finalizedState(window)),
+      );
+      expect(await reopened.loadChunkResponse(window, 0, 0n)).toBeNull();
+      // Its witness rows had counts, so they are kept and still bound.
+      expect(await reopened.loadWitnessRecords(window)).toHaveLength(1);
+      expect(
+        await reopened.addWitnessRecord(witnessOf(window, 2), bounds),
+      ).toBe("added");
+      expect(
+        await reopened.addWitnessRecord(witnessOf(window, 3), bounds),
+      ).toBe("window-full");
+    } finally {
+      reopened.close();
+    }
+    expect(
+      withRawDatabase(path, (db) =>
+        Number(
+          db.query<{ user_version: bigint }, []>("PRAGMA user_version").get()
+            ?.user_version,
+        ),
+      ),
+    ).toBe(2);
+  });
+
   test("an older database's witness rows are discarded at open and its windows kept", async () => {
     const path = databasePath();
     // The schema and rows an older build left behind: the same window and

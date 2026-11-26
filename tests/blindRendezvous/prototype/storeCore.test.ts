@@ -47,8 +47,12 @@ import {
   copyStoreWindowState,
 } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
+import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
+import { PROTOTYPE_STORE_ROUTES } from "../../../src/blindRendezvous/prototype/storeRoutes";
 import { validateStoreDescriptor } from "../../../src/blindRendezvous/storeDescriptor";
 import {
+  decodePublicChunkReadV1,
+  decodePublicStoreCheckpointReadV1,
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
   encodePublicChunkReadV1,
@@ -2860,6 +2864,432 @@ describe("prototype store restart from disk", () => {
         restarted.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
       ).rejects.toThrow(StoreFinalizationPendingError);
       expect(await restarted.core.finalizeDue()).toEqual([CHAIN_START]);
+    } finally {
+      disk.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Precomputed finalized responses
+ *
+ * The two GET routes may answer from a stored row instead of decoding the
+ * window. The only property that makes that safe is byte-identity with the
+ * path that decodes it: the store signs what it serves, so a fast path that
+ * produced different bytes would be a different statement under the same
+ * signature. Every test here asserts that equality, and that a row is
+ * consulted only after the clock has let the read through.
+ * ------------------------------------------------------------------ */
+
+describe("prototype store precomputed finalized responses", () => {
+  const sqlitePath = (): string =>
+    join(sqliteRoot, `responses-${String(sqliteCounter++)}.sqlite`);
+
+  const execRaw = (path: string, sql: string): void => {
+    const db = new Database(path, { readwrite: true, safeIntegers: true });
+    try {
+      db.exec(sql);
+    } finally {
+      db.close();
+    }
+  };
+
+  /**
+   * One finalized window on a real database, with one appended object.
+   *
+   * The comparison every test here makes is row against decode **on the same
+   * store**, never against a second store: the finalizer fills every
+   * unoccupied slot with fresh `randomBytes` cover, so two stores of the same
+   * seed and the same appends still sign different chunks. That is the design
+   * working, and it is why "compare two stores" is not available as a check.
+   */
+  const finalizedWindow = async (
+    options: { readonly retentionWindows?: number } = {},
+  ): Promise<{
+    readonly store: Harness;
+    readonly disk: SqliteStorePersistence;
+    readonly path: string;
+    /** Counts every call the core makes to the database. */
+    readonly counter: ReturnType<typeof countedPort<SqliteStorePersistence>>;
+  }> => {
+    const path = sqlitePath();
+    const disk = new SqliteStorePersistence(path);
+    const counter = countedPort(disk);
+    const store = await harness({
+      persistence: counter.port,
+      retentionWindows: options.retentionWindows,
+    });
+    const { lease, secretKey } = await leaseFor(store.core);
+    expect(
+      await verifiedStatus(
+        store.core,
+        await store.core.append(
+          await appendRequest(lease, secretKey, 0, objectOf(0x21)),
+        ),
+      ),
+    ).toBe("stored");
+    store.setNow(FINALIZE_AT);
+    expect(await store.core.finalizeDue()).toEqual([CHAIN_START]);
+    return { store, disk, path, counter };
+  };
+
+  const chunkCoordinates = profile.sizeClasses.flatMap((sizeClass) =>
+    Array.from({ length: sizeClass.publicChunksPerWindow }, (_, index) => ({
+      sizeClass: sizeClass.id,
+      chunkIndex: BigInt(index),
+    })),
+  );
+
+  const readPaths = (window: bigint): readonly string[] => [
+    `${PROTOTYPE_STORE_ROUTES.checkpoint}/${hex(PROFILE_HASH)}/${String(window)}`,
+    ...chunkCoordinates.map(
+      ({ sizeClass, chunkIndex }) =>
+        `${PROTOTYPE_STORE_ROUTES.chunk}/${hex(PROFILE_HASH)}/${String(window)}/${String(sizeClass)}/${String(chunkIndex)}`,
+    ),
+  ];
+
+  test("serves every finalized chunk and the checkpoint byte-identically to the rebuilt window", async () => {
+    const { store, disk } = await finalizedWindow();
+    try {
+      for (const { sizeClass, chunkIndex } of chunkCoordinates) {
+        const bucket = bucketOf(CHAIN_START, sizeClass);
+        const row = await store.core.readChunkEncoded(bucket, chunkIndex);
+        expect(row.finalized).toBe(true);
+        // `readChunk` never consults the rows, so this is the decode path in
+        // full: the row must equal what this store's own window row produces,
+        // byte for byte, because the store signed those bytes once.
+        expect(hex(row.bytes)).toBe(
+          hex(
+            encodePublicChunkReadV1(
+              await store.core.readChunk(bucket, chunkIndex),
+            ),
+          ),
+        );
+      }
+
+      const checkpoint = await store.core.readCheckpointEncoded(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      expect(checkpoint.finalized).toBe(true);
+      expect(hex(checkpoint.bytes)).toBe(
+        hex(
+          encodePublicStoreCheckpointReadV1(
+            await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+          ),
+        ),
+      );
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("serves a database written before the rows existed", async () => {
+    const { store, disk, path } = await finalizedWindow();
+    try {
+      const expectedChunk = hex(
+        (await store.core.readChunkEncoded(bucketOf(CHAIN_START, 0), 0n)).bytes,
+      );
+      const expectedCheckpoint = hex(
+        (await store.core.readCheckpointEncoded(PROFILE_HASH, CHAIN_START))
+          .bytes,
+      );
+
+      // What a window finalized before the rows existed holds: the window
+      // row, and nothing in the response tables.
+      execRaw(
+        path,
+        "DELETE FROM chunk_response; DELETE FROM checkpoint_response;",
+      );
+      expect(await disk.loadChunkResponse(CHAIN_START, 0, 0n)).toBeNull();
+
+      const chunk = await store.core.readChunkEncoded(
+        bucketOf(CHAIN_START, 0),
+        0n,
+      );
+      expect(chunk.finalized).toBe(true);
+      expect(hex(chunk.bytes)).toBe(expectedChunk);
+      const checkpoint = await store.core.readCheckpointEncoded(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      expect(checkpoint.finalized).toBe(true);
+      expect(hex(checkpoint.bytes)).toBe(expectedCheckpoint);
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("ignores a checkpoint row written under a different descriptor", async () => {
+    const { store, disk, path } = await finalizedWindow();
+    try {
+      const live = hex(
+        (await store.core.readCheckpointEncoded(PROFILE_HASH, CHAIN_START))
+          .bytes,
+      );
+
+      // The row still holds this window's answer, but under a descriptor this
+      // process does not serve. Replaying it would hand a client a
+      // self-consistent descriptor-and-checkpoint pair that this store no
+      // longer answers under, which is worse than being slow.
+      execRaw(
+        path,
+        "UPDATE checkpoint_response SET descriptor_hash = zeroblob(32)",
+      );
+      expect(
+        await disk.loadCheckpointResponse(
+          CHAIN_START,
+          store.core.descriptorHash,
+        ),
+      ).toBeNull();
+
+      const checkpoint = await store.core.readCheckpointEncoded(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      expect(checkpoint.finalized).toBe(true);
+      expect(hex(checkpoint.bytes)).toBe(live);
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("a finalized read over HTTP loads no window once its rows are written", async () => {
+    const { store, disk, counter: counted } = await finalizedWindow();
+    try {
+      const handler = createPrototypeStoreHandler({ core: store.core });
+      counted.reset();
+      const bodies: Uint8Array[] = [];
+      for (const path of readPaths(CHAIN_START)) {
+        const response = await handler(
+          new Request(`http://127.0.0.1:5910${path}`),
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toContain("immutable");
+        bodies.push(new Uint8Array(await response.arrayBuffer()));
+      }
+      // One row per answer and no window decoded: the decode is what one
+      // read cost before, once per reader per route.
+      expect(counted.calls()).toEqual({
+        loadCheckpointResponse: 1,
+        loadChunkResponse: chunkCoordinates.length,
+      });
+
+      expect(hex(bodies[0])).toBe(
+        hex(
+          encodePublicStoreCheckpointReadV1(
+            await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+          ),
+        ),
+      );
+      for (const [
+        index,
+        { sizeClass, chunkIndex },
+      ] of chunkCoordinates.entries())
+        expect(hex(bodies[index + 1])).toBe(
+          hex(
+            encodePublicChunkReadV1(
+              await store.core.readChunk(
+                bucketOf(CHAIN_START, sizeClass),
+                chunkIndex,
+              ),
+            ),
+          ),
+        );
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("a stored row never answers for a window the clock refuses", async () => {
+    const {
+      store,
+      disk,
+      counter: counted,
+    } = await finalizedWindow({ retentionWindows: RETENTION });
+    try {
+      expect(await disk.loadChunkResponse(CHAIN_START, 0, 0n)).not.toBeNull();
+      const handler = createPrototypeStoreHandler({ core: store.core });
+
+      // Past retention, and with the clock stepped back before the window's
+      // finalization instant: both rows are still on disk, and neither may
+      // answer. The status is signed at the store's window of the request.
+      for (const [nowMs, status, storeWindow] of [
+        [
+          windowStartOf(CHAIN_START + BACK + 1n),
+          "out-of-range",
+          CHAIN_START + BACK + 1n,
+        ],
+        [FINALIZE_AT - 1n, "not-final", CHAIN_START],
+      ] as const) {
+        store.setNow(nowMs);
+        counted.reset();
+        const checkpoint = await store.core.readCheckpointEncoded(
+          PROFILE_HASH,
+          CHAIN_START,
+        );
+        const chunk = await store.core.readChunkEncoded(
+          bucketOf(CHAIN_START, 0),
+          0n,
+        );
+        expect([checkpoint.finalized, chunk.finalized]).toEqual([false, false]);
+        const checkpointRead = decodePublicStoreCheckpointReadV1(
+          checkpoint.bytes,
+        );
+        const chunkRead = decodePublicChunkReadV1(chunk.bytes);
+        if (checkpointRead.kind !== "status" || chunkRead.kind !== "status")
+          throw new Error("expected signed statuses");
+        expect([
+          checkpointRead.value.status,
+          checkpointRead.value.storeIngressWindow,
+          chunkRead.value.status,
+          chunkRead.value.storeIngressWindow,
+        ]).toEqual([status, storeWindow, status, storeWindow]);
+        // Decided from the clock, before any row was asked for.
+        expect(counted.calls()).toEqual({});
+
+        for (const path of readPaths(CHAIN_START)) {
+          const response = await handler(
+            new Request(`http://127.0.0.1:5910${path}`),
+          );
+          expect(response.status).toBe(200);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+        }
+        expect(counted.calls()).toEqual({});
+      }
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("an encoded read is decided from one reading of the clock", async () => {
+    const path = sqlitePath();
+    const disk = new SqliteStorePersistence(path);
+    let nowMs = WINDOW_START;
+    let readings = 0;
+    try {
+      const core = await PrototypeStoreCore.create({
+        module: cryptoModule,
+        seed: SEED,
+        profile,
+        clock: {
+          nowMs: () => {
+            readings += 1;
+            return nowMs;
+          },
+        },
+        persistence: disk,
+        chainStartIngressWindow: CHAIN_START,
+        origin: "http://127.0.0.1:5910",
+        descriptorValidityMs: 2_592_000_000n,
+        retentionWindows: RETENTION,
+      });
+      nowMs = FINALIZE_AT;
+      await core.finalizeDue();
+      for (const at of [FINALIZE_AT, windowStartOf(CHAIN_START + BACK + 1n)]) {
+        nowMs = at;
+        for (const read of [
+          () => core.readCheckpointEncoded(PROFILE_HASH, CHAIN_START),
+          () => core.readChunkEncoded(bucketOf(CHAIN_START, 1), 1n),
+        ]) {
+          readings = 0;
+          await read();
+          expect(readings).toBe(1);
+        }
+      }
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("a finalization whose window row fails to save writes no rows", async () => {
+    const disk = new SqliteStorePersistence(sqlitePath());
+    try {
+      const adapter = cachingAdapter(disk);
+      const { core, setNow } = await harness({ persistence: adapter.port });
+      await leaseFor(core);
+      setNow(FINALIZE_AT);
+      adapter.control.failingSaves = 1;
+      await expect(core.finalizeDue()).rejects.toThrow(
+        "injected saveWindow failure",
+      );
+      // Rows for a finalization that never committed would be served as this
+      // window, and the finalizer will sign it again with fresh cover.
+      expect(await disk.loadChunkResponse(CHAIN_START, 0, 0n)).toBeNull();
+      expect(
+        await disk.loadCheckpointResponse(CHAIN_START, core.descriptorHash),
+      ).toBeNull();
+      await expect(
+        core.readChunkEncoded(bucketOf(CHAIN_START, 0), 0n),
+      ).rejects.toThrow(StoreFinalizationPendingError);
+      await expect(
+        core.readCheckpointEncoded(PROFILE_HASH, CHAIN_START),
+      ).rejects.toThrow(StoreFinalizationPendingError);
+    } finally {
+      disk.close();
+    }
+  });
+
+  test("a failed write of the rows leaves the window final and served from its window row", async () => {
+    const disk = new SqliteStorePersistence(sqlitePath());
+    let failing = 1;
+    try {
+      const { core, setNow } = await harness({
+        persistence: delegate(disk, {
+          saveFinalizedResponses: async (
+            responses: Parameters<
+              NonNullable<StorePersistencePort["saveFinalizedResponses"]>
+            >[0],
+          ): Promise<void> => {
+            if (failing > 0) {
+              failing -= 1;
+              throw new Error("injected saveFinalizedResponses failure");
+            }
+            await disk.saveFinalizedResponses(responses);
+          },
+        }),
+      });
+      setNow(FINALIZE_AT);
+      // The window row committed before the rows were written, so the window
+      // is final; the call reports the failed write.
+      await expect(core.finalizeDue()).rejects.toThrow(
+        "injected saveFinalizedResponses failure",
+      );
+      expect(await disk.lastFinalizedWindow()).toBe(CHAIN_START);
+      expect(await disk.loadChunkResponse(CHAIN_START, 0, 0n)).toBeNull();
+      expect(
+        await disk.loadCheckpointResponse(CHAIN_START, core.descriptorHash),
+      ).toBeNull();
+
+      const checkpointBefore = await core.readCheckpointEncoded(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      const chunk = await core.readChunkEncoded(bucketOf(CHAIN_START, 0), 0n);
+      expect([checkpointBefore.finalized, chunk.finalized]).toEqual([
+        true,
+        true,
+      ]);
+      expect(hex(chunk.bytes)).toBe(
+        hex(
+          encodePublicChunkReadV1(
+            await core.readChunk(bucketOf(CHAIN_START, 0), 0n),
+          ),
+        ),
+      );
+
+      // The next call resumes after the final window, writes its rows, and
+      // never signs the first one again.
+      setNow(NEXT_FINALIZE_AT);
+      expect(await core.finalizeDue()).toEqual([CHAIN_START + 1n]);
+      expect(
+        await disk.loadChunkResponse(CHAIN_START + 1n, 0, 0n),
+      ).not.toBeNull();
+      expect(
+        hex(
+          (await core.readCheckpointEncoded(PROFILE_HASH, CHAIN_START)).bytes,
+        ),
+      ).toBe(hex(checkpointBefore.bytes));
     } finally {
       disk.close();
     }

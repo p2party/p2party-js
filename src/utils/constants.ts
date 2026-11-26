@@ -504,8 +504,9 @@ export const PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH = 64;
 // Bytes of an admission token: the allocation body's `privacyPassToken`, and
 // the `authorization: Bearer <hex>` value on append and witness.
 export const PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES = 32;
-// `PRAGMA user_version` of the store's SQLite schema.
-export const PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION = 1;
+// `PRAGMA user_version` of the store's SQLite schema. 2 added the precomputed
+// chunk and checkpoint response tables.
+export const PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION = 2;
 // A store client tracks at most this many appends awaiting their answer, and
 // keeps slot hashes for this many scanned windows for receipts that arrive
 // after the scan.

@@ -201,6 +201,68 @@ const waitFor = async (condition: () => boolean): Promise<void> => {
   expect(condition()).toBe(true);
 };
 
+// Stall the worker's first batch read of one file's chunks: the read runs in
+// its transaction at once, only its answer waits for release().
+const stallFirstChunkRead = (rootHex: string) => {
+  const proto = (
+    globalThis as unknown as { IDBObjectStore: { prototype: IDBObjectStore } }
+  ).IDBObjectStore.prototype;
+  const getAll = proto.getAll;
+  let hit = false;
+  let released = false;
+  const waiting: Array<() => void> = [];
+  proto.getAll = function (
+    this: IDBObjectStore,
+    query?: IDBValidKey | IDBKeyRange | null,
+    count?: number,
+  ) {
+    const request = getAll.call(this, query, count);
+    const lower = query instanceof IDBKeyRange ? query.lower : undefined;
+    if (
+      hit ||
+      this.name !== "chunks" ||
+      !Array.isArray(lower) ||
+      lower[0] !== rootHex
+    )
+      return request;
+    hit = true;
+    return new Proxy(request, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (
+            type: string,
+            listener: (event: Event) => void,
+            options?: AddEventListenerOptions,
+          ) =>
+            target.addEventListener(
+              type,
+              type === "success"
+                ? (event: Event) => {
+                    if (released) listener.call(target, event);
+                    else waiting.push(() => listener.call(target, event));
+                  }
+                : listener,
+              options,
+            );
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function"
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      },
+    });
+  } as typeof getAll;
+  return {
+    hit: () => hit,
+    release: () => {
+      released = true;
+      for (const resume of waiting.splice(0)) resume();
+    },
+    restore: () => {
+      proto.getAll = getAll;
+    },
+  };
+};
+
 // Worker-backed storage for the queue, with verification held at a gate the
 // test opens. The real worker call is made at once (as production makes it),
 // only its answer waits.
@@ -627,6 +689,61 @@ describe("a received file is verified outside the edge's receive lock", () => {
     expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
     expect(messageView(file.rootHex)?.savedSize).toBe(8);
     expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
+  test("a sender that reconnects during a start-up verification gets receipts from then on", async () => {
+    quietConsole();
+    notices.length = 0;
+    let offset = 0;
+    const base = Date.now();
+    const dateNow = spyOn(Date, "now").mockImplementation(() => base + offset);
+    restores.push(() => dateNow.mockRestore());
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+
+    // The page that received the file went away before verifying it.
+    const deadPage = {
+      ...storage().dependencies,
+      verifyReceivedFile: () =>
+        new Promise<ReceiveVerificationVerdict>(() => {}),
+    };
+    const gone = new AbortController();
+    const first = edge();
+    const firstLane = lane(file, first.epc, deadPage, gone.signal);
+    firstLane.push(seal(first.alice, file.plaintexts[0], file.root));
+    await waitFor(() => firstLane.sent.length === 1);
+    gone.abort(new Error("page closed"));
+    resetRatchetGate(ROOM, PEER);
+    const token = (await row(file.rootHex))?.receiveVerification?.token ?? "";
+
+    // The next start verifies it without the sender; its first read stalls.
+    const stall = stallFirstChunkRead(file.rootHex);
+    restores.push(stall.restore);
+    await callWorker("getDBRoomMessageData", [ROOM]);
+    await waitFor(() => stall.hit());
+    // No sender, no channel: a report goes nowhere.
+    reportProgress({ merkleRoot: file.rootHex, token, hashedBytes: 0 });
+    expect(firstLane.sent).toHaveLength(1);
+
+    // The sender reconnects and resends the held chunk: it joins the run.
+    const io = storage();
+    io.gate.resolve();
+    const second = edge();
+    const secondLane = lane(file, second.epc, io.dependencies);
+    secondLane.push(seal(second.alice, file.plaintexts[0], file.root));
+    await waitFor(() => io.verifications() === 1);
+    expect(secondLane.sent).toEqual([uint8ArrayToHex(file.receipts[0])]);
+
+    // The read finishes 10 s later: the worker reports, the receipt is re-sent
+    // to the reconnected sender, then the file completes.
+    offset += 10_000;
+    stall.release();
+    await waitFor(() => secondLane.sent.includes(uint8ArrayToHex(file.hash)));
+    expect(secondLane.sent).toEqual([
+      uint8ArrayToHex(file.receipts[0]),
+      uint8ArrayToHex(file.receipts[0]),
+      uint8ArrayToHex(file.hash),
+    ]);
+    expect(firstLane.sent).toHaveLength(1);
   });
 
   test("a resent last chunk for an already verified file gets the final receipt without a second verification", async () => {

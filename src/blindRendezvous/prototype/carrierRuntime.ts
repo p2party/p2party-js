@@ -11,14 +11,19 @@
  * Three properties this file is responsible for:
  *
  * - **The schedule is fixed, not event-driven.** The same number of
- *   same-sized requests leave for every store in every window whether the
- *   outbox is empty or full: one token, one allocation, one append per
- *   `appendSchedule` entry, and one read — thirteen requests at the pinned
- *   profile. The witness pair is the one exception: it leaves at a fixed
- *   offset, but whether it leaves is conditional on the other store's scan
- *   (design doc §3a item 14). A real object simply takes a dummy's place. A
- *   store therefore cannot learn from traffic shape whether this client had
- *   anything to say. A timer the engine delivers late fires its events late
+ *   same-sized requests leave for every store in every window after the
+ *   session's first, whether the outbox is empty or full: one token, one
+ *   allocation, one append per `appendSchedule` entry, and one read —
+ *   thirteen requests at the pinned profile. The witness pair is one
+ *   exception: it leaves at a fixed offset, but whether it leaves is
+ *   conditional on the other store's scan (design doc §3a item 14). The
+ *   session's first window is the other: `start()` skips whatever offset has
+ *   already passed, so a client starting at phase `p` issues only the events
+ *   at offsets `>= p`, except the allocation, which it issues at once as a
+ *   cold start when `p` is already past `allocationRequestOffsetMs`, so it
+ *   goes out exactly once either way (design doc §3a item 16). A real object
+ *   simply takes a dummy's place. A store therefore cannot learn from traffic
+ *   shape whether this client had anything to say. A timer the engine delivers late fires its events late
  *   rather than dropping them — a late request is the same request, a
  *   dropped one changes the count — and nothing is ever retried: retrying
  *   inside a window would make the shape event-driven again, and retrying at

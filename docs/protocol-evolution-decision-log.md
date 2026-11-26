@@ -99,6 +99,7 @@ _Source:_ design §2 pt 4, §3, §15, §12 R1; plan Global Constraints; Stage 7 
 
 **H-5 — Throttling online PIN-guessing: durable stable-identity backoff plus a soft room aggregate.**
 _Paper:_ CPace defeats offline dictionary attacks but an active signaling adversary still gets online guesses. Current v3 gives each stable Ed25519 peer identity three free failures for a room, then applies 500-ms exponential backoff capped at five minutes, persisted by `(roomId, peerIdentityEd25519)`. Success clears that identity's state. To make cheap identity rotation non-free without letting one peer hard-lock every honest member, an additional in-tab room aggregate softly throttles after 30 failures in a five-minute window. Both controls are backoff/window throttles, not permanent locks.
+_2026-11 audit fix:_ the in-tab aggregate reset on reload and, once full, refused every peer in the room, including members who had already authenticated. The room window is now stored beside the backoff, opens at the room's first failure, and while full refuses only identities that never completed a PIN handshake with the device in that room. A success still does not close it.
 _Source:_ `src/roomPinAttempts.ts`; `src/db/types.ts`; `src/db/db.worker.ts`; `src/handlers/handleOpenChannel.ts`.
 
 **H-6 — DTLS remote-certificate verify failed OPEN when the live cert stat was unverifiable.** _(review-driven fix; hard)_

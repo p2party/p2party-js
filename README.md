@@ -611,9 +611,11 @@ const sealed = await alice.encrypt(encoder.encode("hello bob"));
 //                  Each frame is:
 //                    type(1) | DH pubkey(32) | N(8) | PN(8) | PQ epoch(8) |
 //                    nonce(12) | ciphertext(65405) | Poly1305 tag(16)
-//                  Only the 69-byte header is readable; it is authenticated,
-//                  not secret. Everything else is indistinguishable from
-//                  random to anyone without the message key.
+//                  Only the 69-byte header is readable, and it is not secret.
+//                  Its first 57 bytes follow the 64-byte root in the AEAD
+//                  additional data; the 12-byte nonce is the AEAD nonce.
+//                  Everything else is indistinguishable from random to
+//                  anyone without the message key.
 
 // Hand sealed.frames to your transport verbatim. It must delimit records
 // itself — the session returns opaque bytes, not a framed stream.
@@ -626,8 +628,11 @@ const reply = await bob.encrypt(encoder.encode("hi alice"));
 console.log(decoder.decode(await alice.decrypt(reply))); // "hi alice"
 ```
 
-Each logical message consumes one ratchet step. Replays and tampered frames are
-rejected; out-of-order arrival is tolerated within a bounded skipped-key window.
+Each logical message consumes one ratchet step, and `decrypt()` opens it at
+most once. Tampered frames are rejected. A repeat of an opened message raises
+`SessionReplayError` while its chain is the current receiving chain or one of
+the 256 most recently superseded ones, and fails authentication after that.
+Out-of-order arrival is tolerated within a bounded skipped-key window.
 
 ### Suspend and resume
 

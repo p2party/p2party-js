@@ -7,7 +7,8 @@
 // below exercises the real getWrapKey() persistence path, not a stub.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 
 import {
   getWrapKey,
@@ -19,6 +20,7 @@ import {
   unwrapRatchetSession,
 } from "../../src/db/ratchetWrap";
 import { getDB } from "../../src/db/src/getDB";
+import { MAX_SKIP_SESSION } from "../../src/utils/constants";
 
 import type { RatchetSession } from "../../src/db/types";
 
@@ -327,6 +329,336 @@ describe("wrap / unwrap RatchetSession", () => {
     await expect(
       wrapRatchetSession({ ...sampleSession(), rootKey: rnd(31) }, key),
     ).rejects.toThrow("rootKey must be 32 bytes");
+  });
+});
+
+// ── Wrap cost and the 0.14.10 (envelope v2) records ─────────────────────────
+
+const bytesOf = (value: BufferSource): Uint8Array =>
+  value instanceof ArrayBuffer
+    ? new Uint8Array(value)
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+
+const contains = (haystack: Uint8Array, needle: Uint8Array): boolean => {
+  const first = needle[0];
+  for (
+    let i = haystack.indexOf(first);
+    i !== -1;
+    i = haystack.indexOf(first, i + 1)
+  ) {
+    if (i + needle.byteLength > haystack.byteLength) return false;
+    let j = 1;
+    while (j < needle.byteLength && haystack[i + j] === needle[j]) j++;
+    if (j === needle.byteLength) return true;
+  }
+  return false;
+};
+
+// Every input WebCrypto hashes during one call: AES-GCM additional data
+// (GHASH) and digest input. The injected counter is the WebCrypto boundary.
+const observeHashing = async <T>(
+  operation: () => Promise<T>,
+): Promise<{ result: T; aads: Uint8Array[]; digests: Uint8Array[] }> => {
+  const encrypt = spyOn(crypto.subtle, "encrypt");
+  const decrypt = spyOn(crypto.subtle, "decrypt");
+  const digest = spyOn(crypto.subtle, "digest");
+  try {
+    const result = await operation();
+    const aads = [...encrypt.mock.calls, ...decrypt.mock.calls].map(
+      ([params]) => bytesOf((params as AesGcmParams).additionalData!),
+    );
+    const digests = digest.mock.calls.map(([, data]) => bytesOf(data));
+    return { result, aads, digests };
+  } finally {
+    encrypt.mockRestore();
+    decrypt.mockRestore();
+    digest.mockRestore();
+  }
+};
+
+const totalBytes = (inputs: Uint8Array[]): number =>
+  inputs.reduce((sum, input) => sum + input.byteLength, 0);
+
+// One serialized skipped entry: u32 length ‖ dhPub(32) ‖ u64 n.
+const SKIPPED_ENTRY_BYTES = 4 + 32 + 8;
+
+const withSkipped = (count: number): RatchetSession => ({
+  ...sampleSession(),
+  skippedMessageKeys: Array.from({ length: count }, (_, n) => ({
+    dhPub: rnd(32),
+    n,
+    messageKey: rnd(32),
+  })),
+});
+
+const hex = (value: ArrayBuffer | null): string | null =>
+  value === null ? null : Buffer.from(new Uint8Array(value)).toString("hex");
+const buffer = (value: string): ArrayBuffer =>
+  Uint8Array.from(Buffer.from(value, "hex")).buffer;
+const nullableBuffer = (value: string | null): ArrayBuffer | null =>
+  value === null ? null : buffer(value);
+
+interface FixtureSession {
+  rootSuite: RatchetSession["rootSuite"];
+  roomId: string;
+  peerPublicKey: string;
+  peerId: string;
+  rootKey: string;
+  sendingChainKey: string | null;
+  receivingChainKey: string | null;
+  dhSelfPub: string;
+  dhSelfSec: string;
+  dhRemotePub: string | null;
+  Ns: number;
+  Nr: number;
+  PN: number;
+  skippedMessageKeys: { dhPub: string; n: number; messageKey: string }[];
+  edgeCryptoState: string | null;
+  updatedAt: number;
+}
+
+const decodeSession = (s: FixtureSession): RatchetSession => ({
+  ...s,
+  rootKey: buffer(s.rootKey),
+  sendingChainKey: nullableBuffer(s.sendingChainKey),
+  receivingChainKey: nullableBuffer(s.receivingChainKey),
+  dhSelfPub: buffer(s.dhSelfPub),
+  dhSelfSec: buffer(s.dhSelfSec),
+  dhRemotePub: nullableBuffer(s.dhRemotePub),
+  skippedMessageKeys: s.skippedMessageKeys.map((k) => ({
+    dhPub: buffer(k.dhPub),
+    n: k.n,
+    messageKey: buffer(k.messageKey),
+  })),
+  edgeCryptoState: nullableBuffer(s.edgeCryptoState),
+});
+
+const encodeSession = (s: RatchetSession): FixtureSession => ({
+  rootSuite: s.rootSuite,
+  roomId: s.roomId,
+  peerPublicKey: s.peerPublicKey,
+  peerId: s.peerId,
+  rootKey: hex(s.rootKey)!,
+  sendingChainKey: hex(s.sendingChainKey),
+  receivingChainKey: hex(s.receivingChainKey),
+  dhSelfPub: hex(s.dhSelfPub)!,
+  dhSelfSec: hex(s.dhSelfSec)!,
+  dhRemotePub: hex(s.dhRemotePub),
+  Ns: s.Ns,
+  Nr: s.Nr,
+  PN: s.PN,
+  skippedMessageKeys: s.skippedMessageKeys.map((k) => ({
+    dhPub: hex(k.dhPub)!,
+    n: k.n,
+    messageKey: hex(k.messageKey)!,
+  })),
+  edgeCryptoState: hex(s.edgeCryptoState),
+  updatedAt: s.updatedAt,
+});
+
+const envelopesOf = (s: RatchetSession): ArrayBuffer[] =>
+  [
+    s.rootKey,
+    s.sendingChainKey,
+    s.receivingChainKey,
+    s.dhSelfSec,
+    ...s.skippedMessageKeys.map((k) => k.messageKey),
+    s.edgeCryptoState,
+  ].filter((e): e is ArrayBuffer => e !== null);
+
+const envelopeVersion = (envelope: ArrayBuffer): number =>
+  new Uint8Array(envelope)[4];
+
+const withEnvelopeVersion = (
+  envelope: ArrayBuffer,
+  version: number,
+): ArrayBuffer => {
+  const copy = envelope.slice(0);
+  new Uint8Array(copy)[4] = version;
+  return copy;
+};
+
+const loadReleaseFixture = async (): Promise<{
+  key: CryptoKey;
+  wrapVersion: number;
+  sessions: {
+    name: string;
+    plaintext: FixtureSession;
+    wrapped: FixtureSession;
+  }[];
+}> => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/ratchet-wrap-v2-0.14.10.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    wrapVersion: number;
+    wrapKeyHex: string;
+    sessions: {
+      name: string;
+      plaintext: FixtureSession;
+      wrapped: FixtureSession;
+    }[];
+  };
+  const key = await crypto.subtle.importKey(
+    "raw",
+    Buffer.from(fixture.wrapKeyHex, "hex"),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+  return { key, wrapVersion: fixture.wrapVersion, sessions: fixture.sessions };
+};
+
+describe("ratchet wrap cost is linear in the skipped-key count", () => {
+  test("wrap serializes the skipped list once", async () => {
+    const key = await getWrapKey();
+    const none = await observeHashing(() =>
+      wrapRatchetSession(withSkipped(0), key),
+    );
+    const full = withSkipped(MAX_SKIP_SESSION);
+    const cap = await observeHashing(() => wrapRatchetSession(full, key));
+
+    // Every skipped key is still its own envelope …
+    expect(cap.aads).toHaveLength(none.aads.length + MAX_SKIP_SESSION);
+    // … but the serialized list reaches hashed input exactly once.
+    const lastEntry = new Uint8Array(full.skippedMessageKeys.at(-1)!.dhPub);
+    const carriers = [...cap.aads, ...cap.digests].filter((input) =>
+      contains(input, lastEntry),
+    );
+    expect(carriers).toHaveLength(1);
+    // No envelope's additional data grows with the list.
+    expect(new Set(cap.aads.map((aad) => aad.byteLength))).toEqual(
+      new Set(none.aads.map((aad) => aad.byteLength)),
+    );
+    // The bytes hashed grow by one AAD per extra envelope plus one copy of
+    // the list, never by the list once per envelope.
+    const hashed = (o: { aads: Uint8Array[]; digests: Uint8Array[] }) =>
+      totalBytes(o.aads) + totalBytes(o.digests);
+    expect(hashed(cap) - hashed(none)).toBe(
+      MAX_SKIP_SESSION * (cap.aads[0].byteLength + SKIPPED_ENTRY_BYTES),
+    );
+
+    // Unwrapping the same record hashes the list once as well.
+    const back = await observeHashing(() =>
+      unwrapRatchetSession(cap.result, key),
+    );
+    expect(
+      [...back.aads, ...back.digests].filter((input) =>
+        contains(input, lastEntry),
+      ),
+    ).toHaveLength(1);
+    expect(back.result.skippedMessageKeys).toHaveLength(MAX_SKIP_SESSION);
+    expect(
+      eq(
+        back.result.skippedMessageKeys[1999].messageKey,
+        full.skippedMessageKeys[1999].messageKey,
+      ),
+    ).toBe(true);
+  });
+
+  test("unwraps a 0.14.10 wrapped session", async () => {
+    const fixture = await loadReleaseFixture();
+    expect(fixture.wrapVersion).toBe(2);
+    expect(fixture.sessions.map((s) => s.name)).toEqual(["full", "minimal"]);
+
+    for (const record of fixture.sessions) {
+      const stored = decodeSession(record.wrapped);
+      for (const envelope of envelopesOf(stored))
+        expect(envelopeVersion(envelope)).toBe(2);
+
+      const guard = new RatchetRollbackGuard();
+      const restored = await unwrapRatchetSession(stored, fixture.key, guard);
+      expect(encodeSession(restored)).toEqual(record.plaintext);
+
+      // The release envelope still authenticates every public field.
+      await expect(
+        unwrapRatchetSession({ ...stored, Ns: stored.Ns + 1 }, fixture.key),
+      ).rejects.toBeDefined();
+      await expect(
+        unwrapRatchetSession({ ...stored, peerId: "other" }, fixture.key),
+      ).rejects.toBeDefined();
+
+      // The next persist writes the current envelope version, which unwraps
+      // to the same session and moves the guard past the release record.
+      const rewritten = await wrapRatchetSession(
+        { ...restored, updatedAt: restored.updatedAt + 1 },
+        fixture.key,
+      );
+      for (const envelope of envelopesOf(rewritten))
+        expect(envelopeVersion(envelope)).toBe(RATCHET_WRAP_VERSION);
+      expect(RATCHET_WRAP_VERSION).toBeGreaterThan(2);
+      await guard.rememberTrustedWrite(rewritten);
+      expect(
+        encodeSession(await unwrapRatchetSession(rewritten, fixture.key)),
+      ).toEqual({
+        ...record.plaintext,
+        updatedAt: record.plaintext.updatedAt + 1,
+      });
+      await expect(
+        unwrapRatchetSession(stored, fixture.key, guard),
+      ).rejects.toThrow("rollback detected");
+    }
+  });
+
+  test("rejects relabelled and mixed envelope versions", async () => {
+    const fixture = await loadReleaseFixture();
+    const release = decodeSession(fixture.sessions[0].wrapped);
+    const current = await wrapRatchetSession(
+      decodeSession(fixture.sessions[0].plaintext),
+      fixture.key,
+    );
+
+    // A current envelope relabelled as the release version, and the reverse,
+    // fail authentication: the version selects the additional data.
+    await expect(
+      unwrapRatchetSession(
+        {
+          ...current,
+          rootKey: withEnvelopeVersion(current.rootKey, 2),
+          sendingChainKey: withEnvelopeVersion(current.sendingChainKey!, 2),
+          receivingChainKey: withEnvelopeVersion(current.receivingChainKey!, 2),
+          dhSelfSec: withEnvelopeVersion(current.dhSelfSec, 2),
+          skippedMessageKeys: current.skippedMessageKeys.map((k) => ({
+            ...k,
+            messageKey: withEnvelopeVersion(k.messageKey, 2),
+          })),
+          edgeCryptoState: withEnvelopeVersion(current.edgeCryptoState!, 2),
+        },
+        fixture.key,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      unwrapRatchetSession(
+        {
+          ...release,
+          rootKey: withEnvelopeVersion(release.rootKey, RATCHET_WRAP_VERSION),
+        },
+        fixture.key,
+      ),
+    ).rejects.toBeDefined();
+
+    // One row never mixes versions, even with matching record IDs.
+    await expect(
+      unwrapRatchetSession(
+        {
+          ...release,
+          dhSelfSec: withEnvelopeVersion(
+            release.dhSelfSec,
+            RATCHET_WRAP_VERSION,
+          ),
+        },
+        fixture.key,
+      ),
+    ).rejects.toThrow("Unsupported or malformed ratchet wrap envelope");
+    const guard = new RatchetRollbackGuard();
+    await expect(
+      guard.rememberTrustedWrite({
+        ...current,
+        dhSelfSec: withEnvelopeVersion(current.dhSelfSec, 2),
+      }),
+    ).rejects.toThrow("Unsupported or malformed ratchet wrap envelope");
   });
 });
 

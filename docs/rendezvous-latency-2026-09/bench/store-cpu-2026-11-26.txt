@@ -1,7 +1,8 @@
 Store CPU per window, eight readers: 41e8943 (before) against c4f5411 (after).
 Recorded 2026-11-26 23:58 to 2026-11-27 00:00 on the shared development
 machine (Apple silicon, macOS, bun 1.4.4) while other agents ran their own
-suites; the load averages are on each run's header line, 3.0 to 61.7.
+suites; the load averages are on each run's header line (1, 5 and 15
+minutes): the 1-minute value was 5.0 at the first run and 61.7 at the last.
 
 Command, run alternately on clean `git archive` copies of the two commits,
 three rounds, before then after in each:

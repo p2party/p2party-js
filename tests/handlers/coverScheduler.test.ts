@@ -232,7 +232,9 @@ describe("store-free scheduled cover core", () => {
         }),
     });
     h.scheduler.start();
-    await h.clock.advanceTo(50);
+    // The slot-50 cell is produced at the cycle open, one slot ahead; the
+    // rekey lands while that producer is still pending, before its slot.
+    await h.clock.advanceTo(49);
     expect(finish).toBeDefined();
     h.scheduler.invalidateRealJobsForRekey();
     const oldCell = bytes(0x11);
@@ -266,7 +268,9 @@ describe("store-free scheduled cover core", () => {
     h.scheduler.start();
     await h.clock.advanceTo(50);
     expect(h.scheduler.cancel("cancel-during-rekey")).toBe("cancel-pending");
-    await h.clock.advanceTo(150);
+    // The CANCEL for slot 150 is sealed as soon as it is requested, one slot
+    // ahead; the rekey lands while it is being sealed, before its slot.
+    await h.clock.advanceTo(100);
     expect(finishOldCancel).toBeDefined();
     h.scheduler.invalidateRealJobsForRekey();
     expect(h.scheduler.hasPendingRealJobs()).toBe(true);
@@ -279,6 +283,24 @@ describe("store-free scheduled cover core", () => {
     expect(h.trace.filter((line) => line.startsWith("send@"))).toEqual([
       "send@50:d50:e0:l0:f0:real:17",
       "send@150:d150:e0:l0:f1:cancel:206",
+      "send@250:d250:e0:l0:f2:dummy:221",
+      "send@350:d350:e0:l0:f3:dummy:221",
+    ]);
+    h.scheduler.stop();
+  });
+
+  test("a rekey after the next real cell was produced sends a dummy in its slot", async () => {
+    const h = harness(schedule());
+    h.scheduler.enqueue(job("old-epoch-next", "real", [0x11, 0x12]));
+    h.scheduler.start();
+    // The first cell went at 50; the second, for 150, was produced right
+    // after, under the epoch the rekey now retires.
+    await h.clock.advanceTo(60);
+    h.scheduler.invalidateRealJobsForRekey();
+    await h.clock.advanceTo(400);
+    expect(h.trace.filter((line) => line.startsWith("send@"))).toEqual([
+      "send@50:d50:e0:l0:f0:real:17",
+      "send@150:d150:e0:l0:f1:dummy:221",
       "send@250:d250:e0:l0:f2:dummy:221",
       "send@350:d350:e0:l0:f3:dummy:221",
     ]);

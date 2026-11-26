@@ -45,8 +45,11 @@ import type {
 // round 1). A hidden page's timers are throttled to about one wake-up a second,
 // far past the drift tolerance of a slot, so on page timers every cycle
 // degraded and cover visibly collapsed while the tab was hidden. Slot wake-ups
-// now come from a dedicated timer worker, which a hidden page does not
-// throttle; page timers are the fallback.
+// now come from a dedicated timer worker; page timers are the fallback. That a
+// hidden page's worker timers are not throttled the way its own are is an
+// inference from Chromium's documented behaviour, and the measurements in
+// docs/e2e/cover-timers/ show its wake-ups still running late on a hidden page.
+// These tests model the worker's timers as never throttled.
 
 let module: LibCrypto;
 beforeAll(async () => {
@@ -98,7 +101,10 @@ const makePq = (): SparsePqHealingState =>
     now: 0,
   });
 
-const makeRuntime = (timeline: CoverTimeline) => {
+const makeRuntime = (
+  timeline: CoverTimeline,
+  policyHash: Uint8Array = new Uint8Array(32),
+) => {
   const pq = makePq();
   const epc = {
     roomId: ROOM_ID,
@@ -113,7 +119,7 @@ const makeRuntime = (timeline: CoverTimeline) => {
     module,
     amInitiator: true,
     schedule: SCHEDULE,
-    policyHash: new Uint8Array(32),
+    policyHash,
     laneLabelName: "party",
     openLaneChannel: (label) => {
       const lane = new FakeLane(label);
@@ -633,6 +639,168 @@ describe("a worker is not dropped for a late page, and a dead one is replaced", 
       rig.runtime.destroy();
       rig.pq.destroy();
       warn.mockRestore();
+    }
+  });
+
+  test("a second pause during a ping does not drop a healthy worker", async () => {
+    const timeline = new CoverTimeline();
+    // At each thaw the page runs its due timers before its queued messages.
+    timeline.timersFirstAtThaw = true;
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      const [worker] = timeline.workers;
+      // The page pauses again the moment it has posted its ping, for longer
+      // than the ping's timeout: the worker's answer waits behind it.
+      const post = worker.postMessage.bind(worker);
+      worker.postMessage = (message) => {
+        post(message);
+        if (message.op === "ping") timeline.freezePage(20_000);
+      };
+      timeline.freezePage(20_000);
+      await timeline.advanceTo(timeline.time + 45_000);
+
+      expect(
+        worker.posted.some(
+          (message) => (message as { op: string }).op === "ping",
+        ),
+      ).toBe(true);
+      expect(timeline.workers).toHaveLength(1);
+      expect(worker.terminated).toBe(false);
+      expect(rig.runtime.timerSource).toBe("worker");
+      const after = rig.sentCells();
+      await timeline.advanceTo(timeline.time + cycles(5));
+      expect(rig.sentCells()).toBeGreaterThanOrEqual(
+        after + 4 * CELLS_PER_CYCLE,
+      );
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("the restart budget refills after a healthy replacement", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      // Five losses, more than the three replacements in a row, each after
+      // the replacement before it has delivered hundreds of wake-ups.
+      for (let loss = 0; loss < 5; loss++) {
+        timeline.workers[timeline.workers.length - 1].fail();
+        await timeline.advanceTo(timeline.time + 30_000);
+        expect(rig.runtime.timerSource).toBe("worker");
+      }
+      expect(timeline.workers).toHaveLength(6);
+      expect(timeline.workers[5].terminated).toBe(false);
+      expect(
+        lines(warn).filter((line) => /page timers for good/.test(line)),
+      ).toHaveLength(0);
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  test("three losses in quick succession still end on page timers", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    /** Advance until a new worker exists, at most 20 s. */
+    const untilReplaced = async (count: number): Promise<void> => {
+      for (let step = 0; step < 200 && timeline.workers.length <= count; step++)
+        await timeline.advanceTo(timeline.time + 100);
+    };
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      timeline.workers[0].fail();
+      // Each of the three replacements is lost as soon as it is up, long
+      // before it could prove healthy.
+      for (let replacement = 1; replacement <= 3; replacement++) {
+        await untilReplaced(replacement);
+        expect(timeline.workers).toHaveLength(replacement + 1);
+        timeline.workers[replacement].fail();
+      }
+      await timeline.advanceTo(timeline.time + 30_000);
+
+      expect(timeline.workers).toHaveLength(4);
+      expect(rig.runtime.timerSource).toBe("page");
+      const reports = lines(warn).filter((line) =>
+        /page timers for good/.test(line),
+      );
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toContain("3 replacements failed");
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  test("a replacement worker starts at a cycle boundary, not at a slot", async () => {
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      // Lost at 160 ms: the backoff runs to 1,160 ms. Every wake-up of the
+      // cycle 800-1,200 ms was armed before that; the cycle 1,200-1,600 ms
+      // arms its slots after it, and its boundary at 1,550 ms.
+      await timeline.advanceTo(160);
+      timeline.workers[0].fail();
+      await timeline.advanceTo(1_500);
+      expect(timeline.workers).toHaveLength(1);
+      expect(rig.runtime.timerSource).toBe("page");
+      await timeline.advanceTo(1_560);
+      expect(timeline.workers).toHaveLength(2);
+      expect(rig.runtime.timerSource).toBe("worker");
+      await timeline.advanceTo(cycles(6) - 1);
+      expect(rig.sentCells()).toBe(6 * CELLS_PER_CYCLE);
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("each edge moves to a replacement worker at its own cycle boundary", async () => {
+    const timeline = new CoverTimeline();
+    const first = makeRuntime(timeline);
+    // A second room on the page: its cycles start 200 ms into the first's.
+    const shifted = new Uint8Array(32);
+    shifted[7] = 200;
+    const second = makeRuntime(timeline, shifted);
+    try {
+      first.runtime.start();
+      second.runtime.start();
+      await timeline.advanceTo(160);
+      timeline.workers[0].fail();
+      // The backoff runs to 1,160 ms. The second edge's boundary at 1,400 ms
+      // is armed at 1,350 ms and starts the replacement; the first edge's
+      // next boundary, 1,600 ms, is armed at 1,550 ms.
+      await timeline.advanceTo(1_360);
+      expect(timeline.workers).toHaveLength(2);
+      expect(second.runtime.timerSource).toBe("worker");
+      expect(first.runtime.timerSource).toBe("page");
+      // The first edge's slot at 1,450 ms still runs on a page timer: the
+      // rest of its cycle stays on the source it opened on.
+      const pageRunsBefore = timeline.pageTimerRuns;
+      await timeline.advanceTo(1_549);
+      expect(timeline.pageTimerRuns - pageRunsBefore).toBe(1);
+      await timeline.advanceTo(1_560);
+      expect(first.runtime.timerSource).toBe("worker");
+      await timeline.advanceTo(cycles(6) - 1);
+      expect(first.sentCells()).toBe(6 * CELLS_PER_CYCLE);
+      expect(first.statuses).not.toContain("degraded");
+      expect(second.statuses).not.toContain("degraded");
+    } finally {
+      first.runtime.destroy();
+      second.runtime.destroy();
+      first.pq.destroy();
+      second.pq.destroy();
     }
   });
 

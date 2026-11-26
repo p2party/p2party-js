@@ -11,18 +11,31 @@
 // hidden past 300 s (where Chromium's intensive throttling begins), and
 // visible again.
 //
+// With --mode=sealed it drives entry-sealed.ts instead: real CoverRuntimes
+// sealing dummy, control and store-backed real cells, and it reports, per
+// phase and per kind of cell, how long the cell took from its slot's wake-up
+// to channel.send and how far after its slot it left (see entry-sealed.ts).
+//
 // Usage:
 //   bun build docs/e2e/cover-timers/entry.ts --target=browser --outfile=<dir>/bundle.js
 //   node docs/e2e/cover-timers/driver.mjs --bundle=<dir>/bundle.js \
 //     --profile=<dir>/profile --out=<dir>/raw.json --summary=<file>.json \
 //     [--visible=20] [--hidden=390] [--after=10] [--cadence=<ms>] [--chrome=<path>]
+// Sealed mode:
+//   bun docs/e2e/cover-timers/build-sealed.ts <dir>
+//   node docs/e2e/cover-timers/driver.mjs --mode=sealed --bundle=<dir>/bundle.js \
+//     --profile=<dir>/profile --out=<dir>/raw.json --summary=<file>.json \
+//     [--query=cadence=1000&edges=2] [--wasm=src/cryptography/libcrypto.wasm]
 //
 // Local only: the page server and the debugging endpoint bind 127.0.0.1 on
-// ports above 5000; both are stopped (Chrome by its PID) before exit.
+// ports above 5000; both are stopped (Chrome by its PID) before exit. Chrome
+// resolves no host name but 127.0.0.1 (--host-resolver-rules) and its
+// background networking is off, so nothing leaves the machine.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadavg, release } from "node:os";
+import { summariseSealed } from "./summarise-sealed.mjs";
 
 const arg = (name, fallback) => {
   const hit = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -40,6 +53,16 @@ const VISIBLE_S = Number(arg("visible", "20"));
 const HIDDEN_S = Number(arg("hidden", "390"));
 const AFTER_S = Number(arg("after", "10"));
 const CADENCE_MS = arg("cadence", "");
+const MODE = arg("mode", "timers");
+const SEALED = MODE === "sealed";
+const QUERY = arg("query", CADENCE_MS ? `cadence=${CADENCE_MS}` : "");
+const WASM = arg("wasm", "src/cryptography/libcrypto.wasm");
+// --occluded-visible: keep an occluded window's page visible
+// (--disable-backgrounding-occluded-windows), for a host whose screen is
+// locked or asleep, where every window is occluded and the page would be
+// hidden from the start. The page is still hidden by a tab opened in front,
+// which that flag does not govern.
+const OCCLUDED_VISIBLE = process.argv.includes("--occluded-visible");
 const PAGE_PORT = 5918;
 const DEBUG_PORT = 5917;
 if (!BUNDLE || !PROFILE || !OUT || !SUMMARY) {
@@ -139,16 +162,22 @@ const summarise = (recording, from, to, schedule, tolerance) => {
   };
 };
 
-const html = `<!doctype html><meta charset="utf-8"><title>cover timers</title><script src="/bundle.js"></script>`;
+const html = SEALED
+  ? `<!doctype html><meta charset="utf-8"><title>cover send time</title><script>window.process = { env: {} };</script><script type="module" src="/bundle.js"></script>`
+  : `<!doctype html><meta charset="utf-8"><title>cover timers</title><script src="/bundle.js"></script>`;
 const bundle = readFileSync(BUNDLE, "utf8");
+const wasm = SEALED ? readFileSync(WASM) : undefined;
+const respond = (path) =>
+  path === "/bundle.js"
+    ? ["text/javascript", Buffer.from(bundle)]
+    : wasm && path === "/libcrypto.wasm"
+      ? ["application/wasm", wasm]
+      : ["text/html", Buffer.from(html)];
+const PAGE_URL = `http://127.0.0.1:${PAGE_PORT}/${QUERY ? `?${QUERY}` : ""}`;
 const server = createServer((request, response) => {
-  if (request.url === "/bundle.js") {
-    response.writeHead(200, { "content-type": "text/javascript" });
-    response.end(bundle);
-  } else {
-    response.writeHead(200, { "content-type": "text/html" });
-    response.end(html);
-  }
+  const [type, body] = respond(request.url.split("?")[0]);
+  response.writeHead(200, { "content-type": type });
+  response.end(body);
 });
 await new Promise((resolve) => server.listen(PAGE_PORT, "127.0.0.1", resolve));
 
@@ -158,7 +187,16 @@ const chromeArgs = [
   "--no-first-run",
   "--no-default-browser-check",
   "--window-size=900,700",
-  `http://127.0.0.1:${PAGE_PORT}/${CADENCE_MS ? `?cadence=${CADENCE_MS}` : ""}`,
+  // Nothing but the page server is reachable, and Chrome fetches nothing in
+  // the background. Neither flag touches timer throttling.
+  "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+  "--disable-background-networking",
+  "--disable-component-update",
+  // Without it a fresh profile asks the macOS Keychain for its cookie key,
+  // and every http navigation waits for that prompt.
+  "--use-mock-keychain",
+  ...(OCCLUDED_VISIBLE ? ["--disable-backgrounding-occluded-windows"] : []),
+  PAGE_URL,
 ];
 const chrome = spawn(CHROME, chromeArgs, { stdio: "ignore" });
 console.log(`chrome pid ${chrome.pid}`);
@@ -200,8 +238,17 @@ try {
       )
     ).result.value;
   let ready = false;
-  for (let i = 0; i < 150 && !ready; i++) {
+  // Sealed mode stages its messages in IndexedDB before it starts.
+  for (let i = 0; i < (SEALED ? 1_500 : 150) && !ready; i++) {
     ready = await evaluate("typeof window.__coverTimers === 'object'");
+    const failed = await evaluate("window.__coverTimersError ?? null");
+    if (failed) throw new Error(`the measurement page failed: ${failed}`);
+    if (!ready && i % 50 === 49)
+      console.log(
+        `waiting for the page: ${await evaluate(
+          "JSON.stringify([location.href, document.readyState, window.__coverTimersProgress ?? null])",
+        )}`,
+      );
     if (!ready) await sleep(200);
   }
   if (!ready)
@@ -256,10 +303,14 @@ try {
     browser: version.Browser,
     userAgent: data.userAgent,
     host: `${process.platform} ${release()} ${process.arch}`,
-    chromeArgs,
+    chromeArgs: chromeArgs.map((value) =>
+      value.startsWith("--user-data-dir=")
+        ? "--user-data-dir=<scratch profile>"
+        : value,
+    ),
     throttlingFlagsRemoved: [
       "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
+      ...(OCCLUDED_VISIBLE ? [] : ["--disable-backgrounding-occluded-windows"]),
       "--disable-renderer-backgrounding",
     ],
     hiddenBy: "another tab opened in front (Target.createTarget, same window)",
@@ -277,11 +328,21 @@ try {
         [from - data.startedAt, to - data.startedAt],
       ]),
     ),
-    pageTimers: {},
-    timerWorker: {},
+    ...(SEALED
+      ? {
+          edges: data.edgesCount,
+          idleEdges: data.idleEdges,
+          poolPerEdge: data.poolPerEdge,
+          sealed: {},
+        }
+      : { pageTimers: {}, timerWorker: {} }),
   };
   for (const [name, [from, to]] of Object.entries(phases)) {
     if (to <= from) continue;
+    if (SEALED) {
+      summary.sealed[name] = summariseSealed(data, from, to);
+      continue;
+    }
     summary.pageTimers[name] = summarise(
       data.page,
       from,
@@ -300,7 +361,9 @@ try {
   writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(
     JSON.stringify(
-      { pageTimers: summary.pageTimers, timerWorker: summary.timerWorker },
+      SEALED
+        ? summary.sealed
+        : { pageTimers: summary.pageTimers, timerWorker: summary.timerWorker },
       null,
       2,
     ),

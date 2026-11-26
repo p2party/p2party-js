@@ -522,8 +522,16 @@ export const MAX_TIMER_DELAY_MS = 0x7fffffff;
 export const COVER_TIMER_WORKER_STALL_MS = 5_000;
 // A worker that has not answered a ping by then is dropped for page timers.
 export const COVER_TIMER_WORKER_PING_TIMEOUT_MS = 10_000;
-// How many times a lost timer worker is replaced (each at a cycle boundary,
-// the first no sooner than the backoff after the loss, each later one twice as
-// long) before the page stays on page timers for good.
+// A ping timeout that runs this much past its own deadline ran after a page
+// pause, perhaps ahead of the worker's queued answer: it waits one timeout more
+// before the worker is dropped.
+export const COVER_TIMER_WORKER_PING_LATE_MS = 1_000;
+// How many replacements in a row a lost timer worker gets (each at a cycle
+// boundary, the first no sooner than the backoff after the loss, each later
+// one twice as long) before the page stays on page timers for good.
 export const COVER_TIMER_WORKER_MAX_RESTARTS = 3;
 export const COVER_TIMER_WORKER_RESTART_BACKOFF_MS = 1_000;
+// A replacement that has delivered this many wake-ups has proved healthy: the
+// count of replacements starts again, so only losses in quick succession
+// exhaust it.
+export const COVER_TIMER_WORKER_HEALTHY_WAKE_UPS = 100;

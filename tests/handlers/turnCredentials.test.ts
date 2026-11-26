@@ -646,6 +646,9 @@ describe("atomic correlated room response", () => {
           rtcConfig,
           true,
           failurePolicy,
+          // Production retires through the shared edge teardown; this test
+          // observes the transports' own close().
+          (connection) => connection.close(),
         );
         if (failurePolicy === "rollback") leaseCurrent = false;
       },

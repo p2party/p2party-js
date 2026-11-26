@@ -256,6 +256,19 @@ export const RECEIPT_WINDOW_FALLBACK_MS = 500;
 // A completion wait is re-checked this often if no final receipt, refusal or
 // abort wakes it.
 export const COMPLETION_WAIT_FALLBACK_MS = 1_000;
+// Once every chunk of a transfer is acknowledged the receiver is verifying the
+// whole file before its final receipt, and re-sends that transfer's receipt at
+// least every 10 s while it does. The sender gives up after this long without
+// any frame for the transfer: the same 30 s its retransmit rounds took before
+// giving up (RETRANSMIT_TIMEOUT_MS × (1 + 2 + … + MAX_RETRANSMITS)).
+export const RECEIVER_SILENCE_LIMIT_MS =
+  (RETRANSMIT_TIMEOUT_MS * MAX_RETRANSMITS * (MAX_RETRANSMITS + 1)) / 2;
+// The slowest whole-file verification a sender waits for. A receiver that keeps
+// reporting is given at most
+//   totalSize / MIN_RECEIVER_VERIFY_BYTES_PER_SECOND + the silence bound,
+// that is 1,280 s + 30 s ≈ 21.8 min at the 10 GiB MAX_MESSAGE_SIZE. (This
+// machine verifies at about 15 s/GiB, roughly 70 MiB/s.)
+export const MIN_RECEIVER_VERIFY_BYTES_PER_SECOND = 8 * 1024 * 1024;
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

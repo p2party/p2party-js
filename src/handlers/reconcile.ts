@@ -1,4 +1,7 @@
-import { COMPLETION_WAIT_FALLBACK_MS } from "../utils/constants";
+import {
+  COMPLETION_WAIT_FALLBACK_MS,
+  MIN_RECEIVER_VERIFY_BYTES_PER_SECOND,
+} from "../utils/constants";
 
 // Selective retransmit / resume state — in-memory, per
 // (roomId, peerId, random transferId). Content hashes are not identities:
@@ -69,6 +72,53 @@ export const onTransferProgress = (
     if (!current) return;
     current.delete(listener);
     if (current.size === 0) progressListeners.delete(k);
+  };
+};
+
+// Wake-ups for frames that change no state but show the receiver is still at
+// work on a transfer: a receipt it re-sends while it verifies the whole file.
+const activityListeners = new Map<string, Set<() => void>>();
+
+/**
+ * Record that a frame for this transfer arrived from this peer. Called where
+ * an authenticated receipt is first attributed to its transfer, before it is
+ * checked against the have-set (a repeat changes nothing there).
+ */
+export const noteTransferActivity = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+): void => {
+  const listeners = activityListeners.get(key(roomId, peerId, transferId));
+  if (!listeners) return;
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch (error) {
+      console.error(error);
+    }
+  }
+};
+
+/** Call `listener` on every noteTransferActivity for this edge's transfer. */
+export const onTransferActivity = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  listener: () => void,
+): (() => void) => {
+  const k = key(roomId, peerId, transferId);
+  let listeners = activityListeners.get(k);
+  if (!listeners) {
+    listeners = new Set();
+    activityListeners.set(k, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    const current = activityListeners.get(k);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) activityListeners.delete(k);
   };
 };
 
@@ -309,5 +359,99 @@ export const waitForCompletion = async (
       check();
       if (!done) arm();
     });
+  return !signal?.aborted && isTransferComplete(roomId, peerId, transferId);
+};
+
+/**
+ * The longest a sender waits for the final receipt of a fully acknowledged
+ * transfer while its receiver keeps reporting: the file at
+ * MIN_RECEIVER_VERIFY_BYTES_PER_SECOND, plus the silence bound.
+ */
+export const reportedCompletionCapMs = (
+  totalSize: number,
+  silenceMs: number,
+): number =>
+  Math.ceil((totalSize / MIN_RECEIVER_VERIFY_BYTES_PER_SECOND) * 1000) +
+  silenceMs;
+
+export interface ReportedCompletionOptions {
+  /** End once this long has passed without any activity. */
+  readonly silenceMs: number;
+  /** End at the latest this long after the wait starts. */
+  readonly capMs: number;
+  /** Subscribe to the frames that show the receiver is still at work. */
+  readonly onActivity: (wake: () => void) => () => void;
+  /** While true, silence does not accrue (a suspended sender schedule). */
+  readonly isHeld?: () => boolean;
+  readonly signal?: AbortSignal;
+  readonly clock?: TransferWaitClock;
+  /** How the wait learns of completion; `onTransferProgress` in production. */
+  readonly subscribe?: typeof onTransferProgress;
+}
+
+/**
+ * Wait for the final receipt of a transfer whose every chunk is acknowledged,
+ * for as long as the receiver shows it is still at work. Each activity
+ * re-arms the silence bound; the wait ends on the final receipt (true), a
+ * refusal or an abort (false), `silenceMs` without activity (false), or
+ * `capMs` after it began (false), whichever comes first. Its one timer fires
+ * at the silence or cap deadline, not on a polling cadence; every activity
+ * also re-checks completion.
+ */
+export const waitForReportedCompletion = async (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  options: ReportedCompletionOptions,
+): Promise<boolean> => {
+  const clock = options.clock ?? transferWaitClock;
+  const subscribe = options.subscribe ?? onTransferProgress;
+  const { signal } = options;
+  const capAt = clock.now() + options.capMs;
+  let lastActivityAt = clock.now();
+  const ended = (): boolean =>
+    isTransferComplete(roomId, peerId, transferId) ||
+    isTransferCancelled(roomId, peerId, transferId) ||
+    signal?.aborted === true;
+
+  await new Promise<void>((resolve) => {
+    let done = false;
+    let timer: unknown;
+    let unsubscribeProgress = (): void => undefined;
+    let unsubscribeActivity = (): void => undefined;
+    const check = (): void => {
+      if (done) return;
+      const now = clock.now();
+      if (options.isHeld?.() === true) lastActivityAt = now;
+      if (!ended() && now < capAt && now - lastActivityAt < options.silenceMs)
+        return;
+      done = true;
+      if (timer !== undefined) clock.clearTimeout(timer);
+      unsubscribeProgress();
+      unsubscribeActivity();
+      signal?.removeEventListener("abort", check);
+      resolve();
+    };
+    const arm = (): void => {
+      const due = Math.min(capAt, lastActivityAt + options.silenceMs);
+      timer = clock.setTimeout(onTimer, Math.max(0, due - clock.now()));
+    };
+    const onTimer = (): void => {
+      timer = undefined;
+      check();
+      if (!done) arm();
+    };
+    const onActivity = (): void => {
+      if (done) return;
+      lastActivityAt = clock.now();
+      check();
+    };
+    // Registered before the state is checked again.
+    unsubscribeProgress = subscribe(roomId, peerId, transferId, check);
+    unsubscribeActivity = options.onActivity(onActivity);
+    signal?.addEventListener("abort", check);
+    check();
+    if (!done) arm();
+  });
   return !signal?.aborted && isTransferComplete(roomId, peerId, transferId);
 };

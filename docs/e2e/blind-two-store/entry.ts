@@ -131,7 +131,7 @@ const send = async (
   // means "send once there is somewhere to send it".
   await current.waitForPhase("handoff", timeoutMs);
   const bytes = te.encode(text);
-  await current.sendMessage(bytes);
+  await current.sendMessage(bytes, timeoutMs);
   return { bytes: bytes.length };
 };
 

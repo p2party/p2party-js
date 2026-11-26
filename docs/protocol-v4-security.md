@@ -60,9 +60,13 @@ type(1) || DH public key(32) || N(8) || PN(8) || PQ epoch(8) ||
 nonce(12) || encrypted fixed plaintext cell(65,405) || AEAD tag(16)
 ```
 
-The 69-byte clear header is authenticated as AAD, excluding the fresh random
-nonce. The PQ epoch is an unsigned 64-bit counter — widened from v3's single
-byte so the sparse post-quantum healing epoch cannot wrap.
+The AEAD additional data is 121 bytes: the transfer's 64-byte Merkle root
+followed by the first 57 bytes of the clear header (type, DH public key, N, PN
+and PQ epoch). The fresh random 12-byte nonce, which completes the 69-byte
+clear header, is not part of the additional data; it is the AEAD nonce, so a
+changed nonce fails the tag check. The PQ epoch is an unsigned 64-bit counter
+— widened from v3's single byte so the sparse post-quantum healing epoch
+cannot wrap.
 
 The fixed frame geometry absorbs the ratchet and AEAD overhead into the cell
 budget. Random padding and decoy slots can hide the exact payload length within
@@ -138,9 +142,21 @@ designed to provide:
 - transcript binding to roles, identities, endpoint fingerprints, policy
   suite, KEM fields, and initial ratchet public keys;
 - confidentiality and integrity for message cells;
-- forward evolution and post-compromise recovery from later uncompromised
-  classical DH ratchet turns;
-- replay/tamper rejection within the ratchet and transfer protocols; and
+- forward evolution, and post-compromise recovery from later uncompromised
+  X25519 DH ratchet turns against an adversary that cannot break X25519.
+  Against one that can, recovery comes only from the next completed sparse
+  ML-KEM healing exchange, so between exchanges it is classical only. An
+  exchange becomes due, on the side whose turn it is to offer, after 64
+  application messages or 24 hours; in the store-free session API it runs
+  only when the integrator calls `prepareHealing()`;
+- tamper rejection for every message cell;
+- replay rejection in the WebRTC transfer path and in the store-free session
+  API. In the transfer path a repeated chunk is deduplicated in storage while
+  its message key is live, and cannot be decrypted once the key is retired.
+  The session API's `decrypt()` opens each message at most once: a repeat
+  raises `SessionReplayError` while the message's chain is the current
+  receiving chain or one of the 256 most recently superseded ones, and fails
+  authentication after that; and
 - bounded out-of-order key retention and bounded per-edge transfer resources.
 
 These are implementation claims, not a claim of equivalence to Signal's PQXDH

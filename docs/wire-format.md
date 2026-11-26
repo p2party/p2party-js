@@ -33,11 +33,14 @@ observable. Scheduled real data uses tag 2 in a scheduled lane slot.
  | type=2 | ratchet dhPub (32)  | N (8) | PN(8) | pqEpoch | nonce    | ciphertext (65,405)     | tag(16) |
  |  (1)   |                     |  BE   |  BE   |  (8) BE |   (12)   |                         |         |
  +--------+---------------------+-------+-------+---------+----------+-------------------------+---------+
- |<------------------ AAD: 57 bytes ------------------->|          |
+ |<---------- in AAD after the Merkle root: 57 bytes -->|          |
  |<------------------- clear header: 69 bytes ---------------------->|
 ```
 
-- The 57-byte AAD is authenticated but excludes the fresh random nonce.
+- The AEAD additional data is 121 bytes: the transfer's 64-byte Merkle root
+  followed by header bytes 0–56 (type, DH public key, N, PN, pqEpoch). The
+  12-byte nonce is not in the additional data; it is the AEAD nonce, so a
+  changed nonce fails the tag check.
 - `pqEpoch` is an unsigned 64-bit counter. v3 used a single byte; v4 widened it
   so the sparse-PQ healing epoch cannot wrap.
 - The plaintext cell is always 65,405 bytes, so at most **61,912 bytes** are

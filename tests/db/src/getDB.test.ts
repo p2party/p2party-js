@@ -4,6 +4,7 @@ import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import { dbName, dbVersion, getDB } from "../../../src/db/src/getDB";
 
@@ -67,8 +68,8 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
 }
 
 describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
-  test("dbVersion is bumped to exactly 20", () => {
-    expect(dbVersion).toBe(20);
+  test("dbVersion is bumped to exactly 21", () => {
+    expect(dbVersion).toBe(21);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -146,7 +147,7 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
     expect(value).toEqual(fakeKey);
   });
 
-  test("opening at v20 fresh creates the complete schema", async () => {
+  test("opening at v21 fresh creates the complete schema", async () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
@@ -211,5 +212,111 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
         second.receiptToken,
       ]),
     ).toEqual(second);
+  });
+});
+
+// ── v21: ratchet rows wrapped in an older envelope form do not survive ───────
+
+interface FixtureRatchetRow {
+  roomId: string;
+  peerPublicKey: string;
+  peerId: string;
+  rootKey: string;
+  [field: string]: unknown;
+}
+
+// The ratchet rows 0.14.10 wrote (envelope version 2), as raw stored rows.
+const releaseRatchetRows = (): Record<string, unknown>[] => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../../fixtures/ratchet-wrap-v2-0.14.10.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { sessions: { wrapped: FixtureRatchetRow }[] };
+  const bytes = (hex: unknown) =>
+    typeof hex === "string"
+      ? Uint8Array.from(Buffer.from(hex, "hex")).buffer
+      : hex;
+  return fixture.sessions.map(({ wrapped }) => ({
+    ...wrapped,
+    rootKey: bytes(wrapped.rootKey),
+    sendingChainKey: bytes(wrapped.sendingChainKey),
+    receivingChainKey: bytes(wrapped.receivingChainKey),
+    dhSelfPub: bytes(wrapped.dhSelfPub),
+    dhSelfSec: bytes(wrapped.dhSelfSec),
+    dhRemotePub: bytes(wrapped.dhRemotePub),
+    edgeCryptoState: bytes(wrapped.edgeCryptoState),
+  }));
+};
+
+// A database at version 20 (the 0.14.10 schema) holding those rows and one
+// received message, opened without the current upgrade code.
+function openVersion20WithRows(
+  ratchetRows: Record<string, unknown>[],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(dbName, 20);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      const ratchets = db.createObjectStore("ratchetSessions", {
+        keyPath: ["roomId", "peerPublicKey"],
+      });
+      ratchets.createIndex("peerId", "peerId", { unique: false });
+      ratchets.createIndex("peerPublicKey", "peerPublicKey", { unique: false });
+      ratchets.createIndex("roomId", "roomId", { unique: false });
+      const messages = db.createObjectStore("messageData", {
+        keyPath: ["timestamp", "roomId", "merkleRoot"],
+      });
+      messages.createIndex("merkleRoot", "merkleRoot", { unique: true });
+      for (const row of ratchetRows) ratchets.put(row);
+      messages.put({
+        roomId: "room-v20",
+        timestamp: 1,
+        merkleRoot: "ab".repeat(64),
+        hash: "cd".repeat(64),
+        fromPeerId: "peer-v20",
+        filename: "",
+        messageType: 1,
+        savedSize: 5,
+        totalSize: 5,
+        channelLabel: "chat",
+      });
+    };
+    req.onsuccess = () => {
+      req.result.close();
+      resolve();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
+  test("upgrading the database removes ratchet rows in an older envelope form", async () => {
+    const rows = releaseRatchetRows();
+    expect(rows.length).toBeGreaterThan(0);
+    // Envelope version byte of each row's root key: 2, the 0.14.10 form.
+    for (const row of rows)
+      expect(new Uint8Array(row.rootKey as ArrayBuffer)[4]).toBe(2);
+    await openVersion20WithRows(rows);
+
+    const db = await getDB();
+    openDbs.push(db as unknown as IDBDatabase);
+    expect(db.version).toBe(21);
+    expect(await db.count("ratchetSessions")).toBe(0);
+    // Other stores are untouched; the schema is complete.
+    expect(await db.count("messageData")).toBe(1);
+    expect(db.objectStoreNames.contains("receiveActivity")).toBe(true);
+    expect(db.objectStoreNames.contains("meta")).toBe(true);
+  });
+
+  test("a database already on the new version keeps its ratchet rows", async () => {
+    const [row] = releaseRatchetRows();
+    const first = await getDB();
+    await first.put("ratchetSessions", row as never);
+    first.close();
+
+    const reopened = await getDB();
+    openDbs.push(reopened as unknown as IDBDatabase);
+    expect(await reopened.count("ratchetSessions")).toBe(1);
   });
 });

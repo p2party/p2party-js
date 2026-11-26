@@ -329,7 +329,7 @@ without receiver confirmation. Subscribe to see why:
 ```ts
 const stop = p2party.onReceiveStorageError((error) => {
   // error.code: "insufficient-quota" | "quota-exceeded" | "storage-failed"
-  //             | "integrity"
+  //             | "integrity" | "not-removed"
   console.warn(error.code, error.filename, error.fromPeerId, error.totalSize);
 });
 ```
@@ -363,7 +363,11 @@ is stored again.
   already acknowledged, so the sender only waits for the final receipt and
   then gives up. On the next connection the sender's resume finds that this
   device holds none of the file and sends it again in full; once that copy
-  completes and verifies, the file reads normally.
+  completes and verifies, the file reads normally. If the browser refuses to
+  remove the dropped file, `not-removed` is reported as well.
+- `not-removed`: the SDK deleted a message's records itself, and the browser
+  refused to remove its file. `cause` is the browser's error. See "When a
+  received file cannot be removed" below.
 
 Each received file is verified once, when its last chunk arrives. That chunk
 is stored and acknowledged, but held out of the file's progress until the
@@ -394,13 +398,18 @@ room is left, nothing completes on that connection. When the sender
 reconnects while the file is still being verified, its copy of the last chunk
 joins that verification and the file completes on the new connection. If that
 connection's predecessor goes away meanwhile, only it leaves the verification;
-the file is stopped only when no connection is left to complete it.
+the file is stopped only when no connection is left to complete it. A copy of
+the last chunk that arrives while a stopped verification is still ending is
+not turned away: it waits for that run to end, and the file is then verified
+again from the start for the connection that brought it.
 
 A file left unverified (the page was reloaded mid-verification, or its
 connection went away) holds every byte it needs. It is verified without the
 sender when the SDK loads its room to show it, with the same events and
-outcomes. Loading several rooms queues their files: this page verifies one
-file at a time. Deleting a room starts none. If another tab of this site holds
+outcomes. Loading several rooms queues those files: the files left over from
+before are verified one after another. That queue is only for them. A file
+whose last chunk arrives on a connection meanwhile is verified at once,
+alongside it. Deleting a room starts none. If another tab of this site holds
 the file (it is verifying or writing it), the file is tried again when that
 tab's hold ends, and again each time the hold turns out to have been renewed,
 for at most about 22 minutes (the longest a sender waits for a 10 GiB file);
@@ -409,40 +418,95 @@ recorded outcome. Reading a completed file later does not re-verify it. Text
 messages are not verified as a whole; each of their chunks is checked against
 the message's Merkle root as it arrives, like every file chunk.
 
-Deleting a message, a room or everything stops a running verification of a
-file and removes it. A received file is plaintext on disk, so a removal the
-device refuses is never reported as done:
+### When a received file cannot be removed
 
-- `p2party.deleteMessage(roomId, merkleRoot)` rejects with
-  `p2party.StorageFailedError` naming the file, and the message stays listed,
-  so the call can be made again.
-- A `deleteMessage` action you dispatch to the store yourself removes the
-  message from the list and returns nothing; when its file cannot be removed,
-  `p2party.onReceiveStorageError` reports `not-removed` for it, once per
-  failed delete.
-- `p2party.disconnectFromRoom(roomId, true)` removes every other message of
-  the room, then rejects with one `p2party.StorageFailedError`: `cause` is
-  what the room's delete threw, and `failures` holds each message's error.
-- `p2party.disconnectFromAllRooms(true, exceptRoomIds)` does the same for
-  every room it leaves: every other room and message is removed, then one
-  `p2party.StorageFailedError` holds each message's error in `failures`.
-- `p2party.purgeRoom(roomUrl)` finishes every other step (the room, its
-  connections, its pins) and then rejects with one `p2party.StorageFailedError`
-  whose `failures` include each message's error.
-- `p2party.purge()` finishes every other step (the database, the rooms, the
-  identity) and then rejects with `p2party.StorageFailedError`; `cause` is
-  what its steps threw.
-- `p2party.cancelMessage`, `p2party.blacklistPeer` and the SDK's own cleanup
-  remove files through a `deleteMessage` action, so a file they cannot remove
-  is reported through `onReceiveStorageError` (`not-removed`).
+A received file is plaintext on disk. It is one file in the SDK's directory of
+the origin private file system (`p2party-reassembled`), named by its message's
+Merkle root in hex. So is a partly received file, and the copy of a sent file
+that is assembled when you read it back. (Where that file system is
+unavailable the bytes stay in the database and go with the message's
+records; nothing below applies.)
 
-The browser refuses to remove a file, or a directory holding one, while any
-sync access handle or writable stream on it is open, and leaves it as it was
-(Chromium 159: `NoModificationAllowedError`; measured by
-`docs/e2e/opfs-remove/probe.mjs`). The SDK closes its own handles, and waits
-for its own reads and writes of the file, before it removes one; a file that
-another tab of this site holds open is reported as above, and the same call
-removes it once that tab has let it go.
+Deleting a message or a room stops a running verification of a file and then
+removes it in two steps. First the message's records are deleted from the
+database, in one transaction: its row, its chunk records, and with them its
+place in the room's list. Then the file is removed. `p2party.purge()` removes
+the whole directory and then deletes the database, whatever became of the
+files. The browser can refuse to remove a file. HeadlessChrome 159 refuses to
+remove a file, or a directory holding one, while any sync access handle or
+writable stream on that file is open, in this tab or another, and leaves it as
+it was (`NoModificationAllowedError`; measured by
+`docs/e2e/opfs-remove/probe.mjs`, no other browser was measured). The SDK
+closes its own handles, and waits for its own reads and writes of the file,
+before it removes one, so in practice the file is one that another tab of
+this site holds open.
+
+When the file is refused:
+
+- What is already gone: the message's records. The message is no longer
+  listed, here or after a reload, `readMessage` no longer returns it, and a
+  sender that resumes finds nothing of it on this device.
+- What is still there: the file's bytes, in that directory, until a later
+  removal succeeds. Nothing lists them and the SDK does not read them again.
+- A refused removal is never reported as done, and is reported once per call,
+  by one of two routes.
+
+A call you make to delete rejects with `p2party.StorageFailedError`, after
+everything else it had to do was done. `failures` lists each file that is
+still on disk: `merkleRootHex`, and `error`, which is an `Error` with the
+`name` and `message` the browser threw. No event is raised for it.
+
+- `p2party.deleteMessage(roomId, merkleRoot)` and
+  `p2party.cancelMessage(roomId, channelLabel, merkleRoot)`: `cause` is the
+  browser's error for the one file.
+- `p2party.disconnectFromRoom(roomId, true)` and
+  `p2party.disconnectFromAllRooms(true, exceptRoomIds)`: every other message
+  and room was removed; `cause` is what the deletes threw.
+- `p2party.purgeRoom(roomUrl)`: every other step was done (the room, its
+  connections, its pins).
+- `p2party.purge()`: every other step was done (the database, the rooms, the
+  identity), and every file that could be removed was removed.
+
+A removal the SDK started itself is reported through
+`p2party.onReceiveStorageError` with the code `not-removed`; `cause` is the
+browser's error. That covers a `deleteMessage` action you dispatch to the
+store yourself, `p2party.blacklistPeer`, a peer cancelling or abandoning a
+transfer it was sending, an incomplete receive expiring after 24 hours, a
+file dropped after it failed verification, and the retries described below
+that the SDK makes itself. A file is reported once per page load, and again
+only after a chunk of it has been stored again.
+A report raised before your application subscribed is given to the first
+listener when it subscribes. The retry at start reads `roomId`, `fromPeerId`,
+`filename` and `totalSize` from whatever record is left, so they can be empty
+or 0.
+
+A call that is not a delete returns its result. `p2party.listPendingMessages`
+and the other calls that run the storage sweep (`resumePendingMessages`,
+`cancelPendingMessage`) report a file the sweep could not remove through the
+event, and still return what they return otherwise.
+
+The removal is tried again without a purge:
+
+- Every time the SDK's database worker starts, which is once per page load.
+  Before it answers any request that creates, reads or removes a file, it
+  lists the directory and removes every file that no record owns. A file
+  another tab is receiving, verifying or reading has its records and is left
+  alone.
+- When you repeat the call. `p2party.deleteMessage(roomId, merkleRoot)` with
+  the same Merkle root tries the file again although the message is no longer
+  listed, also after a reload; it rejects as before while the browser still
+  refuses, and resolves once the file is gone.
+  `p2party.disconnectFromRoom(roomId, true)` tries again every file an
+  earlier delete of that room's messages left. `p2party.purge()` tries every
+  file again. `p2party.purgeRoom` does nothing for a room it has already
+  removed: repeat `deleteMessage` for the Merkle roots in `failures`, or
+  leave them to the next start.
+- When the storage sweep comes back to a deleted transfer after 24 hours.
+
+What your application can do: tell the user that the file is still on this
+device, ask them to close the site's other tabs, and repeat the call or reload
+the page. Keep the Merkle roots from `failures` if you want to repeat
+`deleteMessage` for them, since the messages are not listed any more.
 
 The database stays usable across tabs of different versions in one
 direction. A tab of this version closes its database connection when another

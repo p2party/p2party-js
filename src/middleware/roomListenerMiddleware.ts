@@ -38,7 +38,11 @@ import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebo
 import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";
 import { stopOutboxOwners } from "../handlers/outbox";
 import { reportReceiveStorageError } from "../handlers/handleReceiveMessage";
-import { StorageFailedError } from "../db/dbErrors";
+import {
+  StorageFailedError,
+  rebuildError,
+  serializeError,
+} from "../db/dbErrors";
 import {
   discardRoomOutbox,
   resumeRoomOutbox,
@@ -50,9 +54,11 @@ import {
 } from "../utils/roomRosterReconciler";
 
 import {
+  announceFileNotRemoved,
   deleteReceiveTransfer,
   deleteDBNewChunk,
   getDBRoomMessageData,
+  onFileNotRemoved,
   setDBUniqueRoom,
 } from "../db/api";
 
@@ -153,6 +159,27 @@ const reconcileRoomRosters = (
   for (const roomId of reconciler.armedRooms())
     if (!stranded.has(roomId)) reconciler.cancel(roomId);
 };
+
+// A removal the SDK started itself left a received file on disk: the
+// application hears it through onReceiveStorageError as "not-removed", with
+// the browser's own error as `cause`. Announcements come from the database
+// worker (a peer's cancel, the stale-receive sweep, the drop after a failed
+// verification, the retry at its start) and from the delete effect below.
+// Subscribed once for the module, however many middlewares are created.
+onFileNotRemoved((notice) => {
+  reportReceiveStorageError(
+    {
+      roomId: notice.roomId,
+      fromPeerId: notice.fromPeerId,
+      merkleRoot: notice.merkleRoot,
+      filename: notice.filename,
+      totalSize: notice.totalSize,
+      chunkIndex: -1,
+    },
+    { failure: "not-removed" },
+    rebuildError(notice.error),
+  );
+});
 
 export const createRoomListenerMiddleware = (
   reconciler: RoomRosterReconciler = browserTimeoutReconciler(),
@@ -569,24 +596,25 @@ export const createRoomListenerMiddleware = (
 
           if (merkleRootHex) {
             try {
+              // Called before this effect's first await. When the action was
+              // dispatched inside a call of the application that answers for
+              // this file (p2party.deleteMessage, p2party.cancelMessage),
+              // that call takes a refusal and this resolves.
               await deleteReceiveTransfer(merkleRootHex);
             } catch (error) {
               if (!(error instanceof StorageFailedError)) throw error;
               // A dispatched delete returns nothing to its caller: the
-              // message has left the list but its received file is still on
-              // disk, which the application hears through
-              // onReceiveStorageError ("not-removed").
-              reportReceiveStorageError(
-                {
-                  roomId: action.payload.roomId,
-                  fromPeerId: deletedMessage?.fromPeerId ?? "",
-                  merkleRoot: merkleRootHex,
-                  filename: deletedMessage?.filename ?? "",
-                  totalSize: deletedMessage?.totalSize ?? 0,
-                  chunkIndex: -1,
-                },
-                { failure: "not-removed" },
-              );
+              // message has left the list and its records are gone, but its
+              // file is still on disk. The application hears that through
+              // onReceiveStorageError ("not-removed"), once per file.
+              announceFileNotRemoved({
+                merkleRoot: merkleRootHex,
+                roomId: action.payload.roomId,
+                fromPeerId: deletedMessage?.fromPeerId ?? "",
+                filename: deletedMessage?.filename ?? "",
+                totalSize: deletedMessage?.totalSize ?? 0,
+                error: serializeError(error.cause ?? error),
+              });
             }
             await deleteDBNewChunk({ merkleRootHex });
           } else if (hashHex) {

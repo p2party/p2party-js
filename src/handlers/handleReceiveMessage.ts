@@ -105,11 +105,17 @@ export interface ReceiveStorageError {
    * - `integrity`: the file's last chunk arrived, but the stored bytes do not
    *   hash to the whole-file hash its message carries. The file's chunks were
    *   dropped and reading it throws ReceiveIntegrityError.
-   * - `not-removed`: a `deleteMessage` action dispatched to the store removed
-   *   the message from the list, but its received file could not be removed
-   *   from disk and is still there. (`p2party.deleteMessage` rejects with
-   *   StorageFailedError instead.) Reported for every such delete;
-   *   `chunkIndex` is -1.
+   * - `not-removed`: a removal the SDK started itself (a peer's cancel, the
+   *   expiry of a stale receive, the drop after a failed verification, a
+   *   `deleteMessage` action dispatched to the store, `blacklistPeer`, or the
+   *   retry when the SDK starts) deleted the message's records, but the
+   *   browser refused to remove its file from the origin private file system
+   *   and the bytes are still there. `cause` is what the browser threw. The
+   *   SDK tries again when it next starts. Reported once per file;
+   *   `chunkIndex` is -1, and `roomId`, `fromPeerId`, `filename` and
+   *   `totalSize` are empty or 0 when no record of the message is left. (A
+   *   call the application makes to delete rejects with StorageFailedError
+   *   instead and raises no event.)
    */
   readonly code: ReceiveStorageFailure;
   readonly roomId: string;
@@ -122,11 +128,32 @@ export interface ReceiveStorageError {
   readonly requiredBytes?: number;
   /** `insufficient-quota` only: the estimated free bytes. */
   readonly availableBytes?: number;
+  /** `not-removed` only: the browser's error, with its name and message. */
+  readonly cause?: Error;
 }
 
 const receiveStorageErrorListeners = new Set<
   (error: ReceiveStorageError) => void
 >();
+
+// A removal retried when the SDK starts can be refused before the application
+// has subscribed. Those reports wait here, oldest dropped past the bound, for
+// the first listener.
+const undeliveredNotRemoved: ReceiveStorageError[] = [];
+
+const deliverReceiveStorageError = (
+  listener: (error: ReceiveStorageError) => void,
+  error: ReceiveStorageError,
+): void => {
+  try {
+    listener(error);
+  } catch (listenerError) {
+    console.error(
+      "p2party: onReceiveStorageError listener threw",
+      listenerError,
+    );
+  }
+};
 
 // Each (transfer, code) is reported once until a later chunk of that transfer
 // stores again, so a full disk does not raise one event per retransmitted
@@ -134,13 +161,24 @@ const receiveStorageErrorListeners = new Set<
 const reportedReceiveStorageErrors = new Set<string>();
 
 /**
- * Call `listener` when a received chunk cannot be stored. Returns an
- * unsubscribe function. Listener errors are caught and logged.
+ * Call `listener` when a received chunk cannot be stored, or a received file
+ * cannot be removed. Returns an unsubscribe function. Listener errors are
+ * caught and logged. The first listener is also given, right after it
+ * subscribes, the `not-removed` reports raised before any listener existed.
  */
 export const onReceiveStorageError = (
   listener: (error: ReceiveStorageError) => void,
 ): (() => void) => {
   receiveStorageErrorListeners.add(listener);
+  if (undeliveredNotRemoved.length > 0) {
+    const waiting = undeliveredNotRemoved.splice(0);
+    queueMicrotask(() => {
+      for (const error of waiting)
+        if (receiveStorageErrorListeners.has(listener))
+          deliverReceiveStorageError(listener, error);
+        else undeliveredNotRemoved.push(error);
+    });
+  }
   return () => {
     receiveStorageErrorListeners.delete(listener);
   };
@@ -160,9 +198,11 @@ export type ReceivedChunkContext = Pick<
 export const reportReceiveStorageError = (
   chunk: ReceivedChunkContext,
   failure: ReceiveChunkStoreFailure,
+  cause?: Error,
 ): void => {
-  // A refused chunk is retransmitted, so it is reported once; every failed
-  // delete is its own call, so each is reported.
+  // A refused chunk is retransmitted, so it is reported once here. A file
+  // that was not removed is announced once by the database client
+  // (announceFileNotRemoved), so each call here is its own report.
   if (failure.failure !== "not-removed") {
     const key = `${chunk.merkleRoot}:${failure.failure}`;
     if (reportedReceiveStorageErrors.has(key)) return;
@@ -186,6 +226,7 @@ export const reportReceiveStorageError = (
     ...(failure.availableBytes === undefined
       ? {}
       : { availableBytes: failure.availableBytes }),
+    ...(cause === undefined ? {} : { cause }),
   };
   console.error(
     failure.failure === "not-removed"
@@ -193,16 +234,17 @@ export const reportReceiveStorageError = (
       : "p2party: a received chunk could not be stored",
     error,
   );
-  for (const listener of receiveStorageErrorListeners) {
-    try {
-      listener(error);
-    } catch (listenerError) {
-      console.error(
-        "p2party: onReceiveStorageError listener threw",
-        listenerError,
-      );
-    }
+  if (
+    failure.failure === "not-removed" &&
+    receiveStorageErrorListeners.size === 0
+  ) {
+    if (undeliveredNotRemoved.length >= MAX_REPORTED_RECEIVE_STORAGE_ERRORS)
+      undeliveredNotRemoved.shift();
+    undeliveredNotRemoved.push(error);
+    return;
   }
+  for (const listener of receiveStorageErrorListeners)
+    deliverReceiveStorageError(listener, error);
 };
 
 const clearReceiveStorageErrors = (merkleRootHex: string): void => {
@@ -326,8 +368,7 @@ export const handleReceiveMessage = async (
   // opted the edge in through ratchetPersist's test-only classical opt-in.
   if (!epc.messageKeyCache)
     epc.messageKeyCache =
-      epc.pqHealingState?.activeReceiveKeys ??
-      new Map<string, Uint8Array>();
+      epc.pqHealingState?.activeReceiveKeys ?? new Map<string, Uint8Array>();
   const cache = epc.messageKeyCache;
 
   // The per-message cache key (dhPub, N, pqEpoch). It stays live through

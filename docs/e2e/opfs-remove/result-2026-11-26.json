@@ -1,5 +1,5 @@
 {
-  "measuredAt": "2026-11-26T19:56:34.334Z",
+  "measuredAt": "2026-11-26T20:34:09.496Z",
   "browser": "HeadlessChrome/159.0.8154.6",
   "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/159.0.8154.6 Safari/537.36",
   "host": "darwin 27.2.0 arm64",
@@ -69,6 +69,112 @@
       "outcome": "rejected",
       "error": "NoModificationAllowedError",
       "message": "Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+    },
+    {
+      "case": "directory listed while a sync access handle on one of its files is open",
+      "outcome": "resolved",
+      "entries": ["closed:file", "held:file"]
+    },
+    {
+      "case": "getFile() on a file whose sync access handle is open",
+      "outcome": "resolved",
+      "size": 3
+    },
+    {
+      "case": "directory listed while getFileHandle({ create: true }) is pending, the creation requested first",
+      "outcome": "resolved",
+      "entriesListed": 20,
+      "newFileListedDuring": false,
+      "newFileListedAfter": true
+    },
+    {
+      "case": "directory listed while getFileHandle({ create: true }) is pending, the creation requested after the first entry was returned",
+      "outcome": "resolved",
+      "entriesListed": 21,
+      "newFileListedDuring": false,
+      "newFileListedAfter": true
+    },
+    {
+      "case": "directory listed while a just-created file's sync access handle is open",
+      "outcome": "resolved",
+      "entriesBeforeAnyWrite": ["new:file"],
+      "entriesAfterPreSizing": ["new:file"]
+    },
+    {
+      "case": "directory listed while another Worker holds a sync access handle on a file in it",
+      "outcome": "resolved",
+      "entries": ["free:file", "held-elsewhere:file"]
+    },
+    {
+      "case": "getFile() on the file while another Worker holds a sync access handle on a file in it",
+      "outcome": "resolved",
+      "size": 3
+    },
+    {
+      "case": "createSyncAccessHandle on the file while another Worker holds a sync access handle on a file in it",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+    },
+    {
+      "case": "the Web Lock the other Worker takes with its handle, requested with { ifAvailable: true } while another Worker holds a sync access handle on a file in it",
+      "outcome": "resolved",
+      "granted": false
+    },
+    {
+      "case": "removeEntry(file) while another Worker holds a sync access handle on a file in it",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'removeEntry' on 'FileSystemDirectoryHandle': An attempt was made to modify an object where modifications are not allowed.",
+      "listedAfter": ["free", "held-elsewhere"]
+    },
+    {
+      "case": "removeEntry(another file of the directory) while another Worker holds a sync access handle on a file in it",
+      "outcome": "resolved",
+      "listedAfter": ["held-elsewhere"]
+    },
+    {
+      "case": "removeEntry(directory, { recursive: true }) while another Worker holds a sync access handle on a file in it",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'removeEntry' on 'FileSystemDirectoryHandle': An attempt was made to modify an object where modifications are not allowed.",
+      "rootListsDirectoryAfter": true,
+      "directoryListedAfter": ["free", "held-elsewhere"]
+    },
+    {
+      "case": "directory listed after the other Worker closed its handle",
+      "outcome": "resolved",
+      "entries": ["free:file", "held-elsewhere:file"]
+    },
+    {
+      "case": "getFile() on the file after the other Worker closed its handle",
+      "outcome": "resolved",
+      "size": 3
+    },
+    {
+      "case": "createSyncAccessHandle on the file after the other Worker closed its handle",
+      "outcome": "resolved"
+    },
+    {
+      "case": "the Web Lock the other Worker takes with its handle, requested with { ifAvailable: true } after the other Worker closed its handle",
+      "outcome": "resolved",
+      "granted": true
+    },
+    {
+      "case": "removeEntry(file) after the other Worker closed its handle",
+      "outcome": "resolved",
+      "listedAfter": ["free"]
+    },
+    {
+      "case": "removeEntry(another file of the directory) after the other Worker closed its handle",
+      "outcome": "resolved",
+      "listedAfter": []
+    },
+    {
+      "case": "removeEntry(directory, { recursive: true }) after the other Worker closed its handle",
+      "outcome": "resolved",
+      "rootListsDirectoryAfter": false,
+      "directoryListedAfter": []
     }
   ]
 }

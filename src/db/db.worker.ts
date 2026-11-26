@@ -10,6 +10,7 @@ import {
   OPFS_REASSEMBLE_DIR,
   RECEIVE_VERIFY_BATCH_CHUNKS,
   RECEIVE_VERIFY_LEASE_RENEW_MS,
+  RECEIVE_RECONCILE_BATCH_FILES,
   RECEIVE_VERIFY_PROGRESS_BYTES,
   RECEIVE_VERIFY_RECEIPT_INTERVAL_MS,
   RECEIVE_VERIFY_SETTLED_MEMORY,
@@ -17,7 +18,15 @@ import {
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
-import { DatabaseUpgradeBlockedError, StorageFailedError } from "./dbErrors";
+import {
+  DatabaseUpgradeBlockedError,
+  StorageFailedError,
+  filesNotRemoved,
+  rebuildError,
+  serializeError,
+  serializeStorageFailure,
+} from "./dbErrors";
+import type { FileRemovalFailure } from "./dbErrors";
 import type { RepoSchema } from "./src/getDB";
 import { Sha512Stream } from "./sha512Stream";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -55,6 +64,8 @@ import type {
   ReceiveDeleteGuard,
   RoomMessageLoadOptions,
   ExpiredReceiveTransfer,
+  FileRemovalNotice,
+  FileRemovalRetryScope,
   SendQueue,
   WorkerMessages,
   WorkerMethodReturnTypes,
@@ -828,9 +839,9 @@ const opfsStorage = ():
 const opfsAssembling = new Map<string, Promise<File | null>>();
 
 // Wait for an assembly of this file (or of every file) to finish: it holds a
-// sync access handle the receive-handle cache does not know, and the browser
+// sync access handle the receive-handle cache does not know, and Chromium 159
 // refuses to remove a file, or a directory holding one, while that is open
-// (NoModificationAllowedError, measured: docs/e2e/opfs-remove/).
+// (NoModificationAllowedError; measured by docs/e2e/opfs-remove/probe.mjs).
 const settleAssemblies = async (merkleRootHex?: string): Promise<void> => {
   const runs =
     merkleRootHex === undefined
@@ -918,6 +929,11 @@ async function assembleToOPFSImpl(
       return null;
     }
 
+    // The chunk records are what owns this file. Without one there is nothing
+    // to assemble, and no file is created: a file no record owns would be
+    // removed by the next start's reconciliation anyway.
+    if (!(await hasChunkRecord(merkleRootHex))) return null;
+
     const root = await storage.getDirectory();
     const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
       create: true,
@@ -989,6 +1005,9 @@ async function assembleToOPFSImpl(
         } catch {
           /* ignore */
         }
+      // If this removal fails the partial stays, still owned by the sent
+      // message's records: the next read truncates and streams it again, and
+      // deleting the message removes it.
       await dir.removeEntry(merkleRootHex).catch(() => {
         /* ignore */
       });
@@ -1010,28 +1029,56 @@ async function assembleToOPFSImpl(
   }
 }
 
-// Remove a message's reassembled OPFS file (best-effort). Wired into the message
-// deletion path so assembled files don't accumulate as orphaned full-size copies.
-// Remove a received file. A file that is not there is fine; any other failure
-// is retried once after its handle is closed, and then reported as a
-// StorageFailedError: a delete must never leave the file behind silently.
-async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
+const isNotFound = (error: unknown): boolean =>
+  (error as { name?: string } | null)?.name === "NotFoundError";
+
+// What was thrown, as an Error that keeps its name and message.
+const thrownError = (error: unknown): Error =>
+  error instanceof Error ? error : rebuildError(serializeError(error));
+
+// Whether any chunk record of this root exists.
+async function hasChunkRecord(merkleRootHex: string): Promise<boolean> {
+  const db = await getDB();
+  try {
+    return (
+      (await db.getKeyFromIndex("chunks", "merkleRoot", merkleRootHex)) !==
+      undefined
+    );
+  } finally {
+    db.close();
+  }
+}
+
+// The directory this SDK owns in the origin private file system, or undefined
+// when it does not exist (or there is no OPFS).
+async function receivedFilesDirectory(): Promise<
+  FileSystemDirectoryHandle | undefined
+> {
   const storage = opfsStorage();
-  if (!storage || typeof storage.getDirectory !== "function") return;
+  if (!storage || typeof storage.getDirectory !== "function") return undefined;
+  const root = await storage.getDirectory();
+  try {
+    return await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR);
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+}
+
+// Remove one file of that directory: a received file, a partly received one
+// or a sent copy's assembly. A file that is not there is removed. Any other
+// failure is retried once after this worker's own handle on it is closed;
+// what the browser threw the second time is returned, never swallowed.
+async function removeStoredFile(
+  merkleRootHex: string,
+): Promise<FileRemovalFailure | undefined> {
   const remove = async (): Promise<void> => {
-    const root = await storage.getDirectory!();
-    let dir: FileSystemDirectoryHandle;
-    try {
-      dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR);
-    } catch (error) {
-      if ((error as { name?: string } | null)?.name === "NotFoundError") return;
-      throw error;
-    }
+    const dir = await receivedFilesDirectory();
+    if (!dir) return;
     try {
       await dir.removeEntry(merkleRootHex);
     } catch (error) {
-      if ((error as { name?: string } | null)?.name === "NotFoundError") return;
-      throw error;
+      if (!isNotFound(error)) throw error;
     }
   };
   try {
@@ -1041,12 +1088,10 @@ async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
       await fnCloseReceiveFile(merkleRootHex);
       await remove();
     } catch (error) {
-      throw new StorageFailedError(
-        `p2party: could not remove the received file ${merkleRootHex}: ${String(error)}`,
-        { cause: error },
-      );
+      return { merkleRootHex, error: thrownError(error) };
     }
   }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1160,37 @@ async function withReceiveLock<T>(
     const locks = globalThis.navigator?.locks;
     return locks
       ? await locks.request(`p2party:receive:${key}`, fn)
+      : await fn();
+  } finally {
+    release();
+    if (receiveLocks.get(key) === mine) receiveLocks.delete(key);
+  }
+}
+
+const RECEIVE_LOCK_BUSY = Symbol("receive lock busy");
+
+// The same lock, taken only when nothing holds it now, in this worker or in
+// another context (a Web Lock held elsewhere is not granted to a request made
+// with `ifAvailable`; measured by docs/e2e/opfs-remove/probe.mjs). For the
+// start-up pass, which must never wait on another tab.
+async function withReceiveLockIfFree<T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T | typeof RECEIVE_LOCK_BUSY> {
+  if (receiveLocks.has(key)) return RECEIVE_LOCK_BUSY;
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  receiveLocks.set(key, mine);
+  try {
+    const locks = globalThis.navigator?.locks;
+    return locks
+      ? await locks.request(
+          `p2party:receive:${key}`,
+          { ifAvailable: true },
+          (lock) => (lock === null ? RECEIVE_LOCK_BUSY : fn()),
+        )
       : await fn();
   } finally {
     release();
@@ -1291,6 +1367,11 @@ interface LiveVerification {
   verdict: Promise<ReceiveVerificationVerdict>;
   /** While the file is being read: resolves once its handle is released. */
   hashing?: Promise<void>;
+  /**
+   * Once a caller arrived after the run was left or stopped: resolves when
+   * the run has ended, given its lease back and left the registry.
+   */
+  retired?: Promise<void>;
 }
 const liveVerifications = new Map<string, LiveVerification>();
 
@@ -1570,19 +1651,55 @@ async function runVerification(
   }
 }
 
+// Wait until a run that was left by its last holder (or stopped by a delete)
+// has ended, given its lease back and left the registry. Never called under
+// the file's lock: the run may be waiting for that lock to start. Every caller
+// waits on the same promise.
+//
+// The lease is given back under the file's lock, and only while the registry
+// still holds this run: a holder of it that settles meanwhile may have retired
+// it already, and a fresh run of the same attempt (which holds the lease under
+// the same token) can only start after whichever of the two came first.
+const retireStoppedVerification = (
+  merkleRoot: string,
+  ending: LiveVerification,
+): Promise<void> => {
+  ending.retired ??= (async () => {
+    await ending.verdict;
+    await ending.hashing;
+    await withReceiveLock(merkleRoot, async () => {
+      if (liveVerifications.get(merkleRoot) !== ending) return;
+      await releaseVerificationLease(merkleRoot, ending.token).catch(
+        () => undefined,
+      );
+      liveVerifications.delete(merkleRoot);
+    });
+  })();
+  return ending.retired;
+};
+
 async function fnVerifyReceivedFile(
   merkleRoot: string,
   token: string,
   holder: string,
 ): Promise<ReceiveVerificationVerdict> {
-  const settled = settledVerifications.get(token);
-  if (settled) return settled.verdict;
-  const running = liveVerifications.get(merkleRoot);
-  if (running) {
+  for (;;) {
+    const settled = settledVerifications.get(token);
+    if (settled) return settled.verdict;
+    const running = liveVerifications.get(merkleRoot);
+    if (!running) break;
     if (running.token !== token) return "aborted";
-    // Another caller holds the same attempt: it joins, it never hashes twice.
-    running.holders.add(holder);
-    return running.verdict;
+    if (!running.aborted) {
+      // Another caller holds the same attempt: it joins, it never hashes
+      // twice.
+      running.holders.add(holder);
+      return running.verdict;
+    }
+    // The run was left by its last holder (or stopped by a delete) and is
+    // ending. This caller did not leave it, so it is owed a verdict: once
+    // that run has let go of the file and of its lease, a fresh one starts.
+    // The first caller to continue starts it and the rest join it.
+    await retireStoppedVerification(merkleRoot, running);
   }
   const live = {
     token,
@@ -1619,6 +1736,9 @@ async function fnSettleReceivedFileVerification(
   if (recorded) return commit ? recorded.outcome : "aborted";
   const live = liveVerifications.get(merkleRoot);
   if (live?.token !== token) return "aborted";
+  // A caller of an earlier run of this attempt, which a fresh run has
+  // replaced: it left that run, and has nothing to commit or to wait for.
+  if (!live.holders.has(holder) && !live.detached.has(holder)) return "aborted";
   const verdict = await live.verdict;
   let retire = false;
   try {
@@ -1637,6 +1757,7 @@ async function fnSettleReceivedFileVerification(
       if (!decided && live.holders.size > 0) return "aborted";
       retire = true;
       let outcome: ReceiveVerificationOutcome = "aborted";
+      let dropped: MessageData | undefined;
       const db = await getDB();
       const tx = db.transaction(
         ["chunks", "messageData", "receiveActivity"],
@@ -1709,6 +1830,7 @@ async function fnSettleReceivedFileVerification(
               lastActivityAt: Date.now(),
             });
             outcome = "integrity";
+            dropped = row;
           }
         } else if (leased)
           // Not committed: the marker stays, and the next copy of the held
@@ -1728,9 +1850,15 @@ async function fnSettleReceivedFileVerification(
         db.close();
       }
       if (outcome !== "aborted") rememberSettled(token, verdict, outcome);
-      if (outcome === "integrity") {
+      if (dropped) {
+        // The outcome stands whether or not the file goes: its have-set is
+        // dropped, so nothing vouches for its bytes any more. A file the
+        // browser will not remove now is reported, and stays owned by its
+        // message's row: the next start removes it (staleAfterIntegrity),
+        // and so does deleting the message.
         await fnCloseReceiveFile(merkleRoot);
-        await fnDeleteOPFSFile(merkleRoot);
+        const failure = await removeStoredFile(merkleRoot);
+        if (failure) reportFileNotRemoved(dropped, failure);
       }
       return outcome;
     });
@@ -2276,9 +2404,10 @@ async function fnStoreReceiveChunk(
   )
     throw new ReceiveChunkRejectedError("Invalid receive identity");
   // A copy that arrives while the file is verified joins that attempt. One
-  // that arrives after the attempt was stopped takes the normal path: until
-  // the stopped run gives its lease back it is refused, and the sender's next
-  // retransmission starts a fresh attempt.
+  // that arrives after the attempt was stopped has waited for the stopped run
+  // to give its lease back (the dispatcher, before this lock) and takes the
+  // normal path: the file is still held for verification, so its caller
+  // starts a fresh run.
   const verifying = liveVerifications.get(chunk.merkleRoot);
   if (verifying && !verifying.aborted)
     return storeWhileVerifying(chunk, verifying);
@@ -2378,6 +2507,11 @@ async function fnStoreReceiveChunk(
   }
 }
 
+// Expire receives without activity for the retention window, and tombstones
+// older than it. A file the browser will not remove never fails the sweep:
+// the transfer's records are gone either way, so it is returned as removed,
+// the refusal is reported (reportFileNotRemoved) and its tombstone keeps the
+// removal pending.
 async function fnSweepStaleReceives(): Promise<ExpiredReceiveTransfer[]> {
   const cutoff = Date.now() - INCOMPLETE_RECEIVE_RETENTION_MS;
   const db = await getDB();
@@ -2395,35 +2529,71 @@ async function fnSweepStaleReceives(): Promise<ExpiredReceiveTransfer[]> {
   const removed: ExpiredReceiveTransfer[] = [];
   for (const row of candidates) {
     if (row.deletedAt !== undefined) {
-      // Tombstones carry no payload. Keep them through one receive retention window
-      // so pre-cancel queued writes cannot recreate abandoned rows.
-      const db = await getDB();
-      try {
-        const tx = db.transaction("receiveActivity", "readwrite");
-        const latest = await tx.store.get(row.merkleRoot);
-        if (latest?.deletedAt === row.deletedAt && latest.deletedAt! <= cutoff)
-          await tx.store.delete(row.merkleRoot);
-        await tx.done;
-      } finally {
-        db.close();
-      }
+      await withReceiveLock(row.merkleRoot, () =>
+        expireTombstone(row.merkleRoot, row.deletedAt!, cutoff),
+      );
       continue;
     }
     if ((row.leaseUntil ?? 0) > Date.now()) continue;
-    let deletedScope: ExpiredReceiveTransfer | undefined;
-    const deleted = await withReceiveLock(row.merkleRoot, () =>
-      fnDeleteReceiveTransferLocked(
-        row.merkleRoot,
-        cutoff,
-        undefined,
-        (scope) => {
-          deletedScope = scope;
-        },
-      ),
+    const deletion = await withReceiveLock(row.merkleRoot, () =>
+      fnDeleteReceiveTransferLocked(row.merkleRoot, cutoff),
     );
-    if (deleted && deletedScope) removed.push(deletedScope);
+    if (!deletion.scope) continue;
+    removed.push({
+      merkleRoot: deletion.scope.merkleRoot,
+      roomId: deletion.scope.roomId,
+      fromPeerId: deletion.scope.fromPeerId,
+    });
+    if (deletion.notRemoved)
+      reportFileNotRemoved(deletion.scope, deletion.notRemoved);
   }
   return removed;
+}
+
+// A tombstone carries no payload; it is kept through one receive retention
+// window so writes queued before a cancel cannot recreate abandoned rows. It
+// is also the last record of its transfer, so it goes only once the
+// transfer's file is gone: the removal is tried here first, and a tombstone
+// whose file the browser still refuses to remove is kept, to be looked at
+// again one retention window later. Called under the file's lock.
+async function expireTombstone(
+  merkleRoot: string,
+  deletedAt: number,
+  cutoff: number,
+): Promise<void> {
+  const current = async (
+    store: IDBPObjectStore<
+      RepoSchema,
+      ["receiveActivity"],
+      "receiveActivity",
+      "readwrite"
+    >,
+  ): Promise<ReceiveActivity | undefined> => {
+    const latest = await store.get(merkleRoot);
+    return latest?.deletedAt === deletedAt && deletedAt <= cutoff
+      ? latest
+      : undefined;
+  };
+  const removal = await removeUnownedFile(merkleRoot);
+  const db = await getDB();
+  try {
+    const tx = db.transaction("receiveActivity", "readwrite");
+    const latest = await current(tx.store);
+    if (latest) {
+      if (typeof removal === "object")
+        await tx.store.put({
+          ...latest,
+          lastActivityAt: Date.now(),
+          fileNotRemoved: true,
+        });
+      else await tx.store.delete(merkleRoot);
+    }
+    await tx.done;
+  } finally {
+    db.close();
+  }
+  if (typeof removal === "object")
+    reportFileNotRemoved(removal.scope, removal.failure);
 }
 
 // Flush + close the open write handle for a transfer so the finished file can be
@@ -2498,12 +2668,6 @@ async function getReceiveFileImpl(
   try {
     const storage = opfsStorage();
     if (!storage || typeof storage.getDirectory !== "function") return null;
-    const root = await storage.getDirectory();
-    const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
-      create: true,
-    });
-    const fileHandle = await dir.getFileHandle(merkleRootHex, { create: true });
-
     const db = await getDB();
 
     // Scan the have-set with a cursor (one record resident) to find any chunks
@@ -2528,6 +2692,25 @@ async function getReceiveFileImpl(
       console.error(error);
       db.close();
       return null;
+    }
+
+    // The file is created here only to take bytes its chunk records still
+    // carry: those records own it. With none to migrate the file either
+    // exists already or there is nothing to return, and a file no record
+    // owns is never made.
+    const root = await storage.getDirectory();
+    const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
+      create: true,
+    });
+    let fileHandle: FileSystemFileHandle;
+    try {
+      fileHandle = await dir.getFileHandle(merkleRootHex, {
+        create: dataBearing.length > 0,
+      });
+    } catch (error) {
+      db.close();
+      if (isNotFound(error)) return null;
+      throw error;
     }
 
     // Fast path: file is the right size and there is nothing left to migrate.
@@ -3683,6 +3866,282 @@ async function fnDeleteDBSendQueue(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Files and the records that own them.
+//
+// Every file in OPFS_REASSEMBLE_DIR is named by its message's Merkle root and
+// is owned by that message's records in IndexedDB. Each writer has its record
+// before it creates the file:
+//   - a file being received (placeReceiveChunk): its receiveActivity row,
+//     committed by fnStoreReceiveChunk before the chunk is placed; then its
+//     messageData row and its have-set in `chunks`;
+//   - a received file whose last bytes are moved in on read
+//     (getReceiveFileImpl): the chunk records that carry those bytes;
+//   - a sent copy's assembly (assembleToOPFSImpl): the sent message's chunk
+//     records, read before the file is created.
+// All three run under the file's lock (withReceiveLock).
+//
+// A delete removes the records first, in one transaction, and the file after
+// it. When the browser refuses to remove the file (Chromium 159 was measured
+// to, while any context holds a handle on it: docs/e2e/opfs-remove/), what is
+// left is a file no record owns, and the directory entry is itself the
+// durable knowledge of it:
+//   - the worker's start lists the directory and removes every file no
+//     record owns (reconcileStoredFiles);
+//   - the application can repeat the delete (retryFileRemovals);
+//   - a deleted transfer's receiveActivity row is kept until its file is
+//     gone (expireTombstone), so a room's pending removals can be found.
+// ---------------------------------------------------------------------------
+
+/** Whose file a removal left behind, for the report. */
+interface RemovalScope {
+  merkleRoot: string;
+  roomId: string;
+  fromPeerId: string;
+  filename?: string;
+  totalSize?: number;
+}
+
+// Tell the page that a removal the SDK started itself left a file on disk.
+// The page raises it as the "not-removed" storage error.
+const reportFileNotRemoved = (
+  scope: RemovalScope,
+  failure: FileRemovalFailure,
+): void => {
+  const removal: FileRemovalNotice = {
+    merkleRoot: scope.merkleRoot,
+    roomId: scope.roomId,
+    fromPeerId: scope.fromPeerId,
+    filename: scope.filename ?? "",
+    totalSize: scope.totalSize ?? 0,
+    error: serializeError(failure.error),
+  };
+  postMessage({ removal });
+};
+
+/** What the records say about one file of the directory. */
+interface StoredFileRecords {
+  /** A record owns the file: it must not be removed. */
+  owned: boolean;
+  /** Its deleted transfer's row is marked fileNotRemoved. */
+  marked: boolean;
+  scope: RemovalScope;
+}
+
+const storedFileRecords = (
+  merkleRoot: string,
+  row: MessageData | undefined,
+  activity: ReceiveActivity | undefined,
+  hasChunk: boolean,
+): StoredFileRecords => {
+  const receiving = activity !== undefined && activity.deletedAt === undefined;
+  const leased = receiving && (activity.leaseUntil ?? 0) > Date.now();
+  // A file that failed its whole-file verification and could not be removed
+  // then: its have-set was dropped, so nothing vouches for its bytes. It is
+  // stale while no chunk of it is held again (decided first, below), no last
+  // chunk is held for verification and no write of it is under way.
+  const staleAfterIntegrity =
+    row?.integrityFailed === true &&
+    row.receiveVerification === undefined &&
+    !leased;
+  return {
+    owned: hasChunk || (row !== undefined ? !staleAfterIntegrity : receiving),
+    marked:
+      activity?.deletedAt !== undefined && activity.fileNotRemoved === true,
+    scope: {
+      merkleRoot,
+      roomId: row?.roomId ?? activity?.roomId ?? "",
+      fromPeerId: row?.fromPeerId ?? activity?.fromPeerId ?? "",
+      ...(row ? { filename: row.filename, totalSize: row.totalSize } : {}),
+    },
+  };
+};
+
+// One read transaction for all of them: a failure to read rejects, and is
+// never taken to mean that no record exists.
+async function readStoredFileRecords(
+  merkleRoots: readonly string[],
+): Promise<StoredFileRecords[]> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction(
+      ["messageData", "receiveActivity", "chunks"],
+      "readonly",
+    );
+    const rows = tx.objectStore("messageData").index("merkleRoot");
+    const activities = tx.objectStore("receiveActivity");
+    const chunks = tx.objectStore("chunks").index("merkleRoot");
+    const records: StoredFileRecords[] = [];
+    for (const merkleRoot of merkleRoots)
+      records.push(
+        storedFileRecords(
+          merkleRoot,
+          await rows.get(merkleRoot),
+          await activities.get(merkleRoot),
+          (await chunks.getKey(merkleRoot)) !== undefined,
+        ),
+      );
+    await tx.done;
+    return records;
+  } finally {
+    db.close();
+  }
+}
+
+// Mark or unmark a deleted transfer's row as having a file still on disk.
+// A transfer without such a row (it had no record when it was deleted) is
+// left to the start's listing alone.
+async function markFileNotRemoved(
+  merkleRoot: string,
+  notRemoved: boolean,
+): Promise<void> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction("receiveActivity", "readwrite");
+    const row = await tx.store.get(merkleRoot);
+    if (
+      row?.deletedAt !== undefined &&
+      (row.fileNotRemoved === true) !== notRemoved
+    ) {
+      const { fileNotRemoved: _was, ...rest } = row;
+      void _was;
+      await tx.store.put(notRemoved ? { ...rest, fileNotRemoved: true } : rest);
+    }
+    await tx.done;
+  } finally {
+    db.close();
+  }
+}
+
+/** The browser refused to remove a file no record owns. */
+interface FileLeftBehind {
+  scope: RemovalScope;
+  failure: FileRemovalFailure;
+}
+
+// Remove one file of the directory if no record owns it. Called under the
+// file's lock.
+//   "owned":   a record owns it; nothing was touched.
+//   "removed": it is gone, or was not there.
+//   otherwise: the browser's refusal. That is returned only if no record
+//   owns the file when the records are read again after the refusal: a file
+//   another context holds open because it is receiving it has its record by
+//   then, and is not a failure.
+async function removeUnownedFile(
+  merkleRoot: string,
+): Promise<"owned" | "removed" | FileLeftBehind> {
+  const [before] = await readStoredFileRecords([merkleRoot]);
+  if (before.owned) return "owned";
+  const failure = await removeStoredFile(merkleRoot);
+  if (!failure) {
+    if (before.marked) await markFileNotRemoved(merkleRoot, false);
+    return "removed";
+  }
+  const [after] = await readStoredFileRecords([merkleRoot]);
+  if (after.owned) return "owned";
+  if (!after.marked) await markFileNotRemoved(merkleRoot, true);
+  return { scope: after.scope, failure };
+}
+
+const STORED_FILE_NAME = new RegExp(
+  `^[0-9a-f]{${String(crypto_hash_sha512_BYTES * 2)}}$`,
+);
+
+// The names of the directory's entries. Chromium 159 was measured to list a
+// file that is held open, and one that was just created, and not to list a
+// creation still pending (docs/e2e/opfs-remove/).
+async function listStoredFiles(
+  dir: FileSystemDirectoryHandle,
+): Promise<{ name: string; kind: string }[]> {
+  const listed: { name: string; kind: string }[] = [];
+  const entries = (
+    dir as unknown as {
+      entries: () => AsyncIterable<[string, { kind: string }]>;
+    }
+  ).entries();
+  for await (const [name, handle] of entries)
+    listed.push({ name, kind: handle.kind });
+  return listed;
+}
+
+// The start-up pass: remove every file of the directory that no record owns.
+// Those are the files a delete, a cancel, a sweep or a purge could not remove
+// in an earlier run. A name that is not a Merkle root is not this SDK's and
+// is left alone.
+//
+// It cannot take a file from a receive. In this worker no receive starts
+// while it runs (onmessage holds file requests until it is done). In another
+// context a receive has its record before it creates its file, so the file is
+// owned when it is listed; and each removal is decided again under the file's
+// lock, which is taken only if nothing holds it (never waited for).
+async function reconcileStoredFiles(): Promise<void> {
+  const dir = await receivedFilesDirectory();
+  if (!dir) return;
+  const names = (await listStoredFiles(dir))
+    .filter(({ name, kind }) => kind === "file" && STORED_FILE_NAME.test(name))
+    .map(({ name }) => name);
+  for (let at = 0; at < names.length; at += RECEIVE_RECONCILE_BATCH_FILES) {
+    const records = await readStoredFileRecords(
+      names.slice(at, at + RECEIVE_RECONCILE_BATCH_FILES),
+    );
+    for (const { owned, scope } of records) {
+      if (owned) continue;
+      const outcome = await withReceiveLockIfFree(scope.merkleRoot, () =>
+        removeUnownedFile(scope.merkleRoot),
+      );
+      if (typeof outcome === "object")
+        reportFileNotRemoved(outcome.scope, outcome.failure);
+    }
+  }
+}
+
+// Try pending removals again because the application repeated a delete: one
+// file, if no record owns it, or every file a room's deleted messages left
+// behind. Rejects with one StorageFailedError naming each file the browser
+// still refuses to remove.
+async function fnRetryFileRemovals(
+  scope: FileRemovalRetryScope,
+): Promise<void> {
+  let merkleRoots: string[];
+  if ("merkleRootHex" in scope) {
+    if (!STORED_FILE_NAME.test(scope.merkleRootHex))
+      throw new Error("invalid receive transfer Merkle root");
+    merkleRoots = [scope.merkleRootHex];
+  } else {
+    const db = await getDB();
+    try {
+      merkleRoots = (await db.getAll("receiveActivity"))
+        .filter(
+          (row) =>
+            row.roomId === scope.roomId &&
+            row.deletedAt !== undefined &&
+            row.fileNotRemoved === true,
+        )
+        .map((row) => row.merkleRoot);
+    } finally {
+      db.close();
+    }
+  }
+  const failures: FileRemovalFailure[] = [];
+  for (const merkleRoot of merkleRoots) {
+    const outcome = await withReceiveLock(merkleRoot, () =>
+      removeUnownedFile(merkleRoot),
+    );
+    if (typeof outcome === "object") failures.push(outcome.failure);
+  }
+  if (failures.length > 0) throw filesNotRemoved(failures);
+}
+
+/** What deleting one transfer did (fnDeleteReceiveTransferLocked). */
+interface ReceiveDeletion {
+  /** False when the guard or the staleness check refused: nothing changed. */
+  deleted: boolean;
+  /** Whose transfer it was, when it had any record. */
+  scope?: RemovalScope;
+  /** Its records are gone and the browser refused to remove its file. */
+  notRemoved?: FileRemovalFailure;
+}
+
 /**
  * Remove every receiver-owned artifact for one Merkle root.
  *
@@ -3691,28 +4150,31 @@ async function fnDeleteDBSendQueue(
  * after that write and cannot leave a newly-created chunk/message row behind.
  * The IndexedDB records share one transaction; the OPFS handle is closed before
  * its file is removed.
+ *
+ * A file the browser refuses to remove does not undo the deletion and is not
+ * thrown: it is returned as `notRemoved`, and each caller reports it its own
+ * way. The transfer's row (now a tombstone) is marked so the removal stays
+ * pending.
  */
 async function fnDeleteReceiveTransferLocked(
   merkleRootHex: string,
   staleBefore?: number,
   guard?: ReceiveDeleteGuard,
-  onDeleted?: (scope: ExpiredReceiveTransfer) => void,
-): Promise<boolean> {
-  if (
-    merkleRootHex.length !== crypto_hash_sha512_BYTES * 2 ||
-    !/^[0-9a-f]+$/.test(merkleRootHex)
-  )
+): Promise<ReceiveDeletion> {
+  if (!STORED_FILE_NAME.test(merkleRootHex))
     throw new Error("invalid receive transfer Merkle root");
 
   // A verification of this file stops and releases its handle first; deleting
   // the row below keeps its verdict from ever being committed. An assembly of
   // it finishes and closes its own handle; then the receive handle is closed.
-  // The browser refuses to remove a file while any handle on it is open.
+  // Chromium 159 was measured to refuse to remove a file while any handle on
+  // it is open (docs/e2e/opfs-remove/).
   await stopVerification(merkleRootHex);
   await settleAssemblies(merkleRootHex);
 
   await fnCloseReceiveFile(merkleRootHex);
 
+  let scope: RemovalScope | undefined;
   const db = await getDB();
   try {
     const tx = db.transaction(
@@ -3735,7 +4197,7 @@ async function fnDeleteReceiveTransferLocked(
         previous.savedSize >= previous.totalSize)
     ) {
       await tx.done;
-      return false;
+      return { deleted: false };
     }
     if (
       staleBefore !== undefined &&
@@ -3750,7 +4212,7 @@ async function fnDeleteReceiveTransferLocked(
             previous.savedSize >= previous.totalSize)))
     ) {
       await tx.done;
-      return false;
+      return { deleted: false };
     }
     if (activity || previous)
       await activityStore.put({
@@ -3801,55 +4263,81 @@ async function fnDeleteReceiveTransferLocked(
     // Capture ownership from the SAME transaction that authorized deletion.
     // A later main-thread projection must never infer it from another room.
     if (activity || previous)
-      onDeleted?.({
+      scope = {
         merkleRoot: merkleRootHex,
         roomId: activity?.roomId ?? previous!.roomId,
         fromPeerId: activity?.fromPeerId ?? previous!.fromPeerId,
-      });
+        ...(previous
+          ? { filename: previous.filename, totalSize: previous.totalSize }
+          : {}),
+      };
   } finally {
     db.close();
   }
 
-  await fnDeleteOPFSFile(merkleRootHex);
-  return true;
+  const notRemoved = await removeStoredFile(merkleRootHex);
+  if (!notRemoved) return { deleted: true, scope };
+  if (scope) await markFileNotRemoved(merkleRootHex, true);
+  return { deleted: true, scope, notRemoved };
 }
 
-// A full wipe. It does everything it can, and then reports a received file it
-// could not remove: a purge never reports done while plaintext it tried to
-// remove is still on disk.
+// Remove the whole directory (a separate storage system that deleteDatabase
+// cannot touch). Chromium 159 was measured to refuse that, and to remove
+// nothing, while a handle on any file inside is open
+// (docs/e2e/opfs-remove/); then every file that can be removed is removed
+// one by one, and the ones that cannot are returned.
+async function removeAllStoredFiles(): Promise<FileRemovalFailure[]> {
+  const storage = opfsStorage();
+  if (!storage || typeof storage.getDirectory !== "function") return [];
+  const root = await storage.getDirectory();
+  const removeDirectory = async (): Promise<boolean> => {
+    try {
+      await root.removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true });
+    } catch (error) {
+      // Not there is fine: nothing was left.
+      if (!isNotFound(error)) return false;
+    }
+    return true;
+  };
+  if (await removeDirectory()) return [];
+  const dir = await receivedFilesDirectory();
+  if (!dir) return [];
+  const failures: FileRemovalFailure[] = [];
+  for (const { name } of await listStoredFiles(dir))
+    try {
+      await dir.removeEntry(name, { recursive: true });
+    } catch (error) {
+      if (!isNotFound(error))
+        failures.push({ merkleRootHex: name, error: thrownError(error) });
+    }
+  // With every entry gone only the empty directory is left; removing it is
+  // tidying, and a refusal of that leaves no file behind.
+  if (failures.length === 0) await removeDirectory();
+  return failures;
+}
+
+// A full wipe. It does everything it can, and then reports each received file
+// it could not remove: a purge never reports done while plaintext it tried to
+// remove is still on disk. The database is deleted either way, so such a file
+// is left with no record, and the next start of the worker removes it.
 async function fnDeleteDB(): Promise<void> {
-  let leftBehind: unknown;
+  let leftBehind: FileRemovalFailure[];
   try {
     // Stop every verification, let every assembly finish, and close every
-    // receive handle first: the browser refuses to remove the directory while
-    // a handle on a file inside it is open (NoModificationAllowedError, as
-    // measured by docs/e2e/opfs-remove/), though the File System Standard's
-    // removeEntry steps name no lock.
+    // receive handle first: HeadlessChrome 159 refuses to remove the
+    // directory, or a file, while a handle on that file is open, in this
+    // worker or another (NoModificationAllowedError; measured by
+    // docs/e2e/opfs-remove/probe.mjs). No other browser was measured. Any
+    // error but "not found" is taken as a refusal, whatever its name.
     forgetStartupRetries();
     for (const merkleRoot of [...liveVerifications.keys()])
       await stopVerification(merkleRoot);
     await settleAssemblies();
     await closeAllReceiveFiles();
-    // Also remove the whole OPFS reassembly subtree (a separate storage system
-    // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
-    const storage = opfsStorage();
-    if (storage && typeof storage.getDirectory === "function") {
-      const root = (await storage.getDirectory()) as unknown as {
-        removeEntry: (
-          name: string,
-          options: { recursive: boolean },
-        ) => Promise<void>;
-      };
-      try {
-        await root.removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true });
-      } catch (error) {
-        // Not there is fine: nothing was left.
-        if ((error as { name?: string } | null)?.name !== "NotFoundError")
-          leftBehind = error;
-      }
-    }
+    leftBehind = await removeAllStoredFiles();
   } catch (error) {
-    leftBehind = error;
+    // The directory could not be reached at all: no file can be named.
+    leftBehind = [{ merkleRootHex: "", error: thrownError(error) }];
   }
 
   await deleteDB(dbName, {
@@ -3859,17 +4347,44 @@ async function fnDeleteDB(): Promise<void> {
   });
   ratchetRollbackGuard.clear();
   ratchetLastWrite.clear();
-  if (leftBehind !== undefined)
-    throw new StorageFailedError(
-      `p2party: the purge could not remove received files: ${String(leftBehind)}`,
-      { cause: leftBehind },
-    );
+  if (leftBehind.length > 0)
+    throw filesNotRemoved(leftBehind, "p2party: the purge could not remove");
 }
+
+// The start of this worker: one pass over the directory, begun when the
+// module is evaluated. Requests that create, read or remove files wait for it
+// (FILE_REQUESTS), so it never runs alongside the start of a receive in this
+// worker. It never rejects: a pass that could not list the directory or read
+// the records removes nothing, and the next start tries again.
+let storedFilesPassOver = false;
+const storedFilesReconciled: Promise<void> = reconcileStoredFiles()
+  .catch((error: unknown) => {
+    console.error("p2party: could not reconcile stored files at start", error);
+  })
+  .then(() => {
+    storedFilesPassOver = true;
+  });
+
+const FILE_REQUESTS: ReadonlySet<WorkerMessages["method"]> = new Set([
+  "storeReceiveChunk",
+  "getReceiveFile",
+  "assembleToOPFS",
+  "settleReceivedFileVerification",
+  "deleteReceiveTransfer",
+  "retryFileRemovals",
+  "sweepStaleReceives",
+  "sweepStaleReceiveDetails",
+  "deleteDB",
+]);
 
 onmessage = async (e: MessageEvent) => {
   const message = e.data as WorkerMessages;
   const { id, method } = message;
   try {
+    // Only while the pass runs: afterwards a request is not delayed, so
+    // requests keep the order they arrived in.
+    if (!storedFilesPassOver && FILE_REQUESTS.has(method))
+      await storedFilesReconciled;
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
       case "outboxRequest":
@@ -3952,9 +4467,15 @@ onmessage = async (e: MessageEvent) => {
       case "getDBAllChunkLeafHashes":
         result = await fnGetDBAllChunkLeafHashes(...message.args);
         break;
-      case "assembleToOPFS":
-        result = await fnAssembleToOPFS(...message.args);
+      case "assembleToOPFS": {
+        // Under the file's lock, like every other writer of it: the chunk
+        // records are read and the file created with no delete in between.
+        const args = message.args;
+        result = await withReceiveLock(args[0], () =>
+          fnAssembleToOPFS(...args),
+        );
         break;
+      }
       case "getDBAllChunksCount":
         result = await fnGetDBAllChunksCount(...message.args);
         break;
@@ -3965,6 +4486,12 @@ onmessage = async (e: MessageEvent) => {
       case "storeReceiveChunk": {
         const admittedAt = Date.now();
         const chunk = message.args[0];
+        // A verification of this file that its last holder left is ending:
+        // this copy waits for it, so that it is not refused over a lease the
+        // stopped run is about to give back.
+        const stopped = liveVerifications.get(chunk.merkleRoot);
+        if (stopped?.aborted)
+          await retireStoppedVerification(chunk.merkleRoot, stopped);
         try {
           result = await withReceiveLock(chunk.merkleRoot, () =>
             fnStoreReceiveChunk(chunk, admittedAt),
@@ -4004,12 +4531,32 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteReceiveTransfer": {
         const [root, guard] = message.args;
-        const removed = await withReceiveLock(root, () =>
+        const deletion = await withReceiveLock(root, () =>
           fnDeleteReceiveTransferLocked(root, undefined, guard),
         );
-        result = guard ? removed : undefined;
+        if (deletion.notRemoved) {
+          // An unguarded delete answers to its caller on the page, which
+          // reports it: it rejects with the browser's refusal. A guarded one
+          // is a peer's cancel, started by the SDK itself: it is reported by
+          // a notice and answers as done, since the transfer's records are
+          // gone.
+          if (!guard) throw filesNotRemoved([deletion.notRemoved]);
+          reportFileNotRemoved(
+            deletion.scope ?? {
+              merkleRoot: root,
+              roomId: guard.roomId,
+              fromPeerId: guard.fromPeerId,
+            },
+            deletion.notRemoved,
+          );
+        }
+        result = guard ? deletion.deleted : undefined;
         break;
       }
+      case "retryFileRemovals":
+        await fnRetryFileRemovals(...message.args);
+        result = undefined;
+        break;
       case "getDBAllNewChunks":
         result = await fnGetDBAllNewChunks(...message.args);
         break;
@@ -4124,9 +4671,16 @@ onmessage = async (e: MessageEvent) => {
     postMessage({
       id,
       error: String(error),
-      ...(error instanceof DatabaseUpgradeBlockedError ||
-      error instanceof StorageFailedError
+      ...(error instanceof DatabaseUpgradeBlockedError
         ? { errorCode: error.code }
+        : {}),
+      // The browser's own failure for each file crosses as data, since an
+      // error's cause and fields do not survive String().
+      ...(error instanceof StorageFailedError
+        ? {
+            errorCode: error.code,
+            errorDetail: serializeStorageFailure(error),
+          }
         : {}),
     });
   }

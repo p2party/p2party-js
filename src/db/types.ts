@@ -2,6 +2,7 @@ import type { OutboxLease, OutboxRequest, OutboxResponse } from "./outboxTypes";
 import type { Peer } from "../reducers/roomSlice";
 import type { RatchetRootSuite } from "../utils/constants";
 import type { ReceiveManifest } from "./receiveManifest";
+import type { SerializedError } from "./dbErrors";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface UsernamedPeer extends Peer {
@@ -144,6 +145,30 @@ export interface ReceiveDeleteGuard {
   fromPeerId: string;
   incompleteOnly: true;
 }
+
+/**
+ * Posted by the worker (outside any request) when a removal the SDK started
+ * itself left a file in the origin private file system: a peer's cancel, the
+ * stale-receive sweep, the drop after a failed verification, or the retry at
+ * the worker's start. `roomId`, `fromPeerId`, `filename` and `totalSize` are
+ * empty or 0 when no record of the file's message remains.
+ */
+export interface FileRemovalNotice {
+  merkleRoot: string;
+  roomId: string;
+  fromPeerId: string;
+  filename: string;
+  totalSize: number;
+  /** What the browser threw: its error's name and message. */
+  error: SerializedError;
+}
+
+/**
+ * Which pending removals to try again (retryFileRemovals): one file, if no
+ * record owns it, or every file a room's deleted messages left behind.
+ */
+export type FileRemovalRetryScope =
+  { merkleRootHex: string } | { roomId: string };
 
 export interface ReceiveChunkStored {
   /** True only when this call inserted a previously absent chunk index. */
@@ -584,6 +609,11 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "retryFileRemovals";
+      args: [scope: FileRemovalRetryScope];
+    }
+  | {
+      id: number;
       method: "getDBAllNewChunks";
       args: [selector: NewChunkSelector];
     }
@@ -748,6 +778,7 @@ export interface WorkerMethodReturnTypes {
   getReceiveFile: File | null;
   closeReceiveFile: undefined;
   deleteReceiveTransfer: boolean | undefined;
+  retryFileRemovals: undefined;
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
   setDBNewChunk: undefined;

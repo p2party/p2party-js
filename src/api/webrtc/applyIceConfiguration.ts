@@ -1,7 +1,13 @@
-import { teardownEdgeGeneration } from "./disconnectFromPeerQuery";
-
-import type { EdgeTeardownContext } from "./disconnectFromPeerQuery";
 import type { IRTCPeerConnection } from "./interfaces";
+
+/**
+ * How a transport that cannot hold the room's configuration is abandoned.
+ * Production passes the shared edge teardown with the API's registry and
+ * dispatch (src/api/webrtc/index.ts). It is passed in rather than imported so
+ * this module stays a leaf: the teardown's module graph reaches the Redux
+ * store at import time.
+ */
+export type RetireTransport = (connection: IRTCPeerConnection) => void;
 
 const cloneIceServer = (server: RTCIceServer): RTCIceServer => ({
   ...server,
@@ -18,21 +24,19 @@ const hasStartedNegotiation = (connection: IRTCPeerConnection): boolean =>
  * do not allow setConfiguration() to change. Only the refreshable ICE list is
  * replaced.
  *
- * A transport that cannot hold the authoritative configuration is retired
- * through the shared edge teardown, never just closed: pc.close() fires no
- * event, so until something retires the closed transport nothing would wipe
- * its ratchet and PQ state or stop its healing interval. It stays registered,
- * closed, for the next introduction or description to retire and rebuild.
- * `teardown` carries the registry and dispatch for that teardown when the
- * caller holds them.
+ * A transport that cannot hold the authoritative configuration is handed to
+ * `retire`, never just closed here: pc.close() fires no event, so nothing
+ * else would wipe its ratchet and PQ state or stop its healing interval. It
+ * stays registered, closed, for the next introduction or description to
+ * retire and rebuild.
  */
 export const applyRoomIceConfiguration = (
   peerConnections: readonly IRTCPeerConnection[],
   roomId: string,
   rtcConfig: RTCConfiguration,
-  restartIceAfterApply = false,
-  failurePolicy: "rollback" | "close" = "rollback",
-  teardown: EdgeTeardownContext = {},
+  restartIceAfterApply: boolean,
+  failurePolicy: "rollback" | "close",
+  retire: RetireTransport,
 ): number => {
   const live = peerConnections.filter(
     (connection) =>
@@ -56,7 +60,7 @@ export const applyRoomIceConfiguration = (
         // A room must never retain a mixture of old and new relay
         // generations. If authoritative restoration is impossible, retire
         // that transport and let normal room signaling recreate it.
-        teardownEdgeGeneration(connection, teardown);
+        retire(connection);
       }
     }
   };
@@ -73,8 +77,7 @@ export const applyRoomIceConfiguration = (
         if (hasStartedNegotiation(connection)) connection.restartIce();
   } catch (error) {
     if (failurePolicy === "close")
-      for (const { connection } of snapshots)
-        teardownEdgeGeneration(connection, teardown);
+      for (const { connection } of snapshots) retire(connection);
     else rollbackOrClose();
     throw error;
   }

@@ -8,7 +8,9 @@ import webrtcMessageQuery from "./sendMessageQuery";
 import webrtcDisconnectQuery from "./disconnectQuery";
 import webrtcDisconnectRoomQuery from "./disconnectFromRoomQuery";
 import webrtcDisconnectAllRoomsQuery from "./disconnectFromAllRoomsQuery";
-import webrtcDisconnectPeerQuery from "./disconnectFromPeerQuery";
+import webrtcDisconnectPeerQuery, {
+  teardownEdgeGeneration,
+} from "./disconnectFromPeerQuery";
 import webrtcDisconnectFromChannelLabelQuery from "./disconnectFromChannelLabelQuery";
 import webrtcDisconnectFromPeerChannelLabelQuery from "./disconnectFromPeerChannelLabelQuery";
 import { applyRoomIceConfiguration } from "./applyIceConfiguration";
@@ -112,18 +114,24 @@ const webrtcApi = createApi({
       undefined,
       RTCApplyRoomConfigurationParams
     >({
-      queryFn: ({
-        roomId,
-        rtcConfig,
-        restartIce = false,
-        failurePolicy = "rollback",
-      }) => {
+      queryFn: (
+        { roomId, rtcConfig, restartIce = false, failurePolicy = "rollback" },
+        api,
+      ) => {
+        // A transport the configuration cannot be held on is retired through
+        // the shared edge teardown, which gets this API's registry and
+        // dispatch so its channels and handshake status go at once.
         applyRoomIceConfiguration(
           peerConnections,
           roomId,
           rtcConfig,
           restartIce,
           failurePolicy,
+          (connection) =>
+            teardownEdgeGeneration(connection, {
+              dataChannels,
+              dispatch: api.dispatch,
+            }),
         );
         return { data: undefined };
       },

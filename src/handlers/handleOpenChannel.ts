@@ -53,6 +53,7 @@ import { installCoverEdge } from "./coverEdge";
 import { requestPeersAfterEdgeTeardown } from "./edgeTeardownFollowUp";
 
 import webrtcApi from "../api/webrtc";
+import { teardownEdgeGeneration } from "../api/webrtc/disconnectFromPeerQuery";
 import { clearRebindAuthenticationDeadline } from "../api/webrtc/rebindDeadline";
 
 import {
@@ -1116,13 +1117,41 @@ export const handleOpenChannel = async (
             extChannel.onerror = null;
           }
           if (extChannel.readyState !== "closed") extChannel.close();
-          if (epc.connectionState !== "closed") epc.close();
+          if (!transportAlreadyClosed) {
+            // This generation is abandoned, so everything it holds goes
+            // through the one edge teardown (a ratchet seeded before a later
+            // step threw, the PQ runtime and its healing interval, cover, its
+            // channels, a re-bind deadline) before the transport closes. A
+            // terminal failure leaves the closed transport registered for the
+            // next introduction or description to retire (C2).
+            teardownEdgeGeneration(epc, dataChannels);
+            // The teardown detached main's close handler, which used to carry
+            // a transport failure's room/peer teardown, and a browser need not
+            // deliver that event after pc.close() anyway. Run it here, unless
+            // a replacement has claimed the edge in the meantime.
+            if (
+              failureReason === "transport" &&
+              (ratchetGateLease === undefined ||
+                isCurrentRatchetGateLease(
+                  roomId,
+                  epc.withPeerId,
+                  ratchetGateLease,
+                ))
+            )
+              await api.dispatch(
+                webrtcApi.endpoints.disconnectFromPeer.initiate({
+                  roomId,
+                  peerId: epc.withPeerId,
+                }),
+              );
+          }
           // pc.close() fires no connectionstatechange, so no transport-level
-          // follow-up ever re-dials for this edge; the main onclose above may
-          // run too, and its re-dial then dedups under the same budget. Only
-          // a transport failure is worth rebuilding the edge for: a PIN or
-          // policy mismatch fails again on any fresh transport and a re-dial
-          // would only burn another attempt against the PIN throttle.
+          // follow-up ever re-dials for this edge; a main close handler that
+          // ran first re-dials too, and that re-dial dedups under the same
+          // budget.
+          // Only a transport failure is worth rebuilding the edge for: a PIN
+          // or policy mismatch fails again on any fresh transport and a
+          // re-dial would only burn another attempt against the PIN throttle.
           if (failureReason === "transport" && !transportAlreadyClosed)
             requestPeersAfterEdgeTeardown(api, roomId);
         } finally {

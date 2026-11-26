@@ -14,6 +14,7 @@ import type {
   PeerHandshakeStatus,
 } from "../../../src/reducers/roomSlice";
 import type { RatchetSession } from "../../../src/db/types";
+import { RATCHET_ROOT_SUITE_MLKEM512 } from "../../../src/utils/constants";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -108,6 +109,7 @@ type Handshake = typeof import("../../../src/handlers/handleHandshake");
 type DisconnectFromPeerQuery =
   typeof import("../../../src/api/webrtc/disconnectFromPeerQuery");
 type RatchetPersist = typeof import("../../../src/handlers/ratchetPersist");
+type PqRuntime = typeof import("../../../src/handlers/pqHealingRuntime");
 type DbApi = typeof import("../../../src/db/api");
 
 let webrtcBaseQuery: BaseQuery["default"];
@@ -124,6 +126,12 @@ let disconnectModule: DisconnectFromPeerQuery;
 let claimRatchetPersistence: RatchetPersist["claimRatchetPersistence"];
 let persistClaimedRatchetState: RatchetPersist["persistClaimedRatchetState"];
 let dbApiModule: DbApi;
+let SparsePqHealingState: PqRuntime["SparsePqHealingState"];
+let pqModule: Awaited<
+  ReturnType<
+    (typeof import("../../../src/cryptography/testModule"))["loadTestModule"]
+  >
+>;
 let restoreBlacklist: () => void;
 let roomReducer: (typeof import("../../../src/reducers/roomSlice"))["default"];
 
@@ -158,6 +166,11 @@ beforeAll(async () => {
     await import("../../../src/api/webrtc/disconnectFromPeerQuery");
   ({ claimRatchetPersistence, persistClaimedRatchetState } =
     await import("../../../src/handlers/ratchetPersist"));
+  ({ SparsePqHealingState } =
+    await import("../../../src/handlers/pqHealingRuntime"));
+  pqModule = await (
+    await import("../../../src/cryptography/testModule")
+  ).loadTestModule();
 });
 
 afterAll(() => {
@@ -451,10 +464,6 @@ describe("a generation retire releases what the retired edge held", () => {
 });
 
 describe("the shared edge teardown", () => {
-  test("is the function disconnectFromPeer and the generation retire share", () => {
-    expect(typeof disconnectModule.teardownEdgeGeneration).toBe("function");
-  });
-
   // Re-entrancy: a teardown can reach a generation late (a handshake catch
   // that resumed after an await, a duplicate retire). The gate, the handshake
   // inbox and the registry entries for this room/peer then belong to the
@@ -736,5 +745,167 @@ describe("a retired generation's persisted ratchet row", () => {
     } finally {
       store.restore();
     }
+  });
+});
+
+// The generation retire and an explicit disconnect go through one teardown.
+// Each path is run against the same fully loaded edge and must release every
+// part of it; a path that stops going through the shared teardown (and does
+// not reproduce all of it) fails here.
+describe("both teardown paths release the same things", () => {
+  const paths: Array<{
+    readonly name: string;
+    readonly run: (
+      edge: RetiredEdge,
+      dataChannels: IRTCDataChannel[],
+      api: BaseQueryApi,
+    ) => Promise<void>;
+  }> = [
+    {
+      name: "a generation retire",
+      run: (edge, dataChannels, api) =>
+        retireForNewGeneration([edge], dataChannels, api),
+    },
+    {
+      name: "an explicit disconnect",
+      run: async (edge, dataChannels, api) => {
+        await disconnectModule.default(
+          {
+            peerId: PEER_ID,
+            roomId: ROOM_ID,
+            peerConnections: [edge],
+            dataChannels,
+            iceCandidates: [],
+          },
+          api,
+          {},
+        );
+      },
+    },
+  ];
+
+  for (const path of paths)
+    test(`${path.name} releases everything the generation held`, async () => {
+      const deletedRows: string[] = [];
+      const setRow = spyOn(dbApiModule, "setRatchetSession").mockImplementation(
+        async () => undefined,
+      );
+      const deleteRow = spyOn(
+        dbApiModule,
+        "deleteRatchetSession",
+      ).mockImplementation(async (roomId: string, peerPublicKey: string) => {
+        deletedRows.push(`${roomId}/${peerPublicKey}`);
+      });
+      const setIntervalSpy = spyOn(globalThis, "setInterval");
+      const clearIntervalSpy = spyOn(globalThis, "clearInterval");
+      const edge = seedAuthenticatedEdge();
+      try {
+        const rootKey = new Uint8Array(32).fill(1);
+        const dhSelfSec = new Uint8Array(32).fill(4);
+        const cached = new Uint8Array(32).fill(6);
+        edge.ratchetState = {
+          rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
+          rootKey,
+          sendingChainKey: null,
+          receivingChainKey: null,
+          dhSelfPub: new Uint8Array(32),
+          dhSelfSec,
+          dhRemotePub: null,
+          Ns: 0,
+          Nr: 0,
+          PN: 0,
+          skipped: new Map(),
+        };
+        edge.messageKeyCache = new Map([["cached", cached]]);
+        let pqDestroyed = 0;
+        edge.pqHealingState = {
+          destroy: () => {
+            pqDestroyed += 1;
+          },
+        } as unknown as NonNullable<IRTCPeerConnection["pqHealingState"]>;
+        installPqHealingOrchestrator(edge, ROOM_ID, {
+          sendControlFrame: () => true,
+          failEdge: () => undefined,
+          tickMs: 3_600_000,
+        });
+        const interval = setIntervalSpy.mock.results.at(-1)?.value as unknown;
+        const main = fakeChannel("main");
+        edge.mainChannel = main.channel;
+        const dataChannels: IRTCDataChannel[] = [main.channel];
+        setHandshakeChannel(ROOM_ID, PEER_ID, { send: () => undefined });
+        const deadlinesCleared: unknown[] = [];
+        edge.rebindDeadline = 7 as unknown as ReturnType<typeof setTimeout>;
+        edge.rebindDeadlineClear = (handle) => {
+          deadlinesCleared.push(handle);
+        };
+        claimRatchetPersistence(edge, ROOM_ID);
+        const api = fakeApi({
+          [PEER_ID]: {
+            status: "authenticated",
+            peerPublicKey: LOWER_PUBLIC_KEY,
+          },
+        });
+
+        await path.run(edge, dataChannels, api);
+        for (let turn = 0; turn < 3; turn++)
+          await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(edge.closes).toBe(1);
+        for (const secret of [rootKey, dhSelfSec, cached])
+          expect(secret.every((byte) => byte === 0)).toBe(true);
+        expect(pqDestroyed).toBe(1);
+        expect(
+          clearIntervalSpy.mock.calls.some(
+            ([cleared]: unknown[]) => cleared === interval,
+          ),
+        ).toBe(true);
+        expect(main.closes.count).toBe(1);
+        expect(main.channel.onclose).toBeNull();
+        expect(dataChannels).toEqual([]);
+        expect(clearHandshakeChannel(ROOM_ID, PEER_ID)).toBe(false);
+        expect(deadlinesCleared).toEqual([7]);
+        expect(
+          (api.getState() as { rooms: ManagedRoom[] }).rooms[0]
+            .handshakeStatusByPeer?.[PEER_ID],
+        ).toBeUndefined();
+        expect(deletedRows).toEqual([`${ROOM_ID}/${LOWER_PUBLIC_KEY}`]);
+      } finally {
+        destroyPqHealingOrchestrator(edge);
+        setRow.mockRestore();
+        deleteRow.mockRestore();
+        setIntervalSpy.mockRestore();
+        clearIntervalSpy.mockRestore();
+      }
+    }, 20000);
+});
+
+describe("a real post-quantum runtime through the teardown", () => {
+  test("the teardown wipes the PQ runtime's key bytes", () => {
+    const pq = new SparsePqHealingState({
+      module: pqModule,
+      pqMode: "hybrid-mlkem512",
+      rootSuite: RATCHET_ROOT_SUITE_MLKEM512,
+      binding: new Uint8Array(32).fill(0x42),
+      rootKey: new Uint8Array(32).fill(0x19),
+      nextOfferer: "local",
+      amInitiator: true,
+      now: 0,
+    });
+    const edge = seedAuthenticatedEdge();
+    edge.pqHealingState = pq;
+    // Live views of what the runtime holds: its message root, its edge
+    // binding and an active combined receive key.
+    const context = pq.currentMessageContext();
+    const receiveKey = new Uint8Array(32).fill(0x5a);
+    pq.activeReceiveKeys.set("receive", receiveKey);
+    for (const bytes of [context.rootKey, context.binding, receiveKey])
+      expect(bytes.some((byte) => byte !== 0)).toBe(true);
+
+    disconnectModule.teardownEdgeGeneration(edge, {});
+
+    for (const bytes of [context.rootKey, context.binding, receiveKey])
+      expect(bytes.every((byte) => byte === 0)).toBe(true);
+    expect(edge.pqHealingState).toBeUndefined();
+    expect(pq.trafficBlocked).toBe(true);
   });
 });

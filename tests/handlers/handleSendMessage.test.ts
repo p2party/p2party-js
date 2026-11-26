@@ -41,6 +41,7 @@ let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")[
 let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
 let coverRuntimeAdmitsScheduledJobs: typeof import("../../src/handlers/handleSendMessage")["coverRuntimeAdmitsScheduledJobs"];
 let sendScheduled: typeof import("../../src/handlers/handleSendMessage")["sendScheduled"];
+let OutboundMessage: typeof import("../../src/handlers/handleSendMessage")["OutboundMessage"];
 let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
 let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
 let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
@@ -56,6 +57,7 @@ beforeAll(async () => {
     coverRuntimeAdmitsScheduledJobs,
     isAuthenticatedPeerCancel,
     isResumableRebindFailure,
+    OutboundMessage,
     runPeerSendFanout,
     runWithTerminalChannelClose,
     sendScheduled,
@@ -725,13 +727,14 @@ describe("sendScheduled's own admission guard (the real call site, not the predi
       "chat",
       scheduledPolicy(),
       [{ peerId: "peer-cover-down", epc }],
-      1,
-      new Uint8Array(0),
-      new Uint8Array(0),
-      "root-hex",
-      "transfer-id",
-      "hash-hex",
-      {} as unknown as LibCrypto,
+      new OutboundMessage({
+        transferId: "transfer-id",
+        hashHex: "hash-hex",
+        merkleRoot: new Uint8Array(64),
+        totalChunks: 1,
+        chunkHashes: new Uint8Array(64),
+        merkleModule: {} as unknown as LibCrypto,
+      }),
       {} as unknown as LibCrypto,
       undefined,
       () => {

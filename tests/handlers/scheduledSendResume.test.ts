@@ -63,6 +63,7 @@ let teardownCoverEdge: (typeof import("../../src/handlers/coverEdge"))["teardown
 let coverEdgeGeneration: (typeof import("../../src/handlers/coverEdge"))["coverEdgeGeneration"];
 let waitForCoverEdgeGeneration: (typeof import("../../src/handlers/coverEdge"))["waitForCoverEdgeGeneration"];
 let sendScheduled: (typeof import("../../src/handlers/handleSendMessage"))["sendScheduled"];
+let OutboundMessage: (typeof import("../../src/handlers/handleSendMessage"))["OutboundMessage"];
 let claimRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["claimRatchetGate"];
 let openRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["openRatchetGate"];
 let resetRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["resetRatchetGate"];
@@ -85,7 +86,8 @@ beforeAll(async () => {
     teardownCoverEdge,
     waitForCoverEdgeGeneration,
   } = await import("../../src/handlers/coverEdge"));
-  ({ sendScheduled } = await import("../../src/handlers/handleSendMessage"));
+  ({ OutboundMessage, sendScheduled } =
+    await import("../../src/handlers/handleSendMessage"));
   ({ claimRatchetGate, openRatchetGate, resetRatchetGate } =
     await import("../../src/handlers/ratchetGate"));
   ({ clearTransfer, isTransferComplete, markTransferComplete } =
@@ -359,13 +361,14 @@ const runSend = async (options: RunOptions) => {
     "chat",
     options.policy ?? scheduledPolicy(),
     [{ peerId: PEER, epc: options.peerConnections[0] }],
-    2,
-    new Uint8Array(0),
-    new Uint8Array(64).fill(0xab),
-    ROOT_HEX,
-    TRANSFER_ID,
-    "ef".repeat(64),
-    module,
+    new OutboundMessage({
+      transferId: TRANSFER_ID,
+      hashHex: "ef".repeat(64),
+      merkleRoot: new Uint8Array(64).fill(0xab),
+      totalChunks: 2,
+      chunkHashes: new Uint8Array(2 * 64),
+      merkleModule: module,
+    }),
     module,
     undefined,
     undefined,

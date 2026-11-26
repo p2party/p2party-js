@@ -601,6 +601,73 @@ Notes on the table:
 - Not measured: other browsers, mobile, a frozen or discarded page, and a
   suspended process.
 
+### Sealed mode: when a cell leaves, and what it carries
+
+`driver.mjs --mode=sealed` drives `entry-sealed.ts` instead: real
+`CoverRuntime`s with real PQ runtimes, the real sealers and the real database
+worker (bundled by `build-sealed.ts`, which inlines it as the package build
+does), recorder channels in place of WebRTC. For every cell it records the slot
+deadline, when the wake-up ran, when `send()` was called and which producer
+made the cell; `summarise-sealed.mjs` turns that into per-phase statistics by
+kind of cell (also on a saved raw recording).
+
+- Query (`--query=`): `cadence`, `lanes`, `frames`; `edges` and `idle` (the
+  last `idle` edges carry no job); `phases` (each edge's phase offset in ms:
+  an edge with another phase is another room's grid on the page); `leaves`
+  (cells per message, for the proof-level build); `cells` (cells per job);
+  `gap` (cycles between jobs); `pool` (messages staged per edge).
+- Driver flags added: `--use-mock-keychain` (a fresh profile otherwise waits
+  on a macOS Keychain prompt before any http request), `--occluded-visible`
+  (adds `--disable-backgrounding-occluded-windows`, for a host whose screen is
+  locked; the page is still hidden by a tab in front of it), and network
+  isolation: no host name resolves but 127.0.0.1, every other address goes to
+  a proxy port on 127.0.0.1 where nothing listens, no background networking.
+  `--code=` names the code under test; each summary records it with the
+  SHA-256 of the bundle and of the entry file.
+- Each summary gives, per phase: cells and degraded cycles per edge and by the
+  scheduler's reason; per kind the wake-up→send and slot→send distributions
+  and their comparison with the dummies (median shift, Kolmogorov–Smirnov
+  distance and its 5 % critical value, share above the dummies' 99th
+  percentile), pooled and at the same slot position; the cross-edge and
+  cross-grid comparisons; real cells' stage times. Every cell's offset of the
+  visible and hidden phases is in the matching `.offsets.tsv`.
+- Offsets subtract the `Date.now()` slot deadline from
+  `performance.timeOrigin + now()`; their absolute value includes the offset
+  between the two clocks (`clockOffsetMs`), comparisons do not.
+
+### Recorded results, sealed mode and later timer runs (2026-11-26)
+
+All with the screen locked (`--occluded-visible`), Chrome for Testing 159,
+macOS 27.2 arm64, other work on the host (load averages in each file). The
+figures and what they show are in `docs/protocol-v4-pq-cover-architecture.md`
+(section 4, "When a cell leaves, and what it carries").
+
+- `results-2026-11-26-sealed-{100,500}ms-slots-before.json`: the send path
+  that produced a cell at its wake-up.
+- `results-2026-11-26-sealed-100ms-slots-produced-ahead-unbatched.json`,
+  `results-2026-11-26-sealed-{100,500}ms-slots-after.json`: cells produced a
+  slot ahead, before and after due wake-ups ran in one task (a cell not ready
+  then still degraded its cycle).
+- `results-2026-11-26-fallback-*.json`: the slot's dummy in place of a cell
+  not ready; one grid at 100 and 500 ms, two grids at 25 and 100 ms with 5- and
+  1,600-cell messages.
+- `results-2026-11-26-clearance-*.json`: with the production clearance; the
+  `-gap` runs leave a cycle between jobs, for comparisons at the same slot
+  position.
+- `results-2026-11-26-locked-{100,500}ms-slots-{shared-worker,worker-per-scheduler}.json`:
+  `entry.ts` on the shared worker (`4f7c09a`) and on one worker per scheduler
+  (`92d2c90`), under the same conditions.
+
+The runs before the fix round recorded no cell producer and no phases; their
+summaries were recomputed from the raw recordings (`resummarised`). The
+fix-round runs without `-gap` used an earlier entry file, without the producer
+fingerprints and `gap` (and, but for `2of5cells`, without `cells`); there a
+job lane's dummy is told from its cells by the frame type, which cannot tell
+a control job's dummy tail in `2of5cells` from its cells. Each summary names
+its entry file's SHA-256. The `-gap` runs used the committed file before two
+edits that change no code: a one-line reformatting by prettier and five lines
+of its header comment.
+
 ## `frontend-audit-report.md`
 
 The synthesized multi-agent UI/UX + v3/v4-wiring audit of `p2party.com`.

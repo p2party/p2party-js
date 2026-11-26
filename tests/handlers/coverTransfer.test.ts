@@ -333,6 +333,7 @@ describe("scheduled receipts and cancellation", () => {
     queueScheduledReceipt(epc, root, root);
     for (let i = 0; i < 3; i++) {
       await fake.enqueued[i].nextCell(fakeSlot());
+      fake.enqueued[i].cellSent?.(); // the scheduler sent it
       fake.settleCallbacks.get(fake.enqueued[i].id)!();
     }
     expect(
@@ -349,6 +350,7 @@ describe("scheduled receipts and cancellation", () => {
     // A later retry must create a live batch, never append to a removed one.
     queueScheduledChunkReceipt(epc, root, token(201));
     await fake.enqueued[3].nextCell(fakeSlot());
+    fake.enqueued[3].cellSent?.(); // the scheduler sent it
     expect(fake.sealed[3].subtype).toBe("chunk-receipts");
     expect(root[0]).toBe(1);
     releaseScheduledReceipts(epc);
@@ -373,6 +375,7 @@ describe("scheduled receipts and cancellation", () => {
     add(later, 4094); // one survivor + one completion + 4094 = the 4096 cap
     for (let i = 0; i < 2; i++) {
       await fake.enqueued[i].nextCell(fakeSlot());
+      fake.enqueued[i].cellSent?.(); // the scheduler sent it
       fake.settleCallbacks.get(fake.enqueued[i].id)!();
     }
     expect(
@@ -395,6 +398,7 @@ describe("scheduled receipts and cancellation", () => {
     queueScheduledChunkReceipt(epc, root, token);
     expect(queueScheduledReceipt(epc, root, token)).toBe(false);
     await fake.enqueued[0].nextCell(fakeSlot());
+    fake.enqueued[0].cellSent?.(); // the scheduler sent it
     expect(fake.sealed[0].subtype).toBe("chunk-receipts");
     fake.settleCallbacks.get(fake.enqueued[0].id)!();
     expect(fake.enqueued).toHaveLength(1);
@@ -413,6 +417,7 @@ describe("scheduled receipts and cancellation", () => {
     }
     expect(fake.enqueued).toHaveLength(1);
     await fake.enqueued[0].nextCell(fakeSlot());
+    fake.enqueued[0].cellSent?.(); // the scheduler sent it
     const first = fake.sealed[0];
     expect(first.subtype).toBe("chunk-receipts");
     if (first.subtype !== "chunk-receipts") throw new Error("wrong subtype");
@@ -420,6 +425,7 @@ describe("scheduled receipts and cancellation", () => {
     expect(first.merkleRoot).toEqual(root);
     fake.settleCallbacks.get(fake.enqueued[0].id)!();
     await fake.enqueued[1].nextCell(fakeSlot());
+    fake.enqueued[1].cellSent?.(); // the scheduler sent it
     const second = fake.sealed[1];
     if (second.subtype !== "chunk-receipts") throw new Error("wrong subtype");
     expect(second.tokens).toHaveLength(2);
@@ -434,8 +440,10 @@ describe("scheduled receipts and cancellation", () => {
     queueScheduledChunkReceipt(epc, new Uint8Array(64).fill(1), token);
     queueScheduledChunkReceipt(epc, new Uint8Array(64).fill(2), token);
     await fake.enqueued[0].nextCell(fakeSlot());
+    fake.enqueued[0].cellSent?.(); // the scheduler sent it
     fake.settleCallbacks.get(fake.enqueued[0].id)!();
     await fake.enqueued[1].nextCell(fakeSlot());
+    fake.enqueued[1].cellSent?.(); // the scheduler sent it
     expect(
       fake.sealed.map((cell) =>
         cell.subtype === "chunk-receipts" ? cell.merkleRoot[0] : -1,
@@ -457,11 +465,35 @@ describe("scheduled receipts and cancellation", () => {
     expect(job.declaredCellCount).toBe(1);
 
     const cell = await job.nextCell(fakeSlot());
+    job.cellSent?.(); // the scheduler sent it
     expect(cell).toHaveLength(WIRE_CHUNK_FRAME_LEN);
     expect(fake.sealed[0].subtype).toBe("receipt");
     // An empty queue produces a dummy substitution.
     expect(await job.nextCell(fakeSlot())).toBeNull();
 
+    releaseScheduledReceipts(epc);
+  });
+
+  test("a receipt cell discarded before it is sent is sealed again from the same receipt", async () => {
+    const fake = fakeRuntime(4);
+    const epc = fakeEpc(fake.runtime);
+    const root = new Uint8Array(64).fill(0xab);
+    expect(queueScheduledReceipt(epc, root, Uint8Array.from(root))).toBe(true);
+    const job = fake.enqueued[0];
+
+    // Produced a slot ahead, then discarded (a rekey): nothing was sent.
+    await job.nextCell(fakeSlot());
+    job.cellDiscarded?.();
+    const again = await job.nextCell(fakeSlot());
+    expect(again).toHaveLength(WIRE_CHUNK_FRAME_LEN);
+    expect(fake.sealed.map((cell) => cell.subtype)).toEqual([
+      "receipt",
+      "receipt",
+    ]);
+    // Sent: nothing is left to seal.
+    job.cellSent?.();
+    expect(await job.nextCell(fakeSlot())).toBeNull();
+    expect(fake.sealed).toHaveLength(2);
     releaseScheduledReceipts(epc);
   });
 

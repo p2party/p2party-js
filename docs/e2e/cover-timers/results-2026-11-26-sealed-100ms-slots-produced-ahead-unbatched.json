@@ -61,6 +61,41 @@
       "degradedCycles": 0,
       "cellsSent": 2610,
       "cellsExpected": 2610,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 2643,
         "p50": 7.8,
@@ -133,29 +168,62 @@
         "control": {
           "medianShiftMs": 0.3,
           "ks": 0.079,
-          "flaggedAtDummyP99": 0.017,
-          "flaggedAtDummyP90": 0.169
+          "ksCritical5pct": 0.085,
+          "flaggedAtReferenceP99": 0.017
         },
         "store-read": {
           "medianShiftMs": 0.7,
           "ks": 0.138,
-          "flaggedAtDummyP99": 0.027,
-          "flaggedAtDummyP90": 0.168
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.027
         },
         "store-write": {
           "medianShiftMs": 0.5,
           "ks": 0.117,
-          "flaggedAtDummyP99": 0.027,
-          "flaggedAtDummyP90": 0.168
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.027
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": -0.1,
+          "ks": 0.047,
+          "ksCritical5pct": 0.085,
+          "flaggedAtReferenceP99": 0.007
+        },
+        "store-read": {
+          "medianShiftMs": 0.2,
+          "ks": 0.082,
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.007
+        },
+        "store-write": {
+          "medianShiftMs": 0.1,
+          "ks": 0.054,
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.01
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 9.4,
+        "1": 7.7,
+        "2": 8,
+        "3": 8,
+        "4": 8.1,
+        "5": 7.4,
+        "6": 7.6,
+        "7": 7.8,
+        "8": 8,
+        "9": 7.5
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 1323,
-          "p50": 7.6,
-          "p90": 10.8,
-          "p99": 11.3,
-          "max": 11.7
+          "n": 441,
+          "p50": 7.5,
+          "p90": 10.7,
+          "p99": 11.1,
+          "max": 11.6
         },
         "dummyBesideReal": {
           "n": 440,
@@ -164,8 +232,13 @@
           "p99": 11.6,
           "max": 12
         },
-        "ks": 0.13
+        "medianShiftMs": 0.6,
+        "ks": 0.142,
+        "ksCritical5pct": 0.092,
+        "flaggedAtReferenceP99": 0.052,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -234,6 +307,56 @@
       "degradedCycles": 177,
       "cellsSent": 41,
       "cellsExpected": 1770,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 12,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 11,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 18,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 116,
         "p50": 144.2,
@@ -306,29 +429,57 @@
         "control": {
           "medianShiftMs": -0.9,
           "ks": 0.175,
-          "flaggedAtDummyP99": 0.111,
-          "flaggedAtDummyP90": 0.222
+          "ksCritical5pct": 0.542,
+          "flaggedAtReferenceP99": 0.111
         },
         "store-read": {
           "medianShiftMs": 0.8,
           "ks": 0.286,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0.167
+          "ksCritical5pct": 0.63,
+          "flaggedAtReferenceP99": 0
         },
         "store-write": {
           "medianShiftMs": -0.7,
           "ks": 0.196,
-          "flaggedAtDummyP99": 0.125,
-          "flaggedAtDummyP90": 0.125
+          "ksCritical5pct": 0.565,
+          "flaggedAtReferenceP99": 0.125
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.4,
+          "ks": 0.333,
+          "ksCritical5pct": 0.542,
+          "flaggedAtReferenceP99": 0.111
+        },
+        "store-read": {
+          "medianShiftMs": 1,
+          "ks": 0.5,
+          "ksCritical5pct": 0.63,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.5,
+          "ks": 0.417,
+          "ksCritical5pct": 0.565,
+          "flaggedAtReferenceP99": 0.125
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 77.9,
+        "1": 74.1,
+        "2": 50.4,
+        "4": 11.1,
+        "undefined": 0.8
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 12,
-          "p50": 2.4,
-          "p90": 75.4,
-          "p99": 76.8,
-          "max": 76.8
+          "n": 10,
+          "p50": 1.7,
+          "p90": 74.1,
+          "p99": 74.1,
+          "max": 74.1
         },
         "dummyBesideReal": {
           "n": 9,
@@ -337,8 +488,18 @@
           "p99": 96.3,
           "max": 96.3
         },
-        "ks": 0.25
+        "medianShiftMs": 0.9,
+        "ks": 0.367,
+        "ksCritical5pct": 0.625,
+        "flaggedAtReferenceP99": 0.222,
+        "atSamePosition": {
+          "medianShiftMs": -0.7,
+          "ks": 0.55,
+          "ksCritical5pct": 0.805,
+          "flaggedAtReferenceP99": 0
+        }
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -407,6 +568,41 @@
       "degradedCycles": 0,
       "cellsSent": 0,
       "cellsExpected": 0,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 0,
         "p50": null,
@@ -476,6 +672,9 @@
         }
       },
       "versusDummy": {},
+      "versusDummyAtSamePosition": {},
+      "dummyMedianByPositionMs": {},
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
           "n": 0,
@@ -491,8 +690,9 @@
           "p99": null,
           "max": null
         },
-        "ks": null
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {}
     },
     "hiddenAll": {
@@ -500,6 +700,56 @@
       "degradedCycles": 177,
       "cellsSent": 41,
       "cellsExpected": 1770,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 12,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 11,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 18,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 24
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 39,
+            "(no degrade event in this or the cycle before)": 20
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 116,
         "p50": 144.2,
@@ -572,29 +822,57 @@
         "control": {
           "medianShiftMs": -0.9,
           "ks": 0.175,
-          "flaggedAtDummyP99": 0.111,
-          "flaggedAtDummyP90": 0.222
+          "ksCritical5pct": 0.542,
+          "flaggedAtReferenceP99": 0.111
         },
         "store-read": {
           "medianShiftMs": 0.8,
           "ks": 0.286,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0.167
+          "ksCritical5pct": 0.63,
+          "flaggedAtReferenceP99": 0
         },
         "store-write": {
           "medianShiftMs": -0.7,
           "ks": 0.196,
-          "flaggedAtDummyP99": 0.125,
-          "flaggedAtDummyP90": 0.125
+          "ksCritical5pct": 0.565,
+          "flaggedAtReferenceP99": 0.125
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.4,
+          "ks": 0.333,
+          "ksCritical5pct": 0.542,
+          "flaggedAtReferenceP99": 0.111
+        },
+        "store-read": {
+          "medianShiftMs": 1,
+          "ks": 0.5,
+          "ksCritical5pct": 0.63,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.5,
+          "ks": 0.417,
+          "ksCritical5pct": 0.565,
+          "flaggedAtReferenceP99": 0.125
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 77.9,
+        "1": 74.1,
+        "2": 50.4,
+        "4": 11.1,
+        "undefined": 0.8
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 12,
-          "p50": 2.4,
-          "p90": 75.4,
-          "p99": 76.8,
-          "max": 76.8
+          "n": 10,
+          "p50": 1.7,
+          "p90": 74.1,
+          "p99": 74.1,
+          "max": 74.1
         },
         "dummyBesideReal": {
           "n": 9,
@@ -603,8 +881,18 @@
           "p99": 96.3,
           "max": 96.3
         },
-        "ks": 0.25
+        "medianShiftMs": 0.9,
+        "ks": 0.367,
+        "ksCritical5pct": 0.625,
+        "flaggedAtReferenceP99": 0.222,
+        "atSamePosition": {
+          "medianShiftMs": -0.7,
+          "ks": 0.55,
+          "ksCritical5pct": 0.805,
+          "flaggedAtReferenceP99": 0
+        }
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -673,6 +961,47 @@
       "degradedCycles": 3,
       "cellsSent": 390,
       "cellsExpected": 420,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 402,
         "p50": 7.5,
@@ -745,29 +1074,62 @@
         "control": {
           "medianShiftMs": -0.1,
           "ks": 0.165,
-          "flaggedAtDummyP99": 0.022,
-          "flaggedAtDummyP90": 0.089
+          "ksCritical5pct": 0.219,
+          "flaggedAtReferenceP99": 0.022
         },
         "store-read": {
           "medianShiftMs": -1.1,
           "ks": 0.213,
-          "flaggedAtDummyP99": 0.106,
-          "flaggedAtDummyP90": 0.149
+          "ksCritical5pct": 0.215,
+          "flaggedAtReferenceP99": 0.106
         },
         "store-write": {
           "medianShiftMs": 0.2,
           "ks": 0.135,
-          "flaggedAtDummyP99": 0.071,
-          "flaggedAtDummyP90": 0.143
+          "ksCritical5pct": 0.226,
+          "flaggedAtReferenceP99": 0.071
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.3,
+          "ks": 0.154,
+          "ksCritical5pct": 0.219,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.1,
+          "ks": 0.132,
+          "ksCritical5pct": 0.215,
+          "flaggedAtReferenceP99": 0.021
+        },
+        "store-write": {
+          "medianShiftMs": 0.3,
+          "ks": 0.098,
+          "ksCritical5pct": 0.226,
+          "flaggedAtReferenceP99": 0.024
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 8.2,
+        "1": 6,
+        "2": 4.5,
+        "3": 7.5,
+        "4": 2.5,
+        "5": 7.5,
+        "6": 8.3,
+        "7": 7.7,
+        "8": 7.5,
+        "9": 9.3
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 201,
-          "p50": 7.5,
+          "n": 67,
+          "p50": 7.6,
           "p90": 10.5,
           "p99": 10.9,
-          "max": 11.1
+          "max": 10.9
         },
         "dummyBesideReal": {
           "n": 67,
@@ -776,8 +1138,13 @@
           "p99": 10.9,
           "max": 10.9
         },
-        "ks": 0.209
+        "medianShiftMs": -0.1,
+        "ks": 0.224,
+        "ksCritical5pct": 0.235,
+        "flaggedAtReferenceP99": 0,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -841,5 +1208,11 @@
         }
       }
     }
-  }
+  },
+  "sha256": {
+    "bundle": "4dc50b68df7cc5ec6f43fc5fd38fb350c14169f8842d0f51c14373ea5d5110b5",
+    "docs/e2e/cover-timers/entry-sealed.ts": "83600b9d4f15ad4ce7c9cd1fcf73ff24eadaa5f0057ac42979aaa0fc4381a099"
+  },
+  "resummarised": "Phases recomputed on 2026-11-26 from the raw recording with the fix-round summarise-sealed.mjs (adds byEdge, versusDummyAtSamePosition and every cell offset); the run itself is unchanged.",
+  "cellOffsetsFile": "results-2026-11-26-sealed-100ms-slots-produced-ahead-unbatched.offsets.tsv"
 }

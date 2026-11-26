@@ -32,9 +32,18 @@ import type { CoverClock, CoverTimerKind } from "./coverScheduler";
 // still happens on the page, so on a hidden page every cell leaves late
 // against the slot grid even when no cycle degrades, and tab visibility is
 // readable from that. Closing it needs the cells sent from the worker itself,
-// which is not built (an owner decision). That shift is the same for every
-// cell: what a cell carries does not change when it leaves (the scheduler
-// produces each cell a slot ahead, CoverScheduler.prepare).
+// which is not built (an owner decision). The shift was measured the same for
+// every kind of cell (the scheduler produces each cell a slot ahead,
+// CoverScheduler.prepare): on one page with the screen locked, at 25, 100 and
+// 500 ms slots, one grid and two grids 1 to 10 ms apart, messages of 5 and
+// 1,600 cells, timed at send() on the data channel, not on the wire. What
+// remains (the first slot of a cycle runs earlier; cycles with jobs ran up to
+// 1.2 ms apart from cycles without) is in the architecture document.
+//
+// The host runs every wake-up already due on the page's clock in one task, so
+// the edges of one grid all send before any produces its next cell; and a
+// production waits (whenClear) while another grid's wake-up is about to fall
+// due.
 //
 // Lateness is judged on ONE clock, the page's `Date.now()`, read when the page
 // runs the callback: the scheduler compares that against the slot's deadline.
@@ -218,6 +227,8 @@ class CoverTimerHost {
   #deliveredSinceRestart = 0;
   #permanent: string | undefined;
   #ping: { readonly id: number; readonly timer: unknown } | undefined;
+  /** Work waiting for the wake-ups due by `until` to have run. */
+  #deferred: Array<{ readonly until: number; readonly run: () => void }> = [];
 
   constructor(env: CoverTimerEnvironment) {
     this.env = env;
@@ -257,6 +268,7 @@ class CoverTimerHost {
     for (const [id, wakeUp] of this.#wakeUps)
       if (wakeUp.clock === clock) this.cancel(id);
     if (this.#clocks.size > 0) return;
+    this.#deferred = [];
     this.#clearPing();
     const worker = this.#worker;
     this.#worker = undefined;
@@ -321,6 +333,8 @@ class CoverTimerHost {
     if (!wakeUp) return;
     this.#wakeUps.delete(id);
     this.#clearPageTimers(wakeUp);
+    // Work that waited for it waits no longer.
+    this.#releaseDeferred();
     if (!wakeUp.onWorker) return;
     try {
       this.#worker?.postMessage({ op: "cancel", id });
@@ -411,7 +425,42 @@ class CoverTimerHost {
       ran += 1;
       dueWakeUp.callback();
     }
+    this.#releaseDeferred();
     return ran;
+  }
+
+  /**
+   * Run `run` once no wake-up of any clock on this page falls due within
+   * `withinMs`: at once (in a microtask) when none does, else right after
+   * those that do have run. Scheduled cover starts a cell's production this
+   * way, so its synchronous work never runs over another grid's wake-up that
+   * is about to fall due (the edges of one grid run in one batch already).
+   */
+  whenClear(withinMs: number, run: () => void): void {
+    queueMicrotask(() => {
+      const horizon = this.env.now() + withinMs;
+      let until = -Infinity;
+      for (const wakeUp of this.#wakeUps.values())
+        if (wakeUp.deadline <= horizon && wakeUp.deadline > until)
+          until = wakeUp.deadline;
+      if (until === -Infinity) run();
+      else this.#deferred.push({ until, run });
+    });
+  }
+
+  #releaseDeferred(): void {
+    if (this.#deferred.length === 0) return;
+    // After the batch's own microtasks: its sends' continuations.
+    queueMicrotask(() => {
+      const pendingBy = (until: number): boolean => {
+        for (const wakeUp of this.#wakeUps.values())
+          if (wakeUp.deadline <= until) return true;
+        return false;
+      };
+      const ready = this.#deferred.filter(({ until }) => !pendingBy(until));
+      this.#deferred = this.#deferred.filter(({ until }) => pendingBy(until));
+      for (const { run } of ready) run();
+    });
   }
 
   /**
@@ -591,6 +640,11 @@ class HostedCoverClock implements CoverTimerClock {
   clearTimeout(handle: unknown): void {
     if (typeof handle !== "number" || !this.#ids.delete(handle)) return;
     this.#host.cancel(handle);
+  }
+
+  whenClear(withinMs: number, run: () => void): void {
+    if (this.#destroyed) return;
+    this.#host.whenClear(withinMs, run);
   }
 
   destroy(): void {

@@ -1,0 +1,1807 @@
+{
+  "code": "41e8943 + fix round 1 working tree (fallback dummy per slot, production clearance)",
+  "mode": "sealed",
+  "hostState": "macOS screen locked for the whole run (ioreg IOConsoleLocked = Yes before and after), so every window was occluded; --disable-backgrounding-occluded-windows kept the page visible until a tab was opened in front of it. Other agents were running on the host (see loadAverage1m).",
+  "measuredAt": "2026-11-26T21:46:15.422Z",
+  "sha256": {
+    "bundle": "2303a051a155ff3675dfa5393ed4e092841f85df2ca8ac46ba1eef6a77bb6b46",
+    "docs/e2e/cover-timers/entry-sealed.ts": "6a34460618ba31da2a83f89145d2b34ba59edc1193517e82aaf6bc3a5fb0ec90"
+  },
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--proxy-server=http://127.0.0.1:5919",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--use-mock-keychain",
+    "--disable-backgrounding-occluded-windows",
+    "http://127.0.0.1:5918/?cadence=1000&edges=9&idle=7&phases=0,0,0,1,2,3,5,7,10&gap=1&pool=40"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [-1, "visible"],
+    [90210, "hidden"],
+    [96231, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 1000,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 99,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [193, 3.4013671875],
+    [95223, 3.83544921875],
+    [100235, 4.00830078125]
+  ],
+  "phasesMs": {
+    "visible": [2000, 90194],
+    "hidden0to60s": [90194, 95224],
+    "hidden60to300s": [95224, 95224],
+    "hiddenPast300s": [95224, 95224],
+    "hiddenAll": [90194, 95224],
+    "visibleAgain": [95224, 100235]
+  },
+  "edges": 9,
+  "idleEdges": 7,
+  "edgePhasesMs": [0, 0, 0, 1, 2, 3, 5, 7, 10],
+  "leavesPerMessage": 5,
+  "proofLevelBuildMs": [
+    0.5, 0.09999996423721313, 0, 0, 0, 0, 0.09999996423721313, 0, 0, 0
+  ],
+  "clockOffsetMs": {
+    "start": {
+      "min": 0.7998046875,
+      "median": 0.7998046875,
+      "max": 0.7998046875
+    },
+    "end": {
+      "min": -0.300048828125,
+      "median": -0.300048828125,
+      "max": -0.300048828125
+    }
+  },
+  "poolPerEdge": 40,
+  "sealed": {
+    "visible": {
+      "cycles": 783,
+      "degradedCycles": 0,
+      "cellsSent": 7830,
+      "cellsExpected": 7830,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 7938,
+        "p50": 4.2,
+        "p90": 10.5,
+        "p99": 11.4,
+        "max": 12.2,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 2206,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.2
+        },
+        "control": {
+          "n": 150,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.2
+        },
+        "store-read": {
+          "n": 145,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-write": {
+          "n": 145,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 2206,
+          "p50": 8.6,
+          "p90": 11,
+          "p99": 11.7,
+          "max": 12.2
+        },
+        "control": {
+          "n": 150,
+          "p50": 9.4,
+          "p90": 11.1,
+          "p99": 11.6,
+          "max": 11.7
+        },
+        "store-read": {
+          "n": 145,
+          "p50": 8.4,
+          "p90": 11.1,
+          "p99": 11.4,
+          "max": 11.4
+        },
+        "store-write": {
+          "n": 145,
+          "p50": 8.7,
+          "p90": 11.2,
+          "p99": 11.6,
+          "max": 11.7
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 0.8,
+          "ks": 0.048,
+          "ksCritical5pct": 0.115,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.2,
+          "ks": 0.065,
+          "ksCritical5pct": 0.117,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.1,
+          "ks": 0.066,
+          "ksCritical5pct": 0.117,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.2,
+          "ks": 0.075,
+          "ksCritical5pct": 0.115,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.4,
+          "ks": 0.083,
+          "ksCritical5pct": 0.117,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0,
+          "ks": 0.09,
+          "ksCritical5pct": 0.117,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 8.6,
+        "1": 9.4,
+        "2": 9.8,
+        "3": 8.3,
+        "4": 8.3,
+        "5": 8.8,
+        "6": 9.8,
+        "7": 8.5,
+        "8": 8.8,
+        "9": 7.3,
+        "undefined": 5.8
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 662,
+          "p50": 8.6,
+          "p90": 11,
+          "p99": 11.7,
+          "max": 12.2
+        },
+        "dummyBesideReal": {
+          "n": 220,
+          "p50": 8.8,
+          "p90": 11.2,
+          "p99": 11.5,
+          "max": 11.7
+        },
+        "medianShiftMs": 0.2,
+        "ks": 0.059,
+        "ksCritical5pct": 0.106,
+        "flaggedAtReferenceP99": 0,
+        "atSamePosition": {
+          "medianShiftMs": 0,
+          "ks": 0.096,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 7.2,
+            "p90": 10,
+            "p99": 10.6,
+            "max": 10.6
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 8,
+            "p90": 10.1,
+            "p99": 10.7,
+            "max": 11.2
+          },
+          "medianShiftMs": -0.8,
+          "ks": 0.071,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -1.1,
+            "ks": 0.117,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.023
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 6.2,
+            "p90": 9,
+            "p99": 9.6,
+            "max": 9.6
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 7,
+            "p90": 9.1,
+            "p99": 9.7,
+            "max": 10.2
+          },
+          "medianShiftMs": -0.8,
+          "ks": 0.073,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -1.1,
+            "ks": 0.108,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.032
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 5.2,
+            "p90": 8,
+            "p99": 8.6,
+            "max": 8.6
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 6,
+            "p90": 8.1,
+            "p99": 8.7,
+            "max": 9.2
+          },
+          "medianShiftMs": -0.8,
+          "ks": 0.067,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -1.2,
+            "ks": 0.105,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.018
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 3.4,
+            "p90": 6,
+            "p99": 6.6,
+            "max": 6.7
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 4.1,
+            "p90": 6.1,
+            "p99": 6.8,
+            "max": 7.3
+          },
+          "medianShiftMs": -0.7,
+          "ks": 0.067,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -0.7,
+            "ks": 0.084,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.018
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 2.4,
+            "p90": 4.1,
+            "p99": 4.6,
+            "max": 4.7
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 2.7,
+            "p90": 4.2,
+            "p99": 4.8,
+            "max": 5.3
+          },
+          "medianShiftMs": -0.3,
+          "ks": 0.068,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 0.1,
+            "ks": 0.093,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.009
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 220,
+            "p50": 1.3,
+            "p90": 2.5,
+            "p99": 3.2,
+            "max": 4.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 662,
+            "p50": 1.3,
+            "p90": 2.6,
+            "p99": 3.6,
+            "max": 4
+          },
+          "medianShiftMs": 0,
+          "ks": 0.043,
+          "ksCritical5pct": 0.106,
+          "flaggedAtReferenceP99": 0.005,
+          "atSamePosition": {
+            "medianShiftMs": -0.1,
+            "ks": 0.081,
+            "ksCritical5pct": 0.106,
+            "flaggedAtReferenceP99": 0.009
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-read": {
+          "read": {
+            "n": 145,
+            "p50": 0.8,
+            "p90": 1.4,
+            "p99": 3.1,
+            "max": 3.7
+          },
+          "plaintext": {
+            "n": 145,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 145,
+            "p50": 0.3,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.6
+          },
+          "total": {
+            "n": 145,
+            "p50": 1,
+            "p90": 1.8,
+            "p99": 3.4,
+            "max": 4.2
+          }
+        },
+        "store-write": {
+          "read": {
+            "n": 145,
+            "p50": 1,
+            "p90": 1.8,
+            "p99": 3.6,
+            "max": 4.1
+          },
+          "plaintext": {
+            "n": 145,
+            "p50": 1.1,
+            "p90": 2,
+            "p99": 4.5,
+            "max": 7.3
+          },
+          "seal": {
+            "n": 145,
+            "p50": 0.3,
+            "p90": 0.4,
+            "p99": 0.5,
+            "max": 0.6
+          },
+          "total": {
+            "n": 145,
+            "p50": 2.3,
+            "p90": 4.4,
+            "p99": 6.5,
+            "max": 8.6
+          }
+        }
+      }
+    },
+    "hidden0to60s": {
+      "cycles": 36,
+      "degradedCycles": 36,
+      "cellsSent": 0,
+      "cellsExpected": 360,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 27,
+        "p50": 150.3,
+        "p90": 162.7,
+        "p99": 162.9,
+        "max": 162.9,
+        "beyondToleranceShare": 0.667
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 3,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 3,
+          "p50": 6.2,
+          "p90": 6.2,
+          "p99": 6.2,
+          "max": 6.2
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "versusDummy": {},
+      "versusDummyAtSamePosition": {},
+      "dummyMedianByPositionMs": {
+        "4": 6.2
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 1,
+          "p50": 6.2,
+          "p90": 6.2,
+          "p99": 6.2,
+          "max": 6.2
+        },
+        "dummyBesideReal": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "atSamePosition": null
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 5.2,
+            "p90": 5.2,
+            "p99": 5.2,
+            "max": 5.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 4.3,
+            "p90": 4.3,
+            "p99": 4.3,
+            "max": 4.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 3.3,
+            "p90": 3.3,
+            "p99": 3.3,
+            "max": 3.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 1.3,
+            "p90": 1.3,
+            "p99": 1.3,
+            "max": 1.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 85.3,
+            "p90": 85.3,
+            "p99": 85.3,
+            "max": 85.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 82.3,
+            "p90": 82.3,
+            "p99": 82.3,
+            "max": 82.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        }
+      },
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 1,
+            "p50": 1.5,
+            "p90": 1.5,
+            "p99": 1.5,
+            "max": 1.5
+          },
+          "plaintext": {
+            "n": 1,
+            "p50": 2,
+            "p90": 2,
+            "p99": 2,
+            "max": 2
+          },
+          "seal": {
+            "n": 1,
+            "p50": 0.5,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 1,
+            "p50": 4,
+            "p90": 4,
+            "p99": 4,
+            "max": 4
+          }
+        }
+      }
+    },
+    "hiddenAll": {
+      "cycles": 36,
+      "degradedCycles": 36,
+      "cellsSent": 0,
+      "cellsExpected": 360,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 4,
+          "degradedCycles": 4,
+          "cellsSent": 0,
+          "cellsExpected": 40,
+          "degradeEvents": {
+            "missed-deadline": 2
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 2,
+            "(no degrade event in this or the cycle before)": 2
+          }
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 27,
+        "p50": 150.3,
+        "p90": 162.7,
+        "p99": 162.9,
+        "max": 162.9,
+        "beyondToleranceShare": 0.667
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 3,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 3,
+          "p50": 6.2,
+          "p90": 6.2,
+          "p99": 6.2,
+          "max": 6.2
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "versusDummy": {},
+      "versusDummyAtSamePosition": {},
+      "dummyMedianByPositionMs": {
+        "4": 6.2
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 1,
+          "p50": 6.2,
+          "p90": 6.2,
+          "p99": 6.2,
+          "max": 6.2
+        },
+        "dummyBesideReal": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "atSamePosition": null
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 5.2,
+            "p90": 5.2,
+            "p99": 5.2,
+            "max": 5.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 4.3,
+            "p90": 4.3,
+            "p99": 4.3,
+            "max": 4.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 3.3,
+            "p90": 3.3,
+            "p99": 3.3,
+            "max": 3.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 1.3,
+            "p90": 1.3,
+            "p99": 1.3,
+            "max": 1.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 85.3,
+            "p90": 85.3,
+            "p99": 85.3,
+            "max": 85.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 1,
+            "p50": 82.3,
+            "p90": 82.3,
+            "p99": 82.3,
+            "max": 82.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 0,
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "max": null
+          },
+          "atSamePosition": null
+        }
+      },
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 1,
+            "p50": 1.5,
+            "p90": 1.5,
+            "p99": 1.5,
+            "max": 1.5
+          },
+          "plaintext": {
+            "n": 1,
+            "p50": 2,
+            "p90": 2,
+            "p99": 2,
+            "max": 2
+          },
+          "seal": {
+            "n": 1,
+            "p50": 0.5,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 1,
+            "p50": 4,
+            "p90": 4,
+            "p99": 4,
+            "max": 4
+          }
+        }
+      }
+    },
+    "visibleAgain": {
+      "cycles": 36,
+      "degradedCycles": 9,
+      "cellsSent": 270,
+      "cellsExpected": 360,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 4,
+          "degradedCycles": 1,
+          "cellsSent": 30,
+          "cellsExpected": 40,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 315,
+        "p50": 4.5,
+        "p90": 10.5,
+        "p99": 11.4,
+        "max": 11.7,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 85,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 10,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-read": {
+          "n": 5,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-write": {
+          "n": 5,
+          "p50": 0.1,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 85,
+          "p50": 6.8,
+          "p90": 10.9,
+          "p99": 11.7,
+          "max": 11.7
+        },
+        "control": {
+          "n": 10,
+          "p50": 10.6,
+          "p90": 11.4,
+          "p99": 11.4,
+          "max": 11.4
+        },
+        "store-read": {
+          "n": 5,
+          "p50": 10.6,
+          "p90": 11.4,
+          "p99": 11.4,
+          "max": 11.4
+        },
+        "store-write": {
+          "n": 5,
+          "p50": 10.5,
+          "p90": 11,
+          "p99": 11,
+          "max": 11
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 3.8,
+          "ks": 0.576,
+          "ksCritical5pct": 0.455,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 3.8,
+          "ks": 0.4,
+          "ksCritical5pct": 0.626,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 3.7,
+          "ks": 0.765,
+          "ksCritical5pct": 0.626,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0,
+          "ks": 0.176,
+          "ksCritical5pct": 0.455,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0,
+          "ks": 0.224,
+          "ksCritical5pct": 0.626,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": -0.2,
+          "ks": 0.259,
+          "ksCritical5pct": 0.626,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 10.7,
+        "1": 3.1,
+        "2": 11.3,
+        "3": 9,
+        "4": 1.1,
+        "5": 6.8,
+        "6": 8.7,
+        "7": 4.6,
+        "8": 11.7,
+        "9": 1.2
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 25,
+          "p50": 6.5,
+          "p90": 10.9,
+          "p99": 11.7,
+          "max": 11.7
+        },
+        "dummyBesideReal": {
+          "n": 10,
+          "p50": 10.6,
+          "p90": 11.4,
+          "p99": 11.4,
+          "max": 11.4
+        },
+        "medianShiftMs": 4.1,
+        "ks": 0.64,
+        "ksCritical5pct": 0.509,
+        "flaggedAtReferenceP99": 0,
+        "atSamePosition": {
+          "medianShiftMs": -0.2,
+          "ks": 0.24,
+          "ksCritical5pct": 0.509,
+          "flaggedAtReferenceP99": 0.1
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 6.8,
+            "p90": 9.1,
+            "p99": 9.1,
+            "max": 9.1
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 8,
+            "p90": 10.4,
+            "p99": 10.7,
+            "max": 10.7
+          },
+          "medianShiftMs": -1.2,
+          "ks": 0.48,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 3.2,
+            "ks": 0.618,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 5.8,
+            "p90": 8.2,
+            "p99": 8.2,
+            "max": 8.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 7,
+            "p90": 9.4,
+            "p99": 9.8,
+            "max": 9.8
+          },
+          "medianShiftMs": -1.2,
+          "ks": 0.48,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 2.6,
+            "ks": 0.547,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 4.9,
+            "p90": 7.2,
+            "p99": 7.2,
+            "max": 7.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 6.1,
+            "p90": 8.4,
+            "p99": 8.8,
+            "max": 8.8
+          },
+          "medianShiftMs": -1.2,
+          "ks": 0.48,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 2.6,
+            "ks": 0.658,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0.111
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 4.1,
+            "p90": 5.2,
+            "p99": 5.2,
+            "max": 5.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 4.1,
+            "p90": 6.4,
+            "p99": 6.8,
+            "max": 6.8
+          },
+          "medianShiftMs": 0,
+          "ks": 0.48,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 1,
+            "ks": 0.547,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 3,
+            "p90": 3.2,
+            "p99": 3.2,
+            "max": 3.2
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 2.1,
+            "p90": 4.4,
+            "p99": 4.8,
+            "max": 4.8
+          },
+          "medianShiftMs": 0.9,
+          "ks": 0.48,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 1,
+            "ks": 0.658,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 0.2,
+            "p90": 5.3,
+            "p99": 5.3,
+            "max": 5.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 25,
+            "p50": 1.1,
+            "p90": 2.2,
+            "p99": 2.7,
+            "max": 2.7
+          },
+          "medianShiftMs": -0.9,
+          "ks": 0.667,
+          "ksCritical5pct": 0.529,
+          "flaggedAtReferenceP99": 0.222,
+          "atSamePosition": {
+            "medianShiftMs": -1.7,
+            "ks": 0.667,
+            "ksCritical5pct": 0.529,
+            "flaggedAtReferenceP99": 0.111
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 4,
+            "p50": 1.6,
+            "p90": 2.3,
+            "p99": 2.3,
+            "max": 2.3
+          },
+          "plaintext": {
+            "n": 4,
+            "p50": 1.9,
+            "p90": 2,
+            "p99": 2,
+            "max": 2
+          },
+          "seal": {
+            "n": 4,
+            "p50": 0.3,
+            "p90": 0.4,
+            "p99": 0.4,
+            "max": 0.4
+          },
+          "total": {
+            "n": 4,
+            "p50": 3.4,
+            "p90": 4.4,
+            "p99": 4.4,
+            "max": 4.4
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 5,
+            "p50": 1.1,
+            "p90": 1.6,
+            "p99": 1.6,
+            "max": 1.6
+          },
+          "plaintext": {
+            "n": 5,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 5,
+            "p50": 0.4,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 5,
+            "p50": 1.6,
+            "p90": 2,
+            "p99": 2,
+            "max": 2
+          }
+        }
+      }
+    }
+  },
+  "cellOffsetsFile": "results-2026-11-26-clearance-two-grids-100ms-5cells-gap.offsets.tsv"
+}

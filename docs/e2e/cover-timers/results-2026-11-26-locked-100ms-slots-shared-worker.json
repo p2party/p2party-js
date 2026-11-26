@@ -197,5 +197,9 @@
       "cellsSent": 80,
       "cellsExpected": 90
     }
+  },
+  "sha256": {
+    "bundle": "3ce9ff3d1bdba7136ae67669d3d454ebc5c03769950bad295d54238cb2e52489",
+    "docs/e2e/cover-timers/entry.ts (at the code commit)": "4b2fffe77127fe3986e3334ee131136037a0bb8098b48bd4be523c12d994d2be"
   }
 }

@@ -181,6 +181,25 @@ export type ReceiveVerificationVerdict =
 export type ReceiveVerificationOutcome = "complete" | "integrity" | "aborted";
 
 /**
+ * Posted by the worker (outside any request) when it verified a held file on
+ * its own: at the next start, when the SDK loaded that file's room.
+ */
+export interface HeldFileSettledNotice {
+  roomId: string;
+  fromPeerId: string;
+  merkleRoot: string;
+  hash: string;
+  filename: string;
+  messageType: number;
+  channelLabel: string;
+  timestamp: number;
+  totalSize: number;
+  chunkIndex: number;
+  verdict: ReceiveVerificationVerdict;
+  outcome: ReceiveVerificationOutcome;
+}
+
+/**
  * Why a received chunk could not be stored. Nothing for it was committed.
  * - `insufficient-quota`: the first chunk of a transfer larger than the
  *   estimated free storage; refused before anything was written.

@@ -1,5 +1,5 @@
 import { executeOutbox, storeOutboxChunk } from "./outboxStore";
-import type { OutboxLease } from "./outboxTypes";
+import type { OutboxLease, ReceiveActivity } from "./outboxTypes";
 import { deleteDB } from "idb";
 import type { IDBPObjectStore, StoreNames } from "idb";
 
@@ -10,10 +10,11 @@ import {
   OPFS_REASSEMBLE_DIR,
   RECEIVE_VERIFY_BATCH_CHUNKS,
   RECEIVE_VERIFY_LEASE_RENEW_MS,
+  RECEIVE_VERIFY_SETTLED_MEMORY,
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
-import { DatabaseUpgradeBlockedError } from "./dbErrors";
+import { DatabaseUpgradeBlockedError, StorageFailedError } from "./dbErrors";
 import type { RepoSchema } from "./src/getDB";
 import { Sha512Stream } from "./sha512Stream";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -43,6 +44,7 @@ import type {
   ReceiveChunkStored,
   ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
+  HeldFileSettledNotice,
   ReceiveVerificationMarker,
   ReceiveVerificationOutcome,
   ReceiveVerificationVerdict,
@@ -491,6 +493,11 @@ async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
   const db = await getDB();
   const messages = await db.getAllFromIndex("messageData", "roomId", roomId);
   db.close();
+
+  // The SDK loads a room's messages here once per room load. Files of this
+  // room left held by an interrupted verification are verified now, after
+  // this reply, so the room's list never waits for a hash.
+  void verifyHeldFilesOfRoom(messages);
 
   const messagesLen = messages.length;
 
@@ -982,20 +989,39 @@ async function assembleToOPFSImpl(
 
 // Remove a message's reassembled OPFS file (best-effort). Wired into the message
 // deletion path so assembled files don't accumulate as orphaned full-size copies.
+// Remove a received file. A file that is not there is fine; any other failure
+// is retried once after its handle is closed, and then reported as a
+// StorageFailedError: a delete must never leave the file behind silently.
 async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
+  const storage = opfsStorage();
+  if (!storage || typeof storage.getDirectory !== "function") return;
+  const remove = async (): Promise<void> => {
+    const root = await storage.getDirectory!();
+    let dir: FileSystemDirectoryHandle;
+    try {
+      dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR);
+    } catch (error) {
+      if ((error as { name?: string } | null)?.name === "NotFoundError") return;
+      throw error;
+    }
+    try {
+      await dir.removeEntry(merkleRootHex);
+    } catch (error) {
+      if ((error as { name?: string } | null)?.name === "NotFoundError") return;
+      throw error;
+    }
+  };
   try {
-    const storage = opfsStorage();
-    if (!storage || typeof storage.getDirectory !== "function") return;
-    const root = await storage.getDirectory();
-    const dir = await root
-      .getDirectoryHandle(OPFS_REASSEMBLE_DIR)
-      .catch(() => null);
-    if (dir)
-      await dir.removeEntry(merkleRootHex).catch(() => {
-        /* not present — fine */
-      });
+    await remove();
   } catch {
-    /* ignore */
+    try {
+      await fnCloseReceiveFile(merkleRootHex);
+      await remove();
+    } catch (error) {
+      throw new StorageFailedError(
+        `p2party: could not remove a received file: ${String(error)}`,
+      );
+    }
   }
 }
 
@@ -1079,17 +1105,18 @@ async function withReceiveLock<T>(
 // no-op on the already-sized file), so eviction is safe.
 const MAX_OPEN_RECEIVE_HANDLES = 8;
 
+// `create: false` opens an existing file only, and never resizes it: a reader
+// (verification) must not bring back a file a delete has just removed.
 async function openReceiveHandleImpl(
   merkleRootHex: string,
   totalSize: number,
+  create: boolean,
 ): Promise<ReceiveFileEntry | null> {
   const storage = opfsStorage();
   if (!storage || typeof storage.getDirectory !== "function") return null;
   const root = await storage.getDirectory();
-  const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, {
-    create: true,
-  });
-  const fileHandle = await dir.getFileHandle(merkleRootHex, { create: true });
+  const dir = await root.getDirectoryHandle(OPFS_REASSEMBLE_DIR, { create });
+  const fileHandle = await dir.getFileHandle(merkleRootHex, { create });
   const createSyncAccessHandle = getCreateSyncAccessHandle(fileHandle);
   if (typeof createSyncAccessHandle !== "function") return null;
   const access = await createSyncAccessHandle.call(fileHandle);
@@ -1097,7 +1124,7 @@ async function openReceiveHandleImpl(
     // Pre-size to totalSize; truncate to a larger size zero-fills, so gaps are
     // zeros until their chunks land. On resume the file is already totalSize
     // (OPFS persists across reloads) so this is a no-op that preserves the data.
-    if (totalSize > 0 && access.getSize() !== totalSize)
+    if (create && totalSize > 0 && access.getSize() !== totalSize)
       access.truncate(totalSize);
     return {
       access,
@@ -1118,6 +1145,7 @@ async function openReceiveHandleImpl(
 async function ensureReceiveHandle(
   merkleRootHex: string,
   totalSize: number,
+  { create = true }: { create?: boolean } = {},
 ): Promise<ReceiveFileEntry | null> {
   const open = opfsReceiving.get(merkleRootHex);
   if (open) return open;
@@ -1133,10 +1161,12 @@ async function ensureReceiveHandle(
       }
     }
   }
-  const p = openReceiveHandleImpl(merkleRootHex, totalSize).catch((error) => {
-    console.error(error);
-    return null;
-  });
+  const p = openReceiveHandleImpl(merkleRootHex, totalSize, create).catch(
+    (error) => {
+      console.error(error);
+      return null;
+    },
+  );
   opfsReceivingOpening.set(merkleRootHex, p);
   try {
     const entry = await p;
@@ -1210,30 +1240,53 @@ function readReceiveAt(
 //
 // The chunk that would complete a file is not recorded by storeReceiveChunk:
 // it is held on the row (receiveVerification marker) with its bytes in OPFS,
-// and the caller then
+// and each caller holding that attempt's token then
 //   1. verifyReceivedFile: hashes the stored file once, in chunk order,
-//      outside the per-file lock and yielding between batches, so neither the
-//      file's other requests nor the worker as a whole wait for it;
+//      outside the per-file lock, on one database connection, reading in
+//      short batches and yielding between them, so neither the file's other
+//      requests nor the worker as a whole wait for it;
 //   2. settleReceivedFileVerification: under the per-file lock, commits the
 //      verdict (complete, or drop the file as failed) or, when told not to
-//      commit, leaves the marker for the next copy of that chunk to verify
-//      again.
-// While a verification runs in this worker, any copy of any of the file's
-// chunks counts as held and changes nothing. A marker no running
-// verification owns (the page reloaded, or the caller did not commit) is
-// verified again when that chunk next arrives.
+//      commit and no other caller still holds the attempt, leaves the marker
+//      for the next copy of that chunk, or the next start, to verify again.
+// Several callers can hold one attempt: a copy of the held chunk that arrives
+// on a new connection while the file is verified joins it, so that
+// connection commits it. No failure in a run leaves the attempt live: the
+// verdict always settles, and the attempt is retired once nothing can commit
+// it any more.
 // ---------------------------------------------------------------------------
 
 interface LiveVerification {
   readonly token: string;
   aborted: boolean;
-  verdict?: Promise<ReceiveVerificationVerdict>;
+  /** Callers that asked to verify this attempt and have not settled it. */
+  holders: number;
+  /** Always resolves; a failure is a verdict, never a rejection. */
+  verdict: Promise<ReceiveVerificationVerdict>;
+  /** While the file is being read: resolves once its handle is released. */
+  hashing?: Promise<void>;
 }
 const liveVerifications = new Map<string, LiveVerification>();
 
+// What recently committed attempts settled to, so a caller that settles after
+// another caller committed the same attempt gets the same answer.
+const settledVerifications = new Map<
+  string,
+  { verdict: ReceiveVerificationVerdict; outcome: ReceiveVerificationOutcome }
+>();
+const rememberSettled = (
+  token: string,
+  verdict: ReceiveVerificationVerdict,
+  outcome: ReceiveVerificationOutcome,
+): void => {
+  settledVerifications.set(token, { verdict, outcome });
+  while (settledVerifications.size > RECEIVE_VERIFY_SETTLED_MEMORY)
+    settledVerifications.delete(settledVerifications.keys().next().value!);
+};
+
 class VerificationAborted extends Error {}
 
-const renewVerificationLease = async (
+const releaseVerificationLease = async (
   merkleRoot: string,
   token: string,
 ): Promise<void> => {
@@ -1241,33 +1294,28 @@ const renewVerificationLease = async (
   try {
     const tx = db.transaction("receiveActivity", "readwrite");
     const activity = await tx.store.get(merkleRoot);
-    if (activity?.writeToken !== token) throw new VerificationAborted();
-    await tx.store.put({
-      ...activity,
-      leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
-      lastActivityAt: Date.now(),
-    });
+    if (activity?.writeToken === token)
+      await tx.store.put({
+        ...activity,
+        writeToken: undefined,
+        leaseUntil: 0,
+        lastActivityAt: Date.now(),
+      });
     await tx.done;
   } finally {
     db.close();
   }
 };
 
-// The chunk records `first`..`last` of a file, in index order.
-const readChunkRecords = async (
-  merkleRoot: string,
-  first: number,
-  last: number,
-): Promise<Chunk[]> => {
-  const db = await getDB();
-  try {
-    return await db.getAll(
-      "chunks",
-      IDBKeyRange.bound([merkleRoot, first], [merkleRoot, last]),
-    );
-  } finally {
-    db.close();
-  }
+type RepoConnection = Awaited<ReturnType<typeof getDB>>;
+
+// Stop a running verification of this file and wait until it no longer holds
+// the file's handle, so the file can be removed. Used by every delete.
+const stopVerification = async (merkleRoot: string): Promise<void> => {
+  const live = liveVerifications.get(merkleRoot);
+  if (!live) return;
+  live.aborted = true;
+  await live.hashing;
 };
 
 interface VerificationStart {
@@ -1277,10 +1325,74 @@ interface VerificationStart {
   manifest: ReceiveManifest;
 }
 
+// Under the per-file lock: confirm the marker and take the receive lease, so a
+// sweep or another tab leaves the transfer alone while it is hashed.
+async function startVerification(
+  db: RepoConnection,
+  merkleRoot: string,
+  token: string,
+  live: LiveVerification,
+): Promise<VerificationStart | undefined> {
+  if (live.aborted) return undefined;
+  const tx = db.transaction(
+    ["chunks", "messageData", "receiveActivity"],
+    "readwrite",
+  );
+  try {
+    const row = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(merkleRoot);
+    const marker = row?.receiveVerification;
+    const activity = await tx.objectStore("receiveActivity").get(merkleRoot);
+    if (
+      !row ||
+      !marker ||
+      marker.token !== token ||
+      activity?.deletedAt !== undefined ||
+      (activity?.writeToken !== undefined &&
+        (activity.leaseUntil ?? 0) > Date.now())
+    ) {
+      await tx.done;
+      return undefined;
+    }
+    const manifest = await loadReceiveManifest(
+      tx.objectStore("chunks"),
+      merkleRoot,
+      row,
+      row.totalSize,
+    );
+    await tx.objectStore("receiveActivity").put({
+      merkleRoot,
+      roomId: row.roomId,
+      fromPeerId: row.fromPeerId,
+      lastActivityAt: Date.now(),
+      writeToken: token,
+      leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+    });
+    await tx.done;
+    return {
+      row,
+      marker,
+      manifest: advanceReceiveManifest(
+        manifest,
+        row.totalSize,
+        marker.chunkIndex,
+        marker.realLen,
+      ),
+    };
+  } catch (error) {
+    await abortQuietly(tx);
+    throw error;
+  }
+}
+
 // Hash the stored file once, in chunk order: from OPFS for chunks placed
 // there, from a record or the marker for bytes kept in IndexedDB. Yields after
-// every batch so the worker answers other requests in between.
+// every batch so the worker answers other requests in between. Never creates
+// or resizes the file: a file that is gone ends the run.
 async function hashHeldFile(
+  db: RepoConnection,
   merkleRoot: string,
   token: string,
   { row, marker, manifest }: VerificationStart,
@@ -1291,9 +1403,12 @@ async function hashHeldFile(
   let handle: ReceiveFileEntry | undefined;
   const fromOpfs = async (index: number, length: number) => {
     if (!handle) {
-      const opened = await ensureReceiveHandle(merkleRoot, row.totalSize);
+      const opened = await ensureReceiveHandle(merkleRoot, row.totalSize, {
+        create: false,
+      });
       if (!opened)
         throw new Error("received file bytes are in unavailable OPFS");
+      if (live.aborted) throw new VerificationAborted();
       handle = opened;
       handle.pins += 1;
     }
@@ -1311,9 +1426,13 @@ async function hashHeldFile(
       if (live.aborted) throw new VerificationAborted();
       const last =
         Math.min(manifest.count, first + RECEIVE_VERIFY_BATCH_CHUNKS) - 1;
-      const records = await readChunkRecords(merkleRoot, first, last);
+      const records = await db.getAll(
+        "chunks",
+        IDBKeyRange.bound([merkleRoot, first], [merkleRoot, last]),
+      );
       let next = 0;
       for (let index = first; index <= last; index++) {
+        if (live.aborted) throw new VerificationAborted();
         if (index === marker.chunkIndex) {
           hasher.update(
             marker.data
@@ -1339,7 +1458,18 @@ async function hashHeldFile(
       if (next !== records.length)
         throw new Error("received file layout does not match its manifest");
       if (Date.now() - renewedAt >= RECEIVE_VERIFY_LEASE_RENEW_MS) {
-        await renewVerificationLease(merkleRoot, token);
+        const tx = db.transaction("receiveActivity", "readwrite");
+        const activity = await tx.store.get(merkleRoot);
+        if (activity?.writeToken !== token) {
+          await tx.done;
+          throw new VerificationAborted();
+        }
+        await tx.store.put({
+          ...activity,
+          leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+          lastActivityAt: Date.now(),
+        });
+        await tx.done;
         renewedAt = Date.now();
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -1351,74 +1481,44 @@ async function hashHeldFile(
   return uint8ArrayToHex(hasher.digest());
 }
 
+// One run: one database connection for the start, every batch and the lease,
+// closed at the end. Never rejects: a failure anywhere is the verdict
+// "storage-failed" (or "aborted" when the run was stopped).
 async function runVerification(
   merkleRoot: string,
   token: string,
   live: LiveVerification,
 ): Promise<ReceiveVerificationVerdict> {
-  // Confirm the marker under the per-file lock and take the receive lease, so
-  // a sweep or another tab leaves the transfer alone while it is hashed.
-  const start = await withReceiveLock(merkleRoot, async () => {
-    const db = await getDB();
-    try {
-      const tx = db.transaction(
-        ["chunks", "messageData", "receiveActivity"],
-        "readwrite",
-      );
-      const row = await tx
-        .objectStore("messageData")
-        .index("merkleRoot")
-        .get(merkleRoot);
-      const marker = row?.receiveVerification;
-      const activity = await tx.objectStore("receiveActivity").get(merkleRoot);
-      if (
-        !row ||
-        !marker ||
-        marker.token !== token ||
-        activity?.deletedAt !== undefined ||
-        (activity?.writeToken !== undefined &&
-          (activity.leaseUntil ?? 0) > Date.now())
-      ) {
-        await tx.done;
-        return undefined;
-      }
-      const manifest = await loadReceiveManifest(
-        tx.objectStore("chunks"),
-        merkleRoot,
-        row,
-        row.totalSize,
-      );
-      await tx.objectStore("receiveActivity").put({
-        merkleRoot,
-        roomId: row.roomId,
-        fromPeerId: row.fromPeerId,
-        lastActivityAt: Date.now(),
-        writeToken: token,
-        leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
-      });
-      await tx.done;
-      return {
-        row,
-        marker,
-        manifest: advanceReceiveManifest(
-          manifest,
-          row.totalSize,
-          marker.chunkIndex,
-          marker.realLen,
-        ),
-      };
-    } finally {
-      db.close();
-    }
-  });
-  if (!start) return "aborted";
+  let db: RepoConnection | undefined;
   try {
-    const digest = await hashHeldFile(merkleRoot, token, start, live);
-    return digest === start.row.hash ? "match" : "mismatch";
+    db = await getDB();
+    const connection = db;
+    const start = await withReceiveLock(merkleRoot, () =>
+      startVerification(connection, merkleRoot, token, live),
+    );
+    if (!start) return "aborted";
+    let released!: () => void;
+    live.hashing = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    try {
+      const digest = await hashHeldFile(
+        connection,
+        merkleRoot,
+        token,
+        start,
+        live,
+      );
+      return digest === start.row.hash ? "match" : "mismatch";
+    } finally {
+      released();
+    }
   } catch (error) {
     if (live.aborted || error instanceof VerificationAborted) return "aborted";
     console.error("p2party: could not verify a received file", error);
     return "storage-failed";
+  } finally {
+    db?.close();
   }
 }
 
@@ -1426,13 +1526,20 @@ async function fnVerifyReceivedFile(
   merkleRoot: string,
   token: string,
 ): Promise<ReceiveVerificationVerdict> {
+  const settled = settledVerifications.get(token);
+  if (settled) return settled.verdict;
   const running = liveVerifications.get(merkleRoot);
-  // A second request for the same attempt joins it; it never hashes twice.
-  if (running)
-    return running.token === token && running.verdict
-      ? running.verdict
-      : "aborted";
-  const live: LiveVerification = { token, aborted: false };
+  if (running) {
+    if (running.token !== token) return "aborted";
+    // Another caller holds the same attempt: it joins, it never hashes twice.
+    running.holders += 1;
+    return running.verdict;
+  }
+  const live = {
+    token,
+    aborted: false,
+    holders: 1,
+  } as LiveVerification;
   liveVerifications.set(merkleRoot, live);
   live.verdict = runVerification(merkleRoot, token, live);
   return live.verdict;
@@ -1451,15 +1558,25 @@ async function fnSettleReceivedFileVerification(
   token: string,
   commit: boolean,
 ): Promise<ReceiveVerificationOutcome> {
+  const recorded = settledVerifications.get(token);
+  if (recorded) return commit ? recorded.outcome : "aborted";
   const live = liveVerifications.get(merkleRoot);
-  const verdict =
-    live?.token === token && live.verdict ? await live.verdict : "aborted";
-  return withReceiveLock(merkleRoot, async () => {
-    try {
+  if (live?.token !== token) return "aborted";
+  const verdict = await live.verdict;
+  let retire = false;
+  try {
+    return await withReceiveLock(merkleRoot, async () => {
+      // Another holder may have committed this attempt while we waited.
+      const already = settledVerifications.get(token);
+      live.holders -= 1;
+      if (already) return commit ? already.outcome : "aborted";
       const decided =
         commit && (verdict === "match" || verdict === "mismatch")
           ? verdict
           : undefined;
+      // Someone else may still commit it: leave the attempt to them.
+      if (!decided && live.holders > 0) return "aborted";
+      retire = true;
       let outcome: ReceiveVerificationOutcome = "aborted";
       const db = await getDB();
       const tx = db.transaction(
@@ -1536,7 +1653,7 @@ async function fnSettleReceivedFileVerification(
           }
         } else if (leased)
           // Not committed: the marker stays, and the next copy of the held
-          // chunk verifies the file again.
+          // chunk (or the next start) verifies the file again.
           await activityStore.put({
             ...activity,
             writeToken: undefined,
@@ -1551,20 +1668,133 @@ async function fnSettleReceivedFileVerification(
       } finally {
         db.close();
       }
+      if (outcome !== "aborted") rememberSettled(token, verdict, outcome);
       if (outcome === "integrity") {
         await fnCloseReceiveFile(merkleRoot);
         await fnDeleteOPFSFile(merkleRoot);
       }
       return outcome;
-    } finally {
-      if (liveVerifications.get(merkleRoot) === live && live)
-        liveVerifications.delete(merkleRoot);
-    }
-  });
+    });
+  } catch (error) {
+    retire = true;
+    // Nothing was committed; give the lease back so the next copy of the held
+    // chunk does not wait for it to expire.
+    await releaseVerificationLease(merkleRoot, token).catch(() => undefined);
+    throw error;
+  } finally {
+    // Retire the attempt once nothing can commit it any more, whatever
+    // happened above; a later copy of the held chunk starts a fresh one.
+    if (
+      (retire || live.holders <= 0) &&
+      liveVerifications.get(merkleRoot) === live
+    )
+      liveVerifications.delete(merkleRoot);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verification at the next start.
+//
+// A file whose last chunk is held but whose verification no running worker
+// owns (the page reloaded mid-verification, or its edge went away first) holds
+// every byte it needs. It is verified without the sender when the SDK next
+// loads that file's room (getDBRoomMessageData, below), one file at a time,
+// through the same verification as a live one. The outcome is posted to the
+// main thread as a HeldFileSettledNotice. If another context holds the file's
+// receive lease, one timer retries when that lease ends; nothing polls.
+// ---------------------------------------------------------------------------
+
+const startupRetries = new Map<string, ReturnType<typeof setTimeout>>();
+
+async function verifyHeldFileAtStart(
+  merkleRoot: string,
+  retried = false,
+): Promise<void> {
+  if (liveVerifications.has(merkleRoot)) return;
+  const db = await getDB();
+  let row: MessageData | undefined;
+  let activity: ReceiveActivity | undefined;
+  try {
+    const tx = db.transaction(["messageData", "receiveActivity"], "readonly");
+    row = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(merkleRoot);
+    activity = await tx.objectStore("receiveActivity").get(merkleRoot);
+    await tx.done;
+  } finally {
+    db.close();
+  }
+  const marker = row?.receiveVerification;
+  if (!row || !marker || activity?.deletedAt !== undefined) return;
+  const leasedUntil =
+    activity?.writeToken !== undefined ? (activity.leaseUntil ?? 0) : 0;
+  if (leasedUntil > Date.now()) {
+    // Another context is verifying or writing this file: try once more when
+    // its lease ends, and leave it to that context if it is still busy then.
+    if (!retried && !startupRetries.has(merkleRoot))
+      startupRetries.set(
+        merkleRoot,
+        setTimeout(
+          () => {
+            startupRetries.delete(merkleRoot);
+            void verifyHeldFileAtStart(merkleRoot, true).catch(
+              (error: unknown) => {
+                console.error("p2party: could not verify a held file", error);
+              },
+            );
+          },
+          leasedUntil - Date.now() + 50,
+        ),
+      );
+    return;
+  }
+  const verdict = await fnVerifyReceivedFile(merkleRoot, marker.token);
+  // No edge is involved: a device holding every byte commits the verdict.
+  let outcome: ReceiveVerificationOutcome;
+  try {
+    outcome = await fnSettleReceivedFileVerification(
+      merkleRoot,
+      marker.token,
+      verdict === "match" || verdict === "mismatch",
+    );
+  } catch (error) {
+    console.error("p2party: could not settle a held file", error);
+    outcome = "aborted";
+  }
+  const notice: HeldFileSettledNotice = {
+    roomId: row.roomId,
+    fromPeerId: row.fromPeerId,
+    merkleRoot,
+    hash: row.hash,
+    filename: row.filename,
+    messageType: row.messageType,
+    channelLabel: row.channelLabel,
+    timestamp: row.timestamp,
+    totalSize: row.totalSize,
+    chunkIndex: marker.chunkIndex,
+    verdict:
+      outcome === "aborted" && verdict !== "aborted"
+        ? "storage-failed"
+        : verdict,
+    outcome,
+  };
+  postMessage({ notice });
+}
+
+async function verifyHeldFilesOfRoom(rows: MessageData[]): Promise<void> {
+  for (const row of rows)
+    if (row.receiveVerification && row.transferId === undefined)
+      await verifyHeldFileAtStart(row.merkleRoot).catch((error: unknown) => {
+        console.error("p2party: could not verify a held file", error);
+      });
 }
 
 // A store that arrives while this worker verifies the file: every chunk of it
-// is already held (in the have-set, or as the marker), so nothing changes.
+// is already held (in the have-set, or as the marker), so nothing changes. A
+// copy of the held chunk itself is handed the attempt's token: it arrived on
+// a connection that may outlive the one the run started on, and that
+// connection commits the attempt when it settles.
 async function storeWhileVerifying(
   chunk: ReceiveChunk,
   live: LiveVerification,
@@ -1576,11 +1806,12 @@ async function storeWhileVerifying(
       .objectStore("messageData")
       .index("merkleRoot")
       .get(chunk.merkleRoot);
-    const held =
+    const isHeldChunk =
+      row?.receiveVerification?.chunkIndex === chunk.chunkIndex;
+    const recorded =
       (await tx
         .objectStore("chunks")
-        .getKey([chunk.merkleRoot, chunk.chunkIndex])) !== undefined ||
-      row?.receiveVerification?.chunkIndex === chunk.chunkIndex;
+        .getKey([chunk.merkleRoot, chunk.chunkIndex])) !== undefined;
     await tx.done;
     if (
       !row ||
@@ -1588,12 +1819,17 @@ async function storeWhileVerifying(
       row.roomId !== chunk.roomId ||
       row.fromPeerId !== chunk.fromPeerId ||
       row.hash !== chunk.hash ||
-      !held
+      !(recorded || isHeldChunk)
     )
       throw new ReceiveChunkRejectedError(
         "receive chunk conflicts with a file being verified",
       );
-    return { stored: false, savedSize: row.savedSize, complete: false };
+    return {
+      stored: false,
+      savedSize: row.savedSize,
+      complete: false,
+      ...(isHeldChunk ? { verification: live.token } : {}),
+    };
   } finally {
     db.close();
   }
@@ -1956,8 +2192,13 @@ async function fnStoreReceiveChunk(
     !chunk.fromPeerId
   )
     throw new ReceiveChunkRejectedError("Invalid receive identity");
+  // A copy that arrives while the file is verified joins that attempt. One
+  // that arrives after the attempt was stopped takes the normal path: until
+  // the stopped run gives its lease back it is refused, and the sender's next
+  // retransmission starts a fresh attempt.
   const verifying = liveVerifications.get(chunk.merkleRoot);
-  if (verifying) return storeWhileVerifying(chunk, verifying);
+  if (verifying && !verifying.aborted)
+    return storeWhileVerifying(chunk, verifying);
   const token = crypto.randomUUID();
   const estimate = storageEstimator();
   let quotaChecked = estimate === undefined;
@@ -3410,11 +3651,14 @@ async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
     // the per-merkleRoot lock so a chunk arriving mid-delete can't reopen the
     // handle between the close and the removeEntry (which would throw + leak).
     await withReceiveLock(merkleRootHex, async () => {
+      // A verification of this file stops and releases its handle first.
+      await stopVerification(merkleRootHex);
       await fnCloseReceiveFile(merkleRootHex);
       await fnDeleteOPFSFile(merkleRootHex);
     });
-  } catch {
-    /* empty */
+  } catch (error) {
+    // A file left on disk is a failed delete; the caller must hear of it.
+    if (error instanceof StorageFailedError) throw error;
   }
 }
 
@@ -3439,10 +3683,9 @@ async function fnDeleteReceiveTransferLocked(
   )
     throw new Error("invalid receive transfer Merkle root");
 
-  // A verification of this file stops at its next read; deleting the row
-  // below keeps its verdict from ever being committed.
-  const verifying = liveVerifications.get(merkleRootHex);
-  if (verifying) verifying.aborted = true;
+  // A verification of this file stops and releases its handle first; deleting
+  // the row below keeps its verdict from ever being committed.
+  await stopVerification(merkleRootHex);
 
   await fnCloseReceiveFile(merkleRootHex);
 
@@ -3551,8 +3794,10 @@ async function fnDeleteDB(): Promise<void> {
   // Also remove the whole OPFS reassembly subtree (a separate storage system
   // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
   try {
-    // Close every open receive handle first, or removeEntry(recursive) trips
-    // over the still-held exclusive locks.
+    // Stop every verification and close every open receive handle first, or
+    // removeEntry(recursive) trips over the still-held exclusive locks.
+    for (const merkleRoot of [...liveVerifications.keys()])
+      await stopVerification(merkleRoot);
     await closeAllReceiveFiles();
     const storage = opfsStorage();
     if (storage && typeof storage.getDirectory === "function") {
@@ -3845,7 +4090,8 @@ onmessage = async (e: MessageEvent) => {
     postMessage({
       id,
       error: String(error),
-      ...(error instanceof DatabaseUpgradeBlockedError
+      ...(error instanceof DatabaseUpgradeBlockedError ||
+      error instanceof StorageFailedError
         ? { errorCode: error.code }
         : {}),
     });

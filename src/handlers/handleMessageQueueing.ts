@@ -1,5 +1,6 @@
 import {
   handleReceiveMessage,
+  reportReceiveStorageError,
   settleHeldFile,
   verifyHeldFile,
   type ReceiveMessageDependencies,
@@ -12,12 +13,12 @@ import {
   queueScheduledChunkReceipt,
 } from "./coverTransfer";
 
-import { closeReceiveFile } from "../db/api";
+import { closeReceiveFile, onHeldFileSettled } from "../db/api";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
 
 import {
-  deleteMessageStateOnly,
+  resetMessageReceiveProgress,
   setMessage,
   setMessageAllChunks,
   incrementMessageStats,
@@ -27,7 +28,9 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
+import type { UnknownAction } from "@reduxjs/toolkit";
 import type { RatchetGateLease } from "./ratchetGate";
+import type { HeldFileSettledNotice } from "../db/types";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -440,28 +443,71 @@ const finishHeldFile = async (
         epc,
         dependencies,
       );
-    else if (outcome === "integrity") {
+    else if (outcome === "integrity")
       // The worker dropped the file's chunks; show that at once rather than
-      // the pre-failure progress until a reload. Re-adding the message moves
-      // it to the end of the room's list.
-      api.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
-      api.dispatch(
-        setMessage({
-          roomId,
-          merkleRootHex,
-          sha512Hex: uint8ArrayToHex(held.messageHash),
-          fromPeerId: peerId,
-          chunkSize: 0,
-          totalSize: held.totalSize,
-          messageType: held.messageType,
-          filename: held.filename,
-          channelLabel,
-          timestamp: held.date.getTime(),
-        }),
-      );
-    }
+      // the pre-failure progress until a reload.
+      api.dispatch(resetMessageReceiveProgress({ roomId, merkleRootHex }));
   });
 };
+
+/**
+ * Show the outcome of a held file the worker verified on its own at the next
+ * start: the same events and progress as a live verification. No terminal
+ * receipt is sent from here; the sender's next copy of the last chunk is
+ * answered from the recorded outcome. The store is reached through a lazy
+ * import (as in inboundTransferSweep.ts): this module loads before it.
+ */
+export const applyHeldFileSettled = async (
+  notice: HeldFileSettledNotice,
+  dispatch?: (action: UnknownAction) => unknown,
+): Promise<void> => {
+  const context = {
+    roomId: notice.roomId,
+    fromPeerId: notice.fromPeerId,
+    merkleRoot: notice.merkleRoot,
+    filename: notice.filename,
+    totalSize: notice.totalSize,
+    chunkIndex: notice.chunkIndex,
+  };
+  if (notice.outcome === "aborted") {
+    if (notice.verdict === "storage-failed")
+      reportReceiveStorageError(context, { failure: "storage-failed" });
+    return;
+  }
+  const send: (action: UnknownAction) => unknown =
+    dispatch ??
+    ((await import("../store")).dispatch as (action: UnknownAction) => unknown);
+  if (notice.outcome === "integrity") {
+    reportReceiveStorageError(context, { failure: "integrity" });
+    send(
+      resetMessageReceiveProgress({
+        roomId: notice.roomId,
+        merkleRootHex: notice.merkleRoot,
+      }),
+    );
+    return;
+  }
+  send(
+    setMessageAllChunks({
+      roomId: notice.roomId,
+      merkleRootHex: notice.merkleRoot,
+      sha512Hex: notice.hash,
+      fromPeerId: notice.fromPeerId,
+      totalSize: notice.totalSize,
+      messageType: notice.messageType,
+      filename: notice.filename,
+      channelLabel: notice.channelLabel,
+      timestamp: notice.timestamp,
+      alsoSendFinishedMessage: true,
+    }),
+  );
+};
+
+onHeldFileSettled((notice) => {
+  void applyHeldFileSettled(notice).catch((error: unknown) => {
+    console.error("p2party: could not apply a held file's outcome", error);
+  });
+});
 
 const processMessage = async (
   data: Uint8Array,

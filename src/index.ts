@@ -213,6 +213,8 @@ import {
 import {
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
+  DatabaseWorkerError,
+  StorageFailedError,
 } from "./db/dbErrors";
 import type { ReceiveStorageError } from "./handlers/handleReceiveMessage";
 import {
@@ -2033,6 +2035,8 @@ export {
   ReceiveIntegrityError,
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
+  DatabaseWorkerError,
+  StorageFailedError,
   setDebugLogging,
 };
 

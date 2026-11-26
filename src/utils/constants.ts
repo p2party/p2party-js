@@ -204,6 +204,9 @@ export const RECEIVE_VERIFY_BATCH_CHUNKS = 16;
 // ...and renews its receive lease this often, so another tab cannot take the
 // transfer over while it runs.
 export const RECEIVE_VERIFY_LEASE_RENEW_MS = 30_000;
+// ...and remembers the outcome of this many recently committed attempts, so a
+// second caller holding the same attempt gets the same answer.
+export const RECEIVE_VERIFY_SETTLED_MEMORY = 256;
 
 // Wait this long for a per-message data channel to reach "open" before sending,
 // so its first frames aren't spilled to the WS relay while it is still

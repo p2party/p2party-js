@@ -152,6 +152,11 @@ export interface SetChannelArgs {
   label: string;
 }
 
+export interface ResetMessageReceiveProgressArgs {
+  roomId: string;
+  merkleRootHex: string;
+}
+
 export interface DeleteMessageArgs {
   roomId: string;
   transferId?: string;
@@ -1192,6 +1197,23 @@ const roomSlice = createSlice({
       }
     },
 
+    /**
+     * A received file whose stored bytes failed verification had its chunks
+     * dropped: show its progress as 0 again, in place, so it keeps its
+     * position in the room's list.
+     */
+    resetMessageReceiveProgress: (
+      state,
+      action: PayloadAction<ResetMessageReceiveProgressArgs>,
+    ) => {
+      const { roomId, merkleRootHex } = action.payload;
+      const room = state.find((candidate) => candidate.id === roomId);
+      const message = room?.messages.find(
+        (candidate) => candidate.merkleRootHex === merkleRootHex,
+      );
+      if (message) message.savedSize = 0;
+    },
+
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {
       deleteMessageFromState(state, action.payload);
     },
@@ -1302,6 +1324,7 @@ export const {
   setIceServers,
   setMessage,
   setMessageAllChunks,
+  resetMessageReceiveProgress,
   incrementMessageStats,
   deletePeer,
   deleteChannel,

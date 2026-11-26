@@ -367,4 +367,46 @@ describe("getDB — connections never block or hang an upgrade", () => {
     expect(db?.version).toBe(dbVersion);
     db?.close();
   });
+
+  // An older tab that keeps a connection open and ignores versionchange.
+  const openOldTab = () =>
+    new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(dbName, 20);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore("meta");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+  test("concurrent opens during a blocked upgrade all fail with the typed error", async () => {
+    const old = await openOldTab();
+    // Concurrent calls are normal in the worker: none may hang.
+    const results = await Promise.allSettled([getDB(), getDB(), getDB()]);
+    expect(results.map((result) => result.status)).toEqual([
+      "rejected",
+      "rejected",
+      "rejected",
+    ]);
+    for (const result of results)
+      expect((result as PromiseRejectedResult).reason).toBeInstanceOf(
+        DatabaseUpgradeBlockedError,
+      );
+    old.close();
+  });
+
+  test("an open succeeds once the blocking tab has closed", async () => {
+    const old = await openOldTab();
+    await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);
+    old.close();
+    // The queued upgrade completes and is closed; then opens work again.
+    let db: Awaited<ReturnType<typeof getDB>> | undefined;
+    for (let attempt = 0; attempt < 50 && !db; attempt++) {
+      db = await getDB().catch(() => undefined);
+      if (!db) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(db?.version).toBe(dbVersion);
+    expect(db?.objectStoreNames.contains("receiveActivity")).toBe(true);
+    db?.close();
+  });
 });

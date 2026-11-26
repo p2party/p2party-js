@@ -57,7 +57,11 @@ import type {
   GeneratedSessionIdentity,
   P2PartySession,
 } from "../../session";
-import type { StoreTopology } from "./carrierRuntime";
+import type {
+  CarrierTimerHandle,
+  CarrierTimers,
+  StoreTopology,
+} from "./carrierRuntime";
 import type {
   HandoffFacts,
   PairDriverPhase,
@@ -184,9 +188,9 @@ export interface PrototypeRun {
   waitForPhase(phase: PairDriverPhase, timeoutMs: number): Promise<void>;
   /**
    * Send one message once the session exists. Rejects with
-   * `PrototypeRunTimeoutError` if there is still no session `timeoutMs` after
-   * the call, and with the failure itself if the session could not be
-   * established.
+   * `PrototypeRunTimeoutError` if it cannot leave within `timeoutMs` of the
+   * call — and then it has not left at all — and with the failure itself if
+   * the session could not be established.
    */
   sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void>;
   recvMessage(timeoutMs: number): Promise<Uint8Array>;
@@ -216,21 +220,30 @@ const requireDeadline = (timeoutMs: number, label: string): void => {
     fail(`${label} needs a finite, non-negative deadline in milliseconds`);
 };
 
+/**
+ * Every deadline below runs on the run's own timers, the same injected pair
+ * the carrier schedule uses, so a harness that drives the clock drives the
+ * deadlines too.
+ */
 const withTimeout = async <T>(
   promise: Promise<T>,
   timeoutMs: number,
   label: string,
+  timers: CarrierTimers,
 ): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: CarrierTimerHandle | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(timedOut(label, timeoutMs)), timeoutMs);
+        timer = timers.setTimeout(
+          () => reject(timedOut(label, timeoutMs)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) timers.clearTimeout(timer);
   }
 };
 
@@ -243,6 +256,7 @@ const withTimeout = async <T>(
 const waitChannelOpen = (
   channel: RTCDataChannel,
   timeoutMs: number,
+  timers: CarrierTimers,
 ): Promise<void> =>
   channel.readyState === "open"
     ? Promise.resolve()
@@ -251,7 +265,7 @@ const waitChannelOpen = (
         // below; nothing can call it before the executor finishes initializing
         // them, because the listeners and the timer are all attached after.
         const settle = (error?: PrototypeRunError): void => {
-          clearTimeout(timer);
+          timers.clearTimeout(timer);
           channel.removeEventListener("open", onOpen);
           channel.removeEventListener("close", onClose);
           if (error) reject(error);
@@ -264,7 +278,7 @@ const waitChannelOpen = (
               "the bootstrap data channel closed before it opened",
             ),
           );
-        const timer = setTimeout(
+        const timer = timers.setTimeout(
           () =>
             settle(
               new PrototypeRunTimeoutError(
@@ -286,12 +300,13 @@ const waitChannelOpen = (
 const waitConnected = (
   peerConnection: RTCPeerConnection,
   timeoutMs: number,
+  timers: CarrierTimers,
 ): Promise<void> =>
   peerConnection.connectionState === "connected"
     ? Promise.resolve()
     : new Promise<void>((resolve, reject) => {
         const settle = (error?: PrototypeRunError): void => {
-          clearTimeout(timer);
+          timers.clearTimeout(timer);
           peerConnection.removeEventListener("connectionstatechange", onChange);
           if (error) reject(error);
           else resolve();
@@ -304,7 +319,7 @@ const waitConnected = (
               new PrototypeRunError(`the peer connection went to "${state}"`),
             );
         };
-        const timer = setTimeout(
+        const timer = timers.setTimeout(
           () =>
             settle(
               new PrototypeRunTimeoutError(
@@ -424,6 +439,9 @@ export interface RunParts {
   readonly wasmBinary: ArrayBuffer;
   /** The deadline `createSession` runs under once the transport is up. */
   readonly handshakeTimeoutMs: number;
+  /** The run's clock and timers: every deadline here runs on them. */
+  readonly clock: { nowMs(): bigint };
+  readonly timers: CarrierTimers;
   readonly emit: (kind: string, detail?: string) => void;
 }
 
@@ -442,6 +460,8 @@ export class BlindRendezvousRun implements PrototypeRun {
   readonly #pqMode: RoomPqMode;
   readonly #wasmBinary: ArrayBuffer;
   readonly #handshakeTimeoutMs: number;
+  readonly #clock: { nowMs(): bigint };
+  readonly #timers: CarrierTimers;
   readonly #emit: (kind: string, detail?: string) => void;
 
   readonly #reached = new Set<PairDriverPhase>();
@@ -472,6 +492,8 @@ export class BlindRendezvousRun implements PrototypeRun {
     this.#pqMode = parts.pqMode;
     this.#wasmBinary = parts.wasmBinary;
     this.#handshakeTimeoutMs = parts.handshakeTimeoutMs;
+    this.#clock = parts.clock;
+    this.#timers = parts.timers;
     this.#emit = parts.emit;
     this.#sessionGate = new Promise<EstablishedSession>((resolve, reject) => {
       this.#openGate = resolve;
@@ -530,15 +552,15 @@ export class BlindRendezvousRun implements PrototypeRun {
       const waiter: PhaseWaiter = {
         phase,
         resolve: () => {
-          clearTimeout(timer);
+          this.#timers.clearTimeout(timer);
           resolve();
         },
         reject: (error) => {
-          clearTimeout(timer);
+          this.#timers.clearTimeout(timer);
           reject(error);
         },
       };
-      const timer = setTimeout(() => {
+      const timer = this.#timers.setTimeout(() => {
         this.#dropWaiter(waiter);
         reject(
           new PrototypeRunTimeoutError(
@@ -566,18 +588,26 @@ export class BlindRendezvousRun implements PrototypeRun {
    * the prototype's harness does, and why this is documented rather than
    * locked.
    *
-   * `timeoutMs` bounds the wait for the session, the one step here that
-   * depends on the peer: encryption and framing are local work, and
-   * `sendApp` queues without waiting.
+   * `timeoutMs` bounds the call: the wait for the session, the one step here
+   * that depends on the peer, and the local encryption after it. A call that
+   * rejects with `PrototypeRunTimeoutError` sent nothing, so a caller may
+   * retry it without the peer receiving the message twice; `sendApp` itself
+   * queues without waiting.
    */
   async sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void> {
     requireDeadline(timeoutMs, "sendMessage");
+    const deadlineMs = this.#clock.nowMs() + BigInt(Math.ceil(timeoutMs));
     const established = await withTimeout(
       this.#requireSession(),
       timeoutMs,
       "session handoff",
+      this.#timers,
     );
     const message = await established.session.encrypt(bytes);
+    // A session that arrived just in time can still leave encryption to end
+    // past the deadline; the message then stays unsent, as the rejection says.
+    if (this.#clock.nowMs() > deadlineMs)
+      throw timedOut("sendMessage", timeoutMs);
 
     const header = new Uint8Array(4 + message.root.length + 4);
     const view = new DataView(header.buffer);
@@ -594,18 +624,21 @@ export class BlindRendezvousRun implements PrototypeRun {
   }
 
   async recvMessage(timeoutMs: number): Promise<Uint8Array> {
-    const deadlineMs = Date.now() + timeoutMs;
-    const remaining = (): number => Math.max(1, deadlineMs - Date.now());
+    const deadlineMs = this.#clock.nowMs() + BigInt(Math.ceil(timeoutMs));
+    const remaining = (): number =>
+      Math.max(1, Number(deadlineMs - this.#clock.nowMs()));
 
     const established = await withTimeout(
       this.#requireSession(),
       remaining(),
       "session handoff",
+      this.#timers,
     );
     const header = await withTimeout(
       established.transport.recvApp(),
       remaining(),
       "application message header",
+      this.#timers,
     );
     if (header.length < 8)
       fail("the application header is shorter than its two length fields");
@@ -631,6 +664,7 @@ export class BlindRendezvousRun implements PrototypeRun {
           established.transport.recvApp(),
           remaining(),
           `application frame ${String(index)}`,
+          this.#timers,
         ),
       );
 
@@ -769,9 +803,14 @@ export class BlindRendezvousRun implements PrototypeRun {
       provider.channel(),
       CHANNEL_TIMEOUT_MS,
       "bootstrap data channel",
+      this.#timers,
     );
-    await waitChannelOpen(channel, CHANNEL_TIMEOUT_MS);
-    await waitConnected(provider.peerConnection, CONNECTED_TIMEOUT_MS);
+    await waitChannelOpen(channel, CHANNEL_TIMEOUT_MS, this.#timers);
+    await waitConnected(
+      provider.peerConnection,
+      CONNECTED_TIMEOUT_MS,
+      this.#timers,
+    );
     this.#emit("webrtc-connected", provider.role);
 
     // The tripwire runs before the handshake, and a throw here ends the
@@ -816,6 +855,7 @@ export class BlindRendezvousRun implements PrototypeRun {
         handshake,
         this.#handshakeTimeoutMs,
         "session handshake",
+        this.#timers,
       );
     } catch (error) {
       void handshake.then(
@@ -925,16 +965,72 @@ export const runBlindRendezvousPrototype = async (
     emit,
   );
 
-  let runtime: CarrierRuntime | null = null;
-  let run: BlindRendezvousRun | null = null;
-
   const transport = new LazyWebRtcTransport(options.rtcConfig, (role) => {
     emit("webrtc-role", role);
   });
 
-  const driver = new PairDriver({
+  return assembleRun({
     module,
     capability: options.capability,
+    identity,
+    stores,
+    profile,
+    profileHash,
+    transport,
+    wasmBinary: options.wasmBinary,
+    handshakeTimeoutMs: CONNECTED_TIMEOUT_MS,
+    clock: { nowMs: () => BigInt(Date.now()) },
+    // Wrapped, not the bare globals: a WebIDL operation called as a method of
+    // anything but `window` throws "Illegal invocation" in Chromium. The cast
+    // is on the opaque handle the runtime hands back, never on the runtime.
+    timers: {
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (handle) =>
+        clearTimeout(handle as ReturnType<typeof setTimeout>),
+    },
+    emit,
+  });
+};
+
+/**
+ * Everything `assembleRun` wires together. A page never builds one: it is
+ * what `runBlindRendezvousPrototype` has once the module, the identity and
+ * the stores are in hand, and what a test supplies with its own clock.
+ *
+ * @internal
+ */
+export interface RunAssembly {
+  readonly module: LibCrypto;
+  readonly capability: Uint8Array;
+  readonly identity: GeneratedSessionIdentity;
+  readonly stores: readonly PrototypeStoreClient[];
+  readonly profile: DeliveryProfileV1;
+  readonly profileHash: Uint8Array;
+  /** Both what the driver negotiates through and what the run tears down. */
+  readonly transport: TransportCandidateProvider & RunTransport;
+  readonly wasmBinary: ArrayBuffer;
+  readonly handshakeTimeoutMs: number;
+  readonly clock: { nowMs(): bigint };
+  readonly timers: CarrierTimers;
+  readonly emit: (kind: string, detail?: string) => void;
+}
+
+/**
+ * Wire one driver to one carrier runtime and start both: the presence first,
+ * then the schedule.
+ *
+ * @internal
+ */
+export const assembleRun = async (
+  assembly: RunAssembly,
+): Promise<BlindRendezvousRun> => {
+  const { identity, emit } = assembly;
+  let runtime: CarrierRuntime | null = null;
+  let run: BlindRendezvousRun | null = null;
+
+  const driver = new PairDriver({
+    module: assembly.module,
+    capability: assembly.capability,
     // The driver signs with the stable Ed25519 identity and proves the X25519
     // binding with its cross-signature; the X25519 SECRET belongs to the
     // protocol-v4 3DH alone and is never handed to the rendezvous layer.
@@ -948,8 +1044,8 @@ export const runBlindRendezvousPrototype = async (
       if (runtime === null) fail("the carrier runtime is not built yet");
       runtime.publish(operation, workKind);
     },
-    transport,
-    clock: { nowMs: () => BigInt(Date.now()) },
+    transport: assembly.transport,
+    clock: assembly.clock,
     random: (length) => crypto.getRandomValues(new Uint8Array(length)),
     onPhase: (phase, detail) => run?.handlePhase(phase, detail),
   });
@@ -964,24 +1060,17 @@ export const runBlindRendezvousPrototype = async (
 
   let lastTopology: StoreTopology | null = null;
   runtime = new CarrierRuntime({
-    module,
+    module: assembly.module,
     roomRoot: driver.roomRoot,
-    profile,
-    profileHash,
-    stores,
+    profile: assembly.profile,
+    profileHash: assembly.profileHash,
+    stores: assembly.stores,
     validationContextAt: (referenceLogicalWindow) =>
       driver.validationContextAt(referenceLogicalWindow),
     logicalWindowMs: driver.roomPolicy.protocolLimits.logicalWindowMs,
-    clock: { nowMs: () => BigInt(Date.now()) },
-    // Wrapped, not the bare globals: a WebIDL operation called as a method of
-    // anything but `window` throws "Illegal invocation" in Chromium. The cast
-    // is on the opaque handle the runtime hands back, never on the runtime.
-    timers: {
-      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimeout: (handle) =>
-        clearTimeout(handle as ReturnType<typeof setTimeout>),
-    },
-    // The runtime calls this one batch at a time and never from inside a
+    clock: assembly.clock,
+    timers: assembly.timers,
+    // The runtime calls this one batch at a time and never awaits it from a
     // scheduled event, which is what keeps the non-reentrant `ingest` from
     // overlapping itself when an ICE wait outlives a delivery window.
     onOperations: (fresh) => driver.ingest(fresh),
@@ -1004,11 +1093,13 @@ export const runBlindRendezvousPrototype = async (
   run = new BlindRendezvousRun({
     driver,
     runtime,
-    transport,
+    transport: assembly.transport,
     identity,
     pqMode: decodeRoomPolicyV1(driver.roomPolicy.sessionPolicyV1).pqMode,
-    wasmBinary: options.wasmBinary,
-    handshakeTimeoutMs: CONNECTED_TIMEOUT_MS,
+    wasmBinary: assembly.wasmBinary,
+    handshakeTimeoutMs: assembly.handshakeTimeoutMs,
+    clock: assembly.clock,
+    timers: assembly.timers,
     emit,
   });
 

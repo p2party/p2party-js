@@ -147,7 +147,12 @@ which excludes source anonymity and traffic patterns by definition):
    rounds. The co-membership edge is hidden at the identifier level only.
 3. **Size and count** are visible; the fixed schedule pads both.
 4. **Polling shape** must stay schedule-shaped, never event-shaped: no
-   burst after a hit, no coordinated dial phase between stores.
+   burst after a hit, no coordinated dial phase between stores. The
+   prototype keeps to this only while its timers fire within one delivery
+   window of their instants. After a longer suspension it catches up the
+   reads it owes, so a store sees a silence followed by a run of extra
+   scans (item 15). The run follows the suspension, not a hit, but it is
+   not the fixed shape.
 5. **Retry oracle.** Retrying at the surviving store after an omission is an
    active cross-store tagging channel; retries happen only at the next
    scheduled slot.
@@ -178,7 +183,11 @@ which excludes source anonymity and traffic patterns by definition):
     when the witness writes happen; this is about whether they happen at all.
     `#witness` (`carrierRuntime.ts`) posts a record about store A to store B
     **only if** A's scan of that window came back `finalized` and neither store
-    is inert, and reads B's records back in the same condition. So store B
+    is inert, and reads B's records back in the same condition. The scan must
+    also have answered by the witness instant: one still out is not waited
+    for; the pair is skipped for that window and reported `missed`. So A can
+    take the pair away from B by answering slowly — the same bit, as an
+    absence — but cannot move it in time. So store B
     learns, directly off its own request log and with no cooperation from
     anyone, whether store A served this client a finalized window. Count it per
     store: a store receives **one witness POST and one witness GET, or
@@ -202,6 +211,49 @@ which excludes source anonymity and traffic patterns by definition):
     when there is nothing to witness, exactly as an append slot carries cover
     when the outbox is empty. Making the traffic unconditional is a design
     change with its own cost, so it is disclosed rather than done.
+15. **Late timers and suspension change the trace.** The schedule fixes what
+    this client sends while its timers fire on time. A browser does not
+    always fire them on time, and what the runtime does then is visible to a
+    store (`carrierRuntime.ts`, `#takeDue` and `#catchUp`):
+    - A timer that fires late releases every event it held back, at the late
+      instant. The requests are the same ones, but they leave off the
+      profile's offsets and several at once: a background tab clamps timers
+      to whole seconds, so its token, read and allocation leave together on
+      a whole-second boundary. Item 1's argument applies to every such send.
+      The profile defines 200 ms of drift as conforming; a client whose
+      requests leave further off the grid is outside the set a fixed
+      schedule creates, and the offset it leaves at (for a clamped tab, its
+      alignment phase) repeats from window to window, so each store can link
+      that client's windows by it.
+    - An upload more than one delivery window late is not sent — the store
+      would refuse it — and is reported `missed`. That window's count drops
+      below thirteen at every store.
+    - A read more than one delivery window late is caught up. After a
+      suspension each store receives scans of the windows this client
+      missed, newest first, one in flight at a time, none started while one
+      of the current window's requests to that store is in flight, each
+      failed one once more after the rest, reaching back at most 64 windows;
+      windows
+      the reach moves past first are reported `missed`. A store sees a
+      silence, then a run of extra scans whose length tracks the
+      suspension's. On a fake clock with every request taking 150 ms and six
+      connections per store, a 64-window suspension was caught up in 14.9 s:
+      60 windows read, the 3 oldest given up as the reach moved, and every
+      request of the resumed windows answered within its deadline (at most
+      500 ms) (`carrierSlowStore.test.ts`).
+    - The witness pair about a store is skipped when that store's scan has
+      not answered by the witness instant (item 14).
+    - **A throttled background tab cannot store state-replication work in
+      some alignments.** By arithmetic on the pinned profile, ignoring
+      network time and clock skew: with timers clamped to whole seconds at
+      phase p ∈ [0, 1000) ms within the window, the class-0
+      state-replication append due at 2100 leaves at the first aligned
+      instant at or after 2100 — p + 2000 for p ≥ 100, p + 3000 for p < 100
+      — and the store, which finalizes at 2800, refuses it whenever
+      p ∈ [0, 100) or [800, 1000): 30% of phases. The class-1 append due at
+      1900 is refused for p ∈ [800, 900). That class-0 slot carries PRESENCE
+      and backfill, so in those phases a background tab's presence never
+      reaches a store.
 
 What no sweep found published together — and therefore the only thing this
 work may present as novel — is the *composition*: a capability-authenticated
@@ -379,15 +431,19 @@ offsets (`ingressWindowStartMs` + offset, wall clock via an injected clock):
   dummy with the exact header and random body;
 - at `publicReadOffsetMs`: checkpoint + all chunk reads for `w-1`;
 - at `chunkFinalizationOffsetMs - maxScheduleSkewMs` (2600 at the pinned
-  profile), waiting for nothing but the other store's scan of `w-1`: a
-  witness POST and a witness GET to each *other* store, which is the one
-  part of the shape that is **conditional** rather than fixed (§3a item 14,
-  counted in §5). Its timing does not depend on what the read decrypted or
-  on the application's handling of it.
+  profile), waiting for nothing: a witness POST and a witness GET to each
+  *other* store about each store whose scan of `w-1` had answered
+  `finalized` by then, which is the one part of the shape that is
+  **conditional** rather than fixed (§3a item 14, counted in §5). Its timing
+  does not depend on what the read decrypted, on the application's handling
+  of it, or on when a store answers.
 
 A timer delivered late fires its events late rather than dropping them;
 uploads more than one delivery window late are not sent and are reported
-`missed` (`#takeDue`). Nothing is retried (no same-window retry). Outbox:
+`missed`, and reads more than one delivery window late are caught up one
+scan at a time per store (`#takeDue`, `#catchUp`; §3a item 15). A scheduled
+read is not retried (no same-window retry); a caught-up read is retried once.
+Outbox:
 operations queue with their `ServiceWorkKindV1`; role mapping and ordering follow
 `OperationServiceRole`/`OperationServiceOrder` from §4.3. Each publication
 wraps the **same operation bytes** per store with `sealCarrierEnvelope`
@@ -577,7 +633,9 @@ Counted from `carrierRuntime.ts` — `#eventsForWindow` for the scheduled events
 and `storeClient.scanWindow` for what one read expands into — at the pinned
 profile, and stated as fixed and conditional rather than as one number.
 
-**Thirteen fixed requests**, issued whether or not anything real was sent:
+**Thirteen fixed requests**, issued whether or not anything real was sent,
+while the client's timers fire within one delivery window of their instants
+(§3a item 15 states what late timers and suspensions change):
 
 | Count | Request | Route | Offset in the window |
 |---:|---|---|---|
@@ -596,13 +654,14 @@ it would be distinguishable from one that did not (`#issueToken`).
 
 **Two conditional requests, or none** — one witness POST and one witness GET
 (`…/witness`), never one without the other. A store receives that pair in a
-window exactly when the *other* store's scan of that window came back
-`finalized` and neither store is inert:
+window exactly when the *other* store's scan of that window had come back
+`finalized` by the witness instant and neither store is inert:
 
 | Situation | This store receives |
 |---|---:|
 | both stores healthy, the other's scan `finalized` | 2 |
 | the other store's scan not `finalized` | 0 |
+| the other store's scan not answered by the witness instant | 0 |
 | either store inert | 0 |
 
 Which of the two it is, is a fact about the *other* store, not about this one.
@@ -624,8 +683,8 @@ and never answers cannot hold the union — or this trace — open.
   no throw out of the scan, and the union completes on the other store's
   objects. Each store's read is its own handler, so the honest store's
   objects are delivered without waiting for the silent one; without the
-  deadline, the silent store's scan would never settle and the witness event
-  that waits for it would never finish. The path is defended in
+  deadline, the silent store's scan would never settle and its part of the
+  window's union would stay open. The path is defended in
   code and exercised by a unit test (`carrierRuntime.test.ts`, "keeps
   delivering through the other store when one stalls and answers nothing");
   **no end-to-end scenario covers it yet** — `kill-a` refuses the connection

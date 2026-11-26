@@ -25,12 +25,16 @@ import {
   encodeOperation,
   operationValidationContextAt,
 } from "../../../src/blindRendezvous/operation";
-import { ingressWindowStartMs } from "../../../src/blindRendezvous/publicWindow";
+import {
+  ingressWindow,
+  ingressWindowStartMs,
+} from "../../../src/blindRendezvous/publicWindow";
 import { copyBlindDefaultPolicy } from "../../../src/blindRendezvous/roomPolicyV4";
 import { CarrierRuntime } from "../../../src/blindRendezvous/prototype/carrierRuntime";
 import {
   BlindRendezvousRun,
   PrototypeRunTimeoutError,
+  assembleRun,
 } from "../../../src/blindRendezvous/prototype/index";
 import { PairDriver } from "../../../src/blindRendezvous/prototype/pairDriver";
 import {
@@ -1950,9 +1954,37 @@ class SilentChannel extends EventTarget {
   binaryType = "arraybuffer";
   readyState: RTCDataChannelState = "open";
   sent = 0;
+  #spoke: (() => void) | null = null;
+  /** Settles on the first frame this side sends. */
+  readonly spoke = new Promise<void>((resolve) => {
+    this.#spoke = resolve;
+  });
 
   send(): void {
     this.sent += 1;
+    this.#spoke?.();
+  }
+
+  close(): void {
+    if (this.readyState === "closed") return;
+    this.readyState = "closed";
+    this.dispatchEvent(new Event("close"));
+  }
+}
+
+/** One end of an in-memory data channel; every frame is kept. */
+class PairedChannel extends EventTarget {
+  binaryType = "arraybuffer";
+  readyState: RTCDataChannelState = "open";
+  peer: PairedChannel | null = null;
+  readonly frames: Uint8Array[] = [];
+
+  send(bytes: Uint8Array): void {
+    const copy = Uint8Array.from(bytes);
+    this.frames.push(copy);
+    this.peer?.dispatchEvent(
+      new MessageEvent("message", { data: Uint8Array.from(copy).buffer }),
+    );
   }
 
   close(): void {
@@ -1968,25 +2000,29 @@ interface FakeRunTransport {
   closed: number;
 }
 
+const providerOver = (
+  channel: EventTarget,
+  verifyCertificates: SessionTransportProvider["verifyCertificates"],
+): SessionTransportProvider => ({
+  role: "initiator",
+  peerConnection: {
+    connectionState: "connected",
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  } as unknown as RTCPeerConnection,
+  channel: () => Promise.resolve(channel as unknown as RTCDataChannel),
+  verifyCertificates,
+});
+
 const fakeRunTransport = (
   verifyCertificates: SessionTransportProvider["verifyCertificates"],
 ): FakeRunTransport => {
   const channel = new SilentChannel();
-  const provider: SessionTransportProvider = {
-    role: "initiator",
-    peerConnection: {
-      connectionState: "connected",
-      addEventListener: () => undefined,
-      removeEventListener: () => undefined,
-    } as unknown as RTCPeerConnection,
-    channel: () => Promise.resolve(channel as unknown as RTCDataChannel),
-    verifyCertificates,
-  };
   const fake: FakeRunTransport = {
     channel,
     closed: 0,
     transport: {
-      provider,
+      provider: providerOver(channel, verifyCertificates),
       // What `WebRtcCandidateProvider.close()` does to its channel.
       close: (): void => {
         fake.closed += 1;
@@ -2001,41 +2037,26 @@ const fakeRunTransport = (
 const stubDriver = (handoff: HandoffFacts | null): PairDriver =>
   ({ handoff }) as unknown as PairDriver;
 
-interface RunUnderTest {
-  readonly run: BlindRendezvousRun;
+interface RunEvents {
   readonly events: { readonly kind: string; readonly detail?: string }[];
+  readonly emit: (kind: string, detail?: string) => void;
   readonly reached: (kind: string) => Promise<string | undefined>;
 }
 
-const runOver = (
-  carrier: Carrier,
-  driver: PairDriver,
-  transport: RunTransport,
-  handshakeTimeoutMs: number,
-): RunUnderTest => {
+const runEvents = (): RunEvents => {
   const events: { readonly kind: string; readonly detail?: string }[] = [];
   const waiters: {
     readonly kind: string;
     readonly resolve: (detail: string | undefined) => void;
   }[] = [];
-  const run = new BlindRendezvousRun({
-    driver,
-    runtime: carrier.runtime,
-    transport,
-    identity: runIdentity,
-    pqMode: "hybrid-mlkem768",
-    wasmBinary,
-    handshakeTimeoutMs,
+  return {
+    events,
     emit: (kind, detail) => {
       events.push({ kind, detail });
       for (const waiter of waiters.splice(0))
         if (waiter.kind === kind) waiter.resolve(detail);
         else waiters.push(waiter);
     },
-  });
-  return {
-    run,
-    events,
     reached: (kind) => {
       const seen = events.find((event) => event.kind === kind);
       if (seen !== undefined) return Promise.resolve(seen.detail);
@@ -2043,6 +2064,140 @@ const runOver = (
     },
   };
 };
+
+interface RunUnderTest extends RunEvents {
+  readonly run: BlindRendezvousRun;
+}
+
+/** A run whose every deadline is on the world's fake clock. */
+const runOver = (
+  world: World,
+  carrier: Carrier,
+  driver: PairDriver,
+  transport: RunTransport,
+  options: {
+    readonly handshakeTimeoutMs: number;
+    readonly identity?: typeof runIdentity;
+  },
+): RunUnderTest => {
+  const observed = runEvents();
+  const run = new BlindRendezvousRun({
+    driver,
+    runtime: carrier.runtime,
+    transport,
+    identity: options.identity ?? runIdentity,
+    pqMode: "hybrid-mlkem768",
+    wasmBinary,
+    handshakeTimeoutMs: options.handshakeTimeoutMs,
+    clock: world.scheduler.clock,
+    timers: world.scheduler.timers,
+    emit: observed.emit,
+  });
+  return { run, ...observed };
+};
+
+/** Every outcome of a promise as a value, so no rejection goes unhandled
+ * while the test drives the clock towards it. */
+const settled = <T>(promise: Promise<T>): Promise<T | Error> =>
+  promise.then(
+    (value) => value,
+    (error: unknown) =>
+      error instanceof Error ? error : new Error(String(error)),
+  );
+
+const fingerprintText = (byte: number): string =>
+  Array.from({ length: 32 }, () =>
+    byte.toString(16).padStart(2, "0").toUpperCase(),
+  ).join(":");
+
+/** One canned complete-ICE description, as `pairDriver.test.ts` uses. */
+const sdpBytes = (tag: string, fingerprintByte: number): Uint8Array =>
+  new TextEncoder().encode(
+    [
+      "v=0",
+      "o=- 4611731400430051336 2 IN IP4 127.0.0.1",
+      "s=-",
+      "t=0 0",
+      "a=group:BUNDLE 0",
+      "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+      "c=IN IP4 0.0.0.0",
+      "a=ice-ufrag:" + tag,
+      "a=ice-pwd:" + tag + tag + tag,
+      "a=ice-options:trickle",
+      "a=fingerprint:sha-256 " + fingerprintText(fingerprintByte),
+      "a=setup:actpass",
+      "a=mid:0",
+      "a=sctp-port:5000",
+      "",
+    ].join("\r\n"),
+  );
+
+interface Party extends RunEvents {
+  readonly run: BlindRendezvousRun;
+  readonly transports: Transport[];
+  acceptOfferCalls: number;
+}
+
+/**
+ * One whole endpoint through `assembleRun`, on the world's stores and fake
+ * clock. Its WebRTC side is canned SDP; `acceptOffer` — which in a browser
+ * waits for ICE gathering and may be called only once — waits for `gate`.
+ */
+const startParty = async (
+  world: World,
+  capability: Uint8Array,
+  sdp: Uint8Array,
+  gate: Promise<void>,
+): Promise<Party> => {
+  const transports: Transport[] = [];
+  const clients: PrototypeStoreClient[] = [];
+  for (const store of world.stores) {
+    const transport = transportTo(store.origin, world.scheduler);
+    world.transports.push(transport);
+    transports.push(transport);
+    clients.push(await connect(world, store, transport));
+  }
+  const observed = runEvents();
+  const party = {
+    ...observed,
+    transports,
+    acceptOfferCalls: 0,
+  } as Party;
+  const run = await assembleRun({
+    module,
+    capability,
+    identity: await generateSessionIdentity({ wasmBinary }),
+    stores: clients,
+    profile: world.profile,
+    profileHash: world.profileHash,
+    transport: {
+      provider: null,
+      close: () => undefined,
+      createOffer: () => Promise.resolve(Uint8Array.from(sdp)),
+      acceptOffer: async () => {
+        party.acceptOfferCalls += 1;
+        await gate;
+        return Uint8Array.from(sdp);
+      },
+      acceptAnswer: () => Promise.resolve(),
+    },
+    wasmBinary,
+    handshakeTimeoutMs: 60_000,
+    clock: world.scheduler.clock,
+    timers: world.scheduler.timers,
+    emit: observed.emit,
+  });
+  world.carriers.push({
+    runtime: run.runtime,
+    received: [],
+    events: [],
+    clients,
+  });
+  return Object.assign(party, { run });
+};
+
+const kinds = (subject: RunEvents): string[] =>
+  subject.events.map((event) => event.kind);
 
 describe("prototype run composition", () => {
   test.each(["dtls-mismatch", "stalled-handshake"] as const)(
@@ -2062,37 +2217,47 @@ describe("prototype run composition", () => {
             : () => Promise.resolve("verified"),
         );
         const subject = runOver(
+          world,
           carrier,
           stubDriver(HANDOFF),
           fake.transport,
-          50,
+          {
+            handshakeTimeoutMs: 1_000,
+          },
         );
         ended = subject;
         subject.run.handlePhase("handoff");
+
+        if (failure === "stalled-handshake") {
+          // The handshake starts — the initiator speaks first — and nobody
+          // answers. Its deadline is on the fake clock, so it fires exactly
+          // when the clock passes it and not before.
+          await fake.channel.spoke;
+          const startedAt = world.scheduler.nowMs;
+          await world.advance(startedAt + 999n);
+          expect(kinds(subject)).not.toContain("session-failed");
+          await world.advance(startedAt + 1_000n);
+        }
         const detail = await subject.reached("session-failed");
 
         if (failure === "stalled-handshake") {
-          // The handshake did start: the initiator spoke first, and nobody
-          // answered.
-          expect(fake.channel.sent).toBeGreaterThan(0);
           expect(detail).toContain("session handshake");
-          await expect(
-            subject.run.sendMessage(new Uint8Array([1]), 1_000),
-          ).rejects.toBeInstanceOf(PrototypeRunTimeoutError);
+          expect(
+            await settled(subject.run.sendMessage(new Uint8Array([1]), 1_000)),
+          ).toBeInstanceOf(PrototypeRunTimeoutError);
         } else {
           expect(detail).toContain("DTLS fingerprint mismatch");
-          await expect(
+          const outcome = await settled(
             subject.run.sendMessage(new Uint8Array([1]), 1_000),
-          ).rejects.toThrow("DTLS fingerprint mismatch");
+          );
+          expect(String(outcome)).toContain("DTLS fingerprint mismatch");
         }
         // The session and its peer connection are gone ...
         expect(fake.closed).toBeGreaterThan(0);
         expect(fake.channel.readyState).toBe("closed");
         // ... and nothing else: the run was not stopped, so the schedule
         // goes on at its fixed shape in the windows after the failure.
-        expect(subject.events.map((event) => event.kind)).not.toContain(
-          "run-stopped",
-        );
+        expect(kinds(subject)).not.toContain("run-stopped");
         await world.advance(windowStartMs(W3));
         expect(
           windowShape(
@@ -2117,21 +2282,198 @@ describe("prototype run composition", () => {
       const carrier = await addCarrier(world, room, [0]);
       // No handoff ever comes, so there is no session to send on.
       subject = runOver(
+        world,
         carrier,
         stubDriver(null),
         { provider: null, close: () => undefined },
-        50,
+        { handshakeTimeoutMs: 1_000 },
       );
-      await expect(
+      const startedAt = world.scheduler.nowMs;
+      const sending = settled(
         subject.run.sendMessage(new Uint8Array([1, 2, 3]), 20),
-      ).rejects.toBeInstanceOf(PrototypeRunTimeoutError);
-      // A deadline is not a failure of the edge: the run is still live.
-      expect(subject.events.map((event) => event.kind)).not.toContain(
-        "run-stopped",
       );
+      await world.advance(startedAt + 20n);
+      expect(await sending).toBeInstanceOf(PrototypeRunTimeoutError);
+      // A deadline is not a failure of the edge: the run is still live.
+      expect(kinds(subject)).not.toContain("run-stopped");
     } finally {
       subject?.run.stop();
       world.stop();
     }
   }, 30_000);
+
+  test("a send that missed its deadline stays unsent", async () => {
+    const world = await createWorld();
+    const subjects: RunUnderTest[] = [];
+    try {
+      const room = await makeRoom(new Uint8Array(32).fill(0xd9), START_MS);
+      const carrier = await addCarrier(world, room, [0]);
+      const responderIdentity = await generateSessionIdentity({ wasmBinary });
+      const initiatorChannel = new PairedChannel();
+      const responderChannel = new PairedChannel();
+      initiatorChannel.peer = responderChannel;
+      responderChannel.peer = initiatorChannel;
+      const verified = (): Promise<"verified"> => Promise.resolve("verified");
+
+      const initiator = runOver(
+        world,
+        carrier,
+        stubDriver({
+          ...HANDOFF,
+          sessionRole: "initiator",
+          peerStableEd25519PublicKey: responderIdentity.ed25519PublicKey,
+        }),
+        {
+          provider: providerOver(initiatorChannel, verified),
+          close: () => initiatorChannel.close(),
+        },
+        { handshakeTimeoutMs: 60_000 },
+      );
+      const responder = runOver(
+        world,
+        carrier,
+        stubDriver({
+          ...HANDOFF,
+          sessionRole: "responder",
+          rendezvousRole: "responder",
+          localFingerprint: HANDOFF.remoteFingerprint,
+          remoteFingerprint: HANDOFF.localFingerprint,
+          peerStableEd25519PublicKey: runIdentity.ed25519PublicKey,
+        }),
+        {
+          provider: providerOver(responderChannel, verified),
+          close: () => responderChannel.close(),
+        },
+        { handshakeTimeoutMs: 60_000, identity: responderIdentity },
+      );
+      subjects.push(initiator, responder);
+
+      // There is no session yet, so this send waits — past its deadline.
+      const early = new TextEncoder().encode("sent too early");
+      const startedAt = world.scheduler.nowMs;
+      const missed = settled(initiator.run.sendMessage(early, 100));
+      await world.advance(startedAt + 100n);
+      expect(await missed).toBeInstanceOf(PrototypeRunTimeoutError);
+
+      // Now the session comes up. The missed send must not go out with it.
+      initiator.run.handlePhase("handoff");
+      responder.run.handlePhase("handoff");
+      await initiator.reached("session-authenticated");
+      await responder.reached("session-authenticated");
+      const appLane = (channel: PairedChannel): Uint8Array[] =>
+        channel.frames.filter((frame) => frame[0] === 1);
+      expect(appLane(initiatorChannel)).toEqual([]);
+
+      // And the next message is the first one the peer receives.
+      await initiator.run.sendMessage(
+        new TextEncoder().encode("sent in time"),
+        1_000,
+      );
+      expect(
+        new TextDecoder().decode(await responder.run.recvMessage(1_000)),
+      ).toBe("sent in time");
+    } finally {
+      for (const subject of subjects) subject.run.stop();
+      world.stop();
+    }
+  }, 60_000);
+
+  test("the composition hands operations to driver.ingest one call at a time", async () => {
+    const world = await createWorld();
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const parties: Party[] = [];
+    try {
+      const capability = new Uint8Array(32).fill(0xda);
+      parties.push(
+        await startParty(world, capability, sdpBytes("aaaa", 0xaa), gate),
+        await startParty(world, capability, sdpBytes("bbbb", 0xbb), gate),
+      );
+      // Presence, HELLO, ACCEPT and OFFER travel through the stores until the
+      // responder's ingest reaches `acceptOffer` and stays there.
+      for (
+        let window = CHAIN_START + 1n;
+        window <= CHAIN_START + 12n &&
+        parties.every((party) => party.acceptOfferCalls === 0);
+        window += 1n
+      )
+        await world.advance(windowStartMs(window));
+      const responder = parties.find((party) => party.acceptOfferCalls > 0);
+      if (responder === undefined)
+        throw new Error("no party reached acceptOffer");
+      expect(responder.acceptOfferCalls).toBe(1);
+
+      // A third holder of the capability announces itself. Its presence is
+      // read and handed on while the responder's ingest is still waiting.
+      const room = await makeRoom(capability, START_MS);
+      const announcer = await addCarrier(world, room, [0, 1]);
+      announcer.runtime.publish(
+        await presenceFor(capability, world.scheduler),
+        "PRESENCE",
+      );
+      const seenBefore = responder.run.runtime.counters.operationsSeen;
+      const pausedAt = ingressWindow(
+        world.profile.deliveryWindowMs,
+        world.scheduler.nowMs,
+      );
+      await world.advance(windowStartMs(pausedAt + 3n));
+      expect(responder.run.runtime.counters.operationsSeen).toBeGreaterThan(
+        seenBefore,
+      );
+      // Delivered to a second `ingest` alongside the first, it would have
+      // called `acceptOffer` again, which a browser refuses.
+      expect(responder.acceptOfferCalls).toBe(1);
+
+      release();
+      for (
+        let window = pausedAt + 4n;
+        window <= pausedAt + 12n &&
+        !parties.every((party) => kinds(party).includes("handoff"));
+        window += 1n
+      )
+        await world.advance(windowStartMs(window));
+      for (const party of parties) {
+        expect(kinds(party)).toContain("handoff");
+        expect(kinds(party)).not.toContain("failed");
+      }
+      expect(
+        parties.reduce((total, party) => total + party.acceptOfferCalls, 0),
+      ).toBe(1);
+    } finally {
+      release();
+      for (const party of parties) party.run.stop();
+      world.stop();
+    }
+  }, 120_000);
+
+  test("a window no store served reaches the page as store-missed", async () => {
+    const world = await createWorld();
+    let party: Party | null = null;
+    try {
+      party = await startParty(
+        world,
+        new Uint8Array(32).fill(0xdb),
+        sdpBytes("cccc", 0xcc),
+        Promise.resolve(),
+      );
+      await world.advance(windowStartMs(W2));
+      // Both stores refuse this client's read of W1, made at W2's read offset.
+      for (const transport of party.transports) transport.down = true;
+      await world.advance(windowStartMs(W2) + profile.publicReadOffsetMs + 1n);
+      for (const transport of party.transports) transport.down = false;
+
+      const forwarded = party.events.filter(
+        (event) =>
+          event.kind === "store-missed" &&
+          (event.detail ?? "").startsWith(`runtime w${String(W1)}:`) &&
+          (event.detail ?? "").includes("no store served"),
+      );
+      expect(forwarded).toHaveLength(1);
+    } finally {
+      party?.run.stop();
+      world.stop();
+    }
+  }, 60_000);
 });

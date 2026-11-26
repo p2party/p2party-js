@@ -135,16 +135,26 @@ export type { RoomPqMode } from "./roomPolicy";
 export { PROTOCOL_VERSION, WIRE_CHUNK_FRAME_LEN };
 
 /**
- * `decrypt()` rejects with this when the session can no longer open the
- * message because it already returned it (a replay or a duplicate delivery).
- * The check covers the current receiving chain and the most recent superseded
- * ones; it also fires for a message whose skipped key the bounded skip window
- * evicted. Nothing is committed and the session stays usable.
+ * `decrypt()` rejects with this when the session cannot open the message
+ * again: it already returned it (a replay or a duplicate delivery), or the
+ * bounded skip window evicted the message's skipped key before it arrived. The
+ * check covers the current receiving chain and the most recent superseded
+ * ones. Nothing is committed and the session stays usable.
+ *
+ * It does not prove the application received the message: in the eviction
+ * case it never did. Do not acknowledge or stop retransmitting on it alone.
+ *
+ * `name` is always "SessionReplayError". Check it rather than `instanceof`
+ * when the session may come from another bundle: the `p2party` and
+ * `p2party/session` entry points each bundle their own copy of this class.
  */
 export class SessionReplayError extends Error {
+  override readonly name = "SessionReplayError";
+
   constructor() {
-    super("session: message was already decrypted");
-    this.name = "SessionReplayError";
+    super(
+      "session: message cannot be opened again (already decrypted or its key expired)",
+    );
   }
 }
 

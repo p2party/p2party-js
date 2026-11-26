@@ -385,8 +385,7 @@ reordered, is rejected and commits nothing:
 
 - `SessionReplayError` when the message is on the current receiving chain or
   on one of the 256 most recently superseded receiving chains (each peer turn
-  of the DH ratchet supersedes one). Treat it as a duplicate delivery and drop
-  it.
+  of the DH ratchet supersedes one).
 - the ordinary authentication error for a message on an older superseded
   chain. The session no longer recognises that chain, but it holds no key that
   could open the message.
@@ -396,11 +395,24 @@ once each. The session holds at most 2,000 skipped keys and drops the oldest
 first; a message whose skipped key was dropped also raises
 `SessionReplayError`, because the session can no longer open it.
 
+`SessionReplayError` therefore means only "this session cannot open this
+envelope again". It does not prove that `decrypt()` ever returned the
+message to your application: after a skipped-key eviction it never did. Do
+not acknowledge the message, stop retransmitting it, or mark it delivered
+because of this error. Use your own delivery record for that, and treat the
+error as a frame to drop.
+
+Check `error.name` rather than `instanceof`. The `p2party` and
+`p2party/session` entry points are separate bundles, each with its own copy of
+the class, so `instanceof` fails when the session came from the other entry
+point. `name` is always `"SessionReplayError"`.
+
 ```ts
 try {
   deliver(await session.decrypt(envelope));
 } catch (error) {
-  if (error instanceof SessionReplayError) return; // already delivered
+  // Cannot be opened again; not proof of delivery. Drop the frame.
+  if (error instanceof Error && error.name === "SessionReplayError") return;
   throw error;
 }
 ```

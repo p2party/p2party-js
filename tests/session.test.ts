@@ -13,8 +13,11 @@ import {
   type P2PartySession,
 } from "../src/session";
 import type { RoomPqMode } from "../src/roomPolicy";
+import { MAX_ACTIVE_RECEIVE_KEYS } from "../src/handlers/pqHealingRuntime";
 import {
   CHUNK_LEN,
+  MAX_SKIP,
+  MAX_SKIP_SESSION,
   PROTOCOL_VERSION,
   WIRE_CHUNK_FRAME_LEN,
 } from "../src/utils/constants";
@@ -1010,5 +1013,177 @@ describe("public store-free session replay rejection and bounded receive state",
     await bob.destroy();
     await expectReplayRejected(restoredAgain.decrypt(fixtureEnvelope(message)));
     await restoredAgain.destroy();
+  });
+  test("a replay older than the remembered chains is still rejected", async () => {
+    const { alice, bob } = await createPair();
+    const oldestPlaintext = patternedBytes(32, 1);
+    const oldest = await alice.encrypt(oldestPlaintext);
+    expectBytes(await bob.decrypt(oldest), oldestPlaintext);
+
+    // From the second round on, every round makes Bob supersede one more of
+    // Alice's chains, so this runs the record past its cap and evicts the
+    // oldest chain first.
+    const rounds = MAX_ACTIVE_RECEIVE_KEYS + 4;
+    let recent: EncryptedSessionMessage | null = null;
+    for (let round = 0; round < rounds; round += 1) {
+      const forward = patternedBytes(24, round);
+      const message = await alice.encrypt(forward);
+      expectBytes(await bob.decrypt(message), forward);
+      if (round === rounds - 3) recent = message;
+      const back = patternedBytes(24, round + 1);
+      expectBytes(await alice.decrypt(await bob.encrypt(back)), back);
+    }
+    if (!recent) throw new Error("expected a recent message");
+
+    const before = await bob.serialize();
+    // The oldest chain is no longer remembered: the replay still fails, as an
+    // unauthenticated frame rather than a typed replay, and commits nothing.
+    const error = await bob.decrypt(oldest).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SessionReplayError);
+    expect((error as Error).message).toBe(
+      "session: encrypted frame authentication failed",
+    );
+    expectBytes(await bob.serialize(), before);
+
+    // A superseded chain still inside the record keeps the typed error.
+    await expectReplayRejected(bob.decrypt(recent));
+    await pingPong(alice, bob, rounds);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  }, 120_000);
+
+  test("an evicted skipped key raises the replay error", async () => {
+    const { alice, bob } = await createPair();
+    // Bob receives only every MAX_SKIP-th message. The first delivery stores
+    // MAX_SKIP skipped keys and each later one MAX_SKIP - 1, until the map
+    // passes MAX_SKIP_SESSION and drops its oldest keys.
+    let deliveries = 1;
+    while (deliveries * MAX_SKIP - (deliveries - 1) <= MAX_SKIP_SESSION)
+      deliveries += 1;
+    const evicted = deliveries * MAX_SKIP - (deliveries - 1) - MAX_SKIP_SESSION;
+    expect(evicted).toBeGreaterThan(0);
+
+    const kept = new Map<number, EncryptedSessionMessage>();
+    for (let n = 0; n <= deliveries * MAX_SKIP; n += 1) {
+      const message = await alice.encrypt(patternedBytes(8, n));
+      if (n === 0 || n === evicted || (n > 0 && n % MAX_SKIP === 0))
+        kept.set(n, message);
+    }
+    for (let k = 1; k <= deliveries; k += 1)
+      expectBytes(
+        await bob.decrypt(kept.get(k * MAX_SKIP)!),
+        patternedBytes(8, k * MAX_SKIP),
+      );
+
+    // Message 0 was never returned to the application, yet the session can no
+    // longer open it: the replay error is not proof of delivery.
+    const error = await bob.decrypt(kept.get(0)!).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(SessionReplayError);
+    expect((error as Error).name).toBe("SessionReplayError");
+    expect((error as Error).message).toBe(
+      "session: message cannot be opened again (already decrypted or its key expired)",
+    );
+
+    // The oldest key the window kept still opens its message exactly once.
+    expectBytes(
+      await bob.decrypt(kept.get(evicted)!),
+      patternedBytes(8, evicted),
+    );
+    await expectReplayRejected(bob.decrypt(kept.get(evicted)!));
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  }, 120_000);
+
+  test("format 5 rejects malformed chain records", async () => {
+    const { alice, bob } = await createPair();
+    for (let round = 0; round < 4; round += 1)
+      await pingPong(alice, bob, round);
+    const snapshot = await bob.serialize();
+
+    // Format-5 layout (src/session.ts encodeSessionSnapshot): magic(8),
+    // version, protocol, flags, suite, Ns/Nr/PN(24), root key(32),
+    // [sending chain(32)], [receiving chain(32)], self DH pub+secret(64),
+    // [remote DH pub(32)], skipped count(2) + 72 bytes each, chain count(2) +
+    // 40 bytes each (DH pub, u64 length), then the PQ checkpoint.
+    const flags = snapshot[10];
+    let offset = 8 + 4 + 24 + 32;
+    if (flags & 0b001) offset += 32;
+    if (flags & 0b010) offset += 32;
+    const selfKeys = offset;
+    offset += 64;
+    expect(flags & 0b100).not.toBe(0);
+    const remote = offset;
+    offset += 32;
+    const view = (bytes: Uint8Array): DataView =>
+      new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    expect(view(snapshot).getUint16(offset)).toBe(0); // no skipped keys
+    const countOffset = offset + 2;
+    const count = view(snapshot).getUint16(countOffset);
+    expect(count).toBeGreaterThanOrEqual(2);
+    const firstEntry = countOffset + 2;
+    const secondEntry = firstEntry + 40;
+    const afterEntries = firstEntry + count * 40;
+
+    const mutated = (change: (bytes: Uint8Array) => void): Uint8Array => {
+      const bytes = Uint8Array.from(snapshot);
+      change(bytes);
+      return bytes;
+    };
+    const cases: Array<[string, Uint8Array, string]> = [
+      [
+        "count over the cap",
+        mutated((bytes) =>
+          view(bytes).setUint16(countOffset, MAX_ACTIVE_RECEIVE_KEYS + 1),
+        ),
+        "too many superseded receiving chains",
+      ],
+      [
+        "duplicate chain",
+        mutated((bytes) =>
+          bytes.copyWithin(secondEntry, firstEntry, firstEntry + 32),
+        ),
+        "duplicate receiving chain",
+      ],
+      [
+        "current chain",
+        mutated((bytes) => bytes.copyWithin(firstEntry, remote, remote + 32)),
+        "duplicate receiving chain",
+      ],
+      [
+        "length 0",
+        mutated((bytes) => view(bytes).setBigUint64(firstEntry + 32, 0n)),
+        "empty superseded chain",
+      ],
+    ];
+    // Missing remote key: drop both chain keys and the remote DH key (so the
+    // earlier chain-state checks pass), keep one chain record.
+    const withoutRemote = new Uint8Array(
+      68 + 64 + 2 + 2 + 40 + (snapshot.length - afterEntries),
+    );
+    withoutRemote.set(snapshot.subarray(0, 68), 0);
+    withoutRemote[10] = flags & ~0b111;
+    withoutRemote.set(snapshot.subarray(selfKeys, selfKeys + 64), 68);
+    view(withoutRemote).setUint16(132, 0);
+    view(withoutRemote).setUint16(134, 1);
+    withoutRemote.set(snapshot.subarray(firstEntry, firstEntry + 40), 136);
+    withoutRemote.set(snapshot.subarray(afterEntries), 176);
+    cases.push([
+      "missing remote key",
+      withoutRemote,
+      "superseded chains require a remote DH key",
+    ]);
+
+    for (const [, bytes, message] of cases)
+      await expect(restoreSession(bytes, cryptoOptions)).rejects.toThrow(
+        message,
+      );
+    // Control: the unmodified snapshot restores.
+    const restored = await restoreSession(snapshot, cryptoOptions);
+    await Promise.all([alice.destroy(), bob.destroy(), restored.destroy()]);
   });
 });

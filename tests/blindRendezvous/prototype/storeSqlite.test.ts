@@ -26,6 +26,7 @@ import type {
 } from "../../../src/blindRendezvous/publicWindow";
 import type {
   StoreAllocationRecord,
+  StoreWindowSlot,
   StoreWindowState,
 } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 
@@ -208,10 +209,29 @@ const withRawDatabase = <T>(path: string, body: (db: Database) => T): T => {
   }
 };
 
-const storedDocument = (
-  path: string,
-  window: bigint,
-): { allocations: { admissionQuotaKey32?: unknown }[] } =>
+/**
+ * The stored `state` blob, as the row actually holds it.
+ *
+ * Only the fields these tests read are named. Reaching into the row is the
+ * only way to test the decoder's refusals: nothing above this port can write
+ * a malformed document, and a decoder that is never handed one is a decoder
+ * whose validation is never exercised.
+ */
+interface StoredDocumentShape {
+  allocations: {
+    leaseBody: string;
+    lease: string;
+    requestHash: string;
+    admissionQuotaKey32?: unknown;
+  }[];
+  slots: { key: string; objectHash: string; object: string }[];
+  finalized: {
+    checkpoint: string;
+    chunks: { sizeClass: number; chunks: string[] }[];
+  } | null;
+}
+
+const storedDocument = (path: string, window: bigint): StoredDocumentShape =>
   withRawDatabase(path, (db) => {
     const row = db
       .query<{ state: Uint8Array }, [bigint]>(
@@ -219,10 +239,35 @@ const storedDocument = (
       )
       .get(window);
     if (row === null) throw new Error(`no row for window ${String(window)}`);
-    return JSON.parse(new TextDecoder().decode(row.state)) as {
-      allocations: { admissionQuotaKey32?: unknown }[];
-    };
+    return JSON.parse(
+      new TextDecoder().decode(row.state),
+    ) as StoredDocumentShape;
   });
+
+/** Rewrites one slot's `object` field in place, leaving the row otherwise
+ * byte-identical, so the load path meets exactly one bad value. */
+const corruptStoredObject = (
+  path: string,
+  window: bigint,
+  corrupt: (value: string) => string,
+): void => {
+  const document = storedDocument(path, window);
+  document.slots[0].object = corrupt(document.slots[0].object);
+  withRawDatabase(path, (db) => {
+    db.query<unknown, [Uint8Array, bigint]>(
+      'UPDATE "window" SET state = ? WHERE "window" = ?',
+    ).run(new TextEncoder().encode(JSON.stringify(document)), window);
+  });
+};
+
+/** Every byte value once, in order: 0x00 exercises the leading-zero nibble,
+ * 0xa0-0xff the letter nibbles, and `filled()` exercises neither end. */
+const EVERY_BYTE = Uint8Array.from({ length: 256 }, (_, index) => index);
+
+/** `EVERY_BYTE` rotated by `offset`, cut to `length` (wrapping as needed), so
+ * a fixed-width field still carries values from both ends of the range. */
+const everyByteFrom = (offset: number, length: number): Uint8Array =>
+  Uint8Array.from({ length }, (_, index) => (offset + index) % 256);
 
 describe("prototype store SQLite persistence", () => {
   test("optional admission quota keys are copied across both persistence boundaries", async () => {
@@ -372,6 +417,204 @@ describe("prototype store SQLite persistence", () => {
       );
     } finally {
       persistence.close();
+    }
+  });
+
+  /* ---------------------------------------------------------------- *
+   * The hex codec
+   *
+   * The stored document is hex throughout, so the codec is on the path of
+   * every read and every write this port serves. These pin the things a
+   * faster codec is most likely to get wrong quietly: that it round-trips
+   * every byte value in every field it stores, and that it still refuses a
+   * row it cannot read rather than inventing bytes for it. A table that maps
+   * an unexpected character to zero turns a corrupt row into a silently wrong
+   * object, and the store signs what it serves.
+   * ---------------------------------------------------------------- */
+
+  test("sqlite codec round-trips all byte values", async () => {
+    const path = databasePath();
+    const window = 425_000_010n;
+    // Eight allocations and eight slots, so each 32-byte field carries all 256
+    // values across them, and every variable-length field carries all 256 in
+    // one value.
+    const ordinals = Array.from({ length: 8 }, (_, ordinal) => ordinal);
+    const allocations = new Map(
+      ordinals.map((ordinal): [number, StoreAllocationRecord] => {
+        const leaseBody = {
+          version: 1 as const,
+          storeId: everyByteFrom(ordinal * 32, 32),
+          deliveryProfileHash: everyByteFrom(ordinal * 32 + 7, 32),
+          ingressWindow: window,
+          requestHash: everyByteFrom(ordinal * 32 + 13, 32),
+          allocationOrdinal: ordinal,
+          allocationEd25519PublicKey: everyByteFrom(ordinal * 32 + 19, 32),
+        };
+        return [
+          ordinal,
+          {
+            leaseBody,
+            lease: {
+              ...leaseBody,
+              storeSignature: everyByteFrom(ordinal * 32 + 23, 64),
+            },
+            requestHash: everyByteFrom(ordinal * 32 + 29, 32),
+            admissionQuotaKey32: everyByteFrom(ordinal * 32 + 31, 32),
+          },
+        ];
+      }),
+    );
+    const slots = new Map(
+      ordinals.map((ordinal): [string, StoreWindowSlot] => [
+        `0:0:${String(ordinal)}`,
+        {
+          objectHash: everyByteFrom(ordinal * 32, 32),
+          object: everyByteFrom(ordinal, 256),
+        },
+      ]),
+    );
+    const chunk: PublicChunkV1 = {
+      ...chunkOf(0, 0n, window),
+      previousChunkHash: everyByteFrom(200, 32),
+      fixedObjects: [EVERY_BYTE, everyByteFrom(128, 256)],
+      storeSignature: everyByteFrom(64, 64),
+    };
+    const checkpoint: PublicStoreCheckpointV1 = {
+      ...checkpointOf(window),
+      storeId: everyByteFrom(0, 32),
+      descriptorHash: everyByteFrom(32, 32),
+      previousCheckpointHash: everyByteFrom(96, 32),
+      finalizedChunkRoot: everyByteFrom(160, 32),
+      storeSignature: everyByteFrom(192, 64),
+    };
+    const state: StoreWindowState = {
+      window,
+      allocations,
+      slots,
+      finalized: { chunks: new Map([[0, [chunk]]]), checkpoint },
+    };
+
+    const writer = new SqliteStorePersistence(path);
+    try {
+      await writer.saveWindow(state);
+    } finally {
+      writer.close();
+    }
+    const reader = new SqliteStorePersistence(path);
+    try {
+      const loaded = await reader.loadWindow(window);
+      expect(loaded).not.toBeNull();
+      expect(hex(loaded!.slots.get("0:0:0")!.object)).toBe(hex(EVERY_BYTE));
+      expect(hex(loaded!.finalized!.chunks.get(0)![0].fixedObjects[0])).toBe(
+        hex(EVERY_BYTE),
+      );
+      expect(fingerprint(loaded as StoreWindowState)).toBe(fingerprint(state));
+      // The quota key is not in the fingerprint; every value of it is here.
+      expect(
+        ordinals.map((ordinal) =>
+          hex(loaded!.allocations.get(ordinal)!.admissionQuotaKey32!),
+        ),
+      ).toEqual(
+        ordinals.map((ordinal) => hex(everyByteFrom(ordinal * 32 + 31, 32))),
+      );
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("loading a stored window does not parse its hex one byte at a time", async () => {
+    const path = databasePath();
+    const window = 425_000_014n;
+    const persistence = new SqliteStorePersistence(path);
+    try {
+      await persistence.saveWindow(finalizedState(window));
+      // `Number.parseInt` over a two-character slice was the per-byte decoder;
+      // a window document is megabytes, so that one call per byte was most of
+      // what a store read cost. Counted, not timed.
+      const parseInt = spyOn(Number, "parseInt");
+      try {
+        const loaded = await persistence.loadWindow(window);
+        expect(fingerprint(loaded as StoreWindowState)).toBe(
+          fingerprint(finalizedState(window)),
+        );
+        expect(parseInt).toHaveBeenCalledTimes(0);
+      } finally {
+        parseInt.mockRestore();
+      }
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("writes the stored document as lowercase hex", async () => {
+    const path = databasePath();
+    const persistence = new SqliteStorePersistence(path);
+    try {
+      await persistence.saveWindow(finalizedState(425_000_011n));
+    } finally {
+      persistence.close();
+    }
+
+    // The reader's own validation demands lowercase, so an encoder that emitted
+    // uppercase would write rows this port could never read back.
+    const document = storedDocument(path, 425_000_011n);
+    for (const [field, value] of Object.entries(document.slots[0]))
+      if (field !== "key") expect(value).toMatch(/^[0-9a-f]*$/);
+    expect(document.finalized?.checkpoint).toMatch(/^[0-9a-f]+$/);
+    expect(document.finalized?.chunks[0].chunks[0]).toMatch(/^[0-9a-f]+$/);
+  });
+
+  // `A` is the uppercase half of the alphabet the codec does accept, `g` the
+  // character just past it, and `中` the case a table indexed by character code
+  // cannot hold a row for at all — three different ways to reach the same
+  // refusal, and the third is the one an out-of-range lookup answers `0` to.
+  for (const [label, replacement] of [
+    ["an uppercase hex digit", "A"],
+    ["a letter past f", "g"],
+    ["a character above U+00FF", "中"],
+  ] as const)
+    test(`refuses a stored row holding ${label}`, async () => {
+      const path = databasePath();
+      const window = 425_000_012n;
+      const persistence = new SqliteStorePersistence(path);
+      try {
+        await persistence.saveWindow(finalizedState(window));
+      } finally {
+        persistence.close();
+      }
+      corruptStoredObject(
+        path,
+        window,
+        (value) => `${replacement}${value.slice(1)}`,
+      );
+
+      const reader = new SqliteStorePersistence(path);
+      try {
+        await expect(reader.loadWindow(window)).rejects.toThrow(
+          /stored object is not lowercase hex/,
+        );
+      } finally {
+        reader.close();
+      }
+    });
+
+  test("refuses a stored row whose hex has an odd number of characters", async () => {
+    const path = databasePath();
+    const persistence = new SqliteStorePersistence(path);
+    try {
+      await persistence.saveWindow(finalizedState(425_000_013n));
+    } finally {
+      persistence.close();
+    }
+    corruptStoredObject(path, 425_000_013n, (value) => value.slice(1));
+
+    const reader = new SqliteStorePersistence(path);
+    try {
+      await expect(reader.loadWindow(425_000_013n)).rejects.toThrow(
+        /stored object is not lowercase hex/,
+      );
+    } finally {
+      reader.close();
     }
   });
 

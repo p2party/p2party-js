@@ -69,15 +69,46 @@ const fail: (message: string) => never = (message) => {
   throw new StorePersistenceError(message);
 };
 
+/* ------------------------------------------------------------------ *
+ * The hex codec
+ *
+ * Every byte this port stores in a window row crosses it twice, and a whole
+ * window document is megabytes, so this is the hottest code in the store:
+ * an append, an allocation, every finalization and every read the
+ * precomputed rows do not answer encode or decode the entire document, on
+ * one event loop. A per-character-pair codec here is what made the store,
+ * not the browser, the cost of a scan.
+ *
+ * The validation is not optional and must survive any speed work. The store
+ * signs what it serves, so a codec that quietly reads an unexpected character
+ * as some byte turns a corrupt row into a wrong object under a real
+ * signature. Hence the table below is `-1` everywhere except the sixteen
+ * lowercase hex digits, and the `< 256` guard: an out-of-range typed-array
+ * read yields `undefined`, and `undefined << 4` is `0` — the exact silent
+ * mapping this refuses to have.
+ * ------------------------------------------------------------------ */
+
 const hexOf = (value: Uint8Array): string =>
-  [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("hex");
+
+const NIBBLE_OF_CHAR_CODE = ((): Int8Array => {
+  const table = new Int8Array(256).fill(-1);
+  for (let digit = 0; digit < 10; digit++) table[0x30 + digit] = digit;
+  for (let letter = 0; letter < 6; letter++) table[0x61 + letter] = 10 + letter;
+  return table;
+})();
 
 const bytesFrom = (value: string, field: string): Uint8Array => {
-  if (!/^(?:[0-9a-f]{2})*$/.test(value))
-    fail(`stored ${field} is not lowercase hex`);
-  const output = new Uint8Array(value.length / 2);
-  for (let index = 0; index < output.length; index++)
-    output[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  if ((value.length & 1) !== 0) fail(`stored ${field} is not lowercase hex`);
+  const output = new Uint8Array(value.length >>> 1);
+  for (let index = 0; index < output.length; index++) {
+    const highCode = value.charCodeAt(index * 2);
+    const lowCode = value.charCodeAt(index * 2 + 1);
+    const high = highCode < 256 ? NIBBLE_OF_CHAR_CODE[highCode] : -1;
+    const low = lowCode < 256 ? NIBBLE_OF_CHAR_CODE[lowCode] : -1;
+    if (high < 0 || low < 0) fail(`stored ${field} is not lowercase hex`);
+    output[index] = (high << 4) | low;
+  }
   return output;
 };
 

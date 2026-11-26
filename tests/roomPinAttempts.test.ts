@@ -2,7 +2,6 @@
 // (db.worker.ts's own onmessage handler over fake-indexeddb), the same rows the
 // browser writes. A "reload" is a second limiter over the same IndexedDB: it
 // starts with empty in-tab state, exactly as a reloaded page does.
-import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -15,70 +14,22 @@ import {
   createPinAttemptLimiter,
   pinBackoffMs,
 } from "../src/roomPinAttempts";
+import {
+  callPinWorker as callWorker,
+  workerPinAttemptStore as workerStore,
+} from "./pinAttemptStores";
+
+import {
+  classifyHandshakeFailure,
+  isTerminalHandshakeFailure,
+} from "../src/handlers/handshakeFailure";
 
 import type { PinAttemptStore } from "../src/roomPinAttempts";
-import type { PinAttemptState } from "../src/db/types";
 
 beforeEach(() => {
   (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB =
     new IDBFactory();
 });
-
-let nextWorkerId = 1;
-const pendingWorkerCalls = new Map<
-  number,
-  { resolve: (value: unknown) => void; reject: (reason: Error) => void }
->();
-
-const deliverWorkerReply = (message: unknown): void => {
-  const reply = message as { id: number; result?: unknown; error?: unknown };
-  const call = pendingWorkerCalls.get(reply.id);
-  if (!call) return;
-  pendingWorkerCalls.delete(reply.id);
-  if (reply.error) call.reject(new Error(String(reply.error)));
-  else call.resolve(reply.result);
-};
-
-const callWorker = async (
-  method: string,
-  ...args: unknown[]
-): Promise<unknown> => {
-  await import("../src/db/db.worker"); // installs onmessage once
-  (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
-    deliverWorkerReply;
-  const handler = (
-    globalThis as unknown as {
-      onmessage: (event: MessageEvent) => Promise<void>;
-    }
-  ).onmessage;
-  const id = nextWorkerId++;
-  return new Promise((resolve, reject) => {
-    pendingWorkerCalls.set(id, { resolve, reject });
-    void handler({
-      data: structuredClone({ id, method, args }),
-    } as MessageEvent);
-  });
-};
-
-const workerStore: PinAttemptStore = {
-  get: (roomId, id) =>
-    callWorker("getPinAttemptState", roomId, id) as Promise<
-      PinAttemptState | undefined
-    >,
-  increment: (roomId, id, now, maxImmediateAttempts, baseMs, maxMs) =>
-    callWorker(
-      "incrementPinAttemptState",
-      roomId,
-      id,
-      now,
-      maxImmediateAttempts,
-      baseMs,
-      maxMs,
-    ) as Promise<PinAttemptState>,
-  delete: async (roomId, id) => {
-    await callWorker("deletePinAttemptState", roomId, id);
-  },
-};
 
 const ROOM = "00000000-0000-4000-8000-00000000a003";
 const OTHER_ROOM = "00000000-0000-4000-8000-00000000a004";
@@ -118,8 +69,7 @@ describe("per-room/per-peer PIN attempt backoff", () => {
     expect(pinBackoffMs(MAX_PIN_ATTEMPTS + 40)).toBe(PIN_BACKOFF_MAX_MS);
   });
 
-  test("a per-identity backoff row written by 0.14.10 still throttles that identity", async () => {
-    // 0.14.10 wrote exactly these rows through the same worker method.
+  test("a per-identity backoff row written by the worker throttles that identity", async () => {
     for (let i = 0; i < MAX_PIN_ATTEMPTS; i++)
       await callWorker(
         "incrementPinAttemptState",
@@ -314,40 +264,63 @@ describe("room-wide PIN failure window", () => {
     ).toBe(roomThrottledUntil(T0 + WINDOW));
 
     // Every one of these finds the ended window; exactly one may restart it.
-    // The first restart's delete is held until another failure has written
-    // the window (or 50 ms pass, when writes are serialized and none can):
-    // unserialized, that delete would erase the other failure's count.
-    let releaseHeldDelete!: () => void;
-    const otherWindowWrite = new Promise<void>((resolve) => {
-      releaseHeldDelete = resolve;
-    });
-    let held = false;
-    const lateDeleteStore: PinAttemptStore = {
-      ...workerStore,
-      increment: async (roomId, id, ...rest) => {
-        const row = await workerStore.increment(roomId, id, ...rest);
-        if (roomId !== ROOM) releaseHeldDelete();
-        return row;
-      },
-      delete: async (roomId, id) => {
-        if (!held && roomId !== ROOM) {
-          held = true;
-          await Promise.race([
-            otherWindowWrite,
-            new Promise((resolve) => setTimeout(resolve, 50)),
-          ]);
-        }
-        await workerStore.delete(roomId, id);
-      },
+    // The window's store operations run one at a time in an adversarial order
+    // the test chooses: a delete runs only when nothing else is waiting. With
+    // writes serialized per room only one operation is ever waiting; without,
+    // every restart's delete would erase the counts written before it.
+    const waiting: {
+      kind: "get" | "increment" | "delete";
+      run: () => Promise<void>;
+    }[] = [];
+    const scheduled = <T>(
+      kind: "get" | "increment" | "delete",
+      operation: () => Promise<T>,
+    ): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        waiting.push({
+          kind,
+          run: () => operation().then(resolve, reject),
+        });
+      });
+    const scheduledStore: PinAttemptStore = {
+      get: (roomId, id) =>
+        roomId === ROOM
+          ? workerStore.get(roomId, id)
+          : scheduled("get", () => workerStore.get(roomId, id)),
+      increment: (roomId, id, ...rest) =>
+        roomId === ROOM
+          ? workerStore.increment(roomId, id, ...rest)
+          : scheduled("increment", () =>
+              workerStore.increment(roomId, id, ...rest),
+            ),
+      delete: (roomId, id) =>
+        roomId === ROOM
+          ? workerStore.delete(roomId, id)
+          : scheduled("delete", () => workerStore.delete(roomId, id)),
     };
-    const sameTabLater = createPinAttemptLimiter(lateDeleteStore);
+    const sameTabLater = createPinAttemptLimiter(scheduledStore);
     const later = T0 + WINDOW + 10;
-    await Promise.all(
+    let settled = false;
+    const failures = Promise.all(
       Array.from({ length: LIMIT }, (_, i) =>
         sameTabLater.recordFailure(ROOM, freshIdentity(1_000 + i), later),
       ),
-    );
-    expect(held).toBe(true);
+    ).finally(() => {
+      settled = true;
+    });
+    let deletesRun = 0;
+    while (!settled) {
+      const nonDelete = waiting.findIndex(({ kind }) => kind !== "delete");
+      const [next] = waiting.splice(nonDelete === -1 ? 0 : nonDelete, 1);
+      if (next) {
+        if (next.kind === "delete") deletesRun += 1;
+        await next.run();
+        // Let the caller's continuation queue its next operation.
+        for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+      } else await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await failures;
+    expect(deletesRun).toBe(1);
     expect(
       await outcome(
         createPinAttemptLimiter(workerStore).assertAttemptAllowed(
@@ -392,7 +365,7 @@ describe("room-wide PIN failure window", () => {
     ).toBe("allowed");
   });
 
-  test("an unreadable known-peer record refuses the peer while the window is full", async () => {
+  test("an unreadable known-peer record fails the attempt as a transport failure", async () => {
     const tab = createPinAttemptLimiter(workerStore);
     await tab.recordSuccess(ROOM, KNOWN, T0);
     await failFromFreshIdentities(tab, LIMIT, T0);
@@ -404,15 +377,21 @@ describe("room-wide PIN failure window", () => {
           ? Promise.reject(new Error("injected: read failed"))
           : workerStore.get(roomId, id),
     };
-    expect(
-      await outcome(
-        createPinAttemptLimiter(unreadableKnown).assertAttemptAllowed(
-          ROOM,
-          KNOWN,
-          T0 + 100,
-        ),
-      ),
-    ).toBe(roomThrottledUntil(T0 + 1 + WINDOW));
+    const refused = await createPinAttemptLimiter(unreadableKnown)
+      .assertAttemptAllowed(ROOM, KNOWN, T0 + 100)
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(refused).toBeInstanceOf(Error);
+    expect((refused as Error).message).toBe("injected: read failed");
+    // Refused before the handshake, and not terminal: the edge re-dials.
+    const { reason } = classifyHandshakeFailure(refused, {
+      handshakeStarted: false,
+      pinRoom: true,
+    });
+    expect(reason).toBe("transport");
+    expect(isTerminalHandshakeFailure(reason)).toBe(false);
   });
 
   test("clearing a room removes its window, its known peers and every identity's backoff", async () => {
@@ -449,6 +428,39 @@ describe("room-wide PIN failure window", () => {
     expect(
       await outcome(reloaded.assertAttemptAllowed(ROOM, KNOWN, T0 + 1_100)),
     ).toBe(roomThrottledUntil(T0 + 1_001 + WINDOW));
+  });
+
+  test("clearing the limits drops the window and backoff and keeps authenticated peers", async () => {
+    const tab = createPinAttemptLimiter(workerStore);
+    await tab.recordSuccess(ROOM, KNOWN, T0);
+    await failFromFreshIdentities(tab, LIMIT, T0);
+    for (let i = 0; i < MAX_PIN_ATTEMPTS; i++)
+      await tab.recordFailure(ROOM, NEVER_SEEN, T0 + 50);
+
+    await tab.clearLimits(ROOM);
+
+    for (const limiter of [tab, createPinAttemptLimiter(workerStore)])
+      expect(
+        await outcome(limiter.assertAttemptAllowed(ROOM, NEVER_SEEN, T0 + 100)),
+      ).toBe("allowed");
+    const reloaded = createPinAttemptLimiter(workerStore);
+    await failFromFreshIdentities(reloaded, LIMIT, T0 + 1_000);
+    expect(
+      await outcome(reloaded.assertAttemptAllowed(ROOM, KNOWN, T0 + 1_100)),
+    ).toBe("allowed");
+  });
+
+  test("a success racing a room clear leaves no authenticated-peer row behind", async () => {
+    const tab = createPinAttemptLimiter(workerStore);
+    const success = tab.recordSuccess(ROOM, KNOWN, T0);
+    const clear = tab.clear(ROOM);
+    await Promise.all([success, clear]);
+
+    const reloaded = createPinAttemptLimiter(workerStore);
+    await failFromFreshIdentities(reloaded, LIMIT, T0);
+    expect(
+      await outcome(reloaded.assertAttemptAllowed(ROOM, KNOWN, T0 + 100)),
+    ).toBe(roomThrottledUntil(T0 + 1 + WINDOW));
   });
 
   test("a room ID cannot alias another room's window or known-peer record", async () => {

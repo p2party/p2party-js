@@ -89,7 +89,7 @@ import {
   hasRoomPin,
   putRoomPin,
 } from "./roomPinVault";
-import { clearPinAttempts } from "./roomPinAttempts";
+import { clearPinAttemptLimits, clearPinAttempts } from "./roomPinAttempts";
 import {
   decodeRoomCapability,
   decodeRoomCapabilityBase64Url,
@@ -442,7 +442,10 @@ const connect = async (
     if (policy.authMode === "pin" && options.pin !== undefined) {
       const existingRoomId =
         store.getState().rooms.find((room) => room.url === roomUrl)?.id ?? "";
-      if (existingRoomId) await clearPinAttempts(existingRoomId);
+      // A deliberate PIN re-entry resets the throttles but keeps the record
+      // of peers that already authenticated here: they stay exempt from the
+      // room window. Purge (below) removes that record too.
+      if (existingRoomId) await clearPinAttemptLimits(existingRoomId);
     }
 
     await activateSignalingRoom(roomUrl, {

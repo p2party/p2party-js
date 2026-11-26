@@ -15,7 +15,7 @@ export const MAX_ROOM_PIN_FAILURES_PER_WINDOW = 30;
 // Two durable controls bound online PIN guessing in a room:
 //
 // - per identity: `(roomId, peer Ed25519 identity)` → exponential backoff
-//   after MAX_PIN_ATTEMPTS failures (the 0.14.10 row, unchanged);
+//   after MAX_PIN_ATTEMPTS failures;
 // - per room: one failure window that opens at the room's first failure and
 //   lasts ROOM_PIN_FAILURE_WINDOW_MS. Once it holds
 //   MAX_ROOM_PIN_FAILURES_PER_WINDOW failures, identities that never completed
@@ -32,6 +32,10 @@ export const MAX_ROOM_PIN_FAILURES_PER_WINDOW = 30;
 //   `${KNOWN_PEER_SCOPE_PREFIX}${roomId}` / peer identity
 //       present once that identity completed a PIN handshake in this room
 //       { failures: successful handshakes, retryAfter: latest success }
+//
+// Every key starts with the room ID the signaling server assigned. After a
+// reload the client accepts a new one for the same room URL, so a server that
+// hands out a fresh ID starts all three records afresh.
 const ROOM_WINDOW_SCOPE_PREFIX = "pin-room-window:";
 const KNOWN_PEER_SCOPE_PREFIX = "pin-known-peers:";
 const ROOM_WINDOW_ROW = "0".repeat(64);
@@ -52,7 +56,10 @@ export interface PinAttemptStore {
 }
 
 export interface PinAttemptLimiter {
-  /** Throws `... throttled until <ISO time>` when this attempt must wait. */
+  /**
+   * Throws `... throttled until <ISO time>` when this attempt must wait. A
+   * storage read error propagates unchanged.
+   */
   assertAttemptAllowed(
     roomId: string,
     peerIdentityEd25519: string,
@@ -71,12 +78,16 @@ export interface PinAttemptLimiter {
     now?: number,
   ): Promise<void>;
   /**
+   * Drops the room window and every identity's backoff, and keeps the record
+   * of authenticated peers (a deliberate PIN re-entry).
+   */
+  clearLimits(roomId: string): Promise<void>;
+  /**
    * With an identity: drops that identity's backoff. Without: drops every PIN
-   * row of the room — backoff, window and the record of authenticated peers.
+   * row of the room — backoff, window and the record of authenticated peers
+   * (room purge).
    */
   clear(roomId: string, peerIdentityEd25519?: string): Promise<void>;
-  /** Counts a failure in this tab's copy of the room window only. */
-  recordInTabRoomFailure(roomId: string, now?: number): void;
 }
 
 export const pinBackoffMs = (failures: number): number => {
@@ -115,16 +126,16 @@ export const createPinAttemptLimiter = (
   // fails (storage full); the known-peer copy spares a read per handshake.
   const inTabWindows = new Map<string, { failures: number; end: number }>();
   const inTabKnownPeers = new Map<string, Set<string>>();
-  // Restarting an ended persisted window is read → delete → increment; this
-  // per-room chain keeps concurrent failures in this tab from deleting each
-  // other's count.
-  const windowWrites = new Map<string, Promise<void>>();
+  // One chain per room for window and known-peer writes. Restarting an ended
+  // persisted window is read → delete → increment, and a room clear deletes
+  // rows a success may be writing; in this tab neither can interleave.
+  const roomWrites = new Map<string, Promise<void>>();
 
-  const serializeWindowWrite = (
+  const serializeRoomWrite = (
     roomId: string,
     write: () => Promise<void>,
   ): Promise<void> => {
-    const run = (windowWrites.get(roomId) ?? Promise.resolve()).then(
+    const run = (roomWrites.get(roomId) ?? Promise.resolve()).then(
       write,
       write,
     );
@@ -132,9 +143,9 @@ export const createPinAttemptLimiter = (
       () => undefined,
       () => undefined,
     );
-    windowWrites.set(roomId, settled);
+    roomWrites.set(roomId, settled);
     void settled.then(() => {
-      if (windowWrites.get(roomId) === settled) windowWrites.delete(roomId);
+      if (roomWrites.get(roomId) === settled) roomWrites.delete(roomId);
     });
     return run;
   };
@@ -146,7 +157,7 @@ export const createPinAttemptLimiter = (
     return undefined;
   };
 
-  const recordInTabRoomFailure = (roomId: string, now = Date.now()): void => {
+  const recordInTabRoomFailure = (roomId: string, now: number): void => {
     const window = inTabWindow(roomId, now);
     if (window) window.failures += 1;
     else
@@ -181,7 +192,7 @@ export const createPinAttemptLimiter = (
     roomId: string,
     now: number,
   ): Promise<void> =>
-    serializeWindowWrite(roomId, async () => {
+    serializeRoomWrite(roomId, async () => {
       const scope = roomWindowScope(roomId);
       const row = await store.get(scope, ROOM_WINDOW_ROW);
       if (row && row.retryAfter > now) {
@@ -203,6 +214,11 @@ export const createPinAttemptLimiter = (
       );
     });
 
+  const deletePersistedWindow = (roomId: string): Promise<void> =>
+    serializeRoomWrite(roomId, () =>
+      store.delete(roomWindowScope(roomId), ROOM_WINDOW_ROW),
+    );
+
   const rememberKnownPeer = (
     roomId: string,
     peerIdentityEd25519: string,
@@ -212,19 +228,14 @@ export const createPinAttemptLimiter = (
     inTabKnownPeers.set(roomId, peers);
   };
 
+  // A read error propagates like a window read error: the attempt fails
+  // before the handshake as a transport failure, and the edge re-dials.
   const isKnownPeer = async (
     roomId: string,
     peerIdentityEd25519: string,
   ): Promise<boolean> => {
     if (inTabKnownPeers.get(roomId)?.has(peerIdentityEd25519)) return true;
-    let row: PinAttemptState | undefined;
-    try {
-      row = await store.get(knownPeerScope(roomId), peerIdentityEd25519);
-    } catch {
-      // Only asked while the room window is full: an identity this device
-      // cannot confirm it has authenticated is refused like a new one.
-      return false;
-    }
+    const row = await store.get(knownPeerScope(roomId), peerIdentityEd25519);
     if (row === undefined) return false;
     rememberKnownPeer(roomId, peerIdentityEd25519);
     return true;
@@ -233,8 +244,8 @@ export const createPinAttemptLimiter = (
   return {
     async assertAttemptAllowed(roomId, peerIdentityEd25519, now = Date.now()) {
       assertNotReservedRoomId(roomId);
-      // The in-tab copy is checked first so a full window still refuses new
-      // identities when storage cannot be read.
+      // The in-tab copy is checked first so a window whose persisted write
+      // failed still counts.
       const windowEnd =
         fullWindowEnd(inTabWindow(roomId, now), now) ??
         (await persistedFullWindowEnd(roomId, now));
@@ -273,16 +284,24 @@ export const createPinAttemptLimiter = (
       await Promise.all([
         // No immediate-attempt limit is ever reached, so the worker stores
         // retryAfter = now: the latest success.
-        store.increment(
-          knownPeerScope(roomId),
-          peerIdentityEd25519,
-          now,
-          Number.MAX_SAFE_INTEGER,
-          1,
-          1,
-        ),
+        serializeRoomWrite(roomId, async () => {
+          await store.increment(
+            knownPeerScope(roomId),
+            peerIdentityEd25519,
+            now,
+            Number.MAX_SAFE_INTEGER,
+            1,
+            1,
+          );
+        }),
         store.delete(roomId, peerIdentityEd25519),
       ]);
+    },
+
+    async clearLimits(roomId) {
+      assertNotReservedRoomId(roomId);
+      inTabWindows.delete(roomId);
+      await Promise.all([store.delete(roomId), deletePersistedWindow(roomId)]);
     },
 
     async clear(roomId, peerIdentityEd25519) {
@@ -295,22 +314,29 @@ export const createPinAttemptLimiter = (
       inTabKnownPeers.delete(roomId);
       await Promise.all([
         store.delete(roomId),
-        store.delete(knownPeerScope(roomId)),
-        serializeWindowWrite(roomId, () =>
-          store.delete(roomWindowScope(roomId), ROOM_WINDOW_ROW),
-        ),
+        deletePersistedWindow(roomId),
+        serializeRoomWrite(roomId, () => store.delete(knownPeerScope(roomId))),
       ]);
     },
-
-    recordInTabRoomFailure,
   };
 };
 
-const pinAttempts = createPinAttemptLimiter({
+const databaseStore: PinAttemptStore = {
   get: getPinAttemptState,
   increment: incrementPinAttemptState,
   delete: deletePinAttemptState,
-});
+};
+
+let pinAttempts = createPinAttemptLimiter(databaseStore);
+
+/**
+ * Points the module-level functions at `store` with fresh in-tab state, or
+ * back at the database worker when called without one. Unit runs have no
+ * database worker; production never calls this.
+ */
+export const usePinAttemptStoreForTests = (store?: PinAttemptStore): void => {
+  pinAttempts = createPinAttemptLimiter(store ?? databaseStore);
+};
 
 export const assertPinAttemptAllowed = (
   roomId: string,
@@ -331,16 +357,12 @@ export const recordPinSuccess = (
   now = Date.now(),
 ): Promise<void> => pinAttempts.recordSuccess(roomId, peerIdentityEd25519, now);
 
+/** PIN re-entry: drops the room window and all backoff, keeps known peers. */
+export const clearPinAttemptLimits = (roomId: string): Promise<void> =>
+  pinAttempts.clearLimits(roomId);
+
+/** Room purge: drops every PIN row of the room, known peers included. */
 export const clearPinAttempts = (
   roomId: string,
   peerIdentityEd25519?: string,
 ): Promise<void> => pinAttempts.clear(roomId, peerIdentityEd25519);
-
-/**
- * Counts one failure in this tab's copy of the room window, without storage.
- * Production records failures with recordPinFailure.
- */
-export const recordRoomPinAggregateFailure = (
-  roomId: string,
-  now = Date.now(),
-): void => pinAttempts.recordInTabRoomFailure(roomId, now);

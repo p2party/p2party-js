@@ -22,7 +22,7 @@ import { debugLog } from "../utils/debug";
 import { handleOpenChannel } from "./handleOpenChannel";
 
 import { fisherYatesShuffle } from "../cryptography/utils";
-import { getMerkleProof } from "../cryptography/merkle";
+import { buildMerkleProofLevels } from "../cryptography/merkle";
 import {
   crypto_hash_sha512_BYTES,
   crypto_sign_ed25519_PUBLICKEYBYTES,
@@ -111,8 +111,11 @@ import type {
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type { MerkleProofLevels } from "../cryptography/merkle";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { MessageChunkSealer } from "./messageChunkCrypto";
+import type { NewChunk } from "../db/types";
+import type { Metadata } from "../utils/metadata";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
 import type { ScheduledDeliveryWaitOptions } from "./coverTransfer";
@@ -168,7 +171,389 @@ export const waitForReceiptWindow = async (
   throwIfTransferAborted(params.signal);
 };
 
-const sendChunks = async (
+/**
+ * Where a sender's staged plaintext cells live: the durable `newChunks` store
+ * the DB worker owns. Injectable so the read/write pattern of a send has a
+ * focused unit test; production always uses the worker.
+ */
+export interface OutboundChunkStore {
+  readonly get: (
+    transferId: string,
+    chunkIndex: number,
+  ) => Promise<NewChunk | undefined>;
+  readonly put: (chunk: NewChunk, lease?: OutboxLease) => Promise<void>;
+}
+
+const stagedChunkStore: OutboundChunkStore = {
+  get: (transferId, chunkIndex) => getDBNewChunk(transferId, chunkIndex),
+  put: (chunk, lease) => setDBNewChunk(chunk, lease),
+};
+
+export interface OutboundMessageParams {
+  readonly transferId: string;
+  readonly hashHex: string;
+  readonly merkleRoot: Uint8Array;
+  readonly totalChunks: number;
+  /** The leaf hashes, totalChunks × 64 bytes, in chunk order. */
+  readonly chunkHashes: Uint8Array;
+  /** Hashes the tree's internal nodes when the proof levels are built. */
+  readonly merkleModule: LibCrypto;
+  readonly store?: OutboundChunkStore;
+}
+
+/** One staged cell, read once, with what its own metadata says it is. */
+export interface StagedOutboundChunk {
+  readonly index: number;
+  readonly row: NewChunk;
+  readonly metadataArray: Uint8Array;
+  readonly metadata: Metadata;
+  /** Real bytes, not padding. A decoy has chunkEnd − chunkStart > totalSize. */
+  readonly real: boolean;
+}
+
+// Per-cell kinds an OutboundMessage learned by reading; 0 = not read yet.
+const CHUNK_KIND_REAL = 1;
+const CHUNK_KIND_DECOY = 2;
+
+/**
+ * Everything a sender knows about one logical message for as long as that
+ * message is being delivered, shared by every peer's transfer of it.
+ *
+ * Its Merkle proof levels are built at most once — on the first cell whose
+ * staged row has no proof yet — and serve every chunk, every retransmit round
+ * and every peer in O(log N). The previous path called `getMerkleProof` per
+ * chunk, which rebuilds the whole tree each time (about 51 ms at 19,270
+ * leaves). A resume after a page reload builds them once from the leaves the
+ * outbox claim returned, and only if some chunk still lacks a stored proof.
+ *
+ * It also remembers which cells a read showed to be decoys, so a retransmit
+ * pass skips them without reading them again.
+ *
+ * `close()` drops both. `withOutboundMessage` owns that call; after it nothing
+ * is rebuilt.
+ */
+export class OutboundMessage {
+  readonly transferId: string;
+  readonly hashHex: string;
+  readonly merkleRoot: Uint8Array;
+  readonly merkleRootHex: string;
+  readonly totalChunks: number;
+  readonly #chunkHashes: Uint8Array;
+  readonly #merkleModule: LibCrypto;
+  readonly #store: OutboundChunkStore;
+  #kinds: Uint8Array;
+  #levels: MerkleProofLevels | null = null;
+  #levelsError: Error | null = null;
+  #closed = false;
+
+  constructor(params: OutboundMessageParams) {
+    if (params.merkleRoot.length !== crypto_hash_sha512_BYTES)
+      throw new Error("Outbound message Merkle root must be 64 bytes");
+    if (
+      !Number.isSafeInteger(params.totalChunks) ||
+      params.totalChunks < 1 ||
+      params.chunkHashes.length !==
+        params.totalChunks * crypto_hash_sha512_BYTES
+    )
+      throw new Error("Outbound message leaves do not match its chunk count");
+    this.transferId = params.transferId;
+    this.hashHex = params.hashHex;
+    this.merkleRoot = params.merkleRoot;
+    this.merkleRootHex = uint8ArrayToHex(params.merkleRoot);
+    this.totalChunks = params.totalChunks;
+    this.#chunkHashes = params.chunkHashes;
+    this.#merkleModule = params.merkleModule;
+    this.#store = params.store ?? stagedChunkStore;
+    this.#kinds = new Uint8Array(params.totalChunks);
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  /** Bytes the cached proof levels hold; zero before they are built and after close. */
+  get proofLevelBytes(): number {
+    return this.#levels?.byteLength ?? 0;
+  }
+
+  /** True once a read of this cell showed it is padding. */
+  isKnownDecoy(index: number): boolean {
+    return this.#kinds[index] === CHUNK_KIND_DECOY;
+  }
+
+  /** Read one staged cell from storage and check it belongs at `index`. */
+  async read(
+    index: number,
+    signal?: AbortSignal,
+  ): Promise<StagedOutboundChunk | undefined> {
+    this.#assertOpen();
+    const row = await this.#store.get(this.transferId, index);
+    throwIfTransferAborted(signal);
+    if (!row) return undefined;
+    const metadataArray = new Uint8Array(row.metadata);
+    const metadata = deserializeMetadata(metadataArray);
+    if (metadata.chunkIndex !== index || row.chunkIndex !== index)
+      throw new Error("Outbound chunk index does not match its staging key");
+    // Real-vs-decoy is read from the chunk's own metadata (SSOT).
+    const real =
+      metadata.chunkEndIndex > metadata.chunkStartIndex &&
+      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
+    if (!this.#closed)
+      this.#kinds[index] = real ? CHUNK_KIND_REAL : CHUNK_KIND_DECOY;
+    return { index, row, metadataArray, metadata, real };
+  }
+
+  /**
+   * The DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk) for one staged
+   * cell. Its proof and scoped receipt token are persisted BEFORE the frame
+   * can go on the wire: if quota/storage fails, propagating the error is the
+   * only recoverable behaviour, because a sent frame whose resend source was
+   * not committed can never take part in reconnect reconciliation.
+   */
+  async cellPlaintext(
+    staged: StagedOutboundChunk,
+    outboxLease?: OutboxLease,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    this.#assertOpen();
+    const { row, index } = staged;
+    const hasStoredProof = row.merkleProof.byteLength > 0;
+    const merkleProof = new Uint8Array(PROOF_LEN);
+    if (hasStoredProof) merkleProof.set(new Uint8Array(row.merkleProof));
+    else
+      merkleProof.set(
+        this.#proofLevels().proof(
+          index,
+          hexToUint8Array(row.leafHash),
+          PROOF_LEN,
+        ),
+      );
+
+    const receiptToken =
+      row.receiptToken.length === crypto_hash_sha512_BYTES * 2
+        ? row.receiptToken
+        : uint8ArrayToHex(
+            await createChunkReceiptToken(
+              this.merkleRoot,
+              staged.metadata.chunkIndex,
+              hexToUint8Array(row.leafHash),
+            ),
+          );
+    throwIfTransferAborted(signal);
+
+    if (
+      !hasStoredProof ||
+      row.merkleRoot !== this.merkleRootHex ||
+      row.receiptToken !== receiptToken
+    ) {
+      await this.#store.put(
+        {
+          transferId: this.transferId,
+          hash: this.hashHex,
+          merkleRoot: this.merkleRootHex,
+          leafHash: row.leafHash,
+          receiptToken,
+          chunkIndex: index,
+          data: row.data,
+          metadata: row.metadata,
+          merkleProof: merkleProof.buffer,
+        },
+        outboxLease,
+      );
+      throwIfTransferAborted(signal);
+    }
+
+    const data = new Uint8Array(row.data);
+    if (
+      DECRYPTED_LEN !==
+      staged.metadataArray.length + merkleProof.length + data.length
+    )
+      throw new Error("Outbound staged chunk has invalid cell length");
+
+    const chunk = await concatUint8Arrays([
+      staged.metadataArray,
+      merkleProof,
+      data,
+    ]);
+    throwIfTransferAborted(signal);
+    return chunk;
+  }
+
+  /** Drop the proof levels and the decoy map. Idempotent. */
+  close(): void {
+    this.#closed = true;
+    this.#levels?.release();
+    this.#levels = null;
+    this.#kinds = new Uint8Array(0);
+  }
+
+  #assertOpen(): void {
+    if (this.#closed)
+      throw new Error("Outbound message delivery has already ended");
+  }
+
+  #proofLevels(): MerkleProofLevels {
+    this.#assertOpen();
+    if (this.#levels) return this.#levels;
+    // A failed build is not retried: every peer and cell of this delivery
+    // would only pay N − 1 hashes again to reach the same answer.
+    if (this.#levelsError) throw this.#levelsError;
+    let levels: MerkleProofLevels;
+    try {
+      levels = buildMerkleProofLevels(this.#chunkHashes, this.#merkleModule);
+    } catch (error) {
+      this.#levelsError =
+        error instanceof Error ? error : new Error(String(error));
+      throw this.#levelsError;
+    }
+    // The leaves came from the outbox, not from this page's staging, on a
+    // resume. Proofs over leaves that do not reach the message's root would
+    // only be rejected by every receiver, chunk by chunk.
+    const root = levels.root();
+    if (root.some((byte, i) => byte !== this.merkleRoot[i])) {
+      levels.release();
+      this.#levelsError = new Error(
+        "Outbound message leaves do not reach its Merkle root",
+      );
+      throw this.#levelsError;
+    }
+    this.#levels = levels;
+    return levels;
+  }
+}
+
+/**
+ * Run one delivery of one message — every peer's transfer, immediate or
+ * scheduled — against a single `OutboundMessage`, and close it however the
+ * delivery ends: completion, the receiver's final receipt, a cancel, a torn
+ * down edge, a left room. Each of those settles `deliver`.
+ */
+export const withOutboundMessage = async <T>(
+  params: OutboundMessageParams,
+  deliver: (message: OutboundMessage) => Promise<T>,
+): Promise<T> => {
+  const message = new OutboundMessage(params);
+  try {
+    return await deliver(message);
+  } finally {
+    message.close();
+  }
+};
+
+// A full send buffer (MAX_BUFFERED_AMOUNT) is waited out until it drains to
+// half, so one wake-up refills about eight frames instead of one.
+export const SEND_BUFFER_LOW_THRESHOLD = MAX_BUFFERED_AMOUNT / 2;
+// Re-check a full buffer this often in case `bufferedamountlow` is never
+// delivered. It is a fallback, not the pacing: the event resumes the send.
+export const SEND_BUFFER_FALLBACK_MS = 250;
+
+/** The part of a data channel the send-buffer wait reads and listens to. */
+export interface SendBufferChannel {
+  readonly readyState: string;
+  readonly bufferedAmount: number;
+  bufferedAmountLowThreshold: number;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+export interface SendBufferTimers {
+  readonly setTimeout: (callback: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+}
+
+const sendBufferTimers: SendBufferTimers = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+const SEND_BUFFER_WAKE_EVENTS = [
+  "bufferedamountlow",
+  "close",
+  "closing",
+  "error",
+] as const;
+
+/**
+ * Wait until `channel` can take another frame. Resolves true at once while
+ * its buffer is below MAX_BUFFERED_AMOUNT; otherwise sets the low threshold
+ * and waits for `bufferedamountlow`. Resolves false once the channel is no
+ * longer open (the caller stops this pass, as the polling loop's caller did),
+ * and rejects with the transfer's abort reason when `signal` aborts.
+ *
+ * The listeners are registered before the amount is re-checked, and a
+ * SEND_BUFFER_FALLBACK_MS timer re-checks it after that, so a drain the event
+ * did not report still ends the wait.
+ */
+export const waitForSendBuffer = async (
+  channel: SendBufferChannel,
+  signal?: AbortSignal,
+  timers: SendBufferTimers = sendBufferTimers,
+): Promise<boolean> => {
+  throwIfTransferAborted(signal);
+  if (channel.readyState !== "open") return false;
+  if (channel.bufferedAmount < MAX_BUFFERED_AMOUNT) return true;
+
+  return await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    let timer: unknown;
+    const finish = (settle: () => void): void => {
+      settled = true;
+      if (timer !== undefined) timers.clearTimeout(timer);
+      for (const type of SEND_BUFFER_WAKE_EVENTS)
+        channel.removeEventListener(type, check);
+      signal?.removeEventListener("abort", check);
+      settle();
+    };
+    const check = (): void => {
+      if (settled) return;
+      if (signal?.aborted) {
+        finish(() => {
+          try {
+            throwIfTransferAborted(signal);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      } else if (channel.readyState !== "open")
+        finish(() => {
+          resolve(false);
+        });
+      else if (channel.bufferedAmount <= SEND_BUFFER_LOW_THRESHOLD)
+        finish(() => {
+          resolve(true);
+        });
+    };
+    const fallback = (): void => {
+      timer = undefined;
+      check();
+      if (!settled)
+        timer = timers.setTimeout(fallback, SEND_BUFFER_FALLBACK_MS);
+    };
+
+    channel.bufferedAmountLowThreshold = SEND_BUFFER_LOW_THRESHOLD;
+    for (const type of SEND_BUFFER_WAKE_EVENTS)
+      channel.addEventListener(type, check);
+    signal?.addEventListener("abort", check);
+    check();
+    if (!settled) timer = timers.setTimeout(fallback, SEND_BUFFER_FALLBACK_MS);
+  });
+};
+
+/**
+ * One pass over a message's cells on one per-message channel, in a fresh
+ * random order.
+ *
+ * Without `reconcileAcked` (the first pass) every cell, real and decoy, is
+ * read once and sent once. With it (a retransmit or resume pass) only the real
+ * cells the receiver has not acknowledged are sent, and a cell already known
+ * to be acknowledged or a decoy is skipped before it is read.
+ *
+ * Exported only for a focused unit test of that read and proof pattern. It is
+ * not part of the package's public root exports.
+ */
+export const sendChunks = async (
   channel: IRTCDataChannel,
   // v4: the sealer holds the combined key derived ONCE for the whole message
   // from the caller's ratchet step (`ratchetEncryptDurably`). Every chunk of
@@ -176,12 +561,7 @@ const sendChunks = async (
   // round — is sealed under this same key with a FRESH random nonce
   // (streaming-safe; no per-message frame cache needed).
   sealer: MessageChunkSealer,
-  chunksLen: number,
-  chunkHashes: Uint8Array,
-  merkleRoot: Uint8Array,
-  transferId: string,
-  hashHex: string,
-  merkleModule: LibCrypto,
+  message: OutboundMessage,
   signal?: AbortSignal,
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
   // real chunks — skip decoys and already-acked reals.
@@ -190,10 +570,10 @@ const sendChunks = async (
   // sender-side receipt window. Absent → legacy SCTP-only pacing.
   getAckedRealCount?: () => number,
   outboxLease?: OutboxLease,
-) => {
+): Promise<void> => {
   throwIfTransferAborted(signal);
   const { merkleRootHex } = await decompileChannelMessageLabel(channel.label);
-  if (merkleRootHex !== uint8ArrayToHex(merkleRoot))
+  if (merkleRootHex !== message.merkleRootHex)
     throw new Error("Outbound channel label does not match its Merkle root");
 
   // Receipts landing during this pass shrink the window; acks that predate the
@@ -201,40 +581,30 @@ const sendChunks = async (
   const ackedAtPassStart = getAckedRealCount?.() ?? 0;
   let sentRealThisPass = 0;
 
-  const indexes = Array.from({ length: chunksLen }, (_, i) => i);
+  const indexes = Array.from({ length: message.totalChunks }, (_, i) => i);
   const indexesRandomized = fisherYatesShuffle(indexes);
 
-  for (let i = 0; i < chunksLen; i++) {
+  for (let i = 0; i < message.totalChunks; i++) {
     throwIfTransferAborted(signal);
     const iRandom = indexesRandomized[i];
 
-    const unencryptedChunk = await getDBNewChunk(transferId, iRandom);
-    throwIfTransferAborted(signal);
-    if (!unencryptedChunk)
-      throw new Error(`Missing staged outbound chunk ${String(iRandom)}`);
-
-    const metadataArray = new Uint8Array(unencryptedChunk.metadata);
-    const metadata = deserializeMetadata(metadataArray);
-    if (
-      metadata.chunkIndex !== iRandom ||
-      unencryptedChunk.chunkIndex !== iRandom
-    )
-      throw new Error("Outbound chunk index does not match its staging key");
-
-    // Real-vs-decoy is read from the chunk's own metadata (SSOT) — a decoy has
-    // chunkEnd − chunkStart > totalSize.
-    const isRealChunk =
-      metadata.chunkEndIndex > metadata.chunkStartIndex &&
-      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
     // Reconcile: resend only un-acked REAL chunks. Decoys are cover and never
-    // resent; acked reals are skipped.
-    if (reconcileAcked !== undefined) {
-      if (!isRealChunk || reconcileAcked.has(metadata.chunkIndex)) continue;
-    }
+    // resent; acked reals are skipped. What is already known is skipped
+    // before the read, so a retransmit round reads only what it may send.
+    if (
+      reconcileAcked !== undefined &&
+      (reconcileAcked.has(iRandom) || message.isKnownDecoy(iRandom))
+    )
+      continue;
+
+    const staged = await message.read(iRandom, signal);
+    if (!staged)
+      throw new Error(`Missing staged outbound chunk ${String(iRandom)}`);
+    if (reconcileAcked !== undefined && !staged.real) continue;
 
     // Hold real frames inside the receipt window so a fast link cannot outrun
     // the receiver's decrypt+store drain into its queue-budget channel close.
-    if (isRealChunk && getAckedRealCount) {
+    if (staged.real && getAckedRealCount) {
       await waitForReceiptWindow({
         windowSize: SEND_RECEIPT_WINDOW,
         stallTimeoutMs: SEND_WINDOW_STALL_MS,
@@ -247,72 +617,7 @@ const sendChunks = async (
       });
     }
 
-    const merkleProof = new Uint8Array(PROOF_LEN);
-    if (unencryptedChunk.merkleProof.byteLength === 0) {
-      const m = await getMerkleProof(
-        chunkHashes,
-        hexToUint8Array(unencryptedChunk.leafHash),
-        merkleModule,
-        PROOF_LEN,
-      );
-      throwIfTransferAborted(signal);
-
-      merkleProof.set(m);
-    } else {
-      merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
-    }
-
-    const receiptToken =
-      unencryptedChunk.receiptToken.length === crypto_hash_sha512_BYTES * 2
-        ? unencryptedChunk.receiptToken
-        : uint8ArrayToHex(
-            await createChunkReceiptToken(
-              merkleRoot,
-              metadata.chunkIndex,
-              hexToUint8Array(unencryptedChunk.leafHash),
-            ),
-          );
-    throwIfTransferAborted(signal);
-
-    // Persist proof + scoped receipt lookup BEFORE putting the frame on wire.
-    // If quota/storage fails, propagating the error is the only recoverable
-    // behaviour: a sent frame whose resend source was not committed can never
-    // participate correctly in reconnect reconciliation.
-    if (
-      unencryptedChunk.merkleProof.byteLength === 0 ||
-      unencryptedChunk.merkleRoot !== merkleRootHex ||
-      unencryptedChunk.receiptToken !== receiptToken
-    ) {
-      await setDBNewChunk(
-        {
-          transferId,
-          hash: hashHex,
-          merkleRoot: merkleRootHex,
-          leafHash: unencryptedChunk.leafHash,
-          receiptToken,
-          chunkIndex: iRandom,
-          data: unencryptedChunk.data,
-          metadata: unencryptedChunk.metadata,
-          merkleProof: merkleProof.buffer,
-        },
-        outboxLease,
-      );
-    }
-
-    if (
-      DECRYPTED_LEN !==
-      metadataArray.length +
-        merkleProof.length +
-        new Uint8Array(unencryptedChunk.data).length
-    )
-      throw new Error("Outbound staged chunk has invalid cell length");
-
-    const chunk = await concatUint8Arrays([
-      metadataArray,
-      merkleProof,
-      new Uint8Array(unencryptedChunk.data),
-    ]);
-    throwIfTransferAborted(signal);
+    const chunk = await message.cellPlaintext(staged, outboxLease, signal);
 
     // protocol-v3: seal the DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk)
     // under the per-message ratchet key with a fresh random nonce, framed as
@@ -325,15 +630,7 @@ const sendChunks = async (
     // ciphertext sealed under the dead transport's ratchet can never be replayed
     // on the replacement. The durable resend source is the plaintext newChunks
     // store; after reconnect those chunks are resealed under a fresh message key.
-    while (
-      (channel.readyState as string) === "open" &&
-      channel.bufferedAmount >= MAX_BUFFERED_AMOUNT
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, CHANNEL_OPEN_POLL_MS));
-      throwIfTransferAborted(signal);
-    }
-
-    if ((channel.readyState as string) !== "open") {
+    if (!(await waitForSendBuffer(channel, signal))) {
       debugLog(
         "Cannot send message because channel is " +
           channel.readyState +
@@ -344,9 +641,9 @@ const sendChunks = async (
       break;
     }
 
-    let message: Uint8Array;
+    let frame: Uint8Array;
     try {
-      message = sealer.seal(chunk, merkleRoot);
+      frame = sealer.seal(chunk, message.merkleRoot);
     } catch (error) {
       throw new Error("Could not seal outbound message chunk", {
         cause: error,
@@ -355,8 +652,8 @@ const sendChunks = async (
 
     throwIfTransferAborted(signal);
     try {
-      channel.send(message.buffer as ArrayBuffer);
-      if (isRealChunk) sentRealThisPass++;
+      channel.send(frame.buffer as ArrayBuffer);
+      if (staged.real) sentRealThisPass++;
     } catch (error) {
       // The channel can close between the readyState check and send(). Return to
       // the reconcile loop so it can reopen/rekey instead of rejecting the whole
@@ -940,19 +1237,15 @@ const sendWithReconcile = async (
   api: BaseQueryApi,
   roomId: string,
   epc: IRTCPeerConnection,
-  chunksLen: number,
-  chunkHashes: Uint8Array,
-  merkleRoot: Uint8Array,
-  transferId: string,
-  hashHex: string,
+  message: OutboundMessage,
   peerId: string,
   encryptionModule: LibCrypto,
-  merkleModule: LibCrypto,
   peerConnections: IRTCPeerConnection[],
   dataChannels: IRTCDataChannel[],
   signal?: AbortSignal,
   outboxLease?: OutboxLease,
 ): Promise<void> => {
+  const { transferId, hashHex } = message;
   throwIfTransferAborted(signal);
   clearTransfer(roomId, peerId, transferId);
 
@@ -1039,12 +1332,7 @@ const sendWithReconcile = async (
     await sendChunks(
       currentChannel,
       sealer,
-      chunksLen,
-      chunkHashes,
-      merkleRoot,
-      transferId,
-      hashHex,
-      merkleModule,
+      message,
       signal,
       undefined,
       () => getAckedChunkCount(roomId, peerId, transferId),
@@ -1099,7 +1387,7 @@ const sendWithReconcile = async (
             peerId,
             peerPublicKey: currentEpc.withPeerPublicKey,
             transferId,
-            merkleRootHex: uint8ArrayToHex(merkleRoot),
+            merkleRootHex: message.merkleRootHex,
           });
           throw new Error("Message transfer cancelled by peer");
         }
@@ -1196,12 +1484,7 @@ const sendWithReconcile = async (
       await sendChunks(
         currentChannel,
         sealer,
-        chunksLen,
-        chunkHashes,
-        merkleRoot,
-        transferId,
-        hashHex,
-        merkleModule,
+        message,
         signal,
         getAckedChunks(roomId, peerId, transferId),
         () => getAckedChunkCount(roomId, peerId, transferId),
@@ -1249,75 +1532,22 @@ const sendWithReconcile = async (
 // produce one cell without a burst.
 const makeScheduledSlotSealer =
   (
-    transferId: string,
-    hashHex: string,
-    chunkHashes: Uint8Array,
-    merkleRoot: Uint8Array,
-    merkleRootHex: string,
+    message: OutboundMessage,
     chunkSealer: MessageChunkSealer,
-    merkleModule: LibCrypto,
     outboxLease?: OutboxLease,
     signal?: AbortSignal,
   ) =>
   async (chunkIndex: number): Promise<Uint8Array | null> => {
     throwIfTransferAborted(signal);
-    const unencryptedChunk = await getDBNewChunk(transferId, chunkIndex);
-    if (!unencryptedChunk) return null;
-    const metadataArray = new Uint8Array(unencryptedChunk.metadata);
-    const metadata = deserializeMetadata(metadataArray);
-
-    const merkleProof = new Uint8Array(PROOF_LEN);
-    if (unencryptedChunk.merkleProof.byteLength === 0) {
-      merkleProof.set(
-        await getMerkleProof(
-          chunkHashes,
-          hexToUint8Array(unencryptedChunk.leafHash),
-          merkleModule,
-          PROOF_LEN,
-        ),
-      );
-    } else {
-      merkleProof.set(new Uint8Array(unencryptedChunk.merkleProof));
-    }
-
-    const receiptToken =
-      unencryptedChunk.receiptToken.length === crypto_hash_sha512_BYTES * 2
-        ? unencryptedChunk.receiptToken
-        : uint8ArrayToHex(
-            await createChunkReceiptToken(
-              merkleRoot,
-              metadata.chunkIndex,
-              hexToUint8Array(unencryptedChunk.leafHash),
-            ),
-          );
-    if (
-      unencryptedChunk.merkleProof.byteLength === 0 ||
-      unencryptedChunk.merkleRoot !== merkleRootHex ||
-      unencryptedChunk.receiptToken !== receiptToken
-    ) {
-      await setDBNewChunk(
-        {
-          transferId,
-          hash: hashHex,
-          merkleRoot: merkleRootHex,
-          leafHash: unencryptedChunk.leafHash,
-          receiptToken,
-          chunkIndex,
-          data: unencryptedChunk.data,
-          metadata: unencryptedChunk.metadata,
-          merkleProof: merkleProof.buffer,
-        },
-        outboxLease,
-      );
-    }
-
-    const chunk = await concatUint8Arrays([
-      metadataArray,
-      merkleProof,
-      new Uint8Array(unencryptedChunk.data),
-    ]);
+    // The delivery this job served has ended (a job confirmed delivered is
+    // not settled by the sender), so nothing is left to send: a dummy cell,
+    // and no proof levels rebuilt for a message nobody is sending.
+    if (message.closed) return null;
+    const staged = await message.read(chunkIndex, signal);
+    if (!staged) return null;
+    const chunk = await message.cellPlaintext(staged, outboxLease, signal);
     throwIfTransferAborted(signal);
-    return chunkSealer.seal(chunk, merkleRoot);
+    return chunkSealer.seal(chunk, message.merkleRoot);
   };
 
 /**
@@ -1378,14 +1608,8 @@ export const sendScheduled = async (
   channelLabel: string,
   policy: RoomPolicyV1,
   targets: readonly PeerSendTarget[],
-  totalChunks: number,
-  chunkHashes: Uint8Array,
-  merkleRoot: Uint8Array,
-  merkleRootHex: string,
-  transferId: string,
-  hashHex: string,
+  message: OutboundMessage,
   encryptionModule: LibCrypto,
-  merkleModule: LibCrypto,
   signal?: AbortSignal,
   onTransferStarted?: () => void,
   /**
@@ -1398,6 +1622,7 @@ export const sendScheduled = async (
   dependencies: ScheduledSendDependencies = {},
   outboxLease?: OutboxLease,
 ): Promise<PeerSendFanoutResult> => {
+  const { totalChunks, merkleRoot, merkleRootHex, transferId } = message;
   const waitForGate = dependencies.waitForGate ?? waitForRatchetGate;
   const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
   const waitForDelivery =
@@ -1536,13 +1761,8 @@ export const sendScheduled = async (
           throw error;
         }
         const sealer = makeScheduledSlotSealer(
-          transferId,
-          hashHex,
-          chunkHashes,
-          merkleRoot,
-          merkleRootHex,
+          message,
           chunkSealer,
-          merkleModule,
           outboxLease,
           signal,
         );
@@ -1952,63 +2172,64 @@ export const handleSendMessage = async (
       label,
       merkleRootHex,
     );
-    const fanout =
-      room.policy.coverMode === "scheduled"
-        ? await sendScheduled(
-            roomId,
-            label,
-            room.policy,
-            targets,
-            totalChunks,
-            chunkHashes,
-            merkleRoot,
-            merkleRootHex,
-            transferId,
-            hashHex,
-            encryptionModule,
-            merkleModule,
-            signal,
-            undefined,
-            peerConnections,
-            {},
-            session.lease,
-          )
-        : await runPeerSendFanout(
-            targets,
-            ({ epc }) =>
-              handleOpenChannel(
-                { channel: channelMessageLabel, epc, roomId, dataChannels },
-                api,
-              ),
-            async ({ peerId, epc }, channel) => {
-              await sendWithReconcile(
-                channel,
-                api,
-                roomId,
-                epc,
-                totalChunks,
-                chunkHashes,
-                merkleRoot,
-                transferId,
-                hashHex,
-                peerId,
-                encryptionModule,
-                merkleModule,
-                peerConnections,
-                dataChannels,
-                signal,
-                session!.lease,
-              );
-              await persistOutboundReceipt({
-                roomId,
-                peerId,
-                peerPublicKey: epc.withPeerPublicKey,
-                transferId,
-                merkleRootHex,
-              });
-            },
-            signal,
-          );
+    // One OutboundMessage for every peer of this message: its Merkle proof
+    // levels are built once and closed when this delivery settles.
+    const fanout = await withOutboundMessage(
+      {
+        transferId,
+        hashHex,
+        merkleRoot,
+        totalChunks,
+        chunkHashes,
+        merkleModule,
+      },
+      (message) =>
+        room.policy.coverMode === "scheduled"
+          ? sendScheduled(
+              roomId,
+              label,
+              room.policy,
+              targets,
+              message,
+              encryptionModule,
+              signal,
+              undefined,
+              peerConnections,
+              {},
+              session!.lease,
+            )
+          : runPeerSendFanout(
+              targets,
+              ({ epc }) =>
+                handleOpenChannel(
+                  { channel: channelMessageLabel, epc, roomId, dataChannels },
+                  api,
+                ),
+              async ({ peerId, epc }, channel) => {
+                await sendWithReconcile(
+                  channel,
+                  api,
+                  roomId,
+                  epc,
+                  message,
+                  peerId,
+                  encryptionModule,
+                  peerConnections,
+                  dataChannels,
+                  signal,
+                  session!.lease,
+                );
+                await persistOutboundReceipt({
+                  roomId,
+                  peerId,
+                  peerPublicKey: epc.withPeerPublicKey,
+                  transferId,
+                  merkleRootHex,
+                });
+              },
+              signal,
+            ),
+    );
     for (const outcome of fanout.outcomes) {
       if (outcome.status !== "delivered") continue;
       const recipient = targets.find(

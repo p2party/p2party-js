@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import {
@@ -13,6 +13,7 @@ import {
   type P2PartySession,
 } from "../src/session";
 import type { RoomPqMode } from "../src/roomPolicy";
+import * as pqMessageKey from "../src/cryptography/pqMessageKey";
 import { MAX_ACTIVE_RECEIVE_KEYS } from "../src/handlers/pqHealingRuntime";
 import {
   CHUNK_LEN,
@@ -1185,5 +1186,105 @@ describe("public store-free session replay rejection and bounded receive state",
     // Control: the unmodified snapshot restores.
     const restored = await restoreSession(snapshot, cryptoOptions);
     await Promise.all([alice.destroy(), bob.destroy(), restored.destroy()]);
+  });
+});
+
+// splitmix64 bytes for every getRandomValues request: the stream the
+// multi-chunk known answer was written under (see its description).
+const splitmix64Fill = (
+  seed: bigint,
+): (<T extends ArrayBufferView | null>(array: T) => T) => {
+  let state = seed;
+  const next = (): bigint => {
+    state = (state + 0x9e3779b97f4a7c15n) & 0xffffffffffffffffn;
+    let z = state;
+    z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & 0xffffffffffffffffn;
+    z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & 0xffffffffffffffffn;
+    return z ^ (z >> 31n);
+  };
+  return <T extends ArrayBufferView | null>(array: T): T => {
+    if (array === null) return array;
+    const bytes = new Uint8Array(
+      array.buffer,
+      array.byteOffset,
+      array.byteLength,
+    );
+    for (let i = 0; i < bytes.length; i += 8) {
+      let word = next();
+      for (let j = 0; j < 8 && i + j < bytes.length; j++) {
+        bytes[i + j] = Number(word & 0xffn);
+        word >>= 8n;
+      }
+    }
+    return array;
+  };
+};
+
+const katPlaintext = (length: number): Uint8Array =>
+  Uint8Array.from({ length }, (_, index) => (index * 131 + 7) & 0xff);
+
+const sha512Hex = async (value: Uint8Array): Promise<string> =>
+  Buffer.from(
+    await globalThis.crypto.subtle.digest("SHA-512", Uint8Array.from(value)),
+  ).toString("hex");
+
+describe("session PQ combiner", () => {
+  test("session combiner runs once per message", async () => {
+    const { alice, bob } = await createPair();
+    const plaintext = patternedBytes(2 * CHUNK_LEN + 1000, 3);
+    // The injected counter: the combiner itself, called through.
+    const combine = spyOn(pqMessageKey, "combinePqMessageKey");
+    let message: EncryptedSessionMessage;
+    try {
+      message = await alice.encrypt(plaintext);
+      expect(message.frames).toHaveLength(3);
+      expect(combine).toHaveBeenCalledTimes(1);
+    } finally {
+      combine.mockRestore();
+    }
+    expectBytes(await bob.decrypt(message), plaintext);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("a multi-chunk session message matches its known answer", async () => {
+    const kat = readFixture("session-multichunk-kat.json") as {
+      dateNow: number;
+      plaintextLength: number;
+      aliceSnapshot: string;
+      bobSnapshot: string;
+      root: string;
+      frameSha512: string[];
+    };
+    // Restore and encrypt are one sequential chain, so a fixed random
+    // stream and clock fix every byte of the message.
+    const random = spyOn(
+      globalThis.crypto,
+      "getRandomValues",
+    ).mockImplementation(splitmix64Fill(0x0123456789abcdefn));
+    const clock = spyOn(Date, "now").mockReturnValue(kat.dateNow);
+    let message: EncryptedSessionMessage;
+    try {
+      const alice = await restoreSession(
+        fromBase64(kat.aliceSnapshot),
+        cryptoOptions,
+      );
+      message = await alice.encrypt(katPlaintext(kat.plaintextLength));
+      await alice.destroy();
+    } finally {
+      random.mockRestore();
+      clock.mockRestore();
+    }
+    expect(message.frames).toHaveLength(3);
+    expect(Buffer.from(message.root).toString("hex")).toBe(kat.root);
+    expect(await Promise.all(message.frames.map(sha512Hex))).toEqual(
+      kat.frameSha512,
+    );
+
+    const bob = await restoreSession(
+      fromBase64(kat.bobSnapshot),
+      cryptoOptions,
+    );
+    expectBytes(await bob.decrypt(message), katPlaintext(kat.plaintextLength));
+    await bob.destroy();
   });
 });

@@ -120,7 +120,7 @@ describe("wasmLoader checks the SHA-384 of the bytes it fetches", () => {
   });
 });
 
-describe("setWasmSourceUrl accepts http(s) or the page's own origin", () => {
+describe("setWasmSourceUrl accepts https: or the page's own origin", () => {
   test("accepts a same-origin wasm URL on a non-http scheme", async () => {
     // The Capacitor iOS shell serves the page from capacitor://localhost.
     await onPage("capacitor://localhost/index.html", async () => {
@@ -137,7 +137,13 @@ describe("setWasmSourceUrl accepts http(s) or the page's own origin", () => {
         setWasmSourceUrl("ionic://localhost/libcrypto.wasm"),
       ).toThrow(TypeError);
     });
-    // With no page (Node, Bun) there is no origin to match: only http(s).
+    // A page with no host has an opaque origin: nothing matches it, not
+    // even a host-less URL under the same scheme.
+    await onPage("x-app:index.html", async () => {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() => setWasmSourceUrl("x-app:libcrypto.wasm")).toThrow(TypeError);
+    });
+    // With no page (Node, Bun) there is no origin to match.
     const { setWasmSourceUrl } = await freshLoader();
     expect(() => setWasmSourceUrl(CAPACITOR_WASM)).toThrow(TypeError);
     expect(() =>
@@ -168,6 +174,14 @@ describe("setWasmSourceUrl accepts http(s) or the page's own origin", () => {
         else await onPage(page, attempt);
       }
     }
+    // A file: page with a host is a same-scheme, same-host match; only the
+    // scheme refusal stops its file: source.
+    await onPage("file://fileserver/index.html", async () => {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() =>
+        setWasmSourceUrl("file://fileserver/libcrypto.wasm"),
+      ).toThrow(TypeError);
+    });
   });
 
   test("a same-origin non-http source is still hash-checked", async () => {
@@ -209,5 +223,85 @@ describe("setWasmSourceUrl accepts http(s) or the page's own origin", () => {
         pinned.mockRestore();
       }
     });
+  });
+});
+
+describe("plain http: is accepted only from loopback or the page's own origin", () => {
+  test("refuses a plain-http source on another host", async () => {
+    // Not loopback, though some start like it.
+    const otherHosts = [
+      "http://example.test/libcrypto.wasm",
+      "http://192.168.1.10:8080/libcrypto.wasm",
+      "http://127.0.0.1.example.test/libcrypto.wasm",
+      "http://localhost.example.test/libcrypto.wasm",
+    ];
+    // With no page (Node, Bun), on an https page, and on an http page of
+    // another host.
+    for (const page of [
+      null,
+      "https://app.example.test/index.html",
+      "http://intranet.example.test/index.html",
+    ]) {
+      for (const source of otherHosts) {
+        const attempt = async (): Promise<void> => {
+          const { setWasmSourceUrl } = await freshLoader();
+          expect(() => setWasmSourceUrl(source)).toThrow(TypeError);
+        };
+        if (page === null) await attempt();
+        else await onPage(page, attempt);
+      }
+    }
+    // The page's host but not its origin: another scheme or another port.
+    await onPage("https://app.example.test/index.html", async () => {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() =>
+        setWasmSourceUrl("http://app.example.test/libcrypto.wasm"),
+      ).toThrow(TypeError);
+    });
+    await onPage("http://intranet.example.test:8080/index.html", async () => {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() =>
+        setWasmSourceUrl("http://intranet.example.test:9090/libcrypto.wasm"),
+      ).toThrow(TypeError);
+    });
+    // Control: the http page's own origin is accepted, and https from any
+    // host is.
+    await onPage("http://intranet.example.test/index.html", async () => {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() =>
+        setWasmSourceUrl("http://intranet.example.test/vendor/libcrypto.wasm"),
+      ).not.toThrow();
+    });
+    const { setWasmSourceUrl } = await freshLoader();
+    expect(() =>
+      setWasmSourceUrl("https://cdn.example.test/libcrypto.wasm"),
+    ).not.toThrow();
+  });
+
+  test("accepts a plain-http loopback source", async () => {
+    for (const source of [
+      "http://localhost:5173/libcrypto.wasm",
+      "http://127.0.0.1:5173/libcrypto.wasm",
+      "http://127.42.0.9/libcrypto.wasm",
+      "http://[::1]:5173/libcrypto.wasm",
+    ]) {
+      const { setWasmSourceUrl } = await freshLoader();
+      expect(() => setWasmSourceUrl(source)).not.toThrow();
+    }
+
+    // Hash-checked like any other source: a tampered file is refused.
+    const { server, requests } = serveWasm(tamperedWasm());
+    try {
+      const { setWasmSourceUrl, wasmLoader } = await freshLoader();
+      setWasmSourceUrl(
+        `http://127.0.0.1:${String(server.port)}/libcrypto.wasm`,
+      );
+      await expect(wasmLoader(memory())).rejects.toThrow(
+        "failed its SHA-384 integrity check",
+      );
+      expect(requests()).toBe(1);
+    } finally {
+      await server.stop(true);
+    }
   });
 });

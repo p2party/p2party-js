@@ -862,9 +862,12 @@ compiled into the bundle and cannot be turned off.
 
 ## Local, self-hosted, or release-pinned WASM
 
-The browser root always fetches the exact versioned CDN WASM with a build-pinned
-SHA-384 SRI value by default. A self-hosted browser app can point it at the
-same release bytes before calling `connect()`:
+The browser root fetches the exact versioned CDN WASM by default. Before it
+instantiates the bytes, the loader computes their SHA-384 and compares it with
+the build-pinned digest, on every runtime. The request also carries that digest
+as its SRI `integrity` value, which browsers enforce and Bun ignores. A
+self-hosted app can point the loader at the same release bytes before calling
+`connect()`:
 
 ```ts
 import p2party from "p2party";
@@ -874,7 +877,19 @@ p2party.setWasmSourceUrl(
 );
 ```
 
-The SRI check remains active, so a URL serving different bytes fails closed.
+`setWasmSourceUrl()` accepts:
+
+- an `https:` URL on any host;
+- a URL on the page's own origin, under any scheme. The Capacitor iOS shell
+  serves its page from `capacitor://localhost`, so the example above works
+  there too;
+- a plain `http:` URL only on a loopback host: `localhost`, `127.0.0.0/8` or
+  `[::1]`.
+
+It throws a `TypeError` for anything else, including every `data:`, `blob:`,
+`javascript:` and `file:` URL. Node and Bun have no page origin, so there only
+`https:` and loopback `http:` sources are accepted. Whatever the source, bytes
+whose SHA-384 differs from the pinned digest are refused before instantiation.
 
 ### Get the WASM and check it
 

@@ -13,6 +13,7 @@ import {
   generateSessionIdentity,
   restoreSession,
   PROTOCOL_VERSION,
+  SessionReplayError,
   WIRE_CHUNK_FRAME_LEN,
   type CreateSessionOptions,
   type EncryptedSessionMessage,
@@ -375,6 +376,39 @@ uniform protocol-v4 frames. Either role may send first, and simultaneous first
 messages are supported. Ratchet state advances transactionally: a failed
 decrypt does not commit the candidate receive state.
 
+### Replays and duplicate deliveries
+
+`decrypt()` returns each message at most once. The ratchet consumes a
+message's key when `decrypt()` returns it, and the session wipes the key
+before the call ends. A later call with the same envelope, or with its frames
+reordered, is rejected and commits nothing:
+
+- `SessionReplayError` when the message is on the current receiving chain or
+  on one of the 256 most recently superseded receiving chains (each peer turn
+  of the DH ratchet supersedes one). Treat it as a duplicate delivery and drop
+  it.
+- the ordinary authentication error for a message on an older superseded
+  chain. The session no longer recognises that chain, but it holds no key that
+  could open the message.
+
+Out-of-order messages inside the bounded skip window still decrypt exactly
+once each. The session holds at most 2,000 skipped keys and drops the oldest
+first; a message whose skipped key was dropped also raises
+`SessionReplayError`, because the session can no longer open it.
+
+```ts
+try {
+  deliver(await session.decrypt(envelope));
+} catch (error) {
+  if (error instanceof SessionReplayError) return; // already delivered
+  throw error;
+}
+```
+
+Because `decrypt()` consumes the message, persist the plaintext (or act on
+it) before you replace the stored snapshot with a newer `serialize()`. A
+snapshot taken after `decrypt()` cannot open that message again.
+
 ## Sparse post-quantum healing
 
 The bootstrap ML-KEM exchange protects the initial root. Healing periodically
@@ -440,6 +474,18 @@ Confidentiality without rollback protection is insufficient: restoring an old
 ratchet can reuse state and violate forward-security assumptions. Never send a
 snapshot to the peer, sync it through an unauthenticated store, log it, or
 place it in browser storage as plaintext.
+
+The snapshot keeps the replay record: for each of up to 256 superseded
+receiving chains, the peer's 32-byte DH public key and the chain's message
+count (40 bytes each, no key material). Its size does not grow with the
+number of messages received in order in one direction. Alternating traffic
+adds 40 bytes per superseded chain until the record holds 256 chains, then
+stops growing.
+
+`serialize()` writes snapshot format 5. `restoreSession()` also reads format
+4, written by 0.14.10: the receive keys it carries all belong to messages
+0.14.10 already returned, so restore records their identities in the replay
+record, wipes the keys, and those messages stay rejected.
 
 After `restoreSession(snapshot, cryptoOptions)`, wipe the caller's snapshot
 buffer.

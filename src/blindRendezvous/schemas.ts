@@ -808,10 +808,6 @@ const storeDescriptorFields: readonly FieldDescriptor[] = [
     name: "checkpointChainStarts",
     type: array(storeCheckpointChainStartV1Schema, 0xff),
   },
-  // How many windows back the store serves a finalized window, inclusive as
-  // `bucketIsReadable` defines it. Signed with the rest, so a client can tell
-  // a window the store let expire from one it is withholding.
-  { name: "retentionWindows", type: u32 },
   { name: "notBeforeUnixMs", type: u64 },
   { name: "notAfterUnixMs", type: u64 },
 ];

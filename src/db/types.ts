@@ -181,6 +181,17 @@ export type ReceiveVerificationVerdict =
 export type ReceiveVerificationOutcome = "complete" | "integrity" | "aborted";
 
 /**
+ * Posted by the worker (outside any request) while it verifies a held file:
+ * after every RECEIVE_VERIFY_PROGRESS_BYTES hashed, or once
+ * RECEIVE_VERIFY_PROGRESS_CEILING_MS have passed since the last report.
+ */
+export interface HeldFileProgressNotice {
+  merkleRoot: string;
+  token: string;
+  hashedBytes: number;
+}
+
+/**
  * Posted by the worker (outside any request) when it verified a held file on
  * its own: at the next start, when the SDK loaded that file's room.
  */

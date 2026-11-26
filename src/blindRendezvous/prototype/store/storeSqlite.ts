@@ -30,7 +30,6 @@
 
 import { Database } from "bun:sqlite";
 
-import { PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION } from "../../../utils/constants";
 import { decodeCanonicalStrict, encodeCanonical } from "../../canonicalSchema";
 import {
   publicChunkV1Schema,
@@ -293,7 +292,7 @@ CREATE TABLE IF NOT EXISTS meta (
  * `PRAGMA user_version` of the schema above. Builds before it left the field
  * at 0 and kept witness rows without the counts that bound them.
  */
-const STORE_SQLITE_SCHEMA_VERSION = PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION;
+const STORE_SQLITE_SCHEMA_VERSION = 1;
 
 export class SqliteStorePersistence implements StorePersistencePort {
   readonly #db: Database;

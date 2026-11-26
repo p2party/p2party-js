@@ -237,7 +237,6 @@ const unsignedDescriptor = {
       chainStartIngressWindow: 0n,
     },
   ],
-  retentionWindows: 256,
   notBeforeUnixMs: 0n,
   notAfterUnixMs: 100_000_000n,
 };

@@ -10,6 +10,8 @@ import {
   OPFS_REASSEMBLE_DIR,
   RECEIVE_VERIFY_BATCH_CHUNKS,
   RECEIVE_VERIFY_LEASE_RENEW_MS,
+  RECEIVE_VERIFY_PROGRESS_BYTES,
+  RECEIVE_VERIFY_PROGRESS_CEILING_MS,
   RECEIVE_VERIFY_SETTLED_MEMORY,
 } from "../utils/constants";
 
@@ -44,6 +46,7 @@ import type {
   ReceiveChunkStored,
   ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
+  HeldFileProgressNotice,
   HeldFileSettledNotice,
   ReceiveVerificationMarker,
   ReceiveVerificationOutcome,
@@ -1417,6 +1420,10 @@ async function hashHeldFile(
     return bytes;
   };
   let renewedAt = Date.now();
+  // Progress reports, driven by work done: a stalled run reports nothing.
+  let hashedBytes = 0;
+  let reportedBytes = 0;
+  let reportedAt = Date.now();
   try {
     for (
       let first = 0;
@@ -1457,6 +1464,24 @@ async function hashHeldFile(
       }
       if (next !== records.length)
         throw new Error("received file layout does not match its manifest");
+      for (let index = first; index <= last; index++)
+        hashedBytes +=
+          index === manifest.count - 1
+            ? row.totalSize - manifest.uniformSize * (manifest.count - 1)
+            : manifest.uniformSize;
+      if (
+        hashedBytes - reportedBytes >= RECEIVE_VERIFY_PROGRESS_BYTES ||
+        Date.now() - reportedAt >= RECEIVE_VERIFY_PROGRESS_CEILING_MS
+      ) {
+        const progress: HeldFileProgressNotice = {
+          merkleRoot,
+          token,
+          hashedBytes,
+        };
+        postMessage({ progress });
+        reportedBytes = hashedBytes;
+        reportedAt = Date.now();
+      }
       if (Date.now() - renewedAt >= RECEIVE_VERIFY_LEASE_RENEW_MS) {
         const tx = db.transaction("receiveActivity", "readwrite");
         const activity = await tx.store.get(merkleRoot);

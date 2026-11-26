@@ -25,14 +25,9 @@
  *   below the chain start or swept by retention — is answered from the
  *   request and the clock alone: it loads no window and never waits on the
  *   mutation queue, so it cannot stall the store and its cost does not say
- *   which of those it was. The admission hook is asked before the queue too,
- *   and a refusal, a full cohort, a spent grant and an exact replay are
- *   answered from this process's record of the open window when it holds one.
- *   Only work that may change a window waits on the queue, and the queue is
- *   bounded: past `PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH` a request is
- *   refused with `StoreBusyError` before anything of it is queued. Every write
- *   copies the window it loaded, saves the copy, and only then answers, so a
- *   failed write leaves the loaded window exactly as it was.
+ *   which of those it was. Every write that does reach the queue copies the
+ *   window it loaded, saves the copy, and only then answers, so a failed
+ *   write leaves the loaded window exactly as it was.
  *
  * Transport lives in `storeHttp.ts`; durable rows live behind
  * `StorePersistencePort`. This file knows about neither.
@@ -42,15 +37,6 @@
  */
 
 import { keyPairFromSeed, sign, verify } from "../../../cryptography/ed25519";
-import {
-  PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES,
-  PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS,
-  PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH,
-  PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_QUOTA_KEY,
-  PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_WINDOW,
-  PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
-  PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS,
-} from "../../../utils/constants";
 import {
   allocationAppendSignedMessage,
   allocationTokenIssueRequestHash,
@@ -178,20 +164,6 @@ export class StoreAdmissionRefusedError extends Error {
   }
 }
 
-/**
- * The mutation queue is full (`PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH`), so
- * this request was refused before it was queued. The transport answers a
- * constant `503 busy`; a client treats it as it treats any non-200 answer, as
- * one failed request, and never as evidence against the store.
- */
-export class StoreBusyError extends Error {
-  override readonly name = "StoreBusyError";
-
-  constructor() {
-    super("storeCore: the mutation queue is full");
-  }
-}
-
 const fail: (message: string) => never = (message) => {
   throw new StoreRequestError(message);
 };
@@ -233,6 +205,52 @@ export interface StoreRetentionSweep {
   readonly witnessWindows: number;
 }
 
+/**
+ * How many windows back a store keeps a window readable when nothing else is
+ * configured, unless the profile's own `carrierRetentionWindows` is smaller.
+ *
+ * Retention is inclusive, as `bucketIsReadable` defines it: window `w` is
+ * served through the end of `w + retentionWindows`. At the pinned 4,000 ms
+ * window this default is about 17 minutes, and the measured idle window row
+ * (2,763,134 bytes) puts it near 0.7 GB per store. That is far below the
+ * pinned profile's `carrierRetentionWindows` of 160,000 (about 7.4 days and
+ * 442 GB): a store started without a configured value keeps less than the
+ * profile allows. The carrier runtime reads back at most 64 windows, so the
+ * prototype's own clients never ask past it.
+ */
+export const DEFAULT_STORE_RETENTION_WINDOWS = 256;
+
+/**
+ * The smallest retention a store accepts. A read of window `w - 1` is
+ * scheduled in window `w`, may be released one window late and may take one
+ * window to answer, so it can land three windows after the one it reads; the
+ * witness pair for `w - 1` is bounded the same way. One more is margin.
+ */
+export const MIN_STORE_RETENTION_WINDOWS = 4;
+
+/**
+ * Window rows, and separately witness windows, one sweep deletes at most. An
+ * idle row is about 2.7 MB, so one batch frees about 44 MB; a backlog left by
+ * downtime drains a batch per call rather than in one long statement.
+ */
+export const STORE_RETENTION_SWEEP_BATCH_WINDOWS = 16;
+
+/**
+ * Distinct witness records one window holds, from every caller together. It
+ * is the canonical cap on the records array (`storeWitnessRecordsV1Schema`),
+ * so a full window still encodes as one answer.
+ */
+export const MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
+
+/**
+ * New witness records one admission quota key may add to one window. A client
+ * posts one record per other store per window, so this covers a deployment of
+ * up to nine stores; it is what stops one admitted caller from filling a
+ * window's whole bound. Under open admission there is no key to charge and
+ * only the per-window bound applies.
+ */
+export const MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW = 8;
+
 /** The one secret a store process holds; the server writes it to a key file. */
 export interface StoreIdentityFiles {
   seed: Uint8Array;
@@ -266,30 +284,15 @@ export interface PrototypeStoreCoreOptions {
    *
    * When it is called: only after the core's own checks that need no hook —
    * the profile, the request's shape, and the window being one this store
-   * serves on its clock. Allocation: at or after the chain start, inside
-   * `[current, current + maxFutureIngressWindows]` and before its
-   * finalization instant; the hook runs before the request is queued and
-   * before the exact-retry replay, so a revoked grant cannot replay its lease,
-   * and the window is checked again inside the queue (a finalized window is
-   * always closed on the clock, so that check also covers the race). Append:
-   * at or after the chain start, before its window's finalization instant and
-   * not past the allocation horizon; the hook runs before the lease is
-   * verified. Witness: a window closed on the clock and still retained, under
-   * this store's profile. So a request the store would refuse anyway never
-   * reaches the hook, and the hook is never asked about a window the store
-   * would not serve.
-   *
-   * What it is given on the append route, pinned by a test: an unallocated
-   * cover append presents 32 zero bytes as `allocationEd25519PublicKey`, and
-   * an append under a lease presents that lease's key, so a hook can tell
-   * them apart by that field alone.
-   *
-   * What it should do with the token: compare it in constant time (a token
-   * that is a bearer secret must not be found byte by byte from response
-   * timing), and expect tokens that are unlinkable per request. A bearer token
-   * presented unchanged on every route links one client's allocation, appends
-   * and witness offers across windows and network addresses; only a token
-   * scheme that hands out a fresh unlinkable token per request avoids that.
+   * serves on its clock. Allocation: inside `[current, current +
+   * maxFutureIngressWindows]` and before its finalization instant, checked
+   * again once the window is loaded; the hook then runs before the exact-retry
+   * replay, so a revoked grant cannot replay its lease. Append: before its
+   * window's finalization instant and not past the allocation horizon; the
+   * hook runs before the lease is verified. Witness: a window this store
+   * retains, under this store's profile. So a request the store would refuse
+   * anyway never reaches the hook, and the hook is never asked about a window
+   * the store would not serve.
    *
    * What it may do: it may have side effects, provided they are idempotent.
    * An exact retry of an admitted request calls it again (and replays its
@@ -308,12 +311,9 @@ export interface PrototypeStoreCoreOptions {
     ): Uint8Array | null | Promise<Uint8Array | null>;
   };
   /**
-   * How many windows back reads, witness offers and stored rows reach, and
-   * what the signed descriptor states; see `sweepRetention`. An integer from
-   * `PROTOTYPE_STORE_MIN_RETENTION_WINDOWS` (what an honest client reads back)
-   * to the profile's `carrierRetentionWindows`; the default is
-   * `PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS`, or the profile's value if
-   * that is smaller.
+   * How many windows back reads, witness offers and stored rows reach; see
+   * `DEFAULT_STORE_RETENTION_WINDOWS` and `sweepRetention`. An integer from
+   * `MIN_STORE_RETENTION_WINDOWS` to the profile's `carrierRetentionWindows`.
    */
   readonly retentionWindows?: number;
 }
@@ -347,17 +347,12 @@ const U64_MAX = 0xffffffffffffffffn;
 const textEncoder = new TextEncoder();
 
 /** What a caller that presented no admission token is taken to have sent. */
-const NO_ADMISSION_TOKEN_BYTES = PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES;
+const NO_ADMISSION_TOKEN_BYTES = 32;
 
 type Admission =
   | { readonly kind: "open" }
   | { readonly kind: "admitted"; readonly quotaKey32: Uint8Array }
   | { readonly kind: "refused" };
-
-/** What the allocation path settled on: a lease, or a status to sign. */
-type AllocationDecision =
-  | { readonly kind: "lease"; readonly lease: PublicAllocationLeaseV1 }
-  | { readonly kind: "status"; readonly status: PublicAllocationStatusKindV1 };
 
 const OPEN_ADMISSION: Admission = { kind: "open" };
 const REFUSED_ADMISSION: Admission = { kind: "refused" };
@@ -443,7 +438,6 @@ const copyDescriptor = (descriptor: StoreDescriptorV1): StoreDescriptorV1 => ({
     deliveryProfileHash: copyBytes(start.deliveryProfileHash),
     chainStartIngressWindow: start.chainStartIngressWindow,
   })),
-  retentionWindows: descriptor.retentionWindows,
   notBeforeUnixMs: descriptor.notBeforeUnixMs,
   notAfterUnixMs: descriptor.notAfterUnixMs,
   descriptorSignature: copyBytes(descriptor.descriptorSignature),
@@ -504,24 +498,6 @@ export class PrototypeStoreCore {
 
   /** One retention sweep at a time; see `sweepRetention`. */
   #sweeping = false;
-
-  /** Units of work queued or running on `#serialize`. */
-  #queueDepth = 0;
-
-  /** The finalization queued or running, which a second caller joins. */
-  #finalizing: Promise<readonly bigint[]> | null = null;
-
-  /**
-   * This process's record of each window still open for writes: the window's
-   * state as last loaded or saved, so refusals, a full cohort, a spent grant
-   * and exact replays are answered without loading it, and the queue loads a
-   * window once rather than once per request. It only ever holds what
-   * persistence holds (filled from a load, replaced after a successful save),
-   * and it holds only windows not closed on the clock, so at most
-   * `maxFutureIngressWindows + 2` entries; at the pinned profile each is at
-   * most 8 allocation records and 40 bound objects, about 1.4 MB.
-   */
-  readonly #openWindows = new Map<string, StoreWindowState>();
 
   private constructor(
     options: PrototypeStoreCoreOptions,
@@ -589,16 +565,6 @@ export class PrototypeStoreCore {
     return this.#retentionWindows;
   }
 
-  /** Units of work queued or running on the mutation queue. */
-  get mutationQueueDepth(): number {
-    return this.#queueDepth;
-  }
-
-  /** True while a request that needs the queue would be refused busy. */
-  get mutationQueueSaturated(): boolean {
-    return this.#queueDepth >= PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH;
-  }
-
   static async create(
     options: PrototypeStoreCoreOptions,
   ): Promise<PrototypeStoreCore> {
@@ -626,18 +592,16 @@ export class PrototypeStoreCore {
     const retentionWindows =
       options.retentionWindows ??
       Math.min(
-        PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS,
+        DEFAULT_STORE_RETENTION_WINDOWS,
         options.profile.carrierRetentionWindows,
       );
-    // Below the minimum an honest client's catch-up read would meet an
-    // expired window; clients refuse such a store at connect anyway.
     if (
       !Number.isSafeInteger(retentionWindows) ||
-      retentionWindows < PROTOTYPE_STORE_MIN_RETENTION_WINDOWS ||
+      retentionWindows < MIN_STORE_RETENTION_WINDOWS ||
       retentionWindows > options.profile.carrierRetentionWindows
     )
       failConfiguration(
-        `retentionWindows must be an integer from ${String(PROTOTYPE_STORE_MIN_RETENTION_WINDOWS)}, the furthest an honest client reads back, to the profile's carrierRetentionWindows (${String(options.profile.carrierRetentionWindows)})`,
+        `retentionWindows must be an integer from ${String(MIN_STORE_RETENTION_WINDOWS)} to the profile's carrierRetentionWindows (${String(options.profile.carrierRetentionWindows)})`,
       );
 
     const seed = copyBytes(options.seed);
@@ -679,7 +643,6 @@ export class PrototypeStoreCore {
           chainStartIngressWindow: options.chainStartIngressWindow,
         },
       ],
-      retentionWindows,
       notBeforeUnixMs,
       notAfterUnixMs: notBeforeUnixMs + options.descriptorValidityMs,
       descriptorSignature: new Uint8Array(64),
@@ -863,41 +826,17 @@ export class PrototypeStoreCore {
     requireWindow(privateRequest.ingressWindow);
 
     const requestHash = await publicAllocationRequestHash(privateRequest);
-    const status = (
-      kind: PublicAllocationStatusKindV1,
-    ): Promise<PublicAllocationResultV1> =>
-      this.#allocationStatus(
+    // A refusal the clock already decides is signed here, off the mutation
+    // queue: it needs no window, so it must not wait behind ones that do.
+    const refusal = this.#allocationRefusal(privateRequest);
+    if (refusal !== null)
+      return this.#allocationStatus(
         privateRequest.deliveryProfileHash,
         privateRequest.ingressWindow,
         requestHash,
-        kind,
+        refusal,
       );
-
-    // Everything up to the lease is decided off the mutation queue: the clock,
-    // the admission hook, and — when this process holds a record of the open
-    // window — a replay, a spent grant and a full cohort. None of them loads
-    // the window, and none of them waits behind requests that do.
-    const refusal = this.#allocationRefusal(privateRequest);
-    if (refusal !== null) return status(refusal);
-    const admitted = await this.#admit({
-      ...privateRequest,
-      route: "allocation",
-    });
-    if (admitted.kind === "refused") return status("invalid-token");
-
-    const known = this.#openWindows.get(String(privateRequest.ingressWindow));
-    const early =
-      known === undefined
-        ? null
-        : this.#allocationFromState(known, requestHash, admitted);
-    const decided =
-      early ??
-      (await this.#serialize(() =>
-        this.#allocate(privateRequest, requestHash, admitted),
-      ));
-    return decided.kind === "lease"
-      ? { kind: "allocated", lease: copyLease(decided.lease) }
-      : status(decided.status);
+    return this.#serialize(() => this.#allocate(privateRequest, requestHash));
   }
 
   /** The refusal the request and the clock alone decide, or `null`. */
@@ -913,10 +852,7 @@ export class PrototypeStoreCore {
 
     const target = request.ingressWindow;
     const current = this.currentWindow();
-    // Below the chain start no window is ever finalized, so a lease there
-    // would promise custody of slots no chunk will carry.
     if (
-      target < this.#chainStart ||
       target < current ||
       target > current + BigInt(this.#profile.maxFutureIngressWindows) ||
       this.#closedOnClock(target)
@@ -925,51 +861,49 @@ export class PrototypeStoreCore {
     return null;
   }
 
-  /**
-   * What `state` already decides about an admitted allocation: the lease an
-   * exact retry replays, or a refusal for a spent grant or a full cohort.
-   * `null` means only a new lease can answer, which needs the queue.
-   */
-  #allocationFromState(
-    state: StoreWindowState,
+  async #allocate(
+    request: PublicAllocationRequestV1,
     requestHash: Uint8Array,
-    admitted: Admission,
-  ): AllocationDecision | null {
+  ): Promise<PublicAllocationResultV1> {
+    const status = (
+      kind: PublicAllocationStatusKindV1,
+    ): Promise<PublicAllocationResultV1> =>
+      this.#allocationStatus(
+        request.deliveryProfileHash,
+        request.ingressWindow,
+        requestHash,
+        kind,
+      );
+
+    // Decided again: the window may have closed while this request waited.
+    const refusal = this.#allocationRefusal(request);
+    if (refusal !== null) return status(refusal);
+
+    const target = request.ingressWindow;
+    const state = await this.#windowState(target);
+    if (this.#windowIsClosed(state, target)) return status("window-closed");
+
+    const admitted = await this.#admit({ ...request, route: "allocation" });
+    if (admitted.kind === "refused") return status("invalid-token");
+    const admissionQuotaKey32 =
+      admitted.kind === "admitted" ? admitted.quotaKey32 : undefined;
+
     // An exact duplicate replays the byte-identical lease and consumes no
     // second ordinal, on any route and after a restart.
     for (const record of state.allocations.values())
       if (bytesEqual(record.requestHash, requestHash))
-        return { kind: "lease", lease: record.lease };
+        return { kind: "allocated", lease: copyLease(record.lease) };
 
-    if (admitted.kind === "admitted")
+    if (admissionQuotaKey32 !== undefined)
       for (const record of state.allocations.values())
         if (
           record.admissionQuotaKey32 !== undefined &&
-          bytesEqual(record.admissionQuotaKey32, admitted.quotaKey32)
+          bytesEqual(record.admissionQuotaKey32, admissionQuotaKey32)
         )
-          return { kind: "status", status: "invalid-token" };
+          return status("invalid-token");
 
     if (state.allocations.size >= this.#profile.cohortAllocationsPerWindow)
-      return { kind: "status", status: "capacity-exhausted" };
-    return null;
-  }
-
-  async #allocate(
-    request: PublicAllocationRequestV1,
-    requestHash: Uint8Array,
-    admitted: Admission,
-  ): Promise<AllocationDecision> {
-    // Decided again: the window may have closed while this request waited,
-    // and a finalized window is always closed on the clock.
-    const refusal = this.#allocationRefusal(request);
-    if (refusal !== null) return { kind: "status", status: refusal };
-
-    const target = request.ingressWindow;
-    const state = await this.#openWindowState(target);
-    if (this.#windowIsClosed(state, target))
-      return { kind: "status", status: "window-closed" };
-    const decided = this.#allocationFromState(state, requestHash, admitted);
-    if (decided !== null) return decided;
+      return status("capacity-exhausted");
 
     let allocationOrdinal = 0;
     while (state.allocations.has(allocationOrdinal)) allocationOrdinal++;
@@ -992,21 +926,17 @@ export class PrototypeStoreCore {
       ),
     };
 
-    // Do not mutate a window returned by a caching persistence adapter, or
-    // held in this process's record, before saveWindow commits. A failed
-    // write must not consume an ordinal or grant.
+    // Do not mutate a window returned by a caching persistence adapter before
+    // saveWindow commits. A failed write must not consume an ordinal or grant.
     const nextState = { ...state, allocations: new Map(state.allocations) };
     nextState.allocations.set(allocationOrdinal, {
       leaseBody,
       lease,
       requestHash,
-      ...(admitted.kind === "admitted"
-        ? { admissionQuotaKey32: admitted.quotaKey32 }
-        : {}),
+      ...(admissionQuotaKey32 === undefined ? {} : { admissionQuotaKey32 }),
     });
     await this.#persistence.saveWindow(nextState);
-    this.#rememberOpenWindow(nextState);
-    return { kind: "lease", lease };
+    return { kind: "allocated", lease: copyLease(lease) };
   }
 
   async #allocationStatus(
@@ -1101,10 +1031,8 @@ export class PrototypeStoreCore {
     // Answered from the clock: a finalized window, one closed but not yet
     // finalized, one below the chain start and one already swept are the
     // same request to this line and get the same answer for the same work.
-    // Below the chain start no window is ever finalized, so it is closed.
     const window = bucket.ingressWindow;
-    if (window < this.#chainStart || this.#closedOnClock(window))
-      return result("window-finalized");
+    if (this.#closedOnClock(window)) return result("window-finalized");
     // The status set has no "not open yet". `capacity-exhausted` is the
     // honest one: no lease can exist this far ahead, so the window has no
     // capacity any append to it could use.
@@ -1201,15 +1129,6 @@ export class PrototypeStoreCore {
     );
     const objectHash = await sha256(exactFixedObject);
 
-    // A replay of a bound slot is answered from this process's record of the
-    // open window: it binds nothing, so it neither loads nor queues.
-    const bound = this.#openWindows.get(String(window))?.slots.get(key);
-    if (bound !== undefined)
-      return result(
-        bytesEqual(bound.objectHash, objectHash)
-          ? "already-present"
-          : "slot-conflict",
-      );
     return result(
       await this.#serialize(() =>
         this.#bindSlot(window, key, objectHash, exactFixedObject),
@@ -1224,7 +1143,7 @@ export class PrototypeStoreCore {
     objectHash: Uint8Array,
     object: Uint8Array,
   ): Promise<PublicAppendStatusV1> {
-    const state = await this.#openWindowState(window);
+    const state = await this.#windowState(window);
     // Decided again: the window may have closed while this waited, and a
     // finalized row is final whatever the clock says.
     if (this.#windowIsClosed(state, window)) return "window-finalized";
@@ -1240,9 +1159,7 @@ export class PrototypeStoreCore {
     // state this process would go on serving and no restart would find.
     const slots = new Map(state.slots);
     slots.set(key, { objectHash, object });
-    const nextState = { ...state, slots };
-    await this.#persistence.saveWindow(nextState);
-    this.#rememberOpenWindow(nextState);
+    await this.#persistence.saveWindow({ ...state, slots });
     return "stored";
   }
 
@@ -1283,16 +1200,7 @@ export class PrototypeStoreCore {
    * never be filled in later without equivocating.
    */
   async finalizeDue(): Promise<readonly bigint[]> {
-    // The store's own work: never shed, and one call queued at a time, so a
-    // finalizer tick that lands behind a long queue does not add another.
-    if (this.#finalizing !== null) return this.#finalizing;
-    const run = this.#serialize(() => this.#finalizeDue(), false);
-    this.#finalizing = run;
-    try {
-      return await run;
-    } finally {
-      this.#finalizing = null;
-    }
+    return this.#serialize(() => this.#finalizeDue());
   }
 
   async #finalizeDue(): Promise<readonly bigint[]> {
@@ -1315,9 +1223,7 @@ export class PrototypeStoreCore {
   }
 
   async #finalizeWindow(window: bigint): Promise<void> {
-    const state =
-      this.#openWindows.get(String(window)) ??
-      (await this.#windowState(window));
+    const state = await this.#windowState(window);
     // Immutable after signature: re-signing one window is a fault proof.
     if (state.finalized !== null) return;
 
@@ -1424,7 +1330,6 @@ export class PrototypeStoreCore {
       slots: new Map(),
       finalized: { chunks, checkpoint },
     });
-    this.#openWindows.delete(String(window));
   }
 
   /* ---------------------------------------------------------------- *
@@ -1451,9 +1356,6 @@ export class PrototypeStoreCore {
     // the row yet: the answer follows the clock, not the sweep's progress.
     if (window < this.#chainStart || !this.#readable(window))
       return status("out-of-range");
-    // Before its finalization instant no window can be final: the clock
-    // answers, and an unauthenticated read decodes no row.
-    if (!this.#closedOnClock(window)) return status("not-final");
 
     const state = await this.#persistence.loadWindow(window);
     if (state?.finalized == null) return status("not-final");
@@ -1518,8 +1420,6 @@ export class PrototypeStoreCore {
       !this.#readable(requested.ingressWindow)
     )
       return status("out-of-range");
-    if (!this.#closedOnClock(requested.ingressWindow))
-      return status("not-final");
 
     const state = await this.#persistence.loadWindow(requested.ingressWindow);
     const chunk = state?.finalized?.chunks.get(sizeClass.id)?.[
@@ -1555,22 +1455,18 @@ export class PrototypeStoreCore {
    *
    * Bounded and idempotent: a witness log is unauthenticated input from a peer
    * store, so it may not grow without limit, and re-offering an observation
-   * must not make it look like two. Only a window closed on this store's clock
-   * and still retained is accepted, so nobody can pre-fill a window before
-   * its checkpoint can exist, and every row goes with its window at the
-   * sweep. Under open admission that still leaves the interval from the
-   * window's finalization instant to the honest witness instant, one window
-   * later at `chunkFinalizationOffsetMs - maxScheduleSkewMs`, in which anyone
-   * can fill the window's bound first.
+   * must not make it look like two. Only a window this store retains is
+   * accepted — the current one and the `retentionWindows` before it — so
+   * nobody can pre-fill a window before it happens, and every row goes with
+   * its window at the sweep.
    *
    * The insert is one atomic persistence call against kept counts: it reads
    * none of the window's records and takes no place on the mutation queue.
    * Under admission each quota key adds at most
-   * `PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_QUOTA_KEY` records to a window,
-   * so filling the window's `PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_WINDOW`
-   * takes that many admitted grants; under open admission there is no key to
-   * charge, and the first callers to reach the per-window bound fill it for
-   * everyone.
+   * `MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW` records to a window, so
+   * filling the window's `MAX_WITNESS_RECORDS_PER_WINDOW` takes that many
+   * admitted grants; under open admission there is no key to charge, and
+   * the first callers to reach the per-window bound fill it for everyone.
    */
   async addWitness(
     record: StoreWitnessRecordV1,
@@ -1609,9 +1505,9 @@ export class PrototypeStoreCore {
       throw new StoreAdmissionRefusedError("witness");
 
     const outcome = await this.#persistence.addWitnessRecord(privateRecord, {
-      maxRecordsPerWindow: PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_WINDOW,
+      maxRecordsPerWindow: MAX_WITNESS_RECORDS_PER_WINDOW,
       quotaKey32: admitted.kind === "admitted" ? admitted.quotaKey32 : null,
-      maxRecordsPerQuotaKey: PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_QUOTA_KEY,
+      maxRecordsPerQuotaKey: MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW,
     });
     if (outcome === "added") return "recorded";
     return outcome === "present" ? "already-held" : "not-recorded";
@@ -1630,7 +1526,7 @@ export class PrototypeStoreCore {
 
   /**
    * Delete what retention no longer covers: at most
-   * `PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS` window rows and as many witness
+   * `STORE_RETENTION_SWEEP_BATCH_WINDOWS` window rows and as many witness
    * windows per call, smallest first. The server calls it on a timer.
    *
    * A window stops being served once `current - window > retentionWindows`
@@ -1659,11 +1555,11 @@ export class PrototypeStoreCore {
           ? 0
           : await this.#persistence.deleteWindowsBefore(
               tip < floor ? tip : floor,
-              PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS,
+              STORE_RETENTION_SWEEP_BATCH_WINDOWS,
             );
       const witnessWindows = await this.#persistence.deleteWitnessRecordsBefore(
         floor,
-        PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS,
+        STORE_RETENTION_SWEEP_BATCH_WINDOWS,
       );
       return { windows, witnessWindows };
     } finally {
@@ -1682,19 +1578,14 @@ export class PrototypeStoreCore {
    * (signing is async), so two concurrent requests on the HTTP server would
    * otherwise both see the same free ordinal or the same empty slot.
    */
-  #serialize<T>(work: () => Promise<T>, shed = true): Promise<T> {
-    // Refused before the closure exists: a shed request leaves nothing of
-    // itself on the queue.
-    if (shed && this.#queueDepth >= PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH)
-      return Promise.reject(new StoreBusyError());
-    this.#queueDepth += 1;
+  #serialize<T>(work: () => Promise<T>): Promise<T> {
     const running = this.#tail.then(work, work);
     // The chain must survive a rejected unit of work, or one bad request would
     // wedge every later one.
-    const settled = (): void => {
-      this.#queueDepth -= 1;
-    };
-    this.#tail = running.then(settled, settled);
+    this.#tail = running.then(
+      () => undefined,
+      () => undefined,
+    );
     return running;
   }
 
@@ -1733,47 +1624,13 @@ export class PrototypeStoreCore {
     );
   }
 
-  /**
-   * Accepted for witnessing: a window closed on the clock, so its checkpoint
-   * can exist, and still retained.
-   */
+  /** Accepted for witnessing: the current window and the retained ones. */
   #witnessRetained(window: bigint): boolean {
-    return (
-      this.#closedOnClock(window) &&
-      bucketIsReadable(window, this.currentWindow(), this.#retentionWindows)
+    return bucketIsReadable(
+      window,
+      this.currentWindow(),
+      this.#retentionWindows,
     );
-  }
-
-  /**
-   * The state of a window a write names: this process's record of it, or a
-   * load that then becomes the record while the window is open.
-   */
-  async #openWindowState(window: bigint): Promise<StoreWindowState> {
-    const known = this.#openWindows.get(String(window));
-    if (known !== undefined) return known;
-    const loaded = await this.#windowState(window);
-    this.#rememberOpenWindow(loaded);
-    return loaded;
-  }
-
-  /**
-   * Record a window's committed state while it is open for writes, and drop
-   * every window the clock has closed (finalization loads a closed window
-   * once). The record never outgrows the windows a write can still name.
-   */
-  #rememberOpenWindow(state: StoreWindowState): void {
-    for (const [key, held] of this.#openWindows)
-      if (this.#closedOnClock(held.window)) this.#openWindows.delete(key);
-    if (state.finalized !== null || this.#closedOnClock(state.window)) return;
-    this.#openWindows.set(String(state.window), state);
-    const bound = this.#profile.maxFutureIngressWindows + 2;
-    while (this.#openWindows.size > bound) {
-      let oldest: bigint | null = null;
-      for (const held of this.#openWindows.values())
-        if (oldest === null || held.window < oldest) oldest = held.window;
-      if (oldest === null) break;
-      this.#openWindows.delete(String(oldest));
-    }
   }
 
   async #windowState(window: bigint): Promise<StoreWindowState> {

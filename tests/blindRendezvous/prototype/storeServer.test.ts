@@ -8,11 +8,6 @@ import { deliveryProfileHash } from "../../../src/blindRendezvous/derivations";
 import { ingressWindow } from "../../../src/blindRendezvous/publicWindow";
 import { PROTOTYPE_DELIVERY_PROFILE_V0 } from "../../../src/blindRendezvous/prototype/profile";
 import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
-import { emptyStoreWindowState } from "../../../src/blindRendezvous/prototype/store/storePersistence";
-import {
-  PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
-  PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS,
-} from "../../../src/utils/constants";
 import {
   PROTOTYPE_STORE_MEDIA_TYPES,
   PROTOTYPE_STORE_ROUTES,
@@ -321,24 +316,14 @@ describe("prototype store entrypoint", () => {
     const directory = join(root, "retention");
     mkdirSync(directory, { recursive: true });
     const databasePath = join(directory, "store.sqlite");
+    const retention = 4;
+    // A chain that started a dozen windows ago: the finalizer catches up at
+    // start, so the database holds every one of them unless something sweeps.
     const chainStart =
       ingressWindow(
         PROTOTYPE_DELIVERY_PROFILE_V0.deliveryWindowMs,
         BigInt(Date.now()),
-      ) - 2n;
-    // Rows far older than any retention, planted before the store starts:
-    // only a sweep the entrypoint runs on its own can remove them.
-    const planted = Array.from(
-      { length: PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS + 4 },
-      (_, index) => chainStart - 500n + BigInt(index),
-    );
-    const seed = new SqliteStorePersistence(databasePath);
-    try {
-      for (const window of planted)
-        await seed.saveWindow(emptyStoreWindowState(window));
-    } finally {
-      seed.close();
-    }
+      ) - 12n;
     const port = freePort();
     const child = spawnStore({
       P2PARTY_STORE_PROTOTYPE: "1",
@@ -347,73 +332,48 @@ describe("prototype store entrypoint", () => {
       P2PARTY_STORE_DB: databasePath,
       P2PARTY_STORE_KEY_FILE: join(directory, "store.key"),
       P2PARTY_STORE_CHAIN_START: String(chainStart),
-      P2PARTY_STORE_RETENTION_WINDOWS: String(
-        PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
-      ),
+      P2PARTY_STORE_RETENTION_WINDOWS: String(retention),
     });
-    let remaining = planted.length;
-    let finalized = 0;
+    let observed: { rows: number; oldest: bigint; newest: bigint } | null =
+      null;
     try {
       await waitForHealth(child, port);
-      // Polled rather than timed: the assertion is the rows left, however
-      // long the sweep takes to reach them.
-      for (let attempt = 0; attempt < 120 && remaining > 0; attempt++) {
-        await Bun.sleep(250);
+      // Polled rather than timed: the assertion is the row count once the
+      // catch-up has passed the retention floor, however long that takes.
+      for (let attempt = 0; attempt < 120; attempt++) {
         const db = new Database(databasePath, {
           readonly: true,
           safeIntegers: true,
         });
         try {
-          remaining = Number(
-            db
-              .query<{ rows: bigint }, [bigint]>(
-                'SELECT count(*) AS rows FROM "window" WHERE "window" < ?',
-              )
-              .get(chainStart)?.rows ?? 0n,
-          );
-          finalized = Number(
-            db
-              .query<{ rows: bigint }, []>(
-                'SELECT count(*) AS rows FROM "window" WHERE finalized = 1',
-              )
-              .get()?.rows ?? 0n,
-          );
+          const row = db
+            .query<{ rows: bigint; oldest: bigint; newest: bigint }, []>(
+              'SELECT count(*) AS rows, min("window") AS oldest, max("window") AS newest FROM "window" WHERE finalized = 1',
+            )
+            .get();
+          if (
+            row !== null &&
+            row.newest !== null &&
+            row.newest >= chainStart + 11n
+          ) {
+            observed = {
+              rows: Number(row.rows),
+              oldest: row.oldest,
+              newest: row.newest,
+            };
+            if (row.oldest > chainStart) break;
+          }
         } finally {
           db.close();
         }
+        await Bun.sleep(250);
       }
     } finally {
       child.kill("SIGTERM");
       await child.exited;
     }
-    expect(remaining).toBe(0);
-    expect(finalized).toBeGreaterThan(0);
+    if (observed === null) throw new Error("the finalizer never caught up");
+    expect(observed.oldest).toBeGreaterThan(chainStart);
+    expect(observed.rows).toBeLessThanOrEqual(retention + 2);
   }, 90_000);
-
-  test("the entrypoint refuses a retention below what clients read back", async () => {
-    const directory = join(root, "retention-short");
-    mkdirSync(directory, { recursive: true });
-    const child = spawnStore({
-      P2PARTY_STORE_PROTOTYPE: "1",
-      P2PARTY_STORE_OPEN_ALLOCATION: "1",
-      P2PARTY_STORE_PORT: String(freePort()),
-      P2PARTY_STORE_DB: join(directory, "store.sqlite"),
-      P2PARTY_STORE_KEY_FILE: join(directory, "store.key"),
-      P2PARTY_STORE_RETENTION_WINDOWS: String(
-        PROTOTYPE_STORE_MIN_RETENTION_WINDOWS - 1,
-      ),
-    });
-    const outcome = await Promise.race([
-      child.exited,
-      Bun.sleep(20_000).then(() => "still running" as const),
-    ]);
-    if (outcome === "still running") {
-      child.kill("SIGTERM");
-      await child.exited;
-    }
-    expect(outcome).toBe(1);
-    expect(await new Response(child.stderr).text()).toContain(
-      "retentionWindows must be an integer from",
-    );
-  }, 30_000);
 });

@@ -31,9 +31,15 @@ import { createHash } from "node:crypto";
 
 import { getDB } from "../../src/db/src/getDB";
 import { buildReceiveManifest } from "../../src/db/receiveManifest";
+import {
+  CHUNK_LEN,
+  RECEIVE_VERIFY_PROGRESS_BYTES,
+  RECEIVE_VERIFY_PROGRESS_CEILING_MS,
+} from "../../src/utils/constants";
 
 import type {
   Chunk,
+  HeldFileProgressNotice,
   HeldFileSettledNotice,
   MessageData,
   ReceiveChunk,
@@ -55,6 +61,7 @@ const pendingReplies = new Map<number, (reply: WorkerResponse) => void>();
 // Notices the worker posts outside any request (a held file it verified on
 // its own), in arrival order.
 const notices: HeldFileSettledNotice[] = [];
+const progressReports: HeldFileProgressNotice[] = [];
 async function callWorker(
   method: string,
   args: unknown[],
@@ -62,9 +69,16 @@ async function callWorker(
   await import("../../src/db/db.worker");
   (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
     (message: unknown) => {
-      const { notice } = message as { notice?: HeldFileSettledNotice };
+      const { notice, progress } = message as {
+        notice?: HeldFileSettledNotice;
+        progress?: HeldFileProgressNotice;
+      };
       if (notice) {
         notices.push(notice);
+        return;
+      }
+      if (progress) {
+        progressReports.push(progress);
         return;
       }
       const reply = message as WorkerResponse;
@@ -1164,6 +1178,78 @@ describe("no failure leaves a verification behind", () => {
     ).toEqual([]);
     expect(await settle(root, token)).toBe("aborted");
   });
+});
+
+describe("verification progress reports", () => {
+  test("the worker reports progress after bounded work, and at least every 10 s while it works", async () => {
+    // By bytes: just over one RECEIVE_VERIFY_PROGRESS_BYTES of real bytes.
+    progressReports.length = 0;
+    installOpfs(new Map());
+    const big = "d9".repeat(64);
+    const chunks = 140;
+    const total = chunks * CHUNK_LEN;
+    for (let index = 0; index < chunks; index++)
+      await store(
+        chunkOf(big, index, total, CHUNK_LEN, {
+          messageType: 2,
+          storage: "opfs",
+          mimeType: "application/octet-stream",
+        }),
+      );
+    const bigToken = (
+      (await callWorker("getDBMessageData", [big])).result as MessageData
+    ).receiveVerification!.token;
+    expect(await verify(big, bigToken)).toBe("match");
+    expect(progressReports).toEqual([
+      {
+        merkleRoot: big,
+        token: bigToken,
+        // The first batch end at or past 8 MiB: here the last batch, so the
+        // whole file (128 chunks are just under 8 MiB).
+        hashedBytes: total,
+      },
+    ]);
+    expect(progressReports[0].hashedBytes).toBeGreaterThanOrEqual(
+      RECEIVE_VERIFY_PROGRESS_BYTES,
+    );
+    expect(await settle(big, bigToken)).toBe("complete");
+
+    // By time: a small file whose reads are slow. The clock moves only as the
+    // file is read, so a stalled read would report nothing.
+    progressReports.length = 0;
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    restores.push(() => clock.mockRestore());
+    installOpfs(
+      new Map(),
+      {},
+      {
+        onRead: () => {
+          now += 700;
+        },
+      },
+    );
+    const slow = "da".repeat(64);
+    for (let index = 0; index < 40; index++)
+      await store(
+        chunkOf(slow, index, 200, 5, {
+          messageType: 2,
+          storage: "opfs",
+          mimeType: "application/octet-stream",
+        }),
+      );
+    const slowToken = (
+      (await callWorker("getDBMessageData", [slow])).result as MessageData
+    ).receiveVerification!.token;
+    expect(await verify(slow, slowToken)).toBe("match");
+    // Batches of 16, 16 and 8 reads take 11.2, 11.2 and 5.6 s: a report after
+    // each of the first two, none after the third.
+    expect(progressReports.map((report) => report.hashedBytes)).toEqual([
+      80, 160,
+    ]);
+    expect(RECEIVE_VERIFY_PROGRESS_CEILING_MS).toBe(10_000);
+    expect(await settle(slow, slowToken)).toBe("complete");
+  }, 60_000);
 });
 
 describe("held files are verified at the next start", () => {

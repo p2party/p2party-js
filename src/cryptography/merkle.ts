@@ -3,7 +3,10 @@ import cryptoMemory from "./memory";
 // import libcrypto from "./libcrypto";
 import { wasmLoader } from "./wasmLoader";
 
-import { crypto_hash_sha512_BYTES } from "./interfaces";
+import {
+  crypto_hash_sha512_BYTES,
+  crypto_hash_sha512_STATEBYTES,
+} from "./interfaces";
 import { hashMerkleLeaf, hashMerkleLeafWasm } from "../utils/leafHash";
 
 import type { LibCrypto } from "./libcrypto";
@@ -242,6 +245,210 @@ export const getMerkleProof = async (
       }
     }
   }
+};
+
+// merkle.c's internal-node hash: SHA-512(0x01 ‖ left ‖ right).
+const MERKLE_NODE_DOMAIN = 0x01;
+const MERKLE_NODE_INPUT_BYTES = 1 + 2 * crypto_hash_sha512_BYTES;
+const MERKLE_PROOF_ARTIFACT_BYTES = crypto_hash_sha512_BYTES + 1;
+
+/** getMerkleProof's fixed-length framing: u32 BE length ‖ proof ‖ random. */
+const frameMerkleProof = (
+  proof: Uint8Array,
+  proofFixedLen: number,
+): Uint8Array => {
+  const framed = globalThis.crypto.getRandomValues(
+    new Uint8Array(proofFixedLen),
+  );
+  new DataView(framed.buffer, 0, 4).setUint32(0, proof.length, false);
+  framed.set(proof, 4);
+  return framed;
+};
+
+/**
+ * Every level of one Merkle tree, built once, so the proof of any leaf is a
+ * walk of at most ⌈log2 N⌉ sibling copies. `getMerkleProof` rebuilds the
+ * whole tree in WASM for every call, which a sender pays once per chunk.
+ */
+export interface MerkleProofLevels {
+  readonly leafCount: number;
+  /**
+   * Bytes held above the caller's leaves: about N × 64 for N leaves. Zero once
+   * released.
+   */
+  readonly byteLength: number;
+  /**
+   * The proof of the leaf at `index`, framed exactly as `getMerkleProof`
+   * frames it (with `proofFixedLen`: u32 BE length ‖ proof ‖ random padding).
+   * For a tree of distinct leaves the bytes equal `getMerkleProof(tree,
+   * leafHash)`. With duplicate leaves `getMerkleProof` proves the FIRST equal
+   * leaf, and this proves the one at `index`; both verify against the root.
+   * Throws when `leafHash` is not the leaf at `index`.
+   */
+  proof(
+    index: number,
+    leafHash: Uint8Array,
+    proofFixedLen?: number,
+  ): Uint8Array;
+  /** A copy of the root, equal to `getMerkleRoot` over the same leaves. */
+  root(): Uint8Array;
+  /** Drop every level. Idempotent; a later `proof` or `root` throws. */
+  release(): void;
+}
+
+/**
+ * Build every level of the tree over `treeHashes` (the domain-separated leaf
+ * hashes) with merkle.c's rules: an internal node is SHA-512(0x01 ‖ left ‖
+ * right), computed by the module's libsodium SHA-512, and a lone odd node is
+ * promoted unchanged. That is N − 1 node hashes, once.
+ *
+ * Level 0 is `treeHashes` itself, not a copy: the caller must not modify it
+ * while the levels are live.
+ */
+export const buildMerkleProofLevels = (
+  treeHashes: Uint8Array,
+  module: LibCrypto,
+): MerkleProofLevels => {
+  if (treeHashes.length % crypto_hash_sha512_BYTES !== 0) {
+    throw new Error("Hashes were not passed");
+  }
+  const leafCount = treeHashes.length / crypto_hash_sha512_BYTES;
+  if (leafCount === 0) {
+    throw new Error("Cannot calculate Merkle proof of element of empty tree.");
+  }
+
+  let levels: Uint8Array[] = [treeHashes];
+  if (leafCount > 1) {
+    const statePtr = module._malloc(crypto_hash_sha512_STATEBYTES);
+    const inputPtr = module._malloc(MERKLE_NODE_INPUT_BYTES);
+    const outputPtr = module._malloc(crypto_hash_sha512_BYTES);
+    try {
+      if (!statePtr || !inputPtr || !outputPtr)
+        throw new Error(
+          "Could not allocate memory for hash concatenation helper array.",
+        );
+      // ALLOW_MEMORY_GROWTH=0: the heap never moves, so these views stay valid.
+      const input = new Uint8Array(
+        module.wasmMemory.buffer,
+        inputPtr,
+        MERKLE_NODE_INPUT_BYTES,
+      );
+      const output = new Uint8Array(
+        module.wasmMemory.buffer,
+        outputPtr,
+        crypto_hash_sha512_BYTES,
+      );
+      input[0] = MERKLE_NODE_DOMAIN;
+      let below = treeHashes;
+      let nodes = leafCount;
+      while (nodes > 1) {
+        const parents = Math.ceil(nodes / 2);
+        const level = new Uint8Array(parents * crypto_hash_sha512_BYTES);
+        for (let j = 0; j < parents; j++) {
+          const left = 2 * j * crypto_hash_sha512_BYTES;
+          if (2 * j + 1 === nodes) {
+            level.set(
+              below.subarray(left, left + crypto_hash_sha512_BYTES),
+              j * crypto_hash_sha512_BYTES,
+            );
+            continue;
+          }
+          input.set(
+            below.subarray(left, left + 2 * crypto_hash_sha512_BYTES),
+            1,
+          );
+          if (
+            module._sha512_init(statePtr) !== 0 ||
+            module._sha512_update(
+              statePtr,
+              inputPtr,
+              MERKLE_NODE_INPUT_BYTES,
+            ) !== 0 ||
+            module._sha512_final(statePtr, outputPtr) !== 0
+          )
+            throw new Error("Could not calculate hash.");
+          level.set(output, j * crypto_hash_sha512_BYTES);
+        }
+        levels.push(level);
+        below = level;
+        nodes = parents;
+      }
+    } finally {
+      module._free(statePtr);
+      module._free(inputPtr);
+      module._free(outputPtr);
+    }
+  }
+
+  let released = false;
+  return {
+    leafCount,
+    get byteLength(): number {
+      let bytes = 0;
+      for (let l = 1; l < levels.length; l++) bytes += levels[l].length;
+      return bytes;
+    },
+    proof(
+      index: number,
+      leafHash: Uint8Array,
+      proofFixedLen?: number,
+    ): Uint8Array {
+      if (released) throw new Error("Merkle proof levels were released.");
+      if (!Number.isSafeInteger(index) || index < 0 || index >= leafCount)
+        throw new RangeError("Merkle leaf index is out of range.");
+      const leafStart = index * crypto_hash_sha512_BYTES;
+      if (
+        leafHash.length !== crypto_hash_sha512_BYTES ||
+        leafHash.some((byte, i) => byte !== levels[0][leafStart + i])
+      )
+        throw new Error("Element is not the leaf at this index.");
+
+      if (leafCount === 1) {
+        const proof = new Uint8Array(MERKLE_PROOF_ARTIFACT_BYTES);
+        proof.set(leafHash);
+        return proofFixedLen ? frameMerkleProof(proof, proofFixedLen) : proof;
+      }
+
+      const artifacts = new Uint8Array(
+        (levels.length - 1) * MERKLE_PROOF_ARTIFACT_BYTES,
+      );
+      let emitted = 0;
+      let position = index;
+      for (let l = 0; l < levels.length - 1; l++) {
+        const level = levels[l];
+        const nodes = level.length / crypto_hash_sha512_BYTES;
+        // A lone odd node is promoted, so it contributes no artifact.
+        if (nodes % 2 === 1 && position === nodes - 1) {
+          position >>>= 1;
+          continue;
+        }
+        const siblingIsRight = position % 2 === 0;
+        const sibling =
+          (siblingIsRight ? position + 1 : position - 1) *
+          crypto_hash_sha512_BYTES;
+        const at = emitted * MERKLE_PROOF_ARTIFACT_BYTES;
+        artifacts.set(
+          level.subarray(sibling, sibling + crypto_hash_sha512_BYTES),
+          at,
+        );
+        artifacts[at + crypto_hash_sha512_BYTES] = siblingIsRight ? 1 : 0;
+        emitted++;
+        position >>>= 1;
+      }
+      const proof = artifacts.slice(0, emitted * MERKLE_PROOF_ARTIFACT_BYTES);
+      return proofFixedLen && proofFixedLen >= proof.length
+        ? frameMerkleProof(proof, proofFixedLen)
+        : proof;
+    },
+    root(): Uint8Array {
+      if (released) throw new Error("Merkle proof levels were released.");
+      return levels[levels.length - 1].slice(0, crypto_hash_sha512_BYTES);
+    },
+    release(): void {
+      released = true;
+      levels = [];
+    },
+  };
 };
 
 /**

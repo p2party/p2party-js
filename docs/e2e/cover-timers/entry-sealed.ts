@@ -26,9 +26,11 @@
 // message's Merkle proof levels, built once on its first send, cover all of
 // them, as a large file's do. `cells` makes a job send fewer than its lane's
 // slots; `gap` leaves that many cycles between one job and the next, so the
-// same slots carry a job in some cycles and dummies in others. Every cell a
-// job's producer made is fingerprinted (its AEAD tag), so each sent cell is
-// recorded with what made it.
+// same slots carry a job in some cycles and dummies in others: jobs go in
+// every (gap + 1)-th cycle of the grid, on every busy edge alike, enqueued by
+// a page timer that fires in the middle of every cycle, job cycle or not.
+// Every cell a job's producer made is fingerprinted (its AEAD tag), so each
+// sent cell is recorded with what made it.
 //
 // The slot sealer below is a copy of handleSendMessage.ts's
 // makeScheduledSlotSealer (read, cellPlaintext, seal), instrumented, without
@@ -106,6 +108,27 @@ const random = (length: number): Uint8Array => {
   for (let offset = 0; offset < length; offset += 65_536)
     crypto.getRandomValues(bytes.subarray(offset, offset + 65_536));
   return bytes;
+};
+
+// Each slot's offset from its cycle's start, as the scheduler places it.
+const SLOT_OFFSETS = Array.from({ length: LANES * FRAMES }, (_, within) =>
+  Math.floor(((2 * within + 1) * CADENCE_MS) / (2 * LANES * FRAMES)),
+);
+
+/** The slot deadline of this grid nearest to `at`. */
+const snapToSlot = (at: number, phase: number): number => {
+  const cycleStart =
+    at - ((((at - phase) % CADENCE_MS) + CADENCE_MS) % CADENCE_MS);
+  let best = cycleStart + SLOT_OFFSETS[0];
+  for (const start of [
+    cycleStart - CADENCE_MS,
+    cycleStart,
+    cycleStart + CADENCE_MS,
+  ])
+    for (const offset of SLOT_OFFSETS)
+      if (Math.abs(start + offset - at) < Math.abs(best - at))
+        best = start + offset;
+  return best;
 };
 
 /** A sealed cell's last 16 bytes (its AEAD tag): what identifies it. */
@@ -340,9 +363,12 @@ const run = async (): Promise<void> => {
     // The slot deadline of the send in progress: the scheduler arms one
     // wake-up at a time, so it is the due time of the last slot wake-up.
     let pendingDeadline = 0;
+    // The due time a wake-up was armed for can be a millisecond off its slot
+    // (two reads of Date.now() straddling a tick): snap it to this edge's grid.
     const slotDue = (): number => {
       for (let i = recording.wakeUps.length - 1; i >= 0; i--)
-        if (recording.wakeUps[i][2] === "slot") return recording.wakeUps[i][0];
+        if (recording.wakeUps[i][2] === "slot")
+          return snapToSlot(recording.wakeUps[i][0], PHASES[edge] % CADENCE_MS);
       return 0;
     };
 
@@ -351,6 +377,7 @@ const run = async (): Promise<void> => {
     let lastWritten: StagedMessage | undefined;
     let jobSequence = 0;
     let currentJob = "";
+    let waiting: CoverJob | undefined;
 
     const makeSealer =
       (staged: StagedMessage, kind: Kind) =>
@@ -434,6 +461,11 @@ const run = async (): Promise<void> => {
         });
       }
       recording.labels[job.id] = kind;
+      if (GAP_CYCLES > 0) {
+        // Admitted by the next cycle tick before a job cycle.
+        waiting = job;
+        return;
+      }
       currentJob = job.id;
       runtime.enqueue(job);
     };
@@ -468,16 +500,34 @@ const run = async (): Promise<void> => {
       onStatusChange: ({ status, reason }) =>
         recording.statuses.push([Date.now(), status, reason ?? ""]),
       onJobResult: ({ jobId }) => {
-        if (jobId !== currentJob) return;
-        if (GAP_CYCLES > 0)
-          setTimeout(() => void enqueueNext(), GAP_CYCLES * CADENCE_MS);
-        else void enqueueNext();
+        if (jobId === currentJob) void enqueueNext();
       },
       clock,
     });
     (epc as unknown as { coverRuntime: CoverRuntime }).coverRuntime = runtime;
     runtimes.push(runtime);
     if (edge < EDGES - IDLE) await enqueueNext();
+    // With gaps, jobs go in every (GAP_CYCLES + 1)-th cycle of the grid, the
+    // same cycles on every busy edge. A page timer in the middle of every
+    // cycle, job cycle or not, enqueues the waiting job before a job cycle;
+    // the job itself was built when the one before it settled.
+    if (GAP_CYCLES > 0 && edge < EDGES - IDLE) {
+      const phase = PHASES[edge] % CADENCE_MS;
+      const tick = (): void => {
+        const now = Date.now();
+        const cycle = Math.floor((now - phase) / CADENCE_MS);
+        if (waiting && (cycle + 1) % (GAP_CYCLES + 1) === 0) {
+          currentJob = waiting.id;
+          runtime.enqueue(waiting);
+          waiting = undefined;
+        }
+        const next = phase + (cycle + 1) * CADENCE_MS + CADENCE_MS / 2;
+        setTimeout(tick, next - now);
+      };
+      const now = Date.now();
+      const cycle = Math.floor((now - phase) / CADENCE_MS);
+      setTimeout(tick, phase + cycle * CADENCE_MS + CADENCE_MS * 1.5 - now);
+    }
   }
 
   const visibility: Array<[number, DocumentVisibilityState]> = [

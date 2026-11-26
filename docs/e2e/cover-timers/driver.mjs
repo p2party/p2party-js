@@ -39,7 +39,7 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadavg, release } from "node:os";
-import { summariseSealed } from "./summarise-sealed.mjs";
+import { summariseSealed, writeSealedSummary } from "./summarise-sealed.mjs";
 
 const arg = (name, fallback) => {
   const hit = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -383,7 +383,8 @@ try {
       data.maxTimerDriftMs,
     );
   }
-  writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`);
+  if (SEALED) writeSealedSummary(SUMMARY, summary);
+  else writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(
     JSON.stringify(
       SEALED

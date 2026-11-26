@@ -532,10 +532,11 @@ export class CoverRuntime {
   //
   // The scheduler produces each cell a slot ahead and the wake-up only sends
   // it, the slot's dummy when the job's cell is not ready (CoverScheduler.
-  // prepare). Kinds of cell then left alike at send() on the data channel, as
-  // measured on one page (screen locked) at 25, 100 and 500 ms slots, one and
-  // two grids, messages of 5 and 1,600 cells (docs/e2e/cover-timers/, sealed
-  // mode); what remains is in docs/protocol-v4-pq-cover-architecture.md.
+  // prepare). Kinds of cell then left alike at send() on the data channel on a
+  // visible page (screen locked) at 25, 100 and 500 ms slots, one and two
+  // grids, messages of 5 and 1,600 cells, and on a hidden page at 500 ms on
+  // one grid (docs/e2e/cover-timers/, sealed mode); what remains is in
+  // docs/protocol-v4-pq-cover-architecture.md.
   //
   // A scheduled send's idle budget is held while the page stays hidden
   // (scheduledCoverIsSuspended). The diagnostic names no peer and no room.

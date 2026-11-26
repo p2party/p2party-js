@@ -541,9 +541,3 @@ export const COVER_TIMER_WORKER_RESTART_BACKOFF_MS = 1_000;
 // count of replacements starts again, so only losses in quick succession
 // exhaust it.
 export const COVER_TIMER_WORKER_HEALTHY_WAKE_UPS = 100;
-// A scheduled cell's production does not start while a wake-up of another
-// grid on the page falls due within this many ms. Its first synchronous run is
-// the slot's dummy seal and, on a control lane, the control cell's seal, one
-// after the other (the largest measured: 2.6 ms and 3.1 ms, in
-// docs/e2e/cover-timers/, sealed mode).
-export const COVER_PRODUCTION_CLEARANCE_MS = 6;

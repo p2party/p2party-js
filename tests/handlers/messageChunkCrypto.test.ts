@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { loadTestModule } from "../../src/cryptography/testModule";
 import {
@@ -17,10 +18,12 @@ import { sendReceiveFrameReceipt } from "../../src/handlers/handleMessageQueuein
 import {
   sealChunk,
   decryptMessageChunk,
+  decryptMessageChunkClassicalOnlyForTests,
   messageCacheKey,
 } from "../../src/handlers/messageChunkCrypto";
 import { forgetCompletedReceiveMessageKey } from "../../src/handlers/receiveMessageKeyLifetime";
 import {
+  allowClassicalOnlyReceiveForTests,
   decryptMessageChunkDurably,
   forgetReceiveMessageKeyDurably,
   ratchetEncryptDurably,
@@ -38,6 +41,7 @@ import type { PqMessageKeyContext } from "../../src/cryptography/pqMessageKey";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type { RatchetState } from "../../src/cryptography/ratchet";
+import type { DecryptedChunk } from "../../src/handlers/messageChunkCrypto";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -144,6 +148,16 @@ const edge = (ratchetState: RatchetState): IRTCPeerConnection =>
     ratchetState,
   }) as unknown as IRTCPeerConnection;
 
+// A PQ-less edge that explicitly opts into the test-only classical receive
+// path; without the opt-in the durable receive refuses it.
+const classicalReceiveEdge = (
+  ratchetState: RatchetState,
+): IRTCPeerConnection => {
+  const epc = edge(ratchetState);
+  allowClassicalOnlyReceiveForTests(epc);
+  return epc;
+};
+
 describe("messageChunkCrypto (single-call C receive)", () => {
   test("round-trip: a real 2-chunk message decrypts byte-exact through the C receive; chunk 0 steps the ratchet, chunk 1 rides the per-message cache", async () => {
     const { module, alice, bob } = await pair();
@@ -164,8 +178,20 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(Buffer.from(h1.nonce)).not.toEqual(Buffer.from(h0.nonce));
 
     const cache = new Map<string, Uint8Array>();
-    const d0 = decryptMessageChunk(bob, frames[0], cache, root, module);
-    const d1 = decryptMessageChunk(bob, frames[1], cache, root, module);
+    const d0 = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frames[0],
+      cache,
+      root,
+      module,
+    );
+    const d1 = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frames[1],
+      cache,
+      root,
+      module,
+    );
 
     expect(d0.ok).toBe(true);
     expect(d1.ok).toBe(true);
@@ -182,6 +208,108 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(Buffer.from(receiptOf(d0.decrypted!))).toEqual(
       Buffer.from(hashMerkleLeafWasm(datas[0], module)),
     );
+  });
+
+  test("decrypt fails closed without a PQ context", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    // Sealed under the raw classical key at wire epoch 0: exactly what a
+    // context-free receive would open.
+    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    messageKey.fill(0);
+    const rootBefore = Uint8Array.from(bob.rootKey);
+    const failedClosed = { decrypted: null, ok: false, stateAdvanced: false };
+
+    // No resolver: omitted by an untyped caller, or passed as undefined.
+    const untypedDecrypt = decryptMessageChunk as unknown as (
+      ...args: unknown[]
+    ) => DecryptedChunk;
+    expect(untypedDecrypt(bob, frame, new Map(), root, module)).toEqual(
+      failedClosed,
+    );
+    expect(
+      untypedDecrypt(bob, frame, new Map(), root, module, undefined),
+    ).toEqual(failedClosed);
+    expect(bob.Nr).toBe(0);
+    expect(Buffer.from(bob.rootKey)).toEqual(Buffer.from(rootBefore));
+
+    // The durable receive refuses an edge that has a ratchet but no PQ
+    // runtime, before it decrypts, stages a key or persists anything.
+    const cache = new Map<string, Uint8Array>();
+    let persisted = 0;
+    const countPersist = async (): Promise<void> => {
+      persisted += 1;
+    };
+    await expect(
+      decryptMessageChunkDurably(
+        edge(bob),
+        "room-1",
+        frame,
+        cache,
+        root,
+        module,
+        countPersist,
+      ),
+    ).rejects.toThrow("edge has no PQ runtime");
+
+    // The production receive handler drops the frame.
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const received = await handleReceiveMessage(
+        frame,
+        "room-1",
+        "chat",
+        edge(bob),
+        root,
+        module,
+        undefined,
+        {
+          persistRatchetState: countPersist,
+          storeReceiveChunk: async () => {
+            throw new Error("a classical-only frame must not reach storage");
+          },
+        },
+      );
+      expect(received.chunkIndex).toBe(-1);
+      expect(received.chunkSize).toBe(0);
+    } finally {
+      errorLog.mockRestore();
+    }
+    expect(persisted).toBe(0);
+    expect(cache.size).toBe(0);
+    expect(bob.Nr).toBe(0);
+    expect(Buffer.from(bob.rootKey)).toEqual(Buffer.from(rootBefore));
+
+    // Control: the frame is valid, and opens on the explicit test-only path.
+    const control = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frame,
+      new Map(),
+      root,
+      module,
+    );
+    expect(control.ok).toBe(true);
+  });
+
+  test("no production module opts into the classical-only receive path", () => {
+    const srcRoot = new URL("../../src/", import.meta.url);
+    const referencing = (readdirSync(srcRoot, { recursive: true }) as string[])
+      .filter((path) => path.endsWith(".ts"))
+      .filter((path) =>
+        /decryptMessageChunkClassicalOnlyForTests|allowClassicalOnlyReceiveForTests/.test(
+          readFileSync(new URL(path, srcRoot), "utf8"),
+        ),
+      )
+      .map((path) => path.split("\\").join("/"))
+      .sort();
+    // messageChunkCrypto.ts defines the classical decrypt; ratchetPersist.ts
+    // defines the per-edge opt-in and calls the classical decrypt only for an
+    // opted-in edge. Nothing else may reach either.
+    expect(referencing).toEqual([
+      "handlers/messageChunkCrypto.ts",
+      "handlers/ratchetPersist.ts",
+    ]);
   });
 
   test("v4 combines against an explicit PQ epoch, uses an epoch-bound cache identity, and rejects unknown epochs before ratchet mutation", async () => {
@@ -264,7 +392,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
       const rootBefore = Uint8Array.from(candidate.rootKey);
       const tampered = Uint8Array.from(frame);
       tampered[offset] ^= 1;
-      const result = decryptMessageChunk(
+      const result = decryptMessageChunkClassicalOnlyForTests(
         candidate,
         tampered,
         new Map(),
@@ -297,7 +425,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     bad[80] ^= 0xff;
 
     const cache = new Map<string, Uint8Array>();
-    const r = decryptMessageChunk(bob, bad, cache, root, module);
+    const r = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      bad,
+      cache,
+      root,
+      module,
+    );
     expect(r.ok).toBe(false);
     expect(r.stateAdvanced).toBe(false);
     expect(r.decrypted).toBeNull();
@@ -309,7 +443,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(cache.size).toBe(0);
 
     // The GOOD frame of that message still decrypts (rollback left it usable).
-    const good = decryptMessageChunk(bob, frames[0], cache, root, module);
+    const good = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frames[0],
+      cache,
+      root,
+      module,
+    );
     expect(good.ok).toBe(true);
     expect(good.stateAdvanced).toBe(true);
     expect(Buffer.from(chunkOf(good.decrypted!))).toEqual(
@@ -351,7 +491,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     };
 
     try {
-      const result = decryptMessageChunk(
+      const result = decryptMessageChunkClassicalOnlyForTests(
         bob,
         frame,
         new Map<string, Uint8Array>(),
@@ -380,7 +520,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     messageKey.fill(0);
 
     const cache = new Map<string, Uint8Array>();
-    const r = decryptMessageChunk(bob, frame, cache, root, module);
+    const r = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frame,
+      cache,
+      root,
+      module,
+    );
     expect(r.ok).toBe(false); // Merkle verification failed inside the C call
     expect(r.decrypted).toBeNull();
     expect(r.stateAdvanced).toBe(true); // but the AEAD authenticated → ratchet stepped
@@ -395,7 +541,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
 
     const cache = new Map<string, Uint8Array>();
-    const d = decryptMessageChunk(bob, frame, cache, root, module);
+    const d = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      frame,
+      cache,
+      root,
+      module,
+    );
     expect(d.ok).toBe(true);
     expect(d.stateAdvanced).toBe(true);
 
@@ -404,7 +556,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const resend = sealChunk(messageKey, header, plaintexts[0], root, module);
     messageKey.fill(0);
     expect(Buffer.from(resend)).not.toEqual(Buffer.from(frame)); // fresh nonce
-    const re = decryptMessageChunk(bob, resend, cache, root, module);
+    const re = decryptMessageChunkClassicalOnlyForTests(
+      bob,
+      resend,
+      cache,
+      root,
+      module,
+    );
     expect(re.ok).toBe(true);
     expect(re.stateAdvanced).toBe(false); // cache HIT, no ratchet step
     expect(Buffer.from(chunkOf(re.decrypted!))).toEqual(Buffer.from(datas[0]));
@@ -437,7 +595,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
     messageKey.fill(0);
 
-    const epc = edge(bob);
+    const epc = classicalReceiveEdge(bob);
     const rootBefore = Uint8Array.from(bob.rootKey);
     const cache = new Map<string, Uint8Array>();
     let stagedReceivingChain: Uint8Array | undefined;
@@ -476,7 +634,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
 
     const firstCache = new Map<string, Uint8Array>();
     const first = await decryptMessageChunkDurably(
-      edge(bob),
+      classicalReceiveEdge(bob),
       "room-1",
       frames[0],
       firstCache,
@@ -491,7 +649,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     // Simulate a replacement PC/reload: restore only the persisted ratchet and
     // start with an empty RAM cache. The retained skipped-key copy rebuilds it.
     const restored = cloneRatchet(bob);
-    const restoredEpc = edge(restored);
+    const restoredEpc = classicalReceiveEdge(restored);
     const restoredCache = new Map<string, Uint8Array>();
     const second = await decryptMessageChunkDurably(
       restoredEpc,
@@ -529,7 +687,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     );
     messageKey.fill(0);
 
-    const epc = edge(bob);
+    const epc = classicalReceiveEdge(bob);
     epc.messageKeyCache = new Map<string, Uint8Array>();
     const cacheKey = messageCacheKey(header.dhPub, header.N);
     const merkleRootHex = uint8ArrayToHex(root);

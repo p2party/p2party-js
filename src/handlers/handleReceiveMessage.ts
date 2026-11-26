@@ -111,8 +111,9 @@ export const handleReceiveMessage = async (
   }
   // v4: the per-edge cache IS the PQ runtime's active combined receive-key
   // collection (aliased at handshake activation) so every persisted edge
-  // checkpoint carries it. The bare-Map fallback serves runtime-free
-  // bootstrap/unit-test edges only.
+  // checkpoint carries it. An edge without a PQ runtime gets a bare Map here,
+  // but decryptMessageChunkDurably refuses to decrypt for it unless a test
+  // opted the edge in through ratchetPersist's test-only classical opt-in.
   if (!epc.messageKeyCache)
     epc.messageKeyCache =
       epc.pqHealingState?.activeReceiveKeys ??
@@ -122,7 +123,7 @@ export const handleReceiveMessage = async (
   // The per-message cache key (dhPub, N, pqEpoch). It stays live through
   // channel drain: the real cell can complete storage before later valid cover
   // cells arrive. Production identity is epoch-bound; the two-field form is
-  // the runtime-free bootstrap path.
+  // the test-only classical path.
   let cacheKey: string | undefined;
   try {
     const { header, pqEpoch } = parseChunkFrameHeader(frame);

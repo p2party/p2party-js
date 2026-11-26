@@ -32,10 +32,18 @@ import {
   performHandshakeCore,
   type HandshakeTransport,
 } from "./handlers/handshakeCore";
-import { decryptMessageChunk, sealChunk } from "./handlers/messageChunkCrypto";
+import {
+  decryptMessageChunk,
+  messageCacheKey,
+  sealChunk,
+} from "./handlers/messageChunkCrypto";
 import { parseChunkFrameHeader } from "./handlers/chunkFrame";
-import { SparsePqHealingState } from "./handlers/pqHealingRuntime";
+import {
+  MAX_ACTIVE_RECEIVE_KEYS,
+  SparsePqHealingState,
+} from "./handlers/pqHealingRuntime";
 import { hashMerkleLeafWasm } from "./utils/leafHash";
+import { hexToUint8Array } from "./utils/uint8array";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
@@ -55,6 +63,7 @@ import { AsyncMutex } from "./utils/mutex";
 
 import type { LibCrypto } from "./cryptography/libcrypto";
 import type {
+  RatchetHeader,
   RatchetSessionSecrets,
   RatchetState,
 } from "./cryptography/ratchet";
@@ -65,7 +74,15 @@ import type { RatchetRootSuite } from "./utils/constants";
 // PQ machine/root/epoch/turn/counters plus its active combined receive keys
 // (inside the appended P2EDGE4 checkpoint) alongside the Double Ratchet. A v3
 // snapshot is rejected outright. Suite tags are unchanged provenance codes.
-const SESSION_SNAPSHOT_VERSION = 4;
+//
+// Format 5 inserts the record of superseded receiving chains (before the PQ
+// checkpoint) that decrypt() uses to reject replays, and its checkpoint holds
+// no active receive keys: decrypt() wipes a message's key once it returns.
+// Format 4, written by 0.14.10, is still read. Every active receive key in it
+// belongs to a message that version already returned, so restore turns those
+// keys into replay-record entries and wipes them.
+const SESSION_SNAPSHOT_VERSION = 5;
+const SESSION_SNAPSHOT_VERSION_0_14 = 4;
 const SESSION_ROOT_SUITE_3DH_ML_KEM_768_CPACE21 = 3;
 const SESSION_ROOT_SUITE_3DH_ML_KEM_512_CPACE21 = 4;
 const SESSION_ROOT_SUITE_3DH_ML_KEM_1024_CPACE21 = 5;
@@ -95,6 +112,13 @@ const SNAPSHOT_FIXED_PREFIX_LEN =
   32 + // self DH secret key
   2; // skipped-key count
 const SNAPSHOT_SKIPPED_ENTRY_LEN = 32 + 8 + 32;
+const SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES = 2;
+const SNAPSHOT_PREVIOUS_CHAIN_ENTRY_LEN = 32 + 8; // remote DH public key, length
+// The replay record keeps one entry per superseded receiving chain: the peer's
+// DH public key and how many messages the chain held, no key material. The cap
+// equals the active receive-key cap, so the consumed-message identities of any
+// format-4 snapshot (at most that many keys) convert without dropping a chain.
+const MAX_PREVIOUS_RECEIVE_CHAINS = MAX_ACTIVE_RECEIVE_KEYS;
 const SESSION_WASM_PAGES = 32;
 const SESSION_METADATA_NAME = "p2party-session";
 
@@ -109,6 +133,20 @@ export type { RoomPqMode } from "./roomPolicy";
  * invalidate.
  */
 export { PROTOCOL_VERSION, WIRE_CHUNK_FRAME_LEN };
+
+/**
+ * `decrypt()` rejects with this when the session can no longer open the
+ * message because it already returned it (a replay or a duplicate delivery).
+ * The check covers the current receiving chain and the most recent superseded
+ * ones; it also fires for a message whose skipped key the bounded skip window
+ * evicted. Nothing is committed and the session stays usable.
+ */
+export class SessionReplayError extends Error {
+  constructor() {
+    super("session: message was already decrypted");
+    this.name = "SessionReplayError";
+  }
+}
 
 export interface LocalSessionIdentity {
   ed25519PublicKey: Uint8Array;
@@ -198,8 +236,9 @@ export interface P2PartySession {
   pendingControl(): Promise<Uint8Array | null>;
   /**
    * Plaintext secret snapshot (Double Ratchet + PQ machine/root/epoch/turn/
-   * counters + active combined receive keys). Store only under authenticated
-   * encryption with rollback protection; never send this blob to the peer.
+   * counters + the replay record of superseded receiving chains). Store only
+   * under authenticated encryption with rollback protection; never send this
+   * blob to the peer.
    */
   serialize(): Promise<Uint8Array>;
   destroy(): Promise<void>;
@@ -543,6 +582,13 @@ class Session implements P2PartySession {
   readonly #module: LibCrypto;
   readonly #mutex = new AsyncMutex();
   readonly #amInitiator: boolean;
+  /**
+   * Superseded receiving chains, oldest first: remote DH public key (hex) to
+   * the number of messages that chain held. With the ratchet's own receive
+   * counter and skipped-key map this identifies every message the session
+   * already returned on those chains, without keeping any message key.
+   */
+  readonly #previousReceiveChains: Map<string, number>;
   #state: RatchetState;
   #pq: SparsePqHealingState;
   #destroyed = false;
@@ -552,11 +598,13 @@ class Session implements P2PartySession {
     module: LibCrypto,
     pq: SparsePqHealingState,
     amInitiator: boolean,
+    previousReceiveChains: Map<string, number>,
   ) {
     this.#state = state;
     this.#module = module;
     this.#pq = pq;
     this.#amInitiator = amInitiator;
+    this.#previousReceiveChains = previousReceiveChains;
   }
 
   get pqMode(): RoomPqMode {
@@ -665,12 +713,28 @@ class Session implements P2PartySession {
           throw new Error("session: duplicate chunk nonce");
         nonces.add(nonce);
       }
+      const header = parsed[0].header;
+      if (this.#alreadyDecrypted(header)) {
+        root.fill(0);
+        throw new SessionReplayError();
+      }
+
+      // If this message opens a new receiving chain, the current one becomes
+      // superseded. The ratchet first derives skipped keys up to the header's
+      // PN, so the superseded chain ends at max(Nr, PN) when it was open.
+      const supersededRemote = this.#state.dhRemotePub
+        ? copyBytes(this.#state.dhRemotePub)
+        : null;
+      const supersededLength = this.#state.receivingChainKey
+        ? Math.max(this.#state.Nr, header.PN)
+        : this.#state.Nr;
 
       const next = cloneRatchet(this.#state);
-      // A logical message's already-combined keys stay in the runtime's active
-      // receive-key collection so they persist in the snapshot; a staged copy
-      // is committed only on success.
-      const stagedCache = new Map(this.#pq.activeReceiveKeys);
+      // Each call carries one whole logical message, so its combined key is
+      // needed only inside this call: it is staged here and wiped on every
+      // exit. The ratchet has already consumed it, and the replay record
+      // remembers that, so a later delivery cannot open the message again.
+      const stagedCache = new Map<string, Uint8Array>();
       const decryptedBuffers: Uint8Array[] = [];
       let committed = false;
       try {
@@ -697,28 +761,50 @@ class Session implements P2PartySession {
         }
 
         const plaintext = await validateAndJoinRecords(records);
+        const nextRemote = next.dhRemotePub;
+        if (
+          supersededRemote &&
+          nextRemote &&
+          !bytesEqual(supersededRemote, nextRemote)
+        ) {
+          // A peer that returns to an earlier DH key makes that chain current
+          // again; the record never holds the current chain.
+          this.#previousReceiveChains.delete(bytesHex(nextRemote));
+          if (supersededLength > 0)
+            rememberReceiveChain(
+              this.#previousReceiveChains,
+              bytesHex(supersededRemote),
+              supersededLength,
+            );
+        }
         adoptRatchet(this.#state, next);
-        // Publish the staged active receive keys and count one application
-        // message. A single logical session message is one DR step.
-        this.#adoptActiveReceiveKeys(stagedCache);
+        // A single logical session message is one DR step.
         this.#pq.noteApplicationMessage();
         committed = true;
         return plaintext;
       } finally {
         root.fill(0);
         for (const decrypted of decryptedBuffers) decrypted.fill(0);
-        if (!committed) {
-          for (const [key, value] of stagedCache)
-            if (!this.#pq.activeReceiveKeys.has(key)) value.fill(0);
-          wipeRatchet(next);
-        }
+        for (const value of stagedCache.values()) value.fill(0);
+        if (!committed) wipeRatchet(next);
       }
     });
   }
 
-  #adoptActiveReceiveKeys(staged: Map<string, Uint8Array>): void {
-    const live = this.#pq.activeReceiveKeys;
-    for (const [key, value] of staged) if (!live.has(key)) live.set(key, value);
+  /**
+   * True when the ratchet can no longer derive this header's message key
+   * because it was already used: below the receive counter on the current
+   * chain, or below the recorded length of a superseded chain, and in both
+   * cases not held in the skipped-key map.
+   */
+  #alreadyDecrypted(header: RatchetHeader): boolean {
+    if (this.#state.skipped.has(messageCacheKey(header.dhPub, header.N)))
+      return false;
+    const remote = this.#state.dhRemotePub;
+    if (remote && bytesEqual(header.dhPub, remote))
+      return header.N < this.#state.Nr;
+    const length = this.#previousReceiveChains.get(bytesHex(header.dhPub));
+    return length !== undefined && header.N < length;
   }
 
   async prepareHealing(): Promise<SessionControlOutput> {
@@ -756,7 +842,12 @@ class Session implements P2PartySession {
   async serialize(): Promise<Uint8Array> {
     return this.#mutex.runExclusive(async () => {
       this.#assertLive();
-      return encodeSessionSnapshot(this.#state, this.#pq, this.#amInitiator);
+      return encodeSessionSnapshot(
+        this.#state,
+        this.#pq,
+        this.#amInitiator,
+        this.#previousReceiveChains,
+      );
     });
   }
 
@@ -765,10 +856,64 @@ class Session implements P2PartySession {
       if (this.#destroyed) return;
       wipeRatchet(this.#state);
       this.#pq.destroy();
+      this.#previousReceiveChains.clear();
       this.#destroyed = true;
     });
   }
 }
+
+/**
+ * Record a superseded receiving chain, keeping the most recent
+ * MAX_PREVIOUS_RECEIVE_CHAINS (oldest evicted first). An older chain that
+ * falls out is still never decrypted again: its message keys are gone, so a
+ * replay from it fails authentication instead of raising SessionReplayError.
+ */
+const rememberReceiveChain = (
+  record: Map<string, number>,
+  dhPubHex: string,
+  length: number,
+): void => {
+  record.set(dhPubHex, Math.max(record.get(dhPubHex) ?? 0, length));
+  for (const oldest of record.keys()) {
+    if (record.size <= MAX_PREVIOUS_RECEIVE_CHAINS) break;
+    record.delete(oldest);
+  }
+};
+
+/**
+ * Every active receive key in a restored checkpoint belongs to a message the
+ * session already returned: format 4 kept each one and never evicted it,
+ * format 5 writes none. Record each key's (dhPub, N) identity, so the message
+ * stays rejected, then wipe the key. Keys of the current receiving chain need
+ * no entry: the ratchet's receive counter already covers them. A converted
+ * chain's length also covers its still-skipped keys, which stay decryptable
+ * until used; for a format-5 entry that adjustment changes nothing.
+ */
+const retireRestoredReceiveKeys = (
+  keys: Map<string, Uint8Array>,
+  state: RatchetState,
+  record: Map<string, number>,
+): void => {
+  const currentRemote = state.dhRemotePub ? bytesHex(state.dhRemotePub) : null;
+  // Both maps use canonical "dhPubHex:N[:epoch]" identities.
+  const lengthOf = (identity: string): [string, number] => {
+    const [dhPubHex, n] = identity.split(":");
+    return [dhPubHex, Number(n) + 1];
+  };
+  for (const [cacheKey, messageKey] of keys) {
+    messageKey.fill(0);
+    const [dhPubHex, length] = lengthOf(cacheKey);
+    if (dhPubHex !== currentRemote && Number.isSafeInteger(length))
+      rememberReceiveChain(record, dhPubHex, length);
+  }
+  keys.clear();
+  for (const skippedKey of state.skipped.keys()) {
+    const [dhPubHex, length] = lengthOf(skippedKey);
+    const recorded = record.get(dhPubHex);
+    if (recorded !== undefined && Number.isSafeInteger(length))
+      record.set(dhPubHex, Math.max(recorded, length));
+  }
+};
 
 const NO_CONTROL: SessionControlOutput = {
   frame: null,
@@ -829,11 +974,15 @@ const encodeSessionSnapshot = (
   state: RatchetState,
   pq: SparsePqHealingState,
   amInitiator: boolean,
+  previousReceiveChains: ReadonlyMap<string, number>,
 ): Uint8Array => {
   validateSnapshotState(state);
+  if (previousReceiveChains.size > MAX_PREVIOUS_RECEIVE_CHAINS)
+    throw new Error("snapshot: too many superseded receiving chains");
   const serialized = serializeRatchet(state);
   // The PQ checkpoint carries the machine/root/epoch/turn/counters, exact
-  // outbox, replay/ACK caches, and active combined receive keys.
+  // outbox and replay/ACK caches. Its active receive-key set is empty for a
+  // session: decrypt() never keeps a key past its own call.
   const pqCheckpoint = pq.serialize();
   if (
     pqCheckpoint.length === 0 ||
@@ -856,6 +1005,8 @@ const encodeSessionSnapshot = (
       SNAPSHOT_FIXED_PREFIX_LEN +
         optionalKeyCount * 32 +
         serialized.skippedMessageKeys.length * SNAPSHOT_SKIPPED_ENTRY_LEN +
+        SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES +
+        previousReceiveChains.size * SNAPSHOT_PREVIOUS_CHAIN_ENTRY_LEN +
         SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES +
         pqCheckpoint.length,
     );
@@ -903,6 +1054,16 @@ const encodeSessionSnapshot = (
       output.set(new Uint8Array(skipped.messageKey), offset);
       offset += 32;
     }
+    view.setUint16(offset, previousReceiveChains.size, false);
+    offset += SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES;
+    for (const [dhPubHex, length] of previousReceiveChains) {
+      const dhPub = hexToUint8Array(dhPubHex);
+      requireBytes(dhPub, "snapshot.previousChain.dhPub", 32);
+      if (length < 1) throw new Error("snapshot: empty superseded chain");
+      output.set(dhPub, offset);
+      offset += 32;
+      offset = writeU64(view, offset, length);
+    }
     view.setUint32(offset, pqCheckpoint.length, false);
     offset += SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES;
     output.set(pqCheckpoint, offset);
@@ -925,6 +1086,8 @@ interface DecodedSessionSnapshot {
   readonly state: RatchetState;
   readonly pqCheckpoint: Uint8Array;
   readonly amInitiator: boolean;
+  /** Empty for a format-4 snapshot. */
+  readonly previousReceiveChains: Map<string, number>;
 }
 
 const decodeSessionSnapshot = (
@@ -971,7 +1134,11 @@ const decodeSessionSnapshot = (
   try {
     if (!bytesEqual(take(SESSION_MAGIC.length), SESSION_MAGIC))
       throw new Error("snapshot: invalid magic");
-    if (take(1)[0] !== SESSION_SNAPSHOT_VERSION)
+    const version = take(1)[0];
+    if (
+      version !== SESSION_SNAPSHOT_VERSION &&
+      version !== SESSION_SNAPSHOT_VERSION_0_14
+    )
       throw new Error("snapshot: unsupported snapshot version");
     if (take(1)[0] !== PROTOCOL_VERSION)
       throw new Error("snapshot: unsupported protocol version");
@@ -1033,6 +1200,35 @@ const decodeSessionSnapshot = (
       });
     }
 
+    const previousReceiveChains = new Map<string, number>();
+    if (version === SESSION_SNAPSHOT_VERSION) {
+      if (offset + SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES > bytes.length)
+        throw new Error("snapshot: missing superseded-chain count");
+      const chainCount = new DataView(
+        bytes.buffer,
+        bytes.byteOffset + offset,
+        SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES,
+      ).getUint16(0, false);
+      offset += SNAPSHOT_PREVIOUS_CHAIN_COUNT_BYTES;
+      if (chainCount > MAX_PREVIOUS_RECEIVE_CHAINS)
+        throw new Error("snapshot: too many superseded receiving chains");
+      if (chainCount > 0 && dhRemotePub === null)
+        throw new Error("snapshot: superseded chains require a remote DH key");
+      const currentRemote = dhRemotePub
+        ? bytesHex(new Uint8Array(dhRemotePub))
+        : null;
+      for (let index = 0; index < chainCount; index++) {
+        const dhPubHex = bytesHex(take(32));
+        const length = readU64();
+        if (length < 1) throw new Error("snapshot: empty superseded chain");
+        if (dhPubHex === currentRemote || previousReceiveChains.has(dhPubHex))
+          throw new Error("snapshot: duplicate receiving chain");
+        previousReceiveChains.set(dhPubHex, length);
+      }
+    }
+    if (offset + SNAPSHOT_PQ_CHECKPOINT_LENGTH_BYTES > bytes.length)
+      throw new Error("snapshot: truncated input");
+
     const pqCheckpointLength = new DataView(
       bytes.buffer,
       bytes.byteOffset + offset,
@@ -1067,6 +1263,7 @@ const decodeSessionSnapshot = (
       state,
       pqCheckpoint,
       amInitiator: (flags & SNAPSHOT_FLAG_INITIATOR) !== 0,
+      previousReceiveChains,
     };
   } finally {
     bytes.fill(0);
@@ -1207,7 +1404,7 @@ export const createSession = async (
       nextOfferer: result.pqHealing.nextOfferer,
       amInitiator: initiator,
     });
-    const session = new Session(state, module, pq, initiator);
+    const session = new Session(state, module, pq, initiator, new Map());
     state = null;
     pq = null;
     return session;
@@ -1248,7 +1445,18 @@ export const restoreSession = async (
     } finally {
       expectedBinding.fill(0);
     }
-    const session = new Session(decoded.state, module, pq, decoded.amInitiator);
+    retireRestoredReceiveKeys(
+      pq.activeReceiveKeys,
+      decoded.state,
+      decoded.previousReceiveChains,
+    );
+    const session = new Session(
+      decoded.state,
+      module,
+      pq,
+      decoded.amInitiator,
+      decoded.previousReceiveChains,
+    );
     pq = null;
     return session;
   } catch (error) {

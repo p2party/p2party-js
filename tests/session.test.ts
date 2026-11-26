@@ -5,6 +5,7 @@ import {
   createSession,
   generateSessionIdentity,
   restoreSession,
+  SessionReplayError,
   type CreateSessionOptions,
   type EncryptedSessionMessage,
   type GeneratedSessionIdentity,
@@ -129,6 +130,58 @@ const patternedBytes = (length: number, salt = 0): Uint8Array =>
 const expectBytes = (actual: Uint8Array, expected: Uint8Array): void => {
   expect(Buffer.from(actual)).toEqual(Buffer.from(expected));
 };
+
+const expectReplayRejected = async (
+  attempt: Promise<unknown>,
+): Promise<void> => {
+  await expect(attempt).rejects.toBeInstanceOf(SessionReplayError);
+};
+
+// One logical message each way, so every round turns both DH ratchets.
+const pingPong = async (
+  alice: P2PartySession,
+  bob: P2PartySession,
+  round: number,
+): Promise<void> => {
+  const forward = patternedBytes(24, round);
+  expectBytes(await bob.decrypt(await alice.encrypt(forward)), forward);
+  const back = patternedBytes(24, round + 1);
+  expectBytes(await alice.decrypt(await bob.encrypt(back)), back);
+};
+
+interface FixtureMessage {
+  plaintext: string;
+  root: string;
+  frames: string[];
+}
+
+const readFixture = (name: string): unknown =>
+  JSON.parse(
+    readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"),
+  );
+
+// Both written by the format-4 session code of p2party 0.14.10 (commit
+// 62661e0), before the replay record existed; see their description fields.
+const v4Fixture = readFixture("session-snapshot-v4.json") as {
+  aliceSnapshot: string;
+  bobSnapshot: string;
+  messages: Record<
+    "previousChain" | "currentChain" | "pendingSkipped",
+    FixtureMessage
+  >;
+};
+const v4SkippedFixture = readFixture(
+  "session-snapshot-v4-skipped-superseded.json",
+) as { bobSnapshot: string; skippedOnSupersededChain: FixtureMessage };
+
+const fromBase64 = (value: string): Uint8Array =>
+  Uint8Array.from(Buffer.from(value, "base64"));
+
+const fixtureEnvelope = (message: FixtureMessage): EncryptedSessionMessage => ({
+  protocolVersion: PROTOCOL_VERSION,
+  root: fromBase64(message.root),
+  frames: message.frames.map(fromBase64),
+});
 
 describe("public store-free session API", () => {
   test("all room-selected ML-KEM suites handshake, persist provenance, and round-trip", async () => {
@@ -280,10 +333,11 @@ describe("public store-free session API", () => {
     const { alice, bob } = await createPair();
     const snapshot = await alice.serialize();
 
-    // "P2PSESS\0" occupies bytes 0..7; format v4 (the protocol-v4 break) and
-    // root-suite byte 3 reject pre-draft-21 CPace / pre-interactive-3DH roots.
-    // A v3 snapshot is rejected outright.
-    expect(snapshot[8]).toBe(4);
+    // "P2PSESS\0" occupies bytes 0..7; format 5 (format 4 plus the replay
+    // record) and root-suite byte 3 reject pre-draft-21 CPace /
+    // pre-interactive-3DH roots. A v3 snapshot is rejected outright; format 4
+    // is still read (see "restores a 0.14.10 snapshot").
+    expect(snapshot[8]).toBe(5);
     expect(snapshot[11]).toBe(3);
 
     const preHybrid = Uint8Array.from(snapshot);
@@ -696,5 +750,265 @@ describe("public store-free session sparse-PQ healing", () => {
     await bob.acceptControlFrame(duplicateAck.frame);
     expect(bob.pqEpoch).toBe(1n);
     await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+});
+
+// These sessions never call prepareHealing(), so they stay at pqEpoch 0 by
+// design: healing is caller-driven in the store-free API.
+describe("public store-free session replay rejection and bounded receive state", () => {
+  test("rejects a replayed message", async () => {
+    const { alice, bob } = await createPair();
+    const plaintext = patternedBytes(CHUNK_LEN + 9, 3);
+    const message = await alice.encrypt(plaintext);
+    expectBytes(await bob.decrypt(message), plaintext);
+    const afterFirst = await bob.serialize();
+
+    await expectReplayRejected(bob.decrypt(message));
+    await expectReplayRejected(
+      bob.decrypt({ ...message, frames: [...message.frames].reverse() }),
+    );
+    // A rejected replay commits nothing.
+    expectBytes(await bob.serialize(), afterFirst);
+
+    // Bob replies and Alice's next message opens a new chain, so the replayed
+    // message now belongs to a chain Bob has superseded.
+    await pingPong(alice, bob, 10);
+    const next = patternedBytes(77, 4);
+    expectBytes(await bob.decrypt(await alice.encrypt(next)), next);
+    await expectReplayRejected(bob.decrypt(message));
+
+    const after = patternedBytes(78, 5);
+    expectBytes(await bob.decrypt(await alice.encrypt(after)), after);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("concurrent deliveries of one message decrypt it once", async () => {
+    const { alice, bob } = await createPair();
+    const plaintext = patternedBytes(CHUNK_LEN + 1, 8);
+    const message = await alice.encrypt(plaintext);
+
+    const outcomes = await Promise.allSettled([
+      bob.decrypt(message),
+      bob.decrypt(message),
+    ]);
+    const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+    const rejected = outcomes.filter((o) => o.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expectBytes(
+      (fulfilled[0] as PromiseFulfilledResult<Uint8Array>).value,
+      plaintext,
+    );
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      SessionReplayError,
+    );
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("a message decrypted before a healing exchange stays rejected after it", async () => {
+    const { alice, bob } = await createPair();
+    const firstPlaintext = patternedBytes(48, 70);
+    const first = await alice.encrypt(firstPlaintext);
+    expectBytes(await bob.decrypt(first), firstPlaintext);
+    for (let index = 1; index < 64; index += 1)
+      await bob.decrypt(await alice.encrypt(patternedBytes(48, index)));
+
+    await runSessionHealing(alice, bob);
+    expect(bob.pqEpoch).toBe(1n);
+    await expectReplayRejected(bob.decrypt(first));
+
+    const healedPlaintext = patternedBytes(49, 71);
+    const healed = await alice.encrypt(healedPlaintext);
+    expectBytes(await bob.decrypt(healed), healedPlaintext);
+    await expectReplayRejected(bob.decrypt(healed));
+    await Promise.all([alice.destroy(), bob.destroy()]);
+  });
+
+  test("rejects a replay after serialize and restore", async () => {
+    const { alice, bob } = await createPair();
+    const firstPlaintext = patternedBytes(100, 1);
+    const first = await alice.encrypt(firstPlaintext);
+    expectBytes(await bob.decrypt(first), firstPlaintext);
+
+    const restored = await restoreSession(await bob.serialize(), cryptoOptions);
+    await bob.destroy();
+    await expectReplayRejected(restored.decrypt(first));
+
+    // Supersede the first message's chain, then restore again.
+    const reply = patternedBytes(60, 2);
+    expectBytes(await alice.decrypt(await restored.encrypt(reply)), reply);
+    const secondPlaintext = patternedBytes(90, 3);
+    const second = await alice.encrypt(secondPlaintext);
+    expectBytes(await restored.decrypt(second), secondPlaintext);
+
+    const restoredAgain = await restoreSession(
+      await restored.serialize(),
+      cryptoOptions,
+    );
+    await restored.destroy();
+    await expectReplayRejected(restoredAgain.decrypt(first));
+    await expectReplayRejected(restoredAgain.decrypt(second));
+
+    const third = patternedBytes(33, 4);
+    expectBytes(await restoredAgain.decrypt(await alice.encrypt(third)), third);
+    await Promise.all([alice.destroy(), restoredAgain.destroy()]);
+  });
+
+  test("serialize succeeds after 1000 one-way messages", async () => {
+    const { alice, bob } = await createPair();
+    for (let index = 0; index < 1000; index += 1) {
+      const plaintext = patternedBytes(16, index);
+      expectBytes(await bob.decrypt(await alice.encrypt(plaintext)), plaintext);
+      (await bob.serialize()).fill(0);
+    }
+    const restored = await restoreSession(await bob.serialize(), cryptoOptions);
+    const last = patternedBytes(16, 1000);
+    expectBytes(await restored.decrypt(await alice.encrypt(last)), last);
+    await Promise.all([alice.destroy(), bob.destroy(), restored.destroy()]);
+  }, 120_000);
+
+  test("serialize succeeds after 1000 ping-pong rounds", async () => {
+    const { alice, bob } = await createPair();
+    for (let round = 0; round < 1000; round += 1) {
+      await pingPong(alice, bob, round);
+      (await alice.serialize()).fill(0);
+      (await bob.serialize()).fill(0);
+    }
+    const [restoredAlice, restoredBob] = await Promise.all([
+      restoreSession(await alice.serialize(), cryptoOptions),
+      restoreSession(await bob.serialize(), cryptoOptions),
+    ]);
+    await Promise.all([alice.destroy(), bob.destroy()]);
+    await pingPong(restoredAlice, restoredBob, 1000);
+    await Promise.all([restoredAlice.destroy(), restoredBob.destroy()]);
+  }, 120_000);
+
+  test("snapshot size is flat for in-order traffic", async () => {
+    // One direction: a single receiving chain, so the receiver's snapshot
+    // is the same size after every message.
+    const oneWay = await createPair();
+    const oneWaySizes = new Set<number>();
+    for (let index = 0; index < 300; index += 1) {
+      const plaintext = patternedBytes(16, index);
+      await oneWay.bob.decrypt(await oneWay.alice.encrypt(plaintext));
+      oneWaySizes.add((await oneWay.bob.serialize()).length);
+    }
+    expect([...oneWaySizes]).toHaveLength(1);
+    await Promise.all([oneWay.alice.destroy(), oneWay.bob.destroy()]);
+
+    // Alternating: every round supersedes one receiving chain per side. The
+    // record of superseded chains is capped, so the size stops changing.
+    const alternating = await createPair();
+    const sizesAfterCap = new Set<string>();
+    for (let round = 0; round < 400; round += 1) {
+      await pingPong(alternating.alice, alternating.bob, round);
+      if (round >= 300)
+        sizesAfterCap.add(
+          `${String((await alternating.alice.serialize()).length)}/${String(
+            (await alternating.bob.serialize()).length,
+          )}`,
+        );
+    }
+    expect([...sizesAfterCap]).toHaveLength(1);
+    await Promise.all([alternating.alice.destroy(), alternating.bob.destroy()]);
+  }, 120_000);
+
+  test("out-of-order messages inside the skip window decrypt exactly once", async () => {
+    const { alice, bob } = await createPair();
+    const plaintexts = Array.from({ length: 5 }, (_, index) =>
+      patternedBytes(64 + index, 50 + index),
+    );
+    const messages: EncryptedSessionMessage[] = [];
+    for (const plaintext of plaintexts)
+      messages.push(await alice.encrypt(plaintext));
+
+    for (const index of [3, 0, 4, 1, 2]) {
+      expectBytes(await bob.decrypt(messages[index]), plaintexts[index]);
+      await expectReplayRejected(bob.decrypt(messages[index]));
+    }
+    for (const message of messages)
+      await expectReplayRejected(bob.decrypt(message));
+
+    // A key skipped on a chain that is later superseded still opens its
+    // message once, including after a restore.
+    const latePlaintext = patternedBytes(41, 90);
+    const late = await alice.encrypt(latePlaintext);
+    const deliveredPlaintext = patternedBytes(42, 91);
+    const delivered = await alice.encrypt(deliveredPlaintext);
+    expectBytes(await bob.decrypt(delivered), deliveredPlaintext);
+    await pingPong(alice, bob, 92);
+    const newChainPlaintext = patternedBytes(43, 93);
+    expectBytes(
+      await bob.decrypt(await alice.encrypt(newChainPlaintext)),
+      newChainPlaintext,
+    );
+
+    const restored = await restoreSession(await bob.serialize(), cryptoOptions);
+    await bob.destroy();
+    expectBytes(await restored.decrypt(late), latePlaintext);
+    await expectReplayRejected(restored.decrypt(late));
+    await expectReplayRejected(restored.decrypt(delivered));
+    await expectReplayRejected(restored.decrypt(messages[3]));
+    await Promise.all([alice.destroy(), restored.destroy()]);
+  });
+
+  test("restores a 0.14.10 snapshot", async () => {
+    const { messages } = v4Fixture;
+    const bobSnapshot = fromBase64(v4Fixture.bobSnapshot);
+    expect(bobSnapshot[8]).toBe(4);
+    const [alice, bob] = await Promise.all([
+      restoreSession(fromBase64(v4Fixture.aliceSnapshot), cryptoOptions),
+      restoreSession(bobSnapshot, cryptoOptions),
+    ]);
+    const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
+
+    // The message skipped before the upgrade opens once.
+    expect(
+      text(await bob.decrypt(fixtureEnvelope(messages.pendingSkipped))),
+    ).toBe(messages.pendingSkipped.plaintext);
+    await expectReplayRejected(
+      bob.decrypt(fixtureEnvelope(messages.pendingSkipped)),
+    );
+    // Messages 0.14.10 already returned stay rejected: on the current
+    // receiving chain and on the chain it superseded.
+    await expectReplayRejected(
+      bob.decrypt(fixtureEnvelope(messages.currentChain)),
+    );
+    await expectReplayRejected(
+      bob.decrypt(fixtureEnvelope(messages.previousChain)),
+    );
+
+    // Both directions keep working.
+    await pingPong(alice, bob, 7);
+
+    const upgraded = await bob.serialize();
+    expect(upgraded[8]).toBe(5);
+    const restoredAgain = await restoreSession(upgraded, cryptoOptions);
+    await bob.destroy();
+    await expectReplayRejected(
+      restoredAgain.decrypt(fixtureEnvelope(messages.previousChain)),
+    );
+    await pingPong(alice, restoredAgain, 8);
+    await Promise.all([alice.destroy(), restoredAgain.destroy()]);
+  });
+
+  test("a key skipped on a chain 0.14.10 superseded opens its message once after restore", async () => {
+    const message = v4SkippedFixture.skippedOnSupersededChain;
+    const bob = await restoreSession(
+      fromBase64(v4SkippedFixture.bobSnapshot),
+      cryptoOptions,
+    );
+    expect(
+      new TextDecoder().decode(await bob.decrypt(fixtureEnvelope(message))),
+    ).toBe(message.plaintext);
+    await expectReplayRejected(bob.decrypt(fixtureEnvelope(message)));
+
+    const restoredAgain = await restoreSession(
+      await bob.serialize(),
+      cryptoOptions,
+    );
+    await bob.destroy();
+    await expectReplayRejected(restoredAgain.decrypt(fixtureEnvelope(message)));
+    await restoredAgain.destroy();
   });
 });

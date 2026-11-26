@@ -216,15 +216,19 @@ const deferred = <T = void>() => {
 
 // Everything these tests wait for is queued work (fake IndexedDB requests,
 // worker calls, promise chains), so they wait in turns of the event loop and
-// never in time: the same number of turns is needed on any machine.
+// never in time.
 //
-// waitFor: until the condition holds. flush: a fixed number of turns, for
-// work that has no condition to wait on ("nothing more is sent"). FLUSH_TURNS
-// is many times what such work takes here: a delete that nothing holds up
-// answers within a dozen turns.
+// waitFor: until the condition holds, however many turns that takes. There is
+// no limit on the turns: storing a file of 400 chunks takes tens of thousands,
+// and not the same number in every run. A condition that never holds fails
+// the test at the runner's timeout, as an awaited promise that never settles
+// does.
+// flush: a fixed number of turns, for work that has no condition to wait on
+// ("nothing more is sent"). FLUSH_TURNS is many times what such work takes
+// here: a delete that nothing holds up answers within a dozen turns.
 const FLUSH_TURNS = 400;
 const waitFor = async (condition: () => boolean): Promise<void> => {
-  expect(await untilTurns(condition)).toBe(true);
+  while (!condition()) await new Promise((resolve) => setImmediate(resolve));
 };
 const flush = async (): Promise<void> => {
   for (let turns = 0; turns < FLUSH_TURNS; turns++)

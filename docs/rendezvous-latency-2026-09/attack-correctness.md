@@ -2,7 +2,7 @@
 
 Written 2026-09-08 as the adversary pass over `floor.md`, `observed.md` and the
 six angle reports. Every claim below was checked by reading the source at
-`/Users/deliberative/Desktop/@p2party/p2party-js` (branch in the tree:
+the repository root (branch in the tree:
 `fix/peer-desync-2026-09`; the blind-rendezvous sources are identical to the
 ones the reports cite). Citations are `file:line`. I ran no E2E — my job is to
 say what breaks, name the invariant, and name the test.

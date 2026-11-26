@@ -1,7 +1,7 @@
 # The privacy adversary's pass over every latency candidate
 
 2026-09-08. Branch `feat/blind-two-store-prototype`. Paths relative to
-`/Users/deliberative/Desktop/@p2party/p2party-js`.
+the repository root.
 
 Inputs: `floor.md`, `observed.md`, and the six angle reports
 (`angle-shrink-class-1.md`, `angle-collapse-flights.md`,

@@ -1,7 +1,7 @@
 # Stage 1 review — store codec, precomputed rows, harness assertions, disclosures
 
 Reviewer: independent agent, 2026-09-08. Range `8be5c14..HEAD` (6 commits).
-Worktree `/Users/deliberative/Desktop/@p2party/p2party-js-latency`, branch
+Worktree: the latency worktree of this repository, branch
 `feat/rendezvous-latency-2026-09`. Nothing was committed; every mutation below
 was restored byte-identically and `git status --short` is empty at the end of
 this review. Ports used for every harness run: **stores 6500-6507, page 6520**

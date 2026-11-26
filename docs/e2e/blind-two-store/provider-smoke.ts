@@ -153,10 +153,18 @@ const sendMessage = async (
   const framed = new Uint8Array(4 + blob.length);
   new DataView(framed.buffer).setUint32(0, blob.length, false);
   framed.set(blob, 4);
+  // Every slice is queued before any is awaited, so they enter the lane in
+  // order; awaiting them all waits for the channel to take them and carries a
+  // refused or closed channel into run()'s result instead of leaving it
+  // unhandled.
+  const slices: Promise<void>[] = [];
   for (let offset = 0; offset < framed.length; offset += APP_SLICE)
-    transport.sendApp(
-      framed.subarray(offset, Math.min(offset + APP_SLICE, framed.length)),
+    slices.push(
+      transport.sendApp(
+        framed.subarray(offset, Math.min(offset + APP_SLICE, framed.length)),
+      ),
     );
+  await Promise.all(slices);
   return message.frames.length;
 };
 

@@ -1,13 +1,12 @@
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
-import { teardownCoverEdge } from "../../handlers/coverEdge";
 
 import { getDBPeerIsBlacklisted } from "../../db/api";
 
 import { attachDataChannelHandler } from "./dataChannelHandler";
+import { teardownEdgeGeneration } from "./disconnectFromPeerQuery";
 import { findRoomPeerConnectionIndex } from "./roomPeer";
 import { runRoomPeerExclusive } from "./negotiationLock";
-import { retireRemoteTransport } from "./retiredRemoteTransports";
 import {
   isCanonicalSocketGeneration,
   markPeerSocketGenerationRetired,
@@ -28,18 +27,6 @@ export interface RTCPeerConnectionParamsExtend extends RTCPeerConnectionParams {
   peerConnections: IRTCPeerConnection[];
   dataChannels: IRTCDataChannel[];
 }
-
-const clearConnectionHandlers = (epc: IRTCPeerConnection): void => {
-  epc.ontrack = null;
-  epc.ondatachannel = null;
-  epc.onicecandidate = null;
-  epc.onicecandidateerror = null;
-  epc.onnegotiationneeded = null;
-  epc.onsignalingstatechange = null;
-  epc.onconnectionstatechange = null;
-  epc.onicegatheringstatechange = null;
-  epc.oniceconnectionstatechange = null;
-};
 
 const openMainChannel = async (
   epc: IRTCPeerConnection,
@@ -148,15 +135,22 @@ const webrtcBaseQuery: BaseQueryFn<
           epc.peerSocketGeneration,
         );
 
-      // A replaced edge must stop claiming cover, same as a disconnected one,
-      // and the remote certificate it was bound to is retired with it: an
-      // answer the peer still produces on that transport must never bind the
-      // replacement built below, which has no remote description of its own
-      // to compare a fingerprint against (see retiredRemoteTransports).
-      retireRemoteTransport(roomId, peerId, epc.remoteDescription?.sdp);
-      teardownCoverEdge(epc);
-      clearConnectionHandlers(epc);
-      if (epc.connectionState !== "closed") epc.close();
+      // The retired generation goes through the same teardown as a
+      // disconnected one: its ratchet, PQ runtime and message keys are wiped,
+      // its PQ healing interval and scheduled cover stop, its channels are
+      // detached and unregistered (a late close event from its main must not
+      // run disconnectFromPeer against the replacement built below), and the
+      // remote certificate it was bound to is retired: an answer the peer
+      // still produces on that transport must never bind the replacement,
+      // which has no remote description of its own to compare a fingerprint
+      // against (see retiredRemoteTransports).
+      //
+      // What disconnectFromPeer additionally does is room/peer-wide and stays
+      // with the edge, which lives on in the replacement: the negotiation lock
+      // is held by this very operation, and the roster entry describes the
+      // peer, not the transport (the replacement's main reports its own
+      // handshake status).
+      teardownEdgeGeneration(epc, dataChannels);
       peerConnections.splice(connectionIndex, 1);
     }
 

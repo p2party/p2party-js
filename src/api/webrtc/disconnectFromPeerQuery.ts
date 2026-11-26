@@ -6,9 +6,11 @@ import {
 import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
 import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
-import { releaseScheduledReceipts } from "../../handlers/coverTransfer";
 import { teardownCoverEdge } from "../../handlers/coverEdge";
-import { rejectRatchetGate } from "../../handlers/ratchetGate";
+import {
+  isCurrentRatchetGateLease,
+  rejectRatchetGate,
+} from "../../handlers/ratchetGate";
 import { releaseRoomPeerMutex } from "./negotiationLock";
 import { discardPendingIceCandidates } from "./pendingIceCandidates";
 import { clearRebindAuthenticationDeadline } from "./rebindDeadline";
@@ -28,6 +30,142 @@ export interface RTCDisconnectFromPeerParamsExtension extends RTCDisconnectFromP
   dataChannels: IRTCDataChannel[];
   iceCandidates: IRTCIceCandidate[];
 }
+
+/**
+ * Detach every handler from one data channel, release its queue accounting,
+ * close it and drop it from the shared registry. A channel that is already
+ * closed is released and unregistered but never closed again.
+ */
+const releaseDataChannel = (
+  channel: IRTCDataChannel,
+  dataChannels: IRTCDataChannel[],
+): void => {
+  channel.releaseProtocolResources?.();
+  channel.onopen = null;
+  channel.onclose = null;
+  channel.onerror = null;
+  channel.onclosing = null;
+  channel.onmessage = null;
+  channel.onbufferedamountlow = null;
+  if (channel.readyState !== "closed") channel.close();
+  const index = dataChannels.indexOf(channel);
+  if (index > -1) dataChannels.splice(index, 1);
+};
+
+/**
+ * Release everything one transport generation of a room/peer edge owns, and
+ * close it. This is the one teardown behind every path that abandons a
+ * transport: `disconnectFromPeer` (and through it room leave, purge, the
+ * grace-timer and ICE-failure teardowns and the certificate-change
+ * replacement), the generation retire in baseQuery, and a failed handshake in
+ * handleOpenChannel.
+ *
+ * It wipes the ratchet, the sparse-PQ runtime and the derived message keys,
+ * stops the PQ healing interval, stops scheduled cover (which releases its
+ * queued receipts), releases the generation's data channels and its re-bind
+ * deadline, detaches every handler and closes the RTCPeerConnection. It does
+ * NOT remove the connection from the registry or touch Redux: a caller that
+ * replaces the transport and a terminal handshake failure (which leaves the
+ * closed transport registered on purpose, C2) both need that left to them.
+ *
+ * State kept per ROOM/PEER rather than per connection (the ratchet gate, the
+ * handshake inbox, the channels registered for this room/peer) is released
+ * only while this connection still holds the current gate lease. Once a
+ * replacement has claimed the gate, that state is the replacement's, and a
+ * teardown that reaches a superseded generation late releases only what the
+ * connection itself references. A connection without a lease (it never
+ * claimed one) keeps the force-teardown behaviour.
+ *
+ * Idempotent: a second call finds nothing left to release.
+ */
+export const teardownEdgeGeneration = (
+  connection: IRTCPeerConnection,
+  dataChannels: IRTCDataChannel[],
+): void => {
+  const { roomId, withPeerId: peerId } = connection;
+  const ownsRoomPeerState =
+    connection.ratchetGateLease === undefined ||
+    isCurrentRatchetGateLease(roomId, peerId, connection.ratchetGateLease);
+
+  // This side stops believing in the remote transport this connection was
+  // bound to. The peer may still hold it (its ICE consent survived a freeze
+  // this side gave up on) and answer an offer it queued before the
+  // teardown; that answer would otherwise land on the replacement
+  // transport, which has no remote description to compare a fingerprint
+  // against, and bind it to a certificate we just retired. An offer from
+  // the same transport is still accepted — it proves the peer negotiates
+  // there — and un-retires it (see retiredRemoteTransports).
+  retireRemoteTransport(roomId, peerId, connection.remoteDescription?.sdp);
+
+  if (ownsRoomPeerState) {
+    const teardownError = new Error(
+      `Room/peer transport closed (${roomId}, ${peerId})`,
+    );
+    clearHandshakeChannel(roomId, peerId, teardownError);
+    rejectRatchetGate(roomId, peerId, teardownError);
+  }
+  if (connection.ratchetState) {
+    wipeRatchet(connection.ratchetState);
+    connection.ratchetState = undefined;
+  }
+  // Stop scheduled cover first: its timers and lane channels must not fire
+  // against a torn-down edge, and any queued scheduled receipts are wiped
+  // (teardownCoverEdge releases them itself).
+  teardownCoverEdge(connection);
+  // Destroy the sparse-PQ runtime with the ratchet: its machine, message
+  // root, sealed outbox, replay/ACK caches, and active combined receive keys
+  // are all wiped by destroy(). The edge serializer hook dies with it so a
+  // late persistence call cannot serialize a destroyed runtime. The
+  // orchestrator's timers and admission gate die first.
+  destroyPqHealingOrchestrator(connection);
+  if (connection.pqHealingState) {
+    connection.pqHealingState.destroy();
+    connection.pqHealingState = undefined;
+  }
+  connection.serializeEdgeCryptoState = undefined;
+  if (connection.messageKeyCache) {
+    for (const messageKey of connection.messageKeyCache.values())
+      messageKey.fill(0);
+    connection.messageKeyCache.clear();
+    connection.messageKeyCache = undefined;
+  }
+  connection.messageKeyByMerkleRoot?.clear();
+  connection.messageKeyByMerkleRoot = undefined;
+
+  // The generation's channels: the ones it references itself, plus, while it
+  // still owns the edge, everything registered for this room/peer (a cover
+  // lane mid-close, a channel whose own accounting already let go of it).
+  // Their handlers are detached BEFORE anything closes: a retired main's
+  // close or error handler would otherwise run disconnectFromPeer against
+  // whatever owns the edge by the time the event is delivered.
+  const channels = new Set<IRTCDataChannel>(connection.messageChannels);
+  if (connection.mainChannel) channels.add(connection.mainChannel);
+  if (ownsRoomPeerState)
+    for (const channel of dataChannels)
+      if (channel.withPeerId === peerId && channel.roomIds.includes(roomId))
+        channels.add(channel);
+  for (const channel of channels) releaseDataChannel(channel, dataChannels);
+  connection.messageChannels?.clear();
+  connection.messageChannels = undefined;
+  connection.mainChannel = undefined;
+
+  // A transport being torn down here can carry an armed in-place re-bind
+  // deadline (remoteTransportChange). Release it with everything else this
+  // connection owns: the edge is going away now, and the deadline's own job
+  // — tearing it down and re-dialling — is exactly what is happening.
+  clearRebindAuthenticationDeadline(connection);
+
+  connection.ontrack = null;
+  connection.ondatachannel = null;
+  connection.onicecandidate = null;
+  connection.onicecandidateerror = null;
+  connection.onnegotiationneeded = null;
+  connection.onsignalingstatechange = null;
+  connection.onconnectionstatechange = null;
+  connection.onicegatheringstatechange = null;
+  connection.oniceconnectionstatechange = null;
+  if (connection.connectionState !== "closed") connection.close();
+};
 
 const webrtcDisconnectPeerQuery: BaseQueryFn<
   RTCDisconnectFromPeerParamsExtension,
@@ -52,80 +190,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     )
       continue;
     terminalRoomIds.add(connection.roomId);
-
-    // This side stops believing in the remote transport this connection was
-    // bound to. The peer may still hold it (its ICE consent survived a freeze
-    // this side gave up on) and answer an offer it queued before the
-    // teardown; that answer would otherwise land on the replacement
-    // transport, which has no remote description to compare a fingerprint
-    // against, and bind it to a certificate we just retired. An offer from
-    // the same transport is still accepted — it proves the peer negotiates
-    // there — and un-retires it (see retiredRemoteTransports).
-    retireRemoteTransport(
-      connection.roomId,
-      connection.withPeerId,
-      connection.remoteDescription?.sdp,
-    );
-
-    const teardownError = new Error(
-      `Room/peer transport closed (${connection.roomId}, ${connection.withPeerId})`,
-    );
-    clearHandshakeChannel(
-      connection.roomId,
-      connection.withPeerId,
-      teardownError,
-    );
-    rejectRatchetGate(
-      connection.roomId,
-      connection.withPeerId,
-      teardownError,
-    );
-    if (connection.ratchetState) {
-      wipeRatchet(connection.ratchetState);
-      connection.ratchetState = undefined;
-    }
-    // Stop scheduled cover first: its timers and lane channels must not fire
-    // against a torn-down edge, and any queued scheduled receipts are wiped.
-    teardownCoverEdge(connection);
-    releaseScheduledReceipts(connection);
-    // Destroy the sparse-PQ runtime with the ratchet: its machine, message
-    // root, sealed outbox, replay/ACK caches, and active combined receive keys
-    // are all wiped by destroy(). The edge serializer hook dies with it so a
-    // late persistence call cannot serialize a destroyed runtime. The
-    // orchestrator's timers and admission gate die first.
-    destroyPqHealingOrchestrator(connection);
-    if (connection.pqHealingState) {
-      connection.pqHealingState.destroy();
-      connection.pqHealingState = undefined;
-    }
-    connection.serializeEdgeCryptoState = undefined;
-    if (connection.messageKeyCache) {
-      for (const messageKey of connection.messageKeyCache.values())
-        messageKey.fill(0);
-      connection.messageKeyCache.clear();
-      connection.messageKeyCache = undefined;
-    }
-    connection.messageKeyByMerkleRoot?.clear();
-    connection.messageKeyByMerkleRoot = undefined;
-    connection.messageChannels?.clear();
-    connection.messageChannels = undefined;
-    connection.mainChannel = undefined;
-    // A transport being torn down here can carry an armed in-place re-bind
-    // deadline (remoteTransportChange). Release it with everything else this
-    // connection owns: the edge is going away now, and the deadline's own job
-    // — tearing it down and re-dialling — is exactly what is happening.
-    clearRebindAuthenticationDeadline(connection);
-
-    connection.ontrack = null;
-    connection.ondatachannel = null;
-    connection.onicecandidate = null;
-    connection.onicecandidateerror = null;
-    connection.onnegotiationneeded = null;
-    connection.onsignalingstatechange = null;
-    connection.onconnectionstatechange = null;
-    connection.onicegatheringstatechange = null;
-    connection.oniceconnectionstatechange = null;
-    if (connection.connectionState !== "closed") connection.close();
+    teardownEdgeGeneration(connection, dataChannels);
     peerConnections.splice(i, 1);
   }
 
@@ -139,6 +204,9 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   api.dispatch(deletePeer({ peerId, roomId }));
   api.dispatch(deleteChannel({ peerId, roomId }));
 
+  // Channels of this peer that no registered transport claimed (each
+  // transport's own were released with it above). Omitting roomId sweeps
+  // every room.
   for (let i = dataChannels.length - 1; i >= 0; i--) {
     const channel = dataChannels[i];
     if (
@@ -146,16 +214,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
       (roomId !== undefined && !channel.roomIds.includes(roomId))
     )
       continue;
-
-    channel.releaseProtocolResources?.();
-    channel.onopen = null;
-    channel.onclose = null;
-    channel.onerror = null;
-    channel.onclosing = null;
-    channel.onmessage = null;
-    channel.onbufferedamountlow = null;
-    if (channel.readyState !== "closed") channel.close();
-    dataChannels.splice(i, 1);
+    releaseDataChannel(channel, dataChannels);
   }
 
   if (alsoDeleteData) {

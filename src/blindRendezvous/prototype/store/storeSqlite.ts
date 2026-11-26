@@ -3,11 +3,12 @@
  * The durable half of the prototype store: `StorePersistencePort` over one
  * SQLite file (`bun:sqlite`, no new dependency).
  *
- * Every column here is public geometry — an ingress window, a size class, an
- * ordinal, and opaque object bytes. There is no room, member, peer or account
- * column, so seizing this file yields the same thing a passive reader of the
- * chunks already has: which fixed positions were occupied, and nothing about
- * who occupied them or which conversation they belonged to.
+ * Windows store geometry — an ingress window, a size class, an ordinal — and
+ * opaque object bytes, without a room identifier. Allocation records contain
+ * public allocation keys and request hashes, and optional
+ * experimental admission records additionally contain grant quota keys that
+ * link that grant's allocations. These are private store metadata beyond the
+ * finalized public chunks; the database does not establish participant anonymity.
  *
  * Two properties this file must not break:
  *
@@ -93,7 +94,22 @@ interface StoredAllocationV1 {
   leaseBody: string;
   lease: string;
   requestHash: string;
+  admissionQuotaKey32?: string;
 }
+
+const quotaKeyFrom = (value: unknown): Uint8Array => {
+  if (typeof value !== "string" || value.length !== 64)
+    fail(
+      "stored admission quota key must be exactly 32 bytes of lowercase hex",
+    );
+  return bytesFrom(value as string, "admission quota key");
+};
+
+const quotaKeyHex = (value: Uint8Array): string => {
+  if (!(value instanceof Uint8Array) || value.length !== 32)
+    fail("admission quota key must be exactly 32 bytes");
+  return hexOf(value);
+};
 
 interface StoredSlotV1 {
   key: string;
@@ -143,6 +159,9 @@ const toDocument = (state: StoreWindowState): StoredWindowDocumentV1 => ({
     leaseBody: hexOf(encodePublicAllocationLeaseBodyV1(record.leaseBody)),
     lease: hexOf(encodePublicAllocationLeaseV1(record.lease)),
     requestHash: hexOf(record.requestHash),
+    ...(record.admissionQuotaKey32 === undefined
+      ? {}
+      : { admissionQuotaKey32: quotaKeyHex(record.admissionQuotaKey32) }),
   })),
   slots: [...state.slots].map(([key, slot]) => ({
     key,
@@ -177,6 +196,11 @@ const fromDocument = (document: StoredWindowDocumentV1): StoreWindowState => {
             bytesFrom(record.lease, "lease"),
           ),
           requestHash: bytesFrom(record.requestHash, "request hash"),
+          ...(record.admissionQuotaKey32 === undefined
+            ? {}
+            : {
+                admissionQuotaKey32: quotaKeyFrom(record.admissionQuotaKey32),
+              }),
         },
       ]),
     ),

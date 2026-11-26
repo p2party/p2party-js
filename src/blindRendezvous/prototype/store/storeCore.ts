@@ -2,11 +2,11 @@
  * The prototype store's window machine: allocation, append, finalization, and
  * the checkpoint chain (design doc §4.3, specification §4.3).
  *
- * Everything this file touches is public geometry — a delivery-profile hash,
- * an ingress window, a size class, an ordinal, and opaque fixed-length bytes.
- * No room, member, peer, invitation or operation value is an input to any
- * method here, and none is derivable from what is stored, which is the whole
- * reason unrelated rooms can share one bucket and cover for each other.
+ * Routing uses public geometry — a delivery-profile hash, an ingress window,
+ * a size class, an ordinal, and opaque fixed-length bytes. No room identifier
+ * is required. Optional experimental admission additionally associates leases
+ * with opaque grant quota keys; these can link a grant's uses across windows.
+ * Shared buckets alone do not establish relationship or participant anonymity.
  *
  * Two properties this file is responsible for and that nothing downstream can
  * repair:
@@ -170,6 +170,17 @@ export interface PrototypeStoreCoreOptions {
   readonly descriptorValidityMs: bigint;
   /** Test-only: `"withhold"` accepts appends and finalizes them all-dummy. */
   readonly fault?: "withhold" | null;
+  /**
+   * Experimental server-local admission. This callback must be
+   * pure: it validates a request and returns a stable 32-byte grant quota key,
+   * or null. The core atomically commits one lease per key per ingress window.
+   * The hook supplies no descriptor-level privacy or unique-person claim.
+   */
+  readonly allocationAdmission?: {
+    authorize(
+      request: PublicAllocationRequestV1,
+    ): Uint8Array | null | Promise<Uint8Array | null>;
+  };
 }
 
 /** `crypto.getRandomValues` refuses more than this many bytes per call. */
@@ -323,6 +334,7 @@ export class PrototypeStoreCore {
   readonly #persistence: StorePersistencePort;
   readonly #chainStart: bigint;
   readonly #fault: "withhold" | null;
+  readonly #allocationAdmission: PrototypeStoreCoreOptions["allocationAdmission"];
   readonly #sizeClasses: readonly DeliverySizeClassV1[];
   readonly #objectBytesByClass: ReadonlyMap<number, number>;
 
@@ -349,6 +361,7 @@ export class PrototypeStoreCore {
     this.#persistence = options.persistence;
     this.#chainStart = options.chainStartIngressWindow;
     this.#fault = options.fault ?? null;
+    this.#allocationAdmission = options.allocationAdmission;
     // Sorted by id once: leaf order and chunk order are both profile order,
     // and rebuilding that order per finalization invites one of them to drift.
     this.#sizeClasses = [...options.profile.sizeClasses].sort(
@@ -667,11 +680,40 @@ export class PrototypeStoreCore {
     const state = await this.#windowState(target);
     if (this.#windowIsClosed(state, target)) return status("window-closed");
 
+    let admissionQuotaKey32: Uint8Array | undefined;
+    if (this.#allocationAdmission !== undefined) {
+      try {
+        // The adapter gets its own bytes, so accidental mutation cannot change
+        // the request already hashed above or the key the lease binds below.
+        const key = await this.#allocationAdmission.authorize({
+          ...request,
+          deliveryProfileHash: copyBytes(request.deliveryProfileHash),
+          allocationEd25519PublicKey: copyBytes(
+            request.allocationEd25519PublicKey,
+          ),
+          privacyPassToken: copyBytes(request.privacyPassToken),
+        });
+        if (!(key instanceof Uint8Array) || key.length !== 32)
+          return status("invalid-token");
+        admissionQuotaKey32 = copyBytes(key);
+      } catch {
+        return status("invalid-token");
+      }
+    }
+
     // An exact duplicate replays the byte-identical lease and consumes no
     // second ordinal, on any route and after a restart.
     for (const record of state.allocations.values())
       if (bytesEqual(record.requestHash, requestHash))
         return { kind: "allocated", lease: copyLease(record.lease) };
+
+    if (admissionQuotaKey32 !== undefined)
+      for (const record of state.allocations.values())
+        if (
+          record.admissionQuotaKey32 !== undefined &&
+          bytesEqual(record.admissionQuotaKey32, admissionQuotaKey32)
+        )
+          return status("invalid-token");
 
     if (state.allocations.size >= this.#profile.cohortAllocationsPerWindow)
       return status("capacity-exhausted");
@@ -697,8 +739,16 @@ export class PrototypeStoreCore {
       ),
     };
 
-    state.allocations.set(allocationOrdinal, { leaseBody, lease, requestHash });
-    await this.#persistence.saveWindow(state);
+    // Do not mutate a window returned by a caching persistence adapter before
+    // saveWindow commits. A failed write must not consume an ordinal or grant.
+    const nextState = { ...state, allocations: new Map(state.allocations) };
+    nextState.allocations.set(allocationOrdinal, {
+      leaseBody,
+      lease,
+      requestHash,
+      ...(admissionQuotaKey32 === undefined ? {} : { admissionQuotaKey32 }),
+    });
+    await this.#persistence.saveWindow(nextState);
     return { kind: "allocated", lease: copyLease(lease) };
   }
 

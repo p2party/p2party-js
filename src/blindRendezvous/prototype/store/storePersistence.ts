@@ -2,11 +2,11 @@
  * The prototype store's durable state, and the in-memory implementation the
  * tests and the E2E's ephemeral mode run on.
  *
- * Everything a store keeps is public geometry: a delivery-profile hash, an
- * ingress window, a size class, an ordinal, and opaque object bytes. There is
- * deliberately no room, peer, member, or account key anywhere in these rows,
- * because a store that cannot name a room cannot be asked which rooms a
- * request belonged to.
+ * Windows store public geometry and opaque object bytes, plus allocation
+ * public keys and request hashes. An optional experimental admission mode
+ * also retains an opaque quota key per allocation. That key links uses of the
+ * same admission grant; it is not a room identifier or a claim of unique-person
+ * identity. The private database exposes more metadata than public chunks.
  *
  * The port is whole-window replace rather than per-row upsert. A window is the
  * unit the specification makes atomic — allocation ordinals, slot bindings and
@@ -45,6 +45,8 @@ export interface StoreAllocationRecord {
   leaseBody: PublicAllocationLeaseBodyV1;
   lease: PublicAllocationLeaseV1;
   requestHash: Uint8Array;
+  /** Optional admission grant quota key, exactly 32 bytes; never on the wire. */
+  admissionQuotaKey32?: Uint8Array;
 }
 
 /** The immutable half of a window: signed once, then never re-signed. */
@@ -125,6 +127,9 @@ const copyAllocation = (
   leaseBody: copyLeaseBody(record.leaseBody),
   lease: copyLease(record.lease),
   requestHash: copyBytes(record.requestHash),
+  ...(record.admissionQuotaKey32 === undefined
+    ? {}
+    : { admissionQuotaKey32: copyBytes(record.admissionQuotaKey32) }),
 });
 
 const copySlot = (slot: StoreWindowSlot): StoreWindowSlot => ({

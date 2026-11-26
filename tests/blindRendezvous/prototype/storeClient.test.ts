@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import libcrypto from "../../../src/cryptography/libcrypto";
@@ -416,6 +416,125 @@ describe("prototype store client", () => {
       { fault: "withhold" },
     );
   });
+
+  test("overlapping custody scans preserve new receipts and consume each receipt once", async () => {
+    await withStore(
+      async (store, clock) => {
+        const client = await connect(store.origin, clock);
+        await appendObject(client, CHAIN_START, 0x31);
+        clock.now = WINDOW_START + profile.deliveryWindowMs;
+        await appendObject(client, CHAIN_START + 1n, 0x32);
+        clock.now = NEXT_FINALIZE_AT;
+        await store.core.finalizeDue();
+
+        const gates = await Promise.all(
+          [CHAIN_START, CHAIN_START + 1n].map(async (window) => {
+            const read = await store.core.readChunk(
+              {
+                deliveryProfileHash: PROFILE_HASH,
+                ingressWindow: window,
+                sizeClass: 0,
+              },
+              0n,
+            );
+            if (read.kind !== "finalized") throw new Error("expected a chunk");
+            let entered!: () => void;
+            let release!: () => void;
+            return {
+              objectHex: hex(read.chunk.fixedObjects[0]),
+              entered: new Promise<void>((resolve) => {
+                entered = resolve;
+              }),
+              wait: new Promise<void>((resolve) => {
+                release = resolve;
+              }),
+              markEntered: () => entered(),
+              release: () => release(),
+              held: false,
+            };
+          }),
+        );
+
+        // Pause real WebCrypto only when custody hashes one of these exact
+        // public slot objects. Signatures and chunk/checkpoint verification
+        // still execute normally; no store-client state is inspected.
+        const digest = crypto.subtle.digest.bind(crypto.subtle);
+        const digestSpy = spyOn(crypto.subtle, "digest").mockImplementation(
+          async (algorithm, data) => {
+            const bytes = ArrayBuffer.isView(data)
+              ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+              : new Uint8Array(data);
+            const gate =
+              bytes.length === CLASS_0_OBJECT_BYTES
+                ? gates.find(
+                    (candidate) =>
+                      !candidate.held && candidate.objectHex === hex(bytes),
+                  )
+                : undefined;
+            if (gate !== undefined) {
+              gate.held = true;
+              gate.markEntered();
+              await gate.wait;
+            }
+            return digest(algorithm, data);
+          },
+        );
+        const scans: ReturnType<PrototypeStoreClient["scanWindow"]>[] = [];
+        try {
+          const first = client.scanWindow(CHAIN_START);
+          scans.push(first);
+          await Promise.race([
+            gates[0].entered,
+            first.then(() => {
+              throw new Error("first scan never reached custody hash");
+            }),
+          ]);
+          const second = client.scanWindow(CHAIN_START + 1n);
+          scans.push(second);
+          await Promise.race([
+            gates[1].entered,
+            second.then(() => {
+              throw new Error("second scan never reached custody hash");
+            }),
+          ]);
+
+          // The first scan finishes while the second still owns an earlier
+          // view of pending receipts. Record another promise in between.
+          gates[0].release();
+          expect((await first).status).toBe("finalized");
+          await appendObject(client, CHAIN_START + 2n, 0x33);
+          gates[1].release();
+          expect((await second).status).toBe("finalized");
+
+          clock.now = NEXT_FINALIZE_AT + profile.deliveryWindowMs;
+          await store.core.finalizeDue();
+          expect((await client.scanWindow(CHAIN_START + 2n)).status).toBe(
+            "finalized",
+          );
+          const custodyWindows = () =>
+            client.faults
+              .filter((fault) => fault.kind === "custody-breach")
+              .map((fault) => fault.window);
+          const afterNewWindow = custodyWindows();
+
+          // A rescan has no unconsumed promise left to contradict. Restoring
+          // receipts from another scan would report duplicate breaches here.
+          await client.scanWindow(CHAIN_START);
+          await client.scanWindow(CHAIN_START + 1n);
+          const expected = [CHAIN_START, CHAIN_START + 1n, CHAIN_START + 2n];
+          expect({ afterNewWindow, afterRescan: custodyWindows() }).toEqual({
+            afterNewWindow: expected,
+            afterRescan: expected,
+          });
+        } finally {
+          for (const gate of gates) gate.release();
+          digestSpy.mockRestore();
+          await Promise.allSettled(scans);
+        }
+      },
+      { fault: "withhold" },
+    );
+  }, 30_000);
 
   test("detects a second checkpoint for one window as a chain fault", async () => {
     const clock: Clock = { now: WINDOW_START };

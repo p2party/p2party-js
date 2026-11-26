@@ -246,6 +246,11 @@ const waitChannelOpen = (
         channel.addEventListener("open", onOpen);
         channel.addEventListener("close", onClose);
         if (channel.readyState === "open") settle();
+        else if (
+          channel.readyState === "closed" ||
+          channel.readyState === "closing"
+        )
+          onClose();
       });
 
 const waitConnected = (
@@ -684,12 +689,14 @@ class BlindRendezvousRun implements PrototypeRun {
     // the peer connection is closed and the schedule disarmed. The fingerprints
     // below are the ones the pair transcript signed, so a live certificate that
     // disagrees means the SDP was rewritten after both peers authenticated it.
-    // Note the ordering: `dataChannelTransport` is constructed only after the
-    // verdict, so a tripped gate has no lane for application bytes at all.
+    // The provider already buffers bounded raw input, since a faster peer may
+    // send its HELLO while getStats() is pending. Session processing still
+    // begins only after this verdict; a mismatch discards the buffered input.
     const verdict = await provider.verifyCertificates(
       handoff.localFingerprint,
       handoff.remoteFingerprint,
     );
+    if (this.#stopped) fail("the run stopped during certificate verification");
     this.#emit(verdict === "verified" ? "dtls-verified" : "dtls-unsupported");
 
     const transport = dataChannelTransport(channel);
@@ -708,6 +715,13 @@ class BlindRendezvousRun implements PrototypeRun {
       mode: "nopin",
       crypto: { wasmBinary: this.#wasmBinary },
     });
+    // stop() closes pending receives, but a handshake that already consumed
+    // its last frame can finish async cryptography afterwards. It must never
+    // publish an authenticated session or retain its keys after teardown.
+    if (this.#stopped) {
+      await session.destroy();
+      fail("the run stopped during session authentication");
+    }
     this.#session = session;
     this.#emit("session-authenticated", handoff.sessionRole);
     return { session, transport };

@@ -1,0 +1,110 @@
+Store CPU per window, eight readers: 41e8943 (before) against c4f5411 (after).
+Recorded 2026-11-26 23:58 to 2026-11-27 00:00 on the shared development
+machine (Apple silicon, macOS, bun 1.4.4) while other agents ran their own
+suites; the load averages are on each run's header line, 3.0 to 61.7.
+
+Command, run alternately on clean `git archive` copies of the two commits,
+three rounds, before then after in each:
+  bun docs/rendezvous-latency-2026-09/bench/benchstore.ts --readers=8 --windows=5
+  bun docs/rendezvous-latency-2026-09/bench/benchstore.ts 12
+(the second is the script's original persistence timings; at 41e8943 it stops
+at saveFinalizedResponses, which that commit does not have.)
+
+Readers mode: a real PrototypeStoreCore over SqliteStorePersistence behind
+createPrototypeStoreHandler, called in process with no socket, at the pinned
+profile (4,000 ms windows, cohort 8, 40 slots). Per window: 8 allocations, all
+40 appends, finalizeDue, then 8 readers each GET the checkpoint and all 5
+chunks (48 reads). CPU is process user + system summed around the store's
+calls only. The median is over windows 1..4 (window 0, the chain start, loads
+no predecessor at finalization).
+
+Raw output follows.
+
+=== round 1 BASE (41e8943) 23:58:21 5,04 4,46 4,14
+readers mode: 8 readers, 5 windows, load averages 5.04 4.46 4.14
+window 0: store CPU ms allocate 13.2  append 1777.8  finalize 92.6  read (8 readers) 5029.6  total 6913.3  (wall 7516.6)
+window 1: store CPU ms allocate 14.6  append 2191.1  finalize 256.4  read (8 readers) 5217.4  total 7679.5  (wall 8436.6)
+window 2: store CPU ms allocate 14.5  append 1611.3  finalize 199.8  read (8 readers) 4957.3  total 6782.9  (wall 6698.3)
+window 3: store CPU ms allocate 14.5  append 1630.3  finalize 204.5  read (8 readers) 4983.0  total 6832.4  (wall 6809.3)
+window 4: store CPU ms allocate 5.6  append 1798.0  finalize 225.5  read (8 readers) 4819.0  total 6848.1  (wall 7257.2)
+median over windows 1..4: allocate 14.5  append 1798.0  finalize 225.5  read 4983.0  total 6848.1 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 81.43  p50 86.67  max 101.20 ms
+loadWindow     n=12  min 113.51  p50 114.63  max 117.71 ms
+392 | await times("saveWindow", () => p.saveWindow(state));
+393 | await times("loadWindow", () => p.loadWindow(W));
+394 | await times("saveResponses", () => p.saveFinalizedResponses(responses));
+TypeError: p.saveFinalizedResponses is not a function. (In 'p.saveFinalizedResponses(responses)', 'p.saveFinalizedResponses' is undefined)
+=== round 1 HEAD (c4f5411) 23:59:01 7,94 5,23 4,43
+readers mode: 8 readers, 5 windows, load averages 7.94 5.23 4.43
+window 0: store CPU ms allocate 9.3  append 257.2  finalize 17.5  read (8 readers) 12.3  total 296.2  (wall 286.4)
+window 1: store CPU ms allocate 4.6  append 245.1  finalize 31.8  read (8 readers) 5.8  total 287.3  (wall 278.7)
+window 2: store CPU ms allocate 4.6  append 183.8  finalize 20.3  read (8 readers) 5.1  total 213.8  (wall 240.3)
+window 3: store CPU ms allocate 4.3  append 194.3  finalize 24.3  read (8 readers) 10.0  total 232.9  (wall 282.5)
+window 4: store CPU ms allocate 3.8  append 179.5  finalize 23.6  read (8 readers) 6.3  total 213.3  (wall 279.8)
+median over windows 1..4: allocate 4.6  append 194.3  finalize 24.3  read 6.3  total 232.9 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 1.57  p50 2.47  max 12.27 ms
+loadWindow     n=12  min 6.04  p50 6.81  max 13.10 ms
+saveResponses  n=12  min 1.99  p50 2.50  max 13.10 ms
+loadChunkRow   n=12  min 0.04  p50 0.04  max 0.21 ms
+loadCkptRow    n=12  min 0.00  p50 0.01  max 0.10 ms
+=== round 2 BASE (41e8943) 23:59:03 7,94 5,23 4,43
+readers mode: 8 readers, 5 windows, load averages 7.94 5.23 4.43
+window 0: store CPU ms allocate 13.3  append 1773.6  finalize 104.0  read (8 readers) 5536.8  total 7427.7  (wall 7719.9)
+window 1: store CPU ms allocate 9.9  append 1916.8  finalize 258.7  read (8 readers) 6028.4  total 8213.8  (wall 10613.7)
+window 2: store CPU ms allocate 11.1  append 1724.1  finalize 201.5  read (8 readers) 5033.2  total 6969.9  (wall 6898.7)
+window 3: store CPU ms allocate 14.8  append 1665.6  finalize 223.9  read (8 readers) 5515.1  total 7419.4  (wall 8088.8)
+window 4: store CPU ms allocate 16.6  append 2005.9  finalize 230.4  read (8 readers) 5602.0  total 7854.9  (wall 10223.3)
+median over windows 1..4: allocate 14.8  append 1916.8  finalize 230.4  read 5602.0  total 7854.9 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 83.45  p50 87.62  max 113.20 ms
+loadWindow     n=12  min 109.98  p50 116.06  max 122.90 ms
+392 | await times("saveWindow", () => p.saveWindow(state));
+393 | await times("loadWindow", () => p.loadWindow(W));
+394 | await times("saveResponses", () => p.saveFinalizedResponses(responses));
+TypeError: p.saveFinalizedResponses is not a function. (In 'p.saveFinalizedResponses(responses)', 'p.saveFinalizedResponses' is undefined)
+=== round 2 HEAD (c4f5411) 23:59:49 9,04 5,90 4,72
+readers mode: 8 readers, 5 windows, load averages 9.04 5.90 4.72
+window 0: store CPU ms allocate 8.1  append 395.7  finalize 28.2  read (8 readers) 7.9  total 439.8  (wall 490.2)
+window 1: store CPU ms allocate 7.8  append 395.4  finalize 41.7  read (8 readers) 5.8  total 450.7  (wall 528.2)
+window 2: store CPU ms allocate 10.8  append 404.1  finalize 32.7  read (8 readers) 5.0  total 452.5  (wall 702.9)
+window 3: store CPU ms allocate 11.0  append 349.0  finalize 32.3  read (8 readers) 6.5  total 398.8  (wall 489.7)
+window 4: store CPU ms allocate 8.8  append 374.7  finalize 36.8  read (8 readers) 5.3  total 425.7  (wall 493.8)
+median over windows 1..4: allocate 10.8  append 395.4  finalize 36.8  read 5.8  total 450.7 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 1.39  p50 2.20  max 16.95 ms
+loadWindow     n=12  min 6.22  p50 7.08  max 9.72 ms
+saveResponses  n=12  min 5.52  p50 14.19  max 41.81 ms
+loadChunkRow   n=12  min 0.07  p50 0.08  max 0.26 ms
+loadCkptRow    n=12  min 0.00  p50 0.01  max 0.11 ms
+=== round 3 BASE (41e8943) 23:59:53 10,24 6,20 4,83
+readers mode: 8 readers, 5 windows, load averages 10.24 6.20 4.83
+window 0: store CPU ms allocate 11.8  append 1850.1  finalize 101.4  read (8 readers) 5351.0  total 7314.4  (wall 7531.4)
+window 1: store CPU ms allocate 10.5  append 1945.7  finalize 263.5  read (8 readers) 6682.6  total 8902.3  (wall 12171.6)
+window 2: store CPU ms allocate 20.6  append 2253.8  finalize 212.3  read (8 readers) 5002.4  total 7489.1  (wall 9675.0)
+window 3: store CPU ms allocate 12.5  append 1883.4  finalize 226.5  read (8 readers) 5258.7  total 7381.1  (wall 8861.8)
+window 4: store CPU ms allocate 18.8  append 2159.3  finalize 229.3  read (8 readers) 5430.9  total 7838.3  (wall 8975.1)
+median over windows 1..4: allocate 18.8  append 2159.3  finalize 229.3  read 5430.9  total 7838.3 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 87.49  p50 98.26  max 165.96 ms
+loadWindow     n=12  min 111.52  p50 124.62  max 203.93 ms
+392 | await times("saveWindow", () => p.saveWindow(state));
+393 | await times("loadWindow", () => p.loadWindow(W));
+394 | await times("saveResponses", () => p.saveFinalizedResponses(responses));
+TypeError: p.saveFinalizedResponses is not a function. (In 'p.saveFinalizedResponses(responses)', 'p.saveFinalizedResponses' is undefined)
+=== round 3 HEAD (c4f5411) 00:00:43 61,66 17,65 8,97
+readers mode: 8 readers, 5 windows, load averages 61.66 17.65 8.97
+window 0: store CPU ms allocate 8.8  append 369.5  finalize 26.6  read (8 readers) 8.0  total 412.9  (wall 476.3)
+window 1: store CPU ms allocate 5.7  append 366.7  finalize 28.1  read (8 readers) 5.4  total 405.9  (wall 429.7)
+window 2: store CPU ms allocate 4.7  append 190.7  finalize 22.2  read (8 readers) 4.9  total 222.5  (wall 232.7)
+window 3: store CPU ms allocate 4.6  append 170.0  finalize 28.2  read (8 readers) 5.5  total 208.4  (wall 223.9)
+window 4: store CPU ms allocate 3.9  append 178.6  finalize 26.3  read (8 readers) 4.5  total 213.3  (wall 231.8)
+median over windows 1..4: allocate 4.7  append 190.7  finalize 28.1  read 5.4  total 222.5 ms CPU per window
+--- persistence timings (n=12)
+saveWindow     n=12  min 1.39  p50 2.20  max 10.89 ms
+loadWindow     n=12  min 6.14  p50 6.69  max 8.98 ms
+saveResponses  n=12  min 2.28  p50 4.82  max 15.65 ms
+loadChunkRow   n=12  min 0.04  p50 0.04  max 0.22 ms
+loadCkptRow    n=12  min 0.00  p50 0.00  max 0.10 ms
+=== done 00:00:45 61,66 17,65 8,97

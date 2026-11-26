@@ -99,6 +99,7 @@ const descriptorFields: UnsignedDescriptor = {
   checkpointChainStarts: [
     { deliveryProfileHash: PROFILE, chainStartIngressWindow: CHAIN_START },
   ],
+  retentionWindows: 256,
   notBeforeUnixMs: NOT_BEFORE,
   notAfterUnixMs: NOT_AFTER,
 };

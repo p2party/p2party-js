@@ -72,6 +72,7 @@ import {
   ingressWindowStartMs,
   roomLogicalWindow,
 } from "../publicWindow";
+import { PROTOTYPE_MAX_READ_WINDOWS } from "../../utils/constants";
 import { sizeClassForPayloadClass } from "./profile";
 import { buildAppendAdmission } from "./storeClient";
 import { operationServiceRole } from "./workKinds";
@@ -226,7 +227,7 @@ const MAX_BACKFILL_PAIRS = 8_192;
  * reported `missed`. It also bounds the per-window read bookkeeping, which
  * never needs to reach further back than the schedule does.
  */
-const MAX_READ_WINDOWS = 64;
+const MAX_READ_WINDOWS = PROTOTYPE_MAX_READ_WINDOWS;
 
 /** Leases are consumed by the window they name; this bounds the rest. */
 const MAX_HELD_LEASES = 8;
@@ -324,7 +325,11 @@ interface WindowRead {
 type ReadAttempt = "scheduled" | "catch-up-first" | "catch-up-last";
 
 /** A scan that came back with something this client can stand on: a
- * finalized window, or one below the chain start that holds nothing. */
+ * finalized window, or one below the chain start that holds nothing — the
+ * client decides that one without asking, because the store refuses every
+ * write below its chain start. A store's own refusal of a window it no longer
+ * retains is `beyond-retention`, which is never a success: the window was not
+ * read at that store. */
 const readSucceeded = (status: WindowScan["status"]): boolean =>
   status === "finalized" || status === "out-of-range";
 
@@ -944,8 +949,14 @@ export class CarrierRuntime {
           next.window,
           next.attempt === 1 ? "catch-up-first" : "catch-up-last",
         );
-        if (readSucceeded(status) || next.attempt === 2) {
-          if (!readSucceeded(status))
+        // An expired window stays expired: retrying it would only spend six
+        // more requests on the same answer, and `#read` already reported it.
+        if (
+          readSucceeded(status) ||
+          status === "beyond-retention" ||
+          next.attempt === 2
+        ) {
+          if (!readSucceeded(status) && status !== "beyond-retention")
             this.#emit({
               kind: "missed",
               storeIdHex: state.store.storeIdHex,
@@ -1348,6 +1359,14 @@ export class CarrierRuntime {
         detail: scan.status,
         count: scan.objects.length,
       });
+      if (scan.status === "beyond-retention")
+        this.#emit({
+          kind: "missed",
+          storeIdHex: store.storeIdHex,
+          window,
+          detail:
+            "the store no longer retains this window (it is past the retention its descriptor states); it was not read at this store",
+        });
       if (!this.#running) return status;
 
       const observed = await this.#openObjects(store, window, scan.objects);
@@ -1378,7 +1397,11 @@ export class CarrierRuntime {
     } finally {
       if (this.#scanStatuses.get(key) === "pending")
         this.#rememberScanStatus(key, status);
-      if (readSucceeded(status) || attempt !== "catch-up-first")
+      if (
+        readSucceeded(status) ||
+        status === "beyond-retention" ||
+        attempt !== "catch-up-first"
+      )
         this.#settleRead(window, union, status);
     }
   }

@@ -43,6 +43,13 @@ export interface StoreDescriptorV1 {
   compatibilityHash: Uint8Array;
   supportedDeliveryProfileHashes: readonly Uint8Array[];
   checkpointChainStarts: readonly StoreCheckpointChainStartV1[];
+  /**
+   * How many windows back this store serves a finalized window: window `w`
+   * through the end of `w + retentionWindows`, as `bucketIsReadable` defines
+   * it. Signed, so a signed `out-of-range` for a window inside it is the
+   * store withholding, not expiry.
+   */
+  retentionWindows: number;
   notBeforeUnixMs: bigint;
   notAfterUnixMs: bigint;
   descriptorSignature: Uint8Array;

@@ -18,9 +18,16 @@ import {
   publicStoreCheckpointHash,
 } from "../../../src/blindRendezvous/publicWindow";
 import {
+  descriptorHash,
   publicCarrierContextId,
+  storeDescriptorSignedMessage,
   storeId as computeStoreId,
+  storeRouteSignedMessage,
 } from "../../../src/blindRendezvous/storeDescriptor";
+import {
+  PROTOTYPE_READ_BACK_WINDOWS,
+  PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
+} from "../../../src/utils/constants";
 import {
   PROTOTYPE_DELIVERY_PROFILE_V0,
   carrierObjectWireBytes,
@@ -117,6 +124,7 @@ const startStore = async (
     seed?: Uint8Array;
     fault?: "withhold" | null;
     chainStart?: bigint;
+    retentionWindows?: number;
     allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
     /** Wraps the store's handler, e.g. to answer some routes another way. */
     wrap?: (
@@ -144,6 +152,7 @@ const startStore = async (
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
     allocationAdmission: options.allocationAdmission,
+    retentionWindows: options.retentionWindows,
   });
   const storeHandler = createPrototypeStoreHandler({ core });
   handler =
@@ -1217,7 +1226,7 @@ describe("prototype store client admission tokens", () => {
       expect((await client.append(CHAIN_START, 0, object, null))?.status).toBe(
         "unallocated-cover",
       );
-      expect(await client.postWitness(witnessRecordFor(CHAIN_START))).toBe(
+      expect(await client.postWitness(witnessRecordFor(CHAIN_START - 1n))).toBe(
         true,
       );
 
@@ -1229,12 +1238,12 @@ describe("prototype store client admission tokens", () => {
         `append:${tokenHex("append")}`,
         `witness:${tokenHex("witness")}`,
       ]);
-      const pinned = `${hex(store.core.storeId)} ${store.origin} ${String(CHAIN_START)}`;
+      const pinned = `${hex(store.core.storeId)} ${store.origin}`;
       expect(asked).toEqual([
-        `allocation ${pinned}`,
-        `append ${pinned}`,
-        `append ${pinned}`,
-        `witness ${pinned}`,
+        `allocation ${pinned} ${String(CHAIN_START)}`,
+        `append ${pinned} ${String(CHAIN_START)}`,
+        `append ${pinned} ${String(CHAIN_START)}`,
+        `witness ${pinned} ${String(CHAIN_START - 1n)}`,
       ]);
 
       // Open admission stays the default: no provider, no header, zero token.
@@ -1473,5 +1482,270 @@ describe("prototype store client late acknowledgements", () => {
       },
       { fault: "withhold" },
     );
+  });
+});
+
+describe("prototype store client retention", () => {
+  const signedOutOfRange = async (window: bigint): Promise<Uint8Array> => {
+    const secretKey = await storeSecretKey();
+    const storeIdBytes = await computeStoreId(
+      (await keyPairFromSeed(Uint8Array.from(SEED), cryptoModule)).publicKey,
+    );
+    const value = {
+      version: 1 as const,
+      storeId: storeIdBytes,
+      deliveryProfileHash: PROFILE_HASH,
+      ingressWindow: window,
+      status: "out-of-range" as const,
+    };
+    return encodePublicStoreCheckpointReadV1({
+      kind: "status",
+      value,
+      storeSignature: await sign(
+        await publicCheckpointStatusSigningHash(value),
+        secretKey,
+        cryptoModule,
+      ),
+    });
+  };
+
+  /** Checkpoint reads answered with `body`; everything else by the store. */
+  const answeringCheckpoints = (
+    store: StoreProcess,
+    body: Uint8Array,
+  ): typeof fetch =>
+    ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+        return Promise.resolve(
+          new Response(asBody(body), {
+            status: 200,
+            headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+          }),
+        );
+      return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+    }) as typeof fetch;
+
+  test("the descriptor states the store's retention and the client checks it", async () => {
+    const clock: Clock = { now: WINDOW_START };
+    const store = await startStore(clock, {
+      retentionWindows: PROTOTYPE_STORE_MIN_RETENTION_WINDOWS + 3,
+    });
+    try {
+      const client = await connect(store.origin, clock);
+      expect(client.descriptor.retentionWindows).toBe(
+        PROTOTYPE_STORE_MIN_RETENTION_WINDOWS + 3,
+      );
+
+      // The same store, signing a descriptor that states one window less
+      // than this client reads back, and a route bound to it.
+      const secretKey = await storeSecretKey();
+      const document = store.core.descriptorDocument();
+      const shortDraft = {
+        ...document.descriptor,
+        retentionWindows: PROTOTYPE_READ_BACK_WINDOWS - 1,
+      };
+      const short = {
+        ...shortDraft,
+        descriptorSignature: await sign(
+          await storeDescriptorSignedMessage(shortDraft),
+          secretKey,
+          cryptoModule,
+        ),
+      };
+      const routeDraft = {
+        ...document.routes[0],
+        descriptorHash: await descriptorHash(short),
+      };
+      const route = {
+        ...routeDraft,
+        routeSignature: await sign(
+          await storeRouteSignedMessage(routeDraft),
+          secretKey,
+          cryptoModule,
+        ),
+      };
+      const serving = (descriptorBytes: Uint8Array): typeof fetch =>
+        ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          if (url.pathname === PROTOTYPE_STORE_ROUTES.descriptor)
+            return Promise.resolve(
+              new Response(asBody(descriptorBytes), {
+                status: 200,
+                headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.descriptor),
+              }),
+            );
+          return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+        }) as typeof fetch;
+      await expect(
+        connect(store.origin, clock, {
+          fetch: serving(
+            encodePrototypeStoreDescriptorDocumentV1({
+              descriptor: short,
+              routes: [route],
+            }),
+          ),
+        }),
+      ).rejects.toMatchObject({ name: "StoreRetentionError" });
+
+      // A retention changed without the store's signature is no descriptor.
+      await expect(
+        connect(store.origin, clock, {
+          fetch: serving(
+            encodePrototypeStoreDescriptorDocumentV1({
+              ...document,
+              descriptor: {
+                ...document.descriptor,
+                retentionWindows: PROTOTYPE_STORE_MIN_RETENTION_WINDOWS + 99,
+              },
+            }),
+          ),
+        }),
+      ).rejects.toThrow(StoreClientError);
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("out-of-range inside the stated retention is a fault with evidence", async () => {
+    await withStore(async (store, clock) => {
+      const refusal = await signedOutOfRange(CHAIN_START);
+      const client = await connect(store.origin, clock, {
+        fetch: answeringCheckpoints(store, refusal),
+      });
+      // A promise of custody for the window, then its checkpoint refused as
+      // out of range one window later: well inside the stated retention.
+      await appendObject(client, CHAIN_START, 0x61);
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+
+      const scan = await client.scanWindow(CHAIN_START);
+      expect(scan.status).toBe("unreachable");
+      expect(client.inert).toBe(true);
+      const breach = client.faults.find(
+        (fault) => fault.kind === "retention-breach",
+      );
+      expect(breach?.window).toBe(CHAIN_START);
+      // The store's own signed answer, byte for byte.
+      expect(hex(breach?.evidence ?? new Uint8Array(0))).toBe(hex(refusal));
+      // And the receipt it held for that window is reported, not dropped.
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "retention-breach",
+        "custody-unchecked",
+      ]);
+    });
+  });
+
+  test("out-of-range beyond the stated retention is a distinct scan result", async () => {
+    const clock: Clock = { now: WINDOW_START };
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const store = await startStore(clock, { retentionWindows: retention });
+    try {
+      const client = await connect(store.origin, clock);
+      await appendObject(client, CHAIN_START, 0x71);
+      clock.now = FINALIZE_AT;
+      await store.core.finalizeDue();
+      // Past the retention the store states, on both clocks.
+      clock.now =
+        WINDOW_START + BigInt(retention + 1) * profile.deliveryWindowMs;
+      const scan = await client.scanWindow(CHAIN_START);
+      expect(scan.status).toBe("beyond-retention");
+      expect(scan.objects).toEqual([]);
+      expect(client.inert).toBe(false);
+      // The receipt held for that window is reported, not dropped.
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "custody-unchecked",
+      ]);
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("a breach record is never dropped because of unacknowledged reports", async () => {
+    await withStore(
+      async (store, clock) => {
+        // The first 600 appends this client sends are never answered; each is
+        // reported unacknowledged at its window's scan, past the fault cap.
+        let held = 600;
+        const holding: typeof fetch = ((
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ) => {
+          const url = new URL(String(input));
+          if (
+            init?.method === "POST" &&
+            url.pathname === PROTOTYPE_STORE_ROUTES.append &&
+            held > 0
+          ) {
+            held -= 1;
+            return new Promise<Response>(() => undefined);
+          }
+          return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+        }) as typeof fetch;
+        const client = await connect(store.origin, clock, { fetch: holding });
+        const { lease, secretKey } = await leaseFor(client, CHAIN_START);
+        const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x81);
+        const admission = await buildAppendAdmission(
+          lease,
+          secretKey,
+          0,
+          0,
+          object,
+          cryptoModule,
+        );
+        for (let index = 0; index < 600; index++)
+          void client.append(CHAIN_START, 0, object, admission);
+        while (held > 0) await Bun.sleep(0);
+
+        // Then a withheld object in the next window, answered `stored`.
+        clock.now = WINDOW_START + profile.deliveryWindowMs;
+        await appendObject(client, CHAIN_START + 1n, 0x82);
+        clock.now = NEXT_FINALIZE_AT;
+        await store.core.finalizeDue();
+        await client.scanWindow(CHAIN_START);
+        await client.scanWindow(CHAIN_START + 1n);
+
+        const kinds = client.faults.map((fault) => fault.kind);
+        expect(
+          kinds.filter((kind) => kind === "custody-unacknowledged").length,
+        ).toBeGreaterThan(500);
+        expect(client.inert).toBe(true);
+        expect(
+          client.faults.filter((fault) => fault.kind === "custody-breach"),
+        ).toEqual([expect.objectContaining({ window: CHAIN_START + 1n })]);
+      },
+      { fault: "withhold" },
+    );
+  });
+
+  test("a busy store's 503 is an unreachable answer, not misbehaviour", async () => {
+    await withStore(async (store, clock) => {
+      const busy: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (init?.method === "POST")
+          return Promise.resolve(
+            new Response("busy", {
+              status: 503,
+              headers: headersOf("text/plain; charset=utf-8"),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+      const client = await connect(store.origin, clock, { fetch: busy });
+      const keyPair = await newKeyPair(cryptoModule);
+      const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x91);
+      // The runtime already handles both: a missing lease and an unanswered
+      // append are reported missed, and the entry waits for its next slot.
+      expect(await client.allocate(CHAIN_START, keyPair)).toBeNull();
+      expect(await client.append(CHAIN_START, 0, object, null)).toBeNull();
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "unreachable",
+        "unreachable",
+      ]);
+      expect(client.inert).toBe(false);
+    });
   });
 });

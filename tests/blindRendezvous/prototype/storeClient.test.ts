@@ -17,6 +17,7 @@ import {
 import {
   ingressWindowStartMs,
   publicStoreCheckpointHash,
+  publicStoreCheckpointSigningHash,
 } from "../../../src/blindRendezvous/publicWindow";
 import {
   descriptorHash,
@@ -3818,4 +3819,384 @@ describe("prototype store client signed refusals", () => {
       "store-clock-disagreement",
     ]);
   }, 120_000);
+});
+
+/* ------------------------------------------------------------------ *
+ * The verified run
+ *
+ * What a scan costs this client, counted rather than timed: Ed25519
+ * verifications through a module that counts every `_verify` call, and the
+ * SHA-256 of carrier objects through WebCrypto. Both are the real module;
+ * nothing of the client is replaced.
+ * ------------------------------------------------------------------ */
+
+describe("prototype store client verified run", () => {
+  const CHUNKS_PER_WINDOW = profile.sizeClasses.reduce(
+    (total, sizeClass) => total + sizeClass.publicChunksPerWindow,
+    0,
+  );
+  /** Every chunk signature, and the descriptor's and the checkpoint's own
+   * signature in the checkpoint's structural check: what any finalized scan
+   * verifies of its own answers. */
+  const OWN_VERIFICATIONS = CHUNKS_PER_WINDOW + 2;
+  /** What the full chain verifier adds per observation it re-verifies. */
+  const PER_REVERIFIED_OBSERVATION = 2;
+
+  const OBJECT_BYTES = new Set(
+    profile.sizeClasses.map((sizeClass) =>
+      carrierObjectWireBytes(profile, sizeClass.id, PROFILE_HASH),
+    ),
+  );
+
+  /** `cryptoModule`, with every Ed25519 verification counted. */
+  const countingModule = (): {
+    readonly module: LibCrypto;
+    readonly take: () => number;
+  } => {
+    let count = 0;
+    const module = new Proxy(cryptoModule, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (property !== "_verify" || typeof value !== "function") return value;
+        return (...args: unknown[]): unknown => {
+          count += 1;
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+    return {
+      module,
+      take: () => {
+        const taken = count;
+        count = 0;
+        return taken;
+      },
+    };
+  };
+
+  /** One scan, with the verifications it made and the carrier objects it
+   * hashed (a SHA-256 over exactly one object's wire length). */
+  const countedScan = async (
+    client: PrototypeStoreClient,
+    counting: ReturnType<typeof countingModule>,
+    window: bigint,
+  ): Promise<{
+    readonly status: string;
+    readonly verifications: number;
+    readonly objectHashes: number;
+  }> => {
+    counting.take();
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let objectHashes = 0;
+    const spy = spyOn(crypto.subtle, "digest").mockImplementation(
+      async (algorithm, data) => {
+        const length = ArrayBuffer.isView(data)
+          ? data.byteLength
+          : (data as ArrayBuffer).byteLength;
+        if (OBJECT_BYTES.has(length)) objectHashes += 1;
+        return digest(algorithm, data);
+      },
+    );
+    try {
+      const scan = await client.scanWindow(window);
+      return {
+        status: scan.status,
+        verifications: counting.take(),
+        objectHashes,
+      };
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  const connectCounting = async (
+    origin: string,
+    clock: Clock,
+    counting: ReturnType<typeof countingModule>,
+    fetchOverride?: typeof fetch,
+  ): Promise<PrototypeStoreClient> =>
+    PrototypeStoreClient.connect({
+      origin,
+      profile,
+      profileHash: PROFILE_HASH,
+      module: counting.module,
+      fetch: fetchOverride,
+      nowMs: () => clock.now,
+    });
+
+  /** Finalize every window from the chain start through `last`. */
+  const finalizeThrough = async (
+    store: StoreProcess,
+    clock: Clock,
+    last: bigint,
+  ): Promise<void> => {
+    clock.now = FINALIZE_AT + (last - CHAIN_START) * profile.deliveryWindowMs;
+    while ((await store.core.finalizeDue()).length > 0);
+  };
+
+  test("scan verifies only new checkpoints", async () => {
+    await withStore(async (store, clock) => {
+      const counting = countingModule();
+      const client = await connectCounting(store.origin, clock, counting);
+      const WINDOWS = 6;
+      await finalizeThrough(store, clock, CHAIN_START + BigInt(WINDOWS - 1));
+
+      const scans = [];
+      for (let offset = 0; offset < WINDOWS; offset++)
+        scans.push(
+          await countedScan(client, counting, CHAIN_START + BigInt(offset)),
+        );
+      // The first scan builds the run with the full verifier over its one
+      // observation; every later one checks its own answers and how its
+      // checkpoint links to the run, by the hashes kept for it. Before the
+      // run was kept, scan n re-verified all n observations.
+      expect(scans).toEqual(
+        Array.from({ length: WINDOWS }, (_, offset) => ({
+          status: "finalized",
+          verifications:
+            OWN_VERIFICATIONS + (offset === 0 ? PER_REVERIFIED_OBSERVATION : 0),
+          objectHashes: OBJECTS_PER_WINDOW,
+        })),
+      );
+
+      // A window read again: its answers are checked again, its checkpoint
+      // is already in the run, and its objects are not hashed again.
+      for (const offset of [0, WINDOWS - 1])
+        expect(
+          await countedScan(client, counting, CHAIN_START + BigInt(offset)),
+        ).toEqual({
+          status: "finalized",
+          verifications: OWN_VERIFICATIONS,
+          objectHashes: 0,
+        });
+      expect(client.faults).toEqual([]);
+      expect(client.inert).toBe(false);
+    });
+  });
+
+  test("a checkpoint that does not link to its neighbour in the verified run is a chain fault", async () => {
+    // Two processes holding one key are one store with two branches: each
+    // fills its unoccupied slots from its own CSPRNG, so their chains differ
+    // from the chain start on, and each is consistent on its own.
+    const clock: Clock = { now: WINDOW_START };
+    const first = await startStore(clock);
+    const second = await startStore(clock);
+    try {
+      clock.now = FINALIZE_AT + profile.deliveryWindowMs;
+      await first.core.finalizeDue();
+      await second.core.finalizeDue();
+      // The run holds the predecessor, then the successor.
+      for (const [held, added] of [
+        [CHAIN_START, CHAIN_START + 1n],
+        [CHAIN_START + 1n, CHAIN_START],
+      ] as const) {
+        let origin = first.origin;
+        const branch = ((input: RequestInfo | URL, init?: RequestInit) =>
+          fetch(
+            `${origin}${new URL(String(input)).pathname}`,
+            init,
+          )) as typeof fetch;
+        const client = await connect(first.origin, clock, { fetch: branch });
+        expect((await client.scanWindow(held)).status).toBe("finalized");
+        expect(client.faults).toEqual([]);
+        origin = second.origin;
+        expect((await client.scanWindow(added)).status).toBe("finalized");
+        expect(client.inert).toBe(true);
+        expect(client.faults.map((fault) => fault.kind)).toEqual([
+          "chain-fault",
+        ]);
+        expect(client.faults[0].detail).toContain("chain-breach");
+      }
+    } finally {
+      first.stop();
+      second.stop();
+    }
+  });
+
+  test("the verified run is dropped on blame, on a changed descriptor and on reconnect", async () => {
+    // Blame: a store that acknowledges an append it never binds.
+    await withStore(
+      async (store, clock) => {
+        const counting = countingModule();
+        const client = await connectCounting(store.origin, clock, counting);
+        await finalizeThrough(store, clock, CHAIN_START + 2n);
+        for (let offset = 0n; offset < 3n; offset++)
+          await countedScan(client, counting, CHAIN_START + offset);
+
+        clock.now = WINDOW_START + 3n * profile.deliveryWindowMs;
+        await appendObject(client, CHAIN_START + 3n, 0x41);
+        await finalizeThrough(store, clock, CHAIN_START + 4n);
+        expect(
+          (await countedScan(client, counting, CHAIN_START + 3n)).verifications,
+        ).toBe(OWN_VERIFICATIONS);
+        expect(client.inert).toBe(true);
+        expect(client.faults.map((fault) => fault.kind)).toEqual([
+          "custody-breach",
+        ]);
+        // Distrusted now: the next scan re-verifies the whole run of five,
+        // and the one after it extends the rebuilt run again.
+        expect(
+          (await countedScan(client, counting, CHAIN_START + 4n)).verifications,
+        ).toBe(OWN_VERIFICATIONS + 5 * PER_REVERIFIED_OBSERVATION);
+        await finalizeThrough(store, clock, CHAIN_START + 5n);
+        expect(
+          (await countedScan(client, counting, CHAIN_START + 5n)).verifications,
+        ).toBe(OWN_VERIFICATIONS);
+      },
+      { fault: "withhold" },
+    );
+
+    // Blame on the store's own signed words: an `out-of-range` for window 3,
+    // signed at window 4, inside the retention its descriptor states.
+    await withStore(async (store, clock) => {
+      await finalizeThrough(store, clock, CHAIN_START + 4n);
+      const value = {
+        version: 1 as const,
+        storeId: store.core.storeId,
+        descriptorHash: store.core.descriptorHash,
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: CHAIN_START + 3n,
+        storeIngressWindow: CHAIN_START + 4n,
+        status: "out-of-range" as const,
+      };
+      const refusal = encodePublicStoreCheckpointReadV1({
+        kind: "status",
+        value,
+        storeSignature: await sign(
+          await publicCheckpointStatusSigningHash(value),
+          await storeSecretKey(),
+          cryptoModule,
+        ),
+      });
+      const refusingWindow3 = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (
+          url.pathname ===
+          `${PROTOTYPE_STORE_ROUTES.checkpoint}/${PROFILE_HEX}/${String(CHAIN_START + 3n)}`
+        )
+          return Promise.resolve(
+            new Response(asBody(refusal), {
+              status: 200,
+              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}`, init);
+      }) as typeof fetch;
+      const counting = countingModule();
+      const client = await connectCounting(
+        store.origin,
+        clock,
+        counting,
+        refusingWindow3,
+      );
+      for (let offset = 0n; offset < 3n; offset++)
+        await countedScan(client, counting, CHAIN_START + offset);
+      expect(
+        (await countedScan(client, counting, CHAIN_START + 3n)).status,
+      ).toBe("unreachable");
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "retention-breach",
+      ]);
+      // Windows 0 to 2 and 4: the whole run again.
+      expect(
+        (await countedScan(client, counting, CHAIN_START + 4n)).verifications,
+      ).toBe(OWN_VERIFICATIONS + 4 * PER_REVERIFIED_OBSERVATION);
+    });
+
+    // A changed descriptor, and a reconnect.
+    await withStore(async (store, clock) => {
+      await finalizeThrough(store, clock, CHAIN_START + 3n);
+      const secretKey = await storeSecretKey();
+      // A second descriptor under the same key, and window 3's checkpoint
+      // signed again under it: the same chunks and the same predecessor, so
+      // the chain stays one chain across the change.
+      const draft = { ...store.core.descriptor, descriptorGeneration: 2n };
+      const second: StoreDescriptorV1 = {
+        ...draft,
+        descriptorSignature: await sign(
+          await storeDescriptorSignedMessage(draft),
+          secretKey,
+          cryptoModule,
+        ),
+      };
+      const served = await store.core.readCheckpoint(
+        PROFILE_HASH,
+        CHAIN_START + 3n,
+      );
+      if (served.kind !== "finalized") throw new Error("expected a checkpoint");
+      const { storeSignature: _signature, ...body } = served.checkpoint;
+      const resignedBody = {
+        ...body,
+        descriptorHash: await descriptorHash(second),
+      };
+      const resigned = encodePublicStoreCheckpointReadV1({
+        kind: "finalized",
+        descriptor: second,
+        checkpoint: {
+          ...resignedBody,
+          storeSignature: await sign(
+            await publicStoreCheckpointSigningHash(resignedBody),
+            secretKey,
+            cryptoModule,
+          ),
+        },
+      });
+      const underSecond = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (
+          url.pathname ===
+          `${PROTOTYPE_STORE_ROUTES.checkpoint}/${PROFILE_HEX}/${String(CHAIN_START + 3n)}`
+        )
+          return Promise.resolve(
+            new Response(asBody(resigned), {
+              status: 200,
+              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}`, init);
+      }) as typeof fetch;
+
+      const counting = countingModule();
+      const client = await connectCounting(
+        store.origin,
+        clock,
+        counting,
+        underSecond,
+      );
+      for (let offset = 0n; offset < 3n; offset++)
+        await countedScan(client, counting, CHAIN_START + offset);
+      // Window 3 under the second descriptor: the run of four is verified
+      // again in full, then held under that descriptor.
+      expect(await countedScan(client, counting, CHAIN_START + 3n)).toEqual({
+        status: "finalized",
+        verifications: OWN_VERIFICATIONS + 4 * PER_REVERIFIED_OBSERVATION,
+        objectHashes: OBJECTS_PER_WINDOW,
+      });
+      expect(
+        (await countedScan(client, counting, CHAIN_START + 3n)).verifications,
+      ).toBe(OWN_VERIFICATIONS);
+      expect(client.faults).toEqual([]);
+
+      // A reconnect is a new client: nothing the first one verified carries
+      // over, so its first scan of a window the first client holds builds a
+      // run of its own.
+      const reconnecting = countingModule();
+      const reconnected = await connectCounting(
+        store.origin,
+        clock,
+        reconnecting,
+      );
+      expect(
+        (await countedScan(reconnected, reconnecting, CHAIN_START + 1n))
+          .verifications,
+      ).toBe(OWN_VERIFICATIONS + PER_REVERIFIED_OBSERVATION);
+      expect(
+        (await countedScan(reconnected, reconnecting, CHAIN_START + 2n))
+          .verifications,
+      ).toBe(OWN_VERIFICATIONS);
+    });
+  });
 });

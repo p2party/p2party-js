@@ -25,10 +25,11 @@
  *   mismatch refuses to start rather than equivocate.
  * - **The identity seed is created 0600 or not at all.**
  * - **Retention is swept on a timer.** `P2PARTY_STORE_RETENTION_WINDOWS` sets
- *   how many windows back the store serves (default
- *   `DEFAULT_STORE_RETENTION_WINDOWS`, 256, in `storeCore.ts`); the sweep
- *   starts with the server, deletes one bounded batch per tick, and stops at
- *   shutdown.
+ *   how many windows back the store serves and states in its descriptor
+ *   (default `PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS`, 256; at least
+ *   `PROTOTYPE_STORE_MIN_RETENTION_WINDOWS`, 67, what an honest client reads
+ *   back; both in `src/utils/constants.ts`); the sweep starts with the
+ *   server, deletes one bounded batch per tick, and stops at shutdown.
  *
  * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
  * registry.
@@ -39,6 +40,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { wasmLoader } from "../../../cryptography/wasmLoader";
+import { PROTOTYPE_STORE_SWEEP_INTERVAL_MS } from "../../../utils/constants";
 import { deliveryProfileHash } from "../../derivations";
 import { ingressWindow } from "../../publicWindow";
 import {
@@ -68,12 +70,12 @@ const DEFAULT_KEY_FILE = "./p2party-store-prototype.key";
 const DESCRIPTOR_VALIDITY_MS = 2_592_000_000n; // 30 days
 const FINALIZE_INTERVAL_MS = 250;
 /**
- * One sweep per second deletes up to `STORE_RETENTION_SWEEP_BATCH_WINDOWS`
+ * One sweep per interval deletes up to `PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS`
  * windows, against one new window every 4,000 ms at the pinned profile, so a
  * backlog drains and a steady store holds `retentionWindows` plus at most a
  * couple more.
  */
-const RETENTION_SWEEP_INTERVAL_MS = 1_000;
+const RETENTION_SWEEP_INTERVAL_MS = PROTOTYPE_STORE_SWEEP_INTERVAL_MS;
 const SEED_BYTES = 32;
 
 /**

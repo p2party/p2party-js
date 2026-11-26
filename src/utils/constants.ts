@@ -442,3 +442,47 @@ export const ROOM_ROSTER_RECONCILE_DEBOUNCE_MS = 4_000;
 export const SIGNALING_RECONNECT_DELAYS_MS = [
   1_000, 2_000, 4_000, 8_000, 15_000, 30_000,
 ];
+
+// ── Blind-rendezvous prototype store, client and carrier runtime ────────────
+// (prototype/store/*, prototype/storeClient.ts, prototype/carrierRuntime.ts)
+//
+// How far behind the clock a carrier runtime's schedule catches up, in windows.
+// A page suspended for longer gives the older windows up whole and reports
+// them missed, rather than coming back as a burst of every window it slept.
+export const PROTOTYPE_MAX_READ_WINDOWS = 64;
+// The furthest back, in windows, any request of an honest client lands at a
+// store: a catch-up read reaches MAX_READ_WINDOWS + 1 back (reads lag the
+// schedule by `publicReadLagWindows`), its answer may take up to one window
+// (the client's request deadline), and a store clock ahead by under a window
+// may already count one window more.
+export const PROTOTYPE_READ_BACK_WINDOWS = PROTOTYPE_MAX_READ_WINDOWS + 3;
+// A store's retention (inclusive, as `bucketIsReadable` defines it), stated in
+// its signed descriptor. A store refuses to start below the minimum and a
+// client refuses to use a store that states less, so no honest read ever
+// meets an expired window. The default is about 17 minutes at the pinned
+// 4,000 ms window and about 0.7 GB of idle rows per store.
+export const PROTOTYPE_STORE_MIN_RETENTION_WINDOWS =
+  PROTOTYPE_READ_BACK_WINDOWS;
+export const PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS = 256;
+// One retention sweep deletes at most this many window rows, and as many
+// witness windows; the entrypoint runs one per interval.
+export const PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS = 16;
+export const PROTOTYPE_STORE_SWEEP_INTERVAL_MS = 1_000;
+// Witness records one window holds from every caller together (the canonical
+// cap of the records array), and new records one admission quota key may add.
+export const PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
+export const PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_QUOTA_KEY = 8;
+// Units of work the store's mutation queue holds, queued and running. One
+// window's honest work at the pinned profile is 8 allocations and 40 slot
+// bindings; past the bound a request is answered 503 before it is queued.
+export const PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH = 64;
+// Bytes of an admission token: the allocation body's `privacyPassToken`, and
+// the `authorization: Bearer <hex>` value on append and witness.
+export const PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES = 32;
+// `PRAGMA user_version` of the store's SQLite schema.
+export const PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION = 1;
+// A store client tracks at most this many appends awaiting their answer, and
+// keeps slot hashes for this many scanned windows for receipts that arrive
+// after the scan.
+export const PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS = 1_024;
+export const PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS = 16;

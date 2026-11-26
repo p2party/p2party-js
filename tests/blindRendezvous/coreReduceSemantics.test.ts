@@ -1012,6 +1012,7 @@ describe("CoreReduce store and authority facts", () => {
             chainStartIngressWindow: 0n,
           },
         ],
+        retentionWindows: 256,
         notBeforeUnixMs: 0n,
         notAfterUnixMs: 1_000_000_000n,
         descriptorSignature: bytes(0, 64),

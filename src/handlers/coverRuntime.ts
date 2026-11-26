@@ -101,6 +101,15 @@ export interface CoverRuntimeOptions {
   readonly clock?: CoverClock;
 }
 
+/**
+ * True while the page is hidden: the condition under which scheduled cover
+ * stays armed on throttled timers (see CoverRuntime's visibility handler) and
+ * a scheduled send's delivery idle budget is held (scheduledCoverIsSuspended).
+ * False outside a browser.
+ */
+export const isPageHidden = (): boolean =>
+  typeof document !== "undefined" && document.visibilityState === "hidden";
+
 const realClock: CoverClock = {
   now: () => Date.now(),
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -448,10 +457,12 @@ export class CoverRuntime {
   // acknowledging, so its sender's idle budget ran out. The browser may
   // throttle a hidden page's timers; a cell that then fires past its drift
   // tolerance degrades the cycle, which the status reports, rather than
-  // pretending the gap was covered. The diagnostic names no peer and no room.
+  // pretending the gap was covered; a scheduled send's idle budget is held for
+  // as long as the page stays hidden (scheduledCoverIsSuspended). The
+  // diagnostic names no peer and no room.
   readonly #onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
-    if (document.visibilityState === "hidden")
+    if (isPageHidden())
       debugLog(
         "p2party: page hidden; scheduled cover stays armed, but the browser may throttle its timers, so late cells degrade the cycle",
       );

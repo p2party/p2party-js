@@ -757,12 +757,14 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
 
   // ── finding 1: a suspended job is not a stalled job ────────────────────────
   //
-  // CoverRuntime suspends the scheduler on visibilitychange→hidden, pagehide,
-  // freeze and offline. `CoverScheduler.suspend` REQUEUES but KEEPS the job, so
-  // the sender's only progress signal freezes while the send is perfectly
-  // healthy. Spending the idle budget through that gap abandons a live send,
-  // and `sendScheduled`'s CANCEL then deletes the receiver's partial — an
-  // ordinary user action (backgrounding a tab) destroying the peer's download.
+  // CoverRuntime suspends the scheduler on pagehide, freeze and offline (a
+  // hidden page keeps its schedule armed on throttled timers instead; see
+  // hiddenSenderBudget.test.ts). `CoverScheduler.suspend` REQUEUES but KEEPS the
+  // job, so the sender's only progress signal freezes while the send is
+  // perfectly healthy. Spending the idle budget through that gap abandons a
+  // live send, and `sendScheduled`'s CANCEL then deletes the receiver's partial
+  // — an ordinary user action (backgrounding a tab) destroying the peer's
+  // download. These tests suspend the scheduler directly.
   describe("a backgrounded tab is not a stalled send (finding 1)", () => {
     // Three whole budgets hidden: far beyond anything the idle bound tolerates
     // when it cannot tell "paused" from "stuck".

@@ -1447,9 +1447,11 @@ describe("the cover generation map does not grow without bound", () => {
     );
     try {
       installThrowawayEdge("busy-prune-512", "peer");
+      // The install wakes its waiter synchronously, so the watcher has settled
+      // before one event-loop turn passes; no timer is needed to tell.
       const advanced = await Promise.race([
         watchers[512],
-        new Promise<number>((resolve) => setTimeout(() => resolve(-1), 100)),
+        new Promise<number>((resolve) => setImmediate(() => resolve(-1))),
       ]);
       expect(advanced).toBeGreaterThan(0);
     } finally {

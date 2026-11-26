@@ -14,6 +14,7 @@ import {
   createSession,
   generateSessionIdentity,
   restoreSession,
+  SessionReplayError,
 } from "./session";
 import {
   generateMnemonic,
@@ -1885,6 +1886,7 @@ export const p2party = {
   createSession,
   restoreSession,
   generateSessionIdentity,
+  SessionReplayError,
   setWasmSourceUrl,
   DEFAULT_ROOM_POLICY_V1,
   encodeRoomPolicyV1,
@@ -1982,6 +1984,7 @@ export {
   createSession,
   restoreSession,
   generateSessionIdentity,
+  SessionReplayError,
   setWasmSourceUrl,
   MessageDeliveryError,
   RemoteRoomRevocationUnconfirmedError,

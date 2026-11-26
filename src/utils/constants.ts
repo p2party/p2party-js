@@ -19,6 +19,26 @@ export const MAX_MESSAGE_SIZE = 10 * 1024 * 1024 * 1024; // 10 GiB
 // the peer-to-peer data channel and reserves server relay for a genuinely
 // unavailable channel.
 export const MAX_BUFFERED_AMOUNT = 16 * MESSAGE_LEN;
+
+// ── Blind-rendezvous prototype data channel (prototype/webrtcProvider.ts) ────
+// Inbound bounds, one pair per lane. A remote endpoint may speak before local
+// certificate verification or session startup completes, and a reader may fall
+// behind its peer, so what arrives with no reader waiting is queued, up to these
+// bounds and no further. The control lane carries the protocol-v4 handshake
+// alone: at most three frames from the peer, the largest 3,329 bytes (an
+// ML-KEM-1024 HELLO). The app lane carries the message header and the uniform
+// chunk frames; 16 MiB is 256 of them. The frame counts bound the per-frame
+// overhead of tiny frames. The send side waits at MAX_BUFFERED_AMOUNT and
+// resumes at SEND_BUFFER_LOW_THRESHOLD, as the main app's sender does.
+export const PROTOTYPE_CONTROL_LANE_HIGH_WATER_BYTES = 64 * 1024;
+export const PROTOTYPE_CONTROL_LANE_MAX_FRAMES = 16;
+export const PROTOTYPE_APP_LANE_HIGH_WATER_BYTES = 16 * 1024 * 1024;
+export const PROTOTYPE_APP_LANE_MAX_FRAMES = 1024;
+// How long a graceful `stop()` of a prototype run waits for the data channel's
+// send buffer to drain before it closes the channel anyway. The same 5 s as the
+// default of `src/utils/drainAndClose.ts`.
+export const PROTOTYPE_STOP_DRAIN_TIMEOUT_MS = 5_000;
+
 export const NAME_LEN = 256;
 export const METADATA_LEN =
   8 + // schemaVersion (8 bytes)

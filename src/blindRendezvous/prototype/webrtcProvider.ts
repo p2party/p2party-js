@@ -13,8 +13,9 @@
  * state machinery. `verifyCertificates` therefore *copies* the certificate
  * comparison of `src/handlers/handleHandshake.ts` (`verifyDtlsFingerprints`)
  * rather than importing it — that function reaches the store through its
- * `IRTCPeerConnection` wrappers. The only import in this file is a type, which
- * `verbatimModuleSyntax` erases entirely at build time.
+ * `IRTCPeerConnection` wrappers. Its one runtime import is
+ * `src/utils/constants.ts`, which imports only `cryptography/interfaces`; the
+ * rest are types, which `verbatimModuleSyntax` erases at build time.
  *
  * Three properties of this file are load-bearing, and each one has cost a
  * debugging session before:
@@ -40,6 +41,15 @@
  * Status: PROTOTYPE. Nothing here is a v0.4 release byte.
  */
 
+import {
+  SEND_BUFFER_LOW_THRESHOLD,
+  MAX_BUFFERED_AMOUNT,
+  PROTOTYPE_APP_LANE_HIGH_WATER_BYTES,
+  PROTOTYPE_APP_LANE_MAX_FRAMES,
+  PROTOTYPE_CONTROL_LANE_HIGH_WATER_BYTES,
+  PROTOTYPE_CONTROL_LANE_MAX_FRAMES,
+} from "../../utils/constants";
+
 import type { TransportCandidateProvider } from "./pairDriver";
 import type { HandshakeTransport } from "../../session";
 
@@ -60,40 +70,19 @@ const TAG_APP = 1;
 
 const SHA256_FINGERPRINT_BYTES = 32;
 
-/**
+/*
  * Outbound backpressure, on the one send buffer both lanes share: the data
  * channel's own `bufferedAmount`. A frame is handed to the channel only while
- * that buffer holds at most `SEND_HIGH_WATER_BYTES`; above it, sends wait for
- * `bufferedamountlow`, which the channel fires once the buffer has drained to
- * `SEND_LOW_WATER_BYTES`. 1 MiB is sixteen uniform 65,490-byte chunk frames in
- * flight. A browser's send buffer is finite — the WebRTC specification has
- * `send()` throw `OperationError` when a frame does not fit — and without the
- * wait a large message would be handed to it all at once. Draining to half the
- * mark leaves the channel 512 KiB to send while the page refills it. Both
- * values are the main app's: `MAX_BUFFERED_AMOUNT` in `src/utils/constants.ts`
- * and half of it in `handleSendMessage.ts`.
- *
- * Exported for the tests. They belong in `src/utils/constants.ts`, which this
- * file does not import from: it has no runtime imports at all (see the header).
+ * that buffer holds at most `MAX_BUFFERED_AMOUNT` (1 MiB, sixteen uniform
+ * 65,490-byte chunk frames); above it, sends wait for `bufferedamountlow`,
+ * which the channel fires once the buffer has drained to
+ * `SEND_BUFFER_LOW_THRESHOLD`. Without the wait a large message would be
+ * handed to the browser's finite send buffer all at once. Measured in
+ * headless Chromium 159 (2026-11-26): `send()` threw `OperationError` ("send
+ * queue is full") once 16 MiB were buffered, and the channel stayed open —
+ * which is why a refused frame ends the lane here rather than waiting for a
+ * close. The inbound bounds are the `PROTOTYPE_*_LANE_*` constants.
  */
-export const SEND_HIGH_WATER_BYTES = 1024 * 1024;
-export const SEND_LOW_WATER_BYTES = SEND_HIGH_WATER_BYTES / 2;
-
-/**
- * Inbound bounds, one pair per lane. A remote endpoint may speak before local
- * certificate verification or session startup completes, and a reader may fall
- * behind its peer, so what arrives with no reader waiting is queued — up to
- * these bounds and no further.
- *
- * The control lane carries the protocol-v4 handshake alone: at most three
- * frames from the peer, the largest 3,329 bytes (an ML-KEM-1024 HELLO). The app
- * lane carries the message header and the uniform chunk frames; 16 MiB is 256
- * of them. The frame counts bound the per-frame overhead of tiny frames.
- */
-export const CONTROL_LANE_HIGH_WATER_BYTES = 64 * 1024;
-export const CONTROL_LANE_MAX_FRAMES = 16;
-export const APP_LANE_HIGH_WATER_BYTES = 16 * 1024 * 1024;
-export const APP_LANE_MAX_FRAMES = 1024;
 
 const channelTransports = new WeakMap<RTCDataChannel, DataChannelTransport>();
 
@@ -101,11 +90,48 @@ const utf8Encoder = new TextEncoder();
 /** Fatal: silently substituting U+FFFD would change the bytes the peer signed. */
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
+/**
+ * Why a `WebRtcProviderError` was raised, for a caller to switch on:
+ *   - `"closed"`: the data channel closed in order — the peer's graceful
+ *     close, or this end's after its send buffer drained — or was closing when
+ *     a frame was to be sent.
+ *   - `"errored"`: the data channel reported an error (an SCTP abort, a
+ *     transport failure).
+ *   - `"aborted"`: this endpoint ended the transport or the provider at once,
+ *     or is closing it and refuses new work.
+ *   - `"protocol"`: the peer broke the framing: a non-binary, empty,
+ *     unknown-lane or oversized frame.
+ *   - `"overflow"`: a lane's receive queue would pass its high-water mark;
+ *     the reader fell too far behind its peer.
+ *   - `"refused"`: the open channel refused a frame (`send()` threw); no later
+ *     frame may follow it.
+ *   - `"undrained"`: an orderly close ended with frames still unsent.
+ *   - `"cancelled"`: a receive was withdrawn by its caller before it took a
+ *     frame.
+ *   - `"certificate"`: the live DTLS certificates do not match the SDP.
+ *   - `"negotiation"`: offer/answer, ICE gathering, or a call this provider's
+ *     state or role does not allow.
+ */
+export type WebRtcProviderErrorReason =
+  | "closed"
+  | "errored"
+  | "aborted"
+  | "protocol"
+  | "overflow"
+  | "refused"
+  | "undrained"
+  | "cancelled"
+  | "certificate"
+  | "negotiation";
+
 /** Every failure raised by this module, so callers can tell it apart. */
 export class WebRtcProviderError extends Error {
-  constructor(message: string) {
+  readonly reason: WebRtcProviderErrorReason;
+
+  constructor(reason: WebRtcProviderErrorReason, message: string) {
     super(`webrtcProvider: ${message}`);
     this.name = "WebRtcProviderError";
+    this.reason = reason;
   }
 }
 
@@ -145,9 +171,13 @@ const expectedFingerprintHex = (
   label: string,
 ): string => {
   if (!(fingerprint instanceof Uint8Array))
-    throw new WebRtcProviderError(`${label} must be a Uint8Array`);
+    throw new WebRtcProviderError(
+      "negotiation",
+      `${label} must be a Uint8Array`,
+    );
   if (fingerprint.length !== SHA256_FINGERPRINT_BYTES)
     throw new WebRtcProviderError(
+      "negotiation",
       `${label} must be ${SHA256_FINGERPRINT_BYTES} bytes, got ${fingerprint.length}`,
     );
   return toHex(fingerprint);
@@ -155,13 +185,22 @@ const expectedFingerprintHex = (
 
 const decodeSdp = (bytes: Uint8Array, label: string): string => {
   if (!(bytes instanceof Uint8Array))
-    throw new WebRtcProviderError(`remote ${label} SDP must be a Uint8Array`);
+    throw new WebRtcProviderError(
+      "negotiation",
+      `remote ${label} SDP must be a Uint8Array`,
+    );
   if (bytes.length === 0)
-    throw new WebRtcProviderError(`remote ${label} SDP is empty`);
+    throw new WebRtcProviderError(
+      "negotiation",
+      `remote ${label} SDP is empty`,
+    );
   try {
     return utf8Decoder.decode(bytes);
   } catch {
-    throw new WebRtcProviderError(`remote ${label} SDP is not valid UTF-8`);
+    throw new WebRtcProviderError(
+      "negotiation",
+      `remote ${label} SDP is not valid UTF-8`,
+    );
   }
 };
 
@@ -189,13 +228,17 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
 
   constructor(options: WebRtcProviderOptions) {
     if (!options || typeof options !== "object")
-      throw new WebRtcProviderError("options are required");
+      throw new WebRtcProviderError("negotiation", "options are required");
     if (options.role !== "initiator" && options.role !== "responder")
-      throw new WebRtcProviderError('role must be "initiator" or "responder"');
+      throw new WebRtcProviderError(
+        "negotiation",
+        'role must be "initiator" or "responder"',
+      );
     const gatheringTimeoutMs =
       options.gatheringTimeoutMs ?? DEFAULT_GATHERING_TIMEOUT_MS;
     if (!Number.isFinite(gatheringTimeoutMs) || gatheringTimeoutMs <= 0)
       throw new WebRtcProviderError(
+        "negotiation",
         "gatheringTimeoutMs must be a positive finite number of milliseconds",
       );
 
@@ -237,7 +280,8 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new WebRtcProviderError("provider is closed");
+    if (this.#closed)
+      throw new WebRtcProviderError("aborted", "provider is closed");
   }
 
   /**
@@ -248,7 +292,9 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
    */
   channel(): Promise<RTCDataChannel> {
     if (this.#closed)
-      return Promise.reject(new WebRtcProviderError("provider is closed"));
+      return Promise.reject(
+        new WebRtcProviderError("aborted", "provider is closed"),
+      );
     if (this.#channel) return Promise.resolve(this.#channel);
     return new Promise<RTCDataChannel>((resolve, reject) => {
       this.#channelWaiters.push({ resolve, reject });
@@ -259,11 +305,18 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
   async createOffer(): Promise<Uint8Array> {
     this.#assertOpen();
     if (this.role !== "initiator")
-      throw new WebRtcProviderError("only the initiator may create an offer");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "only the initiator may create an offer",
+      );
     if (this.#offerCreated)
-      throw new WebRtcProviderError("createOffer() may only be called once");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "createOffer() may only be called once",
+      );
     if (!this.#channel)
       throw new WebRtcProviderError(
+        "negotiation",
         "the bootstrap data channel must exist before the offer",
       );
     this.#offerCreated = true;
@@ -278,9 +331,15 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
   async acceptOffer(remoteSdp: Uint8Array): Promise<Uint8Array> {
     this.#assertOpen();
     if (this.role !== "responder")
-      throw new WebRtcProviderError("only the responder may accept an offer");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "only the responder may accept an offer",
+      );
     if (this.#offerAccepted)
-      throw new WebRtcProviderError("acceptOffer() may only be called once");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "acceptOffer() may only be called once",
+      );
     const sdp = decodeSdp(remoteSdp, "offer");
     this.#offerAccepted = true;
 
@@ -295,9 +354,15 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
   async acceptAnswer(remoteSdp: Uint8Array): Promise<void> {
     this.#assertOpen();
     if (this.role !== "initiator")
-      throw new WebRtcProviderError("only the initiator may accept an answer");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "only the initiator may accept an answer",
+      );
     if (this.#answerAccepted)
-      throw new WebRtcProviderError("acceptAnswer() may only be called once");
+      throw new WebRtcProviderError(
+        "negotiation",
+        "acceptAnswer() may only be called once",
+      );
     const sdp = decodeSdp(remoteSdp, "answer");
     this.#answerAccepted = true;
 
@@ -381,11 +446,13 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
 
     if (liveLocal === null || liveLocal !== expectedLocal)
       throw new WebRtcProviderError(
+        "certificate",
         "DTLS fingerprint mismatch: the local certificate was not found in the " +
           "stats report or does not match the local SDP fingerprint",
       );
     if (liveRemote === null || liveRemote !== expectedRemote)
       throw new WebRtcProviderError(
+        "certificate",
         "DTLS fingerprint mismatch: the remote certificate was not found in the " +
           "stats report or does not match the remote SDP fingerprint (possible MITM)",
       );
@@ -405,6 +472,7 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
     for (const waiter of waiters)
       waiter.reject(
         new WebRtcProviderError(
+          "aborted",
           "provider closed before a data channel arrived",
         ),
       );
@@ -422,6 +490,7 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
     const sdp = this.peerConnection.localDescription?.sdp;
     if (!sdp)
       throw new WebRtcProviderError(
+        "negotiation",
         `no local ${label} SDP after ICE gathering completed`,
       );
     // Exactly what the peer signs over: the description's own UTF-8 bytes.
@@ -457,12 +526,18 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
         if (pc.iceGatheringState === "complete") settle();
       };
       const abort = (): void =>
-        settle(new WebRtcProviderError("provider closed while gathering ICE"));
+        settle(
+          new WebRtcProviderError(
+            "aborted",
+            "provider closed while gathering ICE",
+          ),
+        );
 
       const timer = setTimeout(
         () =>
           settle(
             new WebRtcProviderError(
+              "negotiation",
               `ICE gathering did not complete within ${this.#gatheringTimeoutMs}ms`,
             ),
           ),
@@ -483,17 +558,36 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
  */
 export interface DataChannelTransport extends HandshakeTransport {
   /**
-   * Resolves once the frame is in the data channel's buffer. Frames of both
-   * lanes enter the channel in call order, whether or not each call is
-   * awaited; a call made while the buffer is above `SEND_HIGH_WATER_BYTES`
-   * waits for it to drain.
+   * Resolves once the frame is in the data channel's send buffer, which is
+   * not delivery. Frames of both lanes enter the channel in call order,
+   * whether or not each call is awaited; a call made while the buffer is above
+   * `MAX_BUFFERED_AMOUNT` waits for it to drain.
    */
   send(bytes: Uint8Array): Promise<void>;
   sendApp(bytes: Uint8Array): Promise<void>;
-  recvApp(): Promise<Uint8Array>;
+  /**
+   * The next frame of the lane, in arrival order. Aborting `signal` before a
+   * frame arrives withdraws the receive — it rejects with reason
+   * `"cancelled"` and takes nothing, so the next frame goes to the next
+   * receive. Without a signal a receive cannot be withdrawn: a caller that
+   * stops waiting on it would let it take the next frame unseen.
+   */
+  recv(signal?: AbortSignal): Promise<Uint8Array>;
+  recvApp(signal?: AbortSignal): Promise<Uint8Array>;
+  /**
+   * An orderly close. Receiving ends at once, as on `close()`, and new sends
+   * are refused; the frames already queued keep leaving. Once the channel's
+   * send buffer is empty the channel is closed, and the promise resolves on
+   * its `close` event. It rejects with a `WebRtcProviderError` if the
+   * transport ends first with frames still unsent — the peer closed, the
+   * channel refused a frame, or `close()` aborted the wait — since those may
+   * never reach the peer. It has no deadline of its own: the caller bounds it
+   * and calls `close()` to stop waiting.
+   */
+  closeAfterSending(): Promise<void>;
   /**
    * A local abort: discards every queued frame, rejects every pending receive
-   * and send, and closes the underlying channel.
+   * and send, and closes the underlying channel at once.
    */
   close(): void;
 }
@@ -516,24 +610,33 @@ interface PendingSend {
   readonly reject: (error: Error) => void;
 }
 
+interface GracefulClose {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (error: Error) => void;
+}
+
 /**
  * Frame the two lanes over one `RTCDataChannel` as `[tag(1)][payload]`, the
  * same framing `docs/e2e/webrtc-e2e/entry.ts` proved against real Chromium.
  *
  * RECEIVING. Anything that arrives with no waiter is queued on its lane, and
  * waiters are served FIFO. Each lane has a byte high-water mark and a frame
- * count (the `*_LANE_*` constants above), and a frame that would take its lane
- * past either ends the transport. `RTCDataChannel` delivers every message as
- * an event and has no way to pause that, and telling the peer to slow down
- * would need a frame this framing does not have, so a reader that falls more
- * than one high-water mark behind its peer loses the edge, with a typed error,
+ * count (`PROTOTYPE_*_LANE_*`), and a frame that would take its lane past
+ * either ends the transport. `RTCDataChannel` delivers every message as an
+ * event and has no way to pause that, and telling the peer to slow down would
+ * need a frame this framing does not have, so a reader that falls more than
+ * one high-water mark behind its peer loses the edge, with a typed error,
  * rather than the page's memory.
  *
  * ENDING. Who ends the transport decides what happens to queued frames:
  *   - The channel ends it (`close`, or `error` then `close`): frames already
  *     delivered stay readable, and a reader drains them before it observes the
- *     end. A peer that sends and then closes is the normal case: the messages
- *     this endpoint received before the close are dispatched before it. A
+ *     end. A peer that sends and then closes is the normal case. Measured in
+ *     headless Chromium 159 over loopback (2026-11-26): a peer that called
+ *     `RTCDataChannel.close()` with 8 MiB still buffered had all 512 of its
+ *     messages dispatched here before the `close` event and none after; one
+ *     that called `RTCPeerConnection.close()` instead had 2 of 512 arrive. A
  *     frame never arrives in part: a data channel message is whole or absent.
  *   - This endpoint ends it — `close()`, which `WebRtcCandidateProvider.close()`
  *     calls before it closes the connection, a lane past its bound, or a frame
@@ -541,6 +644,8 @@ interface PendingSend {
  *     pending receive rejects at once, so shutdown cannot later continue a
  *     handshake from stale input. A local abort after the channel ended still
  *     discards what that end kept.
+ *   - `closeAfterSending()` ends receiving the same way, then lets the send
+ *     buffer drain before it closes the channel.
  * Either way every pending and later send rejects with the same
  * `WebRtcProviderError`, and a frame still waiting to be sent never is.
  *
@@ -561,7 +666,7 @@ export const dataChannelTransport = (
   const existing = channelTransports.get(channel);
   if (existing) return existing;
   channel.binaryType = "arraybuffer";
-  channel.bufferedAmountLowThreshold = SEND_LOW_WATER_BYTES;
+  channel.bufferedAmountLowThreshold = SEND_BUFFER_LOW_THRESHOLD;
 
   const lane = (
     name: Lane["name"],
@@ -577,42 +682,76 @@ export const dataChannelTransport = (
   });
   const control = lane(
     "control",
-    CONTROL_LANE_HIGH_WATER_BYTES,
-    CONTROL_LANE_MAX_FRAMES,
+    PROTOTYPE_CONTROL_LANE_HIGH_WATER_BYTES,
+    PROTOTYPE_CONTROL_LANE_MAX_FRAMES,
   );
-  const app = lane("app", APP_LANE_HIGH_WATER_BYTES, APP_LANE_MAX_FRAMES);
+  const app = lane(
+    "app",
+    PROTOTYPE_APP_LANE_HIGH_WATER_BYTES,
+    PROTOTYPE_APP_LANE_MAX_FRAMES,
+  );
   const outbox: PendingSend[] = [];
-  /** Set once, when the transport ends; receives see it once drained. */
+  /** Set once, when the transport ends. */
   let ended: WebRtcProviderError | null = null;
+  /** Set once, when receiving ends; receives see it once their lane drained. */
+  let receivingEnded: WebRtcProviderError | null = null;
   /** Set once, when the channel refused a frame; sends only. */
   let refused: WebRtcProviderError | null = null;
+  /** True once a frame this transport accepted can no longer leave. */
+  let lostFrames = false;
+  /** Whether frames were still unsent when the transport ended. */
+  let unsentAtEnd = false;
+  /** The orderly close in progress, once `closeAfterSending()` was called. */
+  let graceful: GracefulClose | null = null;
   /** True inside `flush`, which a channel may re-enter from its `send()`. */
   let flushing = false;
 
+  const unsent = (): boolean =>
+    lostFrames || outbox.length > 0 || channel.bufferedAmount > 0;
+
   const rejectSends = (error: WebRtcProviderError): void => {
     const pending = outbox.splice(0);
+    if (pending.length > 0) lostFrames = true;
     for (const send of pending) send.reject(error);
   };
 
-  const end = (error: WebRtcProviderError, discard: boolean): void => {
-    if (discard)
-      for (const each of [control, app]) {
-        each.queue.length = 0;
-        each.bytes = 0;
-      }
-    if (ended) return;
-    ended = error;
-    channel.removeEventListener("message", onMessage);
-    channel.removeEventListener("close", onClose);
-    channel.removeEventListener("error", onError);
-    channel.removeEventListener("bufferedamountlow", flush);
-    // A lane has waiters only while its queue is empty, so these readers have
-    // nothing left to drain.
+  const discardQueues = (): void => {
+    for (const each of [control, app]) {
+      each.queue.length = 0;
+      each.bytes = 0;
+    }
+  };
+
+  /** A lane has waiters only while its queue is empty: nothing left to drain. */
+  const endReceiving = (error: WebRtcProviderError): void => {
+    receivingEnded ??= error;
     for (const each of [control, app]) {
       const waiters = each.waiters.splice(0);
       for (const waiter of waiters) waiter.reject(error);
     }
+  };
+
+  const end = (error: WebRtcProviderError, discard: boolean): void => {
+    if (discard) discardQueues();
+    if (ended) return;
+    ended = error;
+    unsentAtEnd = unsent();
+    channel.removeEventListener("message", onMessage);
+    channel.removeEventListener("close", onClose);
+    channel.removeEventListener("error", onError);
+    channel.removeEventListener("bufferedamountlow", flush);
+    endReceiving(error);
     rejectSends(error);
+    if (graceful !== null) {
+      if (unsentAtEnd)
+        graceful.reject(
+          new WebRtcProviderError(
+            "undrained",
+            `the transport ended with frames still unsent: ${error.message}`,
+          ),
+        );
+      else graceful.resolve();
+    }
     if (channel.readyState !== "closed" && channel.readyState !== "closing")
       channel.close();
   };
@@ -630,6 +769,7 @@ export const dataChannelTransport = (
     ) {
       abort(
         new WebRtcProviderError(
+          "overflow",
           `the ${target.name} lane receive queue would pass its high-water mark ` +
             `(${target.highWaterBytes} bytes, ${target.maxFrames} frames): ` +
             "the reader is too far behind the peer",
@@ -645,6 +785,7 @@ export const dataChannelTransport = (
     if (!(event.data instanceof ArrayBuffer)) {
       abort(
         new WebRtcProviderError(
+          "protocol",
           "data channel delivered a non-binary frame; the lane framing is binary only",
         ),
       );
@@ -652,7 +793,12 @@ export const dataChannelTransport = (
     }
     const bytes = new Uint8Array(event.data);
     if (bytes.length === 0) {
-      abort(new WebRtcProviderError("data channel delivered an empty frame"));
+      abort(
+        new WebRtcProviderError(
+          "protocol",
+          "data channel delivered an empty frame",
+        ),
+      );
       return;
     }
     const target =
@@ -660,6 +806,7 @@ export const dataChannelTransport = (
     if (target === null) {
       abort(
         new WebRtcProviderError(
+          "protocol",
           `data channel frame carried unknown lane tag ${bytes[0]}`,
         ),
       );
@@ -668,6 +815,7 @@ export const dataChannelTransport = (
     if (bytes.length - 1 > target.highWaterBytes) {
       abort(
         new WebRtcProviderError(
+          "protocol",
           `a ${bytes.length - 1}-byte ${target.name} frame exceeds the lane's ` +
             `${target.highWaterBytes}-byte high-water mark`,
         ),
@@ -678,18 +826,19 @@ export const dataChannelTransport = (
   };
 
   const onClose = (): void => {
-    end(new WebRtcProviderError("data channel closed"), false);
+    end(new WebRtcProviderError("closed", "data channel closed"), false);
   };
   const onError = (): void => {
-    end(new WebRtcProviderError("data channel errored"), false);
+    end(new WebRtcProviderError("errored", "data channel errored"), false);
   };
 
   /**
    * Hand queued frames to the channel, in order, while its buffer is at or
-   * under the high-water mark. Runs on every send and on every drain; an event
-   * that finds the buffer still above the mark releases nothing. A call from
-   * inside the loop returns at once: the loop re-reads the buffer before every
-   * frame, so it misses no drain, and frames cannot overtake each other.
+   * under the high-water mark, then close it if an orderly close is waiting
+   * for that. Runs on every send and on every drain; an event that finds the
+   * buffer still above the mark releases nothing. A call from inside the loop
+   * returns at once: the loop re-reads the buffer before every frame, so it
+   * misses no drain, and frames cannot overtake each other.
    */
   function flush(): void {
     if (flushing) return;
@@ -699,13 +848,15 @@ export const dataChannelTransport = (
     } finally {
       flushing = false;
     }
+    closeIfDrained();
   }
 
   function flushQueued(): void {
     while (outbox.length > 0 && ended === null && refused === null) {
-      if (channel.bufferedAmount > SEND_HIGH_WATER_BYTES) return;
+      if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) return;
       if (channel.readyState !== "open") {
         refused = new WebRtcProviderError(
+          "closed",
           `data channel is "${channel.readyState}", not "open"`,
         );
         rejectSends(refused);
@@ -718,11 +869,15 @@ export const dataChannelTransport = (
       try {
         channel.send(next.framed);
       } catch (error) {
+        // A channel that stopped being open is closing; one that is still
+        // open refused this frame itself.
         refused = new WebRtcProviderError(
+          channel.readyState === "open" ? "refused" : "closed",
           `data channel refused a frame: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
+        lostFrames = true;
         next.reject(refused);
         rejectSends(refused);
         return;
@@ -731,19 +886,45 @@ export const dataChannelTransport = (
     }
   }
 
+  /**
+   * The last step of an orderly close: once nothing is queued and the buffer
+   * is empty, close the channel; its `close` event ends the transport and
+   * settles the close. To hear the buffer reach zero, the threshold is lowered
+   * first and the buffer read after, so a drain in between is not missed.
+   */
+  function closeIfDrained(): void {
+    if (graceful === null || ended !== null) return;
+    if (refused !== null) {
+      abort(refused);
+      return;
+    }
+    if (outbox.length > 0) return;
+    if (channel.bufferedAmount > 0) {
+      channel.bufferedAmountLowThreshold = 0;
+      if (channel.bufferedAmount > 0) return;
+    }
+    channel.close();
+    // A channel already closed fires no further `close` event.
+    if (ended === null && channel.readyState === "closed") onClose();
+  }
+
   channel.addEventListener("message", onMessage);
   channel.addEventListener("close", onClose);
   channel.addEventListener("error", onError);
   channel.addEventListener("bufferedamountlow", flush);
   if (channel.readyState === "closed" || channel.readyState === "closing")
-    end(new WebRtcProviderError("data channel already closed"), false);
+    end(
+      new WebRtcProviderError("closed", "data channel already closed"),
+      false,
+    );
 
   const sendTagged = (tag: number, bytes: Uint8Array): Promise<void> => {
-    const refusal = ended ?? refused;
+    const refusal = ended ?? refused ?? (graceful ? receivingEnded : null);
     if (refusal) return Promise.reject(refusal);
     if (channel.readyState !== "open")
       return Promise.reject(
         new WebRtcProviderError(
+          "closed",
           `data channel is "${channel.readyState}", not "open"`,
         ),
       );
@@ -758,25 +939,86 @@ export const dataChannelTransport = (
     });
   };
 
-  const receive = (source: Lane): Promise<Uint8Array> => {
+  const cancelled = (): WebRtcProviderError =>
+    new WebRtcProviderError(
+      "cancelled",
+      "the receive was withdrawn before it took a frame",
+    );
+
+  const receive = (
+    source: Lane,
+    signal: AbortSignal | undefined,
+  ): Promise<Uint8Array> => {
+    if (signal?.aborted) return Promise.reject(cancelled());
     const queued = source.queue.shift();
     if (queued !== undefined) {
       source.bytes -= queued.length;
       return Promise.resolve(queued);
     }
-    if (ended) return Promise.reject(ended);
+    if (receivingEnded) return Promise.reject(receivingEnded);
     return new Promise<Uint8Array>((resolve, reject) => {
-      source.waiters.push({ resolve, reject });
+      // A withdrawn receive leaves the lane: the next frame then waits in the
+      // queue for the next reader instead of settling this one. Once a frame
+      // has settled it, the waiter is gone and withdrawing does nothing.
+      const withdraw = (): void => {
+        const index = source.waiters.indexOf(waiter);
+        if (index < 0) return;
+        source.waiters.splice(index, 1);
+        reject(cancelled());
+      };
+      const waiter = {
+        resolve: (bytes: Uint8Array): void => {
+          signal?.removeEventListener("abort", withdraw);
+          resolve(bytes);
+        },
+        reject: (error: Error): void => {
+          signal?.removeEventListener("abort", withdraw);
+          reject(error);
+        },
+      };
+      source.waiters.push(waiter);
+      signal?.addEventListener("abort", withdraw, { once: true });
     });
+  };
+
+  const closeAfterSending = (): Promise<void> => {
+    if (graceful !== null) return graceful.promise;
+    if (ended !== null)
+      return unsentAtEnd
+        ? Promise.reject(
+            new WebRtcProviderError(
+              "undrained",
+              `the transport ended with frames still unsent: ${ended.message}`,
+            ),
+          )
+        : Promise.resolve();
+    // Receiving ends now, exactly as on a local abort; what arrives from here
+    // on is dropped.
+    const closing = new WebRtcProviderError("aborted", "transport closed");
+    channel.removeEventListener("message", onMessage);
+    discardQueues();
+    endReceiving(closing);
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((settle, fail) => {
+      resolve = settle;
+      reject = fail;
+    });
+    graceful = { promise, resolve, reject };
+    closeIfDrained();
+    return promise;
   };
 
   const transport: DataChannelTransport = {
     send: (bytes: Uint8Array): Promise<void> => sendTagged(TAG_CONTROL, bytes),
-    recv: (): Promise<Uint8Array> => receive(control),
+    recv: (signal?: AbortSignal): Promise<Uint8Array> =>
+      receive(control, signal),
     sendApp: (bytes: Uint8Array): Promise<void> => sendTagged(TAG_APP, bytes),
-    recvApp: (): Promise<Uint8Array> => receive(app),
+    recvApp: (signal?: AbortSignal): Promise<Uint8Array> =>
+      receive(app, signal),
+    closeAfterSending,
     close: (): void => {
-      abort(new WebRtcProviderError("transport closed"));
+      abort(new WebRtcProviderError("aborted", "transport closed"));
     },
   };
   channelTransports.set(channel, transport);

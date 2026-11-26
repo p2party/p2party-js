@@ -2,16 +2,18 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import {
-  APP_LANE_HIGH_WATER_BYTES,
-  APP_LANE_MAX_FRAMES,
-  CONTROL_LANE_HIGH_WATER_BYTES,
-  CONTROL_LANE_MAX_FRAMES,
-  SEND_HIGH_WATER_BYTES,
-  SEND_LOW_WATER_BYTES,
   WebRtcCandidateProvider,
   WebRtcProviderError,
   dataChannelTransport,
 } from "../../../src/blindRendezvous/prototype/webrtcProvider";
+import {
+  SEND_BUFFER_LOW_THRESHOLD,
+  MAX_BUFFERED_AMOUNT,
+  PROTOTYPE_APP_LANE_HIGH_WATER_BYTES,
+  PROTOTYPE_APP_LANE_MAX_FRAMES,
+  PROTOTYPE_CONTROL_LANE_HIGH_WATER_BYTES,
+  PROTOTYPE_CONTROL_LANE_MAX_FRAMES,
+} from "../../../src/utils/constants";
 import {
   createSession,
   generateSessionIdentity,
@@ -105,13 +107,21 @@ const laneFrame = (tag: number, length: number, fill: number): Uint8Array => {
   return frame;
 };
 
-/** Every outcome of a promise as a value, so a rejection can be inspected. */
-const settled = <T>(promise: Promise<T>): Promise<T | Error> =>
-  promise.then(
-    (value) => value,
-    (error: unknown) =>
-      error instanceof Error ? error : new Error(String(error)),
-  );
+/**
+ * How a provider promise settled: `"resolved"`, or the `reason` it rejected
+ * with. A synchronous throw counts as a rejection, so a call that throws
+ * instead of rejecting is still told apart.
+ */
+const reasonOf = async (call: () => Promise<unknown>): Promise<string> => {
+  try {
+    await call();
+    return "resolved";
+  } catch (error) {
+    return error instanceof WebRtcProviderError
+      ? error.reason
+      : `not a WebRtcProviderError: ${String(error)}`;
+  }
+};
 
 /** Let every pending promise reaction run: one macrotask turn. */
 const turn = (): Promise<void> =>
@@ -196,37 +206,29 @@ describe("prototype WebRTC bootstrap transport", () => {
       expect(await transport.recvApp()).toEqual(new Uint8Array([22]));
       const pending = transport.recv();
       bob.close();
-      await expect(pending).rejects.toThrow("closed");
-      await expect(bob.channel()).rejects.toThrow("closed");
+      expect(await reasonOf(() => pending)).toBe("aborted");
+      expect(await reasonOf(() => bob.channel())).toBe("aborted");
     } finally {
       alice.close();
       bob.close();
     }
   });
 
-  test("certificate mismatch discards bytes a graceful close kept", async () => {
-    const { alice, bob, a, b } = makeProviders();
+  test("the provider's close discards what the peer's graceful close kept", async () => {
+    const { alice, bob, a } = makeProviders();
     try {
-      // Alice speaks before Bob has verified anything, then closes in order.
+      // Alice speaks before Bob reads anything, then closes in order.
       a.channel.send(new Uint8Array([TAG_CONTROL, 99]));
       a.channel.send(new Uint8Array([TAG_APP, 7]));
       alice.close();
-      expect(b.channel.readyState).toBe("closed");
       const transport = dataChannelTransport(await bob.channel());
       // The orderly close kept what had arrived ...
       expect(await transport.recvApp()).toEqual(new Uint8Array([7]));
-
-      b.statsResult = Promise.resolve(stats(fingerprintB, new Uint8Array(32)));
-      await expect(
-        bob.verifyCertificates(fingerprintB, fingerprintA),
-      ).rejects.toThrow("DTLS fingerprint mismatch");
-      // ... and the local close a mismatch ends in discards the rest of it,
-      // so no later reader can start a handshake from Alice's early HELLO.
+      // ... and Bob's own close, which a run reaches on any teardown, is a
+      // local abort of the transport, not a second close of the channel: it
+      // discards the rest, so no later reader starts a handshake from it.
       bob.close();
-      await expect(transport.recv()).rejects.toThrow(WebRtcProviderError);
-      await expect(transport.sendApp(new Uint8Array([8]))).rejects.toThrow(
-        WebRtcProviderError,
-      );
+      expect(await reasonOf(() => transport.recv())).toBe("closed");
     } finally {
       alice.close();
       bob.close();
@@ -234,8 +236,8 @@ describe("prototype WebRTC bootstrap transport", () => {
   });
 
   test.each([
-    ["control", TAG_CONTROL, CONTROL_LANE_MAX_FRAMES],
-    ["app", TAG_APP, APP_LANE_MAX_FRAMES],
+    ["control", TAG_CONTROL, PROTOTYPE_CONTROL_LANE_MAX_FRAMES],
+    ["app", TAG_APP, PROTOTYPE_APP_LANE_MAX_FRAMES],
   ] as const)(
     "tiny-frame overflow of the %s lane rejects pending receives and clears both queues",
     async (lane, tag, maxFrames) => {
@@ -248,8 +250,8 @@ describe("prototype WebRTC bootstrap transport", () => {
       channel.deliver([tag]);
       expect(channel.readyState).toBe("closed");
       await expect(other).rejects.toThrow(`${lane} lane`);
-      await expect(transport.recv()).rejects.toThrow("high-water mark");
-      await expect(transport.recvApp()).rejects.toThrow("high-water mark");
+      expect(await reasonOf(() => transport.recv())).toBe("overflow");
+      expect(await reasonOf(() => transport.recvApp())).toBe("overflow");
     },
   );
 
@@ -257,11 +259,11 @@ describe("prototype WebRTC bootstrap transport", () => {
     const channel = new FakeChannel();
     const transport = dataChannelTransport(channel.asRtc());
     // The control lane holding all the frames it may ...
-    for (let i = 0; i < CONTROL_LANE_MAX_FRAMES; i += 1)
+    for (let i = 0; i < PROTOTYPE_CONTROL_LANE_MAX_FRAMES; i += 1)
       channel.deliver([TAG_CONTROL, i]);
     // ... takes nothing from the app lane, which fills to exactly its mark.
     const appFrames = 16;
-    const appFrameBytes = APP_LANE_HIGH_WATER_BYTES / appFrames;
+    const appFrameBytes = PROTOTYPE_APP_LANE_HIGH_WATER_BYTES / appFrames;
     for (let i = 0; i < appFrames; i += 1)
       channel.deliver(laneFrame(TAG_APP, appFrameBytes, i));
     expect(channel.readyState).toBe("open");
@@ -275,7 +277,7 @@ describe("prototype WebRTC bootstrap transport", () => {
     channel.deliver([TAG_APP, 0xff]);
     expect(channel.readyState).toBe("closed");
     await expect(transport.recvApp()).rejects.toThrow("app lane");
-    await expect(transport.recv()).rejects.toThrow("app lane");
+    expect(await reasonOf(() => transport.recv())).toBe("overflow");
   });
 
   test("a frame larger than its lane's high-water mark ends the transport even with a reader waiting", async () => {
@@ -283,9 +285,9 @@ describe("prototype WebRTC bootstrap transport", () => {
     const transport = dataChannelTransport(channel.asRtc());
     const waiting = transport.recv();
     channel.deliver(
-      laneFrame(TAG_CONTROL, CONTROL_LANE_HIGH_WATER_BYTES + 1, 1),
+      laneFrame(TAG_CONTROL, PROTOTYPE_CONTROL_LANE_HIGH_WATER_BYTES + 1, 1),
     );
-    await expect(waiting).rejects.toThrow("high-water mark");
+    expect(await reasonOf(() => waiting)).toBe("protocol");
     expect(channel.readyState).toBe("closed");
   });
 
@@ -293,16 +295,15 @@ describe("prototype WebRTC bootstrap transport", () => {
     const channel = new FakeChannel();
     channel.close();
     const transport = dataChannelTransport(channel.asRtc());
-    await expect(transport.recv()).rejects.toThrow("already closed");
-    await expect(transport.recvApp()).rejects.toThrow("already closed");
+    expect(await reasonOf(() => transport.recv())).toBe("closed");
+    expect(await reasonOf(() => transport.recvApp())).toBe("closed");
   });
 
   test("frames delivered before a graceful close are still read", async () => {
     const channel = new FakeChannel();
     const transport = dataChannelTransport(channel.asRtc());
     // A reader mid-message: the first frame goes straight to it, the rest
-    // queue, and only then does the peer's close arrive — the order
-    // RTCDataChannel guarantees for a peer that sends and then closes.
+    // queue, and only then does the peer's close arrive.
     const first = transport.recvApp();
     for (const value of [1, 2, 3]) channel.deliver([TAG_APP, value]);
     channel.deliver([TAG_CONTROL, 9]);
@@ -313,11 +314,21 @@ describe("prototype WebRTC bootstrap transport", () => {
     expect(await transport.recvApp()).toEqual(new Uint8Array([3]));
     expect(await transport.recv()).toEqual(new Uint8Array([9]));
     // Drained, each lane then reports the close.
-    await expect(transport.recvApp()).rejects.toThrow("data channel closed");
-    await expect(transport.recv()).rejects.toThrow("data channel closed");
-    await expect(transport.sendApp(new Uint8Array([4]))).rejects.toThrow(
-      "data channel closed",
+    expect(await reasonOf(() => transport.recvApp())).toBe("closed");
+    expect(await reasonOf(() => transport.recv())).toBe("closed");
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([4])))).toBe(
+      "closed",
     );
+  });
+
+  test("a reader blocked on an empty lane observes a remote graceful close", async () => {
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    const blockedApp = reasonOf(() => transport.recvApp());
+    const blockedControl = reasonOf(() => transport.recv());
+    channel.close();
+    expect(await blockedApp).toBe("closed");
+    expect(await blockedControl).toBe("closed");
   });
 
   test("frames delivered before a channel error are still read", async () => {
@@ -331,7 +342,7 @@ describe("prototype WebRTC bootstrap transport", () => {
 
     expect(await transport.recvApp()).toEqual(new Uint8Array([5]));
     expect(await transport.recvApp()).toEqual(new Uint8Array([6]));
-    await expect(transport.recvApp()).rejects.toThrow("data channel errored");
+    expect(await reasonOf(() => transport.recvApp())).toBe("errored");
   });
 
   test("local abort clears the queues", async () => {
@@ -341,8 +352,8 @@ describe("prototype WebRTC bootstrap transport", () => {
     open.deliver([TAG_CONTROL, 1]);
     open.deliver([TAG_APP, 2]);
     live.close();
-    await expect(live.recv()).rejects.toThrow("transport closed");
-    await expect(live.recvApp()).rejects.toThrow("transport closed");
+    expect(await reasonOf(() => live.recv())).toBe("aborted");
+    expect(await reasonOf(() => live.recvApp())).toBe("aborted");
     expect(open.readyState).toBe("closed");
 
     // After a graceful close: what the close kept, a later local abort
@@ -355,21 +366,41 @@ describe("prototype WebRTC bootstrap transport", () => {
     closed.close();
     expect(await ended.recvApp()).toEqual(new Uint8Array([3]));
     ended.close();
-    await expect(ended.recvApp()).rejects.toThrow("data channel closed");
-    await expect(ended.recv()).rejects.toThrow("data channel closed");
+    expect(await reasonOf(() => ended.recvApp())).toBe("closed");
+    expect(await reasonOf(() => ended.recv())).toBe("closed");
+  });
+
+  test("a withdrawn receive does not take the next frame", async () => {
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    const withdrawal = new AbortController();
+    const abandoned = reasonOf(() => transport.recvApp(withdrawal.signal));
+    withdrawal.abort();
+    expect(await abandoned).toBe("cancelled");
+    channel.deliver([TAG_APP, 0xaa]);
+    channel.deliver([TAG_APP, 0xbb]);
+    expect(await transport.recvApp()).toEqual(new Uint8Array([0xaa]));
+    expect(await transport.recvApp()).toEqual(new Uint8Array([0xbb]));
+
+    // Withdrawn before it starts, a receive takes nothing that is queued.
+    channel.deliver([TAG_APP, 0xcc]);
+    expect(await reasonOf(() => transport.recvApp(withdrawal.signal))).toBe(
+      "cancelled",
+    );
+    expect(await transport.recvApp()).toEqual(new Uint8Array([0xcc]));
   });
 
   test("sender waits when the lane is above its high-water mark", async () => {
     const channel = new FakeChannel();
     const transport = dataChannelTransport(channel.asRtc());
     // At the mark, a frame still leaves at once.
-    channel.bufferedAmount = SEND_HIGH_WATER_BYTES;
+    channel.bufferedAmount = MAX_BUFFERED_AMOUNT;
     await transport.sendApp(new Uint8Array([1]));
     expect(channel.sent).toHaveLength(1);
 
     // Above it, frames wait: app and control alike, since both lanes share
     // the channel's one buffer.
-    channel.bufferedAmount = SEND_HIGH_WATER_BYTES + 1;
+    channel.bufferedAmount = MAX_BUFFERED_AMOUNT + 1;
     const order: string[] = [];
     const app = Promise.resolve(transport.sendApp(new Uint8Array([2]))).then(
       () => order.push("app"),
@@ -388,8 +419,8 @@ describe("prototype WebRTC bootstrap transport", () => {
     expect(channel.sent).toHaveLength(1);
 
     // The drain the transport asked to hear about releases both, in order.
-    expect(channel.bufferedAmountLowThreshold).toBe(SEND_LOW_WATER_BYTES);
-    channel.drainTo(SEND_LOW_WATER_BYTES);
+    expect(channel.bufferedAmountLowThreshold).toBe(SEND_BUFFER_LOW_THRESHOLD);
+    channel.drainTo(SEND_BUFFER_LOW_THRESHOLD);
     await Promise.all([app, control]);
     expect(order).toEqual(["app", "control"]);
     expect(channel.sent).toEqual([
@@ -399,26 +430,21 @@ describe("prototype WebRTC bootstrap transport", () => {
     ]);
   });
 
-  test.each(["the channel closes", "the transport is closed locally"] as const)(
+  test.each([
+    ["the channel closes", "closed"],
+    ["the transport is closed locally", "aborted"],
+  ] as const)(
     "a send waiting for a drain fails with the provider's error when %s",
-    async (how) => {
+    async (how, reason) => {
       const channel = new FakeChannel();
       const transport = dataChannelTransport(channel.asRtc());
-      channel.bufferedAmount = SEND_HIGH_WATER_BYTES + 1;
-      const waiting = settled(
-        Promise.resolve(transport.sendApp(new Uint8Array([7]))),
-      );
+      channel.bufferedAmount = MAX_BUFFERED_AMOUNT + 1;
+      const waiting = reasonOf(() => transport.sendApp(new Uint8Array([7])));
       await turn();
       if (how === "the channel closes") channel.close();
       else transport.close();
 
-      const outcome = await waiting;
-      expect(outcome).toBeInstanceOf(WebRtcProviderError);
-      expect(String(outcome)).toContain(
-        how === "the channel closes"
-          ? "data channel closed"
-          : "transport closed",
-      );
+      expect(await waiting).toBe(reason);
       // The waiting frame never reaches the channel, even once it drains.
       channel.drainTo(0);
       await turn();
@@ -430,26 +456,36 @@ describe("prototype WebRTC bootstrap transport", () => {
     const channel = new FakeChannel();
     const transport = dataChannelTransport(channel.asRtc());
     channel.refuseNextSend = true;
-    const refused = await settled(
-      Promise.resolve().then(() => transport.sendApp(new Uint8Array([1]))),
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([1])))).toBe(
+      "refused",
     );
-    expect(refused).toBeInstanceOf(WebRtcProviderError);
-    expect(String(refused)).toContain("send queue is full");
     // The lane's framing is positional, so nothing may follow a lost frame.
-    const after = await settled(
-      Promise.resolve().then(() => transport.sendApp(new Uint8Array([2]))),
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([2])))).toBe(
+      "refused",
     );
-    expect(after).toBeInstanceOf(WebRtcProviderError);
     expect(channel.sent).toHaveLength(0);
 
     channel.deliver([TAG_APP, 9]);
     expect(await transport.recvApp()).toEqual(new Uint8Array([9]));
   });
 
+  test("a send that throws because the channel is closing reports the close, not a refusal", async () => {
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    // The peer's close begins as this frame goes out.
+    channel.beforeSend = () => {
+      channel.readyState = "closing";
+    };
+    channel.refuseNextSend = true;
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([1])))).toBe(
+      "closed",
+    );
+  });
+
   test("a drain reported from inside send() does not reorder frames", async () => {
     const channel = new FakeChannel();
     const transport = dataChannelTransport(channel.asRtc());
-    channel.bufferedAmount = SEND_HIGH_WATER_BYTES + 1;
+    channel.bufferedAmount = MAX_BUFFERED_AMOUNT + 1;
     const sends = [1, 2, 3].map((value) =>
       transport.sendApp(new Uint8Array([value])),
     );
@@ -464,6 +500,76 @@ describe("prototype WebRTC bootstrap transport", () => {
       new Uint8Array([TAG_APP, 2]),
       new Uint8Array([TAG_APP, 3]),
     ]);
+  });
+
+  test("closing after sending waits for the buffer to empty, then closes", async () => {
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    channel.deliver([TAG_APP, 9]);
+    channel.bufferedAmount = MAX_BUFFERED_AMOUNT + 1;
+    const queued = transport.sendApp(new Uint8Array([1]));
+    const pendingRecv = reasonOf(() => transport.recv());
+    let closed = false;
+    const closing = transport.closeAfterSending().then(() => {
+      closed = true;
+    });
+
+    // Receiving ends at once, as on a local abort, and new sends are refused.
+    expect(await pendingRecv).toBe("aborted");
+    expect(await reasonOf(() => transport.recvApp())).toBe("aborted");
+    expect(await reasonOf(() => transport.sendApp(new Uint8Array([2])))).toBe(
+      "aborted",
+    );
+
+    // The frame already queued still leaves ...
+    channel.drainTo(SEND_BUFFER_LOW_THRESHOLD);
+    await queued;
+    expect(channel.sent).toEqual([new Uint8Array([TAG_APP, 1])]);
+    // ... and the channel stays open while the buffer is not yet empty.
+    await turn();
+    expect(closed).toBe(false);
+    expect(channel.readyState).toBe("open");
+
+    channel.drainTo(0);
+    await turn();
+    expect(closed).toBe(true);
+    expect(channel.readyState).toBe("closed");
+    await closing;
+  });
+
+  test("closing after sending fails when the peer closes before the buffer empties", async () => {
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    channel.bufferedAmount = 100;
+    const closing = reasonOf(() => transport.closeAfterSending());
+    channel.close();
+    expect(await closing).toBe("undrained");
+  });
+
+  test("a local abort does not wait for the buffer", async () => {
+    // With no orderly close asked for: the channel closes at once over a
+    // buffer that still holds bytes.
+    const busy = new FakeChannel();
+    const aborted = dataChannelTransport(busy.asRtc());
+    busy.bufferedAmount = 100;
+    aborted.close();
+    expect(busy.readyState).toBe("closed");
+
+    // With one under way, the abort ends it too, and nothing queued survives.
+    const channel = new FakeChannel();
+    const transport = dataChannelTransport(channel.asRtc());
+    channel.deliver([TAG_APP, 9]);
+    channel.bufferedAmount = MAX_BUFFERED_AMOUNT + 1;
+    const waiting = reasonOf(() => transport.sendApp(new Uint8Array([1])));
+    const closing = reasonOf(() => transport.closeAfterSending());
+    transport.close();
+    expect(channel.readyState).toBe("closed");
+    expect(await waiting).toBe("aborted");
+    expect(await closing).toBe("undrained");
+    expect(await reasonOf(() => transport.recvApp())).toBe("aborted");
+    channel.drainTo(0);
+    await turn();
+    expect(channel.sent).toHaveLength(0);
   });
 
   test("real session retains an early HELLO while the responder awaits certificate verification", async () => {

@@ -40,6 +40,7 @@
 import libcrypto from "../../cryptography/libcrypto";
 import { decodeRoomPolicyV1 } from "../../roomPolicy";
 import { createSession, generateSessionIdentity } from "../../session";
+import { PROTOTYPE_STOP_DRAIN_TIMEOUT_MS } from "../../utils/constants";
 import { deliveryProfileHash } from "../derivations";
 import { CarrierRuntime } from "./carrierRuntime";
 import { PairDriver } from "./pairDriver";
@@ -47,6 +48,7 @@ import { PROTOTYPE_DELIVERY_PROFILE_V0, withDeliveryWindowMs } from "./profile";
 import { PrototypeStoreClient } from "./storeClient";
 import {
   WebRtcCandidateProvider,
+  WebRtcProviderError,
   dataChannelTransport,
 } from "./webrtcProvider";
 
@@ -108,8 +110,8 @@ const MAX_APP_FRAMES = 65_536;
 export class PrototypeRunError extends Error {
   override readonly name: string = "PrototypeRunError";
 
-  constructor(message: string) {
-    super(`blindRendezvousPrototype: ${message}`);
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super(`blindRendezvousPrototype: ${message}`, options);
   }
 }
 
@@ -117,10 +119,23 @@ export class PrototypeRunError extends Error {
  * A deadline passed before the awaited step finished: a phase that did not
  * arrive, a session that was not established, a handshake that stalled, a
  * message that did not come. Distinct from every other run failure, so a
- * caller can tell "the peer was too slow" from "the edge is broken".
+ * caller can tell "the peer was too slow" from "the edge is broken". A call
+ * that rejects with it has neither sent nor taken any part of a message.
  */
 export class PrototypeRunTimeoutError extends PrototypeRunError {
   override readonly name = "PrototypeRunTimeoutError";
+}
+
+/**
+ * This endpoint ended the session because its app lane can no longer be
+ * framed: a send's deadline passed with part of its message on the lane, the
+ * open data channel refused a frame, or a receive's deadline passed with part
+ * of a message taken. Every call on the session from then on — including one
+ * that overlapped the call that ended it — rejects with this same error;
+ * `cause` is what ended it.
+ */
+export class PrototypeSessionEndedError extends PrototypeRunError {
+  override readonly name = "PrototypeSessionEndedError";
 }
 
 const fail: (message: string) => never = (message) => {
@@ -187,20 +202,48 @@ export interface PrototypeRun {
    */
   waitForPhase(phase: PairDriverPhase, timeoutMs: number): Promise<void>;
   /**
-   * Send one message once the session exists, resolving when the data channel
-   * has taken all of it. Rejects with `PrototypeRunTimeoutError` if it cannot
-   * start to leave within `timeoutMs` of the call — and then it has not left
-   * at all — and with the failure itself if the session could not be
-   * established. A deadline that passes while the message is leaving ends the
-   * session and rejects with `PrototypeRunError`.
+   * Send one message once the session exists. It resolves once every frame is
+   * in the data channel's send buffer, which is not delivery: `stop()` is what
+   * waits for that buffer to drain. Rejects with `PrototypeRunTimeoutError` if
+   * it cannot start to leave within `timeoutMs` of the call — and then it has
+   * not left at all — and with the failure itself if the session could not be
+   * established. A deadline that passes while the message is leaving, or a
+   * frame the channel refuses, ends the session and rejects with
+   * `PrototypeSessionEndedError`; so does every later call, and an
+   * overlapping one, on the session that ended.
    */
   sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void>;
+  /**
+   * Receive one message. Rejects with `PrototypeRunTimeoutError`, taking
+   * nothing, if no frame of a message arrived within `timeoutMs`; a deadline
+   * that passes part-way through a message ends the session and rejects with
+   * `PrototypeSessionEndedError`.
+   */
   recvMessage(timeoutMs: number): Promise<Uint8Array>;
   auditSecrets(): PrototypeRunAudit;
   storeTopology(): StoreTopology;
   faults(): readonly StoreFaultRecord[];
-  stop(): void;
+  /**
+   * Stop the run. The schedule, the session and every pending wait end at
+   * once; frames already in the data channel's send buffer are given up to
+   * `PROTOTYPE_STOP_DRAIN_TIMEOUT_MS` to leave before the channel and the peer
+   * connection close. Never rejects; see `PrototypeStopOutcome`.
+   */
+  stop(): Promise<PrototypeStopOutcome>;
 }
+
+/**
+ * How a `stop()` left the frames this endpoint had queued:
+ *   - `"drained"`: every frame left the data channel's send buffer before the
+ *     channel closed, or there was no session to send on.
+ *   - `"undrained"`: the channel closed with frames possibly still queued —
+ *     the buffer did not drain within `PROTOTYPE_STOP_DRAIN_TIMEOUT_MS`, the
+ *     peer closed first, or the channel refused a frame. Those frames may
+ *     never reach the peer.
+ * "Left the buffer" is the browser's handover to its SCTP stack, not the
+ * peer's receipt.
+ */
+export type PrototypeStopOutcome = "drained" | "undrained";
 
 /* ------------------------------------------------------------------ *
  * Small async helpers
@@ -242,6 +285,38 @@ const withTimeout = async <T>(
           () => reject(timedOut(label, timeoutMs)),
           timeoutMs,
         );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) timers.clearTimeout(timer);
+  }
+};
+
+/**
+ * One frame from a transport lane, under a deadline. Not `withTimeout`: that
+ * would leave the receive registered on the lane, and the next frame to arrive
+ * would settle a promise nobody reads any more. Here the deadline withdraws
+ * the receive before it rejects, so a frame that arrives later waits for the
+ * next read.
+ */
+const receiveWithin = async (
+  receive: (signal: AbortSignal) => Promise<Uint8Array>,
+  timeoutMs: number,
+  label: string,
+  timers: CarrierTimers,
+): Promise<Uint8Array> => {
+  const withdrawal = new AbortController();
+  let timer: CarrierTimerHandle | undefined;
+  try {
+    return await Promise.race([
+      receive(withdrawal.signal),
+      new Promise<never>((_resolve, reject) => {
+        timer = timers.setTimeout(() => {
+          // The timeout settles the race first; the withdrawal right after,
+          // in the same callback, rejects a receive nobody awaits any more.
+          reject(timedOut(label, timeoutMs));
+          withdrawal.abort();
+        }, timeoutMs);
       }),
     ]);
   } finally {
@@ -485,6 +560,9 @@ export class BlindRendezvousRun implements PrototypeRun {
   #session: P2PartySession | null = null;
   #appTransport: DataChannelTransport | null = null;
   #stopped = false;
+  #stopping: Promise<PrototypeStopOutcome> | null = null;
+  /** Set once, when a call ended the established session; see the class. */
+  #sessionEnded: PrototypeSessionEndedError | null = null;
 
   constructor(parts: RunParts) {
     this.driver = parts.driver;
@@ -588,17 +666,23 @@ export class BlindRendezvousRun implements PrototypeRun {
    * all of its frames before it awaits any of them, so two overlapping calls
    * put two whole messages on the lane in the order they were encrypted. They
    * share one send buffer: a call's deadline also covers the wait behind the
-   * other's frames. The prototype's harness awaits each call before the next.
+   * other's frames. And they share the session: a deadline or a refused frame
+   * that ends it ends it for both, so the other call rejects with the same
+   * `PrototypeSessionEndedError` even if none of its own frames had left. The
+   * prototype's harness awaits each call before the next.
    *
    * `timeoutMs` bounds the whole call: the wait for the session, the local
    * encryption, and the hand-off of every frame to the data channel, which
-   * takes frames only as fast as it drains (`SEND_HIGH_WATER_BYTES` in
+   * takes frames only as fast as it drains (`MAX_BUFFERED_AMOUNT`, see
    * `webrtcProvider.ts`). A call that rejects with `PrototypeRunTimeoutError`
    * sent nothing, so a caller may retry it without the peer receiving the
    * message twice. A deadline that passes once the hand-off has begun is a
    * different failure: part of the message may have left, the peer cannot
    * frame past a partial message, so the session is ended and the call
-   * rejects with a plain `PrototypeRunError`.
+   * rejects with `PrototypeSessionEndedError`. So does a frame the open
+   * channel refuses. A channel that closed is reported as the provider's
+   * `WebRtcProviderError` and ends nothing here: frames it delivered stay
+   * readable.
    */
   async sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void> {
     requireDeadline(timeoutMs, "sendMessage");
@@ -609,9 +693,13 @@ export class BlindRendezvousRun implements PrototypeRun {
       "session handoff",
       this.#timers,
     );
-    // Set when the session went up and cleared when it is ended.
-    if (this.#session !== established.session) fail("the session has ended");
-    const message = await established.session.encrypt(bytes);
+    this.#assertLive();
+    let message: EncryptedSessionMessage;
+    try {
+      message = await established.session.encrypt(bytes);
+    } catch (error) {
+      throw this.#asCallFailure(error);
+    }
     // A session that arrived just in time can still leave encryption to end
     // past the deadline; the message then stays unsent, as the rejection says.
     if (this.#clock.nowMs() > deadlineMs)
@@ -638,16 +726,22 @@ export class BlindRendezvousRun implements PrototypeRun {
         this.#timers,
       );
     } catch (error) {
-      if (!(error instanceof PrototypeRunTimeoutError)) throw error;
       void handedOff.catch(() => undefined);
-      const partial = new PrototypeRunError(
-        `the data channel did not take the message's ${String(leaving.length)} ` +
-          `frames within ${String(timeoutMs)}ms of sendMessage; part of it ` +
-          "may have left, and the session was ended",
+      const misframed =
+        error instanceof PrototypeRunTimeoutError
+          ? `the data channel did not take the message's ${String(leaving.length)} ` +
+            `frames within ${String(timeoutMs)}ms of sendMessage`
+          : error instanceof WebRtcProviderError && error.reason === "refused"
+            ? `the data channel refused one of the message's ${String(leaving.length)} frames`
+            : null;
+      if (misframed === null) throw this.#asCallFailure(error);
+      const ended = new PrototypeSessionEndedError(
+        `${misframed}; part of it may have left, and the session was ended`,
+        { cause: error },
       );
       // A local abort: what has not left is discarded and never leaves.
-      this.#endSession(partial);
-      throw partial;
+      this.#endSession(ended);
+      throw ended;
     }
     this.#emit(
       "message-sent",
@@ -655,6 +749,15 @@ export class BlindRendezvousRun implements PrototypeRun {
     );
   }
 
+  /**
+   * One application message from the app lane (framing: see `sendMessage`).
+   *
+   * A deadline that passes before any frame of a message was taken rejects
+   * with `PrototypeRunTimeoutError` and takes nothing: the next call reads
+   * that message from its header. One that passes part-way through a message
+   * ends the session and rejects with `PrototypeSessionEndedError`, since
+   * what remains of the message can no longer be told from the next one.
+   */
   async recvMessage(timeoutMs: number): Promise<Uint8Array> {
     const deadlineMs = this.#clock.nowMs() + BigInt(Math.ceil(timeoutMs));
     const remaining = (): number =>
@@ -666,12 +769,20 @@ export class BlindRendezvousRun implements PrototypeRun {
       "session handoff",
       this.#timers,
     );
-    const header = await withTimeout(
-      established.transport.recvApp(),
-      remaining(),
-      "application message header",
-      this.#timers,
-    );
+    this.#assertLive();
+    const lane = (signal: AbortSignal): Promise<Uint8Array> =>
+      established.transport.recvApp(signal);
+    let header: Uint8Array;
+    try {
+      header = await receiveWithin(
+        lane,
+        remaining(),
+        "application message header",
+        this.#timers,
+      );
+    } catch (error) {
+      throw this.#asCallFailure(error);
+    }
     if (header.length < 8)
       fail("the application header is shorter than its two length fields");
     const view = new DataView(
@@ -690,22 +801,41 @@ export class BlindRendezvousRun implements PrototypeRun {
       );
 
     const frames: Uint8Array[] = [];
-    for (let index = 0; index < frameCount; index += 1)
-      frames.push(
-        await withTimeout(
-          established.transport.recvApp(),
-          remaining(),
-          `application frame ${String(index)}`,
-          this.#timers,
-        ),
-      );
+    for (let index = 0; index < frameCount; index += 1) {
+      try {
+        frames.push(
+          await receiveWithin(
+            lane,
+            remaining(),
+            `application frame ${String(index)}`,
+            this.#timers,
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof PrototypeRunTimeoutError))
+          throw this.#asCallFailure(error);
+        const ended = new PrototypeSessionEndedError(
+          `recvMessage's ${String(timeoutMs)}ms passed with ${String(index + 1)} ` +
+            `of the message's ${String(frameCount + 1)} frames taken; the rest ` +
+            "cannot be framed, and the session was ended",
+          { cause: error },
+        );
+        this.#endSession(ended);
+        throw ended;
+      }
+    }
 
     const message: EncryptedSessionMessage = {
       protocolVersion: 4,
       root,
       frames,
     };
-    const plaintext = await established.session.decrypt(message);
+    let plaintext: Uint8Array;
+    try {
+      plaintext = await established.session.decrypt(message);
+    } catch (error) {
+      throw this.#asCallFailure(error);
+    }
     this.#emit(
       "message-verified",
       `${String(plaintext.length)} bytes from ${String(frameCount)} frames`,
@@ -733,30 +863,39 @@ export class BlindRendezvousRun implements PrototypeRun {
   }
 
   /**
-   * Idempotent teardown of the session, the WebRTC provider and the schedule.
+   * Idempotent teardown of the session, the WebRTC provider and the schedule;
+   * every call returns the same promise.
    *
-   * After this the endpoint is inert: the peer connection is closed and the
-   * carrier schedule is disarmed, so nothing further is published to any store.
-   * It emits `run-stopped` so an observer can tell an endpoint that went quiet
-   * from one that is merely between windows.
+   * At once: the carrier schedule is disarmed, so nothing further is
+   * published to any store; the session is destroyed; pending receives and
+   * phase waits reject; new sends are refused. It emits `run-stopped` then, so
+   * an observer can tell an endpoint that went quiet from one that is merely
+   * between windows.
+   *
+   * Then, gracefully: frames already queued on the data channel are given
+   * `PROTOTYPE_STOP_DRAIN_TIMEOUT_MS` to leave its send buffer, because closing
+   * the peer connection over them would lose what a caller was told was sent.
+   * The channel and the peer connection close when the buffer is empty, or
+   * when the time is up; the latter resolves `"undrained"` and emits
+   * `stop-undrained`. A failed session does not come through here: it ends
+   * the session at once (`#endSession`).
    *
    * The driver's own secrets are deliberately NOT wiped here: `auditSecrets`
    * is the harness's proof obligation and has to stay answerable after a run
    * has been stopped. Call `driver.destroy()` once the audit is done.
    *
    * `detail` is the internal teardown reason (a presence that could not be
-   * published); a caller stopping its own run leaves it out. A failed session
-   * is not one: it ends the session alone (`#endSession`).
+   * published); a caller stopping its own run leaves it out.
    */
-  stop(detail?: string): void {
-    if (this.#stopped) return;
+  stop(detail?: string): Promise<PrototypeStopOutcome> {
+    if (this.#stopping !== null) return this.#stopping;
     this.#stopped = true;
 
     const session = this.#session;
     if (session !== null) void session.destroy().catch(() => undefined);
-    this.#appTransport?.close();
-    this.#transport.close();
     this.runtime.stop();
+    // Receiving and new sends end now; what is already queued may still leave.
+    const leaving = this.#appTransport?.closeAfterSending() ?? null;
 
     const stopped = new PrototypeRunError("the run was stopped");
     // A no-op once the gate has settled, which is the point: stopping after a
@@ -765,6 +904,34 @@ export class BlindRendezvousRun implements PrototypeRun {
     const waiters = this.#phaseWaiters.splice(0);
     for (const waiter of waiters) waiter.reject(stopped);
     this.#emit("run-stopped", detail);
+
+    this.#stopping = this.#closeWhenSent(leaving);
+    return this.#stopping;
+  }
+
+  /** The graceful half of `stop()`; synchronous when nothing is to drain. */
+  async #closeWhenSent(
+    leaving: Promise<void> | null,
+  ): Promise<PrototypeStopOutcome> {
+    let outcome: PrototypeStopOutcome = "drained";
+    if (leaving !== null) {
+      try {
+        await withTimeout(
+          leaving,
+          PROTOTYPE_STOP_DRAIN_TIMEOUT_MS,
+          "the send buffer's drain at stop",
+          this.#timers,
+        );
+      } catch (error) {
+        void leaving.catch(() => undefined);
+        outcome = "undrained";
+        this.#emit("stop-undrained", detailOf(error));
+      }
+    }
+    // A local abort of whatever is left, then the peer connection.
+    this.#appTransport?.close();
+    this.#transport.close();
+    return outcome;
   }
 
   #dropWaiter(waiter: PhaseWaiter): void {
@@ -774,6 +941,24 @@ export class BlindRendezvousRun implements PrototypeRun {
 
   #requireSession(): Promise<EstablishedSession> {
     return this.#sessionGate;
+  }
+
+  /** A call on a session this endpoint ended, or on a stopped run, fails here. */
+  #assertLive(): void {
+    if (this.#sessionEnded !== null) throw this.#sessionEnded;
+    if (this.#stopped) fail("the run was stopped");
+  }
+
+  /**
+   * What a call reports for a failure it met: once a call has ended the
+   * session, every other call's failure — a transport this endpoint aborted, a
+   * destroyed session — stands for that, and reports the error that ended it.
+   */
+  #asCallFailure(error: unknown): unknown {
+    if (this.#sessionEnded !== null) return this.#sessionEnded;
+    if (this.#stopped)
+      return new PrototypeRunError("the run was stopped", { cause: error });
+    return error;
   }
 
   #startSession(): void {
@@ -812,6 +997,8 @@ export class BlindRendezvousRun implements PrototypeRun {
    * the run's, which the caller ends with `stop()`.
    */
   #endSession(error: unknown): void {
+    if (error instanceof PrototypeSessionEndedError)
+      this.#sessionEnded ??= error;
     this.#emit("session-failed", detailOf(error));
     // Already settled when the gate adopted a failed establishment; settles
     // it for a handoff that never got that far.
@@ -1144,7 +1331,10 @@ export const assembleRun = async (
   } catch (error) {
     // A caller that never got a run cannot stop one, so the half-built one is
     // stopped here and its schedule is never armed.
-    run.stop(`the local presence could not be published: ${detailOf(error)}`);
+    // No session exists yet, so this stop has nothing to drain.
+    void run.stop(
+      `the local presence could not be published: ${detailOf(error)}`,
+    );
     throw error;
   }
   runtime.start();

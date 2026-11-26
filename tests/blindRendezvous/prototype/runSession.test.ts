@@ -4,16 +4,19 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import {
   BlindRendezvousRun,
-  PrototypeRunError,
   PrototypeRunTimeoutError,
+  PrototypeSessionEndedError,
 } from "../../../src/blindRendezvous/prototype/index";
 import {
-  SEND_HIGH_WATER_BYTES,
   WebRtcCandidateProvider,
   WebRtcProviderError,
   dataChannelTransport,
 } from "../../../src/blindRendezvous/prototype/webrtcProvider";
 import { generateSessionIdentity } from "../../../src/session";
+import {
+  MAX_BUFFERED_AMOUNT,
+  PROTOTYPE_STOP_DRAIN_TIMEOUT_MS,
+} from "../../../src/utils/constants";
 
 import type {
   CarrierRuntime,
@@ -110,6 +113,8 @@ class LinkedChannel extends EventTarget {
   /** Every frame this end handed to `send`, in order. */
   readonly sent: Uint8Array[] = [];
   holding = false;
+  /** The next `send` throws while the channel stays open, as a refusal does. */
+  refuseNextSend = false;
   /** Called with each frame this end is handed, before it travels. */
   onSend: ((frame: Uint8Array) => void) | null = null;
   /** Called with each frame after it has been delivered to this end. */
@@ -119,6 +124,10 @@ class LinkedChannel extends EventTarget {
   send(bytes: Uint8Array): void {
     if (this.readyState !== "open")
       throw new DOMException("channel is not open", "InvalidStateError");
+    if (this.refuseNextSend) {
+      this.refuseNextSend = false;
+      throw new DOMException("send queue is full", "OperationError");
+    }
     const frame = Uint8Array.from(bytes);
     this.sent.push(frame);
     this.onSend?.(frame);
@@ -155,11 +164,14 @@ class LinkedChannel extends EventTarget {
       this.dispatchEvent(new Event("bufferedamountlow"));
   }
 
+  /**
+   * Held frames never leave once the channel closes; `bufferedAmount` keeps
+   * its value, as the specification has it.
+   */
   close(): void {
     if (this.readyState === "closed") return;
     this.readyState = "closed";
     this.#held.length = 0;
-    this.bufferedAmount = 0;
     this.dispatchEvent(new Event("close"));
     this.peer?.close();
   }
@@ -189,6 +201,8 @@ interface FakeConnection {
   readonly channel: LinkedChannel;
   statsResult: Promise<RTCStatsReport>;
   ondatachannel: ((event: RTCDataChannelEvent) => void) | null;
+  /** As `RTCPeerConnection.close()`: the channel goes with it, at once. */
+  close(): void;
 }
 
 const originalPeerConnection = globalThis.RTCPeerConnection;
@@ -378,6 +392,10 @@ const turn = (): Promise<void> =>
 const kinds = (subject: Endpoint): string[] =>
   subject.events.map((event) => event.kind);
 
+/** The provider reason an error carries, or "none". */
+const reasonOf = (error: unknown): string =>
+  error instanceof WebRtcProviderError ? error.reason : "none";
+
 /**
  * How the endpoint's session attempt ended, whichever way it went, so a test
  * that expects one outcome fails on the other instead of waiting for ever.
@@ -462,16 +480,113 @@ describe("prototype run session", () => {
       initiator.run.stop();
       expect(responder.channel.readyState).toBe("closed");
 
+      // A send that meets the closed channel reports the close and ends
+      // nothing here: what the peer delivered stays readable.
+      const reply = await settled(
+        responder.run.sendMessage(text("too late"), 1_000),
+      );
+      expect(reasonOf(reply)).toBe("closed");
+      expect(kinds(responder)).not.toContain("session-failed");
+
       expect(await responder.run.recvMessage(1_000)).toEqual(payload);
       const after = await settled(responder.run.recvMessage(1_000));
-      expect(after).toBeInstanceOf(WebRtcProviderError);
-      expect(String(after)).toContain("data channel closed");
+      expect(reasonOf(after)).toBe("closed");
     } finally {
       both.stop();
     }
   }, 30_000);
 
-  test("a message cut short by the peer's close is never delivered", async () => {
+  test("a graceful stop delivers frames still in the send buffer", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      const payload = pattern(2 * CHUNK_PLAINTEXT_BYTES + 1);
+      initiator.channel.holding = true;
+      // sendMessage resolves at the hand-off: the frames are in the buffer.
+      await initiator.run.sendMessage(payload, 1_000);
+      expect(initiator.channel.bufferedAmount).toBeGreaterThan(0);
+
+      let outcome: unknown = "still pending";
+      const stopping = Promise.resolve(initiator.run.stop()).then((value) => {
+        outcome = value;
+      });
+      await turn();
+      // The run is stopped; its channel waits for the buffer to empty.
+      expect(kinds(initiator)).toContain("run-stopped");
+      expect(outcome).toBe("still pending");
+      expect(initiator.channel.readyState).toBe("open");
+
+      initiator.channel.drain();
+      await stopping;
+      expect(outcome).toBe("drained");
+      expect(initiator.channel.readyState).toBe("closed");
+      expect(await responder.run.recvMessage(1_000)).toEqual(payload);
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a stop whose buffer never drains closes after the timeout and reports it", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      initiator.channel.holding = true;
+      await initiator.run.sendMessage(text("never leaves"), 1_000);
+
+      let outcome: unknown = "still pending";
+      void Promise.resolve(initiator.run.stop()).then((value) => {
+        outcome = value;
+      });
+      const stoppedAt = time.nowMs;
+      const timeoutMs = BigInt(PROTOTYPE_STOP_DRAIN_TIMEOUT_MS);
+      time.advanceTo(stoppedAt + timeoutMs - 1n);
+      await turn();
+      expect(outcome).toBe("still pending");
+      expect(initiator.channel.readyState).toBe("open");
+
+      time.advanceTo(stoppedAt + timeoutMs);
+      await turn();
+      expect(outcome).toBe("undrained");
+      expect(initiator.channel.readyState).toBe("closed");
+      expect(
+        initiator.events.find((event) => event.kind === "stop-undrained")
+          ?.detail,
+      ).toContain(`within ${String(PROTOTYPE_STOP_DRAIN_TIMEOUT_MS)}ms`);
+      // The peer never gets the message: the close reaches it instead.
+      const received = await settled(responder.run.recvMessage(1_000));
+      expect(reasonOf(received)).toBe("closed");
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a read that times out does not consume the next frame", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator, responder } = both;
+    try {
+      // Nothing has been sent: the read waits on the header, and its deadline
+      // passes with nothing taken.
+      const early = settled(responder.run.recvMessage(100));
+      await turn();
+      time.advanceTo(time.nowMs + 100n);
+      const outcome = await early;
+      expect(outcome).toBeInstanceOf(PrototypeRunTimeoutError);
+      expect(String(outcome)).toContain("application message header");
+      expect(kinds(responder)).not.toContain("session-failed");
+
+      // The message sent next is read whole, header first, by the next call.
+      const payload = pattern(CHUNK_PLAINTEXT_BYTES + 1);
+      await initiator.run.sendMessage(payload, 1_000);
+      expect(await responder.run.recvMessage(1_000)).toEqual(payload);
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a read that times out mid-message ends the session", async () => {
     const time = new FakeTime();
     const both = await connected(time);
     const { initiator, responder } = both;
@@ -482,14 +597,49 @@ describe("prototype run session", () => {
         1_000,
       );
       expect(appFrames(initiator.channel)).toHaveLength(4);
-      // The header and one chunk get out; the peer closes before the rest.
+      // The header and one chunk arrive; the rest is still on the way when
+      // the reader's deadline passes.
       initiator.channel.release(2);
-      initiator.run.stop();
+      const reading = settled(responder.run.recvMessage(100));
+      await turn();
+      time.advanceTo(time.nowMs + 100n);
+      const outcome = await reading;
 
-      const outcome = await settled(responder.run.recvMessage(1_000));
-      expect(outcome).toBeInstanceOf(WebRtcProviderError);
-      expect(String(outcome)).toContain("data channel closed");
-      expect(kinds(responder)).not.toContain("message-verified");
+      expect(outcome).toBeInstanceOf(PrototypeSessionEndedError);
+      expect((outcome as Error).cause).toBeInstanceOf(PrototypeRunTimeoutError);
+      expect(await responder.reached("session-failed")).toContain(
+        "2 of the message's 4 frames taken",
+      );
+      expect(responder.channel.readyState).toBe("closed");
+      // Every later call on that session reports the same end.
+      expect(await settled(responder.run.recvMessage(1_000))).toBe(
+        outcome as Error,
+      );
+      expect(
+        await settled(responder.run.sendMessage(text("after"), 1_000)),
+      ).toBe(outcome as Error);
+    } finally {
+      both.stop();
+    }
+  }, 30_000);
+
+  test("a frame the channel refuses ends the session", async () => {
+    const time = new FakeTime();
+    const both = await connected(time);
+    const { initiator } = both;
+    try {
+      initiator.channel.refuseNextSend = true;
+      const outcome = await settled(
+        initiator.run.sendMessage(text("refused"), 1_000),
+      );
+      expect(outcome).toBeInstanceOf(PrototypeSessionEndedError);
+      expect(reasonOf((outcome as Error).cause)).toBe("refused");
+      expect(await initiator.reached("session-failed")).toContain("refused");
+      // The edge is closed rather than left open with its lane misframed.
+      expect(initiator.channel.readyState).toBe("closed");
+      expect(
+        await settled(initiator.run.sendMessage(text("after"), 1_000)),
+      ).toBe(outcome as Error);
     } finally {
       both.stop();
     }
@@ -636,11 +786,11 @@ describe("prototype run session", () => {
       const firstBatch = appFrames(initiator.channel);
       const last = firstBatch[firstBatch.length - 1];
       expect(initiator.channel.bufferedAmount).toBeGreaterThan(
-        SEND_HIGH_WATER_BYTES,
+        MAX_BUFFERED_AMOUNT,
       );
       expect(
         initiator.channel.bufferedAmount - last.length,
-      ).toBeLessThanOrEqual(SEND_HIGH_WATER_BYTES);
+      ).toBeLessThanOrEqual(MAX_BUFFERED_AMOUNT);
       expect(done).toBe(false);
 
       let drains = 0;
@@ -714,40 +864,58 @@ describe("prototype run session", () => {
     const { initiator } = both;
     try {
       initiator.channel.holding = true;
-      const leaving = firstAppFrame(initiator.channel);
+      // The run's own transport, watched: the second header queued means the
+      // overlapping call's whole message is waiting behind the first.
+      const transport = dataChannelTransport(
+        initiator.channel as unknown as RTCDataChannel,
+      );
+      const sendApp = transport.sendApp;
+      let headers = 0;
+      const bothQueued = new Promise<void>((resolve) => {
+        transport.sendApp = (bytes) => {
+          const queued = sendApp(bytes);
+          if (bytes.length < 1_024 && (headers += 1) === 2) resolve();
+          return queued;
+        };
+      });
       const sending = settled(
         initiator.run.sendMessage(pattern(20 * CHUNK_PLAINTEXT_BYTES), 50),
       );
-      await leaving;
+      const overlapping = settled(
+        initiator.run.sendMessage(text("queued behind"), 60_000),
+      );
+      await bothQueued;
       await turn();
-      // The hand-off stopped at the mark with the rest of the message waiting.
+      // The hand-off stopped at the mark with the rest of both messages
+      // waiting; none of the second call's frames has left.
       const handedOff = initiator.channel.sent.length;
       const batch = appFrames(initiator.channel);
       expect(
         initiator.channel.bufferedAmount - batch[batch.length - 1].length,
-      ).toBeLessThanOrEqual(SEND_HIGH_WATER_BYTES);
+      ).toBeLessThanOrEqual(MAX_BUFFERED_AMOUNT);
+      expect(batch.filter((frame) => frame.length < 1_024 + 1).length).toBe(1);
 
-      // The channel never drains, and the deadline passes with frames waiting.
+      // The channel never drains, and the first deadline passes.
       let outcome: unknown = "still pending";
       void sending.then((value) => {
         outcome = value;
       });
       time.advanceTo(time.nowMs + 50n);
       await turn();
-      expect(outcome).toBeInstanceOf(PrototypeRunError);
-      expect(outcome).not.toBeInstanceOf(PrototypeRunTimeoutError);
-      expect(String(outcome)).toContain("the session was ended");
+      expect(outcome).toBeInstanceOf(PrototypeSessionEndedError);
+      expect((outcome as Error).cause).toBeInstanceOf(PrototypeRunTimeoutError);
       expect(await initiator.reached("session-failed")).toContain(
         "the session was ended",
       );
+      // The overlapping call fails with the same typed end, not a raw error
+      // from the transport its frames were waiting on.
+      expect(await overlapping).toBe(outcome as Error);
       // What had not left never leaves, and the edge is closed.
       expect(initiator.channel.readyState).toBe("closed");
       expect(initiator.channel.sent).toHaveLength(handedOff);
-      const next = await settled(
-        initiator.run.sendMessage(text("next"), 1_000),
-      );
-      expect(next).toBeInstanceOf(PrototypeRunError);
-      expect(String(next)).toContain("the session has ended");
+      expect(
+        await settled(initiator.run.sendMessage(text("next"), 1_000)),
+      ).toBe(outcome as Error);
     } finally {
       both.stop();
     }

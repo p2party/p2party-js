@@ -134,35 +134,76 @@ during a browser-imposed gap.
 
 A hidden page is not suspended: its schedule stays armed. Because a hidden
 page's own timers are throttled, the schedule's wake-ups come from a dedicated
-timer worker, and the page sends each cell when the worker's message arrives.
-Lateness is judged on the page's clock when it runs the slot, and a cycle with
-a slot past its drift tolerance is marked degraded.
+timer worker, one shared by every scheduled-cover edge on the page. The page
+sends each cell when the worker's message arrives. Lateness is judged on the
+page's clock when it runs the slot, and a cycle with a slot past its drift
+tolerance is marked degraded.
 
-Measured in Chrome for Testing 159.0.8154.6 on macOS 27.2 (arm64), launched
-without the flags browser drivers add to disable background throttling, with
-the page hidden behind another tab (harness and results in
-`docs/e2e/cover-timers/`; one cycle a second over 2 lanes × 5 frames, so a
-slot every 100 ms with a 99 ms tolerance; 390 s hidden):
+A late wake-up on the page's clock does not prove the worker is dead: a freeze,
+a system sleep or a long task delays every wake-up too. So a wake-up 5 s
+overdue only makes the page ping the worker, and a worker that answers is kept.
+A worker that raises its error event, cannot be reached, or does not answer
+within 10 s is replaced:
+
+- the pending wake-ups move to page timers at once;
+- a new worker starts at a later cycle boundary, after a backoff of 1, 2 and
+  then 4 s, at most 3 times;
+- after that the page stays on page timers for good, and each scheduled-cover
+  edge reports this once with `console.warn`.
+
+`p2party.getCoverTimerSource()` returns `"worker"`, `"page"` or `"none"`.
+
+The figures below come from one measurement in Chrome for Testing 159.0.8154.6
+on macOS 27.2 (arm64). Setup:
+
+- the harness and results are in `docs/e2e/cover-timers/`;
+- the browser was launched without the flags browser drivers add to disable
+  background throttling;
+- the page was hidden behind another tab;
+- the 1-minute load average on the host was 6 to 9;
+- the harness ran the scheduler alone, with recorder lanes and a constant
+  cell, so cell sealing and WebRTC were not part of it, and with one worker
+  per scheduler (the worker is shared now; the path from worker timer through
+  `postMessage` to the page's handler is the same);
+- one cycle a second over 2 lanes × 5 frames, so a slot every 100 ms with a
+  99 ms tolerance, 390 s hidden.
+
+Results:
 
 - On page timers, the clock used before the worker, no cell was sent while
   hidden and all 389 cycles degraded. Past 300 s hidden, wake-ups arrived once
   a minute.
 - On the timer worker, 3,456 of 3,890 cells were sent and 75 of 389 cycles
-  (19.3 %) degraded. The worker's wake-ups reached the hidden page late: median
-  50 ms, 99th percentile 100 ms, maximum 143 ms. 1.8 % of them were past the
-  99 ms tolerance. The phase past 300 s hidden looked like the earlier ones.
+  (19.3 %) degraded. The wake-ups ran late on the hidden page: median 50 ms,
+  90th percentile 94 ms, 99th percentile 100 ms, maximum 143 ms. 1.8 % of them
+  were past the 99 ms tolerance.
+- The phase past 300 s hidden looked like the earlier ones. While visible, no
+  wake-up was more than 6 ms late.
 - With 500 ms slots (499 ms tolerance) and 120 s hidden, the worker sent all
-  230 cells and no cycle degraded. Page timers sent none.
+  230 cells and no cycle degraded, but its wake-ups still ran late: median
+  60 ms, maximum 105 ms. Page timers sent none.
+
+The harness timestamps only the page side. It therefore cannot tell a late
+worker timer from a late page task. That the worker's own timers are not
+throttled is an inference from Chromium's documented behaviour, not a
+measurement.
 
 So tab visibility can still be read off the wire:
 
+- from cell timing, even when no cycle degrades. A cell is sent when its
+  wake-up runs on the page. On a hidden page that was tens of milliseconds
+  after the slot (median 50–60 ms), and on a visible one at most 6 ms. An
+  observer timing cells against the slot grid sees the difference. Closing
+  this needs the cells to be sent off the page's event loop, from the worker;
+  this change does not do that.
 - in the cycles that still degrade at short slot spacings, as measured above;
 - in cases that were not measured:
   - a frozen or discarded page (mobile browsers, Safari), where `freeze`
     suspends cover;
   - a browser that throttles worker timers;
   - a suspended process;
-  - the page-timer fallback where no worker can be created.
+  - page timers, used while a lost worker is being replaced and for good
+    where no worker can be created or the replacements are spent.
 
 While the page is hidden, a scheduled send's delivery idle budget is held
 exactly as it is while cover is suspended, so a send that genuinely stalls

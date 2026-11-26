@@ -1367,6 +1367,17 @@ export class CarrierRuntime {
           detail:
             "the store no longer retains this window (it is past the retention its descriptor states); it was not read at this store",
         });
+      // Neither expiry nor blame can be told apart from a store whose clock
+      // disagrees with this one, so the window is missed at this store now;
+      // a caught-up read is retried, and the store is read again next time.
+      if (scan.status === "clock-disagreement")
+        this.#emit({
+          kind: "missed",
+          storeIdHex: store.storeIdHex,
+          window,
+          detail:
+            "the store's signed clock disagrees with this client's beyond the profile's skew; this window was not read at this store this time",
+        });
       if (!this.#running) return status;
 
       const observed = await this.#openObjects(store, window, scan.objects);

@@ -390,6 +390,90 @@ describe("prototype store entrypoint", () => {
     expect(finalized).toBeGreaterThan(0);
   }, 90_000);
 
+  test("a store restarted with a different retention refuses to start and says why", async () => {
+    const directory = join(root, "retention-changed");
+    mkdirSync(directory, { recursive: true });
+    const databasePath = join(directory, "store.sqlite");
+    const chainStart =
+      ingressWindow(
+        PROTOTYPE_DELIVERY_PROFILE_V0.deliveryWindowMs,
+        BigInt(Date.now()),
+      ) - 1n;
+    const base = {
+      P2PARTY_STORE_PROTOTYPE: "1",
+      P2PARTY_STORE_OPEN_ALLOCATION: "1",
+      P2PARTY_STORE_DB: databasePath,
+      P2PARTY_STORE_KEY_FILE: join(directory, "store.key"),
+      P2PARTY_STORE_CHAIN_START: String(chainStart),
+    };
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const launch = async (windows: number): Promise<void> => {
+      const port = freePort();
+      const child = spawnStore({
+        ...base,
+        P2PARTY_STORE_PORT: String(port),
+        P2PARTY_STORE_RETENTION_WINDOWS: String(windows),
+      });
+      try {
+        await waitForHealth(child, port);
+        // Polled, not timed: wait until the chain has a signed window.
+        for (let attempt = 0; attempt < 120; attempt++) {
+          const db = new Database(databasePath, {
+            readonly: true,
+            safeIntegers: true,
+          });
+          let finalized = 0n;
+          try {
+            finalized =
+              db
+                .query<{ rows: bigint }, []>(
+                  'SELECT count(*) AS rows FROM "window" WHERE finalized = 1',
+                )
+                .get()?.rows ?? 0n;
+          } finally {
+            db.close();
+          }
+          if (finalized > 0n) return;
+          await Bun.sleep(250);
+        }
+        throw new Error("the store never finalized a window");
+      } finally {
+        child.kill("SIGTERM");
+        await child.exited;
+      }
+    };
+    await launch(retention);
+
+    const changed = spawnStore({
+      ...base,
+      P2PARTY_STORE_PORT: String(freePort()),
+      P2PARTY_STORE_RETENTION_WINDOWS: String(retention + 1),
+    });
+    const outcome = await Promise.race([
+      changed.exited,
+      Bun.sleep(20_000).then(() => "still running" as const),
+    ]);
+    if (outcome === "still running") {
+      changed.kill("SIGTERM");
+      await changed.exited;
+    }
+    expect(outcome).toBe(1);
+    const said = await new Response(changed.stderr).text();
+    // One line, naming the cause and the two ways out.
+    expect(said.trim().split("\n")).toHaveLength(1);
+    for (const phrase of [
+      "signed under another descriptor",
+      "P2PARTY_STORE_RETENTION_WINDOWS",
+      "restore the setting",
+      "new P2PARTY_STORE_DB",
+      "new P2PARTY_STORE_KEY_FILE",
+    ])
+      expect(said).toContain(phrase);
+
+    // Restoring the setting is enough to serve the chain again.
+    await launch(retention);
+  }, 90_000);
+
   test("the entrypoint refuses a retention below what clients read back", async () => {
     const directory = join(root, "retention-short");
     mkdirSync(directory, { recursive: true });

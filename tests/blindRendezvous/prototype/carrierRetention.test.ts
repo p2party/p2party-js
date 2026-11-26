@@ -16,6 +16,7 @@ import { CarrierRuntime } from "../../../src/blindRendezvous/prototype/carrierRu
 import { PROTOTYPE_DELIVERY_PROFILE_V0 } from "../../../src/blindRendezvous/prototype/profile";
 import { PrototypeStoreClient } from "../../../src/blindRendezvous/prototype/storeClient";
 import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store/storeCore";
+import { PROTOTYPE_MAX_READ_WINDOWS } from "../../../src/utils/constants";
 import { createPrototypeStoreHandler } from "../../../src/blindRendezvous/prototype/store/storeHttp";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 
@@ -169,8 +170,58 @@ describe("carrier runtime and store retention", () => {
     }
   });
 
+  test("a clock disagreement is reported missed and the store is read again", async () => {
+    const storeIdHex = "bb".repeat(32);
+    const scanned: bigint[] = [];
+    const disagreeing = {
+      storeIdHex,
+      storeId: new Uint8Array(32).fill(0xbb),
+      carrierContextId: new Uint8Array(32).fill(0xbb),
+      inert: false,
+      faults: [],
+      issueToken: (): Promise<boolean> => Promise.resolve(true),
+      allocate: (): Promise<null> => Promise.resolve(null),
+      append: (): Promise<null> => Promise.resolve(null),
+      scanWindow: (window: bigint): Promise<WindowScan> => {
+        scanned.push(window);
+        return Promise.resolve({
+          window,
+          status: window === CHAIN_START ? "clock-disagreement" : "finalized",
+          objects: [],
+          checkpointHash: null,
+        });
+      },
+      recordReceipt: (): void => undefined,
+      checkpointHashFor: (): null => null,
+    } as unknown as PrototypeStoreClient;
+    const harness = harnessFor([disagreeing], windowStart(CHAIN_START));
+    harness.runtime.start();
+    try {
+      await fireUntil(
+        harness,
+        windowStart(CHAIN_START + 2n) + profile.publicReadOffsetMs,
+      );
+      expect(
+        missedAt(harness.events, CHAIN_START, storeIdHex).filter((event) =>
+          (event.detail ?? "").includes("signed clock disagrees"),
+        ),
+      ).toHaveLength(1);
+      expect(
+        missedAt(harness.events, CHAIN_START).some((event) =>
+          (event.detail ?? "").includes("no store served a finalized read"),
+        ),
+      ).toBe(true);
+      // Not dropped: the next window's read goes to the same store.
+      expect(scanned).toContain(CHAIN_START + 1n);
+    } finally {
+      await harness.runtime.stop();
+    }
+  });
+
   test("a client returning from suspension does not silently lose a catch-up window", async () => {
-    const clock = { now: windowStart(CHAIN_START) };
+    // The run starts one window after the chain start, so the chain-start
+    // window is the oldest its catch-up can reach.
+    const clock = { now: windowStart(CHAIN_START + 1n) + 50n };
     let handler: ((request: Request) => Promise<Response>) | null = null;
     const server = Bun.serve({
       port: 0,
@@ -217,11 +268,11 @@ describe("carrier runtime and store retention", () => {
       };
       harness.runtime.start();
       try {
-        // One window on schedule, then a suspension of 60 windows, inside the
-        // runtime's catch-up reach.
-        await fireUntil(harness, windowStart(CHAIN_START) + WINDOW_MS - 1n);
-        syncClock();
-        const resumeWindow = CHAIN_START + 61n;
+        // Suspended from the start for the runtime's whole catch-up reach:
+        // no timer fires until the page resumes 64 windows later, so the
+        // oldest window it reads back is the one 65 behind the clock.
+        const resumeWindow =
+          CHAIN_START + 1n + BigInt(PROTOTYPE_MAX_READ_WINDOWS);
         harness.nowMs = windowStart(resumeWindow) + profile.publicReadOffsetMs;
         syncClock();
         while ((await core.finalizeDue()).length > 0);
@@ -238,10 +289,17 @@ describe("carrier runtime and store retention", () => {
         const scans = harness.events.filter(
           (event) =>
             event.kind === "scan" &&
-            event.window >= CHAIN_START + 1n &&
+            event.window >= CHAIN_START &&
             event.window < resumeWindow - 1n,
         );
-        expect(scans.length).toBeGreaterThan(50);
+        expect(scans.length).toBeGreaterThan(60);
+        // The edge the retention floor is derived from: 65 back, read.
+        expect(resumeWindow - CHAIN_START).toBe(65n);
+        expect(
+          scans
+            .filter((event) => event.window === CHAIN_START)
+            .map((event) => event.detail),
+        ).toEqual(["finalized"]);
         // Every caught-up window was read, or reported missed at this store:
         // none came back as an empty success.
         // A report about the read itself, at this store or for the window as

@@ -1203,6 +1203,8 @@ export class PrototypeStoreClient {
    * client and starts with none. See `#verifyChain`.
    */
   #verified: VerifiedRun | null = null;
+  /** Counts blame; a run verified across a blame is not kept. */
+  #distrust = 0;
   readonly #checkpointHashes = new Map<string, Uint8Array>();
   #receipts: AppendReceipt[] = [];
   readonly #inFlight = new Set<InFlightAppend>();
@@ -2331,6 +2333,7 @@ export class PrototypeStoreClient {
   ): T {
     this.#inert = true;
     this.#verified = null;
+    this.#distrust += 1;
     return this.#reject(kind, window, detail, value);
   }
 
@@ -2662,8 +2665,13 @@ export class PrototypeStoreClient {
       this.#observation(window, checkpoint, descriptor, checkpointHash),
     );
     this.#verified = null;
+    // A scan of another window can run beside this one and observe or blame
+    // while the verifier awaits: it is given this moment's run, and what it
+    // verified is kept only if nothing was blamed meanwhile.
+    const observed = [...this.#observed];
+    const distrust = this.#distrust;
     const verdict = await verifyStoreCheckpointChain(
-      this.#observed,
+      observed,
       this.#geometry,
       this.#module,
     );
@@ -2673,11 +2681,12 @@ export class PrototypeStoreClient {
       verdict.outcome === "chain-verified" ||
       verdict.outcome === "unverified-chain-gap"
     ) {
+      if (distrust !== this.#distrust) return;
       const hashes = new Map<string, Uint8Array>();
-      for (const observed of this.#observed) {
-        const hash = this.#observedHashes.get(observed);
+      for (const held of observed) {
+        const hash = this.#observedHashes.get(held);
         if (hash === undefined) return;
-        hashes.set(String(observed.checkpoint.ingressWindow), hash);
+        hashes.set(String(held.checkpoint.ingressWindow), hash);
       }
       this.#verified = {
         descriptorHash: copyBytes(checkpoint.descriptorHash),
@@ -3048,6 +3057,7 @@ export class PrototypeStoreClient {
     this.#markUnreadable(window);
     this.#inert = true;
     this.#verified = null;
+    this.#distrust += 1;
     this.#record(kind, window, detail, evidence);
     return "unreachable";
   }

@@ -305,6 +305,50 @@ returned. The application limit is 10 GiB. Cancellation is scoped most
 precisely by the handle's transfer ID, so prefer `handle.cancel()` over a
 content-hash lookup for concurrent identical sends.
 
+### When a received message cannot be stored
+
+A received chunk this device cannot store is not acknowledged. Its sender gets
+no receipt for it and either retransmits it or reports that the transfer ended
+without receiver confirmation. Subscribe to see why:
+
+```ts
+const stop = p2party.onReceiveStorageError((error) => {
+  // error.code: "insufficient-quota" | "quota-exceeded" | "storage-failed"
+  //             | "integrity"
+  console.warn(error.code, error.filename, error.fromPeerId, error.totalSize);
+});
+```
+
+Each transfer and code is reported once, until a later chunk of that transfer
+is stored again.
+
+- `insufficient-quota`: before the first byte of a new transfer is written,
+  its size is compared with the browser's free storage estimate
+  (`quota - usage`). A larger transfer is refused and nothing is written;
+  `requiredBytes` and `availableBytes` say by how much. If no estimate is
+  available, the transfer is accepted and the next code covers a full disk.
+- `quota-exceeded`: the browser refused a write for lack of space.
+- `storage-failed`: any other storage fault.
+- `integrity`: the last chunk of a received file arrived, but the stored file
+  does not hash to the whole-file SHA-512 its message carries. The file is not
+  marked complete, the sender gets no final receipt, and its stored chunks are
+  dropped. `readMessage` for that file throws `p2party.ReceiveIntegrityError`
+  instead of returning bytes, until a later resend of the whole file (for
+  example after a reconnect) completes and verifies. While the connection
+  stays up, the sender resends only the last chunk, which cannot complete the
+  file, so recovery needs that later full resend.
+
+Each received file is verified once, when its last chunk arrives: the database
+worker reads the stored file once in chunk order and hashes it. Reading a
+completed file later does not re-verify it. Text messages are not
+re-verified; each of their chunks is checked against the message's Merkle root
+as it arrives, like every file chunk.
+
+The first received file in a page also asks the browser once for persistent
+storage (`navigator.storage.persist()`), so storage pressure does not evict a
+partly received file. The answer is not awaited, and a refusal changes nothing
+else. Firefox may show a permission prompt.
+
 ## Back up and restore an identity
 
 The identity behind every room is an Ed25519 key pair in browser storage, and

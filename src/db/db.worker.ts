@@ -12,9 +12,12 @@ import {
 
 import { getDB, dbName } from "./src/getDB";
 import type { RepoSchema } from "./src/getDB";
+import { Sha512Stream } from "./sha512Stream";
+import { uint8ArrayToHex } from "../utils/uint8array";
 import {
   advanceReceiveManifest,
   buildReceiveManifest,
+  EMPTY_RECEIVE_MANIFEST,
   isCurrentReceiveManifest,
   ReceiveChunkRejectedError,
   receiveProgress,
@@ -34,7 +37,6 @@ import type {
   Chunk,
   ChunkLeafHash,
   ReceiveChunk,
-  ReceiveChunkStored,
   ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
   ReceiveDeleteGuard,
@@ -805,6 +807,7 @@ const opfsAssembling = new Map<string, Promise<File | null>>();
 type OPFSSyncAccessHandle = {
   getSize: () => number;
   truncate: (size: number) => void;
+  read: (buffer: ArrayBufferView, options: { at: number }) => number;
   write: (buffer: ArrayBufferView, options: { at: number }) => number;
   flush: () => void;
   close: () => void;
@@ -1203,6 +1206,103 @@ async function placeReceiveChunk(
   return true;
 }
 
+// read() may return fewer bytes than requested — loop until `into` is full.
+function readReceiveAt(
+  access: OPFSSyncAccessHandle,
+  offset: number,
+  into: Uint8Array,
+): void {
+  let done = 0;
+  while (done < into.length) {
+    const n = access.read(into.subarray(done), { at: offset + done });
+    if (n <= 0) throw new Error("OPFS short read");
+    done += n;
+  }
+}
+
+// SHA-512 of a received file, reading each byte once in chunk order: from OPFS
+// for chunks placed there, from the record for chunks kept in IndexedDB, and
+// from `pending` for the chunk being stored now (not yet recorded). Returns
+// undefined when a chunk's bytes are in OPFS but no handle was supplied.
+async function hashReceivedFileOnce(
+  merkleRoot: string,
+  manifest: ReceiveManifest,
+  pending: { chunkIndex: number; data: ArrayBuffer },
+  entry: ReceiveFileEntry | undefined,
+): Promise<string | undefined> {
+  const hasher = new Sha512Stream();
+  const scratch = new Uint8Array(manifest.uniformSize);
+  let next = 0;
+  const db = await getDB();
+  try {
+    const tx = db.transaction("chunks", "readonly");
+    let cursor = await tx.store.openCursor(
+      IDBKeyRange.bound([merkleRoot, 0], [merkleRoot, Number.MAX_SAFE_INTEGER]),
+    );
+    while (cursor) {
+      const record = cursor.value;
+      if (next === pending.chunkIndex) {
+        hasher.update(new Uint8Array(pending.data));
+        next += 1;
+      }
+      const length = record.realLen ?? -1;
+      if (record.chunkIndex !== next || length <= 0 || length > scratch.length)
+        throw new Error("received file layout does not match its manifest");
+      if (record.data) {
+        if (record.data.byteLength !== length)
+          throw new Error("received chunk length does not match its record");
+        hasher.update(new Uint8Array(record.data));
+      } else {
+        if (!entry) return undefined;
+        const bytes = scratch.subarray(0, length);
+        readReceiveAt(entry.access, next * manifest.uniformSize, bytes);
+        hasher.update(bytes);
+      }
+      next += 1;
+      cursor = await cursor.continue();
+    }
+    if (next === pending.chunkIndex) {
+      hasher.update(new Uint8Array(pending.data));
+      next += 1;
+    }
+    if (next !== manifest.count)
+      throw new Error("received file layout does not match its manifest");
+    await tx.done;
+  } finally {
+    db.close();
+  }
+  return uint8ArrayToHex(hasher.digest());
+}
+
+async function hashReceivedFile(
+  merkleRoot: string,
+  totalSize: number,
+  manifest: ReceiveManifest,
+  pending: { chunkIndex: number; data: ArrayBuffer },
+): Promise<string> {
+  const open = opfsReceiving.get(merkleRoot);
+  const digest = await hashReceivedFileOnce(
+    merkleRoot,
+    manifest,
+    pending,
+    open,
+  );
+  if (digest !== undefined) return digest;
+  // Chunk bytes are in OPFS but this worker holds no handle for the file
+  // (only when the completing chunk itself could not be placed there).
+  const entry = await ensureReceiveHandle(merkleRoot, totalSize);
+  if (!entry) throw new Error("received file bytes are in unavailable OPFS");
+  const reopened = await hashReceivedFileOnce(
+    merkleRoot,
+    manifest,
+    pending,
+    entry,
+  );
+  if (reopened === undefined)
+    throw new Error("received file bytes are in unavailable OPFS");
+  return reopened;
+}
+
 // The running manifest of a received transfer, read from its messageData row.
 // A row without a current one (written by 0.14.10, or by a writer that does
 // not maintain it) is summarized once from its chunk records instead.
@@ -1242,10 +1342,15 @@ async function loadReceiveManifest<
 // transaction, so a duplicate can never be mistaken for the chunk that
 // completed a message. The work per chunk does not depend on how many chunks
 // are already held: the manifest replaces a scan of every held record.
+//
+// A file is complete only once its stored bytes hash to the whole-file hash
+// its message carries. The chunk that would complete it is verified before it
+// is recorded; on a mismatch nothing completes, the transfer's have-set and
+// OPFS file are dropped, and its row is marked integrityFailed.
 async function storeReceiveChunkLocked(
   chunk: ReceiveChunk,
   writeToken: string,
-): Promise<ReceiveChunkStored> {
+): Promise<ReceiveChunkStoreResult> {
   const {
     schemaVersion,
     roomId,
@@ -1307,6 +1412,7 @@ async function storeReceiveChunkLocked(
   // bytes). The worker dispatcher holds the per-Merkle lock across this whole
   // function, so this view cannot change before the committing transaction
   // below, which nevertheless re-derives everything it decides on.
+  let completed: ReceiveManifest;
   const readDb = await getDB();
   try {
     const tx = readDb.transaction(["chunks", "messageData"], "readonly");
@@ -1325,10 +1431,16 @@ async function storeReceiveChunkLocked(
     );
     await tx.done;
     if (held) return { stored: false, ...receiveProgress(manifest, totalSize) };
-    advanceReceiveManifest(manifest, totalSize, chunkIndex, realLen);
+    completed = advanceReceiveManifest(
+      manifest,
+      totalSize,
+      chunkIndex,
+      realLen,
+    );
   } finally {
     readDb.close();
   }
+  const completes = receiveProgress(completed, totalSize).complete;
 
   // Write bytes to OPFS FIRST (durable), then record the have-set entry: if we
   // crash between the two we get bytes-without-record (resent + rewritten
@@ -1353,6 +1465,14 @@ async function storeReceiveChunkLocked(
     storage === "opfs" && wroteToOPFS
       ? { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash }
       : { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash, data };
+
+  const intact =
+    storage !== "opfs" ||
+    !completes ||
+    (await hashReceivedFile(merkleRoot, totalSize, completed, {
+      chunkIndex,
+      data,
+    })) === hash;
 
   const db = await getDB();
   try {
@@ -1383,6 +1503,7 @@ async function storeReceiveChunkLocked(
       totalSize,
     );
     let stored = false;
+    let integrityFailed = false;
     if (existing === undefined) {
       manifest = advanceReceiveManifest(
         manifest,
@@ -1390,13 +1511,24 @@ async function storeReceiveChunkLocked(
         chunkIndex,
         realLen,
       );
-      await store.add(record);
-      stored = true;
+      if (receiveProgress(manifest, totalSize).complete !== completes)
+        throw new Error("receive state changed during verification");
+      if (intact) {
+        await store.add(record);
+        stored = true;
+      } else {
+        // The sender's resume replays only what this device still holds, so
+        // a dropped have-set lets a later resume send the whole file again.
+        const keys = await store.index("merkleRoot").getAllKeys(merkleRoot);
+        for (const key of keys) await store.delete(key);
+        manifest = { ...EMPTY_RECEIVE_MANIFEST };
+        integrityFailed = true;
+      }
     }
 
     const progress = receiveProgress(manifest, totalSize);
 
-    if (stored) {
+    if (stored || integrityFailed) {
       await messageStore.put({
         roomId,
         timestamp: previous?.timestamp ?? timestamp,
@@ -1409,6 +1541,11 @@ async function storeReceiveChunkLocked(
         totalSize,
         channelLabel,
         receiveManifest: manifest,
+        // Cleared only by a verified completion.
+        ...(integrityFailed ||
+        (previous?.integrityFailed === true && !progress.complete)
+          ? { integrityFailed: true }
+          : {}),
       });
 
       const roomStore = tx.objectStore("uniqueRoom");
@@ -1424,13 +1561,13 @@ async function storeReceiveChunkLocked(
     }
 
     await tx.done;
-    return {
-      stored,
-      ...progress,
-    };
+    if (!integrityFailed) return { stored, ...progress };
   } finally {
     db.close();
   }
+  await fnCloseReceiveFile(merkleRoot);
+  await fnDeleteOPFSFile(merkleRoot);
+  return { failure: "integrity" };
 }
 
 export const INCOMPLETE_RECEIVE_RETENTION_MS = 24 * 60 * 60 * 1000;

@@ -4,6 +4,7 @@
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { getDB } from "../../src/db/src/getDB";
 import { buildReceiveManifest } from "../../src/db/receiveManifest";
@@ -53,8 +54,15 @@ const store = async (chunk: ReceiveChunk): Promise<ReceiveChunkStoreResult> => {
   return reply.result as ReceiveChunkStoreResult;
 };
 
+// SHA-512 hex of a whole transfer whose bytes are 0, 1, 2, ... (mod 256).
+const contentHash = (totalSize: number): string =>
+  createHash("sha512")
+    .update(Uint8Array.from({ length: totalSize }, (_, k) => k & 0xff))
+    .digest("hex");
+
 // Chunk `index` of a transfer whose bytes are 0, 1, 2, ... (mod 256), cut at
-// `uniform` real bytes per chunk. Matches the fixture generator.
+// `uniform` real bytes per chunk, carrying that content's whole-file hash.
+// Matches the fixture generator.
 const chunkOf = (
   merkleRoot: string,
   index: number,
@@ -73,7 +81,7 @@ const chunkOf = (
     channelLabel: "chat",
     timestamp: 1_790_000_000_000,
     merkleRoot,
-    hash: merkleRoot.slice(0, 2).replace(/./, "f").repeat(64),
+    hash: contentHash(totalSize),
     filename: "",
     messageType: 1,
     chunkIndex: index,
@@ -154,14 +162,32 @@ const countCursorWork = () => {
 };
 
 // In-memory OPFS: one Uint8Array per file name, with the sync-access-handle
-// surface the worker uses.
+// surface the worker uses. Every read is logged.
 const installOpfs = (
   files: Map<string, Uint8Array>,
   extra: Record<string, unknown> = {},
-): { directoryOpens: number } => {
-  const stats = { directoryOpens: 0 };
+): {
+  directoryOpens: number;
+  reads: Array<{ name: string; at: number; length: number }>;
+} => {
+  const stats = {
+    directoryOpens: 0,
+    reads: [] as Array<{ name: string; at: number; length: number }>,
+  };
   const access = (name: string) => ({
     getSize: () => (files.get(name) ?? new Uint8Array()).length,
+    read: (view: ArrayBufferView, { at }: { at: number }) => {
+      const buf = files.get(name) ?? new Uint8Array();
+      const into = new Uint8Array(
+        view.buffer,
+        view.byteOffset,
+        view.byteLength,
+      );
+      const n = Math.max(0, Math.min(into.length, buf.length - at));
+      into.set(buf.subarray(at, at + n));
+      stats.reads.push({ name, at, length: n });
+      return n;
+    },
     truncate: (size: number) => {
       const old = files.get(name) ?? new Uint8Array();
       const next = new Uint8Array(size);
@@ -188,6 +214,9 @@ const installOpfs = (
       stats.directoryOpens += 1;
       return {
         getDirectoryHandle: async () => ({
+          removeEntry: async (name: string) => {
+            files.delete(name);
+          },
           getFileHandle: async (name: string) => ({
             createSyncAccessHandle: async () => access(name),
             getFile: async () =>
@@ -333,8 +362,9 @@ describe("receive cost does not grow with chunks already held", () => {
       { stored: true, savedSize: 48, complete: true },
     ]);
     // The 0.14.10 row is summarized once (validation pass + commit pass over
-    // its five records), then never re-read.
-    expect(advances).toEqual([10, 0, 0, 0, 0]);
+    // its five records), then never re-read until the completing chunk, whose
+    // whole-file verification visits each of the nine held records once.
+    expect(advances).toEqual([10, 0, 0, 0, 9]);
     const completed = await messageRow(file);
     expect(completed?.savedSize).toBe(48);
     const records = (await rows()).chunks.filter(
@@ -438,6 +468,99 @@ describe("receive cost does not grow with chunks already held", () => {
       savedSize: 5,
       complete: false,
     });
+  });
+});
+
+describe("whole-file verification", () => {
+  const fileChunk = (
+    root: string,
+    index: number,
+    totalSize: number,
+    overrides: Partial<ReceiveChunk> = {},
+  ) =>
+    chunkOf(root, index, totalSize, 5, {
+      messageType: 2,
+      filename: "f.bin",
+      mimeType: "application/octet-stream",
+      storage: "opfs",
+      ...overrides,
+    });
+
+  test("a completed file whose stored bytes do not match the message hash is refused", async () => {
+    quietConsole();
+    const root = "7a".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    installOpfs(files);
+    expect(await store(fileChunk(root, 0, 13))).toMatchObject({ stored: true });
+    expect(await store(fileChunk(root, 1, 13))).toMatchObject({ stored: true });
+    // The stored bytes change after their have-set record was committed.
+    files.get(root)![3] ^= 0xff;
+
+    expect(await store(fileChunk(root, 2, 13))).toEqual({
+      failure: "integrity",
+    });
+    // Not complete, nothing held: the have-set and the OPFS file are gone and
+    // the row says why, so a reconnect has no final receipt to replay.
+    const after = await rows();
+    expect(after.chunks.filter((c) => c.merkleRoot === root)).toEqual([]);
+    expect(files.has(root)).toBe(false);
+    expect(await messageRow(root)).toMatchObject({
+      savedSize: 0,
+      totalSize: 13,
+      integrityFailed: true,
+    });
+
+    // A later full resend that stores intact bytes completes and clears it.
+    for (const index of [0, 1])
+      expect(await store(fileChunk(root, index, 13))).toMatchObject({
+        stored: true,
+        complete: false,
+      });
+    expect(await store(fileChunk(root, 2, 13))).toEqual({
+      stored: true,
+      savedSize: 13,
+      complete: true,
+    });
+    expect((await messageRow(root))?.integrityFailed).toBeUndefined();
+
+    // A sender whose bytes never match the hash it claims is refused too.
+    const liar = "7b".repeat(64);
+    const claimed = { hash: contentHash(14) };
+    await store(fileChunk(liar, 0, 13, claimed));
+    await store(fileChunk(liar, 1, 13, claimed));
+    expect(await store(fileChunk(liar, 2, 13, claimed))).toEqual({
+      failure: "integrity",
+    });
+  });
+
+  test("verification reads the file once", async () => {
+    const root = "7c".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const counts = countCursorWork();
+    // Chunk 3 arrives first, before the uniform size is known, so its bytes
+    // stay in its IndexedDB record; the others land in OPFS.
+    const visits: number[] = [];
+    const readsPerStore: number[] = [];
+    let last: ReceiveChunkStoreResult | undefined;
+    for (const index of [3, 0, 1, 2, 4]) {
+      const visitsBefore = counts.advances;
+      const readsBefore = opfs.reads.length;
+      last = await store(fileChunk(root, index, 23));
+      visits.push(counts.advances - visitsBefore);
+      readsPerStore.push(opfs.reads.length - readsBefore);
+    }
+    expect(last).toEqual({ stored: true, savedSize: 23, complete: true });
+    // Only the completing store reads, and it reads each byte once, in order:
+    // chunks 0-2 from OPFS, chunk 3 from its record, chunk 4 from memory.
+    expect(readsPerStore).toEqual([0, 0, 0, 0, 3]);
+    expect(opfs.reads).toEqual([
+      { name: root, at: 0, length: 5 },
+      { name: root, at: 5, length: 5 },
+      { name: root, at: 10, length: 5 },
+    ]);
+    // One pass over the four held records, at completion only.
+    expect(visits).toEqual([0, 0, 0, 0, 4]);
   });
 });
 

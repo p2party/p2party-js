@@ -188,6 +188,11 @@ export const MAX_SKIP_SESSION = 2000;
 export const MAX_RETRANSMITS = 5;
 export const RETRANSMIT_TIMEOUT_MS = 2000;
 
+// The receive handler reports each (transfer, failure) pair to the app once
+// until that transfer stores again; this caps the set it remembers them in.
+// Forgetting one only means its next failure is reported again.
+export const MAX_REPORTED_RECEIVE_STORAGE_ERRORS = 1_024;
+
 // Wait this long for a per-message data channel to reach "open" before sending,
 // so its first frames aren't spilled to the WS relay while it is still
 // "connecting" (anything that still slips is recovered by reconcile()).

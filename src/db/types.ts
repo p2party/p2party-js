@@ -67,6 +67,12 @@ export interface MessageData {
    * chunk insert. Absent on sent rows and on rows written by 0.14.10.
    */
   receiveManifest?: ReceiveManifest;
+  /**
+   * Receiver only: the file's stored bytes did not match its whole-file hash
+   * when it last completed, so its chunks were dropped. Cleared when a later
+   * re-receive completes and verifies.
+   */
+  integrityFailed?: true;
   // recipients: number;
 }
 
@@ -150,9 +156,11 @@ export interface ReceiveChunkStored {
  *   estimated free storage; refused before anything was written.
  * - `quota-exceeded`: the browser refused a write for lack of space.
  * - `storage-failed`: any other storage fault.
+ * - `integrity`: the chunk would have completed a file whose stored bytes do
+ *   not hash to the message's whole-file hash; the file's chunks were dropped.
  */
 export type ReceiveStorageFailure =
-  "insufficient-quota" | "quota-exceeded" | "storage-failed";
+  "insufficient-quota" | "quota-exceeded" | "storage-failed" | "integrity";
 
 export interface ReceiveChunkStoreFailure {
   failure: ReceiveStorageFailure;

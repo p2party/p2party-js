@@ -3,7 +3,12 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { isStorableChunkRange } from "../utils/chunkBounds";
 import { createChunkReceiptToken } from "../utils/receiptToken";
-import { MESSAGE_LEN, METADATA_LEN, PROOF_LEN } from "../utils/constants";
+import {
+  MAX_REPORTED_RECEIVE_STORAGE_ERRORS,
+  MESSAGE_LEN,
+  METADATA_LEN,
+  PROOF_LEN,
+} from "../utils/constants";
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import { messageCacheKey } from "./messageChunkCrypto";
@@ -11,7 +16,10 @@ import { parseChunkFrameHeader } from "./chunkFrame";
 import { decryptMessageChunkDurably } from "./ratchetPersist";
 import { bindReceiveMessageKey } from "./receiveMessageKeyLifetime";
 
-import { storeReceiveChunk as persistReceiveChunk } from "../db/api";
+import {
+  getDBMessageData,
+  storeReceiveChunk as persistReceiveChunk,
+} from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
@@ -75,6 +83,9 @@ export interface ReceiveStorageError {
    *   storage and was refused before anything was written.
    * - `quota-exceeded`: the browser refused a write for lack of space.
    * - `storage-failed`: any other storage fault.
+   * - `integrity`: the file's last chunk arrived, but the stored bytes do not
+   *   hash to the whole-file hash its message carries. The file's chunks were
+   *   dropped and reading it throws ReceiveIntegrityError.
    */
   readonly code: ReceiveStorageFailure;
   readonly roomId: string;
@@ -95,8 +106,7 @@ const receiveStorageErrorListeners = new Set<
 
 // Each (transfer, code) is reported once until a later chunk of that transfer
 // stores again, so a full disk does not raise one event per retransmitted
-// chunk. Bounded: a forgotten entry only means one repeated event.
-const MAX_REPORTED_RECEIVE_STORAGE_ERRORS = 1_024;
+// chunk.
 const reportedReceiveStorageErrors = new Set<string>();
 
 /**
@@ -155,8 +165,39 @@ const clearReceiveStorageErrors = (merkleRootHex: string): void => {
     "insufficient-quota",
     "quota-exceeded",
     "storage-failed",
+    "integrity",
   ] satisfies ReceiveStorageFailure[])
     reportedReceiveStorageErrors.delete(`${merkleRootHex}:${code}`);
+};
+
+/**
+ * Thrown when reading a received file whose stored bytes did not match the
+ * whole-file hash its message carries. Its chunks were dropped, so it stays
+ * unreadable until its sender sends the whole file again.
+ */
+export class ReceiveIntegrityError extends Error {
+  readonly code = "integrity" as const;
+  readonly merkleRootHex: string;
+
+  constructor(merkleRootHex: string) {
+    super("p2party: the received file does not match its message hash");
+    this.name = "ReceiveIntegrityError";
+    this.merkleRootHex = merkleRootHex;
+  }
+}
+
+/**
+ * Throw ReceiveIntegrityError if this received file failed whole-file
+ * verification. A completed file was verified when it completed, so callers
+ * need this only for a file that is not complete.
+ */
+export const assertReceivedFileIntact = async (
+  merkleRootHex: string,
+  readProgress: typeof getDBMessageData = getDBMessageData,
+): Promise<void> => {
+  const progress = await readProgress(merkleRootHex);
+  if (progress?.integrityFailed === true)
+    throw new ReceiveIntegrityError(merkleRootHex);
 };
 
 // Ask once per page for persistent storage, so the browser does not evict a

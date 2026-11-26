@@ -211,6 +211,7 @@ const checkpointStatusBody: PublicStoreCheckpointStatusBodyV1 = {
   storeId: fill(32, 1),
   deliveryProfileHash: fill(32, 2),
   ingressWindow: 7n,
+  storeIngressWindow: 9n,
   status: "not-final",
 };
 
@@ -273,6 +274,7 @@ const chunkStatusBody: PublicChunkStatusBodyV1 = {
   version: 1,
   bucket,
   chunkIndex: 1n,
+  storeIngressWindow: 9n,
   status: "out-of-range",
 };
 
@@ -442,7 +444,7 @@ describe("prototype store wire codecs", () => {
       checkpointStatusBody,
     );
     expect(hex(bytes)).toBe(
-      "0101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202000000000000000700",
+      "01010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000900",
     );
   });
 
@@ -458,7 +460,7 @@ describe("prototype store wire codecs", () => {
     const status = encodePublicStoreCheckpointReadV1(checkpointStatus);
     expect(decodePublicStoreCheckpointReadV1(status)).toEqual(checkpointStatus);
     expect(hex(status)).toBe(
-      "010001010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020000000000000007001d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+      "0100010101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000009001d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
     );
   });
 
@@ -466,7 +468,7 @@ describe("prototype store wire codecs", () => {
     const bytes = encodePublicChunkStatusBodyV1(chunkStatusBody);
     expect(decodePublicChunkStatusBodyV1(bytes)).toEqual(chunkStatusBody);
     expect(hex(bytes)).toBe(
-      "010202020202020202020202020202020202020202020202020202020202020202000000000000000700000000000000000101",
+      "0102020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000001000000000000000901",
     );
   });
 
@@ -480,7 +482,7 @@ describe("prototype store wire codecs", () => {
     const status = encodePublicChunkReadV1(chunkStatus);
     expect(decodePublicChunkReadV1(status)).toEqual(chunkStatus);
     expect(hex(status)).toBe(
-      "01000102020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000001011c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "010001020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000000010000000000000009011c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
     );
   });
 
@@ -648,11 +650,11 @@ describe("prototype store wire transcripts", () => {
 
   test("the chunk and checkpoint status signing hashes are pinned", async () => {
     expect(hex(await publicChunkStatusSigningHash(chunkStatusBody))).toBe(
-      "e97ee53418b4cbedee89bc9b7e9fba8fe2f742c14e2073f15f03071b88049157",
+      "df6aed2a80180d61f01872b381af920d62036075f505492f109f61280cae4fa8",
     );
     expect(
       hex(await publicCheckpointStatusSigningHash(checkpointStatusBody)),
-    ).toBe("f4a92dc9a58a45dc84d3a6c536c41b245016f5037a0c7b27b20c32052e09bf0d");
+    ).toBe("746402d9c328914841f135f6c4f3fb39208ae50ee2de2dd8e67c6dcf91acaffb");
   });
 
   test("the prototype compatibility hash is pinned and requires 32 bytes", async () => {

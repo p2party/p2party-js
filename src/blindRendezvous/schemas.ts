@@ -1077,6 +1077,11 @@ export const publicStoreCheckpointStatusBodyV1Schema = record(
     { name: "storeId", type: bytes32 },
     { name: "deliveryProfileHash", type: bytes32 },
     { name: "ingressWindow", type: u64 },
+    // The store's own current window when it signed. With the descriptor's
+    // retention it makes an `out-of-range` answer evidence a third party can
+    // check: whether the window was inside the stated retention is decided
+    // from the store's two signed statements, not from anyone's clock.
+    { name: "storeIngressWindow", type: u64 },
     {
       name: "status",
       type: enumOf("PublicStoreCheckpointStatusKindV1", [
@@ -1129,6 +1134,8 @@ export const publicChunkStatusBodyV1Schema = record("PublicChunkStatusBodyV1", [
   { name: "version", type: u8 },
   { name: "bucket", type: publicBucketV1Schema },
   { name: "chunkIndex", type: u64 },
+  // As in the checkpoint status: the store's own window when it signed.
+  { name: "storeIngressWindow", type: u64 },
   {
     name: "status",
     type: enumOf("PublicChunkStatusKindV1", ["not-final", "out-of-range"]),

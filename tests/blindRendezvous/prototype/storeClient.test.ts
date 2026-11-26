@@ -41,6 +41,7 @@ import {
   PrototypeStoreClient,
   StoreClientError,
   buildAppendAdmission,
+  outOfRangeProvesWithholding,
 } from "../../../src/blindRendezvous/prototype/storeClient";
 import {
   PrototypeStoreCore,
@@ -125,6 +126,8 @@ const startStore = async (
     fault?: "withhold" | null;
     chainStart?: bigint;
     retentionWindows?: number;
+    /** How far the store's clock runs ahead of the shared clock. */
+    aheadMs?: bigint;
     allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
     /** Wraps the store's handler, e.g. to answer some routes another way. */
     wrap?: (
@@ -145,7 +148,7 @@ const startStore = async (
     module: cryptoModule,
     seed: options.seed ?? SEED,
     profile,
-    clock: { nowMs: () => clock.now },
+    clock: { nowMs: () => clock.now + (options.aheadMs ?? 0n) },
     persistence: new MemoryStorePersistence(),
     chainStartIngressWindow: options.chainStart ?? CHAIN_START,
     origin,
@@ -753,6 +756,7 @@ describe("prototype store client", () => {
         storeId: store.core.storeId,
         deliveryProfileHash: PROFILE_HASH,
         ingressWindow: CHAIN_START,
+        storeIngressWindow: CHAIN_START,
         status: "chain-unavailable" as const,
       };
       const body = encodePublicStoreCheckpointReadV1({
@@ -1486,7 +1490,11 @@ describe("prototype store client late acknowledgements", () => {
 });
 
 describe("prototype store client retention", () => {
-  const signedOutOfRange = async (window: bigint): Promise<Uint8Array> => {
+  /** An out-of-range the test store signs, stating `storeWindow` as now. */
+  const signedOutOfRange = async (
+    window: bigint,
+    storeWindow: bigint,
+  ): Promise<Uint8Array> => {
     const secretKey = await storeSecretKey();
     const storeIdBytes = await computeStoreId(
       (await keyPairFromSeed(Uint8Array.from(SEED), cryptoModule)).publicKey,
@@ -1496,6 +1504,7 @@ describe("prototype store client retention", () => {
       storeId: storeIdBytes,
       deliveryProfileHash: PROFILE_HASH,
       ingressWindow: window,
+      storeIngressWindow: storeWindow,
       status: "out-of-range" as const,
     };
     return encodePublicStoreCheckpointReadV1({
@@ -1607,14 +1616,14 @@ describe("prototype store client retention", () => {
     }
   });
 
-  test("out-of-range inside the stated retention is a fault with evidence", async () => {
+  test("an out-of-range inside the store's own stated retention is a breach a third party can verify", async () => {
     await withStore(async (store, clock) => {
-      const refusal = await signedOutOfRange(CHAIN_START);
+      // Signed one window after the window it refuses: by the store's own
+      // two statements, well inside the retention its descriptor states.
+      const refusal = await signedOutOfRange(CHAIN_START, CHAIN_START + 1n);
       const client = await connect(store.origin, clock, {
         fetch: answeringCheckpoints(store, refusal),
       });
-      // A promise of custody for the window, then its checkpoint refused as
-      // out of range one window later: well inside the stated retention.
       await appendObject(client, CHAIN_START, 0x61);
       clock.now = NEXT_FINALIZE_AT;
       await store.core.finalizeDue();
@@ -1626,14 +1635,209 @@ describe("prototype store client retention", () => {
         (fault) => fault.kind === "retention-breach",
       );
       expect(breach?.window).toBe(CHAIN_START);
-      // The store's own signed answer, byte for byte.
       expect(hex(breach?.evidence ?? new Uint8Array(0))).toBe(hex(refusal));
-      // And the receipt it held for that window is reported, not dropped.
+      // The receipt held for the window is reported, not dropped.
       expect(client.faults.map((fault) => fault.kind)).toEqual([
         "retention-breach",
         "custody-unchecked",
       ]);
+
+      // Anyone holding the descriptor and the evidence reaches the same
+      // verdict, with no clock: the store's own statements convict it.
+      const descriptor = store.core.descriptor;
+      const evidence = breach?.evidence ?? new Uint8Array(0);
+      expect(
+        await outOfRangeProvesWithholding(descriptor, evidence, cryptoModule),
+      ).toBe(true);
+      // Not with an altered answer, nor against another store's descriptor.
+      const altered = Uint8Array.from(evidence);
+      altered[altered.length - 70] ^= 0x01;
+      expect(
+        await outOfRangeProvesWithholding(descriptor, altered, cryptoModule),
+      ).toBe(false);
+      const other = await startStore(clock, {
+        seed: new Uint8Array(32).fill(0x6b),
+      });
+      try {
+        expect(
+          await outOfRangeProvesWithholding(
+            other.core.descriptor,
+            evidence,
+            cryptoModule,
+          ),
+        ).toBe(false);
+      } finally {
+        other.stop();
+      }
     });
+  });
+
+  test("an honest store whose clock runs ahead is not blamed", async () => {
+    // The re-review's case: the minimum retention, a last-chance catch-up
+    // read of W = c - 65 answered during window c + 1, and a store clock two
+    // window numbers ahead, which sees the window 68 back and honestly
+    // refuses it.
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const current = CHAIN_START + 70n;
+    const read = current - 65n;
+    const clock: Clock = {
+      now: WINDOW_START + 70n * profile.deliveryWindowMs + 100n,
+    };
+    const store = await startStore(clock, {
+      retentionWindows: retention,
+      aheadMs: 2n * profile.deliveryWindowMs,
+    });
+    try {
+      while ((await store.core.finalizeDue()).length > 0);
+      const answeredNextWindow: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+          clock.now += profile.deliveryWindowMs;
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+      const client = await connect(store.origin, clock, {
+        fetch: answeredNextWindow,
+      });
+      const scan = await client.scanWindow(read);
+      expect(scan.status).toBe("clock-disagreement");
+      expect(client.inert).toBe(false);
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "store-clock-disagreement",
+      ]);
+      expect(current).toBe(read + 65n);
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("a store that states a window far from the client's clock is a clock disagreement, not a breach", async () => {
+    await withStore(async (store, clock) => {
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+      // A refusal for a window one back, excused by a current window a
+      // thousand windows ahead: past the retention by the store's own words,
+      // but nowhere near this client's clock.
+      const excuse = await signedOutOfRange(CHAIN_START, CHAIN_START + 1_000n);
+      let answered = 0;
+      const once: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (
+          url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`) &&
+          answered++ === 0
+        )
+          return Promise.resolve(
+            new Response(asBody(excuse), {
+              status: 200,
+              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+      const client = await connect(store.origin, clock, { fetch: once });
+      expect((await client.scanWindow(CHAIN_START)).status).toBe(
+        "clock-disagreement",
+      );
+      expect(client.inert).toBe(false);
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "store-clock-disagreement",
+      ]);
+      expect(
+        await outOfRangeProvesWithholding(
+          store.core.descriptor,
+          excuse,
+          cryptoModule,
+        ),
+      ).toBe(false);
+      // Not excluded: the next read of the same window is served.
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
+    });
+  });
+
+  test("the same out-of-range bytes cannot be replayed as evidence for another time", async () => {
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const clock: Clock = { now: FINALIZE_AT };
+    const store = await startStore(clock, { retentionWindows: retention });
+    try {
+      await store.core.finalizeDue();
+      const refusedAt = async (storeWindow: bigint): Promise<Uint8Array> => {
+        clock.now = ingressWindowStartMs(storeWindow, profile.deliveryWindowMs);
+        return encodePublicStoreCheckpointReadV1(
+          await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+        );
+      };
+      // An honest store's expiry, asked twice: two different statements,
+      // each naming when it was given, and neither proves anything.
+      const first = await refusedAt(CHAIN_START + BigInt(retention) + 1n);
+      const later = await refusedAt(CHAIN_START + BigInt(retention) + 9n);
+      expect(hex(first)).not.toBe(hex(later));
+      for (const bytes of [first, later])
+        expect(
+          await outOfRangeProvesWithholding(
+            store.core.descriptor,
+            bytes,
+            cryptoModule,
+          ),
+        ).toBe(false);
+      // A refusal the same store signs while the window is retained is a
+      // different statement again, and that one does prove withholding.
+      const withheld = await signedOutOfRange(CHAIN_START, CHAIN_START + 1n);
+      expect(hex(withheld)).not.toBe(hex(first));
+      expect(
+        await outOfRangeProvesWithholding(
+          store.core.descriptor,
+          withheld,
+          cryptoModule,
+        ),
+      ).toBe(true);
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("the oldest window a catch-up reads is served and the one before it is beyond retention", async () => {
+    // The floor's derivation: a catch-up read reaches 65 back, its answer
+    // may arrive a window later, and the store's clock may be one window
+    // ahead, so the store sees it 67 back, the minimum retention, and serves
+    // it. One window further is 68 back: honest expiry, within the skew.
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const current = CHAIN_START + 70n;
+    const start = WINDOW_START + 70n * profile.deliveryWindowMs + 100n;
+    const clock: Clock = { now: start };
+    const store = await startStore(clock, {
+      retentionWindows: retention,
+      aheadMs: profile.deliveryWindowMs,
+    });
+    try {
+      while ((await store.core.finalizeDue()).length > 0);
+      const answeredNextWindow: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+          clock.now += profile.deliveryWindowMs;
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+      const client = await connect(store.origin, clock, {
+        fetch: answeredNextWindow,
+      });
+      clock.now = start;
+      expect((await client.scanWindow(current - 65n)).status).toBe("finalized");
+      clock.now = start;
+      expect((await client.scanWindow(current - 66n)).status).toBe(
+        "beyond-retention",
+      );
+      expect(client.inert).toBe(false);
+      expect(client.faults).toEqual([]);
+    } finally {
+      store.stop();
+    }
   });
 
   test("out-of-range beyond the stated retention is a distinct scan result", async () => {

@@ -30,6 +30,14 @@
  *   `PROTOTYPE_STORE_MIN_RETENTION_WINDOWS`, 67, what an honest client reads
  *   back; both in `src/utils/constants.ts`); the sweep starts with the
  *   server, deletes one bounded batch per tick, and stops at shutdown.
+ * - **The descriptor is pinned to the chain too.** The retention is stated in
+ *   the signed descriptor, and every checkpoint names that descriptor's hash,
+ *   so a restart with a different `P2PARTY_STORE_RETENTION_WINDOWS` (or a
+ *   different key file), or on a database written before the descriptor
+ *   stated retention, refuses to start rather than extend a chain under
+ *   another descriptor. The refusal says so in one line: restore the
+ *   setting, or start a new chain with a new `P2PARTY_STORE_DB` and a new
+ *   `P2PARTY_STORE_KEY_FILE`.
  *
  * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
  * registry.
@@ -47,7 +55,7 @@ import {
   PROTOTYPE_DELIVERY_PROFILE_V0,
   withDeliveryWindowMs,
 } from "../profile";
-import { PrototypeStoreCore } from "./storeCore";
+import { PrototypeStoreCore, StoreDescriptorChangedError } from "./storeCore";
 import {
   PROTOTYPE_STORE_MAX_REQUEST_BODY_BYTES,
   createPrototypeStoreHandler,
@@ -311,11 +319,15 @@ const core = await PrototypeStoreCore.create({
   allocationAdmission,
   retentionWindows,
 }).catch((error: unknown) =>
-  refuse(
-    `cannot serve the chain anchored at window ${String(chainStartIngressWindow)}: ${
-      error instanceof Error ? error.message : "unknown error"
-    }`,
-  ),
+  error instanceof StoreDescriptorChangedError
+    ? refuse(
+        `${databasePath} holds a chain signed under another descriptor: P2PARTY_STORE_RETENTION_WINDOWS (now ${String(retentionWindows ?? "the default")}) or the key file changed, or the database predates the descriptor stating its retention; restore the setting, or start a new chain with a new P2PARTY_STORE_DB and a new P2PARTY_STORE_KEY_FILE`,
+      )
+    : refuse(
+        `cannot serve the chain anchored at window ${String(chainStartIngressWindow)}: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      ),
 );
 
 // Anchored only now, and only because `create` succeeded.

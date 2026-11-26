@@ -74,6 +74,7 @@ import {
   descriptorChainStart,
   descriptorSupportsProfile,
   publicCarrierContextId,
+  storeDescriptorAuthentic,
   storeId as computeStoreId,
   validateStoreDescriptor,
   validateStoreRoute,
@@ -181,11 +182,22 @@ export interface StoreClientOptions {
  * for `inert`: the store may come back.
  *
  * `retention-breach` is blame: the store signed `out-of-range` for a window at
- * or after its chain start that is inside the retention its signed
- * descriptor states, measured on this client's clock with one window of
- * allowance for a store clock running ahead. It sets `inert`, and the record
- * keeps the signed answer as `evidence`. The same answer for a window past
+ * or after its chain start, and the answer's own signed current window puts
+ * that window inside the retention the store's signed descriptor states. It
+ * is decided from the store's two signed statements alone, never from this
+ * client's clock, so the record's `evidence` (the signed answer) proves it to
+ * anyone holding the descriptor (`outOfRangeProvesWithholding`). It sets
+ * `inert`. The same answer for a window the store's own window puts past
  * that retention is expiry, not blame: the scan says `beyond-retention`.
+ *
+ * `store-clock-disagreement` is a report: an `out-of-range` answer whose
+ * signed current window lies further from this client's clock than the
+ * profile's skew allows (`storeClockToleranceWindows`). Expiry cannot be
+ * told from a store lying about its time, and a third party cannot check
+ * when the answer was given, so it is no blame: the scan says
+ * `clock-disagreement`, the window is not read at this store this time, and
+ * the store is asked again on later reads (an honest store whose clock is
+ * set right recovers).
  *
  * `custody-unchecked` is a report: receipts for a window this client could not
  * read back (expired or withheld) were not checked, rather than dropped
@@ -218,6 +230,7 @@ export type StoreFaultKind =
   | "root-mismatch"
   | "custody-breach"
   | "retention-breach"
+  | "store-clock-disagreement"
   | "custody-unacknowledged"
   | "custody-unchecked"
   | "checkpoint-split-view-hint";
@@ -265,6 +278,7 @@ export interface WindowScan {
     | "not-final"
     | "out-of-range"
     | "beyond-retention"
+    | "clock-disagreement"
     | "unreachable";
   readonly objects: readonly Uint8Array[];
   readonly checkpointHash: Uint8Array | null;
@@ -356,6 +370,110 @@ const MAX_IN_FLIGHT_APPENDS = PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS;
 const MAX_SCANNED_WINDOWS = PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS;
 
 const ADMISSION_TOKEN_BYTES = PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES;
+
+/**
+ * How many window numbers a store's signed current window may sit outside
+ * the windows this client's clock showed between asking and being answered:
+ * the profile's schedule-skew bound, in windows, rounded up. One at the
+ * pinned profile (200 ms of skew against a 4,000 ms window).
+ */
+export const storeClockToleranceWindows = (
+  profile: DeliveryProfileV1,
+): bigint =>
+  (profile.maxScheduleSkewMs + profile.deliveryWindowMs - 1n) /
+  profile.deliveryWindowMs;
+
+/**
+ * Whether a signed `out-of-range` for `window`, given when the store's own
+ * current window was `storeWindow`, contradicts what the store states about
+ * itself: a window at or after its chain start is served while it is not
+ * yet past (`window > storeWindow`) and through the end of
+ * `window + retentionWindows`, as `bucketIsReadable` defines it.
+ */
+export const outOfRangeContradictsRetention = (
+  window: bigint,
+  storeWindow: bigint,
+  chainStart: bigint,
+  retentionWindows: number,
+): boolean =>
+  window >= chainStart &&
+  (window > storeWindow || storeWindow - window <= BigInt(retentionWindows));
+
+/**
+ * Check `retention-breach` evidence with nothing but the store's descriptor
+ * and the signed answer: the descriptor is the store's own, the answer is a
+ * signed `out-of-range` (checkpoint or chunk) under the descriptor's key, and
+ * the answer's two windows put the requested one inside the descriptor's
+ * retention and at or after its chain start. No clock is consulted, so the
+ * verdict is the same for anyone, at any time.
+ */
+export const outOfRangeProvesWithholding = async (
+  descriptor: StoreDescriptorV1,
+  evidence: Uint8Array,
+  module: LibCrypto,
+): Promise<boolean> => {
+  if (!(await storeDescriptorAuthentic(descriptor, module)).valid) return false;
+  const storeIdBytes = await computeStoreId(descriptor.storeIdentityEd25519Key);
+  let statement: {
+    readonly profile: Uint8Array;
+    readonly window: bigint;
+    readonly storeWindow: bigint;
+    readonly message: Uint8Array;
+    readonly signature: Uint8Array;
+  } | null = null;
+  try {
+    const read = decodePublicStoreCheckpointReadV1(evidence);
+    if (
+      read.kind === "status" &&
+      read.value.version === 1 &&
+      read.value.status === "out-of-range" &&
+      bytesEqual(read.value.storeId, storeIdBytes)
+    )
+      statement = {
+        profile: read.value.deliveryProfileHash,
+        window: read.value.ingressWindow,
+        storeWindow: read.value.storeIngressWindow,
+        message: await publicCheckpointStatusSigningHash(read.value),
+        signature: read.storeSignature,
+      };
+  } catch {
+    try {
+      const read = decodePublicChunkReadV1(evidence);
+      if (
+        read.kind === "status" &&
+        read.value.version === 1 &&
+        read.value.status === "out-of-range"
+      )
+        statement = {
+          profile: read.value.bucket.deliveryProfileHash,
+          window: read.value.bucket.ingressWindow,
+          storeWindow: read.value.storeIngressWindow,
+          message: await publicChunkStatusSigningHash(read.value),
+          signature: read.storeSignature,
+        };
+    } catch {
+      return false;
+    }
+  }
+  if (statement === null) return false;
+  if (
+    !(await verify(
+      statement.message,
+      statement.signature,
+      descriptor.storeIdentityEd25519Key,
+      module,
+    ))
+  )
+    return false;
+  const chainStart = descriptorChainStart(descriptor, statement.profile);
+  if (chainStart === null) return false;
+  return outOfRangeContradictsRetention(
+    statement.window,
+    statement.storeWindow,
+    chainStart,
+    descriptor.retentionWindows,
+  );
+};
 
 /**
  * How long one request to this store may stay outstanding, in milliseconds.
@@ -525,6 +643,7 @@ export class PrototypeStoreClient {
 
   readonly #nowMs: () => bigint;
   readonly #retentionWindows: number;
+  readonly #clockToleranceWindows: bigint;
 
   #inert = false;
   /** Recorded faults with their arrival order, blame and reports apart. */
@@ -589,6 +708,7 @@ export class PrototypeStoreClient {
     this.#admissionTokens = options.admissionTokens;
     this.#nowMs = options.nowMs;
     this.#retentionWindows = pinned.descriptor.retentionWindows;
+    this.#clockToleranceWindows = storeClockToleranceWindows(options.profile);
   }
 
   /**
@@ -600,9 +720,10 @@ export class PrototypeStoreClient {
    * push that decision to a caller with less context. Everything after this
    * point degrades instead.
    *
-   * `nowMs` is read here, and once more for one judgment only: whether a
-   * signed `out-of-range` names a window inside the retention the store
-   * states, which is a question about now. The descriptor and route leases are
+   * `nowMs` is read here, and at a scan for one check only: whether the
+   * current window a store signs into an `out-of-range` answer agrees with
+   * this client's clock. Whether that answer is a breach is decided from the
+   * store's own signed statements, never from this clock. The descriptor and route leases are
    * about now too, but every other later check is anchored to the instant the
    * window it concerns was finalized — historical evidence must not change
    * meaning because the wall clock moved.
@@ -1144,6 +1265,9 @@ export class PrototypeStoreClient {
     const classes = [...this.#profile.sizeClasses].sort(
       (left, right) => left.id - right.id,
     );
+    // This client's window as the requests leave: with the window when the
+    // answers arrive, the span a store's signed window must fall in.
+    const sentWindow = this.#clientWindow();
     const checkpointPromise = this.#get(
       `${PROTOTYPE_STORE_ROUTES.checkpoint}/${this.#profileHex}/${String(window)}`,
       window,
@@ -1164,12 +1288,18 @@ export class PrototypeStoreClient {
     const checkpointStatus = await this.#readCheckpoint(
       window,
       checkpointBytes,
+      sentWindow,
     );
     if (checkpointStatus.kind !== "finalized")
       return this.#unreadableOutcome(window, empty(checkpointStatus.status));
     const { checkpoint, descriptor } = checkpointStatus;
 
-    const chunks = await this.#readChunks(window, classes, chunkBytes);
+    const chunks = await this.#readChunks(
+      window,
+      classes,
+      chunkBytes,
+      sentWindow,
+    );
     if (chunks.kind !== "finalized")
       return this.#unreadableOutcome(window, empty(chunks.status));
 
@@ -1607,6 +1737,7 @@ export class PrototypeStoreClient {
   async #readCheckpoint(
     window: bigint,
     bytes: Uint8Array | null,
+    sentWindow: bigint,
   ): Promise<
     | {
         readonly kind: "finalized";
@@ -1668,7 +1799,13 @@ export class PrototypeStoreClient {
       if (value.status === "out-of-range")
         return {
           kind: "status",
-          status: this.#judgeOutOfRange(window, bytes, "the checkpoint"),
+          status: this.#judgeOutOfRange(
+            window,
+            value.storeIngressWindow,
+            bytes,
+            "the checkpoint",
+            sentWindow,
+          ),
         };
       // `chain-unavailable` contradicts the descriptor this client pinned,
       // which named this profile and a chain start for it.
@@ -1764,6 +1901,7 @@ export class PrototypeStoreClient {
       readonly publicChunksPerWindow: number;
     }[],
     chunkBytes: readonly (readonly (Uint8Array | null)[])[],
+    sentWindow: bigint,
   ): Promise<
     | {
         readonly kind: "finalized";
@@ -1847,8 +1985,10 @@ export class PrototypeStoreClient {
               kind: "status",
               status: this.#judgeOutOfRange(
                 window,
+                value.storeIngressWindow,
                 bytes,
                 `chunk ${String(index)} of class ${String(sizeClass.id)}`,
+                sentWindow,
               ),
             };
           // A store that signed a checkpoint for this window and then calls
@@ -2055,38 +2195,67 @@ export class PrototypeStoreClient {
     }
   }
 
+  /** This client's current ingress window. */
+  #clientWindow(): bigint {
+    return ingressWindow(this.#profile.deliveryWindowMs, this.#nowMs());
+  }
+
   /**
    * Classify a signed `out-of-range` for `window`, which is at or after this
-   * store's chain start (below it, no request is made).
+   * store's chain start (below it, no request is made), signed when the
+   * store's own window was `storeWindow`.
    *
-   * An honest store answers it only once `current - window > retentionWindows`
-   * on its own clock. A store clock less than one window ahead of this one
-   * counts at most one window more, so an honest answer means
-   * `current - window >= retentionWindows` here, read after the answer
-   * arrived. Anything less is the store refusing a window it states it
-   * serves: blame, with the signed answer kept. Either way the window will
-   * not be read back from this store.
+   * Blame is decided from the store's statements alone: its descriptor's
+   * retention and chain start, and the two windows in the answer. If those
+   * put the window inside the retention, the store refused what it states
+   * it serves, and the signed answer proves it to anyone. Otherwise the store
+   * states expiry, which is believed only when its window agrees with this
+   * client's clock between asking and being answered, within the profile's
+   * skew (`storeClockToleranceWindows`). A store whose stated window does
+   * not agree could be lying about its time to excuse a refusal, or could
+   * simply have a bad clock; neither can be shown to a third party, so it is
+   * a report and the window is not read at this store this time.
    */
   #judgeOutOfRange(
     window: bigint,
+    storeWindow: bigint,
     evidence: Uint8Array,
     what: string,
-  ): "beyond-retention" | "unreachable" {
+    sentWindow: bigint,
+  ): "beyond-retention" | "clock-disagreement" | "unreachable" {
+    if (
+      outOfRangeContradictsRetention(
+        window,
+        storeWindow,
+        this.#chainStart,
+        this.#retentionWindows,
+      )
+    ) {
+      this.#markUnreadable(window);
+      this.#inert = true;
+      this.#record(
+        "retention-breach",
+        window,
+        `the store signed out-of-range for ${what} at its own window ${String(storeWindow)}, which puts this window inside the ${String(this.#retentionWindows)}-window retention its descriptor states`,
+        evidence,
+      );
+      return "unreachable";
+    }
+    const receivedWindow = this.#clientWindow();
+    const tolerance = this.#clockToleranceWindows;
+    if (
+      storeWindow + tolerance < sentWindow ||
+      storeWindow > receivedWindow + tolerance
+    ) {
+      this.#record(
+        "store-clock-disagreement",
+        window,
+        `the store signed out-of-range for ${what} at its own window ${String(storeWindow)}, while this client's clock read windows ${String(sentWindow)} to ${String(receivedWindow)}; not read at this store this time`,
+      );
+      return "clock-disagreement";
+    }
     this.#markUnreadable(window);
-    const current = ingressWindow(
-      this.#profile.deliveryWindowMs,
-      this.#nowMs(),
-    );
-    if (current - window >= BigInt(this.#retentionWindows))
-      return "beyond-retention";
-    this.#inert = true;
-    this.#record(
-      "retention-breach",
-      window,
-      `the store signed out-of-range for ${what} of a window inside the ${String(this.#retentionWindows)}-window retention its descriptor states`,
-      evidence,
-    );
-    return "unreachable";
+    return "beyond-retention";
   }
 
   #markUnreadable(window: bigint): void {

@@ -172,6 +172,8 @@ export interface PublicStoreCheckpointStatusBodyV1 {
   storeId: Uint8Array;
   deliveryProfileHash: Uint8Array;
   ingressWindow: bigint;
+  /** The store's own current ingress window when it signed this answer. */
+  storeIngressWindow: bigint;
   status: PublicStoreCheckpointStatusKindV1;
 }
 
@@ -193,6 +195,8 @@ export interface PublicChunkStatusBodyV1 {
   version: 1;
   bucket: PublicBucketV1;
   chunkIndex: bigint;
+  /** The store's own current ingress window when it signed this answer. */
+  storeIngressWindow: bigint;
   status: PublicChunkStatusKindV1;
 }
 

@@ -159,7 +159,24 @@ export class StoreRequestError extends Error {
  * process must not run at all.
  */
 export class StoreConfigurationError extends StoreRequestError {
-  override readonly name = "StoreConfigurationError";
+  // Widened to `string` so `StoreDescriptorChangedError` can narrow it.
+  override readonly name: string = "StoreConfigurationError";
+}
+
+/**
+ * The persisted chain was signed under another descriptor than this
+ * configuration produces, so this process must not extend it: every later
+ * checkpoint would name a descriptor the earlier ones do not.
+ *
+ * A setting the descriptor states changed — the retention, or the identity
+ * key — or the chain was written before the descriptor stated its retention.
+ * There are two ways out: restore the setting, or start a new chain with a
+ * new database and a new identity key (a new chain under the same key would
+ * be a second chain start for one store, which clients treat as permanent
+ * equivocation).
+ */
+export class StoreDescriptorChangedError extends StoreConfigurationError {
+  override readonly name = "StoreDescriptorChangedError";
 }
 
 /**
@@ -297,8 +314,9 @@ export interface PrototypeStoreCoreOptions {
    * the store then refuses or fails to persist — capacity exhausted, a lease
    * that does not verify, a window that closed while the request waited, a
    * failed write. The core commits at most one lease per quota key per
-   * ingress window and at most `MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW`
-   * new witness records per quota key per window; on append the key only
+   * ingress window and at most
+   * `PROTOTYPE_STORE_MAX_WITNESS_RECORDS_PER_QUOTA_KEY` new witness records
+   * per quota key per window; on append the key only
    * admits. The hook supplies no descriptor-level privacy or unique-person
    * claim.
    */
@@ -763,8 +781,8 @@ export class PrototypeStoreCore {
           `the persisted chain starts at window ${String(persisted.chainStartIngressWindow)}, not the configured ${String(options.chainStartIngressWindow)}`,
         );
       if (!bytesEqual(persisted.descriptorHash, descriptorHashBytes))
-        failConfiguration(
-          "the persisted chain was signed under a different descriptor than this configuration produces",
+        throw new StoreDescriptorChangedError(
+          `the persisted chain was signed under a different descriptor than this configuration produces (retention ${String(retentionWindows)} windows): a setting the descriptor states changed, such as the retention or the identity key, or the chain predates the descriptor stating its retention; restore the setting, or start a new chain with a new database and a new identity key`,
         );
     }
 
@@ -1474,6 +1492,11 @@ export class PrototypeStoreCore {
       storeId: copyBytes(this.#storeId),
       deliveryProfileHash: deliveryProfileHashBytes,
       ingressWindow: window,
+      // Signed so a refusal states when it was given: an `out-of-range` for
+      // a window inside the stated retention is then provable from this
+      // answer and the descriptor alone, and the same refusal given at two
+      // instants is two different statements.
+      storeIngressWindow: this.currentWindow(),
       status,
     };
     return {
@@ -1534,7 +1557,13 @@ export class PrototypeStoreCore {
     chunkIndex: bigint,
     status: PublicChunkStatusKindV1,
   ): Promise<PublicChunkReadV1> {
-    const value = { version: 1 as const, bucket, chunkIndex, status };
+    const value = {
+      version: 1 as const,
+      bucket,
+      chunkIndex,
+      storeIngressWindow: this.currentWindow(),
+      status,
+    };
     return {
       kind: "status",
       value,

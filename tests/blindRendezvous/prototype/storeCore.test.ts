@@ -2183,6 +2183,35 @@ describe("prototype store retention", () => {
     ).toBe(PROTOTYPE_READ_BACK_WINDOWS);
   });
 
+  test("a changed descriptor setting refuses to extend the chain, with a typed error", async () => {
+    const persistence = new MemoryStorePersistence();
+    const first = await harness({ persistence, retentionWindows: RETENTION });
+    first.setNow(FINALIZE_AT);
+    expect(await first.core.finalizeDue()).toEqual([CHAIN_START]);
+    const refusal = await harness({
+      persistence,
+      now: FINALIZE_AT,
+      retentionWindows: RETENTION + 1,
+    }).then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
+    expect(refusal?.name).toBe("StoreDescriptorChangedError");
+    expect(refusal).toBeInstanceOf(StoreConfigurationError);
+    expect(refusal?.message).toContain("retention");
+    expect(refusal?.message).toContain("restore the setting");
+    expect(refusal?.message).toContain("start a new chain");
+    // The original setting still serves the chain.
+    const resumed = await harness({
+      persistence,
+      now: FINALIZE_AT,
+      retentionWindows: RETENTION,
+    });
+    expect(
+      (await resumed.core.readCheckpoint(PROFILE_HASH, CHAIN_START)).kind,
+    ).toBe("finalized");
+  });
+
   test("retention outside its bounds refuses to start", async () => {
     const minimum = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
     for (const retentionWindows of [
@@ -2402,6 +2431,91 @@ describe("prototype store mutation queue", () => {
     const retried = started(core, honestKey.publicKey, CHAIN_START + 1n);
     await retried.done;
     expect(retried.outcome).toBe("allocated");
+  });
+
+  test("a replay and a full-cohort refusal are answered while the queue is blocked", async () => {
+    const blockedWindow = CHAIN_START + 1n;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    const durable = new MemoryStorePersistence();
+    const persistence = delegate<StorePersistencePort>(durable, {
+      saveWindow: async (state: StoreWindowState): Promise<void> => {
+        if (state.window === blockedWindow) {
+          markBlocked();
+          await released;
+        }
+        await durable.saveWindow(state);
+      },
+    });
+    const { core } = await harness({ persistence });
+    // A full cohort and one bound slot, committed before the queue blocks.
+    const leases: { lease: PublicAllocationLeaseV1; secretKey: Uint8Array }[] =
+      [];
+    const keys: Uint8Array[] = [];
+    for (let index = 0; index < profile.cohortAllocationsPerWindow; index++) {
+      const keyPair = await newKeyPair(cryptoModule);
+      keys.push(keyPair.publicKey);
+      const result = await core.allocate(allocationRequest(keyPair.publicKey));
+      if (result.kind !== "allocated") throw new Error("expected a lease");
+      leases.push({ lease: result.lease, secretKey: keyPair.secretKey });
+    }
+    const append = await appendRequest(
+      leases[0].lease,
+      leases[0].secretKey,
+      0,
+      objectOf(0x83),
+    );
+    expect(await verifiedStatus(core, await core.append(append))).toBe(
+      "stored",
+    );
+
+    // The queue now holds one unit inside a write that does not return.
+    const holder = await newKeyPair(cryptoModule);
+    const holding = core.allocate(
+      allocationRequest(holder.publicKey, blockedWindow),
+    );
+    await blocked;
+    expect(core.mutationQueueDepth).toBe(1);
+
+    const answers: Record<string, string> = {};
+    const replay = core.allocate(allocationRequest(keys[3])).then((result) => {
+      answers.replay =
+        result.kind === "allocated"
+          ? `lease ${String(result.lease.allocationOrdinal)}`
+          : result.value.status;
+    });
+    const late = await newKeyPair(cryptoModule);
+    const full = core
+      .allocate(allocationRequest(late.publicKey))
+      .then((result) => {
+        answers.full =
+          result.kind === "allocated" ? "allocated" : result.value.status;
+      });
+    const appendReplay = core.append(append).then(async (result) => {
+      answers.append = await verifiedStatus(core, result);
+    });
+    // Bounded in turns of the event loop: a regression that put these behind
+    // the queue fails here, by assertion, not by the test's timeout.
+    for (
+      let turn = 0;
+      turn < 200_000 && Object.keys(answers).length < 3;
+      turn++
+    )
+      await Bun.sleep(0);
+    expect(answers).toEqual({
+      replay: `lease ${String(leases[3].lease.allocationOrdinal)}`,
+      full: "capacity-exhausted",
+      append: "already-present",
+    });
+    expect(core.mutationQueueDepth).toBe(1);
+    release();
+    await Promise.all([holding, replay, full, appendReplay]);
   });
 
   test("a cover append presents an all-zero allocation key to the admission hook", async () => {

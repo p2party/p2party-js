@@ -322,6 +322,20 @@ describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
   });
 });
 
+// While a blocked upgrade is still pending, an open fails at once. Open again
+// each turn of the event loop until one succeeds: turns and not time, since
+// the pending upgrade ends by queued work. One that never ends fails the test
+// at the runner's timeout.
+const openOnceUnblocked = async (): Promise<
+  Awaited<ReturnType<typeof getDB>>
+> => {
+  for (;;) {
+    const db = await getDB().catch(() => undefined);
+    if (db) return db;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
 describe("getDB — connections never block or hang an upgrade", () => {
   test("a connection closes on versionchange", async () => {
     const db = await getDB();
@@ -359,13 +373,9 @@ describe("getDB — connections never block or hang an upgrade", () => {
 
     // Once the old tab goes, the pending upgrade completes and opens work.
     old.close();
-    let db: Awaited<ReturnType<typeof getDB>> | undefined;
-    for (let attempt = 0; attempt < 50 && !db; attempt++) {
-      db = await getDB().catch(() => undefined);
-      if (!db) await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(db?.version).toBe(dbVersion);
-    db?.close();
+    const db = await openOnceUnblocked();
+    expect(db.version).toBe(dbVersion);
+    db.close();
   });
 
   // An older tab that keeps a connection open and ignores versionchange.
@@ -400,14 +410,7 @@ describe("getDB — connections never block or hang an upgrade", () => {
     // they have); wait for that on a scratch database.
     const factoryUnderTest = indexedDB;
     (globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const db = await getDB().catch(() => undefined);
-      if (db) {
-        db.close();
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    (await openOnceUnblocked()).close();
     (globalThis as { indexedDB: IDBFactory }).indexedDB = factoryUnderTest;
     const old = await openOldTab();
     // Request one more open at the moment `blocked` fires, after getDB's own
@@ -438,11 +441,9 @@ describe("getDB — connections never block or hang an upgrade", () => {
     try {
       await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);
       expect(late).toBeDefined();
-      const settled = await Promise.race([
-        late!,
-        new Promise((resolve) => setTimeout(() => resolve("waiting"), 300)),
-      ]);
-      expect(settled).toBeInstanceOf(DatabaseUpgradeBlockedError);
+      // The old tab is still open here: an open that waited for it instead
+      // of failing never settles, and the test ends at the runner's timeout.
+      expect(await late).toBeInstanceOf(DatabaseUpgradeBlockedError);
     } finally {
       factory.open = open;
       old.close();
@@ -454,13 +455,9 @@ describe("getDB — connections never block or hang an upgrade", () => {
     await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);
     old.close();
     // The queued upgrade completes and is closed; then opens work again.
-    let db: Awaited<ReturnType<typeof getDB>> | undefined;
-    for (let attempt = 0; attempt < 50 && !db; attempt++) {
-      db = await getDB().catch(() => undefined);
-      if (!db) await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(db?.version).toBe(dbVersion);
-    expect(db?.objectStoreNames.contains("receiveActivity")).toBe(true);
-    db?.close();
+    const db = await openOnceUnblocked();
+    expect(db.version).toBe(dbVersion);
+    expect(db.objectStoreNames.contains("receiveActivity")).toBe(true);
+    db.close();
   });
 });

@@ -80,12 +80,17 @@ export const installFakeClock = (startAt: number = Date.now()): FakeClock => {
   };
 };
 
-/** Let queued work run until `condition` holds: event-loop turns, not time. */
-export const untilTurns = async (
-  condition: () => boolean,
-  limit = 50_000,
-): Promise<boolean> => {
-  for (let turns = 0; turns < limit && !condition(); turns++)
-    await new Promise((resolve) => setImmediate(resolve));
-  return condition();
+/**
+ * Let queued work run until `condition` holds: turns of the event loop, not
+ * time, and as many as it takes.
+ *
+ * There is no limit on the turns, because their number is not the same in
+ * every run. An idle turn takes about a microsecond, and work that leaves the
+ * event loop (a WebCrypto digest on the runtime's threads, a zero-delay
+ * timer) is away for as many turns as fit in the time it takes: a limit on
+ * turns is a limit on that time. A condition that never holds fails the test
+ * at the runner's timeout, as an awaited promise that never settles does.
+ */
+export const untilTurns = async (condition: () => boolean): Promise<void> => {
+  while (!condition()) await new Promise((resolve) => setImmediate(resolve));
 };

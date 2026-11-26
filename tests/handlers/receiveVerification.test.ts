@@ -214,25 +214,26 @@ const deferred = <T = void>() => {
   return { promise, resolve };
 };
 
-// Everything these tests wait for is queued work (fake IndexedDB requests,
-// worker calls, promise chains), so they wait in turns of the event loop and
-// never in time.
+// These tests wait in turns of the event loop and never in time.
 //
-// waitFor: until the condition holds, however many turns that takes. There is
-// no limit on the turns: storing a file of 400 chunks takes tens of thousands,
-// and not the same number in every run. A condition that never holds fails
-// the test at the runner's timeout, as an awaited promise that never settles
-// does.
-// flush: a fixed number of turns, for work that has no condition to wait on
-// ("nothing more is sent"). FLUSH_TURNS is many times what such work takes
-// here: a delete that nothing holds up answers within a dozen turns.
-const FLUSH_TURNS = 400;
-const waitFor = async (condition: () => boolean): Promise<void> => {
-  while (!condition()) await new Promise((resolve) => setImmediate(resolve));
-};
+// waitFor: until the condition holds, however many turns that takes
+// (untilTurns says why there is no limit).
+// flush: for work that has no condition to wait on ("nothing more is sent").
+// What these tests wait for runs on the event loop and hashes on the
+// runtime's WebCrypto threads, so a flush is FLUSH_ROUNDS round trips through
+// both: one digest, then FLUSH_TURNS turns. A delete that nothing holds up
+// answers within a dozen turns. It is a margin and not a proof: an assertion
+// that something did happen waits for it with waitFor first.
+const FLUSH_ROUNDS = 8;
+const FLUSH_TURNS = 50;
+const FLUSH_INPUT = new Uint8Array(64);
+const waitFor = untilTurns;
 const flush = async (): Promise<void> => {
-  for (let turns = 0; turns < FLUSH_TURNS; turns++)
-    await new Promise((resolve) => setImmediate(resolve));
+  for (let round = 0; round < FLUSH_ROUNDS; round++) {
+    await crypto.subtle.digest("SHA-512", FLUSH_INPUT);
+    for (let turns = 0; turns < FLUSH_TURNS; turns++)
+      await new Promise((resolve) => setImmediate(resolve));
+  }
 };
 
 // Stall the worker's first batch read of one file's chunks: the read runs in
@@ -813,7 +814,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     const closed = new AbortController();
     const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
     oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
-    expect(await untilTurns(() => stall.hit())).toBe(true);
+    await untilTurns(() => stall.hit());
 
     // A reconnect's copy of the held chunk is stored while the run has its
     // holder. Before that copy asks for the verdict, the old edge is gone and
@@ -825,20 +826,18 @@ describe("a received file is verified outside the edge's receive lock", () => {
       ...io.dependencies,
       verifyReceivedFile: async (merkleRoot, token, holder) => {
         closed.abort(new Error("channel closed"));
-        expect(await untilTurns(() => io.aborts() === 1)).toBe(true);
+        await untilTurns(() => io.aborts() === 1);
         return io.dependencies.verifyReceivedFile(merkleRoot, token, holder);
       },
     });
     newLane.push(seal(after.alice, file.plaintexts[0], file.root));
-    expect(await untilTurns(() => io.verifications() === 2)).toBe(true);
+    await untilTurns(() => io.verifications() === 2);
     stall.release();
 
     // The new edge did not leave, so it is owed a verdict: the file is
     // verified again from the start and the new edge completes it.
-    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
-    expect(
-      await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash))),
-    ).toBe(true);
+    await untilTurns(() => io.outcomes.includes("complete"));
+    await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash)));
     expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
     expect((await row(file.rootHex))?.savedSize).toBe(8);
   });
@@ -854,13 +853,13 @@ describe("a received file is verified outside the edge's receive lock", () => {
     const closed = new AbortController();
     const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
     oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
-    expect(await untilTurns(() => stall.hit())).toBe(true);
+    await untilTurns(() => stall.hit());
 
     // The old edge is torn down and its channel closes: the run has no
     // holder left and is told to stop.
     resetRatchetGate(ROOM, PEER);
     closed.abort(new Error("channel closed"));
-    expect(await untilTurns(() => io.aborts() === 1)).toBe(true);
+    await untilTurns(() => io.aborts() === 1);
 
     // A reconnect's copy of the held chunk arrives while that run is ending.
     // It is not refused over the lease the run still holds: it waits for the
@@ -875,11 +874,9 @@ describe("a received file is verified outside the edge's receive lock", () => {
 
     // Then the file is verified again and this copy completes it, without
     // the sender sending it once more.
-    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
+    await untilTurns(() => io.outcomes.includes("complete"));
     expect(io.verifications()).toBe(2);
-    expect(
-      await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash))),
-    ).toBe(true);
+    await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash)));
     expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
     expect((await row(file.rootHex))?.savedSize).toBe(8);
   });
@@ -894,7 +891,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     const { alice, epc } = edge();
     const only = lane(file, epc, io.dependencies);
     only.push(seal(alice, file.plaintexts[0], file.root));
-    expect(await untilTurns(() => stall.hit())).toBe(true);
+    await untilTurns(() => stall.hit());
     const token = (await row(file.rootHex))?.receiveVerification?.token ?? "";
     expect(token).not.toBe("");
 
@@ -910,13 +907,13 @@ describe("a received file is verified outside the edge's receive lock", () => {
     ]).then((outcome) => {
       answered = outcome;
     });
-    expect(await untilTurns(() => answered !== "pending")).toBe(true);
+    await untilTurns(() => answered !== "pending");
     expect(answered).toBe("aborted");
     expect(io.outcomes).toEqual([]);
 
     // The run is untouched: its own holder completes the file.
     stall.release();
-    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
+    await untilTurns(() => io.outcomes.includes("complete"));
     expect((await row(file.rootHex))?.savedSize).toBe(8);
   });
 
@@ -1321,6 +1318,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     stall.release();
     await deleting;
     expect(await deleteIo.settled.promise).toBe("aborted");
+    await waitFor(() => deletedLane.sent.length === 1);
     await flush();
     expect(deletedLane.sent).toEqual([uint8ArrayToHex(deleted.receipts[0])]);
   });

@@ -22,7 +22,7 @@ import {
 } from "bun:test";
 
 import { readFileSync } from "node:fs";
-import { installFakeClock } from "./fakeClock";
+import { installFakeClock, untilTurns } from "./fakeClock";
 import { fakeOpfs } from "./fakeOpfs";
 
 import { getDB } from "../../src/db/src/getDB";
@@ -325,11 +325,9 @@ const hold = async (root: string): Promise<() => void> => {
 };
 const turn = (): Promise<void> =>
   new Promise((resolve) => setImmediate(resolve));
-// Let queued work run until `condition` holds: turns of the event loop.
-const until = async (condition: () => boolean): Promise<void> => {
-  for (let turns = 0; turns < 50_000 && !condition(); turns++) await turn();
-  expect(condition()).toBe(true);
-};
+// Let queued work run until `condition` holds: turns of the event loop, as
+// many as it takes.
+const until = untilTurns;
 // Everything queued for this file in the worker has run, and what the page
 // does with the answers too: the request below waits its turn at the file's
 // lock.
@@ -379,11 +377,7 @@ const roomRecord = async (roomId = ROOM) => {
   }
 };
 const roomRecorded = async (roomId = ROOM): Promise<void> => {
-  for (let turns = 0; turns < 50_000; turns++) {
-    if (await roomRecord(roomId)) return;
-    await turn();
-  }
-  throw new Error("the room's record was never written");
+  while (!(await roomRecord(roomId))) await turn();
 };
 // A file this device sent, listed under the transfer ID it was sent with.
 // Its copy on disk was assembled when the application read it back.

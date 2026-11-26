@@ -1291,7 +1291,7 @@ describe("no failure leaves a verification behind", () => {
     const after = "4e".repeat(64);
     await holdFile(after);
     await callWorker("getDBRoomMessageData", [room, { verifyHeld: true }]);
-    expect(await untilTurns(() => notices.length > 0)).toBe(true);
+    await untilTurns(() => notices.length > 0);
     // The delete read the room's rows to delete them, and nothing of its file
     // was hashed or settled: the only file read back and the only outcome
     // posted are the second file's.
@@ -1507,7 +1507,7 @@ describe("held files are verified at the next start", () => {
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     // The first try finds the lease and arms one timer for its end.
-    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    await untilTurns(() => clock.armed() === 1);
     clock.advance(79);
     // Not while the other tab holds it.
     expect(notices).toEqual([]);
@@ -1578,13 +1578,13 @@ describe("held files are verified at the next start", () => {
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     // The first try finds the lease and arms its retry for the lease's end.
-    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    await untilTurns(() => clock.armed() === 1);
     // The other tab is still verifying: it renews its lease before it ends.
     clock.advance(20);
     await leaseTo(root, "another-tab", clock.now() + 120);
     // The retry fires, sees the renewed lease, and arms the next one.
     clock.advance(100);
-    expect(await untilTurns(() => clock.armed() === 2)).toBe(true);
+    await untilTurns(() => clock.armed() === 2);
     expect(notices).toEqual([]);
     expect(opfs.reads.length).toBe(readsBefore);
     // Then the other tab stops renewing: once its lease has ended, the next
@@ -1611,7 +1611,7 @@ describe("held files are verified at the next start", () => {
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     // The first try finds the lease and arms its retry.
-    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    await untilTurns(() => clock.armed() === 1);
     // The other tab keeps renewing: first for the whole retry window...
     await leaseTo(
       root,
@@ -1619,7 +1619,7 @@ describe("held files are verified at the next start", () => {
       clock.now() + RECEIVE_VERIFY_START_RETRY_WINDOW_MS,
     );
     clock.advance(90);
-    expect(await untilTurns(() => clock.armed() === 2)).toBe(true);
+    await untilTurns(() => clock.armed() === 2);
     // ...and again before that lease ends.
     clock.advance(RECEIVE_VERIFY_START_RETRY_WINDOW_MS - 100);
     await leaseTo(root, "another-tab", clock.now() + 60_000);

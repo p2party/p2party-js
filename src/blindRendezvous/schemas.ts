@@ -1075,6 +1075,10 @@ export const publicStoreCheckpointStatusBodyV1Schema = record(
   [
     { name: "version", type: u8 },
     { name: "storeId", type: bytes32 },
+    // The descriptor this answer was given under. A third party then judges
+    // it against that descriptor and no other: a store that signs a second
+    // descriptor (another generation, another retention) cannot recast it.
+    { name: "descriptorHash", type: bytes32 },
     { name: "deliveryProfileHash", type: bytes32 },
     { name: "ingressWindow", type: u64 },
     // The store's own current window when it signed. With the descriptor's
@@ -1132,13 +1136,23 @@ export const publicStoreCheckpointReadV1Schema = union(
 
 export const publicChunkStatusBodyV1Schema = record("PublicChunkStatusBodyV1", [
   { name: "version", type: u8 },
+  // As in the checkpoint status: the descriptor this answer was given under.
+  { name: "descriptorHash", type: bytes32 },
   { name: "bucket", type: publicBucketV1Schema },
   { name: "chunkIndex", type: u64 },
   // As in the checkpoint status: the store's own window when it signed.
   { name: "storeIngressWindow", type: u64 },
   {
     name: "status",
-    type: enumOf("PublicChunkStatusKindV1", ["not-final", "out-of-range"]),
+    // `out-of-range` means the window is outside what the store keeps, and
+    // nothing else; `no-such-chunk` answers coordinates no window of this
+    // store can hold (a profile it does not serve, a class the profile does
+    // not define, an index past the class's count).
+    type: enumOf("PublicChunkStatusKindV1", [
+      "not-final",
+      "out-of-range",
+      "no-such-chunk",
+    ]),
   },
 ]);
 

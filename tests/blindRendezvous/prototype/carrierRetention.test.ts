@@ -218,6 +218,75 @@ describe("carrier runtime and store retention", () => {
     }
   });
 
+  test("a caught-up read that meets a clock disagreement is retried once, then missed", async () => {
+    const storeIdHex = "cc".repeat(32);
+    const scans = new Map<bigint, number>();
+    const disagreeing = {
+      storeIdHex,
+      storeId: new Uint8Array(32).fill(0xcc),
+      carrierContextId: new Uint8Array(32).fill(0xcc),
+      inert: false,
+      faults: [],
+      issueToken: (): Promise<boolean> => Promise.resolve(true),
+      allocate: (): Promise<null> => Promise.resolve(null),
+      append: (): Promise<null> => Promise.resolve(null),
+      scanWindow: (window: bigint): Promise<WindowScan> => {
+        scans.set(window, (scans.get(window) ?? 0) + 1);
+        return Promise.resolve({
+          window,
+          status: window === CHAIN_START ? "clock-disagreement" : "finalized",
+          objects: [],
+          checkpointHash: null,
+        });
+      },
+      recordReceipt: (): void => undefined,
+      checkpointHashFor: (): null => null,
+    } as unknown as PrototypeStoreClient;
+    // Suspended from the start: the chain-start window's read is first made
+    // as a catch-up read, when the page resumes five windows later.
+    const harness = harnessFor(
+      [disagreeing],
+      windowStart(CHAIN_START + 1n) + 50n,
+    );
+    harness.runtime.start();
+    try {
+      harness.nowMs =
+        windowStart(CHAIN_START + 6n) + profile.publicReadOffsetMs;
+      const first = [...harness.pending.entries()].sort((left, right) =>
+        left[1].atMs < right[1].atMs ? -1 : 1,
+      )[0];
+      if (first === undefined) throw new Error("the schedule was not armed");
+      harness.pending.delete(first[0]);
+      first[1].callback();
+      await harness.runtime.drain();
+
+      const reads = harness.events.filter(
+        (event) => event.kind === "scan" && event.window === CHAIN_START,
+      );
+      // Read twice, both as catch-up reads, and never a third time.
+      expect(reads.map((event) => event.detail)).toEqual([
+        "clock-disagreement",
+        "clock-disagreement",
+      ]);
+      expect(scans.get(CHAIN_START)).toBe(2);
+      const missed = missedAt(harness.events, CHAIN_START, storeIdHex).map(
+        (event) => event.detail ?? "",
+      );
+      expect(
+        missed.filter((detail) => detail.includes("signed clock disagrees")),
+      ).toHaveLength(2);
+      expect(
+        missed.filter((detail) =>
+          detail.includes("a catch-up read failed twice (clock-disagreement)"),
+        ),
+      ).toHaveLength(1);
+      // The other caught-up windows were read once each.
+      expect(scans.get(CHAIN_START + 1n)).toBe(1);
+    } finally {
+      await harness.runtime.stop();
+    }
+  });
+
   test("a client returning from suspension does not silently lose a catch-up window", async () => {
     // The run starts one window after the chain start, so the chain-start
     // window is the oldest its catch-up can reach.

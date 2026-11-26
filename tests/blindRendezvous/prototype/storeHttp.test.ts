@@ -464,7 +464,8 @@ describe("prototype store HTTP handler", () => {
         );
       }
 
-      // An out-of-range index is a signed status, not a transport error.
+      // An index past the class's count is a signed status, not a transport
+      // error, and it is `no-such-chunk`, never `out-of-range`.
       const over = await fetch(
         `${base}${PROTOTYPE_STORE_ROUTES.chunk}/${PROFILE_HEX}/${String(CHAIN_START)}/0/3`,
       );
@@ -473,7 +474,7 @@ describe("prototype store HTTP handler", () => {
       const status = decodePublicChunkReadV1(await bodyBytes(over));
       expect(status.kind).toBe("status");
       if (status.kind === "status")
-        expect(status.value.status).toBe("out-of-range");
+        expect(status.value.status).toBe("no-such-chunk");
     });
   });
 

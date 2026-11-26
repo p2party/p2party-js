@@ -16,6 +16,14 @@
  *   has passed even if the chunks are not signed yet, so a slow finalizer can
  *   never let one client's object into a chunk another client already read a
  *   checkpoint for.
+ * - A read is answered from one reading of the clock, and that reading is
+ *   the window a signed status states. `out-of-range` means only that the
+ *   window is outside what the store keeps, and `not-final` is signed only
+ *   before the window's finalization instant: a window that has closed on
+ *   the clock but is not signed yet is answered with
+ *   `StoreFinalizationPendingError` (a 503), never a signed `not-final`. So
+ *   none of this store's signed statuses can be shown, from its own words, to
+ *   contradict its descriptor (`signedStatusProvesFault` in the client).
  * - A finalized window is never re-signed. Signing two different chunk bodies
  *   for one index, or two checkpoints for one window, is a permanent fault
  *   proof against the store — so `#finalizeWindow` returns early rather than
@@ -202,10 +210,27 @@ export class StoreAdmissionRefusedError extends Error {
  * one failed request, and never as evidence against the store.
  */
 export class StoreBusyError extends Error {
-  override readonly name = "StoreBusyError";
+  // Widened to `string` so `StoreFinalizationPendingError` can name itself.
+  override readonly name: string = "StoreBusyError";
 
-  constructor() {
-    super("storeCore: the mutation queue is full");
+  constructor(message = "the mutation queue is full") {
+    super(`storeCore: ${message}`);
+  }
+}
+
+/**
+ * A read of a window that has closed on this store's clock before the
+ * finalizer has signed it: after a restart, while the finalizer catches up,
+ * or in the moment between the close and the next finalizer tick. A signed
+ * `not-final` would then contradict the store's own clock, so the answer is
+ * the transport's unsigned `503 busy`, which a client treats as one failed
+ * request. The next read finds the window signed.
+ */
+export class StoreFinalizationPendingError extends StoreBusyError {
+  override readonly name = "StoreFinalizationPendingError";
+
+  constructor(window: bigint) {
+    super(`window ${String(window)} has closed but is not signed yet`);
   }
 }
 
@@ -1456,10 +1481,15 @@ export class PrototypeStoreCore {
     const requested = copyBytes(deliveryProfileHashBytes);
     requireProfileHash(requested);
     requireWindow(window);
+    // One reading of the clock decides the answer and is the window it
+    // states: two readings could straddle a step of the wall clock and sign a
+    // window that contradicts the decision made on the other.
+    const nowMs = this.#clock.nowMs();
+    const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
     const status = (
       kind: PublicStoreCheckpointStatusKindV1,
     ): Promise<PublicStoreCheckpointReadV1> =>
-      this.#checkpointStatus(requested, window, kind);
+      this.#checkpointStatus(requested, window, current, kind);
 
     // A profile this store never served has no chain at all, which is a
     // different answer from "that window of my chain is not final yet".
@@ -1467,14 +1497,15 @@ export class PrototypeStoreCore {
       return status("chain-unavailable");
     // Past retention it is out of range whether or not a sweep has deleted
     // the row yet: the answer follows the clock, not the sweep's progress.
-    if (window < this.#chainStart || !this.#readable(window))
+    if (window < this.#chainStart || !this.#readable(window, current))
       return status("out-of-range");
     // Before its finalization instant no window can be final: the clock
     // answers, and an unauthenticated read decodes no row.
-    if (!this.#closedOnClock(window)) return status("not-final");
+    if (!this.#closedOnClock(window, nowMs)) return status("not-final");
 
     const state = await this.#persistence.loadWindow(window);
-    if (state?.finalized == null) return status("not-final");
+    if (state?.finalized == null)
+      throw new StoreFinalizationPendingError(window);
     return {
       kind: "finalized",
       descriptor: copyDescriptor(this.#descriptor),
@@ -1485,18 +1516,23 @@ export class PrototypeStoreCore {
   async #checkpointStatus(
     deliveryProfileHashBytes: Uint8Array,
     window: bigint,
+    storeWindow: bigint,
     status: PublicStoreCheckpointStatusKindV1,
   ): Promise<PublicStoreCheckpointReadV1> {
     const value = {
       version: 1 as const,
       storeId: copyBytes(this.#storeId),
+      // The descriptor this answer is given under: judged against any other,
+      // the answer does not verify.
+      descriptorHash: copyBytes(this.#descriptorHash),
       deliveryProfileHash: deliveryProfileHashBytes,
       ingressWindow: window,
       // Signed so a refusal states when it was given: an `out-of-range` for
       // a window inside the stated retention is then provable from this
       // answer and the descriptor alone, and the same refusal given at two
-      // instants is two different statements.
-      storeIngressWindow: this.currentWindow(),
+      // instants is two different statements. It is the reading the answer
+      // was decided on.
+      storeIngressWindow: storeWindow,
       status,
     };
     return {
@@ -1519,49 +1555,62 @@ export class PrototypeStoreCore {
     requireWindow(requested.ingressWindow);
     requireSizeClassId(requested.sizeClass);
     requireChunkIndex(chunkIndex);
+    // One reading of the clock, as in `readCheckpoint`.
+    const nowMs = this.#clock.nowMs();
+    const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
     const status = (
       kind: PublicChunkStatusKindV1,
     ): Promise<PublicChunkReadV1> =>
-      this.#chunkStatus(requested, chunkIndex, kind);
+      this.#chunkStatus(requested, chunkIndex, current, kind);
 
-    // Chunk reads have only two status values, so an unserved profile, an
-    // unknown class and an index past the profile's count all answer with the
-    // one out-of-range shape: none of them names a chunk this store can ever
-    // hold, and the reader learns nothing extra from which of the three it was.
+    // Coordinates no window of this store can hold, whatever the window:
+    // an unserved profile, an unknown class, an index past the class's
+    // count. One status for all three, so the reader learns nothing extra
+    // from which it was, and never `out-of-range`, which says only that the
+    // window is outside what the store keeps.
     if (!bytesEqual(requested.deliveryProfileHash, this.#profileHash))
-      return status("out-of-range");
+      return status("no-such-chunk");
     const sizeClass = this.#profile.sizeClasses.find(
       (candidate) => candidate.id === requested.sizeClass,
     );
-    if (sizeClass === undefined) return status("out-of-range");
+    if (sizeClass === undefined) return status("no-such-chunk");
     if (chunkIndex >= BigInt(sizeClass.publicChunksPerWindow))
-      return status("out-of-range");
+      return status("no-such-chunk");
     if (
       requested.ingressWindow < this.#chainStart ||
-      !this.#readable(requested.ingressWindow)
+      !this.#readable(requested.ingressWindow, current)
     )
       return status("out-of-range");
-    if (!this.#closedOnClock(requested.ingressWindow))
+    if (!this.#closedOnClock(requested.ingressWindow, nowMs))
       return status("not-final");
 
     const state = await this.#persistence.loadWindow(requested.ingressWindow);
-    const chunk = state?.finalized?.chunks.get(sizeClass.id)?.[
+    if (state?.finalized == null)
+      throw new StoreFinalizationPendingError(requested.ingressWindow);
+    const chunk = state.finalized.chunks.get(sizeClass.id)?.[
       Number(chunkIndex)
     ];
-    if (chunk === undefined) return status("not-final");
+    // Finalization signs every index of every class, so this is a damaged
+    // row: an internal failure, never a signed status.
+    if (chunk === undefined)
+      throw new Error(
+        `storeCore: finalized window ${String(requested.ingressWindow)} has no chunk ${String(chunkIndex)} of class ${String(sizeClass.id)}`,
+      );
     return { kind: "finalized", chunk: copyChunk(chunk) };
   }
 
   async #chunkStatus(
     bucket: PublicBucketV1,
     chunkIndex: bigint,
+    storeWindow: bigint,
     status: PublicChunkStatusKindV1,
   ): Promise<PublicChunkReadV1> {
     const value = {
       version: 1 as const,
+      descriptorHash: copyBytes(this.#descriptorHash),
       bucket,
       chunkIndex,
-      storeIngressWindow: this.currentWindow(),
+      storeIngressWindow: storeWindow,
       status,
     };
     return {
@@ -1754,8 +1803,7 @@ export class PrototypeStoreCore {
   }
 
   /** Served on read: any window not yet past, and retained ones that are. */
-  #readable(window: bigint): boolean {
-    const current = this.currentWindow();
+  #readable(window: bigint, current: bigint = this.currentWindow()): boolean {
     return (
       window > current ||
       bucketIsReadable(window, current, this.#retentionWindows)
@@ -1822,11 +1870,11 @@ export class PrototypeStoreCore {
   }
 
   /** `IngressWindowStart(window) + chunkFinalizationOffsetMs` has passed. */
-  #closedOnClock(window: bigint): boolean {
+  #closedOnClock(window: bigint, nowMs: bigint = this.#clock.nowMs()): boolean {
     const dueAt =
       ingressWindowStartMs(window, this.#profile.deliveryWindowMs) +
       this.#profile.chunkFinalizationOffsetMs;
-    return dueAt <= this.#clock.nowMs();
+    return dueAt <= nowMs;
   }
 
   #sizeClass(id: number): DeliverySizeClassV1 {

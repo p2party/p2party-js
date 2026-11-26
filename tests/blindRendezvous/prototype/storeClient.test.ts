@@ -12,6 +12,7 @@ import {
   deliveryProfileHash,
   publicAllocationLeaseSignedMessage,
   publicCheckpointStatusSigningHash,
+  publicChunkStatusSigningHash,
 } from "../../../src/blindRendezvous/derivations";
 import {
   ingressWindowStartMs,
@@ -41,7 +42,7 @@ import {
   PrototypeStoreClient,
   StoreClientError,
   buildAppendAdmission,
-  outOfRangeProvesWithholding,
+  signedStatusProvesFault,
 } from "../../../src/blindRendezvous/prototype/storeClient";
 import {
   PrototypeStoreCore,
@@ -59,10 +60,17 @@ import {
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
   encodePublicChunkReadV1,
+  decodePublicStoreCheckpointReadV1,
   encodePublicStoreCheckpointReadV1,
 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 import type { LibCrypto } from "../../../src/cryptography/libcrypto";
+import type { StoreDescriptorV1 } from "../../../src/blindRendezvous/storeDescriptor";
+import type {
+  PublicAppendResultV1,
+  PublicChunkStatusKindV1,
+  PublicStoreCheckpointStatusKindV1,
+} from "../../../src/blindRendezvous/prototype/storeWire";
 import type { StoreClientOptions } from "../../../src/blindRendezvous/prototype/storeClient";
 import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
@@ -754,6 +762,7 @@ describe("prototype store client", () => {
       const value = {
         version: 1 as const,
         storeId: store.core.storeId,
+        descriptorHash: store.core.descriptorHash,
         deliveryProfileHash: PROFILE_HASH,
         ingressWindow: CHAIN_START,
         storeIngressWindow: CHAIN_START,
@@ -1490,10 +1499,16 @@ describe("prototype store client late acknowledgements", () => {
 });
 
 describe("prototype store client retention", () => {
-  /** An out-of-range the test store signs, stating `storeWindow` as now. */
-  const signedOutOfRange = async (
+  /**
+   * A checkpoint status the test store's key signs, stating `storeWindow` as
+   * now, under the store's descriptor unless another hash is named.
+   */
+  const signedCheckpointStatus = async (
+    store: StoreProcess,
     window: bigint,
     storeWindow: bigint,
+    status: PublicStoreCheckpointStatusKindV1,
+    descriptorHashBytes: Uint8Array = store.core.descriptorHash,
   ): Promise<Uint8Array> => {
     const secretKey = await storeSecretKey();
     const storeIdBytes = await computeStoreId(
@@ -1502,10 +1517,11 @@ describe("prototype store client retention", () => {
     const value = {
       version: 1 as const,
       storeId: storeIdBytes,
+      descriptorHash: descriptorHashBytes,
       deliveryProfileHash: PROFILE_HASH,
       ingressWindow: window,
       storeIngressWindow: storeWindow,
-      status: "out-of-range" as const,
+      status,
     };
     return encodePublicStoreCheckpointReadV1({
       kind: "status",
@@ -1517,6 +1533,72 @@ describe("prototype store client retention", () => {
       ),
     });
   };
+
+  /** An out-of-range the test store signs, stating `storeWindow` as now. */
+  const signedOutOfRange = (
+    store: StoreProcess,
+    window: bigint,
+    storeWindow: bigint,
+  ): Promise<Uint8Array> =>
+    signedCheckpointStatus(store, window, storeWindow, "out-of-range");
+
+  /** A chunk status the test store's key signs. */
+  const signedChunkStatus = async (
+    store: StoreProcess,
+    window: bigint,
+    sizeClass: number,
+    chunkIndex: bigint,
+    storeWindow: bigint,
+    status: PublicChunkStatusKindV1,
+  ): Promise<Uint8Array> => {
+    const value = {
+      version: 1 as const,
+      descriptorHash: store.core.descriptorHash,
+      bucket: {
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: window,
+        sizeClass,
+      },
+      chunkIndex,
+      storeIngressWindow: storeWindow,
+      status,
+    };
+    return encodePublicChunkReadV1({
+      kind: "status",
+      value,
+      storeSignature: await sign(
+        await publicChunkStatusSigningHash(value),
+        await storeSecretKey(),
+        cryptoModule,
+      ),
+    });
+  };
+
+  /** What a third party concludes from the descriptor and the answer alone. */
+  const proves = (
+    descriptor: StoreDescriptorV1,
+    evidence: Uint8Array,
+  ): Promise<string | null> =>
+    signedStatusProvesFault(descriptor, profile, evidence, cryptoModule);
+
+  /** One chunk route answered with `body`; everything else by the store. */
+  const answeringChunk = (
+    store: StoreProcess,
+    sizeClass: number,
+    chunkIndex: number,
+    body: Uint8Array,
+  ): typeof fetch =>
+    ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (
+        url.pathname ===
+        `${PROTOTYPE_STORE_ROUTES.chunk}/${PROFILE_HEX}/${String(CHAIN_START)}/${String(sizeClass)}/${String(chunkIndex)}`
+      )
+        return Promise.resolve(
+          new Response(asBody(body), { status: 200, headers: chunkHeaders }),
+        );
+      return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+    }) as typeof fetch;
 
   /** Checkpoint reads answered with `body`; everything else by the store. */
   const answeringCheckpoints = (
@@ -1620,7 +1702,11 @@ describe("prototype store client retention", () => {
     await withStore(async (store, clock) => {
       // Signed one window after the window it refuses: by the store's own
       // two statements, well inside the retention its descriptor states.
-      const refusal = await signedOutOfRange(CHAIN_START, CHAIN_START + 1n);
+      const refusal = await signedOutOfRange(
+        store,
+        CHAIN_START,
+        CHAIN_START + 1n,
+      );
       const client = await connect(store.origin, clock, {
         fetch: answeringCheckpoints(store, refusal),
       });
@@ -1635,7 +1721,11 @@ describe("prototype store client retention", () => {
         (fault) => fault.kind === "retention-breach",
       );
       expect(breach?.window).toBe(CHAIN_START);
-      expect(hex(breach?.evidence ?? new Uint8Array(0))).toBe(hex(refusal));
+      expect((breach?.evidence ?? []).map(hex)).toEqual([hex(refusal)]);
+      // Kept with the descriptor the answer names.
+      expect(
+        hex(await descriptorHash(breach?.descriptor ?? store.core.descriptor)),
+      ).toBe(hex(store.core.descriptorHash));
       // The receipt held for the window is reported, not dropped.
       expect(client.faults.map((fault) => fault.kind)).toEqual([
         "retention-breach",
@@ -1644,28 +1734,18 @@ describe("prototype store client retention", () => {
 
       // Anyone holding the descriptor and the evidence reaches the same
       // verdict, with no clock: the store's own statements convict it.
-      const descriptor = store.core.descriptor;
-      const evidence = breach?.evidence ?? new Uint8Array(0);
-      expect(
-        await outOfRangeProvesWithholding(descriptor, evidence, cryptoModule),
-      ).toBe(true);
+      const descriptor = breach?.descriptor ?? store.core.descriptor;
+      const evidence = breach?.evidence?.[0] ?? new Uint8Array(0);
+      expect(await proves(descriptor, evidence)).toBe("retention-breach");
       // Not with an altered answer, nor against another store's descriptor.
       const altered = Uint8Array.from(evidence);
       altered[altered.length - 70] ^= 0x01;
-      expect(
-        await outOfRangeProvesWithholding(descriptor, altered, cryptoModule),
-      ).toBe(false);
+      expect(await proves(descriptor, altered)).toBeNull();
       const other = await startStore(clock, {
         seed: new Uint8Array(32).fill(0x6b),
       });
       try {
-        expect(
-          await outOfRangeProvesWithholding(
-            other.core.descriptor,
-            evidence,
-            cryptoModule,
-          ),
-        ).toBe(false);
+        expect(await proves(other.core.descriptor, evidence)).toBeNull();
       } finally {
         other.stop();
       }
@@ -1720,7 +1800,11 @@ describe("prototype store client retention", () => {
       // A refusal for a window one back, excused by a current window a
       // thousand windows ahead: past the retention by the store's own words,
       // but nowhere near this client's clock.
-      const excuse = await signedOutOfRange(CHAIN_START, CHAIN_START + 1_000n);
+      const excuse = await signedOutOfRange(
+        store,
+        CHAIN_START,
+        CHAIN_START + 1_000n,
+      );
       let answered = 0;
       const once: typeof fetch = ((
         input: RequestInfo | URL,
@@ -1747,13 +1831,7 @@ describe("prototype store client retention", () => {
       expect(client.faults.map((fault) => fault.kind)).toEqual([
         "store-clock-disagreement",
       ]);
-      expect(
-        await outOfRangeProvesWithholding(
-          store.core.descriptor,
-          excuse,
-          cryptoModule,
-        ),
-      ).toBe(false);
+      expect(await proves(store.core.descriptor, excuse)).toBeNull();
       // Not excluded: the next read of the same window is served.
       expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
     });
@@ -1777,27 +1855,385 @@ describe("prototype store client retention", () => {
       const later = await refusedAt(CHAIN_START + BigInt(retention) + 9n);
       expect(hex(first)).not.toBe(hex(later));
       for (const bytes of [first, later])
-        expect(
-          await outOfRangeProvesWithholding(
-            store.core.descriptor,
-            bytes,
-            cryptoModule,
-          ),
-        ).toBe(false);
+        expect(await proves(store.core.descriptor, bytes)).toBeNull();
       // A refusal the same store signs while the window is retained is a
       // different statement again, and that one does prove withholding.
-      const withheld = await signedOutOfRange(CHAIN_START, CHAIN_START + 1n);
+      const withheld = await signedOutOfRange(
+        store,
+        CHAIN_START,
+        CHAIN_START + 1n,
+      );
       expect(hex(withheld)).not.toBe(hex(first));
-      expect(
-        await outOfRangeProvesWithholding(
-          store.core.descriptor,
-          withheld,
-          cryptoModule,
-        ),
-      ).toBe(true);
+      expect(await proves(store.core.descriptor, withheld)).toBe(
+        "retention-breach",
+      );
     } finally {
       store.stop();
     }
+  });
+
+  test("a refusal for a chunk that does not exist is not evidence of withholding", async () => {
+    // The re-review's two calls, against a real core, for the window one
+    // back: an index one past class 0's count, and a class the profile does
+    // not define.
+    const clock: Clock = { now: NEXT_FINALIZE_AT };
+    const store = await startStore(clock);
+    try {
+      while ((await store.core.finalizeDue()).length > 0);
+      const count = BigInt(
+        profile.sizeClasses.find((sizeClass) => sizeClass.id === 0)
+          ?.publicChunksPerWindow ?? 0,
+      );
+      const bucket = (sizeClass: number) => ({
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: CHAIN_START,
+        sizeClass,
+      });
+      const reads = [
+        await store.core.readChunk(bucket(0), count),
+        await store.core.readChunk(bucket(9), 0n),
+      ];
+      for (const read of reads) {
+        expect(read.kind === "status" ? read.value.status : read.kind).toBe(
+          "no-such-chunk",
+        );
+        expect(
+          await proves(store.core.descriptor, encodePublicChunkReadV1(read)),
+        ).toBeNull();
+      }
+      // The same coordinates refused as `out-of-range` under the store's key,
+      // as the store signed them before: still nothing, since the profile
+      // defines no such chunk.
+      for (const [sizeClass, index] of [
+        [0, count],
+        [9, 0n],
+      ] as const)
+        expect(
+          await proves(
+            store.core.descriptor,
+            await signedChunkStatus(
+              store,
+              CHAIN_START,
+              sizeClass,
+              index,
+              CHAIN_START + 1n,
+              "out-of-range",
+            ),
+          ),
+        ).toBeNull();
+      // While a chunk that does exist, refused that way, is withheld.
+      expect(
+        await proves(
+          store.core.descriptor,
+          await signedChunkStatus(
+            store,
+            CHAIN_START,
+            0,
+            count - 1n,
+            CHAIN_START + 1n,
+            "out-of-range",
+          ),
+        ),
+      ).toBe("retention-breach");
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("out-of-range for a chunk inside the stated retention is a breach a third party can verify", async () => {
+    await withStore(async (store, clock) => {
+      const refusal = await signedChunkStatus(
+        store,
+        CHAIN_START,
+        0,
+        0n,
+        CHAIN_START + 1n,
+        "out-of-range",
+      );
+      const client = await connect(store.origin, clock, {
+        fetch: answeringChunk(store, 0, 0, refusal),
+      });
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
+      expect(client.inert).toBe(true);
+      const breach = client.faults.find(
+        (fault) => fault.kind === "retention-breach",
+      );
+      expect((breach?.evidence ?? []).map(hex)).toEqual([hex(refusal)]);
+      const descriptor = breach?.descriptor ?? store.core.descriptor;
+      expect(hex(await descriptorHash(descriptor))).toBe(
+        hex(store.core.descriptorHash),
+      );
+      expect(await proves(descriptor, refusal)).toBe("retention-breach");
+      const altered = Uint8Array.from(refusal);
+      altered[altered.length - 66] ^= 0x01;
+      expect(await proves(descriptor, altered)).toBeNull();
+    });
+  });
+
+  test('a signed "no such chunk" for a chunk the checkpoint lists is a fault with both statements kept', async () => {
+    await withStore(async (store, clock) => {
+      const denial = await signedChunkStatus(
+        store,
+        CHAIN_START,
+        0,
+        0n,
+        CHAIN_START + 1n,
+        "no-such-chunk",
+      );
+      const client = await connect(store.origin, clock, {
+        fetch: answeringChunk(store, 0, 0, denial),
+      });
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+      const servedCheckpoint = encodePublicStoreCheckpointReadV1(
+        await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+      );
+
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
+      const fault = client.faults.find((candidate) =>
+        candidate.detail.includes("withholds chunk 0 of class 0"),
+      );
+      // The existing fault for a missing chunk: a report, not blame.
+      expect(fault?.kind).toBe("signature-invalid");
+      expect(fault?.detail).toContain("no-such-chunk");
+      expect(client.inert).toBe(false);
+      // Both signed statements: the checkpoint that commits to the chunk,
+      // then the status that denies it, with the descriptor they name.
+      expect((fault?.evidence ?? []).map(hex)).toEqual([
+        hex(servedCheckpoint),
+        hex(denial),
+      ]);
+      const checkpointRead = decodePublicStoreCheckpointReadV1(
+        fault?.evidence?.[0] ?? new Uint8Array(0),
+      );
+      expect(checkpointRead.kind).toBe("finalized");
+      if (checkpointRead.kind === "finalized")
+        expect(checkpointRead.checkpoint.ingressWindow).toBe(CHAIN_START);
+      expect(
+        hex(await descriptorHash(fault?.descriptor ?? store.core.descriptor)),
+      ).toBe(hex(store.core.descriptorHash));
+      // A denial is not an expiry claim, so it proves no withholding alone.
+      expect(await proves(store.core.descriptor, denial)).toBeNull();
+    });
+  });
+
+  test("evidence cannot be disputed with a second descriptor", async () => {
+    const clock: Clock = { now: WINDOW_START };
+    const store = await startStore(clock, { retentionWindows: 100 });
+    try {
+      const first = store.core.descriptor;
+      // A second descriptor under the same key: another generation, and a
+      // retention short enough to make the refusal below an honest expiry.
+      const draft = {
+        ...first,
+        descriptorGeneration: 2n,
+        retentionWindows: PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
+      };
+      const second: StoreDescriptorV1 = {
+        ...draft,
+        descriptorSignature: await sign(
+          await storeDescriptorSignedMessage(draft),
+          await storeSecretKey(),
+          cryptoModule,
+        ),
+      };
+
+      // Eighty windows back: inside the first descriptor's 100, past the
+      // second's 67.
+      const storeWindow = CHAIN_START + 80n;
+      const refusal = await signedOutOfRange(store, CHAIN_START, storeWindow);
+      clock.now = ingressWindowStartMs(storeWindow, profile.deliveryWindowMs);
+      const client = await connect(store.origin, clock, {
+        fetch: answeringCheckpoints(store, refusal),
+      });
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
+      const breach = client.faults.find(
+        (fault) => fault.kind === "retention-breach",
+      );
+      const kept = breach?.descriptor ?? second;
+      expect(hex(await descriptorHash(kept))).toBe(
+        hex(await descriptorHash(first)),
+      );
+      expect(await proves(kept, refusal)).toBe("retention-breach");
+
+      // The second descriptor is authentic, and the answer names the first:
+      // judged against the second it proves nothing, but it does not stop
+      // proving against the first.
+      expect(await proves(second, refusal)).toBeNull();
+      // The store's own answer naming the second is another statement, and
+      // under the second it is an honest expiry.
+      const recast = await signedCheckpointStatus(
+        store,
+        CHAIN_START,
+        storeWindow,
+        "out-of-range",
+        await descriptorHash(second),
+      );
+      expect(await proves(second, recast)).toBeNull();
+      expect(await proves(first, recast)).toBeNull();
+      expect(await proves(first, refusal)).toBe("retention-breach");
+    } finally {
+      store.stop();
+    }
+  });
+
+  test("a not-final for a window the store's own clock says must be final is a breach a third party can verify", async () => {
+    await withStore(async (store, clock) => {
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+      // Signed at the store's window after the one it calls not final: its
+      // whole window lies past that window's finalization instant.
+      const stalling = await signedCheckpointStatus(
+        store,
+        CHAIN_START,
+        CHAIN_START + 1n,
+        "not-final",
+      );
+      const client = await connect(store.origin, clock, {
+        fetch: answeringCheckpoints(store, stalling),
+      });
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
+      expect(client.inert).toBe(true);
+      const breach = client.faults.find(
+        (fault) => fault.kind === "finalization-breach",
+      );
+      expect((breach?.evidence ?? []).map(hex)).toEqual([hex(stalling)]);
+      expect(
+        await proves(breach?.descriptor ?? store.core.descriptor, stalling),
+      ).toBe("finalization-breach");
+      // A chunk status is held to the same rule.
+      expect(
+        await proves(
+          store.core.descriptor,
+          await signedChunkStatus(
+            store,
+            CHAIN_START,
+            1,
+            0n,
+            CHAIN_START + 1n,
+            "not-final",
+          ),
+        ),
+      ).toBe("finalization-breach");
+    });
+  });
+
+  test("an honest store at the finalization boundary is not blamed", async () => {
+    await withStore(async (store, clock) => {
+      // The last instant before the close: the store honestly says not final,
+      // stating the window itself, and nothing proves otherwise.
+      clock.now = FINALIZE_AT - 1n;
+      const checkpoint = await store.core.readCheckpoint(
+        PROFILE_HASH,
+        CHAIN_START,
+      );
+      const chunk = await store.core.readChunk(
+        {
+          deliveryProfileHash: PROFILE_HASH,
+          ingressWindow: CHAIN_START,
+          sizeClass: 0,
+        },
+        0n,
+      );
+      if (checkpoint.kind !== "status" || chunk.kind !== "status")
+        throw new Error("expected statuses");
+      expect([checkpoint.value.status, chunk.value.status]).toEqual([
+        "not-final",
+        "not-final",
+      ]);
+      expect(checkpoint.value.storeIngressWindow).toBe(CHAIN_START);
+      expect(
+        await proves(
+          store.core.descriptor,
+          encodePublicStoreCheckpointReadV1(checkpoint),
+        ),
+      ).toBeNull();
+      expect(
+        await proves(store.core.descriptor, encodePublicChunkReadV1(chunk)),
+      ).toBeNull();
+      const client = await connect(store.origin, clock);
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("not-final");
+      expect(client.faults).toEqual([]);
+
+      // At the close itself, before the finalizer has run, the store signs
+      // nothing: an unsigned 503, one unreachable answer, no blame.
+      clock.now = FINALIZE_AT;
+      await expect(
+        store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+      ).rejects.toMatchObject({ name: "StoreFinalizationPendingError" });
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
+      expect(client.inert).toBe(false);
+      expect(client.faults.every((fault) => fault.kind === "unreachable")).toBe(
+        true,
+      );
+      await store.core.finalizeDue();
+      expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
+    });
+  });
+
+  test("receipts kept after a clock disagreement are reported unchecked when they are evicted", async () => {
+    await withStore(async (store, clock) => {
+      let answered = 0;
+      const disagreeingOnce: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (
+          url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`) &&
+          answered++ === 0
+        )
+          return signedOutOfRange(
+            store,
+            CHAIN_START,
+            CHAIN_START + 1_000n,
+          ).then(
+            (body) =>
+              new Response(asBody(body), {
+                status: 200,
+                headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+              }),
+          );
+        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+      }) as typeof fetch;
+      const client = await connect(store.origin, clock, {
+        fetch: disagreeingOnce,
+      });
+      await appendObject(client, CHAIN_START, 0x52);
+      clock.now = NEXT_FINALIZE_AT;
+      await store.core.finalizeDue();
+      expect((await client.scanWindow(CHAIN_START)).status).toBe(
+        "clock-disagreement",
+      );
+      // Kept for a read that may come: nothing is reported yet.
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "store-clock-disagreement",
+      ]);
+
+      // No read of that window comes, and newer receipts fill the client's
+      // room for them: the oldest is pushed out, and said to be unchecked.
+      const { lease } = await leaseFor(client, CHAIN_START + 2n);
+      for (let index = 0; index < 1_024; index++) {
+        const window = CHAIN_START + 10n + BigInt(index);
+        client.recordReceipt({
+          window,
+          sizeClass: 0,
+          lease: { ...lease, ingressWindow: window },
+          objectOrdinal: 0,
+          objectHash: new Uint8Array(32).fill(0x53),
+          result: {} as PublicAppendResultV1,
+        });
+      }
+      const unchecked = client.faults.filter(
+        (fault) => fault.kind === "custody-unchecked",
+      );
+      expect(unchecked.map((fault) => fault.window)).toEqual([CHAIN_START]);
+      expect(unchecked[0]?.detail).toContain("was not checked");
+      expect(client.inert).toBe(false);
+    });
   });
 
   test("the oldest window a catch-up reads is served and the one before it is beyond retention", async () => {

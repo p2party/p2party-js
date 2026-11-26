@@ -209,6 +209,7 @@ const allocationStatusResult: PublicAllocationResultV1 = {
 const checkpointStatusBody: PublicStoreCheckpointStatusBodyV1 = {
   version: 1,
   storeId: fill(32, 1),
+  descriptorHash: fill(32, 30),
   deliveryProfileHash: fill(32, 2),
   ingressWindow: 7n,
   storeIngressWindow: 9n,
@@ -272,6 +273,7 @@ const chunk: PublicChunkV1 = {
 
 const chunkStatusBody: PublicChunkStatusBodyV1 = {
   version: 1,
+  descriptorHash: fill(32, 30),
   bucket,
   chunkIndex: 1n,
   storeIngressWindow: 9n,
@@ -444,7 +446,7 @@ describe("prototype store wire codecs", () => {
       checkpointStatusBody,
     );
     expect(hex(bytes)).toBe(
-      "01010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000900",
+      "0101010101010101010101010101010101010101010101010101010101010101011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e02020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000900",
     );
   });
 
@@ -460,15 +462,21 @@ describe("prototype store wire codecs", () => {
     const status = encodePublicStoreCheckpointReadV1(checkpointStatus);
     expect(decodePublicStoreCheckpointReadV1(status)).toEqual(checkpointStatus);
     expect(hex(status)).toBe(
-      "0100010101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000009001d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+      "01000101010101010101010101010101010101010101010101010101010101010101011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000009001d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
     );
   });
 
   test("chunk status body round-trips and is pinned", () => {
     const bytes = encodePublicChunkStatusBodyV1(chunkStatusBody);
     expect(decodePublicChunkStatusBodyV1(bytes)).toEqual(chunkStatusBody);
+    // `no-such-chunk` is the third value of the closed status enum: the same
+    // body with only its final byte changed.
+    const denial = { ...chunkStatusBody, status: "no-such-chunk" as const };
+    const denialBytes = encodePublicChunkStatusBodyV1(denial);
+    expect(decodePublicChunkStatusBodyV1(denialBytes)).toEqual(denial);
+    expect(hex(denialBytes)).toBe(`${hex(bytes).slice(0, -2)}02`);
     expect(hex(bytes)).toBe(
-      "0102020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000001000000000000000901",
+      "011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e02020202020202020202020202020202020202020202020202020202020202020000000000000007000000000000000001000000000000000901",
     );
   });
 
@@ -482,7 +490,7 @@ describe("prototype store wire codecs", () => {
     const status = encodePublicChunkReadV1(chunkStatus);
     expect(decodePublicChunkReadV1(status)).toEqual(chunkStatus);
     expect(hex(status)).toBe(
-      "010001020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000000010000000000000009011c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "0100011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e020202020202020202020202020202020202020202020202020202020202020200000000000000070000000000000000010000000000000009011c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
     );
   });
 
@@ -650,11 +658,11 @@ describe("prototype store wire transcripts", () => {
 
   test("the chunk and checkpoint status signing hashes are pinned", async () => {
     expect(hex(await publicChunkStatusSigningHash(chunkStatusBody))).toBe(
-      "df6aed2a80180d61f01872b381af920d62036075f505492f109f61280cae4fa8",
+      "f484ffeba46d5078b81444b32555c6cfd36e3e9f13d03fb94965d16c5465ccd7",
     );
     expect(
       hex(await publicCheckpointStatusSigningHash(checkpointStatusBody)),
-    ).toBe("746402d9c328914841f135f6c4f3fb39208ae50ee2de2dd8e67c6dcf91acaffb");
+    ).toBe("57b59f42c94ee142c8d9b3d90e36c7c3ef89849e5aa06d0f87e0746c9db79494");
   });
 
   test("the prototype compatibility hash is pinned and requires 32 bytes", async () => {

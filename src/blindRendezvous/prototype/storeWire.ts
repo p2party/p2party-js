@@ -170,6 +170,8 @@ export type PublicStoreCheckpointStatusKindV1 =
 export interface PublicStoreCheckpointStatusBodyV1 {
   version: 1;
   storeId: Uint8Array;
+  /** `DescriptorHash` of the descriptor this answer was given under. */
+  descriptorHash: Uint8Array;
   deliveryProfileHash: Uint8Array;
   ingressWindow: bigint;
   /** The store's own current ingress window when it signed this answer. */
@@ -189,10 +191,17 @@ export type PublicStoreCheckpointReadV1 =
       storeSignature: Uint8Array;
     };
 
-export type PublicChunkStatusKindV1 = "not-final" | "out-of-range";
+/**
+ * `out-of-range`: the window is outside what the store keeps. `no-such-chunk`:
+ * the coordinates name no chunk any window of this store can hold.
+ */
+export type PublicChunkStatusKindV1 =
+  "not-final" | "out-of-range" | "no-such-chunk";
 
 export interface PublicChunkStatusBodyV1 {
   version: 1;
+  /** `DescriptorHash` of the descriptor this answer was given under. */
+  descriptorHash: Uint8Array;
   bucket: PublicBucketV1;
   chunkIndex: bigint;
   /** The store's own current ingress window when it signed this answer. */

@@ -16,8 +16,15 @@ createPrototypeStoreHandler, called in process with no socket, at the pinned
 profile (4,000 ms windows, cohort 8, 40 slots). Per window: 8 allocations, all
 40 appends, finalizeDue, then 8 readers each GET the checkpoint and all 5
 chunks (48 reads). CPU is process user + system summed around the store's
-calls only. The median is over windows 1..4 (window 0, the chain start, loads
-no predecessor at finalization).
+calls only. Each run's last line summarises windows 1..4 (window 0, the chain
+start, loads no predecessor at finalization). The script that printed these
+lines, at e2f7cf4, labelled "median" the upper of the two middle values of the
+four; it now prints the median (the mean of the two). Computed from the
+per-window lines below, the medians of the eight readers' reads and of the
+whole window are, BASE then after:
+  round 1: reads 4,970.1 / 6.0 ms, whole window 6,840.2 / 223.4 ms
+  round 2: reads 5,558.6 / 5.5 ms, whole window 7,637.1 / 438.2 ms
+  round 3: reads 5,344.8 / 5.2 ms, whole window 7,663.7 / 217.9 ms
 
 Raw output follows.
 

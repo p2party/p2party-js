@@ -577,7 +577,7 @@ what two real clients on two machines would see, not a protocol constant.
 
 ## 7. The residual leaks
 
-The design enumerates seventeen residual leaks. All seventeen are disclosed
+The design enumerates eighteen residual leaks. All eighteen are disclosed
 there; this is the summary an outside reader needs, with the worst one in full.
 
 ### 1. Replicated-write timing linkability — unmitigated, and measured

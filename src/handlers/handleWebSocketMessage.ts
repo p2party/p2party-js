@@ -4,8 +4,11 @@ import { isUUID, isHexadecimal } from "../utils/formatValidation";
 import { handleChallenge } from "./handleChallenge";
 import { establishSignaledConnection } from "./connectionSignal";
 import {
+  isRoomMember,
   mergePeerRosterDelta,
+  parsePeerLeft,
   parsePeerRosterSnapshot,
+  planPeerDeparture,
 } from "./peerRosterDelta";
 import {
   commitRoomResponsePlan,
@@ -15,7 +18,7 @@ import {
 } from "./roomResponse";
 import { requestRoomFromSignaling } from "./requestRoom";
 
-import webrtcApi from "../api/webrtc";
+import webrtcApi, { snapshotPeerConnections } from "../api/webrtc";
 import {
   getRoomIceConfigurationMutex,
   releaseRoomIceConfigurationMutex,
@@ -32,6 +35,8 @@ import {
   setConnectingToPeers,
   expireRoomTurnCredentials,
   rollbackRoomResponse,
+  notePeerPresence,
+  peerDeparted,
 } from "../reducers/roomSlice";
 import { setChallengeId } from "../reducers/keyPairSlice";
 
@@ -49,8 +54,10 @@ import type {
   WebSocketMessageError,
   WebSocketMessagePingRequest,
   WebSocketMessagePeerConnectionResponse,
+  WebSocketMessagePeerLeft,
   WebSocketMessageRoomLeftResponse,
 } from "../utils/interfaces";
+import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
 import { isCanonicalEd25519Identity } from "../utils/identityRole";
 import { isProtocolVersionCompatible } from "../utils/protocolVersion";
@@ -79,6 +86,15 @@ import {
 } from "../utils/roomRequestCoordinator";
 import { classifySignalingHeartbeat } from "../utils/signalingIngressQueue";
 import { acknowledgeRoomLeft } from "../utils/roomLeaveCoordinator";
+
+/**
+ * An edge that has a working transport, or one ICE is still trying to keep:
+ * "disconnected" heals by ICE restart or is torn down by its own grace timer.
+ * A `peerLeft` report never closes one of these.
+ */
+const isConnectedEdge = (connection: IRTCPeerConnection): boolean =>
+  connection.connectionState === "connected" ||
+  connection.connectionState === "disconnected";
 
 const handleWebSocketMessage = async (
   event: MessageEvent,
@@ -118,6 +134,7 @@ const handleWebSocketMessage = async (
       | WebSocketMessageSuccessfulChallenge
       | WebSocketMessageError
       | WebSocketMessagePeerConnectionResponse
+      | WebSocketMessagePeerLeft
       | WebSocketMessageRoomLeftResponse;
 
     switch (message.type) {
@@ -433,6 +450,15 @@ const handleWebSocketMessage = async (
         }
 
         if (!isCurrentSocket()) break;
+        // The requester's live socket asked for peers: it is present.
+        api.dispatch(
+          notePeerPresence({
+            roomId: message.roomId,
+            peerId: message.peer.id,
+            socketGeneration: message.peer.socketGeneration,
+            evidence: "session",
+          }),
+        );
         await api.dispatch(
           signalingServerApi.endpoints.sendMessage.initiate({
             content: {
@@ -444,6 +470,60 @@ const handleWebSocketMessage = async (
             },
           }),
         );
+
+        break;
+      }
+
+      case "peerLeft": {
+        const report = parsePeerLeft(message);
+        if (!report) {
+          console.error("Rejecting malformed peer departure");
+          break;
+        }
+        const { keyPair, rooms } = api.getState() as State;
+        const roomIndex = findActiveSignalingRoomIndex(rooms, report.roomId);
+        if (
+          roomIndex === -1 ||
+          report.peerId === keyPair.peerId ||
+          !isRoomMember(rooms[roomIndex], report.peerId)
+        ) {
+          console.error(
+            "Rejecting a peer departure for this client, an unknown peer or an unknown room",
+          );
+          break;
+        }
+        // The server cannot remove a peer on its own word: an authenticated
+        // edge is the peers' own, and a hostile server could otherwise end
+        // any edge it likes. Read the edge state synchronously, with no await
+        // before the reducer applies it.
+        const edges = snapshotPeerConnections().filter(
+          (connection) =>
+            connection.roomId === report.roomId &&
+            connection.withPeerId === report.peerId,
+        );
+        const edgeConnected = edges.some(isConnectedEdge);
+        const verdict = planPeerDeparture(
+          rooms[roomIndex],
+          report,
+          keyPair.peerId,
+          edgeConnected,
+        );
+        if (verdict === "ignore") {
+          debugLog(
+            "[handleWebSocketMessage] Ignoring a departure of an earlier session",
+          );
+          break;
+        }
+        api.dispatch(peerDeparted({ ...report, edgeConnected }));
+        // "left" with no connected edge: a negotiation still in progress is
+        // abandoned, so it is not completed against a departed member.
+        if (verdict === "remove" && edges.length > 0)
+          await api.dispatch(
+            webrtcApi.endpoints.disconnectFromPeer.initiate({
+              roomId: report.roomId,
+              peerId: report.peerId,
+            }),
+          );
 
         break;
       }
@@ -511,6 +591,20 @@ const handleWebSocketMessage = async (
               api.dispatch(
                 setKnownRoomPeers({ roomId: message.roomId, peers: eligible }),
               );
+              // A snapshot is membership, offline members included: it ends a
+              // "left" report, and an "offline" one only for a member it
+              // shows on a newer socket (notedPeerPresence).
+              for (const member of eligible)
+                api.dispatch(
+                  notePeerPresence({
+                    roomId: message.roomId,
+                    peerId: member.peerId,
+                    socketGeneration: message.peers.find(
+                      (peer) => peer.id === member.peerId,
+                    )?.socketGeneration,
+                    evidence: "membership",
+                  }),
+                );
             }
             break;
           }
@@ -578,6 +672,16 @@ const handleWebSocketMessage = async (
                 roomId: message.roomId,
                 peerId: message.peers[i].id,
                 peerPublicKey: message.peers[i].publicKey,
+              }),
+            );
+            // The peer's live socket accepted an introduction: it is present,
+            // whatever an earlier `peerLeft` said.
+            api.dispatch(
+              notePeerPresence({
+                roomId: message.roomId,
+                peerId: message.peers[i].id,
+                socketGeneration: message.peers[i].socketGeneration,
+                evidence: "session",
               }),
             );
             await api.dispatch(
@@ -741,7 +845,17 @@ const handleWebSocketMessage = async (
             rooms[roomIndex].rtcConfig,
             {
               recordPeer: (peer) => {
-                if (isCurrentSocket()) api.dispatch(setPeer(peer));
+                if (!isCurrentSocket()) return;
+                api.dispatch(setPeer(peer));
+                // The peer is dialling from its live socket.
+                api.dispatch(
+                  notePeerPresence({
+                    roomId: peer.roomId,
+                    peerId: peer.peerId,
+                    socketGeneration: message.fromPeerSocketGeneration,
+                    evidence: "session",
+                  }),
+                );
               },
               recordChannel: (channel) => {
                 if (!isCurrentSocket()) return;

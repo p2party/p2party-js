@@ -18,6 +18,8 @@ import {
   setPeerHandshakeStatus,
   deleteRoom,
   purgeAllRooms,
+  notePeerPresence,
+  peerDeparted,
 } from "../reducers/roomSlice";
 
 import signalingServerApi from "../api/signalingServerApi";
@@ -49,6 +51,7 @@ import {
 } from "../handlers/outboxCoordinator";
 import {
   createRoomRosterReconciler,
+  hasReportedDeparture,
   isRoomRosterStranded,
   hasOnlyTerminalPeerHandshakeFailures,
 } from "../utils/roomRosterReconciler";
@@ -108,6 +111,7 @@ const reconcileRoomRosters = (
                 (peer) =>
                   room.handshakeStatusByPeer?.[peer.peerId]?.status !==
                     "authenticated" &&
+                  !hasReportedDeparture(room, peer.peerId) &&
                   !hasTerminalPeerHandshakeFailure(
                     room.handshakeStatusByPeer,
                     peer.peerId,
@@ -134,6 +138,7 @@ const reconcileRoomRosters = (
             (!target.knownPeers?.some(
               (peer) =>
                 peer.peerId === peerId &&
+                !hasReportedDeparture(target, peer.peerId) &&
                 !hasTerminalPeerHandshakeFailure(
                   target.handshakeStatusByPeer,
                   peer.peerId,
@@ -200,6 +205,8 @@ export const createRoomListenerMiddleware = (
       setPeerHandshakeStatus,
       deleteRoom,
       purgeAllRooms,
+      notePeerPresence,
+      peerDeparted,
       signalingServerActions.startConnecting,
       signalingServerActions.connectionEstablished,
       signalingServerActions.connectionVerified,
@@ -372,6 +379,7 @@ export const createRoomListenerMiddleware = (
                           (peer) =>
                             peer.peerId === id &&
                             !excludedPeerIds.includes(id) &&
+                            !hasReportedDeparture(room, id) &&
                             room.handshakeStatusByPeer?.[id]?.status !==
                               "authenticated",
                         ),

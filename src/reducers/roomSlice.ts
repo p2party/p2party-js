@@ -14,10 +14,17 @@ import {
   MAX_SIGNALING_ROOM_PEERS,
 } from "../utils/signalingBounds";
 
+import {
+  isRoomMember,
+  notedPeerPresence,
+  planPeerDeparture,
+} from "../handlers/peerRosterDelta";
+
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { RoomPolicyV1 } from "../roomPolicy";
 import type { CoverSchedulerStatus } from "../handlers/coverScheduler";
-import type { TurnCredentials } from "../utils/interfaces";
+import type { PeerPresenceEvidence } from "../handlers/peerRosterDelta";
+import type { PeerDepartureReason, TurnCredentials } from "../utils/interfaces";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface Channel {
@@ -219,6 +226,65 @@ export interface SetPeerHandshakeStatusArgs extends PeerHandshakeStatus {
   peerId: string;
 }
 
+/**
+ * What the signaling server last said about one room member's session. An
+ * unauthenticated hint: it decides which members this client asks the server
+ * to reintroduce, and never closes an edge.
+ */
+export interface PeerSignalingPresence {
+  /** The member's socket generation the server last named in this room. */
+  socketGeneration?: string;
+  /**
+   * A departure the server reported (`peerLeft`) that no later frame naming
+   * the member has withdrawn. A departed member is not re-dialled.
+   */
+  departure?: PeerDepartureReason;
+}
+
+export interface NotePeerPresenceArgs {
+  roomId: string;
+  peerId: string;
+  /** As the frame carried it; only a UUIDv4 is recorded. */
+  socketGeneration?: unknown;
+  evidence: PeerPresenceEvidence;
+}
+
+export interface PeerDepartedArgs {
+  roomId: string;
+  peerId: string;
+  reason: PeerDepartureReason;
+  socketGeneration: string;
+  /** Whether this client holds a connected edge to the peer in this room. */
+  edgeConnected: boolean;
+}
+
+/**
+ * Forget a member: roster entry, snapshot entry, presence, cover status and
+ * any non-failed handshake status (a failed one is kept, as deletePeer keeps
+ * it). Channels belong to the transport and go with its teardown.
+ */
+const removeRoomMember = (room: Room, peerId: string): void => {
+  const peerIndex = room.peers.findIndex((peer) => peer.peerId === peerId);
+  if (peerIndex > -1) room.peers.splice(peerIndex, 1);
+  const knownIndex =
+    room.knownPeers?.findIndex((peer) => peer.peerId === peerId) ?? -1;
+  if (knownIndex > -1) room.knownPeers!.splice(knownIndex, 1);
+  if (room.peerPresence) delete room.peerPresence[peerId];
+  if (room.coverStatusByPeer) delete room.coverStatusByPeer[peerId];
+  if (
+    room.handshakeStatusByPeer &&
+    room.handshakeStatusByPeer[peerId]?.status !== "failed"
+  )
+    delete room.handshakeStatusByPeer[peerId];
+};
+
+/** Presence is kept only for tracked members, so it is bounded with them. */
+const prunePeerPresence = (room: Room): void => {
+  if (!room.peerPresence) return;
+  for (const peerId of Object.keys(room.peerPresence))
+    if (!isRoomMember(room, peerId)) delete room.peerPresence[peerId];
+};
+
 export interface Room extends SetRoomArgs {
   policy: RoomPolicyV1;
   connectingToPeers: boolean;
@@ -238,6 +304,12 @@ export interface Room extends SetRoomArgs {
   peers: Peer[];
   /** Eligible signaling membership, independent of currently retained transports. */
   knownPeers?: Peer[];
+  /**
+   * Per tracked member (peerId): the socket generation the server last named
+   * and a departure it reported (`peerLeft`). Only members on `peers` or
+   * `knownPeers` have an entry.
+   */
+  peerPresence?: Record<string, PeerSignalingPresence>;
   channels: Channel[];
   messages: Message[];
   /**
@@ -760,8 +832,59 @@ const roomSlice = createSlice({
       const room = state.find(
         (r) => r.id === action.payload.roomId && r.signalingActive !== false,
       );
-      if (room && action.payload.peers.length <= MAX_SIGNALING_ROOM_PEERS)
+      if (room && action.payload.peers.length <= MAX_SIGNALING_ROOM_PEERS) {
         room.knownPeers = action.payload.peers.map((peer) => ({ ...peer }));
+        prunePeerPresence(room);
+      }
+    },
+
+    /**
+     * A server frame named a member (handleWebSocketMessage): record the
+     * socket generation it carried and withdraw a departure it answers
+     * (notedPeerPresence). Untracked peers get no entry.
+     */
+    notePeerPresence: (state, action: PayloadAction<NotePeerPresenceArgs>) => {
+      const { roomId, peerId, socketGeneration, evidence } = action.payload;
+      const room = state.find(
+        (r) => r.id === roomId && r.signalingActive !== false,
+      );
+      if (!room || !isRoomMember(room, peerId)) return;
+      room.peerPresence ??= {};
+      room.peerPresence[peerId] = notedPeerPresence(
+        room.peerPresence[peerId],
+        socketGeneration,
+        evidence,
+      );
+    },
+
+    /**
+     * The server reported that a member left the room or went offline
+     * (`peerLeft`). Applies planPeerDeparture: a report about an earlier
+     * session or an untracked peer changes nothing; "left" without a
+     * connected edge drops the member; anything else only marks it, and
+     * never touches its edge.
+     */
+    peerDeparted: (state, action: PayloadAction<PeerDepartedArgs>) => {
+      const { roomId, peerId, reason, socketGeneration, edgeConnected } =
+        action.payload;
+      const room = state.find(
+        (r) => r.id === roomId && r.signalingActive !== false,
+      );
+      if (!room) return;
+      // Self never appears among a room's members, so no self id is needed.
+      const verdict = planPeerDeparture(
+        room,
+        { peerId, reason, socketGeneration },
+        "",
+        edgeConnected,
+      );
+      if (verdict === "ignore") return;
+      if (verdict === "remove") {
+        removeRoomMember(room, peerId);
+        return;
+      }
+      room.peerPresence ??= {};
+      room.peerPresence[peerId] = { socketGeneration, departure: reason };
     },
 
     setPeer: (state, action: PayloadAction<SetPeerArgs>) => {
@@ -811,6 +934,20 @@ const roomSlice = createSlice({
         );
 
         if (peerIndex > -1) state[i].peers.splice(peerIndex, 1);
+        // The edge of a member the server reported as left is gone: the
+        // member goes too, so nothing re-dials it. An "offline" member stays
+        // in the snapshot with its mark, and is not re-dialled either until
+        // a server frame names it again.
+        if (
+          state[i].peerPresence?.[action.payload.peerId]?.departure === "left"
+        ) {
+          const knownIndex =
+            state[i].knownPeers?.findIndex(
+              (p) => p.peerId === action.payload.peerId,
+            ) ?? -1;
+          if (knownIndex > -1) state[i].knownPeers!.splice(knownIndex, 1);
+        }
+        prunePeerPresence(state[i]);
         const coverStatusByPeer = state[i].coverStatusByPeer;
         if (coverStatusByPeer) delete coverStatusByPeer[action.payload.peerId];
         // A FAILED handshake must outlive the peer it describes: the edge is
@@ -1337,6 +1474,8 @@ export const {
   deleteRoom,
   purgeAllRooms,
   setKnownRoomPeers,
+  notePeerPresence,
+  peerDeparted,
 } = roomSlice.actions;
 export const roomSelector = <TRoom extends Room>(state: {
   readonly rooms: TRoom[];

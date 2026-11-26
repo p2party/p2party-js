@@ -152,7 +152,21 @@ export interface ReconcilableRoom {
   readonly handshakeStatusByPeer?: Readonly<
     Record<string, HandshakeRetryStatus | undefined>
   >;
+  /** A member the server reported as left or offline carries a departure. */
+  readonly peerPresence?: Readonly<
+    Record<string, { readonly departure?: string } | undefined>
+  >;
 }
+
+/**
+ * Whether the server reported this member as gone (`peerLeft`) and no later
+ * frame has named it again. Such a member is not re-dialled: no reconcile
+ * retry and no targeted roster request is made for it.
+ */
+export const hasReportedDeparture = (
+  room: Pick<ReconcilableRoom, "peerPresence">,
+  peerId: string,
+): boolean => room.peerPresence?.[peerId]?.departure !== undefined;
 
 export interface ReconcilableSocket {
   readonly isConnected: boolean;
@@ -201,6 +215,7 @@ export const isRoomRosterStranded = (
     return room.knownPeers.some(
       (peer) =>
         statuses[peer.peerId]?.status !== "authenticated" &&
+        !hasReportedDeparture(room, peer.peerId) &&
         !hasTerminalPeerHandshakeFailure(
           statuses,
           peer.peerId,

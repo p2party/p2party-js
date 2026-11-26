@@ -76,8 +76,8 @@ import { getRoomPin } from "../roomPinVault";
 import { hashRoomPolicyV1 } from "../roomPolicy";
 import {
   assertPinAttemptAllowed,
-  clearPinAttempts,
   recordPinFailure,
+  recordPinSuccess,
 } from "../roomPinAttempts";
 import { decompileChannelMessageLabel } from "../utils/channelLabel";
 import {
@@ -984,12 +984,15 @@ export const handleOpenChannel = async (
               );
             },
           });
+          // Clears this identity's backoff and records it as authenticated
+          // in this room, which exempts it from the room-wide failure window.
+          // The window itself is left as it is.
           if (pinRoom)
-            await clearPinAttempts(roomId, epc.withPeerPublicKey).catch(
-              (clearError) => {
+            await recordPinSuccess(roomId, epc.withPeerPublicKey).catch(
+              (successError) => {
                 console.error(
-                  "Could not clear successful PIN attempt state:",
-                  clearError,
+                  "Could not persist successful PIN attempt state:",
+                  successError,
                 );
               },
             );

@@ -115,7 +115,39 @@ render or browser focus event. Call it for initial admission and a deliberate
 retry, such as entering a corrected PIN. Terminal PIN or policy failures stay
 visible and do not trigger automatic peer discovery or transport retries.
 A fresh connection request from the other peer can retry that peer's failed
-edge; the existing PIN-attempt throttle still applies.
+edge; the PIN-attempt limits below still apply.
+
+### Failed PIN attempts
+
+A wrong PIN shows up as a failed key confirmation. Each device limits these
+failures per room in two layers. Both are stored in IndexedDB and survive a
+page reload.
+
+- **Per peer identity.** Failures are counted per room and per peer Ed25519
+  identity. The first two cost nothing. From the third, that identity waits
+  500 ms, doubling with each further failure up to five minutes. A successful
+  PIN handshake clears its count.
+- **Per room.** A five-minute window opens at the room's first failure. Once
+  it holds 30 failures, the device refuses PIN handshakes with every identity
+  that has never completed a PIN handshake with it in this room, until the
+  window ends. The refused peer's status is `failed` with reason
+  `pin-throttled`, and `retryAfter` is the window's end. Identities that have
+  completed one are not refused by this window; their own per-identity limit
+  still applies. Failures from any identity count toward the window, and a
+  successful handshake does not close it.
+
+What remains: an attacker who rotates fresh identities can fill the window
+over and over. While it is full, first-time joiners are refused for up to five
+minutes at a time; established members are not. Handshakes that were already
+running when the window filled are not stopped, so concurrent attempts can
+push one window past 30. Identities this device authenticated while it ran
+0.14.10 or earlier count as new until their next successful handshake. If the
+device cannot read its record of authenticated identities while the window is
+full, it refuses the peer as new. When the window write for a failure fails,
+the failure still counts in the open tab's copy of the window, but not after a
+reload. Calling `connect()` with a PIN
+for a room this page has already loaded, or purging the room, clears both
+limits and the record of authenticated identities for that room.
 
 Scheduled timing cover is wired as of 0.14: a policy may pin `coverMode:
 "scheduled"` with a cadence, lane count, and frames per cell, and every edge in

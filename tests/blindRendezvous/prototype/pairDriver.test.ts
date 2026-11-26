@@ -265,6 +265,31 @@ const runPairedRoom = async (options: {
 };
 
 describe("prototype pair driver", () => {
+  test("reports the payload class its transport flights were published in", async () => {
+    const { carrier, a, b } = await runPairedRoom({
+      capability: new Uint8Array(32).fill(0x51),
+    });
+    await carrier.pump();
+
+    // `padPairPlaintextV1` picks the class from the SDP's size and says
+    // nothing. In the pinned delivery profile class 1's safety-control slot is
+    // 200 ms *earlier* than class 0's, so a flight that quietly changed class
+    // would take a different append slot with a smaller budget and every
+    // recorded flight timing would be measuring something else. The E2E
+    // asserts the value; this asserts that there is a value to assert.
+    // Which side offers is decided by the protocol, not by this test, so the
+    // record is looked up across both parties rather than assumed.
+    const recordFor = (phase: PairDriverPhase): PhaseRecord | undefined =>
+      [...a.phaseRecords, ...b.phaseRecords].find(
+        (record) => record.phase === phase,
+      );
+    for (const phase of ["offer-sent", "answered"] as const) {
+      const record = recordFor(phase);
+      expect(record).toBeDefined();
+      expect(record?.detail).toBe("operationPayloadClass 0");
+    }
+  });
+
   test("drives presence, HELLO/ACCEPT and OFFER/ANSWER to a shared handoff", async () => {
     const { carrier, a, b } = await runPairedRoom({
       capability: new Uint8Array(32).fill(0x42),

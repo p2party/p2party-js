@@ -1585,7 +1585,14 @@ export class PairDriver {
     this.offerOperationId = await deriveOperationId(sealedOperation);
     this.recordOwnOperation(this.offerOperationId);
     this.publish(sealedOperation, "TRANSPORT_OFFER");
-    this.setPhase("offer-sent");
+    // The payload class is reported because it is chosen silently: an SDP that
+    // outgrows class 0 moves this flight to class 1, which in the pinned
+    // profile is an *earlier* append slot with *less* budget, and nothing else
+    // in the event stream would say so.
+    this.setPhase(
+      "offer-sent",
+      `operationPayloadClass ${String(sealedOperation.operationPayloadClass)}`,
+    );
   }
 
   private async handleIncomingOffer(
@@ -1697,7 +1704,10 @@ export class PairDriver {
     this.answerOperationId = await deriveOperationId(answerOperation);
     this.recordOwnOperation(this.answerOperationId);
     this.publish(answerOperation, "TRANSPORT_ANSWER");
-    this.setPhase("answered");
+    this.setPhase(
+      "answered",
+      `operationPayloadClass ${String(answerOperation.operationPayloadClass)}`,
+    );
     await this.completeHandoff();
     return true;
   }

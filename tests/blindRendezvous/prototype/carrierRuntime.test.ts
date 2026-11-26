@@ -1382,6 +1382,84 @@ describe("prototype carrier runtime", () => {
     }
   }, 180_000);
 
+  /**
+   * Design §3a item 16's start-window rule, at every boundary the schedule has
+   * (item 15 in the September latency documents).
+   *
+   * `start()` drops every event of the current window whose instant has
+   * already passed (a late timer's events are sent late; a cold start's past
+   * ones were never its to send), so a runtime armed at phase `p` issues
+   * exactly the scheduled events at offsets `>= p`. The allocation is the
+   * exception in both directions: at or
+   * past `allocationRequestOffsetMs`, `start()` drops the queued allocation and
+   * issues a cold-start allocation for the next window immediately, so exactly
+   * one allocation POST leaves at every `p`.
+   *
+   * This exists because the item first stated the count as
+   * `2 + (append offsets after p)` and was wrong below the read offset: the
+   * sixteen observations it was derived from all fell above it, because
+   * sequential E2E runs phase-lock to the delivery-window grid and resample
+   * nearly the same `p`. Sampling a phase space cannot establish a rule over
+   * it; this can, because the clock is injected. Below `publicReadOffsetMs`
+   * the start window carries the **whole** fixed thirteen and is not
+   * distinguishable from a later one by count at all — the two rows at
+   * `p = 350` and `p = 600` are that result.
+   *
+   * The carrier is armed in W2 rather than in the chain-start window so the
+   * read has a predecessor window in range: below the chain start
+   * `scanWindow` answers `out-of-range` without issuing a request, which is a
+   * fact about the store's age and not about `p`.
+   */
+  test("issues exactly the scheduled events still ahead of its start phase", async () => {
+    const appendOffsetsMs = profile.sizeClasses
+      .flatMap((sizeClass) =>
+        sizeClass.appendSchedule.map((entry) => entry.offsetMs),
+      )
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+    const predicted = (phaseMs: bigint): Record<string, number> => ({
+      token: phaseMs <= profile.tokenIssueOffsetMs ? 1 : 0,
+      allocation: 1,
+      append: appendOffsetsMs.filter((offset) => offset >= phaseMs).length,
+      checkpoint: phaseMs <= profile.publicReadOffsetMs ? 1 : 0,
+      chunk: phaseMs <= profile.publicReadOffsetMs ? CHUNKS_PER_WINDOW : 0,
+    });
+
+    for (const phaseMs of [
+      0n,
+      profile.tokenIssueOffsetMs,
+      profile.tokenIssueOffsetMs + 1n,
+      350n,
+      profile.publicReadOffsetMs,
+      profile.publicReadOffsetMs + 1n,
+      profile.allocationRequestOffsetMs,
+      profile.allocationRequestOffsetMs + 1n,
+      appendOffsetsMs[0],
+      appendOffsetsMs[0] + 1n,
+      appendOffsetsMs[2],
+      appendOffsetsMs[4],
+      appendOffsetsMs[4] + 1n,
+      profile.deliveryWindowMs - 1n,
+    ]) {
+      const world = await createWorld();
+      try {
+        const room = await makeRoom(new Uint8Array(32).fill(0x15), START_MS);
+        await world.advance(windowStartMs(W2) + phaseMs);
+        await addCarrier(world, room, [0, 1]);
+        await world.advance(windowStartMs(W3) - 1n);
+
+        // The phase rides along in the compared value so a failure names the
+        // row rather than only the counts.
+        for (const transport of world.transports)
+          expect({
+            atPhaseMs: String(phaseMs),
+            ...windowShape(transport, windowStartMs(W2), windowStartMs(W3)),
+          }).toEqual({ atPhaseMs: String(phaseMs), ...predicted(phaseMs) });
+      } finally {
+        world.stop();
+      }
+    }
+  }, 180_000);
+
   test("keeps the schedule intact when an operation cannot be sealed into its class", async () => {
     const world = await createWorld({ profile: undersizedProfile });
     try {

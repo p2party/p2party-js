@@ -51,8 +51,11 @@ import {
   markChunkAcked,
   hasChunkAcked,
   getAckedChunkCount,
+  onTransferActivity,
   onTransferProgress,
+  reportedCompletionCapMs,
   transferWaitClock,
+  waitForReportedCompletion,
 } from "./reconcile";
 import type { TransferWaitClock } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
@@ -104,6 +107,7 @@ import {
   MAX_RESUME_ATTEMPTS,
   MAX_SCHEDULED_SEND_RESUMES,
   RECEIPT_WINDOW_FALLBACK_MS,
+  RECEIVER_SILENCE_LIMIT_MS,
   SEND_BUFFER_FALLBACK_MS,
   SEND_BUFFER_LOW_THRESHOLD,
 } from "../utils/constants";
@@ -320,6 +324,7 @@ export class OutboundMessage {
   readonly #merkleModule: LibCrypto;
   readonly #store: OutboundChunkStore;
   #kinds: Uint8Array;
+  #totalSize = 0;
   #levels: MerkleProofLevels | null = null;
   #levelsError: Error | null = null;
   #closed = false;
@@ -359,6 +364,27 @@ export class OutboundMessage {
     return this.#kinds[index] === CHUNK_KIND_DECOY;
   }
 
+  /** The message's size in bytes, as its cells' metadata states it; 0 before any read. */
+  get totalSize(): number {
+    return this.#totalSize;
+  }
+
+  /**
+   * True once every cell has been read and every real one is acknowledged:
+   * the receiver holds the whole file. False while any cell's kind is unknown.
+   */
+  allRealsAcknowledged(isAcked: (index: number) => boolean): boolean {
+    if (this.#kinds.length !== this.totalChunks) return false;
+    for (let index = 0; index < this.totalChunks; index++) {
+      const kind = this.#kinds[index];
+      if (
+        kind === CHUNK_KIND_REAL ? !isAcked(index) : kind !== CHUNK_KIND_DECOY
+      )
+        return false;
+    }
+    return true;
+  }
+
   /** Read one staged cell from storage and check it belongs at `index`. */
   async read(
     index: number,
@@ -376,8 +402,10 @@ export class OutboundMessage {
     const real =
       metadata.chunkEndIndex > metadata.chunkStartIndex &&
       metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
-    if (!this.#closed)
+    if (!this.#closed) {
       this.#kinds[index] = real ? CHUNK_KIND_REAL : CHUNK_KIND_DECOY;
+      this.#totalSize = metadata.totalSize;
+    }
     return { index, row, metadataArray, metadata, real };
   }
 
@@ -611,6 +639,116 @@ export const waitForSendBuffer = async (
     check();
     if (!settled) timer = timers.setTimeout(fallback, SEND_BUFFER_FALLBACK_MS);
   });
+};
+
+/** The events the immediate-mode completion wait listens to: the transfer's own channel. */
+export interface TransferFrameSource {
+  addEventListener(type: "message", listener: () => void): void;
+  removeEventListener(type: "message", listener: () => void): void;
+}
+
+/**
+ * Immediate mode, every chunk acknowledged: wait for the final receipt while
+ * the receiver verifies the whole file. Any frame on the transfer's own
+ * channel (a re-sent receipt) re-arms the RECEIVER_SILENCE_LIMIT_MS bound;
+ * the wait is capped at reportedCompletionCapMs(totalSize). Only this peer
+ * can send on that channel, and only about this transfer.
+ */
+export const waitForVerifiedDelivery = (
+  channel: TransferFrameSource,
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  totalSize: number,
+  options: {
+    readonly signal?: AbortSignal;
+    readonly clock?: TransferWaitClock;
+  } = {},
+): Promise<boolean> =>
+  waitForReportedCompletion(roomId, peerId, transferId, {
+    silenceMs: RECEIVER_SILENCE_LIMIT_MS,
+    capMs: reportedCompletionCapMs(totalSize, RECEIVER_SILENCE_LIMIT_MS),
+    onActivity: (wake) => {
+      channel.addEventListener("message", wake);
+      return () => {
+        channel.removeEventListener("message", wake);
+      };
+    },
+    signal: options.signal,
+    clock: options.clock,
+  });
+
+/**
+ * Scheduled mode, every chunk acknowledged: the same wait, re-armed by each
+ * authenticated scheduled receipt for this transfer as coverEdge attributes
+ * it (noteTransferActivity). `silenceMs` is the caller's: a scheduled receipt
+ * can arrive only in a cover slot, so the bound is at least the schedule's
+ * own delivery idle budget.
+ */
+export const waitForScheduledVerifiedDelivery = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  totalSize: number,
+  silenceMs: number,
+  options: {
+    readonly isHeld?: () => boolean;
+    readonly signal?: AbortSignal;
+    readonly clock?: TransferWaitClock;
+  } = {},
+): Promise<boolean> =>
+  waitForReportedCompletion(roomId, peerId, transferId, {
+    silenceMs,
+    capMs: reportedCompletionCapMs(totalSize, silenceMs),
+    onActivity: (wake) => onTransferActivity(roomId, peerId, transferId, wake),
+    isHeld: options.isHeld,
+    signal: options.signal,
+    clock: options.clock,
+  });
+
+/**
+ * The wait between retransmit rounds of an immediate transfer. While a real
+ * chunk is unacknowledged it is the round's fixed RETRANSMIT_TIMEOUT_MS wait;
+ * once every chunk is acknowledged it is waitForVerifiedDelivery, and
+ * `verifying` tells the caller there is nothing left to retransmit.
+ */
+export const waitForTransferConfirmation = async (
+  message: OutboundMessage,
+  channel: TransferFrameSource,
+  roomId: string,
+  peerId: string,
+  retries: number,
+  signal?: AbortSignal,
+  clock?: TransferWaitClock,
+): Promise<{ readonly done: boolean; readonly verifying: boolean }> => {
+  const { transferId } = message;
+  if (
+    message.allRealsAcknowledged((index) =>
+      hasChunkAcked(roomId, peerId, transferId, index),
+    )
+  )
+    return {
+      verifying: true,
+      done: await waitForVerifiedDelivery(
+        channel,
+        roomId,
+        peerId,
+        transferId,
+        message.totalSize,
+        { signal, clock },
+      ),
+    };
+  return {
+    verifying: false,
+    done: await waitForCompletion(
+      roomId,
+      peerId,
+      transferId,
+      RETRANSMIT_TIMEOUT_MS * (retries + 1),
+      signal,
+      { clock },
+    ),
+  };
 };
 
 /**
@@ -1425,15 +1563,16 @@ const sendWithReconcile = async (
     let resumeAttempts = 0;
     let completed = false;
     while (retries < MAX_RETRANSMITS) {
-      const done = await waitForCompletion(
+      const confirmation = await waitForTransferConfirmation(
+        message,
+        currentChannel,
         roomId,
         peerId,
-        transferId,
-        RETRANSMIT_TIMEOUT_MS * (retries + 1),
+        retries,
         signal,
       );
       throwIfTransferAborted(signal);
-      if (done) {
+      if (confirmation.done) {
         completed = true;
         break;
       }
@@ -1559,6 +1698,10 @@ const sendWithReconcile = async (
         continue;
       }
 
+      // Every chunk is acknowledged and the verifying receiver went silent
+      // (or ran past the cap): nothing is left to retransmit.
+      if (confirmation.verifying) break;
+
       // Reconcile: resend only the reals the receiver hasn't acked yet. Same
       // message key + header + PQ context (the ratchet is NOT re-stepped); a
       // fresh nonce per re-seal keeps it safe and the receiver's cached key
@@ -1675,6 +1818,8 @@ export interface ScheduledSendDependencies {
   ) => Promise<boolean>;
   /** How long to watch for a replacement cover runtime before giving up (C8). */
   readonly resumeWaitMs?: number;
+  /** The clock of the wait while the receiver verifies the file. */
+  readonly clock?: TransferWaitClock;
 }
 
 /**
@@ -1947,6 +2092,30 @@ export const sendScheduled = async (
           idleTimeoutMs: deliveryIdleTimeoutMs,
           signal,
         });
+        // Every chunk acknowledged, no final receipt yet: the receiver is
+        // verifying the whole file, and re-sends a receipt while it does. Wait
+        // for as long as one keeps arriving (no less than the schedule's own
+        // idle budget between them), capped by the file's size.
+        if (
+          !delivered &&
+          !signal?.aborted &&
+          !isTransferCancelled(roomId, target.peerId, transferId) &&
+          message.allRealsAcknowledged((index) =>
+            hasChunkAcked(roomId, target.peerId, transferId, index),
+          )
+        )
+          delivered = await waitForScheduledVerifiedDelivery(
+            roomId,
+            target.peerId,
+            transferId,
+            message.totalSize,
+            Math.max(RECEIVER_SILENCE_LIMIT_MS, deliveryIdleTimeoutMs),
+            {
+              isHeld: () => scheduledCoverIsSuspended(currentEpc.coverRuntime),
+              signal,
+              clock: dependencies.clock,
+            },
+          );
         if (
           delivered ||
           signal?.aborted ||

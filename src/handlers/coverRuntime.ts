@@ -23,6 +23,7 @@ import {
   type CoverCellDirection,
 } from "../cryptography/coverCell";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
+import { debugLog } from "../utils/debug";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { MAX_BUFFERED_AMOUNT, WIRE_CHUNK_FRAME_LEN } from "../utils/constants";
 
@@ -47,9 +48,11 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 // kind here carries scheduled RECEIPTS (coverTransfer's receipt drain job),
 // not PQ controls. Inbound routing accepts a PQ control frame arriving on a
 // cover lane, but nothing on this side puts one there.
-// Browser visibility/freeze/pagehide/offline events suspend cover; resume
-// targets a strictly future cycle boundary, and the surfaced status makes the
-// suspension gap visible to the UI instead of silently claiming cover.
+// Browser freeze/pagehide/offline events suspend cover; resume targets a
+// strictly future cycle boundary, and the surfaced status makes the
+// suspension gap visible to the UI instead of silently claiming cover. A
+// hidden page is not suspended: its schedule stays armed, and timers the
+// browser throttles there degrade the cycle instead (see #onVisibilityChange).
 
 /** The transport surface a cover lane needs from an RTCDataChannel. */
 export interface CoverLaneChannel {
@@ -440,10 +443,21 @@ export class CoverRuntime {
 
   // ── browser environment: degraded/suspended cover is never claimed ────────
 
+  // A hidden page keeps its schedule armed. Suspending it made tab visibility
+  // readable off the wire as cover on/off, and a hidden receiver stopped
+  // acknowledging, so its sender's idle budget ran out. The browser may
+  // throttle a hidden page's timers; a cell that then fires past its drift
+  // tolerance degrades the cycle, which the status reports, rather than
+  // pretending the gap was covered. The diagnostic names no peer and no room.
   readonly #onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
     if (document.visibilityState === "hidden")
-      this.#scheduler.suspend("page-hidden");
+      debugLog(
+        "p2party: page hidden; scheduled cover stays armed, but the browser may throttle its timers, so late cells degrade the cycle",
+      );
+    // Visible again: lift a suspension a browser without the Page Lifecycle
+    // `resume` event (a pagehide into the back/forward cache) would otherwise
+    // never end. A runtime that is not suspended ignores this.
     else this.#scheduler.resume();
   };
 
@@ -455,6 +469,10 @@ export class CoverRuntime {
     this.#scheduler.suspend("freeze");
   };
 
+  readonly #onResume = (): void => {
+    this.#scheduler.resume();
+  };
+
   readonly #onOffline = (): void => {
     this.#scheduler.suspend("offline");
   };
@@ -463,14 +481,18 @@ export class CoverRuntime {
     this.#scheduler.resume();
   };
 
+  // The Page Lifecycle `freeze` and `resume` events fire on document only; a
+  // listener for them on window never runs.
   #attachEnvironment(): void {
     if (this.#environmentAttached) return;
     this.#environmentAttached = true;
-    if (typeof document !== "undefined")
+    if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.#onVisibilityChange);
+      document.addEventListener("freeze", this.#onFreeze);
+      document.addEventListener("resume", this.#onResume);
+    }
     if (typeof window !== "undefined") {
       window.addEventListener("pagehide", this.#onPageHide);
-      window.addEventListener("freeze", this.#onFreeze);
       window.addEventListener("offline", this.#onOffline);
       window.addEventListener("online", this.#onOnline);
     }
@@ -479,14 +501,16 @@ export class CoverRuntime {
   #detachEnvironment(): void {
     if (!this.#environmentAttached) return;
     this.#environmentAttached = false;
-    if (typeof document !== "undefined")
+    if (typeof document !== "undefined") {
       document.removeEventListener(
         "visibilitychange",
         this.#onVisibilityChange,
       );
+      document.removeEventListener("freeze", this.#onFreeze);
+      document.removeEventListener("resume", this.#onResume);
+    }
     if (typeof window !== "undefined") {
       window.removeEventListener("pagehide", this.#onPageHide);
-      window.removeEventListener("freeze", this.#onFreeze);
       window.removeEventListener("offline", this.#onOffline);
       window.removeEventListener("online", this.#onOnline);
     }

@@ -77,6 +77,7 @@ import {
   cancelScheduledSend,
   coverEdgeGeneration,
   enqueueScheduledSend,
+  onCoverEdgeRetired,
   trackScheduledSend,
   untrackScheduledSend,
   waitForCoverEdgeGeneration,
@@ -734,12 +735,19 @@ export const waitForScheduledVerifiedDelivery = (
     readonly isHeld?: () => boolean;
     readonly signal?: AbortSignal;
     readonly clock?: TransferWaitClock;
+    readonly subscribeActivity?: typeof onTransferActivity;
   } = {},
 ): Promise<boolean> =>
   waitForReportedCompletion(roomId, peerId, transferId, {
     silenceMs,
     capMs: reportedCompletionCapMs(totalSize, silenceMs),
-    onActivity: (wake) => onTransferActivity(roomId, peerId, transferId, wake),
+    onActivity: (wake) =>
+      (options.subscribeActivity ?? onTransferActivity)(
+        roomId,
+        peerId,
+        transferId,
+        wake,
+      ),
     onInterrupt: options.onInterrupt,
     isInterrupted: options.isInterrupted,
     isHeld: options.isHeld,
@@ -1023,6 +1031,10 @@ const resumeChannel = async (
   dataChannels: IRTCDataChannel[],
   timeoutMs: number,
   signal?: AbortSignal,
+  deleteSendQueue: (label: string, peerId: string) => Promise<void> = (
+    label,
+    toPeerId,
+  ) => deleteDBSendQueue(label, toPeerId),
 ): Promise<{
   epc: IRTCPeerConnection;
   channel: IRTCDataChannel;
@@ -1044,7 +1056,7 @@ const resumeChannel = async (
       // A previous build may have left ciphertext in the legacy durable queue.
       // Drop it before the replacement channel can observe bufferedamountlow:
       // its ratchet belongs to the dead transport and is not replay-safe here.
-      await deleteDBSendQueue(
+      await deleteSendQueue(
         roomSendQueueLabel(roomId, channelMessageLabel),
         peerId,
       );
@@ -1696,6 +1708,7 @@ export const sendWithReconcile = async (
           dataChannels,
           dependencies.resumeTimeoutMs ?? RECONNECT_RESUME_TIMEOUT_MS,
           signal,
+          deleteSendQueue,
         );
         if (!resumed) break;
         // Adopt the replacement channel BEFORE re-deriving: re-binding can
@@ -1791,7 +1804,9 @@ export const sendWithReconcile = async (
         incrementMessageStats({ roomId, sha512Hex: hashHex, retransmit: true }),
       );
     }
-    if (!completed)
+    // A final receipt can land while a resume or a retransmit round gives
+    // up: a transfer the receiver has confirmed is never reported failed.
+    if (!completed && !isTransferComplete(roomId, peerId, transferId))
       throw new Error("Message transfer ended without receiver confirmation");
   };
   try {
@@ -1895,6 +1910,8 @@ export interface ScheduledSendDependencies {
   readonly resumeWaitMs?: number;
   /** The clock of the wait while the receiver verifies the file. */
   readonly clock?: TransferWaitClock;
+  /** How that wait hears of receipts; `onTransferActivity` in production. */
+  readonly subscribeActivity?: typeof onTransferActivity;
 }
 
 /**
@@ -2171,9 +2188,21 @@ export const sendScheduled = async (
         // that is already gone it returns at once, before it subscribes or
         // arms anything, and it ends the moment the edge goes: the
         // replacement is where the transfer resumes, at once.
-        const edgeIsGone = (): boolean =>
-          coverEdgeGeneration(roomId, target.peerId) > generation ||
-          !coverRuntimeIsLive(currentEpc.coverRuntime);
+        // Retired (torn down) or replaced (the peer's current authenticated
+        // transport carries another runtime, even before the old edge is torn
+        // down). A key-epoch change on the same runtime is neither: the
+        // receiver is still verifying the same file for the same edge.
+        const edgeIsGone = (): boolean => {
+          if (
+            currentEpc.coverRuntime !== runtime ||
+            !coverRuntimeIsLive(runtime)
+          )
+            return true;
+          const current = peerConnections.find((candidate) =>
+            isResumableAuthenticatedTransport(candidate, roomId, target.peerId),
+          );
+          return current !== undefined && current.coverRuntime !== runtime;
+        };
         if (
           !delivered &&
           !signal?.aborted &&
@@ -2189,19 +2218,33 @@ export const sendScheduled = async (
             message.totalSize,
             Math.max(RECEIVER_SILENCE_LIMIT_MS, deliveryIdleTimeoutMs),
             {
-              onInterrupt: (interrupt) => {
+              // Woken by every generation published for the edge (a
+              // replacement install, or a rekey) and by its teardown; it ends
+              // only if edgeIsGone holds.
+              onInterrupt: (wake) => {
                 const watching = new AbortController();
-                void waitForCoverEdgeGeneration(
+                const watch = (since: number): void => {
+                  void waitForCoverEdgeGeneration(
+                    roomId,
+                    target.peerId,
+                    since,
+                    MAX_TIMER_DELAY_MS,
+                    watching.signal,
+                  ).then((next) => {
+                    if (watching.signal.aborted) return;
+                    if (next > since) wake();
+                    watch(next);
+                  });
+                };
+                watch(coverEdgeGeneration(roomId, target.peerId));
+                const unsubscribeRetired = onCoverEdgeRetired(
                   roomId,
                   target.peerId,
-                  generation,
-                  MAX_TIMER_DELAY_MS,
-                  watching.signal,
-                ).then((next) => {
-                  if (next > generation) interrupt();
-                });
+                  wake,
+                );
                 return () => {
                   watching.abort();
+                  unsubscribeRetired();
                 };
               },
               isInterrupted: edgeIsGone,
@@ -2215,6 +2258,7 @@ export const sendScheduled = async (
                 ) !== undefined,
               signal,
               clock: dependencies.clock,
+              subscribeActivity: dependencies.subscribeActivity,
             },
           );
         if (
@@ -2350,7 +2394,19 @@ export const sendScheduled = async (
       untrackScheduledSend(currentEpc, merkleRootHex, transferId);
     }
   };
-  const outcomes = await Promise.all(targets.map(sendToTarget));
+  // Every peer's send is observed whatever it throws, and each outcome keeps
+  // its target's place.
+  const outcomes = (await Promise.allSettled(targets.map(sendToTarget))).map(
+    (settled, index): PeerDeliveryOutcome =>
+      settled.status === "fulfilled"
+        ? settled.value
+        : {
+            peerId: targets[index].peerId,
+            status: "failed",
+            phase: "transfer",
+            reason: settled.reason,
+          },
+  );
   return { outcomes, startedTransfers };
 };
 

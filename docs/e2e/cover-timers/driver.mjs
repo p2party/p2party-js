@@ -26,6 +26,13 @@
 //   node docs/e2e/cover-timers/driver.mjs --mode=sealed --bundle=<dir>/bundle.js \
 //     --profile=<dir>/profile --out=<dir>/raw.json --summary=<file>.json \
 //     [--query=cadence=1000&edges=2] [--wasm=src/cryptography/libcrypto.wasm]
+// Proof-level mode (entry-proof-levels.ts; the page stays visible, and the
+// run ends when the page has done its builds and its jobs):
+//   bun docs/e2e/cover-timers/build-sealed.ts <dir> docs/e2e/cover-timers/entry-proof-levels.ts
+//   node docs/e2e/cover-timers/driver.mjs --mode=proof-levels --bundle=<dir>/bundle.js \
+//     --profile=<dir>/profile --out=<dir>/raw.json --summary=<file>.json [--headless]
+// --headless runs Chrome for Testing headless (--headless=new), where the page
+// is visible and no window can be occluded.
 //
 // Local only: the page server and the debugging endpoint bind 127.0.0.1 on
 // ports above 5000; both are stopped (Chrome by its PID) before exit. Chrome
@@ -34,12 +41,13 @@
 // proxy port on 127.0.0.1 where nothing listens (--proxy-server; loopback is
 // never proxied), so such a request fails; and its background networking and
 // component updates are off. The pages use no WebRTC.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadavg, release } from "node:os";
 import { summariseSealed, writeSealedSummary } from "./summarise-sealed.mjs";
+import { summariseProofLevels } from "./summarise-proof-levels.mjs";
 
 const arg = (name, fallback) => {
   const hit = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -58,7 +66,9 @@ const HIDDEN_S = Number(arg("hidden", "390"));
 const AFTER_S = Number(arg("after", "10"));
 const CADENCE_MS = arg("cadence", "");
 const MODE = arg("mode", "timers");
-const SEALED = MODE === "sealed";
+const PROOF_LEVELS = MODE === "proof-levels";
+// Both run real CoverRuntimes with the WASM, as an ES module.
+const SEALED = MODE === "sealed" || PROOF_LEVELS;
 const QUERY = arg("query", CADENCE_MS ? `cadence=${CADENCE_MS}` : "");
 const WASM = arg("wasm", "src/cryptography/libcrypto.wasm");
 // The code the bundle was built from (a commit, or a commit plus a working
@@ -66,8 +76,30 @@ const WASM = arg("wasm", "src/cryptography/libcrypto.wasm");
 const CODE = arg("code", "unrecorded");
 const ENTRY = arg(
   "entry",
-  `docs/e2e/cover-timers/${SEALED ? "entry-sealed.ts" : "entry.ts"}`,
+  `docs/e2e/cover-timers/${
+    PROOF_LEVELS
+      ? "entry-proof-levels.ts"
+      : SEALED
+        ? "entry-sealed.ts"
+        : "entry.ts"
+  }`,
 );
+const HEADLESS = process.argv.includes("--headless");
+// How long a proof-level run may take before the driver gives up on it.
+const RUN_LIMIT_S = Number(arg("limit", "900"));
+
+/** macOS: whether the screen is locked (ioreg IOConsoleLocked); null elsewhere. */
+const screenLocked = () => {
+  if (process.platform !== "darwin") return null;
+  try {
+    const match = /"IOConsoleLocked" = (Yes|No)/.exec(
+      execFileSync("ioreg", ["-n", "Root", "-d1"], { encoding: "utf8" }),
+    );
+    return match ? match[1] === "Yes" : null;
+  } catch {
+    return null;
+  }
+};
 // Nothing listens here: Chrome's requests to any address but loopback go to
 // it and fail.
 const DEAD_PROXY = "127.0.0.1:5919";
@@ -211,6 +243,7 @@ const chromeArgs = [
   // and every http navigation waits for that prompt.
   "--use-mock-keychain",
   ...(OCCLUDED_VISIBLE ? ["--disable-backgrounding-occluded-windows"] : []),
+  ...(HEADLESS ? ["--headless=new"] : []),
   PAGE_URL,
 ];
 const chrome = spawn(CHROME, chromeArgs, { stdio: "ignore" });
@@ -252,6 +285,17 @@ try {
         sessionId,
       )
     ).result.value;
+  if (PROOF_LEVELS) await runProofLevels(evaluate, version);
+  else await runCoverTimers(evaluate, version, cdp, page);
+  cdp.close();
+} finally {
+  chrome.kill("SIGTERM");
+  server.close();
+  console.log(`stopped chrome pid ${chrome.pid} and the page server`);
+}
+
+/** The cover-timer modes: visible, hidden behind a tab, visible again. */
+async function runCoverTimers(evaluate, version, cdp, page) {
   let ready = false;
   // Sealed mode stages its messages in IndexedDB before it starts.
   for (let i = 0; i < (SEALED ? 1_500 : 150) && !ready; i++) {
@@ -394,9 +438,63 @@ try {
       2,
     ),
   );
-  cdp.close();
-} finally {
-  chrome.kill("SIGTERM");
-  server.close();
-  console.log(`stopped chrome pid ${chrome.pid} and the page server`);
+}
+
+/** Proof-level mode: the page does its builds and its jobs, visible. */
+async function runProofLevels(evaluate, version) {
+  const lockedBefore = screenLocked();
+  const sampleLoad = () => load.push([Date.now(), loadavg()[0]]);
+  sampleLoad();
+  const startedAt = Date.now();
+  let done = false;
+  while (!done) {
+    if (Date.now() - startedAt > RUN_LIMIT_S * 1000)
+      throw new Error(`the page did not finish within ${RUN_LIMIT_S} s`);
+    const failed = await evaluate("window.__proofLevelsError ?? null");
+    if (failed) throw new Error(`the measurement page failed: ${failed}`);
+    done = await evaluate("window.__proofLevels?.done === true");
+    if (!done) {
+      console.log(
+        `${await evaluate(
+          "JSON.stringify([document.visibilityState, window.__proofLevelsProgress ?? null])",
+        )}`,
+      );
+      await sleep(5_000);
+      sampleLoad();
+    }
+  }
+  sampleLoad();
+  const lockedAfter = screenLocked();
+  const raw = await evaluate("JSON.stringify(window.__proofLevels)");
+  writeFileSync(OUT, raw);
+  const data = JSON.parse(raw);
+  const summary = {
+    measuredAt: new Date(data.startedAt).toISOString(),
+    code: CODE,
+    sha256: {
+      bundle: createHash("sha256").update(bundle).digest("hex"),
+      [ENTRY]: createHash("sha256").update(readFileSync(ENTRY)).digest("hex"),
+      // Untracked (built); the same file for every run, as constraint 10 holds.
+      "libcrypto.wasm": createHash("sha256").update(wasm).digest("hex"),
+    },
+    browser: version.Browser,
+    userAgent: data.userAgent,
+    host: `${process.platform} ${release()} ${process.arch}`,
+    hostState: {
+      screenLockedBefore: lockedBefore,
+      screenLockedAfter: lockedAfter,
+      headless: HEADLESS,
+    },
+    chromeArgs: chromeArgs.map((value) =>
+      value.startsWith("--user-data-dir=")
+        ? "--user-data-dir=<scratch profile>"
+        : value,
+    ),
+    query: data.query,
+    loadAverage1m: load.map(([at, value]) => [at - data.startedAt, value]),
+    clockOffsetMs: data.clockOffsetMs,
+    results: summariseProofLevels(data),
+  };
+  writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`);
+  console.log(JSON.stringify(summary.results, null, 2));
 }

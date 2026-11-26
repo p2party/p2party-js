@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { dbName, dbVersion, getDB } from "../../../src/db/src/getDB";
+import { DatabaseUpgradeBlockedError } from "../../../src/db/dbErrors";
 
 // Every test gets a pristine, empty IndexedDB environment so the fixed
 // `dbName` ("p2party") never leaks state between tests.
@@ -318,5 +319,52 @@ describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
     const reopened = await getDB();
     openDbs.push(reopened as unknown as IDBDatabase);
     expect(await reopened.count("ratchetSessions")).toBe(1);
+  });
+});
+
+describe("getDB — connections never block or hang an upgrade", () => {
+  test("a connection closes on versionchange", async () => {
+    const db = await getDB();
+    // A newer tab of this site upgrades while this connection is open.
+    const outcome = await new Promise<string>((resolve, reject) => {
+      const req = indexedDB.open(dbName, dbVersion + 1);
+      req.onblocked = () => resolve("blocked");
+      req.onsuccess = () => {
+        req.result.close();
+        resolve("upgraded");
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect(outcome).toBe("upgraded");
+    // This side's connection is closed, not left to block the other tab.
+    expect(() => db.transaction("meta")).toThrow();
+  });
+
+  test("a blocked upgrade fails with a typed error instead of hanging", async () => {
+    // An older tab keeps a connection open and ignores versionchange.
+    const old = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(dbName, 20);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore("meta");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);
+    // While that upgrade is pending, every open fails at once too.
+    await expect(getDB()).rejects.toMatchObject({
+      code: "database-upgrade-blocked",
+    });
+
+    // Once the old tab goes, the pending upgrade completes and opens work.
+    old.close();
+    let db: Awaited<ReturnType<typeof getDB>> | undefined;
+    for (let attempt = 0; attempt < 50 && !db; attempt++) {
+      db = await getDB().catch(() => undefined);
+      if (!db) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(db?.version).toBe(dbVersion);
+    db?.close();
   });
 });

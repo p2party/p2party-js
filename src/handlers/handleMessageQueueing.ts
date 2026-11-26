@@ -1,5 +1,8 @@
 import {
   handleReceiveMessage,
+  settleHeldFile,
+  verifyHeldFile,
+  type ReceiveMessageDependencies,
   type ReceiveMessageResult,
 } from "./handleReceiveMessage";
 import { getRatchetGate, isCurrentRatchetGateLease } from "./ratchetGate";
@@ -14,6 +17,7 @@ import { closeReceiveFile } from "../db/api";
 import { uint8ArrayToHex } from "../utils/uint8array";
 
 import {
+  deleteMessageStateOnly,
   setMessage,
   setMessageAllChunks,
   incrementMessageStats,
@@ -23,6 +27,7 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
+import type { RatchetGateLease } from "./ratchetGate";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -313,6 +318,151 @@ export const sendReceiveFrameReceipt = (
   return sendReceiptFrame(channel, decoyReceipt);
 };
 
+/** What completing (or resetting) one received message needs to know. */
+interface ReceivedMessage {
+  date: Date;
+  totalSize: number;
+  messageType: number;
+  filename: string;
+  messageHash: Uint8Array;
+}
+
+// Mark a received message complete for the app and send its terminal
+// receipt. Scheduled mode substitutes the terminal receipt into a reverse
+// cover slot, never an immediate frame.
+const completeReceivedMessage = async (
+  message: ReceivedMessage,
+  api: BaseQueryApi,
+  roomId: string,
+  peerId: string,
+  channelLabel: string,
+  merkleRootHex: string,
+  merkleRoot: Uint8Array,
+  extChannel: IRTCDataChannel | undefined,
+  epc: IRTCPeerConnection | undefined,
+  dependencies: ReceiveMessageDependencies,
+): Promise<void> => {
+  // Scheduled mode: confirm the whole message with ONE terminal receipt
+  // cover cell (token == transfer root) so the sender's send resolves.
+  if (epc?.coverRuntime) queueScheduledReceipt(epc, merkleRoot, merkleRoot);
+
+  // Flush + close the OPFS write handle before flipping the UI to 100% so
+  // readMessage can open the finished file without hitting the write lock.
+  // No-op for text (no handle) and for a re-observed completion.
+  await (dependencies.closeReceiveFile ?? closeReceiveFile)(merkleRootHex);
+
+  api.dispatch(
+    setMessageAllChunks({
+      roomId,
+      merkleRootHex,
+      sha512Hex: uint8ArrayToHex(message.messageHash),
+      fromPeerId: peerId,
+      totalSize: message.totalSize,
+      messageType: message.messageType,
+      filename: message.filename,
+      channelLabel,
+      timestamp: message.date.getTime(),
+      alsoSendFinishedMessage: true,
+    }),
+  );
+
+  // Scheduled mode already queued the terminal receipt as a cover cell
+  // above; emitting this immediate 65-byte frame as well would put an
+  // off-schedule, distinctively sized packet on the wire at the exact
+  // instant a real transfer completed — correlated with the event the
+  // cover schedule exists to hide. (It was also inert: the sender never
+  // attaches a message handler to the cover lane it arrives on.)
+  if (shouldSendImmediateTerminalReceipt(epc) && extChannel)
+    sendReceiptFrame(extChannel, message.messageHash);
+};
+
+/** A received file whose last chunk is held while the file is verified. */
+interface HeldFile extends ReceivedMessage {
+  token: string;
+  chunkIndex: number;
+  lease: RatchetGateLease | undefined;
+}
+
+// Verify a held file outside the edge's receive lock, then take the lock
+// again only to commit the outcome. Other frames on the edge (chat, receipts,
+// healing) are handled while the file is hashed. The verdict is committed
+// only if the edge that delivered the file is still current: after a
+// teardown or room leave nothing completes, and the next copy of the held
+// chunk verifies the file again.
+const finishHeldFile = async (
+  held: HeldFile,
+  api: BaseQueryApi,
+  roomId: string,
+  peerId: string,
+  channelLabel: string,
+  merkleRootHex: string,
+  merkleRoot: Uint8Array,
+  extChannel: IRTCDataChannel | undefined,
+  epc: IRTCPeerConnection | undefined,
+  signal: AbortSignal | undefined,
+  dependencies: ReceiveMessageDependencies,
+): Promise<void> => {
+  const { lease } = held;
+  const edgeIsCurrent = (): boolean =>
+    lease !== undefined && isCurrentRatchetGateLease(roomId, peerId, lease);
+  const verdict = await verifyHeldFile(
+    merkleRootHex,
+    held.token,
+    signal,
+    edgeIsCurrent,
+    dependencies,
+  );
+  await withProcessingLock(edgeQueueKey(roomId, peerId), async () => {
+    const outcome = await settleHeldFile(
+      {
+        roomId,
+        fromPeerId: peerId,
+        merkleRoot: merkleRootHex,
+        filename: held.filename,
+        totalSize: held.totalSize,
+        chunkIndex: held.chunkIndex,
+      },
+      held.token,
+      verdict,
+      edgeIsCurrent(),
+      dependencies,
+    );
+    if (outcome === "complete")
+      await completeReceivedMessage(
+        held,
+        api,
+        roomId,
+        peerId,
+        channelLabel,
+        merkleRootHex,
+        merkleRoot,
+        extChannel,
+        epc,
+        dependencies,
+      );
+    else if (outcome === "integrity") {
+      // The worker dropped the file's chunks; show that at once rather than
+      // the pre-failure progress until a reload. Re-adding the message moves
+      // it to the end of the room's list.
+      api.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+      api.dispatch(
+        setMessage({
+          roomId,
+          merkleRootHex,
+          sha512Hex: uint8ArrayToHex(held.messageHash),
+          fromPeerId: peerId,
+          chunkSize: 0,
+          totalSize: held.totalSize,
+          messageType: held.messageType,
+          filename: held.filename,
+          channelLabel,
+          timestamp: held.date.getTime(),
+        }),
+      );
+    }
+  });
+};
+
 const processMessage = async (
   data: Uint8Array,
   api: BaseQueryApi,
@@ -325,7 +475,8 @@ const processMessage = async (
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
   signal?: AbortSignal,
-): Promise<{ receivedFullSize: boolean }> => {
+  dependencies: ReceiveMessageDependencies = {},
+): Promise<{ receivedFullSize: boolean; held?: HeldFile }> => {
   if (signal?.aborted) return { receivedFullSize: false };
   if (epc) {
     try {
@@ -349,6 +500,7 @@ const processMessage = async (
         merkleRoot,
         receiveMessageModule,
         signal,
+        dependencies,
       );
       const {
         date,
@@ -378,52 +530,37 @@ const processMessage = async (
         queueScheduledChunkReceipt(epc, merkleRoot, receiveResult.chunkHash);
 
       const hashHex = uint8ArrayToHex(messageHash);
+      const message: ReceivedMessage = {
+        date,
+        totalSize,
+        messageType,
+        filename,
+        messageHash,
+      };
 
-      if (receivedFullSize) {
-        // Scheduled mode: confirm the whole message with ONE terminal receipt
-        // cover cell (token == transfer root) so the sender's send resolves.
-        // It substitutes into a reverse cover slot, never an immediate frame.
-        if (epc?.coverRuntime)
-          queueScheduledReceipt(epc, merkleRoot, merkleRoot);
-      }
-
-      if (receivedFullSize) {
-        // Flush + close the OPFS write handle before flipping the UI to 100% so
-        // readMessage can open the finished file without hitting the write lock.
-        // No-op for text (no handle) and for a re-observed completion.
-        await closeReceiveFile(merkleRootHex);
-
-        api.dispatch(
-          setMessageAllChunks({
-            roomId,
-            merkleRootHex,
-            sha512Hex: hashHex,
-            fromPeerId: peerId,
-            totalSize,
-            messageType,
-            filename,
-            channelLabel,
-            timestamp: date.getTime(),
-            alsoSendFinishedMessage: true,
-          }),
+      if (receivedFullSize)
+        await completeReceivedMessage(
+          message,
+          api,
+          roomId,
+          peerId,
+          channelLabel,
+          merkleRootHex,
+          merkleRoot,
+          extChannel,
+          epc,
+          dependencies,
         );
-
-        // Scheduled mode already queued the terminal receipt as a cover cell
-        // above; emitting this immediate 65-byte frame as well would put an
-        // off-schedule, distinctively sized packet on the wire at the exact
-        // instant a real transfer completed — correlated with the event the
-        // cover schedule exists to hide. (It was also inert: the sender never
-        // attaches a message handler to the cover lane it arrives on.)
-        if (shouldSendImmediateTerminalReceipt(epc) && extChannel)
-          sendReceiptFrame(extChannel, messageHash);
-      } else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
+      else if (chunkSize > 0 && chunkIndex > -1 && !chunkAlreadyExists) {
         api.dispatch(
           setMessage({
             roomId,
             merkleRootHex,
             sha512Hex: hashHex,
             fromPeerId: peerId,
-            chunkSize,
+            // A held last chunk counts only once its file verifies; reaching
+            // the total here would also close the message channel.
+            chunkSize: receiveResult.verification === undefined ? chunkSize : 0,
             totalSize,
             messageType,
             filename,
@@ -445,7 +582,17 @@ const processMessage = async (
         }),
       );
 
-      return { receivedFullSize };
+      return receiveResult.verification === undefined
+        ? { receivedFullSize }
+        : {
+            receivedFullSize,
+            held: {
+              ...message,
+              token: receiveResult.verification,
+              chunkIndex,
+              lease: transportGateLease,
+            },
+          };
     } catch (error) {
       console.error(error);
 
@@ -470,6 +617,7 @@ const drain = async (
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
   signal?: AbortSignal,
+  dependencies: ReceiveMessageDependencies = {},
 ) => {
   if (drainingRef.value || drainingRef.released || signal?.aborted) return;
   drainingRef.value = true;
@@ -481,8 +629,7 @@ const drain = async (
       if (!chunk) break;
       adjustQueuedBytes(queue, roomId, peerId, -chunk.byteLength);
 
-      // const { receivedFullSize } =
-      await withProcessingLock(lockKey, async () =>
+      const { held } = await withProcessingLock(lockKey, async () =>
         processMessage(
           chunk,
           api,
@@ -495,8 +642,27 @@ const drain = async (
           epc,
           receiveMessageModule,
           signal,
+          dependencies,
         ),
       );
+      // The file is verified after this frame's lock is released; the drain
+      // goes on with the next frame meanwhile.
+      if (held)
+        void finishHeldFile(
+          held,
+          api,
+          roomId,
+          peerId,
+          channelLabel,
+          merkleRootHex,
+          merkleRoot,
+          extChannel,
+          epc,
+          signal,
+          dependencies,
+        ).catch((error: unknown) => {
+          console.error("p2party: received file verification failed", error);
+        });
 
       // if (receivedFullSize) {
       //   queue = [];
@@ -522,6 +688,7 @@ const drain = async (
         epc,
         receiveMessageModule,
         signal,
+        dependencies,
       );
     else settleMessageQueueIdle(queue, drainingRef);
   }
@@ -542,6 +709,8 @@ export const enqueue = (
   epc: IRTCPeerConnection | undefined,
   receiveMessageModule: LibCrypto,
   signal?: AbortSignal,
+  /** Test/fault-injection seam for storage; production uses the worker. */
+  dependencies: ReceiveMessageDependencies = {},
 ): boolean => {
   if (drainingRef.released || signal?.aborted) return false;
   const k = k32(data);
@@ -578,6 +747,7 @@ export const enqueue = (
       epc,
       receiveMessageModule,
       signal,
+      dependencies,
     );
 
   return true;

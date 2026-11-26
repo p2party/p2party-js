@@ -73,6 +73,11 @@ export interface MessageData {
    * re-receive completes and verifies.
    */
   integrityFailed?: true;
+  /**
+   * Receiver only: the chunk that would complete this file, held here (not in
+   * the have-set) until the file verifies against its whole-file hash.
+   */
+  receiveVerification?: ReceiveVerificationMarker;
   // recipients: number;
 }
 
@@ -147,8 +152,33 @@ export interface ReceiveChunkStored {
   savedSize: number;
   /** Authoritative distinct-byte completion after this transaction. */
   complete: boolean;
+  /**
+   * Set when this chunk would complete a file: it is held pending
+   * verification and the caller verifies the file with this token
+   * (verifyReceivedFile, then settleReceivedFileVerification).
+   */
+  verification?: string;
   failure?: undefined;
 }
+
+/** The chunk that would complete a received file, held until it verifies. */
+export interface ReceiveVerificationMarker {
+  /** Identifies one verification attempt. */
+  token: string;
+  chunkIndex: number;
+  realLen: number;
+  leafHash: string;
+  mimeType: string;
+  /** The chunk's bytes, only when they could not be placed in OPFS. */
+  data?: ArrayBuffer;
+}
+
+/** What hashing the stored file found (verifyReceivedFile). */
+export type ReceiveVerificationVerdict =
+  "match" | "mismatch" | "aborted" | "storage-failed";
+
+/** What settling a verification did (settleReceivedFileVerification). */
+export type ReceiveVerificationOutcome = "complete" | "integrity" | "aborted";
 
 /**
  * Why a received chunk could not be stored. Nothing for it was committed.
@@ -473,6 +503,21 @@ export type WorkerMessages =
     }
   | {
       id: number;
+      method: "verifyReceivedFile";
+      args: [merkleRootHex: string, token: string];
+    }
+  | {
+      id: number;
+      method: "settleReceivedFileVerification";
+      args: [merkleRootHex: string, token: string, commit: boolean];
+    }
+  | {
+      id: number;
+      method: "abortReceivedFileVerification";
+      args: [merkleRootHex: string, token: string];
+    }
+  | {
+      id: number;
       method: "getReceiveFile";
       args: [
         merkleRootHex: string,
@@ -652,6 +697,9 @@ export interface WorkerMethodReturnTypes {
   setDBChunk: undefined;
   // true if the chunk was newly stored; false if it was already present (dedup).
   storeReceiveChunk: ReceiveChunkStoreResult;
+  verifyReceivedFile: ReceiveVerificationVerdict;
+  settleReceivedFileVerification: ReceiveVerificationOutcome;
+  abortReceivedFileVerification: undefined;
   getReceiveFile: File | null;
   closeReceiveFile: undefined;
   deleteReceiveTransfer: boolean | undefined;

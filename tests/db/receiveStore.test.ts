@@ -3,7 +3,30 @@
 // db.worker.test.ts), with an in-memory OPFS where a test needs one.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+
+// Process-wide state this file changes, restored in afterAll.
+const indexedDBBefore = (globalThis as unknown as { indexedDB: IDBFactory })
+  .indexedDB;
+const postMessageBefore = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "postMessage",
+);
+afterAll(() => {
+  (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB =
+    indexedDBBefore;
+  if (postMessageBefore)
+    Object.defineProperty(globalThis, "postMessage", postMessageBefore);
+  else delete (globalThis as { postMessage?: unknown }).postMessage;
+});
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 
 import { getDB } from "../../src/db/src/getDB";
@@ -25,33 +48,67 @@ interface WorkerResponse {
   error?: unknown;
 }
 
+// Replies are routed by id, so calls may overlap as they do in a real worker.
 let nextId = 1;
+const pendingReplies = new Map<number, (reply: WorkerResponse) => void>();
 async function callWorker(
   method: string,
   args: unknown[],
 ): Promise<WorkerResponse> {
   await import("../../src/db/db.worker");
-  const id = nextId++;
-  let captured: WorkerResponse | undefined;
   (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
     (message: unknown) => {
-      captured = message as WorkerResponse;
+      const reply = message as WorkerResponse;
+      pendingReplies.get(reply.id)?.(reply);
+      pendingReplies.delete(reply.id);
     };
+  const id = nextId++;
+  const reply = new Promise<WorkerResponse>((resolve) =>
+    pendingReplies.set(id, resolve),
+  );
   const handler = (
     globalThis as unknown as { onmessage: (e: MessageEvent) => Promise<void> }
   ).onmessage;
   await handler({
     data: structuredClone({ id, method, args }),
   } as MessageEvent);
-  if (!captured || captured.id !== id)
-    throw new Error(`worker did not respond to message id ${id}`);
-  return captured;
+  return reply;
 }
+
+// Dispatch several requests in order without waiting for each to finish.
+const callWorkersConcurrently = (
+  calls: Array<{ method: string; args: unknown[] }>,
+): Promise<WorkerResponse[]> =>
+  Promise.all(calls.map((call) => callWorker(call.method, call.args)));
 
 const store = async (chunk: ReceiveChunk): Promise<ReceiveChunkStoreResult> => {
   const reply = await callWorker("storeReceiveChunk", [chunk]);
   if (reply.error !== undefined) throw new Error(String(reply.error));
   return reply.result as ReceiveChunkStoreResult;
+};
+
+const verify = async (merkleRoot: string, token: string) =>
+  (await callWorker("verifyReceivedFile", [merkleRoot, token])).result;
+
+const settle = async (merkleRoot: string, token: string, commit = true) =>
+  (
+    await callWorker("settleReceivedFileVerification", [
+      merkleRoot,
+      token,
+      commit,
+    ])
+  ).result;
+
+// Store a file's chunk; when it is the completing one, verify and commit the
+// file as the receive path does, and return what that settled to.
+const storeAndSettle = async (
+  chunk: ReceiveChunk,
+): Promise<ReceiveChunkStoreResult | string> => {
+  const result = await store(chunk);
+  if (result.failure !== undefined || result.verification === undefined)
+    return result;
+  await verify(chunk.merkleRoot, result.verification);
+  return (await settle(chunk.merkleRoot, result.verification)) as string;
 };
 
 // SHA-512 hex of a whole transfer whose bytes are 0, 1, 2, ... (mod 256).
@@ -119,14 +176,19 @@ const messageRow = async (
   }
 };
 
-// Count cursor advances (records a cursor visits: the per-record cost the
-// audit measured) and transactions until the test ends. Iterating to the end
-// calls continue() once per visited record, so the two counts are the same.
+// Count records read by scans (the per-record cost the audit measured: each
+// record a cursor visits, and each record a getAll/getAllKeys returns) and
+// transactions until the test ends. Iterating a cursor to the end calls
+// continue() once per visited record, so visits equal the audit's advances.
 // IDBCursor.prototype.continue itself is not replaced: idb recognizes cursor
 // methods by identity, memoized on first use, so swapping it would break
 // cursor iteration for the rest of the process.
 const countCursorWork = () => {
-  type Opener = { openCursor: (...a: unknown[]) => unknown };
+  type Opener = {
+    openCursor: (...a: unknown[]) => unknown;
+    getAll: (...a: unknown[]) => unknown;
+    getAllKeys: (...a: unknown[]) => unknown;
+  };
   const globals = globalThis as unknown as {
     IDBIndex: { prototype: Opener };
     IDBObjectStore: { prototype: Opener };
@@ -148,6 +210,19 @@ const countCursorWork = () => {
     restores.push(() => {
       proto.openCursor = openCursor;
     });
+    for (const method of ["getAll", "getAllKeys"] as const) {
+      const original = proto[method];
+      proto[method] = function (this: unknown, ...args: unknown[]) {
+        const request = original.apply(this, args) as IDBRequest<unknown[]>;
+        request.addEventListener("success", () => {
+          counts.advances += request.result.length;
+        });
+        return request;
+      };
+      restores.push(() => {
+        proto[method] = original;
+      });
+    }
   }
   const database = globals.IDBDatabase.prototype;
   const transaction = database.transaction;
@@ -163,52 +238,75 @@ const countCursorWork = () => {
 
 // In-memory OPFS: one Uint8Array per file name, with the sync-access-handle
 // surface the worker uses. Every read is logged.
+// A closed handle refuses reads and writes, as a real one does.
 const installOpfs = (
   files: Map<string, Uint8Array>,
   extra: Record<string, unknown> = {},
+  hooks: {
+    onRead?: (name: string, at: number) => void;
+    onWrite?: (name: string, at: number, bytes: Uint8Array) => void;
+  } = {},
 ): {
   directoryOpens: number;
+  closes: string[];
   reads: Array<{ name: string; at: number; length: number }>;
 } => {
   const stats = {
     directoryOpens: 0,
+    closes: [] as string[],
     reads: [] as Array<{ name: string; at: number; length: number }>,
   };
-  const access = (name: string) => ({
-    getSize: () => (files.get(name) ?? new Uint8Array()).length,
-    read: (view: ArrayBufferView, { at }: { at: number }) => {
-      const buf = files.get(name) ?? new Uint8Array();
-      const into = new Uint8Array(
-        view.buffer,
-        view.byteOffset,
-        view.byteLength,
-      );
-      const n = Math.max(0, Math.min(into.length, buf.length - at));
-      into.set(buf.subarray(at, at + n));
-      stats.reads.push({ name, at, length: n });
-      return n;
-    },
-    truncate: (size: number) => {
-      const old = files.get(name) ?? new Uint8Array();
-      const next = new Uint8Array(size);
-      next.set(old.subarray(0, Math.min(size, old.length)));
-      files.set(name, next);
-    },
-    write: (view: ArrayBufferView, { at }: { at: number }) => {
-      const src = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-      let buf = files.get(name) ?? new Uint8Array();
-      if (at + src.length > buf.length) {
-        const grown = new Uint8Array(at + src.length);
-        grown.set(buf);
-        buf = grown;
-      }
-      buf.set(src, at);
-      files.set(name, buf);
-      return src.length;
-    },
-    flush: () => {},
-    close: () => {},
-  });
+  const access = (name: string) => {
+    let closed = false;
+    const open = (): void => {
+      if (closed)
+        throw new DOMException("handle is closed", "InvalidStateError");
+    };
+    return {
+      getSize: () => (files.get(name) ?? new Uint8Array()).length,
+      read: (view: ArrayBufferView, { at }: { at: number }) => {
+        open();
+        hooks.onRead?.(name, at);
+        const buf = files.get(name) ?? new Uint8Array();
+        const into = new Uint8Array(
+          view.buffer,
+          view.byteOffset,
+          view.byteLength,
+        );
+        const n = Math.max(0, Math.min(into.length, buf.length - at));
+        into.set(buf.subarray(at, at + n));
+        stats.reads.push({ name, at, length: n });
+        return n;
+      },
+      truncate: (size: number) => {
+        const old = files.get(name) ?? new Uint8Array();
+        const next = new Uint8Array(size);
+        next.set(old.subarray(0, Math.min(size, old.length)));
+        files.set(name, next);
+      },
+      write: (view: ArrayBufferView, { at }: { at: number }) => {
+        open();
+        const src = Uint8Array.from(
+          new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+        );
+        hooks.onWrite?.(name, at, src);
+        let buf = files.get(name) ?? new Uint8Array();
+        if (at + src.length > buf.length) {
+          const grown = new Uint8Array(at + src.length);
+          grown.set(buf);
+          buf = grown;
+        }
+        buf.set(src, at);
+        files.set(name, buf);
+        return src.length;
+      },
+      flush: () => {},
+      close: () => {
+        closed = true;
+        stats.closes.push(name);
+      },
+    };
+  };
   installStorage({
     getDirectory: async () => {
       stats.directoryOpens += 1;
@@ -354,17 +452,23 @@ describe("receive cost does not grow with chunks already held", () => {
       results.push(await store(fileChunk(index)));
       advances.push(counts.advances - before);
     }
-    expect(results).toEqual([
+    expect(results).toMatchObject([
       { stored: true, savedSize: 28, complete: false },
       { stored: true, savedSize: 33, complete: false },
       { stored: true, savedSize: 38, complete: false },
       { stored: true, savedSize: 43, complete: false },
-      { stored: true, savedSize: 48, complete: true },
+      // The completing chunk is held until the file verifies.
+      { stored: true, savedSize: 43, complete: false },
     ]);
     // The 0.14.10 row is summarized once (validation pass + commit pass over
-    // its five records), then never re-read until the completing chunk, whose
-    // whole-file verification visits each of the nine held records once.
-    expect(advances).toEqual([10, 0, 0, 0, 9]);
+    // its five records), then never re-read.
+    expect(advances).toEqual([10, 0, 0, 0, 0]);
+    const token = (results[4] as { verification: string }).verification;
+    const visitsBefore = counts.advances;
+    expect(await verify(file, token)).toBe("match");
+    // Verification reads each of the nine recorded chunks once.
+    expect(counts.advances - visitsBefore).toBe(9);
+    expect(await settle(file, token)).toBe("complete");
     const completed = await messageRow(file);
     expect(completed?.savedSize).toBe(48);
     const records = (await rows()).chunks.filter(
@@ -496,19 +600,23 @@ describe("whole-file verification", () => {
     // The stored bytes change after their have-set record was committed.
     files.get(root)![3] ^= 0xff;
 
-    expect(await store(fileChunk(root, 2, 13))).toEqual({
-      failure: "integrity",
-    });
+    const held = await store(fileChunk(root, 2, 13));
+    expect(held).toMatchObject({ stored: true, complete: false });
+    const token = (held as { verification: string }).verification;
+    expect(await verify(root, token)).toBe("mismatch");
+    expect(await settle(root, token)).toBe("integrity");
     // Not complete, nothing held: the have-set and the OPFS file are gone and
     // the row says why, so a reconnect has no final receipt to replay.
     const after = await rows();
     expect(after.chunks.filter((c) => c.merkleRoot === root)).toEqual([]);
     expect(files.has(root)).toBe(false);
-    expect(await messageRow(root)).toMatchObject({
+    const failed = await messageRow(root);
+    expect(failed).toMatchObject({
       savedSize: 0,
       totalSize: 13,
       integrityFailed: true,
     });
+    expect(failed?.receiveVerification).toBeUndefined();
 
     // A later full resend that stores intact bytes completes and clears it.
     for (const index of [0, 1])
@@ -516,21 +624,85 @@ describe("whole-file verification", () => {
         stored: true,
         complete: false,
       });
-    expect(await store(fileChunk(root, 2, 13))).toEqual({
-      stored: true,
-      savedSize: 13,
-      complete: true,
-    });
-    expect((await messageRow(root))?.integrityFailed).toBeUndefined();
+    expect(await storeAndSettle(fileChunk(root, 2, 13))).toBe("complete");
+    const repaired = await messageRow(root);
+    expect(repaired?.integrityFailed).toBeUndefined();
+    expect(repaired?.savedSize).toBe(13);
 
     // A sender whose bytes never match the hash it claims is refused too.
     const liar = "7b".repeat(64);
     const claimed = { hash: contentHash(14) };
     await store(fileChunk(liar, 0, 13, claimed));
     await store(fileChunk(liar, 1, 13, claimed));
-    expect(await store(fileChunk(liar, 2, 13, claimed))).toEqual({
-      failure: "integrity",
+    expect(await storeAndSettle(fileChunk(liar, 2, 13, claimed))).toBe(
+      "integrity",
+    );
+  });
+
+  test("verification hashes the stored bytes of the completing chunk", async () => {
+    quietConsole();
+    const root = "7d".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    // The completing chunk's bytes are damaged on their way to disk; the copy
+    // the worker was handed stays intact.
+    installOpfs(
+      files,
+      {},
+      {
+        onWrite: (_name, at, bytes) => {
+          if (at === 10) bytes[0] ^= 0xff;
+        },
+      },
+    );
+    await store(fileChunk(root, 0, 13));
+    await store(fileChunk(root, 1, 13));
+    expect(await storeAndSettle(fileChunk(root, 2, 13))).toBe("integrity");
+  });
+
+  test("a retransmitted short last chunk on a fresh handle lands at its own offset", async () => {
+    quietConsole();
+    const root = "7e".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    installOpfs(files);
+    await store(fileChunk(root, 0, 13));
+    await store(fileChunk(root, 1, 13));
+    // A reload or an eviction: the next chunk opens a fresh handle.
+    await callWorker("closeReceiveFile", [root]);
+    // The short last chunk's first commit fails for lack of space: its first
+    // write is refused before anything is issued, so nothing commits.
+    const proto = (
+      globalThis as unknown as {
+        IDBObjectStore: {
+          prototype: Record<"add" | "put", (...a: unknown[]) => unknown>;
+        };
+      }
+    ).IDBObjectStore.prototype;
+    let failNext = true;
+    for (const method of ["add", "put"] as const) {
+      const original = proto[method];
+      proto[method] = function (this: { name: string }, ...args: unknown[]) {
+        if (
+          failNext &&
+          (this.name === "chunks" || this.name === "messageData")
+        ) {
+          failNext = false;
+          throw new DOMException("injected", "QuotaExceededError");
+        }
+        return original.apply(this, args);
+      };
+      restores.push(() => {
+        proto[method] = original;
+      });
+    }
+    expect(await store(fileChunk(root, 2, 13))).toEqual({
+      failure: "quota-exceeded",
     });
+    // The retransmission is the second placement on that handle. It must land
+    // at 2 × 5, not at 2 × its own length over chunk 1's bytes.
+    expect(await storeAndSettle(fileChunk(root, 2, 13))).toBe("complete");
+    expect(Array.from(files.get(root)!)).toEqual(
+      Array.from({ length: 13 }, (_, i) => i),
+    );
   });
 
   test("verification reads the file once", async () => {
@@ -550,17 +722,203 @@ describe("whole-file verification", () => {
       visits.push(counts.advances - visitsBefore);
       readsPerStore.push(opfs.reads.length - readsBefore);
     }
-    expect(last).toEqual({ stored: true, savedSize: 23, complete: true });
-    // Only the completing store reads, and it reads each byte once, in order:
-    // chunks 0-2 from OPFS, chunk 3 from its record, chunk 4 from memory.
-    expect(readsPerStore).toEqual([0, 0, 0, 0, 3]);
+    expect(last).toMatchObject({
+      stored: true,
+      savedSize: 20,
+      complete: false,
+    });
+    // No store reads the file or scans its records.
+    expect(readsPerStore).toEqual([0, 0, 0, 0, 0]);
+    expect(visits).toEqual([0, 0, 0, 0, 0]);
+
+    const token = (last as { verification: string }).verification;
+    const visitsBefore = counts.advances;
+    expect(await verify(root, token)).toBe("match");
+    // Each stored byte is read back once, in order: chunks 0-2 and the held
+    // chunk 4 from OPFS, chunk 3 from its record, which is read once.
     expect(opfs.reads).toEqual([
       { name: root, at: 0, length: 5 },
       { name: root, at: 5, length: 5 },
       { name: root, at: 10, length: 5 },
+      { name: root, at: 20, length: 3 },
     ]);
-    // One pass over the four held records, at completion only.
-    expect(visits).toEqual([0, 0, 0, 0, 4]);
+    expect(counts.advances - visitsBefore).toBe(4);
+    expect(await settle(root, token)).toBe("complete");
+  });
+
+  test("a resent chunk during verification changes nothing", async () => {
+    const root = "7f".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    await store(fileChunk(root, 0, 13));
+    await store(fileChunk(root, 1, 13));
+    const held = await store(fileChunk(root, 2, 13));
+    const token = (held as { verification: string }).verification;
+    const before = await rows();
+
+    // Verification has started; copies of the held chunk and of a recorded
+    // one arrive, and a second completion asks to verify again.
+    const [first, resentHeld, resentRecorded, second] =
+      await callWorkersConcurrently([
+        { method: "verifyReceivedFile", args: [root, token] },
+        { method: "storeReceiveChunk", args: [fileChunk(root, 2, 13)] },
+        { method: "storeReceiveChunk", args: [fileChunk(root, 0, 13)] },
+        { method: "verifyReceivedFile", args: [root, token] },
+      ]);
+    expect(resentHeld.result).toEqual({
+      stored: false,
+      savedSize: 10,
+      complete: false,
+    });
+    expect(resentRecorded.result).toEqual({
+      stored: false,
+      savedSize: 10,
+      complete: false,
+    });
+    expect(first.result).toBe("match");
+    expect(second.result).toBe("match");
+    // Nothing was written (beyond the verification's own lease), and the
+    // file was read once, not twice.
+    const after = await rows();
+    expect(after.chunks).toEqual(before.chunks);
+    expect(after.messageData).toEqual(before.messageData);
+    expect(opfs.reads.length).toBe(3);
+    expect(await settle(root, token)).toBe("complete");
+  });
+
+  test("a reload during verification verifies again on the next start", async () => {
+    quietConsole();
+    let now = 1_800_000_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    restores.push(() => clock.mockRestore());
+    const root = "70".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    installOpfs(files);
+    await store(fileChunk(root, 0, 13));
+    await store(fileChunk(root, 1, 13));
+    const held = await store(fileChunk(root, 2, 13));
+    const lost = (held as { verification: string }).verification;
+    // The page dies mid-verification: its lease outlives it, nothing settles.
+    const db = await getDB();
+    const activity = (await db.get("receiveActivity", root))!;
+    await db.put("receiveActivity", {
+      ...activity,
+      writeToken: "the-reloaded-page",
+      leaseUntil: now + 120_000,
+    });
+    db.close();
+
+    // Not complete and not stuck: the held chunk is not in the have-set the
+    // receiver replays on reconnect, so the sender sends it again.
+    expect(await messageRow(root)).toMatchObject({ savedSize: 10 });
+    const replay = await callWorker("getDBAllChunkLeafHashes", [root]);
+    expect(
+      (replay.result as { chunkIndex: number }[]).map((c) => c.chunkIndex),
+    ).toEqual([0, 1]);
+    // The old attempt cannot be resumed.
+    expect(await verify(root, lost)).toBe("aborted");
+    expect(await settle(root, lost)).toBe("aborted");
+
+    // Once the dead page's lease has expired, that copy verifies the file.
+    now += 120_001;
+    expect(await storeAndSettle(fileChunk(root, 2, 13))).toBe("complete");
+    expect(await messageRow(root)).toMatchObject({ savedSize: 13 });
+  });
+
+  test("a stopped verification commits nothing and is verified again", async () => {
+    const root = "71".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    installOpfs(files);
+    await store(fileChunk(root, 0, 13));
+    await store(fileChunk(root, 1, 13));
+    const held = await store(fileChunk(root, 2, 13));
+    const token = (held as { verification: string }).verification;
+    const [verdict] = await callWorkersConcurrently([
+      { method: "verifyReceivedFile", args: [root, token] },
+      { method: "abortReceivedFileVerification", args: [root, token] },
+    ]);
+    expect(verdict.result).toBe("aborted");
+    // Settling without committing (the edge is gone) leaves it unfinished.
+    expect(await settle(root, token, false)).toBe("aborted");
+    const row = await messageRow(root);
+    expect(row?.savedSize).toBe(10);
+    expect(row?.receiveVerification?.token).toBe(token);
+    expect(await storeAndSettle(fileChunk(root, 2, 13))).toBe("complete");
+  });
+
+  test("another transfer's chunk commits while a file is being verified", async () => {
+    const big = "72".repeat(64);
+    const other = "73".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    // 160 chunks = 10 verification batches.
+    const total = 160 * 5;
+    installOpfs(files);
+    for (let index = 0; index < 159; index++)
+      await store(fileChunk(big, index, total));
+    const held = await store(fileChunk(big, 159, total));
+    const token = (held as { verification: string }).verification;
+
+    const order: string[] = [];
+    const verifying = callWorker("verifyReceivedFile", [big, token]).then(
+      (reply) => {
+        order.push("verified");
+        return reply.result;
+      },
+    );
+    const committed = callWorker("storeReceiveChunk", [
+      chunkOf(other, 0, 10, 5),
+    ]).then((reply) => {
+      order.push("other committed");
+      return reply.result;
+    });
+    expect(await committed).toEqual({
+      stored: true,
+      savedSize: 5,
+      complete: false,
+    });
+    expect(await verifying).toBe("match");
+    expect(order).toEqual(["other committed", "verified"]);
+    expect(await settle(big, token)).toBe("complete");
+  });
+
+  test("a file being verified keeps its handle while other files open theirs", async () => {
+    const root = "74".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    const others = Array.from({ length: 8 }, (_, i) =>
+      (0x80 + i).toString(16).repeat(64),
+    );
+    let opened: Promise<WorkerResponse[]> | undefined;
+    const opfs = installOpfs(
+      files,
+      {},
+      {
+        onRead: () => {
+          // Eight other files open handles while this one is read: one more
+          // than the cap of eight, so the oldest unpinned handle is evicted.
+          opened ??= callWorkersConcurrently(
+            others.map((other) => ({
+              method: "storeReceiveChunk",
+              args: [fileChunk(other, 0, 13)],
+            })),
+          );
+        },
+      },
+    );
+    // 40 chunks: three verification batches, yielding between them.
+    for (let index = 0; index < 39; index++)
+      await store(fileChunk(root, index, 200));
+    const held = await store(fileChunk(root, 39, 200));
+    const token = (held as { verification: string }).verification;
+
+    expect(await verify(root, token)).toBe("match");
+    const stored = await opened!;
+    expect(stored.map((reply) => reply.error)).toEqual(
+      others.map(() => undefined),
+    );
+    // Another file's handle was evicted; the one being read never was.
+    expect(opfs.closes).not.toContain(root);
+    expect(opfs.closes.length).toBeGreaterThan(0);
+    expect(await settle(root, token)).toBe("complete");
   });
 });
 
@@ -602,14 +960,14 @@ describe("receive storage failure", () => {
     });
     free = 0;
     expect(
-      await store(
+      await storeAndSettle(
         chunkOf(root, 1, 10, 5, {
           messageType: 2,
           mimeType: "application/octet-stream",
           storage: "opfs",
         }),
       ),
-    ).toEqual({ stored: true, savedSize: 10, complete: true });
+    ).toBe("complete");
   });
 
   test("an unavailable estimate does not block a transfer", async () => {

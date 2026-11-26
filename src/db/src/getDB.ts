@@ -5,6 +5,8 @@ import type {
 } from "../outboxTypes";
 import { openDB } from "idb";
 
+import { DatabaseUpgradeBlockedError } from "../dbErrors";
+
 import type { DBSchema, IDBPDatabase } from "idb";
 import type {
   MessageData,
@@ -110,8 +112,30 @@ export interface RepoSchema extends DBSchema {
   };
 }
 
+// The open whose upgrade another tab blocks. While it is pending every open
+// fails at once instead of queueing behind it, and it is closed when it
+// finally succeeds.
+let blockedUpgrade: Promise<void> | undefined;
+
+/**
+ * Open the database. The connection closes itself when another context asks
+ * to upgrade, so a newer tab is never blocked by this one. When this version's
+ * own upgrade is blocked by an older tab that keeps its connection open, the
+ * open rejects with DatabaseUpgradeBlockedError instead of waiting.
+ */
 export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
-  return openDB<RepoSchema>(dbName, dbVersion, {
+  if (blockedUpgrade) throw new DatabaseUpgradeBlockedError();
+  let rejectBlocked!: (error: DatabaseUpgradeBlockedError) => void;
+  const blocked = new Promise<never>((_resolve, reject) => {
+    rejectBlocked = reject;
+  });
+  const opening = openDB<RepoSchema>(dbName, dbVersion, {
+    blocked() {
+      rejectBlocked(new DatabaseUpgradeBlockedError());
+    },
+    blocking(_currentVersion, _blockedVersion, event) {
+      (event.target as IDBDatabase).close();
+    },
     upgrade(db, oldVersion, _newVersion, tx) {
       if (!db.objectStoreNames.contains("outbox")) {
         const outbox = db.createObjectStore("outbox", {
@@ -362,4 +386,20 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
       }
     },
   });
+  try {
+    return await Promise.race([opening, blocked]);
+  } catch (error) {
+    if (error instanceof DatabaseUpgradeBlockedError) {
+      const pending: Promise<void> = opening
+        .then(
+          (db) => db.close(),
+          () => undefined,
+        )
+        .finally(() => {
+          if (blockedUpgrade === pending) blockedUpgrade = undefined;
+        });
+      blockedUpgrade = pending;
+    }
+    throw error;
+  }
 }

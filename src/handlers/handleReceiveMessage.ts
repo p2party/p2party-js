@@ -3,6 +3,7 @@ import { getMimeType, MessageType } from "../utils/messageTypes";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { isStorableChunkRange } from "../utils/chunkBounds";
 import { createChunkReceiptToken } from "../utils/receiptToken";
+import { DatabaseUnavailableError } from "../db/dbErrors";
 import {
   MAX_REPORTED_RECEIVE_STORAGE_ERRORS,
   MESSAGE_LEN,
@@ -17,8 +18,11 @@ import { decryptMessageChunkDurably } from "./ratchetPersist";
 import { bindReceiveMessageKey } from "./receiveMessageKeyLifetime";
 
 import {
+  abortReceivedFileVerification,
   getDBMessageData,
+  settleReceivedFileVerification,
   storeReceiveChunk as persistReceiveChunk,
+  verifyReceivedFile,
 } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
@@ -28,6 +32,8 @@ import type {
   ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
   ReceiveStorageFailure,
+  ReceiveVerificationOutcome,
+  ReceiveVerificationVerdict,
 } from "../db/types";
 import type { PersistRatchetState } from "./ratchetPersist";
 
@@ -43,6 +49,11 @@ export interface ReceiveMessageResult {
   /** 64-byte root/index/leaf-bound receipt token (legacy field name). */
   chunkHash: Uint8Array;
   messageHash: Uint8Array;
+  /**
+   * Set when this chunk would complete a file: it is held, and the file must
+   * be verified (verifyHeldFile, then settleHeldFile) before it is complete.
+   */
+  verification?: string;
 }
 
 // Uniform "not stored / crypto-failed" result — the queueing layer reacts to it
@@ -70,6 +81,11 @@ export interface ReceiveMessageDependencies {
   persistRatchetState?: PersistRatchetState;
   /** Test/fault-injection seam; production uses the receive-chunk worker. */
   storeReceiveChunk?: ReceiveChunkStore;
+  /** Test seams for whole-file verification; production uses the worker. */
+  closeReceiveFile?: (merkleRootHex: string) => Promise<void>;
+  verifyReceivedFile?: typeof verifyReceivedFile;
+  settleReceivedFileVerification?: typeof settleReceivedFileVerification;
+  abortReceivedFileVerification?: typeof abortReceivedFileVerification;
 }
 
 /**
@@ -122,8 +138,19 @@ export const onReceiveStorageError = (
   };
 };
 
+/** What names a received transfer in a ReceiveStorageError. */
+export type ReceivedChunkContext = Pick<
+  ReceiveChunk,
+  | "roomId"
+  | "fromPeerId"
+  | "merkleRoot"
+  | "filename"
+  | "totalSize"
+  | "chunkIndex"
+>;
+
 const reportReceiveStorageError = (
-  chunk: Omit<ReceiveChunk, "data">,
+  chunk: ReceivedChunkContext,
   failure: ReceiveChunkStoreFailure,
 ): void => {
   const key = `${chunk.merkleRoot}:${failure.failure}`;
@@ -232,6 +259,11 @@ export const storeReceiveChunkFailClosed = async (
     return await store({ ...chunk, data: realChunk.buffer as ArrayBuffer });
   } catch (error) {
     console.error("Could not durably store received chunk", error);
+    // The database as a whole is down (its worker failed, or an older tab
+    // blocks its upgrade): a storage failure the app is told about, unlike a
+    // chunk the worker refused.
+    if (error instanceof DatabaseUnavailableError)
+      return { failure: "storage-failed" };
     return null;
   } finally {
     realChunk.fill(0);
@@ -477,6 +509,9 @@ export const handleReceiveMessage = async (
       filename: metadata.name,
       chunkHash: receiptToken,
       messageHash: metadata.hash,
+      ...(progress.verification === undefined
+        ? {}
+        : { verification: progress.verification }),
     };
   } catch (error) {
     console.error("Could not parse or store decrypted message", error);
@@ -486,4 +521,73 @@ export const handleReceiveMessage = async (
     // and receipt fields are independent slices, so erase the padded body now.
     decrypted.fill(0);
   }
+};
+
+/**
+ * Hash a received file held pending verification (a result with
+ * `verification`). Call it outside the edge's receive lock: the worker reads
+ * the file once and keeps serving other requests meanwhile. If `signal`
+ * aborts once the edge is no longer current (teardown, room leave), the
+ * hashing stops at its next read and the verdict is "aborted".
+ */
+export const verifyHeldFile = async (
+  merkleRootHex: string,
+  token: string,
+  signal: AbortSignal | undefined,
+  edgeIsCurrent: () => boolean,
+  dependencies: ReceiveMessageDependencies = {},
+): Promise<ReceiveVerificationVerdict> => {
+  const verify = dependencies.verifyReceivedFile ?? verifyReceivedFile;
+  const abort =
+    dependencies.abortReceivedFileVerification ?? abortReceivedFileVerification;
+  const onAbort = (): void => {
+    if (edgeIsCurrent()) return;
+    void abort(merkleRootHex, token).catch((error: unknown) => {
+      console.error("p2party: could not stop a file verification", error);
+    });
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  try {
+    return await verify(merkleRootHex, token);
+  } catch (error) {
+    console.error("p2party: could not verify a received file", error);
+    return "storage-failed";
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+};
+
+/**
+ * Commit a verification's verdict under the edge's receive lock, or decline
+ * it (`commit` false: the edge is gone), which leaves the file to be verified
+ * again by the next copy of its last chunk. Reports an integrity failure, or a
+ * storage fault while reading the file, through onReceiveStorageError.
+ */
+export const settleHeldFile = async (
+  context: ReceivedChunkContext,
+  token: string,
+  verdict: ReceiveVerificationVerdict,
+  commit: boolean,
+  dependencies: ReceiveMessageDependencies = {},
+): Promise<ReceiveVerificationOutcome> => {
+  const settle =
+    dependencies.settleReceivedFileVerification ??
+    settleReceivedFileVerification;
+  let outcome: ReceiveVerificationOutcome;
+  try {
+    outcome = await settle(context.merkleRoot, token, commit);
+  } catch (error) {
+    // The commit itself failed (nothing was written): the file stays to be
+    // verified again by the next copy of its last chunk.
+    console.error("p2party: could not settle a file verification", error);
+    if (commit)
+      reportReceiveStorageError(context, { failure: "storage-failed" });
+    return "aborted";
+  }
+  if (outcome === "integrity")
+    reportReceiveStorageError(context, { failure: "integrity" });
+  else if (commit && verdict === "storage-failed")
+    reportReceiveStorageError(context, { failure: "storage-failed" });
+  return outcome;
 };

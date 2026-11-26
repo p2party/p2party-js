@@ -1079,11 +1079,102 @@ describe("prototype store reads", () => {
         await signedStatusProvesFault(
           core.descriptor,
           profile,
-          answer.bytes,
+          [answer.bytes],
           cryptoModule,
         ),
       ).toBeNull();
     }
+  });
+
+  test("no refusal an honest store signs proves a fault, at any window and any clock reading", async () => {
+    // What the client's blame rests on, pinned on the store's own code: for
+    // the profile its descriptor declares and a chunk that profile defines,
+    // the store never signs `chain-unavailable` or `no-such-chunk`, and its
+    // `out-of-range` and `not-final` never contradict its descriptor. That
+    // holds before the chain start, far ahead, and when its clock is past the
+    // descriptor's own validity, which the judgment does not consult.
+    const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
+    const { core, setNow } = await harness({ retentionWindows: retention });
+    const startOf = (window: bigint): bigint =>
+      ingressWindowStartMs(window, profile.deliveryWindowMs);
+    const pastValidity = core.descriptor.notAfterUnixMs;
+    const readings = [
+      WINDOW_START,
+      FINALIZE_AT - 1n,
+      FINALIZE_AT,
+      startOf(CHAIN_START + 1n),
+      startOf(CHAIN_START + BigInt(retention)) + 3_999n,
+      startOf(CHAIN_START + BigInt(retention) + 1n),
+      pastValidity - 1n,
+      pastValidity,
+      pastValidity + 1_000_000n,
+    ];
+    const windows = [
+      0n,
+      CHAIN_START - 1n,
+      CHAIN_START,
+      CHAIN_START + 1n,
+      CHAIN_START + BigInt(retention) + 1n,
+      pastValidity / profile.deliveryWindowMs,
+      1n << 40n,
+    ];
+    let checkpointBeside: Uint8Array | null = null;
+    const statuses = new Set<string>();
+    for (const reading of readings) {
+      setNow(reading);
+      await core.finalizeDue();
+      for (const window of windows) {
+        const checkpoint = await core
+          .readCheckpoint(PROFILE_HASH, window)
+          .catch(() => null);
+        if (checkpoint?.kind === "finalized" && window === CHAIN_START)
+          checkpointBeside = encodePublicStoreCheckpointReadV1(checkpoint);
+        if (checkpoint?.kind === "status") {
+          statuses.add(`checkpoint ${checkpoint.value.status}`);
+          expect(
+            await signedStatusProvesFault(
+              core.descriptor,
+              profile,
+              [encodePublicStoreCheckpointReadV1(checkpoint)],
+              cryptoModule,
+            ),
+          ).toBeNull();
+        }
+        const chunk = await core
+          .readChunk(bucketOf(window, 0), 0n)
+          .catch(() => null);
+        if (chunk?.kind === "status") {
+          statuses.add(`chunk ${chunk.value.status}`);
+          const bytes = encodePublicChunkReadV1(chunk);
+          expect(
+            await signedStatusProvesFault(
+              core.descriptor,
+              profile,
+              [bytes],
+              cryptoModule,
+            ),
+          ).toBeNull();
+          // Nor beside the checkpoint the store signed for the chain start.
+          if (checkpointBeside !== null && window === CHAIN_START)
+            expect(
+              await signedStatusProvesFault(
+                core.descriptor,
+                profile,
+                [checkpointBeside, bytes],
+                cryptoModule,
+              ),
+            ).toBeNull();
+        }
+      }
+    }
+    expect(checkpointBeside).not.toBeNull();
+    // Every refusal it gave was one of these two, on both routes.
+    expect([...statuses].sort()).toEqual([
+      "checkpoint not-final",
+      "checkpoint out-of-range",
+      "chunk not-final",
+      "chunk out-of-range",
+    ]);
   });
 
   test("throws on coordinates no signed status could name", async () => {

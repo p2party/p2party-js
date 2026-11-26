@@ -21,9 +21,14 @@
  *   window is outside what the store keeps, and `not-final` is signed only
  *   before the window's finalization instant: a window that has closed on
  *   the clock but is not signed yet is answered with
- *   `StoreFinalizationPendingError` (a 503), never a signed `not-final`. So
- *   none of this store's signed statuses can be shown, from its own words, to
- *   contradict its descriptor (`signedStatusProvesFault` in the client).
+ *   `StoreFinalizationPendingError` (a 503), never a signed `not-final`.
+ *   `chain-unavailable` is signed only for a profile other than the one the
+ *   descriptor declares, and `no-such-chunk` only for coordinates that
+ *   profile does not define. So none of this store's signed statuses can be
+ *   shown, from its own words, to contradict its descriptor
+ *   (`signedStatusProvesFault` in the client), and a client that blames each
+ *   of the four when it does contradict the descriptor never blames this
+ *   store, whatever its clock reads.
  * - A finalized window is never re-signed. Signing two different chunk bodies
  *   for one index, or two checkpoints for one window, is a permanent fault
  *   proof against the store — so `#finalizeWindow` returns early rather than

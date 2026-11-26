@@ -42,6 +42,7 @@ import {
   PrototypeStoreClient,
   StoreClientError,
   buildAppendAdmission,
+  judgeSignedRefusal,
   signedStatusProvesFault,
 } from "../../../src/blindRendezvous/prototype/storeClient";
 import {
@@ -71,7 +72,10 @@ import type {
   PublicChunkStatusKindV1,
   PublicStoreCheckpointStatusKindV1,
 } from "../../../src/blindRendezvous/prototype/storeWire";
-import type { StoreClientOptions } from "../../../src/blindRendezvous/prototype/storeClient";
+import type {
+  StoreClientOptions,
+  StoreEvidenceFaultKind,
+} from "../../../src/blindRendezvous/prototype/storeClient";
 import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 const hex = (value: Uint8Array): string =>
@@ -757,53 +761,100 @@ describe("prototype store client", () => {
     });
   });
 
-  test("refuses a signed chain-unavailable its own descriptor contradicts", async () => {
+  test("a signed chain-unavailable for a profile the descriptor declares is a breach a third party can verify", async () => {
     await withStore(async (store, clock) => {
-      const value = {
-        version: 1 as const,
-        storeId: store.core.storeId,
-        descriptorHash: store.core.descriptorHash,
-        deliveryProfileHash: PROFILE_HASH,
-        ingressWindow: CHAIN_START,
-        storeIngressWindow: CHAIN_START,
-        status: "chain-unavailable" as const,
+      const denial = async (
+        deliveryProfileHashBytes: Uint8Array,
+        storeWindow: bigint,
+      ): Promise<Uint8Array> => {
+        const value = {
+          version: 1 as const,
+          storeId: store.core.storeId,
+          descriptorHash: store.core.descriptorHash,
+          deliveryProfileHash: deliveryProfileHashBytes,
+          ingressWindow: CHAIN_START,
+          storeIngressWindow: storeWindow,
+          status: "chain-unavailable" as const,
+        };
+        return encodePublicStoreCheckpointReadV1({
+          kind: "status",
+          value,
+          storeSignature: await sign(
+            await publicCheckpointStatusSigningHash(value),
+            await storeSecretKey(),
+            cryptoModule,
+          ),
+        });
       };
-      const body = encodePublicStoreCheckpointReadV1({
-        kind: "status",
-        value,
-        storeSignature: await sign(
-          await publicCheckpointStatusSigningHash(value),
-          await storeSecretKey(),
-          cryptoModule,
-        ),
-      });
-      const denying: typeof fetch = ((
-        input: RequestInfo | URL,
-        init?: RequestInit,
-      ) => {
-        const url = new URL(String(input));
-        if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
-          return Promise.resolve(
-            new Response(asBody(body), {
-              status: 200,
-              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
-            }),
-          );
-        return fetch(`${store.origin}${url.pathname}${url.search}`, init);
-      }) as typeof fetch;
+      // The store's own code signs this status only for a profile it does not
+      // serve, whatever the window and the clock: asked for its own profile
+      // below the chain start, far ahead and now, it never does.
+      for (const window of [0n, CHAIN_START - 1n, CHAIN_START, 1n << 40n]) {
+        const read = await store.core.readCheckpoint(PROFILE_HASH, window);
+        expect(read.kind === "status" ? read.value.status : read.kind).not.toBe(
+          "chain-unavailable",
+        );
+      }
 
-      const client = await connect(store.origin, clock, { fetch: denying });
-      const scan = await client.scanWindow(CHAIN_START);
-      expect(scan.status).toBe("unreachable");
-      expect(
-        client.faults.some((fault) =>
-          fault.detail.includes("denies a profile chain its own descriptor"),
-        ),
-      ).toBe(true);
+      // Stated a thousand windows from this client's clock: no stated window
+      // turns the denial into a clock disagreement.
+      for (const storeWindow of [CHAIN_START, CHAIN_START + 1_000n]) {
+        const body = await denial(PROFILE_HASH, storeWindow);
+        const denying: typeof fetch = ((
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ) => {
+          const url = new URL(String(input));
+          if (url.pathname.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+            return Promise.resolve(
+              new Response(asBody(body), {
+                status: 200,
+                headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+              }),
+            );
+          return fetch(`${store.origin}${url.pathname}${url.search}`, init);
+        }) as typeof fetch;
+
+        const client = await connect(store.origin, clock, { fetch: denying });
+        const scan = await client.scanWindow(CHAIN_START);
+        expect(scan.status).toBe("unreachable");
+        expect(client.inert).toBe(true);
+        expect(client.faults.map((fault) => fault.kind)).toEqual([
+          "chain-denial-breach",
+        ]);
+        const breach = client.faults[0];
+        expect((breach.evidence ?? []).map(hex)).toEqual([hex(body)]);
+        // From the kept record alone.
+        expect(
+          await signedStatusProvesFault(
+            breach.descriptor ?? ({} as StoreDescriptorV1),
+            profile,
+            breach.evidence ?? [],
+            cryptoModule,
+          ),
+        ).toBe("chain-denial-breach");
+      }
+
+      // What the store honestly signs, for a profile its descriptor does not
+      // declare, proves nothing.
+      const foreign = new Uint8Array(32).fill(0x44);
+      const honest = await store.core.readCheckpoint(foreign, CHAIN_START);
+      expect(honest.kind === "status" ? honest.value.status : honest.kind).toBe(
+        "chain-unavailable",
+      );
+      for (const candidate of [profile, withDeliveryWindowMs(profile, 8_000n)])
+        expect(
+          await signedStatusProvesFault(
+            store.core.descriptor,
+            candidate,
+            [encodePublicStoreCheckpointReadV1(honest)],
+            cryptoModule,
+          ),
+        ).toBeNull();
     });
   });
 
-  test("refuses a chunk the store withholds from a window it finalized", async () => {
+  test("a not-final replayed for a chunk of a finalized window is a clock disagreement once no store within the skew could say it", async () => {
     await withStore(async (store, clock) => {
       const path = `${PROTOTYPE_STORE_ROUTES.chunk}/${PROFILE_HEX}/${String(CHAIN_START)}/0/0`;
       // A genuine signed `not-final` for this exact chunk, taken while the
@@ -829,14 +880,25 @@ describe("prototype store client", () => {
         return fetch(`${store.origin}${url.pathname}${url.search}`, init);
       }) as typeof fetch;
 
-      const client = await connect(store.origin, clock, { fetch: withholding });
-      const scan = await client.scanWindow(CHAIN_START);
-      expect(scan.status).toBe("unreachable");
+      // Sent one millisecond before the close plus the skew: a store whose
+      // clock is the full skew behind this client's still reads before the
+      // close, and its checkpoint and chunk answers can race across it. The
+      // window is not final at this store yet, and nothing is recorded.
+      const early = await connect(store.origin, clock, { fetch: withholding });
+      clock.now = FINALIZE_AT + profile.maxScheduleSkewMs - 1n;
+      expect((await early.scanWindow(CHAIN_START)).status).toBe("not-final");
+      expect(early.faults).toEqual([]);
+
+      // From the close plus the skew on, no such store can say it.
+      const late = await connect(store.origin, clock, { fetch: withholding });
+      clock.now = FINALIZE_AT + profile.maxScheduleSkewMs;
+      const scan = await late.scanWindow(CHAIN_START);
+      expect(scan.status).toBe("clock-disagreement");
+      expect(late.inert).toBe(false);
       expect(
-        client.faults.some((fault) =>
-          fault.detail.includes("withholds chunk 0 of class 0"),
-        ),
-      ).toBe(true);
+        late.faults.map((fault) => [fault.kind, fault.window] as const),
+      ).toEqual([["store-clock-disagreement", CHAIN_START]]);
+      expect(late.faults[0].detail).toContain("chunk 0 of class 0");
     });
   });
 
@@ -1574,10 +1636,10 @@ describe("prototype store client retention", () => {
     });
   };
 
-  /** What a third party concludes from the descriptor and the answer alone. */
+  /** What a third party concludes from the descriptor and the answers alone. */
   const proves = (
     descriptor: StoreDescriptorV1,
-    evidence: Uint8Array,
+    ...evidence: Uint8Array[]
   ): Promise<string | null> =>
     signedStatusProvesFault(descriptor, profile, evidence, cryptoModule);
 
@@ -1973,7 +2035,7 @@ describe("prototype store client retention", () => {
     });
   });
 
-  test('a signed "no such chunk" for a chunk the checkpoint lists is a fault with both statements kept', async () => {
+  test("a signed denial of a chunk the signed checkpoint lists is a breach a third party can verify", async () => {
     await withStore(async (store, clock) => {
       const denial = await signedChunkStatus(
         store,
@@ -1986,37 +2048,89 @@ describe("prototype store client retention", () => {
       const client = await connect(store.origin, clock, {
         fetch: answeringChunk(store, 0, 0, denial),
       });
-      clock.now = NEXT_FINALIZE_AT;
-      await store.core.finalizeDue();
+      await appendObject(client, CHAIN_START, 0x62);
+      clock.now = NEXT_FINALIZE_AT + profile.deliveryWindowMs;
+      while ((await store.core.finalizeDue()).length > 0);
       const servedCheckpoint = encodePublicStoreCheckpointReadV1(
         await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
       );
 
       expect((await client.scanWindow(CHAIN_START)).status).toBe("unreachable");
-      const fault = client.faults.find((candidate) =>
-        candidate.detail.includes("withholds chunk 0 of class 0"),
-      );
-      // The existing fault for a missing chunk: a report, not blame.
-      expect(fault?.kind).toBe("signature-invalid");
-      expect(fault?.detail).toContain("no-such-chunk");
-      expect(client.inert).toBe(false);
+      // Blame under its own name, and the receipt for the window reported.
+      expect(client.inert).toBe(true);
+      expect(client.faults.map((fault) => fault.kind)).toEqual([
+        "chunk-denial-breach",
+        "custody-unchecked",
+      ]);
+      const breach = client.faults[0];
+      expect(breach.window).toBe(CHAIN_START);
+      expect(breach.detail).toContain("chunk 0 of class 0");
       // Both signed statements: the checkpoint that commits to the chunk,
       // then the status that denies it, with the descriptor they name.
-      expect((fault?.evidence ?? []).map(hex)).toEqual([
+      expect((breach.evidence ?? []).map(hex)).toEqual([
         hex(servedCheckpoint),
         hex(denial),
       ]);
-      const checkpointRead = decodePublicStoreCheckpointReadV1(
-        fault?.evidence?.[0] ?? new Uint8Array(0),
+      const kept = breach.descriptor ?? ({} as StoreDescriptorV1);
+      expect(hex(await descriptorHash(kept))).toBe(
+        hex(store.core.descriptorHash),
       );
-      expect(checkpointRead.kind).toBe("finalized");
-      if (checkpointRead.kind === "finalized")
-        expect(checkpointRead.checkpoint.ingressWindow).toBe(CHAIN_START);
+
+      // A third party, from the record alone.
+      expect(await proves(kept, ...(breach.evidence ?? []))).toBe(
+        "chunk-denial-breach",
+      );
+      // Neither statement proves it without the other.
+      expect(await proves(kept, denial)).toBeNull();
+      expect(await proves(kept, servedCheckpoint)).toBeNull();
+      expect(await proves(kept, denial, servedCheckpoint)).toBeNull();
+      // Not with an altered denial or an altered checkpoint.
+      const alteredDenial = Uint8Array.from(denial);
+      alteredDenial[alteredDenial.length - 66] ^= 0x01;
+      expect(await proves(kept, servedCheckpoint, alteredDenial)).toBeNull();
+      const alteredCheckpoint = Uint8Array.from(servedCheckpoint);
+      alteredCheckpoint[alteredCheckpoint.length - 1] ^= 0x01;
+      expect(await proves(kept, alteredCheckpoint, denial)).toBeNull();
+      // Not with the checkpoint of another window, which commits to other
+      // chunks than the one denied.
+      const nextCheckpoint = encodePublicStoreCheckpointReadV1(
+        await store.core.readCheckpoint(PROFILE_HASH, CHAIN_START + 1n),
+      );
+      expect(decodePublicStoreCheckpointReadV1(nextCheckpoint).kind).toBe(
+        "finalized",
+      );
+      expect(await proves(kept, nextCheckpoint, denial)).toBeNull();
+      // Not for a chunk the profile does not define, which the store denies
+      // honestly: the real core's own answer, beside the real checkpoint.
+      const count = BigInt(
+        profile.sizeClasses.find((sizeClass) => sizeClass.id === 0)
+          ?.publicChunksPerWindow ?? 0,
+      );
+      const honest = await store.core.readChunk(
+        {
+          deliveryProfileHash: PROFILE_HASH,
+          ingressWindow: CHAIN_START,
+          sizeClass: 0,
+        },
+        count,
+      );
+      expect(honest.kind === "status" ? honest.value.status : honest.kind).toBe(
+        "no-such-chunk",
+      );
       expect(
-        hex(await descriptorHash(fault?.descriptor ?? store.core.descriptor)),
-      ).toBe(hex(store.core.descriptorHash));
-      // A denial is not an expiry claim, so it proves no withholding alone.
-      expect(await proves(store.core.descriptor, denial)).toBeNull();
+        await proves(kept, servedCheckpoint, encodePublicChunkReadV1(honest)),
+      ).toBeNull();
+      // Not against another store's descriptor.
+      const other = await startStore(clock, {
+        seed: new Uint8Array(32).fill(0x6c),
+      });
+      try {
+        expect(
+          await proves(other.core.descriptor, servedCheckpoint, denial),
+        ).toBeNull();
+      } finally {
+        other.stop();
+      }
     });
   });
 
@@ -2238,16 +2352,21 @@ describe("prototype store client retention", () => {
 
   test("the oldest window a catch-up reads is served and the one before it is beyond retention", async () => {
     // The floor's derivation: a catch-up read reaches 65 back, its answer
-    // may arrive a window later, and the store's clock may be one window
-    // ahead, so the store sees it 67 back, the minimum retention, and serves
-    // it. One window further is 68 back: honest expiry, within the skew.
+    // may arrive a window later, and the store's clock may be the skew
+    // ahead, which near the end of a window is one window number ahead. So
+    // the store sees it 67 back, the minimum retention, and serves it. One
+    // window further is 68 back: honest expiry, within the skew.
     const retention = PROTOTYPE_STORE_MIN_RETENTION_WINDOWS;
     const current = CHAIN_START + 70n;
-    const start = WINDOW_START + 70n * profile.deliveryWindowMs + 100n;
+    // Half the skew before the end of this client's window `current`.
+    const start =
+      WINDOW_START +
+      71n * profile.deliveryWindowMs -
+      profile.maxScheduleSkewMs / 2n;
     const clock: Clock = { now: start };
     const store = await startStore(clock, {
       retentionWindows: retention,
-      aheadMs: profile.deliveryWindowMs,
+      aheadMs: profile.maxScheduleSkewMs,
     });
     try {
       while ((await store.core.finalizeDue()).length > 0);
@@ -2388,4 +2507,1315 @@ describe("prototype store client retention", () => {
       expect(client.inert).toBe(false);
     });
   });
+});
+
+/**
+ * Every signed refusal of a read, judged by one order
+ * (`judgeSignedRefusal`). No socket is opened here: the client's transport is
+ * a stub over a real core's finalized window and statuses signed with that
+ * core's key, so each test states the store's window, the descriptor's
+ * validity and this client's clock exactly.
+ */
+describe("prototype store client signed refusals", () => {
+  const L = profile.deliveryWindowMs;
+  const F = profile.chunkFinalizationOffsetMs;
+  const SKEW = profile.maxScheduleSkewMs;
+  const READ_OFFSET = profile.publicReadOffsetMs;
+  /** The window every read here asks for: the chain start. */
+  const W = CHAIN_START;
+  const R = BigInt(PROTOTYPE_STORE_MIN_RETENTION_WINDOWS);
+  const startOf = (window: bigint): bigint => window * L;
+  /** The instant W is final from, by the profile. */
+  const FIN = startOf(W) + F;
+  const ORIGIN = "http://store.invalid:5999";
+  const CLASS_0_CHUNKS = BigInt(
+    profile.sizeClasses.find((sizeClass) => sizeClass.id === 0)
+      ?.publicChunksPerWindow ?? 0,
+  );
+
+  type Route = "checkpoint" | "chunk";
+  type DescriptorDocument = ReturnType<
+    PrototypeStoreCore["descriptorDocument"]
+  >;
+
+  /** A real core at the minimum retention, with W finalized. */
+  const buildServed = async (aheadMs = 0n) => {
+    const clock: Clock = { now: FIN };
+    const core = await PrototypeStoreCore.create({
+      module: cryptoModule,
+      seed: SEED,
+      profile,
+      clock: { nowMs: () => clock.now + aheadMs },
+      persistence: new MemoryStorePersistence(),
+      chainStartIngressWindow: W,
+      origin: ORIGIN,
+      descriptorValidityMs: 2_592_000_000n,
+      retentionWindows: Number(R),
+    });
+    return { core, clock, handler: createPrototypeStoreHandler({ core }) };
+  };
+
+  let memo: Promise<{
+    readonly core: PrototypeStoreCore;
+    readonly clock: Clock;
+    readonly checkpoint: Uint8Array;
+    readonly chunks: ReadonlyMap<string, Uint8Array>;
+  }> | null = null;
+  /** One core for the block, with what it serves for W once finalized. */
+  const served = (): NonNullable<typeof memo> =>
+    (memo ??= (async () => {
+      const { core, clock } = await buildServed();
+      await core.finalizeDue();
+      const chunks = new Map<string, Uint8Array>();
+      for (const sizeClass of profile.sizeClasses)
+        for (let index = 0; index < sizeClass.publicChunksPerWindow; index++)
+          chunks.set(
+            `${String(sizeClass.id)}/${String(index)}`,
+            encodePublicChunkReadV1(
+              await core.readChunk(
+                {
+                  deliveryProfileHash: PROFILE_HASH,
+                  ingressWindow: W,
+                  sizeClass: sizeClass.id,
+                },
+                BigInt(index),
+              ),
+            ),
+          );
+      return {
+        core,
+        clock,
+        checkpoint: encodePublicStoreCheckpointReadV1(
+          await core.readCheckpoint(PROFILE_HASH, W),
+        ),
+        chunks,
+      };
+    })());
+
+  /**
+   * The served store's descriptor with another validity, and a route bound
+   * to it, both signed with the store's key: what a client pins.
+   */
+  const documentValid = async (
+    notBeforeUnixMs: bigint,
+    notAfterUnixMs: bigint,
+    retentionWindows = Number(R),
+  ): Promise<DescriptorDocument> => {
+    const base = (await served()).core.descriptorDocument();
+    const secretKey = await storeSecretKey();
+    const draft = {
+      ...base.descriptor,
+      retentionWindows,
+      notBeforeUnixMs,
+      notAfterUnixMs,
+    };
+    const descriptor = {
+      ...draft,
+      descriptorSignature: await sign(
+        await storeDescriptorSignedMessage(draft),
+        secretKey,
+        cryptoModule,
+      ),
+    };
+    const routeDraft = {
+      ...base.routes[0],
+      descriptorHash: await descriptorHash(descriptor),
+      notBeforeUnixMs: 0n,
+      notAfterUnixMs: 1n << 62n,
+    };
+    return {
+      descriptor,
+      routes: [
+        {
+          ...routeDraft,
+          routeSignature: await sign(
+            await storeRouteSignedMessage(routeDraft),
+            secretKey,
+            cryptoModule,
+          ),
+        },
+      ],
+    };
+  };
+
+  /** A validity that covers every window and instant these tests use. */
+  const wideDocument = (): Promise<DescriptorDocument> =>
+    documentValid(startOf(W - 5_000n), startOf(W + 50_000n));
+
+  /** A status about W signed with the store's key. */
+  const signedStatus = async (
+    route: Route,
+    status: string,
+    storeWindow: bigint,
+    descriptorHashBytes: Uint8Array,
+    chunk: { sizeClass: number; chunkIndex: bigint } = {
+      sizeClass: 0,
+      chunkIndex: 0n,
+    },
+  ): Promise<Uint8Array> => {
+    const secretKey = await storeSecretKey();
+    if (route === "checkpoint") {
+      const value = {
+        version: 1 as const,
+        storeId: (await served()).core.storeId,
+        descriptorHash: descriptorHashBytes,
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: W,
+        storeIngressWindow: storeWindow,
+        status: status as PublicStoreCheckpointStatusKindV1,
+      };
+      return encodePublicStoreCheckpointReadV1({
+        kind: "status",
+        value,
+        storeSignature: await sign(
+          await publicCheckpointStatusSigningHash(value),
+          secretKey,
+          cryptoModule,
+        ),
+      });
+    }
+    const value = {
+      version: 1 as const,
+      descriptorHash: descriptorHashBytes,
+      bucket: {
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: W,
+        sizeClass: chunk.sizeClass,
+      },
+      chunkIndex: chunk.chunkIndex,
+      storeIngressWindow: storeWindow,
+      status: status as PublicChunkStatusKindV1,
+    };
+    return encodePublicChunkReadV1({
+      kind: "status",
+      value,
+      storeSignature: await sign(
+        await publicChunkStatusSigningHash(value),
+        secretKey,
+        cryptoModule,
+      ),
+    });
+  };
+
+  /**
+   * A transport that serves `document`, the finalized window W, and
+   * `answer` in place of W's checkpoint (`route` "checkpoint") or of chunk 0
+   * of class 0 (`route` "chunk").
+   */
+  const transport = async (
+    document: DescriptorDocument,
+    route: Route | null,
+    answer: Uint8Array | null,
+    onRequest: () => void = () => undefined,
+  ): Promise<typeof fetch> => {
+    const { checkpoint, chunks } = await served();
+    const respond = (bytes: Uint8Array, mediaType: string): Promise<Response> =>
+      Promise.resolve(
+        new Response(asBody(bytes), {
+          status: 200,
+          headers: headersOf(mediaType),
+        }),
+      );
+    return ((input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === PROTOTYPE_STORE_ROUTES.descriptor)
+        return respond(
+          encodePrototypeStoreDescriptorDocumentV1(document),
+          PROTOTYPE_STORE_MEDIA_TYPES.descriptor,
+        );
+      onRequest();
+      if (path.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+        return respond(
+          route === "checkpoint" && answer !== null ? answer : checkpoint,
+          PROTOTYPE_STORE_MEDIA_TYPES.checkpoint,
+        );
+      const parts = path.split("/");
+      const key = `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+      return respond(
+        route === "chunk" && answer !== null && key === "0/0"
+          ? answer
+          : (chunks.get(key) ?? new Uint8Array(0)),
+        PROTOTYPE_STORE_MEDIA_TYPES.chunk,
+      );
+    }) as typeof fetch;
+  };
+
+  /**
+   * One scan of W at `readMs` on this client's clock, by a client that pinned
+   * `document` at an instant inside its validity. `answeredAfterMs` is how
+   * much later the answers arrive.
+   */
+  const scanAt = async (
+    document: DescriptorDocument,
+    route: Route | null,
+    answer: Uint8Array | null,
+    readMs: bigint,
+    answeredAfterMs = 0n,
+  ) => {
+    const { notBeforeUnixMs, notAfterUnixMs } = document.descriptor;
+    const clock: Clock = {
+      now:
+        readMs >= notAfterUnixMs
+          ? notAfterUnixMs - 1n
+          : readMs < notBeforeUnixMs
+            ? notBeforeUnixMs
+            : readMs,
+    };
+    let advanced = false;
+    const client = await PrototypeStoreClient.connect({
+      origin: ORIGIN,
+      profile,
+      profileHash: PROFILE_HASH,
+      module: cryptoModule,
+      fetch: await transport(document, route, answer, () => {
+        if (!advanced) clock.now += answeredAfterMs;
+        advanced = true;
+      }),
+      nowMs: () => clock.now,
+    });
+    clock.now = readMs;
+    const scan = await client.scanWindow(W);
+    return {
+      client,
+      scan,
+      kinds: client.faults.map((fault) => fault.kind),
+    };
+  };
+
+  /** What a third party concludes from a fault record alone. */
+  const provedBy = (
+    fault: { evidence?: readonly Uint8Array[]; descriptor?: StoreDescriptorV1 },
+    withProfile = profile,
+  ): Promise<string | null> =>
+    signedStatusProvesFault(
+      fault.descriptor ?? ({} as StoreDescriptorV1),
+      withProfile,
+      fault.evidence ?? [],
+      cryptoModule,
+    );
+
+  const SCHEDULED_READ = startOf(W + 1n) + READ_OFFSET;
+
+  test("a not-final from a store inside the allowed skew is accepted at the boundary", async () => {
+    // A real core whose clock is `aheadMs` from this client's, read through
+    // its own HTTP handler at every instant around the close. Whatever the
+    // offset inside the skew, and whenever the read is made, nothing is
+    // recorded against it.
+    const offsets = [-SKEW, -SKEW / 2n, 0n, SKEW / 2n, SKEW];
+    const instants: bigint[] = [];
+    for (let at = FIN - SKEW - 250n; at <= FIN + SKEW + 250n; at += 50n)
+      instants.push(at);
+    instants.push(FIN - SKEW - 1n, FIN - 1n, FIN + SKEW - 1n, FIN + SKEW);
+    instants.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+
+    let boundaryAnswer: Uint8Array | null = null;
+    for (const aheadMs of offsets) {
+      const { core, clock, handler } = await buildServed(aheadMs);
+      let lastCheckpoint: Uint8Array | null = null;
+      const throughHandler: typeof fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const response = await handler(new Request(String(input), init));
+        if (
+          new URL(String(input)).pathname.startsWith(
+            `${PROTOTYPE_STORE_ROUTES.checkpoint}/`,
+          )
+        )
+          lastCheckpoint = new Uint8Array(await response.clone().arrayBuffer());
+        return response;
+      }) as typeof fetch;
+      clock.now = instants[0];
+      const client = await PrototypeStoreClient.connect({
+        origin: ORIGIN,
+        profile,
+        profileHash: PROFILE_HASH,
+        module: cryptoModule,
+        fetch: throughHandler,
+        nowMs: () => clock.now,
+      });
+      for (const at of instants) {
+        clock.now = at;
+        // The finalizer runs as soon as the store's own clock allows.
+        await core.finalizeDue();
+        const scan = await client.scanWindow(W);
+        // The store's clock decides the answer; this client accepts either.
+        expect([String(at), String(aheadMs), scan.status]).toEqual([
+          String(at),
+          String(aheadMs),
+          at + aheadMs < FIN ? "not-final" : "finalized",
+        ]);
+        if (aheadMs === -SKEW && at === FIN + SKEW - 1n)
+          boundaryAnswer = lastCheckpoint;
+      }
+      expect(client.faults).toEqual([]);
+      expect(client.inert).toBe(false);
+    }
+
+    // The boundary itself. The last `not-final` an honest store the full
+    // skew behind can sign is for a request sent at the close plus the skew
+    // less one millisecond; it was accepted above. The same signed answer
+    // for a request sent one millisecond later is one no store within the
+    // skew could give.
+    if (boundaryAnswer === null) throw new Error("no boundary answer");
+    const decoded = decodePublicStoreCheckpointReadV1(boundaryAnswer);
+    expect(decoded.kind === "status" ? decoded.value.status : null).toBe(
+      "not-final",
+    );
+    const document = (await served()).core.descriptorDocument();
+    const accepted = await scanAt(
+      document,
+      "checkpoint",
+      boundaryAnswer,
+      FIN + SKEW - 1n,
+    );
+    expect([accepted.scan.status, accepted.kinds]).toEqual(["not-final", []]);
+    const refused = await scanAt(
+      document,
+      "checkpoint",
+      boundaryAnswer,
+      FIN + SKEW,
+    );
+    expect([refused.scan.status, refused.kinds, refused.client.inert]).toEqual([
+      "clock-disagreement",
+      ["store-clock-disagreement"],
+      false,
+    ]);
+  });
+
+  test("an honest store inside the allowed skew is never reported at the retention edge", async () => {
+    // The same sweep at the other boundary a clock decides: the instant W
+    // leaves the store's retention. Before it the store serves W, after it
+    // the store honestly refuses, and this client records nothing either way.
+    const edge = startOf(W + R + 1n);
+    for (const aheadMs of [-SKEW, -SKEW / 2n, 0n, SKEW / 2n, SKEW]) {
+      const { core, clock, handler } = await buildServed(aheadMs);
+      // Finalized once the store's own clock is past the close.
+      clock.now = FIN + SKEW;
+      expect(await core.finalizeDue()).toEqual([W]);
+      const throughHandler: typeof fetch = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => handler(new Request(String(input), init))) as typeof fetch;
+      clock.now = edge - SKEW - 250n;
+      const client = await PrototypeStoreClient.connect({
+        origin: ORIGIN,
+        profile,
+        profileHash: PROFILE_HASH,
+        module: cryptoModule,
+        fetch: throughHandler,
+        nowMs: () => clock.now,
+      });
+      const instants: bigint[] = [];
+      for (let at = edge - SKEW - 250n; at <= edge + SKEW + 250n; at += 50n)
+        instants.push(at);
+      instants.push(edge - SKEW - 1n, edge - 1n, edge + SKEW - 1n, edge + SKEW);
+      for (const at of instants) {
+        clock.now = at;
+        const scan = await client.scanWindow(W);
+        expect([String(at), String(aheadMs), scan.status]).toEqual([
+          String(at),
+          String(aheadMs),
+          at + aheadMs < edge ? "finalized" : "beyond-retention",
+        ]);
+      }
+      expect(client.faults).toEqual([]);
+      expect(client.inert).toBe(false);
+    }
+  });
+
+  test("a not-final is never accepted at a read the carrier runtime makes", async () => {
+    // The profile puts the read of W after W's finalization instant plus the
+    // skew, so at the scheduled read and every catch-up read after it a
+    // `not-final` is a disagreement or a breach, whatever window it states.
+    expect(F + SKEW < L + READ_OFFSET).toBe(true);
+    const document = await wideDocument();
+    const hash = await descriptorHash(document.descriptor);
+    for (const route of ["checkpoint", "chunk"] as const)
+      for (const readMs of [
+        SCHEDULED_READ,
+        startOf(W + 10n) + READ_OFFSET,
+        startOf(W + 60n) + READ_OFFSET,
+      ])
+        for (const storeWindow of [
+          W - 1_000n,
+          W - 1n,
+          W,
+          W + 1n,
+          readMs / L,
+          readMs / L + 1n,
+        ]) {
+          const { scan, kinds, client } = await scanAt(
+            document,
+            route,
+            await signedStatus(route, "not-final", storeWindow, hash),
+            readMs,
+          );
+          expect(scan.status).not.toBe("not-final");
+          expect(kinds).toEqual([
+            storeWindow > W
+              ? "finalization-breach"
+              : "store-clock-disagreement",
+          ]);
+          expect(client.inert).toBe(storeWindow > W);
+        }
+  });
+
+  test("out-of-range inside the named descriptor's retention is a breach whatever window the store states", async () => {
+    const runs = [
+      {
+        // The descriptor ran out at the start of W + 10; the client pinned
+        // it while it was valid, and its clock now reads W + 12, as does the
+        // store's signed window.
+        name: "stated past notAfter",
+        notAfter: startOf(W + 10n),
+        storeWindow: W + 12n,
+        readMs: startOf(W + 12n) + READ_OFFSET,
+      },
+      {
+        // Validity ends in the middle of W + 5, the window the store states;
+        // this client's clock is in that window and still inside validity.
+        name: "validity ending mid-window, the client's clock still inside",
+        notAfter: startOf(W + 5n) + 2_000n,
+        storeWindow: W + 5n,
+        readMs: startOf(W + 5n) + READ_OFFSET,
+      },
+      {
+        // And before validity begins, by the same rule.
+        name: "stated before notBefore",
+        notBefore: startOf(W + 3n),
+        notAfter: startOf(W + 50_000n),
+        storeWindow: W + 1n,
+        readMs: startOf(W + 3n) + READ_OFFSET,
+      },
+    ];
+    for (const run of runs)
+      for (const route of ["checkpoint", "chunk"] as const) {
+        const document = await documentValid(
+          run.notBefore ?? startOf(W - 5_000n),
+          run.notAfter,
+        );
+        const refusal = await signedStatus(
+          route,
+          "out-of-range",
+          run.storeWindow,
+          await descriptorHash(document.descriptor),
+        );
+        // W is inside the retention of the descriptor the refusal names.
+        expect(run.storeWindow - W <= R).toBe(true);
+        const { client, scan, kinds } = await scanAt(
+          document,
+          route,
+          refusal,
+          run.readMs,
+        );
+        expect([run.name, route, scan.status, kinds, client.inert]).toEqual([
+          run.name,
+          route,
+          "unreachable",
+          ["retention-breach"],
+          true,
+        ]);
+        const breach = client.faults[0];
+        expect(breach.window).toBe(W);
+        expect((breach.evidence ?? []).map(hex)).toEqual([hex(refusal)]);
+        // From the kept record alone, with no clock.
+        expect(await provedBy(breach)).toBe("retention-breach");
+      }
+  });
+
+  test("a status stated outside the descriptor's validity that proves nothing is reported, not accepted", async () => {
+    const pastRetention = W + R + 1n;
+    const runs = [
+      {
+        // By the store's own words W has expired, which would be believed,
+        // but the window it states is one the descriptor ends inside.
+        name: "out-of-range stated in the window validity ends in",
+        status: "out-of-range",
+        notAfter: startOf(pastRetention) + 2_000n,
+        storeWindow: pastRetention,
+        readMs: startOf(pastRetention) + READ_OFFSET,
+      },
+      {
+        // Stated in the first window wholly past notAfter, by a store whose
+        // clock is just ahead of this client's, which is still inside.
+        name: "out-of-range stated in the window after validity ends",
+        status: "out-of-range",
+        notAfter: startOf(pastRetention),
+        storeWindow: pastRetention,
+        readMs: startOf(pastRetention) - SKEW / 2n,
+      },
+      {
+        name: "not-final stated in the window validity ends in",
+        status: "not-final",
+        notAfter: FIN + 100n,
+        storeWindow: W,
+        readMs: FIN - 1n,
+      },
+      {
+        name: "not-final stated in the window validity begins in",
+        status: "not-final",
+        notBefore: startOf(W) + 1_000n,
+        notAfter: startOf(W + 50_000n),
+        storeWindow: W,
+        readMs: FIN - 1n,
+      },
+    ];
+    for (const run of runs)
+      for (const route of ["checkpoint", "chunk"] as const) {
+        const document = await documentValid(
+          run.notBefore ?? startOf(W - 5_000n),
+          run.notAfter,
+        );
+        // This client's own clock is inside validity for the whole read.
+        expect(
+          document.descriptor.notBeforeUnixMs <= run.readMs &&
+            run.readMs < document.descriptor.notAfterUnixMs,
+        ).toBe(true);
+        const refusal = await signedStatus(
+          route,
+          run.status,
+          run.storeWindow,
+          await descriptorHash(document.descriptor),
+        );
+        const { client, scan, kinds } = await scanAt(
+          document,
+          route,
+          refusal,
+          run.readMs,
+        );
+        expect([run.name, route, scan.status, kinds, client.inert]).toEqual([
+          run.name,
+          route,
+          "descriptor-out-of-validity",
+          ["descriptor-out-of-validity"],
+          false,
+        ]);
+        expect(client.faults[0].window).toBe(W);
+        expect(client.faults[0].evidence).toBeUndefined();
+        // It proves nothing to a third party either.
+        expect(
+          await signedStatusProvesFault(
+            document.descriptor,
+            profile,
+            [refusal],
+            cryptoModule,
+          ),
+        ).toBeNull();
+
+        // The same answer under a descriptor that covers the stated window
+        // is the benign one, so the report above is the validity's doing.
+        const covering = await wideDocument();
+        const benign = await scanAt(
+          covering,
+          route,
+          await signedStatus(
+            route,
+            run.status,
+            run.storeWindow,
+            await descriptorHash(covering.descriptor),
+          ),
+          run.readMs,
+        );
+        expect([benign.scan.status, benign.kinds]).toEqual([
+          run.status === "out-of-range" ? "beyond-retention" : "not-final",
+          [],
+        ]);
+      }
+  });
+
+  test("a read after the pinned descriptor expires on the client's clock is reported, not served", async () => {
+    const notAfter = startOf(W + 20n) + 1_234n;
+    const document = await documentValid(startOf(W - 5_000n), notAfter);
+    const hash = await descriptorHash(document.descriptor);
+
+    // A window the store serves whole. One millisecond before the
+    // descriptor's end it is read; from the end on it is not.
+    const before = await scanAt(document, null, null, notAfter - 1n);
+    expect(before.scan.status).toBe("finalized");
+    expect(before.scan.objects.length).toBe(OBJECTS_PER_WINDOW);
+    expect(before.kinds).toEqual([]);
+    for (const readMs of [notAfter, notAfter + 40n * L]) {
+      const { client, scan, kinds } = await scanAt(
+        document,
+        null,
+        null,
+        readMs,
+      );
+      expect(scan.status).toBe("descriptor-out-of-validity");
+      expect(scan.objects).toEqual([]);
+      expect(scan.checkpointHash).toBeNull();
+      expect(kinds).toEqual(["descriptor-out-of-validity"]);
+      expect(client.faults[0].window).toBe(W);
+      expect(client.inert).toBe(false);
+    }
+    // The answers arriving after the end count as the read being outside.
+    const straddling = await scanAt(document, null, null, notAfter - 1n, 1n);
+    expect([straddling.scan.status, straddling.kinds]).toEqual([
+      "descriptor-out-of-validity",
+      ["descriptor-out-of-validity"],
+    ]);
+
+    // A refusal that would otherwise be believed is not believed either: an
+    // honest expiry (W + R + 1, past the retention), stated within the skew
+    // of this client's clock, under a descriptor whose end that clock has
+    // passed. In the last two runs the stated window lies wholly inside the
+    // validity, so it is this client's own clock alone that decides.
+    const past = W + R + 1n;
+    const lapses = [
+      {
+        name: "the end inside the stated window, read after it",
+        notAfter: startOf(past) + READ_OFFSET - 10n,
+        readMs: startOf(past) + READ_OFFSET,
+        answeredAfterMs: 0n,
+      },
+      {
+        name: "the end at the stated window's own end, read just after it",
+        notAfter: startOf(past + 1n),
+        readMs: startOf(past + 1n) + SKEW / 2n,
+        answeredAfterMs: 0n,
+      },
+      {
+        name: "sent before the end, answered at it",
+        notAfter: startOf(past + 1n),
+        readMs: startOf(past + 1n) - 1n,
+        answeredAfterMs: 1n,
+      },
+    ];
+    for (const lapse of lapses)
+      for (const route of ["checkpoint", "chunk"] as const) {
+        const short = await documentValid(startOf(W - 5_000n), lapse.notAfter);
+        const { client, scan, kinds } = await scanAt(
+          short,
+          route,
+          await signedStatus(
+            route,
+            "out-of-range",
+            past,
+            await descriptorHash(short.descriptor),
+          ),
+          lapse.readMs,
+          lapse.answeredAfterMs,
+        );
+        expect([lapse.name, route, scan.status, kinds, client.inert]).toEqual([
+          lapse.name,
+          route,
+          "descriptor-out-of-validity",
+          ["descriptor-out-of-validity"],
+          false,
+        ]);
+      }
+    // The same expiry read and answered one millisecond inside the end is
+    // believed, so each report above is the lapse's doing.
+    for (const route of ["checkpoint", "chunk"] as const) {
+      const whole = await documentValid(
+        startOf(W - 5_000n),
+        startOf(past + 1n),
+      );
+      const believed = await scanAt(
+        whole,
+        route,
+        await signedStatus(
+          route,
+          "out-of-range",
+          past,
+          await descriptorHash(whole.descriptor),
+        ),
+        startOf(past + 1n) - 1n,
+      );
+      expect([route, believed.scan.status, believed.kinds]).toEqual([
+        route,
+        "beyond-retention",
+        [],
+      ]);
+    }
+
+    // What the store signs is evidence whenever it is read: a refusal that
+    // contradicts the store's own words is blamed after the end too.
+    const breach = await scanAt(
+      document,
+      "checkpoint",
+      await signedStatus("checkpoint", "out-of-range", W + 30n, hash),
+      startOf(W + 30n) + READ_OFFSET,
+    );
+    expect([breach.scan.status, breach.kinds, breach.client.inert]).toEqual([
+      "unreachable",
+      ["retention-breach"],
+      true,
+    ]);
+  });
+
+  test("receipts for a window read after the descriptor's end are reported unchecked, not held", async () => {
+    const { core, clock: storeClock, handler } = await buildServed();
+    const base = core.descriptorDocument();
+    // The store's own descriptor: the client's clock passes its end.
+    const notAfter = base.descriptor.notAfterUnixMs;
+    const clock: Clock = { now: startOf(W) };
+    const refusal = async (): Promise<Uint8Array> =>
+      signedStatus(
+        "checkpoint",
+        "out-of-range",
+        notAfter / L + 1n,
+        core.descriptorHash,
+      );
+    let refuse = false;
+    const client = await PrototypeStoreClient.connect({
+      origin: ORIGIN,
+      profile,
+      profileHash: PROFILE_HASH,
+      module: cryptoModule,
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        storeClock.now = clock.now;
+        const path = new URL(String(input)).pathname;
+        if (refuse && path.startsWith(`${PROTOTYPE_STORE_ROUTES.checkpoint}/`))
+          return new Response(asBody(await refusal()), {
+            status: 200,
+            headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+          });
+        return handler(new Request(String(input), init));
+      }) as typeof fetch,
+      nowMs: () => clock.now,
+    });
+    await appendObject(client, W, 0x77);
+    // Long after: W is past the store's retention, and the descriptor ended.
+    refuse = true;
+    clock.now = startOf(notAfter / L + 1n) + READ_OFFSET;
+    expect(clock.now >= notAfter).toBe(true);
+    expect((await client.scanWindow(W)).status).toBe(
+      "descriptor-out-of-validity",
+    );
+    expect(client.faults.map((fault) => fault.kind)).toEqual([
+      "descriptor-out-of-validity",
+      "custody-unchecked",
+    ]);
+    expect(client.inert).toBe(false);
+  });
+
+  // One test for each route, so neither hides the other.
+  for (const route of ["checkpoint", "chunk"] as const)
+    test(`a status naming another descriptor is refused (${route} status)`, async () => {
+      const pinned = await wideDocument();
+      // A second authentic descriptor of the same store: another generation,
+      // with a longer retention.
+      const other = await documentValid(
+        startOf(W - 5_000n),
+        startOf(W + 50_000n),
+        Number(R) + 40,
+      );
+      const otherHash = await descriptorHash(other.descriptor);
+      expect(hex(otherHash)).not.toBe(
+        hex(await descriptorHash(pinned.descriptor)),
+      );
+
+      const runs = [
+        {
+          // Judged under the pinned descriptor this would be the store
+          // refusing a window inside its retention: blame, and wrongly, for
+          // a statement made under a descriptor this client does not hold.
+          name: "out-of-range one window on",
+          status: "out-of-range",
+          storeWindow: W + 1n,
+          readMs: SCHEDULED_READ,
+        },
+        {
+          // Judged under the pinned descriptor this would be believed as
+          // expiry, with nothing recorded.
+          name: "out-of-range past the pinned retention",
+          status: "out-of-range",
+          storeWindow: W + R + 1n,
+          readMs: startOf(W + R + 1n) + READ_OFFSET,
+        },
+        {
+          // And this would be believed as a window not yet final.
+          name: "not-final before the close",
+          status: "not-final",
+          storeWindow: W,
+          readMs: FIN - 1n,
+        },
+        {
+          // A denial is blame under the pinned descriptor too.
+          name: "a denial",
+          status:
+            route === "checkpoint" ? "chain-unavailable" : "no-such-chunk",
+          storeWindow: W + 1n,
+          readMs: SCHEDULED_READ,
+        },
+      ];
+      for (const run of runs) {
+        const answer = await signedStatus(
+          route,
+          run.status,
+          run.storeWindow,
+          otherHash,
+        );
+        const { client, scan, kinds } = await scanAt(
+          pinned,
+          route,
+          answer,
+          run.readMs,
+        );
+        expect([run.name, scan.status, kinds, client.inert]).toEqual([
+          run.name,
+          "unreachable",
+          ["signature-invalid"],
+          false,
+        ]);
+        expect(client.faults[0].detail).toContain(
+          "names a descriptor other than the one this client pinned",
+        );
+        expect(client.faults[0].evidence).toBeUndefined();
+        // Nor is it evidence under the pinned descriptor for anyone else,
+        // alone or beside the window's checkpoint.
+        for (const evidence of [
+          [answer],
+          [(await served()).checkpoint, answer],
+        ])
+          expect(
+            await signedStatusProvesFault(
+              pinned.descriptor,
+              profile,
+              evidence,
+              cryptoModule,
+            ),
+          ).toBeNull();
+      }
+    });
+
+  test("a status with no benign meaning has no benign outcome, whatever is passed to the decision", async () => {
+    // What the client never passes, the function still decides: a profile
+    // the descriptor declares no chain for, a chunk the profile does not
+    // define, a denial with no checkpoint beside it. None of them is ever
+    // one of the two benign outcomes.
+    const { descriptor } = await wideDocument();
+    const undeclared = new Uint8Array(32).fill(0x11);
+    const span = { sentMs: FIN - 1n, receivedMs: FIN - 1n };
+    const windows = { window: W, storeWindow: W };
+    const outcomeOf = (
+      statement: Parameters<typeof judgeSignedRefusal>[0],
+      checkpointCommitsWindow: boolean,
+    ): string =>
+      judgeSignedRefusal(
+        statement,
+        descriptor,
+        profile,
+        span,
+        checkpointCommitsWindow,
+      ).outcome;
+
+    // The declared profile at this instant: the two benign answers, and the
+    // two denials as breaches.
+    expect(
+      (["not-final", "out-of-range", "chain-unavailable"] as const).map(
+        (status) =>
+          outcomeOf(
+            {
+              route: "checkpoint",
+              status,
+              deliveryProfileHash: PROFILE_HASH,
+              window: W,
+              storeWindow: status === "out-of-range" ? W + R + 1n : W,
+            },
+            false,
+          ),
+      ),
+    ).toEqual(["not-final", "store-clock-disagreement", "chain-denial-breach"]);
+
+    for (const status of [
+      "not-final",
+      "out-of-range",
+      "chain-unavailable",
+    ] as const)
+      expect([
+        status,
+        outcomeOf(
+          {
+            route: "checkpoint",
+            status,
+            deliveryProfileHash: undeclared,
+            ...windows,
+          },
+          false,
+        ),
+      ]).toEqual([status, "no-benign-meaning"]);
+    for (const status of [
+      "not-final",
+      "out-of-range",
+      "no-such-chunk",
+    ] as const)
+      for (const checkpointCommitsWindow of [false, true])
+        expect([
+          status,
+          outcomeOf(
+            {
+              route: "chunk",
+              status,
+              deliveryProfileHash: undeclared,
+              ...windows,
+              sizeClass: 0,
+              chunkIndex: 0n,
+            },
+            checkpointCommitsWindow,
+          ),
+        ]).toEqual([status, "no-benign-meaning"]);
+
+    // A `no-such-chunk` is a breach only for a chunk the profile defines
+    // beside a checkpoint; otherwise it is the truth or unproven, and in
+    // neither case an answer to a read: never benign.
+    const denial = (chunkIndex: bigint, sizeClass = 0) =>
+      ({
+        route: "chunk",
+        status: "no-such-chunk",
+        deliveryProfileHash: PROFILE_HASH,
+        ...windows,
+        sizeClass,
+        chunkIndex,
+      }) as const;
+    expect([
+      outcomeOf(denial(0n), true),
+      outcomeOf(denial(0n), false),
+      outcomeOf(denial(CLASS_0_CHUNKS), true),
+      outcomeOf(denial(0n, 250), true),
+    ]).toEqual([
+      "chunk-denial-breach",
+      "no-benign-meaning",
+      "no-benign-meaning",
+      "no-benign-meaning",
+    ]);
+  });
+
+  test("the verifier refuses evidence when given another profile", async () => {
+    const document = await wideDocument();
+    const hash = await descriptorHash(document.descriptor);
+    // The same geometry at another window length, and the same window length
+    // with another finalization instant: two profiles that are not the one
+    // the signed answers name by hash.
+    const others = [
+      withDeliveryWindowMs(profile, 8_000n),
+      {
+        ...profile,
+        chunkFinalizationOffsetMs: profile.chunkFinalizationOffsetMs + 1n,
+      },
+    ];
+    for (const other of others)
+      expect(hex(await deliveryProfileHash(other))).not.toBe(PROFILE_HEX);
+
+    const cases: [Route, string, bigint, StoreEvidenceFaultKind][] = [
+      ["checkpoint", "out-of-range", W + 1n, "retention-breach"],
+      ["chunk", "out-of-range", W + 1n, "retention-breach"],
+      ["checkpoint", "not-final", W + 1n, "finalization-breach"],
+      ["chunk", "not-final", W + 1n, "finalization-breach"],
+      ["checkpoint", "chain-unavailable", W + 1n, "chain-denial-breach"],
+      ["chunk", "no-such-chunk", W + 1n, "chunk-denial-breach"],
+    ];
+    for (const [route, status, storeWindow, kind] of cases) {
+      const { client, kinds } = await scanAt(
+        document,
+        route,
+        await signedStatus(route, status, storeWindow, hash),
+        SCHEDULED_READ,
+      );
+      expect(kinds).toEqual([kind]);
+      const fault = client.faults[0];
+      // The record holds no profile; the signed answers name it by hash.
+      expect(Object.keys(fault).sort()).toEqual([
+        "descriptor",
+        "detail",
+        "evidence",
+        "kind",
+        "storeIdHex",
+        "window",
+      ]);
+      expect(await provedBy(fault)).toBe(kind);
+      for (const other of others)
+        expect(await provedBy(fault, other)).toBeNull();
+    }
+  });
+
+  test("no stated values end in a benign outcome outside the table", async () => {
+    const { core, clock: storeClock, checkpoint } = await served();
+
+    const STATED: [string, bigint][] = [
+      ["far before W", W - 1_000n],
+      ["W - 1", W - 1n],
+      ["W", W],
+      ["W + 1", W + 1n],
+      ["inside retention", W + R],
+      ["just outside retention", W + R + 1n],
+      ["far ahead", W + R + 1_000n],
+    ];
+    const READS: [string, bigint][] = [
+      ["before the close", FIN - 1n],
+      [
+        "the last instant a store within the skew reads before the close",
+        FIN + SKEW - 1n,
+      ],
+      ["the first instant none does", FIN + SKEW],
+      ["the scheduled read", SCHEDULED_READ],
+      ["a catch-up shortly after", startOf(W + 10n) + READ_OFFSET],
+      ["a catch-up long after", startOf(W + 60n) + READ_OFFSET],
+      [
+        "the last instant no store within the skew is past retention",
+        startOf(W + R + 1n) - SKEW - 1n,
+      ],
+      ["the first instant one is", startOf(W + R + 1n) - SKEW],
+      ["after the window left retention", startOf(W + R + 1n) + READ_OFFSET],
+      [
+        "just past a window's end, where a store within the skew still states it",
+        startOf(W + R + 2n) + SKEW - 1n,
+      ],
+    ];
+    const VALIDITY = [
+      "inside",
+      "straddling notBefore",
+      "straddling notAfter",
+      "expired",
+    ] as const;
+    const STATUSES: { route: Route; status: string; listed: boolean }[] = [
+      { route: "checkpoint", status: "not-final", listed: true },
+      { route: "checkpoint", status: "out-of-range", listed: true },
+      { route: "checkpoint", status: "chain-unavailable", listed: true },
+      { route: "chunk", status: "not-final", listed: true },
+      { route: "chunk", status: "out-of-range", listed: true },
+      { route: "chunk", status: "no-such-chunk", listed: true },
+      // An answer naming a chunk the checkpoint does not list (an index one
+      // past the class's count), in place of the chunk that was asked for.
+      { route: "chunk", status: "not-final", listed: false },
+      { route: "chunk", status: "out-of-range", listed: false },
+      { route: "chunk", status: "no-such-chunk", listed: false },
+    ];
+
+    /** The validity each configuration gives, around one stated window and read. */
+    const validityFor = (
+      kind: (typeof VALIDITY)[number],
+      stated: bigint,
+      readMs: bigint,
+    ): { notBefore: bigint; notAfter: bigint } => {
+      const first = stated * L < readMs ? stated * L : readMs;
+      const last = (stated + 1n) * L > readMs ? (stated + 1n) * L : readMs + 1n;
+      if (kind === "inside")
+        return { notBefore: first - L, notAfter: last + L };
+      if (kind === "straddling notBefore")
+        return { notBefore: stated * L + L / 2n, notAfter: last + L };
+      if (kind === "straddling notAfter")
+        return { notBefore: first - L, notAfter: stated * L + L / 2n };
+      // Half-open: at `notAfter` itself the descriptor is no longer valid.
+      return { notBefore: first - L, notAfter: readMs };
+    };
+
+    /**
+     * The table, from the profile's numbers and the descriptor's alone: the
+     * step that ends the cell and the outcome's name. W is the chain start,
+     * so every window asked for is at or after it.
+     */
+    const tabled = (cell: {
+      route: Route;
+      status: string;
+      listed: boolean;
+      stated: bigint;
+      readMs: bigint;
+      notBefore: bigint;
+      notAfter: bigint;
+    }): { step: number; scan: string; kinds: string[]; inert: boolean } => {
+      const { status, stated, readMs, notBefore, notAfter } = cell;
+      const blame = (kind: string) => ({
+        step: 3,
+        scan: "unreachable",
+        kinds: [kind],
+        inert: true,
+      });
+      const report = (step: number, kind: string, scan: string) => ({
+        step,
+        scan,
+        kinds: [kind],
+        inert: false,
+      });
+      // 1. Not the chunk that was asked for.
+      if (!cell.listed) return report(1, "signature-invalid", "unreachable");
+      // 3. The store's own statements.
+      if (status === "chain-unavailable") return blame("chain-denial-breach");
+      if (status === "no-such-chunk") return blame("chunk-denial-breach");
+      if (status === "out-of-range" && (W > stated || stated - W <= R))
+        return blame("retention-breach");
+      if (status === "not-final" && stated * L >= W * L + F)
+        return blame("finalization-breach");
+      // 4. No instant within the skew of the read lies in the stated window.
+      if ((stated + 1n) * L <= readMs - SKEW || stated * L > readMs + SKEW)
+        return report(4, "store-clock-disagreement", "clock-disagreement");
+      // 5. The descriptor does not cover the stated window and the read.
+      if (
+        notBefore > stated * L ||
+        (stated + 1n) * L > notAfter ||
+        readMs < notBefore ||
+        readMs >= notAfter
+      )
+        return report(
+          5,
+          "descriptor-out-of-validity",
+          "descriptor-out-of-validity",
+        );
+      // 6. Sent when no store within the skew still reads before the close.
+      if (status === "not-final" && readMs >= W * L + F + SKEW)
+        return report(6, "store-clock-disagreement", "clock-disagreement");
+      // 7.
+      return {
+        step: 7,
+        scan: status === "out-of-range" ? "beyond-retention" : "not-final",
+        kinds: [],
+        inert: false,
+      };
+    };
+
+    /**
+     * Every answer the real core signs for this read at a clock reading
+     * within the skew of `readMs`, as `status@storeWindow@reading`.
+     */
+    const honest = new Map<
+      string,
+      { status: string; stated: bigint; atMs: bigint }[]
+    >();
+    for (const [, readMs] of READS)
+      for (const route of ["checkpoint", "chunk"] as const) {
+        const answers: { status: string; stated: bigint; atMs: bigint }[] = [];
+        for (let atMs = readMs - SKEW; atMs <= readMs + SKEW; atMs++) {
+          storeClock.now = atMs;
+          const read = await (route === "checkpoint"
+            ? core.readCheckpoint(PROFILE_HASH, W)
+            : core.readChunk(
+                {
+                  deliveryProfileHash: PROFILE_HASH,
+                  ingressWindow: W,
+                  sizeClass: 0,
+                },
+                0n,
+              ));
+          if (read.kind === "status")
+            answers.push({
+              status: read.value.status,
+              stated: read.value.storeIngressWindow,
+              atMs,
+            });
+        }
+        honest.set(`${route}@${String(readMs)}`, answers);
+      }
+    storeClock.now = FIN;
+
+    const documents = new Map<string, DescriptorDocument>();
+    const endedAt = new Map<number, number>();
+    const benign = new Map<string, number>();
+    const seenKinds = new Set<string>();
+    const wrong: string[] = [];
+    let cells = 0;
+    for (const { route, status, listed } of STATUSES)
+      for (const [statedName, stated] of STATED)
+        for (const [readName, readMs] of READS)
+          for (const validity of VALIDITY) {
+            cells += 1;
+            const { notBefore, notAfter } = validityFor(
+              validity,
+              stated,
+              readMs,
+            );
+            const key = `${String(notBefore)}:${String(notAfter)}`;
+            const document =
+              documents.get(key) ?? (await documentValid(notBefore, notAfter));
+            documents.set(key, document);
+            const answer = await signedStatus(
+              route,
+              status,
+              stated,
+              await descriptorHash(document.descriptor),
+              listed
+                ? { sizeClass: 0, chunkIndex: 0n }
+                : { sizeClass: 0, chunkIndex: CLASS_0_CHUNKS },
+            );
+            const { client, scan, kinds } = await scanAt(
+              document,
+              route,
+              answer,
+              readMs,
+            );
+            const expected = tabled({
+              route,
+              status,
+              listed,
+              stated,
+              readMs,
+              notBefore,
+              notAfter,
+            });
+            const name = `${route} ${status}${listed ? "" : " (unlisted chunk)"} | stated ${statedName} | read at ${readName} | validity ${validity}`;
+            const got = `${scan.status} [${kinds.join(",")}] inert=${String(client.inert)}`;
+            const want = `${expected.scan} [${expected.kinds.join(",")}] inert=${String(expected.inert)}`;
+            if (got !== want) wrong.push(`${name}: got ${got}, want ${want}`);
+            endedAt.set(expected.step, (endedAt.get(expected.step) ?? 0) + 1);
+            for (const kind of kinds) seenKinds.add(kind);
+
+            // Blame is provable from the kept record alone, and nothing
+            // else is evidence.
+            const proved =
+              client.faults.length === 1
+                ? await provedBy(client.faults[0])
+                : null;
+            if (proved !== (expected.step === 3 ? expected.kinds[0] : null))
+              wrong.push(`${name}: the verifier said ${String(proved)}`);
+            // Where the client did not blame, the answer itself (beside
+            // W's checkpoint, for a chunk) proves nothing to anyone either.
+            if (expected.step !== 3) {
+              const direct = await signedStatusProvesFault(
+                document.descriptor,
+                profile,
+                route === "chunk" ? [checkpoint, answer] : [answer],
+                cryptoModule,
+              );
+              if (direct !== null)
+                wrong.push(`${name}: unblamed, yet it proves ${direct}`);
+            }
+
+            // An honest store whose clock is within the skew of this
+            // client's, under a descriptor valid at that reading.
+            const producible =
+              listed &&
+              (honest.get(`${route}@${String(readMs)}`) ?? []).some(
+                (candidate) =>
+                  candidate.status === status &&
+                  candidate.stated === stated &&
+                  notBefore <= candidate.atMs &&
+                  candidate.atMs < notAfter,
+              );
+            const isBenign =
+              scan.status === "beyond-retention" || scan.status === "not-final";
+            if (isBenign)
+              benign.set(scan.status, (benign.get(scan.status) ?? 0) + 1);
+            // The only benign cells are ones such a store can produce.
+            if (isBenign && (!producible || kinds.length > 0 || client.inert))
+              wrong.push(
+                `${name}: benign, and no honest store within the skew signs it`,
+              );
+            // And with the descriptor valid throughout, every answer such a
+            // store can produce is benign: it is never reported.
+            if (validity === "inside" && producible && !isBenign)
+              wrong.push(
+                `${name}: an honest store within the skew signs it, got ${got}`,
+              );
+          }
+
+    expect(wrong).toEqual([]);
+    expect(cells).toBe(
+      STATUSES.length * STATED.length * READS.length * VALIDITY.length,
+    );
+    // Not vacuous: every step ends some cell, both benign outcomes occur,
+    // and every outcome the table names was seen.
+    expect([...endedAt.keys()].sort()).toEqual([1, 3, 4, 5, 6, 7]);
+    expect((benign.get("not-final") ?? 0) > 0).toBe(true);
+    expect((benign.get("beyond-retention") ?? 0) > 0).toBe(true);
+    expect([...seenKinds].sort()).toEqual([
+      "chain-denial-breach",
+      "chunk-denial-breach",
+      "descriptor-out-of-validity",
+      "finalization-breach",
+      "retention-breach",
+      "signature-invalid",
+      "store-clock-disagreement",
+    ]);
+  }, 120_000);
 });

@@ -497,6 +497,42 @@ describe("scheduled receipts and cancellation", () => {
     releaseScheduledReceipts(epc);
   });
 
+  test("a receipt put back after a discard counts against the flood bound", async () => {
+    const fake = fakeRuntime(64);
+    const epc = fakeEpc(fake.runtime);
+    const root = new Uint8Array(64).fill(1);
+    const tokenFor = (index: number): Uint8Array => {
+      const token = new Uint8Array(64);
+      new DataView(token.buffer).setUint32(0, index);
+      return token;
+    };
+    // The queue at its bound: 4,096 tokens, 64 batches of 64.
+    for (let i = 0; i < 4096; i++)
+      queueScheduledChunkReceipt(epc, root, tokenFor(i));
+    const job = fake.enqueued[0];
+    // Its first batch is sealed a slot ahead, then discarded by a rekey: it
+    // is back in the queue, and counts again.
+    await job.nextCell(fakeSlot());
+    job.cellDiscarded?.();
+    const sealedBefore = fake.sealed.length;
+    // One more token: the oldest batch goes, as at the bound before.
+    queueScheduledChunkReceipt(epc, new Uint8Array(64).fill(2), tokenFor(9999));
+
+    let tokens = 0;
+    for (let index = 0; index < fake.enqueued.length; index++) {
+      const drain = fake.enqueued[index];
+      for (let cell = 0; cell < drain.declaredCellCount; cell++) {
+        if ((await drain.nextCell(fakeSlot())) === null) break;
+        drain.cellSent?.();
+      }
+      fake.settleCallbacks.get(drain.id)?.();
+    }
+    for (const content of fake.sealed.slice(sealedBefore))
+      if (content.subtype === "chunk-receipts") tokens += content.tokens.length;
+    expect(tokens).toBe(4096 - 64 + 1);
+    releaseScheduledReceipts(epc);
+  });
+
   test("immediate-mode edges reject scheduled receipts so the caller falls back", () => {
     const epc = fakeEpc(undefined);
     expect(

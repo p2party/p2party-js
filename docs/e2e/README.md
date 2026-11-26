@@ -615,7 +615,9 @@ kind of cell (also on a saved raw recording).
   last `idle` edges carry no job); `phases` (each edge's phase offset in ms:
   an edge with another phase is another room's grid on the page); `leaves`
   (cells per message, for the proof-level build); `cells` (cells per job);
-  `gap` (cycles between jobs); `pool` (messages staged per edge).
+  `gap` (cycles between jobs: jobs then go in every `gap + 1`-th cycle of the
+  grid on every busy edge, enqueued by a page timer that fires in the middle of
+  every cycle, job cycle or not); `pool` (messages staged per edge).
 - Driver flags added: `--use-mock-keychain` (a fresh profile otherwise waits
   on a macOS Keychain prompt before any http request), `--occluded-visible`
   (adds `--disable-backgrounding-occluded-windows`, for a host whose screen is
@@ -628,9 +630,14 @@ kind of cell (also on a saved raw recording).
   scheduler's reason; per kind the wake-up→send and slot→send distributions
   and their comparison with the dummies (median shift, Kolmogorov–Smirnov
   distance and its 5 % critical value, share above the dummies' 99th
-  percentile), pooled and at the same slot position; the cross-edge and
-  cross-grid comparisons; real cells' stage times. Every cell's offset of the
-  visible and hidden phases is in the matching `.offsets.tsv`.
+  percentile), pooled and at the same slot position (against the grid's idle
+  edge's dummies there); the cross-edge and cross-grid comparisons; cycles
+  with a job against cycles without, with cycles as the unit and a
+  permutation test (fixed seed), for the page and for each edge; real cells'
+  stage times. Every cell of the visible and hidden phases is in the matching
+  `.offsets.tsv`, one per line: phase, edge, kind, slot deadline, cycle, slot
+  position, offset (summaries written before the second review round have one
+  line per edge and kind instead, offsets only).
 - Offsets subtract the `Date.now()` slot deadline from
   `performance.timeOrigin + now()`; their absolute value includes the offset
   between the two clocks (`clockOffsetMs`), comparisons do not.
@@ -651,14 +658,17 @@ figures and what they show are in `docs/protocol-v4-pq-cover-architecture.md`
 - `results-2026-11-26-fallback-*.json`: the slot's dummy in place of a cell
   not ready; one grid at 100 and 500 ms, two grids at 25 and 100 ms with 5- and
   1,600-cell messages.
-- `results-2026-11-26-clearance-*.json`: with the production clearance; the
-  `-gap` runs leave a cycle between jobs, for comparisons at the same slot
-  position.
+- `results-2026-11-26-clearance-*.json`: with the production clearance (since
+  removed); the `-gap` runs leave a cycle between jobs, for comparisons at the
+  same slot position. Their gap timer enqueued the next job in the cycle
+  without a job, at about its eighth slot.
 - `results-2026-11-26-locked-{100,500}ms-slots-{shared-worker,worker-per-scheduler}.json`:
   `entry.ts` on the shared worker (`4f7c09a`) and on one worker per scheduler
   (`92d2c90`), under the same conditions.
 
-The runs before the fix round recorded no cell producer and no phases; their
+All of these were made on a working tree: their `code` names it, and no
+recorded hash equals a committed file's. The runs before the fix round
+recorded no cell producer and no phases; their
 summaries were recomputed from the raw recordings (`resummarised`). The
 fix-round runs without `-gap` used an earlier entry file, without the producer
 fingerprints and `gap` (and, but for `2of5cells`, without `cells`); there a

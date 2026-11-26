@@ -503,59 +503,348 @@ describe("a cover cell's send time does not show what it carries", () => {
     }
   });
 
-  test("a production does not start inside another grid's wake-up window", async () => {
-    // Two rooms on one page: grid B's slots fall 2 ms after grid A's, within
-    // the bound of a production's first synchronous work. A's production of
-    // its next cell, due right after its send at 150, waits until B's
-    // wake-up at 152 has run.
+  test("a wake-up that runs late within tolerance does not cost the next slot", async () => {
+    // Slots at 50, 150, 250 and 350 ms (tolerance 99 ms). The page is frozen
+    // from 149 to 245 ms: the 150 ms wake-up runs 95 ms late.
     const timeline = new CoverTimeline();
-    const log: string[] = [];
-    const a = makeRig(timeline, SCHEDULE, {
-      onSend: () => log.push(`${String(timeline.time)} A sends`),
-    });
-    const shifted = new Uint8Array(32);
-    shifted[7] = 2;
-    const b = makeRig(
-      timeline,
-      SCHEDULE,
-      { onSend: () => log.push(`${String(timeline.time)} B sends`) },
-      shifted,
-    );
-    const merkleRoot = merkleRootOf(0x4e);
-    const label = await compileChannelMessageLabel(
-      "party",
-      uint8ArrayToHex(merkleRoot),
-    );
-    a.runtime.enqueue(
-      buildScheduledSendJob({
-        runtime: a.runtime,
-        channelMessageLabel: label,
-        totalChunks: 2,
-        merkleRoot,
-        sealSlotCell: (chunkIndex) => {
-          log.push(`${String(timeline.time)} A produces`);
-          return new Uint8Array(WIRE_CHUNK_FRAME_LEN).fill(chunkIndex + 1);
-        },
-      }),
-    );
+    const rig = makeRig(timeline);
     try {
-      a.runtime.start();
-      b.runtime.start();
+      rig.runtime.start();
+      await timeline.advanceTo(149);
+      timeline.freezePage(96);
       await timeline.advanceTo(SCHEDULE.coverCadenceMs - 1);
 
-      const window = log.filter((line) => {
-        const at = Number(line.split(" ")[0]);
-        return at >= 150 && at < 200;
-      });
-      expect(window).toEqual(["150 A sends", "152 B sends", "152 A produces"]);
-      // Both still send every slot, on their own grids.
-      expect(a.allSent()).toHaveLength(4);
-      expect(b.allSent()).toHaveLength(4);
+      expect(
+        rig
+          .allSent()
+          .map(({ at }) => at)
+          .sort((a, b) => a - b),
+      ).toEqual([50, 245, 250, 350]);
+      expect(rig.statuses.map(([status]) => status)).toEqual([
+        "starting",
+        "active",
+      ]);
     } finally {
-      a.runtime.destroy();
-      b.runtime.destroy();
-      a.pq.destroy();
-      b.pq.destroy();
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a late cycle boundary does not silence the cycle", async () => {
+    // 25 ms slots: 2 lanes x 5 frames per 250 ms, a tolerance of 24 ms. The
+    // page is frozen from 499 to 507 ms: the boundary at 500 runs 7 ms late,
+    // 5 ms before the cycle's first slot.
+    const schedule = {
+      ...SCHEDULE,
+      coverCadenceMs: 250,
+      coverFramesPerCell: 5,
+    };
+    const timeline = new CoverTimeline();
+    const rig = makeRig(timeline, schedule);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(499);
+      timeline.freezePage(8);
+      await timeline.advanceTo(749);
+
+      const cycle = rig.allSent().filter(({ at }) => at >= 500 && at < 750);
+      expect(cycle).toHaveLength(10);
+      expect(rig.statuses.map(([status]) => status)).toEqual([
+        "starting",
+        "active",
+      ]);
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("the dummy a job's cell replaced is zeroed", async () => {
+    const clock = manualClock();
+    const dummies = new Map<number, Uint8Array>();
+    const scheduler = createCoverScheduler({
+      schedule: { ...SCHEDULE, phaseOffsetMs: 0 },
+      clock: clock.clock,
+      makeDummy: (slot) => {
+        const cell = new Uint8Array(8).fill(0xdd);
+        dummies.set(slot.deadlineMs, cell);
+        return cell;
+      },
+      laneFactory: () => ({ send: () => undefined, close: () => undefined }),
+    });
+    scheduler.enqueue({
+      id: "chunks",
+      kind: "real",
+      declaredCellCount: 2,
+      nextCell: () => new Uint8Array(8).fill(1),
+    });
+    scheduler.start();
+    await clock.advanceTo(SCHEDULE.coverCadenceMs - 1);
+    // The job's cells went at 50 and 250; the dummies sealed for those slots
+    // were never sent.
+    expect(dummies.get(50)!.every((byte) => byte === 0)).toBe(true);
+    expect(dummies.get(250)!.every((byte) => byte === 0)).toBe(true);
+    // The dummy lane's dummies went out as they were.
+    expect(dummies.get(150)!.every((byte) => byte === 0xdd)).toBe(true);
+    scheduler.stop();
+  });
+
+  test("nothing runs between a wake-up and its send that depends on which cell goes", async () => {
+    // The unused dummy is zeroed after the send, so the work before the send
+    // is the same whether the job's cell or the dummy goes.
+    const clock = manualClock();
+    const dummies = new Map<number, Uint8Array>();
+    const intactAtSend: boolean[] = [];
+    const scheduler = createCoverScheduler({
+      schedule: { ...SCHEDULE, phaseOffsetMs: 0 },
+      clock: clock.clock,
+      makeDummy: (slot) => {
+        const cell = new Uint8Array(8).fill(0xdd);
+        dummies.set(slot.deadlineMs, cell);
+        return cell;
+      },
+      laneFactory: () => ({
+        send: (request) => {
+          if (request.source === "real")
+            intactAtSend.push(
+              dummies
+                .get(request.slot.deadlineMs)!
+                .every((byte) => byte === 0xdd),
+            );
+        },
+        close: () => undefined,
+      }),
+    });
+    scheduler.enqueue({
+      id: "chunks",
+      kind: "real",
+      declaredCellCount: 2,
+      nextCell: () => new Uint8Array(8).fill(1),
+    });
+    scheduler.start();
+    await clock.advanceTo(SCHEDULE.coverCadenceMs - 1);
+    expect(intactAtSend).toEqual([true, true]);
+    scheduler.stop();
+  });
+
+  test("a job requeued for a lost slot fails at the end of a later cycle that loses none", async () => {
+    const clock = manualClock();
+    const results: string[] = [];
+    // One lane of two slots a cycle (50 and 150 in each 200 ms).
+    const scheduler = createCoverScheduler({
+      schedule: {
+        phaseOffsetMs: 0,
+        coverCadenceMs: 200,
+        coverLanes: 1,
+        coverFramesPerCell: 2,
+        coverDurationEpochs: 1,
+      },
+      clock: clock.clock,
+      makeDummy: () => new Uint8Array(8).fill(0xdd),
+      laneFactory: () => ({ send: () => undefined, close: () => undefined }),
+      onJobResult: ({ outcome, reason }) =>
+        results.push(`${outcome}${reason ? ` ${reason}` : ""}`),
+    });
+    let calls = 0;
+    scheduler.enqueue({
+      id: "short",
+      kind: "real",
+      declaredCellCount: 2,
+      // Its first cell takes 80 ms (it loses the slot at 50 and goes at 150);
+      // after that it has nothing more, without saying it is exhausted.
+      nextCell: () =>
+        ++calls === 1 ? clock.after(80, new Uint8Array(8).fill(1)) : null,
+    });
+    scheduler.start();
+    // Cycle 0 lost a slot: requeued. Cycle 1 lost none but did not finish:
+    // that is a capacity overrun, as before.
+    await clock.advanceTo(400);
+    expect(results).toEqual(["failed capacity-exhausted"]);
+    scheduler.stop();
+  });
+
+  test("cancelling a job whose store read never returns sends the CANCEL and settles", async () => {
+    const clock = manualClock();
+    const sent: string[] = [];
+    const results: string[] = [];
+    const scheduler = createCoverScheduler({
+      schedule: {
+        phaseOffsetMs: 0,
+        coverCadenceMs: 200,
+        coverLanes: 1,
+        coverFramesPerCell: 2,
+        coverDurationEpochs: 1,
+      },
+      clock: clock.clock,
+      makeDummy: () => new Uint8Array(8).fill(0xdd),
+      laneFactory: () => ({
+        send: (request) => {
+          sent.push(`${String(clock.clock.now())} ${request.source}`);
+        },
+        close: () => undefined,
+      }),
+      onJobResult: ({ outcome }) => results.push(outcome),
+    });
+    let finishRead!: (cell: Uint8Array) => void;
+    scheduler.enqueue({
+      id: "stuck",
+      kind: "real",
+      declaredCellCount: 2,
+      nextCell: () =>
+        new Promise<Uint8Array>((resolve) => {
+          finishRead = resolve;
+        }),
+      cancelCell: () => new Uint8Array(8).fill(0xcc),
+    });
+    scheduler.start();
+    await clock.advanceTo(160);
+    expect(sent).toEqual(["50 dummy", "150 dummy"]);
+
+    expect(scheduler.cancel("stuck")).toBe("cancel-pending");
+    await clock.advanceTo(400);
+    // The CANCEL went in the job's next slot, and the job settled.
+    expect(sent).toEqual(["50 dummy", "150 dummy", "250 cancel", "350 dummy"]);
+    expect(results).toEqual(["cancelled"]);
+    expect(scheduler.getJobProgress("stuck")).toBeUndefined();
+
+    // The read returns at last: its cell is zeroed and never sent.
+    const late = new Uint8Array(8).fill(7);
+    finishRead(late);
+    await clock.advanceTo(800);
+    expect(late.every((byte) => byte === 0)).toBe(true);
+    expect(sent.filter((line) => line.endsWith("real"))).toEqual([]);
+    scheduler.stop();
+  });
+
+  test("a chunk that arrives after its job was cancelled is zeroed at once and never sent", async () => {
+    const clock = manualClock();
+    const sent: string[] = [];
+    const scheduler = createCoverScheduler({
+      schedule: {
+        phaseOffsetMs: 0,
+        coverCadenceMs: 200,
+        coverLanes: 1,
+        coverFramesPerCell: 2,
+        coverDurationEpochs: 1,
+      },
+      clock: clock.clock,
+      makeDummy: () => new Uint8Array(8).fill(0xdd),
+      laneFactory: () => ({
+        send: (request) => {
+          sent.push(`${String(clock.clock.now())} ${request.source}`);
+        },
+        close: () => undefined,
+      }),
+    });
+    let finishRead!: (cell: Uint8Array) => void;
+    scheduler.enqueue({
+      id: "slow",
+      kind: "real",
+      declaredCellCount: 2,
+      nextCell: () =>
+        new Promise<Uint8Array>((resolve) => {
+          finishRead = resolve;
+        }),
+      cancelCell: () => new Uint8Array(8).fill(0xcc),
+    });
+    scheduler.start();
+    await clock.advanceTo(160);
+    scheduler.cancel("slow");
+    // The read returns before the CANCEL's slot at 250.
+    const late = new Uint8Array(8).fill(7);
+    finishRead(late);
+    await clock.advanceTo(200);
+    expect(late.every((byte) => byte === 0)).toBe(true);
+    await clock.advanceTo(400);
+    expect(sent).toEqual(["50 dummy", "150 dummy", "250 cancel", "350 dummy"]);
+    scheduler.stop();
+  });
+
+  test("a receipt cell still in production when its epoch is retired is not sent under the retired epoch", async () => {
+    const timeline = new CoverTimeline();
+    const contextFor = (epoch: bigint, seed: number) => ({
+      rootSuite: RATCHET_ROOT_SUITE_MLKEM512,
+      rootKey: new Uint8Array(32).fill(seed),
+      binding: new Uint8Array(32).fill(0x42),
+      epoch,
+    });
+    let context = contextFor(1n, 0x11);
+    const epc = {
+      roomId: ROOM_ID,
+      pqHealingState: { currentMessageContext: () => context },
+    } as unknown as IRTCPeerConnection;
+    const lanes: RecordingLane[] = [];
+    const runtime = new CoverRuntime({
+      epc,
+      roomId: ROOM_ID,
+      module,
+      amInitiator: true,
+      schedule: SCHEDULE,
+      policyHash: new Uint8Array(32),
+      laneLabelName: "party",
+      openLaneChannel: (label) => {
+        const lane = new RecordingLane(label, timeline);
+        lanes.push(lane);
+        return lane;
+      },
+      timerEnvironment: timeline.env,
+    });
+    const open = (frame: Uint8Array, at: typeof context) =>
+      openCoverCell({
+        module,
+        rootSuite: at.rootSuite,
+        rootKey: at.rootKey,
+        binding: at.binding,
+        direction: "initiator-to-responder",
+        keyEpoch: at.epoch,
+        frame,
+      });
+    // A receipt job whose first cell is sealed at once, then handed over
+    // 30 ms later (still in production when the epoch changes at 10 ms).
+    let calls = 0;
+    let discarded = 0;
+    runtime.enqueue({
+      id: runtime.randomLaneLabel(),
+      kind: "control",
+      declaredCellCount: 1,
+      nextCell: async () => {
+        const cell = runtime.sealCoverContent({
+          subtype: "receipt",
+          merkleRoot: merkleRootOf(0x3d),
+          token: merkleRootOf(0x3d),
+        });
+        if (++calls === 1) await storeRead(timeline, 30);
+        return cell;
+      },
+      cellDiscarded: () => {
+        discarded += 1;
+      },
+    });
+    const retired = context;
+    try {
+      runtime.start();
+      await timeline.advanceTo(10);
+      context = contextFor(2n, 0x22);
+      runtime.onPqEpochChanged();
+      await timeline.advanceTo(SCHEDULE.coverCadenceMs - 1);
+
+      expect(discarded).toBe(1);
+      expect(calls).toBe(2);
+      const receipts = lanes
+        .flatMap((lane) => lane.sent)
+        .filter(({ frame }) => {
+          try {
+            return open(frame, context).content.subtype === "receipt";
+          } catch {
+            return false;
+          }
+        });
+      expect(receipts).toHaveLength(1);
+      // Nothing that was sent opens under the retired epoch.
+      for (const { frame } of lanes.flatMap((lane) => lane.sent))
+        expect(() => open(frame, retired)).toThrow();
+    } finally {
+      runtime.destroy();
     }
   });
 

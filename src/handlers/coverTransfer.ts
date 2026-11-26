@@ -192,10 +192,11 @@ const ensureReceiptDrainJob = (
   if (declared <= 0) return;
   state.drainJobActive = true;
   state.jobSequence += 1;
-  // The entry the last cell was sealed from, kept (unwiped) until its cell is
-  // sent. The scheduler produces a slot's cell a slot ahead; a rekey before
-  // the slot discards it, and the entry goes back to the head of the queue to
-  // be sealed again under the new epoch.
+  // The entry the last cell was sealed from, kept (its tokens unwiped) until
+  // its cell is sent, about one slot, or the job settles. The scheduler
+  // produces a slot's cell a slot ahead; a rekey before the slot discards it,
+  // and the entry goes back to the head of the queue to be sealed again under
+  // the new epoch, which needs its tokens.
   let sealed: PendingScheduledControlCell | undefined;
   const wipeSealed = (): void => {
     if (sealed) wipeControl(sealed);

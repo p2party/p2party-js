@@ -1,7 +1,4 @@
-import {
-  COVER_PRODUCTION_CLEARANCE_MS,
-  MAX_TIMER_DELAY_MS,
-} from "../utils/constants";
+import { MAX_TIMER_DELAY_MS } from "../utils/constants";
 
 export type CoverSchedulerStatus =
   "starting" | "active" | "degraded" | "suspended" | "stopped";
@@ -26,11 +23,6 @@ export interface CoverClock {
     kind?: CoverTimerKind,
   ): unknown;
   clearTimeout(handle: unknown): void;
-  /**
-   * Run `run` once no wake-up of the page falls due within `withinMs` (the
-   * page's timer host knows them all). Absent: in a microtask.
-   */
-  whenClear?(withinMs: number, run: () => void): void;
 }
 
 /**
@@ -207,8 +199,13 @@ interface JobRuntime {
    */
   pendingCell?: Uint8Array;
   pendingCancelCell?: Uint8Array;
-  /** Set while this job's producer runs: one production per job at a time. */
+  /**
+   * Set while this job's chunk producer runs: one production per job at a
+   * time (a CANCEL does not wait for it).
+   */
   producing?: Promise<void>;
+  /** Set while its CANCEL is being sealed. */
+  producingCancel?: Promise<void>;
   /**
    * Set when a slot of this job's lane went out as a dummy because the job's
    * cell was not ready: at the cycle's end the job is requeued, not failed.
@@ -892,32 +889,26 @@ export class CoverScheduler {
     runtime: JobRuntime,
     slot: CoverSlot,
   ): Promise<{ cell: Uint8Array; source: CoverCellSource } | null> {
-    while (runtime.producing) await runtime.producing;
-    if (runtime.settled) return null;
+    for (;;) {
+      if (runtime.settled) return null;
+      // A CANCEL never waits for a chunk's production: one stuck in its store
+      // read would hold it for ever. It is sealed now, and whatever the stuck
+      // production returns is zeroed below.
+      if (runtime.cancelRequested && !runtime.cancelSent)
+        return this.produceCancelCell(runtime, slot);
+      if (!runtime.producing) break;
+      await runtime.producing;
+    }
     let finished!: () => void;
-    runtime.producing = new Promise<void>((resolve) => {
+    const producing = new Promise<void>((resolve) => {
       finished = resolve;
     });
+    runtime.producing = producing;
     try {
       for (;;) {
         if (runtime.settled) return null;
-        const withJob = this.jobSlot(runtime, slot);
-        if (runtime.cancelRequested && !runtime.cancelSent) {
-          if (runtime.pendingCancelCell)
-            return { cell: runtime.pendingCancelCell, source: "cancel" };
-          const keyEpochVersion = runtime.keyEpochVersion;
-          const cell = assertCell(
-            "cancelCell",
-            await runtime.job.cancelCell?.(withJob),
-          );
-          // Sealed against an epoch a rekey retired meanwhile: seal again.
-          if (runtime.settled || keyEpochVersion !== runtime.keyEpochVersion) {
-            cell.fill(0);
-            continue;
-          }
-          runtime.pendingCancelCell = cell;
-          continue;
-        }
+        if (runtime.cancelRequested && !runtime.cancelSent)
+          return await this.produceCancelCell(runtime, slot);
         if (
           runtime.completed ||
           runtime.sentCells >= runtime.job.declaredCellCount
@@ -926,12 +917,16 @@ export class CoverScheduler {
         if (runtime.pendingCell)
           return { cell: runtime.pendingCell, source: runtime.job.kind };
         const keyEpochVersion = runtime.keyEpochVersion;
-        const produced = await runtime.job.nextCell(withJob);
-        // A durable PQ commit or explicit completion may retire this producer
-        // while its storage/sealing promise is pending. Never emit its old key.
-        if (runtime.settled || runtime.completed) {
+        const produced = await runtime.job.nextCell(
+          this.jobSlot(runtime, slot),
+        );
+        // A durable PQ commit, an explicit completion or a CANCEL may retire
+        // this producer while its storage/sealing promise is pending. Never
+        // emit its old key, nor a chunk after a CANCEL.
+        if (runtime.settled || runtime.completed || runtime.cancelRequested) {
           produced?.fill(0);
-          return null;
+          if (runtime.settled || runtime.completed) return null;
+          continue;
         }
         // A rekey meanwhile retired the epoch a control cell was sealed under.
         if (keyEpochVersion !== runtime.keyEpochVersion) {
@@ -945,27 +940,62 @@ export class CoverScheduler {
           if (runtime.job.exhausted?.()) this.finishJob(runtime);
           return null;
         }
-        // Kept by the job, then offered again by the loop: a CANCEL requested
-        // while it was produced still takes precedence.
         runtime.pendingCell = assertCell("nextCell", produced);
       }
     } finally {
-      runtime.producing = undefined;
       finished();
+      if (runtime.producing === producing) runtime.producing = undefined;
+    }
+  }
+
+  /** The job's CANCEL, sealed once even when asked for twice. */
+  private async produceCancelCell(
+    runtime: JobRuntime,
+    slot: CoverSlot,
+  ): Promise<{ cell: Uint8Array; source: CoverCellSource } | null> {
+    while (runtime.producingCancel) await runtime.producingCancel;
+    let finished!: () => void;
+    const producing = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    runtime.producingCancel = producing;
+    try {
+      for (;;) {
+        if (runtime.settled || runtime.cancelSent) return null;
+        if (runtime.pendingCancelCell)
+          return { cell: runtime.pendingCancelCell, source: "cancel" };
+        const keyEpochVersion = runtime.keyEpochVersion;
+        const cell = assertCell(
+          "cancelCell",
+          await runtime.job.cancelCell?.(this.jobSlot(runtime, slot)),
+        );
+        // Sealed against an epoch a rekey retired meanwhile: seal again.
+        if (runtime.settled || keyEpochVersion !== runtime.keyEpochVersion) {
+          cell.fill(0);
+          continue;
+        }
+        runtime.pendingCancelCell = cell;
+      }
+    } finally {
+      finished();
+      if (runtime.producingCancel === producing)
+        runtime.producingCancel = undefined;
     }
   }
 
   /**
    * Produce the cells for the open cycle's next slot now, one slot ahead of
    * it. The slot's wake-up then only sends what is ready, so the time a cell
-   * leaves is the time its wake-up runs, whatever the cell carries: a dummy
+   * leaves is the time its wake-up runs, whatever the cell carries. A dummy
    * sealed in memory and a real chunk read from the outbox store, its receipt
-   * token written back and sealed leave alike (docs/e2e/cover-timers/, sealed
-   * mode).
+   * token written back and sealed, left alike at send() as measured on a
+   * visible page at 25, 100 and 500 ms slots (docs/e2e/cover-timers/, sealed
+   * mode; what remains is in docs/protocol-v4-pq-cover-architecture.md).
    *
    * Every slot first gets its dummy, sealed before the job's production
-   * starts, so the work done for a slot before that does not depend on what
-   * the slot will carry. A job's cell that is not ready when its slot comes
+   * starts: that seal is the same for every slot. A job slot then also runs
+   * its job's production, which a dummy slot does not, before its wake-up.
+   * A job's cell that is not ready when its slot comes
    * does not hold the slot: the dummy goes, on time, and the job's cell takes
    * a later slot of its lane. Otherwise a silent rest of the cycle, which
    * only a slow real production could cause, would show that one was there.
@@ -987,15 +1017,10 @@ export class CoverScheduler {
       abandoned: false,
     };
     cycle.prepared = prepared;
-    // Started after the current task: the page's timer host runs the wake-ups
-    // of every edge due at once in one task, so all of them have sent (or
-    // opened their lanes) before any edge's production runs. And not while
-    // another grid's wake-up falls due within the bound of a production's
-    // first synchronous work (the slot's dummy seal, a control cell's seal).
-    const start = (): void => void this.produce(prepared);
-    if (this.clock.whenClear)
-      this.clock.whenClear(COVER_PRODUCTION_CLEARANCE_MS, start);
-    else void Promise.resolve().then(start);
+    // Started in a microtask: the page's timer host runs the wake-ups of every
+    // edge due at once in one task, so all of them have sent (or opened their
+    // lanes) before any edge's production runs.
+    void Promise.resolve().then(() => this.produce(prepared));
   }
 
   private async produce(prepared: PreparedCell): Promise<void> {
@@ -1116,23 +1141,11 @@ export class CoverScheduler {
     // one. The job's cell if it is ready, else the slot's dummy, on time: a
     // job's cell still being produced (or whose production failed) keeps its
     // chunk for a later slot of the lane. Sending it when ready would make the
-    // send time tell what it carries; a silent slot would tell it too.
-    let request: CoverSendRequest | undefined;
-    if (prepared.jobState === "ready") {
-      request = prepared.request;
-      if (prepared.dummy) this.releaseUnsent(prepared.dummy);
-    } else {
-      request = prepared.dummy;
-      if (
-        request &&
-        prepared.job &&
-        (prepared.jobState === "producing" || prepared.jobState === "failed")
-      )
-        prepared.job.lostSlot =
-          prepared.jobState === "failed"
-            ? "cell-production-failed"
-            : "missed-deadline";
-    }
+    // send time tell what it carries; a silent slot would tell it too. Nothing
+    // else runs before the send: the bookkeeping that depends on which cell
+    // went (zeroing the unused dummy, a lost slot) runs after it.
+    const jobCellGoes = prepared.jobState === "ready";
+    const request = jobCellGoes ? prepared.request : prepared.dummy;
     if (!request) {
       // Not even the dummy: the same for a slot whatever it carries.
       this.degrade(
@@ -1147,17 +1160,26 @@ export class CoverScheduler {
     }
     const { lane } = prepared;
 
-    let accepted: boolean | void;
+    let accepted: boolean | void = undefined;
+    let sendFailed = false;
     try {
       accepted = await lane.handle.send(request);
     } catch {
-      this.releaseUnsent(request);
-      this.degrade("send-failed");
-      return;
+      sendFailed = true;
     }
-    if (accepted === false) {
+    if (jobCellGoes) {
+      if (prepared.dummy) this.releaseUnsent(prepared.dummy);
+    } else if (
+      prepared.job &&
+      (prepared.jobState === "producing" || prepared.jobState === "failed")
+    )
+      prepared.job.lostSlot =
+        prepared.jobState === "failed"
+          ? "cell-production-failed"
+          : "missed-deadline";
+    if (sendFailed || accepted === false) {
       this.releaseUnsent(request);
-      this.degrade("backpressure");
+      this.degrade(sendFailed ? "send-failed" : "backpressure");
       return;
     }
     this.acceptSent(lane, request);

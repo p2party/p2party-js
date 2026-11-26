@@ -392,19 +392,40 @@ next start, below) until that sender reconnects. Only when the hash is done is
 the file marked complete and the final receipt sent. If the connection to that peer is torn down first, or the
 room is left, nothing completes on that connection. When the sender
 reconnects while the file is still being verified, its copy of the last chunk
-joins that verification and the file completes on the new connection. A file
-left unverified (the page was reloaded mid-verification, or its connection
-went away) holds every byte it needs: it is verified without the sender the
-next time the SDK loads its room's messages, one file at a time, with the same
-events and outcomes; if another tab of this site is busy with that file, it is
-tried once more when that tab's hold on it ends. A later copy of the last
-chunk is then answered from the recorded outcome. Deleting the message, its
-room or all data stops a running verification and removes the file; if the
-file cannot be removed, the call that deleted it rejects with
-`p2party.StorageFailedError`. Reading a completed file later does not
-re-verify it. Text messages are not verified as a whole; each of their chunks
-is checked against the message's Merkle root as it arrives, like every file
-chunk.
+joins that verification and the file completes on the new connection. If that
+connection's predecessor goes away meanwhile, only it leaves the verification;
+the file is stopped only when no connection is left to complete it.
+
+A file left unverified (the page was reloaded mid-verification, or its
+connection went away) holds every byte it needs. It is verified without the
+sender when the SDK loads its room to show it, with the same events and
+outcomes. Loading several rooms queues their files: this page verifies one
+file at a time. Deleting a room starts none. If another tab of this site holds
+the file (it is verifying or writing it), the file is tried again when that
+tab's hold ends, and again each time the hold turns out to have been renewed,
+for at most about 22 minutes (the longest a sender waits for a 10 GiB file);
+after that it is left for the next time the room is loaded. A later copy of the last chunk is answered from the
+recorded outcome. Reading a completed file later does not re-verify it. Text
+messages are not verified as a whole; each of their chunks is checked against
+the message's Merkle root as it arrives, like every file chunk.
+
+Deleting a message, a room or everything stops a running verification of a
+file and removes it. A received file is plaintext on disk, so a removal the
+device refuses is never reported as done:
+
+- `p2party.deleteMessage(roomId, merkleRoot)` rejects with
+  `p2party.StorageFailedError` naming the file, and the message stays listed,
+  so the call can be made again.
+- A `deleteMessage` action you dispatch to the store yourself removes the
+  message from the list and returns nothing; when its file cannot be removed,
+  `p2party.onReceiveStorageError` reports `not-removed` for it, once per
+  failed delete.
+- `p2party.disconnectFromRoom(roomId, true)` removes every other message of
+  the room, then rejects with one `p2party.StorageFailedError`: `cause` is
+  what the room's delete threw, and `failures` holds each message's error.
+- `p2party.purge()` finishes every other step (the database, the rooms, the
+  identity) and then rejects with `p2party.StorageFailedError`; `cause` is
+  what its steps threw.
 
 The database stays usable across tabs of different versions in one
 direction. A tab of this version closes its database connection when another

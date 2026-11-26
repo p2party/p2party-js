@@ -37,6 +37,8 @@ import {
 import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebouncer";
 import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";
 import { stopOutboxOwners } from "../handlers/outbox";
+import { reportReceiveStorageError } from "../handlers/handleReceiveMessage";
+import { StorageFailedError } from "../db/dbErrors";
 import {
   discardRoomOutbox,
   resumeRoomOutbox,
@@ -177,6 +179,16 @@ export const createRoomListenerMiddleware = (
       signalingServerActions.disconnect,
     ),
     effect: async (action, listenerApi) => {
+      // What a deleted message was, read now: the original state is only
+      // readable before the effect's first await.
+      const deletedMessage = deleteMessage.match(action)
+        ? (listenerApi.getOriginalState() as State).rooms
+            .find((room) => room.id === action.payload.roomId)
+            ?.messages.findLast(
+              (message) =>
+                message.merkleRootHex === action.payload.merkleRootHex,
+            )
+        : undefined;
       // Guarded as a whole. This effect awaits IndexedDB through the worker, and
       // a storage failure there would otherwise surface as an unhandled promise
       // rejection in the host application — a library has no business taking a
@@ -396,7 +408,10 @@ export const createRoomListenerMiddleware = (
             const persistedPolicy = encodedPolicy.slice().buffer as ArrayBuffer;
             await setDBUniqueRoom(url, id, persistedPolicy);
 
-            const oldMessages = await getDBRoomMessageData(id);
+            // Loading the room to show it: its held files are verified.
+            const oldMessages = await getDBRoomMessageData(id, {
+              verifyHeld: true,
+            });
             const oldMessagesLen = oldMessages.length;
             for (let i = 0; i < oldMessagesLen; i++) {
               listenerApi.dispatch(
@@ -450,7 +465,10 @@ export const createRoomListenerMiddleware = (
             encodedPolicy.slice().buffer as ArrayBuffer,
           );
 
-          const oldMessages = await getDBRoomMessageData(roomId);
+          // Loading the room to show it: its held files are verified.
+          const oldMessages = await getDBRoomMessageData(roomId, {
+            verifyHeld: true,
+          });
           for (const message of oldMessages) {
             listenerApi.dispatch(
               setMessage({
@@ -550,7 +568,26 @@ export const createRoomListenerMiddleware = (
             return;
 
           if (merkleRootHex) {
-            await deleteReceiveTransfer(merkleRootHex);
+            try {
+              await deleteReceiveTransfer(merkleRootHex);
+            } catch (error) {
+              if (!(error instanceof StorageFailedError)) throw error;
+              // A dispatched delete returns nothing to its caller: the
+              // message has left the list but its received file is still on
+              // disk, which the application hears through
+              // onReceiveStorageError ("not-removed").
+              reportReceiveStorageError(
+                {
+                  roomId: action.payload.roomId,
+                  fromPeerId: deletedMessage?.fromPeerId ?? "",
+                  merkleRoot: merkleRootHex,
+                  filename: deletedMessage?.filename ?? "",
+                  totalSize: deletedMessage?.totalSize ?? 0,
+                  chunkIndex: -1,
+                },
+                { failure: "not-removed" },
+              );
+            }
             await deleteDBNewChunk({ merkleRootHex });
           } else if (hashHex) {
             // await deleteDBChunk(hashHex);

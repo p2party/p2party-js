@@ -115,9 +115,16 @@ export interface RepoSchema extends DBSchema {
 // Opens that have not settled yet. When one of them is blocked by an older
 // tab, IndexedDB queues every other open behind it, so all of them fail at
 // once rather than only the one that saw `blocked`.
-const unsettledOpens = new Set<(error: DatabaseUpgradeBlockedError) => void>();
+interface UnsettledOpen {
+  readonly reject: (error: DatabaseUpgradeBlockedError) => void;
+  /** Failed as blocked, and counted in blockedOpensPending. */
+  counted: boolean;
+}
+const unsettledOpens = new Set<UnsettledOpen>();
 // Opens that failed as blocked but are still queued in IndexedDB. Each is
-// closed when it finally succeeds; until the last has, new opens fail at once.
+// counted the moment `blocked` fires, so an open requested before their
+// rejections have landed fails at once too; each is closed when it finally
+// succeeds. Until the last has, new opens fail at once.
 let blockedOpensPending = 0;
 
 /**
@@ -132,11 +139,16 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
   const blocked = new Promise<never>((_resolve, reject) => {
     rejectBlocked = reject;
   });
-  unsettledOpens.add(rejectBlocked);
+  const pending: UnsettledOpen = { reject: rejectBlocked, counted: false };
+  unsettledOpens.add(pending);
   const opening = openDB<RepoSchema>(dbName, dbVersion, {
     blocked() {
-      for (const reject of unsettledOpens)
-        reject(new DatabaseUpgradeBlockedError());
+      for (const open of unsettledOpens) {
+        if (open.counted) continue;
+        open.counted = true;
+        blockedOpensPending += 1;
+        open.reject(new DatabaseUpgradeBlockedError());
+      }
     },
     blocking(_currentVersion, _blockedVersion, event) {
       (event.target as IDBDatabase).close();
@@ -391,22 +403,24 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
       }
     },
   });
+  let db: IDBPDatabase<RepoSchema>;
   try {
-    return await Promise.race([opening, blocked]);
+    db = await Promise.race([opening, blocked]);
   } catch (error) {
-    if (error instanceof DatabaseUpgradeBlockedError) {
-      blockedOpensPending += 1;
+    if (pending.counted)
       void opening
         .then(
-          (db) => db.close(),
+          (late) => late.close(),
           () => undefined,
         )
         .finally(() => {
           blockedOpensPending -= 1;
         });
-    }
     throw error;
   } finally {
-    unsettledOpens.delete(rejectBlocked);
+    unsettledOpens.delete(pending);
   }
+  // Opened before another open's `blocked` counted it: not pending after all.
+  if (pending.counted) blockedOpensPending -= 1;
+  return db;
 }

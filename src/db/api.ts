@@ -2,6 +2,7 @@ import type {
   HeldFileProgressNotice,
   HeldFileSettledNotice,
   ReceiveDeleteGuard,
+  RoomMessageLoadOptions,
 } from "./types";
 import type { OutboxLease, OutboxRequest } from "./outboxTypes";
 import type {
@@ -180,12 +181,26 @@ const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
 const workerBlob = new Blob([workerSrc], {
   type: "application/javascript",
 });
-const client = createDatabaseClient(
+let client = createDatabaseClient(
   new Worker(URL.createObjectURL(workerBlob), {
     type: "module",
   }) as unknown as DatabaseWorkerPort,
   workerSrc.length > 0,
 );
+
+/**
+ * Test seam: send every database call to `port` (an in-process worker) until
+ * the returned function is called. Not part of the package's public exports.
+ */
+export const useDatabaseWorkerForTests = (
+  port: DatabaseWorkerPort,
+): (() => void) => {
+  const previous = client;
+  client = createDatabaseClient(port, true);
+  return () => {
+    client = previous;
+  };
+};
 
 const callWorkerOwned = (
   method: WorkerMessages["method"],
@@ -265,8 +280,10 @@ export const setDBUniqueRoom = (
 export const getDBMessageData = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBMessageData", merkleRootHex, hashHex);
 
-export const getDBRoomMessageData = (roomId: string) =>
-  callWorker("getDBRoomMessageData", roomId);
+export const getDBRoomMessageData = (
+  roomId: string,
+  options?: RoomMessageLoadOptions,
+) => callWorker("getDBRoomMessageData", roomId, options);
 
 export const getDBRoomStats = (roomId: string) =>
   callWorker("getDBRoomStats", roomId);
@@ -346,9 +363,14 @@ export const storeReceiveChunk = (chunk: ReceiveChunk) =>
 
 // Hash a received file held pending verification (storeReceiveChunk returned
 // `verification`) against its whole-file hash. Runs outside the per-file
-// lock; the worker keeps serving other requests between reads.
-export const verifyReceivedFile = (merkleRootHex: string, token: string) =>
-  callWorker("verifyReceivedFile", merkleRootHex, token);
+// lock; the worker keeps serving other requests between reads. `holder`
+// names the caller: several callers can hold one attempt, and each settles
+// (or detaches from) it under its own name.
+export const verifyReceivedFile = (
+  merkleRootHex: string,
+  token: string,
+  holder: string,
+) => callWorker("verifyReceivedFile", merkleRootHex, token, holder);
 
 // Commit a verification's verdict (complete, or drop the file as failed) when
 // `commit` is true; otherwise leave the file to be verified again by the next
@@ -357,13 +379,24 @@ export const settleReceivedFileVerification = (
   merkleRootHex: string,
   token: string,
   commit: boolean,
-) => callWorker("settleReceivedFileVerification", merkleRootHex, token, commit);
+  holder: string,
+) =>
+  callWorker(
+    "settleReceivedFileVerification",
+    merkleRootHex,
+    token,
+    commit,
+    holder,
+  );
 
-// Stop a running verification at its next read; settle it with commit false.
+// Detach this holder from a running verification; the run stops at its next
+// read only once no holder is left. The holder still settles, with commit
+// false.
 export const abortReceivedFileVerification = (
   merkleRootHex: string,
   token: string,
-) => callWorker("abortReceivedFileVerification", merkleRootHex, token);
+  holder: string,
+) => callWorker("abortReceivedFileVerification", merkleRootHex, token, holder);
 
 // Open the finished (all offsets filled) OPFS file for a fully-received message
 // and hand it back as a disk-backed File — no reassembly. Returns null if OPFS
@@ -418,9 +451,6 @@ export const deleteDBChunk = (hashHex: string, chunkIndex?: number) =>
 
 export const deleteDBNewChunk = (selector: NewChunkSelector) =>
   callWorker("deleteDBNewChunk", selector);
-
-export const deleteDBMessageData = (merkleRootHex: string) =>
-  callWorker("deleteDBMessageData", merkleRootHex);
 
 export const deleteDBUniqueRoom = (roomId: string) =>
   callWorker("deleteDBUniqueRoom", roomId);

@@ -705,4 +705,48 @@ describe("received message progress", () => {
     expect(state[0].messages[0]).toEqual(before[0]);
     expect(state[0].messages[2]).toEqual(before[2]);
   });
+
+  test("a failed verification resets the entry setMessage updates when a root is listed twice", () => {
+    const roomId = "00000000-0000-4000-8000-0000000000e9";
+    const fromPeerId = "00000000-0000-4000-8000-0000000000ea";
+    const merkleRootHex = "d4".repeat(64);
+    const chunk = (chunkSize: number) =>
+      setMessage({
+        roomId,
+        merkleRootHex,
+        sha512Hex: "cd".repeat(64),
+        fromPeerId,
+        chunkSize,
+        totalSize: 16,
+        messageType: 2,
+        filename: "f.bin",
+        channelLabel: "chat",
+        timestamp: 1,
+      });
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "e9".repeat(32), id: roomId }),
+    );
+    state = roomReducer(state, chunk(5));
+    // The same root listed twice: an older entry, then the live one.
+    state = [
+      {
+        ...state[0],
+        messages: [state[0].messages[0], { ...state[0].messages[0] }],
+      },
+    ];
+    // setMessage updates the last entry for the root...
+    state = roomReducer(state, chunk(3));
+    expect(state[0].messages.map((message) => message.savedSize)).toEqual([
+      5, 8,
+    ]);
+    // ...and so does the reset.
+    state = roomReducer(
+      state,
+      resetMessageReceiveProgress({ roomId, merkleRootHex }),
+    );
+    expect(state[0].messages.map((message) => message.savedSize)).toEqual([
+      5, 0,
+    ]);
+  });
 });

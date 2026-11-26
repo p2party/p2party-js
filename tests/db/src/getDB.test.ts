@@ -395,6 +395,60 @@ describe("getDB — connections never block or hang an upgrade", () => {
     old.close();
   });
 
+  test("an open requested as the upgrade is found blocked fails at once", async () => {
+    // Earlier tests' blocked opens settle first (opens fail at once until
+    // they have); wait for that on a scratch database.
+    const factoryUnderTest = indexedDB;
+    (globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const db = await getDB().catch(() => undefined);
+      if (db) {
+        db.close();
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    (globalThis as { indexedDB: IDBFactory }).indexedDB = factoryUnderTest;
+    const old = await openOldTab();
+    // Request one more open at the moment `blocked` fires, after getDB's own
+    // handler has run and before the rejection it caused has landed.
+    const factory = indexedDB;
+    const open = factory.open.bind(factory);
+    let late: Promise<unknown> | undefined;
+    factory.open = ((...args: Parameters<IDBFactory["open"]>) => {
+      const request = open(...args);
+      // Right behind getDB's own `blocked` listener.
+      const add = request.addEventListener.bind(request);
+      request.addEventListener = ((
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) => {
+        add(type, listener, options);
+        if (type === "blocked")
+          add("blocked", () => {
+            late ??= getDB().then(
+              () => "opened",
+              (error: unknown) => error,
+            );
+          });
+      }) as typeof request.addEventListener;
+      return request;
+    }) as IDBFactory["open"];
+    try {
+      await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);
+      expect(late).toBeDefined();
+      const settled = await Promise.race([
+        late!,
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 300)),
+      ]);
+      expect(settled).toBeInstanceOf(DatabaseUpgradeBlockedError);
+    } finally {
+      factory.open = open;
+      old.close();
+    }
+  });
+
   test("an open succeeds once the blocking tab has closed", async () => {
     const old = await openOldTab();
     await expect(getDB()).rejects.toBeInstanceOf(DatabaseUpgradeBlockedError);

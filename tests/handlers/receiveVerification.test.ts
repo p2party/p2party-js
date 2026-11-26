@@ -89,7 +89,8 @@ const memory = new Map<string, string>();
 };
 
 const { store } = await import("../../src/store");
-const { deleteRoom, setRoom } = await import("../../src/reducers/roomSlice");
+const { deleteMessageStateOnly, deleteRoom, setMessage, setRoom } =
+  await import("../../src/reducers/roomSlice");
 const { DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy");
 const { normalizeRoomCapability } = await import("../../src/roomInvite");
 const { applyHeldFileSettled, enqueue } =
@@ -283,6 +284,7 @@ const storage = () => {
   const hashed = deferred<ReceiveVerificationVerdict>();
   const outcomes: ReceiveVerificationOutcome[] = [];
   let verifications = 0;
+  let aborts = 0;
   return {
     gate,
     started,
@@ -290,6 +292,8 @@ const storage = () => {
     hashed,
     outcomes,
     verifications: () => verifications,
+    /** Detaches the worker has carried out. */
+    aborts: () => aborts,
     dependencies: {
       onVerificationProgress,
       persistRatchetState: async () => undefined,
@@ -297,9 +301,17 @@ const storage = () => {
         (await callWorker("storeReceiveChunk", [
           chunk,
         ])) as ReceiveChunkStoreResult,
-      verifyReceivedFile: async (merkleRoot: string, token: string) => {
+      verifyReceivedFile: async (
+        merkleRoot: string,
+        token: string,
+        holder: string,
+      ) => {
         verifications += 1;
-        const verdict = callWorker("verifyReceivedFile", [merkleRoot, token]);
+        const verdict = callWorker("verifyReceivedFile", [
+          merkleRoot,
+          token,
+          holder,
+        ]);
         void verdict.then((value) =>
           hashed.resolve(value as ReceiveVerificationVerdict),
         );
@@ -311,11 +323,13 @@ const storage = () => {
         merkleRoot: string,
         token: string,
         commit: boolean,
+        holder: string,
       ) => {
         const outcome = (await callWorker("settleReceivedFileVerification", [
           merkleRoot,
           token,
           commit,
+          holder,
         ])) as ReceiveVerificationOutcome;
         outcomes.push(outcome);
         settled.resolve(outcome);
@@ -324,8 +338,14 @@ const storage = () => {
       abortReceivedFileVerification: async (
         merkleRoot: string,
         token: string,
+        holder: string,
       ): Promise<undefined> => {
-        await callWorker("abortReceivedFileVerification", [merkleRoot, token]);
+        await callWorker("abortReceivedFileVerification", [
+          merkleRoot,
+          token,
+          holder,
+        ]);
+        aborts += 1;
         return undefined;
       },
       closeReceiveFile: async (merkleRoot: string) => {
@@ -648,24 +668,44 @@ describe("a received file is verified outside the edge's receive lock", () => {
 
     fileLane.push(seal(alice, file.plaintexts[0], file.root));
     await waitFor(() => messageView(file.rootHex)?.savedSize === 8);
+    // Another message arrives after it, so it is not last in the list.
+    const later = "e4".repeat(64);
+    store.dispatch(
+      setMessage({
+        roomId: ROOM,
+        merkleRootHex: later,
+        sha512Hex: "e5".repeat(64),
+        fromPeerId: PEER,
+        chunkSize: 1,
+        totalSize: 1,
+        messageType: MessageType.Text,
+        filename: "",
+        channelLabel: "chat",
+        timestamp: 2,
+      }),
+    );
+    restores.push(() =>
+      store.dispatch(
+        deleteMessageStateOnly({ roomId: ROOM, merkleRootHex: later }),
+      ),
+    );
+    const roots = () =>
+      store
+        .getState()
+        .rooms.find((room) => room.id === ROOM)!
+        .messages.map((message) => message.merkleRootHex);
+    const before = roots();
+    expect(before.indexOf(file.rootHex)).toBeLessThan(before.indexOf(later));
     fileLane.push(seal(alice, file.plaintexts[1], file.root));
     await io.started.promise;
     // While it is verified, the held last chunk is not counted yet.
     expect(messageView(file.rootHex)?.savedSize).toBe(8);
     io.gate.resolve();
     expect(await io.settled.promise).toBe("integrity");
-    const position = () =>
-      store
-        .getState()
-        .rooms.find((room) => room.id === ROOM)!
-        .messages.findIndex(
-          (message) => message.merkleRootHex === file.rootHex,
-        );
-    const before = position();
     // The app sees the reset at once, matching the dropped chunks on disk,
     // and the message keeps its place in the room's list.
     await waitFor(() => messageView(file.rootHex)?.savedSize === 0);
-    expect(position()).toBe(before);
+    expect(roots()).toEqual(before);
     expect(messageView(file.rootHex)?.totalSize).toBe(11);
     expect((await row(file.rootHex))?.savedSize).toBe(0);
   });
@@ -701,6 +741,40 @@ describe("a received file is verified outside the edge's receive lock", () => {
     expect((await row(file.rootHex))?.savedSize).toBe(8);
   });
 
+  test("one holder's abort does not abort the attempt for the others", async () => {
+    quietConsole();
+    const io = storage();
+    io.gate.resolve();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    // The file's first read waits, so the attempt is still running when the
+    // old edge leaves.
+    const stall = stallFirstChunkRead(file.rootHex);
+    restores.push(stall.restore);
+    const before = edge();
+    const closed = new AbortController();
+    const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
+    oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
+    await waitFor(() => stall.hit());
+
+    // The edge is torn down and a reconnect's copy of the held chunk joins
+    // the attempt; then the old edge's channel closes, and it detaches.
+    resetRatchetGate(ROOM, PEER);
+    const after = edge();
+    const newLane = lane(file, after.epc, io.dependencies);
+    newLane.push(seal(after.alice, file.plaintexts[0], file.root));
+    await waitFor(() => io.verifications() === 2);
+    closed.abort(new Error("channel closed"));
+    await waitFor(() => io.aborts() === 1);
+    stall.release();
+
+    // The new edge completes the file; only the old one is aborted.
+    await waitFor(() => io.outcomes.length === 2);
+    expect([...io.outcomes].sort()).toEqual(["aborted", "complete"]);
+    await waitFor(() => newLane.sent.includes(uint8ArrayToHex(file.hash)));
+    expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
+    expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
   test("a sender that reconnects during a start-up verification gets receipts from then on", async () => {
     quietConsole();
     notices.length = 0;
@@ -728,7 +802,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     // The next start verifies it without the sender; its first read stalls.
     const stall = stallFirstChunkRead(file.rootHex);
     restores.push(stall.restore);
-    await callWorker("getDBRoomMessageData", [ROOM]);
+    await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     await waitFor(() => stall.hit());
     // No sender, no channel: a report goes nowhere.
     reportProgress({ merkleRoot: file.rootHex, token, hashedBytes: 0 });
@@ -774,7 +848,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
 
     // The next start loads the room; the worker verifies the file on its own
     // and the app shows the outcome.
-    await callWorker("getDBRoomMessageData", [ROOM]);
+    await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     await waitFor(() => notices.length === 1);
     expect(notices[0]).toMatchObject({
       merkleRoot: file.rootHex,
@@ -821,9 +895,13 @@ describe("a received file is verified outside the edge's receive lock", () => {
     });
     const dependencies = {
       ...io.dependencies,
-      verifyReceivedFile: (merkleRoot: string, token: string) => {
+      verifyReceivedFile: (
+        merkleRoot: string,
+        token: string,
+        holder: string,
+      ) => {
         armed = true;
-        return io.dependencies.verifyReceivedFile(merkleRoot, token);
+        return io.dependencies.verifyReceivedFile(merkleRoot, token, holder);
       },
     };
     const errors = collectErrors();
@@ -962,6 +1040,36 @@ describe("a received file is verified outside the edge's receive lock", () => {
   });
 
   test("a stalled verification sends nothing", async () => {
+    // Time runs ahead for the page: the clock, and every page timer of a
+    // second or more, which runs as soon as it would be due. A receipt sent
+    // from a page timer would go out here.
+    const time = batchClock("", 0);
+    const pending: Array<{ at: number; run: () => void; every?: number }> = [];
+    const timers = globalThis as unknown as {
+      setTimeout: typeof setTimeout;
+      setInterval: typeof setInterval;
+    };
+    const realTimeout = timers.setTimeout;
+    const realInterval = timers.setInterval;
+    const hold =
+      (every: boolean) =>
+      (callback: (...args: unknown[]) => void, ms = 0, ...args: unknown[]) => {
+        if (ms < 1_000)
+          return (every ? realInterval : realTimeout)(callback, ms, ...args);
+        pending.push({
+          at: time.now() + ms,
+          run: () => callback(...args),
+          ...(every ? { every: ms } : {}),
+        });
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      };
+    timers.setTimeout = hold(false) as unknown as typeof setTimeout;
+    timers.setInterval = hold(true) as unknown as typeof setInterval;
+    restores.push(() => {
+      timers.setTimeout = realTimeout;
+      timers.setInterval = realInterval;
+    });
+
     const { alice, epc } = edge();
     const io = storage();
     const file = await buildMessage(MessageType.ImagePNG, [8]);
@@ -969,8 +1077,18 @@ describe("a received file is verified outside the edge's receive lock", () => {
     fileLane.push(seal(alice, file.plaintexts[0], file.root));
     await io.started.promise;
     await waitFor(() => fileLane.sent.length === 1);
-    // No progress is reported, so time passing alone sends no receipt.
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // A minute passes and nothing is reported: no receipt goes out.
+    for (let second = 0; second < 60; second++) {
+      time.advance(1_000);
+      for (const timer of [...pending])
+        if (timer.at <= time.now()) {
+          if (timer.every) timer.at += timer.every;
+          else pending.splice(pending.indexOf(timer), 1);
+          timer.run();
+        }
+      await Promise.resolve();
+    }
+    await flush();
     expect(fileLane.sent).toEqual([uint8ArrayToHex(file.receipts[0])]);
     io.gate.resolve();
     expect(await io.settled.promise).toBe("complete");
@@ -1032,18 +1150,33 @@ describe("a received file is verified outside the edge's receive lock", () => {
     abortIo.gate.resolve();
     expect(await abortIo.settled.promise).toBe("aborted");
 
-    // Deleted: the message is removed while it is verified.
+    // Deleted: the message is removed (by the delete the app's calls use)
+    // while its file is being read. The run stops, and its next batch, due a
+    // full interval later with more hashed, reports nothing.
     const owner = edge();
     const deleteIo = storage();
+    deleteIo.gate.resolve();
     const deleted = await buildMessage(MessageType.ImagePNG, [8]);
+    const stall = stallFirstChunkRead(deleted.rootHex);
+    restores.push(stall.restore);
     const deletedLane = lane(deleted, owner.epc, deleteIo.dependencies);
     deletedLane.push(seal(owner.alice, deleted.plaintexts[0], deleted.root));
-    await deleteIo.started.promise;
-    const deletedToken = await tokenOf(deleted.rootHex);
-    await callWorker("deleteDBMessageData", [deleted.rootHex]);
-    deleteIo.gate.resolve();
-    await deleteIo.settled.promise;
-    reportFor(deleted.rootHex, deletedToken);
+    await waitFor(() => stall.hit());
+    let removed = false;
+    const deleting = callWorker("deleteReceiveTransfer", [
+      deleted.rootHex,
+    ]).then(() => {
+      removed = true;
+    });
+    // The delete reaches the running verification, stops it and waits for
+    // its read to end.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(removed).toBe(false);
+    time.advance(RECEIVE_VERIFY_RECEIPT_INTERVAL_MS);
+    stall.release();
+    await deleting;
+    expect(await deleteIo.settled.promise).toBe("aborted");
+    await flush();
     expect(deletedLane.sent).toEqual([uint8ArrayToHex(deleted.receipts[0])]);
   });
 });

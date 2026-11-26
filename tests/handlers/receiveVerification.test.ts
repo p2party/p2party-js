@@ -214,10 +214,21 @@ const deferred = <T = void>() => {
   return { promise, resolve };
 };
 
+// Everything these tests wait for is queued work (fake IndexedDB requests,
+// worker calls, promise chains), so they wait in turns of the event loop and
+// never in time: the same number of turns is needed on any machine.
+//
+// waitFor: until the condition holds. flush: a fixed number of turns, for
+// work that has no condition to wait on ("nothing more is sent"). FLUSH_TURNS
+// is many times what such work takes here: a delete that nothing holds up
+// answers within a dozen turns.
+const FLUSH_TURNS = 400;
 const waitFor = async (condition: () => boolean): Promise<void> => {
-  for (let attempt = 0; attempt < 400 && !condition(); attempt++)
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  expect(condition()).toBe(true);
+  expect(await untilTurns(condition)).toBe(true);
+};
+const flush = async (): Promise<void> => {
+  for (let turns = 0; turns < FLUSH_TURNS; turns++)
+    await new Promise((resolve) => setImmediate(resolve));
 };
 
 // Stall the worker's first batch read of one file's chunks: the read runs in
@@ -659,7 +670,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     // Both chunks were acknowledged as stored; the message-hash receipt that
     // completes the transfer never went out.
     await waitFor(() => fileLane.sent.length === 2);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
     expect(fileLane.sent).toEqual(file.receipts.map(uint8ArrayToHex));
     expect(fileLane.sent).not.toContain(uint8ArrayToHex(file.hash));
     expect(errors.map((error) => error.code)).toEqual(["integrity"]);
@@ -1300,7 +1311,7 @@ describe("a received file is verified outside the edge's receive lock", () => {
     });
     // The delete reaches the running verification, stops it and waits for
     // its read to end.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
     expect(removed).toBe(false);
     time.advance(RECEIVE_VERIFY_RECEIPT_INTERVAL_MS);
     stall.release();
@@ -1312,8 +1323,6 @@ describe("a received file is verified outside the edge's receive lock", () => {
 });
 
 // ── clocks and the sender's side ─────────────────────────────────────────────
-
-const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 // Push every chunk of a file, as the channel queue (at most 64 frames) drains.
 const feed = async (

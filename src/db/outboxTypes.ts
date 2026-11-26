@@ -127,4 +127,17 @@ export interface ReceiveActivity {
    * is gone, and names the room whose removals a repeated room delete retries.
    */
   fileNotRemoved?: true;
+  /**
+   * With `fileNotRemoved` only: the other names the deleted message had, so
+   * that a delete or cancel repeated under one of them finds the file. The
+   * transfer ID it was sent under, and its whole-file hash.
+   */
+  transferId?: string;
+  hash?: string;
+  /**
+   * A digest of the room's URL (never the URL), set once the room's record
+   * is deleted. A purge of the same URL finds the room's files by it after
+   * the room itself is gone.
+   */
+  roomKey?: string;
 }

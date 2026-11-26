@@ -13,6 +13,24 @@ export class DatabaseWorkerError extends DatabaseUnavailableError {
   }
 }
 
+/**
+ * A Merkle root or whole-file hash passed to `deleteMessage` or
+ * `cancelMessage` is not in a form the SDK accepts: the 128 lower-case
+ * hexadecimal characters the SDK reports it as, or the 64 bytes those
+ * encode. Nothing was looked up or changed. `argument` says which one.
+ */
+export class InvalidMessageHashError extends Error {
+  readonly code = "invalid-message-hash";
+
+  constructor(readonly argument: "merkleRoot" | "hash") {
+    super(
+      `p2party: invalid ${argument === "merkleRoot" ? "Merkle root" : "hash"}: ` +
+        "expected 128 lower-case hexadecimal characters or 64 bytes",
+    );
+    this.name = "InvalidMessageHashError";
+  }
+}
+
 export const DATABASE_UPGRADE_BLOCKED = "database-upgrade-blocked";
 
 /**

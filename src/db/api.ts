@@ -545,16 +545,19 @@ export function deleteReceiveTransfer(
 }
 
 /**
- * Try again to remove files an earlier delete left on disk: one file, if no
- * record owns it (a message deleted before, which is no longer listed), or
- * every file a room's deleted messages left behind. Rejects with
- * StorageFailedError while the browser still refuses.
+ * Try again to remove files an earlier delete left on disk. A scope that
+ * names a room covers only what that room's deleted messages left: one
+ * message's file (named by its Merkle root, transfer ID or hash), every file
+ * of the room, or every file of a room that only its URL can still name.
+ * (Leaving all rooms covers every room but the ones it excepts.) A file some
+ * record owns, or that another room's records name, is not touched. Rejects
+ * with StorageFailedError while the browser still refuses.
  */
-export const retryFileRemovals = (scope: FileRemovalRetryScope) =>
-  callWorker("retryFileRemovals", scope).then((done) => {
-    if ("merkleRootHex" in scope)
-      announcedNotRemoved.delete(scope.merkleRootHex);
-    return done;
+export const retryFileRemovals = (
+  scope: FileRemovalRetryScope,
+): Promise<void> =>
+  callWorker("retryFileRemovals", scope).then((gone) => {
+    for (const merkleRoot of gone) announcedNotRemoved.delete(merkleRoot);
   });
 
 export const getDBAllNewChunks = (selector: NewChunkSelector) =>

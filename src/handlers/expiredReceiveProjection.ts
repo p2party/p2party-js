@@ -94,17 +94,27 @@ export const sweepExpiredReceiveState = async ({
   }
 };
 
-/** Metadata polling shares one lazy maintenance pass at most every 30 seconds. */
+/**
+ * Metadata polling shares one lazy maintenance pass at most every 30 seconds.
+ *
+ * `now` is called each time the throttle is consulted. The default reads
+ * `Date.now` then, not when the maintenance is created. That is the wall
+ * clock, which can be set back: a reading earlier than the last pass's ends
+ * the interval, so a clock set back by a day does not hold the pass off for
+ * a day.
+ */
 export const createExpiredReceiveMaintenance = (
   dependencies: ExpiredReceiveProjectionDependencies,
-  now: () => number = Date.now,
+  now: () => number = () => Date.now(),
 ): (() => Promise<void>) => {
-  let nextRunAt = -Infinity;
+  let lastRunAt: number | undefined;
   let running: Promise<void> | undefined;
   return () => {
     if (running) return running;
-    if (now() < nextRunAt) return Promise.resolve();
-    nextRunAt = now() + 30_000;
+    const at = now();
+    if (lastRunAt !== undefined && at >= lastRunAt && at - lastRunAt < 30_000)
+      return Promise.resolve();
+    lastRunAt = at;
     running = sweepExpiredReceiveState(dependencies).finally(() => {
       running = undefined;
     });

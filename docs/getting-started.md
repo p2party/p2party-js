@@ -183,7 +183,14 @@ const handle = p2party.sendMessage("hello room", "chat", room.id);
 console.log("transfer", handle.transferId);
 
 // Wire this to a cancel button. It also works during hashing/channel setup.
-const cancel = () => handle.cancel();
+// The send is cancelled either way. The promise rejects with
+// p2party.StorageFailedError when the browser refused to remove a file kept
+// for the message (see "When a received file cannot be removed").
+const cancel = () =>
+  handle.cancel().catch((error: unknown) => {
+    if (!(error instanceof p2party.StorageFailedError)) throw error;
+    console.warn("cancelled, but still on this device:", error.failures);
+  });
 
 try {
   const result = await handle.done;
@@ -237,8 +244,14 @@ try {
 
 // Exact logical-send cancellation also works after the original handle was
 // lost to a reload. It fences queued writes before removing retained staging.
+// It rejects as handle.cancel() does.
 if (pending[0])
-  await p2party.cancelPendingMessage(room.id, pending[0].transferId);
+  try {
+    await p2party.cancelPendingMessage(room.id, pending[0].transferId);
+  } catch (error) {
+    if (!(error instanceof p2party.StorageFailedError)) throw error;
+    console.warn("cancelled, but still on this device:", error.failures);
+  }
 ```
 
 Authenticated-peer events trigger a serialized retry pass, including a bounded
@@ -319,6 +332,13 @@ if (message) {
 returned. The application limit is 10 GiB. Cancellation is scoped most
 precisely by the handle's transfer ID, so prefer `handle.cancel()` over a
 content-hash lookup for concurrent identical sends.
+
+`deleteMessage` and `cancelMessage` take a Merkle root or a hash in one of two
+forms: the 128 lower-case hexadecimal characters the SDK reports
+(`merkleRootHex`, `sha512Hex`), or the 64 bytes those encode as a
+`Uint8Array`. Any other form (upper-case hexadecimal, another length) rejects
+with `p2party.InvalidMessageHashError` (`code` is `"invalid-message-hash"`,
+`argument` is `"merkleRoot"` or `"hash"`) before anything is looked up.
 
 ### When a received message cannot be stored
 
@@ -459,6 +479,10 @@ still on disk: `merkleRootHex`, and `error`, which is an `Error` with the
 - `p2party.deleteMessage(roomId, merkleRoot)` and
   `p2party.cancelMessage(roomId, channelLabel, merkleRoot)`: `cause` is the
   browser's error for the one file.
+- `handle.cancel()` and `p2party.cancelPendingMessage(roomId, transferId)`:
+  both cancel through `cancelMessage` and reject as it does. The send is
+  cancelled; the file is the copy of the sent file that was assembled when
+  you read it back.
 - `p2party.disconnectFromRoom(roomId, true)` and
   `p2party.disconnectFromAllRooms(true, exceptRoomIds)`: every other message
   and room was removed; `cause` is what the deletes threw.
@@ -481,27 +505,50 @@ listener when it subscribes. The retry at start reads `roomId`, `fromPeerId`,
 or 0.
 
 A call that is not a delete returns its result. `p2party.listPendingMessages`
-and the other calls that run the storage sweep (`resumePendingMessages`,
-`cancelPendingMessage`) report a file the sweep could not remove through the
-event, and still return what they return otherwise.
+and `resumePendingMessages` run the storage sweep, report a file the sweep
+could not remove through the event, and still return what they return
+otherwise. `cancelPendingMessage` runs the sweep too: a file of another
+message that the sweep could not remove is reported through the event, and
+only a file of the message it cancels rejects the call.
 
 The removal is tried again without a purge:
 
 - Every time the SDK's database worker starts, which is once per page load.
-  Before it answers any request that creates, reads or removes a file, it
-  lists the directory and removes every file that no record owns. A file
+  It lists the directory and removes every file that no record owns. A file
   another tab is receiving, verifying or reading has its records and is left
-  alone.
-- When you repeat the call. `p2party.deleteMessage(roomId, merkleRoot)` with
-  the same Merkle root tries the file again although the message is no longer
-  listed, also after a reload; it rejects as before while the browser still
-  refuses, and resolves once the file is gone.
-  `p2party.disconnectFromRoom(roomId, true)` tries again every file an
-  earlier delete of that room's messages left. `p2party.purge()` tries every
-  file again. `p2party.purgeRoom` does nothing for a room it has already
-  removed: repeat `deleteMessage` for the Merkle roots in `failures`, or
-  leave them to the next start.
+  alone. Requests that create, read or remove a file wait for this pass, for
+  at most 5 seconds; after that they are served while the pass goes on. The
+  pass decides each removal while it holds the file's lock, from the records
+  as they are at that moment, so a file whose receive started meanwhile is
+  kept.
+- When you repeat the call with the same arguments, in the same session or
+  after a reload. The message or the room is no longer listed; the call
+  finds what it left and tries the file again. It rejects as before while the
+  browser still refuses: none of these calls resolves while a file it left
+  is on disk.
+  - `deleteMessage` and `cancelMessage`: by the Merkle root, the hash or (for
+    `cancelMessage`, `handle.cancel()` and `cancelPendingMessage`) the
+    transfer ID the first call used.
+  - `disconnectFromRoom(roomId, true)`: every file an earlier delete of that
+    room's messages left.
+  - `disconnectFromAllRooms(true, exceptRoomIds)`: the same for every room,
+    listed or not, the excepted ones aside.
+  - `purgeRoom(roomUrl)`: every file the room's messages left, also when the
+    room itself was already removed. The SDK keeps no copy of a removed
+    room's URL for this. What the room left carries a SHA-512 digest of the
+    URL, which goes when the file does.
+  - `purge()`: every file.
 - When the storage sweep comes back to a deleted transfer after 24 hours.
+
+A repeated call acts only on what the room it names left behind. It resolves
+without touching anything when a record owns the file again (the same message
+is being received again, in this tab or another), and when the records name
+another room for it: `deleteMessage(roomId, merkleRoot)` never removes a file
+of another room's message, listed or left behind. So "resolved" from a
+repeated call means that nothing this room left under that name is on disk,
+not that no file with that name exists. A file that no record names at all
+(what `purge()` leaves when it is refused) is tried again by a
+`deleteMessage` that names its Merkle root, whatever room it names.
 
 What your application can do: tell the user that the file is still on this
 device, ask them to close the site's other tabs, and repeat the call or reload

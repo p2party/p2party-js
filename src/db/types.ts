@@ -79,6 +79,13 @@ export interface MessageData {
    * the have-set) until the file verifies against its whole-file hash.
    */
   receiveVerification?: ReceiveVerificationMarker;
+  /**
+   * Set when the room's record is deleted while this row still exists: a
+   * digest of the room's URL (never the URL). If this message's file then
+   * cannot be removed, the digest moves to the deleted transfer's row, so a
+   * later purge of the same URL can find the file. See `ReceiveActivity`.
+   */
+  roomKey?: string;
   // recipients: number;
 }
 
@@ -164,11 +171,25 @@ export interface FileRemovalNotice {
 }
 
 /**
- * Which pending removals to try again (retryFileRemovals): one file, if no
- * record owns it, or every file a room's deleted messages left behind.
+ * Which pending removals to try again (retryFileRemovals). A scope that
+ * names a room covers only what that room's deleted messages left behind:
+ * - `roomId` with one name of a message (its Merkle root, the transfer ID it
+ *   was sent under, or its whole-file hash): that message's file. By Merkle
+ *   root this also covers a file that no record of any room names.
+ * - `roomId` alone: every file the room's deleted messages left.
+ * - `roomUrl`, with or without `roomId`: the same for a room whose record
+ *   was deleted (its files are found by a digest of the URL), together with
+ *   what the room left under the id it has now, if it has one.
+ * - `exceptRoomIds`: every file the deleted messages of any room left, the
+ *   listed rooms excepted (leaving all rooms with their messages).
  */
 export type FileRemovalRetryScope =
-  { merkleRootHex: string } | { roomId: string };
+  | { roomId: string; merkleRootHex: string }
+  | { roomId: string; transferId: string }
+  | { roomId: string; hash: string }
+  | { roomId: string; roomUrl?: string }
+  | { roomUrl: string }
+  | { exceptRoomIds: readonly string[] };
 
 export interface ReceiveChunkStored {
   /** True only when this call inserted a previously absent chunk index. */
@@ -778,7 +799,7 @@ export interface WorkerMethodReturnTypes {
   getReceiveFile: File | null;
   closeReceiveFile: undefined;
   deleteReceiveTransfer: boolean | undefined;
-  retryFileRemovals: undefined;
+  retryFileRemovals: string[];
   getDBAllNewChunks: NewChunk[];
   getDBAllNewChunksCount: number;
   setDBNewChunk: undefined;

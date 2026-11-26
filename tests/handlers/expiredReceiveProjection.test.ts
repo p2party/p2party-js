@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   sweepExpiredReceiveState,
   createExpiredReceiveMaintenance,
@@ -244,6 +244,70 @@ describe("expired receive projection", () => {
     await maintain();
     expect(snapshots).toBe(4);
     expect(sweeps).toBe(2);
+  });
+
+  // The dependencies of a maintenance that only counts its passes.
+  const countingPasses = (): {
+    dependencies: Parameters<typeof createExpiredReceiveMaintenance>[0];
+    passes: () => number;
+  } => {
+    let passes = 0;
+    return {
+      dependencies: {
+        getRooms: () => [],
+        getPeers: () => [],
+        sweep: async () => {
+          passes++;
+          return [];
+        },
+        dropMessage: () => {
+          throw new Error("No stale rows");
+        },
+      },
+      passes: () => passes,
+    };
+  };
+
+  test("the maintenance reads the clock when it is consulted, not when it is created", async () => {
+    const { dependencies, passes } = countingPasses();
+    // Created on whatever clock the process has, as the SDK creates its own
+    // when the module loads.
+    const maintain = createExpiredReceiveMaintenance(dependencies);
+    // A clock installed afterwards is the one it reads.
+    let now = 5_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      await maintain();
+      expect(passes()).toBe(1);
+      now += 29_999;
+      await maintain();
+      expect(passes()).toBe(1);
+      now += 1;
+      await maintain();
+      expect(passes()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("a clock set back does not hold the next maintenance pass off", async () => {
+    const { dependencies, passes } = countingPasses();
+    let now = 90_000_000;
+    const maintain = createExpiredReceiveMaintenance(dependencies, () => now);
+    await maintain();
+    expect(passes()).toBe(1);
+    // The wall clock is set back by a day. The interval is over: the pass
+    // is not put off until the clock has caught up with the old reading.
+    now -= 86_400_000;
+    await maintain();
+    expect(passes()).toBe(2);
+    // From there the 30 s count on the new clock.
+    now += 29_999;
+    await maintain();
+    expect(passes()).toBe(2);
+    now += 1;
+    await maintain();
+    expect(passes()).toBe(3);
   });
 
   test("atomic deletion removes only its partial room row and durably mapped key", async () => {

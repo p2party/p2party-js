@@ -191,11 +191,13 @@ import type {
 import type { RoomData } from "./api/webrtc/interfaces";
 import type {
   BlacklistedPeer,
+  FileRemovalRetryScope,
   IdentityDerivation,
   UsernamedPeer,
   UniqueRoom,
   RoomStats,
 } from "./db/types";
+import type { FileRemovalFailure } from "./db/dbErrors";
 import type {
   CreatedRecoverableIdentity,
   CreateRecoverableIdentityOptions,
@@ -220,6 +222,8 @@ import {
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
   DatabaseWorkerError,
+  filesNotRemoved,
+  InvalidMessageHashError,
   StorageFailedError,
 } from "./db/dbErrors";
 import { deleteRoomDataTerminal } from "./api/webrtc/deleteRoomData";
@@ -775,11 +779,28 @@ const disconnectFromPeer = async (peerId: string) => {
 // are no longer listed, so nothing else would reach them), then every stored
 // message is removed. Each file is tried once; whatever failed is thrown
 // after everything was tried.
-const deleteStoredRoomData = async (roomId: string): Promise<void> => {
+//
+// The earlier leftovers are found by the room's id while it has one. A room
+// that was removed before has none (its entry is a placeholder with an empty
+// id, or is gone), and its leftovers are found by a digest of its URL, which
+// purgeRoom passes. A caller that has tried the leftovers itself (leaving
+// all rooms does, once for all of them) passes `retryLeftovers` false.
+const deleteStoredRoomData = async (
+  roomId: string,
+  roomUrl?: string,
+  retryLeftovers = true,
+): Promise<void> => {
   const failures: unknown[] = [];
-  if (roomId !== "")
+  const left = !retryLeftovers
+    ? undefined
+    : roomId !== ""
+      ? { roomId, ...(roomUrl === undefined ? {} : { roomUrl }) }
+      : roomUrl === undefined
+        ? undefined
+        : { roomUrl };
+  if (left)
     try {
-      await retryFileRemovals({ roomId });
+      await retryFileRemovals(left);
     } catch (error) {
       failures.push(error);
     }
@@ -826,6 +847,9 @@ const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
 // after the connections close. A received file the browser refuses to remove
 // makes this reject with one StorageFailedError (`failures`: each file and
 // the browser's error for it) once every other room and message was tried.
+// Calling it again tries the files that were left, also those of rooms this
+// page no longer lists (after a reload it lists none until they are joined
+// again): every file a deleted message left, the excepted rooms' aside.
 const disconnectFromAllRooms = async (
   deleteMessages = false,
   exceptionRoomIds: string[] = [],
@@ -839,10 +863,16 @@ const disconnectFromAllRooms = async (
   if (!deleteMessages) return;
   const exceptions = new Set(exceptionRoomIds);
   const failures: unknown[] = [];
+  try {
+    await retryFileRemovals({ exceptRoomIds: exceptionRoomIds });
+  } catch (error) {
+    failures.push(error);
+  }
   for (const room of store.getState().rooms) {
     if (exceptions.has(room.id)) continue;
     try {
-      await deleteStoredRoomData(room.id);
+      // The files earlier deletes left were tried above, once.
+      await deleteStoredRoomData(room.id, undefined, false);
     } catch (error) {
       failures.push(error);
     }
@@ -986,7 +1016,13 @@ export interface MessageTransferHandle {
    * ```
    */
   readonly done: Promise<SendMessageResult | undefined>;
-  /** Cancels exactly this logical send, even before hashing/WASM setup finishes. */
+  /**
+   * Cancels exactly this logical send, even before hashing/WASM setup
+   * finishes. Like `cancelMessage`, it rejects with StorageFailedError when
+   * the browser refuses to remove a file kept for the message (the copy
+   * assembled when the sent file was read back); the send is cancelled all
+   * the same, and calling it again tries the file again.
+   */
   cancel(): Promise<void>;
 }
 
@@ -1104,6 +1140,11 @@ const resumePendingMessages = (
   return work;
 };
 
+/**
+ * Cancel a pending outbound message by its transfer ID. It goes through
+ * `cancelMessage`, and like it rejects with StorageFailedError when the
+ * browser refuses to remove a file kept for the message.
+ */
 const cancelPendingMessage = async (
   roomId: string,
   transferId: string,
@@ -1390,6 +1431,70 @@ const readMessage = async (
   }
 };
 
+// A Merkle root or whole-file hash as the application gives it: the 128
+// lower-case hexadecimal characters the SDK reports it as, or the 64 bytes
+// those encode. Any other form names nothing the SDK holds, so it is refused
+// here with a typed error instead of being looked up.
+const MESSAGE_HASH_HEX = new RegExp(
+  `^[0-9a-f]{${String(crypto_hash_sha512_BYTES * 2)}}$`,
+);
+const messageHashHex = (
+  value: string | Uint8Array | undefined,
+  argument: "merkleRoot" | "hash",
+): string => {
+  if (!value) return "";
+  if (typeof value !== "string") {
+    if (value.length !== crypto_hash_sha512_BYTES)
+      throw new InvalidMessageHashError(argument);
+    return uint8ArrayToHex(value);
+  }
+  if (!MESSAGE_HASH_HEX.test(value))
+    throw new InvalidMessageHashError(argument);
+  return value;
+};
+
+// A delete or cancel of a message this page does not list. That is also how
+// a message looks whose delete or cancel was refused its file earlier, in
+// this session or before a reload: its records are gone and its file may
+// still be on disk. The removal is tried again, under every name the call
+// gave (a file found under two of them is listed once). Only what this
+// room's deleted messages left is touched (a file some record still owns, or
+// that another room's records name, is left alone). A file that is still
+// refused rejects the call with StorageFailedError, as the first call did,
+// after every name was tried.
+const retryUnlistedRemoval = async (
+  roomId: string,
+  names: { merkleRootHex: string; hashHex: string; transferId?: string },
+): Promise<void> => {
+  const scopes: FileRemovalRetryScope[] = [];
+  if (names.transferId) scopes.push({ roomId, transferId: names.transferId });
+  if (names.merkleRootHex)
+    scopes.push({ roomId, merkleRootHex: names.merkleRootHex });
+  if (names.hashHex) scopes.push({ roomId, hash: names.hashHex });
+  const left = new Map<string, FileRemovalFailure>();
+  for (const scope of scopes)
+    try {
+      await retryFileRemovals(scope);
+    } catch (error) {
+      if (!(error instanceof StorageFailedError) || error.failures.length === 0)
+        throw error;
+      for (const failure of error.failures)
+        left.set(failure.merkleRootHex, failure);
+    }
+  if (left.size > 0) throw filesNotRemoved([...left.values()]);
+};
+
+/**
+ * Cancel a message that is being sent or received, and remove everything
+ * stored for it. `merkleRoot` and `hash` are the 128 lower-case hexadecimal
+ * characters the SDK reports, or the 64 bytes those encode
+ * (InvalidMessageHashError otherwise).
+ *
+ * Rejects with StorageFailedError when the browser refuses to remove the
+ * message's file; the message is cancelled and unlisted all the same.
+ * Calling again with the same arguments tries the file again, and rejects
+ * while it is still on disk.
+ */
 const cancelMessage = async (
   roomId: string,
   channelLabel: string,
@@ -1401,44 +1506,8 @@ const cancelMessage = async (
     throw new Error("Need to provide a transfer ID, Merkle root, or hash");
   if (transferId && !/^[0-9a-f]{64}$/.test(transferId))
     throw new Error("Invalid transfer ID");
-  if (
-    merkleRoot &&
-    typeof merkleRoot === "string" &&
-    merkleRoot.length !== crypto_hash_sha512_BYTES * 2
-  )
-    throw new Error("Invalid Merkle root length");
-  if (
-    merkleRoot &&
-    typeof merkleRoot !== "string" &&
-    merkleRoot.length !== crypto_hash_sha512_BYTES
-  )
-    throw new Error("Invalid Merkle root length");
-
-  if (
-    hash &&
-    typeof hash === "string" &&
-    hash.length !== crypto_hash_sha512_BYTES * 2
-  )
-    throw new Error("Invalid hash length");
-  if (
-    hash &&
-    typeof hash !== "string" &&
-    hash.length !== crypto_hash_sha512_BYTES
-  )
-    throw new Error("Invalid hash length");
-
-  const merkleRootHex =
-    merkleRoot && typeof merkleRoot === "string"
-      ? merkleRoot
-      : merkleRoot && typeof merkleRoot !== "string"
-        ? uint8ArrayToHex(merkleRoot)
-        : "";
-  const hashHex =
-    hash && typeof hash === "string"
-      ? hash
-      : hash && typeof hash !== "string"
-        ? uint8ArrayToHex(hash)
-        : "";
+  const merkleRootHex = messageHashHex(merkleRoot, "merkleRoot");
+  const hashHex = messageHashHex(hash, "hash");
 
   await discardPendingSelection(
     {
@@ -1491,7 +1560,8 @@ const cancelMessage = async (
       label,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,
     );
-  }
+  } else if (messageIndex === -1)
+    await retryUnlistedRemoval(roomId, { merkleRootHex, hashHex, transferId });
 };
 
 // Close a listed message's channel and remove everything stored for it, for
@@ -1529,6 +1599,21 @@ const removeStoredMessage = async (
   store.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
 };
 
+/**
+ * Delete a message of a room and everything stored for it. `merkleRoot` and
+ * `hash` are the 128 lower-case hexadecimal characters the SDK reports, or
+ * the 64 bytes those encode (InvalidMessageHashError otherwise).
+ *
+ * Rejects with StorageFailedError when the browser refuses to remove the
+ * message's file; its records are deleted and it is unlisted all the same.
+ * Calling again with the same arguments tries the file again, and rejects
+ * while it is still on disk.
+ *
+ * Only a message this page lists is deleted. For any other name the call
+ * tries again the file an earlier delete of this room's messages left, if
+ * there is one, and otherwise resolves without changing anything: a file a
+ * record still owns, or that another room's records name, is never touched.
+ */
 const deleteMsg = async (
   roomId: string,
   merkleRoot?: string | Uint8Array,
@@ -1536,43 +1621,8 @@ const deleteMsg = async (
 ) => {
   if (!merkleRoot && !hash)
     throw new Error("Need to provide either merkle root or hash");
-  if (
-    merkleRoot &&
-    typeof merkleRoot === "string" &&
-    merkleRoot.length !== crypto_hash_sha512_BYTES * 2
-  )
-    throw new Error("Invalid Merkle root length");
-  if (
-    merkleRoot &&
-    typeof merkleRoot !== "string" &&
-    merkleRoot.length !== crypto_hash_sha512_BYTES
-  )
-    throw new Error("Invalid Merkle root length");
-  if (
-    hash &&
-    typeof hash === "string" &&
-    hash.length !== crypto_hash_sha512_BYTES * 2
-  )
-    throw new Error("Invalid hash length");
-  if (
-    hash &&
-    typeof hash !== "string" &&
-    hash.length !== crypto_hash_sha512_BYTES
-  )
-    throw new Error("Invalid hash length");
-
-  const merkleRootHex =
-    merkleRoot && typeof merkleRoot === "string"
-      ? merkleRoot
-      : merkleRoot && typeof merkleRoot !== "string"
-        ? uint8ArrayToHex(merkleRoot)
-        : "";
-  const hashHex =
-    hash && typeof hash === "string"
-      ? hash
-      : hash && typeof hash !== "string"
-        ? uint8ArrayToHex(hash)
-        : "";
+  const merkleRootHex = messageHashHex(merkleRoot, "merkleRoot");
+  const hashHex = messageHashHex(hash, "hash");
 
   await discardPendingSelection(
     {
@@ -1621,17 +1671,8 @@ const deleteMsg = async (
       label,
       rooms[roomIndex].messages[messageIndex].merkleRootHex,
     );
-  } else if (
-    messageIndex === -1 &&
-    merkleRootHex.length === crypto_hash_sha512_BYTES * 2
-  ) {
-    // Not listed. That is also how a message looks whose delete was refused
-    // its file earlier, in this session or before a reload: its records are
-    // gone and its file may still be on disk. Try that removal again. A file
-    // some record still owns is left alone; one that is still refused
-    // rejects this call with StorageFailedError, as the first call did.
-    await retryFileRemovals({ merkleRootHex });
-  }
+  } else if (messageIndex === -1)
+    await retryUnlistedRemoval(roomId, { merkleRootHex, hashHex });
 };
 
 /**
@@ -1900,7 +1941,16 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
     const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
     // An unknown capability has no local or server-side membership to remove.
     // In particular it must not tear down the socket shared by other rooms.
-    if (roomIndex === -1) return;
+    // It may name a room that was removed before, some of whose files the
+    // browser refused to remove then. Those removals are tried again (the
+    // files are found by a digest of this URL), and one that is refused again
+    // rejects this call as it did the first. (Until the page is reloaded a
+    // removed room is still listed, as a placeholder without an id; that
+    // case goes through deleteStoredRoomData below, which does the same.)
+    if (roomIndex === -1) {
+      await retryFileRemovals({ roomUrl });
+      return;
+    }
 
     const removedRoom = rooms[roomIndex];
     deleteRoomPin(roomUrl);
@@ -1931,7 +1981,7 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
       },
       // Awaited here, not inside the disconnect query, so a typed storage
       // failure reaches this call; closeLocalTransport already disconnected.
-      deleteLocalData: () => deleteStoredRoomData(removedRoom.id),
+      deleteLocalData: () => deleteStoredRoomData(removedRoom.id, roomUrl),
       clearPinAttempts: async () => {
         if (removedRoom.id) await clearPinAttempts(removedRoom.id);
       },
@@ -2094,6 +2144,15 @@ export const p2party = {
   validateRoomPolicyV1,
   MessageDeliveryError,
   RemoteRoomRevocationUnconfirmedError,
+  // The typed errors of storage, as the guide names them (`p2party.X`), so
+  // that `error instanceof p2party.StorageFailedError` works with the default
+  // import as it does with the named one.
+  StorageFailedError,
+  InvalidMessageHashError,
+  ReceiveIntegrityError,
+  DatabaseUnavailableError,
+  DatabaseUpgradeBlockedError,
+  DatabaseWorkerError,
   joinRoom,
   waitForRoom,
   waitForPeers,
@@ -2177,6 +2236,7 @@ export {
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
   DatabaseWorkerError,
+  InvalidMessageHashError,
   StorageFailedError,
   setDebugLogging,
   getCoverTimerSource,

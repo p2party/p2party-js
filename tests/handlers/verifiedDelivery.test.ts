@@ -25,6 +25,7 @@ import { hashMerkleLeafWasm } from "../../src/utils/leafHash";
 import { serializeMetadata } from "../../src/utils/metadata";
 import { MessageType } from "../../src/utils/messageTypes";
 import { hexToUint8Array, uint8ArrayToHex } from "../../src/utils/uint8array";
+import * as bytes from "../../src/utils/uint8array";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
@@ -34,6 +35,7 @@ import {
   REPORTED_COMPLETION_CHECK_MS,
   RATCHET_ROOT_SUITE_MLKEM512,
   RECEIVER_SILENCE_LIMIT_MS,
+  RECONNECT_RESUME_POLL_MS,
   RETRANSMIT_TIMEOUT_MS,
 } from "../../src/utils/constants";
 import {
@@ -264,6 +266,9 @@ const stageMessage = async (
   reals: number,
   decoys: number,
   totalSize: number,
+  // Called with each copy the store hands out, before the reader gets it; its
+  // return value, when given, is handed out instead.
+  onRead?: (copy: NewChunk) => NewChunk | void,
 ) => {
   const totalChunks = reals + decoys;
   const hash = rand(crypto_hash_sha512_BYTES);
@@ -310,7 +315,8 @@ const stageMessage = async (
       get: async (_transferId, index) => {
         const row = rows.get(index);
         if (!row) return undefined;
-        const copy = structuredClone(row);
+        const original = structuredClone(row);
+        const copy = onRead?.(original) ?? original;
         handedOut.push(copy);
         return copy;
       },
@@ -757,10 +763,13 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       edge.receiveReceipt(merkleRootHex);
       await settle();
     }
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
 
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
-    const result = await settledWithin(sending);
+    const result = await outcomeOf(sending);
     expect(result.settled).toBe(true);
     expect(result.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
@@ -778,6 +787,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     edge.receiveReceipt(merkleRootHex);
     await settle();
     clock.advanceTo(silence / 2 + silence - 1);
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(silence / 2 + silence);
     // The outcome a scheduled send gives when its delivery wait runs out.
@@ -806,8 +818,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       await startScheduledVerification(totalSize);
     edge.epc.coverRuntime!.suspend("pagehide");
     clock.advanceTo(2 * silence);
-    // Real milliseconds too: a send that gave up settles after its 1 ms
-    // resume watch.
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
     edge.epc.coverRuntime!.resume();
     // Silence counts again from the last check while suspended.
@@ -832,6 +845,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     );
     edge.epc.coverRuntime!.suspend("pagehide");
     clock.advanceTo(silence - 1);
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(silence);
     const settled = await outcomeOf(sending);
@@ -853,6 +869,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       await settle();
     }
     clock.advanceTo(cap - 1);
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(cap);
     const settled = await outcomeOf(sending);
@@ -916,6 +935,8 @@ const startImmediateVerification = async (totalSize: number) => {
     pq.destroy();
   });
   const clock = new ManualClock();
+  // The resume watch's own clock, apart from the confirmation clock.
+  const resumeClock = new ManualClock();
   const cancellations: string[] = [];
   const queueDeletes: [string, string][] = [];
   const sending = sendWithReconcile(
@@ -942,8 +963,9 @@ const startImmediateVerification = async (totalSize: number) => {
         cancellations.push(receipt.transferId);
         return true;
       },
-      resumeTimeoutMs: 1,
+      resumeTimeoutMs: RESUME_BUDGET_MS,
       clock,
+      resumeClock,
     },
   );
   own(sending);
@@ -963,10 +985,33 @@ const startImmediateVerification = async (totalSize: number) => {
     channel,
     epc,
     clock,
+    resumeClock,
     sending,
     cancellations,
     queueDeletes,
   };
+};
+
+/**
+ * A resume that finds no transport sleeps one poll on its clock; with that
+ * sleep armed, move its clock past the poll, and so past the budget. Answers
+ * whether the resume armed that sleep on its clock (false: the send ended
+ * first).
+ */
+const RESUME_BUDGET_MS = 1;
+const endResumeWatch = async (
+  resumeClock: ManualClock,
+  sending: Promise<unknown>,
+): Promise<boolean> => {
+  const armed = await Promise.race([
+    resumeClock.whenArmed().then(() => true),
+    sending.then(
+      () => false,
+      () => false,
+    ),
+  ]);
+  resumeClock.advanceTo(RECONNECT_RESUME_POLL_MS);
+  return armed;
 };
 
 const closeFromTheFarSide = (channel: TransferChannel): void => {
@@ -976,13 +1021,16 @@ const closeFromTheFarSide = (channel: TransferChannel): void => {
 
 describe("immediate mode: a closing channel ends the verification wait at once", () => {
   test("the completion wait ends at once when the channel closes", async () => {
-    const { channel, epc, clock, sending, cancellations } =
+    const { channel, epc, clock, resumeClock, sending, cancellations } =
       await startImmediateVerification(800 * MIB);
     // The transport goes: what a close did before this wait existed, a
     // resume attempt, and with nothing to resume on, the usual failure.
     (epc as { connectionState: string }).connectionState = "disconnected";
     closeFromTheFarSide(channel);
+    // The resume found no transport and sleeps one poll on its own clock.
+    expect(await endResumeWatch(resumeClock, sending)).toBe(true);
     const settled = await outcomeOf(sending.catch((error: Error) => error));
+    expect(resumeClock.now()).toBe(RECONNECT_RESUME_POLL_MS);
     expect(settled.settled).toBe(true);
     expect((settled.value as Error).message).toBe(
       "Message transfer ended without receiver confirmation",
@@ -1011,6 +1059,8 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     const { clock, sending } = await startImmediateVerification(800 * MIB);
     const outcome = sending.catch((error: Error) => error);
     clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS - 1);
+    // Still in its wait: the wait's own timer is armed.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(outcome)).settled).toBe(false);
     clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS);
     const settled = await outcomeOf(outcome);
@@ -1191,6 +1241,9 @@ describe("scheduled mode: one peer's verification does not hold back the next", 
     // first peer's verification is still open.
     expect(second.jobs).toHaveLength(1);
     expect(order).toEqual(["first verifying", "second delivery wait"]);
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
 
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
@@ -1452,6 +1505,9 @@ describe("a key-epoch change is not an edge going away", () => {
     // A PQ heal on the same edge publishes a new cover generation.
     started.edge.epc.coverRuntime!.onPqEpochChanged();
     await settle();
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(started.clock.armed).toBe(1);
     expect((await settledWithin(started.sending)).settled).toBe(false);
     // Not re-entered, not resumed, nothing re-offered.
     expect(started.activitySubscriptions()).toBe(1);
@@ -1477,6 +1533,9 @@ describe("a key-epoch change is not an edge going away", () => {
       started.edge.epc.coverRuntime!.onPqEpochChanged();
       await settle();
     }
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(started.clock.armed).toBe(1);
     expect((await settledWithin(started.sending)).settled).toBe(false);
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
     const settled = await outcomeOf(started.sending);
@@ -1497,6 +1556,9 @@ describe("a replacement that arrives before the old edge is torn down", () => {
     // A rekey first: the generation watch must keep listening after it.
     edge.epc.coverRuntime!.onPqEpochChanged();
     await settle();
+    // Still in its wait: the wait's own timer is armed. A send whose wait
+    // ended early is past it (in its real resume watch) and has none.
+    expect(clock.armed).toBe(1);
     expect((await settledWithin(sending)).settled).toBe(false);
     // The peer's fresh connection authenticates and installs its runtime;
     // the old edge is not torn down yet.
@@ -1536,7 +1598,7 @@ describe("an edge retired with no replacement", () => {
 
 describe("immediate mode: completion and the receiver's CANCEL around a close", () => {
   test("a completion recorded while the resume was failing is reported as delivered", async () => {
-    const { channel, epc, sending, realIndexes } =
+    const { channel, epc, resumeClock, sending, realIndexes } =
       await startImmediateVerification(800 * MIB);
     const outcome = sending.then(
       () => "delivered",
@@ -1561,13 +1623,14 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
       },
     });
     closeFromTheFarSide(channel);
+    expect(await endResumeWatch(resumeClock, sending)).toBe(true);
     const settled = await outcomeOf(outcome);
     expect(recorded).toBe(true);
     expect(settled).toEqual({ settled: true, value: "delivered" });
   });
 
   test("a resume drops the legacy queue through the same seam as the send", async () => {
-    const { channel, epc, sending, realIndexes, queueDeletes } =
+    const { channel, epc, sending, realIndexes, queueDeletes, resumeClock } =
       await startImmediateVerification(800 * MIB);
     const outcome = sending.then(
       () => "delivered",
@@ -1590,15 +1653,22 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
           : "connected",
     });
     closeFromTheFarSide(channel);
+    // Its one open attempt fails; it waits a poll on its clock before trying
+    // again, and by then its budget is spent.
+    expect(await endResumeWatch(resumeClock, sending)).toBe(true);
     const settled = await outcomeOf(outcome);
     expect(settled).toEqual({
       settled: true,
       value: "Message transfer ended without receiver confirmation",
     });
-    expect(queueDeletes.length).toBeGreaterThan(1);
-    for (const call of queueDeletes) expect(call).toEqual([label, PEER]);
-    // One logged failure per open the resume tried after its queue delete.
-    expect(logged).toHaveBeenCalledTimes(queueDeletes.length - 1);
+    // The send's own delete, then the resume's, through the same seam.
+    expect(queueDeletes).toEqual([
+      [label, PEER],
+      [label, PEER],
+    ]);
+    // The resume's one open attempt failed and was logged.
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(resumeClock.now()).toBe(RECONNECT_RESUME_POLL_MS);
   });
 
   test("a receiver's CANCEL frame then close is reported as a cancel without waiting", async () => {
@@ -1858,6 +1928,59 @@ describe("a sealed cell's plaintext does not outlive its sealing", () => {
     expect(staged.handedOut).toHaveLength(1);
     expect(allZero(staged.handedOut[0].data)).toBe(true);
     expect(allZero(staged.handedOut[0].metadata)).toBe(true);
+  });
+
+  test("an aborted read zeroes the plaintext it built", async () => {
+    const staged = await stageMessage(1, 1, 800 * MIB);
+    const cell = await staged.message.read(0);
+    const reading = new AbortController();
+    // The send is aborted while the cell's plaintext is being put together:
+    // cellPlaintext has built it but will not return it.
+    let built: Uint8Array | undefined;
+    const concatenate = bytes.concatUint8Arrays;
+    const spy = spyOn(bytes, "concatUint8Arrays").mockImplementation(
+      async (parts) => {
+        built = await concatenate(parts);
+        expect(allZero(built)).toBe(false);
+        reading.abort(new Error("Message transfer cancelled"));
+        return built;
+      },
+    );
+    cleanups.push(() => {
+      spy.mockRestore();
+    });
+    await expect(
+      staged.message.cellPlaintext(cell!, undefined, reading.signal),
+    ).rejects.toThrow("Message transfer cancelled");
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(built).toHaveLength(DECRYPTED_LEN);
+    expect(allZero(built!)).toBe(true);
+  });
+
+  test("a read that fails after the store answered zeroes the row", async () => {
+    // An abort that lands while the store read is in flight.
+    const reading = new AbortController();
+    const aborted = await stageMessage(1, 1, 800 * MIB, () => {
+      reading.abort(new Error("Message transfer cancelled"));
+    });
+    await expect(aborted.message.read(0, reading.signal)).rejects.toThrow(
+      "Message transfer cancelled",
+    );
+    expect(aborted.handedOut).toHaveLength(1);
+    expect(allZero(aborted.handedOut[0].data)).toBe(true);
+    expect(allZero(aborted.handedOut[0].metadata)).toBe(true);
+
+    // A row the store answered for another index.
+    const misplaced = await stageMessage(1, 1, 800 * MIB, (copy) => ({
+      ...copy,
+      chunkIndex: copy.chunkIndex + 1,
+    }));
+    await expect(misplaced.message.read(0)).rejects.toThrow(
+      "Outbound chunk index does not match its staging key",
+    );
+    expect(misplaced.handedOut).toHaveLength(1);
+    expect(allZero(misplaced.handedOut[0].data)).toBe(true);
+    expect(allZero(misplaced.handedOut[0].metadata)).toBe(true);
   });
 
   test("the immediate sender zeroes each cell's plaintext after sealing", async () => {

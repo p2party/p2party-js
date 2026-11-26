@@ -40,7 +40,12 @@ import {
   compileChannelMessageLabel,
   decompileChannelMessageLabel,
 } from "../utils/channelLabel";
-import { waitForOpen } from "../utils/waitForOpen";
+import {
+  realPollClock,
+  sleepUnlessAborted,
+  waitForOpen,
+  type PollClock,
+} from "../utils/waitForOpen";
 import { incrementMessageStats } from "../reducers/roomSlice";
 import {
   clearTransfer,
@@ -296,14 +301,18 @@ export interface StagedOutboundChunk {
 }
 
 /**
- * Zero a staged cell's plaintext. A read returns a fresh copy of the staged
- * row (the database worker's reply is a structured clone, and a staging put
- * clones it again), owned by the one caller that seals it; nothing reads it
- * once that cell is sealed or refused.
+ * Zero a staged row's plaintext. A read gets a fresh copy of the staged row
+ * (the database worker's reply is a structured clone, and a staging put
+ * clones it again), owned by the one caller that seals it or by the read
+ * that drops it; nothing reads it after that.
  */
+const wipeRowPlaintext = (row: NewChunk): void => {
+  new Uint8Array(row.data).fill(0);
+  new Uint8Array(row.metadata).fill(0);
+};
+
 const wipeStagedPlaintext = (staged: StagedOutboundChunk): void => {
-  new Uint8Array(staged.row.data).fill(0);
-  new Uint8Array(staged.row.metadata).fill(0);
+  wipeRowPlaintext(staged.row);
 };
 
 // Per-cell kinds an OutboundMessage learned by reading; 0 = not read yet.
@@ -410,21 +419,27 @@ export class OutboundMessage {
   ): Promise<StagedOutboundChunk | undefined> {
     this.#assertOpen();
     const row = await this.#store.get(this.transferId, index);
-    throwIfTransferAborted(signal);
-    if (!row) return undefined;
-    const metadataArray = new Uint8Array(row.metadata);
-    const metadata = deserializeMetadata(metadataArray);
-    if (metadata.chunkIndex !== index || row.chunkIndex !== index)
-      throw new Error("Outbound chunk index does not match its staging key");
-    // Real-vs-decoy is read from the chunk's own metadata (SSOT).
-    const real =
-      metadata.chunkEndIndex > metadata.chunkStartIndex &&
-      metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
-    if (!this.#closed) {
-      this.#kinds[index] = real ? CHUNK_KIND_REAL : CHUNK_KIND_DECOY;
-      this.#totalSize = metadata.totalSize;
+    try {
+      throwIfTransferAborted(signal);
+      if (!row) return undefined;
+      const metadataArray = new Uint8Array(row.metadata);
+      const metadata = deserializeMetadata(metadataArray);
+      if (metadata.chunkIndex !== index || row.chunkIndex !== index)
+        throw new Error("Outbound chunk index does not match its staging key");
+      // Real-vs-decoy is read from the chunk's own metadata (SSOT).
+      const real =
+        metadata.chunkEndIndex > metadata.chunkStartIndex &&
+        metadata.chunkEndIndex - metadata.chunkStartIndex <= metadata.totalSize;
+      if (!this.#closed) {
+        this.#kinds[index] = real ? CHUNK_KIND_REAL : CHUNK_KIND_DECOY;
+        this.#totalSize = metadata.totalSize;
+      }
+      return { index, row, metadataArray, metadata, real };
+    } catch (error) {
+      // The store's copy is this read's own until it is returned.
+      if (row) wipeRowPlaintext(row);
+      throw error;
     }
-    return { index, row, metadataArray, metadata, real };
   }
 
   /**
@@ -1062,20 +1077,19 @@ const resumeChannel = async (
     label,
     toPeerId,
   ) => deleteDBSendQueue(label, toPeerId),
+  clock: PollClock = realPollClock,
 ): Promise<{
   epc: IRTCPeerConnection;
   channel: IRTCDataChannel;
 } | null> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = clock.now() + timeoutMs;
+  while (clock.now() < deadline) {
     throwIfTransferAborted(signal);
     const epc = peerConnections.find((p) =>
       isResumableAuthenticatedTransport(p, roomId, peerId),
     );
     if (!epc) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, RECONNECT_RESUME_POLL_MS),
-      );
+      await sleepUnlessAborted(RECONNECT_RESUME_POLL_MS, signal, clock);
       throwIfTransferAborted(signal);
       continue;
     }
@@ -1097,7 +1111,9 @@ const resumeChannel = async (
       // newChunks cleanup. If it still hasn't opened (timed out, or the pc died
       // again mid-open), neutralize it so it can never later open, push into
       // dataChannels, or malloc receive buffers, then look for a fresh epc.
-      if (await waitForOpen(ch, deadline - Date.now(), undefined, signal))
+      if (
+        await waitForOpen(ch, deadline - clock.now(), undefined, signal, clock)
+      )
         return { epc, channel: ch };
       try {
         closeTransferChannel(ch);
@@ -1107,6 +1123,10 @@ const resumeChannel = async (
       throwIfTransferAborted(signal);
     } catch (error) {
       console.error(error);
+      // Retried after a poll, never at once: an attempt that fails without
+      // any I/O would otherwise retry in a microtask loop that starves the
+      // page for the whole budget.
+      await sleepUnlessAborted(RECONNECT_RESUME_POLL_MS, signal, clock);
     }
   }
   return null;
@@ -1543,6 +1563,11 @@ export interface ImmediateSendDependencies {
   readonly persistCancellation?: typeof persistOutboundCancellation;
   /** How long a resume watches for the peer's replacement connection. */
   readonly resumeTimeoutMs?: number;
+  /**
+   * The clock of that resume watch and of its channel-open wait, apart from
+   * the confirmation clock below; the browser's by default.
+   */
+  readonly resumeClock?: PollClock;
   /** The clock of the waits between retransmit rounds. */
   readonly clock?: TransferWaitClock;
 }
@@ -1736,6 +1761,7 @@ export const sendWithReconcile = async (
           dependencies.resumeTimeoutMs ?? RECONNECT_RESUME_TIMEOUT_MS,
           signal,
           deleteSendQueue,
+          dependencies.resumeClock,
         );
         if (!resumed) break;
         // Adopt the replacement channel BEFORE re-deriving: re-binding can

@@ -432,11 +432,14 @@ export const isForwardScheduledProgress = (
  * - the cover scheduler is SUSPENDED (pagehide, freeze, offline): the schedule
  *   is not running at all;
  * - the page is HIDDEN. Its schedule stays armed (suspending it made tab
- *   visibility readable off the wire), but the browser may throttle its
- *   timers, and a cycle whose cells fire late degrades without sending. The
- *   send is as healthy as a suspended one and is held exactly as one is. The
- *   cost: a send that genuinely stalls while the page is hidden is detected
- *   only when the page is visible again.
+ *   visibility readable off the wire) and is woken by the page's timer
+ *   worker, but it can still stop making progress: on the page-timer
+ *   fallback a hidden page's throttled timers degrade cycles without sending,
+ *   and even on the worker a hidden page runs its wake-ups late enough to
+ *   degrade some cycles at short slot spacings. The send is as healthy as a
+ *   suspended one and is held exactly as one is. The cost: a send that
+ *   genuinely stalls while the page is hidden is detected only when the page
+ *   is visible again.
  *
  * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
  * one are NOT this, hidden page or not: they are conditions the idle budget

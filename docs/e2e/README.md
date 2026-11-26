@@ -589,6 +589,15 @@ Notes on the table:
   once a minute. The worker's numbers did not change in that phase.
 - While visible, both clocks sent every cell, and no wake-up was more than
   6 ms late.
+- Even with no cycle degraded (500 ms slots), the worker's wake-ups, and so
+  the cells, ran 60 ms late at the median on the hidden page, against at most
+  6 ms visible. Visibility is therefore readable from cell timing against the
+  slot grid. Closing that needs sending from the worker, which the SDK does not
+  do.
+- The harness timestamps only the page side, so it cannot tell a late worker
+  timer from a late page task.
+- It ran one worker per scheduler. The SDK now shares one worker per page; the
+  path from worker timer to page handler is the same.
 - Not measured: other browsers, mobile, a frozen or discarded page, and a
   suspended process.
 

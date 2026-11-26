@@ -589,13 +589,15 @@ describe("a late boundary degrades and re-arms instead of parking (C5)", () => {
     const { clock, trace, scheduler, statuses } = harness(schedule(), 0);
     scheduler.start();
     await clock.advanceTo(50);
-    expect(scheduler.suspend("page-hidden")).toBe(true);
+    // A frozen page: the Page Lifecycle `freeze` suspends cover (a hidden
+    // page no longer does).
+    expect(scheduler.suspend("freeze")).toBe(true);
 
     await clock.jumpTo(5_400);
 
     // "suspended" is the one status a browser event is guaranteed to lift.
-    // Degrading here would resurrect cover on a hidden page and claim a gap
-    // the runtime has deliberately refused to claim.
+    // Degrading here would resurrect cover on a frozen page, which cannot
+    // send, and claim a gap the runtime has deliberately refused to claim.
     expect(scheduler.getStatus()).toBe("suspended");
     expect(statuses).not.toContain("degraded");
     expect(clock.armedTimerCount()).toBe(0);

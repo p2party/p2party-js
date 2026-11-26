@@ -182,6 +182,19 @@ WebRTC exposes them, packet volume, transfer duration, and traffic bursts. An
 endpoint peer necessarily learns plaintexts it decrypts, peer identity, message
 ordering, and transfer activity.
 
+Room members learn from the signaling server when another member leaves a
+room and when its last signaling socket closes (`peerLeft`, see below). Before
+this frame existed a member learned that only from its own edge to that
+member, if it had one. Now every online member of every room an identity is
+in is told each time that identity goes offline, whether or not it holds an
+edge to that identity, within the server's delivery time and subject to the
+server's per-identity limit (`p2party-server` announces at most six offline
+closes per identity per minute per process and drops the rest). With the
+introductions a returning member already causes, room-mates can record the
+start and end of each of a member's signaling sessions. The frame carries the
+room UUID, the member's peer id and a socket generation that introductions and
+deltas already show to room-mates; it carries no address and no key.
+
 Fixed chunk cells hide exact plaintext length only within the frame-count
 bucket and chosen decoy allocation. With immediate delivery, observers still
 see when a message starts, how many cells/channels are active, when receipts
@@ -215,6 +228,33 @@ does not make that signaling path blind.
   registries have explicit client-side bounds. Those bounds limit one client's
   exposure; they are not server-side Sybil resistance or a global availability
   proof.
+- The server reports departures with a `peerLeft` frame:
+  `{ type: "peerLeft", roomId, peerId, reason: "left" | "offline",
+socketGeneration, protocolVersion: 4 }`. `"left"` means the member sent
+  `leaveRoom`; `"offline"` means its last signaling socket closed, and the
+  server sends one frame per room the identity is in. `socketGeneration` names
+  the socket that left or closed. The client cannot verify the report, and a
+  hostile or compromised signaling server is inside this project's threat
+  model, so the report is a hint (`handleWebSocketMessage.ts`,
+  `peerRosterDelta.ts`): it never closes a connected edge (an
+  `RTCPeerConnection` in `connected` or `disconnected`). For `"left"` with no
+  connected edge the client drops the member and abandons a negotiation still
+  in progress; with a connected edge it keeps the edge and drops the member
+  when that edge closes. For `"offline"` it keeps the edge and the member, and
+  makes no reconcile retry or targeted roster request for that member until a
+  server frame names it again. A `peers` delta, a `peerConnection`
+  introduction or a `connection` from the member withdraws either report; a
+  `peers` snapshot, which lists offline members too, withdraws a `"left"`
+  report, and an `"offline"` one only when it shows the member on another
+  socket generation. A report naming another generation than the one the
+  server last named for that member is about an earlier session and changes
+  nothing, which is what keeps a departure delivered after the member's quick
+  return from removing it; a report naming this client, an untracked peer or
+  an unknown room is refused like a malformed frame. A false report gives the
+  server no power it lacked: it could already decline to introduce a member or
+  to relay a negotiation that has not connected. What a false report can do is
+  make this client stop retrying a member whose edge later drops; the other
+  member's own retries still reach it through the server.
 
 TURN is a transport relay, not a privacy proxy. The legacy REST username is
 expiry-bound but contains the client's Ed25519 public key, and the TURN

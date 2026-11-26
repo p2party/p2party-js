@@ -192,6 +192,17 @@ describe("correlated room membership snapshots", () => {
           peers: [{ peerId: PEER_ID, peerPublicKey: PEER_PUBLIC_KEY }],
         },
       },
+      // Membership evidence only: it never dials and never ends an
+      // "offline" report on its own.
+      {
+        type: "rooms/notePeerPresence",
+        payload: {
+          roomId: ROOM_ID,
+          peerId: PEER_ID,
+          socketGeneration: undefined,
+          evidence: "membership",
+        },
+      },
     ]);
     expect(connectParams).toEqual([]);
     expect(signalingPeerRequestDebouncer.supportsRosterSnapshots).toBe(true);

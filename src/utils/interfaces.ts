@@ -145,8 +145,32 @@ export interface WebSocketMessagePeersResponse {
 export interface WebSocketMessageConnectionRequest {
   type: "peerConnection";
   roomId: string;
+  /** The requester; `socketGeneration` names the socket that asked. */
   peer: RoomPeer;
   /** Optional only so missing/pre-v3 messages can be rejected at runtime. */
+  protocolVersion?: number;
+}
+
+/** "left": the member sent leaveRoom. "offline": its last socket closed. */
+export type PeerDepartureReason = "left" | "offline";
+
+/**
+ * The server's report that another member of a room left it or went offline.
+ * Unauthenticated: the signaling server can send it about anyone, so it is a
+ * hint that never closes a connected edge (handleWebSocketMessage).
+ */
+export interface WebSocketMessagePeerLeft {
+  type: "peerLeft";
+  roomId: string;
+  peerId: string;
+  reason: PeerDepartureReason;
+  /**
+   * The generation of the member's socket that left or closed. A departure
+   * naming another generation than the one the server last named for that
+   * member is about an earlier session and is ignored.
+   */
+  socketGeneration: string;
+  /** Optional only so a missing version can be rejected at runtime. */
   protocolVersion?: number;
 }
 

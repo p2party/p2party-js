@@ -434,7 +434,9 @@ export const isForwardScheduledProgress = (
  * - the page is HIDDEN. Its schedule stays armed (suspending it made tab
  *   visibility readable off the wire), but the browser may throttle its
  *   timers, and a cycle whose cells fire late degrades without sending. The
- *   send is as healthy as a suspended one and is held exactly as one is.
+ *   send is as healthy as a suspended one and is held exactly as one is. The
+ *   cost: a send that genuinely stalls while the page is hidden is detected
+ *   only when the page is visible again.
  *
  * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
  * one are NOT this, hidden page or not: they are conditions the idle budget

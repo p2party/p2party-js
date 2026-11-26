@@ -254,6 +254,86 @@ which excludes source anonymity and traffic patterns by definition):
       1900 is refused for p ∈ [800, 900). That class-0 slot carries PRESENCE
       and backfill, so in those phases a background tab's presence never
       reaches a store.
+16. **The first window of a session is a different shape — and above the read
+    offset it is a start-phase oracle, while below it, it is not.** Items 3
+    and 4 are about a per-window trace that is fixed; this is the one window
+    where it is not. `start()` (`carrierRuntime.ts`) drops every event of
+    the current window whose instant has already passed (a late timer's
+    events, item 15, are sent late; a cold start's past ones were never its
+    to send), so a client that starts at phase `p` into a delivery window
+    issues exactly the events at offsets `≥ p`. The allocation is the one exception, in both directions: at
+    or past `allocationRequestOffsetMs`, `start()` drops the queued allocation
+    and issues a cold-start allocation for the next window immediately, so
+    exactly one allocation POST leaves whatever `p` is. The once-per-session
+    descriptor GET lands in the same window. So the start window carries
+    **1 descriptor GET + 1 allocation POST + every scheduled request at an
+    offset `≥ p`**, plus the witness pair under item 14's usual condition.
+
+    At the pinned profile that is, per store — 16 at `p ≤ 100`, 15 at
+    `100 < p ≤ 600`, then 7, 6, 5, 4, 3 as `p` crosses the five append
+    offsets, and 2 at `p > 2,100` — against **15** in every later window.
+    The rule is pinned at every one of those boundaries by "issues exactly the
+    scheduled events still ahead of its start phase" in
+    `tests/blindRendezvous/prototype/carrierRuntime.test.ts`, which drives the
+    runtime from an injected clock at fourteen start phases, and it was
+    observed end to end at sixteen deliberately unlocked start phases from
+    234 ms to 3,954 ms (`docs/rendezvous-latency-2026-09/stage-1-fixround-report.md`).
+
+    **What a store can read off its own log, and what it cannot.** That this
+    client's session began in this window: **always**, but from the descriptor
+    GET, which is unconditional and on its own route — not from the count.
+    The start phase to within one offset gap: only when `p` is **past
+    `publicReadOffsetMs`** (600 ms of 4,000 — 85 % of the phase space), where
+    the missing offsets separate six bins. Below the read offset the leak
+    very nearly closes: every scheduled event of the window still goes out, so
+    the schedule contributes a complete steady-state trace, and at
+    `100 < p ≤ 600` the total is **exactly the 15 of a steady-state window**,
+    the descriptor GET taking the token POST's place in the count. Measured
+    directly, `w+0 a=15 b=15` at `p = 234 ms`. In that region a store learns
+    one bit — whether `p ≤ tokenIssueOffsetMs` — and nothing finer.
+
+    This item first stated the count as `2 + (append offsets after p)`, which
+    is false below the read offset: it was derived from sixteen observations
+    that all fell above it, because sequential harness runs phase-lock to the
+    delivery-window grid and resample nearly the same `p`. The corrected leak
+    is smaller than the one first disclosed, and it is disclosed at its real
+    size rather than at the size the biased sample suggested.
+
+    Above the read offset it is still the alignment anchor a cross-store
+    observer would reach for before anything else, so it sits directly against
+    item 1. `windowShape()` in the same test file does not cover it — that
+    helper asserts steady-state windows — which is why the start-phase test
+    above was added, and why `docs/e2e/blind-two-store/run.mjs` now asserts
+    the rule per route against the observed `p` on every E2E run rather than
+    printing a number. **What would fix it** is to hold the first window's
+    schedule and begin at the next window boundary, at the price of up to one
+    window of extra latency for every session; it is disclosed rather than
+    done.
+17. **ICE gathering is event-shaped, on a route the fixed schedule does not
+    cover.** Item 4 requires the polling shape to stay schedule-shaped and
+    never event-shaped, and it is stated about the store routes. `createOffer()`
+    and complete ICE gathering run only once a pair has been found, both
+    identity gates have passed and the transport flight is being built
+    (`pairDriver.ts`, `sendOffer`). With any STUN or TURN server configured —
+    the recorded runs use `iceServers: []` and therefore cannot see this — a
+    client emits gathering traffic **if and only if** a rendezvous in this room
+    reached the transport stage, at a predictable offset inside one delivery
+    window. An on-path observer, or the STUN/TURN operator, learns that a
+    rendezvous is in progress and what stage it reached without reading a
+    carrier byte. **What would fix it** is to gather once at session start,
+    before any peer is known; gathering again per pair attempt restores the
+    correlation.
+18. **The per-window request count is a room counter.** One carrier runtime
+    holds one `RoomRoot` and runs one scheduler per store, so a client with `K`
+    open rooms issues `K` times the fixed per-window trace from one source
+    address at the same offsets, and a store divides its own log by that trace
+    to read `K` and to join all `K` rooms' traffic to one address. Item 2
+    discloses the address; it does not disclose the multiplier. The profile
+    field that exists to fold several rooms behind one fixed per-client object
+    count, `roomSlotsPerClient`, is pinned to 1 and unused.
+    Items 16 to 18 were numbered 15 to 17 in the September latency
+    documents (`docs/rendezvous-latency-2026-09/`), which cite them by
+    those numbers; item 15 above was added after them.
 
 What no sweep found published together — and therefore the only thing this
 work may present as novel — is the *composition*: a capability-authenticated
@@ -633,9 +713,11 @@ Counted from `carrierRuntime.ts` — `#eventsForWindow` for the scheduled events
 and `storeClient.scanWindow` for what one read expands into — at the pinned
 profile, and stated as fixed and conditional rather than as one number.
 
-**Thirteen fixed requests**, issued whether or not anything real was sent,
-while the client's timers fire within one delivery window of their instants
-(§3a item 15 states what late timers and suspensions change):
+**Thirteen fixed requests in every window after the client's first**,
+issued whether or not anything real was sent, while the client's timers
+fire within one delivery window of their instants (§3a item 15 states what
+late timers and suspensions change, and §3a item 16 what the first window
+carries):
 
 | Count | Request | Route | Offset in the window |
 |---:|---|---|---|
@@ -666,7 +748,18 @@ window exactly when the *other* store's scan of that window had come back
 
 Which of the two it is, is a fact about the *other* store, not about this one.
 That conditioning is a cross-store status oracle and is disclosed as §3a item
-14; it is the only part of this trace that is not fixed.
+14.
+
+**It is not the only part of this trace that is not fixed.** The session's
+first window is the other, and it is disclosed as §3a item 16. `start()` drops
+every event of the current window whose instant has already passed, so a
+client that starts at phase `p` into a window issues only the rows above whose
+offset is `≥ p` — with one exception in both directions: at or past
+`allocationRequestOffsetMs`, `start()` drops the queued allocation and issues a
+cold-start allocation for the next window immediately, so the allocation row is
+present exactly once whatever `p` is. The once-per-session descriptor GET falls
+in that same window. Item 16 states what a store can and cannot read off that;
+the two sentences above this one are about **every window after it**.
 
 The descriptor GET is once per store per session, not per window. Every one of
 these requests is bounded by a deadline of one delivery window

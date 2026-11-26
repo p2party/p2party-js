@@ -305,7 +305,10 @@ about what a store could infer, and nothing about independence.
 - **The per-window trace is thirteen fixed requests plus a conditional pair.**
   Per client, per store, per window: one allocation-token POST, one allocation
   POST, five append POSTs, one checkpoint GET and five chunk GETs, all of them
-  sent whether the client is idle or mid-rendezvous. The witness POST and
+  sent whether the client is idle or mid-rendezvous — **in every window after
+  the client's first**. The first window is a different shape, because the
+  scheduler skips events whose instant has already passed; design §3a item 16
+  discloses it. The witness POST and
   witness GET are **not** fixed: a store gets both or neither, and it gets them
   only when the *other* store's scan of that window came back `finalized` and
   neither store is inert — so their absence in a healthy store's log is a
@@ -566,12 +569,15 @@ the geometry rather than by comparing scenarios.
 ### `--cohort=<n>`: window length and cohort size are exchangeable
 
 Design §8 asked for a latency table over `deliveryWindowMs ∈ {4000, 2000, 1000}`.
-Rescaling alone does not reach it: `withDeliveryWindowMs` scales the append
-offsets and the finalization offset by the same ratio, so the slack between the
-last append and the window's close shrinks with the window, and at 2,000 ms
-every append arrives after `window-finalized`. Task 8b recorded that as a dead
-end. It is not a dead end — it is a _cost_ problem, and the cost has a second
-knob.
+Against the store as first written, rescaling alone did not reach it:
+`withDeliveryWindowMs` scales the append offsets and the finalization offset by
+the same ratio, so the slack between the last append and the window's close
+shrinks with the window, and at 2,000 ms every append arrived after
+`window-finalized`. Task 8b recorded that as a dead end. It read here as a
+_cost_ problem with a second knob, the cohort, and the table below is what that
+reading measured — but the cost was the store's, not the cohort's, and finding
+2 below retracts the conclusion. At the pinned cohort of 8 a 2,000 ms window now
+completes; the second knob was not needed.
 
 Per client, per store, per window the schedule costs a fixed **append** of
 172,542 bytes (5 objects; set by `appendSchedule`, and independent of the cohort)
@@ -593,6 +599,17 @@ Measured on this machine — macOS, headless Chromium, both pages and both store
 in one process tree — time from `presence-published` to `message-verified`,
 `--scenario=healthy`:
 
+> **These rows are a record of the pre-fix store, not a current cost model.**
+> They were measured when every chunk GET, checkpoint GET, append POST and
+> allocation POST rebuilt the whole hex-encoded window document with a
+> character-pair-at-a-time codec, at a cost independent of which chunk was
+> asked for. The cohort looked like the latency knob because the cohort is what
+> sizes that document. `storeSqlite.ts` no longer does that (122 → 6.7 ms to
+> load and 106 → 2.0 ms to save one pinned-profile window, `bun`, n=12 each),
+> so finding 1 and finding 2 below describe a store that no longer exists.
+> They are kept because a measurement a later change made obsolete is still a
+> measurement.
+
 | window |         cohort | chunks/window | full scan, B/store/window |        per flight |                          time to `message-verified` |
 | -----: | -------------: | :-----------: | ------------------------: | ----------------: | --------------------------------------------------: |
 |   4000 | **8** (pinned) |      3+2      |                 1,380,336 | 8.0 s = 2 windows |                                          **39.9 s** |
@@ -605,27 +622,61 @@ in one process tree — time from `presence-published` to `message-verified`,
 
 Read it as three findings, all about this machine and nothing else:
 
-1. **The pinned cohort already costs a whole extra delivery window per flight.**
-   The protocol's designed cadence is one window per flight: append in window
-   `w`, the peer reads `w` at `publicReadOffsetMs` into `w+1` and appends its
-   answer inside `w+1`. At cohort 8 the browser cannot finish 1.38 MB × 2 stores
-   of scanning and sealing between the read offset (600 ms) and the last append
-   offset (2,100 ms), so every flight slips to the window after — 8 s instead of
-   4 s, and 39.9 s instead of ~22 s for the whole rendezvous. Halving the cohort
-   halves the scan and recovers the designed cadence at the _same_ window length.
+1. **At the pinned cohort each flight cost a whole extra delivery window — and
+   the browser was not what ran out of budget.** The protocol's designed cadence
+   is one window per flight: append in window `w`, the peer reads `w` at
+   `publicReadOffsetMs` into `w+1` and appends its answer inside `w+1`. What
+   could not finish between the read offset (600 ms) and the last append offset
+   (2,100 ms) was the pre-fix **store** serving two clients' scans. The
+   browser's own work is nowhere near the budget: decode and trial-open of all
+   40 carrier objects of one store's window, 1,380,336 bytes, is **4.4 ms per
+   store** (p50, n=20, `bun` on this laptop, real `decodeCarrierEnvelope` +
+   `openCarrierEnvelope` with every open failing) and 4.0 ms per store measured
+   in the same headless Chromium the harness uses
+   (`docs/rendezvous-latency-2026-09/observed.md` §4b). Halving the cohort
+   halved the store's document, which is why it looked like a scan effect.
 2. **A smaller cohort is exactly what makes a shorter window work.** At the
    pinned cohort, `--window-ms=2000` cannot append at all. At `--cohort=4` the
    same 2,000 ms profile completes in 20.8 s, and at `--cohort=2` a 1,000 ms
    profile completes in 10.5 s with zero `window-finalized` misses. So design
    §8's table _is_ reachable — by moving both knobs, not one.
-3. **The knob that buys the latency is the one that sizes the shared bucket.**
+
+   **This finding no longer holds.** It was the store, not the cohort, that
+   could not keep up. Re-measured after the codec and the precomputed rows, at
+   the **pinned cohort 8**, `--scenario=healthy`, with a randomised sleep
+   between runs so consecutive runs do not resample the same start phase:
+
+   | `--window-ms` | runs | connect | `append window-finalized` |
+   | ---: | ---: | --- | --- |
+   | 2000 | 3 | 10.7, 11.3, 12.2 s | 0 on every run |
+   | 1000 | 3 | 5.3, 5.7, 6.1 s | 0 on every run |
+   | 500 | 4 | 3.3, 3.4, 3.5, 3.6 s | 0 on every run |
+   | 250 | 3 | one PASS at 1.8 s; two FAIL | 5 and 475 misses; one also timed out |
+   | 240 | 2 | one PASS at 1.7 s; one FAIL | 0 misses, but both pages degraded to `single-carrier-dependent` |
+   | 200 | 2 | both FAIL | 641 and 841 misses, then timeout |
+
+   The 2,000 / 1,000 / 500 ms rows are the ones that reproduce: an independent
+   review measured 12.0 / 11.2, 6.1 / 6.2 and 3.3 s on the same machine under
+   different load. **Below 500 ms there is no clean floor** — 250 ms and 240 ms
+   each both passed and failed here, and an earlier single-run sweep that
+   recorded "250 ms passes in 1.8 s, the first append failures appear at 240 ms"
+   was reading one sample of a flaky band as a step. Those are runs of a
+   measurement flag, not a proposal: `deliveryWindowMs` is a published profile
+   field, shortening it rescales the per-store phase band of §3a item 1 against
+   the window and re-opens every disclosure that is stated as a fraction of it,
+   and none of that has been re-derived. The pinned profile is still 4,000 ms.
+3. **The knob that appeared to buy the latency was the one that sizes the
+   shared bucket — and what it bought was a way around a store defect.**
    `cohortAllocationsPerWindow` is, by definition, how many allocations a store
-   may hand out per window in one bucket; the fixed scan is large precisely
-   because it is that whole bucket. Moving it from 8 to 2 measured a 2.1×
+   may hand out per window in one bucket; the pre-fix store's per-request cost
+   was linear in that whole bucket. Moving it from 8 to 2 measured a 2.1×
    smaller scan (1,380,336 → 656,992 B) and, **at the same 4,000 ms window, a
    1.7× faster rendezvous** (39.9 → 23.8 s). The 3.8× (39.9 → 10.5 s) in the
-   last row is a **two-knob** change: it takes the shorter window the smaller
-   cohort makes possible as well, and is not a cohort effect. And by definition
+   last row is a **two-knob** change: it takes a shorter window as well, and is
+   not a cohort effect. **The shorter window was never made possible by the
+   smaller cohort** — at the pinned cohort of 8, 2,000 ms, 1,000 ms and 500 ms
+   all complete with zero `append window-finalized` misses on the fixed store,
+   which finding 2 above measures. And by definition
    the same move divides by four the number of allocations that share the
    bucket — 8 to 2 is 4×. **Those ratios are different quantities, not one.**
    What the change means for what a store can tell apart is **not** measured by

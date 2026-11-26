@@ -72,6 +72,14 @@ const info = async (): Promise<void> => {
     return {
       id: sizeClass.id,
       appendsPerWindow: sizeClass.appendSchedule.length,
+      // The individual offsets, not just how many there are: `run.mjs` asserts
+      // design §3a item 16's start-window rule, which is a function of which
+      // offsets are still ahead of the start phase. Deriving them there by
+      // rescaling hardcoded 4,000 ms constants would make the assertion agree
+      // with a copy of the profile rather than with the profile.
+      appendOffsetsMs: sizeClass.appendSchedule.map((entry) =>
+        Number(entry.offsetMs),
+      ),
       publicChunksPerWindow: sizeClass.publicChunksPerWindow,
       objectWireBytes: objectBytes,
       appendedBytesPerWindow: appended,
@@ -85,6 +93,9 @@ const info = async (): Promise<void> => {
         cohortAllocationsPerWindow: profile.cohortAllocationsPerWindow,
         cohortFromEnv: cohortFromEnv(),
         deliveryWindowMs: String(profile.deliveryWindowMs),
+        tokenIssueOffsetMs: String(profile.tokenIssueOffsetMs),
+        allocationRequestOffsetMs: String(profile.allocationRequestOffsetMs),
+        publicReadOffsetMs: String(profile.publicReadOffsetMs),
         chunkFinalizationOffsetMs: String(profile.chunkFinalizationOffsetMs),
         lastAppendOffsetMs: String(
           profile.sizeClasses

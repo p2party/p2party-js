@@ -88,6 +88,56 @@ const DEADLINE_MS = argOf("deadline-ms", 180_000);
 const PINNED_COHORT = 8;
 const COHORT = argOf("cohort", null);
 
+/**
+ * The class the transport flight must be published in.
+ *
+ * `workKinds.operationServiceRole` maps TRANSPORT_OFFER/ANSWER to
+ * safety-control, and the pinned profile's safety-control slots are 1,700 ms
+ * in class 0 and 1,500 ms in class 1 — so which class the SDP happens to fit
+ * in decides which slot the critical flight takes, and how much of the window
+ * it has left to make it. Nothing announced that choice before this constant
+ * existed.
+ */
+const EXPECTED_TRANSPORT_PAYLOAD_CLASS = 0;
+
+/**
+ * Which of design §5's routes a store request went to, from its URL.
+ *
+ * The prefixes are `PROTOTYPE_STORE_ROUTES` in
+ * `src/blindRendezvous/prototype/storeRoutes.ts`; they are repeated here
+ * because this file is plain Node ESM and cannot import TypeScript. `token`
+ * must be tested before `allocation`: `/allocation-token` starts with
+ * `/allocation`.
+ */
+const routeOf = (url) => {
+  const route = new URL(url).pathname;
+  if (route.startsWith("/p2party/prototype-v0/allocation-token"))
+    return "token";
+  if (route.startsWith("/p2party/prototype-v0/allocation")) return "allocation";
+  if (route.startsWith("/p2party/prototype-v0/append")) return "append";
+  if (route.startsWith("/p2party/prototype-v0/checkpoint")) return "checkpoint";
+  if (route.startsWith("/p2party/prototype-v0/chunk")) return "chunk";
+  if (route.startsWith("/p2party/prototype-v0/witness")) return "witness";
+  if (route.startsWith("/.well-known/p2party-store/")) return "descriptor";
+  return "other";
+};
+
+/**
+ * How far the start phase may be off before a scheduled event's presence or
+ * absence stops being predictable from it.
+ *
+ * `p` is `Date.now() % deliveryWindowMs` read on the driver side at
+ * `presence-published`, so it carries the Playwright binding hop and whatever
+ * separates `runtime.start()` from the event; the schedule compares its own
+ * clock against the offset. Within this band of an offset the assertion below
+ * accepts either outcome rather than guessing. It scales with the window
+ * because at `--window-ms=1000` the append offsets are 50 ms apart.
+ */
+const START_PHASE_TOLERANCE_MS = Math.max(
+  10,
+  Math.round((WINDOW_MS * 60) / 4000),
+);
+
 // A→B is deliberately multi-frame (the session's uniform chunk frame is
 // 65,490 bytes) and B→A single-frame, so one run exercises both shapes of the
 // app-lane framing in `prototype/index.ts`.
@@ -411,6 +461,51 @@ const runScenario = async (name, index, profileInfo) => {
   const missed = { A: 0, B: 0 };
   const refused = { A: 0, B: 0 };
   const requests = { A: { a: 0, b: 0 }, B: { a: 0, b: 0 } };
+  /**
+   * The same requests, split by delivery window and by route.
+   *
+   * A store sees its own log divided this way, so this is the shape design §3a
+   * items 3 and 15 are about. Index 0 is the window the page issued its first
+   * store request in, and the counts are per store.
+   *
+   * Per route rather than per total, because the start-window rule item 16
+   * states is a statement about *which* scheduled events are still ahead of
+   * the start phase. A total of 7 cannot tell "the read went out and two
+   * appends did not" from "the read did not and five appends did", and those
+   * are different disclosures.
+   */
+  const windowRequests = { A: [], B: [] };
+  const firstRequestWindow = { A: null, B: null };
+  const emptyRoutes = () => ({
+    total: 0,
+    token: 0,
+    allocation: 0,
+    append: 0,
+    checkpoint: 0,
+    chunk: 0,
+    witness: 0,
+    descriptor: 0,
+    other: 0,
+  });
+  /** `Date.now() % deliveryWindowMs` at `presence-published`, which is the one
+   * quantity every `p`-dependent estimate about this prototype needs and none
+   * of them had. It is read on the driver side, so it carries the Playwright
+   * binding hop — single-digit milliseconds, not a window. */
+  const startPhase = { A: null, B: null };
+  /** `append window-finalized` refusals, per page. Any is a failure. */
+  const finalizedMisses = { A: 0, B: 0 };
+
+  const countRequest = (label, which, url) => {
+    requests[label][which] += 1;
+    const window = Math.floor(Date.now() / WINDOW_MS);
+    firstRequestWindow[label] ??= window;
+    const index = window - firstRequestWindow[label];
+    while (windowRequests[label].length <= index)
+      windowRequests[label].push({ a: emptyRoutes(), b: emptyRoutes() });
+    const counts = windowRequests[label][index][which];
+    counts.total += 1;
+    counts[routeOf(url)] += 1;
+  };
   const started = Date.now();
   const stamp = () => seconds(Date.now() - started).padStart(6);
 
@@ -418,6 +513,26 @@ const runScenario = async (name, index, profileInfo) => {
 
   const push = (event) => {
     events.push(event);
+    if (event.kind === "presence-published" && startPhase[event.page] === null)
+      startPhase[event.page] = Date.now() % WINDOW_MS;
+    // Asserted here rather than with the other verdict checks so it survives a
+    // run that never reaches them. `append window-finalized` means the append
+    // reached the store after `chunkFinalizationOffsetMs` and was refused; the
+    // rendezvous does not fail when that happens, it waits a window and tries
+    // again — or waits to the deadline — so a profile or a window length that
+    // no longer fits its own append schedule has always looked merely "slow".
+    // This is the one assertion that guards every schedule and window change
+    // at once, and it must therefore fire on a stalled run too.
+    if (
+      event.kind === "store-missed" &&
+      (event.detail ?? "").includes("append window-finalized")
+    ) {
+      finalizedMisses[event.page] += 1;
+      if (finalizedMisses.A + finalizedMisses.B === 1)
+        note(
+          `page ${event.page} appended after its window closed — ${event.detail}`,
+        );
+    }
     if (event.kind === "store-missed") {
       missed[event.page] += 1;
       if (missed[event.page] > MISSED_PRINT_LIMIT) return;
@@ -477,8 +592,8 @@ const runScenario = async (name, index, profileInfo) => {
     // bodies: this is the only place the GET reads are visible at all.
     page.on("request", (request) => {
       const url = request.url();
-      if (url.startsWith(`${originA}/`)) requests[label].a += 1;
-      else if (url.startsWith(`${originB}/`)) requests[label].b += 1;
+      if (url.startsWith(`${originA}/`)) countRequest(label, "a", url);
+      else if (url.startsWith(`${originB}/`)) countRequest(label, "b", url);
     });
     await page.exposeFunction("__blindEvent", (json) => {
       push({ page: label, ...JSON.parse(json) });
@@ -797,6 +912,199 @@ const runScenario = async (name, index, profileInfo) => {
         note(`page ${page} reported session-failed`);
     }
 
+    /*
+     * Three assertions that exist because these failures are otherwise silent.
+     * All three can fail, and none of them can pass by having nothing to look
+     * at — an assertion that passes vacuously is the same disease as a failure
+     * that passes quietly.
+     *
+     * (a) `append window-finalized` means the append reached the store after
+     *     `chunkFinalizationOffsetMs` and was refused. The rendezvous does not
+     *     fail when that happens — it waits a window and tries again, or waits
+     *     to the deadline — so a profile or a window length that no longer
+     *     fits its own append schedule has, until now, looked like "slow".
+     *     This is the one assertion that guards every schedule and window
+     *     change at once.
+     *
+     * (b) The transport flight's payload class is chosen by
+     *     `padPairPlaintextV1` from the SDP's size, with no event of its own.
+     *     In the pinned profile class 1 is an *earlier* append slot (1,500 ms)
+     *     with *less* budget than class 0 (1,700 ms), so a silent flip both
+     *     changes the delivery geometry of the critical flight and makes every
+     *     recorded flight budget wrong. `pairDriver` now reports it on
+     *     `offer-sent` and `answered`; this asserts it — and asserts that the
+     *     run reached exactly one of each, because a loop over "every reported
+     *     class" passes a run in which no class was ever reported.
+     *
+     * (c) The start window's request shape against the start phase. Design §3a
+     *     item 16 states a rule — the scheduler skips whatever is already past,
+     *     so the start window carries the descriptor GET, exactly one
+     *     allocation, and whichever scheduled events are still ahead of `p`.
+     *     This asserts that rule per route. It is the check that would have
+     *     caught the first version of item 16, whose closed form was derived
+     *     from a phase-locked sample and was wrong below the read offset.
+     */
+    {
+      const classesSeen = { "offer-sent": 0, answered: 0 };
+      for (const page of ["A", "B"])
+        for (const kind of ["offer-sent", "answered"])
+          for (const detail of detailsOf(page, kind)) {
+            const match = /operationPayloadClass (\d+)/.exec(detail);
+            if (match === null) {
+              note(`page ${page} ${kind} did not report its payload class`);
+              continue;
+            }
+            classesSeen[kind] += 1;
+            if (match[1] !== String(EXPECTED_TRANSPORT_PAYLOAD_CLASS))
+              note(
+                `page ${page} published its ${kind} transport flight in` +
+                  ` operationPayloadClass ${match[1]}, expected` +
+                  ` ${EXPECTED_TRANSPORT_PAYLOAD_CLASS}: the SDP outgrew its size` +
+                  ` class and the flight moved to a different append slot`,
+              );
+          }
+      // One pair means one offer and one answer, from opposite sides. Zero is
+      // the vacuous pass this exists to stop; more than one is a repeated
+      // transport flight, which is a delivery-geometry change of its own and
+      // is what the plan's step 6 intends to alter deliberately.
+      for (const kind of ["offer-sent", "answered"])
+        if (classesSeen[kind] !== 1)
+          note(
+            `the run reported ${classesSeen[kind]} ${kind} transport flights` +
+              ` carrying a payload class across both pages, expected exactly 1` +
+              ` — the payload-class assertion had ${classesSeen[kind] === 0 ? "nothing to check" : "more flights than the geometry describes"}`,
+          );
+    }
+
+    /*
+     * Design §3a item 16's rule, as a predicate.
+     *
+     * `#nextEvent` in `carrierRuntime.ts` returns the first event whose instant
+     * is `>= now`, so an event at offset `o` goes out in the start window
+     * exactly when `o >= p`. The allocation is the exception in both
+     * directions: below the allocation offset the scheduled one fires, at or
+     * above it `start()` drops the queued one and issues a cold-start
+     * allocation for the next window immediately — so the count is one either
+     * way, and the source comment that says two would be "one more than the
+     * profile's fixed shape" is what this pins.
+     *
+     * The descriptor GET is once per store per session, not per window, so it
+     * is asserted over the run rather than over the start window; when it lands
+     * in the window before the schedule's first, the start window is still
+     * found correctly, because the start window is the one carrying the
+     * allocation.
+     */
+    const appendOffsetsMs = profileInfo.sizeClasses
+      .flatMap((sizeClass) => sizeClass.appendOffsetsMs)
+      .sort((left, right) => left - right);
+    const chunkGetsPerRead = profileInfo.sizeClasses.reduce(
+      (total, sizeClass) => total + sizeClass.publicChunksPerWindow,
+      0,
+    );
+    const tokenOffsetMs = Number(profileInfo.tokenIssueOffsetMs);
+    const readOffsetMs = Number(profileInfo.publicReadOffsetMs);
+    /** Item 15's rule, evaluated at one phase. */
+    const predictedStartWindow = (phaseMs) => ({
+      token: phaseMs <= tokenOffsetMs ? 1 : 0,
+      chunk: phaseMs <= readOffsetMs ? chunkGetsPerRead : 0,
+      checkpoint: phaseMs <= readOffsetMs ? 1 : 0,
+      allocation: 1,
+      append: appendOffsetsMs.filter((offset) => offset >= phaseMs).length,
+    });
+    const storesOf = (page) =>
+      (page === "A" ? originsForA : originsForB).map((origin) =>
+        origin === originA ? "a" : "b",
+      );
+
+    let startWindowsChecked = 0;
+    for (const page of ["A", "B"]) {
+      const startedAt = startPhase[page];
+      const shape = windowRequests[page]
+        .slice(0, 3)
+        .map(
+          (counts, index) =>
+            `w+${index} a=${counts.a.total} b=${counts.b.total} (${counts.a.total + counts.b.total})`,
+        )
+        .join("  ");
+      say(
+        `  start phase [${page}] presence-published at` +
+          ` +${startedAt === null ? "?" : startedAt}ms into its` +
+          ` ${WINDOW_MS}ms delivery window; requests per window  ${shape}`,
+      );
+      if (startedAt === null) {
+        note(
+          `page ${page} never reported a start phase, so design §3a item 16's` +
+            ` start-window rule could not be checked`,
+        );
+        continue;
+      }
+      // The tolerance band is on `p`, and the count is monotonically
+      // non-increasing in `p`, so the two ends of the band bracket every
+      // outcome the schedule could legitimately have produced.
+      const low = predictedStartWindow(
+        Math.max(0, startedAt - START_PHASE_TOLERANCE_MS),
+      );
+      const high = predictedStartWindow(startedAt + START_PHASE_TOLERANCE_MS);
+      for (const which of storesOf(page)) {
+        const index = windowRequests[page].findIndex(
+          (counts) => counts[which].allocation > 0,
+        );
+        if (index === -1) {
+          note(
+            `page ${page} issued no allocation request to store ${which} in any` +
+              ` window, so it has no start window to check against item 16`,
+          );
+          continue;
+        }
+        const counts = windowRequests[page][index];
+        const observed = counts[which];
+        const descriptors = windowRequests[page].reduce(
+          (total, window) => total + window[which].descriptor,
+          0,
+        );
+        if (descriptors !== 1)
+          note(
+            `page ${page} issued ${descriptors} descriptor GETs to store` +
+              ` ${which}; design §5 says once per store per session`,
+          );
+        if (observed.other !== 0)
+          note(
+            `page ${page} issued ${observed.other} requests to store ${which} on` +
+              ` a route design §5 does not enumerate`,
+          );
+        for (const route of [
+          "token",
+          "chunk",
+          "checkpoint",
+          "allocation",
+          "append",
+        ]) {
+          const min = Math.min(low[route], high[route]);
+          const max = Math.max(low[route], high[route]);
+          if (observed[route] < min || observed[route] > max)
+            note(
+              `page ${page} start window (index ${index}) sent` +
+                ` ${observed[route]} ${route} requests to store ${which} at` +
+                ` p=${startedAt}ms; design §3a item 16's rule predicts` +
+                ` ${min === max ? String(min) : `${min}-${max}`}` +
+                ` (tolerance ±${START_PHASE_TOLERANCE_MS}ms)`,
+            );
+        }
+        startWindowsChecked += 1;
+        say(
+          `    item 16 [${page}→${which}] start window w+${index}:` +
+            ` token=${observed.token} read=${observed.chunk}+${observed.checkpoint}` +
+            ` alloc=${observed.allocation} append=${observed.append}` +
+            ` witness=${observed.witness} descriptor=${observed.descriptor}`,
+        );
+      }
+    }
+    if (startWindowsChecked === 0)
+      note(
+        "design §3a item 16's start-window rule was not checked against a single" +
+          " page-store pair; this assertion would have passed on nothing",
+      );
+
     const connectedCount = (page) => detailsOf(page, "store-connected").length;
     if (connectedCount("A") !== originsForA.length)
       note(
@@ -949,6 +1257,9 @@ const runScenario = async (name, index, profileInfo) => {
     say(
       `store-missed events       A=${missed.A} B=${missed.B}   (browser "failed to load" lines A=${refused.A} B=${refused.B})`,
     );
+    say(
+      `  of which "append window-finalized"  A=${finalizedMisses.A} B=${finalizedMisses.B}   (any is a failure)`,
+    );
     // Absence and misbehaviour are separate kinds since `f1f5aa4`, so the two
     // populations are reported separately: a store that stopped answering is
     // not being accused of anything, and neither kind marks a store inert.
@@ -1024,6 +1335,15 @@ const runScenario = async (name, index, profileInfo) => {
 
   const ok = problems.length === 0;
   say("");
+  // Re-stated after teardown. The counter printed with the other totals above
+  // is a snapshot taken while events are still arriving: a run that finishes
+  // and then misses appends during its last window prints `A=0 B=0` there and
+  // fails on exactly that assertion, which reads as a contradiction. This line
+  // is the final count.
+  say(
+    `append window-finalized, final count   A=${finalizedMisses.A} B=${finalizedMisses.B}` +
+      "   (any is a failure)",
+  );
   say(
     ok
       ? `SCENARIO ${name} PASS in ${seconds(connectedMs ?? 0)} — ` +

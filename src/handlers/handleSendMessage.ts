@@ -1873,8 +1873,8 @@ const makeScheduledSlotSealer =
  * refuses to open one while suspended or stopped. Enqueuing into either and
  * then awaiting the schedule-derived delivery bound burns that whole budget —
  * 321 s on the shipped "5 min cycles" preset — for a job nothing was going to
- * send, and `sendScheduled` fans out serially, so it stalls every later peer
- * in the room behind it.
+ * send, and the whole send's result waits for every peer's outcome, so it
+ * holds up the send for every peer in the room.
  *
  * "starting" and "degraded" both still open every subsequent cycle and both
  * still admit. Since C5 "degraded" is where a late or failed boundary lands,

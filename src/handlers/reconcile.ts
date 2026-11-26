@@ -401,28 +401,29 @@ export const clampTimerDelayMs = (delayMs: number): number =>
   Math.min(MAX_TIMER_DELAY_MS, Math.max(0, delayMs));
 
 /**
- * Run `callback` once `delayMs` has passed on `clock`, however long that is: a
- * delay above MAX_TIMER_DELAY_MS is armed in clamped steps, each re-armed for
- * the remainder. Returns the cancel.
+ * Run `callback` once `clock`'s timers have run for `delayMs`, however long
+ * that is: a delay above MAX_TIMER_DELAY_MS is armed in clamped steps, each
+ * re-armed for the remainder. The remainder is counted in the timers' own
+ * time, never read off the wall clock, so a wall clock stepped backwards does
+ * not hold the callback back. Returns the cancel.
  */
 export const armTimer = (
   clock: TransferWaitClock,
   callback: () => void,
   delayMs: number,
 ): (() => void) => {
-  const dueAt = clock.now() + Math.max(0, delayMs);
+  let remainingMs = Math.max(0, delayMs);
   let handle: unknown;
   let cancelled = false;
   const step = (): void => {
-    handle = clock.setTimeout(
-      () => {
-        handle = undefined;
-        if (cancelled) return;
-        if (dueAt - clock.now() > 0) step();
-        else callback();
-      },
-      clampTimerDelayMs(dueAt - clock.now()),
-    );
+    const stepMs = clampTimerDelayMs(remainingMs);
+    remainingMs -= stepMs;
+    handle = clock.setTimeout(() => {
+      handle = undefined;
+      if (cancelled) return;
+      if (remainingMs > 0) step();
+      else callback();
+    }, stepMs);
   };
   step();
   return () => {
@@ -458,10 +459,13 @@ export const armTimer = (
  * bound, which a check sees within P of its end. With P at most
  * REPORTED_COMPLETION_CHECK_MS no check is late, and the wait ends within P of
  * the cap. On a page throttled to one wake-up every P above twice
- * REPORTED_COMPLETION_CHECK_MS (a hidden page, once a minute) every check is
- * late, so silence never ends the wait: a receiver that goes silent there is
- * detected only through the cap, within one silence bound and two periods of
- * it.
+ * REPORTED_COMPLETION_CHECK_MS (a hidden page, once a minute) every timer
+ * check but the wait's first is late. That first one runs on time only within
+ * twice REPORTED_COMPLETION_CHECK_MS of the wait's start, and a check a
+ * receipt runs counts the receipt as activity, so with a silence bound longer
+ * than that (every bound here is at least RECEIVER_SILENCE_LIMIT_MS) silence
+ * never ends the wait: a receiver that goes silent there is detected only
+ * through the cap, within one silence bound and two periods of it.
  */
 export const waitForReportedCompletion = async (
   roomId: string,

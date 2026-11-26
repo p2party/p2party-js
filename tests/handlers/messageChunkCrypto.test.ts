@@ -1171,7 +1171,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
           sealer.wipe();
         }
       });
-      // … and the one-chunk call (the session API) give the release frames.
+      // … and the one-chunk call give the release frames.
       const viaSealChunk = withFixedNonces(nonces, () =>
         chunks.map((chunk) =>
           sealChunk(classicalKey, header, chunk, merkleRoot, module, context),

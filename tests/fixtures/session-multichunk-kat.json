@@ -1,0 +1,15 @@
+{
+  "description": "Known answer for one 3-chunk Session.encrypt, written before the session API derived its PQ-combined key once per message. Produced by the session code of 276afe7 (format-5 snapshots; its encrypt path seals each chunk with sealChunk, whose output tests/fixtures/pq-message-key-0.14.10.json pins to 0.14.10) under Bun 1.4.4: a random hybrid-mlkem768 no-PIN pair exchanged one 24-byte message each way and was serialized; aliceSnapshot was then restored with crypto.getRandomValues replaced by the splitmix64 stream below and Date.now fixed, and encrypted plaintextLength bytes of pattern (i * 131 + 7) & 0xff. root and frameSha512 are that message. bobSnapshot opens it. The same check against HEAD d990895 gave the same bytes in three runs.",
+  "base": "276afe7",
+  "rng": "splitmix64, state0 = 0x0123456789abcdef, each 64-bit output written little-endian into successive 8-byte groups of every getRandomValues request",
+  "dateNow": 1764000000000,
+  "plaintextLength": 124824,
+  "aliceSnapshot": "UDJQU0VTUwAFBA8DAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAB3xyJHKeyTPVu1DfmvdY30JnvW3x++Wbm+Isp/z6shyQFE4TL2eMzI/FhLICjJN9Jv1Z+hNfsQCrw0SEylZaf0l1hKCzUbydy6bp7TM5VxDGocy95CKYoPI+HbsgTsDP/KNC5uDaD4J0nMUxsyNGhOCzjUST+0nRsmx4a9Np4jynnVPFFeE+J8rZzrIqvtKCaAaTV/plFthXTPyc74q1COT9DBZegNJssFaayWulmdVxoBfl5CmLh3VZ7v6h0OkYFAAAAAAAAAI1QMkVER0U0AAECAQAAAAGiGMsaBgAAAAAAAAAC53oNvfSDwfG4cl1/lKTMf1fzUU8UyumJONk0kt1hFnF4QakYxzgVAlTprK4jxn++QeKdzC4qVlm8htcKY6mYoQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "bobSnapshot": "UDJQU0VTUwAFBAcDAAAAAAAAAAEAAAAAAAAAAQAAAAAAAAAAEBM9cG1R37GRYck7NR4UmO7nCdMWcLya86WMLQb07XBdYSgs1G8ncum6e0zOVcQxqHMveQimKDyPh27IE7Az//hRJhkAv6VK+/15ubMTHf2ULFwPHu+kqpjcZq1bNrc+P0MFl6A0mywVprJa6WZ1XGgF+XkKYuHdVnu/qHQ6RgXfOUx6Q/uPHub/vLJbbAB3inbltD6xzzh0d2huHqGqpPIkK/wnmwIZtMKD6Yu4b8n3lwHDWEFLZrZLaWm9Yv0uAAAAAAAAAI1QMkVER0U0AAECAgAAAAGiGMsaBgAAAAAAAAAC53oNvfSDwfG4cl1/lKTMf1fzUU8UyumJONk0kt1hFnF4QakYxzgVAlTprK4jxn++QeKdzC4qVlm8htcKY6mYoQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "root": "1e9ec3e1ffdc35d5e49f02fd7f1b777bd50845ae2c6a84a937225bb23515a20ad24bc063097eed77beecab6a518f79bb4b5f9b370bebac07e614f7f8848ecf21",
+  "frameSha512": [
+    "261aafb94cd405b881cd1de8f3d9f1bbc8d0bdfff23180656e42e8e19e7dbb5549fa97e08f50bb7399fad318b130e4749b4698faf4907cf9f4cd26a12f21465a",
+    "abcb62786d37a019a2c1fecf62fd42497d08cb486e612871bb9bf4605dc9ccfe6c2ec51f087e5ee0e33d8b476213ee641d0faef081cc26fba9808d440a5c5ec6",
+    "78558a596a892c7fb6d21b781bad7fb8faa1c911e4f6849d15c5a615beb26a80efcd1a2b16de46ab9d8f26505a242489c556638f5783e047c7146355895d930b"
+  ]
+}

@@ -33,9 +33,10 @@ import {
   type HandshakeTransport,
 } from "./handlers/handshakeCore";
 import {
+  createMessageChunkSealer,
   decryptMessageChunk,
   messageCacheKey,
-  sealChunk,
+  type MessageChunkSealer,
 } from "./handlers/messageChunkCrypto";
 import { parseChunkFrameHeader } from "./handlers/chunkFrame";
 import {
@@ -649,9 +650,7 @@ class Session implements P2PartySession {
       let prepared: PreparedMessage | null = null;
       let next: RatchetState | null = null;
       let messageKey: Uint8Array | null = null;
-      let pqContext: ReturnType<
-        SparsePqHealingState["currentMessageContext"]
-      > | null = null;
+      let sealer: MessageChunkSealer | null = null;
       let committed = false;
       try {
         this.#assertLive();
@@ -665,16 +664,18 @@ class Session implements P2PartySession {
         messageKey = encrypted.messageKey;
         // Always combine against the current PQ epoch (zero before healing,
         // then each successive epoch after ACK).
-        pqContext = this.#pq.currentMessageContext();
+        const pqContext = this.#pq.currentMessageContext();
+        // The combined key is derived once and seals every chunk.
+        const chunkSealer = createMessageChunkSealer(
+          messageKey,
+          encrypted.header,
+          pqContext,
+          this.#module,
+        );
+        sealer = chunkSealer;
+        const root = prepared.root;
         const frames = prepared.plaintexts.map((chunk) =>
-          sealChunk(
-            messageKey!,
-            encrypted.header,
-            chunk,
-            prepared!.root,
-            this.#module,
-            pqContext!,
-          ),
+          chunkSealer.seal(chunk, root),
         );
         adoptRatchet(this.#state, next);
         this.#pq.noteApplicationMessage();
@@ -686,6 +687,7 @@ class Session implements P2PartySession {
         };
       } finally {
         ownedPlaintext.fill(0);
+        sealer?.wipe();
         messageKey?.fill(0);
         if (next && !committed) wipeRatchet(next);
         if (prepared) wipePreparedMessage(prepared);

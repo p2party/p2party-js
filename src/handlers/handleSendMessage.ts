@@ -295,6 +295,17 @@ export interface StagedOutboundChunk {
   readonly real: boolean;
 }
 
+/**
+ * Zero a staged cell's plaintext. A read returns a fresh copy of the staged
+ * row (the database worker's reply is a structured clone, and a staging put
+ * clones it again), owned by the one caller that seals it; nothing reads it
+ * once that cell is sealed or refused.
+ */
+const wipeStagedPlaintext = (staged: StagedOutboundChunk): void => {
+  new Uint8Array(staged.row.data).fill(0);
+  new Uint8Array(staged.row.metadata).fill(0);
+};
+
 // Per-cell kinds an OutboundMessage learned by reading; 0 = not read yet.
 const CHUNK_KIND_REAL = 1;
 const CHUNK_KIND_DECOY = 2;
@@ -490,7 +501,11 @@ export class OutboundMessage {
       merkleProof,
       data,
     ]);
-    throwIfTransferAborted(signal);
+    if (signal?.aborted) {
+      // Never handed to the caller, so it is zeroed here.
+      chunk.fill(0);
+      throwIfTransferAborted(signal);
+    }
     return chunk;
   }
 
@@ -859,63 +874,71 @@ export const sendChunks = async (
     const staged = await message.read(iRandom, signal);
     if (!staged)
       throw new Error(`Missing staged outbound chunk ${String(iRandom)}`);
-    if (reconcileAcked !== undefined && !staged.real) continue;
-
-    // Hold real frames inside the receipt window so a fast link cannot outrun
-    // the receiver's decrypt+store drain into its queue-budget channel close.
-    if (staged.real && receipts) {
-      await waitForReceiptWindow({
-        windowSize: SEND_RECEIPT_WINDOW,
-        stallTimeoutMs: SEND_WINDOW_STALL_MS,
-        fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
-        isOpen: () => (channel.readyState as string) === "open",
-        inFlight: () =>
-          sentRealThisPass - Math.max(0, receipts.count() - ackedAtPassStart),
-        subscribe: (wake) => {
-          const unsubscribe = receipts.subscribe(wake);
-          for (const type of CHANNEL_END_EVENTS)
-            channel.addEventListener(type, wake);
-          return () => {
-            unsubscribe();
-            for (const type of CHANNEL_END_EVENTS)
-              channel.removeEventListener(type, wake);
-          };
-        },
-        signal,
-      });
-    }
-
-    const chunk = await message.cellPlaintext(staged, outboxLease, signal);
-
-    // protocol-v3: seal the DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk)
-    // under the per-message ratchet key with a fresh random nonce, framed as
-    // FRAME_TYPE_CHUNK ‖ dhPub ‖ N ‖ PN ‖ PQ_EPOCH ‖ nonce ‖ ciphertext‖tag.
-    // Replaces the box scheme's per-chunk ephemeral keypair + signature + asymmetric
-    // encrypt. A retransmit re-seals the same plaintext (fresh nonce) — the receiver
-    // reuses its cached per-(dhPub,N) key, so no frame cache is required.
-    // Backpressure stays inside this logical send. Persisting ciphertext here is
-    // unsafe: a replacement RTCPeerConnection performs a fresh handshake, so
-    // ciphertext sealed under the dead transport's ratchet can never be replayed
-    // on the replacement. The durable resend source is the plaintext newChunks
-    // store; after reconnect those chunks are resealed under a fresh message key.
-    if (!(await waitForSendBuffer(channel, signal))) {
-      debugLog(
-        "Cannot send message because channel is " +
-          channel.readyState +
-          " and bufferedAmount is " +
-          String(channel.bufferedAmount),
-      );
-
-      break;
-    }
-
+    let chunk: Uint8Array | undefined;
     let frame: Uint8Array;
     try {
-      frame = sealer.seal(chunk, message.merkleRoot);
-    } catch (error) {
-      throw new Error("Could not seal outbound message chunk", {
-        cause: error,
-      });
+      if (reconcileAcked !== undefined && !staged.real) continue;
+
+      // Hold real frames inside the receipt window so a fast link cannot outrun
+      // the receiver's decrypt+store drain into its queue-budget channel close.
+      if (staged.real && receipts) {
+        await waitForReceiptWindow({
+          windowSize: SEND_RECEIPT_WINDOW,
+          stallTimeoutMs: SEND_WINDOW_STALL_MS,
+          fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
+          isOpen: () => (channel.readyState as string) === "open",
+          inFlight: () =>
+            sentRealThisPass - Math.max(0, receipts.count() - ackedAtPassStart),
+          subscribe: (wake) => {
+            const unsubscribe = receipts.subscribe(wake);
+            for (const type of CHANNEL_END_EVENTS)
+              channel.addEventListener(type, wake);
+            return () => {
+              unsubscribe();
+              for (const type of CHANNEL_END_EVENTS)
+                channel.removeEventListener(type, wake);
+            };
+          },
+          signal,
+        });
+      }
+
+      chunk = await message.cellPlaintext(staged, outboxLease, signal);
+
+      // protocol-v3: seal the DECRYPTED_LEN plaintext (metadata ‖ proof ‖ chunk)
+      // under the per-message ratchet key with a fresh random nonce, framed as
+      // FRAME_TYPE_CHUNK ‖ dhPub ‖ N ‖ PN ‖ PQ_EPOCH ‖ nonce ‖ ciphertext‖tag.
+      // Replaces the box scheme's per-chunk ephemeral keypair + signature + asymmetric
+      // encrypt. A retransmit re-seals the same plaintext (fresh nonce) — the receiver
+      // reuses its cached per-(dhPub,N) key, so no frame cache is required.
+      // Backpressure stays inside this logical send. Persisting ciphertext here is
+      // unsafe: a replacement RTCPeerConnection performs a fresh handshake, so
+      // ciphertext sealed under the dead transport's ratchet can never be replayed
+      // on the replacement. The durable resend source is the plaintext newChunks
+      // store; after reconnect those chunks are resealed under a fresh message key.
+      if (!(await waitForSendBuffer(channel, signal))) {
+        debugLog(
+          "Cannot send message because channel is " +
+            channel.readyState +
+            " and bufferedAmount is " +
+            String(channel.bufferedAmount),
+        );
+
+        break;
+      }
+
+      try {
+        frame = sealer.seal(chunk, message.merkleRoot);
+      } catch (error) {
+        throw new Error("Could not seal outbound message chunk", {
+          cause: error,
+        });
+      }
+    } finally {
+      // The cell's plaintext and the staged copy it was built from are this
+      // pass's own; nothing reads them once the cell is sealed or skipped.
+      chunk?.fill(0);
+      wipeStagedPlaintext(staged);
     }
 
     throwIfTransferAborted(signal);
@@ -968,6 +991,7 @@ const waitForConnectedEdge = (
 
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const settle = (usable: boolean): void => {
       if (settled) return;
       settled = true;
@@ -987,11 +1011,14 @@ const waitForConnectedEdge = (
     const onAbort = (): void => {
       settle(false);
     };
-    const timer = setTimeout(() => {
-      settle(false);
-    }, timeoutMs);
+    // The budget is armed only once both listeners are in place: a
+    // registration that throws rejects this promise and leaves no timer.
     epc.addEventListener("connectionstatechange", onChange);
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (!settled)
+      timer = setTimeout(() => {
+        settle(false);
+      }, timeoutMs);
   });
 };
 
@@ -1838,8 +1865,10 @@ export const sendWithReconcile = async (
 // Seal exactly one staged chunk into its uniform 65,490-byte cell under the
 // message's sealer (its combined key, derived once). Mirrors sendChunks'
 // per-chunk staging but for a single index, so a scheduled slot can lazily
-// produce one cell without a burst.
-const makeScheduledSlotSealer =
+// produce one cell without a burst. The cell's plaintext and the staged copy
+// it was built from are zeroed once the cell is sealed or refused. Exported
+// only for a focused test of that; not part of the package's root exports.
+export const makeScheduledSlotSealer =
   (
     message: OutboundMessage,
     chunkSealer: MessageChunkSealer,
@@ -1848,10 +1877,12 @@ const makeScheduledSlotSealer =
     signal?: AbortSignal,
   ) =>
   async (chunkIndex: number): Promise<Uint8Array | null> => {
+    let staged: StagedOutboundChunk | undefined;
+    let chunk: Uint8Array | undefined;
     try {
-      const staged = await message.read(chunkIndex, signal);
+      staged = await message.read(chunkIndex, signal);
       if (!staged) return null;
-      const chunk = await message.cellPlaintext(staged, outboxLease, signal);
+      chunk = await message.cellPlaintext(staged, outboxLease, signal);
       return chunkSealer.seal(chunk, message.merkleRoot);
     } catch (error) {
       // Nothing is left to send once the delivery this job served has ended
@@ -1863,6 +1894,11 @@ const makeScheduledSlotSealer =
       // after a transfer ends.
       if (signal?.aborted || message.closed || jobRetired()) return null;
       throw error;
+    } finally {
+      // The cell's plaintext and the staged copy it was built from are this
+      // call's own; nothing reads them once the cell is sealed or refused.
+      chunk?.fill(0);
+      if (staged) wipeStagedPlaintext(staged);
     }
   };
 

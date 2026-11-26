@@ -17,7 +17,10 @@ import {
   carrierObjectWireBytes,
   withDeliveryWindowMs,
 } from "../../../src/blindRendezvous/prototype/profile";
-import { PrototypeStoreCore } from "../../../src/blindRendezvous/prototype/store/storeCore";
+import {
+  PrototypeStoreCore,
+  type PrototypeStoreCoreOptions,
+} from "../../../src/blindRendezvous/prototype/store/storeCore";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import {
   PROTOTYPE_STORE_MEDIA_TYPES,
@@ -104,9 +107,12 @@ interface Harness {
   readonly stop: () => void;
 }
 
-const harness = async (
-  options: { logBodiesPath?: string } = {},
-): Promise<Harness> => {
+interface HarnessOptions {
+  readonly logBodiesPath?: string;
+  readonly allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
+}
+
+const harness = async (options: HarnessOptions = {}): Promise<Harness> => {
   let now = WINDOW_START;
   const core = await PrototypeStoreCore.create({
     module: cryptoModule,
@@ -117,6 +123,7 @@ const harness = async (
     chainStartIngressWindow: CHAIN_START,
     origin: "http://127.0.0.1:5910",
     descriptorValidityMs: 2_592_000_000n,
+    allocationAdmission: options.allocationAdmission,
   });
   // A real socket on an ephemeral port: the routing, the header set and the
   // body limits are all properties of the server, not of the handler alone.
@@ -141,7 +148,7 @@ const harness = async (
 
 const withHarness = async (
   run: (harness: Harness) => Promise<void>,
-  options: { logBodiesPath?: string } = {},
+  options: HarnessOptions = {},
 ): Promise<void> => {
   const active = await harness(options);
   try {
@@ -164,10 +171,11 @@ const post = async (
   path: string,
   mediaType: string,
   body: Uint8Array,
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response> =>
   fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "content-type": mediaType },
+    headers: { "content-type": mediaType, ...extraHeaders },
     body: asBody(body),
   });
 
@@ -716,5 +724,189 @@ describe("prototype store HTTP handler", () => {
     expect(PROTOTYPE_STORE_MEDIA_TYPES.descriptor).toBe(
       PROTOTYPE_MEDIA_TYPE("store-descriptor"),
     );
+  });
+});
+
+describe("prototype store HTTP admission", () => {
+  const coverBody = (window = CHAIN_START, fill = 0x2c): Uint8Array =>
+    encodePublicAppendRequestV1({
+      version: 1,
+      bucket: {
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: window,
+        sizeClass: 0,
+      },
+      exactFixedObject: new Uint8Array(CLASS_0_OBJECT_BYTES).fill(fill),
+      admission: null,
+    });
+  const witnessBody = (window = CHAIN_START, fill = 0xc4): Uint8Array =>
+    encodeStoreWitnessRecordV1({
+      version: 1,
+      witnessedStoreId: new Uint8Array(32).fill(0x91),
+      deliveryProfileHash: PROFILE_HASH,
+      ingressWindow: window,
+      checkpointHash: new Uint8Array(32).fill(fill),
+    });
+  const bearer = (token: Uint8Array): Record<string, string> => ({
+    authorization: `Bearer ${hex(token)}`,
+  });
+
+  test("append and witness present the bearer token to the admission hook", async () => {
+    const seen: string[] = [];
+    await withHarness(
+      async ({ base }) => {
+        const token = new Uint8Array(32).fill(0x3d);
+        const appended = await post(
+          base,
+          PROTOTYPE_STORE_ROUTES.append,
+          PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
+          coverBody(),
+          bearer(token),
+        );
+        expect(appended.status).toBe(200);
+        expect(
+          decodePublicAppendResultV1(await bodyBytes(appended)).status,
+        ).toBe("unallocated-cover");
+        const witnessed = await post(
+          base,
+          PROTOTYPE_STORE_ROUTES.witness,
+          PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
+          witnessBody(),
+          bearer(token),
+        );
+        expect(witnessed.status).toBe(200);
+        await witnessed.arrayBuffer();
+        // No header is the zero token, not an error.
+        const bare = await post(
+          base,
+          PROTOTYPE_STORE_ROUTES.append,
+          PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
+          coverBody(CHAIN_START, 0x2d),
+        );
+        expect(bare.status).toBe(200);
+        await bare.arrayBuffer();
+        expect(seen).toEqual([
+          `append:${hex(token)}`,
+          `witness:${hex(token)}`,
+          `append:${hex(new Uint8Array(32))}`,
+        ]);
+      },
+      {
+        allocationAdmission: {
+          authorize: (request) => {
+            seen.push(`${request.route}:${hex(request.privacyPassToken)}`);
+            return request.privacyPassToken;
+          },
+        },
+      },
+    );
+  });
+
+  test("a malformed admission header is the one constant 400", async () => {
+    let calls = 0;
+    await withHarness(
+      async ({ base }) => {
+        const valid = hex(new Uint8Array(32).fill(0x3d));
+        for (const authorization of [
+          `Bearer ${valid.toUpperCase()}`,
+          `Bearer ${valid.slice(2)}`,
+          `Bearer ${valid}00`,
+          `bearer ${valid}`,
+          `Basic ${valid}`,
+          `Bearer  ${valid}`,
+          `Bearer ${valid}, Bearer ${valid}`,
+        ])
+          for (const [path, mediaType, body] of [
+            [
+              PROTOTYPE_STORE_ROUTES.append,
+              PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
+              coverBody(),
+            ],
+            [
+              PROTOTYPE_STORE_ROUTES.witness,
+              PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
+              witnessBody(),
+            ],
+          ] as const) {
+            const response = await post(base, path, mediaType, body, {
+              authorization,
+            });
+            expect({ authorization, status: response.status }).toEqual({
+              authorization,
+              status: 400,
+            });
+            expect(await response.text()).toBe("malformed");
+          }
+        expect(calls).toBe(0);
+      },
+      {
+        allocationAdmission: {
+          authorize: () => {
+            calls += 1;
+            return new Uint8Array(32).fill(1);
+          },
+        },
+      },
+    );
+  });
+
+  test("an admission refusal is a 403 and an unrecorded witness a 409", async () => {
+    await withHarness(
+      async ({ base, core }) => {
+        for (const [path, mediaType, body] of [
+          [
+            PROTOTYPE_STORE_ROUTES.append,
+            PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
+            coverBody(),
+          ],
+          [
+            PROTOTYPE_STORE_ROUTES.witness,
+            PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
+            witnessBody(),
+          ],
+        ] as const) {
+          const refused = await post(base, path, mediaType, body);
+          expect(refused.status).toBe(403);
+          expect(await refused.text()).toBe("refused");
+          expect(refused.headers.get("cache-control")).toBe("no-store");
+          expectStoreHeader(refused);
+        }
+        expect(await core.witnessRecords(CHAIN_START)).toEqual([]);
+
+        // A future window is not one this store retains, whoever asks.
+        const future = await post(
+          base,
+          PROTOTYPE_STORE_ROUTES.witness,
+          PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
+          witnessBody(CHAIN_START + 1n),
+          bearer(new Uint8Array(32).fill(0x3d)),
+        );
+        expect(future.status).toBe(409);
+        expect(await future.text()).toBe("not recorded");
+        expectStoreHeader(future);
+      },
+      {
+        allocationAdmission: {
+          authorize: (request) =>
+            request.privacyPassToken[0] === 0x3d
+              ? request.privacyPassToken
+              : null,
+        },
+      },
+    );
+  });
+
+  test("the preflight admits the authorization header", async () => {
+    await withHarness(async ({ base }) => {
+      const response = await fetch(`${base}${PROTOTYPE_STORE_ROUTES.append}`, {
+        method: "OPTIONS",
+      });
+      expect(response.status).toBe(204);
+      expect(
+        (response.headers.get("access-control-allow-headers") ?? "")
+          .split(",")
+          .map((name) => name.trim()),
+      ).toEqual(["content-type", "authorization"]);
+    });
   });
 });

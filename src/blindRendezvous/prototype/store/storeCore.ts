@@ -20,6 +20,14 @@
  *   for one index, or two checkpoints for one window, is a permanent fault
  *   proof against the store — so `#finalizeWindow` returns early rather than
  *   recompute, and every mutating entry point is serialized.
+ * - A refusal costs what the clock costs. An append or allocation the clock
+ *   already refuses — a closed window, one past the allocation horizon, one
+ *   below the chain start or swept by retention — is answered from the
+ *   request and the clock alone: it loads no window and never waits on the
+ *   mutation queue, so it cannot stall the store and its cost does not say
+ *   which of those it was. Every write that does reach the queue copies the
+ *   window it loaded, saves the copy, and only then answers, so a failed
+ *   write leaves the loaded window exactly as it was.
  *
  * Transport lives in `storeHttp.ts`; durable rows live behind
  * `StorePersistencePort`. This file knows about neither.
@@ -47,6 +55,7 @@ import {
 import {
   ZERO32,
   appendSlotCoordinates,
+  bucketIsReadable,
   checkpointLeafEntries,
   ingressWindow,
   ingressWindowStartMs,
@@ -70,7 +79,6 @@ import {
   profileGeometry,
   validateDeliveryProfileGeometry,
 } from "../profile";
-import { encodeStoreWitnessRecordV1 } from "../storeWire";
 import {
   copyBucket,
   copyBytes,
@@ -79,7 +87,6 @@ import {
   copyLease,
   copyWitnessRecord,
   emptyStoreWindowState,
-  hexOf,
 } from "./storePersistence";
 
 import type { LibCrypto } from "../../../cryptography/libcrypto";
@@ -141,6 +148,22 @@ export class StoreConfigurationError extends StoreRequestError {
   override readonly name = "StoreConfigurationError";
 }
 
+/**
+ * The admission hook refused an append or a witness offer.
+ *
+ * Not a `StoreRequestError`: the request was well formed, and the transport
+ * answers it with its own constant `403 refused` rather than the `400` that
+ * family maps to. Allocation has a signed refusal in its status set
+ * (`invalid-token`) and never throws this.
+ */
+export class StoreAdmissionRefusedError extends Error {
+  override readonly name = "StoreAdmissionRefusedError";
+
+  constructor(route: StoreAdmissionRouteV1) {
+    super(`storeCore: the admission hook refused this ${route} request`);
+  }
+}
+
 const fail: (message: string) => never = (message) => {
   throw new StoreRequestError(message);
 };
@@ -152,6 +175,81 @@ const failConfiguration: (message: string) => never = (message) => {
 export interface StoreClock {
   nowMs(): bigint;
 }
+
+/** The route an admission hook is asked about. */
+export type StoreAdmissionRouteV1 = "allocation" | "append" | "witness";
+
+/**
+ * What an admission hook is asked: an allocation request's fields, plus the
+ * route. See `PrototypeStoreCoreOptions.allocationAdmission` for what each
+ * field holds on the append and witness routes.
+ */
+export interface StoreAdmissionRequestV1 extends PublicAllocationRequestV1 {
+  readonly route: StoreAdmissionRouteV1;
+}
+
+/**
+ * `recorded`: this offer added the record. `already-held`: those exact bytes
+ * were already held and nothing was charged. `not-recorded`: the window is
+ * not one this store retains, the record names another profile, or the
+ * window or the offering quota key has no room left.
+ */
+export type StoreWitnessOutcomeV1 =
+  "recorded" | "already-held" | "not-recorded";
+
+/** What one `sweepRetention` call deleted. */
+export interface StoreRetentionSweep {
+  /** Window rows, each with its allocation records and their quota keys. */
+  readonly windows: number;
+  /** Windows whose witness records and per-key counts were deleted. */
+  readonly witnessWindows: number;
+}
+
+/**
+ * How many windows back a store keeps a window readable when nothing else is
+ * configured, unless the profile's own `carrierRetentionWindows` is smaller.
+ *
+ * Retention is inclusive, as `bucketIsReadable` defines it: window `w` is
+ * served through the end of `w + retentionWindows`. At the pinned 4,000 ms
+ * window this default is about 17 minutes, and the measured idle window row
+ * (2,763,134 bytes) puts it near 0.7 GB per store. That is far below the
+ * pinned profile's `carrierRetentionWindows` of 160,000 (about 7.4 days and
+ * 442 GB): a store started without a configured value keeps less than the
+ * profile allows. The carrier runtime reads back at most 64 windows, so the
+ * prototype's own clients never ask past it.
+ */
+export const DEFAULT_STORE_RETENTION_WINDOWS = 256;
+
+/**
+ * The smallest retention a store accepts. A read of window `w - 1` is
+ * scheduled in window `w`, may be released one window late and may take one
+ * window to answer, so it can land three windows after the one it reads; the
+ * witness pair for `w - 1` is bounded the same way. One more is margin.
+ */
+export const MIN_STORE_RETENTION_WINDOWS = 4;
+
+/**
+ * Window rows, and separately witness windows, one sweep deletes at most. An
+ * idle row is about 2.7 MB, so one batch frees about 44 MB; a backlog left by
+ * downtime drains a batch per call rather than in one long statement.
+ */
+export const STORE_RETENTION_SWEEP_BATCH_WINDOWS = 16;
+
+/**
+ * Distinct witness records one window holds, from every caller together. It
+ * is the canonical cap on the records array (`storeWitnessRecordsV1Schema`),
+ * so a full window still encodes as one answer.
+ */
+export const MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
+
+/**
+ * New witness records one admission quota key may add to one window. A client
+ * posts one record per other store per window, so this covers a deployment of
+ * up to nine stores; it is what stops one admitted caller from filling a
+ * window's whole bound. Under open admission there is no key to charge and
+ * only the per-window bound applies.
+ */
+export const MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW = 8;
 
 /** The one secret a store process holds; the server writes it to a key file. */
 export interface StoreIdentityFiles {
@@ -171,16 +269,53 @@ export interface PrototypeStoreCoreOptions {
   /** Test-only: `"withhold"` accepts appends and finalizes them all-dummy. */
   readonly fault?: "withhold" | null;
   /**
-   * Experimental server-local admission. This callback must be
-   * pure: it validates a request and returns a stable 32-byte grant quota key,
-   * or null. The core atomically commits one lease per key per ingress window.
-   * The hook supplies no descriptor-level privacy or unique-person claim.
+   * Experimental server-local admission for the allocation, append and
+   * witness routes; absent, the store runs open admission. The name predates
+   * the second and third routes and is kept so existing hooks plug in as-is.
+   *
+   * `authorize` is given the request's public geometry, the route asking
+   * (`route`), and the token the caller presented (`privacyPassToken`: the
+   * allocation body's own field, or the bearer header on append and witness;
+   * 32 zero bytes when the caller presented none). On append,
+   * `allocationEd25519PublicKey` is the admitted lease's key, or 32 zero bytes
+   * for unallocated cover; on witness it is always 32 zero bytes. A 32-byte
+   * return admits the request under that quota key; `null`, any other value,
+   * or a throw refuses it.
+   *
+   * When it is called: only after the core's own checks that need no hook —
+   * the profile, the request's shape, and the window being one this store
+   * serves on its clock. Allocation: inside `[current, current +
+   * maxFutureIngressWindows]` and before its finalization instant, checked
+   * again once the window is loaded; the hook then runs before the exact-retry
+   * replay, so a revoked grant cannot replay its lease. Append: before its
+   * window's finalization instant and not past the allocation horizon; the
+   * hook runs before the lease is verified. Witness: a window this store
+   * retains, under this store's profile. So a request the store would refuse
+   * anyway never reaches the hook, and the hook is never asked about a window
+   * the store would not serve.
+   *
+   * What it may do: it may have side effects, provided they are idempotent.
+   * An exact retry of an admitted request calls it again (and replays its
+   * lease only if it admits again), and a side effect can outlive a request
+   * the store then refuses or fails to persist — capacity exhausted, a lease
+   * that does not verify, a window that closed while the request waited, a
+   * failed write. The core commits at most one lease per quota key per
+   * ingress window and at most `MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW`
+   * new witness records per quota key per window; on append the key only
+   * admits. The hook supplies no descriptor-level privacy or unique-person
+   * claim.
    */
   readonly allocationAdmission?: {
     authorize(
-      request: PublicAllocationRequestV1,
+      request: StoreAdmissionRequestV1,
     ): Uint8Array | null | Promise<Uint8Array | null>;
   };
+  /**
+   * How many windows back reads, witness offers and stored rows reach; see
+   * `DEFAULT_STORE_RETENTION_WINDOWS` and `sweepRetention`. An integer from
+   * `MIN_STORE_RETENTION_WINDOWS` to the profile's `carrierRetentionWindows`.
+   */
+  readonly retentionWindows?: number;
 }
 
 /** `crypto.getRandomValues` refuses more than this many bytes per call. */
@@ -198,9 +333,6 @@ const RANDOM_SLICE_BYTES = 65_536;
  */
 const MAX_WINDOWS_FINALIZED_PER_CALL = 32;
 
-/** The witness array's canonical cap (`storeWitnessRecordsV1Schema`). */
-const MAX_WITNESS_RECORDS_PER_WINDOW = 4_096;
-
 /** A route lease is the descriptor's; a route outliving it proves nothing. */
 const PROTOTYPE_ROUTE_FAMILY = 1;
 
@@ -213,6 +345,28 @@ const DESCRIPTOR_BACKDATE_MS = 60_000n;
 const U64_MAX = 0xffffffffffffffffn;
 
 const textEncoder = new TextEncoder();
+
+/** What a caller that presented no admission token is taken to have sent. */
+const NO_ADMISSION_TOKEN_BYTES = 32;
+
+type Admission =
+  | { readonly kind: "open" }
+  | { readonly kind: "admitted"; readonly quotaKey32: Uint8Array }
+  | { readonly kind: "refused" };
+
+const OPEN_ADMISSION: Admission = { kind: "open" };
+const REFUSED_ADMISSION: Admission = { kind: "refused" };
+
+/** The caller's token, copied, or the zero token when none was presented. */
+const presentedToken = (token: Uint8Array | undefined): Uint8Array => {
+  if (token === undefined) return new Uint8Array(NO_ADMISSION_TOKEN_BYTES);
+  if (
+    !(token instanceof Uint8Array) ||
+    token.length !== NO_ADMISSION_TOKEN_BYTES
+  )
+    fail("an admission token must be exactly 32 bytes");
+  return copyBytes(token);
+};
 
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
   if (left.length !== right.length) return false;
@@ -335,16 +489,21 @@ export class PrototypeStoreCore {
   readonly #chainStart: bigint;
   readonly #fault: "withhold" | null;
   readonly #allocationAdmission: PrototypeStoreCoreOptions["allocationAdmission"];
+  readonly #retentionWindows: number;
   readonly #sizeClasses: readonly DeliverySizeClassV1[];
   readonly #objectBytesByClass: ReadonlyMap<number, number>;
 
   /** Serializes every mutating entry point; see the file header. */
   #tail: Promise<unknown> = Promise.resolve();
 
+  /** One retention sweep at a time; see `sweepRetention`. */
+  #sweeping = false;
+
   private constructor(
     options: PrototypeStoreCoreOptions,
     identity: PreparedIdentity,
     objectBytesByClass: ReadonlyMap<number, number>,
+    retentionWindows: number,
   ) {
     this.#storeId = identity.storeId;
     this.#descriptor = identity.descriptor;
@@ -362,6 +521,7 @@ export class PrototypeStoreCore {
     this.#chainStart = options.chainStartIngressWindow;
     this.#fault = options.fault ?? null;
     this.#allocationAdmission = options.allocationAdmission;
+    this.#retentionWindows = retentionWindows;
     // Sorted by id once: leaf order and chunk order are both profile order,
     // and rebuilding that order per finalization invites one of them to drift.
     this.#sizeClasses = [...options.profile.sizeClasses].sort(
@@ -400,6 +560,11 @@ export class PrototypeStoreCore {
     return copyBytes(this.#profileHash);
   }
 
+  /** How many windows back this store serves; see `retentionWindows`. */
+  get retentionWindows(): number {
+    return this.#retentionWindows;
+  }
+
   static async create(
     options: PrototypeStoreCoreOptions,
   ): Promise<PrototypeStoreCore> {
@@ -424,6 +589,20 @@ export class PrototypeStoreCore {
     // A profile that has not passed §4.3's inequalities cannot be served:
     // every later offset comparison in this file assumes them.
     validateDeliveryProfileGeometry(options.profile);
+    const retentionWindows =
+      options.retentionWindows ??
+      Math.min(
+        DEFAULT_STORE_RETENTION_WINDOWS,
+        options.profile.carrierRetentionWindows,
+      );
+    if (
+      !Number.isSafeInteger(retentionWindows) ||
+      retentionWindows < MIN_STORE_RETENTION_WINDOWS ||
+      retentionWindows > options.profile.carrierRetentionWindows
+    )
+      failConfiguration(
+        `retentionWindows must be an integer from ${String(MIN_STORE_RETENTION_WINDOWS)} to the profile's carrierRetentionWindows (${String(options.profile.carrierRetentionWindows)})`,
+      );
 
     const seed = copyBytes(options.seed);
     const keyPair = await keyPairFromSeed(seed, options.module);
@@ -573,6 +752,7 @@ export class PrototypeStoreCore {
         routes: [route],
       },
       objectBytesByClass,
+      retentionWindows,
     );
   }
 
@@ -645,13 +825,46 @@ export class PrototypeStoreCore {
     requireProfileHash(privateRequest.deliveryProfileHash);
     requireWindow(privateRequest.ingressWindow);
 
-    return this.#serialize(() => this.#allocate(privateRequest));
+    const requestHash = await publicAllocationRequestHash(privateRequest);
+    // A refusal the clock already decides is signed here, off the mutation
+    // queue: it needs no window, so it must not wait behind ones that do.
+    const refusal = this.#allocationRefusal(privateRequest);
+    if (refusal !== null)
+      return this.#allocationStatus(
+        privateRequest.deliveryProfileHash,
+        privateRequest.ingressWindow,
+        requestHash,
+        refusal,
+      );
+    return this.#serialize(() => this.#allocate(privateRequest, requestHash));
+  }
+
+  /** The refusal the request and the clock alone decide, or `null`. */
+  #allocationRefusal(
+    request: PublicAllocationRequestV1,
+  ): PublicAllocationStatusKindV1 | null {
+    // The closed status set has no "unsupported profile" value. `invalid-token`
+    // is the honest one: in every allocation scheme the token is bound to the
+    // profile, so a request naming another profile cannot carry a token this
+    // store would ever accept.
+    if (!bytesEqual(request.deliveryProfileHash, this.#profileHash))
+      return "invalid-token";
+
+    const target = request.ingressWindow;
+    const current = this.currentWindow();
+    if (
+      target < current ||
+      target > current + BigInt(this.#profile.maxFutureIngressWindows) ||
+      this.#closedOnClock(target)
+    )
+      return "window-closed";
+    return null;
   }
 
   async #allocate(
     request: PublicAllocationRequestV1,
+    requestHash: Uint8Array,
   ): Promise<PublicAllocationResultV1> {
-    const requestHash = await publicAllocationRequestHash(request);
     const status = (
       kind: PublicAllocationStatusKindV1,
     ): Promise<PublicAllocationResultV1> =>
@@ -662,44 +875,18 @@ export class PrototypeStoreCore {
         kind,
       );
 
-    // The closed status set has no "unsupported profile" value. `invalid-token`
-    // is the honest one: in every allocation scheme the token is bound to the
-    // profile, so a request naming another profile cannot carry a token this
-    // store would ever accept.
-    if (!bytesEqual(request.deliveryProfileHash, this.#profileHash))
-      return status("invalid-token");
+    // Decided again: the window may have closed while this request waited.
+    const refusal = this.#allocationRefusal(request);
+    if (refusal !== null) return status(refusal);
 
     const target = request.ingressWindow;
-    const current = this.currentWindow();
-    if (
-      target < current ||
-      target > current + BigInt(this.#profile.maxFutureIngressWindows)
-    )
-      return status("window-closed");
-
     const state = await this.#windowState(target);
     if (this.#windowIsClosed(state, target)) return status("window-closed");
 
-    let admissionQuotaKey32: Uint8Array | undefined;
-    if (this.#allocationAdmission !== undefined) {
-      try {
-        // The adapter gets its own bytes, so accidental mutation cannot change
-        // the request already hashed above or the key the lease binds below.
-        const key = await this.#allocationAdmission.authorize({
-          ...request,
-          deliveryProfileHash: copyBytes(request.deliveryProfileHash),
-          allocationEd25519PublicKey: copyBytes(
-            request.allocationEd25519PublicKey,
-          ),
-          privacyPassToken: copyBytes(request.privacyPassToken),
-        });
-        if (!(key instanceof Uint8Array) || key.length !== 32)
-          return status("invalid-token");
-        admissionQuotaKey32 = copyBytes(key);
-      } catch {
-        return status("invalid-token");
-      }
-    }
+    const admitted = await this.#admit({ ...request, route: "allocation" });
+    if (admitted.kind === "refused") return status("invalid-token");
+    const admissionQuotaKey32 =
+      admitted.kind === "admitted" ? admitted.quotaKey32 : undefined;
 
     // An exact duplicate replays the byte-identical lease and consumes no
     // second ordinal, on any route and after a restart.
@@ -789,8 +976,17 @@ export class PrototypeStoreCore {
    * constant 400) rather than returning a status: `slot-conflict` is carrier
    * evidence about a slot two clients both claimed, and answering a forged
    * signature with it would manufacture that evidence out of nothing.
+   *
+   * `admissionToken` is what the caller presented to the admission hook (the
+   * transport's bearer header); a hook refusal throws
+   * `StoreAdmissionRefusedError`. Everything before the slot binding reads
+   * only the request and the clock, and only the binding itself loads the
+   * window and takes the mutation queue.
    */
-  async append(request: PublicAppendRequestV1): Promise<PublicAppendResultV1> {
+  async append(
+    request: PublicAppendRequestV1,
+    admissionToken?: Uint8Array,
+  ): Promise<PublicAppendResultV1> {
     const admission = request.admission;
     const privateRequest: PublicAppendRequestV1 = {
       version: request.version,
@@ -807,18 +1003,15 @@ export class PrototypeStoreCore {
               allocationSignature: copyBytes(admission.allocationSignature),
             },
     };
+    const token = presentedToken(admissionToken);
     if (privateRequest.version !== 1)
       fail("unsupported append request version");
     requireProfileHash(privateRequest.bucket.deliveryProfileHash);
     requireWindow(privateRequest.bucket.ingressWindow);
     requireSizeClassId(privateRequest.bucket.sizeClass);
 
-    return this.#serialize(() => this.#append(privateRequest));
-  }
-
-  async #append(request: PublicAppendRequestV1): Promise<PublicAppendResultV1> {
-    const { bucket, exactFixedObject, admission } = request;
-
+    const { bucket, exactFixedObject } = privateRequest;
+    const appendAdmission = privateRequest.admission;
     if (!bytesEqual(bucket.deliveryProfileHash, this.#profileHash))
       fail(
         "the append bucket names a delivery profile this store does not serve",
@@ -829,21 +1022,46 @@ export class PrototypeStoreCore {
     if (exactFixedObject.length !== objectBytes)
       fail("the carrier object is not this size class's exact wire length");
 
-    const requestHash = await publicAppendRequestHash(request);
+    const requestHash = await publicAppendRequestHash(privateRequest);
     const result = (
       status: PublicAppendStatusV1,
     ): Promise<PublicAppendResultV1> =>
       this.#appendResult(bucket, requestHash, status);
 
-    const state = await this.#windowState(bucket.ingressWindow);
-    if (this.#windowIsClosed(state, bucket.ingressWindow))
-      return result("window-finalized");
+    // Answered from the clock: a finalized window, one closed but not yet
+    // finalized, one below the chain start and one already swept are the
+    // same request to this line and get the same answer for the same work.
+    const window = bucket.ingressWindow;
+    if (this.#closedOnClock(window)) return result("window-finalized");
+    // The status set has no "not open yet". `capacity-exhausted` is the
+    // honest one: no lease can exist this far ahead, so the window has no
+    // capacity any append to it could use.
+    if (
+      window >
+      this.currentWindow() + BigInt(this.#profile.maxFutureIngressWindows)
+    )
+      return result("capacity-exhausted");
+
+    const admitted = await this.#admit({
+      route: "append",
+      version: 1,
+      deliveryProfileHash: bucket.deliveryProfileHash,
+      ingressWindow: window,
+      allocationEd25519PublicKey:
+        appendAdmission === null
+          ? new Uint8Array(32)
+          : appendAdmission.lease.allocationEd25519PublicKey,
+      privacyPassToken: token,
+    });
+    if (admitted.kind === "refused")
+      throw new StoreAdmissionRefusedError("append");
 
     // Degraded cover: the same bounded parse, the one fixed result, no row.
-    if (admission === null) return result("unallocated-cover");
+    if (appendAdmission === null) return result("unallocated-cover");
 
-    if (admission.version !== 1) fail("unsupported append admission version");
-    const { storeSignature, ...leaseBody } = admission.lease;
+    if (appendAdmission.version !== 1)
+      fail("unsupported append admission version");
+    const { storeSignature, ...leaseBody } = appendAdmission.lease;
     if (!bytesEqual(leaseBody.storeId, this.#storeId))
       fail("the admission lease names another store");
     if (!bytesEqual(leaseBody.deliveryProfileHash, bucket.deliveryProfileHash))
@@ -862,7 +1080,7 @@ export class PrototypeStoreCore {
     const sizeClass = this.#sizeClass(bucket.sizeClass);
     const slotsPerAllocation =
       this.#profile.roomSlotsPerClient * sizeClass.appendSchedule.length;
-    const ordinal = admission.objectOrdinalWithinAllocation;
+    const ordinal = appendAdmission.objectOrdinalWithinAllocation;
     if (
       !Number.isSafeInteger(ordinal) ||
       ordinal < 0 ||
@@ -886,7 +1104,7 @@ export class PrototypeStoreCore {
         ordinal,
         exactFixedObject,
       ),
-      admission.allocationSignature,
+      appendAdmission.allocationSignature,
       leaseBody.allocationEd25519PublicKey,
       this.#module,
     );
@@ -911,17 +1129,38 @@ export class PrototypeStoreCore {
     );
     const objectHash = await sha256(exactFixedObject);
 
+    return result(
+      await this.#serialize(() =>
+        this.#bindSlot(window, key, objectHash, exactFixedObject),
+      ),
+    );
+  }
+
+  /** The one part of an append that reads and writes the window. */
+  async #bindSlot(
+    window: bigint,
+    key: string,
+    objectHash: Uint8Array,
+    object: Uint8Array,
+  ): Promise<PublicAppendStatusV1> {
+    const state = await this.#windowState(window);
+    // Decided again: the window may have closed while this waited, and a
+    // finalized row is final whatever the clock says.
+    if (this.#windowIsClosed(state, window)) return "window-finalized";
+
     const bound = state.slots.get(key);
     if (bound !== undefined)
-      return result(
-        bytesEqual(bound.objectHash, objectHash)
-          ? "already-present"
-          : "slot-conflict",
-      );
+      return bytesEqual(bound.objectHash, objectHash)
+        ? "already-present"
+        : "slot-conflict";
 
-    state.slots.set(key, { objectHash, object: exactFixedObject });
-    await this.#persistence.saveWindow(state);
-    return result("stored");
+    // Never mutate a window a caching persistence adapter handed back before
+    // saveWindow commits: a failed write must not leave the slot bound in a
+    // state this process would go on serving and no restart would find.
+    const slots = new Map(state.slots);
+    slots.set(key, { objectHash, object });
+    await this.#persistence.saveWindow({ ...state, slots });
+    return "stored";
   }
 
   async #appendResult(
@@ -1080,8 +1319,17 @@ export class PrototypeStoreCore {
       ),
     };
 
-    state.finalized = { chunks, checkpoint };
-    await this.#persistence.saveWindow(state);
+    // Saved as a new value, for the reason `#bindSlot` gives: a cached row
+    // mutated before a failed write would serve a checkpoint no restart finds,
+    // and the restart would sign a different one — the store equivocating.
+    // The slots go: every bound object is now inside a signed chunk, and a
+    // finalized window binds no slot again.
+    await this.#persistence.saveWindow({
+      window: state.window,
+      allocations: state.allocations,
+      slots: new Map(),
+      finalized: { chunks, checkpoint },
+    });
   }
 
   /* ---------------------------------------------------------------- *
@@ -1104,7 +1352,10 @@ export class PrototypeStoreCore {
     // different answer from "that window of my chain is not final yet".
     if (!bytesEqual(requested, this.#profileHash))
       return status("chain-unavailable");
-    if (window < this.#chainStart) return status("out-of-range");
+    // Past retention it is out of range whether or not a sweep has deleted
+    // the row yet: the answer follows the clock, not the sweep's progress.
+    if (window < this.#chainStart || !this.#readable(window))
+      return status("out-of-range");
 
     const state = await this.#persistence.loadWindow(window);
     if (state?.finalized == null) return status("not-final");
@@ -1164,7 +1415,10 @@ export class PrototypeStoreCore {
     if (sizeClass === undefined) return status("out-of-range");
     if (chunkIndex >= BigInt(sizeClass.publicChunksPerWindow))
       return status("out-of-range");
-    if (requested.ingressWindow < this.#chainStart)
+    if (
+      requested.ingressWindow < this.#chainStart ||
+      !this.#readable(requested.ingressWindow)
+    )
       return status("out-of-range");
 
     const state = await this.#persistence.loadWindow(requested.ingressWindow);
@@ -1201,29 +1455,116 @@ export class PrototypeStoreCore {
    *
    * Bounded and idempotent: a witness log is unauthenticated input from a peer
    * store, so it may not grow without limit, and re-offering an observation
-   * must not make it look like two.
+   * must not make it look like two. Only a window this store retains is
+   * accepted — the current one and the `retentionWindows` before it — so
+   * nobody can pre-fill a window before it happens, and every row goes with
+   * its window at the sweep.
+   *
+   * The insert is one atomic persistence call against kept counts: it reads
+   * none of the window's records and takes no place on the mutation queue.
+   * Under admission each quota key adds at most
+   * `MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW` records to a window, so
+   * filling the window's `MAX_WITNESS_RECORDS_PER_WINDOW` takes that many
+   * admitted grants; under open admission there is no key to charge, and
+   * the first callers to reach the per-window bound fill it for everyone.
    */
-  async addWitness(record: StoreWitnessRecordV1): Promise<void> {
+  async addWitness(
+    record: StoreWitnessRecordV1,
+    admissionToken?: Uint8Array,
+  ): Promise<StoreWitnessOutcomeV1> {
     const privateRecord = copyWitnessRecord(record);
+    const token = presentedToken(admissionToken);
     if (privateRecord.version !== 1)
       fail("unsupported store witness record version");
-    if (privateRecord.ingressWindow < 0n)
-      fail("a witness record's ingress window must not be negative");
+    requireWindow(privateRecord.ingressWindow);
+    requireProfileHash(privateRecord.deliveryProfileHash);
+    if (
+      privateRecord.witnessedStoreId.length !== 32 ||
+      privateRecord.checkpointHash.length !== 32
+    )
+      fail("a witness record names a 32-byte store id and checkpoint hash");
 
-    return this.#serialize(async () => {
-      const existing = await this.#persistence.loadWitnessRecords(
-        privateRecord.ingressWindow,
-      );
-      const encoded = hexOf(encodeStoreWitnessRecordV1(privateRecord));
-      for (const held of existing)
-        if (hexOf(encodeStoreWitnessRecordV1(held)) === encoded) return;
-      if (existing.length >= MAX_WITNESS_RECORDS_PER_WINDOW) return;
-      await this.#persistence.saveWitnessRecord(privateRecord);
+    // A record about another profile answers no read of this one, and a
+    // window outside retention can never be read back: neither is worth a
+    // row, or a call to the admission hook.
+    if (
+      !bytesEqual(privateRecord.deliveryProfileHash, this.#profileHash) ||
+      !this.#witnessRetained(privateRecord.ingressWindow)
+    )
+      return "not-recorded";
+
+    const admitted = await this.#admit({
+      route: "witness",
+      version: 1,
+      deliveryProfileHash: privateRecord.deliveryProfileHash,
+      ingressWindow: privateRecord.ingressWindow,
+      allocationEd25519PublicKey: new Uint8Array(32),
+      privacyPassToken: token,
     });
+    if (admitted.kind === "refused")
+      throw new StoreAdmissionRefusedError("witness");
+
+    const outcome = await this.#persistence.addWitnessRecord(privateRecord, {
+      maxRecordsPerWindow: MAX_WITNESS_RECORDS_PER_WINDOW,
+      quotaKey32: admitted.kind === "admitted" ? admitted.quotaKey32 : null,
+      maxRecordsPerQuotaKey: MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW,
+    });
+    if (outcome === "added") return "recorded";
+    return outcome === "present" ? "already-held" : "not-recorded";
   }
 
+  /** The records held for `window`; none outside retention, unloaded. */
   async witnessRecords(window: bigint): Promise<StoreWitnessRecordV1[]> {
+    requireWindow(window);
+    if (!this.#witnessRetained(window)) return [];
     return this.#persistence.loadWitnessRecords(window);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Retention
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Delete what retention no longer covers: at most
+   * `STORE_RETENTION_SWEEP_BATCH_WINDOWS` window rows and as many witness
+   * windows per call, smallest first. The server calls it on a timer.
+   *
+   * A window stops being served once `current - window > retentionWindows`
+   * (`bucketIsReadable`) and is deleted one window after that, so a read that
+   * passed its retention check never loads a row this call is removing.
+   * Window rows go only below the last finalized window: that one is the chain
+   * tip the next checkpoint links to, and anything after it may still owe its
+   * slots to a chunk. A deleted row takes its allocation records, and their
+   * admission quota keys, with it; a deleted witness window takes its per-key
+   * counts.
+   *
+   * It runs beside requests rather than on the mutation queue: allocation
+   * and append name open windows and finalization names the windows after the
+   * tip, so nothing that writes touches a row this deletes. A call that
+   * overlaps a running one returns at once and deletes nothing.
+   */
+  async sweepRetention(): Promise<StoreRetentionSweep> {
+    if (this.#sweeping) return { windows: 0, witnessWindows: 0 };
+    this.#sweeping = true;
+    try {
+      const floor = this.currentWindow() - BigInt(this.#retentionWindows) - 1n;
+      if (floor <= 0n) return { windows: 0, witnessWindows: 0 };
+      const tip = await this.#persistence.lastFinalizedWindow();
+      const windows =
+        tip === null
+          ? 0
+          : await this.#persistence.deleteWindowsBefore(
+              tip < floor ? tip : floor,
+              STORE_RETENTION_SWEEP_BATCH_WINDOWS,
+            );
+      const witnessWindows = await this.#persistence.deleteWitnessRecordsBefore(
+        floor,
+        STORE_RETENTION_SWEEP_BATCH_WINDOWS,
+      );
+      return { windows, witnessWindows };
+    } finally {
+      this.#sweeping = false;
+    }
   }
 
   /* ---------------------------------------------------------------- *
@@ -1248,6 +1589,50 @@ export class PrototypeStoreCore {
     return running;
   }
 
+  /**
+   * Ask the admission hook about one request, or report open admission.
+   *
+   * The hook gets its own bytes, so accidental mutation cannot change a
+   * request already hashed or a key bound afterwards. See
+   * `PrototypeStoreCoreOptions.allocationAdmission` for when this is called.
+   */
+  async #admit(request: StoreAdmissionRequestV1): Promise<Admission> {
+    if (this.#allocationAdmission === undefined) return OPEN_ADMISSION;
+    try {
+      const key = await this.#allocationAdmission.authorize({
+        ...request,
+        deliveryProfileHash: copyBytes(request.deliveryProfileHash),
+        allocationEd25519PublicKey: copyBytes(
+          request.allocationEd25519PublicKey,
+        ),
+        privacyPassToken: copyBytes(request.privacyPassToken),
+      });
+      if (!(key instanceof Uint8Array) || key.length !== 32)
+        return REFUSED_ADMISSION;
+      return { kind: "admitted", quotaKey32: copyBytes(key) };
+    } catch {
+      return REFUSED_ADMISSION;
+    }
+  }
+
+  /** Served on read: any window not yet past, and retained ones that are. */
+  #readable(window: bigint): boolean {
+    const current = this.currentWindow();
+    return (
+      window > current ||
+      bucketIsReadable(window, current, this.#retentionWindows)
+    );
+  }
+
+  /** Accepted for witnessing: the current window and the retained ones. */
+  #witnessRetained(window: bigint): boolean {
+    return bucketIsReadable(
+      window,
+      this.currentWindow(),
+      this.#retentionWindows,
+    );
+  }
+
   async #windowState(window: bigint): Promise<StoreWindowState> {
     return (
       (await this.#persistence.loadWindow(window)) ??
@@ -1261,7 +1646,11 @@ export class PrototypeStoreCore {
    * the finalizer's schedule.
    */
   #windowIsClosed(state: StoreWindowState, window: bigint): boolean {
-    if (state.finalized !== null) return true;
+    return state.finalized !== null || this.#closedOnClock(window);
+  }
+
+  /** `IngressWindowStart(window) + chunkFinalizationOffsetMs` has passed. */
+  #closedOnClock(window: bigint): boolean {
     const dueAt =
       ingressWindowStartMs(window, this.#profile.deliveryWindowMs) +
       this.#profile.chunkFinalizationOffsetMs;

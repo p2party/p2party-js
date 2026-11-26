@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,7 @@ import {
   emptyStoreWindowState,
   copyStoreWindowState,
 } from "../../../src/blindRendezvous/prototype/store/storePersistence";
+import * as storeCoreBounds from "../../../src/blindRendezvous/prototype/store/storeCore";
 import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
 import {
   encodePrototypeStoreDescriptorDocumentV1,
@@ -114,6 +116,7 @@ const harness = async (
     chainStart?: bigint;
     seed?: Uint8Array;
     allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
+    retentionWindows?: number;
   } = {},
 ): Promise<Harness> => {
   let now = options.now ?? WINDOW_START;
@@ -129,6 +132,7 @@ const harness = async (
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
     allocationAdmission: options.allocationAdmission,
+    retentionWindows: options.retentionWindows,
   });
   return {
     core,
@@ -1176,5 +1180,991 @@ describe("prototype store witness records", () => {
     await core.addWitness(other);
     expect((await core.witnessRecords(CHAIN_START)).length).toBe(2);
     expect((await core.witnessRecords(CHAIN_START + 1n)).length).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Hardening (audit 2026-11, blind-rendezvous items 2, 6, 7 and 10)
+ *
+ * Cost is read through a counting persistence port, never through a clock:
+ * one unit per port call plus one per record a call hands back.
+ * ------------------------------------------------------------------ */
+
+const windowStartOf = (window: bigint): bigint =>
+  ingressWindowStartMs(window, profile.deliveryWindowMs);
+
+const finalizeAtOf = (window: bigint): bigint =>
+  windowStartOf(window) + profile.chunkFinalizationOffsetMs;
+
+const tokenOf = (byte: number): Uint8Array => new Uint8Array(32).fill(byte);
+
+const witnessFor = (
+  window: bigint,
+  first: number,
+  second = 0,
+): StoreWitnessRecordV1 => ({
+  version: 1,
+  witnessedStoreId: new Uint8Array(32).fill(3),
+  deliveryProfileHash: PROFILE_HASH,
+  ingressWindow: window,
+  checkpointHash: Uint8Array.from({ length: 32 }, (_, index) =>
+    index === 0 ? first : index === 1 ? second : 0x44,
+  ),
+});
+
+/** Bind every method a proxy hands out, except the ones it overrides. */
+const delegate = <T extends object>(
+  target: T,
+  overrides: Partial<Record<string | symbol, unknown>>,
+): T =>
+  new Proxy(target, {
+    get(inner, property, receiver) {
+      if (property in overrides) return overrides[property];
+      const value: unknown = Reflect.get(inner, property, receiver);
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(inner)
+        : value;
+    },
+  });
+
+const countedPort = <T extends StorePersistencePort>(
+  inner: T,
+): {
+  readonly port: T;
+  readonly calls: () => Record<string, number>;
+  readonly cost: () => number;
+  readonly reset: () => void;
+} => {
+  let calls: Record<string, number> = {};
+  let recordsReturned = 0;
+  const port = new Proxy(inner, {
+    get(target, property, receiver) {
+      const value: unknown = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]): unknown => {
+        const name = String(property);
+        calls[name] = (calls[name] ?? 0) + 1;
+        const output: unknown = (value as (...a: unknown[]) => unknown).apply(
+          target,
+          args,
+        );
+        if (!(output instanceof Promise)) return output;
+        return output.then((resolved: unknown) => {
+          if (Array.isArray(resolved)) recordsReturned += resolved.length;
+          return resolved;
+        });
+      };
+    },
+  });
+  return {
+    port,
+    calls: () => ({ ...calls }),
+    cost: () =>
+      Object.values(calls).reduce((total, count) => total + count, 0) +
+      recordsReturned,
+    reset: () => {
+      calls = {};
+      recordsReturned = 0;
+    },
+  };
+};
+
+/**
+ * A write-through cache in front of durable rows. `loadWindow` hands back the
+ * cached object itself, the way a caching adapter does, and a save reaches the
+ * cache only once the durable write succeeded. A restart is a new cache over
+ * the same durable rows.
+ */
+const cachingAdapter = (
+  durable: StorePersistencePort,
+): {
+  readonly port: StorePersistencePort;
+  readonly control: { failingSaves: number };
+} => {
+  const cache = new Map<string, StoreWindowState>();
+  const control = { failingSaves: 0 };
+  const port = delegate(durable, {
+    loadWindow: async (window: bigint): Promise<StoreWindowState | null> => {
+      const cached = cache.get(String(window));
+      if (cached !== undefined) return cached;
+      const loaded = await durable.loadWindow(window);
+      if (loaded !== null) cache.set(String(window), loaded);
+      return loaded;
+    },
+    saveWindow: async (state: StoreWindowState): Promise<void> => {
+      if (control.failingSaves > 0) {
+        control.failingSaves -= 1;
+        throw new Error("injected saveWindow failure");
+      }
+      await durable.saveWindow(state);
+      cache.set(String(state.window), copyStoreWindowState(state));
+    },
+  });
+  return { port, control };
+};
+
+const storedWindows = async (
+  persistence: StorePersistencePort,
+  from: bigint,
+  through: bigint,
+): Promise<bigint[]> => {
+  const stored: bigint[] = [];
+  for (let window = from; window <= through; window++)
+    if ((await persistence.loadWindow(window)) !== null) stored.push(window);
+  return stored;
+};
+
+const sqliteRoot = mkdtempSync(join(tmpdir(), "p2party-store-hardening-"));
+let sqliteCounter = 0;
+
+afterAll(() => {
+  rmSync(sqliteRoot, { recursive: true, force: true });
+});
+const freshSqlite = (): SqliteStorePersistence =>
+  new SqliteStorePersistence(
+    join(sqliteRoot, `store-${String(sqliteCounter++)}.sqlite`),
+  );
+
+const persistenceKinds: readonly (readonly [
+  string,
+  () => StorePersistencePort & { close?: () => void },
+])[] = [
+  ["memory", () => new MemoryStorePersistence()],
+  ["sqlite", freshSqlite],
+];
+
+const grantKey = new Uint8Array(32).fill(0x72);
+
+describe("prototype store append without the mutation queue", () => {
+  test("append to a finalized window costs no window load", async () => {
+    const counter = countedPort(new MemoryStorePersistence());
+    const { core, setNow } = await harness({ persistence: counter.port });
+    const { lease, secretKey } = await leaseFor(core);
+    const real = await appendRequest(lease, secretKey, 0, objectOf(0x61));
+    setNow(FINALIZE_AT);
+    expect(await core.finalizeDue()).toEqual([CHAIN_START]);
+
+    counter.reset();
+    expect(await verifiedStatus(core, await core.append(real))).toBe(
+      "window-finalized",
+    );
+    expect(
+      await verifiedStatus(core, await core.append(coverRequest(objectOf(2)))),
+    ).toBe("window-finalized");
+    expect(counter.calls()).toEqual({});
+  });
+
+  test("an append that needs no state does not wait for the mutation queue", async () => {
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const durable = new MemoryStorePersistence();
+    const held = delegate<StorePersistencePort>(durable, {
+      saveWindow: async (state: StoreWindowState): Promise<void> => {
+        markEntered();
+        await released;
+        await durable.saveWindow(state);
+      },
+    });
+    // The chain-start window is closed on the clock; the next one is open.
+    const { core } = await harness({ persistence: held, now: FINALIZE_AT });
+    const keyPair = await newKeyPair(cryptoModule);
+    const queued = core.allocate(
+      allocationRequest(keyPair.publicKey, CHAIN_START + 1n),
+    );
+    try {
+      await entered;
+      // The allocation now holds the queue inside its write. None of these
+      // answers needs state, so none may wait behind it.
+      const beyond = CHAIN_START + BigInt(profile.maxFutureIngressWindows) + 1n;
+      expect(
+        await verifiedStatus(
+          core,
+          await core.append(coverRequest(objectOf(1), CHAIN_START)),
+        ),
+      ).toBe("window-finalized");
+      expect(
+        await verifiedStatus(
+          core,
+          await core.append(coverRequest(objectOf(2), CHAIN_START + 1n)),
+        ),
+      ).toBe("unallocated-cover");
+      expect(
+        await verifiedStatus(
+          core,
+          await core.append(coverRequest(objectOf(3), beyond)),
+        ),
+      ).toBe("capacity-exhausted");
+    } finally {
+      release();
+    }
+    expect((await queued).kind).toBe("allocated");
+  });
+
+  test("concurrent appends to one slot still bind it once", async () => {
+    const { core, persistence } = await harness();
+    const { lease, secretKey } = await leaseFor(core);
+    const objects = [objectOf(0x91), objectOf(0x92), objectOf(0x91)];
+    const requests = await Promise.all(
+      objects.map((object) => appendRequest(lease, secretKey, 0, object)),
+    );
+    // Verification now runs before the queue, so which request reaches the
+    // binding first is not fixed; that exactly one binds the slot, and every
+    // other answer agrees with what it bound, is.
+    const statuses = await Promise.all(
+      requests.map(async (request) =>
+        verifiedStatus(core, await core.append(request)),
+      ),
+    );
+    const slots = (await persistence.loadWindow(CHAIN_START))?.slots;
+    expect(slots?.size).toBe(1);
+    const bound = hex([...(slots?.values() ?? [])][0].object);
+    expect(statuses.filter((status) => status === "stored")).toHaveLength(1);
+    statuses.forEach((status, index) => {
+      expect(status).toBe(
+        hex(objects[index]) !== bound
+          ? "slot-conflict"
+          : status === "stored"
+            ? "stored"
+            : "already-present",
+      );
+    });
+  });
+
+  test("refused appends for finalized, closed and never-existing windows answer alike", async () => {
+    const counter = countedPort(new MemoryStorePersistence());
+    const { core, setNow } = await harness({ persistence: counter.port });
+    setNow(FINALIZE_AT);
+    expect(await core.finalizeDue()).toEqual([CHAIN_START]);
+    // The next window is now past its finalization instant without having
+    // been finalized: the finalizer has simply not run since.
+    setNow(NEXT_FINALIZE_AT);
+
+    counter.reset();
+    const answers: string[][] = [];
+    for (const window of [CHAIN_START, CHAIN_START + 1n, CHAIN_START - 7n]) {
+      const result = await core.append(coverRequest(objectOf(0x63), window));
+      answers.push([
+        await verifiedStatus(core, result),
+        hex(result.fixedStatusPadding),
+      ]);
+    }
+    const refusal = ["window-finalized", hex(new Uint8Array(16))];
+    expect(answers).toEqual([refusal, refusal, refusal]);
+    expect(counter.calls()).toEqual({});
+  });
+});
+
+describe("prototype store admission on every route", () => {
+  test("admission hook is consulted for append and witness", async () => {
+    const seen: {
+      route: string;
+      token: string;
+      key: string;
+      window: bigint;
+    }[] = [];
+    const { core } = await harness({
+      allocationAdmission: {
+        authorize: (request) => {
+          seen.push({
+            route: request.route,
+            token: hex(request.privacyPassToken),
+            key: hex(request.allocationEd25519PublicKey),
+            window: request.ingressWindow,
+          });
+          return grantKey;
+        },
+      },
+    });
+    const token = tokenOf(0x5e);
+    const keyPair = await newKeyPair(cryptoModule);
+    const allocation = await core.allocate({
+      ...allocationRequest(keyPair.publicKey),
+      privacyPassToken: token,
+    });
+    if (allocation.kind !== "allocated") throw new Error("expected a lease");
+    const real = await appendRequest(
+      allocation.lease,
+      keyPair.secretKey,
+      0,
+      objectOf(0x64),
+    );
+    expect(await verifiedStatus(core, await core.append(real, token))).toBe(
+      "stored",
+    );
+    expect(
+      await verifiedStatus(
+        core,
+        await core.append(coverRequest(objectOf(0x65)), token),
+      ),
+    ).toBe("unallocated-cover");
+    expect(await core.addWitness(witnessFor(CHAIN_START, 1), token)).toBe(
+      "recorded",
+    );
+    // Presenting nothing is presenting the zero token.
+    await core.append(coverRequest(objectOf(0x66)));
+
+    const none = hex(new Uint8Array(32));
+    expect(seen).toEqual([
+      {
+        route: "allocation",
+        token: hex(token),
+        key: hex(keyPair.publicKey),
+        window: CHAIN_START,
+      },
+      {
+        route: "append",
+        token: hex(token),
+        key: hex(keyPair.publicKey),
+        window: CHAIN_START,
+      },
+      { route: "append", token: hex(token), key: none, window: CHAIN_START },
+      { route: "witness", token: hex(token), key: none, window: CHAIN_START },
+      { route: "append", token: none, key: none, window: CHAIN_START },
+    ]);
+
+    // A refusal on either route is its own typed error and leaves no row.
+    for (const authorize of [
+      (request: { route: string }) =>
+        request.route === "allocation" ? grantKey : null,
+      (request: { route: string }) =>
+        request.route === "allocation" ? grantKey : new Uint8Array(31),
+      (request: { route: string }) => {
+        if (request.route === "allocation") return grantKey;
+        throw new Error("hook failure");
+      },
+    ]) {
+      const refusing = await harness({ allocationAdmission: { authorize } });
+      const { lease, secretKey } = await leaseFor(refusing.core);
+      const refusedReal = await appendRequest(lease, secretKey, 0, objectOf(7));
+      await expect(
+        refusing.core.append(refusedReal, token),
+      ).rejects.toMatchObject({ name: "StoreAdmissionRefusedError" });
+      await expect(
+        refusing.core.append(coverRequest(objectOf(8)), token),
+      ).rejects.toMatchObject({ name: "StoreAdmissionRefusedError" });
+      await expect(
+        refusing.core.addWitness(witnessFor(CHAIN_START, 2), token),
+      ).rejects.toMatchObject({ name: "StoreAdmissionRefusedError" });
+      expect(
+        await refusing.persistence.loadWitnessRecords(CHAIN_START),
+      ).toEqual([]);
+      expect(
+        (await refusing.persistence.loadWindow(CHAIN_START))?.slots.size,
+      ).toBe(0);
+    }
+  });
+
+  test("the admission hook runs after the profile and open-window checks", async () => {
+    const routes: string[] = [];
+    const { core, setNow } = await harness({
+      allocationAdmission: {
+        authorize: (request) => {
+          routes.push(request.route);
+          return grantKey;
+        },
+      },
+    });
+    const keyPair = await newKeyPair(cryptoModule);
+    const beyond = CHAIN_START + BigInt(profile.maxFutureIngressWindows) + 1n;
+
+    // Allocation: another profile, a closed window, past the horizon.
+    for (const request of [
+      allocationRequest(keyPair.publicKey, CHAIN_START, OTHER_PROFILE_HASH),
+      allocationRequest(keyPair.publicKey, CHAIN_START - 1n),
+      allocationRequest(keyPair.publicKey, beyond),
+    ])
+      expect((await core.allocate(request)).kind).toBe("status");
+
+    // Append: another profile is malformed; a closed window and one past the
+    // allocation horizon are answered from the clock.
+    const foreign = coverRequest(objectOf(1));
+    await expect(
+      core.append({
+        ...foreign,
+        bucket: { ...foreign.bucket, deliveryProfileHash: OTHER_PROFILE_HASH },
+      }),
+    ).rejects.toThrow(StoreRequestError);
+    expect(
+      await verifiedStatus(
+        core,
+        await core.append(coverRequest(objectOf(2), CHAIN_START - 1n)),
+      ),
+    ).toBe("window-finalized");
+    expect(
+      await verifiedStatus(
+        core,
+        await core.append(coverRequest(objectOf(3), beyond)),
+      ),
+    ).toBe("capacity-exhausted");
+
+    // Witness: another profile, a future window, a window past retention.
+    expect(
+      await core.addWitness({
+        ...witnessFor(CHAIN_START, 1),
+        deliveryProfileHash: OTHER_PROFILE_HASH,
+      }),
+    ).toBe("not-recorded");
+    expect(await core.addWitness(witnessFor(CHAIN_START + 1n, 1))).toBe(
+      "not-recorded",
+    );
+    expect(
+      await core.addWitness(
+        witnessFor(CHAIN_START - BigInt(core.retentionWindows) - 1n, 1),
+      ),
+    ).toBe("not-recorded");
+    expect(routes).toEqual([]);
+
+    // Each route asks the hook exactly once for a request it would serve.
+    expect(
+      (await core.allocate(allocationRequest(keyPair.publicKey))).kind,
+    ).toBe("allocated");
+    await core.append(coverRequest(objectOf(4)));
+    await core.addWitness(witnessFor(CHAIN_START, 2));
+    expect(routes).toEqual(["allocation", "append", "witness"]);
+
+    // At the finalization instant the window is closed to both writes.
+    setNow(FINALIZE_AT);
+    expect(
+      (await core.allocate(allocationRequest(keyPair.publicKey))).kind,
+    ).toBe("status");
+    await core.append(coverRequest(objectOf(5)));
+    expect(routes).toEqual(["allocation", "append", "witness"]);
+  });
+});
+
+describe("prototype store copy-on-write persistence", () => {
+  test("failed save leaves append state unchanged after restart", async () => {
+    const durable = new MemoryStorePersistence();
+    const first = cachingAdapter(durable);
+    const before = await harness({ persistence: first.port });
+    const { lease, secretKey } = await leaseFor(before.core);
+    const object = objectOf(0x71);
+    const request = await appendRequest(lease, secretKey, 0, object);
+
+    first.control.failingSaves = 1;
+    await expect(before.core.append(request)).rejects.toThrow(
+      "injected saveWindow failure",
+    );
+    // Nothing was committed, so the same process must not now answer as if
+    // the slot were bound: an `already-present` receipt for bytes no durable
+    // row holds is a custody breach the store cannot avoid after a restart.
+    expect(
+      await verifiedStatus(before.core, await before.core.append(request)),
+    ).toBe("stored");
+
+    const restarted = await harness({
+      persistence: cachingAdapter(durable).port,
+      now: FINALIZE_AT,
+    });
+    expect(await restarted.core.finalizeDue()).toEqual([CHAIN_START]);
+    const slot = appendSlotCoordinates(geometry, 0, lease.allocationOrdinal, 0);
+    const read = await restarted.core.readChunk(
+      bucketOf(CHAIN_START, 0),
+      slot.chunkIndex,
+    );
+    if (read.kind !== "finalized") throw new Error("expected a chunk");
+    expect(hex(read.chunk.fixedObjects[slot.objectIndexWithinChunk])).toBe(
+      hex(object),
+    );
+  });
+
+  test("failed save leaves finalize state unchanged after restart", async () => {
+    const durable = new MemoryStorePersistence();
+    const first = cachingAdapter(durable);
+    const before = await harness({ persistence: first.port });
+    // A lease gives the window a row, which the cache then holds.
+    await leaseFor(before.core);
+    before.setNow(FINALIZE_AT);
+
+    first.control.failingSaves = 1;
+    await expect(before.core.finalizeDue()).rejects.toThrow(
+      "injected saveWindow failure",
+    );
+    // A checkpoint served now and a different one signed after a restart
+    // would be the store equivocating, so nothing uncommitted may be served.
+    const served = await before.core.readCheckpoint(PROFILE_HASH, CHAIN_START);
+    expect(served.kind === "status" ? served.value.status : served.kind).toBe(
+      "not-final",
+    );
+
+    // The same process recovers once a write goes through, and a restart
+    // serves exactly what was committed.
+    expect(await before.core.finalizeDue()).toEqual([CHAIN_START]);
+    const committed = hex(
+      encodePublicStoreCheckpointReadV1(
+        await before.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+      ),
+    );
+    const restarted = await harness({
+      persistence: cachingAdapter(durable).port,
+      now: FINALIZE_AT,
+    });
+    expect(await restarted.core.finalizeDue()).toEqual([]);
+    expect(
+      hex(
+        encodePublicStoreCheckpointReadV1(
+          await restarted.core.readCheckpoint(PROFILE_HASH, CHAIN_START),
+        ),
+      ),
+    ).toBe(committed);
+  });
+});
+
+describe("prototype store witness bounds", () => {
+  test("witness for an unretained window is refused", async () => {
+    const persistence = new MemoryStorePersistence();
+    const current = CHAIN_START + 300n;
+    const { core } = await harness({
+      persistence,
+      now: windowStartOf(current),
+      retentionWindows: 16,
+    });
+    const outcomes: Record<string, string> = {};
+    // Retention is inclusive, as `bucketIsReadable` defines it: a window is
+    // retained through the end of window + retentionWindows.
+    for (const window of [
+      current + 500n,
+      current + 1n,
+      current,
+      current - 16n,
+      current - 17n,
+      CHAIN_START,
+    ])
+      outcomes[String(window - current)] = await core.addWitness(
+        witnessFor(window, 1),
+      );
+    expect(outcomes).toEqual({
+      "500": "not-recorded",
+      "1": "not-recorded",
+      "0": "recorded",
+      "-16": "recorded",
+      "-17": "not-recorded",
+      "-300": "not-recorded",
+    });
+    for (const window of [current + 500n, current + 1n, current - 17n])
+      expect(await persistence.loadWitnessRecords(window)).toEqual([]);
+  });
+
+  test("witness for the previous window is accepted at its scheduled offset", async () => {
+    // The carrier runtime posts its witness for window w-1 at
+    // chunkFinalizationOffsetMs - maxScheduleSkewMs into window w.
+    const scheduled =
+      windowStartOf(CHAIN_START + 1n) +
+      profile.chunkFinalizationOffsetMs -
+      profile.maxScheduleSkewMs;
+    const { core, setNow } = await harness({
+      now: scheduled,
+      retentionWindows: storeCoreBounds.MIN_STORE_RETENTION_WINDOWS,
+    });
+    expect(await core.addWitness(witnessFor(CHAIN_START, 9))).toBe("recorded");
+    // A pair released a window late, skewed, and answered at its deadline.
+    setNow(
+      windowStartOf(CHAIN_START + 3n) +
+        profile.chunkFinalizationOffsetMs +
+        profile.maxScheduleSkewMs,
+    );
+    expect(await core.addWitness(witnessFor(CHAIN_START, 10))).toBe("recorded");
+    expect((await core.witnessRecords(CHAIN_START)).length).toBe(2);
+  });
+
+  test("witness insert is constant time", async () => {
+    for (const [kind, make] of persistenceKinds) {
+      const counter = countedPort(make());
+      const { core } = await harness({ persistence: counter.port });
+      const costs: number[] = [];
+      for (let index = 0; index < 96; index++) {
+        counter.reset();
+        await core.addWitness(
+          witnessFor(CHAIN_START, index & 0xff, index >> 8),
+        );
+        costs.push(counter.cost());
+      }
+      expect({ kind, costs }).toEqual({
+        kind,
+        costs: costs.map(() => costs[0]),
+      });
+      counter.port.close?.();
+    }
+  });
+
+  test("witness share per admission key is bounded", async () => {
+    const share = storeCoreBounds.MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW;
+    const { core, persistence } = await harness({
+      allocationAdmission: { authorize: (request) => request.privacyPassToken },
+    });
+    const a = tokenOf(0xa1);
+    const b = tokenOf(0xb2);
+    const outcomes: string[] = [];
+    for (let index = 0; index <= share; index++)
+      outcomes.push(await core.addWitness(witnessFor(CHAIN_START, index), a));
+    expect(outcomes).toEqual([
+      ...Array.from({ length: share }, () => "recorded"),
+      "not-recorded",
+    ]);
+    // Another grant has its own share, and re-offering a record already held
+    // costs it nothing.
+    expect(await core.addWitness(witnessFor(CHAIN_START, 0), b)).toBe(
+      "already-held",
+    );
+    expect(await core.addWitness(witnessFor(CHAIN_START, share), b)).toBe(
+      "recorded",
+    );
+    // The share is per window.
+    expect(await core.addWitness(witnessFor(CHAIN_START - 1n, 0), a)).toBe(
+      "recorded",
+    );
+    expect((await persistence.loadWitnessRecords(CHAIN_START)).length).toBe(
+      share + 1,
+    );
+  });
+
+  test("concurrent witness inserts never exceed a share", async () => {
+    const share = storeCoreBounds.MAX_WITNESS_RECORDS_PER_QUOTA_KEY_PER_WINDOW;
+    for (const [kind, make] of persistenceKinds) {
+      const persistence = make();
+      const { core } = await harness({
+        persistence,
+        allocationAdmission: { authorize: () => grantKey },
+      });
+      const outcomes = await Promise.all(
+        Array.from({ length: share * 3 }, (_, index) =>
+          core.addWitness(witnessFor(CHAIN_START, index), tokenOf(1)),
+        ),
+      );
+      expect({
+        kind,
+        recorded: outcomes.filter((outcome) => outcome === "recorded").length,
+        held: (await persistence.loadWitnessRecords(CHAIN_START)).length,
+      }).toEqual({ kind, recorded: share, held: share });
+      persistence.close?.();
+    }
+  });
+
+  test("the window bound refuses the record past it", async () => {
+    const bound = storeCoreBounds.MAX_WITNESS_RECORDS_PER_WINDOW;
+    const { core, persistence } = await harness();
+    for (let index = 0; index < bound; index++)
+      if (
+        (await core.addWitness(
+          witnessFor(CHAIN_START, index & 0xff, index >> 8),
+        )) !== "recorded"
+      )
+        throw new Error(`record ${String(index)} was not recorded`);
+    expect(await core.addWitness(witnessFor(CHAIN_START, 0xff, 0xff))).toBe(
+      "not-recorded",
+    );
+    expect(await core.addWitness(witnessFor(CHAIN_START, 0, 0))).toBe(
+      "already-held",
+    );
+    expect((await persistence.loadWitnessRecords(CHAIN_START)).length).toBe(
+      bound,
+    );
+  });
+});
+
+describe("prototype store retention", () => {
+  test("sweep bounds stored windows", async () => {
+    for (const [kind, make] of persistenceKinds) {
+      const persistence = make();
+      const { core, setNow } = await harness({
+        persistence,
+        retentionWindows: 4,
+      });
+      const last = CHAIN_START + 11n;
+      for (let window = CHAIN_START; window <= last; window++) {
+        setNow(finalizeAtOf(window));
+        expect(await core.finalizeDue()).toEqual([window]);
+        await core.sweepRetention();
+      }
+      // Readable: the four windows back and the current one. Kept one window
+      // longer than readable, so a read that passed its retention check
+      // never loads a row the sweep is deleting.
+      expect({
+        kind,
+        stored: await storedWindows(persistence, CHAIN_START, last),
+      }).toEqual({
+        kind,
+        stored: [last - 5n, last - 4n, last - 3n, last - 2n, last - 1n, last],
+      });
+      persistence.close?.();
+    }
+  }, 60_000);
+
+  test("one sweep deletes at most one batch", async () => {
+    const batch = storeCoreBounds.STORE_RETENTION_SWEEP_BATCH_WINDOWS;
+    const persistence = new MemoryStorePersistence();
+    const { core, setNow } = await harness({
+      persistence,
+      retentionWindows: 4,
+    });
+    const last = CHAIN_START + BigInt(batch) + 8n;
+    setNow(finalizeAtOf(last));
+    expect((await core.finalizeDue()).length).toBe(batch + 9);
+
+    const deleted: number[] = [];
+    for (let run = 0; run < 3; run++)
+      deleted.push((await core.sweepRetention()).windows);
+    // Everything below last - 5 goes, at most one batch per run.
+    expect(deleted).toEqual([batch, 3, 0]);
+    expect(await storedWindows(persistence, CHAIN_START, last)).toHaveLength(6);
+  }, 60_000);
+
+  test("sweep keeps the chain tip and windows the finalizer has not reached", async () => {
+    const persistence = new MemoryStorePersistence();
+    const { core, setNow } = await harness({
+      persistence,
+      retentionWindows: 4,
+    });
+    setNow(finalizeAtOf(CHAIN_START + 2n));
+    expect(await core.finalizeDue()).toEqual([
+      CHAIN_START,
+      CHAIN_START + 1n,
+      CHAIN_START + 2n,
+    ]);
+    // An open window holding a lease, then a finalizer that falls far behind.
+    setNow(windowStartOf(CHAIN_START + 3n));
+    await leaseFor(core, CHAIN_START + 3n);
+    setNow(windowStartOf(CHAIN_START + 20n));
+    await core.sweepRetention();
+    expect(
+      await storedWindows(persistence, CHAIN_START, CHAIN_START + 3n),
+    ).toEqual([CHAIN_START + 2n, CHAIN_START + 3n]);
+
+    // The chain still extends from the tip the sweep kept.
+    setNow(finalizeAtOf(CHAIN_START + 3n) + 16n * profile.deliveryWindowMs);
+    expect((await core.finalizeDue())[0]).toBe(CHAIN_START + 3n);
+    const tip = await persistence.loadWindow(CHAIN_START + 2n);
+    const next = await persistence.loadWindow(CHAIN_START + 3n);
+    if (tip?.finalized == null || next?.finalized == null)
+      throw new Error("expected both windows finalized");
+    expect(
+      await chainValidSuccessor(
+        tip.finalized.checkpoint,
+        core.descriptor,
+        finalizeAtOf(CHAIN_START + 2n),
+        next.finalized.checkpoint,
+        core.descriptor,
+        finalizeAtOf(CHAIN_START + 3n),
+        geometry,
+        cryptoModule,
+      ),
+    ).toEqual({ valid: true });
+  }, 60_000);
+
+  test("sweep deletes witness rows and admission bookkeeping with its window", async () => {
+    const path = join(
+      sqliteRoot,
+      `bookkeeping-${String(sqliteCounter++)}.sqlite`,
+    );
+    const persistence = new SqliteStorePersistence(path);
+    try {
+      const { core, setNow } = await harness({
+        persistence,
+        retentionWindows: 4,
+        allocationAdmission: {
+          authorize: (request) => request.privacyPassToken,
+        },
+      });
+      const keyPair = await newKeyPair(cryptoModule);
+      expect(
+        (
+          await core.allocate({
+            ...allocationRequest(keyPair.publicKey),
+            privacyPassToken: tokenOf(7),
+          })
+        ).kind,
+      ).toBe("allocated");
+      expect(
+        await core.addWitness(witnessFor(CHAIN_START, 1), tokenOf(7)),
+      ).toBe("recorded");
+      for (let window = CHAIN_START; window <= CHAIN_START + 6n; window++) {
+        setNow(finalizeAtOf(window));
+        await core.finalizeDue();
+        await core.sweepRetention();
+      }
+      expect(await persistence.loadWindow(CHAIN_START)).toBeNull();
+      expect(await persistence.loadWitnessRecords(CHAIN_START)).toEqual([]);
+    } finally {
+      persistence.close();
+    }
+
+    // No table keeps a row for the swept window, whatever it is called.
+    const raw = new Database(path, { readonly: true, safeIntegers: true });
+    try {
+      const tables = raw
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table'",
+        )
+        .all()
+        .map((row) => row.name);
+      const leftovers: Record<string, number> = {};
+      for (const table of tables) {
+        const columns = raw
+          .query<{ name: string }, []>(`PRAGMA table_info("${table}")`)
+          .all()
+          .map((row) => row.name);
+        if (!columns.includes("window")) continue;
+        leftovers[table] = Number(
+          raw
+            .query<{ n: bigint }, [bigint]>(
+              `SELECT count(*) AS n FROM "${table}" WHERE "window" = ?`,
+            )
+            .get(CHAIN_START)?.n ?? 0n,
+        );
+      }
+      expect(Object.keys(leftovers).length).toBeGreaterThan(2);
+      expect(Object.values(leftovers).every((count) => count === 0)).toBe(true);
+    } finally {
+      raw.close();
+    }
+  }, 60_000);
+
+  test("concurrent sweeps and finalization keep the chain intact", async () => {
+    const persistence = new MemoryStorePersistence();
+    const { core, setNow } = await harness({
+      persistence,
+      retentionWindows: 4,
+    });
+    const last = CHAIN_START + 9n;
+    for (let window = CHAIN_START; window <= last; window++) {
+      setNow(finalizeAtOf(window));
+      const [finalized, first, second] = await Promise.all([
+        core.finalizeDue(),
+        core.sweepRetention(),
+        core.sweepRetention(),
+      ]);
+      expect(finalized).toEqual([window]);
+      // One sweep runs at a time; a call that overlaps it does nothing.
+      expect(second).toEqual({ windows: 0, witnessWindows: 0 });
+      expect(first.windows).toBeLessThanOrEqual(1);
+    }
+    const kept = await storedWindows(persistence, CHAIN_START, last);
+    expect(kept.at(-1)).toBe(last);
+    for (let index = 1; index < kept.length; index++) {
+      const previous = await persistence.loadWindow(kept[index - 1]);
+      const current = await persistence.loadWindow(kept[index]);
+      if (previous?.finalized == null || current?.finalized == null)
+        throw new Error("expected finalized windows");
+      expect(
+        await chainValidSuccessor(
+          previous.finalized.checkpoint,
+          core.descriptor,
+          finalizeAtOf(kept[index - 1]),
+          current.finalized.checkpoint,
+          core.descriptor,
+          finalizeAtOf(kept[index]),
+          geometry,
+          cryptoModule,
+        ),
+      ).toEqual({ valid: true });
+    }
+  }, 60_000);
+
+  test("a failed sweep does not wedge the next one", async () => {
+    const durable = new MemoryStorePersistence();
+    let failures = 1;
+    const flaky = delegate<StorePersistencePort>(durable, {
+      deleteWindowsBefore: async (
+        window: bigint,
+        limit: number,
+      ): Promise<number> => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("injected delete failure");
+        }
+        return durable.deleteWindowsBefore(window, limit);
+      },
+    });
+    const { core, setNow } = await harness({
+      persistence: flaky,
+      retentionWindows: 4,
+    });
+    setNow(finalizeAtOf(CHAIN_START + 8n));
+    expect((await core.finalizeDue()).length).toBe(9);
+    await expect(core.sweepRetention()).rejects.toThrow(
+      "injected delete failure",
+    );
+    // Nothing was deleted, and the next call runs rather than finding a
+    // sweep still marked in flight.
+    expect(
+      await storedWindows(durable, CHAIN_START, CHAIN_START + 8n),
+    ).toHaveLength(9);
+    expect((await core.sweepRetention()).windows).toBe(3);
+    expect(
+      await storedWindows(durable, CHAIN_START, CHAIN_START + 8n),
+    ).toHaveLength(6);
+  }, 60_000);
+
+  test("reads past retention answer out-of-range without loading", async () => {
+    const counter = countedPort(new MemoryStorePersistence());
+    const { core, setNow } = await harness({
+      persistence: counter.port,
+      retentionWindows: 4,
+    });
+    setNow(FINALIZE_AT);
+    await core.finalizeDue();
+    expect(await core.addWitness(witnessFor(CHAIN_START, 1))).toBe("recorded");
+
+    // The last instant the window is retained: still served.
+    setNow(windowStartOf(CHAIN_START + 5n) - 1n);
+    expect((await core.readCheckpoint(PROFILE_HASH, CHAIN_START)).kind).toBe(
+      "finalized",
+    );
+
+    // Past retention it is not served whether or not a sweep has run yet.
+    setNow(windowStartOf(CHAIN_START + 5n));
+    counter.reset();
+    const checkpoint = await core.readCheckpoint(PROFILE_HASH, CHAIN_START);
+    const chunk = await core.readChunk(bucketOf(CHAIN_START, 0), 0n);
+    expect([
+      checkpoint.kind === "status" ? checkpoint.value.status : "finalized",
+      chunk.kind === "status" ? chunk.value.status : "finalized",
+      (await core.witnessRecords(CHAIN_START)).length,
+    ]).toEqual(["out-of-range", "out-of-range", 0]);
+    expect(counter.calls()).toEqual({});
+  });
+
+  test("a swept window refuses an append like any closed window", async () => {
+    const counter = countedPort(new MemoryStorePersistence());
+    const { core, setNow } = await harness({
+      persistence: counter.port,
+      retentionWindows: 4,
+    });
+    for (let window = CHAIN_START; window <= CHAIN_START + 6n; window++) {
+      setNow(finalizeAtOf(window));
+      await core.finalizeDue();
+      await core.sweepRetention();
+    }
+    expect(await counter.port.loadWindow(CHAIN_START)).toBeNull();
+    counter.reset();
+    const result = await core.append(coverRequest(objectOf(9), CHAIN_START));
+    expect(await verifiedStatus(core, result)).toBe("window-finalized");
+    expect(counter.calls()).toEqual({});
+  }, 60_000);
+
+  test("retention outside its bounds refuses to start", async () => {
+    const minimum = storeCoreBounds.MIN_STORE_RETENTION_WINDOWS;
+    for (const retentionWindows of [
+      0,
+      minimum - 1,
+      minimum + 0.5,
+      Number.NaN,
+      profile.carrierRetentionWindows + 1,
+    ])
+      await expect(harness({ retentionWindows })).rejects.toThrow(
+        StoreConfigurationError,
+      );
+    expect(
+      (await harness({ retentionWindows: minimum })).core.retentionWindows,
+    ).toBe(minimum);
+    expect((await harness()).core.retentionWindows).toBe(
+      storeCoreBounds.DEFAULT_STORE_RETENTION_WINDOWS,
+    );
   });
 });

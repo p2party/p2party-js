@@ -105,6 +105,13 @@ const witnessOf = (
   checkpointHash: filled(32, checkpointByte),
 });
 
+/** No admission: one shared bound per window, no per-key share. */
+const openWitnessBounds = {
+  maxRecordsPerWindow: 4_096,
+  quotaKey32: null,
+  maxRecordsPerQuotaKey: 0,
+};
+
 const allocationOf = (
   ordinal: number,
   window: bigint,
@@ -372,10 +379,12 @@ describe("prototype store SQLite persistence", () => {
     const path = databasePath();
     const persistence = new SqliteStorePersistence(path);
     try {
-      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc1));
-      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc1));
-      await persistence.saveWitnessRecord(witnessOf(425_000_000n, 0xc2));
-      await persistence.saveWitnessRecord(witnessOf(425_000_001n, 0xc1));
+      const add = (record: StoreWitnessRecordV1) =>
+        persistence.addWitnessRecord(record, openWitnessBounds);
+      expect(await add(witnessOf(425_000_000n, 0xc1))).toBe("added");
+      expect(await add(witnessOf(425_000_000n, 0xc1))).toBe("present");
+      expect(await add(witnessOf(425_000_000n, 0xc2))).toBe("added");
+      expect(await add(witnessOf(425_000_001n, 0xc1))).toBe("added");
 
       const first = await persistence.loadWitnessRecords(425_000_000n);
       expect(first.length).toBe(2);
@@ -401,9 +410,178 @@ describe("prototype store SQLite persistence", () => {
         hex(encodeStoreWitnessRecordV1(witnessOf(425_000_000n, 0xc1))),
         hex(encodeStoreWitnessRecordV1(witnessOf(425_000_000n, 0xc2))),
       ]);
+      // The counts survive the reopen with the rows they count.
+      expect(
+        await reopened.addWitnessRecord(witnessOf(425_000_000n, 0xc3), {
+          ...openWitnessBounds,
+          maxRecordsPerWindow: 2,
+        }),
+      ).toBe("window-full");
     } finally {
       reopened.close();
     }
+  });
+
+  test("witness inserts are bounded per window and per quota key", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    try {
+      const bounds = (quotaByte: number) => ({
+        maxRecordsPerWindow: 3,
+        quotaKey32: filled(32, quotaByte),
+        maxRecordsPerQuotaKey: 2,
+      });
+      const window = 425_000_000n;
+      const outcomes = [
+        await persistence.addWitnessRecord(witnessOf(window, 1), bounds(0xa)),
+        await persistence.addWitnessRecord(witnessOf(window, 2), bounds(0xa)),
+        // The key's share is spent; a record already held costs no share.
+        await persistence.addWitnessRecord(witnessOf(window, 3), bounds(0xa)),
+        await persistence.addWitnessRecord(witnessOf(window, 1), bounds(0xa)),
+        // Another key fills the window, and then nobody can add.
+        await persistence.addWitnessRecord(witnessOf(window, 3), bounds(0xb)),
+        await persistence.addWitnessRecord(witnessOf(window, 4), bounds(0xb)),
+        await persistence.addWitnessRecord(witnessOf(window, 4), {
+          ...openWitnessBounds,
+          maxRecordsPerWindow: 3,
+        }),
+        // A refused insert left nothing behind, so the next window is fresh.
+        await persistence.addWitnessRecord(
+          witnessOf(window + 1n, 3),
+          bounds(0xa),
+        ),
+      ];
+      expect(outcomes).toEqual([
+        "added",
+        "added",
+        "quota-full",
+        "present",
+        "added",
+        "window-full",
+        "window-full",
+        "added",
+      ]);
+      expect((await persistence.loadWitnessRecords(window)).length).toBe(3);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("sweeps delete windows and witness rows in bounded batches, smallest first", async () => {
+    const persistence = new SqliteStorePersistence(databasePath());
+    try {
+      const base = 425_000_000n;
+      for (let offset = 0n; offset < 5n; offset++) {
+        await persistence.saveWindow(finalizedState(base + offset));
+        await persistence.addWitnessRecord(witnessOf(base + offset, 1), {
+          maxRecordsPerWindow: 4,
+          quotaKey32: filled(32, 9),
+          maxRecordsPerQuotaKey: 4,
+        });
+      }
+      expect(await persistence.deleteWindowsBefore(base + 4n, 2)).toBe(2);
+      expect(await persistence.deleteWitnessRecordsBefore(base + 4n, 3)).toBe(
+        3,
+      );
+      const kept: string[] = [];
+      for (let offset = 0n; offset < 5n; offset++)
+        kept.push(
+          `${String(offset)}:${(await persistence.loadWindow(base + offset)) === null ? "-" : "w"}${(await persistence.loadWitnessRecords(base + offset)).length === 0 ? "-" : "r"}`,
+        );
+      expect(kept).toEqual(["0:--", "1:--", "2:w-", "3:wr", "4:wr"]);
+      // The next batch finishes the job and never reaches the floor.
+      expect(await persistence.deleteWindowsBefore(base + 4n, 8)).toBe(2);
+      expect(await persistence.deleteWitnessRecordsBefore(base + 4n, 8)).toBe(
+        1,
+      );
+      expect(await persistence.deleteWindowsBefore(base + 4n, 8)).toBe(0);
+      expect(await persistence.lastFinalizedWindow()).toBe(base + 4n);
+      // A swept window's quota share is gone with it: the key may add again.
+      expect(
+        await persistence.addWitnessRecord(witnessOf(base, 2), {
+          maxRecordsPerWindow: 4,
+          quotaKey32: filled(32, 9),
+          maxRecordsPerQuotaKey: 1,
+        }),
+      ).toBe("added");
+    } finally {
+      persistence.close();
+    }
+  });
+
+  test("an older database's witness rows are discarded at open and its windows kept", async () => {
+    const path = databasePath();
+    // The schema and rows an older build left behind: the same window and
+    // witness tables, no per-window witness counts, no schema version.
+    new Database(path, { create: true }).close();
+    withRawDatabase(path, (db) => {
+      db.exec(`
+        CREATE TABLE "window" ("window" INTEGER PRIMARY KEY, finalized INTEGER NOT NULL, state BLOB NOT NULL);
+        CREATE TABLE witness ("window" INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY ("window", record));
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+      for (let byte = 0; byte < 6; byte++)
+        db.query('INSERT INTO witness ("window", record) VALUES (?, ?)').run(
+          425_000_000n,
+          encodeStoreWitnessRecordV1(witnessOf(425_000_000n, byte)),
+        );
+      db.query("INSERT INTO meta (key, value) VALUES (?, ?)").run(
+        "chainStartIngressWindow",
+        "425000000",
+      );
+    });
+    const seeded = new SqliteStorePersistence(path);
+    try {
+      // Rows written through the current port survive every later open.
+      await seeded.saveWindow(finalizedState(425_000_000n));
+    } finally {
+      seeded.close();
+    }
+    withRawDatabase(path, (db) => {
+      db.exec("PRAGMA user_version = 0");
+      db.query('INSERT INTO witness ("window", record) VALUES (?, ?)').run(
+        425_000_001n,
+        encodeStoreWitnessRecordV1(witnessOf(425_000_001n, 7)),
+      );
+    });
+
+    const reopened = new SqliteStorePersistence(path);
+    try {
+      expect(await reopened.loadWitnessRecords(425_000_000n)).toEqual([]);
+      expect(await reopened.loadWitnessRecords(425_000_001n)).toEqual([]);
+      expect(await reopened.lastFinalizedWindow()).toBe(425_000_000n);
+      expect(reopened.loadMeta("chainStartIngressWindow")).toBe("425000000");
+      // The bound is counted from what is actually held.
+      for (let byte = 0; byte < 2; byte++)
+        expect(
+          await reopened.addWitnessRecord(witnessOf(425_000_000n, byte), {
+            ...openWitnessBounds,
+            maxRecordsPerWindow: 2,
+          }),
+        ).toBe("added");
+      expect(
+        await reopened.addWitnessRecord(witnessOf(425_000_000n, 9), {
+          ...openWitnessBounds,
+          maxRecordsPerWindow: 2,
+        }),
+      ).toBe("window-full");
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test("a database from a newer build is refused with a typed error", () => {
+    const path = databasePath();
+    new SqliteStorePersistence(path).close();
+    withRawDatabase(path, (db) => {
+      db.exec("PRAGMA user_version = 99");
+    });
+    let refusal: unknown = null;
+    try {
+      new SqliteStorePersistence(path).close();
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({ name: "StorePersistenceError" });
   });
 
   test("meta rows survive a reopen, which is what pins the chain start", async () => {

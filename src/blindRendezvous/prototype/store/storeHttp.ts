@@ -3,10 +3,11 @@
  * serialization. Nothing else.
  *
  * Everything this file can name is public geometry — a delivery-profile hash,
- * an ingress window, a size class, and two ordinals. There is no room, member,
- * peer or invitation value in any path, header or body, and no request carries
- * one, which is what lets unrelated rooms share a bucket and cover for each
- * other. The one deliberate exception is `logBodiesPath`, a harness-only file
+ * an ingress window, a size class, and two ordinals — plus, on the append and
+ * witness routes, an optional admission bearer token. There is no room,
+ * member, peer or invitation value in any path, header or body, and no request
+ * carries one, which is what lets unrelated rooms share a bucket and cover for
+ * each other. The one deliberate exception is `logBodiesPath`, a harness-only file
  * sink that exists precisely so the E2E can *prove* that claim by hexdumping
  * every body the store parsed; a store run for real never sets it.
  *
@@ -21,6 +22,9 @@
  *   `window-closed`, `slot-conflict` and friends are signed statements from
  *   the store, not transport errors, so they travel as ordinary bodies. A
  *   reader that trusted HTTP status codes would be trusting an unsigned value.
+ *   Two refusals have no signed form and are constant bodies instead: the
+ *   admission hook refusing an append or a witness offer is `403 refused`,
+ *   and a witness offer the store did not record is `409 not recorded`.
  * - **Only immutable things are cacheable.** A finalized chunk or checkpoint
  *   can never be re-signed, so it gets a year of `immutable`. Everything else
  *   — the descriptor, every status, health — is `no-store`.
@@ -52,7 +56,7 @@ import {
   encodePublicStoreCheckpointReadV1,
   encodeStoreWitnessRecordsV1,
 } from "../storeWire";
-import { StoreRequestError } from "./storeCore";
+import { StoreAdmissionRefusedError, StoreRequestError } from "./storeCore";
 
 import type { PrototypeStoreCore } from "./storeCore";
 
@@ -157,11 +161,13 @@ const responseBody = (bytes: Uint8Array): ArrayBuffer => {
  *
  * `*` is the honest value here rather than a shortcut. Every route is public
  * geometry, every answer is signed and verified against the pinned store key,
- * and the family defines no cookie, no `authorization` header and no
- * credential of any kind — so there is no ambient authority for a hostile page
- * to ride, and `access-control-allow-credentials` is deliberately absent (with
- * `*` the browser would refuse it anyway). What a hostile page can do with
- * these headers is exactly what `curl` can already do: append cover to a public
+ * and the family defines no cookie and no credential a browser attaches on
+ * its own. The one credential, an admission bearer token in `authorization`,
+ * is only ever set explicitly by a client that holds it, so there is still no
+ * ambient authority for a hostile page to ride, and
+ * `access-control-allow-credentials` is deliberately absent (with `*` the
+ * browser would refuse it anyway). What a hostile page can do with these
+ * headers is exactly what `curl` can already do: append cover to a public
  * bucket and read chunks it cannot open.
  *
  * `x-p2party-store` has to be named explicitly: it is not one of the
@@ -205,7 +211,9 @@ const preflight = (): Response =>
     headers: {
       ...headersFor(null, NO_STORE),
       "access-control-allow-methods": "GET, POST, OPTIONS",
-      "access-control-allow-headers": "content-type",
+      // `authorization` is not CORS-safelisted, so a client presenting an
+      // admission token would otherwise be refused before its POST is sent.
+      "access-control-allow-headers": "content-type, authorization",
       "access-control-max-age": PREFLIGHT_MAX_AGE_SECONDS,
     },
   });
@@ -224,8 +232,25 @@ const textResponse = (status: number, body: string): Response =>
   new Response(body, { status, headers: headersFor(PLAIN_TEXT, NO_STORE) });
 
 const malformed = (): Response => textResponse(400, "malformed");
+const refused = (): Response => textResponse(403, "refused");
 const notFound = (): Response => textResponse(404, "not found");
+const notRecorded = (): Response => textResponse(409, "not recorded");
 const internalError = (): Response => textResponse(500, "error");
+
+/** One spelling: the scheme as written, one space, 64 lowercase hex digits. */
+const ADMISSION_BEARER = /^Bearer ([0-9a-f]{64})$/;
+
+/**
+ * The admission token an append or witness offer presents, `undefined` when it
+ * presents none, or `null` when the header is not the one spelling. The core
+ * treats `undefined` as the zero token; `null` is the constant 400.
+ */
+const admissionToken = (request: Request): Uint8Array | undefined | null => {
+  const header = request.headers.get("authorization");
+  if (header === null) return undefined;
+  const match = ADMISSION_BEARER.exec(header);
+  return match === null ? null : parseProfileHash(match[1]);
+};
 
 const mediaTypeMatches = (request: Request, expected: string): boolean => {
   const header = request.headers.get("content-type");
@@ -355,6 +380,13 @@ export const createPrototypeStoreHandler = (
     if (!mediaTypeMatches(request, expected)) return malformed();
     const body = await readCappedBody(request);
     if (body === null) return malformed();
+    // Allocation carries its token in the body (`privacyPassToken`), so the
+    // header is read only where the wire format has no field for one.
+    const token =
+      kind === "append" || kind === "witness"
+        ? admissionToken(request)
+        : undefined;
+    if (token === null) return malformed();
     // Before parsing, so the audit sees exactly the bytes that arrived rather
     // than a re-encoding of what the store made of them.
     if (logBodiesPath !== undefined)
@@ -380,19 +412,26 @@ export const createPrototypeStoreHandler = (
       case "append":
         return canonicalResponse(
           encodePublicAppendResultV1(
-            await core.append(decodePublicAppendRequestV1(body)),
+            await core.append(decodePublicAppendRequestV1(body), token),
           ),
           PROTOTYPE_STORE_MEDIA_TYPES.appendResult,
           NO_STORE,
         );
-      case "witness":
-        await core.addWitness(decodeStoreWitnessRecordV1(body));
-        // A witness offer is an observation, not a query: there is nothing to
-        // say back that the offering store does not already know.
+      case "witness": {
+        const outcome = await core.addWitness(
+          decodeStoreWitnessRecordV1(body),
+          token,
+        );
+        // A witness offer is an observation, not a query: the one thing worth
+        // saying back is whether it is now held. Neither answer is an oracle —
+        // retention follows the clock, and a full window is visible to anyone
+        // who reads it.
+        if (outcome === "not-recorded") return notRecorded();
         return new Response(null, {
           status: 200,
           headers: headersFor(null, NO_STORE),
         });
+      }
       default:
         return notFound();
     }
@@ -420,6 +459,7 @@ export const createPrototypeStoreHandler = (
       // does; it is simply not a route.
       return notFound();
     } catch (error) {
+      if (error instanceof StoreAdmissionRefusedError) return refused();
       if (
         error instanceof StoreRequestError ||
         error instanceof CanonicalSchemaError

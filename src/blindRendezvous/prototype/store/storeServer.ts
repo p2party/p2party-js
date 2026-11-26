@@ -3,11 +3,14 @@
  * The prototype store entrypoint: configuration, the identity key file, and
  * process lifecycle. `bun run store:prototype`.
  *
- * This process is **not conformant**. It implements open allocation only —
- * there is no Privacy Pass issuer, so it carries no Sybil or fairness claim at
- * all, only a fixed traffic shape. Two environment flags must both be set
- * before it will start, so nobody deploys it by accident and nobody can point
- * at a running instance as evidence of the specified store.
+ * This process is **not conformant**. There is no Privacy Pass issuer, so it
+ * carries no Sybil or fairness claim of its own, only a fixed traffic shape.
+ * By default it runs open admission; `P2PARTY_STORE_ADMISSION_MODULE` names a
+ * module whose default export is an admission hook (`{ authorize(request) }`,
+ * see `PrototypeStoreCoreOptions.allocationAdmission`), which the store then
+ * consults on its allocation, append and witness routes. Two environment flags
+ * must both be set before it will start, so nobody deploys it by accident and
+ * nobody can point at a running instance as evidence of the specified store.
  *
  * What it owns that no other file does:
  *
@@ -21,12 +24,19 @@
  *   ruler and sign a chain that disagrees with the one already on disk, so a
  *   mismatch refuses to start rather than equivocate.
  * - **The identity seed is created 0600 or not at all.**
+ * - **Retention is swept on a timer.** `P2PARTY_STORE_RETENTION_WINDOWS` sets
+ *   how many windows back the store serves (default
+ *   `DEFAULT_STORE_RETENTION_WINDOWS`, 256, in `storeCore.ts`); the sweep
+ *   starts with the server, deletes one bounded batch per tick, and stops at
+ *   shutdown.
  *
  * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
  * registry.
  */
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { wasmLoader } from "../../../cryptography/wasmLoader";
 import { deliveryProfileHash } from "../../derivations";
@@ -44,6 +54,7 @@ import { SqliteStorePersistence } from "./storeSqlite";
 
 import type { LibCrypto } from "../../../cryptography/libcrypto";
 import type { DeliveryProfileV1 } from "../profile";
+import type { PrototypeStoreCoreOptions } from "./storeCore";
 
 /** Printed verbatim; the E2E asserts on this exact line. */
 const GATE_REFUSAL =
@@ -56,6 +67,13 @@ const DEFAULT_DB_PATH = "./p2party-store-prototype.sqlite";
 const DEFAULT_KEY_FILE = "./p2party-store-prototype.key";
 const DESCRIPTOR_VALIDITY_MS = 2_592_000_000n; // 30 days
 const FINALIZE_INTERVAL_MS = 250;
+/**
+ * One sweep per second deletes up to `STORE_RETENTION_SWEEP_BATCH_WINDOWS`
+ * windows, against one new window every 4,000 ms at the pinned profile, so a
+ * backlog drains and a steady store holds `retentionWindows` plus at most a
+ * couple more.
+ */
+const RETENTION_SWEEP_INTERVAL_MS = 1_000;
 const SEED_BYTES = 32;
 
 /**
@@ -150,6 +168,49 @@ const loadOrCreateSeed = (path: string): Uint8Array => {
   return seed;
 };
 
+const parseRetention = (raw: string | undefined): number | undefined => {
+  if (raw === undefined) return undefined;
+  if (!DECIMAL.test(raw))
+    refuse("P2PARTY_STORE_RETENTION_WINDOWS must be a decimal integer");
+  // The bounds are the core's, and `create` refuses outside them.
+  return Number(raw);
+};
+
+type AdmissionHook = NonNullable<
+  PrototypeStoreCoreOptions["allocationAdmission"]
+>;
+
+/**
+ * Import the operator's admission hook. It runs in this process with this
+ * process's authority, exactly like the store's own code; the module is
+ * configuration, not input.
+ */
+const loadAdmission = async (
+  path: string | undefined,
+): Promise<AdmissionHook | undefined> => {
+  if (path === undefined) return undefined;
+  let loaded: unknown;
+  try {
+    loaded = await import(pathToFileURL(resolve(path)).href);
+  } catch (error) {
+    return refuse(
+      `cannot load P2PARTY_STORE_ADMISSION_MODULE ${path}: ${
+        error instanceof Error ? error.name : "unknown error"
+      }`,
+    );
+  }
+  const hook = (loaded as { default?: unknown } | null)?.default;
+  if (
+    typeof hook !== "object" ||
+    hook === null ||
+    typeof (hook as { authorize?: unknown }).authorize !== "function"
+  )
+    return refuse(
+      `P2PARTY_STORE_ADMISSION_MODULE ${path} must default-export an object with an authorize(request) function`,
+    );
+  return hook as AdmissionHook;
+};
+
 /** An exported-but-empty variable is a shell accident, not a configured
  * value; treating `FOO=` as "set" turns it into an unreadable path. */
 const setting = (name: string): string | undefined => {
@@ -163,12 +224,28 @@ const fault = parseFault(setting("P2PARTY_STORE_FAULT"));
 const databasePath = setting("P2PARTY_STORE_DB") ?? DEFAULT_DB_PATH;
 const keyFilePath = setting("P2PARTY_STORE_KEY_FILE") ?? DEFAULT_KEY_FILE;
 const logBodiesPath = setting("P2PARTY_STORE_LOG_BODIES");
+const retentionWindows = parseRetention(
+  setting("P2PARTY_STORE_RETENTION_WINDOWS"),
+);
+const admissionModulePath = setting("P2PARTY_STORE_ADMISSION_MODULE");
+const allocationAdmission = await loadAdmission(admissionModulePath);
 
 /* ------------------------------------------------------------------ *
  * Start
  * ------------------------------------------------------------------ */
 
-const persistence = new SqliteStorePersistence(databasePath);
+const openPersistence = (): SqliteStorePersistence => {
+  try {
+    return new SqliteStorePersistence(databasePath);
+  } catch (error) {
+    return refuse(
+      `cannot open ${databasePath}: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+  }
+};
+const persistence = openPersistence();
 const profileHashHex = hexOf(await deliveryProfileHash(profile));
 
 // A chain already on disk was measured with one ruler; changing the ruler now
@@ -229,6 +306,8 @@ const core = await PrototypeStoreCore.create({
   origin,
   descriptorValidityMs: DESCRIPTOR_VALIDITY_MS,
   fault,
+  allocationAdmission,
+  retentionWindows,
 }).catch((error: unknown) =>
   refuse(
     `cannot serve the chain anchored at window ${String(chainStartIngressWindow)}: ${
@@ -261,6 +340,17 @@ const finalizeTimer = setInterval(() => {
   });
 }, FINALIZE_INTERVAL_MS);
 
+// Off the mutation queue and one batch per tick: a deleted row is one no
+// request reads or writes any more, so the sweep never waits on traffic and
+// traffic never waits on it.
+const sweepTimer = setInterval(() => {
+  void core.sweepRetention().catch((error: unknown) => {
+    console.error(
+      `p2party store: retention sweep failed (${error instanceof Error ? error.name : "unknown error"})`,
+    );
+  });
+}, RETENTION_SWEEP_INTERVAL_MS);
+
 const listen = (): Bun.Server<undefined> => {
   try {
     return Bun.serve({
@@ -290,6 +380,10 @@ console.log(
     `windowMs=${String(profile.deliveryWindowMs)}`,
     `chainStart=${String(chainStartIngressWindow)}`,
     `db=${databasePath}`,
+    `retention=${String(core.retentionWindows)}`,
+    admissionModulePath === undefined
+      ? "admission=open"
+      : `admission=${admissionModulePath}`,
     fault === null ? "fault=none" : `fault=${fault}`,
     logBodiesPath === undefined
       ? "log-bodies=off"
@@ -297,7 +391,9 @@ console.log(
   ].join(" "),
 );
 console.warn(
-  "p2party store prototype: open allocation, no Privacy Pass issuer — this store carries no Sybil or fairness claim",
+  admissionModulePath === undefined
+    ? "p2party store prototype: open allocation, no Privacy Pass issuer — this store carries no Sybil or fairness claim"
+    : "p2party store prototype: experimental admission hook, no Privacy Pass issuer — this store carries no Sybil or fairness claim beyond what that hook enforces",
 );
 
 /* ------------------------------------------------------------------ *
@@ -314,6 +410,7 @@ const shutdown = (signal: string): void => {
   if (stopping) return;
   stopping = true;
   clearInterval(finalizeTimer);
+  clearInterval(sweepTimer);
   void server.stop(true).then(
     () => {
       persistence.close();

@@ -2,15 +2,20 @@
 // directory, with the directory-handle and sync-access-handle surface the
 // worker uses. Every read is logged.
 //
-// removeEntry follows the File System Standard (fs.spec.whatwg.org, §2.4.4,
-// read 2026-11-26). Its steps take no lock and do not check one, so a file
-// whose sync access handle is still open is removed like any other. The
-// handle keeps reading and writing that file, which is no longer in the
-// directory. A non-empty directory without `recursive` is
-// InvalidModificationError, a missing entry NotFoundError, and an error from
-// the underlying file system (here: `onRemove` throwing) rejects the call; a
-// recursive removal can fail part-way. MDN documents the same exceptions and
-// nothing about locks.
+// It does what Chromium does, as measured by docs/e2e/opfs-remove/probe.mjs
+// (result-2026-11-26.json, HeadlessChrome 159):
+// - removeEntry of a file whose sync access handle is open rejects with
+//   NoModificationAllowedError, and the file stays, its handle still working;
+// - removeEntry(directory, { recursive: true }) with such a file inside
+//   rejects the same way and removes nothing;
+// - once the handle is closed, both resolve;
+// - a second createSyncAccessHandle on a file whose first one is open rejects
+//   with NoModificationAllowedError.
+// (The File System Standard's removeEntry steps, §2.4.4, name no lock, and MDN
+// lists no lock error; the browser enforces one anyway.) A non-empty directory
+// without `recursive` is InvalidModificationError, a missing entry
+// NotFoundError, and an `onRemove` hook that throws stands in for any other
+// failure of the device.
 //
 // A closed handle refuses reads and writes, as a real one does.
 
@@ -39,8 +44,6 @@ export const fakeOpfs = (
 ): { storage: Record<string, unknown>; stats: FakeOpfsStats } => {
   interface HandleState {
     closed: boolean;
-    /** Set once the file left the directory while this handle was open. */
-    detached?: Uint8Array;
   }
   const open = new Map<string, Set<HandleState>>();
   const stats: FakeOpfsStats = {
@@ -56,12 +59,15 @@ export const fakeOpfs = (
       ),
     list: () => [...files.keys()].sort(),
   };
-  const detach = (name: string): void => {
-    const bytes = files.get(name) ?? new Uint8Array();
-    for (const handle of open.get(name) ?? []) handle.detached ??= bytes;
-    files.delete(name);
-  };
+  const inUse = (name: string): boolean =>
+    [...(open.get(name) ?? [])].some((handle) => !handle.closed);
+  const locked = (): DOMException =>
+    new DOMException(
+      "An attempt was made to modify an object where modifications are not allowed.",
+      "NoModificationAllowedError",
+    );
   const access = (name: string) => {
+    if (inUse(name)) throw locked();
     const state: HandleState = { closed: false };
     let handles = open.get(name);
     if (!handles) {
@@ -73,11 +79,9 @@ export const fakeOpfs = (
       if (state.closed)
         throw new DOMException("handle is closed", "InvalidStateError");
     };
-    const bytes = (): Uint8Array =>
-      state.detached ?? files.get(name) ?? new Uint8Array();
+    const bytes = (): Uint8Array => files.get(name) ?? new Uint8Array();
     const keep = (next: Uint8Array): void => {
-      if (state.detached) state.detached = next;
-      else files.set(name, next);
+      files.set(name, next);
     };
     return {
       getSize: () => bytes().length,
@@ -131,8 +135,9 @@ export const fakeOpfs = (
     ) => {
       if (!files.has(name))
         throw new DOMException("no such entry", "NotFoundError");
+      if (inUse(name)) throw locked();
       hooks.onRemove?.(name, { recursive });
-      detach(name);
+      files.delete(name);
     },
     getFileHandle: async (name: string, options: { create?: boolean } = {}) => {
       if (!options.create && !files.has(name))
@@ -164,8 +169,9 @@ export const fakeOpfs = (
                 "directory is not empty",
                 "InvalidModificationError",
               );
+            if ([...files.keys()].some(inUse)) throw locked();
             hooks.onRemove?.(name, { recursive });
-            for (const file of [...files.keys()]) detach(file);
+            files.clear();
           },
         };
       },

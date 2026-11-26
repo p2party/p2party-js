@@ -132,11 +132,11 @@ afterEach(() => {
 
 // One received chunk (of two) of a file written to OPFS, and the message the
 // app lists for it.
-const receive = async (root: string) => {
+const receive = async (root: string, roomId = ROOM) => {
   const data = Uint8Array.from({ length: 5 }, (_, k) => k);
   const chunk: ReceiveChunk = {
     schemaVersion: 1,
-    roomId: ROOM,
+    roomId,
     fromPeerId: PEER,
     channelLabel: "chat",
     timestamp: 1_790_000_000_000,
@@ -156,7 +156,7 @@ const receive = async (root: string) => {
   await db.closeReceiveFile(root);
   store.dispatch(
     setMessage({
-      roomId: ROOM,
+      roomId,
       merkleRootHex: root,
       sha512Hex: chunk.hash,
       fromPeerId: PEER,
@@ -237,6 +237,47 @@ describe("a received file a delete could not remove reaches the application", ()
     expect(listed(root)).toBe(false);
   });
 
+  test("a deleteMessage that meets a handle still open rejects, and the file stays listed", async () => {
+    const root = "cb".repeat(64);
+    await receive(root);
+    // Another context (a tab writing it) holds the file open.
+    const storage = (
+      navigator as unknown as {
+        storage: {
+          getDirectory: () => Promise<{
+            getDirectoryHandle: (name: string) => Promise<{
+              getFileHandle: (name: string) => Promise<{
+                createSyncAccessHandle: () => Promise<{ close: () => void }>;
+              }>;
+            }>;
+          }>;
+        };
+      }
+    ).storage;
+    const elsewhere = await (
+      await (
+        await (
+          await storage.getDirectory()
+        ).getDirectoryHandle("p2party-reassembled")
+      ).getFileHandle(root)
+    ).createSyncAccessHandle();
+
+    const failure = await p2party.deleteMessage(ROOM, root).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(StorageFailedError);
+    expect((failure as Error).message).toContain(root);
+    expect(listed(root)).toBe(true);
+    expect(opfs.list()).toEqual([root]);
+
+    // Closed there, the same call removes it.
+    elsewhere.close();
+    await p2party.deleteMessage(ROOM, root);
+    expect(opfs.list()).toEqual([]);
+    expect(listed(root)).toBe(false);
+  });
+
   test("disconnectFromRoom rejects when a received file cannot be removed", async () => {
     const kept = "c6".repeat(64);
     const removed = "c7".repeat(64);
@@ -258,6 +299,67 @@ describe("a received file a delete could not remove reaches the application", ()
     expect(typed.failures[0]).toBeInstanceOf(StorageFailedError);
     expect((typed.failures[0] as Error).message).toContain(kept);
     // Every other message was still removed.
+    expect(opfs.list()).toEqual([kept]);
+  });
+
+  test("disconnectFromAllRooms rejects when a received file cannot be removed", async () => {
+    const otherRoom = "00000000-0000-4000-8000-0000000000c9";
+    store.dispatch(
+      setRoom({
+        url: normalizeRoomCapability("c9".repeat(32)),
+        id: otherRoom,
+        rtcConfig: {},
+        policy: DEFAULT_ROOM_POLICY_V1,
+      }),
+    );
+    restores.push(() => store.dispatch(deleteRoom(otherRoom)));
+    const kept = "ca".repeat(64);
+    const removed = "cc".repeat(64);
+    const inOtherRoom = "cd".repeat(64);
+    await receive(kept);
+    await receive(removed);
+    await receive(inOtherRoom, otherRoom);
+    refused.add(kept);
+
+    const failure = await p2party.disconnectFromAllRooms(true).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(StorageFailedError);
+    expect(failure).not.toBeInstanceOf(AggregateError);
+    const typed = failure as InstanceType<typeof StorageFailedError>;
+    expect(typed.cause).toBeInstanceOf(AggregateError);
+    // Each message's failure, not each room's.
+    expect(typed.failures).toHaveLength(1);
+    expect(typed.failures[0]).toBeInstanceOf(StorageFailedError);
+    expect((typed.failures[0] as Error).message).toContain(kept);
+    // Every other room and message was still removed.
+    expect(opfs.list()).toEqual([kept]);
+  });
+
+  test("purgeRoom rejects with StorageFailedError when a received file cannot be removed", async () => {
+    const kept = "ce".repeat(64);
+    const removed = "cf".repeat(64);
+    await receive(kept);
+    await receive(removed);
+    refused.add(kept);
+
+    const failure = await p2party
+      .purgeRoom(normalizeRoomCapability("c1".repeat(32)))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(StorageFailedError);
+    const typed = failure as InstanceType<typeof StorageFailedError>;
+    expect(
+      typed.failures.some(
+        (item) =>
+          item instanceof StorageFailedError && item.message.includes(kept),
+      ),
+    ).toBe(true);
+    // Everything else was done: the room is gone, the other file removed.
+    expect(store.getState().rooms.some((room) => room.id === ROOM)).toBe(false);
     expect(opfs.list()).toEqual([kept]);
   });
 

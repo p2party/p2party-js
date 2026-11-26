@@ -423,9 +423,26 @@ device refuses is never reported as done:
 - `p2party.disconnectFromRoom(roomId, true)` removes every other message of
   the room, then rejects with one `p2party.StorageFailedError`: `cause` is
   what the room's delete threw, and `failures` holds each message's error.
+- `p2party.disconnectFromAllRooms(true, exceptRoomIds)` does the same for
+  every room it leaves: every other room and message is removed, then one
+  `p2party.StorageFailedError` holds each message's error in `failures`.
+- `p2party.purgeRoom(roomUrl)` finishes every other step (the room, its
+  connections, its pins) and then rejects with one `p2party.StorageFailedError`
+  whose `failures` include each message's error.
 - `p2party.purge()` finishes every other step (the database, the rooms, the
   identity) and then rejects with `p2party.StorageFailedError`; `cause` is
   what its steps threw.
+- `p2party.cancelMessage`, `p2party.blacklistPeer` and the SDK's own cleanup
+  remove files through a `deleteMessage` action, so a file they cannot remove
+  is reported through `onReceiveStorageError` (`not-removed`).
+
+The browser refuses to remove a file, or a directory holding one, while any
+sync access handle or writable stream on it is open, and leaves it as it was
+(Chromium 159: `NoModificationAllowedError`; measured by
+`docs/e2e/opfs-remove/probe.mjs`). The SDK closes its own handles, and waits
+for its own reads and writes of the file, before it removes one; a file that
+another tab of this site holds open is reported as above, and the same call
+removes it once that tab has let it go.
 
 The database stays usable across tabs of different versions in one
 direction. A tab of this version closes its database connection when another

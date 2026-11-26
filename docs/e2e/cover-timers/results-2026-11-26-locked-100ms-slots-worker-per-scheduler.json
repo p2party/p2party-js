@@ -1,0 +1,201 @@
+{
+  "code": "92d2c90 (one timer worker per scheduler, before the shared worker and the ping)",
+  "mode": "timers",
+  "hostState": "macOS screen locked for the whole run (ioreg IOConsoleLocked = Yes before and after), so every window was occluded; --disable-backgrounding-occluded-windows kept the page visible until a tab was opened in front of it. Other agents were running on the host (see loadAverage1m).",
+  "measuredAt": "2026-11-26T20:04:47.899Z",
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--use-mock-keychain",
+    "--disable-backgrounding-occluded-windows",
+    "http://127.0.0.1:5918/?cadence=1000"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [0, "visible"],
+    [20209, "hidden"],
+    [141238, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 1000,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 99,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [192, 8.15478515625],
+    [50222, 6.19189453125],
+    [80226, 5.17822265625],
+    [110227, 4.67919921875],
+    [140231, 4.619140625],
+    [150244, 4.22265625]
+  ],
+  "phasesMs": {
+    "visible": [2000, 20195],
+    "hidden0to60s": [20195, 80195],
+    "hidden60to300s": [80195, 140232],
+    "hiddenPast300s": [140232, 140232],
+    "hiddenAll": [20195, 140232],
+    "visibleAgain": [140232, 150244]
+  },
+  "pageTimers": {
+    "visible": {
+      "wakeUps": 200,
+      "latenessMs": {
+        "p50": 2,
+        "p90": 3,
+        "p99": 3,
+        "max": 3
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 17,
+      "degradedCycles": 0,
+      "cellsSent": 170,
+      "cellsExpected": 170
+    },
+    "hidden0to60s": {
+      "wakeUps": 60,
+      "latenessMs": {
+        "p50": 347,
+        "p90": 430,
+        "p99": 474,
+        "max": 474
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 59,
+      "degradedCycles": 59,
+      "cellsSent": 0,
+      "cellsExpected": 590
+    },
+    "hidden60to300s": {
+      "wakeUps": 60,
+      "latenessMs": {
+        "p50": 372,
+        "p90": 430,
+        "p99": 440,
+        "max": 440
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 59,
+      "degradedCycles": 59,
+      "cellsSent": 0,
+      "cellsExpected": 590
+    },
+    "hiddenAll": {
+      "wakeUps": 120,
+      "latenessMs": {
+        "p50": 362,
+        "p90": 430,
+        "p99": 440,
+        "max": 474
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 119,
+      "degradedCycles": 119,
+      "cellsSent": 0,
+      "cellsExpected": 1190
+    },
+    "visibleAgain": {
+      "wakeUps": 99,
+      "latenessMs": {
+        "p50": 2,
+        "p90": 3,
+        "p99": 395,
+        "max": 395
+      },
+      "lateBeyondToleranceShare": 0.0101,
+      "cycles": 9,
+      "degradedCycles": 1,
+      "cellsSent": 80,
+      "cellsExpected": 90
+    }
+  },
+  "timerWorker": {
+    "visible": {
+      "wakeUps": 200,
+      "latenessMs": {
+        "p50": 8,
+        "p90": 10,
+        "p99": 11,
+        "max": 11
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 17,
+      "degradedCycles": 0,
+      "cellsSent": 170,
+      "cellsExpected": 170
+    },
+    "hidden0to60s": {
+      "wakeUps": 127,
+      "latenessMs": {
+        "p50": 91,
+        "p90": 192,
+        "p99": 199,
+        "max": 200
+      },
+      "lateBeyondToleranceShare": 0.4724,
+      "cycles": 59,
+      "degradedCycles": 59,
+      "cellsSent": 35,
+      "cellsExpected": 590
+    },
+    "hidden60to300s": {
+      "wakeUps": 89,
+      "latenessMs": {
+        "p50": 149,
+        "p90": 195,
+        "p99": 201,
+        "max": 201
+      },
+      "lateBeyondToleranceShare": 0.6742,
+      "cycles": 59,
+      "degradedCycles": 59,
+      "cellsSent": 11,
+      "cellsExpected": 590
+    },
+    "hiddenAll": {
+      "wakeUps": 216,
+      "latenessMs": {
+        "p50": 123,
+        "p90": 192,
+        "p99": 200,
+        "max": 201
+      },
+      "lateBeyondToleranceShare": 0.5556,
+      "cycles": 119,
+      "degradedCycles": 119,
+      "cellsSent": 47,
+      "cellsExpected": 1190
+    },
+    "visibleAgain": {
+      "wakeUps": 99,
+      "latenessMs": {
+        "p50": 6,
+        "p90": 10,
+        "p99": 194,
+        "max": 194
+      },
+      "lateBeyondToleranceShare": 0.0101,
+      "cycles": 9,
+      "degradedCycles": 1,
+      "cellsSent": 80,
+      "cellsExpected": 90
+    }
+  }
+}

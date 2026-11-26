@@ -58,10 +58,11 @@ export interface CoverJobSlot extends CoverSlot {
 }
 
 /**
- * A producer is deliberately lazy: ratchet state and encrypted cell bytes can
- * be prepared at the scheduled slot instead of buffering a complete cycle.
- * Returning null substitutes a dummy for this slot without consuming a job
- * cell. declaredCellCount enforces the authenticated F x D capacity class.
+ * A producer is deliberately lazy: ratchet state and encrypted cell bytes are
+ * prepared one slot ahead (see CoverScheduler.prepare) instead of buffering a
+ * complete cycle. Returning null substitutes a dummy for this slot without
+ * consuming a job cell. declaredCellCount enforces the authenticated F x D
+ * capacity class.
  */
 export interface CoverJob {
   readonly id: string;
@@ -183,8 +184,28 @@ interface JobRuntime {
   completed: boolean;
   settled: boolean;
   keyEpochVersion: number;
+  /**
+   * A produced cell belongs to its job until it is sent: a slot that gives up
+   * on it (late, degraded, backpressure) leaves it here for the job's next
+   * slot, and settling the job zeroes it.
+   */
   pendingCell?: Uint8Array;
   pendingCancelCell?: Uint8Array;
+  /** Set while this job's producer runs: one production per job at a time. */
+  producing?: Promise<void>;
+}
+
+/**
+ * The cell for the next slot of the open cycle, produced ahead of the slot so
+ * that the slot's wake-up only sends it.
+ */
+interface PreparedCell {
+  readonly ordinal: number;
+  readonly lane: LaneRuntime;
+  state: "producing" | "ready" | "failed";
+  request?: CoverSendRequest;
+  /** Its slot gave up on it; whatever it produces is released, not sent. */
+  abandoned: boolean;
 }
 
 interface LaneRuntime {
@@ -200,6 +221,7 @@ interface CycleRuntime {
   readonly endMs: number;
   readonly lanes: LaneRuntime[];
   nextSlotOrdinal: number;
+  prepared?: PreparedCell;
 }
 
 type TimerKind = CoverTimerKind;
@@ -318,14 +340,15 @@ export class CoverScheduler {
         continue;
       }
       runtime.completed = true;
-      runtime.pendingCell?.fill(0);
-      runtime.pendingCell = undefined;
       this.settle(runtime, {
         jobId: runtime.job.id,
         outcome: "failed",
         reason: "key-epoch-changed",
       });
     }
+    // The next slot's cell was produced under the old epoch: produce it again
+    // under the new one (a retired job's lane carries a dummy).
+    this.reprepare();
   }
 
   /**
@@ -398,6 +421,8 @@ export class CoverScheduler {
     runtime.cancelRequested = true;
     runtime.completed = false;
     this.sortQueue();
+    // Its lane's next cell is already produced: the CANCEL takes that slot.
+    this.reprepare(runtime);
     return "cancel-pending";
   }
 
@@ -408,11 +433,16 @@ export class CoverScheduler {
   complete(jobId: string): boolean {
     const runtime = this.jobs.get(jobId);
     if (!runtime || runtime.settled) return false;
+    this.finishJob(runtime);
+    // A cell of it already produced for its lane's next slot is not sent.
+    this.reprepare(runtime);
+    return true;
+  }
+
+  private finishJob(runtime: JobRuntime): void {
     this.removeQueued(runtime);
     runtime.completed = true;
-    runtime.pendingCell = undefined;
-    this.settle(runtime, { jobId, outcome: "completed" });
-    return true;
+    this.settle(runtime, { jobId: runtime.job.id, outcome: "completed" });
   }
 
   start(): boolean {
@@ -471,6 +501,9 @@ export class CoverScheduler {
     this.disarm();
     this.setStatus("stopped");
 
+    // Teardown: a cell produced for a slot that will not come is zeroed here
+    // (a dummy) or with its job when the job settles below.
+    this.abandonPrepared();
     for (const runtime of [...this.jobs.values()]) {
       this.removeQueued(runtime);
       this.settle(runtime, {
@@ -552,6 +585,12 @@ export class CoverScheduler {
     if (runtime.settled) return;
     runtime.settled = true;
     runtime.state = "terminal";
+    // A settled job sends nothing more: its produced but unsent cells die
+    // with it.
+    runtime.pendingCell?.fill(0);
+    runtime.pendingCell = undefined;
+    runtime.pendingCancelCell?.fill(0);
+    runtime.pendingCancelCell = undefined;
     this.removeQueued(runtime);
     if (this.jobs.get(runtime.job.id) === runtime)
       this.jobs.delete(runtime.job.id);
@@ -639,7 +678,7 @@ export class CoverScheduler {
   private armSlot(cycle: CycleRuntime): void {
     const slot = this.slotAt(cycle, cycle.nextSlotOrdinal);
     this.arm(slot.deadlineMs, "slot", (generation) =>
-      this.sendSlot(slot, generation),
+      this.sendSlot(generation),
     );
   }
 
@@ -759,6 +798,7 @@ export class CoverScheduler {
       this.cycle?.index !== cycleIndex
     )
       return;
+    this.prepare(this.cycle);
     this.armSlot(this.cycle);
   }
 
@@ -797,55 +837,26 @@ export class CoverScheduler {
     };
   }
 
+  /** The cell for one slot; undefined when its slot gave up on it first. */
   private async requestForSlot(
     lane: LaneRuntime,
     slot: CoverSlot,
-  ): Promise<CoverSendRequest> {
+    prepared: PreparedCell,
+  ): Promise<CoverSendRequest | undefined> {
     const runtime = lane.job;
     if (runtime && !runtime.settled) {
-      const withJob = this.jobSlot(runtime, slot);
-      if (runtime.cancelRequested && !runtime.cancelSent) {
-        const keyEpochVersion = runtime.keyEpochVersion;
-        const cell =
-          runtime.pendingCancelCell ??
-          assertCell("cancelCell", await runtime.job.cancelCell?.(withJob));
-        if (runtime.settled || keyEpochVersion !== runtime.keyEpochVersion) {
-          cell.fill(0);
-          return this.requestForSlot(lane, slot);
-        }
+      const produced = await this.produceJobCell(runtime, slot);
+      if (produced)
         return {
-          cell,
-          source: "cancel",
+          cell: produced.cell,
+          source: produced.source,
           slot,
           jobId: runtime.job.id,
           jobCellIndex: runtime.sentCells,
         };
-      }
-
-      if (
-        !runtime.completed &&
-        runtime.sentCells < runtime.job.declaredCellCount
-      ) {
-        const produced =
-          runtime.pendingCell ?? (await runtime.job.nextCell(withJob));
-        // A durable PQ commit or explicit completion may retire this producer
-        // while its storage/sealing promise is pending. Never emit its old key.
-        if (runtime.settled || runtime.completed) {
-          produced?.fill(0);
-        } else if (produced !== null) {
-          const cell = assertCell("nextCell", produced);
-          return {
-            cell,
-            source: runtime.job.kind,
-            slot,
-            jobId: runtime.job.id,
-            jobCellIndex: runtime.sentCells,
-          };
-        } else if (runtime.job.exhausted?.()) {
-          this.complete(runtime.job.id);
-        }
-      }
     }
+    // No dummy for a slot that will not send it (a torn-down edge among them).
+    if (prepared.abandoned) return undefined;
 
     return {
       cell: assertCell("makeDummy", await this.makeDummy(slot)),
@@ -855,15 +866,145 @@ export class CoverScheduler {
     };
   }
 
-  private cacheUnsent(lane: LaneRuntime, request: CoverSendRequest): void {
-    const runtime =
-      (request.jobId ? this.jobs.get(request.jobId) : undefined) ?? lane.job;
-    if (!runtime || runtime.settled) return;
-    if (request.source === "cancel") {
-      runtime.pendingCancelCell = request.cell;
-    } else if (request.source === "real" || request.source === "control") {
-      runtime.pendingCell = request.cell;
+  /**
+   * The job's next cell for its lane, or null for a dummy. What it produces
+   * is the job's (pendingCell / pendingCancelCell) until it is sent, so a slot
+   * that gives up on it loses nothing and the job never sends a cell twice;
+   * and one production runs per job at a time, so a production still running
+   * when its slot gave up is waited for, never raced by a second nextCell.
+   */
+  private async produceJobCell(
+    runtime: JobRuntime,
+    slot: CoverSlot,
+  ): Promise<{ cell: Uint8Array; source: CoverCellSource } | null> {
+    while (runtime.producing) await runtime.producing;
+    if (runtime.settled) return null;
+    let finished!: () => void;
+    runtime.producing = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    try {
+      for (;;) {
+        if (runtime.settled) return null;
+        const withJob = this.jobSlot(runtime, slot);
+        if (runtime.cancelRequested && !runtime.cancelSent) {
+          if (runtime.pendingCancelCell)
+            return { cell: runtime.pendingCancelCell, source: "cancel" };
+          const keyEpochVersion = runtime.keyEpochVersion;
+          const cell = assertCell(
+            "cancelCell",
+            await runtime.job.cancelCell?.(withJob),
+          );
+          // Sealed against an epoch a rekey retired meanwhile: seal again.
+          if (runtime.settled || keyEpochVersion !== runtime.keyEpochVersion) {
+            cell.fill(0);
+            continue;
+          }
+          runtime.pendingCancelCell = cell;
+          continue;
+        }
+        if (
+          runtime.completed ||
+          runtime.sentCells >= runtime.job.declaredCellCount
+        )
+          return null;
+        if (runtime.pendingCell)
+          return { cell: runtime.pendingCell, source: runtime.job.kind };
+        const produced = await runtime.job.nextCell(withJob);
+        // A durable PQ commit or explicit completion may retire this producer
+        // while its storage/sealing promise is pending. Never emit its old key.
+        if (runtime.settled || runtime.completed) {
+          produced?.fill(0);
+          return null;
+        }
+        if (produced === null) {
+          if (runtime.job.exhausted?.()) this.finishJob(runtime);
+          return null;
+        }
+        // Kept by the job, then offered again by the loop: a CANCEL requested
+        // while it was produced still takes precedence.
+        runtime.pendingCell = assertCell("nextCell", produced);
+      }
+    } finally {
+      runtime.producing = undefined;
+      finished();
     }
+  }
+
+  /**
+   * Produce the cell for the open cycle's next slot now, one slot ahead of it.
+   * The slot's wake-up then only sends what is ready, so the time a cell
+   * leaves is the time its wake-up runs, whatever the cell carries: a dummy
+   * sealed in memory and a real chunk read from the outbox store, its receipt
+   * token written back and sealed leave alike (docs/e2e/cover-timers/,
+   * sealed mode). A cell still being produced when its slot comes is a late
+   * slot, never a late send.
+   */
+  private prepare(cycle: CycleRuntime): void {
+    const slot = this.slotAt(cycle, cycle.nextSlotOrdinal);
+    const lane = cycle.lanes.find(
+      ({ laneIndex }) => laneIndex === slot.laneIndex,
+    );
+    if (!lane) return;
+    const prepared: PreparedCell = {
+      ordinal: cycle.nextSlotOrdinal,
+      lane,
+      state: "producing",
+      abandoned: false,
+    };
+    cycle.prepared = prepared;
+    // Started in a microtask: the page's timer host runs the wake-ups of every
+    // edge due at once in one task, so all of them have sent (or opened their
+    // lanes) before any edge's production runs.
+    void Promise.resolve()
+      .then(() => this.requestForSlot(lane, slot, prepared))
+      .then(
+        (request) => {
+          if (!request) return;
+          if (prepared.abandoned) {
+            this.releaseUnsent(request);
+            return;
+          }
+          prepared.request = request;
+          prepared.state = "ready";
+        },
+        () => {
+          prepared.state = "failed";
+        },
+      );
+  }
+
+  /** The prepared cell's slot will not send it: release it. */
+  private abandonPrepared(): void {
+    const cycle = this.cycle;
+    const prepared = cycle?.prepared;
+    if (!cycle || !prepared) return;
+    cycle.prepared = undefined;
+    prepared.abandoned = true;
+    if (prepared.request) this.releaseUnsent(prepared.request);
+  }
+
+  /**
+   * A job's state changed after the next slot's cell was produced (a cancel,
+   * a completion, a rekey): produce that slot's cell again. With a job, only
+   * when the prepared slot is that job's lane.
+   */
+  private reprepare(runtime?: JobRuntime): void {
+    const cycle = this.cycle;
+    const prepared = cycle?.prepared;
+    if (!cycle || !prepared || this.status !== "active") return;
+    if (runtime && prepared.lane.job !== runtime) return;
+    this.abandonPrepared();
+    this.prepare(cycle);
+  }
+
+  /**
+   * A produced cell that will not be sent. A dummy is zeroed. A job's cell
+   * stays its job's (pendingCell), for the job's next slot, and is zeroed
+   * when the job settles.
+   */
+  private releaseUnsent(request: CoverSendRequest): void {
+    if (request.source === "dummy") request.cell.fill(0);
   }
 
   private acceptSent(lane: LaneRuntime, request: CoverSendRequest): void {
@@ -894,46 +1035,40 @@ export class CoverScheduler {
     }
   }
 
-  private async sendSlot(slot: CoverSlot, generation: number): Promise<void> {
+  private async sendSlot(generation: number): Promise<void> {
     const cycle = this.cycle;
     if (generation !== this.generation || !cycle || this.status !== "active")
       return;
-    const lane = cycle.lanes.find(
-      ({ laneIndex }) => laneIndex === slot.laneIndex,
-    );
-    if (!lane) {
+    const prepared = cycle.prepared;
+    if (prepared?.ordinal !== cycle.nextSlotOrdinal) {
       this.degrade("lane-open-failed");
       return;
     }
-
-    let request: CoverSendRequest;
-    try {
-      request = await this.requestForSlot(lane, slot);
-    } catch {
-      this.degrade("cell-production-failed");
+    cycle.prepared = undefined;
+    // Its cell was produced during the slot before; this wake-up only sends
+    // it. One that is not ready is a late slot: sending it when it is ready
+    // would make the send time tell what the cell carries.
+    if (prepared.state !== "ready" || !prepared.request) {
+      prepared.abandoned = true;
+      this.degrade(
+        prepared.state === "failed"
+          ? "cell-production-failed"
+          : "missed-deadline",
+      );
       return;
     }
-
-    if (generation !== this.generation) {
-      this.cacheUnsent(lane, request);
-      return;
-    }
-    if (this.assertClockNow() > slot.deadlineMs + this.maxTimerDriftMs) {
-      this.cacheUnsent(lane, request);
-      this.degrade("missed-deadline");
-      return;
-    }
+    const { lane, request } = prepared;
 
     let accepted: boolean | void;
     try {
       accepted = await lane.handle.send(request);
     } catch {
-      this.cacheUnsent(lane, request);
+      this.releaseUnsent(request);
       this.degrade("send-failed");
       return;
     }
     if (accepted === false) {
-      this.cacheUnsent(lane, request);
+      this.releaseUnsent(request);
       this.degrade("backpressure");
       return;
     }
@@ -944,6 +1079,7 @@ export class CoverScheduler {
     const totalCycleSlots =
       this.slotsPerEpoch * this.schedule.coverDurationEpochs;
     if (cycle.nextSlotOrdinal < totalCycleSlots) {
+      this.prepare(cycle);
       this.armSlot(cycle);
     } else {
       this.armCycleBoundary(cycle.endMs);
@@ -982,6 +1118,7 @@ export class CoverScheduler {
 
   private interruptCycle(reason: CoverJobInterruption["reason"]): void {
     if (!this.cycle) return;
+    this.abandonPrepared();
     for (const lane of this.cycle.lanes) {
       const runtime = lane.job;
       lane.job = undefined;
@@ -1010,6 +1147,7 @@ export class CoverScheduler {
   private closeCurrentCycle(reason: CoverLaneCloseContext["reason"]): boolean {
     const cycle = this.cycle;
     if (!cycle) return true;
+    this.abandonPrepared();
     let closedCleanly = true;
     for (const lane of [...cycle.lanes].sort(
       (left, right) => left.laneIndex - right.laneIndex,

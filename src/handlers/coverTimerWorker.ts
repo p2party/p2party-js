@@ -1,6 +1,8 @@
 import { debugLog } from "../utils/debug";
 import {
+  COVER_TIMER_WORKER_HEALTHY_WAKE_UPS,
   COVER_TIMER_WORKER_MAX_RESTARTS,
+  COVER_TIMER_WORKER_PING_LATE_MS,
   COVER_TIMER_WORKER_PING_TIMEOUT_MS,
   COVER_TIMER_WORKER_RESTART_BACKOFF_MS,
   COVER_TIMER_WORKER_STALL_MS,
@@ -19,13 +21,20 @@ import type { CoverClock, CoverTimerKind } from "./coverScheduler";
 // the worker owns the timers and posts a message when one is due, and the page
 // runs the slot (and its send) in the message handler.
 //
-// Measured in Chrome for Testing 159 on macOS (docs/e2e/cover-timers/), a
-// hidden page ran those wake-ups up to 143 ms late, median 50 ms. The harness
-// timestamps only the page side, so it cannot tell a late worker timer from a
-// late page task; that the worker's own timers are not throttled is an
+// Measured in Chrome for Testing 159 on macOS, a hidden page still ran those
+// wake-ups late: median 50 ms, at most 143 ms, with the screen unlocked; median
+// 120 to 170 ms, at most 200 to 320 ms, in later runs with it locked. The
+// setup and the host's load of each run are in
+// docs/protocol-v4-pq-cover-architecture.md and docs/e2e/cover-timers/. The harness timestamps only the page side, so it
+// cannot tell a late worker timer from a late page task; that a hidden page
+// does not throttle the worker's own timers the way it throttles its own is an
 // inference from Chromium's documented behaviour, not a measurement. The send
-// still happens on the page, so cell timing on a hidden page shifts by tens of
-// milliseconds against the slot grid even when no cycle degrades.
+// still happens on the page, so on a hidden page every cell leaves late
+// against the slot grid even when no cycle degrades, and tab visibility is
+// readable from that. Closing it needs the cells sent from the worker itself,
+// which is not built (an owner decision). That shift is the same for every
+// cell: what a cell carries does not change when it leaves (the scheduler
+// produces each cell a slot ahead, CoverScheduler.prepare).
 //
 // Lateness is judged on ONE clock, the page's `Date.now()`, read when the page
 // runs the callback: the scheduler compares that against the slot's deadline.
@@ -44,10 +53,14 @@ import type { CoverClock, CoverTimerKind } from "./coverScheduler";
 // system sleep or a long task makes every wake-up overdue too. So a wake-up
 // STALL_MS overdue only makes the host ask the worker to answer a ping. A
 // worker that answers is kept. One that raises its error event, cannot be
-// reached, or does not answer within PING_TIMEOUT_MS is dropped: every pending
+// reached, or does not answer within PING_TIMEOUT_MS (twice that when the
+// timeout itself ran late, after a page pause) is dropped: every pending
 // wake-up moves to page timers, and a new worker is created at a later cycle
-// boundary, after a backoff, at most MAX_RESTARTS times. Only then does the
-// page stay on page timers for good.
+// boundary, after a backoff. Each edge moves to it at a cycle boundary of its
+// own. Replacements are counted in a row, at most MAX_RESTARTS: the count
+// starts again once a replacement has delivered HEALTHY_WAKE_UPS wake-ups, and
+// when the page's last scheduled-cover edge closes. Only when that many
+// replacements in a row are lost does the page stay on page timers for good.
 //
 // Every clock reports, once, when it is on page timers for good (no worker can
 // be created, or the restarts are spent): through console.warn on a browser
@@ -195,9 +208,14 @@ class CoverTimerHost {
   readonly #clocks = new Set<HostedCoverClock>();
   readonly #wakeUps = new Map<number, WakeUp>();
   #worker: CoverTimerWorkerPort | undefined;
+  /** Which worker this is: a clock joins one at its own cycle boundary. */
+  #workerGeneration = 0;
   #nextId = 1;
+  /** Replacements in a row: reset once one has proved healthy. */
   #restarts = 0;
   #restartNotBefore = 0;
+  /** Wake-ups the current worker has delivered, while #restarts > 0. */
+  #deliveredSinceRestart = 0;
   #permanent: string | undefined;
   #ping: { readonly id: number; readonly timer: unknown } | undefined;
 
@@ -207,6 +225,13 @@ class CoverTimerHost {
 
   get source(): "worker" | "page" {
     return this.#worker ? "worker" : "page";
+  }
+
+  /** What drives one clock's wake-ups: it may not have moved to a new worker yet. */
+  sourceFor(clock: HostedCoverClock): "worker" | "page" {
+    return this.#worker && clock.joinedWorker === this.#workerGeneration
+      ? "worker"
+      : "page";
   }
 
   get clockCount(): number {
@@ -222,6 +247,8 @@ class CoverTimerHost {
       this.#permanent = undefined;
       this.#start();
     }
+    // A new clock has no cycle open yet: it starts on whatever runs now.
+    if (this.#worker) clock.joinedWorker = this.#workerGeneration;
     if (this.#permanent) clock.reportPageTimersForGood(this.#permanent);
   }
 
@@ -246,8 +273,10 @@ class CoverTimerHost {
     delayMs: number,
     kind: CoverTimerKind | undefined,
   ): number {
-    // A replacement worker comes up at a cycle boundary, so a cycle runs on
-    // one source from its open to its close.
+    // A replacement worker comes up at a cycle boundary, and every clock moves
+    // to it at a boundary of its own: one edge's cycle runs on one source from
+    // its open to its close, whichever edge's boundary started the worker. (A
+    // lost worker is the exception: its wake-ups move to page timers at once.)
     if (
       !this.#worker &&
       !this.#permanent &&
@@ -255,6 +284,12 @@ class CoverTimerHost {
       this.env.now() >= this.#restartNotBefore
     )
       this.#start();
+    if (
+      this.#worker &&
+      isBoundary(kind) &&
+      clock.joinedWorker !== this.#workerGeneration
+    )
+      clock.joinedWorker = this.#workerGeneration;
     const id = this.#nextId++;
     const deadline = this.env.now() + Math.max(0, delayMs);
     const wakeUp: WakeUp = {
@@ -265,7 +300,8 @@ class CoverTimerHost {
       onWorker: false,
     };
     this.#wakeUps.set(id, wakeUp);
-    const worker = this.#worker;
+    const worker =
+      clock.joinedWorker === this.#workerGeneration ? this.#worker : undefined;
     if (worker) {
       wakeUp.onWorker = true;
       this.#armBackstop(id, wakeUp);
@@ -317,6 +353,8 @@ class CoverTimerHost {
       if (this.#worker === worker) this.#lose("the timer worker failed");
     };
     this.#worker = worker;
+    this.#workerGeneration += 1;
+    this.#deliveredSinceRestart = 0;
   }
 
   #onReply(data: unknown): void {
@@ -334,11 +372,46 @@ class CoverTimerHost {
       return;
     }
     const wakeUp = this.#wakeUps.get(data.id);
-    // A tick for a cancelled wake-up, or a destroyed clock's, is dropped.
+    // A tick for a cancelled wake-up, a destroyed clock's, or one already run
+    // with an earlier tick's due wake-ups, is dropped.
     if (!wakeUp) return;
-    this.#wakeUps.delete(data.id);
-    this.#clearPageTimers(wakeUp);
-    wakeUp.callback();
+    // A replacement that keeps delivering has proved healthy: the budget of
+    // replacements in a row starts again.
+    this.#deliveredSinceRestart += this.#runDue(data.id, wakeUp);
+    if (
+      this.#restarts > 0 &&
+      this.#deliveredSinceRestart >= COVER_TIMER_WORKER_HEALTHY_WAKE_UPS
+    )
+      this.#restarts = 0;
+  }
+
+  /**
+   * Run a wake-up, and with it every other wake-up already due on the page's
+   * clock, in one task, earliest first. The edges of a room share one slot
+   * grid, so their wake-ups for a slot fall due together. Run in one task,
+   * each sends its cell before any edge produces its next one (the scheduler
+   * starts that in a microtask), so no edge's send waits on what another
+   * edge's next cell carries. Returns how many ran.
+   */
+  #runDue(id: number, wakeUp: WakeUp): number {
+    const now = this.env.now();
+    const due: Array<[number, WakeUp]> = [[id, wakeUp]];
+    for (const entry of this.#wakeUps)
+      if (entry[0] !== id && entry[1].deadline <= now) due.push(entry);
+    due.sort(
+      ([leftId, left], [rightId, right]) =>
+        left.deadline - right.deadline || leftId - rightId,
+    );
+    let ran = 0;
+    for (const [dueId, dueWakeUp] of due) {
+      // One run before it may have cancelled it.
+      if (this.#wakeUps.get(dueId) !== dueWakeUp) continue;
+      this.#wakeUps.delete(dueId);
+      this.#clearPageTimers(dueWakeUp);
+      ran += 1;
+      dueWakeUp.callback();
+    }
+    return ran;
   }
 
   /**
@@ -365,18 +438,33 @@ class CoverTimerHost {
     const worker = this.#worker;
     if (!worker || this.#ping) return;
     const id = this.#nextId++;
-    this.#ping = {
-      id,
-      timer: this.env.setTimeout(() => {
-        if (this.#ping?.id === id)
-          this.#lose("the timer worker did not answer");
-      }, COVER_TIMER_WORKER_PING_TIMEOUT_MS),
-    };
+    this.#ping = { id, timer: this.#armPingTimeout(id, false) };
     try {
       worker.postMessage({ op: "ping", id });
     } catch {
       this.#lose("the timer worker could not be reached");
     }
+  }
+
+  /**
+   * The ping's deadline, a page timer. One that runs PING_LATE_MS past its
+   * own deadline ran after a page pause, and at a thaw a page may run its
+   * timers before the messages queued for it, the worker's answer among them:
+   * so it waits one timeout more, once, before the worker is dropped.
+   */
+  #armPingTimeout(id: number, rearmed: boolean): unknown {
+    const deadline = this.env.now() + COVER_TIMER_WORKER_PING_TIMEOUT_MS;
+    return this.env.setTimeout(() => {
+      if (this.#ping?.id !== id) return;
+      if (
+        !rearmed &&
+        this.env.now() - deadline > COVER_TIMER_WORKER_PING_LATE_MS
+      ) {
+        this.#ping = { id, timer: this.#armPingTimeout(id, true) };
+        return;
+      }
+      this.#lose("the timer worker did not answer");
+    }, COVER_TIMER_WORKER_PING_TIMEOUT_MS);
   }
 
   #clearPing(): void {
@@ -426,9 +514,8 @@ class CoverTimerHost {
     wakeUp.pageTimer = this.env.setTimeout(
       () => {
         if (this.#wakeUps.get(id) !== wakeUp) return;
-        this.#wakeUps.delete(id);
-        this.#clearPageTimers(wakeUp);
-        wakeUp.callback();
+        wakeUp.pageTimer = undefined;
+        this.#runDue(id, wakeUp);
       },
       Math.min(
         MAX_TIMER_DELAY_MS,
@@ -466,6 +553,8 @@ class HostedCoverClock implements CoverTimerClock {
   readonly #ids = new Set<number>();
   #destroyed = false;
   #reported = false;
+  /** The host's worker this clock's wake-ups go to (0: none yet). */
+  joinedWorker = 0;
 
   constructor(host: CoverTimerHost) {
     this.#host = host;
@@ -473,7 +562,7 @@ class HostedCoverClock implements CoverTimerClock {
   }
 
   get source(): "worker" | "page" {
-    return this.#host.source;
+    return this.#host.sourceFor(this);
   }
 
   now(): number {

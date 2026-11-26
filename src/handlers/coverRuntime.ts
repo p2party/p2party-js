@@ -194,9 +194,12 @@ export class CoverRuntime {
     const maxTimerDriftMs =
       options.maxTimerDriftMs ??
       Math.max(0, Math.min(Math.floor(slotSpacing) - 1, 500));
-    // Slot wake-ups come from the page's shared timer worker, which a hidden
-    // page does not throttle (see coverTimerWorker for the one clock lateness
-    // is judged on and for the fallback to page timers).
+    // Slot wake-ups come from the page's shared timer worker, because a hidden
+    // page throttles its own timers. That it does not throttle the worker's
+    // the same way is an inference from Chromium's documented behaviour; the
+    // measurements show the worker's wake-ups late on a hidden page too (see
+    // coverTimerWorker for the one clock lateness is judged on, the fallback
+    // to page timers, and the figures).
     const timerClock = options.clock
       ? undefined
       : createCoverTimerClock(options.timerEnvironment);
@@ -285,9 +288,11 @@ export class CoverRuntime {
   }
 
   /**
-   * Stop for good. The runtime's own timer worker is terminated and every
-   * pending wake-up dropped, including the boundary close a stop() pins: the
-   * edge teardown that destroys a runtime closes its lanes itself.
+   * Stop for good. The runtime's clock is released and every pending wake-up
+   * of it dropped, including the boundary close a stop() pins: the edge
+   * teardown that destroys a runtime closes its lanes itself. The page's
+   * shared timer worker is terminated when the last clock using it goes. A
+   * cell already produced for the next slot is zeroed (CoverScheduler.stop).
    */
   destroy(): void {
     if (this.#destroyed) return;
@@ -524,6 +529,10 @@ export class CoverRuntime {
   // measured and also observable: a frozen or discarded page (freeze suspends
   // cover), a browser that throttles worker timers, a suspended process, and
   // the page-timer fallback.
+  //
+  // What a cell carries does not move when it leaves: the scheduler produces
+  // each cell a slot ahead and the wake-up only sends it (CoverScheduler.
+  // prepare; measured in docs/e2e/cover-timers/, sealed mode).
   //
   // A scheduled send's idle budget is held while the page stays hidden
   // (scheduledCoverIsSuspended). The diagnostic names no peer and no room.

@@ -54,12 +54,16 @@ interface Recording {
 
 const instrument = (clock: CoverClock, recording: Recording): CoverClock => ({
   now: () => clock.now(),
-  setTimeout: (callback, delayMs) => {
+  setTimeout: (callback, delayMs, kind) => {
     const due = clock.now() + delayMs;
-    return clock.setTimeout(() => {
-      recording.wakeUps.push([due, clock.now()]);
-      callback();
-    }, delayMs);
+    return clock.setTimeout(
+      () => {
+        recording.wakeUps.push([due, clock.now()]);
+        callback();
+      },
+      delayMs,
+      kind,
+    );
   },
   clearTimeout: (handle) => clock.clearTimeout(handle),
 });

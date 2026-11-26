@@ -64,30 +64,43 @@ const runningOrigin = (): { protocol: string; host: string } | null => {
   return { protocol: location.protocol, host: location.host };
 };
 
+// A loopback name or address, as the URL parser canonicalizes it: localhost,
+// 127.0.0.0/8 in dotted decimal, or [::1].
+const isLoopbackHostname = (hostname: string): boolean =>
+  hostname === "localhost" ||
+  hostname === "[::1]" ||
+  /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+
 /**
- * http: and https: from any host, or any other scheme when the URL is on the
- * running page's own origin (the Capacitor iOS shell serves its page from
- * capacitor://localhost). The scheme does not protect integrity: every source
- * is fetched and its SHA-384 checked against the pinned digest.
+ * https: from any host; any scheme on the running page's own origin (the
+ * Capacitor iOS shell serves its page from capacitor://localhost); plain
+ * http: otherwise only from a loopback host, so local stacks and tests work
+ * where there is no page origin. The scheme does not protect integrity:
+ * every source is fetched and its SHA-384 checked against the pinned digest.
+ * Plain http: elsewhere is refused because the fetch itself would be readable
+ * on the network, and an https: page cannot load it anyway.
  */
 const isAcceptedWasmSource = (candidate: URL): boolean => {
   if (REFUSED_WASM_SOURCE_SCHEMES.has(candidate.protocol)) return false;
-  if (candidate.protocol === "https:" || candidate.protocol === "http:")
-    return true;
+  if (candidate.protocol === "https:") return true;
   const own = runningOrigin();
-  return (
+  if (
     own !== null &&
     candidate.protocol === own.protocol &&
     candidate.host === own.host
+  )
+    return true;
+  return (
+    candidate.protocol === "http:" && isLoopbackHostname(candidate.hostname)
   );
 };
 
 /**
  * Point the browser root at a self-hosted copy of this release's exact WASM:
- * an http: or https: URL, or a URL on the page's own origin whatever its
- * scheme. data:, blob:, javascript: and file: URLs are refused. The
- * build-pinned SHA-384 is still enforced. Configure once, before connect() or
- * any other operation first loads cryptography.
+ * an https: URL, a URL on the page's own origin whatever its scheme, or a
+ * plain http: URL on a loopback host. data:, blob:, javascript: and file:
+ * URLs are refused. The build-pinned SHA-384 is still enforced. Configure
+ * once, before connect() or any other operation first loads cryptography.
  */
 export const setWasmSourceUrl = (source: string | URL): void => {
   if (wasmLoadStarted)
@@ -96,7 +109,7 @@ export const setWasmSourceUrl = (source: string | URL): void => {
     source instanceof URL ? new URL(source.href) : new URL(source);
   if (!isAcceptedWasmSource(candidate))
     throw new TypeError(
-      "WASM source must use http: or https:, or the page's own origin",
+      "WASM source must be https:, the page's own origin, or http: on a loopback host",
     );
   wasmUrl = candidate;
   wasmSourcePinned = true;

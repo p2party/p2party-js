@@ -194,9 +194,15 @@ and latency-matched to one, and it opens for nobody.
 plus a conditional pair that is either both or neither.** Counted from
 `carrierRuntime.ts` —
 `#eventsForWindow` for the schedule, `storeClient.scanWindow` for what one read
-expands into. The thirteen go out whether the client is idle or mid-rendezvous,
-while its timers fire within one delivery window of their instants; what late
-timers and suspensions change is the last item of "2–15, in brief" below:
+expands into. In every window after the client's first, the thirteen go
+out whether the client is idle or mid-rendezvous, while its timers fire
+within one delivery window of their instants; what late timers and
+suspensions change is an item of "2–18, in brief" below. **The first
+window of a session is a different shape** and is not covered by that
+sentence: the scheduler skips any event whose instant has already passed,
+so a client that starts partway into a window issues only the part of the
+schedule still ahead of it. Design §3a item 16 discloses what a store reads
+off its own log from that:
 
 | Count | Request | Offset in the window |
 | ---: | --- | --- |
@@ -287,7 +293,26 @@ that page's own `presence-published` to `message-verified`.
 | `withhold-a` | PASS | 35.6 s | 7.6 s → 35.6 s | 7.6 s → 35.6 s | `single-carrier-dependent` / `single-carrier-dependent` |
 | `unreachable-b-for-one` | PASS | 35.4 s | 7.4 s → 35.4 s | 7.2 s → 35.4 s | `multi-store-union` / `single-carrier-dependent` |
 
-Three things are worth reading off that run.
+**Re-measured later the same day**, after the store's hex codec was replaced and
+its finalized responses precomputed (§6) — same profile, same cohort, same
+machine, `--scenario=all`, exit 0, 4 of 4:
+
+| Scenario | Verdict | Connect |
+| --- | --- | ---: |
+| `healthy` | PASS | 21.4 s |
+| `kill-a` | PASS | 23.5 s |
+| `withhold-a` | PASS | 23.5 s |
+| `unreachable-b-for-one` | PASS | 23.5 s |
+
+Over eight `--scenario=healthy` runs that completed after the change the figure
+sits between **21.4 s and 24.0 s** (21.4, 22.2, 22.4, 23.1, 23.1, 23.3, 23.8,
+24.0), against **32.8 s, 37.1 s and 39.0 s** over the three that completed
+before it. Nothing on the wire, in the schedule or in the profile differs
+between the two tables; the whole difference is what the store process spends
+per request. The rows above are kept because a measurement a later change made
+obsolete is still a measurement.
+
+Three things are worth reading off the first run.
 
 **`kill-a` produced 264 fault records, all of kind `unreachable`, and zero of
 kind `signature-invalid`** (131 on page A, 133 on page B, all naming store A).
@@ -425,11 +450,15 @@ Nothing about independence.
 ## 6. What latency costs: the cohort measurement
 
 The design asked for a latency table over `deliveryWindowMs ∈ {4000, 2000,
-1000}`. Rescaling the window alone does not reach it — `withDeliveryWindowMs`
-scales the append offsets and the finalization offset by the same ratio, so the
-slack between the last append and the window's close shrinks with the window,
-and at 2,000 ms every append arrives after `window-finalized`. That is not a
-dead end; it is a *cost* problem, and the cost has a second knob.
+1000}`. It was measured, twice, against two different stores, and the two
+measurements disagree — which is the point of this section.
+
+Against the store as first written, rescaling the window alone did not reach the
+table: `withDeliveryWindowMs` scales the append offsets and the finalization
+offset by the same ratio, so the slack between the last append and the window's
+close shrinks with the window, and at 2,000 ms every append arrived after
+`window-finalized`. That read as a *cost* problem with a second knob, the
+cohort, and the table below is what that reading measured.
 
 Per client, per store, per window the schedule costs a fixed **append** of
 172,542 bytes (5 objects, set by the append schedule and independent of the
@@ -446,6 +475,19 @@ Measured on one machine — macOS, headless Chromium, both pages and both stores
 one process tree — `--scenario=healthy`, time from `presence-published` to
 `message-verified`:
 
+> **Read this table as a record, not as a current cost model.** It was measured
+> against a store whose every chunk GET, checkpoint GET, append POST and
+> allocation POST rebuilt the entire hex-encoded window document with a
+> character-pair-at-a-time codec, at a cost that did not depend on which chunk
+> was asked for. The cohort appeared to buy latency because the cohort is what
+> sizes that document. With the codec replaced (`storeSqlite.ts`, measured at
+> 122 → 6.7 ms to load and 106 → 2.0 ms to save one pinned-profile window,
+> `bun`, n=12 each), the per-request cost is no longer linear in the cohort in
+> the same way, the "per flight" column collapses towards one window, and
+> `cohortAllocationsPerWindow` can be chosen for what it is actually for — how
+> much unrelated traffic a client's objects sit among — rather than for speed.
+> The rows below are retained as what was measured on the pre-fix store.
+
 | Window | Cohort | Chunks/window | Full scan, B/store/window | Per flight | To `message-verified` |
 | ---: | ---: | :---: | ---: | ---: | ---: |
 | 4000 | **8** (pinned) | 3+2 | 1,380,336 | 8.0 s = 2 windows | **39.9 s** |
@@ -456,25 +498,61 @@ one process tree — `--scenario=healthy`, time from `presence-published` to
 | 2000 | 2 | 1+1 | 656,992 | 4.0 s = 2 windows | **17.9 s** |
 | 1000 | 2 | 1+1 | 656,992 | 2.0 s = 2 windows | **10.5 s** |
 
-**The pinned cohort already costs a whole extra delivery window per flight.** The
-protocol's designed cadence is one window per flight: append in window `w`, the
-peer reads `w` at the read offset into `w+1` and appends its answer inside `w+1`.
-At cohort 8 the browser cannot finish 1.38 MB × 2 stores of scanning and sealing
-between the read offset (600 ms) and the last append offset (2,100 ms), so every
-flight slips to the window after — 8 s instead of 4 s, and 39.9 s instead of
-about 22 s for the whole rendezvous. Halving the cohort halves the scan and
-recovers the designed cadence at the *same* window length. A smaller cohort is
-also exactly what makes a shorter window work: at the pinned cohort a 2,000 ms
-window cannot append at all, while a 1,000 ms window at cohort 2 completes in
-10.5 s with zero misses.
+**At the pinned cohort each flight cost a whole extra delivery window, and the
+reason was the store, not the browser.** The protocol's designed cadence is one
+window per flight: append in window `w`, the peer reads `w` at the read offset
+into `w+1` and appends its answer inside `w+1`. What could not finish between
+the read offset (600 ms) and the last append offset (2,100 ms) was the *store*
+serving two clients' scans, because every request into it rebuilt the whole
+window document through the codec named above, single-threaded and behind one
+global mutex. The browser's own per-window work is not close to the budget: the
+decode and trial-open of all 40 carrier objects of one store's window,
+1,380,336 bytes, is **4.4 ms per store, p50 over n=20** measured on this laptop
+against the real `decodeCarrierEnvelope` + `openCarrierEnvelope` path with every
+open failing, and 4.0 ms per store measured independently in the same headless
+Chromium the harness uses (`docs/rendezvous-latency-2026-09/observed.md` §4b,
+raw samples included). Halving the cohort halved the store's document and so
+recovered the designed cadence at the *same* window length — which is a
+measurement of this store defect through a proxy, not a property of the cohort.
+A smaller cohort also looked like what made a shorter window work: at the pinned
+cohort a 2,000 ms window could not append at all, while a 1,000 ms window at
+cohort 2 completed in 10.5 s with zero misses. **That has stopped being true.**
+Re-measured after the store's codec was replaced and its finalized responses
+precomputed, at the **pinned cohort of 8**, `--scenario=healthy`, with a
+randomised sleep between runs so that consecutive runs do not resample the same
+start phase:
 
-**The knob that buys the latency is the one that sizes the shared bucket.**
+| `--window-ms` | runs | connect | `append window-finalized` |
+| ---: | ---: | --- | --- |
+| 2000 | 3 | 10.7, 11.3, 12.2 s | 0 on every run |
+| 1000 | 3 | 5.3, 5.7, 6.1 s | 0 on every run |
+| 500 | 4 | 3.3, 3.4, 3.5, 3.6 s | 0 on every run |
+| 250 | 3 | one PASS at 1.8 s, two FAIL | 5 and 475 misses; one also timed out |
+| 240 | 2 | one PASS at 1.7 s, one FAIL | 0 misses, but both pages degraded to `single-carrier-dependent` |
+| 200 | 2 | both FAIL | 641 and 841 misses, then timeout |
+
+The 2,000 / 1,000 / 500 ms rows are the ones that reproduce; an independent
+review measured 12.0 / 11.2, 6.1 / 6.2 and 3.3 s on the same machine under
+different load. **Below 500 ms there is no clean floor**: 250 ms and 240 ms each
+both passed and failed here, and an earlier single-run sweep that recorded
+"250 ms in 1.8 s, first append failures at 240 ms" was reading one sample of a
+flaky band as a step. These are runs of a measurement flag and not a proposal —
+`deliveryWindowMs` is a published profile field, shortening it rescales §7's
+per-store phase band against the window and re-opens every disclosure stated as
+a fraction of it, and none of that has been re-derived. The pinned profile is
+still 4,000 ms at cohort 8.
+
+**The knob that appeared to buy the latency was the one that sizes the shared
+bucket — and what it bought was a way around a store defect.**
 `cohortAllocationsPerWindow` is, by definition, how many allocations a store may
-hand out per window in one bucket, and the fixed scan is large precisely because
-it is that whole bucket. Moving it from 8 to 2 measured a 2.1× smaller scan and,
-at the same 4,000 ms window, a 1.7× faster rendezvous — 3.8× only if the shorter
-window that the smaller cohort makes possible is taken as well, which is a
-two-knob change and not a cohort effect. And by definition it also divides by
+hand out per window in one bucket, and the pre-fix store's per-request cost was
+linear in that whole bucket. Moving it from 8 to 2 measured a 2.1× smaller scan
+and, at the same 4,000 ms window, a 1.7× faster rendezvous — 3.8× only if a
+shorter window was taken as well, which is a two-knob change and not a cohort
+effect. **The shorter window was never made possible by the smaller cohort**:
+at the pinned cohort of 8, 2,000 ms, 1,000 ms and 500 ms all complete with zero
+`append window-finalized` misses on the fixed store, which is measured above.
+And by definition it also divides by
 four the number of allocations that share the bucket. **Those ratios are
 different quantities, not one.** What the change means for what a store can tell
 apart is **not** measured by any run here and is not claimed. The table is a cost
@@ -499,7 +577,7 @@ what two real clients on two machines would see, not a protocol constant.
 
 ## 7. The residual leaks
 
-The design enumerates fourteen residual leaks. All fourteen are disclosed
+The design enumerates seventeen residual leaks. All seventeen are disclosed
 there; this is the summary an outside reader needs, with the worst one in full.
 
 ### 1. Replicated-write timing linkability — unmitigated, and measured
@@ -556,7 +634,7 @@ carrier of that operation. That is a latency and fault-tolerance decision for th
 maintainer, so it is recorded as follow-up work with its numbers, not presented
 as a solved problem.
 
-### 2–15, in brief
+### 2–18, in brief
 
 - **Source addresses.** Both stores see the client's IP on every write and poll;
   a single store can recover a write-then-read pairing in a few rounds. The
@@ -566,7 +644,8 @@ as a solved problem.
   after a hit, no coordinated dial phase between stores. The prototype keeps
   to this only while its timers fire within a delivery window of their
   instants; after a longer suspension it catches up the reads it owes, which
-  a store sees as a silence followed by a run of extra scans (the last item).
+  a store sees as a silence followed by a run of extra scans (the late-timers
+  item below).
 - **Retry oracle.** Retrying at the surviving store after an omission would be an
   active cross-store tagging channel, so retries happen only at the next
   scheduled slot.
@@ -614,6 +693,31 @@ as a solved problem.
   of the window — 30% of phases — has its class-0 state-replication append
   (due at 2100) refused after finalization at 2800, so its presence never
   reaches a store.
+- **The first window of a session is a different shape — but only above the
+  read offset does it say when the session started.** The scheduler issues
+  exactly the events whose offsets are still ahead of the start phase `p`,
+  plus one allocation whatever `p` is (past the allocation offset a cold start
+  replaces the scheduled one) and the once-per-session descriptor GET. At the
+  pinned profile that is 16 requests per store at `p ≤ 100 ms`, 15 at
+  `100 < p ≤ 600`, then 7, 6, 5, 4, 3 as `p` crosses the five append offsets,
+  and 2 above 2,100 — against 15 in every later window. So a store always
+  learns that the session began in this window, from the descriptor GET rather
+  than from the count; it learns `p` to within one offset gap only when `p` is
+  past the 600 ms read offset, which is 85 % of the phase space; and below it
+  the start window carries the whole steady-state schedule and at
+  `100 < p ≤ 600` **the same total of 15**, so `p` is hidden there but for one
+  bit. Pinned by a test that drives the runtime from an injected clock at
+  fourteen start phases, and observed end to end at sixteen deliberately
+  unlocked ones. Design §3a item 16.
+- **ICE gathering is event-shaped.** It runs only once a pair has been found
+  and the transport flight is being built, so with any STUN or TURN server
+  configured a client emits gathering traffic exactly when a rendezvous in this
+  room reached the transport stage. The recorded runs use `iceServers: []` and
+  therefore cannot see it. Design §3a item 17.
+- **The per-window request count is a room counter.** One runtime holds one
+  room, so a client with `K` open rooms issues `K` copies of the fixed trace
+  from one address at the same offsets, and a store divides to read `K`.
+  Design §3a item 18.
 
 What no literature sweep found published together — and therefore the only thing
 this work may present as novel — is the *composition*: a capability-authenticated,

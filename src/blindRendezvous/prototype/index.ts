@@ -187,10 +187,12 @@ export interface PrototypeRun {
    */
   waitForPhase(phase: PairDriverPhase, timeoutMs: number): Promise<void>;
   /**
-   * Send one message once the session exists. Rejects with
-   * `PrototypeRunTimeoutError` if it cannot leave within `timeoutMs` of the
-   * call — and then it has not left at all — and with the failure itself if
-   * the session could not be established.
+   * Send one message once the session exists, resolving when the data channel
+   * has taken all of it. Rejects with `PrototypeRunTimeoutError` if it cannot
+   * start to leave within `timeoutMs` of the call — and then it has not left
+   * at all — and with the failure itself if the session could not be
+   * established. A deadline that passes while the message is leaving ends the
+   * session and rejects with `PrototypeRunError`.
    */
   sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void>;
   recvMessage(timeoutMs: number): Promise<Uint8Array>;
@@ -581,18 +583,22 @@ export class BlindRendezvousRun implements PrototypeRun {
    * The root is carried because `decrypt` authenticates it as additional data
    * and the frames alone do not contain it.
    *
-   * NOT SERIALIZED. The framing is positional, so two overlapping calls would
-   * interleave one message's header with another's frames on the single app
-   * lane and both decrypts on the peer would fail. A caller that sends more
-   * than one message must await each before starting the next — which is what
-   * the prototype's harness does, and why this is documented rather than
-   * locked.
+   * OVERLAPPING CALLS. The framing is positional, so a message must reach the
+   * lane whole. The session runs one `encrypt` at a time, and each call queues
+   * all of its frames before it awaits any of them, so two overlapping calls
+   * put two whole messages on the lane in the order they were encrypted. They
+   * share one send buffer: a call's deadline also covers the wait behind the
+   * other's frames. The prototype's harness awaits each call before the next.
    *
-   * `timeoutMs` bounds the call: the wait for the session, the one step here
-   * that depends on the peer, and the local encryption after it. A call that
-   * rejects with `PrototypeRunTimeoutError` sent nothing, so a caller may
-   * retry it without the peer receiving the message twice; `sendApp` itself
-   * queues without waiting.
+   * `timeoutMs` bounds the whole call: the wait for the session, the local
+   * encryption, and the hand-off of every frame to the data channel, which
+   * takes frames only as fast as it drains (`SEND_HIGH_WATER_BYTES` in
+   * `webrtcProvider.ts`). A call that rejects with `PrototypeRunTimeoutError`
+   * sent nothing, so a caller may retry it without the peer receiving the
+   * message twice. A deadline that passes once the hand-off has begun is a
+   * different failure: part of the message may have left, the peer cannot
+   * frame past a partial message, so the session is ended and the call
+   * rejects with a plain `PrototypeRunError`.
    */
   async sendMessage(bytes: Uint8Array, timeoutMs: number): Promise<void> {
     requireDeadline(timeoutMs, "sendMessage");
@@ -603,6 +609,8 @@ export class BlindRendezvousRun implements PrototypeRun {
       "session handoff",
       this.#timers,
     );
+    // Set when the session went up and cleared when it is ended.
+    if (this.#session !== established.session) fail("the session has ended");
     const message = await established.session.encrypt(bytes);
     // A session that arrived just in time can still leave encryption to end
     // past the deadline; the message then stays unsent, as the rejection says.
@@ -615,8 +623,32 @@ export class BlindRendezvousRun implements PrototypeRun {
     header.set(message.root, 4);
     view.setUint32(4 + message.root.length, message.frames.length, false);
 
-    established.transport.sendApp(header);
-    for (const frame of message.frames) established.transport.sendApp(frame);
+    // Every frame is queued before any is awaited, so the message enters the
+    // app lane whole, in order, and nothing another call queues lands inside
+    // it. The wait is for the channel to take all of them.
+    const leaving = [header, ...message.frames].map((frame) =>
+      established.transport.sendApp(frame),
+    );
+    const handedOff = Promise.all(leaving);
+    try {
+      await withTimeout(
+        handedOff,
+        Math.max(0, Number(deadlineMs - this.#clock.nowMs())),
+        "sendMessage",
+        this.#timers,
+      );
+    } catch (error) {
+      if (!(error instanceof PrototypeRunTimeoutError)) throw error;
+      void handedOff.catch(() => undefined);
+      const partial = new PrototypeRunError(
+        `the data channel did not take the message's ${String(leaving.length)} ` +
+          `frames within ${String(timeoutMs)}ms of sendMessage; part of it ` +
+          "may have left, and the session was ended",
+      );
+      // A local abort: what has not left is discarded and never leaves.
+      this.#endSession(partial);
+      throw partial;
+    }
     this.#emit(
       "message-sent",
       `${String(bytes.length)} bytes in ${String(message.frames.length)} frames`,

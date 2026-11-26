@@ -1,3 +1,6 @@
+import { teardownEdgeGeneration } from "./disconnectFromPeerQuery";
+
+import type { EdgeTeardownContext } from "./disconnectFromPeerQuery";
 import type { IRTCPeerConnection } from "./interfaces";
 
 const cloneIceServer = (server: RTCIceServer): RTCIceServer => ({
@@ -14,6 +17,14 @@ const hasStartedNegotiation = (connection: IRTCPeerConnection): boolean =>
  * getConfiguration() preserves construction-time WebRTC options that browsers
  * do not allow setConfiguration() to change. Only the refreshable ICE list is
  * replaced.
+ *
+ * A transport that cannot hold the authoritative configuration is retired
+ * through the shared edge teardown, never just closed: pc.close() fires no
+ * event, so until something retires the closed transport nothing would wipe
+ * its ratchet and PQ state or stop its healing interval. It stays registered,
+ * closed, for the next introduction or description to retire and rebuild.
+ * `teardown` carries the registry and dispatch for that teardown when the
+ * caller holds them.
  */
 export const applyRoomIceConfiguration = (
   peerConnections: readonly IRTCPeerConnection[],
@@ -21,6 +32,7 @@ export const applyRoomIceConfiguration = (
   rtcConfig: RTCConfiguration,
   restartIceAfterApply = false,
   failurePolicy: "rollback" | "close" = "rollback",
+  teardown: EdgeTeardownContext = {},
 ): number => {
   const live = peerConnections.filter(
     (connection) =>
@@ -42,9 +54,9 @@ export const applyRoomIceConfiguration = (
           connection.restartIce();
       } catch {
         // A room must never retain a mixture of old and new relay
-        // generations. If authoritative restoration is impossible, remove
+        // generations. If authoritative restoration is impossible, retire
         // that transport and let normal room signaling recreate it.
-        connection.close();
+        teardownEdgeGeneration(connection, teardown);
       }
     }
   };
@@ -61,7 +73,8 @@ export const applyRoomIceConfiguration = (
         if (hasStartedNegotiation(connection)) connection.restartIce();
   } catch (error) {
     if (failurePolicy === "close")
-      for (const { connection } of snapshots) connection.close();
+      for (const { connection } of snapshots)
+        teardownEdgeGeneration(connection, teardown);
     else rollbackOrClose();
     throw error;
   }

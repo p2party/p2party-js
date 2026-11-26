@@ -145,12 +145,13 @@ const webrtcBaseQuery: BaseQueryFn<
       // which has no remote description of its own to compare a fingerprint
       // against (see retiredRemoteTransports).
       //
-      // What disconnectFromPeer additionally does is room/peer-wide and stays
-      // with the edge, which lives on in the replacement: the negotiation lock
-      // is held by this very operation, and the roster entry describes the
-      // peer, not the transport (the replacement's main reports its own
-      // handshake status).
-      teardownEdgeGeneration(epc, dataChannels);
+      // The teardown also deletes the persisted ratchet row this generation
+      // wrote and clears its handshake status, so a replacement that never
+      // authenticates is not shown as authenticated. What disconnectFromPeer
+      // additionally does is room/peer-wide and stays with the edge, which
+      // lives on in the replacement: the negotiation lock is held by this very
+      // operation, and the roster entry describes the peer, not the transport.
+      teardownEdgeGeneration(epc, { dataChannels, dispatch: api.dispatch });
       peerConnections.splice(connectionIndex, 1);
     }
 

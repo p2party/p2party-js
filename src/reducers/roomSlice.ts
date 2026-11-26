@@ -849,6 +849,25 @@ const roomSlice = createSlice({
           delete room.handshakeStatusByPeer[peerId];
     },
 
+    /**
+     * A transport generation of this edge was torn down: an "authenticating"
+     * or "authenticated" status described a transport that no longer exists,
+     * so a peer whose replacement never authenticates is not shown as
+     * authenticated. A failed status stays, exactly as deletePeer keeps it,
+     * and the roster entry is left alone.
+     */
+    clearPeerHandshakeStatus: (
+      state,
+      action: PayloadAction<{ roomId: string; peerId: string }>,
+    ) => {
+      const { roomId, peerId } = action.payload;
+      const statuses = state.find(
+        (room) => room.id === roomId,
+      )?.handshakeStatusByPeer;
+      if (statuses && statuses[peerId]?.status !== "failed")
+        delete statuses[peerId];
+    },
+
     allowPeerHandshakeRetry: (state, action: PayloadAction<SetPeerArgs>) => {
       const { roomId, peerId, peerPublicKey } = action.payload;
       const room = state.find((candidate) => candidate.id === roomId);
@@ -1277,6 +1296,7 @@ export const {
   setPeerCoverStatus,
   setPeerHandshakeStatus,
   clearPeerHandshakeFailures,
+  clearPeerHandshakeStatus,
   allowPeerHandshakeRetry,
   setChannel,
   setIceServers,

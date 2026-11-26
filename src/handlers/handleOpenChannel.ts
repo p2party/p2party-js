@@ -955,8 +955,35 @@ export const handleOpenChannel = async (
             },
             failEdge: (reason) => {
               console.error(reason);
-              if (extChannel.readyState !== "closed") extChannel.close();
-              if (epc.connectionState !== "closed") epc.close();
+              // A transport already closed was torn down by whoever closed
+              // it, and once a replacement holds the gate the edge is not
+              // this generation's to fail.
+              if (
+                epc.connectionState === "closed" ||
+                !isCurrentRatchetGateLease(
+                  roomId,
+                  epc.withPeerId,
+                  ratchetGateLease,
+                )
+              )
+                return;
+              teardownEdgeGeneration(epc, {
+                dataChannels,
+                dispatch: api.dispatch,
+              });
+              // The teardown detached main's close handler, which used to
+              // carry the room/peer teardown and the re-dial, and a browser
+              // need not deliver that event after pc.close() anyway.
+              void Promise.resolve(
+                api.dispatch(
+                  webrtcApi.endpoints.disconnectFromPeer.initiate({
+                    roomId,
+                    peerId: epc.withPeerId,
+                  }),
+                ),
+              ).then(() => {
+                requestPeersAfterEdgeTeardown(api, roomId);
+              });
             },
           });
 
@@ -1124,7 +1151,10 @@ export const handleOpenChannel = async (
             // channels, a re-bind deadline) before the transport closes. A
             // terminal failure leaves the closed transport registered for the
             // next introduction or description to retire (C2).
-            teardownEdgeGeneration(epc, dataChannels);
+            teardownEdgeGeneration(epc, {
+              dataChannels,
+              dispatch: api.dispatch,
+            });
             // The teardown detached main's close handler, which used to carry
             // a transport failure's room/peer teardown, and a browser need not
             // deliver that event after pc.close() anyway. Run it here, unless

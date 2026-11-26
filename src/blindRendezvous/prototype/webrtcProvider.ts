@@ -60,10 +60,41 @@ const TAG_APP = 1;
 
 const SHA256_FINGERPRINT_BYTES = 32;
 
-// A remote endpoint may speak before local certificate verification or session
-// startup completes. Retain that traffic, but cap both bytes and tiny frames.
-const MAX_QUEUED_BYTES = 16 * 1024 * 1024;
-const MAX_QUEUED_FRAMES = 1024;
+/**
+ * Outbound backpressure, on the one send buffer both lanes share: the data
+ * channel's own `bufferedAmount`. A frame is handed to the channel only while
+ * that buffer holds at most `SEND_HIGH_WATER_BYTES`; above it, sends wait for
+ * `bufferedamountlow`, which the channel fires once the buffer has drained to
+ * `SEND_LOW_WATER_BYTES`. 1 MiB is sixteen uniform 65,490-byte chunk frames in
+ * flight. A browser's send buffer is finite — the WebRTC specification has
+ * `send()` throw `OperationError` when a frame does not fit — and without the
+ * wait a large message would be handed to it all at once. Draining to half the
+ * mark leaves the channel 512 KiB to send while the page refills it. Both
+ * values are the main app's: `MAX_BUFFERED_AMOUNT` in `src/utils/constants.ts`
+ * and half of it in `handleSendMessage.ts`.
+ *
+ * Exported for the tests. They belong in `src/utils/constants.ts`, which this
+ * file does not import from: it has no runtime imports at all (see the header).
+ */
+export const SEND_HIGH_WATER_BYTES = 1024 * 1024;
+export const SEND_LOW_WATER_BYTES = SEND_HIGH_WATER_BYTES / 2;
+
+/**
+ * Inbound bounds, one pair per lane. A remote endpoint may speak before local
+ * certificate verification or session startup completes, and a reader may fall
+ * behind its peer, so what arrives with no reader waiting is queued — up to
+ * these bounds and no further.
+ *
+ * The control lane carries the protocol-v4 handshake alone: at most three
+ * frames from the peer, the largest 3,329 bytes (an ML-KEM-1024 HELLO). The app
+ * lane carries the message header and the uniform chunk frames; 16 MiB is 256
+ * of them. The frame counts bound the per-frame overhead of tiny frames.
+ */
+export const CONTROL_LANE_HIGH_WATER_BYTES = 64 * 1024;
+export const CONTROL_LANE_MAX_FRAMES = 16;
+export const APP_LANE_HIGH_WATER_BYTES = 16 * 1024 * 1024;
+export const APP_LANE_MAX_FRAMES = 1024;
+
 const channelTransports = new WeakMap<RTCDataChannel, DataChannelTransport>();
 
 const utf8Encoder = new TextEncoder();
@@ -378,8 +409,10 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
         ),
       );
 
-    // RTCDataChannel.close() may deliver its close event later. Reject pending
-    // receives and discard buffered pre-verification bytes synchronously.
+    // A local abort, before the channel closes: it rejects pending receives
+    // and sends and discards buffered pre-verification bytes synchronously,
+    // where the channel's own close event would read as an orderly close by
+    // the peer and keep them readable.
     if (this.#channel) dataChannelTransport(this.#channel).close();
     this.peerConnection.ondatachannel = null;
     this.peerConnection.close();
@@ -444,35 +477,80 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
 
 /**
  * The two logical streams a rendezvous edge carries over its one data channel:
- * the protocol-v4 handshake / sparse-PQ control lane (`send` / `recv`, the
+ * the protocol-v4 handshake control lane (`send` / `recv`, the
  * `HandshakeTransport` the session API consumes) and the application lane
  * (`sendApp` / `recvApp`) that carries encrypted chunk frames.
  */
 export interface DataChannelTransport extends HandshakeTransport {
-  sendApp(bytes: Uint8Array): void;
+  /**
+   * Resolves once the frame is in the data channel's buffer. Frames of both
+   * lanes enter the channel in call order, whether or not each call is
+   * awaited; a call made while the buffer is above `SEND_HIGH_WATER_BYTES`
+   * waits for it to drain.
+   */
+  send(bytes: Uint8Array): Promise<void>;
+  sendApp(bytes: Uint8Array): Promise<void>;
   recvApp(): Promise<Uint8Array>;
-  /** Rejects every pending receive and closes the underlying channel. */
+  /**
+   * A local abort: discards every queued frame, rejects every pending receive
+   * and send, and closes the underlying channel.
+   */
   close(): void;
 }
 
 interface Lane {
-  queue: Uint8Array[];
-  waiters: Array<{
+  readonly name: "control" | "app";
+  readonly highWaterBytes: number;
+  readonly maxFrames: number;
+  readonly queue: Uint8Array[];
+  bytes: number;
+  readonly waiters: Array<{
     resolve: (bytes: Uint8Array) => void;
     reject: (error: Error) => void;
   }>;
+}
+
+interface PendingSend {
+  readonly framed: Uint8Array<ArrayBuffer>;
+  readonly resolve: () => void;
+  readonly reject: (error: Error) => void;
 }
 
 /**
  * Frame the two lanes over one `RTCDataChannel` as `[tag(1)][payload]`, the
  * same framing `docs/e2e/webrtc-e2e/entry.ts` proved against real Chromium.
  *
- * Anything that arrives with no waiter is queued, and waiters are served FIFO.
- * A close — of the channel, or through this transport's own `close()` — rejects
- * every pending receive with a `WebRtcProviderError` instead of leaving it
- * pending. Failure discards queued bytes, so shutdown cannot later continue a
- * handshake from stale input. The combined queues are capped at 16 MiB and
- * 1,024 frames. A peer exceeding either budget closes the channel.
+ * RECEIVING. Anything that arrives with no waiter is queued on its lane, and
+ * waiters are served FIFO. Each lane has a byte high-water mark and a frame
+ * count (the `*_LANE_*` constants above), and a frame that would take its lane
+ * past either ends the transport. `RTCDataChannel` delivers every message as
+ * an event and has no way to pause that, and telling the peer to slow down
+ * would need a frame this framing does not have, so a reader that falls more
+ * than one high-water mark behind its peer loses the edge, with a typed error,
+ * rather than the page's memory.
+ *
+ * ENDING. Who ends the transport decides what happens to queued frames:
+ *   - The channel ends it (`close`, or `error` then `close`): frames already
+ *     delivered stay readable, and a reader drains them before it observes the
+ *     end. A peer that sends and then closes is the normal case: the messages
+ *     this endpoint received before the close are dispatched before it. A
+ *     frame never arrives in part: a data channel message is whole or absent.
+ *   - This endpoint ends it — `close()`, which `WebRtcCandidateProvider.close()`
+ *     calls before it closes the connection, a lane past its bound, or a frame
+ *     that breaks the framing: every queued frame is discarded and every
+ *     pending receive rejects at once, so shutdown cannot later continue a
+ *     handshake from stale input. A local abort after the channel ended still
+ *     discards what that end kept.
+ * Either way every pending and later send rejects with the same
+ * `WebRtcProviderError`, and a frame still waiting to be sent never is.
+ *
+ * SENDING. Frames enter the channel in call order. Above the high-water mark
+ * they wait for `bufferedamountlow`; the listener is registered when the
+ * transport is installed, before any check of `bufferedAmount`, so no drain
+ * goes unheard. A frame the channel refuses (its `send()` throws) fails that
+ * send and every later one: the framing is positional, so nothing may follow a
+ * lost frame. Receiving is not affected by that; a close of the channel then
+ * ends it as above.
  *
  * A channel has exactly one transport. The provider installs it at channel
  * adoption; later callers receive that same transport and its buffered bytes.
@@ -483,52 +561,89 @@ export const dataChannelTransport = (
   const existing = channelTransports.get(channel);
   if (existing) return existing;
   channel.binaryType = "arraybuffer";
+  channel.bufferedAmountLowThreshold = SEND_LOW_WATER_BYTES;
 
-  const control: Lane = { queue: [], waiters: [] };
-  const app: Lane = { queue: [], waiters: [] };
-  let failure: WebRtcProviderError | null = null;
-  let queuedBytes = 0;
-  let queuedFrames = 0;
+  const lane = (
+    name: Lane["name"],
+    highWaterBytes: number,
+    maxFrames: number,
+  ): Lane => ({
+    name,
+    highWaterBytes,
+    maxFrames,
+    queue: [],
+    bytes: 0,
+    waiters: [],
+  });
+  const control = lane(
+    "control",
+    CONTROL_LANE_HIGH_WATER_BYTES,
+    CONTROL_LANE_MAX_FRAMES,
+  );
+  const app = lane("app", APP_LANE_HIGH_WATER_BYTES, APP_LANE_MAX_FRAMES);
+  const outbox: PendingSend[] = [];
+  /** Set once, when the transport ends; receives see it once drained. */
+  let ended: WebRtcProviderError | null = null;
+  /** Set once, when the channel refused a frame; sends only. */
+  let refused: WebRtcProviderError | null = null;
+  /** True inside `flush`, which a channel may re-enter from its `send()`. */
+  let flushing = false;
 
-  const fail = (error: WebRtcProviderError): void => {
-    if (failure) return;
-    failure = error;
+  const rejectSends = (error: WebRtcProviderError): void => {
+    const pending = outbox.splice(0);
+    for (const send of pending) send.reject(error);
+  };
+
+  const end = (error: WebRtcProviderError, discard: boolean): void => {
+    if (discard)
+      for (const each of [control, app]) {
+        each.queue.length = 0;
+        each.bytes = 0;
+      }
+    if (ended) return;
+    ended = error;
     channel.removeEventListener("message", onMessage);
     channel.removeEventListener("close", onClose);
     channel.removeEventListener("error", onError);
-    for (const lane of [control, app]) {
-      lane.queue.length = 0;
-      const waiters = lane.waiters.splice(0);
+    channel.removeEventListener("bufferedamountlow", flush);
+    // A lane has waiters only while its queue is empty, so these readers have
+    // nothing left to drain.
+    for (const each of [control, app]) {
+      const waiters = each.waiters.splice(0);
       for (const waiter of waiters) waiter.reject(error);
     }
-    queuedBytes = 0;
-    queuedFrames = 0;
+    rejectSends(error);
     if (channel.readyState !== "closed" && channel.readyState !== "closing")
       channel.close();
   };
+  const abort = (error: WebRtcProviderError): void => end(error, true);
 
-  const deliver = (lane: Lane, payload: Uint8Array): void => {
-    const waiter = lane.waiters.shift();
-    if (waiter) waiter.resolve(payload);
-    else {
-      if (
-        queuedBytes + payload.length > MAX_QUEUED_BYTES ||
-        queuedFrames >= MAX_QUEUED_FRAMES
-      ) {
-        fail(
-          new WebRtcProviderError("data channel receive queue budget exceeded"),
-        );
-        return;
-      }
-      lane.queue.push(payload);
-      queuedBytes += payload.length;
-      queuedFrames += 1;
+  const deliver = (target: Lane, payload: Uint8Array): void => {
+    const waiter = target.waiters.shift();
+    if (waiter) {
+      waiter.resolve(payload);
+      return;
     }
+    if (
+      target.bytes + payload.length > target.highWaterBytes ||
+      target.queue.length >= target.maxFrames
+    ) {
+      abort(
+        new WebRtcProviderError(
+          `the ${target.name} lane receive queue would pass its high-water mark ` +
+            `(${target.highWaterBytes} bytes, ${target.maxFrames} frames): ` +
+            "the reader is too far behind the peer",
+        ),
+      );
+      return;
+    }
+    target.queue.push(payload);
+    target.bytes += payload.length;
   };
 
   const onMessage = (event: MessageEvent): void => {
     if (!(event.data instanceof ArrayBuffer)) {
-      fail(
+      abort(
         new WebRtcProviderError(
           "data channel delivered a non-binary frame; the lane framing is binary only",
         ),
@@ -537,73 +652,131 @@ export const dataChannelTransport = (
     }
     const bytes = new Uint8Array(event.data);
     if (bytes.length === 0) {
-      fail(new WebRtcProviderError("data channel delivered an empty frame"));
+      abort(new WebRtcProviderError("data channel delivered an empty frame"));
       return;
     }
-    if (bytes.length - 1 > MAX_QUEUED_BYTES) {
-      fail(
-        new WebRtcProviderError(
-          "data channel frame exceeds the receive byte budget",
-        ),
-      );
-      return;
-    }
-    const payload = bytes.slice(1);
-    if (bytes[0] === TAG_CONTROL) deliver(control, payload);
-    else if (bytes[0] === TAG_APP) deliver(app, payload);
-    else
-      fail(
+    const target =
+      bytes[0] === TAG_CONTROL ? control : bytes[0] === TAG_APP ? app : null;
+    if (target === null) {
+      abort(
         new WebRtcProviderError(
           `data channel frame carried unknown lane tag ${bytes[0]}`,
         ),
       );
+      return;
+    }
+    if (bytes.length - 1 > target.highWaterBytes) {
+      abort(
+        new WebRtcProviderError(
+          `a ${bytes.length - 1}-byte ${target.name} frame exceeds the lane's ` +
+            `${target.highWaterBytes}-byte high-water mark`,
+        ),
+      );
+      return;
+    }
+    deliver(target, bytes.slice(1));
   };
 
   const onClose = (): void => {
-    fail(new WebRtcProviderError("data channel closed"));
+    end(new WebRtcProviderError("data channel closed"), false);
   };
   const onError = (): void => {
-    fail(new WebRtcProviderError("data channel errored"));
+    end(new WebRtcProviderError("data channel errored"), false);
   };
+
+  /**
+   * Hand queued frames to the channel, in order, while its buffer is at or
+   * under the high-water mark. Runs on every send and on every drain; an event
+   * that finds the buffer still above the mark releases nothing. A call from
+   * inside the loop returns at once: the loop re-reads the buffer before every
+   * frame, so it misses no drain, and frames cannot overtake each other.
+   */
+  function flush(): void {
+    if (flushing) return;
+    flushing = true;
+    try {
+      flushQueued();
+    } finally {
+      flushing = false;
+    }
+  }
+
+  function flushQueued(): void {
+    while (outbox.length > 0 && ended === null && refused === null) {
+      if (channel.bufferedAmount > SEND_HIGH_WATER_BYTES) return;
+      if (channel.readyState !== "open") {
+        refused = new WebRtcProviderError(
+          `data channel is "${channel.readyState}", not "open"`,
+        );
+        rejectSends(refused);
+        return;
+      }
+      // Taken off the queue before `send`: should the transport end from
+      // inside it, the frame did enter the channel and its send resolves.
+      const next = outbox.shift();
+      if (next === undefined) return;
+      try {
+        channel.send(next.framed);
+      } catch (error) {
+        refused = new WebRtcProviderError(
+          `data channel refused a frame: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        next.reject(refused);
+        rejectSends(refused);
+        return;
+      }
+      next.resolve();
+    }
+  }
 
   channel.addEventListener("message", onMessage);
   channel.addEventListener("close", onClose);
   channel.addEventListener("error", onError);
+  channel.addEventListener("bufferedamountlow", flush);
   if (channel.readyState === "closed" || channel.readyState === "closing")
-    fail(new WebRtcProviderError("data channel already closed"));
+    end(new WebRtcProviderError("data channel already closed"), false);
 
-  const sendTagged = (tag: number, bytes: Uint8Array): void => {
-    if (failure) throw failure;
+  const sendTagged = (tag: number, bytes: Uint8Array): Promise<void> => {
+    const refusal = ended ?? refused;
+    if (refusal) return Promise.reject(refusal);
     if (channel.readyState !== "open")
-      throw new WebRtcProviderError(
-        `data channel is "${channel.readyState}", not "open"`,
+      return Promise.reject(
+        new WebRtcProviderError(
+          `data channel is "${channel.readyState}", not "open"`,
+        ),
       );
+    // Framed now, so the bytes sent are the bytes of this call even if the
+    // caller reuses its buffer while the frame waits.
     const framed = new Uint8Array(1 + bytes.length);
     framed[0] = tag;
     framed.set(bytes, 1);
-    channel.send(framed);
+    return new Promise<void>((resolve, reject) => {
+      outbox.push({ framed, resolve, reject });
+      flush();
+    });
   };
 
-  const receive = (lane: Lane): Promise<Uint8Array> => {
-    const queued = lane.queue.shift();
-    if (queued) {
-      queuedBytes -= queued.length;
-      queuedFrames -= 1;
+  const receive = (source: Lane): Promise<Uint8Array> => {
+    const queued = source.queue.shift();
+    if (queued !== undefined) {
+      source.bytes -= queued.length;
       return Promise.resolve(queued);
     }
-    if (failure) return Promise.reject(failure);
+    if (ended) return Promise.reject(ended);
     return new Promise<Uint8Array>((resolve, reject) => {
-      lane.waiters.push({ resolve, reject });
+      source.waiters.push({ resolve, reject });
     });
   };
 
   const transport: DataChannelTransport = {
-    send: (bytes: Uint8Array): void => sendTagged(TAG_CONTROL, bytes),
+    send: (bytes: Uint8Array): Promise<void> => sendTagged(TAG_CONTROL, bytes),
     recv: (): Promise<Uint8Array> => receive(control),
-    sendApp: (bytes: Uint8Array): void => sendTagged(TAG_APP, bytes),
+    sendApp: (bytes: Uint8Array): Promise<void> => sendTagged(TAG_APP, bytes),
     recvApp: (): Promise<Uint8Array> => receive(app),
     close: (): void => {
-      fail(new WebRtcProviderError("transport closed"));
+      abort(new WebRtcProviderError("transport closed"));
     },
   };
   channelTransports.set(channel, transport);

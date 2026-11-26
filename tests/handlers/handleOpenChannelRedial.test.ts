@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import { HandshakeFailure } from "../../src/handlers/handshakeFailure";
+import { memoryPinAttemptStore } from "../pinAttemptStores";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type {
@@ -49,7 +50,8 @@ let setPeerHandshakeStatus: RoomSlice["setPeerHandshakeStatus"];
 let DEFAULT_ROOM_POLICY_V1: RoomPolicy["DEFAULT_ROOM_POLICY_V1"];
 let putRoomPin: RoomPinVault["putRoomPin"];
 let deleteRoomPin: RoomPinVault["deleteRoomPin"];
-let recordRoomPinAggregateFailure: RoomPinAttempts["recordRoomPinAggregateFailure"];
+let recordPinFailure: RoomPinAttempts["recordPinFailure"];
+let usePinAttemptStoreForTests: RoomPinAttempts["usePinAttemptStoreForTests"];
 let MAX_ROOM_PIN_FAILURES_PER_WINDOW: RoomPinAttempts["MAX_ROOM_PIN_FAILURES_PER_WINDOW"];
 
 beforeAll(async () => {
@@ -66,8 +68,11 @@ beforeAll(async () => {
     await import("../../src/reducers/roomSlice"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy"));
   ({ putRoomPin, deleteRoomPin } = await import("../../src/roomPinVault"));
-  ({ recordRoomPinAggregateFailure, MAX_ROOM_PIN_FAILURES_PER_WINDOW } =
-    await import("../../src/roomPinAttempts"));
+  ({
+    recordPinFailure,
+    usePinAttemptStoreForTests,
+    MAX_ROOM_PIN_FAILURES_PER_WINDOW,
+  } = await import("../../src/roomPinAttempts"));
 });
 
 const ROOM_ID = "00000000-0000-4000-8000-0000000000cc";
@@ -185,7 +190,7 @@ const fakePeerConnection = (
  * runHandshake's own catch rejects the ratchet gate with it and re-throws, and
  * handleOpenChannel's catch classifies whatever comes out. The throttle path
  * above forces its outcome through real production state
- * (recordRoomPinAggregateFailure); nothing equivalent exists for a policy/suite
+ * (recordPinFailure over an in-memory PIN store); nothing equivalent exists for a policy/suite
  * mismatch, whose only producer is deliverHandshakeFrame rejecting a frame into
  * a parked recv — unreachable here, because this runtime has no database worker
  * and so never gets past getIdentityX25519.
@@ -341,8 +346,11 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       messages: [],
     };
     putRoomPin(PIN_ROOM_URL, new Uint8Array([1, 2, 3, 4]));
-    for (let i = 0; i < MAX_ROOM_PIN_FAILURES_PER_WINDOW; i++)
-      recordRoomPinAggregateFailure(PIN_ROOM_ID);
+    // This runtime has no database worker, and a PIN-store read error is a
+    // transport failure, so the limiter gets a working in-memory store.
+    usePinAttemptStoreForTests(memoryPinAttemptStore());
+    for (let i = 1; i <= MAX_ROOM_PIN_FAILURES_PER_WINDOW; i++)
+      await recordPinFailure(PIN_ROOM_ID, i.toString(16).padStart(64, "0"));
     const pc = fakePeerConnection(PIN_ROOM_ID);
     const main = fakeMain();
     const { api, dispatched } = fakeApi([pinRoom]);
@@ -382,6 +390,7 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
       await channel.onerror?.call(channel, new Event("error") as RTCErrorEvent);
       expect(dispatched.slice(beforeErrorEvent)).toEqual([]);
     } finally {
+      usePinAttemptStoreForTests();
       deleteRoomPin(PIN_ROOM_URL);
       resetRatchetGate(PIN_ROOM_ID, PEER_ID);
     }

@@ -120,8 +120,9 @@ edge; the PIN-attempt limits below still apply.
 ### Failed PIN attempts
 
 A wrong PIN shows up as a failed key confirmation. Each device limits these
-failures per room in two layers. Both are stored in IndexedDB and survive a
-page reload.
+failures per room in two layers. Both are stored in IndexedDB under the room
+ID the signaling server assigned (see the last paragraph for what that means
+across a reload).
 
 - **Per peer identity.** Failures are counted per room and per peer Ed25519
   identity. The first two cost nothing. From the third, that identity waits
@@ -136,18 +137,32 @@ page reload.
   still applies. Failures from any identity count toward the window, and a
   successful handshake does not close it.
 
-What remains: an attacker who rotates fresh identities can fill the window
-over and over. While it is full, first-time joiners are refused for up to five
-minutes at a time; established members are not. Handshakes that were already
-running when the window filled are not stopped, so concurrent attempts can
-push one window past 30. Identities this device authenticated while it ran
-0.14.10 or earlier count as new until their next successful handshake. If the
-device cannot read its record of authenticated identities while the window is
-full, it refuses the peer as new. When the window write for a failure fails,
-the failure still counts in the open tab's copy of the window, but not after a
-reload. Calling `connect()` with a PIN
-for a room this page has already loaded, or purging the room, clears both
-limits and the record of authenticated identities for that room.
+What remains:
+
+- An attacker who rotates fresh identities can fill the window over and over.
+  While it is full, first-time joiners are refused for up to five minutes at a
+  time; established members are not.
+- Windows are fixed, not sliding. The long-run rate is 30 failures per five
+  minutes, but up to 60 can land within seconds: 30 at the end of one window
+  and 30 at the start of the next. Handshakes that were already running when
+  the window filled are not stopped, so concurrent attempts can also push one
+  window past 30.
+- Authenticated status is not tied to the PIN. After a PIN change, a former
+  member keeps its exemption from the room window and is limited only by its
+  own per-identity backoff.
+- If the device cannot read its PIN records, the attempt fails before the
+  handshake as a transport failure and the edge re-dials. When the window
+  write for a failure fails, the failure still counts in the open tab's copy
+  of the window, but not after a reload.
+- Calling `connect()` with a PIN for a room this page has already loaded
+  clears both limits for that room and keeps its record of authenticated
+  identities. Purging the room clears all three.
+- **Reload against a hostile signaling server.** After a reload the client
+  accepts whatever room ID the server assigns to the room URL; it does not
+  require the ID it stored before. A server that hands out a new ID on each
+  reload therefore starts both limits and the record of authenticated
+  identities afresh each time. Against an honest server that keeps the room's
+  ID, the limits survive a reload.
 
 Scheduled timing cover is wired as of 0.14: a policy may pin `coverMode:
 "scheduled"` with a cadence, lane count, and frames per cell, and every edge in

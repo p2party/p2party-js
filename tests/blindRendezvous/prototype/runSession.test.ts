@@ -14,6 +14,7 @@ import {
 } from "../../../src/blindRendezvous/prototype/webrtcProvider";
 import { generateSessionIdentity } from "../../../src/session";
 import {
+  FRAME_TYPE_COVER,
   MAX_BUFFERED_AMOUNT,
   PROTOTYPE_STOP_DRAIN_TIMEOUT_MS,
 } from "../../../src/utils/constants";
@@ -417,6 +418,35 @@ const appFrames = (channel: LinkedChannel): Uint8Array[] =>
  * that frame belongs to has returned: encryption takes several turns, so a
  * fixed number of turns is not a wait for it.
  */
+/**
+ * How `promise` stands after one macrotask turn: settled, or "still pending".
+ * A receive that should fail at once is read this way, so a regression that
+ * leaves it waiting fails the test instead of hanging it.
+ */
+const afterOneTurn = async <T>(
+  promise: Promise<T>,
+): Promise<T | Error | "still pending"> => {
+  let outcome: T | Error | "still pending" = "still pending";
+  void settled(promise).then((value) => {
+    outcome = value;
+  });
+  await turn();
+  return outcome;
+};
+
+/** An app-lane header `[u32be rootLength][root][u32be frameCount]`, plus `extra` bytes. */
+const headerBytes = (
+  rootLength: number,
+  frameCount: number,
+  extra = 0,
+): Uint8Array => {
+  const header = new Uint8Array(4 + rootLength + 4 + extra);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, rootLength, false);
+  view.setUint32(4 + rootLength, frameCount, false);
+  return header;
+};
+
 const firstAppFrame = (channel: LinkedChannel): Promise<void> =>
   new Promise((resolve) => {
     channel.onSend = (frame) => {
@@ -622,6 +652,90 @@ describe("prototype run session", () => {
       both.stop();
     }
   }, 30_000);
+
+  test.each([
+    ["shorter than its two length fields", () => new Uint8Array(7)],
+    [
+      "whose length disagrees with its root length",
+      () => headerBytes(64, 1, 1),
+    ],
+    ["whose root is not a SHA-512 digest", () => headerBytes(32, 1)],
+    ["that announces no frames", () => headerBytes(64, 0)],
+    ["that announces too many frames", () => headerBytes(64, 0xffff_ffff)],
+  ] as const)(
+    "a malformed header ends the session with a protocol-violation reason (one %s)",
+    async (_shape, header) => {
+      const time = new FakeTime();
+      const both = await connected(time);
+      const { responder } = both;
+      try {
+        // Where the next message's header belongs, the lane carries this.
+        responder.channel.receive(Uint8Array.of(TAG_APP, ...header()));
+        const outcome = await afterOneTurn(responder.run.recvMessage(1_000));
+
+        expect(outcome).toBeInstanceOf(PrototypeSessionEndedError);
+        expect((outcome as PrototypeSessionEndedError).reason).toBe("protocol");
+        expect(await responder.reached("session-failed")).toContain(
+          "the app lane cannot be framed past it",
+        );
+        expect(responder.channel.readyState).toBe("closed");
+        expect(await settled(responder.run.recvMessage(1_000))).toBe(
+          outcome as Error,
+        );
+      } finally {
+        both.stop();
+      }
+    },
+    30_000,
+  );
+
+  test.each([
+    ["a frame shorter than a chunk frame", "truncated"],
+    ["a frame that is not a chunk frame", "cover"],
+    ["a chunk frame of another message", "foreign"],
+  ] as const)(
+    "%s in a message's place ends the session with a protocol-violation reason",
+    async (_label, kind) => {
+      const time = new FakeTime();
+      const both = await connected(time);
+      const { initiator, responder } = both;
+      try {
+        initiator.channel.holding = true;
+        await initiator.run.sendMessage(
+          pattern(2 * CHUNK_PLAINTEXT_BYTES + 1),
+          1_000,
+        );
+        await initiator.run.sendMessage(text("the next message"), 1_000);
+        // [header, chunk 0, 1, 2] of the first message, [header, chunk 0] of
+        // the second; each still carries its one-byte lane tag.
+        const [header, first, , , , nextChunk] = appFrames(initiator.channel);
+        responder.channel.receive(header);
+        responder.channel.receive(first);
+        // Where the first message's chunk 1 belongs, the lane carries this:
+        // a chunk frame cut short, one whose type is not a chunk's, or the
+        // second message's chunk, whole and valid but under another header.
+        const wrong = Uint8Array.from(
+          kind === "truncated"
+            ? first.subarray(0, 1 + 100)
+            : kind === "foreign"
+              ? nextChunk
+              : first,
+        );
+        if (kind === "cover") wrong[1] = FRAME_TYPE_COVER;
+        responder.channel.receive(wrong);
+        const outcome = await afterOneTurn(responder.run.recvMessage(1_000));
+
+        expect(outcome).toBeInstanceOf(PrototypeSessionEndedError);
+        expect((outcome as PrototypeSessionEndedError).reason).toBe("protocol");
+        expect(await responder.reached("session-failed")).toContain("frame 1 ");
+        expect(responder.channel.readyState).toBe("closed");
+        expect(kinds(responder)).not.toContain("message-verified");
+      } finally {
+        both.stop();
+      }
+    },
+    30_000,
+  );
 
   test("a frame the channel refuses ends the session", async () => {
     const time = new FakeTime();

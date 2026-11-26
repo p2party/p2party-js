@@ -119,6 +119,11 @@ export const CHUNK_AAD_HEADER_LEN =
   RATCHET_N_LEN +
   RATCHET_PN_LEN +
   PQ_EPOCH_LEN; // 57
+// Where the ratchet header (dhPub ‖ N ‖ PN) ends in a chunk frame. Every chunk
+// of one message carries the same bytes before this offset. Derived here for
+// the TypeScript side; there is no matching C #define.
+export const CHUNK_RATCHET_HEADER_END =
+  FRAME_TYPE_LEN + RATCHET_DHPUB_LEN + RATCHET_N_LEN + RATCHET_PN_LEN; // 49
 export const CHUNK_HEADER_LEN =
   RATCHET_DHPUB_LEN +
   RATCHET_N_LEN +

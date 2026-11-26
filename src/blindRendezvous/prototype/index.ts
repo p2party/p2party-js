@@ -40,7 +40,14 @@
 import libcrypto from "../../cryptography/libcrypto";
 import { decodeRoomPolicyV1 } from "../../roomPolicy";
 import { createSession, generateSessionIdentity } from "../../session";
-import { PROTOTYPE_STOP_DRAIN_TIMEOUT_MS } from "../../utils/constants";
+import { crypto_hash_sha512_BYTES } from "../../cryptography/interfaces";
+import {
+  CHUNK_RATCHET_HEADER_END,
+  FRAME_TYPE_CHUNK,
+  FRAME_TYPE_LEN,
+  PROTOTYPE_STOP_DRAIN_TIMEOUT_MS,
+  WIRE_CHUNK_FRAME_LEN,
+} from "../../utils/constants";
 import { deliveryProfileHash } from "../derivations";
 import { CarrierRuntime } from "./carrierRuntime";
 import { PairDriver } from "./pairDriver";
@@ -107,6 +114,60 @@ const CONNECTED_TIMEOUT_MS = 60_000;
  */
 const MAX_APP_FRAMES = 65_536;
 
+/**
+ * The app-lane header `[u32be rootLength][root][u32be frameCount]`, or what is
+ * wrong with it. The root is the message's SHA-512 Merkle root, so its length
+ * is fixed, and a message has at least one chunk frame.
+ */
+const parseMessageHeader = (
+  header: Uint8Array,
+): { readonly root: Uint8Array; readonly frameCount: number } | string => {
+  if (header.length < 8)
+    return "the application header is shorter than its two length fields";
+  const view = new DataView(
+    header.buffer,
+    header.byteOffset,
+    header.byteLength,
+  );
+  const rootLength = view.getUint32(0, false);
+  if (header.length !== 4 + rootLength + 4)
+    return "the application header length does not match its root length";
+  if (rootLength !== crypto_hash_sha512_BYTES)
+    return `the application header carries a ${String(rootLength)}-byte root, not a ${String(crypto_hash_sha512_BYTES)}-byte one`;
+  const frameCount = view.getUint32(4 + rootLength, false);
+  if (frameCount === 0) return "the application header announces no frames";
+  if (frameCount > MAX_APP_FRAMES)
+    return `the peer announced ${String(frameCount)} frames, past the ${String(MAX_APP_FRAMES)} this transport accepts`;
+  return { root: header.slice(4, 4 + rootLength), frameCount };
+};
+
+/**
+ * What is wrong with frame `index` of a message, or null: it must be a whole
+ * protocol-v4 chunk frame, and every chunk of one message shares the first
+ * one's ratchet header (one ratchet step per message), as the session itself
+ * requires. A frame that fails is not this message's next frame, so the lane
+ * is out of step.
+ */
+const chunkFrameViolation = (
+  frame: Uint8Array,
+  first: Uint8Array | undefined,
+  index: number,
+): string | null => {
+  if (frame.length !== WIRE_CHUNK_FRAME_LEN)
+    return `frame ${String(index)} is ${String(frame.length)} bytes, not a ${String(WIRE_CHUNK_FRAME_LEN)}-byte chunk frame`;
+  if (frame[0] !== FRAME_TYPE_CHUNK)
+    return `frame ${String(index)} has frame type ${String(frame[0])}, not a chunk frame's ${String(FRAME_TYPE_CHUNK)}`;
+  if (first === undefined) return null;
+  for (
+    let offset = FRAME_TYPE_LEN;
+    offset < CHUNK_RATCHET_HEADER_END;
+    offset += 1
+  )
+    if (frame[offset] !== first[offset])
+      return `frame ${String(index)} carries another ratchet header than frame 0: it belongs to another message`;
+  return null;
+};
+
 export class PrototypeRunError extends Error {
   override readonly name: string = "PrototypeRunError";
 
@@ -127,15 +188,36 @@ export class PrototypeRunTimeoutError extends PrototypeRunError {
 }
 
 /**
+ * Why this endpoint ended a session, for a caller to switch on:
+ *   - `"send-deadline"`: a send's deadline passed with part of its message on
+ *     the lane.
+ *   - `"refused"`: the open data channel refused a frame.
+ *   - `"receive-deadline"`: a receive's deadline passed with part of a
+ *     message taken.
+ *   - `"protocol"`: a received header or frame did not parse at its place in
+ *     a message, so the lane's framing can no longer be trusted.
+ */
+export type PrototypeSessionEndReason =
+  "send-deadline" | "refused" | "receive-deadline" | "protocol";
+
+/**
  * This endpoint ended the session because its app lane can no longer be
- * framed: a send's deadline passed with part of its message on the lane, the
- * open data channel refused a frame, or a receive's deadline passed with part
- * of a message taken. Every call on the session from then on — including one
- * that overlapped the call that ended it — rejects with this same error;
- * `cause` is what ended it.
+ * framed (`reason` says how). Every call on the session from then on —
+ * including one that overlapped the call that ended it — rejects with this
+ * same error; `cause`, when there is one, is the failure that ended it.
  */
 export class PrototypeSessionEndedError extends PrototypeRunError {
   override readonly name = "PrototypeSessionEndedError";
+  readonly reason: PrototypeSessionEndReason;
+
+  constructor(
+    reason: PrototypeSessionEndReason,
+    message: string,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(message, options);
+    this.reason = reason;
+  }
 }
 
 const fail: (message: string) => never = (message) => {
@@ -727,16 +809,23 @@ export class BlindRendezvousRun implements PrototypeRun {
       );
     } catch (error) {
       void handedOff.catch(() => undefined);
-      const misframed =
+      const misframed: readonly [PrototypeSessionEndReason, string] | null =
         error instanceof PrototypeRunTimeoutError
-          ? `the data channel did not take the message's ${String(leaving.length)} ` +
-            `frames within ${String(timeoutMs)}ms of sendMessage`
+          ? [
+              "send-deadline",
+              `the data channel did not take the message's ${String(leaving.length)} ` +
+                `frames within ${String(timeoutMs)}ms of sendMessage`,
+            ]
           : error instanceof WebRtcProviderError && error.reason === "refused"
-            ? `the data channel refused one of the message's ${String(leaving.length)} frames`
+            ? [
+                "refused",
+                `the data channel refused one of the message's ${String(leaving.length)} frames`,
+              ]
             : null;
       if (misframed === null) throw this.#asCallFailure(error);
       const ended = new PrototypeSessionEndedError(
-        `${misframed}; part of it may have left, and the session was ended`,
+        misframed[0],
+        `${misframed[1]}; part of it may have left, and the session was ended`,
         { cause: error },
       );
       // A local abort: what has not left is discarded and never leaves.
@@ -757,6 +846,14 @@ export class BlindRendezvousRun implements PrototypeRun {
    * that message from its header. One that passes part-way through a message
    * ends the session and rejects with `PrototypeSessionEndedError`, since
    * what remains of the message can no longer be told from the next one.
+   *
+   * So does anything that does not parse at its place in a message (reason
+   * `"protocol"`): a header whose lengths disagree, whose root is not a
+   * SHA-512 digest or whose frame count is zero or too large, and a frame
+   * that is not a whole protocol-v4 chunk frame or carries another message's
+   * ratchet header. Each means the lane's positions can no longer be trusted,
+   * so nothing more is read from it. These are the session's own structural
+   * checks, made as each frame arrives instead of after the last one.
    */
   async recvMessage(timeoutMs: number): Promise<Uint8Array> {
     const deadlineMs = this.#clock.nowMs() + BigInt(Math.ceil(timeoutMs));
@@ -783,38 +880,25 @@ export class BlindRendezvousRun implements PrototypeRun {
     } catch (error) {
       throw this.#asCallFailure(error);
     }
-    if (header.length < 8)
-      fail("the application header is shorter than its two length fields");
-    const view = new DataView(
-      header.buffer,
-      header.byteOffset,
-      header.byteLength,
-    );
-    const rootLength = view.getUint32(0, false);
-    if (header.length !== 4 + rootLength + 4)
-      fail("the application header length does not match its root length");
-    const root = header.slice(4, 4 + rootLength);
-    const frameCount = view.getUint32(4 + rootLength, false);
-    if (frameCount > MAX_APP_FRAMES)
-      fail(
-        `the peer announced ${String(frameCount)} frames, past the ${String(MAX_APP_FRAMES)} this transport accepts`,
-      );
+    const parsed = parseMessageHeader(header);
+    if (typeof parsed === "string") this.#endMisframed(parsed);
+    const { root, frameCount } = parsed;
 
     const frames: Uint8Array[] = [];
     for (let index = 0; index < frameCount; index += 1) {
+      let frame: Uint8Array;
       try {
-        frames.push(
-          await receiveWithin(
-            lane,
-            remaining(),
-            `application frame ${String(index)}`,
-            this.#timers,
-          ),
+        frame = await receiveWithin(
+          lane,
+          remaining(),
+          `application frame ${String(index)}`,
+          this.#timers,
         );
       } catch (error) {
         if (!(error instanceof PrototypeRunTimeoutError))
           throw this.#asCallFailure(error);
         const ended = new PrototypeSessionEndedError(
+          "receive-deadline",
           `recvMessage's ${String(timeoutMs)}ms passed with ${String(index + 1)} ` +
             `of the message's ${String(frameCount + 1)} frames taken; the rest ` +
             "cannot be framed, and the session was ended",
@@ -823,6 +907,9 @@ export class BlindRendezvousRun implements PrototypeRun {
         this.#endSession(ended);
         throw ended;
       }
+      const violation = chunkFrameViolation(frame, frames[0], index);
+      if (violation !== null) this.#endMisframed(violation);
+      frames.push(frame);
     }
 
     const message: EncryptedSessionMessage = {
@@ -959,6 +1046,20 @@ export class BlindRendezvousRun implements PrototypeRun {
     if (this.#stopped)
       return new PrototypeRunError("the run was stopped", { cause: error });
     return error;
+  }
+
+  /**
+   * A received header or frame that does not parse at its place: the lane is
+   * out of step, so the session ends, as the provider ends its transport on a
+   * frame that breaks its own framing.
+   */
+  #endMisframed(detail: string): never {
+    const ended = new PrototypeSessionEndedError(
+      "protocol",
+      `recvMessage: ${detail}; the app lane cannot be framed past it, and the session was ended`,
+    );
+    this.#endSession(ended);
+    throw ended;
   }
 
   #startSession(): void {

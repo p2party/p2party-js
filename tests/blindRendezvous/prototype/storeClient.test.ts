@@ -4281,14 +4281,24 @@ describe("prototype store client verified run", () => {
    */
   const overlapped = async (
     client: PrototypeStoreClient,
+    counting: ReturnType<typeof countingModule>,
     gate: ReturnType<typeof verifierGate>,
     branch: StoreProcess,
   ) => {
+    counting.take();
     const olderHeld = gate.hold(
       await publicStoreCheckpointHash(await checkpointOf(branch, CHAIN_START)),
     );
     const older = client.scanWindow(CHAIN_START);
     await heldOrFail(olderHeld, older);
+    // The overlap is real, not assumed: each scan is held after its full
+    // verifier has checked its snapshot, and the counts say which snapshot
+    // that was. The older one verified window 0 alone (its own answers and
+    // one observation); the newer one, started while the older was held,
+    // verified windows 0 and 1. Neither has returned.
+    expect(counting.take()).toBe(
+      OWN_VERIFICATIONS + PER_REVERIFIED_OBSERVATION,
+    );
     const newerHeld = gate.hold(
       await publicStoreCheckpointHash(
         await checkpointOf(branch, CHAIN_START + 1n),
@@ -4296,6 +4306,9 @@ describe("prototype store client verified run", () => {
     );
     const newer = client.scanWindow(CHAIN_START + 1n);
     await heldOrFail(newerHeld, newer);
+    expect(counting.take()).toBe(
+      OWN_VERIFICATIONS + 2 * PER_REVERIFIED_OBSERVATION,
+    );
     return { older, olderHeld, newer, newerHeld };
   };
 
@@ -4304,11 +4317,16 @@ describe("prototype store client verified run", () => {
     const gate = verifierGate();
     try {
       const branches = new Map<bigint, string>();
-      const client = await connect(world.first.origin, world.clock, {
-        fetch: routedBy(branches, world.first.origin),
-      });
+      const counting = countingModule();
+      const client = await connectCounting(
+        world.first.origin,
+        world.clock,
+        counting,
+        routedBy(branches, world.first.origin),
+      );
       const { older, olderHeld, newer, newerHeld } = await overlapped(
         client,
+        counting,
         gate,
         world.first,
       );
@@ -4339,11 +4357,16 @@ describe("prototype store client verified run", () => {
     const gate = verifierGate();
     try {
       const branches = new Map<bigint, string>();
-      const client = await connect(world.first.origin, world.clock, {
-        fetch: routedBy(branches, world.first.origin),
-      });
+      const counting = countingModule();
+      const client = await connectCounting(
+        world.first.origin,
+        world.clock,
+        counting,
+        routedBy(branches, world.first.origin),
+      );
       const { older, olderHeld, newer, newerHeld } = await overlapped(
         client,
+        counting,
         gate,
         world.first,
       );
@@ -4382,6 +4405,7 @@ describe("prototype store client verified run", () => {
         );
         const { older, olderHeld, newer, newerHeld } = await overlapped(
           client,
+          counting,
           gate,
           world.first,
         );
@@ -4474,8 +4498,13 @@ describe("prototype store client verified run", () => {
             await checkpointOf(store, CHAIN_START),
           ),
         );
+        counting.take();
         const first = client.scanWindow(CHAIN_START);
         await heldOrFail(held, first);
+        // Held after its full verifier checked window 0, not before.
+        expect(counting.take()).toBe(
+          OWN_VERIFICATIONS + PER_REVERIFIED_OBSERVATION,
+        );
         expect((await client.scanWindow(CHAIN_START + 3n)).status).toBe(
           "unreachable",
         );

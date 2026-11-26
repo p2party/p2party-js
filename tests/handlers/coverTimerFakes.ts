@@ -1,8 +1,9 @@
 // A controllable timeline for the scheduled-cover clock: page timers that a
 // "hidden" page throttles the way Chromium does (aligned to one wake-up per
-// throttle period), and a fake dedicated timer worker whose timers are never
-// throttled. Both run on one virtual clock, so a test decides exactly when
-// every wake-up lands.
+// throttle period), a page that can be frozen or a process that can sleep, and
+// a fake dedicated timer worker whose timers are never throttled. Everything
+// runs on one virtual clock, so a test decides exactly when every wake-up
+// lands and in which order the page sees it.
 import type {
   CoverTimerEnvironment,
   CoverTimerRequest,
@@ -11,9 +12,11 @@ import type {
 
 interface QueuedEvent {
   readonly id: number;
-  /** When it is due. A page timer on a hidden page runs later than this. */
+  /** When it is due. A page event can run later than this. */
   readonly at: number;
+  /** Page events are its timers and the messages delivered to it. */
   readonly page: boolean;
+  readonly timer: boolean;
   readonly run: () => void;
 }
 
@@ -28,30 +31,29 @@ export class CoverTimeline {
   /** How many page-timer callbacks have run (backstops included). */
   pageTimerRuns = 0;
   readonly workers: FakeTimerWorker[] = [];
-  /** Set to false to model a runtime that cannot create a worker. */
+  /** False: this runtime cannot create a worker at all. */
   workersAvailable = true;
+  /** True: creating a worker throws (blocked, out of resources). */
+  failWorkerCreation = false;
+  /** Whether the environment is a browser page (console.warn reporting). */
+  browserPage = true;
+  /** Page events (its timers, messages to it) wait until then: a freeze. */
+  pagePausedUntil = -Infinity;
+  /** At a thaw, run the page's due timers before the messages queued for it. */
+  timersFirstAtThaw = false;
   private nextId = 1;
   private readonly queue = new Map<number, QueuedEvent>();
   private readonly pageTimers = new Set<number>();
+  private cachedEnv: CoverTimerEnvironment | undefined;
 
-  schedule(at: number, run: () => void, page = false): number {
+  schedule(
+    at: number,
+    run: () => void,
+    { page = false, timer = true }: { page?: boolean; timer?: boolean } = {},
+  ): number {
     const id = this.nextId++;
-    this.queue.set(id, { id, at, page, run });
+    this.queue.set(id, { id, at, page, timer, run });
     return id;
-  }
-
-  /**
-   * When an event actually runs: a page timer on a hidden page waits for the
-   * next throttle boundary at or after its due time. Judged at run time, so
-   * a timer armed while visible is throttled once the page is hidden.
-   */
-  private runsAt(event: QueuedEvent): number {
-    if (!event.page || !this.hidden) return event.at;
-    const aligned =
-      Math.ceil((event.at - this.throttlePhaseMs) / this.throttleMs) *
-        this.throttleMs +
-      this.throttlePhaseMs;
-    return Math.max(aligned, this.time);
   }
 
   cancel(id: number): void {
@@ -59,36 +61,88 @@ export class CoverTimeline {
     this.pageTimers.delete(id);
   }
 
+  /** A message to the page: a page task, queued now. */
+  deliverToPage(run: () => void): void {
+    this.schedule(this.time, run, { page: true, timer: false });
+  }
+
   /** Page timers still armed (backstops included). */
   armedPageTimers(): number {
     return this.pageTimers.size;
   }
 
-  readonly env: CoverTimerEnvironment = {
-    now: () => this.time,
-    setTimeout: (callback, delayMs) => {
-      const id = this.schedule(
-        this.time + Math.max(0, delayMs),
-        () => {
-          this.pageTimers.delete(id);
-          this.pageTimerRuns += 1;
-          callback();
-        },
-        true,
+  /** Freeze the page (not the worker) for `ms` from now. */
+  freezePage(ms: number): void {
+    this.pagePausedUntil = this.time + ms;
+  }
+
+  /**
+   * The whole process sleeps (a laptop lid): nothing runs for `ms`, then
+   * everything that fell due runs at once, in the order it fell due.
+   */
+  async sleep(ms: number): Promise<void> {
+    this.time += ms;
+    await this.advanceTo(this.time);
+  }
+
+  /**
+   * One object per timeline, as the browser has one per page, so every clock
+   * built on it shares one host. Read once, so set `workersAvailable` and
+   * `browserPage` before the first runtime is built.
+   */
+  get env(): CoverTimerEnvironment {
+    this.cachedEnv ??= {
+      now: () => this.time,
+      browserPage: this.browserPage,
+      setTimeout: (callback, delayMs) => {
+        const id = this.schedule(
+          this.time + Math.max(0, delayMs),
+          () => {
+            this.pageTimers.delete(id);
+            this.pageTimerRuns += 1;
+            callback();
+          },
+          { page: true },
+        );
+        this.pageTimers.add(id);
+        return id;
+      },
+      clearTimeout: (handle) => {
+        if (typeof handle === "number") this.cancel(handle);
+      },
+      createWorker: this.workersAvailable
+        ? () => {
+            if (this.failWorkerCreation)
+              throw new Error("Worker could not be created");
+            const worker = new FakeTimerWorker(this);
+            this.workers.push(worker);
+            return worker;
+          }
+        : undefined,
+    };
+    return this.cachedEnv;
+  }
+
+  /** When an event actually runs. */
+  private runsAt(event: QueuedEvent): number {
+    let at = event.at;
+    if (event.page && event.timer && this.hidden)
+      at = Math.max(
+        Math.ceil((at - this.throttlePhaseMs) / this.throttleMs) *
+          this.throttleMs +
+          this.throttlePhaseMs,
+        this.time,
       );
-      this.pageTimers.add(id);
-      return id;
-    },
-    clearTimeout: (handle) => {
-      if (typeof handle === "number") this.cancel(handle);
-    },
-    createWorker: () => {
-      if (!this.workersAvailable) throw new Error("Worker is not available");
-      const worker = new FakeTimerWorker(this);
-      this.workers.push(worker);
-      return worker;
-    },
-  };
+    if (event.page && at < this.pagePausedUntil) at = this.pagePausedUntil;
+    return at;
+  }
+
+  private before(a: QueuedEvent, aAt: number, b: QueuedEvent, bAt: number) {
+    if (aAt !== bAt) return aAt < bAt;
+    if (this.timersFirstAtThaw && a.timer !== b.timer) return a.timer;
+    if (a.at !== b.at) return a.at < b.at;
+    return a.id < b.id;
+  }
 
   private async drain(): Promise<void> {
     for (let i = 0; i < 8; i++) await Promise.resolve();
@@ -102,10 +156,8 @@ export class CoverTimeline {
       let nextAt = Infinity;
       for (const event of this.queue.values()) {
         const at = this.runsAt(event);
-        if (
-          at <= target &&
-          (at < nextAt || (at === nextAt && next && event.id < next.id))
-        ) {
+        if (at > target) continue;
+        if (!next || this.before(event, at, next, nextAt)) {
           next = event;
           nextAt = at;
         }
@@ -120,7 +172,7 @@ export class CoverTimeline {
   }
 }
 
-/** A dedicated timer worker on the timeline: arms, cancels and fires by handle. */
+/** A dedicated timer worker on the timeline: arms, cancels, fires, answers pings. */
 export class FakeTimerWorker implements CoverTimerWorkerPort {
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
@@ -130,6 +182,8 @@ export class FakeTimerWorker implements CoverTimerWorkerPort {
   terminated = false;
   /** A wedged worker takes messages and never answers. */
   wedged = false;
+  /** Cancels lost in flight: the worker still fires the handle. */
+  ignoreCancels = false;
   private readonly timers = new Map<number, number>();
 
   constructor(private readonly timeline: CoverTimeline) {}
@@ -146,15 +200,23 @@ export class FakeTimerWorker implements CoverTimerWorkerPort {
         message.id,
         this.timeline.schedule(this.timeline.time + message.delayMs, () => {
           this.timers.delete(message.id);
-          if (!this.terminated)
-            this.onmessage?.({ data: { op: "fire", id: message.id } });
+          this.reply({ op: "fire", id: message.id });
         }),
       );
-    } else if (message.op === "cancel") {
+    } else if (message.op === "cancel" && !this.ignoreCancels) {
       const timer = this.timers.get(message.id);
       if (timer !== undefined) this.timeline.cancel(timer);
       this.timers.delete(message.id);
+    } else if (message.op === "ping") {
+      this.reply({ op: "pong", id: message.id });
     }
+  }
+
+  private reply(data: { op: "fire" | "pong"; id: number }): void {
+    if (this.terminated || this.wedged) return;
+    this.timeline.deliverToPage(() => {
+      if (!this.terminated) this.onmessage?.({ data });
+    });
   }
 
   terminate(): void {
@@ -166,6 +228,11 @@ export class FakeTimerWorker implements CoverTimerWorkerPort {
   /** Timers the worker still holds. */
   armedTimers(): number {
     return this.timers.size;
+  }
+
+  /** The handles of the timers it still holds. */
+  armedIds(): number[] {
+    return [...this.timers.keys()];
   }
 
   /** The worker's error event, as a crashed worker raises it. */

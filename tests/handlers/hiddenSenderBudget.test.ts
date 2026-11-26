@@ -304,6 +304,9 @@ const makeSendRig = (workers: boolean): SendRig => {
   const timeline = new CoverTimeline();
   timeline.workersAvailable = workers;
   timeline.throttlePhaseMs = THROTTLE_PHASE_MS;
+  // The fallback's report is pinned in coverTimerWorker.test.ts; here it
+  // goes to the (silent) debug log.
+  timeline.browserPage = false;
   const lanes: FakeChannel[] = [];
   const statuses: CoverSchedulerStatus[] = [];
   const epc = { pqHealingState: pq } as unknown as IRTCPeerConnection;

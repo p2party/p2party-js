@@ -25,6 +25,7 @@ import {
 import { crypto_hash_sha512_BYTES } from "./cryptography/interfaces";
 import { setWasmSourceUrl } from "./cryptography/wasmLoader";
 import { setDebugLogging } from "./utils/debug";
+import { getCoverTimerSource as readCoverTimerSource } from "./handlers/coverTimerWorker";
 
 import {
   deleteDBAddressBookEntry,
@@ -1854,6 +1855,15 @@ const newRoomUrl = async () => {
 
 const newRoomInvite = () => encodeRoomInviteFragment(generateRoomCapability());
 
+/**
+ * Read-only diagnostic: what drives this page's scheduled-cover wake-ups now,
+ * "worker" (its shared timer worker), "page" (page timers: no worker can run
+ * here, or a lost one is being replaced) or "none" (no scheduled-cover edge is
+ * open). On page timers a hidden page's cover cycles can degrade.
+ */
+const getCoverTimerSource = (): "worker" | "page" | "none" =>
+  readCoverTimerSource();
+
 export const p2party = {
   store,
   commonStateSelector,
@@ -1959,6 +1969,7 @@ export const p2party = {
   waitForPeers,
   onMessage,
   setDebugLogging,
+  getCoverTimerSource,
   MIN_PERCENTAGE_FILLED_CHUNK: 0.1,
   // 100%-full cells make identical content roots deterministic. Keep at least
   // 1% RNG padding as the fresh wire/storage transfer namespace; this is not a
@@ -2038,6 +2049,7 @@ export {
   DatabaseWorkerError,
   StorageFailedError,
   setDebugLogging,
+  getCoverTimerSource,
 };
 
 export {

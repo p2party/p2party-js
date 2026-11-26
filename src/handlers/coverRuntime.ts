@@ -194,16 +194,39 @@ export class CoverRuntime {
     const maxTimerDriftMs =
       options.maxTimerDriftMs ??
       Math.max(0, Math.min(Math.floor(slotSpacing) - 1, 500));
-    // Slot wake-ups come from a dedicated timer worker, which a hidden page
-    // does not throttle (see coverTimerWorker for the one clock lateness is
-    // judged on and for the fallback to page timers).
-    this.#timerClock = options.clock
+    // Slot wake-ups come from the page's shared timer worker, which a hidden
+    // page does not throttle (see coverTimerWorker for the one clock lateness
+    // is judged on and for the fallback to page timers).
+    const timerClock = options.clock
       ? undefined
       : createCoverTimerClock(options.timerEnvironment);
-    this.#scheduler = createCoverScheduler({
+    this.#timerClock = timerClock;
+    let scheduler: CoverScheduler;
+    try {
+      scheduler = this.#createScheduler(
+        options,
+        schedule,
+        maxTimerDriftMs,
+        options.clock ?? timerClock!,
+      );
+    } catch (error) {
+      // A schedule the scheduler refuses must not hold the shared worker.
+      timerClock?.destroy();
+      throw error;
+    }
+    this.#scheduler = scheduler;
+  }
+
+  #createScheduler(
+    options: CoverRuntimeOptions,
+    schedule: CoverSchedule,
+    maxTimerDriftMs: number,
+    clock: CoverClock,
+  ): CoverScheduler {
+    return createCoverScheduler({
       schedule,
       maxTimerDriftMs,
-      clock: options.clock ?? this.#timerClock!,
+      clock,
       laneFactory: (context) => this.#openLane(context),
       makeDummy: (slot) => this.#sealDummy(slot),
       onStatusChange: (change) => {
@@ -483,18 +506,24 @@ export class CoverRuntime {
   // A hidden page keeps its schedule armed: suspending it showed tab
   // visibility on the wire as cover on/off, and a hidden receiver stopped
   // acknowledging, so its sender's idle budget ran out. The schedule's
-  // wake-ups come from the timer worker, because a hidden page's own timers
-  // are throttled to one wake-up a second (later one a minute), and a slot
-  // past its drift tolerance degrades its cycle, which the status reports.
+  // wake-ups come from the page's shared timer worker, because a hidden page's
+  // own timers are throttled to one wake-up a second (later one a minute), and
+  // a slot past its drift tolerance degrades its cycle, which the status
+  // reports.
   //
   // That does not make tab visibility unreadable. Measured in Chrome for
   // Testing 159 on macOS (docs/protocol-v4-pq-cover-architecture.md,
   // docs/e2e/cover-timers/): with 100 ms slots, page timers sent no cell while
-  // hidden; the worker sent 89 % of them, but the hidden page handled its
-  // wake-ups up to 143 ms late and 19 % of cycles still degraded. With 500 ms
-  // slots, no cycle degraded. Not measured and still observable: a frozen or
-  // discarded page (freeze suspends cover), a browser that throttles worker
-  // timers, a suspended process, and the page-timer fallback.
+  // hidden; the worker sent 89 % of them, and 19 % of cycles still degraded.
+  // With 500 ms slots no cycle degraded. Even then cells are sent when their
+  // wake-up runs on the page, and on the hidden page that was tens of
+  // milliseconds after the slot (median 50-60 ms, against at most 6 ms
+  // visible), so visibility is readable from cell timing against the slot grid
+  // without any degraded cycle. Closing that needs the send itself to happen
+  // off the page's event loop (from the worker), which this does not do. Not
+  // measured and also observable: a frozen or discarded page (freeze suspends
+  // cover), a browser that throttles worker timers, a suspended process, and
+  // the page-timer fallback.
   //
   // A scheduled send's idle budget is held while the page stays hidden
   // (scheduledCoverIsSuspended). The diagnostic names no peer and no room.

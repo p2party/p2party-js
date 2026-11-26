@@ -34,7 +34,8 @@ import { buildReceiveManifest } from "../../src/db/receiveManifest";
 import {
   CHUNK_LEN,
   RECEIVE_VERIFY_PROGRESS_BYTES,
-  RECEIVE_VERIFY_PROGRESS_CEILING_MS,
+  RECEIVE_VERIFY_RECEIPT_INTERVAL_MS,
+  RECEIVER_SILENCE_LIMIT_MS,
 } from "../../src/utils/constants";
 
 import type {
@@ -1247,7 +1248,10 @@ describe("verification progress reports", () => {
     expect(progressReports.map((report) => report.hashedBytes)).toEqual([
       80, 160,
     ]);
-    expect(RECEIVE_VERIFY_PROGRESS_CEILING_MS).toBe(10_000);
+    expect(RECEIVE_VERIFY_RECEIPT_INTERVAL_MS).toBe(10_000);
+    expect(RECEIVE_VERIFY_RECEIPT_INTERVAL_MS).toBe(
+      RECEIVER_SILENCE_LIMIT_MS / 3,
+    );
     expect(await settle(slow, slowToken)).toBe("complete");
   }, 60_000);
 });

@@ -183,7 +183,8 @@ export type ReceiveVerificationOutcome = "complete" | "integrity" | "aborted";
 /**
  * Posted by the worker (outside any request) while it verifies a held file:
  * after every RECEIVE_VERIFY_PROGRESS_BYTES hashed, or once
- * RECEIVE_VERIFY_PROGRESS_CEILING_MS have passed since the last report.
+ * RECEIVE_VERIFY_RECEIPT_INTERVAL_MS have passed since the last report.
+ * `hashedBytes` only grows within one attempt.
  */
 export interface HeldFileProgressNotice {
   merkleRoot: string;

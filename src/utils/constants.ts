@@ -232,13 +232,11 @@ export const RECEIVE_VERIFY_LEASE_RENEW_MS = 30_000;
 // ...and remembers the outcome of this many recently committed attempts, so a
 // second caller holding the same attempt gets the same answer.
 export const RECEIVE_VERIFY_SETTLED_MEMORY = 256;
-// While a received file is verified the worker reports progress after every
-// this many bytes hashed, or after this long since its last report, whichever
-// comes first, checked as each batch ends. The receiver re-sends the
-// transfer's ordinary receipt on each report, so a stalled verification goes
-// silent and the sender's own silence bound applies.
+// While a received file is verified the worker reports progress, as each batch
+// ends, once this many bytes were hashed since its last report or once
+// RECEIVE_VERIFY_RECEIPT_INTERVAL_MS passed, whichever comes first. A report
+// costs one message to the page; the page decides what goes on the wire.
 export const RECEIVE_VERIFY_PROGRESS_BYTES = 8 * 1024 * 1024;
-export const RECEIVE_VERIFY_PROGRESS_CEILING_MS = 10_000;
 
 // Wait this long for a per-message data channel to reach "open" before sending,
 // so its first frames aren't spilled to the WS relay while it is still
@@ -276,6 +274,13 @@ export const RECEIVER_SILENCE_LIMIT_MS =
 // that is 1,280 s + 30 s ≈ 21.8 min at the 10 GiB MAX_MESSAGE_SIZE. (This
 // machine verifies at about 15 s/GiB, roughly 70 MiB/s.)
 export const MIN_RECEIVER_VERIFY_BYTES_PER_SECOND = 8 * 1024 * 1024;
+// While a received file is verified the receiver re-sends that transfer's
+// ordinary receipt at most once per this interval, and only when the worker's
+// hashed byte count advanced since the receipt it last sent, so a stuck
+// verification goes silent and the sender's silence bound ends its wait. A
+// third of that bound leaves room for one late report. The worker reports at
+// least this often while its reads finish.
+export const RECEIVE_VERIFY_RECEIPT_INTERVAL_MS = RECEIVER_SILENCE_LIMIT_MS / 3;
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

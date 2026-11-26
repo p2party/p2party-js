@@ -697,6 +697,20 @@ export class CarrierRuntime {
     event: ScheduledEvent,
   ): Promise<void> {
     if (!this.#running) return;
+    // A suspended browser can deliver an already armed callback long after
+    // its window. Arming the next event skips intervening slots, but does not
+    // make this old callback timely. Do not start a handler whose callback
+    // already exceeds the skew budget; the next on-grid event is armed. This
+    // bounds handler entry, not dispatch after awaited cryptographic work.
+    if (this.#clock.nowMs() > event.timeMs + this.#profile.maxScheduleSkewMs) {
+      this.#emit({
+        kind: "missed",
+        storeIdHex: state.store.storeIdHex,
+        window: event.window,
+        detail: "the scheduled event exceeded its timer skew budget",
+      });
+      return;
+    }
     switch (event.kindByte) {
       case EVENT_TOKEN:
         return this.#issueToken(state, event.window + 1n);
@@ -856,12 +870,17 @@ export class CarrierRuntime {
       });
       return;
     }
-    if (entry === null || held === null) return;
+    if (held === null) return;
 
-    entry.targets.delete(storeIdHex);
-    if (entry.targets.size === 0) this.#dropEntry(entry);
+    if (entry !== null) {
+      entry.targets.delete(storeIdHex);
+      if (entry.targets.size === 0) this.#dropEntry(entry);
+    }
     // The receipt is the whole input to the custody check the next scan runs:
     // the store has now signed that these exact bytes are in this exact slot.
+    // A stored cover object carries the same promise as a real operation.
+    // Tracking both keeps hashing, receipt occupancy and omission detection
+    // independent of whether this scheduled upload contained room work.
     state.store.recordReceipt({
       window,
       sizeClass: sizeClass.id,

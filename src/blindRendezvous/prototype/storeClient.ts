@@ -1661,14 +1661,19 @@ export class PrototypeStoreClient {
     window: bigint,
     chunksByClass: ReadonlyMap<number, readonly PublicChunkV1[]>,
   ): Promise<void> {
-    const remaining: AppendReceipt[] = [];
-    for (const receipt of this.#receipts) {
-      if (receipt.window !== window) {
-        remaining.push(receipt);
-        continue;
-      }
-      // Only a promise of custody can be breached: a refused or cover append
-      // committed the store to nothing.
+    // Claim this window's receipts before the first await. Other window scans
+    // and newly arriving append acknowledgements may run while hashing; none
+    // may restore consumed receipts or overwrite additions to the live queue.
+    const receipts = this.#receipts.filter(
+      (receipt) => receipt.window === window,
+    );
+    this.#receipts = this.#receipts.filter(
+      (receipt) => receipt.window !== window,
+    );
+    for (const receipt of receipts) {
+      // Only a promise of custody can be breached: a refused or unallocated
+      // append committed the store to nothing. Allocated client cover that
+      // received `stored` carries exactly the same promise as real data.
       if (
         receipt.result.status !== "stored" &&
         receipt.result.status !== "already-present"
@@ -1704,7 +1709,6 @@ export class PrototypeStoreClient {
           undefined,
         );
     }
-    this.#receipts = remaining;
   }
 
   /** `IngressWindowStart(w) + chunkFinalizationOffsetMs`. */

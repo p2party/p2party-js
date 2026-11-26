@@ -60,6 +60,12 @@ const TAG_APP = 1;
 
 const SHA256_FINGERPRINT_BYTES = 32;
 
+// A remote endpoint may speak before local certificate verification or session
+// startup completes. Retain that traffic, but cap both bytes and tiny frames.
+const MAX_QUEUED_BYTES = 16 * 1024 * 1024;
+const MAX_QUEUED_FRAMES = 1024;
+const channelTransports = new WeakMap<RTCDataChannel, DataChannelTransport>();
+
 const utf8Encoder = new TextEncoder();
 /** Fatal: silently substituting U+FFFD would change the bytes the peer signed. */
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -179,7 +185,10 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
       this.peerConnection.ondatachannel = (event: RTCDataChannelEvent) => {
         // First channel wins: the pair exchange negotiates exactly one edge,
         // and a second inbound channel would race the first for the handshake.
-        if (this.#channel) return;
+        if (this.#channel || this.#closed) {
+          event.channel.close();
+          return;
+        }
         this.#adopt(event.channel);
       };
     }
@@ -187,6 +196,10 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
 
   #adopt(channel: RTCDataChannel): void {
     channel.binaryType = "arraybuffer";
+    // Capture messages immediately. The peer can finish getStats() and send
+    // its HELLO before this endpoint has even entered certificate verification.
+    // Buffering bytes does not authenticate them or start a session.
+    dataChannelTransport(channel);
     this.#channel = channel;
     const waiters = this.#channelWaiters.splice(0);
     for (const waiter of waiters) waiter.resolve(channel);
@@ -200,16 +213,12 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
    * The one bootstrap data channel of this edge: for the initiator the channel
    * it created in the constructor (resolved immediately, before it opens); for
    * the responder the channel `ondatachannel` delivers. Rejects if the provider
-   * is closed before a channel exists. The caller waits for `readyState`.
+   * is closed. The caller waits for `readyState`.
    */
   channel(): Promise<RTCDataChannel> {
-    if (this.#channel) return Promise.resolve(this.#channel);
     if (this.#closed)
-      return Promise.reject(
-        new WebRtcProviderError(
-          "provider closed before a data channel arrived",
-        ),
-      );
+      return Promise.reject(new WebRtcProviderError("provider is closed"));
+    if (this.#channel) return Promise.resolve(this.#channel);
     return new Promise<RTCDataChannel>((resolve, reject) => {
       this.#channelWaiters.push({ resolve, reject });
     });
@@ -369,8 +378,10 @@ export class WebRtcCandidateProvider implements TransportCandidateProvider {
         ),
       );
 
-    if (this.#channel && this.#channel.readyState !== "closed")
-      this.#channel.close();
+    // RTCDataChannel.close() may deliver its close event later. Reject pending
+    // receives and discard buffered pre-verification bytes synchronously.
+    if (this.#channel) dataChannelTransport(this.#channel).close();
+    this.peerConnection.ondatachannel = null;
     this.peerConnection.close();
   }
 
@@ -459,18 +470,25 @@ interface Lane {
  * Anything that arrives with no waiter is queued, and waiters are served FIFO.
  * A close — of the channel, or through this transport's own `close()` — rejects
  * every pending receive with a `WebRtcProviderError` instead of leaving it
- * pending, so a handshake whose peer went away surfaces as a failure rather
- * than hanging forever. Bytes that already arrived are still drained after a
- * close; only the waiting stops.
+ * pending. Failure discards queued bytes, so shutdown cannot later continue a
+ * handshake from stale input. The combined queues are capped at 16 MiB and
+ * 1,024 frames. A peer exceeding either budget closes the channel.
+ *
+ * A channel has exactly one transport. The provider installs it at channel
+ * adoption; later callers receive that same transport and its buffered bytes.
  */
 export const dataChannelTransport = (
   channel: RTCDataChannel,
 ): DataChannelTransport => {
+  const existing = channelTransports.get(channel);
+  if (existing) return existing;
   channel.binaryType = "arraybuffer";
 
   const control: Lane = { queue: [], waiters: [] };
   const app: Lane = { queue: [], waiters: [] };
   let failure: WebRtcProviderError | null = null;
+  let queuedBytes = 0;
+  let queuedFrames = 0;
 
   const fail = (error: WebRtcProviderError): void => {
     if (failure) return;
@@ -479,15 +497,33 @@ export const dataChannelTransport = (
     channel.removeEventListener("close", onClose);
     channel.removeEventListener("error", onError);
     for (const lane of [control, app]) {
+      lane.queue.length = 0;
       const waiters = lane.waiters.splice(0);
       for (const waiter of waiters) waiter.reject(error);
     }
+    queuedBytes = 0;
+    queuedFrames = 0;
+    if (channel.readyState !== "closed" && channel.readyState !== "closing")
+      channel.close();
   };
 
   const deliver = (lane: Lane, payload: Uint8Array): void => {
     const waiter = lane.waiters.shift();
     if (waiter) waiter.resolve(payload);
-    else lane.queue.push(payload);
+    else {
+      if (
+        queuedBytes + payload.length > MAX_QUEUED_BYTES ||
+        queuedFrames >= MAX_QUEUED_FRAMES
+      ) {
+        fail(
+          new WebRtcProviderError("data channel receive queue budget exceeded"),
+        );
+        return;
+      }
+      lane.queue.push(payload);
+      queuedBytes += payload.length;
+      queuedFrames += 1;
+    }
   };
 
   const onMessage = (event: MessageEvent): void => {
@@ -502,6 +538,14 @@ export const dataChannelTransport = (
     const bytes = new Uint8Array(event.data);
     if (bytes.length === 0) {
       fail(new WebRtcProviderError("data channel delivered an empty frame"));
+      return;
+    }
+    if (bytes.length - 1 > MAX_QUEUED_BYTES) {
+      fail(
+        new WebRtcProviderError(
+          "data channel frame exceeds the receive byte budget",
+        ),
+      );
       return;
     }
     const payload = bytes.slice(1);
@@ -525,6 +569,8 @@ export const dataChannelTransport = (
   channel.addEventListener("message", onMessage);
   channel.addEventListener("close", onClose);
   channel.addEventListener("error", onError);
+  if (channel.readyState === "closed" || channel.readyState === "closing")
+    fail(new WebRtcProviderError("data channel already closed"));
 
   const sendTagged = (tag: number, bytes: Uint8Array): void => {
     if (failure) throw failure;
@@ -540,22 +586,26 @@ export const dataChannelTransport = (
 
   const receive = (lane: Lane): Promise<Uint8Array> => {
     const queued = lane.queue.shift();
-    if (queued) return Promise.resolve(queued);
+    if (queued) {
+      queuedBytes -= queued.length;
+      queuedFrames -= 1;
+      return Promise.resolve(queued);
+    }
     if (failure) return Promise.reject(failure);
     return new Promise<Uint8Array>((resolve, reject) => {
       lane.waiters.push({ resolve, reject });
     });
   };
 
-  return {
+  const transport: DataChannelTransport = {
     send: (bytes: Uint8Array): void => sendTagged(TAG_CONTROL, bytes),
     recv: (): Promise<Uint8Array> => receive(control),
     sendApp: (bytes: Uint8Array): void => sendTagged(TAG_APP, bytes),
     recvApp: (): Promise<Uint8Array> => receive(app),
     close: (): void => {
       fail(new WebRtcProviderError("transport closed"));
-      if (channel.readyState !== "closed" && channel.readyState !== "closing")
-        channel.close();
     },
   };
+  channelTransports.set(channel, transport);
+  return transport;
 };

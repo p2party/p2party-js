@@ -836,6 +836,57 @@ const W2 = CHAIN_START + 2n;
 const W3 = CHAIN_START + 3n;
 
 describe("prototype carrier runtime", () => {
+  test.each([false, true])(
+    "checks every single-store custody promise, including cover (real operation: %s)",
+    async (publishReal) => {
+      const world = await createWorld({ faults: ["withhold", null] });
+      try {
+        const capability = new Uint8Array(32).fill(0x18);
+        const room = await makeRoom(capability, START_MS);
+        const carrier = await addCarrier(world, room, [0]);
+        const presence = await presenceFor(capability, world.scheduler);
+        await world.advance(windowStartMs(W1));
+        if (publishReal) carrier.runtime.publish(presence, "PRESENCE");
+        await world.advance(
+          windowStartMs(W2) + profile.publicReadOffsetMs + 1n,
+        );
+
+        // The store promised to retain every allocated append, then finalized
+        // different bytes. A promise about client cover is equally binding.
+        const breaches = carrier.runtime.faults.filter(
+          (fault) => fault.kind === "custody-breach" && fault.window === W1,
+        );
+        expect(breaches).toHaveLength(APPENDS_PER_WINDOW);
+        expect(carrier.clients[0].inert).toBe(true);
+        expect(carrier.runtime.storeTopology).toBe("no-usable-carrier");
+        expect(carrier.received).toEqual([]);
+        expect(carrier.runtime.counters.appendsReal).toBe(publishReal ? 1 : 0);
+
+        // Blaming a store must not suppress the remaining public schedule.
+        await world.advance(windowStartMs(W3) - 1n);
+        expect(
+          windowShape(
+            world.transports[0],
+            windowStartMs(W2),
+            windowStartMs(W3),
+          ),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+        expect(
+          countRequests(
+            world.transports[0],
+            windowStartMs(W1),
+            windowStartMs(W3),
+            "POST",
+            PROTOTYPE_STORE_ROUTES.witness,
+          ),
+        ).toBe(0);
+      } finally {
+        world.stop();
+      }
+    },
+    180_000,
+  );
+
   test("runs the profile's fixed schedule against both stores on an empty outbox", async () => {
     const world = await createWorld();
     try {

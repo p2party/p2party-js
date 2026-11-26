@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import libcrypto from "../../../src/cryptography/libcrypto";
 import { newKeyPair, sign, verify } from "../../../src/cryptography/ed25519";
@@ -25,11 +27,14 @@ import {
   PrototypeStoreCore,
   StoreConfigurationError,
   StoreRequestError,
+  type PrototypeStoreCoreOptions,
 } from "../../../src/blindRendezvous/prototype/store/storeCore";
 import {
   MemoryStorePersistence,
   emptyStoreWindowState,
+  copyStoreWindowState,
 } from "../../../src/blindRendezvous/prototype/store/storePersistence";
+import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
 import {
   encodePrototypeStoreDescriptorDocumentV1,
   encodePublicAllocationResultV1,
@@ -57,6 +62,10 @@ import type {
   PublicStoreCheckpointV1,
 } from "../../../src/blindRendezvous/publicWindow";
 import type { LibCrypto } from "../../../src/cryptography/libcrypto";
+import type {
+  StorePersistencePort,
+  StoreWindowState,
+} from "../../../src/blindRendezvous/prototype/store/storePersistence";
 
 const hex = (value: Uint8Array): string =>
   [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -93,17 +102,18 @@ const CLASS_0_OBJECT_BYTES = carrierObjectWireBytes(profile, 0, PROFILE_HASH);
 
 interface Harness {
   readonly core: PrototypeStoreCore;
-  readonly persistence: MemoryStorePersistence;
+  readonly persistence: StorePersistencePort;
   readonly setNow: (ms: bigint) => void;
 }
 
 const harness = async (
   options: {
     fault?: "withhold" | null;
-    persistence?: MemoryStorePersistence;
+    persistence?: StorePersistencePort;
     now?: bigint;
     chainStart?: bigint;
     seed?: Uint8Array;
+    allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
   } = {},
 ): Promise<Harness> => {
   let now = options.now ?? WINDOW_START;
@@ -118,6 +128,7 @@ const harness = async (
     origin: "http://127.0.0.1:5910",
     descriptorValidityMs: 2_592_000_000n,
     fault: options.fault ?? null,
+    allocationAdmission: options.allocationAdmission,
   });
   return {
     core,
@@ -237,6 +248,223 @@ const bucketOf = (window: bigint, sizeClass: number): PublicBucketV1 => ({
   deliveryProfileHash: PROFILE_HASH,
   ingressWindow: window,
   sizeClass,
+});
+
+describe("prototype store optional allocation admission", () => {
+  const grant = new Uint8Array(32).fill(0x72);
+  const requestWith = (
+    key: number,
+    token = key,
+    window = CHAIN_START,
+  ): PublicAllocationRequestV1 => ({
+    ...allocationRequest(new Uint8Array(32).fill(key), window),
+    privacyPassToken: new Uint8Array(32).fill(token),
+  });
+  const quota = { authorize: (): Uint8Array => grant };
+
+  test("a grant gets one lease per window despite changing tokens or public keys", async () => {
+    const { core, persistence } = await harness({ allocationAdmission: quota });
+    const request = requestWith(1);
+    const first = await core.allocate(request);
+    expect(first.kind).toBe("allocated");
+    expect(
+      encodePublicAllocationResultV1(await core.allocate(request)),
+    ).toEqual(encodePublicAllocationResultV1(first));
+    for (const varied of [
+      requestWith(1, 2),
+      requestWith(2, 1),
+      requestWith(2, 2),
+    ]) {
+      const result = await core.allocate(varied);
+      if (result.kind !== "status") throw new Error("expected quota refusal");
+      expect(result.value.status).toBe("invalid-token");
+    }
+    expect((await persistence.loadWindow(CHAIN_START))?.allocations.size).toBe(
+      1,
+    );
+    expect(
+      (await core.allocate(requestWith(2, 2, CHAIN_START + 1n))).kind,
+    ).toBe("allocated");
+  });
+
+  test("concurrent variants consume one grant once and exact retries still succeed at capacity", async () => {
+    const { core } = await harness({ allocationAdmission: quota });
+    const outcomes = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => core.allocate(requestWith(i + 1))),
+    );
+    expect(
+      outcomes.filter((result) => result.kind === "allocated"),
+    ).toHaveLength(1);
+    expect(
+      outcomes.filter(
+        (result) =>
+          result.kind === "status" && result.value.status === "invalid-token",
+      ),
+    ).toHaveLength(11);
+
+    const full = await harness({
+      allocationAdmission: { authorize: (request) => request.privacyPassToken },
+    });
+    const requests = Array.from(
+      { length: profile.cohortAllocationsPerWindow },
+      (_, i) => requestWith(i + 1),
+    );
+    const leases = await Promise.all(
+      requests.map((request) => full.core.allocate(request)),
+    );
+    expect(leases.every((result) => result.kind === "allocated")).toBe(true);
+    expect(
+      encodePublicAllocationResultV1(await full.core.allocate(requests[0])),
+    ).toEqual(encodePublicAllocationResultV1(leases[0]));
+    const refused = await full.core.allocate(requestWith(99));
+    if (refused.kind !== "status") throw new Error("expected full store");
+    expect(refused.value.status).toBe("capacity-exhausted");
+  });
+
+  test("authorization fails closed and is checked before an exact retry", async () => {
+    let accepted = true;
+    const { core } = await harness({
+      allocationAdmission: { authorize: () => (accepted ? grant : null) },
+    });
+    const request = requestWith(1);
+    expect((await core.allocate(request)).kind).toBe("allocated");
+    accepted = false;
+    const revoked = await core.allocate(request);
+    if (revoked.kind !== "status")
+      throw new Error("expected authorization refusal");
+    expect(revoked.value.status).toBe("invalid-token");
+    for (const authorize of [
+      () => null,
+      () => new Uint8Array(31),
+      () => {
+        throw new Error("invalid grant");
+      },
+    ]) {
+      const invalid = await harness({ allocationAdmission: { authorize } });
+      const result = await invalid.core.allocate(request);
+      if (result.kind !== "status")
+        throw new Error("expected invalid admission");
+      expect(result.value.status).toBe("invalid-token");
+      expect(await invalid.persistence.loadWindow(CHAIN_START)).toBeNull();
+    }
+  });
+
+  test("profile and window refusals happen before invoking the authorizer", async () => {
+    let calls = 0;
+    const { core, setNow } = await harness({
+      allocationAdmission: {
+        authorize: () => {
+          calls += 1;
+          return grant;
+        },
+      },
+    });
+    await core.allocate({
+      ...requestWith(1),
+      deliveryProfileHash: OTHER_PROFILE_HASH,
+    });
+    await core.allocate(requestWith(1, 1, CHAIN_START - 1n));
+    await core.allocate(
+      requestWith(
+        1,
+        1,
+        CHAIN_START + BigInt(profile.maxFutureIngressWindows) + 1n,
+      ),
+    );
+    setNow(FINALIZE_AT);
+    await core.allocate(requestWith(1));
+    expect(calls).toBe(0);
+  });
+
+  test("admission boundaries copy callback inputs and the retained quota key", async () => {
+    const returned = Uint8Array.from(grant);
+    const { core, persistence } = await harness({
+      allocationAdmission: {
+        authorize: (request) => {
+          request.allocationEd25519PublicKey.fill(0xff);
+          request.deliveryProfileHash.fill(0xff);
+          request.privacyPassToken.fill(0xff);
+          return returned;
+        },
+      },
+    });
+    const request = requestWith(1);
+    const result = await core.allocate(request);
+    if (result.kind !== "allocated") throw new Error("expected admission");
+    expect(result.lease.allocationEd25519PublicKey).toEqual(
+      request.allocationEd25519PublicKey,
+    );
+    expect(result.lease.deliveryProfileHash).toEqual(PROFILE_HASH);
+    returned.fill(0xff);
+    const loaded = await persistence.loadWindow(CHAIN_START);
+    expect(loaded?.allocations.get(0)?.admissionQuotaKey32).toEqual(grant);
+    loaded?.allocations.get(0)?.admissionQuotaKey32?.fill(0);
+    expect(
+      (await persistence.loadWindow(CHAIN_START))?.allocations.get(0)
+        ?.admissionQuotaKey32,
+    ).toEqual(grant);
+  });
+
+  test("failed persistence cannot consume a grant in a cached loaded window", async () => {
+    class FailingCache extends MemoryStorePersistence {
+      cached = emptyStoreWindowState(CHAIN_START);
+      rejectSave = true;
+      override async loadWindow(): Promise<StoreWindowState> {
+        return this.cached;
+      }
+      override async saveWindow(state: StoreWindowState): Promise<void> {
+        if (this.rejectSave) throw new Error("injected saveWindow failure");
+        this.cached = copyStoreWindowState(state);
+      }
+    }
+    const persistence = new FailingCache();
+    const { core } = await harness({ persistence, allocationAdmission: quota });
+    await expect(core.allocate(requestWith(1))).rejects.toThrow(
+      "injected saveWindow failure",
+    );
+    expect(persistence.cached.allocations.size).toBe(0);
+    persistence.rejectSave = false;
+    const retried = await core.allocate(requestWith(2));
+    if (retried.kind !== "allocated")
+      throw new Error("failed write consumed grant");
+    expect(retried.lease.allocationOrdinal).toBe(0);
+    expect(persistence.cached.allocations.size).toBe(1);
+  });
+
+  test("SQLite restart preserves quota enforcement and byte-identical retry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "p2party-admission-restart-"));
+    const path = join(root, "store.sqlite");
+    let db = new SqliteStorePersistence(path);
+    try {
+      const first = await harness({
+        persistence: db,
+        allocationAdmission: quota,
+      });
+      const request = requestWith(1);
+      const original = await first.core.allocate(request);
+      expect(original.kind).toBe("allocated");
+      db.close();
+      db = new SqliteStorePersistence(path);
+      const restarted = await harness({
+        persistence: db,
+        allocationAdmission: quota,
+      });
+      expect(
+        encodePublicAllocationResultV1(await restarted.core.allocate(request)),
+      ).toEqual(encodePublicAllocationResultV1(original));
+      const reused = await restarted.core.allocate(requestWith(2, 3));
+      if (reused.kind !== "status")
+        throw new Error("restart forgot grant quota");
+      expect(reused.value.status).toBe("invalid-token");
+      expect(
+        (await db.loadWindow(CHAIN_START))?.allocations.get(0)
+          ?.admissionQuotaKey32,
+      ).toEqual(grant);
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("prototype store allocation", () => {

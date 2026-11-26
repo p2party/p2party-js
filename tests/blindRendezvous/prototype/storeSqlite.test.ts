@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,7 +192,84 @@ const fingerprint = (state: StoreWindowState): string =>
           },
   });
 
+const withRawDatabase = <T>(path: string, body: (db: Database) => T): T => {
+  const db = new Database(path, { readwrite: true, safeIntegers: true });
+  try {
+    return body(db);
+  } finally {
+    db.close();
+  }
+};
+
+const storedDocument = (
+  path: string,
+  window: bigint,
+): { allocations: { admissionQuotaKey32?: unknown }[] } =>
+  withRawDatabase(path, (db) => {
+    const row = db
+      .query<{ state: Uint8Array }, [bigint]>(
+        'SELECT state FROM "window" WHERE "window" = ?',
+      )
+      .get(window);
+    if (row === null) throw new Error(`no row for window ${String(window)}`);
+    return JSON.parse(new TextDecoder().decode(row.state)) as {
+      allocations: { admissionQuotaKey32?: unknown }[];
+    };
+  });
+
 describe("prototype store SQLite persistence", () => {
+  test("optional admission quota keys are copied across both persistence boundaries", async () => {
+    const path = databasePath();
+    const db = new SqliteStorePersistence(path);
+    try {
+      const state = unfinalizedState(425_000_000n);
+      const key = filled(32, 0xe3);
+      const allocation = state.allocations.get(0);
+      if (!allocation) throw new Error("missing allocation fixture");
+      allocation.admissionQuotaKey32 = key;
+      await db.saveWindow(state);
+      key.fill(0);
+      const loaded = await db.loadWindow(state.window);
+      expect(loaded?.allocations.get(0)?.admissionQuotaKey32).toEqual(
+        filled(32, 0xe3),
+      );
+      expect(loaded?.allocations.get(3)?.admissionQuotaKey32).toBeUndefined();
+      loaded?.allocations.get(0)?.admissionQuotaKey32?.fill(0xff);
+      expect(
+        (await db.loadWindow(state.window))?.allocations.get(0)
+          ?.admissionQuotaKey32,
+      ).toEqual(filled(32, 0xe3));
+    } finally {
+      db.close();
+    }
+  });
+
+  test.each([null, 7, "a".repeat(62), "A".repeat(64), "z".repeat(64)])(
+    "refuses a malformed stored admission quota key: %s",
+    async (invalid) => {
+      const path = databasePath();
+      const db = new SqliteStorePersistence(path);
+      const window = 425_000_000n;
+      try {
+        await db.saveWindow(unfinalizedState(window));
+        const document = storedDocument(path, window);
+        document.allocations[0].admissionQuotaKey32 = invalid;
+        withRawDatabase(path, (raw) => {
+          raw
+            .query<unknown, [Uint8Array, bigint]>(
+              'UPDATE "window" SET state = ? WHERE "window" = ?',
+            )
+            .run(new TextEncoder().encode(JSON.stringify(document)), window);
+        });
+        await expect(db.loadWindow(window)).rejects.toThrow(
+          "admission quota key",
+        );
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   test("round-trips an unfinalized window across a reopen", async () => {
     const path = databasePath();
     const state = unfinalizedState(425_000_000n);

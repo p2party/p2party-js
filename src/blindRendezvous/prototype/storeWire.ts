@@ -1,5 +1,5 @@
 /**
- * Typed encode/decode wrappers for the prototype-v0 store wire.
+ * Typed encode/decode wrappers for the prototype-v1 store wire.
  *
  * The descriptors in `schemas.ts` are the only authority for these bytes;
  * this module is a projection of them, exactly as `projections.ts` is for the
@@ -11,7 +11,7 @@
  * input, and re-encoding proves the bytes are the unique encoding of the value
  * before a signature is checked over them.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry, and nothing here is a v0.4 release artifact.
  */
 

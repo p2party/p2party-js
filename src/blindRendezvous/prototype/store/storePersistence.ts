@@ -20,7 +20,7 @@
  * per-key counts that bound them, so the retention sweep removes a window's
  * bookkeeping by removing the window.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry.
  */
 

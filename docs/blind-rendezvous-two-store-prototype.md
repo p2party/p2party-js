@@ -43,7 +43,7 @@ spec's *bounded measured public-store source unlinkability* package; not its
 `conformant`. It is likewise not the `v0.4` release surface: the specification
 says implementations "shall not independently invent release bytes and call
 them v0.4", so every route path and every media type in this prototype says
-`prototype-v0` instead. Those bytes are not interoperable with the frozen §4.6
+`prototype-v1` instead. Those bytes are not interoperable with the frozen §4.6
 route family and are not a proposal for it.
 
 **Admission is open, and allocation is open.** The specification's admission
@@ -169,7 +169,7 @@ that already existed in `src/blindRendezvous/`.
 | --- | --- |
 | `profile.ts` | `PROTOTYPE_DELIVERY_PROFILE_V0`, the wire constants, `validateDeliveryProfileGeometry` (every inequality of the spec's §4.3 arithmetic), and `withDeliveryWindowMs`. |
 | `storeWire.ts` | Typed encode/decode wrappers over the `schemas.ts` descriptors — a projection, never a second authority for a wire field. Every decoder is strict-canonical. |
-| `storeRoutes.ts` | The `prototype-v0` route table and media types, shared by the browser client and the server. |
+| `storeRoutes.ts` | The `prototype-v1` route table and media types, shared by the browser client and the server. |
 | `store/storeCore.ts` | The pure per-window machine: allocation, append slot binding, finalization with CSPRNG dummies, the signed chunk chain and the checkpoint chain. |
 | `store/storePersistence.ts`, `store/storeSqlite.ts` | The persistence port and its `bun:sqlite` implementation; a restarted store re-serves byte-identical signed objects. |
 | `store/storeHttp.ts` | The `Bun.serve` handler, the constant-shaped refusals, CORS for a cross-origin page, and the optional body log. |
@@ -764,7 +764,9 @@ traffic at all was measured at **2,763,134 bytes of state per finalized
 window** — seven consecutive all-dummy windows, every row byte-identical in
 size, 19,390,464 bytes of SQLite file for the seven. At the pinned 4,000 ms
 window that is 21,600 windows a day, so **about 59.7 GB per store per day, with
-no retention sweep to stop it**. §9 says what a next stage owes here.
+no retention sweep to stop it**. The precomputed response rows (§6) add
+1,377,756 bytes per window on top, the window's finalized objects held a second
+time. §9 says what a next stage owes here.
 
 | Variable | Meaning |
 | --- | --- |
@@ -828,7 +830,7 @@ the demonstration does not run at all.
   store answers with `access-control-allow-origin: *`,
   `access-control-expose-headers: x-p2party-store` (the client refuses any answer
   without that header, and it is not CORS-safelisted), and a 204 preflight for
-  the `application/p2party-*-prototype-v0` request media types. Without those, no
+  the `application/p2party-*-prototype-v1` request media types. Without those, no
   browser reaches a store at all.
 
 ### One caveat about the harness itself
@@ -892,7 +894,7 @@ could be mistaken for implemented.
   the claim and formal registries, the HTTP protocol, the default profile,
   planner and resource values, the allocation scheme, and the compatibility hash.
   Until those are frozen and vector-tested, nothing here is wire-interoperable
-  with anything, and the `prototype-v0` bytes exist precisely so that they cannot
+  with anything, and the `prototype-v1` bytes exist precisely so that they cannot
   be mistaken for the frozen family.
 
 Two smaller items are worth recording because they are cheap and were left

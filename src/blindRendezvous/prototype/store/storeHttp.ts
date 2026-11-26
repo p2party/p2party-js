@@ -27,13 +27,21 @@
  *   a witness offer the store did not record is `409 not recorded`, and an
  *   allocation or append arriving while the mutation queue is full is
  *   `503 busy`, answered before its body is read.
+ * - **Another version is refused as such.** A request for a path of another
+ *   version of this family (another `prototype-vN` route prefix or descriptor
+ *   path) answers `426` naming this store's version, in the
+ *   `x-p2party-store` header every answer carries and in `upgrade`, before
+ *   anything of it is read. A client of the previous version, which takes
+ *   any status but 200 on its descriptor read as a refusal, stops at
+ *   `connect`; this version's client reads the header and throws
+ *   `StoreVersionError`.
  * - **Only immutable things are cacheable.** A finalized chunk or checkpoint
  *   can never be re-signed, so it gets a year of `immutable`. Everything else
  *   — the descriptor, every status, health — is `no-store`.
  *
  * Configuration lives in `storeServer.ts`; this file reads no environment.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry.
  */
 
@@ -41,7 +49,11 @@ import { appendFileSync } from "node:fs";
 
 import { PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES } from "../../../utils/constants";
 import { CanonicalSchemaError } from "../../canonicalSchema";
-import { PROTOTYPE_ROUTE_PREFIX, PROTOTYPE_STORE_PROTOCOL } from "../profile";
+import {
+  PROTOTYPE_ANY_VERSION_PATH,
+  PROTOTYPE_ROUTE_PREFIX,
+  PROTOTYPE_STORE_PROTOCOL,
+} from "../profile";
 import {
   PROTOTYPE_STORE_MEDIA_TYPES,
   PROTOTYPE_STORE_ROUTES,
@@ -201,7 +213,7 @@ const headersFor = (
 /**
  * The preflight every POST in this family triggers.
  *
- * The request media types are `application/p2party-*-prototype-v0`, which is
+ * The request media types are `application/p2party-*-prototype-v1`, which is
  * not a CORS-safelisted `content-type`, so a browser sends `OPTIONS` first and
  * never sends the POST at all if it is refused. It answers with no body and
  * says nothing about whether the path it names exists: a preflight that
@@ -241,6 +253,14 @@ const refused = (): Response => textResponse(403, "refused");
 const notFound = (): Response => textResponse(404, "not found");
 const notRecorded = (): Response => textResponse(409, "not recorded");
 const busy = (): Response => textResponse(503, "busy");
+const versionRefused = (): Response =>
+  new Response(`this store speaks ${PROTOTYPE_STORE_PROTOCOL}`, {
+    status: 426,
+    headers: {
+      ...headersFor(PLAIN_TEXT, NO_STORE),
+      upgrade: PROTOTYPE_STORE_PROTOCOL,
+    },
+  });
 const internalError = (): Response => textResponse(500, "error");
 
 /** One spelling: the scheme as written, one space, the token in lowercase hex. */
@@ -468,7 +488,11 @@ export const createPrototypeStoreHandler = (
         if (path === PROTOTYPE_STORE_ROUTES.health) return health();
         if (path === PROTOTYPE_STORE_ROUTES.descriptor) return descriptor();
       }
-      if (!path.startsWith(ROUTE_PREFIX)) return notFound();
+      if (!path.startsWith(ROUTE_PREFIX))
+        return PROTOTYPE_ANY_VERSION_PATH.test(path) &&
+          path !== PROTOTYPE_STORE_ROUTES.descriptor
+          ? versionRefused()
+          : notFound();
       const segments = path.slice(ROUTE_PREFIX.length).split("/");
       const kind = segments[0];
       const rest = segments.slice(1);

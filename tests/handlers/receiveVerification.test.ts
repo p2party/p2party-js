@@ -30,6 +30,9 @@ import {
   DECRYPTED_LEN,
   METADATA_LEN,
   PROOF_LEN,
+  RECEIVE_VERIFY_BATCH_CHUNKS,
+  RECEIVE_VERIFY_PROGRESS_BYTES,
+  RECEIVER_SILENCE_LIMIT_MS,
 } from "../../src/utils/constants";
 
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
@@ -40,6 +43,7 @@ import type {
   IRTCPeerConnection,
 } from "../../src/api/webrtc/interfaces";
 import type {
+  HeldFileProgressNotice,
   HeldFileSettledNotice,
   MessageData,
   ReceiveChunk,
@@ -48,6 +52,11 @@ import type {
   ReceiveVerificationVerdict,
 } from "../../src/db/types";
 import type { ReceiveStorageError } from "../../src/handlers/handleReceiveMessage";
+import type { CoverRuntime } from "../../src/handlers/coverRuntime";
+import type { CoverJob, CoverJobSlot } from "../../src/handlers/coverScheduler";
+import type { CoverCellContent } from "../../src/cryptography/coverCell";
+import type { TransferWaitClock } from "../../src/handlers/reconcile";
+import type { TransferFrameSource } from "../../src/handlers/handleSendMessage";
 
 // Process-wide state this file changes, restored in afterAll so the rest of
 // the run sees what it saw before.
@@ -92,6 +101,16 @@ const { sealChunkClassicalOnlyForTests } =
   await import("../../src/handlers/messageChunkCrypto");
 const { onReceiveStorageError } =
   await import("../../src/handlers/handleReceiveMessage");
+const { releaseScheduledReceipts } =
+  await import("../../src/handlers/coverTransfer");
+const { waitForScheduledVerifiedDelivery, waitForVerifiedDelivery } =
+  await import("../../src/handlers/handleSendMessage");
+const {
+  clearTransfer,
+  markTransferComplete,
+  noteTransferActivity,
+  reportedCompletionCapMs,
+} = await import("../../src/handlers/reconcile");
 
 const ROOM = "00000000-0000-4000-8000-0000000000a6";
 const PEER = "00000000-0000-4000-8000-0000000000a7";
@@ -119,6 +138,20 @@ interface WorkerResponse {
 let nextId = 1;
 const pendingReplies = new Map<number, (reply: WorkerResponse) => void>();
 const notices: HeldFileSettledNotice[] = [];
+// Progress reports the worker posts while it verifies, delivered to the queue
+// through its onVerificationProgress seam; a test may also post its own.
+const progressListeners = new Set<(notice: HeldFileProgressNotice) => void>();
+const reportProgress = (notice: HeldFileProgressNotice): void => {
+  for (const listener of [...progressListeners]) listener(notice);
+};
+const onVerificationProgress = (
+  listener: (notice: HeldFileProgressNotice) => void,
+) => {
+  progressListeners.add(listener);
+  return () => {
+    progressListeners.delete(listener);
+  };
+};
 const callWorker = async (
   method: string,
   args: unknown[],
@@ -126,9 +159,16 @@ const callWorker = async (
   await import("../../src/db/db.worker");
   (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
     (message: unknown) => {
-      const { notice } = message as { notice?: HeldFileSettledNotice };
+      const { notice, progress } = message as {
+        notice?: HeldFileSettledNotice;
+        progress?: HeldFileProgressNotice;
+      };
       if (notice) {
         notices.push(structuredClone(notice));
+        return;
+      }
+      if (progress) {
+        reportProgress(structuredClone(progress));
         return;
       }
       const reply = structuredClone(message) as WorkerResponse;
@@ -179,6 +219,7 @@ const storage = () => {
     outcomes,
     verifications: () => verifications,
     dependencies: {
+      onVerificationProgress,
       persistRatchetState: async () => undefined,
       storeReceiveChunk: async (chunk: ReceiveChunk) =>
         (await callWorker("storeReceiveChunk", [
@@ -285,7 +326,7 @@ const buildMessage = async (
   };
 };
 
-const channel = () => {
+const channel = (onSend?: (frameHex: string) => void) => {
   const sent: string[] = [];
   return {
     sent,
@@ -293,8 +334,11 @@ const channel = () => {
       label: "a6",
       readyState: "open",
       bufferedAmount: 0,
-      send: (data: ArrayBuffer) =>
-        sent.push(uint8ArrayToHex(new Uint8Array(data).subarray(1))),
+      send: (data: ArrayBuffer) => {
+        const frame = uint8ArrayToHex(new Uint8Array(data).subarray(1));
+        sent.push(frame);
+        onSend?.(frame);
+      },
     } as unknown as IRTCDataChannel,
   };
 };
@@ -338,11 +382,12 @@ const lane = (
   epc: IRTCPeerConnection,
   dependencies: ReturnType<typeof storage>["dependencies"],
   signal?: AbortSignal,
+  onSend?: (frameHex: string) => void,
 ) => {
   const queue: Uint8Array[] = [];
   const seen = new Set<string>();
   const draining = { value: false };
-  const wire = channel();
+  const wire = channel(onSend);
   return {
     sent: wire.sent,
     push: (frame: Uint8Array) =>
@@ -664,4 +709,398 @@ describe("a received file is verified outside the edge's receive lock", () => {
     await waitFor(() => errors.length === 1);
     expect(errors.map((error) => error.code)).toEqual(["storage-failed"]);
   });
+
+  test("the receiver re-sends its receipt on verification progress", async () => {
+    // Just over RECEIVE_VERIFY_PROGRESS_BYTES of real bytes: the worker reports
+    // progress once while it hashes.
+    const lengths = Array.from({ length: 140 }, () => CHUNK_LEN);
+    const file = await buildMessage(MessageType.ImagePNG, lengths);
+    const { alice, epc } = edge();
+    const io = storage();
+    io.gate.resolve();
+    const reports: HeldFileProgressNotice[] = [];
+    restores.push(onVerificationProgress((notice) => reports.push(notice)));
+    const fileLane = lane(file, epc, io.dependencies);
+    // The channel queue holds at most 64 frames; feed it as it drains.
+    for (const plaintext of file.plaintexts) {
+      const frame = seal(alice, plaintext, file.root);
+      while (!fileLane.push(frame))
+        await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(await io.settled.promise).toBe("complete");
+    await waitFor(() => fileLane.sent.includes(uint8ArrayToHex(file.hash)));
+
+    expect(reports).toHaveLength(
+      Math.floor(file.totalSize / RECEIVE_VERIFY_PROGRESS_BYTES),
+    );
+    // Every chunk receipt once, except the held chunk's (whichever chunk
+    // completed the file): once when it was held, then once per progress
+    // report. The final receipt only after the last of them.
+    const counts = new Map<string, number>();
+    for (const frame of fileLane.sent)
+      counts.set(frame, (counts.get(frame) ?? 0) + 1);
+    const repeated = [...counts].filter(([, count]) => count > 1);
+    expect(repeated).toHaveLength(1);
+    const [heldReceipt, sends] = repeated[0];
+    expect(file.receipts.map(uint8ArrayToHex)).toContain(heldReceipt);
+    expect(sends).toBe(1 + reports.length);
+    expect(fileLane.sent.indexOf(uint8ArrayToHex(file.hash))).toBeGreaterThan(
+      fileLane.sent.lastIndexOf(heldReceipt),
+    );
+    expect(counts.size).toBe(file.receipts.length + 1);
+  }, 30_000);
+
+  test("the receiver re-sends its receipt on verification progress, in scheduled mode", async () => {
+    // Scheduled mode: the receipt rides a reverse cover control job, never the
+    // message channel, so the cover cadence is the runtime's own.
+    const { alice, epc } = edge();
+    const enqueued: CoverJob[] = [];
+    const sealed: CoverCellContent[] = [];
+    const settles = new Map<string, () => void>();
+    (epc as unknown as { coverRuntime: CoverRuntime }).coverRuntime = {
+      cellsPerLanePerCycle: () => 8,
+      randomLaneLabel: () => `${"00".repeat(32)}~${"11".repeat(64)}`,
+      sealCoverContent: (content: CoverCellContent) => {
+        sealed.push(structuredClone(content));
+        return new Uint8Array(8);
+      },
+      enqueue: (job: CoverJob) => {
+        enqueued.push(job);
+      },
+      onJobSettled: (id: string, callback: () => void) => {
+        settles.set(id, callback);
+      },
+      cancel: () => "not-found",
+    } as unknown as CoverRuntime;
+    restores.push(() => releaseScheduledReceipts(epc));
+    const slot = {} as CoverJobSlot;
+    // Run one cover slot of the newest control job, then settle it.
+    const runSlot = async () => {
+      const job = enqueued[enqueued.length - 1];
+      await job.nextCell(slot);
+      settles.get(job.id)!();
+    };
+    const tokensSealed = () =>
+      sealed.flatMap((cell) =>
+        cell.subtype === "chunk-receipts"
+          ? cell.tokens.map((token) => uint8ArrayToHex(token))
+          : [],
+      );
+
+    const io = storage();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    const fileLane = lane(file, epc, io.dependencies);
+    fileLane.push(seal(alice, file.plaintexts[0], file.root));
+    await io.started.promise;
+    await waitFor(() => enqueued.length === 1);
+    await runSlot();
+    const receipt = uint8ArrayToHex(file.receipts[0]);
+    expect(tokensSealed()).toEqual([receipt]);
+
+    const token = (await row(file.rootHex))?.receiveVerification?.token ?? "";
+    reportProgress({ merkleRoot: file.rootHex, token, hashedBytes: 8 });
+    await waitFor(() => enqueued.length === 2);
+    await runSlot();
+    expect(tokensSealed()).toEqual([receipt, receipt]);
+    expect(fileLane.sent).toEqual([]);
+
+    io.gate.resolve();
+    expect(await io.settled.promise).toBe("complete");
+  });
+
+  test("a stalled verification sends nothing", async () => {
+    const { alice, epc } = edge();
+    const io = storage();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    const fileLane = lane(file, epc, io.dependencies);
+    fileLane.push(seal(alice, file.plaintexts[0], file.root));
+    await io.started.promise;
+    await waitFor(() => fileLane.sent.length === 1);
+    // No progress is reported, so time passing alone sends no receipt.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(fileLane.sent).toEqual([uint8ArrayToHex(file.receipts[0])]);
+    io.gate.resolve();
+    expect(await io.settled.promise).toBe("complete");
+  });
+
+  test("no receipt is sent after a verification ends, is aborted or its message is deleted", async () => {
+    quietConsole();
+    const progressOf = (rootHex: string, token: string) => ({
+      merkleRoot: rootHex,
+      token,
+      hashedBytes: 1,
+    });
+    const tokenOf = async (rootHex: string) =>
+      (await row(rootHex))?.receiveVerification?.token ?? "";
+
+    // While it runs, a report re-sends the receipt.
+    const live = edge();
+    const io = storage();
+    const ended = await buildMessage(MessageType.ImagePNG, [8]);
+    const endedLane = lane(ended, live.epc, io.dependencies);
+    endedLane.push(seal(live.alice, ended.plaintexts[0], ended.root));
+    await io.started.promise;
+    const token = await tokenOf(ended.rootHex);
+    reportProgress(progressOf(ended.rootHex, token));
+    expect(endedLane.sent).toEqual([
+      uint8ArrayToHex(ended.receipts[0]),
+      uint8ArrayToHex(ended.receipts[0]),
+    ]);
+    // Once it has ended, a late report sends nothing.
+    io.gate.resolve();
+    expect(await io.settled.promise).toBe("complete");
+    await waitFor(() => endedLane.sent.length === 3);
+    reportProgress(progressOf(ended.rootHex, token));
+    expect(endedLane.sent).toHaveLength(3);
+    resetRatchetGate(ROOM, PEER);
+
+    // Aborted: the edge closes; reports for it send nothing.
+    const closing = edge();
+    const abortIo = storage();
+    const aborted = await buildMessage(MessageType.ImagePNG, [8]);
+    const closed = new AbortController();
+    const abortedLane = lane(
+      aborted,
+      closing.epc,
+      abortIo.dependencies,
+      closed.signal,
+    );
+    abortedLane.push(seal(closing.alice, aborted.plaintexts[0], aborted.root));
+    await abortIo.started.promise;
+    const abortedToken = await tokenOf(aborted.rootHex);
+    resetRatchetGate(ROOM, PEER);
+    closed.abort(new Error("edge torn down"));
+    reportProgress(progressOf(aborted.rootHex, abortedToken));
+    expect(abortedLane.sent).toEqual([uint8ArrayToHex(aborted.receipts[0])]);
+    abortIo.gate.resolve();
+    expect(await abortIo.settled.promise).toBe("aborted");
+
+    // Deleted: the message is removed while it is verified.
+    const owner = edge();
+    const deleteIo = storage();
+    const deleted = await buildMessage(MessageType.ImagePNG, [8]);
+    const deletedLane = lane(deleted, owner.epc, deleteIo.dependencies);
+    deletedLane.push(seal(owner.alice, deleted.plaintexts[0], deleted.root));
+    await deleteIo.started.promise;
+    const deletedToken = await tokenOf(deleted.rootHex);
+    await callWorker("deleteDBMessageData", [deleted.rootHex]);
+    deleteIo.gate.resolve();
+    await deleteIo.settled.promise;
+    reportProgress(progressOf(deleted.rootHex, deletedToken));
+    expect(deletedLane.sent).toEqual([uint8ArrayToHex(deleted.receipts[0])]);
+  });
+});
+
+// ── the sender's completion wait against the receiver's emission ─────────────
+
+// One clock for both sides. It moves only as the worker reads the held file
+// (each batch read takes BATCH_MS), so the verification's length on it is the
+// same on any machine.
+const controllableClock = () => {
+  let now = Date.now();
+  let sequence = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const clock: TransferWaitClock = {
+    now: () => now,
+    setTimeout: (callback, ms) => {
+      const id = ++sequence;
+      timers.set(id, { at: now + ms, callback });
+      return id;
+    },
+    clearTimeout: (id) => {
+      timers.delete(id as number);
+    },
+  };
+  return {
+    clock,
+    now: () => now,
+    advance: (ms: number) => {
+      now += ms;
+    },
+    // Run every sender timer that is due, earliest first.
+    fireDue: () => {
+      for (;;) {
+        const due = [...timers]
+          .filter(([, timer]) => timer.at <= now)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) return;
+        timers.delete(due[0]);
+        due[1].callback();
+      }
+    },
+  };
+};
+
+describe("the sender waits while its receiver verifies", () => {
+  // 400 full chunks (about 23.6 MiB) in 25 batches of 1.26 s: the
+  // verification takes 31.5 s, longer than the 30 s silence bound and inside
+  // the sender's cap for this size (about 33 s).
+  const CHUNKS = 400;
+  const BATCH_MS = 1_260;
+
+  const run = async (mode: "immediate" | "scheduled") => {
+    const file = await buildMessage(
+      MessageType.ImagePNG,
+      Array.from({ length: CHUNKS }, () => CHUNK_LEN),
+    );
+    const { alice, epc } = edge();
+    const time = controllableClock();
+    const dateNow = spyOn(Date, "now").mockImplementation(() => time.now());
+    restores.push(() => dateNow.mockRestore());
+    const transferId = `a6-${mode}`;
+    restores.push(() => clearTransfer(ROOM, PEER, transferId));
+
+    // The sender's side of the fake channel: every frame for the transfer is
+    // activity (immediate: a message on its channel; scheduled: what coverEdge
+    // notes for an authenticated receipt), the final receipt completes it.
+    const frameListeners = new Set<() => void>();
+    const senderChannel: TransferFrameSource = {
+      addEventListener: (_type, listener) => frameListeners.add(listener),
+      removeEventListener: (_type, listener) => {
+        frameListeners.delete(listener);
+      },
+    };
+    const activityAt: number[] = [];
+    let completedAt: number | undefined;
+    const deliver = (final: boolean) => {
+      activityAt.push(time.now());
+      if (mode === "immediate")
+        for (const listener of [...frameListeners]) listener();
+      else noteTransferActivity(ROOM, PEER, transferId);
+      if (final) {
+        completedAt = time.now();
+        markTransferComplete(ROOM, PEER, transferId);
+      }
+    };
+
+    // Scheduled: the receiver's receipts ride control jobs of a cover
+    // runtime, delivered as their slots run.
+    const enqueued: CoverJob[] = [];
+    const ran = new Set<CoverJob>();
+    const settles = new Map<string, () => void>();
+    let lanes = 0;
+    if (mode === "scheduled") {
+      (epc as unknown as { coverRuntime: CoverRuntime }).coverRuntime = {
+        cellsPerLanePerCycle: () => 8,
+        randomLaneLabel: () =>
+          `${(++lanes).toString(16).padStart(64, "0")}~${"11".repeat(64)}`,
+        sealCoverContent: (content: CoverCellContent) => {
+          if (
+            (content.subtype === "receipt" ||
+              content.subtype === "chunk-receipts") &&
+            uint8ArrayToHex(content.merkleRoot) === file.rootHex
+          )
+            deliver(content.subtype === "receipt");
+          return new Uint8Array(8);
+        },
+        enqueue: (job: CoverJob) => {
+          enqueued.push(job);
+        },
+        onJobSettled: (id: string, callback: () => void) => {
+          settles.set(id, callback);
+        },
+        cancel: () => "not-found",
+      } as unknown as CoverRuntime;
+      restores.push(() => releaseScheduledReceipts(epc));
+    }
+    const runSlots = async () => {
+      for (;;) {
+        const job = enqueued.find((candidate) => !ran.has(candidate));
+        if (!job) return;
+        ran.add(job);
+        for (let cell = 0; cell < job.declaredCellCount; cell++)
+          await job.nextCell({} as CoverJobSlot);
+        settles.get(job.id)?.();
+      }
+    };
+
+    // Each batch read of the held file takes BATCH_MS on the clock.
+    const store = (
+      globalThis as unknown as { IDBObjectStore: { prototype: IDBObjectStore } }
+    ).IDBObjectStore.prototype;
+    const getAll = store.getAll;
+    let batches = 0;
+    store.getAll = function (
+      this: IDBObjectStore,
+      query?: IDBValidKey | IDBKeyRange | null,
+      count?: number,
+    ) {
+      const lower = query instanceof IDBKeyRange ? query.lower : undefined;
+      if (
+        this.name === "chunks" &&
+        Array.isArray(lower) &&
+        lower[0] === file.rootHex
+      ) {
+        batches += 1;
+        time.advance(BATCH_MS);
+        queueMicrotask(() => {
+          time.fireDue();
+          void runSlots();
+        });
+      }
+      return getAll.call(this, query, count);
+    } as typeof getAll;
+    restores.push(() => {
+      store.getAll = getAll;
+    });
+
+    const io = storage();
+    io.gate.resolve();
+    const startedAt = time.now();
+    const waiting =
+      mode === "immediate"
+        ? waitForVerifiedDelivery(
+            senderChannel,
+            ROOM,
+            PEER,
+            transferId,
+            file.totalSize,
+            { clock: time.clock },
+          )
+        : waitForScheduledVerifiedDelivery(
+            ROOM,
+            PEER,
+            transferId,
+            file.totalSize,
+            RECEIVER_SILENCE_LIMIT_MS,
+            { clock: time.clock },
+          );
+    const finalHex = uint8ArrayToHex(file.hash);
+    const fileLane = lane(file, epc, io.dependencies, undefined, (frame) =>
+      deliver(frame === finalHex),
+    );
+    for (const plaintext of file.plaintexts) {
+      const frame = seal(alice, plaintext, file.root);
+      while (!fileLane.push(frame))
+        await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(await io.settled.promise).toBe("complete");
+    // The final receipt goes out at once (immediate) or in the next slots.
+    for (let slot = 0; slot < 20 && completedAt === undefined; slot++) {
+      time.advance(100);
+      time.fireDue();
+      await runSlots();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(await waiting).toBe(true);
+    expect(batches).toBe(Math.ceil(CHUNKS / RECEIVE_VERIFY_BATCH_CHUNKS));
+    expect(completedAt! - startedAt).toBeGreaterThan(RECEIVER_SILENCE_LIMIT_MS);
+    expect(completedAt! - startedAt).toBeLessThan(
+      reportedCompletionCapMs(file.totalSize, RECEIVER_SILENCE_LIMIT_MS),
+    );
+    // The receiver kept the sender's silence bound from expiring.
+    const gaps = activityAt.map(
+      (at, index) => at - (index === 0 ? startedAt : activityAt[index - 1]),
+    );
+    expect(Math.max(...gaps)).toBeLessThan(RECEIVER_SILENCE_LIMIT_MS);
+  };
+
+  test("the completion wait outlasts a verification longer than the silence bound, in immediate mode", async () => {
+    await run("immediate");
+  }, 120_000);
+
+  test("the completion wait outlasts a verification longer than the silence bound, in scheduled mode", async () => {
+    await run("scheduled");
+  }, 120_000);
 });

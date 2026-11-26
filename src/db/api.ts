@@ -1,4 +1,8 @@
-import type { HeldFileSettledNotice, ReceiveDeleteGuard } from "./types";
+import type {
+  HeldFileProgressNotice,
+  HeldFileSettledNotice,
+  ReceiveDeleteGuard,
+} from "./types";
 import type { OutboxLease, OutboxRequest } from "./outboxTypes";
 import type {
   WorkerMessages,
@@ -35,6 +39,17 @@ export const onHeldFileSettled = (
   heldFileListeners.add(listener);
   return () => {
     heldFileListeners.delete(listener);
+  };
+};
+
+// Progress the worker reports while it verifies a held file.
+const progressListeners = new Set<(notice: HeldFileProgressNotice) => void>();
+export const onVerificationProgress = (
+  listener: (notice: HeldFileProgressNotice) => void,
+): (() => void) => {
+  progressListeners.add(listener);
+  return () => {
+    progressListeners.delete(listener);
   };
 };
 
@@ -78,9 +93,16 @@ export const createDatabaseClient = (
   };
 
   worker.onmessage = (e: MessageEvent) => {
-    const { notice } = e.data as { notice?: HeldFileSettledNotice };
+    const { notice, progress } = e.data as {
+      notice?: HeldFileSettledNotice;
+      progress?: HeldFileProgressNotice;
+    };
     if (notice) {
       for (const listener of heldFileListeners) listener(notice);
+      return;
+    }
+    if (progress) {
+      for (const listener of progressListeners) listener(progress);
       return;
     }
     const { id, result, error, errorCode } = e.data as {

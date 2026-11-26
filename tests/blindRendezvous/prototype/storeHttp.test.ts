@@ -21,7 +21,6 @@ import {
   PrototypeStoreCore,
   type PrototypeStoreCoreOptions,
 } from "../../../src/blindRendezvous/prototype/store/storeCore";
-import { PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH } from "../../../src/utils/constants";
 import { MemoryStorePersistence } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import {
   PROTOTYPE_STORE_MEDIA_TYPES,
@@ -111,7 +110,6 @@ interface Harness {
 interface HarnessOptions {
   readonly logBodiesPath?: string;
   readonly allocationAdmission?: PrototypeStoreCoreOptions["allocationAdmission"];
-  readonly persistence?: PrototypeStoreCoreOptions["persistence"];
 }
 
 const harness = async (options: HarnessOptions = {}): Promise<Harness> => {
@@ -121,7 +119,7 @@ const harness = async (options: HarnessOptions = {}): Promise<Harness> => {
     seed: SEED,
     profile,
     clock: { nowMs: () => now },
-    persistence: options.persistence ?? new MemoryStorePersistence(),
+    persistence: new MemoryStorePersistence(),
     chainStartIngressWindow: CHAIN_START,
     origin: "http://127.0.0.1:5910",
     descriptorValidityMs: 2_592_000_000n,
@@ -536,9 +534,7 @@ describe("prototype store HTTP handler", () => {
   });
 
   test("records and serves witness observations", async () => {
-    await withHarness(async ({ base, core, setNow }) => {
-      // Witnessed once closed on the clock, when its checkpoint can exist.
-      setNow(FINALIZE_AT);
+    await withHarness(async ({ base, core }) => {
       const record = {
         version: 1 as const,
         witnessedStoreId: new Uint8Array(32).fill(0x91),
@@ -599,8 +595,7 @@ describe("prototype store HTTP handler", () => {
       module: cryptoModule,
       seed: SEED,
       profile,
-      // Past the finalization instant, so the read has to reach the row.
-      clock: { nowMs: () => FINALIZE_AT },
+      clock: { nowMs: () => WINDOW_START },
       persistence: new ExplodingStorePersistence(),
       chainStartIngressWindow: CHAIN_START,
       origin: "http://127.0.0.1:5910",
@@ -658,12 +653,11 @@ describe("prototype store HTTP handler", () => {
           ingressWindow: CHAIN_START,
           privacyPassTokenRequest: new Uint8Array(32),
         });
-        // A witness names a window closed on the clock: the one before.
         witnessBody = encodeStoreWitnessRecordV1({
           version: 1,
           witnessedStoreId: new Uint8Array(32).fill(0x91),
           deliveryProfileHash: PROFILE_HASH,
-          ingressWindow: CHAIN_START - 1n,
+          ingressWindow: CHAIN_START,
           checkpointHash: new Uint8Array(32).fill(0xc1),
         });
 
@@ -745,7 +739,7 @@ describe("prototype store HTTP admission", () => {
       exactFixedObject: new Uint8Array(CLASS_0_OBJECT_BYTES).fill(fill),
       admission: null,
     });
-  const witnessBody = (window = CHAIN_START - 1n, fill = 0xc4): Uint8Array =>
+  const witnessBody = (window = CHAIN_START, fill = 0xc4): Uint8Array =>
     encodeStoreWitnessRecordV1({
       version: 1,
       witnessedStoreId: new Uint8Array(32).fill(0x91),
@@ -914,87 +908,5 @@ describe("prototype store HTTP admission", () => {
           .map((name) => name.trim()),
       ).toEqual(["content-type", "authorization"]);
     });
-  });
-});
-
-describe("prototype store HTTP load shedding", () => {
-  test("a full mutation queue answers 503 before reading the body", async () => {
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    class HeldSaves extends MemoryStorePersistence {
-      override async saveWindow(
-        state: Parameters<MemoryStorePersistence["saveWindow"]>[0],
-      ): Promise<void> {
-        await released;
-        return super.saveWindow(state);
-      }
-    }
-    await withHarness(
-      async ({ base, core }) => {
-        // Fill the queue in process: distinct keys, one open window, every
-        // write held.
-        const pending = await Promise.all(
-          Array.from({ length: PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH }, () =>
-            newKeyPair(cryptoModule),
-          ),
-        ).then((keys) =>
-          keys.map((keyPair) =>
-            core
-              .allocate({
-                version: 1,
-                deliveryProfileHash: PROFILE_HASH,
-                ingressWindow: CHAIN_START,
-                allocationEd25519PublicKey: keyPair.publicKey,
-                privacyPassToken: new Uint8Array(32),
-              })
-              .catch(() => null),
-          ),
-        );
-        // Bounded in turns of the event loop, never in time.
-        for (
-          let turn = 0;
-          turn < 200_000 && !core.mutationQueueSaturated;
-          turn++
-        )
-          await Bun.sleep(0);
-        expect(core.mutationQueueSaturated).toBe(true);
-
-        // A body that never finishes: an answer can only come from a handler
-        // that did not wait to read it.
-        let pulls = 0;
-        const endless = new ReadableStream<Uint8Array>({
-          pull: async (controller) => {
-            pulls += 1;
-            controller.enqueue(new Uint8Array(1024));
-            await Bun.sleep(5);
-          },
-        });
-        const response = await fetch(
-          `${base}${PROTOTYPE_STORE_ROUTES.append}`,
-          {
-            method: "POST",
-            headers: {
-              "content-type": PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
-            },
-            body: endless,
-            duplex: "half",
-          } as RequestInit,
-        );
-        expect(response.status).toBe(503);
-        expect(await response.text()).toBe("busy");
-        expect(response.headers.get("cache-control")).toBe("no-store");
-        expectStoreHeader(response);
-        await endless.cancel().catch(() => undefined);
-        expect(core.mutationQueueDepth).toBe(
-          PROTOTYPE_STORE_MAX_MUTATION_QUEUE_DEPTH,
-        );
-        expect(pulls).toBeLessThan(1024);
-        release();
-        await Promise.all(pending);
-      },
-      { persistence: new HeldSaves() },
-    );
   });
 });

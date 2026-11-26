@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -461,92 +461,6 @@ describe("prototype store SQLite persistence", () => {
         "added",
       ]);
       expect((await persistence.loadWitnessRecords(window)).length).toBe(3);
-    } finally {
-      persistence.close();
-    }
-  });
-
-  test("witness insert is a fixed set of full-key lookups whatever the window holds", async () => {
-    const path = databasePath();
-    const persistence = new SqliteStorePersistence(path);
-    const bounds = {
-      maxRecordsPerWindow: 4_096,
-      quotaKey32: filled(32, 0x0b),
-      maxRecordsPerQuotaKey: 4_096,
-    };
-    const window = 425_000_000n;
-    const recordFor = (index: number): StoreWitnessRecordV1 => ({
-      ...witnessOf(window, index & 0xff),
-      witnessedStoreId: Uint8Array.from({ length: 32 }, (_, byte) =>
-        byte === 0 ? index >> 8 : 0x91,
-      ),
-    });
-    // Every statement one insert prepares, read off the driver itself.
-    const statementsOf = async (index: number): Promise<string[]> => {
-      const prepared: string[] = [];
-      const query = Database.prototype.query;
-      const spy = spyOn(Database.prototype, "query").mockImplementation(
-        function (this: Database, sql: string) {
-          prepared.push(sql);
-          return query.call(this, sql);
-        } as typeof Database.prototype.query,
-      );
-      try {
-        expect(
-          await persistence.addWitnessRecord(recordFor(index), bounds),
-        ).toBe("added");
-      } finally {
-        spy.mockRestore();
-      }
-      return prepared;
-    };
-    try {
-      const first = await statementsOf(0);
-      for (let index = 1; index < 400; index++)
-        await persistence.addWitnessRecord(recordFor(index), bounds);
-      // The 401st insert into a window holding 400 runs the same statements.
-      expect(await statementsOf(400)).toEqual(first);
-
-      // And each lookup among them names its table's whole key, so none can
-      // be a scan or a count over the window's rows.
-      withRawDatabase(path, (raw) => {
-        for (const sql of first.filter((statement) =>
-          statement.startsWith("SELECT"),
-        )) {
-          const plan = raw
-            .query<{ detail: string }, number[]>(`EXPLAIN QUERY PLAN ${sql}`)
-            .all(
-              ...sql
-                .split("?")
-                .slice(1)
-                .map(() => 1),
-            );
-          expect(plan.length).toBeGreaterThan(0);
-          for (const { detail } of plan) {
-            const match = /^SEARCH (\w+) USING .*\((.+)\)$/.exec(detail);
-            if (match === null)
-              throw new Error(`not a keyed lookup: ${detail}`);
-            const constrained = new Set(
-              match[2].split(" AND ").map((term) => term.replace(/=\?$/, "")),
-            );
-            const key = raw
-              .query<{ name: string; pk: bigint }, []>(
-                `PRAGMA table_info("${match[1]}")`,
-              )
-              .all()
-              .filter((column) => column.pk > 0n)
-              .map((column) => column.name);
-            const whole =
-              (key.length === 1 && constrained.has("rowid")) ||
-              key.every((column) => constrained.has(column));
-            expect({ sql, detail, whole }).toEqual({
-              sql,
-              detail,
-              whole: true,
-            });
-          }
-        }
-      });
     } finally {
       persistence.close();
     }

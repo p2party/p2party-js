@@ -22,11 +22,9 @@
  *   `window-closed`, `slot-conflict` and friends are signed statements from
  *   the store, not transport errors, so they travel as ordinary bodies. A
  *   reader that trusted HTTP status codes would be trusting an unsigned value.
- *   Three refusals have no signed form and are constant bodies instead: the
+ *   Two refusals have no signed form and are constant bodies instead: the
  *   admission hook refusing an append or a witness offer is `403 refused`,
- *   a witness offer the store did not record is `409 not recorded`, and an
- *   allocation or append arriving while the mutation queue is full is
- *   `503 busy`, answered before its body is read.
+ *   and a witness offer the store did not record is `409 not recorded`.
  * - **Only immutable things are cacheable.** A finalized chunk or checkpoint
  *   can never be re-signed, so it gets a year of `immutable`. Everything else
  *   — the descriptor, every status, health — is `no-store`.
@@ -39,7 +37,6 @@
 
 import { appendFileSync } from "node:fs";
 
-import { PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES } from "../../../utils/constants";
 import { CanonicalSchemaError } from "../../canonicalSchema";
 import { PROTOTYPE_ROUTE_PREFIX, PROTOTYPE_STORE_PROTOCOL } from "../profile";
 import {
@@ -59,11 +56,7 @@ import {
   encodePublicStoreCheckpointReadV1,
   encodeStoreWitnessRecordsV1,
 } from "../storeWire";
-import {
-  StoreAdmissionRefusedError,
-  StoreBusyError,
-  StoreRequestError,
-} from "./storeCore";
+import { StoreAdmissionRefusedError, StoreRequestError } from "./storeCore";
 
 import type { PrototypeStoreCore } from "./storeCore";
 
@@ -242,13 +235,10 @@ const malformed = (): Response => textResponse(400, "malformed");
 const refused = (): Response => textResponse(403, "refused");
 const notFound = (): Response => textResponse(404, "not found");
 const notRecorded = (): Response => textResponse(409, "not recorded");
-const busy = (): Response => textResponse(503, "busy");
 const internalError = (): Response => textResponse(500, "error");
 
-/** One spelling: the scheme as written, one space, the token in lowercase hex. */
-const ADMISSION_BEARER = new RegExp(
-  `^Bearer ([0-9a-f]{${String(2 * PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES)}})$`,
-);
+/** One spelling: the scheme as written, one space, 64 lowercase hex digits. */
+const ADMISSION_BEARER = /^Bearer ([0-9a-f]{64})$/;
 
 /**
  * The admission token an append or witness offer presents, `undefined` when it
@@ -388,14 +378,6 @@ export const createPrototypeStoreHandler = (
     const expected = POST_MEDIA_TYPES.get(kind);
     if (expected === undefined || rest.length !== 0) return notFound();
     if (!mediaTypeMatches(request, expected)) return malformed();
-    // A full queue sheds the routes that may need it before their body is
-    // read, so a flood holds no request body in this process. The core
-    // checks again at the queue itself, which is the bound that holds.
-    if (
-      (kind === "allocation" || kind === "append") &&
-      core.mutationQueueSaturated
-    )
-      return busy();
     const body = await readCappedBody(request);
     if (body === null) return malformed();
     // Allocation carries its token in the body (`privacyPassToken`), so the
@@ -478,7 +460,6 @@ export const createPrototypeStoreHandler = (
       return notFound();
     } catch (error) {
       if (error instanceof StoreAdmissionRefusedError) return refused();
-      if (error instanceof StoreBusyError) return busy();
       if (
         error instanceof StoreRequestError ||
         error instanceof CanonicalSchemaError

@@ -13,7 +13,11 @@ import {
   queueScheduledChunkReceipt,
 } from "./coverTransfer";
 
-import { closeReceiveFile, onHeldFileSettled } from "../db/api";
+import {
+  closeReceiveFile,
+  onHeldFileSettled,
+  onVerificationProgress,
+} from "../db/api";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
 
@@ -383,8 +387,35 @@ const completeReceivedMessage = async (
 interface HeldFile extends ReceivedMessage {
   token: string;
   chunkIndex: number;
+  chunkSize: number;
+  /** The held chunk's ordinary (rooted) receipt token. */
+  receipt: Uint8Array;
   lease: RatchetGateLease | undefined;
 }
+
+// Re-send a held file's ordinary receipt (every chunk acknowledged, not
+// complete) through the same function and path that sent it: an immediate
+// receipt frame on the message channel, or a scheduled chunk receipt that rides
+// the next reverse cover slot, so the cover cadence does not change.
+const resendHeldReceipt = (
+  held: HeldFile,
+  merkleRoot: Uint8Array,
+  extChannel: IRTCDataChannel | undefined,
+  epc: IRTCPeerConnection | undefined,
+): void => {
+  if (epc?.coverRuntime)
+    queueScheduledChunkReceipt(epc, merkleRoot, held.receipt);
+  else
+    sendReceiveFrameReceipt(
+      {
+        chunkHash: held.receipt,
+        chunkIndex: held.chunkIndex,
+        chunkSize: held.chunkSize,
+        totalSize: held.totalSize,
+      },
+      extChannel,
+    );
+};
 
 // Verify a held file outside the edge's receive lock, then take the lock
 // again only to commit the outcome. Other frames on the edge (chat, receipts,
@@ -408,13 +439,43 @@ const finishHeldFile = async (
   const { lease } = held;
   const edgeIsCurrent = (): boolean =>
     lease !== undefined && isCurrentRatchetGateLease(roomId, peerId, lease);
-  const verdict = await verifyHeldFile(
-    merkleRootHex,
-    held.token,
-    signal,
-    edgeIsCurrent,
-    dependencies,
-  );
+  // While the worker reports progress on this attempt, tell the sender the
+  // file is still being verified; silence once it ends, stalls, or this edge
+  // closes.
+  let reporting = true;
+  const unsubscribe = (
+    dependencies.onVerificationProgress ?? onVerificationProgress
+  )((progress) => {
+    if (
+      !reporting ||
+      progress.merkleRoot !== merkleRootHex ||
+      progress.token !== held.token
+    )
+      return;
+    if (signal?.aborted || !edgeIsCurrent()) {
+      stopReporting();
+      return;
+    }
+    resendHeldReceipt(held, merkleRoot, extChannel, epc);
+  });
+  const stopReporting = (): void => {
+    reporting = false;
+    unsubscribe();
+    signal?.removeEventListener("abort", stopReporting);
+  };
+  signal?.addEventListener("abort", stopReporting, { once: true });
+  let verdict: Awaited<ReturnType<typeof verifyHeldFile>>;
+  try {
+    verdict = await verifyHeldFile(
+      merkleRootHex,
+      held.token,
+      signal,
+      edgeIsCurrent,
+      dependencies,
+    );
+  } finally {
+    stopReporting();
+  }
   await withProcessingLock(edgeQueueKey(roomId, peerId), async () => {
     const outcome = await settleHeldFile(
       {
@@ -636,6 +697,8 @@ const processMessage = async (
               ...message,
               token: receiveResult.verification,
               chunkIndex,
+              chunkSize,
+              receipt: Uint8Array.from(receiveResult.chunkHash),
               lease: transportGateLease,
             },
           };

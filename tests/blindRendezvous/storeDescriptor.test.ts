@@ -52,7 +52,6 @@ const unsignedDescriptor = {
     { deliveryProfileHash: firstProfile, chainStartIngressWindow: 100n },
     { deliveryProfileHash: secondProfile, chainStartIngressWindow: 200n },
   ],
-  retentionWindows: 256,
   notBeforeUnixMs: NOW - 1000n,
   notAfterUnixMs: NOW + 1_000_000n,
 };

@@ -20,6 +20,7 @@ import { bindReceiveMessageKey } from "./receiveMessageKeyLifetime";
 import {
   abortReceivedFileVerification,
   getDBMessageData,
+  onVerificationProgress,
   settleReceivedFileVerification,
   storeReceiveChunk as persistReceiveChunk,
   verifyReceivedFile,
@@ -86,6 +87,8 @@ export interface ReceiveMessageDependencies {
   verifyReceivedFile?: typeof verifyReceivedFile;
   settleReceivedFileVerification?: typeof settleReceivedFileVerification;
   abortReceivedFileVerification?: typeof abortReceivedFileVerification;
+  /** Test seam for the worker's verification progress reports. */
+  onVerificationProgress?: typeof onVerificationProgress;
 }
 
 /**

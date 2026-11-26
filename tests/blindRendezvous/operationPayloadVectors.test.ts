@@ -168,7 +168,6 @@ const storeDescriptor: StoreDescriptorV1 = {
       chainStartIngressWindow: 0x1112131415161718n,
     },
   ],
-  retentionWindows: 256,
   notBeforeUnixMs: 0x2122232425262728n,
   notAfterUnixMs: 0x3132333435363738n,
   descriptorSignature: filled(0xd4, 64),
@@ -327,12 +326,12 @@ describe("blind-rendezvous Phase-0 operation-payload known-answer vectors", () =
 
   test("StoreHint operation payload", async () => {
     const encoded = encodeStoreHintOperationV1(storeHint);
-    expect(encoded).toHaveLength(433);
+    expect(encoded).toHaveLength(429);
     expect(hex(await sha256(encoded))).toBe(
-      "5e73a9b1d55b169b38b501eb0dd48c96dc9bfd886ff780725393d2e2c72bca5b",
+      "0d69cfe1345bfe86a3a9da5109da7f24cef68049ae6cc57996c869ebbd67b9ba",
     );
     expect(hex(encoded)).toBe(
-      "0101d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d10000000530030102030102030405060708d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d20001d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d30001d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d311121314151617180000010021222324252627283132333435363738d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4000101e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e212340000001568747470733a2f2f6b61742e6578616d706c652f72000000040102030421222324252627283132333435363738e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e34142434445464748",
+      "0101d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d10000000530030102030102030405060708d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d20001d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d30001d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3111213141516171821222324252627283132333435363738d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4000101e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e212340000001568747470733a2f2f6b61742e6578616d706c652f72000000040102030421222324252627283132333435363738e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e34142434445464748",
     );
   });
 
@@ -376,9 +375,9 @@ describe("blind-rendezvous Phase-0 operation-payload known-answer vectors", () =
 
   test("nonempty CoreRoomState and RouteId ordering", async () => {
     const encoded = await encodeCoreRoomStateV1(coreRoomState);
-    expect(encoded).toHaveLength(592);
+    expect(encoded).toHaveLength(588);
     expect(hex(await sha256(encoded))).toBe(
-      "3d14bccd39d8439f6a79fb5f713a243bf35a2ddc1343024dccece431d8b0cb02",
+      "58b07605cfada7e0ab077ff1da07d5dd95ffd130d422be1fb6c4861c3fbb04d7",
     );
     expect(hex(await routeId(storeRoute))).toBe(
       "0532dcd473db53227e1f13b039972be942eec383df89910d1cf664cef2d7dfa8",

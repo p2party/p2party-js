@@ -441,6 +441,13 @@ export const isForwardScheduledProgress = (
  *   genuinely stalls while the page is hidden is detected only when the page
  *   is visible again.
  *
+ * The wait for a receiver's whole-file verification, after a send's last cell
+ * (waitForScheduledVerifiedDelivery), applies this hold only while the
+ * scheduler still holds the job. Its own checks run on page timers, and a
+ * check that runs late (a frozen page, or a hidden one throttled to a wake-up
+ * a minute) restarts its silence clock: on such a page a receiver that goes
+ * silent is detected only at that wait's cap.
+ *
  * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
  * one are NOT this, hidden page or not: they are conditions the idle budget
  * must still expire on, so the send can reach its resume — or, failing that,

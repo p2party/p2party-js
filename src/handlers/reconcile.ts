@@ -1,6 +1,8 @@
 import {
   COMPLETION_WAIT_FALLBACK_MS,
+  MAX_TIMER_DELAY_MS,
   MIN_RECEIVER_VERIFY_BYTES_PER_SECOND,
+  REPORTED_COMPLETION_CHECK_MS,
 } from "../utils/constants";
 
 // Selective retransmit / resume state — in-memory, per
@@ -341,8 +343,7 @@ export const waitForCompletion = async (
       const arm = (): void => {
         timer = clock.setTimeout(
           onTimer,
-          Math.max(
-            0,
+          clampTimerDelayMs(
             Math.min(COMPLETION_WAIT_FALLBACK_MS, deadline - clock.now()),
           ),
         );
@@ -381,6 +382,13 @@ export interface ReportedCompletionOptions {
   readonly capMs: number;
   /** Subscribe to the frames that show the receiver is still at work. */
   readonly onActivity: (wake: () => void) => () => void;
+  /**
+   * Subscribe to what can end the wait at once — the transfer's channel
+   * closing, the edge being replaced. An event only wakes the wait: it ends
+   * when `isInterrupted` holds, which is also read before the wait starts.
+   */
+  readonly onInterrupt?: (interrupt: () => void) => () => void;
+  readonly isInterrupted?: () => boolean;
   /** While true, silence does not accrue (a suspended sender schedule). */
   readonly isHeld?: () => boolean;
   readonly signal?: AbortSignal;
@@ -389,14 +397,27 @@ export interface ReportedCompletionOptions {
   readonly subscribe?: typeof onTransferProgress;
 }
 
+/** A timer delay a platform honours: a longer one fires at once. */
+export const clampTimerDelayMs = (delayMs: number): number =>
+  Math.min(MAX_TIMER_DELAY_MS, Math.max(0, delayMs));
+
 /**
  * Wait for the final receipt of a transfer whose every chunk is acknowledged,
- * for as long as the receiver shows it is still at work. Each activity
- * re-arms the silence bound; the wait ends on the final receipt (true), a
- * refusal or an abort (false), `silenceMs` without activity (false), or
- * `capMs` after it began (false), whichever comes first. Its one timer fires
- * at the silence or cap deadline, not on a polling cadence; every activity
- * also re-checks completion.
+ * for as long as the receiver shows it is still at work.
+ *
+ * Each activity re-arms the silence bound. The wait ends on the final receipt
+ * (true); a refusal, an abort or an interrupt, at once (false); `silenceMs`
+ * without activity (false); or `capMs` after it began (false).
+ *
+ * Time in which this page ran nothing — frozen, asleep, offline, or its
+ * timers throttled to minutes on a hidden page — never counts as silence: a
+ * check that runs more than REPORTED_COMPLETION_CHECK_MS after its timer was
+ * due restarts the silence clock from that moment, and leaves at least one
+ * silence bound before the cap. `isHeld` restarts it on every check while it
+ * holds (the cap still applies). A page whose timers are throttled hard
+ * therefore detects a silent receiver only at the cap. The wait re-checks every
+ * REPORTED_COMPLETION_CHECK_MS so a suspension is seen; every delay is clamped
+ * to MAX_TIMER_DELAY_MS and re-armed for the remainder.
  */
 export const waitForReportedCompletion = async (
   roomId: string,
@@ -407,51 +428,73 @@ export const waitForReportedCompletion = async (
   const clock = options.clock ?? transferWaitClock;
   const subscribe = options.subscribe ?? onTransferProgress;
   const { signal } = options;
-  const capAt = clock.now() + options.capMs;
+  let capAt = clock.now() + options.capMs;
   let lastActivityAt = clock.now();
+  let timerDueAt = Number.POSITIVE_INFINITY;
   const ended = (): boolean =>
+    options.isInterrupted?.() === true ||
     isTransferComplete(roomId, peerId, transferId) ||
     isTransferCancelled(roomId, peerId, transferId) ||
     signal?.aborted === true;
 
-  await new Promise<void>((resolve) => {
-    let done = false;
-    let timer: unknown;
-    let unsubscribeProgress = (): void => undefined;
-    let unsubscribeActivity = (): void => undefined;
-    const check = (): void => {
-      if (done) return;
-      const now = clock.now();
-      if (options.isHeld?.() === true) lastActivityAt = now;
-      if (!ended() && now < capAt && now - lastActivityAt < options.silenceMs)
-        return;
-      done = true;
-      if (timer !== undefined) clock.clearTimeout(timer);
-      unsubscribeProgress();
-      unsubscribeActivity();
-      signal?.removeEventListener("abort", check);
-      resolve();
-    };
-    const arm = (): void => {
-      const due = Math.min(capAt, lastActivityAt + options.silenceMs);
-      timer = clock.setTimeout(onTimer, Math.max(0, due - clock.now()));
-    };
-    const onTimer = (): void => {
-      timer = undefined;
+  if (!ended())
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let timer: unknown;
+      let unsubscribeProgress = (): void => undefined;
+      let unsubscribeActivity = (): void => undefined;
+      let unsubscribeInterrupt = (): void => undefined;
+      const noteSuspension = (now: number): void => {
+        if (now - timerDueAt > REPORTED_COMPLETION_CHECK_MS) {
+          // The page ran nothing between the timer's due time and now. A
+          // wake after a long sleep gets a whole silence bound, even past
+          // the cap.
+          lastActivityAt = now;
+          capAt = Math.max(capAt, now + options.silenceMs);
+        } else if (options.isHeld?.() === true) lastActivityAt = now;
+      };
+      const check = (): void => {
+        if (done) return;
+        const now = clock.now();
+        noteSuspension(now);
+        if (!ended() && now < capAt && now - lastActivityAt < options.silenceMs)
+          return;
+        done = true;
+        if (timer !== undefined) clock.clearTimeout(timer);
+        unsubscribeProgress();
+        unsubscribeActivity();
+        unsubscribeInterrupt();
+        signal?.removeEventListener("abort", check);
+        resolve();
+      };
+      const arm = (): void => {
+        const now = clock.now();
+        timerDueAt = Math.min(
+          capAt,
+          lastActivityAt + options.silenceMs,
+          now + REPORTED_COMPLETION_CHECK_MS,
+        );
+        timer = clock.setTimeout(onTimer, clampTimerDelayMs(timerDueAt - now));
+      };
+      const onTimer = (): void => {
+        timer = undefined;
+        check();
+        if (!done) arm();
+      };
+      const onActivity = (): void => {
+        if (done) return;
+        const now = clock.now();
+        noteSuspension(now);
+        lastActivityAt = now;
+        check();
+      };
+      // Registered before the state is checked again.
+      unsubscribeProgress = subscribe(roomId, peerId, transferId, check);
+      unsubscribeActivity = options.onActivity(onActivity);
+      unsubscribeInterrupt = options.onInterrupt?.(check) ?? (() => undefined);
+      signal?.addEventListener("abort", check);
       check();
       if (!done) arm();
-    };
-    const onActivity = (): void => {
-      if (done) return;
-      lastActivityAt = clock.now();
-      check();
-    };
-    // Registered before the state is checked again.
-    unsubscribeProgress = subscribe(roomId, peerId, transferId, check);
-    unsubscribeActivity = options.onActivity(onActivity);
-    signal?.addEventListener("abort", check);
-    check();
-    if (!done) arm();
-  });
+    });
   return !signal?.aborted && isTransferComplete(roomId, peerId, transferId);
 };

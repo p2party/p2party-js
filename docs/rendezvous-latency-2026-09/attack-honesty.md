@@ -14,7 +14,7 @@ Inputs read in full: `floor.md`, `observed.md`, and all six angle reports;
 `tests/blindRendezvous/projections.test.ts`. Five code facts below I checked
 myself rather than taking from a report; they are marked **[verified]**.
 
-Paths are relative to `~/Desktop/@p2party/p2party-js`.
+Paths are relative to the repository root.
 
 ---
 

@@ -5,7 +5,7 @@ owed disclosures) and §6.2 (the false sentences). Steps 4-8 are **not** touched
 no wire byte, no request, no route, no delivery geometry and no profile field
 changed in this stage.
 
-Worktree `~/Desktop/@p2party/p2party-js-latency`, branch
+Worktree: the latency worktree of this repository, branch
 `feat/rendezvous-latency-2026-09`, from `8be5c14`.
 
 |           |                                                                             |

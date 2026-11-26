@@ -2,7 +2,7 @@
 
 Angle report, 2026-09-08, branch `feat/blind-two-store-prototype` @ `127ca95`.
 Every code citation is `file:line` against
-`~/Desktop/@p2party/p2party-js`, verified by reading the file
+the repository root, verified by reading the file
 at that revision. Every latency number is anchored to
 `scratchpad/latency/floor.md` (structural derivation) and
 `scratchpad/latency/observed.md` (three instrumented runs + two isolating

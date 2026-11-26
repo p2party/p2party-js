@@ -5,7 +5,7 @@ rendezvous. Everything below is anchored to
 `scratchpad/latency/floor.md` (the structural derivation) and
 `scratchpad/latency/observed.md` (the three instrumented runs), plus four
 new measurements I took for this report (§3). Paths are relative to
-`~/Desktop/@p2party/p2party-js`, branch
+the repository root, branch
 `feat/blind-two-store-prototype`.
 
 ---

@@ -2,7 +2,7 @@
 
 Derived from the pinned profile and the code, 2026-09-08, branch
 `feat/blind-two-store-prototype`. Every constant is cited `file:line`. All paths
-are relative to `~/Desktop/@p2party/p2party-js`.
+are relative to the repository root.
 
 Two claims in the brief turn out to be **half right**, and the correction is the
 whole result:

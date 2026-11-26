@@ -2,7 +2,7 @@
 
 2026-09-08. Inputs: `floor.md`, `observed.md`, six angle reports, three
 adversarial verdicts, all read in full; every code fact re-verified against
-`~/Desktop/@p2party/p2party-js` at the pinned profile
+the repository root at the pinned profile
 (`profile.ts:86-125`, tree clean for `src/blindRendezvous/`).
 
 **The honest headline, before the detail.**

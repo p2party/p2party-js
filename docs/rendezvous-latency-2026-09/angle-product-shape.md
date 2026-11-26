@@ -4,7 +4,7 @@ Question the *problem*, not the mechanism. 2026-09-08, branch
 `feat/blind-two-store-prototype` @ `127ca95`. Every constant is cited
 `file:line`; every second is anchored to `floor.md` or `observed.md` in this
 same directory. Paths are relative to
-`~/Desktop/@p2party/p2party-js`.
+the repository root.
 
 ---
 

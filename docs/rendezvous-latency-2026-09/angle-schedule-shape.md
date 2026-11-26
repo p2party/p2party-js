@@ -7,7 +7,7 @@ which window a client's first append lands in.
 Written 2026-09-08 against `feat/blind-two-store-prototype` (tree clean at
 `profile.ts` md5 `07386f4c…`, `carrierRuntime.ts` md5 `89cfdcbc…`,
 `run.mjs` md5 `398e9a61…`). Paths relative to
-`~/Desktop/@p2party/p2party-js`.
+the repository root.
 
 **This is not an arithmetic paper. Every headline number below was measured by
 running the real harness with a patched profile and then reverting the tree.**

@@ -69,7 +69,7 @@ let resetRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["resetRa
 let clearTransfer: (typeof import("../../src/handlers/reconcile"))["clearTransfer"];
 let isTransferComplete: (typeof import("../../src/handlers/reconcile"))["isTransferComplete"];
 let markTransferComplete: (typeof import("../../src/handlers/reconcile"))["markTransferComplete"];
-let sealChunk: (typeof import("../../src/handlers/messageChunkCrypto"))["sealChunk"];
+let sealChunkClassicalOnlyForTests: (typeof import("../../src/handlers/messageChunkCrypto"))["sealChunkClassicalOnlyForTests"];
 let decryptMessageChunkClassicalOnlyForTests: (typeof import("../../src/handlers/messageChunkCrypto"))["decryptMessageChunkClassicalOnlyForTests"];
 let handleReceiveMessage: (typeof import("../../src/handlers/handleReceiveMessage"))["handleReceiveMessage"];
 let allowClassicalOnlyReceiveForTests: (typeof import("../../src/handlers/ratchetPersist"))["allowClassicalOnlyReceiveForTests"];
@@ -90,8 +90,10 @@ beforeAll(async () => {
     await import("../../src/handlers/ratchetGate"));
   ({ clearTransfer, isTransferComplete, markTransferComplete } =
     await import("../../src/handlers/reconcile"));
-  ({ decryptMessageChunkClassicalOnlyForTests, sealChunk } =
-    await import("../../src/handlers/messageChunkCrypto"));
+  ({
+    decryptMessageChunkClassicalOnlyForTests,
+    sealChunkClassicalOnlyForTests,
+  } = await import("../../src/handlers/messageChunkCrypto"));
   ({ handleReceiveMessage } =
     await import("../../src/handlers/handleReceiveMessage"));
   ({ allowClassicalOnlyReceiveForTests } =
@@ -338,6 +340,8 @@ interface RunOptions {
   ) => void;
   /** Defaults to `scheduledPolicy()`; the derived idle budget comes from it. */
   readonly policy?: RoomPolicyV1;
+  /** Step without capturing a PQ context, as only a broken edge could. */
+  readonly withoutPqContext?: boolean;
   readonly peerConnections: IRTCPeerConnection[];
   readonly steppedOn: IRTCPeerConnection[];
   /** LIVE message-key buffers, so a wipe is observable through them. */
@@ -377,10 +381,20 @@ const runSend = async (options: RunOptions) => {
         const stepped = ratchetEncrypt(options.ratchet.state, module);
         options.keys.push(stepped.messageKey);
         options.keyHexes.push(uint8ArrayToHex(stepped.messageKey));
+        // An owned copy of the edge's current context, as the durable step
+        // captures it.
+        const live = epc.pqHealingState!.currentMessageContext();
         return {
           messageKey: stepped.messageKey,
           header: stepped.header,
-          pqContext: null,
+          pqContext: options.withoutPqContext
+            ? null
+            : {
+                rootKey: Uint8Array.from(live.rootKey),
+                binding: Uint8Array.from(live.binding),
+                rootSuite: live.rootSuite,
+                epoch: live.epoch,
+              },
         };
       },
       waitForDelivery: async (waitOptions) => {
@@ -612,6 +626,44 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     expect(keyHexes[0]).not.toBe("00".repeat(keys[0].length));
     expect(keyAtResume).toBe("00".repeat(keys[0].length));
     expect(uint8ArrayToHex(keys[1])).not.toBe("00".repeat(keys[1].length));
+  });
+
+  test("a step without a PQ context fails the send before any job is enqueued", async () => {
+    const bob = initRatchet(rand(32), false, null, module);
+    const first = makeEdge(
+      initRatchet(Uint8Array.from(rand(32)), true, bob.dhSelfPub, module),
+    );
+    const steppedOn: IRTCPeerConnection[] = [];
+    const keys: Uint8Array[] = [];
+    let waited = 0;
+
+    const result = await runSend({
+      peerConnections: [first.epc],
+      steppedOn,
+      keys,
+      keyHexes: [],
+      ratchet: { state: first.epc.ratchetState as RatchetState },
+      withoutPqContext: true,
+      onWait: () => {
+        waited += 1;
+        return true;
+      },
+    });
+
+    // The scheduled call site refuses to seal under the raw classical key:
+    // nothing is admitted, nothing is awaited, and the step's key is wiped.
+    expect(steppedOn).toEqual([first.epc]);
+    expect(result.startedTransfers).toBe(0);
+    expect(result.outcomes).toHaveLength(1);
+    const outcome = result.outcomes[0];
+    expect(outcome.status).toBe("failed");
+    expect(outcome.status === "failed" ? String(outcome.reason) : "").toContain(
+      "without a PQ message context",
+    );
+    expect(waited).toBe(0);
+    expect(first.runtime.hasPendingRealJobs()).toBe(false);
+    expect(keys).toHaveLength(1);
+    expect(keys[0].every((byte) => byte === 0)).toBe(true);
   });
 
   test("no replacement edge means no resume: one attempt, one cancel, unchanged", async () => {
@@ -1136,7 +1188,13 @@ describe("the peer can decrypt what a resumed send emits", () => {
       module,
     );
     const g1 = ratchetEncrypt(alice1, module);
-    const frame1 = sealChunk(g1.messageKey, g1.header, plaintext, root, module);
+    const frame1 = sealChunkClassicalOnlyForTests(
+      g1.messageKey,
+      g1.header,
+      plaintext,
+      root,
+      module,
+    );
 
     // POSITIVE CONTROL: the generation that sealed it opens it.
     const onGen1 = decryptMessageChunkClassicalOnlyForTests(
@@ -1171,7 +1229,13 @@ describe("the peer can decrypt what a resumed send emits", () => {
 
     // Re-deriving on the new generation — the design this task implements.
     const g2 = ratchetEncrypt(alice2, module);
-    const frame2 = sealChunk(g2.messageKey, g2.header, plaintext, root, module);
+    const frame2 = sealChunkClassicalOnlyForTests(
+      g2.messageKey,
+      g2.header,
+      plaintext,
+      root,
+      module,
+    );
     const resumed = decryptMessageChunkClassicalOnlyForTests(
       bob2,
       frame2,
@@ -1201,7 +1265,7 @@ describe("a resumed send is idempotent at the receiver", () => {
         module,
       );
       const stepped = ratchetEncrypt(alice, module);
-      const frame = sealChunk(
+      const frame = sealChunkClassicalOnlyForTests(
         stepped.messageKey,
         stepped.header,
         plaintext,
@@ -1251,7 +1315,7 @@ describe("a resumed send is idempotent at the receiver", () => {
       module,
     );
     const stepped = ratchetEncrypt(alice, module);
-    const frame = sealChunk(
+    const frame = sealChunkClassicalOnlyForTests(
       stepped.messageKey,
       stepped.header,
       plaintext,

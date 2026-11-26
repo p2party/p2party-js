@@ -388,13 +388,36 @@ const mutateRatchetDurably = async <T>(
     }
   });
 
+// Edges a test explicitly allowed to send under raw classical ratchet keys.
+// Production never adds to it (see allowClassicalOnlySendForTests).
+const classicalOnlySendTestEdges = new WeakSet<IRTCPeerConnection>();
+
+/**
+ * TESTS ONLY. Lets `ratchetEncryptDurably` step this edge without an
+ * installed PQ runtime; the step then returns a null PQ context, which only
+ * `sealChunkClassicalOnlyForTests` accepts. Without this the step refuses
+ * such an edge. tests/handlers/messageChunkCrypto.test.ts checks that no
+ * production module calls it.
+ */
+export const allowClassicalOnlySendForTests = (
+  epc: IRTCPeerConnection,
+): void => {
+  classicalOnlySendTestEdges.add(epc);
+};
+
 /**
  * Advance the sending chain exactly once, durably, before its key/header can be
  * used to build a frame. The returned message key remains caller-owned, as is
- * the returned OWNED copy of the current PQ message context (null only on the
- * bootstrap/test path with no installed PQ runtime). Capturing the context and
- * counting the application message happen inside the same edge transaction as
- * the ratchet step, so a concurrent PQ healing transition cannot interleave.
+ * the returned OWNED copy of the current PQ message context. Capturing the
+ * context and counting the application message happen inside the same edge
+ * transaction as the ratchet step, so a concurrent PQ healing transition
+ * cannot interleave.
+ *
+ * A live edge always installs its PQ runtime together with its ratchet
+ * (`persistAndActivateEdgeCrypto`), and every v4 message key is PQ-combined.
+ * An edge with a ratchet but no PQ runtime therefore means that invariant
+ * broke; the step rejects before touching the ratchet. The context is null
+ * only for an edge a test opted in with `allowClassicalOnlySendForTests`.
  */
 export const ratchetEncryptDurably = async (
   epc: IRTCPeerConnection,
@@ -410,8 +433,12 @@ export const ratchetEncryptDurably = async (
     epc,
     roomId,
     (candidate) => {
-      const stepped = ratchetEncrypt(candidate, module);
       const pq = epc.pqHealingState;
+      if (!pq && !classicalOnlySendTestEdges.has(epc))
+        throw new Error(
+          "ratchet persistence: edge has no PQ runtime; refusing a classical-only encrypt",
+        );
+      const stepped = ratchetEncrypt(candidate, module);
       let pqContext: PqMessageKeyContext | null = null;
       if (pq) {
         const live = pq.currentMessageContext();

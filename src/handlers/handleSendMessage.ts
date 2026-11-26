@@ -53,7 +53,7 @@ import {
   getAckedChunkCount,
 } from "./reconcile";
 import { MAX_QUEUED_FRAMES_PER_CHANNEL } from "./handleMessageQueueing";
-import { sealChunk } from "./messageChunkCrypto";
+import { createMessageChunkSealer } from "./messageChunkCrypto";
 import {
   isRatchetGateWaitTimeout,
   waitForRatchetGate,
@@ -112,6 +112,7 @@ import type {
 } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
+import type { MessageChunkSealer } from "./messageChunkCrypto";
 import type { RatchetHeader } from "../cryptography/ratchet";
 import type { RatchetGateLease } from "./ratchetGate";
 import type { ScheduledDeliveryWaitOptions } from "./coverTransfer";
@@ -169,22 +170,17 @@ export const waitForReceiptWindow = async (
 
 const sendChunks = async (
   channel: IRTCDataChannel,
-  // v4: the CLASSICAL message key + header derived ONCE for the whole message
-  // by the caller (`ratchetEncryptDurably`). Every chunk of the message —
-  // across the initial pass AND every selective-retransmit round — is sealed
-  // under this same key with a FRESH random nonce (streaming-safe; no
-  // per-message frame cache needed). `pqContext` is the caller-owned copy of
-  // the PQ message context captured with the step; sealChunk combines it with
-  // an owned per-chunk copy of the classical key.
-  messageKey: Uint8Array,
-  header: RatchetHeader,
-  pqContext: PqMessageKeyContext | null,
+  // v4: the sealer holds the combined key derived ONCE for the whole message
+  // from the caller's ratchet step (`ratchetEncryptDurably`). Every chunk of
+  // the message — across the initial pass AND every selective-retransmit
+  // round — is sealed under this same key with a FRESH random nonce
+  // (streaming-safe; no per-message frame cache needed).
+  sealer: MessageChunkSealer,
   chunksLen: number,
   chunkHashes: Uint8Array,
   merkleRoot: Uint8Array,
   transferId: string,
   hashHex: string,
-  encryptionModule: LibCrypto,
   merkleModule: LibCrypto,
   signal?: AbortSignal,
   // When set (reconcile: selective retransmit / resume), resend ONLY the un-acked
@@ -350,14 +346,7 @@ const sendChunks = async (
 
     let message: Uint8Array;
     try {
-      message = sealChunk(
-        messageKey,
-        header,
-        chunk,
-        merkleRoot,
-        encryptionModule,
-        pqContext ?? undefined,
-      );
+      message = sealer.seal(chunk, merkleRoot);
     } catch (error) {
       throw new Error("Could not seal outbound message chunk", {
         cause: error,
@@ -376,9 +365,9 @@ const sendChunks = async (
       throw error;
     }
   }
-  // protocol-v3: no box wasm scratch to free — `sealChunk` allocates + frees its
-  // own transient buffers per chunk; the message key is owned + wiped by the
-  // caller (sendWithReconcile) after the last retransmit round.
+  // protocol-v3: no box wasm scratch to free — each seal allocates + frees its
+  // own transient buffers; the sealer and the message key are owned + wiped by
+  // the caller after the last retransmit round.
 };
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
@@ -1024,7 +1013,17 @@ const sendWithReconcile = async (
 
   let currentChannel = channel;
   let currentEpc = epc;
+  // v4: the combined key for this ratchet step, derived once and used for
+  // every chunk of every pass. A re-bind that re-steps the ratchet replaces it.
+  let chunkSealer = null as MessageChunkSealer | null;
   const runTransfer = async (): Promise<void> => {
+    let sealer = createMessageChunkSealer(
+      messageKey,
+      header,
+      pqContext,
+      encryptionModule,
+    );
+    chunkSealer = sealer;
     // The per-message channel label is a pure function of the message, so the dead
     // channel's own label is exactly what we re-open on reconnect.
     const channelMessageLabel = channel.label;
@@ -1039,15 +1038,12 @@ const sendWithReconcile = async (
     // receipt window so the receiver's drain sets the pace on fast links.
     await sendChunks(
       currentChannel,
-      messageKey,
-      header,
-      pqContext,
+      sealer,
       chunksLen,
       chunkHashes,
       merkleRoot,
       transferId,
       hashHex,
-      encryptionModule,
       merkleModule,
       signal,
       undefined,
@@ -1161,11 +1157,24 @@ const sendWithReconcile = async (
           closeTransferChannel(currentChannel);
           continue;
         }
+        const restepped = rebound.messageKey !== messageKey;
         currentEpc = rebound.epc;
         transportGateLease = rebound.lease;
         messageKey = rebound.messageKey;
         header = rebound.header;
         pqContext = rebound.pqContext ?? null;
+        if (restepped) {
+          // The re-bind wiped the old step's key and context; derive the
+          // combined key for the new step.
+          sealer.wipe();
+          sealer = createMessageChunkSealer(
+            messageKey,
+            header,
+            pqContext,
+            encryptionModule,
+          );
+          chunkSealer = sealer;
+        }
         retries = 0; // fresh retransmit budget for the resumed transfer
 
         // Telemetry: surface the reconnect recovery to the UI as a reliability
@@ -1186,15 +1195,12 @@ const sendWithReconcile = async (
       // still opens it.
       await sendChunks(
         currentChannel,
-        messageKey,
-        header,
-        pqContext,
+        sealer,
         chunksLen,
         chunkHashes,
         merkleRoot,
         transferId,
         hashHex,
-        encryptionModule,
         merkleModule,
         signal,
         getAckedChunks(roomId, peerId, transferId),
@@ -1227,9 +1233,10 @@ const sendWithReconcile = async (
       },
     );
   } finally {
-    // The message key + owned PQ context copy are dead once every retransmit
-    // round for this message is done (or given up) — wipe them. The ratchet
-    // has already advanced past the key.
+    // The combined key, message key + owned PQ context copy are dead once
+    // every retransmit round for this message is done (or given up) — wipe
+    // them. The ratchet has already advanced past the key.
+    chunkSealer?.wipe();
     messageKey.fill(0);
     pqContext?.rootKey.fill(0);
     clearTransfer(roomId, peerId, transferId);
@@ -1237,9 +1244,9 @@ const sendWithReconcile = async (
 };
 
 // Seal exactly one staged chunk into its uniform 65,490-byte cell under the
-// message's per-message key/header + PQ context. Mirrors sendChunks' per-chunk
-// staging but for a single index, so a scheduled slot can lazily produce one
-// cell without a burst.
+// message's sealer (its combined key, derived once). Mirrors sendChunks'
+// per-chunk staging but for a single index, so a scheduled slot can lazily
+// produce one cell without a burst.
 const makeScheduledSlotSealer =
   (
     transferId: string,
@@ -1247,10 +1254,7 @@ const makeScheduledSlotSealer =
     chunkHashes: Uint8Array,
     merkleRoot: Uint8Array,
     merkleRootHex: string,
-    messageKey: Uint8Array,
-    header: RatchetHeader,
-    pqContext: PqMessageKeyContext | null,
-    encryptionModule: LibCrypto,
+    chunkSealer: MessageChunkSealer,
     merkleModule: LibCrypto,
     outboxLease?: OutboxLease,
     signal?: AbortSignal,
@@ -1313,14 +1317,7 @@ const makeScheduledSlotSealer =
       new Uint8Array(unencryptedChunk.data),
     ]);
     throwIfTransferAborted(signal);
-    return sealChunk(
-      messageKey,
-      header,
-      chunk,
-      merkleRoot,
-      encryptionModule,
-      pqContext ?? undefined,
-    );
+    return chunkSealer.seal(chunk, merkleRoot);
   };
 
 /**
@@ -1522,26 +1519,40 @@ export const sendScheduled = async (
           throw error;
         }
         const pqEpoch = currentEpc.pqHealingState?.epoch;
+        // v4: derive the combined key once for the message; every cell the
+        // scheduler asks for is sealed under it.
+        let chunkSealer: MessageChunkSealer;
+        try {
+          chunkSealer = createMessageChunkSealer(
+            stepped.messageKey,
+            stepped.header,
+            stepped.pqContext,
+            encryptionModule,
+          );
+        } catch (error) {
+          stepped.messageKey.fill(0);
+          stepped.pqContext?.rootKey.fill(0);
+          releasePq();
+          throw error;
+        }
         const sealer = makeScheduledSlotSealer(
           transferId,
           hashHex,
           chunkHashes,
           merkleRoot,
           merkleRootHex,
-          stepped.messageKey,
-          stepped.header,
-          stepped.pqContext,
-          encryptionModule,
+          chunkSealer,
           merkleModule,
           outboxLease,
           signal,
         );
-        // The sealer closure above holds `stepped.messageKey` and the PQ
-        // context root for exactly as long as the scheduler can still ask this
-        // job for a cell. Wiping them on the delivery timeout — what this did
-        // before C3 — did not stop the still-admitted job: it kept emitting
-        // cells sealed under an all-zero key, which the receiver can never open
-        // and a re-send can never replace. The wipe therefore belongs to job
+        // The sealer closure above holds the message's combined key, and
+        // `stepped` its message key and PQ context root, for exactly as long
+        // as the scheduler can still ask this job for a cell. Wiping them on
+        // the delivery timeout — what this did before C3 — did not stop the
+        // still-admitted job: it kept emitting cells sealed under an all-zero
+        // key, which the receiver can never open and a re-send can never
+        // replace (a wiped sealer now throws instead). The wipe belongs to job
         // settlement, the one moment after which nextCell is never called
         // again. That is also why a resume cannot carry this sealer across the
         // edge: the teardown that causes the resume settles the job, so by then
@@ -1551,6 +1562,7 @@ export const sendScheduled = async (
         const wipeMessageSecrets = (): void => {
           if (wiped) return;
           wiped = true;
+          chunkSealer.wipe();
           stepped.messageKey.fill(0);
           stepped.pqContext?.rootKey.fill(0);
         };

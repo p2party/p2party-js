@@ -634,12 +634,13 @@ export class CoverScheduler {
    * claimed. What must not happen is parking. Before C5 a late boundary called
    * setStatus("suspended", "timer-drift") and armed nothing while `running`
    * stayed true, and "suspended" is left only by resume(), whose callers are
-   * the public method (no src/ caller), visibilitychange -> visible, and
-   * online. A visible, online tab that stalled 500 ms over a boundary
-   * therefore parked scheduled cover permanently: both handshakes stayed
-   * authenticated and the transport stayed connected while every send in both
-   * directions failed at its delivery budget. Degrading instead re-arms, which
-   * is what coverRuntime's own drift comment already promised.
+   * the public method (no src/ caller), visibilitychange -> visible, the Page
+   * Lifecycle `resume` event, and online. A visible, online tab that stalled
+   * 500 ms over a boundary therefore parked scheduled cover permanently: both
+   * handshakes stayed authenticated and the transport stayed connected while
+   * every send in both directions failed at its delivery budget. Degrading
+   * instead re-arms, which is what coverRuntime's own drift comment already
+   * promised.
    *
    * A scheduler that is already suspended or stopped keeps its state: those
    * are deliberate, and each has an event or a caller that will leave it. Only

@@ -551,8 +551,8 @@ describe("ratchet wrap: linear cost, and old rows discarded", () => {
     expect(back.result.skippedMessageKeys).toHaveLength(MAX_SKIP_SESSION);
     expect(
       eq(
-        back.result.skippedMessageKeys[1999].messageKey,
-        full.skippedMessageKeys[1999].messageKey,
+        back.result.skippedMessageKeys[MAX_SKIP_SESSION - 1].messageKey,
+        full.skippedMessageKeys[MAX_SKIP_SESSION - 1].messageKey,
       ),
     ).toBe(true);
   });

@@ -4,10 +4,15 @@ import { describe, expect, test } from "bun:test";
 
 import { newKeyPair } from "../../../src/cryptography/ed25519";
 import { loadTestModule } from "../../../src/cryptography/testModule";
-import { validateAndIdentifyOperationCandidate } from "../../../src/blindRendezvous/coreReduce";
+import {
+  coreReduce,
+  encodeCoreRoomStateV1,
+  validateAndIdentifyOperationCandidate,
+} from "../../../src/blindRendezvous/coreReduce";
 import { pairSemanticSlot } from "../../../src/blindRendezvous/derivations";
 import {
   operationPaddingFor,
+  requiredRoomRetentionWindows,
   signOperation,
 } from "../../../src/blindRendezvous/operation";
 import {
@@ -208,6 +213,7 @@ const createParty = async (options: {
   readonly capability: Uint8Array;
   readonly sdp: Uint8Array;
   readonly forgeOwnership?: boolean;
+  readonly clock?: { nowMs(): bigint };
 }): Promise<Party> => {
   const identity = await generateSessionIdentity({ wasmBinary });
   identity.x25519SecretKey.fill(0);
@@ -225,7 +231,7 @@ const createParty = async (options: {
     },
     publish: options.carrier.publishFor(),
     transport,
-    clock,
+    clock: options.clock ?? clock,
     random,
     onPhase: (phase, detail) => {
       phases.push(phase);
@@ -265,6 +271,84 @@ const runPairedRoom = async (options: {
 };
 
 describe("prototype pair driver", () => {
+  test("knownOperations is pruned past retention", async () => {
+    const policy = copyBlindDefaultPolicy();
+    const logicalWindowMs = policy.protocolLimits.logicalWindowMs;
+    // The last logical window at which `coreReduce` can still use an
+    // operation from LOGICAL_WINDOW as evidence.
+    const horizon =
+      requiredRoomRetentionWindows(policy) +
+      BigInt(policy.protocolLimits.maxClockSkewWindows);
+    let nowMs = NOW_MS;
+    const carrier = new FakeCarrier();
+    const capability = new Uint8Array(32).fill(0x61);
+    const peer = await createParty({
+      carrier,
+      name: "peer",
+      capability,
+      sdp: sdpBytes("pppp", 0x61),
+    });
+    const reader = await createParty({
+      carrier,
+      name: "reader",
+      capability,
+      sdp: sdpBytes("rrrr", 0x62),
+      clock: { nowMs: () => nowMs },
+    });
+    // One that never publishes a presence returns from `ingest` before it
+    // reduces anything, and is bounded all the same.
+    const idle = await createParty({
+      carrier,
+      name: "idle",
+      capability,
+      sdp: sdpBytes("iiii", 0x63),
+      clock: { nowMs: () => nowMs },
+    });
+    await peer.driver.start();
+    await reader.driver.start();
+    const [peerPresence] = carrier.log.map((entry) => entry.operation);
+    expect(peerPresence.logicalWindow).toBe(LOGICAL_WINDOW);
+    const delivered = await validateAndIdentifyOperationCandidate(
+      peerPresence,
+      reader.driver.validationContextAt(LOGICAL_WINDOW),
+      module,
+    );
+
+    for (const party of [reader, idle]) {
+      await party.driver.ingest([delivered]);
+      expect(party.driver.knownOperationCount).toBe(1);
+    }
+
+    nowMs = (LOGICAL_WINDOW + horizon) * logicalWindowMs;
+    for (const party of [reader, idle]) {
+      await party.driver.ingest([]);
+      expect(party.driver.knownOperationCount).toBe(1);
+    }
+
+    // One window later the operation changes no reduction: the state with it
+    // and without it is the same encoding. So it goes, and a redelivery of
+    // it is not kept either.
+    nowMs = (LOGICAL_WINDOW + horizon + 1n) * logicalWindowMs;
+    const context = reader.driver.validationContextAt(
+      LOGICAL_WINDOW + horizon + 1n,
+    );
+    expect(
+      hex(
+        await encodeCoreRoomStateV1(
+          await coreReduce([delivered], context, module),
+        ),
+      ),
+    ).toBe(
+      hex(await encodeCoreRoomStateV1(await coreReduce([], context, module))),
+    );
+    for (const party of [reader, idle]) {
+      await party.driver.ingest([]);
+      expect(party.driver.knownOperationCount).toBe(0);
+      await party.driver.ingest([delivered]);
+      expect(party.driver.knownOperationCount).toBe(0);
+    }
+  });
+
   test("reports the payload class its transport flights were published in", async () => {
     const { carrier, a, b } = await runPairedRoom({
       capability: new Uint8Array(32).fill(0x51),

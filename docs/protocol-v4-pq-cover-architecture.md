@@ -450,10 +450,48 @@ its eighth slot. Open questions, not tested: the browser's or the system's
 timer leeway with the screen locked; the database worker's activity; garbage
 collection; a production overlapping a wake-up.
 
+#### Confirmatory runs, from commit 8002f47
+
+These four runs were made from an archive of commit `8002f47`: the bundle was
+built from it (SHA-256 `04cd594d…`, the same on a rebuild), the entry file's
+SHA-256 (`adc331f6…`) is the committed file's, and each summary's `code` is
+the commit. Two grids on one page as above (a busy grid of two edges with jobs
+and its idle edge; idle grids 1, 2, 3, 5, 7 and 10 ms off it), jobs in every
+other cycle on both busy edges alike (enqueued by a page timer that fires in
+the middle of every cycle, job cycle or not), page visible, 120 s at 25 ms
+slots and 180 s at 100 ms slots. The host's screen was locked when the first
+run started and unlocked about two minutes into it, and stayed unlocked for
+the other three (recorded with each run); the 1-minute load average was 7 to
+9, from other work on the host. Clock offsets: medians of −0.7 to +1.1 ms.
+
+| Slots, message size | Cells sent (degraded cycles) | Kinds vs the idle edge's dummies at the same position: shift; KS (5 % critical) | Job minus no-job cycles, page: difference; permutation p | Per edge: p (smallest) |
+| ------------------- | ---------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------- |
+| 25 ms, 5 cells      | 42,480 (0)                   | −0.1 to 0 ms; 0.029 to 0.056 (0.052)                                            | −0.04 ms; 0.49 (240 and 232 cycles)                      | 0.34                   |
+| 25 ms, 1,600 cells  | 42,390 (0)                   | 0 to +0.1 ms; 0.043 to 0.063 (0.052)                                            | +0.05 ms; 0.079 (242 and 229 cycles)                     | 0.018                  |
+| 100 ms, 5 cells     | 16,020 (0)                   | −0.2 to −0.1 ms; 0.031 to 0.056 (0.085)                                         | −0.002 ms; 0.98 (89 and 89 cycles)                       | 0.068                  |
+| 100 ms, 1,600 cells | 15,930 (0)                   | 0 to +0.1 ms; 0.023 to 0.036 (0.085)                                            | +0.007 ms; 0.94 (89 and 89 cycles)                       | 0.52                   |
+
+The per-cycle figures come from the committed summariser (cycles as the unit,
+10,000 permutations, fixed seed). No cycle-level shift shows: the page-wide
+differences are under 0.05 ms with p from 0.079 to 0.98. Of the 36 per-edge
+tests, two have p under 0.05 (0.018 and 0.021, both in the 25 ms 1,600-cell
+run, for the grids 5 and 7 ms off, with opposite signs), as about two in 36
+would by chance. A cycle's mean offset on one edge spread by 0.19 to 0.85 ms;
+the largest per-edge |d′| was 0.28, for which an observer would need about
+160 cycles of each kind, and would classify one cycle right 56 % of the time.
+At the same slot position, kinds of cell left within 0.2 ms of the idle edge's
+dummies; three of the six KS distances at 25 ms are a little over the
+critical value, which overstates significance here (above). The first slot of
+a cycle again ran earlier than the others, by about 3 ms at 25 ms slots
+(0.9 ms after its slot against 3.8 to 4.3 ms), less than with the screen
+locked. Every slot of every cycle was sent; 20 and 35 of the 25 ms runs' slots
+were a job lane's dummies in place of a cell not ready or in a dummy tail.
+
 What remains observable:
 
 - the first slot of each cycle leaves earlier than the cycle's other slots, at
-  25 ms slots by about 6.5 ms. That is the same whatever the slots carry, and
+  25 ms slots by about 6.5 ms with the screen locked and 3 ms with it
+  unlocked. That is the same whatever the slots carry, and
   shows where cycles start, which the lanes' opening at each boundary shows
   already;
 - a job's chunk delayed by a lane period when its production overran its slot.
@@ -466,9 +504,10 @@ What remains observable:
 - the page's own main-thread work (rendering, the application, garbage
   collection) delays wake-ups whatever the cells carry. These runs had none.
 
-Not measured: a page with the screen unlocked, other browsers, messages
-larger than 1,600 cells, idle grids at other offsets than 1 to 10 ms, packets
-on the wire.
+Not measured: a quiet host (the confirmatory runs had the screen unlocked but
+other work running), a hidden page at 25 or 100 ms slots, other browsers,
+messages larger than 1,600 cells, idle grids at other offsets than 1 to
+10 ms, packets on the wire.
 
 ## Alternatives rejected
 

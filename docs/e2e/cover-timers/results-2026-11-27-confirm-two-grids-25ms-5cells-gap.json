@@ -1,0 +1,2296 @@
+{
+  "code": "8002f47",
+  "mode": "sealed",
+  "hostState": "macOS screen locked when the run started (ioreg IOConsoleLocked = Yes) and unlocked when it ended (No): the screen was unlocked during the run, about two minutes in. --disable-backgrounding-occluded-windows kept the page visible until a tab was opened in front of it. Other agents were running on the host (see loadAverage1m).",
+  "measuredAt": "2026-11-26T23:03:11.070Z",
+  "sha256": {
+    "bundle": "04cd594d30ff27e14b4ecb024edb86112bd92f62e6b62e8c667b27977ae3e926",
+    "docs/e2e/cover-timers/entry-sealed.ts": "adc331f6b16837a45684244f246ec3fdabf5b151955cd83b35266025aac4ba83"
+  },
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--proxy-server=http://127.0.0.1:5919",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--use-mock-keychain",
+    "--disable-backgrounding-occluded-windows",
+    "http://127.0.0.1:5918/?cadence=250&edges=9&idle=7&phases=0,0,0,1,2,3,5,7,10&gap=1&pool=90"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [0, "visible"],
+    [120131, "hidden"],
+    [125141, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 250,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 24,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [119, 7.41845703125],
+    [125137, 7.2783203125],
+    [130148, 7.3359375]
+  ],
+  "phasesMs": {
+    "visible": [2000, 120121],
+    "hidden0to60s": [120121, 125138],
+    "hidden60to300s": [125138, 125138],
+    "hiddenPast300s": [125138, 125138],
+    "hiddenAll": [120121, 125138],
+    "visibleAgain": [125138, 130148]
+  },
+  "edges": 9,
+  "idleEdges": 7,
+  "edgePhasesMs": [0, 0, 0, 1, 2, 3, 5, 7, 10],
+  "leavesPerMessage": 5,
+  "proofLevelBuildMs": [
+    0.5, 0, 0, 0, 0, 0, 0.10000002384185791, 0, 0, 0.09999996423721313
+  ],
+  "clockOffsetMs": {
+    "start": {
+      "min": 0.2001953125,
+      "median": 0.2001953125,
+      "max": 0.300048828125
+    },
+    "end": {
+      "min": 0.2001953125,
+      "median": 0.2001953125,
+      "max": 0.2001953125
+    }
+  },
+  "poolPerEdge": 90,
+  "sealed": {
+    "visible": {
+      "cycles": 4248,
+      "degradedCycles": 0,
+      "cellsSent": 42480,
+      "cellsExpected": 42480,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 472,
+          "degradedCycles": 0,
+          "cellsSent": 4720,
+          "cellsExpected": 4720,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 42524,
+        "p50": 2,
+        "p90": 5.5,
+        "p99": 8.5,
+        "max": 9.8,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 11791,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.2
+        },
+        "control": {
+          "n": 790,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-read": {
+          "n": 787,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.2
+        },
+        "store-write": {
+          "n": 787,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.2
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 11791,
+          "p50": 4.1,
+          "p90": 7.5,
+          "p99": 8.9,
+          "max": 9.8
+        },
+        "control": {
+          "n": 790,
+          "p50": 3.4,
+          "p90": 7.6,
+          "p99": 8.9,
+          "max": 9.4
+        },
+        "store-read": {
+          "n": 787,
+          "p50": 3.5,
+          "p90": 7.7,
+          "p99": 8.8,
+          "max": 9.6
+        },
+        "store-write": {
+          "n": 787,
+          "p50": 3.4,
+          "p90": 7.7,
+          "p99": 9,
+          "max": 9.6
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": -0.7,
+          "ks": 0.123,
+          "ksCritical5pct": 0.05,
+          "flaggedAtReferenceP99": 0.008
+        },
+        "store-read": {
+          "medianShiftMs": -0.6,
+          "ks": 0.11,
+          "ksCritical5pct": 0.05,
+          "flaggedAtReferenceP99": 0.006
+        },
+        "store-write": {
+          "medianShiftMs": -0.7,
+          "ks": 0.126,
+          "ksCritical5pct": 0.05,
+          "flaggedAtReferenceP99": 0.011
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": -0.1,
+          "ks": 0.044,
+          "ksCritical5pct": 0.052,
+          "flaggedAtReferenceP99": 0.009
+        },
+        "store-read": {
+          "medianShiftMs": 0,
+          "ks": 0.056,
+          "ksCritical5pct": 0.052,
+          "flaggedAtReferenceP99": 0.009
+        },
+        "store-write": {
+          "medianShiftMs": -0.1,
+          "ks": 0.029,
+          "ksCritical5pct": 0.052,
+          "flaggedAtReferenceP99": 0.017
+        }
+      },
+      "cyclesWithAJobAgainstWithout": {
+        "page": {
+          "jobCycles": 240,
+          "otherCycles": 232,
+          "differenceMs": -0.036,
+          "permutationP": 0.487,
+          "perCycleSdMs": 0.567,
+          "dPrime": -0.064,
+          "cyclesNeededPerClass": 3019,
+          "singleCycleAccuracy": 0.513
+        },
+        "byEdge": {
+          "0 (busy, phase 0 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.051,
+            "permutationP": 0.496,
+            "perCycleSdMs": 0.813,
+            "dPrime": -0.063,
+            "cyclesNeededPerClass": 3094,
+            "singleCycleAccuracy": 0.513
+          },
+          "1 (busy, phase 0 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.054,
+            "permutationP": 0.473,
+            "perCycleSdMs": 0.821,
+            "dPrime": -0.066,
+            "cyclesNeededPerClass": 2811,
+            "singleCycleAccuracy": 0.513
+          },
+          "2 (idle, phase 0 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.055,
+            "permutationP": 0.463,
+            "perCycleSdMs": 0.818,
+            "dPrime": -0.067,
+            "cyclesNeededPerClass": 2731,
+            "singleCycleAccuracy": 0.513
+          },
+          "3 (idle, phase 1 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.051,
+            "permutationP": 0.5,
+            "perCycleSdMs": 0.811,
+            "dPrime": -0.063,
+            "cyclesNeededPerClass": 3114,
+            "singleCycleAccuracy": 0.513
+          },
+          "4 (idle, phase 2 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.048,
+            "permutationP": 0.476,
+            "perCycleSdMs": 0.727,
+            "dPrime": -0.065,
+            "cyclesNeededPerClass": 2887,
+            "singleCycleAccuracy": 0.513
+          },
+          "5 (idle, phase 3 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.059,
+            "permutationP": 0.345,
+            "perCycleSdMs": 0.673,
+            "dPrime": -0.088,
+            "cyclesNeededPerClass": 1611,
+            "singleCycleAccuracy": 0.517
+          },
+          "6 (idle, phase 5 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": 0.016,
+            "permutationP": 0.675,
+            "perCycleSdMs": 0.409,
+            "dPrime": 0.039,
+            "cyclesNeededPerClass": 8075,
+            "singleCycleAccuracy": 0.508
+          },
+          "7 (idle, phase 7 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.023,
+            "permutationP": 0.336,
+            "perCycleSdMs": 0.262,
+            "dPrime": -0.087,
+            "cyclesNeededPerClass": 1622,
+            "singleCycleAccuracy": 0.517
+          },
+          "8 (idle, phase 10 ms)": {
+            "jobCycles": 240,
+            "otherCycles": 232,
+            "differenceMs": -0.001,
+            "permutationP": 0.965,
+            "perCycleSdMs": 0.32,
+            "dPrime": -0.004,
+            "cyclesNeededPerClass": 834040,
+            "singleCycleAccuracy": 0.501
+          }
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 0.9,
+        "1": 4.2,
+        "2": 4.1,
+        "3": 4.3,
+        "4": 4.2,
+        "5": 4.3,
+        "6": 4.2,
+        "7": 4.2,
+        "8": 4,
+        "9": 4.3
+      },
+      "fallbackDummies": 20,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 3539,
+          "p50": 4.1,
+          "p90": 7.4,
+          "p99": 8.9,
+          "max": 9.8
+        },
+        "dummyBesideReal": {
+          "n": 1186,
+          "p50": 3.4,
+          "p90": 7.7,
+          "p99": 8.9,
+          "max": 9.6
+        },
+        "medianShiftMs": -0.7,
+        "ks": 0.133,
+        "ksCritical5pct": 0.046,
+        "flaggedAtReferenceP99": 0.008,
+        "atSamePosition": {
+          "medianShiftMs": -0.1,
+          "ks": 0.053,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.013
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 3.3,
+            "p90": 6.1,
+            "p99": 7.8,
+            "max": 8.8
+          },
+          "whileBusyProducesDummy": {
+            "n": 3539,
+            "p50": 2.9,
+            "p90": 6.6,
+            "p99": 7.9,
+            "max": 8.7
+          },
+          "medianShiftMs": 0.4,
+          "ks": 0.136,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.007,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.045,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.004
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 2.3,
+            "p90": 5.1,
+            "p99": 6.8,
+            "max": 7.8
+          },
+          "whileBusyProducesDummy": {
+            "n": 3539,
+            "p50": 2,
+            "p90": 5.6,
+            "p99": 6.9,
+            "max": 7.7
+          },
+          "medianShiftMs": 0.3,
+          "ks": 0.126,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.007,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.046,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.005
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 1.5,
+            "p90": 4.1,
+            "p99": 5.8,
+            "max": 6.8
+          },
+          "whileBusyProducesDummy": {
+            "n": 3539,
+            "p50": 1.3,
+            "p90": 4.6,
+            "p99": 6,
+            "max": 6.7
+          },
+          "medianShiftMs": 0.2,
+          "ks": 0.091,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.005,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.043,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.005
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 1.5,
+            "p90": 2.7,
+            "p99": 3.9,
+            "max": 4.8
+          },
+          "whileBusyProducesDummy": {
+            "n": 3539,
+            "p50": 1.5,
+            "p90": 2.8,
+            "p99": 4,
+            "max": 8.4
+          },
+          "medianShiftMs": 0,
+          "ks": 0.039,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.005,
+          "atSamePosition": {
+            "medianShiftMs": 0.1,
+            "ks": 0.046,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.007
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 1.2,
+            "p90": 2.2,
+            "p99": 2.8,
+            "max": 3.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 3539,
+            "p50": 1.2,
+            "p90": 2.2,
+            "p99": 2.7,
+            "max": 6.4
+          },
+          "medianShiftMs": 0,
+          "ks": 0.02,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.021,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.048,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.005
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 1186,
+            "p50": 1.7,
+            "p90": 2.8,
+            "p99": 3.5,
+            "max": 8.5
+          },
+          "whileBusyProducesDummy": {
+            "n": 3538,
+            "p50": 1.8,
+            "p90": 2.7,
+            "p99": 3.5,
+            "max": 4.4
+          },
+          "medianShiftMs": -0.1,
+          "ks": 0.066,
+          "ksCritical5pct": 0.046,
+          "flaggedAtReferenceP99": 0.009,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.074,
+            "ksCritical5pct": 0.046,
+            "flaggedAtReferenceP99": 0.013
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 787,
+            "p50": 0.8,
+            "p90": 1.1,
+            "p99": 2,
+            "max": 12.6
+          },
+          "plaintext": {
+            "n": 787,
+            "p50": 1,
+            "p90": 1.4,
+            "p99": 5.2,
+            "max": 28.7
+          },
+          "seal": {
+            "n": 787,
+            "p50": 0.2,
+            "p90": 0.3,
+            "p99": 0.3,
+            "max": 0.4
+          },
+          "total": {
+            "n": 787,
+            "p50": 2.1,
+            "p90": 2.7,
+            "p99": 7.4,
+            "max": 29.9
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 787,
+            "p50": 0.7,
+            "p90": 1,
+            "p99": 2.3,
+            "max": 12.5
+          },
+          "plaintext": {
+            "n": 787,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.2
+          },
+          "seal": {
+            "n": 787,
+            "p50": 0.2,
+            "p90": 0.3,
+            "p99": 0.3,
+            "max": 0.5
+          },
+          "total": {
+            "n": 787,
+            "p50": 1,
+            "p90": 1.2,
+            "p99": 2.5,
+            "max": 12.6
+          }
+        }
+      }
+    },
+    "hidden0to60s": {
+      "cycles": 171,
+      "degradedCycles": 171,
+      "cellsSent": 102,
+      "cellsExpected": 1710,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 10
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 12,
+            "(no degrade event in this or the cycle before)": 7
+          }
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 11,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 11,
+            "(no degrade event in this or the cycle before)": 8
+          }
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 11,
+            "(no degrade event in this or the cycle before)": 8
+          }
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 16,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 12,
+            "(no degrade event in this or the cycle before)": 7
+          }
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 237,
+        "p50": 18.3,
+        "p90": 84.6,
+        "p99": 93.3,
+        "max": 93.4,
+        "beyondToleranceShare": 0.397
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 32,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        },
+        "control": {
+          "n": 5,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-read": {
+          "n": 3,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-write": {
+          "n": 8,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 32,
+          "p50": 5.6,
+          "p90": 18.5,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "control": {
+          "n": 5,
+          "p50": 5.7,
+          "p90": 18.3,
+          "p99": 18.3,
+          "max": 18.3
+        },
+        "store-read": {
+          "n": 3,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "store-write": {
+          "n": 8,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 0.1,
+          "ks": 0.3,
+          "ksCritical5pct": 0.654,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0.4,
+          "ks": 0.302,
+          "ksCritical5pct": 0.821,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.4,
+          "ks": 0.188,
+          "ksCritical5pct": 0.538,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.1,
+          "ks": 0.306,
+          "ksCritical5pct": 0.692,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0,
+          "ks": 0.412,
+          "ksCritical5pct": 0.852,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.1,
+          "ks": 0.235,
+          "ksCritical5pct": 0.583,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "cyclesWithAJobAgainstWithout": {
+        "page": null,
+        "byEdge": {
+          "0 (busy, phase 0 ms)": null,
+          "1 (busy, phase 0 ms)": null,
+          "2 (idle, phase 0 ms)": null,
+          "3 (idle, phase 1 ms)": null,
+          "4 (idle, phase 2 ms)": null,
+          "5 (idle, phase 3 ms)": null,
+          "6 (idle, phase 5 ms)": null,
+          "7 (idle, phase 7 ms)": null,
+          "8 (idle, phase 10 ms)": null
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 5.6,
+        "1": 8.3,
+        "2": 6,
+        "3": 18.5,
+        "4": 0.6
+      },
+      "fallbackDummies": 3,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 7,
+          "p50": 3.5,
+          "p90": 18.5,
+          "p99": 18.5,
+          "max": 18.5
+        },
+        "dummyBesideReal": {
+          "n": 10,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "medianShiftMs": 2.5,
+        "ks": 0.271,
+        "ksCritical5pct": 0.67,
+        "flaggedAtReferenceP99": 0.1,
+        "atSamePosition": {
+          "medianShiftMs": 15.4,
+          "ks": 0.857,
+          "ksCritical5pct": 1.09,
+          "flaggedAtReferenceP99": 0.5
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 8,
+            "p50": 3.7,
+            "p90": 17.4,
+            "p99": 17.4,
+            "max": 17.4
+          },
+          "whileBusyProducesDummy": {
+            "n": 6,
+            "p50": 7.4,
+            "p90": 21.4,
+            "p99": 21.4,
+            "max": 21.4
+          },
+          "medianShiftMs": -3.7,
+          "ks": 0.292,
+          "ksCritical5pct": 0.734,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -0.1,
+            "ks": 0.333,
+            "ksCritical5pct": 0.785,
+            "flaggedAtReferenceP99": 0.333
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 2.7,
+            "p90": 23.9,
+            "p99": 23.9,
+            "max": 23.9
+          },
+          "whileBusyProducesDummy": {
+            "n": 5,
+            "p50": 6.1,
+            "p90": 13.6,
+            "p99": 13.6,
+            "max": 13.6
+          },
+          "medianShiftMs": -3.4,
+          "ks": 0.356,
+          "ksCritical5pct": 0.759,
+          "flaggedAtReferenceP99": 0.333,
+          "atSamePosition": {
+            "medianShiftMs": 7.5,
+            "ks": 0.429,
+            "ksCritical5pct": 0.796,
+            "flaggedAtReferenceP99": 0.429
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 12,
+            "p50": 14.3,
+            "p90": 22.4,
+            "p99": 22.9,
+            "max": 22.9
+          },
+          "whileBusyProducesDummy": {
+            "n": 4,
+            "p50": 5.4,
+            "p90": 12.6,
+            "p99": 12.6,
+            "max": 12.6
+          },
+          "medianShiftMs": 8.9,
+          "ks": 0.5,
+          "ksCritical5pct": 0.785,
+          "flaggedAtReferenceP99": 0.5,
+          "atSamePosition": {
+            "medianShiftMs": 7.4,
+            "ks": 0.375,
+            "ksCritical5pct": 0.833,
+            "flaggedAtReferenceP99": 0.375
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 10,
+            "p50": 13.7,
+            "p90": 21,
+            "p99": 21,
+            "max": 21
+          },
+          "whileBusyProducesDummy": {
+            "n": 5,
+            "p50": 3.4,
+            "p90": 23.4,
+            "p99": 23.4,
+            "max": 23.4
+          },
+          "medianShiftMs": 10.3,
+          "ks": 0.6,
+          "ksCritical5pct": 0.745,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 9.1,
+            "ks": 0.578,
+            "ksCritical5pct": 0.759,
+            "flaggedAtReferenceP99": 0.556
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 11.7,
+            "p90": 19,
+            "p99": 19,
+            "max": 19
+          },
+          "whileBusyProducesDummy": {
+            "n": 4,
+            "p50": 8.6,
+            "p90": 21.5,
+            "p99": 21.5,
+            "max": 21.5
+          },
+          "medianShiftMs": 3.1,
+          "ks": 0.528,
+          "ksCritical5pct": 0.817,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 7.2,
+            "ks": 0.625,
+            "ksCritical5pct": 0.833,
+            "flaggedAtReferenceP99": 0.625
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 15,
+            "p50": 14.7,
+            "p90": 22.8,
+            "p99": 24.1,
+            "max": 24.1
+          },
+          "whileBusyProducesDummy": {
+            "n": 6,
+            "p50": 15,
+            "p90": 23.2,
+            "p99": 23.2,
+            "max": 23.2
+          },
+          "medianShiftMs": -0.3,
+          "ks": 0.3,
+          "ksCritical5pct": 0.657,
+          "flaggedAtReferenceP99": 0.067,
+          "atSamePosition": {
+            "medianShiftMs": -0.2,
+            "ks": 0.288,
+            "ksCritical5pct": 0.69,
+            "flaggedAtReferenceP99": 0.273
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-read": {
+          "read": {
+            "n": 3,
+            "p50": 0.8,
+            "p90": 0.9,
+            "p99": 0.9,
+            "max": 0.9
+          },
+          "plaintext": {
+            "n": 3,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 3,
+            "p50": 0.4,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 3,
+            "p50": 1.3,
+            "p90": 1.4,
+            "p99": 1.4,
+            "max": 1.4
+          }
+        },
+        "store-write": {
+          "read": {
+            "n": 8,
+            "p50": 1.4,
+            "p90": 5.7,
+            "p99": 5.7,
+            "max": 5.7
+          },
+          "plaintext": {
+            "n": 8,
+            "p50": 1.3,
+            "p90": 2.8,
+            "p99": 2.8,
+            "max": 2.8
+          },
+          "seal": {
+            "n": 8,
+            "p50": 0.5,
+            "p90": 0.6,
+            "p99": 0.6,
+            "max": 0.6
+          },
+          "total": {
+            "n": 8,
+            "p50": 3.1,
+            "p90": 9,
+            "p99": 9,
+            "max": 9
+          }
+        }
+      }
+    },
+    "hiddenAll": {
+      "cycles": 171,
+      "degradedCycles": 171,
+      "cellsSent": 102,
+      "cellsExpected": 1710,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 10
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 12,
+            "(no degrade event in this or the cycle before)": 7
+          }
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 12,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 11
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 13,
+            "(no degrade event in this or the cycle before)": 6
+          }
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 11,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 11,
+            "(no degrade event in this or the cycle before)": 8
+          }
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 9,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 11,
+            "(no degrade event in this or the cycle before)": 8
+          }
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 19,
+          "degradedCycles": 19,
+          "cellsSent": 16,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 9
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 12,
+            "(no degrade event in this or the cycle before)": 7
+          }
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 237,
+        "p50": 18.3,
+        "p90": 84.6,
+        "p99": 93.3,
+        "max": 93.4,
+        "beyondToleranceShare": 0.397
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 32,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        },
+        "control": {
+          "n": 5,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-read": {
+          "n": 3,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-write": {
+          "n": 8,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 32,
+          "p50": 5.6,
+          "p90": 18.5,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "control": {
+          "n": 5,
+          "p50": 5.7,
+          "p90": 18.3,
+          "p99": 18.3,
+          "max": 18.3
+        },
+        "store-read": {
+          "n": 3,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "store-write": {
+          "n": 8,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 0.1,
+          "ks": 0.3,
+          "ksCritical5pct": 0.654,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0.4,
+          "ks": 0.302,
+          "ksCritical5pct": 0.821,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.4,
+          "ks": 0.188,
+          "ksCritical5pct": 0.538,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.1,
+          "ks": 0.306,
+          "ksCritical5pct": 0.692,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0,
+          "ks": 0.412,
+          "ksCritical5pct": 0.852,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.1,
+          "ks": 0.235,
+          "ksCritical5pct": 0.583,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "cyclesWithAJobAgainstWithout": {
+        "page": null,
+        "byEdge": {
+          "0 (busy, phase 0 ms)": null,
+          "1 (busy, phase 0 ms)": null,
+          "2 (idle, phase 0 ms)": null,
+          "3 (idle, phase 1 ms)": null,
+          "4 (idle, phase 2 ms)": null,
+          "5 (idle, phase 3 ms)": null,
+          "6 (idle, phase 5 ms)": null,
+          "7 (idle, phase 7 ms)": null,
+          "8 (idle, phase 10 ms)": null
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 5.6,
+        "1": 8.3,
+        "2": 6,
+        "3": 18.5,
+        "4": 0.6
+      },
+      "fallbackDummies": 3,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 7,
+          "p50": 3.5,
+          "p90": 18.5,
+          "p99": 18.5,
+          "max": 18.5
+        },
+        "dummyBesideReal": {
+          "n": 10,
+          "p50": 6,
+          "p90": 22.3,
+          "p99": 22.3,
+          "max": 22.3
+        },
+        "medianShiftMs": 2.5,
+        "ks": 0.271,
+        "ksCritical5pct": 0.67,
+        "flaggedAtReferenceP99": 0.1,
+        "atSamePosition": {
+          "medianShiftMs": 15.4,
+          "ks": 0.857,
+          "ksCritical5pct": 1.09,
+          "flaggedAtReferenceP99": 0.5
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 8,
+            "p50": 3.7,
+            "p90": 17.4,
+            "p99": 17.4,
+            "max": 17.4
+          },
+          "whileBusyProducesDummy": {
+            "n": 6,
+            "p50": 7.4,
+            "p90": 21.4,
+            "p99": 21.4,
+            "max": 21.4
+          },
+          "medianShiftMs": -3.7,
+          "ks": 0.292,
+          "ksCritical5pct": 0.734,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": -0.1,
+            "ks": 0.333,
+            "ksCritical5pct": 0.785,
+            "flaggedAtReferenceP99": 0.333
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 2.7,
+            "p90": 23.9,
+            "p99": 23.9,
+            "max": 23.9
+          },
+          "whileBusyProducesDummy": {
+            "n": 5,
+            "p50": 6.1,
+            "p90": 13.6,
+            "p99": 13.6,
+            "max": 13.6
+          },
+          "medianShiftMs": -3.4,
+          "ks": 0.356,
+          "ksCritical5pct": 0.759,
+          "flaggedAtReferenceP99": 0.333,
+          "atSamePosition": {
+            "medianShiftMs": 7.5,
+            "ks": 0.429,
+            "ksCritical5pct": 0.796,
+            "flaggedAtReferenceP99": 0.429
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 12,
+            "p50": 14.3,
+            "p90": 22.4,
+            "p99": 22.9,
+            "max": 22.9
+          },
+          "whileBusyProducesDummy": {
+            "n": 4,
+            "p50": 5.4,
+            "p90": 12.6,
+            "p99": 12.6,
+            "max": 12.6
+          },
+          "medianShiftMs": 8.9,
+          "ks": 0.5,
+          "ksCritical5pct": 0.785,
+          "flaggedAtReferenceP99": 0.5,
+          "atSamePosition": {
+            "medianShiftMs": 7.4,
+            "ks": 0.375,
+            "ksCritical5pct": 0.833,
+            "flaggedAtReferenceP99": 0.375
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 10,
+            "p50": 13.7,
+            "p90": 21,
+            "p99": 21,
+            "max": 21
+          },
+          "whileBusyProducesDummy": {
+            "n": 5,
+            "p50": 3.4,
+            "p90": 23.4,
+            "p99": 23.4,
+            "max": 23.4
+          },
+          "medianShiftMs": 10.3,
+          "ks": 0.6,
+          "ksCritical5pct": 0.745,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 9.1,
+            "ks": 0.578,
+            "ksCritical5pct": 0.759,
+            "flaggedAtReferenceP99": 0.556
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 9,
+            "p50": 11.7,
+            "p90": 19,
+            "p99": 19,
+            "max": 19
+          },
+          "whileBusyProducesDummy": {
+            "n": 4,
+            "p50": 8.6,
+            "p90": 21.5,
+            "p99": 21.5,
+            "max": 21.5
+          },
+          "medianShiftMs": 3.1,
+          "ks": 0.528,
+          "ksCritical5pct": 0.817,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 7.2,
+            "ks": 0.625,
+            "ksCritical5pct": 0.833,
+            "flaggedAtReferenceP99": 0.625
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 15,
+            "p50": 14.7,
+            "p90": 22.8,
+            "p99": 24.1,
+            "max": 24.1
+          },
+          "whileBusyProducesDummy": {
+            "n": 6,
+            "p50": 15,
+            "p90": 23.2,
+            "p99": 23.2,
+            "max": 23.2
+          },
+          "medianShiftMs": -0.3,
+          "ks": 0.3,
+          "ksCritical5pct": 0.657,
+          "flaggedAtReferenceP99": 0.067,
+          "atSamePosition": {
+            "medianShiftMs": -0.2,
+            "ks": 0.288,
+            "ksCritical5pct": 0.69,
+            "flaggedAtReferenceP99": 0.273
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-read": {
+          "read": {
+            "n": 3,
+            "p50": 0.8,
+            "p90": 0.9,
+            "p99": 0.9,
+            "max": 0.9
+          },
+          "plaintext": {
+            "n": 3,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 3,
+            "p50": 0.4,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 3,
+            "p50": 1.3,
+            "p90": 1.4,
+            "p99": 1.4,
+            "max": 1.4
+          }
+        },
+        "store-write": {
+          "read": {
+            "n": 8,
+            "p50": 1.4,
+            "p90": 5.7,
+            "p99": 5.7,
+            "max": 5.7
+          },
+          "plaintext": {
+            "n": 8,
+            "p50": 1.3,
+            "p90": 2.8,
+            "p99": 2.8,
+            "max": 2.8
+          },
+          "seal": {
+            "n": 8,
+            "p50": 0.5,
+            "p90": 0.6,
+            "p99": 0.6,
+            "max": 0.6
+          },
+          "total": {
+            "n": 8,
+            "p50": 3.1,
+            "p90": 9,
+            "p99": 9,
+            "max": 9
+          }
+        }
+      }
+    },
+    "visibleAgain": {
+      "cycles": 171,
+      "degradedCycles": 0,
+      "cellsSent": 1710,
+      "cellsExpected": 1710,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 3,
+          "role": "idle",
+          "phaseMs": 1,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 4,
+          "role": "idle",
+          "phaseMs": 2,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 5,
+          "role": "idle",
+          "phaseMs": 3,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {
+            "missed-deadline": 1
+          },
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 6,
+          "role": "idle",
+          "phaseMs": 5,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 7,
+          "role": "idle",
+          "phaseMs": 7,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 8,
+          "role": "idle",
+          "phaseMs": 10,
+          "cycles": 19,
+          "degradedCycles": 0,
+          "cellsSent": 190,
+          "cellsExpected": 190,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 1801,
+        "p50": 1.7,
+        "p90": 4.3,
+        "p99": 5.1,
+        "max": 5.4,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 506,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 32,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-read": {
+          "n": 32,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-write": {
+          "n": 30,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 506,
+          "p50": 4,
+          "p90": 4.9,
+          "p99": 5.3,
+          "max": 5.4
+        },
+        "control": {
+          "n": 32,
+          "p50": 3.7,
+          "p90": 5.1,
+          "p99": 5.4,
+          "max": 5.4
+        },
+        "store-read": {
+          "n": 32,
+          "p50": 4.2,
+          "p90": 5.1,
+          "p99": 5.4,
+          "max": 5.4
+        },
+        "store-write": {
+          "n": 30,
+          "p50": 3.3,
+          "p90": 4.7,
+          "p99": 5.1,
+          "max": 5.1
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": -0.3,
+          "ks": 0.206,
+          "ksCritical5pct": 0.248,
+          "flaggedAtReferenceP99": 0.031
+        },
+        "store-read": {
+          "medianShiftMs": 0.2,
+          "ks": 0.132,
+          "ksCritical5pct": 0.248,
+          "flaggedAtReferenceP99": 0.031
+        },
+        "store-write": {
+          "medianShiftMs": -0.7,
+          "ks": 0.237,
+          "ksCritical5pct": 0.256,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": -0.2,
+          "ks": 0.132,
+          "ksCritical5pct": 0.259,
+          "flaggedAtReferenceP99": 0.063
+        },
+        "store-read": {
+          "medianShiftMs": 0,
+          "ks": 0.123,
+          "ksCritical5pct": 0.259,
+          "flaggedAtReferenceP99": 0.063
+        },
+        "store-write": {
+          "medianShiftMs": -0.3,
+          "ks": 0.2,
+          "ksCritical5pct": 0.266,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "cyclesWithAJobAgainstWithout": {
+        "page": {
+          "jobCycles": 9,
+          "otherCycles": 10,
+          "differenceMs": 0.016,
+          "permutationP": 0.89,
+          "perCycleSdMs": 0.239,
+          "dPrime": 0.067,
+          "cyclesNeededPerClass": 2742,
+          "singleCycleAccuracy": 0.513
+        },
+        "byEdge": {
+          "0 (busy, phase 0 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.003,
+            "permutationP": 0.99,
+            "perCycleSdMs": 0.419,
+            "dPrime": 0.006,
+            "cyclesNeededPerClass": 333318,
+            "singleCycleAccuracy": 0.501
+          },
+          "1 (busy, phase 0 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": -0.003,
+            "permutationP": 0.984,
+            "perCycleSdMs": 0.413,
+            "dPrime": -0.008,
+            "cyclesNeededPerClass": 189494,
+            "singleCycleAccuracy": 0.502
+          },
+          "2 (idle, phase 0 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": -0.001,
+            "permutationP": 0.998,
+            "perCycleSdMs": 0.402,
+            "dPrime": -0.002,
+            "cyclesNeededPerClass": 3265898,
+            "singleCycleAccuracy": 0.5
+          },
+          "3 (idle, phase 1 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.023,
+            "permutationP": 0.898,
+            "perCycleSdMs": 0.389,
+            "dPrime": 0.06,
+            "cyclesNeededPerClass": 3414,
+            "singleCycleAccuracy": 0.512
+          },
+          "4 (idle, phase 2 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.008,
+            "permutationP": 0.962,
+            "perCycleSdMs": 0.309,
+            "dPrime": 0.025,
+            "cyclesNeededPerClass": 19117,
+            "singleCycleAccuracy": 0.505
+          },
+          "5 (idle, phase 3 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.061,
+            "permutationP": 0.513,
+            "perCycleSdMs": 0.198,
+            "dPrime": 0.307,
+            "cyclesNeededPerClass": 131,
+            "singleCycleAccuracy": 0.561
+          },
+          "6 (idle, phase 5 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.148,
+            "permutationP": 0.024,
+            "perCycleSdMs": 0.128,
+            "dPrime": 1.154,
+            "cyclesNeededPerClass": 10,
+            "singleCycleAccuracy": 0.718
+          },
+          "7 (idle, phase 7 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": -0.153,
+            "permutationP": 0.049,
+            "perCycleSdMs": 0.157,
+            "dPrime": -0.976,
+            "cyclesNeededPerClass": 13,
+            "singleCycleAccuracy": 0.687
+          },
+          "8 (idle, phase 10 ms)": {
+            "jobCycles": 9,
+            "otherCycles": 10,
+            "differenceMs": 0.059,
+            "permutationP": 0.434,
+            "perCycleSdMs": 0.162,
+            "dPrime": 0.362,
+            "cyclesNeededPerClass": 95,
+            "singleCycleAccuracy": 0.572
+          }
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 0.6,
+        "1": 4.1,
+        "2": 4,
+        "3": 4,
+        "4": 4,
+        "5": 4.1,
+        "6": 4.4,
+        "7": 3.9,
+        "8": 4.5,
+        "9": 4.2
+      },
+      "fallbackDummies": 3,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 154,
+          "p50": 4.1,
+          "p90": 4.9,
+          "p99": 5.3,
+          "max": 5.3
+        },
+        "dummyBesideReal": {
+          "n": 47,
+          "p50": 4,
+          "p90": 5.1,
+          "p99": 5.4,
+          "max": 5.4
+        },
+        "medianShiftMs": -0.1,
+        "ks": 0.195,
+        "ksCritical5pct": 0.227,
+        "flaggedAtReferenceP99": 0.021,
+        "atSamePosition": {
+          "medianShiftMs": -0.2,
+          "ks": 0.18,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0.064
+        }
+      },
+      "crossGrid": {
+        "phase 1 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 3.1,
+            "p90": 3.6,
+            "p99": 4,
+            "max": 4
+          },
+          "whileBusyProducesDummy": {
+            "n": 153,
+            "p50": 3,
+            "p90": 4,
+            "p99": 4.3,
+            "max": 4.4
+          },
+          "medianShiftMs": 0.1,
+          "ks": 0.152,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.082,
+            "ksCritical5pct": 0.227,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 2 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 2.1,
+            "p90": 2.6,
+            "p99": 3,
+            "max": 3
+          },
+          "whileBusyProducesDummy": {
+            "n": 153,
+            "p50": 2,
+            "p90": 3,
+            "p99": 3.4,
+            "max": 3.4
+          },
+          "medianShiftMs": 0.1,
+          "ks": 0.166,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 0.1,
+            "ks": 0.092,
+            "ksCritical5pct": 0.227,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 3 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 1.2,
+            "p90": 1.7,
+            "p99": 2,
+            "max": 2
+          },
+          "whileBusyProducesDummy": {
+            "n": 146,
+            "p50": 1.2,
+            "p90": 2,
+            "p99": 2.4,
+            "max": 2.4
+          },
+          "medianShiftMs": 0,
+          "ks": 0.149,
+          "ksCritical5pct": 0.228,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.114,
+            "ksCritical5pct": 0.228,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 5 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 1.3,
+            "p90": 1.9,
+            "p99": 2.3,
+            "max": 2.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 153,
+            "p50": 1.1,
+            "p90": 1.8,
+            "p99": 2.2,
+            "max": 3.5
+          },
+          "medianShiftMs": 0.2,
+          "ks": 0.305,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0.021,
+          "atSamePosition": {
+            "medianShiftMs": 0.4,
+            "ks": 0.348,
+            "ksCritical5pct": 0.227,
+            "flaggedAtReferenceP99": 0
+          }
+        },
+        "phase 7 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 0.9,
+            "p90": 1.9,
+            "p99": 2.3,
+            "max": 2.3
+          },
+          "whileBusyProducesDummy": {
+            "n": 153,
+            "p50": 1.1,
+            "p90": 1.9,
+            "p99": 2.1,
+            "max": 2.2
+          },
+          "medianShiftMs": -0.2,
+          "ks": 0.122,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0.021,
+          "atSamePosition": {
+            "medianShiftMs": -0.3,
+            "ks": 0.207,
+            "ksCritical5pct": 0.227,
+            "flaggedAtReferenceP99": 0.021
+          }
+        },
+        "phase 10 ms": {
+          "whileBusyProducesReal": {
+            "n": 47,
+            "p50": 1.4,
+            "p90": 1.9,
+            "p99": 2.5,
+            "max": 2.5
+          },
+          "whileBusyProducesDummy": {
+            "n": 153,
+            "p50": 1.3,
+            "p90": 2,
+            "p99": 2.6,
+            "max": 2.7
+          },
+          "medianShiftMs": 0.1,
+          "ks": 0.123,
+          "ksCritical5pct": 0.227,
+          "flaggedAtReferenceP99": 0,
+          "atSamePosition": {
+            "medianShiftMs": 0,
+            "ks": 0.097,
+            "ksCritical5pct": 0.227,
+            "flaggedAtReferenceP99": 0
+          }
+        }
+      },
+      "realCellStagesMs": {
+        "store-read": {
+          "read": {
+            "n": 33,
+            "p50": 0.7,
+            "p90": 0.8,
+            "p99": 0.9,
+            "max": 0.9
+          },
+          "plaintext": {
+            "n": 33,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 33,
+            "p50": 0.2,
+            "p90": 0.3,
+            "p99": 0.4,
+            "max": 0.4
+          },
+          "total": {
+            "n": 33,
+            "p50": 0.9,
+            "p90": 1,
+            "p99": 1.1,
+            "max": 1.1
+          }
+        },
+        "store-write": {
+          "read": {
+            "n": 30,
+            "p50": 0.8,
+            "p90": 1,
+            "p99": 1.2,
+            "max": 1.2
+          },
+          "plaintext": {
+            "n": 30,
+            "p50": 0.9,
+            "p90": 1.3,
+            "p99": 2.9,
+            "max": 2.9
+          },
+          "seal": {
+            "n": 30,
+            "p50": 0.2,
+            "p90": 0.3,
+            "p99": 0.3,
+            "max": 0.3
+          },
+          "total": {
+            "n": 30,
+            "p50": 2,
+            "p90": 2.4,
+            "p99": 4,
+            "max": 4
+          }
+        }
+      }
+    }
+  },
+  "cellOffsetsFile": "results-2026-11-27-confirm-two-grids-25ms-5cells-gap.offsets.tsv"
+}

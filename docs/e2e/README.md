@@ -667,7 +667,21 @@ figures and what they show are in `docs/protocol-v4-pq-cover-architecture.md`
   (`92d2c90`), under the same conditions.
 
 All of these were made on a working tree: their `code` names it, and no
-recorded hash equals a committed file's. The runs before the fix round
+recorded hash equals a committed file's.
+
+### Confirmatory runs (2026-11-27)
+
+`results-2026-11-27-confirm-two-grids-{25,100}ms-{5,1600}cells-gap.json`, with
+their `.offsets.tsv`: made from an archive of commit `8002f47`, the bundle
+built from it. Each summary's `code` is the commit; its `sha256` gives the
+bundle (`04cd594d…`, the same on a rebuild) and the entry file (`adc331f6…`,
+the committed `entry-sealed.ts`). Queries:
+`cadence=250|1000&edges=9&idle=7&phases=0,0,0,1,2,3,5,7,10&gap=1[&leaves=1600]`,
+120 s visible at 25 ms and 180 s at 100 ms, 5 s hidden, 5 s visible again.
+The screen was locked when the first run started and unlocked about two
+minutes into it; the other three ran unlocked (each summary's `hostState`).
+The figures are in `docs/protocol-v4-pq-cover-architecture.md`, section 4,
+"Confirmatory runs". The runs before the fix round
 recorded no cell producer and no phases; their
 summaries were recomputed from the raw recordings (`resummarised`). The
 fix-round runs without `-gap` used an earlier entry file, without the producer

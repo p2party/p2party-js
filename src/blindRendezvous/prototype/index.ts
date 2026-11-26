@@ -271,6 +271,14 @@ export interface PrototypeRunOptions {
    * under open admission.
    */
   readonly admissionTokens?: StoreAdmissionTokenProvider;
+  /**
+   * The clock the run reads (its schedule, its store clients, its pair
+   * driver and the events it emits) and the timer pair its schedule and
+   * deadlines arm. Default: the wall clock and the platform timers. A
+   * harness or a test that drives the run's time itself injects both.
+   */
+  readonly clock?: { nowMs(): bigint };
+  readonly timers?: CarrierTimers;
   readonly onEvent: (event: PrototypeRunEvent) => void;
 }
 
@@ -1293,6 +1301,7 @@ const connectStores = async (
   profile: DeliveryProfileV1,
   profileHash: Uint8Array,
   module: LibCrypto,
+  clock: { nowMs(): bigint },
   emit: (kind: string, detail?: string) => void,
 ): Promise<readonly PrototypeStoreClient[]> => {
   const connected: PrototypeStoreClient[] = [];
@@ -1303,7 +1312,7 @@ const connectStores = async (
         profile,
         profileHash,
         module,
-        nowMs: () => BigInt(Date.now()),
+        nowMs: () => clock.nowMs(),
         admissionTokens: options.admissionTokens,
       });
       connected.push(client);
@@ -1326,10 +1335,19 @@ const connectStores = async (
 export const runBlindRendezvousPrototype = async (
   options: PrototypeRunOptions,
 ): Promise<PrototypeRun> => {
+  const clock = options.clock ?? { nowMs: () => BigInt(Date.now()) };
+  // Wrapped, not the bare globals: a WebIDL operation called as a method of
+  // anything but `window` throws "Illegal invocation" in Chromium. The cast
+  // is on the opaque handle the runtime hands back, never on the runtime.
+  const timers: CarrierTimers = options.timers ?? {
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
   const emit = (kind: string, detail?: string): void => {
     // A caller's observer must not be able to break the rendezvous.
     try {
-      options.onEvent({ atMs: Date.now(), kind, detail });
+      options.onEvent({ atMs: Number(clock.nowMs()), kind, detail });
     } catch {
       /* Observation is best effort. */
     }
@@ -1353,6 +1371,7 @@ export const runBlindRendezvousPrototype = async (
     profile,
     profileHash,
     module,
+    clock,
     emit,
   );
 
@@ -1370,15 +1389,8 @@ export const runBlindRendezvousPrototype = async (
     transport,
     wasmBinary: options.wasmBinary,
     handshakeTimeoutMs: CONNECTED_TIMEOUT_MS,
-    clock: { nowMs: () => BigInt(Date.now()) },
-    // Wrapped, not the bare globals: a WebIDL operation called as a method of
-    // anything but `window` throws "Illegal invocation" in Chromium. The cast
-    // is on the opaque handle the runtime hands back, never on the runtime.
-    timers: {
-      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimeout: (handle) =>
-        clearTimeout(handle as ReturnType<typeof setTimeout>),
-    },
+    clock,
+    timers,
     emit,
   });
 };

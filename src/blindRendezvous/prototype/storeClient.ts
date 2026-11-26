@@ -1197,14 +1197,28 @@ export class PrototypeStoreClient {
   readonly #observedHashes = new WeakMap<ObservedStoreCheckpoint, Uint8Array>();
   /**
    * What of `#observed` is verified as one chain, or `null` when nothing is
-   * trusted: before the first scan, and after anything that makes this
-   * client distrust the store (blame of any kind, a checkpoint served under
-   * another descriptor than the run's). A client that reconnects is a new
-   * client and starts with none. See `#verifyChain`.
+   * trusted: before the first scan, while a full verification is out, and
+   * after anything that makes this client distrust the store (blame of any
+   * kind, a checkpoint served under another descriptor than the run's). A
+   * client that reconnects is a new client and starts with none. See
+   * `#verifyChain`.
+   *
+   * The invariant it keeps: every observation in `#observed` is either in the
+   * run, under its own hash, or will be seen by the full verifier before any
+   * further checkpoint is accepted. A run is non-null only while it holds
+   * exactly the observed windows; the one path that adds an observation
+   * without the full verifier adds it to the run in the same step, with no
+   * `await` between; and a run the full verifier produced is kept only if
+   * nothing was observed or blamed while it awaited (`#generation`).
    */
   #verified: VerifiedRun | null = null;
-  /** Counts blame; a run verified across a blame is not kept. */
-  #distrust = 0;
+  /**
+   * Bumped by every observation `#observe` inserts and by every blame. A full
+   * verification reads it before it awaits and keeps its run only if it is
+   * unchanged after, so neither a snapshot an overlapping scan has outgrown
+   * nor an older verification finishing after a newer one is ever kept.
+   */
+  #generation = 0;
   readonly #checkpointHashes = new Map<string, Uint8Array>();
   #receipts: AppendReceipt[] = [];
   readonly #inFlight = new Set<InFlightAppend>();
@@ -2333,7 +2347,7 @@ export class PrototypeStoreClient {
   ): T {
     this.#inert = true;
     this.#verified = null;
-    this.#distrust += 1;
+    this.#generation += 1;
     return this.#reject(kind, window, detail, value);
   }
 
@@ -2613,14 +2627,16 @@ export class PrototypeStoreClient {
    * profile and the pinned chain start. What `verifyStoreCheckpointChain`
    * decides beyond that is local: two checkpoints for one window, and each
    * window's link to the one before. So when the verified run is held under
-   * the same descriptor, a checkpoint already in it adds nothing, and a new
-   * one is checked against its two neighbours by the hashes kept for them.
-   * Everything else re-decides the whole observed run with
-   * `verifyStoreCheckpointChain`, exactly as before the run was kept: no run
-   * (the first scan, or after blame), a checkpoint served under another
-   * descriptor, a second checkpoint for a window already in the run, or one
-   * that does not link. The full verifier is also what names a fault, and a
-   * run is only ever rebuilt from its blame-free verdict.
+   * the same descriptor, a checkpoint already in it adds nothing, and one for
+   * a window this client has not observed is checked against its two
+   * neighbours by the hashes kept for them. Everything else re-decides the
+   * whole observed run with `verifyStoreCheckpointChain`, exactly as before
+   * the run was kept: no run (the first scan, after blame, or while another
+   * full verification is out), a checkpoint served under another descriptor,
+   * a second checkpoint for a window already observed (in the run or not),
+   * or one that does not link. The full verifier is also what names a fault,
+   * and a run is only ever rebuilt from its blame-free verdict over a
+   * snapshot nothing has outgrown (`#verified` states the invariant).
    *
    * The verifier is given the run rather than the pair because blame outranks
    * absence: a conflict or a broken predecessor anywhere in what this client
@@ -2634,16 +2650,28 @@ export class PrototypeStoreClient {
   ): Promise<void> {
     const key = String(window);
     const run = this.#verified;
+    // Whatever the run says, a window this client already observed under
+    // another checkpoint is a matter for the full verifier: it is the one
+    // that names the equivocation.
+    const observedHere = this.#observed.filter(
+      (held) => held.checkpoint.ingressWindow === window,
+    );
+    const onlyThisCheckpoint = observedHere.every((held) => {
+      const hash = this.#observedHashes.get(held);
+      return hash !== undefined && bytesEqual(hash, checkpointHash);
+    });
     // `structurallyValidCheckpoint` tied `descriptorHash` to the descriptor
     // served beside this checkpoint, so it names that descriptor.
     if (
       run !== null &&
+      onlyThisCheckpoint &&
       bytesEqual(run.descriptorHash, checkpoint.descriptorHash)
     ) {
       const held = run.hashes.get(key);
       if (held !== undefined && bytesEqual(held, checkpointHash)) return;
       if (
         held === undefined &&
+        observedHere.length === 0 &&
         this.#extendsRun(run, checkpoint, checkpointHash)
       ) {
         const observation = this.#observation(
@@ -2667,9 +2695,11 @@ export class PrototypeStoreClient {
     this.#verified = null;
     // A scan of another window can run beside this one and observe or blame
     // while the verifier awaits: it is given this moment's run, and what it
-    // verified is kept only if nothing was blamed meanwhile.
+    // verified is kept only if nothing was observed or blamed meanwhile.
+    // Otherwise the run stays as it is now: absent, or one a later
+    // verification kept for a later moment.
     const observed = [...this.#observed];
-    const distrust = this.#distrust;
+    const generation = this.#generation;
     const verdict = await verifyStoreCheckpointChain(
       observed,
       this.#geometry,
@@ -2681,7 +2711,7 @@ export class PrototypeStoreClient {
       verdict.outcome === "chain-verified" ||
       verdict.outcome === "unverified-chain-gap"
     ) {
-      if (distrust !== this.#distrust) return;
+      if (generation !== this.#generation) return;
       const hashes = new Map<string, Uint8Array>();
       for (const held of observed) {
         const hash = this.#observedHashes.get(held);
@@ -2778,6 +2808,7 @@ export class PrototypeStoreClient {
     )
       position--;
     this.#observed.splice(position, 0, observation);
+    this.#generation += 1;
     if (this.#observed.length > MAX_OBSERVED_CHECKPOINTS) {
       const dropped = this.#observed.shift();
       // The run holds one observation per window, so the dropped window
@@ -3057,7 +3088,7 @@ export class PrototypeStoreClient {
     this.#markUnreadable(window);
     this.#inert = true;
     this.#verified = null;
-    this.#distrust += 1;
+    this.#generation += 1;
     this.#record(kind, window, detail, evidence);
     return "unreachable";
   }

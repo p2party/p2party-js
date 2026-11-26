@@ -8,16 +8,20 @@ import {
 } from "bun:test";
 
 // A hidden page keeps scheduled cover armed (suspending it made tab visibility
-// readable off the wire), and the browser throttles its timers. A cycle whose
-// cells fire late degrades without sending, so a hidden SENDER's only progress
-// signal freezes while its transfer is perfectly healthy, exactly as it did
-// when a hidden page suspended cover. Its delivery idle budget must be held
-// exactly as it was then: spending the budget through the gap gives the send
-// up, and the CANCEL that follows deletes the partial the receiver holds.
+// readable off the wire). In a browser the schedule's wake-ups come from a
+// dedicated timer worker, which a hidden page does not throttle, so a hidden
+// sender keeps producing cells. Where no worker can run, the page-timer
+// fallback is throttled: a cycle whose cells fire late degrades without
+// sending, so the sender's only progress signal freezes while its transfer is
+// healthy. Its delivery idle budget is then held exactly as it was when a
+// hidden page suspended cover: spending the budget through the gap would give
+// the send up, and the CANCEL that follows deletes the receiver's partial.
 //
 // The rig mirrors inboundCancelSweep.test.ts's "A + B" rig: a real
-// CoverRuntime on a fake clock as the sender, a real installCoverEdge receiver
-// over a synchronous storage double, and the real waitForScheduledDelivery.
+// CoverRuntime as the sender, driven by a CoverTimeline (a fake timer worker
+// and throttleable page timers on one virtual clock), a real installCoverEdge
+// receiver over a synchronous storage double, and the real
+// waitForScheduledDelivery.
 
 // The production state-row deletion dispatches into the real Redux store,
 // whose identity slice reads localStorage at module initialization.
@@ -54,6 +58,7 @@ import {
 import { SparsePqHealingState } from "../../src/handlers/pqHealingRuntime";
 import { loadTestModule } from "../../src/cryptography/testModule";
 import { RATCHET_ROOT_SUITE_MLKEM512 } from "../../src/utils/constants";
+import { CoverTimeline } from "./coverTimerFakes";
 import {
   DEFAULT_ROOM_POLICY_V1,
   type RoomPolicyV1,
@@ -61,10 +66,7 @@ import {
 
 import type { InboundTransferSweepDeps } from "../../src/handlers/inboundTransferSweep";
 import type { CoverLaneChannel } from "../../src/handlers/coverRuntime";
-import type {
-  CoverClock,
-  CoverSchedulerStatus,
-} from "../../src/handlers/coverScheduler";
+import type { CoverSchedulerStatus } from "../../src/handlers/coverScheduler";
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type {
   IRTCDataChannel,
@@ -199,64 +201,6 @@ class FakeChannel implements CoverLaneChannel {
   }
 }
 
-interface FakeTimer {
-  readonly id: number;
-  readonly at: number;
-  readonly callback: () => void;
-}
-
-class FakeClock implements CoverClock {
-  private time = 0;
-  private nextId = 1;
-  private readonly timers = new Map<number, FakeTimer>();
-
-  now(): number {
-    return this.time;
-  }
-
-  setTimeout(callback: () => void, delayMs: number): number {
-    const id = this.nextId++;
-    this.timers.set(id, { id, at: this.time + delayMs, callback });
-    return id;
-  }
-
-  clearTimeout(handle: unknown): void {
-    if (typeof handle === "number") this.timers.delete(handle);
-  }
-
-  private nextDue(target: number): FakeTimer | undefined {
-    return [...this.timers.values()]
-      .filter(({ at }) => at <= target)
-      .sort((left, right) => left.at - right.at || left.id - right.id)[0];
-  }
-
-  private async drain(): Promise<void> {
-    for (let i = 0; i < 8; i++) await Promise.resolve();
-  }
-
-  /** Timers fire on time. */
-  async advanceTo(target: number): Promise<void> {
-    if (target < this.time) throw new Error("fake clock cannot go backwards");
-    for (;;) {
-      await this.drain();
-      const timer = this.nextDue(target);
-      if (!timer) break;
-      this.time = Math.max(this.time, timer.at);
-      this.timers.delete(timer.id);
-      timer.callback();
-    }
-    this.time = target;
-    await this.drain();
-  }
-
-  /** Throttled timers: everything due by `target` fires late, AT `target`. */
-  async jumpTo(target: number): Promise<void> {
-    if (target < this.time) throw new Error("fake clock cannot go backwards");
-    this.time = target;
-    await this.advanceTo(target);
-  }
-}
-
 const makePq = (amInitiator: boolean): SparsePqHealingState =>
   new SparsePqHealingState({
     module,
@@ -336,23 +280,30 @@ const IDLE_BUDGET_MS =
 const CELLS = SEND_SCHEDULE.coverFramesPerCell;
 // Three whole budgets hidden.
 const HIDDEN_MS = 3 * IDLE_BUDGET_MS;
-// A hidden tab's clamped timers arrive about once a second. Deliberately not a
-// divisor of the cycle or slot grid, so no throttled timer lands on time.
-const THROTTLED_TICK_MS = 1_037;
+// A hidden tab's clamped page timers wake about once a second, at a phase that
+// is deliberately off the slot grid, so no throttled page timer lands on time.
+const THROTTLE_PHASE_MS = 37;
 
 interface SendRig {
   readonly epc: IRTCPeerConnection;
   readonly runtime: CoverRuntime;
   readonly pq: SparsePqHealingState;
-  readonly clock: FakeClock;
+  readonly timeline: CoverTimeline;
   readonly lanes: FakeChannel[];
   readonly statuses: CoverSchedulerStatus[];
   readonly jobLabel: string;
 }
 
-const makeSendRig = (): SendRig => {
+/**
+ * The sender. Its runtime builds its own clock from the timeline: the timer
+ * worker when `workers` is true (production in a browser), page timers when
+ * it is false (the fallback where no worker can be created).
+ */
+const makeSendRig = (workers: boolean): SendRig => {
   const pq = makePq(true);
-  const clock = new FakeClock();
+  const timeline = new CoverTimeline();
+  timeline.workersAvailable = workers;
+  timeline.throttlePhaseMs = THROTTLE_PHASE_MS;
   const lanes: FakeChannel[] = [];
   const statuses: CoverSchedulerStatus[] = [];
   const epc = { pqHealingState: pq } as unknown as IRTCPeerConnection;
@@ -371,7 +322,7 @@ const makeSendRig = (): SendRig => {
     },
     onStatusChange: ({ status }) => statuses.push(status),
     maxTimerDriftMs: 0,
-    clock,
+    timerEnvironment: timeline.env,
   });
   epc.coverRuntime = runtime;
   // Four other messages ahead of ours on a two-lane edge: ours is admitted at
@@ -396,7 +347,7 @@ const makeSendRig = (): SendRig => {
     }),
   );
   runtime.start();
-  return { epc, runtime, pq, clock, lanes, statuses, jobLabel };
+  return { epc, runtime, pq, timeline, lanes, statuses, jobLabel };
 };
 
 const jobCellsOnWire = (rig: SendRig): number =>
@@ -404,36 +355,44 @@ const jobCellsOnWire = (rig: SendRig): number =>
     .filter((lane) => lane.label === rig.jobLabel)
     .reduce((total, lane) => total + lane.sent.length, 0);
 
+const setHidden = (rig: SendRig, hidden: boolean): void => {
+  rig.timeline.hidden = hidden;
+  page.setHidden(hidden);
+};
+
 interface HiddenRun {
   readonly delivered: boolean;
   readonly hiddenUntilMs: number;
   readonly cellsAtHide: number;
-  readonly cellsAtShow: number;
+  /** Job cells on the wire when the page became visible again, if it did. */
+  readonly cellsAtShow: number | undefined;
+  /** Whether the wait ended while the page was still hidden. */
+  readonly endedHidden: boolean;
 }
 
 /**
  * Admit the send, emit part of it, hide the page, and wait the way
- * sendScheduled does. While hidden every timer arrives late; the page becomes
- * visible again HIDDEN_MS later, from inside the wait's own sleep, so a wait
- * that gave up earlier never sees it come back.
+ * sendScheduled does. The page becomes visible again HIDDEN_MS later, from
+ * inside the wait's own sleep, so a wait that gave up earlier never sees it
+ * come back.
  */
 const runHidden = async (
   rig: SendRig,
   isSuspended: () => boolean,
 ): Promise<HiddenRun> => {
-  await rig.clock.advanceTo(2 * CYCLE_MS + CYCLE_MS / 2);
+  await rig.timeline.advanceTo(2 * CYCLE_MS + CYCLE_MS / 2);
   const midFlight = rig.runtime.getJobProgress(rig.jobLabel);
   expect(midFlight?.state).toBe("admitted");
   expect(midFlight!.sentCells).toBeGreaterThan(0);
   expect(midFlight!.sentCells).toBeLessThan(CELLS);
 
-  page.setHidden(true);
+  setHidden(rig, true);
   // Cover stays armed while hidden.
   expect(rig.runtime.status).toBe("active");
 
   const cellsAtHide = jobCellsOnWire(rig);
-  const hiddenUntilMs = rig.clock.now() + HIDDEN_MS;
-  let cellsAtShow = -1;
+  const hiddenUntilMs = rig.timeline.time + HIDDEN_MS;
+  let cellsAtShow: number | undefined;
   let receiptLanded = false;
   const delivered = await waitForScheduledDelivery({
     isComplete: () => receiptLanded,
@@ -441,16 +400,15 @@ const runHidden = async (
     isSuspended,
     idleTimeoutMs: IDLE_BUDGET_MS,
     pollMs: 50,
-    now: () => rig.clock.now(),
+    now: () => rig.timeline.time,
     sleep: async (ms) => {
-      if (page.visibilityState === "hidden") {
-        await rig.clock.jumpTo(rig.clock.now() + THROTTLED_TICK_MS);
-        if (rig.clock.now() >= hiddenUntilMs) {
-          cellsAtShow = jobCellsOnWire(rig);
-          page.setHidden(false);
-        }
-      } else {
-        await rig.clock.advanceTo(rig.clock.now() + ms);
+      await rig.timeline.advanceTo(rig.timeline.time + ms);
+      if (
+        page.visibilityState === "hidden" &&
+        rig.timeline.time >= hiddenUntilMs
+      ) {
+        cellsAtShow = jobCellsOnWire(rig);
+        setHidden(rig, false);
       }
       // The terminal receipt cannot exist before every cell is out; model it
       // as the job leaving the scheduler.
@@ -458,28 +416,58 @@ const runHidden = async (
         receiptLanded = true;
     },
   });
-  return { delivered, hiddenUntilMs, cellsAtHide, cellsAtShow };
+  return {
+    delivered,
+    hiddenUntilMs,
+    cellsAtHide,
+    cellsAtShow,
+    endedHidden: page.visibilityState === "hidden",
+  };
 };
 
 describe("a hidden sender is not a stalled sender", () => {
-  test("a hidden sender's idle budget is held", async () => {
-    const rig = makeSendRig();
+  test("a hidden sender keeps producing cells on its timer worker", async () => {
+    const rig = makeSendRig(true);
     try {
       const run = await runHidden(rig, () =>
         scheduledCoverIsSuspended(rig.runtime),
       );
 
+      expect(rig.runtime.timerSource).toBe("worker");
+      // The rest of the message went out while the page was hidden, on
+      // schedule, and its delivery was confirmed before the page came back.
+      expect(run.delivered).toBe(true);
+      expect(run.endedHidden).toBe(true);
+      expect(jobCellsOnWire(rig)).toBe(CELLS);
+      expect(jobCellsOnWire(rig)).toBeGreaterThan(run.cellsAtHide);
+      expect(rig.statuses).not.toContain("degraded");
+      expect(rig.statuses).not.toContain("suspended");
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a hidden sender's idle budget is held", async () => {
+    // The page-timer fallback, where a hidden page's throttled timers do stop
+    // the job's progress: the budget is held through the gap.
+    const rig = makeSendRig(false);
+    try {
+      const run = await runHidden(rig, () =>
+        scheduledCoverIsSuspended(rig.runtime),
+      );
+
+      expect(rig.runtime.timerSource).toBe("page");
       expect(run.delivered).toBe(true);
       // It waited out the whole hidden interval instead of giving up inside it.
-      expect(rig.clock.now()).toBeGreaterThan(run.hiddenUntilMs);
-      // The throttled timers really did stop all progress while hidden: three
-      // budgets went by without a single cell of this job.
+      expect(rig.timeline.time).toBeGreaterThan(run.hiddenUntilMs);
+      // Three budgets went by on throttled page timers without a cell of this
+      // job, and cover degraded honestly rather than being suspended.
       expect(run.cellsAtShow).toBe(run.cellsAtHide);
-      // ...and cover degraded honestly rather than being suspended.
       expect(rig.statuses).toContain("degraded");
       expect(rig.statuses).not.toContain("suspended");
       // The transfer continued once the page came back.
-      expect(jobCellsOnWire(rig)).toBeGreaterThan(run.cellsAtShow);
+      expect(jobCellsOnWire(rig)).toBeGreaterThan(run.cellsAtShow!);
     } finally {
       rig.runtime.destroy();
       rig.pq.destroy();
@@ -487,11 +475,11 @@ describe("a hidden sender is not a stalled sender", () => {
   });
 
   test("CONTROL: without the hold, the hidden sender's budget expires while it is hidden", async () => {
-    const rig = makeSendRig();
+    const rig = makeSendRig(false);
     try {
       const run = await runHidden(rig, () => false);
       expect(run.delivered).toBe(false);
-      expect(rig.clock.now()).toBeLessThan(run.hiddenUntilMs);
+      expect(rig.timeline.time).toBeLessThan(run.hiddenUntilMs);
     } finally {
       rig.runtime.destroy();
       rig.pq.destroy();
@@ -501,7 +489,7 @@ describe("a hidden sender is not a stalled sender", () => {
   test("a hidden sender does not cancel a transfer because its timers were throttled", async () => {
     const spy = makeSweepSpy();
     const receiver = makeReceiver(spy);
-    const rig = makeSendRig();
+    const rig = makeSendRig(false);
     try {
       const run = await runHidden(rig, () =>
         scheduledCoverIsSuspended(rig.runtime),
@@ -509,7 +497,7 @@ describe("a hidden sender is not a stalled sender", () => {
 
       // Exactly what sendScheduled does when delivery is not confirmed.
       if (!run.delivered) cancelScheduledSend(rig.epc, rig.jobLabel);
-      await rig.clock.advanceTo(rig.clock.now() + 2 * CYCLE_MS);
+      await rig.timeline.advanceTo(rig.timeline.time + 2 * CYCLE_MS);
 
       for (const lane of rig.lanes)
         for (const cell of lane.sent)

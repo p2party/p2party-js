@@ -1,0 +1,194 @@
+{
+  "measuredAt": "2026-11-26T18:22:55.083Z",
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "http://127.0.0.1:5918/?cadence=5000"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [-1, "visible"],
+    [15140, "hidden"],
+    [135161, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 5000,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 499,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [128, 7.861328125],
+    [45148, 7.3349609375],
+    [75150, 7.1865234375],
+    [105152, 7.15625],
+    [135155, 7.4013671875],
+    [145165, 7.33935546875]
+  ],
+  "phasesMs": {
+    "visible": [2000, 15129],
+    "hidden0to60s": [15129, 75129],
+    "hidden60to300s": [75129, 135156],
+    "hiddenPast300s": [135156, 135156],
+    "hiddenAll": [15129, 135156],
+    "visibleAgain": [135156, 145166]
+  },
+  "pageTimers": {
+    "visible": {
+      "wakeUps": 29,
+      "latenessMs": {
+        "p50": 1,
+        "p90": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 2,
+      "degradedCycles": 0,
+      "cellsSent": 20,
+      "cellsExpected": 20
+    },
+    "hidden0to60s": {
+      "wakeUps": 24,
+      "latenessMs": {
+        "p50": 927,
+        "p90": 1012,
+        "p99": 1050,
+        "max": 1050
+      },
+      "lateBeyondToleranceShare": 0.5,
+      "cycles": 11,
+      "degradedCycles": 11,
+      "cellsSent": 0,
+      "cellsExpected": 110
+    },
+    "hidden60to300s": {
+      "wakeUps": 24,
+      "latenessMs": {
+        "p50": 932,
+        "p90": 1046,
+        "p99": 1061,
+        "max": 1061
+      },
+      "lateBeyondToleranceShare": 0.5,
+      "cycles": 11,
+      "degradedCycles": 11,
+      "cellsSent": 0,
+      "cellsExpected": 110
+    },
+    "hiddenAll": {
+      "wakeUps": 48,
+      "latenessMs": {
+        "p50": 927,
+        "p90": 1045,
+        "p99": 1061,
+        "max": 1061
+      },
+      "lateBeyondToleranceShare": 0.5,
+      "cycles": 23,
+      "degradedCycles": 23,
+      "cellsSent": 0,
+      "cellsExpected": 230
+    },
+    "visibleAgain": {
+      "wakeUps": 22,
+      "latenessMs": {
+        "p50": 1,
+        "p90": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 1,
+      "degradedCycles": 0,
+      "cellsSent": 10,
+      "cellsExpected": 10
+    }
+  },
+  "timerWorker": {
+    "visible": {
+      "wakeUps": 29,
+      "latenessMs": {
+        "p50": 4,
+        "p90": 5,
+        "p99": 5,
+        "max": 5
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 2,
+      "degradedCycles": 0,
+      "cellsSent": 20,
+      "cellsExpected": 20
+    },
+    "hidden0to60s": {
+      "wakeUps": 132,
+      "latenessMs": {
+        "p50": 55,
+        "p90": 92,
+        "p99": 100,
+        "max": 101
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 11,
+      "degradedCycles": 0,
+      "cellsSent": 110,
+      "cellsExpected": 110
+    },
+    "hidden60to300s": {
+      "wakeUps": 132,
+      "latenessMs": {
+        "p50": 65,
+        "p90": 95,
+        "p99": 100,
+        "max": 105
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 11,
+      "degradedCycles": 0,
+      "cellsSent": 110,
+      "cellsExpected": 110
+    },
+    "hiddenAll": {
+      "wakeUps": 264,
+      "latenessMs": {
+        "p50": 60,
+        "p90": 94,
+        "p99": 100,
+        "max": 105
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 23,
+      "degradedCycles": 0,
+      "cellsSent": 230,
+      "cellsExpected": 230
+    },
+    "visibleAgain": {
+      "wakeUps": 22,
+      "latenessMs": {
+        "p50": 4,
+        "p90": 5,
+        "p99": 5,
+        "max": 5
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 1,
+      "degradedCycles": 0,
+      "cellsSent": 10,
+      "cellsExpected": 10
+    }
+  }
+}

@@ -1,0 +1,231 @@
+{
+  "measuredAt": "2026-11-26T18:12:02.476Z",
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "http://127.0.0.1:5918/"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [-1, "visible"],
+    [20037, "hidden"],
+    [410075, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 1000,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 99,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [26, 7.76025390625],
+    [50045, 8.458984375],
+    [80047, 9.2783203125],
+    [110049, 7.54150390625],
+    [140051, 8.38232421875],
+    [170054, 6.982421875],
+    [200055, 6.36865234375],
+    [230058, 6.5546875],
+    [260061, 6.36865234375],
+    [290063, 6.6064453125],
+    [320066, 6.91943359375],
+    [350068, 6.29638671875],
+    [380069, 6.80517578125],
+    [410072, 5.9326171875],
+    [420079, 5.71533203125]
+  ],
+  "phasesMs": {
+    "visible": [2000, 20027],
+    "hidden0to60s": [20027, 80027],
+    "hidden60to300s": [80027, 320027],
+    "hiddenPast300s": [320027, 410073],
+    "hiddenAll": [20027, 410073],
+    "visibleAgain": [410073, 420079]
+  },
+  "pageTimers": {
+    "visible": {
+      "wakeUps": 199,
+      "latenessMs": {
+        "p50": 1,
+        "p90": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 17,
+      "degradedCycles": 0,
+      "cellsSent": 170,
+      "cellsExpected": 170
+    },
+    "hidden0to60s": {
+      "wakeUps": 60,
+      "latenessMs": {
+        "p50": 244,
+        "p90": 301,
+        "p99": 693,
+        "max": 693
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 59,
+      "degradedCycles": 59,
+      "cellsSent": 0,
+      "cellsExpected": 590
+    },
+    "hidden60to300s": {
+      "wakeUps": 240,
+      "latenessMs": {
+        "p50": 244,
+        "p90": 280,
+        "p99": 312,
+        "max": 315
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 239,
+      "degradedCycles": 239,
+      "cellsSent": 0,
+      "cellsExpected": 2390
+    },
+    "hiddenPast300s": {
+      "wakeUps": 2,
+      "latenessMs": {
+        "p50": 58524,
+        "p90": 58524,
+        "p99": 58524,
+        "max": 58524
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 89,
+      "degradedCycles": 89,
+      "cellsSent": 0,
+      "cellsExpected": 890
+    },
+    "hiddenAll": {
+      "wakeUps": 302,
+      "latenessMs": {
+        "p50": 244,
+        "p90": 284,
+        "p99": 315,
+        "max": 58524
+      },
+      "lateBeyondToleranceShare": 1,
+      "cycles": 389,
+      "degradedCycles": 389,
+      "cellsSent": 0,
+      "cellsExpected": 3890
+    },
+    "visibleAgain": {
+      "wakeUps": 105,
+      "latenessMs": {
+        "p50": 1,
+        "p90": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 9,
+      "degradedCycles": 0,
+      "cellsSent": 90,
+      "cellsExpected": 90
+    }
+  },
+  "timerWorker": {
+    "visible": {
+      "wakeUps": 199,
+      "latenessMs": {
+        "p50": 4,
+        "p90": 5,
+        "p99": 6,
+        "max": 6
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 17,
+      "degradedCycles": 0,
+      "cellsSent": 170,
+      "cellsExpected": 170
+    },
+    "hidden0to60s": {
+      "wakeUps": 587,
+      "latenessMs": {
+        "p50": 53,
+        "p90": 94,
+        "p99": 100,
+        "max": 101
+      },
+      "lateBeyondToleranceShare": 0.0204,
+      "cycles": 59,
+      "degradedCycles": 14,
+      "cellsSent": 508,
+      "cellsExpected": 590
+    },
+    "hidden60to300s": {
+      "wakeUps": 2425,
+      "latenessMs": {
+        "p50": 51,
+        "p90": 94,
+        "p99": 100,
+        "max": 111
+      },
+      "lateBeyondToleranceShare": 0.0165,
+      "cycles": 239,
+      "degradedCycles": 43,
+      "cellsSent": 2140,
+      "cellsExpected": 2390
+    },
+    "hiddenPast300s": {
+      "wakeUps": 905,
+      "latenessMs": {
+        "p50": 49,
+        "p90": 92,
+        "p99": 100,
+        "max": 143
+      },
+      "lateBeyondToleranceShare": 0.0199,
+      "cycles": 89,
+      "degradedCycles": 18,
+      "cellsSent": 788,
+      "cellsExpected": 890
+    },
+    "hiddenAll": {
+      "wakeUps": 3917,
+      "latenessMs": {
+        "p50": 50,
+        "p90": 94,
+        "p99": 100,
+        "max": 143
+      },
+      "lateBeyondToleranceShare": 0.0179,
+      "cycles": 389,
+      "degradedCycles": 75,
+      "cellsSent": 3456,
+      "cellsExpected": 3890
+    },
+    "visibleAgain": {
+      "wakeUps": 110,
+      "latenessMs": {
+        "p50": 5,
+        "p90": 5,
+        "p99": 6,
+        "max": 6
+      },
+      "lateBeyondToleranceShare": 0,
+      "cycles": 9,
+      "degradedCycles": 0,
+      "cellsSent": 90,
+      "cellsExpected": 90
+    }
+  }
+}

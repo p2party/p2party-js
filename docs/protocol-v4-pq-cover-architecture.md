@@ -132,10 +132,40 @@ cover suspended/degraded. Missed epochs are skipped. Resume begins only at a
 future cycle boundary. The API exposes this status so the UI cannot claim cover
 during a browser-imposed gap.
 
-A hidden page is not suspended: its schedule stays armed, so tab visibility is
-not readable off the wire, and the cycles its throttled timers miss are marked
-degraded. While the page is hidden, a scheduled send's delivery idle budget is
-held exactly as it is while cover is suspended, so a send that genuinely stalls
+A hidden page is not suspended: its schedule stays armed. Because a hidden
+page's own timers are throttled, the schedule's wake-ups come from a dedicated
+timer worker, and the page sends each cell when the worker's message arrives.
+Lateness is judged on the page's clock when it runs the slot, and a cycle with
+a slot past its drift tolerance is marked degraded.
+
+Measured in Chrome for Testing 159.0.8154.6 on macOS 27.2 (arm64), launched
+without the flags browser drivers add to disable background throttling, with
+the page hidden behind another tab (harness and results in
+`docs/e2e/cover-timers/`; one cycle a second over 2 lanes × 5 frames, so a
+slot every 100 ms with a 99 ms tolerance; 390 s hidden):
+
+- On page timers, the clock used before the worker, no cell was sent while
+  hidden and all 389 cycles degraded. Past 300 s hidden, wake-ups arrived once
+  a minute.
+- On the timer worker, 3,456 of 3,890 cells were sent and 75 of 389 cycles
+  (19.3 %) degraded. The worker's wake-ups reached the hidden page late: median
+  50 ms, 99th percentile 100 ms, maximum 143 ms. 1.8 % of them were past the
+  99 ms tolerance. The phase past 300 s hidden looked like the earlier ones.
+- With 500 ms slots (499 ms tolerance) and 120 s hidden, the worker sent all
+  230 cells and no cycle degraded. Page timers sent none.
+
+So tab visibility can still be read off the wire:
+
+- in the cycles that still degrade at short slot spacings, as measured above;
+- in cases that were not measured:
+  - a frozen or discarded page (mobile browsers, Safari), where `freeze`
+    suspends cover;
+  - a browser that throttles worker timers;
+  - a suspended process;
+  - the page-timer fallback where no worker can be created.
+
+While the page is hidden, a scheduled send's delivery idle budget is held
+exactly as it is while cover is suspended, so a send that genuinely stalls
 while the page is hidden is detected when the page is visible again.
 
 ## Alternatives rejected

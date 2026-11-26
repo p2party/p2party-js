@@ -19,9 +19,11 @@ import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import type { ReceiptProcessingQueue } from "./handleMessageQueueing";
 import { registerCoverChannelUntilClose } from "./coverChannelRegistry";
 import { sweepCancelledInboundTransfer } from "./inboundTransferSweep";
+import { noteTransferActivity } from "./reconcile";
 
 import type { InboundTransferSweepDeps } from "./inboundTransferSweep";
 import type { CoverStatusChange } from "./coverScheduler";
+import type { CoverTimerEnvironment } from "./coverTimerWorker";
 import type {
   IRTCDataChannel,
   IRTCPeerConnection,
@@ -207,6 +209,8 @@ export interface InstallCoverEdgeOptions {
    */
   readonly inboundSweepDeps?: InboundTransferSweepDeps;
   readonly receiptDependencies?: ScheduledReceiptDependencies;
+  /** The runtime's timer worker and page timers; the browser's by default. */
+  readonly timerEnvironment?: CoverTimerEnvironment;
 }
 
 /**
@@ -269,6 +273,11 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
         options.onRemoteCancel?.(merkleRootHex);
       return;
     }
+    // An authenticated receipt for this transfer from this peer shows the
+    // receiver is still at work, even a repeat that changes no have-set: it
+    // is what keeps a sender waiting through the receiver's verification.
+    if (isCurrent())
+      noteTransferActivity(owner.roomId, owner.peerId, owner.transferId);
     await acceptScheduledReceipt(
       owner,
       packed.subarray(65),
@@ -303,6 +312,7 @@ export const installCoverEdge = (options: InstallCoverEdgeOptions): void => {
     },
     policyHash: options.policyHash,
     laneLabelName: LANE_LABEL_NAME,
+    timerEnvironment: options.timerEnvironment,
     openLaneChannel: (label): CoverLaneChannel => {
       const channel = epc.createDataChannel(label, {
         ordered: true,

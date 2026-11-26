@@ -31,8 +31,9 @@ SDP/ICE relay via `page.exposeFunction`.
   receipt-subtype cover cell, and a real ratchet+PQ **message chunk decrypted
   byte-exact** over a cover slot. `cover.html` stubs `document.visibilityState`
   because headless Chromium reports the page hidden. The runtime keeps cover
-  armed on a hidden page, but a browser may throttle a hidden page's timers and
-  late cells degrade the cycle; the stub keeps the run off that path.
+  armed on a hidden page, woken by its timer worker, but a hidden page can
+  still handle those wake-ups late (see `cover-timers/` below); the stub keeps
+  the run off that path.
 - `diag.mjs` / `index.html` — a minimal single-edge diagnostic and the shared
   page shell (process shim + bundle).
 
@@ -539,10 +540,61 @@ association accepts our new streams but not the peer's, so recovery waits out
 the 30 s handshake step timeout. The outcome is correct; the latency is not yet.
 It is the one arm of this matrix that misses the 15 s convergence bar above.
 
+## `cover-timers/` — scheduled-cover wake-ups on a hidden page
+
+Measures how late scheduled-cover wake-ups land, and which cycles lose cells,
+on a page that is really hidden, with background throttling active.
+
+- `entry.ts` runs two real `CoverScheduler`s side by side with the same
+  schedule:
+  - one on page timers (the clock scheduled cover used before the timer
+    worker);
+  - one on `createCoverTimerClock` (the timer-worker clock `CoverRuntime` now
+    builds in a browser).
+
+  Lanes are recorders and cells a constant buffer, so cell sealing and WebRTC
+  are not part of the measurement. `?cadence=<ms>` widens the cycle.
+
+- `driver.mjs` does the run:
+  - launches Chrome for Testing directly with remote debugging, without the
+    `--disable-background-timer-throttling`,
+    `--disable-backgrounding-occluded-windows` and
+    `--disable-renderer-backgrounding` flags browser drivers add;
+  - serves the bundle on `127.0.0.1:5918`, with the debugging port on 5917;
+  - hides the page by opening another tab in front of it;
+  - writes a raw recording and a per-phase summary;
+  - stops Chrome by its PID.
+- Run:
+  `bun build docs/e2e/cover-timers/entry.ts --target=browser --outfile=<dir>/bundle.js`
+  then
+  `node docs/e2e/cover-timers/driver.mjs --bundle=<dir>/bundle.js --profile=<dir>/profile --out=<dir>/raw.json --summary=<file>.json`.
+  The defaults are 20 s visible, 390 s hidden and 10 s visible again.
+
+### Recorded results (2026-11-26)
+
+Chrome for Testing 159.0.8154.6, macOS 27.2 arm64. The 1-minute load average
+on the host was 6 to 9. Full summaries are in
+`results-2026-11-26-100ms-slots.json` and `results-2026-11-26-500ms-slots.json`.
+
+| Slots, hidden time               | Clock        | Cells sent while hidden | Cycles degraded | Wake-up lateness (median / p99 / max) |
+| -------------------------------- | ------------ | ----------------------- | --------------- | ------------------------------------- |
+| 100 ms (99 ms tolerance), 390 s  | page timers  | 0 of 3,890              | 389 of 389      | 244 ms / 315 ms / 58.5 s              |
+| 100 ms (99 ms tolerance), 390 s  | timer worker | 3,456 of 3,890          | 75 of 389       | 50 ms / 100 ms / 143 ms               |
+| 500 ms (499 ms tolerance), 120 s | page timers  | 0 of 230                | 23 of 23        | 927 ms / 1,061 ms / 1,061 ms          |
+| 500 ms (499 ms tolerance), 120 s | timer worker | 230 of 230              | 0 of 23         | 60 ms / 100 ms / 105 ms               |
+
+Notes on the table:
+
+- Past 300 s hidden (Chromium's intensive throttling), page-timer wake-ups came
+  once a minute. The worker's numbers did not change in that phase.
+- While visible, both clocks sent every cell, and no wake-up was more than
+  6 ms late.
+- Not measured: other browsers, mobile, a frozen or discarded page, and a
+  suspended process.
+
 ## `frontend-audit-report.md`
 
 The synthesized multi-agent UI/UX + v3/v4-wiring audit of `p2party.com`.
-
 
 ## Desync follow-ups (2026-09-08, SDK 0.14.9)
 

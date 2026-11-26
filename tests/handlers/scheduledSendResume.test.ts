@@ -70,8 +70,9 @@ let clearTransfer: (typeof import("../../src/handlers/reconcile"))["clearTransfe
 let isTransferComplete: (typeof import("../../src/handlers/reconcile"))["isTransferComplete"];
 let markTransferComplete: (typeof import("../../src/handlers/reconcile"))["markTransferComplete"];
 let sealChunk: (typeof import("../../src/handlers/messageChunkCrypto"))["sealChunk"];
-let decryptMessageChunk: (typeof import("../../src/handlers/messageChunkCrypto"))["decryptMessageChunk"];
+let decryptMessageChunkClassicalOnlyForTests: (typeof import("../../src/handlers/messageChunkCrypto"))["decryptMessageChunkClassicalOnlyForTests"];
 let handleReceiveMessage: (typeof import("../../src/handlers/handleReceiveMessage"))["handleReceiveMessage"];
+let allowClassicalOnlyReceiveForTests: (typeof import("../../src/handlers/ratchetPersist"))["allowClassicalOnlyReceiveForTests"];
 let MAX_SCHEDULED_SEND_RESUMES: number;
 
 beforeAll(async () => {
@@ -89,10 +90,12 @@ beforeAll(async () => {
     await import("../../src/handlers/ratchetGate"));
   ({ clearTransfer, isTransferComplete, markTransferComplete } =
     await import("../../src/handlers/reconcile"));
-  ({ decryptMessageChunk, sealChunk } =
+  ({ decryptMessageChunkClassicalOnlyForTests, sealChunk } =
     await import("../../src/handlers/messageChunkCrypto"));
   ({ handleReceiveMessage } =
     await import("../../src/handlers/handleReceiveMessage"));
+  ({ allowClassicalOnlyReceiveForTests } =
+    await import("../../src/handlers/ratchetPersist"));
   ({ MAX_SCHEDULED_SEND_RESUMES } = await import("../../src/utils/constants"));
 });
 
@@ -1136,7 +1139,7 @@ describe("the peer can decrypt what a resumed send emits", () => {
     const frame1 = sealChunk(g1.messageKey, g1.header, plaintext, root, module);
 
     // POSITIVE CONTROL: the generation that sealed it opens it.
-    const onGen1 = decryptMessageChunk(
+    const onGen1 = decryptMessageChunkClassicalOnlyForTests(
       bob1,
       frame1,
       new Map<string, Uint8Array>(),
@@ -1156,7 +1159,7 @@ describe("the peer can decrypt what a resumed send emits", () => {
     );
 
     // Replaying the retired generation's cell — the design this task rejected.
-    const replayed = decryptMessageChunk(
+    const replayed = decryptMessageChunkClassicalOnlyForTests(
       bob2,
       frame1,
       new Map<string, Uint8Array>(),
@@ -1169,7 +1172,7 @@ describe("the peer can decrypt what a resumed send emits", () => {
     // Re-deriving on the new generation — the design this task implements.
     const g2 = ratchetEncrypt(alice2, module);
     const frame2 = sealChunk(g2.messageKey, g2.header, plaintext, root, module);
-    const resumed = decryptMessageChunk(
+    const resumed = decryptMessageChunkClassicalOnlyForTests(
       bob2,
       frame2,
       new Map<string, Uint8Array>(),
@@ -1205,7 +1208,7 @@ describe("a resumed send is idempotent at the receiver", () => {
         root,
         module,
       );
-      const out = decryptMessageChunk(
+      const out = decryptMessageChunkClassicalOnlyForTests(
         bob,
         frame,
         new Map<string, Uint8Array>(),
@@ -1262,6 +1265,8 @@ describe("a resumed send is idempotent at the receiver", () => {
       ratchetState: bob,
       messageKeyCache: new Map<string, Uint8Array>(),
     } as unknown as IRTCPeerConnection;
+    // A PQ-less edge must opt into the test-only classical receive path.
+    allowClassicalOnlyReceiveForTests(epc);
 
     // The store reports the authoritative distinct-byte completion for the
     // WHOLE transfer, not "this call inserted something": a duplicate of an

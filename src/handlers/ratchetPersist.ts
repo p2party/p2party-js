@@ -7,7 +7,11 @@ import {
 } from "../cryptography/ratchet";
 import { deleteRatchetSession, setRatchetSession } from "../db/api";
 import { MAX_SKIP_SESSION } from "../utils/constants";
-import { decryptMessageChunk, messageCacheKey } from "./messageChunkCrypto";
+import {
+  decryptMessageChunk,
+  decryptMessageChunkClassicalOnlyForTests,
+  messageCacheKey,
+} from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
@@ -437,11 +441,35 @@ export const ratchetEncryptDurably = async (
     persist,
   );
 
+// Edges a test explicitly allowed to receive under raw classical ratchet keys.
+// Production never adds to it (see allowClassicalOnlyReceiveForTests).
+const classicalOnlyReceiveTestEdges = new WeakSet<IRTCPeerConnection>();
+
+/**
+ * TESTS ONLY. Lets this edge receive without an installed PQ runtime, under
+ * raw classical ratchet keys (`decryptMessageChunkClassicalOnlyForTests`),
+ * with the classical key kept in the persisted skipped map until retirement.
+ * Without this, `decryptMessageChunkDurably` refuses such an edge.
+ * tests/handlers/messageChunkCrypto.test.ts checks that no production module
+ * calls it.
+ */
+export const allowClassicalOnlyReceiveForTests = (
+  epc: IRTCPeerConnection,
+): void => {
+  classicalOnlyReceiveTestEdges.add(epc);
+};
+
 /**
  * Decrypt one inbound chunk with a staged state/cache. An authenticated ratchet
  * advance becomes visible only after its snapshot is durable; persistence
  * failure rejects without advancing live state, caching a key, or exposing the
  * decrypted bytes. Cache hits do not advance or persist the ratchet.
+ *
+ * A live edge always installs its PQ runtime together with its ratchet
+ * (`persistAndActivateEdgeCrypto`), and every v4 message key is PQ-combined.
+ * An edge with a ratchet but no PQ runtime therefore means that invariant
+ * broke; the decrypt rejects before touching the ratchet rather than falling
+ * back to the raw classical key.
  */
 export const decryptMessageChunkDurably = async (
   epc: IRTCPeerConnection,
@@ -457,6 +485,10 @@ export const decryptMessageChunkDurably = async (
     roomId,
     (candidate) => {
       const pq = epc.pqHealingState;
+      if (!pq && !classicalOnlyReceiveTestEdges.has(epc))
+        throw new Error(
+          "ratchet persistence: edge has no PQ runtime; refusing a classical-only decrypt",
+        );
       const { header, pqEpoch } = parseChunkFrameHeader(frame);
       const cacheKey = messageCacheKey(
         header.dhPub,
@@ -464,17 +496,23 @@ export const decryptMessageChunkDurably = async (
         pq ? pqEpoch : undefined,
       );
       const stagedCache = new Map(cache);
-      const decrypted = decryptMessageChunk(
-        candidate,
-        frame,
-        stagedCache,
-        merkleRoot,
-        module,
-        pq
-          ? (epoch: bigint): PqMessageKeyContext | null =>
-              pq.resolveMessageContext(epoch)
-          : undefined,
-      );
+      const decrypted = pq
+        ? decryptMessageChunk(
+            candidate,
+            frame,
+            stagedCache,
+            merkleRoot,
+            module,
+            (epoch: bigint): PqMessageKeyContext | null =>
+              pq.resolveMessageContext(epoch),
+          )
+        : decryptMessageChunkClassicalOnlyForTests(
+            candidate,
+            frame,
+            stagedCache,
+            merkleRoot,
+            module,
+          );
 
       if (!decrypted.stateAdvanced)
         return { value: decrypted, advanced: false };
@@ -508,7 +546,7 @@ export const decryptMessageChunkDurably = async (
         };
       }
 
-      // Bootstrap/low-level path (no PQ runtime, classical keys only): retain
+      // Test-only classical path (allowClassicalOnlyReceiveForTests): retain
       // an independently owned copy in the persisted skipped-key map until the
       // authoritative chunk manifest completes. A restored state can therefore
       // rebuild the RAM cache and decrypt the remaining chunks.

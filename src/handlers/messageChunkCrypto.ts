@@ -313,11 +313,22 @@ const resolvedContextMatches = (
   context.binding instanceof Uint8Array &&
   context.binding.length === PQ_MESSAGE_KEY_BINDING_BYTES;
 
+const failedClosed = (): DecryptedChunk => ({
+  decrypted: null,
+  ok: false,
+  stateAdvanced: false,
+});
+
 /**
  * RECEIVE one chunk frame: derive the per-message key off the ratchet (in TS —
  * the ratchet state is a TS object), then do ALL the crypto in ONE C call
  * (`receiveWithKey` → `_receive_message_with_key`: decrypt + leaf-hash + Merkle +
  * receipt, in place).
+ *
+ * Every protocol-v4 message key is PQ-combined, so the resolver is required.
+ * A call without one fails closed (`ok: false`, state untouched) instead of
+ * falling back to the raw classical ratchet key; the classical-only path is
+ * `decryptMessageChunkClassicalOnlyForTests`, which production never calls.
  *
  * The production `cache` is caller-owned and keyed by
  * `messageCacheKey(dhPub,N,pqEpoch)`. It stores already-combined active receive
@@ -344,11 +355,51 @@ export const decryptMessageChunk = (
   cache: Map<string, Uint8Array>,
   merkleRoot: Uint8Array,
   module: LibCrypto,
-  pqContextResolver?: PqMessageKeyContextResolver,
+  pqContextResolver: PqMessageKeyContextResolver,
 ): DecryptedChunk => {
   if (merkleRoot.length !== crypto_hash_sha512_BYTES)
     throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
+  // Typed callers cannot omit it; this also covers untyped and cast callers.
+  if (typeof pqContextResolver !== "function") return failedClosed();
+  return decryptChunk(
+    state,
+    frame,
+    cache,
+    merkleRoot,
+    module,
+    pqContextResolver,
+  );
+};
 
+/**
+ * TESTS ONLY. Decrypts under the raw classical ratchet key with no PQ
+ * combiner, a key an adversary who breaks X25519 can derive. It accepts only
+ * wire epoch 0 and uses the legacy two-field `dhPub:N` cache identity.
+ * Production receive paths call `decryptMessageChunk` with a resolver. Outside
+ * this module only ratchetPersist.ts references it, for an edge a test opted
+ * in; tests/handlers/messageChunkCrypto.test.ts enforces that.
+ */
+export const decryptMessageChunkClassicalOnlyForTests = (
+  state: RatchetState,
+  frame: Uint8Array,
+  cache: Map<string, Uint8Array>,
+  merkleRoot: Uint8Array,
+  module: LibCrypto,
+): DecryptedChunk => {
+  if (merkleRoot.length !== crypto_hash_sha512_BYTES)
+    throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
+  return decryptChunk(state, frame, cache, merkleRoot, module, null);
+};
+
+// `pqContextResolver === null` selects the classical-only test path.
+const decryptChunk = (
+  state: RatchetState,
+  frame: Uint8Array,
+  cache: Map<string, Uint8Array>,
+  merkleRoot: Uint8Array,
+  module: LibCrypto,
+  pqContextResolver: PqMessageKeyContextResolver | null,
+): DecryptedChunk => {
   const { header, pqEpoch } = parseChunkFrameHeader(frame);
 
   let pqContext: PqMessageKeyContext | null = null;
@@ -356,17 +407,17 @@ export const decryptMessageChunk = (
     try {
       pqContext = pqContextResolver(pqEpoch);
     } catch {
-      return { decrypted: null, ok: false, stateAdvanced: false };
+      return failedClosed();
     }
     if (
       !pqContext ||
       !resolvedContextMatches(pqContext, pqEpoch, state.rootSuite)
     )
-      return { decrypted: null, ok: false, stateAdvanced: false };
+      return failedClosed();
   } else if (pqEpoch !== 0n) {
-    // Context-free operation is a bootstrap-only low-level compatibility path.
-    // Never interpret a nonzero wire epoch as a raw classical key.
-    return { decrypted: null, ok: false, stateAdvanced: false };
+    // The classical-only test path never interprets a nonzero wire epoch as a
+    // raw classical key.
+    return failedClosed();
   }
 
   const cacheK = messageCacheKey(

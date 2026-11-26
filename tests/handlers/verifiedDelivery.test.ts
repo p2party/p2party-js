@@ -1,4 +1,11 @@
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 
 import { loadTestModule } from "../../src/cryptography/testModule";
 import { getMerkleRoot } from "../../src/cryptography/merkle";
@@ -6,12 +13,20 @@ import { initRatchet, ratchetEncrypt } from "../../src/cryptography/ratchet";
 import { sealCoverCell } from "../../src/cryptography/coverCell";
 import { crypto_hash_sha512_BYTES } from "../../src/cryptography/interfaces";
 import { SparsePqHealingState } from "../../src/handlers/pqHealingRuntime";
+import { roomSendQueueLabel } from "../../src/utils/sendQueueKey";
+import {
+  FRAME_TYPE_IMMEDIATE_DISPOSITION,
+  IMMEDIATE_RESUME_PROTOCOL,
+  acceptImmediateDisposition,
+  bindImmediateDisposition,
+} from "../../src/handlers/immediateDisposition";
 import { hashMerkleLeafWasm } from "../../src/utils/leafHash";
 import { serializeMetadata } from "../../src/utils/metadata";
 import { MessageType } from "../../src/utils/messageTypes";
 import { hexToUint8Array, uint8ArrayToHex } from "../../src/utils/uint8array";
 import {
   CHUNK_LEN,
+  MAX_SCHEDULED_SEND_RESUMES,
   MAX_TIMER_DELAY_MS,
   MIN_RECEIVER_VERIFY_BYTES_PER_SECOND,
   REPORTED_COMPLETION_CHECK_MS,
@@ -62,8 +77,11 @@ type Reconcile = typeof import("../../src/handlers/reconcile");
 let clearTransfer: Reconcile["clearTransfer"];
 let markChunkAcked: Reconcile["markChunkAcked"];
 let markTransferComplete: Reconcile["markTransferComplete"];
+let hasChunkAcked: Reconcile["hasChunkAcked"];
 let reportedCompletionCapMs: Reconcile["reportedCompletionCapMs"];
 let waitForReportedCompletion: Reconcile["waitForReportedCompletion"];
+let armTimer: Reconcile["armTimer"];
+let clampTimerDelayMs: Reconcile["clampTimerDelayMs"];
 let noteTransferActivity: Reconcile["noteTransferActivity"];
 let onTransferActivity: Reconcile["onTransferActivity"];
 type CoverEdgeModule = typeof import("../../src/handlers/coverEdge");
@@ -92,8 +110,11 @@ beforeAll(async () => {
     clearTransfer,
     markChunkAcked,
     markTransferComplete,
+    hasChunkAcked,
     reportedCompletionCapMs,
     waitForReportedCompletion,
+    armTimer,
+    clampTimerDelayMs,
     noteTransferActivity,
     onTransferActivity,
   } = await import("../../src/handlers/reconcile"));
@@ -109,7 +130,12 @@ beforeAll(async () => {
 
 const ROOM = "room-a4-verify";
 const PEER = "peer-a4-verify";
-const TRANSFER_ID = "a6".repeat(32);
+// Each test sends its own transfer: a send a failed test leaves running can
+// then never wake another test's wait.
+let TRANSFER_ID = "";
+beforeEach(() => {
+  TRANSFER_ID = uint8ArrayToHex(crypto.getRandomValues(new Uint8Array(32)));
+});
 const HASH_HEX = "e6".repeat(64);
 const MIB = 1024 * 1024;
 
@@ -283,6 +309,7 @@ class TransferChannel extends EventTarget {
   readyState: RTCDataChannelState = "open";
   bufferedAmount = 0;
   bufferedAmountLowThreshold = 0;
+  protocol = "raw";
   withPeerId = PEER;
   roomIds: [string] = [ROOM];
   constructor(label: string) {
@@ -612,6 +639,8 @@ const startScheduledVerification = async (
     readonly clock?: ManualClock;
   } = {},
 ) => {
+  // Every subscription the verification wait makes to receipt activity.
+  let activitySubscriptions = 0;
   const staged = await stageMessage(3, 1, totalSize);
   const edge = scheduledEdge();
   const peerConnections = options.peerConnections ?? [edge.epc];
@@ -647,6 +676,10 @@ const startScheduledVerification = async (
       },
       resumeWaitMs: 1,
       clock,
+      subscribeActivity: (roomId, peerId, transferId, listener) => {
+        activitySubscriptions++;
+        return onTransferActivity(roomId, peerId, transferId, listener);
+      },
     },
   );
   await started;
@@ -658,6 +691,7 @@ const startScheduledVerification = async (
     sending,
     peerConnections,
     deliveryWaits: () => deliveryWaits,
+    activitySubscriptions: () => activitySubscriptions,
   };
 };
 
@@ -848,6 +882,7 @@ const startImmediateVerification = async (totalSize: number) => {
   });
   const clock = new ManualClock();
   const cancellations: string[] = [];
+  const queueDeletes: [string, string][] = [];
   const sending = sendWithReconcile(
     channel as unknown as IRTCDataChannel,
     {
@@ -865,7 +900,9 @@ const startImmediateVerification = async (totalSize: number) => {
     undefined,
     {
       ratchetStep,
-      deleteSendQueue: async () => undefined,
+      deleteSendQueue: async (label, peerId) => {
+        queueDeletes.push([label, peerId]);
+      },
       persistCancellation: async (receipt) => {
         cancellations.push(receipt.transferId);
         return true;
@@ -878,7 +915,15 @@ const startImmediateVerification = async (totalSize: number) => {
   for (let turn = 0; turn < 200 && clock.armed === 0; turn++) await settle();
   expect(sent).toBe(4);
   expect(clock.armed).toBe(1);
-  return { ...staged, channel, epc, clock, sending, cancellations };
+  return {
+    ...staged,
+    channel,
+    epc,
+    clock,
+    sending,
+    cancellations,
+    queueDeletes,
+  };
 };
 
 const closeFromTheFarSide = (channel: TransferChannel): void => {
@@ -902,8 +947,8 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     expect((settled.value as Error).message).toBe(
       "Message transfer ended without receiver confirmation",
     );
-    // No schedule time passed: not the silence bound, not a round wait.
-    expect(clock.now()).toBe(0);
+    // Settled with the clock never advanced, and the wait left no timer.
+    expect(clock.armed).toBe(0);
     expect(cancellations).toEqual([]);
   });
 
@@ -922,7 +967,7 @@ describe("immediate mode: a closing channel ends the verification wait at once",
       "Message transfer cancelled by peer",
     );
     expect(cancellations).toEqual([TRANSFER_ID]);
-    expect(clock.now()).toBe(0);
+    expect(clock.armed).toBe(0);
   });
 
   test("a silent receiver ends sendWithReconcile after one silence bound, not one per retry", async () => {
@@ -943,10 +988,18 @@ describe("immediate mode: a closing channel ends the verification wait at once",
 
 describe("scheduled mode: a replaced edge ends the verification wait at once", () => {
   test("an edge replaced during the scheduled verification wait resumes on the new edge at once", async () => {
-    const { edge, clock, sending, peerConnections, deliveryWaits } =
-      await startScheduledVerification(800 * MIB, {
-        laterDelivery: async () => true,
-      });
+    const {
+      edge,
+      clock,
+      sending,
+      peerConnections,
+      deliveryWaits,
+      activitySubscriptions,
+    } = await startScheduledVerification(800 * MIB, {
+      laterDelivery: async () => true,
+    });
+    // The verification wait was entered and is listening.
+    expect(activitySubscriptions()).toBe(1);
     // The receiver is verifying; the sender's edge is replaced: torn down, and
     // a fresh connection with its own runtime becomes the current transport.
     expect(clock.armed).toBe(1);
@@ -960,10 +1013,11 @@ describe("scheduled mode: a replaced edge ends the verification wait at once", (
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
     ]);
-    // Re-derived and re-offered on the new edge, with no schedule time spent.
+    // Re-derived and re-offered on the new edge, settled with the clock never
+    // advanced, and the wait left no timer.
     expect(replacement.jobs).toHaveLength(1);
     expect(deliveryWaits()).toBe(2);
-    expect(clock.now()).toBe(0);
+    expect(clock.armed).toBe(0);
   });
 
   test("the scheduled verification wait is not entered for a replaced edge", async () => {
@@ -992,9 +1046,58 @@ describe("scheduled mode: a replaced edge ends the verification wait at once", (
       { peerId: PEER, status: "delivered" },
     ]);
     expect(replacement!.jobs).toHaveLength(1);
-    // The verification wait never armed a timer, and no schedule time passed.
+    // The verification wait was never entered: it made no subscription and
+    // armed no timer (its first check inside would have subscribed first).
+    expect(started.activitySubscriptions()).toBe(0);
     expect(armedAtFirstReturn).toBe(0);
-    expect(started.clock.now()).toBe(0);
+    expect(clock.armed).toBe(0);
+  });
+});
+
+describe("scheduled mode: every peer's send is observed", () => {
+  test("a peer whose send throws outside its own handling does not take the other peers' outcomes with it", async () => {
+    const staged = await stageMessage(3, 1, 800 * MIB);
+    const second = scheduledEdge(PEER_TWO);
+    // A connection still coming up, without the event methods the admission
+    // wait needs: that peer's send throws before its own try/catch.
+    const broken = {
+      roomId: ROOM,
+      withPeerId: PEER,
+      connectionState: "connecting",
+    } as unknown as IRTCPeerConnection;
+    const sending = sendScheduled(
+      ROOM,
+      "chat",
+      policy,
+      [
+        { peerId: PEER, epc: broken },
+        { peerId: PEER_TWO, epc: second.epc },
+      ],
+      staged.message,
+      module,
+      undefined,
+      undefined,
+      [broken, second.epc],
+      {
+        waitForGate: async () => undefined,
+        ratchetStep,
+        waitForDelivery: async () => true,
+        resumeWaitMs: 1,
+      },
+    );
+    const settled = await settledSoon(sending.catch((error: Error) => error));
+    expect(settled.settled).toBe(true);
+    const result = settled.value as Awaited<typeof sending>;
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]).toMatchObject({
+      peerId: PEER,
+      status: "failed",
+      phase: "transfer",
+    });
+    expect(result.outcomes[1]).toEqual({
+      peerId: PEER_TWO,
+      status: "delivered",
+    });
   });
 });
 
@@ -1140,5 +1243,390 @@ describe("the verification wait does not count time the page did not run", () =>
     expect(clock.fired).toBe(60_000 / REPORTED_COMPLETION_CHECK_MS);
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
     expect((await settledWithin(waiting)).settled).toBe(true);
+  });
+});
+
+// ── round 3: the cap, rekeys, retirement, completion on a failing resume ───
+
+/** A clock whose timers fire only on whole periods, as a throttled page's. */
+const periodicClock = (periodMs: number) => {
+  const clock = new ManualClock();
+  return {
+    clock,
+    transferClock: {
+      now: clock.now,
+      clearTimeout: clock.clearTimeout,
+      setTimeout: (callback: () => void, ms: number) => {
+        const due = Math.ceil((clock.now() + ms) / periodMs) * periodMs;
+        return clock.setTimeout(
+          callback,
+          Math.max(periodMs, due) - clock.now(),
+        );
+      },
+    },
+  };
+};
+
+const silentWait = (
+  clock: Parameters<Reconcile["waitForReportedCompletion"]>[3]["clock"],
+  silenceMs: number,
+  capMs: number,
+): Promise<boolean> =>
+  waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+    silenceMs,
+    capMs,
+    onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+    clock,
+  });
+
+describe("the verification wait's cap is fixed when it starts", () => {
+  test("the cap bounds the wait on a page whose timers fire once a minute", async () => {
+    const period = 60_000;
+    const cap = 40_000;
+    for (const silence of [30_000, 321_200]) {
+      const { clock, transferClock } = periodicClock(period);
+      const waiting = silentWait(transferClock, silence, cap);
+      let endedAt: number | undefined;
+      for (
+        let t = period;
+        t <= 2 * 3_600_000 && endedAt === undefined;
+        t += period
+      ) {
+        clock.advanceTo(t);
+        if ((await settledWithin(waiting)).settled) endedAt = t;
+      }
+      // Every check ran late, so silence never ended it; the cap did, within
+      // one silence bound and one timer period of it.
+      expect(endedAt).toBeDefined();
+      expect(endedAt!).toBeGreaterThanOrEqual(cap);
+      expect(endedAt!).toBeLessThanOrEqual(cap + silence + period);
+      expect(await waiting).toBe(false);
+      clearTransfer(ROOM, PEER, TRANSFER_ID);
+    }
+  });
+
+  test("a wake past the cap leaves one silence bound, once", async () => {
+    const clock = new ManualClock();
+    const silence = RECEIVER_SILENCE_LIMIT_MS;
+    const cap = 40_000;
+    const waiting = silentWait(clock, silence, cap);
+    clock.advanceTo(12_000);
+    // Asleep past the cap; the overdue check on waking extends it once.
+    clock.jumpTo(100_000);
+    clock.advanceTo(100_000);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    // Asleep again, past the extended cap: no second extension.
+    clock.jumpTo(200_000);
+    clock.advanceTo(200_000);
+    expect(await settledWithin(waiting)).toEqual({
+      settled: true,
+      value: false,
+    });
+  });
+
+  test("receipts arriving after the cap do not extend it", async () => {
+    // On a page that runs on time, receipts every 10 s right up to the cap:
+    // the wait still ends at it.
+    const onTime = new ManualClock();
+    const atCap = silentWait(onTime, RECEIVER_SILENCE_LIMIT_MS, 40_000);
+    for (let t = 10_000; t < 40_000; t += 10_000) {
+      onTime.advanceTo(t);
+      noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    }
+    onTime.advanceTo(39_999);
+    noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    expect((await settledWithin(atCap)).settled).toBe(false);
+    onTime.advanceTo(40_000);
+    expect(await settledWithin(atCap)).toEqual({ settled: true, value: false });
+    clearTransfer(ROOM, PEER, TRANSFER_ID);
+
+    // After a sleep past the cap the first receipt on waking takes the one
+    // extension; a receipt after the next sleep takes none.
+    const clock = new ManualClock();
+    const waiting = silentWait(clock, RECEIVER_SILENCE_LIMIT_MS, 40_000);
+    clock.advanceTo(12_000);
+    clock.jumpTo(100_000);
+    noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    clock.jumpTo(200_000);
+    noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    expect(await settledWithin(waiting)).toEqual({
+      settled: true,
+      value: false,
+    });
+    clearTransfer(ROOM, PEER, TRANSFER_ID);
+
+    // Receipts on time during the extension do not push it either: it still
+    // ends one silence bound after the wake.
+    const extended = new ManualClock();
+    const afterWake = silentWait(extended, RECEIVER_SILENCE_LIMIT_MS, 40_000);
+    extended.advanceTo(12_000);
+    extended.jumpTo(100_000);
+    extended.advanceTo(100_000);
+    for (let t = 110_000; t < 130_000; t += 10_000) {
+      extended.advanceTo(t);
+      noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    }
+    extended.advanceTo(129_999);
+    expect((await settledWithin(afterWake)).settled).toBe(false);
+    extended.advanceTo(130_000);
+    expect(await settledWithin(afterWake)).toEqual({
+      settled: true,
+      value: false,
+    });
+  });
+
+  test("on a throttled page the cap's bound is one silence bound and two periods", async () => {
+    // The cap falls just past a wake-up: the first check past it runs almost
+    // a period late and leaves one silence bound, which the next wake-up
+    // after it sees almost a period late again.
+    const period = 60_000;
+    const silence = 30_000;
+    const cap = 61_000;
+    const { clock, transferClock } = periodicClock(period);
+    const waiting = silentWait(transferClock, silence, cap);
+    let endedAt: number | undefined;
+    for (let t = period; t <= 600_000 && endedAt === undefined; t += period) {
+      clock.advanceTo(t);
+      if ((await settledWithin(waiting)).settled) endedAt = t;
+    }
+    expect(endedAt).toBe(180_000);
+    expect(endedAt!).toBeGreaterThan(cap + silence + period);
+    expect(endedAt!).toBeLessThanOrEqual(cap + silence + 2 * period);
+  });
+});
+
+describe("a key-epoch change is not an edge going away", () => {
+  test("a key-epoch change during the verification wait does not end it", async () => {
+    const started = await startScheduledVerification(800 * MIB);
+    // A PQ heal on the same edge publishes a new cover generation.
+    started.edge.epc.coverRuntime!.onPqEpochChanged();
+    await settle();
+    expect((await settledSoon(started.sending)).settled).toBe(false);
+    // Not re-entered, not resumed, nothing re-offered.
+    expect(started.activitySubscriptions()).toBe(1);
+    expect(started.deliveryWaits()).toBe(1);
+    expect(started.edge.jobs).toHaveLength(1);
+    markTransferComplete(ROOM, PEER, TRANSFER_ID);
+    const settled = await settledSoon(started.sending);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+    ]);
+  });
+
+  test("rekeys during a long verification do not spend the resume budget", async () => {
+    const silence = scheduledSilence();
+    const totalSize = Math.ceil(
+      (10 * silence * MIN_RECEIVER_VERIFY_BYTES_PER_SECOND) / 1000,
+    );
+    const started = await startScheduledVerification(totalSize);
+    for (let rekey = 0; rekey <= MAX_SCHEDULED_SEND_RESUMES + 1; rekey++) {
+      started.clock.advanceTo(started.clock.now() + silence / 2);
+      started.edge.receiveReceipt(started.merkleRootHex);
+      await settle();
+      started.edge.epc.coverRuntime!.onPqEpochChanged();
+      await settle();
+    }
+    expect((await settledSoon(started.sending)).settled).toBe(false);
+    markTransferComplete(ROOM, PEER, TRANSFER_ID);
+    const settled = await settledSoon(started.sending);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+    ]);
+    expect(started.deliveryWaits()).toBe(1);
+    expect(started.edge.jobs).toHaveLength(1);
+  });
+});
+
+describe("a replacement that arrives before the old edge is torn down", () => {
+  test("a replacement installed after a rekey, before the old teardown, ends the wait at once", async () => {
+    const { edge, clock, sending, peerConnections, deliveryWaits } =
+      await startScheduledVerification(800 * MIB, {
+        laterDelivery: async () => true,
+      });
+    // A rekey first: the generation watch must keep listening after it.
+    edge.epc.coverRuntime!.onPqEpochChanged();
+    await settle();
+    expect((await settledSoon(sending)).settled).toBe(false);
+    // The peer's fresh connection authenticates and installs its runtime;
+    // the old edge is not torn down yet.
+    const replacement = scheduledEdge();
+    peerConnections.push(replacement.epc);
+    const settled = await settledSoon(sending);
+    expect(settled.settled).toBe(true);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+    ]);
+    expect(replacement.jobs).toHaveLength(1);
+    expect(deliveryWaits()).toBe(2);
+    expect(clock.armed).toBe(0);
+  });
+});
+
+describe("an edge retired with no replacement", () => {
+  test("an edge retired without a replacement ends the scheduled wait at once", async () => {
+    const started = await startScheduledVerification(800 * MIB);
+    expect(started.clock.armed).toBe(1);
+    // Torn down; nothing replaces it, so no generation is published.
+    teardownCoverEdge(started.edge.epc);
+    const settled = await settledSoon(started.sending);
+    // Settled with the clock never advanced, and the wait left no timer.
+    expect(settled.settled).toBe(true);
+    expect(started.clock.armed).toBe(0);
+    expect(settled.value?.outcomes[0]).toMatchObject({
+      peerId: PEER,
+      status: "failed",
+      phase: "transfer",
+    });
+    expect(
+      (settled.value?.outcomes[0] as { reason: Error }).reason.message,
+    ).toBe("scheduled delivery not confirmed");
+  });
+});
+
+describe("immediate mode: completion and the receiver's CANCEL around a close", () => {
+  test("a completion recorded while the resume was failing is reported as delivered", async () => {
+    const { channel, epc, sending, realIndexes } =
+      await startImmediateVerification(800 * MIB);
+    const outcome = sending.then(
+      () => "delivered",
+      (error: Error) => error.message,
+    );
+    // The peer's connection is gone, and the final receipt is recorded while
+    // the resume looks for its replacement: the first time the connection is
+    // read after the resume has reset the transfer's have-set. The resume
+    // still finds no transport and gives up.
+    let recorded = false;
+    Object.defineProperty(epc, "connectionState", {
+      configurable: true,
+      get: () => {
+        if (
+          !recorded &&
+          !hasChunkAcked(ROOM, PEER, TRANSFER_ID, realIndexes[0])
+        ) {
+          recorded = true;
+          markTransferComplete(ROOM, PEER, TRANSFER_ID);
+        }
+        return "disconnected";
+      },
+    });
+    closeFromTheFarSide(channel);
+    const settled = await settledSoon(outcome, 400);
+    expect(recorded).toBe(true);
+    expect(settled).toEqual({ settled: true, value: "delivered" });
+  });
+
+  test("a resume drops the legacy queue through the same seam as the send", async () => {
+    const { channel, epc, sending, realIndexes, queueDeletes } =
+      await startImmediateVerification(800 * MIB);
+    const outcome = sending.then(
+      () => "delivered",
+      (error: Error) => error.message,
+    );
+    const label = roomSendQueueLabel(ROOM, channel.label);
+    expect(queueDeletes).toEqual([[label, PEER]]);
+    // The transport drops, then comes back before the resume looks for it;
+    // opening the new channel fails, so the resume gives up.
+    Object.defineProperty(epc, "connectionState", {
+      configurable: true,
+      get: () =>
+        hasChunkAcked(ROOM, PEER, TRANSFER_ID, realIndexes[0])
+          ? "disconnected"
+          : "connected",
+    });
+    closeFromTheFarSide(channel);
+    const settled = await settledSoon(outcome, 400);
+    expect(settled).toEqual({
+      settled: true,
+      value: "Message transfer ended without receiver confirmation",
+    });
+    expect(queueDeletes.length).toBeGreaterThan(1);
+    for (const call of queueDeletes) expect(call).toEqual([label, PEER]);
+  });
+
+  test("a receiver's CANCEL frame then close is reported as a cancel without waiting", async () => {
+    const { channel, clock, sending, cancellations, merkleRoot } =
+      await startImmediateVerification(800 * MIB);
+    // The channel carries the disposition protocol, and the receiver has
+    // said a bare close would only pause the transfer...
+    channel.protocol = IMMEDIATE_RESUME_PROTOCOL;
+    bindImmediateDisposition(
+      channel as unknown as IRTCDataChannel,
+      merkleRoot,
+      false,
+      () => true,
+    );
+    const disposition = (kind: number): Uint8Array => {
+      const frame = new Uint8Array(66);
+      frame[0] = FRAME_TYPE_IMMEDIATE_DISPOSITION;
+      frame[1] = kind;
+      frame.set(merkleRoot, 2);
+      return frame;
+    };
+    expect(
+      acceptImmediateDisposition(
+        channel as unknown as IRTCDataChannel,
+        disposition(0),
+      ),
+    ).toBe("capability");
+    // ...then refuses the file: its CANCEL frame arrives, then the close.
+    expect(
+      acceptImmediateDisposition(
+        channel as unknown as IRTCDataChannel,
+        disposition(1),
+      ),
+    ).toBe("cancel");
+    channel.receiveFrame();
+    closeFromTheFarSide(channel);
+    const settled = await settledSoon(
+      sending.catch((error: Error) => error),
+      400,
+    );
+    expect(settled.settled).toBe(true);
+    expect((settled.value as Error).message).toBe(
+      "Message transfer cancelled by peer",
+    );
+    expect(cancellations).toEqual([TRANSFER_ID]);
+    expect(clock.armed).toBe(0);
+  });
+});
+
+describe("timers above the platform limit", () => {
+  test("clampTimerDelayMs and armTimer at the largest delay and one more", () => {
+    expect(clampTimerDelayMs(MAX_TIMER_DELAY_MS)).toBe(MAX_TIMER_DELAY_MS);
+    expect(clampTimerDelayMs(MAX_TIMER_DELAY_MS + 1)).toBe(MAX_TIMER_DELAY_MS);
+    expect(clampTimerDelayMs(-1)).toBe(0);
+
+    const clock = new ManualClock();
+    const delays: number[] = [];
+    const recording = {
+      now: clock.now,
+      clearTimeout: clock.clearTimeout,
+      setTimeout: (callback: () => void, ms: number) => {
+        delays.push(ms);
+        return clock.setTimeout(callback, ms);
+      },
+    };
+    let fired = 0;
+    armTimer(recording, () => fired++, MAX_TIMER_DELAY_MS);
+    expect(delays).toEqual([MAX_TIMER_DELAY_MS]);
+    clock.advanceTo(MAX_TIMER_DELAY_MS);
+    expect(fired).toBe(1);
+
+    // One more: armed at the limit, then re-armed for the 1 ms remainder.
+    delays.length = 0;
+    const start = clock.now();
+    armTimer(recording, () => fired++, MAX_TIMER_DELAY_MS + 1);
+    clock.advanceTo(start + MAX_TIMER_DELAY_MS);
+    expect(fired).toBe(1);
+    expect(delays).toEqual([MAX_TIMER_DELAY_MS, 1]);
+    clock.advanceTo(start + MAX_TIMER_DELAY_MS + 1);
+    expect(fired).toBe(2);
+
+    // Cancelled before it is due: it never fires.
+    const cancel = armTimer(recording, () => fired++, 10);
+    cancel();
+    clock.advanceTo(clock.now() + 10);
+    expect(fired).toBe(2);
   });
 });

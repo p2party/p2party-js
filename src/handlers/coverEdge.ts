@@ -143,10 +143,10 @@ export const coverEdgeGeneration = (roomId: string, peerId: string): number =>
  *
  * `signal` ends the wait early with the CURRENT generation, i.e. with "nothing
  * replaced anything" unless something actually did. A cancelled send must not
- * sit here for the whole resume budget — the fan-out is serial, so that budget
- * is charged to every later peer as well — and answering "no replacement" is
- * the answer that makes the caller stop rather than re-derive onto an edge
- * nobody is waiting for any more.
+ * sit here for the whole resume budget — the whole send's result waits for
+ * every peer's outcome — and answering "no replacement" is the answer that
+ * makes the caller stop rather than re-derive onto an edge nobody is waiting
+ * for any more.
  */
 export const waitForCoverEdgeGeneration = (
   roomId: string,
@@ -220,12 +220,41 @@ export interface InstallCoverEdgeOptions {
  * rooms[].coverStatusByPeer stops claiming cover for this edge. Safe to call
  * on an edge that never had a runtime.
  */
+// A retired runtime with no replacement publishes no generation, so a sender
+// waiting on one of its transfers hears the teardown here instead.
+const retirementListeners = new Map<string, Set<() => void>>();
+
+/**
+ * Call `listener` when this edge's cover runtime is torn down. A wake-up: the
+ * listener reads the edge's state. Returns the unsubscribe.
+ */
+export const onCoverEdgeRetired = (
+  roomId: string,
+  peerId: string,
+  listener: () => void,
+): (() => void) => {
+  const key = coverEdgeKey(roomId, peerId);
+  let listeners = retirementListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    retirementListeners.set(key, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    const current = retirementListeners.get(key);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) retirementListeners.delete(key);
+  };
+};
+
 export const teardownCoverEdge = (epc: IRTCPeerConnection): void => {
   const queue = scheduledReceiptQueues.get(epc);
   if (queue) releaseQueuedReceipts(queue);
   scheduledReceiptQueues.delete(epc);
   transferIdByRoot.delete(epc);
   releaseScheduledReceipts(epc);
+  const retired = epc.coverRuntime !== undefined;
   if (epc.coverRuntime) {
     epc.coverRuntime.destroy();
     epc.coverRuntime = undefined;
@@ -235,6 +264,17 @@ export const teardownCoverEdge = (epc: IRTCPeerConnection): void => {
       if (lane.readyState !== "closed") lane.close();
     epc.coverChannels.clear();
     epc.coverChannels = undefined;
+  }
+  if (!retired) return;
+  const listeners = retirementListeners.get(
+    coverEdgeKey(epc.roomId, epc.withPeerId),
+  );
+  for (const listener of [...(listeners ?? [])]) {
+    try {
+      listener();
+    } catch (error) {
+      console.error(error);
+    }
   }
 };
 

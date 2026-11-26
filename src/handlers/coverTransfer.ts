@@ -445,8 +445,10 @@ export const isForwardScheduledProgress = (
  * (waitForScheduledVerifiedDelivery), applies this hold only while the
  * scheduler still holds the job. Its own checks run on page timers, and a
  * check that runs late (a frozen page, or a hidden one throttled to a wake-up
- * a minute) restarts its silence clock: on such a page a receiver that goes
- * silent is detected only at that wait's cap.
+ * a minute) restarts its silence clock. On a page throttled to one wake-up
+ * every P above twice REPORTED_COMPLETION_CHECK_MS every check is late, so a
+ * receiver that goes silent is detected only through that wait's cap: within
+ * one silence bound and two periods of it (waitForReportedCompletion).
  *
  * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
  * one are NOT this, hidden page or not: they are conditions the idle budget

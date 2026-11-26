@@ -14,6 +14,7 @@ import { validateStoreDescriptor } from "../../../src/blindRendezvous/storeDescr
 import {
   PROTOTYPE_DELIVERY_PROFILE_V0,
   PROTOTYPE_MEDIA_TYPE,
+  PROTOTYPE_STORE_PROTOCOL,
   carrierObjectWireBytes,
   withDeliveryWindowMs,
 } from "../../../src/blindRendezvous/prototype/profile";
@@ -186,7 +187,7 @@ const bodyBytes = async (response: Response): Promise<Uint8Array> =>
 
 /** Every response, on every route, must be attributable to this protocol. */
 const expectStoreHeader = (response: Response): void => {
-  expect(response.headers.get("x-p2party-store")).toBe("prototype-v0");
+  expect(response.headers.get("x-p2party-store")).toBe("prototype-v1");
 };
 
 const leaseFor = async (
@@ -255,7 +256,7 @@ describe("prototype store HTTP handler", () => {
       );
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe(
-        "application/p2party-store-descriptor-prototype-v0",
+        "application/p2party-store-descriptor-prototype-v1",
       );
       // The descriptor is re-signed on every start, so a cache would hand a
       // client a store identity the running process no longer answers under.
@@ -505,15 +506,76 @@ describe("prototype store HTTP handler", () => {
     });
   });
 
+  test("a client of the previous prototype version is refused with a typed version error", async () => {
+    // What a prototype-v0 client sends: its descriptor read first, then its
+    // routes and media types, all under the v0 names.
+    const persistence = new MemoryStorePersistence();
+    await withHarness(
+      async ({ base, core }) => {
+        const v0 = "/p2party/prototype-v0";
+        const keyPair = await newKeyPair(cryptoModule);
+        const requests: [string, RequestInit][] = [
+          ["/.well-known/p2party-store/prototype-v0", {}],
+          [`${v0}/checkpoint/${PROFILE_HEX}/${String(CHAIN_START)}`, {}],
+          [`${v0}/chunk/${PROFILE_HEX}/${String(CHAIN_START)}/0/0`, {}],
+          [
+            `${v0}/allocation`,
+            {
+              method: "POST",
+              headers: {
+                "content-type":
+                  "application/p2party-allocation-request-prototype-v0",
+              },
+              body: asBody(
+                encodePublicAllocationRequestV1({
+                  version: 1,
+                  deliveryProfileHash: PROFILE_HASH,
+                  ingressWindow: CHAIN_START,
+                  allocationEd25519PublicKey: keyPair.publicKey,
+                  privacyPassToken: new Uint8Array(32),
+                }),
+              ),
+            },
+          ],
+          // Any other version of the family, not only the one before.
+          ["/.well-known/p2party-store/prototype-v7", {}],
+        ];
+        for (const [path, init] of requests) {
+          const response = await fetch(`${base}${path}`, init);
+          expect([path, response.status]).toEqual([path, 426]);
+          expectStoreHeader(response);
+          expect(response.headers.get("x-p2party-store")).toBe(
+            PROTOTYPE_STORE_PROTOCOL,
+          );
+          expect(response.headers.get("upgrade")).toBe(
+            PROTOTYPE_STORE_PROTOCOL,
+          );
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(await response.text()).toBe(
+            `this store speaks ${PROTOTYPE_STORE_PROTOCOL}`,
+          );
+        }
+        // Refused before anything of it was read: no allocation was made.
+        expect(await persistence.loadWindow(CHAIN_START)).toBeNull();
+        expect(core.mutationQueueDepth).toBe(0);
+
+        // This version's own descriptor read is still served.
+        const own = await fetch(`${base}${PROTOTYPE_STORE_ROUTES.descriptor}`);
+        expect(own.status).toBe(200);
+      },
+      { persistence },
+    );
+  });
+
   test("answers 404 for anything outside the route family", async () => {
     await withHarness(async ({ base }) => {
       const paths = [
         "/",
         "/p2party",
-        "/p2party/prototype-v0",
-        "/p2party/prototype-v0/",
-        "/p2party/prototype-v0/checkpoint",
-        `/p2party/prototype-v0/checkpoint/${PROFILE_HEX}/1/extra`,
+        "/p2party/prototype-v1",
+        "/p2party/prototype-v1/",
+        "/p2party/prototype-v1/checkpoint",
+        `/p2party/prototype-v1/checkpoint/${PROFILE_HEX}/1/extra`,
         "/.well-known/p2party-store",
         "/health/../admin",
       ];
@@ -588,7 +650,7 @@ describe("prototype store HTTP handler", () => {
       expect(body).toEqual({
         status: "ok",
         role: "store-prototype",
-        protocol: "prototype-v0",
+        protocol: "prototype-v1",
         storeId: hex(core.storeId),
         window: String(CHAIN_START),
       });
@@ -717,15 +779,15 @@ describe("prototype store HTTP handler", () => {
     expect(() => readFileSync(logPath)).toThrow();
   });
 
-  test("routes are exactly the prototype-v0 family", () => {
+  test("routes are exactly the prototype-v1 family", () => {
     expect(PROTOTYPE_STORE_ROUTES).toEqual({
-      descriptor: "/.well-known/p2party-store/prototype-v0",
-      token: "/p2party/prototype-v0/allocation-token",
-      allocation: "/p2party/prototype-v0/allocation",
-      append: "/p2party/prototype-v0/append",
-      checkpoint: "/p2party/prototype-v0/checkpoint",
-      chunk: "/p2party/prototype-v0/chunk",
-      witness: "/p2party/prototype-v0/witness",
+      descriptor: "/.well-known/p2party-store/prototype-v1",
+      token: "/p2party/prototype-v1/allocation-token",
+      allocation: "/p2party/prototype-v1/allocation",
+      append: "/p2party/prototype-v1/append",
+      checkpoint: "/p2party/prototype-v1/checkpoint",
+      chunk: "/p2party/prototype-v1/chunk",
+      witness: "/p2party/prototype-v1/witness",
       health: "/health",
     });
     expect(PROTOTYPE_STORE_MEDIA_TYPES.descriptor).toBe(

@@ -33,7 +33,7 @@
  * `node:fs` and `bun:sqlite`) and nothing Node-only. The route strings come
  * from `storeRoutes.ts`, which both halves share.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry, and nothing here is a v0.4 release artifact.
  */
 
@@ -383,6 +383,30 @@ export class StoreClientError extends Error {
  */
 export class StoreAdmissionTokenError extends StoreClientError {
   override readonly name = "StoreAdmissionTokenError";
+}
+
+/**
+ * The store speaks another version of the prototype protocol: its answer
+ * carries an `x-p2party-store` value other than this client's
+ * `PROTOTYPE_STORE_PROTOCOL`. `connect` refuses it before reading anything
+ * the store signed, since every route, media type and signed body of another
+ * version differs from this one's. A store of the previous version answers
+ * this client's descriptor path with its own 404, which is how this is met
+ * in practice.
+ */
+export class StoreVersionError extends StoreClientError {
+  override readonly name = "StoreVersionError";
+  /** The version the store's answer names. */
+  readonly storeProtocol: string;
+  /** The version this client speaks. */
+  readonly clientProtocol: string = PROTOTYPE_STORE_PROTOCOL;
+
+  constructor(storeProtocol: string) {
+    super(
+      `the store speaks ${storeProtocol}, and this client speaks ${PROTOTYPE_STORE_PROTOCOL}`,
+    );
+    this.storeProtocol = storeProtocol;
+  }
 }
 
 /**
@@ -1276,10 +1300,16 @@ export class PrototypeStoreClient {
             }`,
       );
     }
+    // The version first, whatever the status: a store of another version
+    // answers this client's descriptor path with its own 404 or 426, and
+    // says which version it is in this header on every answer.
+    const protocol = response.headers.get("x-p2party-store");
+    if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
+      throw new StoreVersionError(protocol);
     if (response.status !== 200)
       fail(`the store descriptor route answered ${String(response.status)}`);
-    if (response.headers.get("x-p2party-store") !== PROTOTYPE_STORE_PROTOCOL)
-      fail("the descriptor answer is not from a prototype-v0 store");
+    if (protocol === null)
+      fail("the descriptor answer is not from a prototype store");
 
     let served: PrototypeStoreDescriptorDocumentV1;
     try {
@@ -2055,6 +2085,17 @@ export class PrototypeStoreClient {
         null,
       );
     }
+    // Every answer of this protocol is attributable to it; one that is not did
+    // not come from a store of this version, whatever is in its body or its
+    // status. A store that changed version since `connect` is named.
+    const protocol = response.headers.get("x-p2party-store");
+    if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
+      return this.#reject(
+        "unreachable",
+        window,
+        `${path}: the answer is from a ${protocol} store, and this client speaks ${PROTOTYPE_STORE_PROTOCOL}`,
+        null,
+      );
     if (response.status !== 200)
       return this.#reject(
         "unreachable",
@@ -2062,13 +2103,11 @@ export class PrototypeStoreClient {
         `${path}: answered ${String(response.status)}`,
         null,
       );
-    // Every answer of this protocol is attributable to it; one that is not did
-    // not come from a store, whatever is in its body.
-    if (response.headers.get("x-p2party-store") !== PROTOTYPE_STORE_PROTOCOL)
+    if (protocol === null)
       return this.#reject(
         "unreachable",
         window,
-        `${path}: the answer is not from a prototype-v0 store`,
+        `${path}: the answer is not from a prototype store`,
         null,
       );
     try {

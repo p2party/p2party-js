@@ -1564,7 +1564,7 @@ export const formalProofResultDigest = async (
   );
 
 /* ------------------------------------------------------------------ *
- * ---- prototype-v0 store wire (not a release registry) ----
+ * ---- prototype-v1 store wire (not a release registry) ----
  *
  * The transcripts the prototype store and its client sign and verify. The
  * formulas are the specification's Section 4.3/4.6 ones, but the values they
@@ -1727,17 +1727,20 @@ export const publicCheckpointStatusSigningHash = async (
   );
 
 /**
- * `compatibilityHash = H("p2party/blind-store-prototype-v0/compatibility" ||
+ * `compatibilityHash = H("p2party/blind-store-prototype-v1/compatibility" ||
  *    DeliveryProfileHash)`
  *
  * A prototype store advertises this in its descriptor. It is deliberately
  * prototype-scoped: a client that expects release compatibility bytes will
- * refuse a prototype store rather than half-speak to it.
+ * refuse a prototype store rather than half-speak to it. The version in the
+ * domain is the protocol's (`PROTOTYPE_STORE_PROTOCOL`), so a descriptor
+ * signed by a store of another version names another hash, and so does
+ * every checkpoint and status that names that descriptor.
  */
 export const prototypeStoreCompatibilityHash = async (
   deliveryProfileHashBytes: Uint8Array,
 ): Promise<Uint8Array> =>
   hashWithDomain(
-    "p2party/blind-store-prototype-v0/compatibility",
+    "p2party/blind-store-prototype-v1/compatibility",
     requireBytes("DeliveryProfileHash", deliveryProfileHashBytes, 32),
   );

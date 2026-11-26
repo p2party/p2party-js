@@ -44,7 +44,7 @@ Fifteen further modules, 10,508 lines, added on the branch
 `feat/blind-two-store-prototype`. **The directory boundary is the flag.**
 Nothing here is exported from `src/index.ts`, nothing outside the directory
 imports it, and the store process refuses to start without two environment
-flags. Every route and media type it defines says `prototype-v0`; those bytes
+flags. Every route and media type it defines says `prototype-v1`; those bytes
 are not the frozen §4.6 route family and are not a proposal for it. The whole
 artifact is described in
 [`blind-rendezvous-two-store-prototype.md`](blind-rendezvous-two-store-prototype.md),
@@ -54,7 +54,7 @@ which states at length what it does not claim.
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `profile.ts`                  | The pinned prototype delivery profile, the wire constants, and `validateDeliveryProfileGeometry` over the §4.3 arithmetic. |
 | `storeWire.ts`                | Typed strict-canonical encode/decode wrappers over the `schemas.ts` descriptors; a projection, never a second authority.  |
-| `storeRoutes.ts`              | The `prototype-v0` route table and media types, shared by the browser client and the server.                              |
+| `storeRoutes.ts`              | The `prototype-v1` route table and media types, shared by the browser client and the server.                              |
 | `store/storeCore.ts`          | The per-window machine: allocation, append slot binding, finalization with dummies, the chunk and checkpoint chains.       |
 | `store/storePersistence.ts`   | The persistence port and its in-memory implementation.                                                                    |
 | `store/storeSqlite.ts`        | `bun:sqlite` persistence; a restarted store re-serves byte-identical signed objects.                                      |
@@ -186,7 +186,7 @@ distinction matters.
 its only entrypoint is the legacy WebSocket signaling server. Nothing about the
 deployed server has changed.
 
-What now exists is a **prototype store under `prototype-v0`**, entirely inside
+What now exists is a **prototype store under `prototype-v1`**, entirely inside
 `src/blindRendezvous/prototype/store/`: a window machine, `bun:sqlite`
 persistence, a `Bun.serve` handler and an entrypoint that refuses to start
 without `P2PARTY_STORE_PROTOTYPE=1` and `P2PARTY_STORE_OPEN_ALLOCATION=1`. Two
@@ -197,7 +197,7 @@ described in
 [`blind-rendezvous-two-store-prototype.md`](blind-rendezvous-two-store-prototype.md).
 
 It is not the Section 4.6 route family and does not narrow B2. Its route paths
-and media types say `prototype-v0` precisely so that they cannot be mistaken for
+and media types say `prototype-v1` precisely so that they cannot be mistaken for
 release bytes; the exact §4.6 request/response target lengths, status enum
 bytes, and signature transcripts remain Phase-0 freeze items, and writing them
 now would still mean inventing the exact bytes the freeze exists to fix. The
@@ -333,7 +333,7 @@ remaining AC-035 every-body vector gate and are not described as a freeze.
   media types, fixed target lengths, status/signature bytes, delivery profile
   registry, Privacy Pass issuance/redemption, and append admission signature are
   not frozen, and the release forms of them are not implemented. The
-  `prototype-v0` route family and its fixed client schedule execute (B3), under
+  `prototype-v1` route family and its fixed client schedule execute (B3), under
   their own prefix and behind two environment flags, and are neither
   interoperable with the frozen family nor a proposal for it.
 - **SDK/frontend/server integration.** The blind modules remain outside the

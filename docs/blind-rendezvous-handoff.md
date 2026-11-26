@@ -278,7 +278,7 @@ test files behind them, plus a browser harness under
 `docs/e2e/blind-two-store/`. The directory boundary is the flag: nothing is
 exported from `src/index.ts`, nothing outside the directory imports it, and the
 store entrypoint refuses to start without two environment flags. Every route
-path and media type says `prototype-v0`; those are not the frozen §4.6 route
+path and media type says `prototype-v1`; those are not the frozen §4.6 route
 family and are not a proposal for it.
 
 The demonstration is one reproducible run. Two headless Chromium contexts share
@@ -355,7 +355,7 @@ script cannot even parse.
 - **B4 is unchanged.** The frontend cannot reach any of this, and nothing about
   the deployed `p2party-server` changed.
 - **B2 is unchanged.** No release-registry freeze happened, which is exactly why
-  the bytes say `prototype-v0`.
+  the bytes say `prototype-v1`.
 - Deferred with the work: persistent scheduler cursors and restart-safe outboxes,
   `STORE_HINT` route discovery, retention and garbage collection, and moving the
   cohort override out of the harness's build-time source rewrite into a run

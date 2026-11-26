@@ -507,7 +507,7 @@ describe("carrier runtime and store retention", () => {
             return Promise.resolve(
               new Response(body.slice(0), {
                 status: 200,
-                headers: { "x-p2party-store": "prototype-v0" },
+                headers: { "x-p2party-store": "prototype-v1" },
               }),
             );
           }

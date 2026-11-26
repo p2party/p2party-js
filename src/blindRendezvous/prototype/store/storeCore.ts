@@ -52,7 +52,7 @@
  * Transport lives in `storeHttp.ts`; durable rows live behind
  * `StorePersistencePort`. This file knows about neither.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry, and nothing here is a v0.4 release artifact.
  */
 
@@ -828,7 +828,7 @@ export class PrototypeStoreCore {
         );
       if (!bytesEqual(persisted.descriptorHash, descriptorHashBytes))
         throw new StoreDescriptorChangedError(
-          `the persisted chain was signed under a different descriptor than this configuration produces (retention ${String(retentionWindows)} windows): a setting the descriptor states changed, such as the retention or the identity key, or the chain predates the descriptor stating its retention; restore the setting, or start a new chain with a new database and a new identity key`,
+          `the persisted chain was signed under a different descriptor than this configuration produces (retention ${String(retentionWindows)} windows): a setting the descriptor states changed, such as the retention or the identity key, or the chain was signed by an earlier prototype version (whose descriptor named another compatibility hash, or stated no retention); restore the setting, or start a new chain with a new database and a new identity key`,
         );
     }
 

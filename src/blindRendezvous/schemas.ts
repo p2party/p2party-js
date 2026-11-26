@@ -848,7 +848,7 @@ export const storeRouteV1Schema = record("StoreRouteV1", [
 ]);
 
 /* ------------------------------------------------------------------ *
- * ---- prototype-v0 store wire (not a release registry) ----
+ * ---- prototype-v1 store wire (not a release registry) ----
  *
  * The specification writes these store request/response types in Sections
  * 4.3 and 4.6 as TypeScript, but never gave them canonical descriptors. The
@@ -857,7 +857,7 @@ export const storeRouteV1Schema = record("StoreRouteV1", [
  * because a second authority for a wire field is exactly the drift this file
  * exists to prevent.
  *
- * These belong to the `prototype-v0` route family. They are not part of any
+ * These belong to the `prototype-v1` route family. They are not part of any
  * frozen registry and no hash over them is a v0.4 release artifact.
  * ------------------------------------------------------------------ */
 

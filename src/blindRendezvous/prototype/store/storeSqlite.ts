@@ -24,7 +24,7 @@
  * `bun:sqlite` is imported here and nowhere else in the prototype, so nothing
  * a browser bundle can reach ever pulls a server-only module in.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry.
  */
 

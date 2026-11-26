@@ -666,8 +666,11 @@ describe("prototype store wire transcripts", () => {
   });
 
   test("the prototype compatibility hash is pinned and requires 32 bytes", async () => {
+    // sha256("p2party/blind-store-prototype-v1/compatibility" || 0x02 x 32),
+    // recomputed with Python hashlib. The prototype-v0 value was
+    // 8630e00cd3dcce2e13e5dba8e60991caf7ef26b1d59ebbcddb028f459009aab7.
     expect(hex(await prototypeStoreCompatibilityHash(fill(32, 2)))).toBe(
-      "8630e00cd3dcce2e13e5dba8e60991caf7ef26b1d59ebbcddb028f459009aab7",
+      "193b3feae858fe94b0c4588b8e5597dd9572b0a165ba915ca999c4f15ecb062b",
     );
     await expect(
       prototypeStoreCompatibilityHash(fill(31, 2)),

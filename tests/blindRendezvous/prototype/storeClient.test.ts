@@ -42,6 +42,7 @@ import {
 import {
   PrototypeStoreClient,
   StoreClientError,
+  StoreVersionError,
   buildAppendAdmission,
   judgeSignedRefusal,
   signedStatusProvesFault,
@@ -215,12 +216,12 @@ const connect = async (
   });
 
 const chunkHeaders = {
-  "x-p2party-store": "prototype-v0",
+  "x-p2party-store": "prototype-v1",
   "content-type": PROTOTYPE_STORE_MEDIA_TYPES.chunk,
 };
 
 const headersOf = (mediaType: string): Record<string, string> => ({
-  "x-p2party-store": "prototype-v0",
+  "x-p2party-store": "prototype-v1",
   "content-type": mediaType,
 });
 
@@ -315,6 +316,71 @@ describe("prototype store client", () => {
     });
   });
 
+  test("a store of the previous prototype version is refused with a typed version error", async () => {
+    await withStore(async (store, clock) => {
+      // A prototype-v0 store knows none of this client's paths: it answers
+      // each with its 404, which names its version like every answer it
+      // gives. And one reached through a proxy that maps the paths answers
+      // 200, still naming its version.
+      for (const status of [404, 200]) {
+        const previous: typeof fetch = (async () =>
+          new Response(status === 404 ? "not found" : "", {
+            status,
+            headers: {
+              "x-p2party-store": "prototype-v0",
+              "cache-control": "no-store",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          })) as unknown as typeof fetch;
+        const refusal = await connect(store.origin, clock, {
+          fetch: previous,
+        }).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(refusal).toBeInstanceOf(StoreVersionError);
+        expect(refusal).toBeInstanceOf(StoreClientError);
+        expect(refusal).toMatchObject({
+          name: "StoreVersionError",
+          storeProtocol: "prototype-v0",
+          clientProtocol: "prototype-v1",
+        });
+      }
+
+      // A store of this version is not.
+      const client = await connect(store.origin, clock);
+      expect(client.faults).toEqual([]);
+
+      // A store that changes version after `connect` is unreachable from
+      // then on, and the record says which version it now speaks.
+      const changed = await connect(store.origin, clock, {
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          if (url.pathname === PROTOTYPE_STORE_ROUTES.descriptor)
+            return fetch(`${store.origin}${url.pathname}`, init);
+          return Promise.resolve(
+            new Response("not found", {
+              status: 404,
+              headers: { "x-p2party-store": "prototype-v2" },
+            }),
+          );
+        }) as typeof fetch,
+      });
+      expect((await changed.scanWindow(CHAIN_START)).status).toBe(
+        "unreachable",
+      );
+      expect(changed.inert).toBe(false);
+      expect(changed.faults.length).toBeGreaterThan(0);
+      expect(
+        changed.faults.every(
+          (fault) =>
+            fault.kind === "unreachable" &&
+            fault.detail.includes("a prototype-v2 store"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   test("refuses a forged descriptor and an incompatible profile", async () => {
     await withStore(async (store, clock) => {
       const forged: typeof fetch = (async (
@@ -342,7 +408,7 @@ describe("prototype store client", () => {
           {
             status: 200,
             headers: {
-              "x-p2party-store": "prototype-v0",
+              "x-p2party-store": "prototype-v1",
               "content-type": PROTOTYPE_STORE_MEDIA_TYPES.descriptor,
             },
           },
@@ -1017,7 +1083,7 @@ describe("prototype store client", () => {
             new Response(asBody(Uint8Array.of(1, 2, 3)), {
               status: 200,
               headers: {
-                "x-p2party-store": "prototype-v0",
+                "x-p2party-store": "prototype-v1",
                 "content-type": PROTOTYPE_STORE_MEDIA_TYPES.tokenResult,
               },
             }),
@@ -1414,7 +1480,7 @@ describe("prototype store client admission tokens", () => {
               status: 307,
               headers: {
                 location: `${sink.url.origin}${new URL(request.url).pathname}`,
-                "x-p2party-store": "prototype-v0",
+                "x-p2party-store": "prototype-v1",
               },
             })
           : handler(request),

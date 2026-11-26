@@ -33,13 +33,14 @@
  * - **The descriptor is pinned to the chain too.** The retention is stated in
  *   the signed descriptor, and every checkpoint names that descriptor's hash,
  *   so a restart with a different `P2PARTY_STORE_RETENTION_WINDOWS` (or a
- *   different key file), or on a database written before the descriptor
- *   stated retention, refuses to start rather than extend a chain under
- *   another descriptor. The refusal says so in one line: restore the
+ *   different key file), or on a database whose chain an earlier prototype
+ *   version signed (its descriptor named another compatibility hash, or no
+ *   retention), refuses to start rather than extend a chain under another
+ *   descriptor. The refusal says so in one line: restore the
  *   setting, or start a new chain with a new `P2PARTY_STORE_DB` and a new
  *   `P2PARTY_STORE_KEY_FILE`.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry.
  */
 
@@ -321,7 +322,7 @@ const core = await PrototypeStoreCore.create({
 }).catch((error: unknown) =>
   error instanceof StoreDescriptorChangedError
     ? refuse(
-        `${databasePath} holds a chain signed under another descriptor: P2PARTY_STORE_RETENTION_WINDOWS (now ${String(retentionWindows ?? "the default")}) or the key file changed, or the database predates the descriptor stating its retention; restore the setting, or start a new chain with a new P2PARTY_STORE_DB and a new P2PARTY_STORE_KEY_FILE`,
+        `${databasePath} holds a chain signed under another descriptor: P2PARTY_STORE_RETENTION_WINDOWS (now ${String(retentionWindows ?? "the default")}) or the key file changed, or the database was written by an earlier prototype version; restore the setting, or start a new chain with a new P2PARTY_STORE_DB and a new P2PARTY_STORE_KEY_FILE`,
       )
     : refuse(
         `cannot serve the chain anchored at window ${String(chainStartIngressWindow)}: ${

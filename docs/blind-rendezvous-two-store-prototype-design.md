@@ -33,7 +33,7 @@ The spec (line 3392) permits prototypes behind internal flags and forbids
 inventing release bytes and calling them v0.4. Therefore:
 
 - Every new wire byte lives under a route prefix and media types that say
-  `prototype-v0`. **No route path and no media type here is interoperable
+  `prototype-v1`. **No route path and no media type here is interoperable
   with, or a proposal for, the frozen §4.6 route family.** The *signed
   artifacts* are a narrower statement and the sentence above must not be read
   over them: §4.1 signs under the specification's own frozen transcript domain
@@ -443,13 +443,13 @@ default), unchanged.
 
   | Method and path | Body / result |
   |---|---|
-  | `GET /.well-known/p2party-store/prototype-v0` | canonical `PrototypeStoreDescriptorDocumentV1`; `application/p2party-store-descriptor-prototype-v0` |
-  | `POST /p2party/prototype-v0/allocation-token` | `AllocationTokenIssueRequestV1` → `AllocationTokenIssueResultV1`; open mode answers `issued` with 32 zero bytes |
-  | `POST /p2party/prototype-v0/allocation` | `PublicAllocationRequestV1` → `PublicAllocationResultV1` |
-  | `POST /p2party/prototype-v0/append` | `PublicAppendRequestV1` → `PublicAppendResultV1` |
-  | `GET /p2party/prototype-v0/checkpoint/{profileHashHex}/{window}` | `PublicStoreCheckpointReadV1` |
-  | `GET /p2party/prototype-v0/chunk/{profileHashHex}/{window}/{sizeClass}/{chunkIndex}` | `PublicChunkReadV1` |
-  | `GET /health` | `{ status, role: "store-prototype", storeId, protocol: "prototype-v0" }` |
+  | `GET /.well-known/p2party-store/prototype-v1` | canonical `PrototypeStoreDescriptorDocumentV1`; `application/p2party-store-descriptor-prototype-v1` |
+  | `POST /p2party/prototype-v1/allocation-token` | `AllocationTokenIssueRequestV1` → `AllocationTokenIssueResultV1`; open mode answers `issued` with 32 zero bytes |
+  | `POST /p2party/prototype-v1/allocation` | `PublicAllocationRequestV1` → `PublicAllocationResultV1` |
+  | `POST /p2party/prototype-v1/append` | `PublicAppendRequestV1` → `PublicAppendResultV1` |
+  | `GET /p2party/prototype-v1/checkpoint/{profileHashHex}/{window}` | `PublicStoreCheckpointReadV1` |
+  | `GET /p2party/prototype-v1/chunk/{profileHashHex}/{window}/{sizeClass}/{chunkIndex}` | `PublicChunkReadV1` |
+  | `GET /health` | `{ status, role: "store-prototype", storeId, protocol: "prototype-v1" }` |
 
   Every protocol response is HTTP 200 with a canonical body; a malformed
   outer length or media type is one constant 400 before parsing. No
@@ -464,15 +464,28 @@ default), unchanged.
   appends, finalize all-dummy chunks — `withhold` is its only value), and
   `P2PARTY_STORE_LOG_BODIES=<path>` (test-only, a separate variable: the hex
   of every accepted POST body, written before parsing). Script:
-  `bun run store:prototype`. A finalized window costs about 2.76 MB of state;
+  `bun run store:prototype`. A finalized window costs about 2.76 MB of state,
+  plus 1,377,756 bytes of precomputed response rows (its finalized objects a
+  second time, so a chunk or checkpoint read is one row instead of a decode of
+  the window; `stage-1-fixround-report.md` in `docs/rendezvous-latency-2026-09/`);
   §9 carries what that means for anyone who runs one.
 
 The descriptor is signed at start with `storeDescriptorSignedMessage`;
-`compatibilityHash = H("p2party/blind-store-prototype-v0/compatibility" ||
+`compatibilityHash = H("p2party/blind-store-prototype-v1/compatibility" ||
 DeliveryProfileHash)`, `supportedDeliveryProfileHashes = [profileHash]`,
 `checkpointChainStarts = [{ profileHash, chainStartIngressWindow = the
 window of first start }]`, a 30-day validity interval, and one signed
 `StoreRouteV1` whose `opaqueLocator` is the origin.
+
+The protocol version is in every string the two halves exchange: the
+`x-p2party-store` header on every answer, the route prefix, the descriptor
+path, the media types and the compatibility-hash domain. It is `prototype-v1`
+since the signed status bodies, the descriptor and the write routes changed in
+November 2026; the September documents in `docs/rendezvous-latency-2026-09/`
+describe `prototype-v0`. A client that meets a store of another version throws
+`StoreVersionError` at `connect`, before it checks any signature, and a store
+answers any other version's paths with `426` naming its own. Neither accepts a
+second version.
 
 ### 4.4 Store client adapter (`prototype/storeClient.ts`)
 
@@ -491,9 +504,14 @@ answers nothing would stall the union described in §4.5.
 and every chunk GET for `w` without awaiting, then: verifies each chunk
 signature and bucket coordinates, recomputes the checkpoint root from the
 complete chunk set (`checkpointLeafEntries` + `rfc9162MerkleTreeHash`) and
-requires it to equal `finalizedChunkRoot`, runs
-`verifyStoreCheckpointChain` over the observed checkpoints for that store,
-and yields the fixed objects. A store whose chain verdict is anything but
+requires it to equal `finalizedChunkRoot`, decides the store's observed
+checkpoint chain, and yields the fixed objects. The chain is decided
+incrementally: the client keeps the run it has verified by window and
+checkpoint hash, and a scan's checkpoint is checked against its neighbours
+in that run; `verifyStoreCheckpointChain` re-decides the whole observed run
+when there is no run to extend (the first scan, and after any blame), when
+the checkpoint arrives under another descriptor, and when it does not
+extend the run. A store whose chain verdict is anything but
 `chain-verified` or `unverified-chain-gap` is marked **inert**: its objects
 are still unioned (spec: "union every observed branch") but it is excluded
 from availability.

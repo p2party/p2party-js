@@ -60,12 +60,34 @@ export interface DeliveryProfileV1 {
   maxAssuranceEvidenceAgeMs: bigint;
 }
 
-export const PROTOTYPE_STORE_PROTOCOL = "prototype-v0";
-export const PROTOTYPE_ROUTE_PREFIX = "/p2party/prototype-v0";
+/**
+ * The prototype store protocol's version, and every string the two halves
+ * exchange that names it: the `x-p2party-store` header on every answer, the
+ * route prefix, the descriptor path, the media types, and the domain of the
+ * descriptor's compatibility hash (`prototypeStoreCompatibilityHash`).
+ *
+ * Version 1 is the wire after Tasks P2 and P3 changed the signed status
+ * bodies (each names the descriptor and the store's own window), the
+ * descriptor (it states the retention) and the write routes (bearer
+ * admission on append and witness). A client and a store of different
+ * versions refuse each other on these strings, before any signature is
+ * checked: the client with `StoreVersionError`, the store with a 426 to any
+ * other version's paths. There is no second accepted version.
+ */
+export const PROTOTYPE_STORE_PROTOCOL = "prototype-v1";
+export const PROTOTYPE_ROUTE_PREFIX = "/p2party/prototype-v1";
 export const PROTOTYPE_DESCRIPTOR_PATH =
-  "/.well-known/p2party-store/prototype-v0";
+  "/.well-known/p2party-store/prototype-v1";
 export const PROTOTYPE_MEDIA_TYPE = (name: string): string =>
-  `application/p2party-${name}-prototype-v0`;
+  `application/p2party-${name}-prototype-v1`;
+
+/**
+ * A path of some version of this family, ours or not: the descriptor path or
+ * anything under a route prefix. The store answers the ones that are not its
+ * own with a version refusal instead of a 404.
+ */
+export const PROTOTYPE_ANY_VERSION_PATH =
+  /^\/(?:p2party\/prototype-v\d+\/|\.well-known\/p2party-store\/prototype-v\d+$)/;
 
 /**
  * The prototype's pinned delivery profile (design doc §4.2).

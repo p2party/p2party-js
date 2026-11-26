@@ -111,13 +111,13 @@ const EXPECTED_TRANSPORT_PAYLOAD_CLASS = 0;
  */
 const routeOf = (url) => {
   const route = new URL(url).pathname;
-  if (route.startsWith("/p2party/prototype-v0/allocation-token"))
+  if (route.startsWith("/p2party/prototype-v1/allocation-token"))
     return "token";
-  if (route.startsWith("/p2party/prototype-v0/allocation")) return "allocation";
-  if (route.startsWith("/p2party/prototype-v0/append")) return "append";
-  if (route.startsWith("/p2party/prototype-v0/checkpoint")) return "checkpoint";
-  if (route.startsWith("/p2party/prototype-v0/chunk")) return "chunk";
-  if (route.startsWith("/p2party/prototype-v0/witness")) return "witness";
+  if (route.startsWith("/p2party/prototype-v1/allocation")) return "allocation";
+  if (route.startsWith("/p2party/prototype-v1/append")) return "append";
+  if (route.startsWith("/p2party/prototype-v1/checkpoint")) return "checkpoint";
+  if (route.startsWith("/p2party/prototype-v1/chunk")) return "chunk";
+  if (route.startsWith("/p2party/prototype-v1/witness")) return "witness";
   if (route.startsWith("/.well-known/p2party-store/")) return "descriptor";
   return "other";
 };

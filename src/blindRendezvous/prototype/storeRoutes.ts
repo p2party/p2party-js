@@ -1,5 +1,5 @@
 /**
- * The `prototype-v0` route paths and media types: constants, nothing else.
+ * The `prototype-v1` route paths and media types: constants, nothing else.
  *
  * These strings are the one contract the store server and the browser-side
  * client must agree on letter for letter, so they live in a file both can
@@ -10,7 +10,7 @@
  * constants out is what lets the client name the same strings instead of
  * repeating the literals and drifting from them.
  *
- * Status: PROTOTYPE. This is the `prototype-v0` route family, not a frozen
+ * Status: PROTOTYPE. This is the `prototype-v1` route family, not a frozen
  * registry.
  */
 

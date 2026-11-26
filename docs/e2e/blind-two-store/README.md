@@ -268,7 +268,7 @@ about what a store could infer, and nothing about independence.
   different statement.
 - **The prototype earns no label.** Not "anonymous", not
   "censorship-resistant", not Byzantine fault tolerant, not conformant, and not
-  a release version. Every route and media type says `prototype-v0`, allocation
+  a release version. Every route and media type says `prototype-v1`, allocation
   is open (no Privacy Pass issuer, so no Sybil or fairness claim at all), and
   the admission kernel is not consulted.
 - **`withhold` is not an adversary-grade fault mode.** The store answers
@@ -329,7 +329,8 @@ about what a store could infer, and nothing about independence.
   state per finalized window, because every window is padded to the profile's
   full geometry regardless (seven consecutive all-dummy windows, 19,390,464
   bytes of SQLite between them). At `--window-ms=4000` that is 21,600 windows a
-  day, about 59.7 GB per store per day. The harness's own stores are in a temp
+  day, about 59.7 GB per store per day. The precomputed response rows add
+  1,377,756 bytes per window on top. The harness's own stores are in a temp
   directory that is deleted per scenario, so a run never shows it; anyone
   starting a store by hand should know before they do.
 
@@ -717,7 +718,7 @@ protocol constant.
   answers with `access-control-allow-origin: *`,
   `access-control-expose-headers: x-p2party-store` (the client refuses any
   answer without that header, and it is not CORS-safelisted), and a 204
-  preflight for the `application/p2party-*-prototype-v0` request media types.
+  preflight for the `application/p2party-*-prototype-v1` request media types.
   Without those, no browser reaches a store at all.
 - **The cohort override is a build-time rewrite, not a runtime option.**
   `cohortPreload.ts` registers a Bun loader plugin that renames the pinned

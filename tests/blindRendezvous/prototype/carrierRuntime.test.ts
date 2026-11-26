@@ -1314,7 +1314,7 @@ describe("prototype carrier runtime", () => {
         return new Response(asBody(encodeStoreWitnessRecordsV1([record])), {
           status: 200,
           headers: {
-            "x-p2party-store": "prototype-v0",
+            "x-p2party-store": "prototype-v1",
             "content-type": PROTOTYPE_STORE_MEDIA_TYPES.witness,
           },
         });

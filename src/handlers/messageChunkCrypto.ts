@@ -39,7 +39,8 @@ import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 // `merkleRoot(64) ‖ type(1) ‖ dhPub(32) ‖ N(8) ‖ PN(8) ‖ pqEpoch(8)`.
 // The complete clear header excluding the fresh random nonce is authenticated.
 //
-// SEND builds the AAD + seals in TS (`buildAad`/`aeadSeal`/`sealChunk`). RECEIVE
+// SEND builds the AAD + seals in TS (`buildAad`/`aeadSeal`), under a combined
+// key derived once per message (`createMessageChunkSealer`). RECEIVE
 // is done ENTIRELY in one C call: `decryptMessageChunk` derives the per-message
 // key off the ratchet (the only state C needs, passed in as an arg) and hands the
 // raw frame + key + expected root to `_receive_message_with_key`, which
@@ -228,20 +229,101 @@ const receiveWithKey = (
   return { code, decrypted };
 };
 
+// Seal one chunk under `aeadKey` with a fresh random nonce, framed as
+// FRAME_TYPE_CHUNK ‖ dhPub ‖ N ‖ PN ‖ pqEpoch ‖ nonce ‖ ciphertext‖tag.
+const sealUnderKey = (
+  aeadKey: Uint8Array,
+  header: RatchetHeader,
+  pqEpoch: bigint,
+  chunk: Uint8Array,
+  merkleRoot: Uint8Array,
+  module: LibCrypto,
+): Uint8Array => {
+  if (merkleRoot.length !== crypto_hash_sha512_BYTES)
+    throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
+  const nonce = randomNonce(); // fresh + random per chunk
+  const frameHeader = packChunkFrameHeader(header, nonce, pqEpoch);
+  const aad = buildAad(merkleRoot, frameHeader);
+  const ciphertext = aeadSeal(module, aeadKey, nonce, chunk, aad);
+  const frame = new Uint8Array(frameHeader.length + ciphertext.length);
+  frame.set(frameHeader, 0);
+  frame.set(ciphertext, frameHeader.length);
+  return frame;
+};
+
 /**
- * Seal ONE chunk under an already-derived classical `messageKey` + `header`.
- * With a PQ context, an owned copy of the classical key is consumed by the v4
- * combiner and the resulting key is wiped after this one AEAD operation. The
- * caller's classical key remains live across streamed chunks/retransmit rounds.
- * The low-level context-free default emits bootstrap epoch zero and uses the
- * raw classical key for backwards-compatible tests only.
+ * Seals the chunks of one logical message. The v4 combined key depends only
+ * on the classical message key, the header and the PQ context, which every
+ * chunk of a message shares, so it is derived once here, not once per chunk.
+ */
+export interface MessageChunkSealer {
+  /** Seal one chunk under the message's combined key with a fresh nonce. */
+  readonly seal: (chunk: Uint8Array, merkleRoot: Uint8Array) => Uint8Array;
+  /** Zero the combined key. Idempotent; a later `seal` throws. */
+  readonly wipe: () => void;
+}
+
+/**
+ * Derive the combined key for one message: the send paths call this once per
+ * ratchet step and seal every chunk, retransmit round included, through it.
  *
- * This is the streaming/reconcile-friendly primitive the live send path uses: it
- * seals chunks one-at-a-time as they are read from IndexedDB, so a multi-GB
- * message is never materialised in RAM. A retransmit re-seals the same plaintext
- * under the SAME `messageKey` with a FRESH random nonce — cryptographically safe
- * (distinct 96-bit random nonces under one key) and decryptable by the receiver's
- * cached per-message key (a HIT on `(dhPub, N)`), so no frame-cache is needed.
+ * Every protocol-v4 message key is PQ-combined, so a missing context throws
+ * instead of falling back to the raw classical ratchet key; the classical-only
+ * path is `sealChunkClassicalOnlyForTests`, which production never calls.
+ * An owned copy of `messageKey` is consumed, so the caller's classical key
+ * stays live; the caller keeps owning and wiping it and the context.
+ */
+export const createMessageChunkSealer = (
+  messageKey: Uint8Array,
+  header: RatchetHeader,
+  pqContext: PqMessageKeyContext | null,
+  module: LibCrypto,
+): MessageChunkSealer => {
+  // Typed callers cannot pass undefined; this also covers untyped callers.
+  if (!pqContext)
+    throw new Error(
+      "messageChunkCrypto: refusing to seal without a PQ message context",
+    );
+  const pqEpoch = pqContext.epoch;
+  const frameHeader: RatchetHeader = {
+    dhPub: Uint8Array.from(header.dhPub),
+    N: header.N,
+    PN: header.PN,
+  };
+  const combinedKey = combinePqMessageKey(
+    Uint8Array.from(messageKey),
+    pqContext,
+    frameHeader,
+    module,
+  );
+  let wiped = false;
+  return {
+    seal: (chunk, merkleRoot) => {
+      if (wiped)
+        throw new Error("messageChunkCrypto: message sealer was wiped");
+      return sealUnderKey(
+        combinedKey,
+        frameHeader,
+        pqEpoch,
+        chunk,
+        merkleRoot,
+        module,
+      );
+    },
+    wipe: () => {
+      wiped = true;
+      combinedKey.fill(0);
+    },
+  };
+};
+
+/**
+ * Seal ONE chunk under an already-derived classical `messageKey` + `header`
+ * and the PQ context: derive the combined key, seal, wipe it. For a message
+ * of several chunks, `createMessageChunkSealer` derives the key once instead.
+ * The caller's classical key remains live. A retransmit re-seals the same
+ * plaintext under the same key with a fresh random nonce, which the
+ * receiver's cached per-message key opens.
  */
 export const sealChunk = (
   messageKey: Uint8Array,
@@ -249,36 +331,38 @@ export const sealChunk = (
   chunk: Uint8Array,
   merkleRoot: Uint8Array,
   module: LibCrypto,
-  pqContext?: PqMessageKeyContext,
+  pqContext: PqMessageKeyContext,
 ): Uint8Array => {
   if (merkleRoot.length !== crypto_hash_sha512_BYTES)
     throw new Error("messageChunkCrypto: merkleRoot must be 64 bytes");
-  const nonce = randomNonce(); // fresh + random per chunk
-  const frameHeader = packChunkFrameHeader(
+  const sealer = createMessageChunkSealer(
+    messageKey,
     header,
-    nonce,
-    pqContext?.epoch ?? 0n,
+    pqContext,
+    module,
   );
-  const aad = buildAad(merkleRoot, frameHeader);
-  let combinedKey: Uint8Array | null = null;
   try {
-    const aeadKey = pqContext
-      ? (combinedKey = combinePqMessageKey(
-          Uint8Array.from(messageKey),
-          pqContext,
-          header,
-          module,
-        ))
-      : messageKey;
-    const ciphertext = aeadSeal(module, aeadKey, nonce, chunk, aad);
-    const frame = new Uint8Array(frameHeader.length + ciphertext.length);
-    frame.set(frameHeader, 0);
-    frame.set(ciphertext, frameHeader.length);
-    return frame;
+    return sealer.seal(chunk, merkleRoot);
   } finally {
-    combinedKey?.fill(0);
+    sealer.wipe();
   }
 };
+
+/**
+ * TESTS ONLY. Seals under the raw classical ratchet key with no PQ combiner,
+ * at wire epoch 0: a key an adversary who breaks X25519 can derive.
+ * Production send paths seal through `createMessageChunkSealer` with a PQ
+ * context. Only this module references it in src/;
+ * tests/handlers/messageChunkCrypto.test.ts enforces that.
+ */
+export const sealChunkClassicalOnlyForTests = (
+  messageKey: Uint8Array,
+  header: RatchetHeader,
+  chunk: Uint8Array,
+  merkleRoot: Uint8Array,
+  module: LibCrypto,
+): Uint8Array =>
+  sealUnderKey(messageKey, header, 0n, chunk, merkleRoot, module);
 
 export interface DecryptedChunk {
   /** The DECRYPTED_LEN plaintext `metadata ‖ receiptLeaf ‖ chunk` written by the C

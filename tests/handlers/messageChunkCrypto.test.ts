@@ -16,14 +16,18 @@ import { parseChunkFrameHeader } from "../../src/handlers/chunkFrame";
 import { handleReceiveMessage } from "../../src/handlers/handleReceiveMessage";
 import { sendReceiveFrameReceipt } from "../../src/handlers/handleMessageQueueing";
 import {
+  createMessageChunkSealer,
   sealChunk,
+  sealChunkClassicalOnlyForTests,
   decryptMessageChunk,
   decryptMessageChunkClassicalOnlyForTests,
   messageCacheKey,
 } from "../../src/handlers/messageChunkCrypto";
+import { combinePqMessageKey } from "../../src/cryptography/pqMessageKey";
 import { forgetCompletedReceiveMessageKey } from "../../src/handlers/receiveMessageKeyLifetime";
 import {
   allowClassicalOnlyReceiveForTests,
+  allowClassicalOnlySendForTests,
   decryptMessageChunkDurably,
   forgetReceiveMessageKeyDurably,
   ratchetEncryptDurably,
@@ -135,6 +139,98 @@ const buildRealFirstCoverMessage = async (module: LibCrypto) => {
   return { root, plaintexts };
 };
 
+const fromHex = (value: string): Uint8Array =>
+  Uint8Array.from(Buffer.from(value, "hex"));
+
+// The fixture's input derivation: SHA-512(label + "/" + i) blocks, truncated.
+const labelledBytes = async (
+  label: string,
+  length: number,
+): Promise<Uint8Array> => {
+  const out = new Uint8Array(length);
+  for (let i = 0, offset = 0; offset < length; i++, offset += 64) {
+    const block = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-512",
+        new TextEncoder().encode(`${label}/${String(i)}`),
+      ),
+    );
+    out.set(block.subarray(0, Math.min(64, length - offset)), offset);
+  }
+  return out;
+};
+
+interface PqKnownAnswers {
+  release: string;
+  cases: {
+    rootSuite: PqMessageKeyContext["rootSuite"];
+    epoch: string;
+    header: { dhPub: string; N: number; PN: number };
+    classicalKey: string;
+    pqRootKey: string;
+    binding: string;
+    merkleRoot: string;
+    combinedKey: string;
+    frames: {
+      chunkLabel: string;
+      chunkLength: number;
+      nonce: string;
+      frame?: string;
+      frameLength?: number;
+      frameSha512?: string;
+    }[];
+  }[];
+}
+
+// Hand each 12-byte nonce request the next fixed nonce, so a seal's whole
+// frame is a known answer. Every fixed nonce must be consumed.
+const withFixedNonces = <T>(nonces: Uint8Array[], operation: () => T): T => {
+  const queue = nonces.map((nonce) => Uint8Array.from(nonce));
+  const real = crypto.getRandomValues.bind(crypto);
+  const spy = spyOn(crypto, "getRandomValues").mockImplementation(
+    <V extends ArrayBufferView | null>(array: V): V => {
+      if (array instanceof Uint8Array && array.length === 12 && queue.length)
+        array.set(queue.shift()!);
+      else real(array);
+      return array;
+    },
+  );
+  try {
+    const result = operation();
+    expect(queue).toHaveLength(0);
+    return result;
+  } finally {
+    spy.mockRestore();
+  }
+};
+
+// The injected counter: the same WASM instance, with named exports counted.
+const countWasmCalls = <Name extends string>(
+  module: LibCrypto,
+  names: readonly Name[],
+): { module: LibCrypto; calls: Record<Name, number> } => {
+  const calls = Object.fromEntries(names.map((name) => [name, 0])) as Record<
+    Name,
+    number
+  >;
+  const counted = new Proxy(module, {
+    get(target, property, receiver) {
+      const value: unknown = Reflect.get(target, property, receiver);
+      if (
+        typeof property === "string" &&
+        property in calls &&
+        typeof value === "function"
+      )
+        return (...args: unknown[]): unknown => {
+          calls[property as Name] += 1;
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      return value;
+    },
+  });
+  return { module: counted, calls };
+};
+
 const chunkOf = (decrypted: Uint8Array): Uint8Array =>
   decrypted.slice(METADATA_LEN + PROOF_LEN);
 const receiptOf = (decrypted: Uint8Array): Uint8Array =>
@@ -158,6 +254,14 @@ const classicalReceiveEdge = (
   return epc;
 };
 
+// The same for the test-only classical send path; without the opt-in the
+// durable send step refuses it.
+const classicalSendEdge = (ratchetState: RatchetState): IRTCPeerConnection => {
+  const epc = edge(ratchetState);
+  allowClassicalOnlySendForTests(epc);
+  return epc;
+};
+
 describe("messageChunkCrypto (single-call C receive)", () => {
   test("round-trip: a real 2-chunk message decrypts byte-exact through the C receive; chunk 0 steps the ratchet, chunk 1 rides the per-message cache", async () => {
     const { module, alice, bob } = await pair();
@@ -166,7 +270,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     // ONE ratchet step for the whole message; seal each chunk with a fresh nonce.
     const { messageKey, header } = ratchetEncrypt(alice, module);
     const frames = plaintexts.map((pt) =>
-      sealChunk(messageKey, header, pt, root, module),
+      sealChunkClassicalOnlyForTests(messageKey, header, pt, root, module),
     );
     messageKey.fill(0);
 
@@ -216,7 +320,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { messageKey, header } = ratchetEncrypt(alice, module);
     // Sealed under the raw classical key at wire epoch 0: exactly what a
     // context-free receive would open.
-    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
     messageKey.fill(0);
     const rootBefore = Uint8Array.from(bob.rootKey);
     const failedClosed = { decrypted: null, ok: false, stateAdvanced: false };
@@ -290,6 +400,94 @@ describe("messageChunkCrypto (single-call C receive)", () => {
       module,
     );
     expect(control.ok).toBe(true);
+  });
+
+  test("encrypt fails closed without a PQ context", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, plaintexts } = await buildMessage(module, 1);
+    const chainBefore = Uint8Array.from(alice.sendingChainKey!);
+    let persisted = 0;
+    const countPersist = async (): Promise<void> => {
+      persisted += 1;
+    };
+
+    // The durable send step refuses an edge that has a ratchet but no PQ
+    // runtime, before it steps the ratchet or persists anything.
+    await expect(
+      ratchetEncryptDurably(edge(alice), "room-1", module, countPersist),
+    ).rejects.toThrow("edge has no PQ runtime");
+    expect(persisted).toBe(0);
+    expect(alice.Ns).toBe(0);
+    expect(Buffer.from(alice.sendingChainKey!)).toEqual(
+      Buffer.from(chainBefore),
+    );
+
+    // Sealing without a PQ context throws instead of sealing under the raw
+    // classical key: omitted by an untyped caller, or passed as undefined or
+    // null.
+    const { messageKey, header } = ratchetEncrypt(alice, module);
+    const keyBefore = Uint8Array.from(messageKey);
+    const untypedSeal = sealChunk as unknown as (
+      ...args: unknown[]
+    ) => Uint8Array;
+    expect(() =>
+      untypedSeal(messageKey, header, plaintexts[0], root, module),
+    ).toThrow("without a PQ message context");
+    expect(() =>
+      untypedSeal(messageKey, header, plaintexts[0], root, module, undefined),
+    ).toThrow("without a PQ message context");
+    expect(() =>
+      createMessageChunkSealer(messageKey, header, null, module),
+    ).toThrow("without a PQ message context");
+    expect(Buffer.from(messageKey)).toEqual(Buffer.from(keyBefore));
+
+    // Control: the explicit test-only paths still seal, open and step.
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
+    messageKey.fill(0);
+    expect(
+      decryptMessageChunkClassicalOnlyForTests(
+        bob,
+        frame,
+        new Map(),
+        root,
+        module,
+      ).ok,
+    ).toBe(true);
+    const stepped = await ratchetEncryptDurably(
+      classicalSendEdge(alice),
+      "room-1",
+      module,
+      countPersist,
+    );
+    expect(stepped.pqContext).toBeNull();
+    expect(persisted).toBe(1);
+    stepped.messageKey.fill(0);
+  });
+
+  test("no production module opts into the classical-only send path", () => {
+    const srcRoot = new URL("../../src/", import.meta.url);
+    const referencing = (readdirSync(srcRoot, { recursive: true }) as string[])
+      .filter((path) => path.endsWith(".ts"))
+      .filter((path) =>
+        /sealChunkClassicalOnlyForTests|allowClassicalOnlySendForTests/.test(
+          readFileSync(new URL(path, srcRoot), "utf8"),
+        ),
+      )
+      .map((path) => path.split("\\").join("/"))
+      .sort();
+    // messageChunkCrypto.ts defines the classical seal; ratchetPersist.ts
+    // defines the per-edge send opt-in and reads it in the durable step.
+    // Nothing else may reach either.
+    expect(referencing).toEqual([
+      "handlers/messageChunkCrypto.ts",
+      "handlers/ratchetPersist.ts",
+    ]);
   });
 
   test("no production module opts into the classical-only receive path", () => {
@@ -384,7 +582,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { module, alice, bob } = await pair();
     const { root, plaintexts } = await buildMessage(module, 1);
     const { messageKey, header } = ratchetEncrypt(alice, module);
-    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
     messageKey.fill(0);
 
     for (const offset of [1, 40, 48]) {
@@ -411,7 +615,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { root, datas, plaintexts } = await buildMessage(module, 2);
     const { messageKey, header } = ratchetEncrypt(alice, module);
     const frames = plaintexts.map((pt) =>
-      sealChunk(messageKey, header, pt, root, module),
+      sealChunkClassicalOnlyForTests(messageKey, header, pt, root, module),
     );
     messageKey.fill(0);
 
@@ -461,7 +665,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { module, alice, bob } = await pair();
     const { root, plaintexts } = await buildMessage(module, 1);
     const { messageKey, header } = ratchetEncrypt(alice, module);
-    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
     messageKey.fill(0);
 
     const originalMalloc = module._malloc;
@@ -516,7 +726,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const tampered = Uint8Array.from(plaintexts[0]);
     tampered[METADATA_LEN + 8] ^= 0xff;
     const { messageKey, header } = ratchetEncrypt(alice, module);
-    const frame = sealChunk(messageKey, header, tampered, root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      tampered,
+      root,
+      module,
+    );
     messageKey.fill(0);
 
     const cache = new Map<string, Uint8Array>();
@@ -538,7 +754,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { module, alice, bob } = await pair();
     const { root, datas, plaintexts } = await buildMessage(module, 1);
     const { messageKey, header } = ratchetEncrypt(alice, module);
-    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
 
     const cache = new Map<string, Uint8Array>();
     const d = decryptMessageChunkClassicalOnlyForTests(
@@ -553,7 +775,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
 
     // Selective-retransmit: re-seal the SAME plaintext under the still-live key
     // with a FRESH nonce. Distinct frame on the wire, opened by the cached key.
-    const resend = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const resend = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
     messageKey.fill(0);
     expect(Buffer.from(resend)).not.toEqual(Buffer.from(frame)); // fresh nonce
     const re = decryptMessageChunkClassicalOnlyForTests(
@@ -570,7 +798,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
 
   test("failed pre-send persistence leaves live state unchanged and wipes the staged successor", async () => {
     const { module, alice } = await pair();
-    const epc = edge(alice);
+    const epc = classicalSendEdge(alice);
     const chainBefore = Uint8Array.from(alice.sendingChainKey!);
     let stagedChain: Uint8Array | undefined;
 
@@ -592,7 +820,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { module, alice, bob } = await pair();
     const { root, plaintexts } = await buildMessage(module, 1);
     const { messageKey, header } = ratchetEncrypt(alice, module);
-    const frame = sealChunk(messageKey, header, plaintexts[0], root, module);
+    const frame = sealChunkClassicalOnlyForTests(
+      messageKey,
+      header,
+      plaintexts[0],
+      root,
+      module,
+    );
     messageKey.fill(0);
 
     const epc = classicalReceiveEdge(bob);
@@ -626,7 +860,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { root, datas, plaintexts } = await buildMessage(module, 2);
     const { messageKey, header } = ratchetEncrypt(alice, module);
     const frames = plaintexts.map((plaintext) =>
-      sealChunk(messageKey, header, plaintext, root, module),
+      sealChunkClassicalOnlyForTests(
+        messageKey,
+        header,
+        plaintext,
+        root,
+        module,
+      ),
     );
     messageKey.fill(0);
     const cacheKey = messageCacheKey(header.dhPub, header.N);
@@ -683,7 +923,13 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const { root, plaintexts } = await buildRealFirstCoverMessage(module);
     const { messageKey, header } = ratchetEncrypt(alice, module);
     const frames = plaintexts.map((plaintext) =>
-      sealChunk(messageKey, header, plaintext, root, module),
+      sealChunkClassicalOnlyForTests(
+        messageKey,
+        header,
+        plaintext,
+        root,
+        module,
+      ),
     );
     messageKey.fill(0);
 
@@ -783,7 +1029,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
 
   test("concurrent sends serialize into distinct durable ratchet steps", async () => {
     const { module, alice } = await pair();
-    const epc = edge(alice);
+    const epc = classicalSendEdge(alice);
     const persistedNs: number[] = [];
     let releaseFirst!: () => void;
     const firstBlocked = new Promise<void>((resolve) => {
@@ -869,6 +1115,153 @@ describe("v4 durable PQ-combined receive/send paths", () => {
         edgeCryptoState ? Uint8Array.from(edgeCryptoState) : null,
       );
     };
+
+  test("combined key matches the 0.14.10 known answer", async () => {
+    const module = await loadTestModule();
+    const kat = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/pq-message-key-0.14.10.json", import.meta.url),
+        "utf8",
+      ),
+    ) as PqKnownAnswers;
+    expect(kat.release).toBe("0.14.10");
+    expect(kat.cases).toHaveLength(3);
+
+    for (const known of kat.cases) {
+      const context: PqMessageKeyContext = {
+        rootKey: fromHex(known.pqRootKey),
+        binding: fromHex(known.binding),
+        rootSuite: known.rootSuite,
+        epoch: BigInt(known.epoch),
+      };
+      const header = {
+        dhPub: fromHex(known.header.dhPub),
+        N: known.header.N,
+        PN: known.header.PN,
+      };
+      const classicalKey = fromHex(known.classicalKey);
+      const merkleRoot = fromHex(known.merkleRoot);
+
+      expect(
+        uint8ArrayToHex(
+          combinePqMessageKey(
+            Uint8Array.from(classicalKey),
+            context,
+            header,
+            module,
+          ),
+        ),
+      ).toBe(known.combinedKey);
+
+      const chunks = await Promise.all(
+        known.frames.map((f) => labelledBytes(f.chunkLabel, f.chunkLength)),
+      );
+      const nonces = known.frames.map((f) => fromHex(f.nonce));
+      // One sealer for the message (the send paths) …
+      const viaSealer = withFixedNonces(nonces, () => {
+        const sealer = createMessageChunkSealer(
+          classicalKey,
+          header,
+          context,
+          module,
+        );
+        try {
+          return chunks.map((chunk) => sealer.seal(chunk, merkleRoot));
+        } finally {
+          sealer.wipe();
+        }
+      });
+      // … and the one-chunk call (the session API) give the release frames.
+      const viaSealChunk = withFixedNonces(nonces, () =>
+        chunks.map((chunk) =>
+          sealChunk(classicalKey, header, chunk, merkleRoot, module, context),
+        ),
+      );
+      for (const frames of [viaSealer, viaSealChunk]) {
+        expect(uint8ArrayToHex(frames[0])).toBe(known.frames[0].frame!);
+        expect(frames[1].length).toBe(known.frames[1].frameLength!);
+        expect(
+          uint8ArrayToHex(
+            new Uint8Array(await crypto.subtle.digest("SHA-512", frames[1])),
+          ),
+        ).toBe(known.frames[1].frameSha512!);
+      }
+      // Neither consumes the caller's classical key.
+      expect(uint8ArrayToHex(classicalKey)).toBe(known.classicalKey);
+    }
+  });
+
+  test("combiner runs once per message (counter over a 50-chunk message)", async () => {
+    const { module, alice, bob } = await pair();
+    const { root, datas, plaintexts } = await buildMessage(module, 50);
+    const runtimeA = pqRuntime(module, true);
+    const runtimeB = pqRuntime(module, false);
+    const epcA = pqEdge(alice, runtimeA);
+    const epcB = pqEdge(bob, runtimeB);
+    const persistNoop = async (): Promise<void> => {};
+    const stepped = await ratchetEncryptDurably(
+      epcA,
+      "room-1",
+      module,
+      persistNoop,
+    );
+
+    // Seal the message the way both send paths do, through a module whose
+    // HKDF and AEAD calls are counted.
+    const counted = countWasmCalls(module, [
+      "_hkdf_sha512_extract",
+      "_hkdf_sha512_expand",
+      "_encrypt_chachapoly_symmetric",
+    ]);
+    const sealer = createMessageChunkSealer(
+      stepped.messageKey,
+      stepped.header,
+      stepped.pqContext,
+      counted.module,
+    );
+    const frames = plaintexts.map((plaintext) => sealer.seal(plaintext, root));
+    sealer.wipe();
+    expect(counted.calls).toEqual({
+      _hkdf_sha512_extract: 1,
+      _hkdf_sha512_expand: 1,
+      _encrypt_chachapoly_symmetric: 50,
+    });
+    expect(() => sealer.seal(plaintexts[0], root)).toThrow("wiped");
+
+    // Every chunk opens at the peer: one ratchet step, then the cached key.
+    for (let i = 0; i < frames.length; i++) {
+      const opened = await decryptMessageChunkDurably(
+        epcB,
+        "room-1",
+        frames[i],
+        epcB.messageKeyCache!,
+        root,
+        module,
+        persistNoop,
+      );
+      expect(opened.ok).toBe(true);
+      expect(opened.stateAdvanced).toBe(i === 0);
+      expect(Buffer.from(chunkOf(opened.decrypted!))).toEqual(
+        Buffer.from(datas[i]),
+      );
+    }
+    expect(bob.Nr).toBe(1);
+    stepped.messageKey.fill(0);
+    stepped.pqContext?.rootKey.fill(0);
+    runtimeA.destroy();
+    runtimeB.destroy();
+  });
+
+  test("the send handler seals through one sealer per message", () => {
+    // Both send paths stream chunks from IndexedDB, which these unit tests
+    // cannot reach, so check the call shape: no per-chunk sealChunk call.
+    const source = readFileSync(
+      new URL("../../src/handlers/handleSendMessage.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\bsealChunk\(/);
+    expect(source).toMatch(/\bcreateMessageChunkSealer\(/);
+  });
 
   test("durable receive persists the combined key in the edge checkpoint, never in the skipped map", async () => {
     const { module, alice, bob } = await pair();

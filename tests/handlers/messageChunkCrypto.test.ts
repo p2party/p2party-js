@@ -1182,7 +1182,9 @@ describe("v4 durable PQ-combined receive/send paths", () => {
         expect(frames[1].length).toBe(known.frames[1].frameLength!);
         expect(
           uint8ArrayToHex(
-            new Uint8Array(await crypto.subtle.digest("SHA-512", frames[1])),
+            new Uint8Array(
+              await crypto.subtle.digest("SHA-512", Uint8Array.from(frames[1])),
+            ),
           ),
         ).toBe(known.frames[1].frameSha512!);
       }

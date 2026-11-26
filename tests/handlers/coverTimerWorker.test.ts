@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 
 // The production state-row deletion behind installCoverEdge dispatches into
 // the Redux store, whose identity slice reads localStorage at module
@@ -20,10 +20,11 @@ import {
 import {
   COVER_TIMER_WORKER_SOURCE,
   createCoverTimerClock,
+  getCoverTimerSource,
+  pendingCoverTimerWakeUps,
 } from "../../src/handlers/coverTimerWorker";
 import { SparsePqHealingState } from "../../src/handlers/pqHealingRuntime";
 import { loadTestModule } from "../../src/cryptography/testModule";
-import { setDebugLogging } from "../../src/utils/debug";
 import { uint8ArrayToHex } from "../../src/utils/uint8array";
 import { RATCHET_ROOT_SUITE_MLKEM512 } from "../../src/utils/constants";
 import {
@@ -50,10 +51,6 @@ import type {
 let module: LibCrypto;
 beforeAll(async () => {
   module = await loadTestModule();
-});
-
-afterEach(() => {
-  setDebugLogging(false);
 });
 
 const ROOM_ID = "00000000-0000-4000-8000-0000000000f8";
@@ -131,6 +128,12 @@ const makeRuntime = (timeline: CoverTimeline) => {
   return { runtime, pq, lanes, statuses, sentCells };
 };
 
+/** Every log line written so far by a console method spy. */
+const lines = (spy: ReturnType<typeof spyOn>): string[] =>
+  spy.mock.calls.map((args: unknown[]) => args.map(String).join(" "));
+
+const cycles = (count: number): number => count * SCHEDULE.coverCadenceMs;
+
 describe("scheduled cover's wake-ups come from a timer worker", () => {
   test("slot wake-ups come from the worker, not page timers", async () => {
     const timeline = new CoverTimeline();
@@ -138,7 +141,8 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
     try {
       rig.runtime.start();
       expect(rig.runtime.timerSource).toBe("worker");
-      await timeline.advanceTo(4 * SCHEDULE.coverCadenceMs - 1);
+      expect(getCoverTimerSource(timeline.env)).toBe("worker");
+      await timeline.advanceTo(cycles(4) - 1);
 
       expect(rig.sentCells()).toBe(4 * CELLS_PER_CYCLE);
       expect(rig.statuses).toEqual(["starting", "active"]);
@@ -163,6 +167,7 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
     const runHidden = async (workersAvailable: boolean) => {
       const timeline = new CoverTimeline();
       timeline.workersAvailable = workersAvailable;
+      timeline.browserPage = false;
       timeline.hidden = true;
       const rig = makeRuntime(timeline);
       try {
@@ -193,68 +198,26 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
     expect(onPage.sentCells).toBeLessThan(onWorker.sentCells / 2);
   });
 
-  test("a dead worker falls back to page timers", async () => {
-    const timeline = new CoverTimeline();
-    const rig = makeRuntime(timeline);
-    try {
-      rig.runtime.start();
-      await timeline.advanceTo(SCHEDULE.coverCadenceMs + 150);
-      const before = rig.sentCells();
-      expect(before).toBeGreaterThan(0);
-
-      // The worker crashes mid-cycle: its error event.
-      timeline.workers[0].fail();
-      expect(rig.runtime.timerSource).toBe("page");
-      expect(timeline.workers[0].terminated).toBe(true);
-
-      await timeline.advanceTo(6 * SCHEDULE.coverCadenceMs - 1);
-      // The schedule kept running, on time, on page timers.
-      expect(rig.sentCells()).toBe(6 * CELLS_PER_CYCLE);
-      expect(rig.statuses).not.toContain("stopped");
-      expect(rig.statuses).not.toContain("degraded");
-    } finally {
-      rig.runtime.destroy();
-      rig.pq.destroy();
-    }
-  });
-
-  test("a worker that stops answering is replaced by page timers", async () => {
-    const timeline = new CoverTimeline();
-    const rig = makeRuntime(timeline);
-    try {
-      rig.runtime.start();
-      await timeline.advanceTo(SCHEDULE.coverCadenceMs + 150);
-      // Terminated by the browser, or wedged: it takes requests and never
-      // answers, and no error event says so.
-      timeline.workers[0].wedged = true;
-
-      await timeline.advanceTo(20 * SCHEDULE.coverCadenceMs);
-      expect(rig.runtime.timerSource).toBe("page");
-      // The overdue wake-up ran late (honestly degrading one cycle) and the
-      // schedule then continued on page timers.
-      expect(rig.statuses).not.toContain("stopped");
-      const late = rig.sentCells();
-      await timeline.advanceTo(30 * SCHEDULE.coverCadenceMs - 1);
-      expect(rig.sentCells()).toBe(late + 10 * CELLS_PER_CYCLE);
-    } finally {
-      rig.runtime.destroy();
-      rig.pq.destroy();
-    }
-  });
-
   test("nothing posted to the timer worker contains key material or peer identifiers", async () => {
     const timeline = new CoverTimeline();
+    // At the thaw the page's overdue backstop runs first, so it probes.
+    timeline.timersFirstAtThaw = true;
     const rig = makeRuntime(timeline);
     try {
       rig.runtime.start();
-      await timeline.advanceTo(3 * SCHEDULE.coverCadenceMs);
+      await timeline.advanceTo(cycles(3));
+      // A freeze makes the page probe the worker, so a ping is posted too.
+      timeline.freezePage(20_000);
+      await timeline.advanceTo(timeline.time + 25_000);
       const posted = timeline.workers[0].posted;
-      expect(posted.length).toBeGreaterThan(0);
+      expect(
+        posted.some((message) => (message as { op: string }).op === "ping"),
+      ).toBe(true);
 
       // Slot delays and opaque integer handles, nothing else.
       for (const message of posted) {
         const fields = message as Record<string, unknown>;
-        expect(["arm", "cancel"]).toContain(fields.op as string);
+        expect(["arm", "cancel", "ping"]).toContain(fields.op as string);
         expect(Number.isSafeInteger(fields.id)).toBe(true);
         const keys = Object.keys(fields).sort();
         if (fields.op === "arm") {
@@ -315,7 +278,7 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
         module,
         timerEnvironment: timeline.env,
       });
-      await timeline.advanceTo(SCHEDULE.coverCadenceMs + 150);
+      await timeline.advanceTo(cycles(1) + 150);
       const [worker] = timeline.workers;
       expect(worker.armedTimers()).toBeGreaterThan(0);
 
@@ -325,9 +288,11 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
       expect(worker.terminated).toBe(true);
       expect(worker.armedTimers()).toBe(0);
       expect(timeline.armedPageTimers()).toBe(0);
+      expect(pendingCoverTimerWakeUps(timeline.env)).toBe(0);
+      expect(getCoverTimerSource(timeline.env)).toBe("none");
       // Nothing fires for it afterwards.
       const runsBefore = timeline.pageTimerRuns;
-      await timeline.advanceTo(20 * SCHEDULE.coverCadenceMs);
+      await timeline.advanceTo(cycles(20));
       expect(timeline.pageTimerRuns).toBe(runsBefore);
     } finally {
       teardownCoverEdge(epc);
@@ -335,8 +300,344 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
     }
   });
 
-  test("where no worker can be created the fallback is logged once, never silently", () => {
-    setDebugLogging(true);
+  test("a schedule the scheduler refuses does not keep the timer worker", () => {
+    const timeline = new CoverTimeline();
+    const pq = makePq();
+    try {
+      expect(
+        () =>
+          new CoverRuntime({
+            epc: { pqHealingState: pq } as unknown as IRTCPeerConnection,
+            roomId: ROOM_ID,
+            module,
+            amInitiator: true,
+            // 10 ms over 4 slots is under the 25 ms slot minimum.
+            schedule: { ...SCHEDULE, coverCadenceMs: 10 },
+            policyHash: new Uint8Array(32),
+            laneLabelName: "party",
+            openLaneChannel: (label) => new FakeLane(label),
+            maxTimerDriftMs: 0,
+            timerEnvironment: timeline.env,
+          }),
+      ).toThrow("25ms");
+      expect(timeline.workers.every((worker) => worker.terminated)).toBe(true);
+      expect(getCoverTimerSource(timeline.env)).toBe("none");
+    } finally {
+      pq.destroy();
+    }
+  });
+});
+
+describe("one timer worker serves every edge on the page", () => {
+  test("every edge on the page shares one timer worker", async () => {
+    const timeline = new CoverTimeline();
+    const first = makeRuntime(timeline);
+    const second = makeRuntime(timeline);
+    try {
+      first.runtime.start();
+      second.runtime.start();
+      await timeline.advanceTo(cycles(3) - 1);
+      expect(timeline.workers).toHaveLength(1);
+      expect(first.sentCells()).toBe(3 * CELLS_PER_CYCLE);
+      expect(second.sentCells()).toBe(3 * CELLS_PER_CYCLE);
+      // One counter for the whole page: no handle repeats across the edges.
+      const ids = timeline.workers[0].posted
+        .filter((message) => (message as { op: string }).op === "arm")
+        .map((message) => (message as { id: number }).id);
+      expect(new Set(ids).size).toBe(ids.length);
+    } finally {
+      first.runtime.destroy();
+      second.runtime.destroy();
+      first.pq.destroy();
+      second.pq.destroy();
+    }
+  });
+
+  test("the shared worker is terminated when the last runtime is destroyed", async () => {
+    const timeline = new CoverTimeline();
+    const first = makeRuntime(timeline);
+    const second = makeRuntime(timeline);
+    try {
+      first.runtime.start();
+      second.runtime.start();
+      await timeline.advanceTo(cycles(1));
+      const [worker] = timeline.workers;
+
+      first.runtime.destroy();
+      expect(worker.terminated).toBe(false);
+      second.runtime.destroy();
+      expect(worker.terminated).toBe(true);
+      expect(getCoverTimerSource(timeline.env)).toBe("none");
+    } finally {
+      first.pq.destroy();
+      second.pq.destroy();
+    }
+  });
+
+  test("destroying one runtime cancels only its own timers", async () => {
+    const timeline = new CoverTimeline();
+    const first = makeRuntime(timeline);
+    const second = makeRuntime(timeline);
+    try {
+      first.runtime.start();
+      second.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      const [worker] = timeline.workers;
+      const firstCells = first.sentCells();
+      const pendingBoth = pendingCoverTimerWakeUps(timeline.env);
+      expect(pendingBoth).toBe(2);
+      // Let the worker fire the destroyed runtime's handle anyway, as a tick
+      // already in flight would: it must be dropped, not run.
+      worker.ignoreCancels = true;
+      const handlesBefore = worker.armedIds();
+
+      first.runtime.destroy();
+      worker.ignoreCancels = false;
+
+      // The destroyed runtime's one pending wake-up was cancelled, and only
+      // it: the other edge's is still armed in the worker and keeps running.
+      expect(pendingCoverTimerWakeUps(timeline.env)).toBe(1);
+      expect(handlesBefore).toHaveLength(2);
+      // Every cancel was for the destroyed runtime: none names a handle the
+      // other edge still uses.
+      const cancelled = worker.posted
+        .filter((message) => (message as { op: string }).op === "cancel")
+        .map((message) => (message as { id: number }).id);
+      expect(cancelled.length).toBeGreaterThan(0);
+      const secondHandle = handlesBefore.find(
+        (handle) => !cancelled.includes(handle),
+      );
+      expect(secondHandle).toBeDefined();
+      await timeline.advanceTo(cycles(5) - 1);
+      expect(first.sentCells()).toBe(firstCells);
+      expect(second.sentCells()).toBe(5 * CELLS_PER_CYCLE);
+    } finally {
+      second.runtime.destroy();
+      first.pq.destroy();
+      second.pq.destroy();
+    }
+  });
+
+  test("creating and destroying 100 runtimes leaves no worker and no pending timer", async () => {
+    const timeline = new CoverTimeline();
+    for (let i = 0; i < 100; i++) {
+      const rig = makeRuntime(timeline);
+      rig.runtime.start();
+      await timeline.advanceTo(timeline.time + 150);
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+    expect(timeline.workers.every((worker) => worker.terminated)).toBe(true);
+    expect(
+      timeline.workers.reduce(
+        (total, worker) => total + worker.armedTimers(),
+        0,
+      ),
+    ).toBe(0);
+    expect(pendingCoverTimerWakeUps(timeline.env)).toBe(0);
+    expect(timeline.armedPageTimers()).toBe(0);
+    expect(getCoverTimerSource(timeline.env)).toBe("none");
+  });
+});
+
+describe("a worker is not dropped for a late page, and a dead one is replaced", () => {
+  test("a freeze longer than the stall bound does not drop a healthy worker", async () => {
+    const timeline = new CoverTimeline();
+    // At the thaw the page's overdue backstops run before the worker's queued
+    // messages: the order that used to drop a healthy worker.
+    timeline.timersFirstAtThaw = true;
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      // The page is frozen for 20 s, four times the stall bound; the worker
+      // keeps ticking and its messages wait for the page.
+      timeline.freezePage(20_000);
+      await timeline.advanceTo(timeline.time + 21_000);
+
+      const [worker] = timeline.workers;
+      expect(timeline.workers).toHaveLength(1);
+      expect(worker.terminated).toBe(false);
+      expect(rig.runtime.timerSource).toBe("worker");
+      // It was asked, and it answered.
+      expect(
+        worker.posted.some(
+          (message) => (message as { op: string }).op === "ping",
+        ),
+      ).toBe(true);
+      // The schedule went on on the worker after the thaw.
+      const after = rig.sentCells();
+      await timeline.advanceTo(timeline.time + cycles(5));
+      expect(rig.sentCells()).toBeGreaterThanOrEqual(
+        after + 4 * CELLS_PER_CYCLE,
+      );
+      expect(timeline.pageTimerRuns).toBeLessThan(10);
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a system sleep does not drop a healthy worker", async () => {
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      // The whole process sleeps for a minute: page and worker alike.
+      await timeline.sleep(60_000);
+      await timeline.advanceTo(timeline.time + 100);
+
+      expect(timeline.workers).toHaveLength(1);
+      expect(timeline.workers[0].terminated).toBe(false);
+      expect(rig.runtime.timerSource).toBe("worker");
+      const after = rig.sentCells();
+      await timeline.advanceTo(timeline.time + cycles(5));
+      expect(rig.sentCells()).toBeGreaterThanOrEqual(
+        after + 4 * CELLS_PER_CYCLE,
+      );
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a dead worker falls back to page timers", async () => {
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      expect(rig.sentCells()).toBeGreaterThan(0);
+
+      // The worker crashes mid-cycle: its error event.
+      timeline.workers[0].fail();
+      expect(rig.runtime.timerSource).toBe("page");
+      expect(timeline.workers[0].terminated).toBe(true);
+
+      await timeline.advanceTo(cycles(6) - 1);
+      // The schedule kept running, on time, without a gap.
+      expect(rig.sentCells()).toBe(6 * CELLS_PER_CYCLE);
+      expect(rig.statuses).not.toContain("stopped");
+      expect(rig.statuses).not.toContain("degraded");
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a dead worker is replaced at the next cycle boundary", async () => {
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      // Mid-cycle 2 (cycles are 400 ms).
+      await timeline.advanceTo(cycles(2) + 150);
+      timeline.workers[0].fail();
+      expect(rig.runtime.timerSource).toBe("page");
+
+      // The backoff is 1 s (to 1,950 ms), so the boundary at 2,000 ms is the
+      // first one a replacement may carry. Its wake-up is armed at 1,950 ms,
+      // after the cycle's last slot: still page timers just before that...
+      await timeline.advanceTo(1_949);
+      expect(timeline.workers).toHaveLength(1);
+      expect(rig.runtime.timerSource).toBe("page");
+      // ...and the replacement worker, created for that boundary's wake-up,
+      // carries the next cycle.
+      await timeline.advanceTo(cycles(5) + 1);
+      expect(timeline.workers).toHaveLength(2);
+      expect(rig.runtime.timerSource).toBe("worker");
+      const boundaryArm = timeline.workers[1].posted[0] as {
+        op: string;
+        delayMs: number;
+      };
+      expect(boundaryArm.op).toBe("arm");
+      expect(1_950 + boundaryArm.delayMs).toBe(cycles(5));
+      await timeline.advanceTo(cycles(8) - 1);
+      const arms = timeline.workers[1].posted.filter(
+        (message) => (message as { op: string }).op === "arm",
+      );
+      expect(arms.length).toBeGreaterThanOrEqual(2 * CELLS_PER_CYCLE);
+      expect(rig.sentCells()).toBe(8 * CELLS_PER_CYCLE);
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("a worker that does not answer its ping is replaced", async () => {
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      // Terminated by the browser, or wedged: it takes requests and never
+      // answers, and no error event says so.
+      timeline.workers[0].wedged = true;
+
+      // 5 s stall, then 10 s for the ping, then a replacement at a boundary.
+      await timeline.advanceTo(cycles(1) + 20_000);
+      expect(timeline.workers[0].terminated).toBe(true);
+      expect(timeline.workers).toHaveLength(2);
+      expect(rig.runtime.timerSource).toBe("worker");
+      expect(rig.statuses).not.toContain("stopped");
+      const late = rig.sentCells();
+      await timeline.advanceTo(timeline.time + cycles(10));
+      expect(rig.sentCells()).toBeGreaterThanOrEqual(
+        late + 9 * CELLS_PER_CYCLE,
+      );
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+    }
+  });
+
+  test("after the attempts are exhausted the runtime stays on page timers and says so", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    const timeline = new CoverTimeline();
+    const rig = makeRuntime(timeline);
+    try {
+      rig.runtime.start();
+      await timeline.advanceTo(cycles(1) + 150);
+      // From now on no worker can be made, and the one that runs dies.
+      timeline.failWorkerCreation = true;
+      timeline.workers[0].fail();
+
+      // Replacements are tried after 1, 2 and 4 s, each at a boundary.
+      await timeline.advanceTo(timeline.time + 15_000);
+      expect(rig.runtime.timerSource).toBe("page");
+      expect(getCoverTimerSource(timeline.env)).toBe("page");
+      expect(timeline.workers).toHaveLength(1);
+
+      // Said once, without debug logging, and naming nothing of the edge.
+      const reports = lines(warn).filter((line) =>
+        /page timers for good/.test(line),
+      );
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toContain("3 replacements failed");
+      for (const forbidden of [ROOM_ID, PEER_ID, uint8ArrayToHex(PQ_ROOT)])
+        expect(reports[0]).not.toContain(forbidden);
+
+      // And it stays there: no further attempt, the schedule still runs.
+      await timeline.advanceTo(timeline.time + 30_000);
+      expect(rig.runtime.timerSource).toBe("page");
+      expect(
+        lines(warn).filter((line) => /page timers/.test(line)),
+      ).toHaveLength(1);
+      const sent = rig.sentCells();
+      await timeline.advanceTo(timeline.time + cycles(5));
+      expect(rig.sentCells()).toBeGreaterThanOrEqual(
+        sent + 4 * CELLS_PER_CYCLE,
+      );
+    } finally {
+      rig.runtime.destroy();
+      rig.pq.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  test("where no worker can be created it is reported once, without debug logging", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
     const log = spyOn(console, "log").mockImplementation(() => undefined);
     try {
       const timeline = new CoverTimeline();
@@ -345,10 +646,13 @@ describe("scheduled cover's wake-ups come from a timer worker", () => {
       expect(clock.source).toBe("page");
       clock.setTimeout(() => undefined, 10);
       clock.setTimeout(() => undefined, 20);
-      const lines = log.mock.calls.map((args) => args.map(String).join(" "));
-      expect(lines.filter((line) => /page timers/.test(line))).toHaveLength(1);
+      const reports = lines(warn).filter((line) => /page timers/.test(line));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toContain("no timer worker can be created");
+      expect(log).not.toHaveBeenCalled();
       clock.destroy();
     } finally {
+      warn.mockRestore();
       log.mockRestore();
     }
   });
@@ -408,5 +712,11 @@ describe("the timer worker's own script", () => {
     worker.fireAll();
 
     expect(worker.posted).toEqual([{ op: "fire", id: 1 }]);
+  });
+
+  test("it answers a ping with the same handle", () => {
+    const worker = loadWorker();
+    worker.scope.onmessage?.({ data: { op: "ping", id: 7 } });
+    expect(worker.posted).toEqual([{ op: "pong", id: 7 }]);
   });
 });

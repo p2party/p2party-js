@@ -1,3 +1,5 @@
+import { MAX_TIMER_DELAY_MS } from "../utils/constants";
+
 export type CoverSchedulerStatus =
   "starting" | "active" | "degraded" | "suspended" | "stopped";
 
@@ -6,9 +8,20 @@ export type CoverCellSource = CoverJobKind | "cancel" | "dummy";
 
 type MaybePromise<T> = T | PromiseLike<T>;
 
+/** What a scheduler wake-up is for; a clock may route on it. */
+export type CoverTimerKind = "open-boundary" | "cycle-boundary" | "slot";
+
 export interface CoverClock {
   now(): number;
-  setTimeout(callback: () => void, delayMs: number): unknown;
+  /**
+   * `kind` says whether the wake-up opens or closes a cycle or runs a slot;
+   * the timer-worker clock brings a replacement worker up only at a boundary.
+   */
+  setTimeout(
+    callback: () => void,
+    delayMs: number,
+    kind?: CoverTimerKind,
+  ): unknown;
   clearTimeout(handle: unknown): void;
 }
 
@@ -189,11 +202,10 @@ interface CycleRuntime {
   nextSlotOrdinal: number;
 }
 
-type TimerKind = "open-boundary" | "cycle-boundary" | "slot";
+type TimerKind = CoverTimerKind;
 
 const MAX_COVER_LANES = 16;
 const MIN_COVER_SLOT_MS = 25;
-const MAX_TIMER_DELAY_MS = 0x7fffffff;
 
 const assertSafeInteger = (name: string, value: number): void => {
   if (!Number.isSafeInteger(value))
@@ -583,27 +595,31 @@ export class CoverScheduler {
       const remaining = deadlineMs - now;
       const delayMs = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, remaining));
       this.hasTimer = true;
-      this.timer = this.clock.setTimeout(() => {
-        if (generation !== this.generation) return;
-        this.hasTimer = false;
-        this.timer = undefined;
-        const firedAt = this.assertClockNow();
-        if (firedAt < deadlineMs) {
-          armRemaining();
-          return;
-        }
-        if (firedAt > deadlineMs + this.maxTimerDriftMs) {
-          this.handleLateTimer(kind, deadlineMs, firedAt);
-          return;
-        }
-        void Promise.resolve(handler(generation)).catch(() => {
-          if (kind === "slot") this.degrade("cell-production-failed");
-          // Never suspend: "suspended" is only left by resume(), whose callers
-          // are all browser wake events, so a boundary handler that rejected on
-          // a visible, online tab parked cover forever (C5).
-          else this.degrade("lane-open-failed", "boundary-handler-failed");
-        });
-      }, delayMs);
+      this.timer = this.clock.setTimeout(
+        () => {
+          if (generation !== this.generation) return;
+          this.hasTimer = false;
+          this.timer = undefined;
+          const firedAt = this.assertClockNow();
+          if (firedAt < deadlineMs) {
+            armRemaining();
+            return;
+          }
+          if (firedAt > deadlineMs + this.maxTimerDriftMs) {
+            this.handleLateTimer(kind, deadlineMs, firedAt);
+            return;
+          }
+          void Promise.resolve(handler(generation)).catch(() => {
+            if (kind === "slot") this.degrade("cell-production-failed");
+            // Never suspend: "suspended" is only left by resume(), whose callers
+            // are all browser wake events, so a boundary handler that rejected on
+            // a visible, online tab parked cover forever (C5).
+            else this.degrade("lane-open-failed", "boundary-handler-failed");
+          });
+        },
+        delayMs,
+        kind,
+      );
     };
     armRemaining();
   }

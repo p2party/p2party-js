@@ -493,3 +493,19 @@ export const PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION = 1;
 // after the scan.
 export const PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS = 1_024;
 export const PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS = 16;
+
+// The largest delay a platform timer honours (2^31 - 1 ms): a longer one fires
+// at once.
+export const MAX_TIMER_DELAY_MS = 0x7fffffff;
+// Scheduled cover's shared timer worker (src/handlers/coverTimerWorker.ts).
+// A wake-up this far past its deadline on the page's clock makes the page ask
+// the worker to answer a ping; it is not taken as proof the worker is dead (a
+// freeze, a system sleep or a long task makes every wake-up late too).
+export const COVER_TIMER_WORKER_STALL_MS = 5_000;
+// A worker that has not answered a ping by then is dropped for page timers.
+export const COVER_TIMER_WORKER_PING_TIMEOUT_MS = 10_000;
+// How many times a lost timer worker is replaced (each at a cycle boundary,
+// the first no sooner than the backoff after the loss, each later one twice as
+// long) before the page stays on page timers for good.
+export const COVER_TIMER_WORKER_MAX_RESTARTS = 3;
+export const COVER_TIMER_WORKER_RESTART_BACKOFF_MS = 1_000;

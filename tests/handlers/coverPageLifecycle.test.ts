@@ -366,4 +366,67 @@ describe("scheduled cover across the page lifecycle", () => {
 
     runtime.destroy();
   });
+
+  test("resume does not lift an offline suspension", async () => {
+    const { runtime, clock } = makeRuntime();
+    runtime.start();
+    await clock.advanceTo(100);
+
+    fakeWindow.dispatchEvent(new Event("offline"));
+    fakeDocument.dispatchEvent(new Event("freeze"));
+    expect(runtime.status).toBe("suspended");
+
+    // The page thaws, and becomes visible, while the device is still offline.
+    fakeDocument.dispatchEvent(new Event("resume"));
+    expect(runtime.status).toBe("suspended");
+    fakeDocument.visibilityState = "visible";
+    fakeDocument.dispatchEvent(new Event("visibilitychange"));
+    expect(runtime.status).toBe("suspended");
+
+    // Only coming back online lifts it, at a strictly future boundary.
+    fakeWindow.dispatchEvent(new Event("online"));
+    expect(runtime.status).toBe("starting");
+    await clock.advanceTo(500);
+    expect(runtime.status).toBe("active");
+
+    runtime.destroy();
+  });
+
+  test("a wake event never lifts a suspension it does not own", async () => {
+    const { runtime, clock } = makeRuntime();
+    runtime.start();
+    await clock.advanceTo(100);
+
+    fakeWindow.dispatchEvent(new Event("pagehide"));
+    fakeWindow.dispatchEvent(new Event("online"));
+    fakeDocument.dispatchEvent(new Event("resume"));
+    expect(runtime.status).toBe("suspended");
+
+    fakeDocument.visibilityState = "visible";
+    fakeDocument.dispatchEvent(new Event("visibilitychange"));
+    expect(runtime.status).toBe("starting");
+
+    runtime.destroy();
+  });
+
+  test("destroy removes the document listeners", async () => {
+    const { runtime, clock, statuses } = makeRuntime();
+    runtime.start();
+    await clock.advanceTo(100);
+    expect(fakeDocument.listenedTypes()).toEqual(
+      ["freeze", "resume", "visibilitychange"].sort(),
+    );
+
+    runtime.destroy();
+
+    expect(fakeDocument.listenedTypes()).toEqual([]);
+    expect(fakeWindow.listenedTypes()).toEqual([]);
+    // A page event after destroy reaches nothing.
+    const seen = statuses.length;
+    fakeDocument.dispatchEvent(new Event("freeze"));
+    fakeDocument.dispatchEvent(new Event("resume"));
+    fakeDocument.visibilityState = "hidden";
+    fakeDocument.dispatchEvent(new Event("visibilitychange"));
+    expect(statuses.length).toBe(seen);
+  });
 });

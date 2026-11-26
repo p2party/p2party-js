@@ -24,11 +24,16 @@ import {
 } from "../cryptography/coverCell";
 import { compileChannelMessageLabel } from "../utils/channelLabel";
 import { debugLog } from "../utils/debug";
+import { createCoverTimerClock } from "./coverTimerWorker";
 import { uint8ArrayToHex } from "../utils/uint8array";
 import { MAX_BUFFERED_AMOUNT, WIRE_CHUNK_FRAME_LEN } from "../utils/constants";
 
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
+import type {
+  CoverTimerClock,
+  CoverTimerEnvironment,
+} from "./coverTimerWorker";
 
 // ── protocol-v4 scheduled-cover WebRTC adapter ───────────────────────────────
 //
@@ -51,8 +56,9 @@ import type { LibCrypto } from "../cryptography/libcrypto";
 // Browser freeze/pagehide/offline events suspend cover; resume targets a
 // strictly future cycle boundary, and the surfaced status makes the
 // suspension gap visible to the UI instead of silently claiming cover. A
-// hidden page is not suspended: its schedule stays armed, and timers the
-// browser throttles there degrade the cycle instead (see #onVisibilityChange).
+// hidden page is not suspended: its schedule stays armed, woken by a dedicated
+// timer worker because a hidden page's own timers are throttled (see
+// coverTimerWorker and #onVisibilityChange for what remains observable).
 
 /** The transport surface a cover lane needs from an RTCDataChannel. */
 export interface CoverLaneChannel {
@@ -98,24 +104,26 @@ export interface CoverRuntimeOptions {
     merkleRootHex: string,
     tokens: readonly Uint8Array[],
   ) => void;
+  /**
+   * A clock to drive the schedule with, owned by the caller (deterministic
+   * tests). Without one the runtime creates its own timer-worker clock
+   * (coverTimerWorker) and destroys it with itself.
+   */
   readonly clock?: CoverClock;
+  /** Where that own clock gets time, page timers and its worker (tests). */
+  readonly timerEnvironment?: CoverTimerEnvironment;
 }
 
+/** Browser events that suspend cover, each lifted only by its own wake event. */
+type EnvironmentSuspension = "pagehide" | "freeze" | "offline";
+
 /**
- * True while the page is hidden: the condition under which scheduled cover
- * stays armed on throttled timers (see CoverRuntime's visibility handler) and
- * a scheduled send's delivery idle budget is held (scheduledCoverIsSuspended).
- * False outside a browser.
+ * True while the page is hidden: the condition under which a scheduled send's
+ * delivery idle budget is held (scheduledCoverIsSuspended). False outside a
+ * browser.
  */
 export const isPageHidden = (): boolean =>
   typeof document !== "undefined" && document.visibilityState === "hidden";
-
-const realClock: CoverClock = {
-  now: () => Date.now(),
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (handle) =>
-    clearTimeout(handle as Parameters<typeof clearTimeout>[0]),
-};
 
 /**
  * Every peer derives the identical absolute phase from the authenticated
@@ -155,6 +163,8 @@ export class CoverRuntime {
   static readonly #REPLAY_WINDOW = 1024n;
   readonly #jobSettledCallbacks = new Map<string, () => void>();
   #environmentAttached = false;
+  readonly #environmentSuspensions = new Set<EnvironmentSuspension>();
+  readonly #timerClock: CoverTimerClock | undefined;
   #destroyed = false;
   #lastStatus: CoverSchedulerStatus = "stopped";
 
@@ -184,10 +194,16 @@ export class CoverRuntime {
     const maxTimerDriftMs =
       options.maxTimerDriftMs ??
       Math.max(0, Math.min(Math.floor(slotSpacing) - 1, 500));
+    // Slot wake-ups come from a dedicated timer worker, which a hidden page
+    // does not throttle (see coverTimerWorker for the one clock lateness is
+    // judged on and for the fallback to page timers).
+    this.#timerClock = options.clock
+      ? undefined
+      : createCoverTimerClock(options.timerEnvironment);
     this.#scheduler = createCoverScheduler({
       schedule,
       maxTimerDriftMs,
-      clock: options.clock ?? realClock,
+      clock: options.clock ?? this.#timerClock!,
       laneFactory: (context) => this.#openLane(context),
       makeDummy: (slot) => this.#sealDummy(slot),
       onStatusChange: (change) => {
@@ -241,13 +257,25 @@ export class CoverRuntime {
 
   stop(): void {
     this.#detachEnvironment();
+    this.#environmentSuspensions.clear();
     this.#scheduler.stop();
   }
 
+  /**
+   * Stop for good. The runtime's own timer worker is terminated and every
+   * pending wake-up dropped, including the boundary close a stop() pins: the
+   * edge teardown that destroys a runtime closes its lanes itself.
+   */
   destroy(): void {
     if (this.#destroyed) return;
     this.stop();
+    this.#timerClock?.destroy();
     this.#destroyed = true;
+  }
+
+  /** Which source drives the schedule's wake-ups: the timer worker or the page. */
+  get timerSource(): "worker" | "page" {
+    return this.#timerClock?.source ?? "page";
   }
 
   /** A browser-imposed gap: close at the boundary, never claim the gap. */
@@ -452,45 +480,73 @@ export class CoverRuntime {
 
   // ── browser environment: degraded/suspended cover is never claimed ────────
 
-  // A hidden page keeps its schedule armed. Suspending it made tab visibility
-  // readable off the wire as cover on/off, and a hidden receiver stopped
-  // acknowledging, so its sender's idle budget ran out. The browser may
-  // throttle a hidden page's timers; a cell that then fires past its drift
-  // tolerance degrades the cycle, which the status reports, rather than
-  // pretending the gap was covered; a scheduled send's idle budget is held for
-  // as long as the page stays hidden (scheduledCoverIsSuspended). The
-  // diagnostic names no peer and no room.
+  // A hidden page keeps its schedule armed: suspending it showed tab
+  // visibility on the wire as cover on/off, and a hidden receiver stopped
+  // acknowledging, so its sender's idle budget ran out. The schedule's
+  // wake-ups come from the timer worker, because a hidden page's own timers
+  // are throttled to one wake-up a second (later one a minute), and a slot
+  // past its drift tolerance degrades its cycle, which the status reports.
+  //
+  // That does not make tab visibility unreadable. Measured in Chrome for
+  // Testing 159 on macOS (docs/protocol-v4-pq-cover-architecture.md,
+  // docs/e2e/cover-timers/): with 100 ms slots, page timers sent no cell while
+  // hidden; the worker sent 89 % of them, but the hidden page handled its
+  // wake-ups up to 143 ms late and 19 % of cycles still degraded. With 500 ms
+  // slots, no cycle degraded. Not measured and still observable: a frozen or
+  // discarded page (freeze suspends cover), a browser that throttles worker
+  // timers, a suspended process, and the page-timer fallback.
+  //
+  // A scheduled send's idle budget is held while the page stays hidden
+  // (scheduledCoverIsSuspended). The diagnostic names no peer and no room.
   readonly #onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
     if (isPageHidden())
       debugLog(
-        "p2party: page hidden; scheduled cover stays armed, but the browser may throttle its timers, so late cells degrade the cycle",
+        this.timerSource === "worker"
+          ? "p2party: page hidden; scheduled cover stays armed on its timer worker"
+          : "p2party: page hidden; scheduled cover stays armed, but on page timers, which the browser may throttle, so late cells degrade the cycle",
       );
-    // Visible again: lift a suspension a browser without the Page Lifecycle
-    // `resume` event (a pagehide into the back/forward cache) would otherwise
-    // never end. A runtime that is not suspended ignores this.
-    else this.#scheduler.resume();
+    // Visible again: the page is neither hidden in the back/forward cache nor
+    // frozen any more. That lifts a pagehide or freeze suspension in a browser
+    // without the Page Lifecycle `resume` event, and never an offline one.
+    else this.#liftEnvironmentSuspension("pagehide", "freeze");
   };
 
   readonly #onPageHide = (): void => {
-    this.#scheduler.suspend("pagehide");
+    this.#suspendForEnvironment("pagehide");
   };
 
   readonly #onFreeze = (): void => {
-    this.#scheduler.suspend("freeze");
+    this.#suspendForEnvironment("freeze");
   };
 
   readonly #onResume = (): void => {
-    this.#scheduler.resume();
+    this.#liftEnvironmentSuspension("freeze");
   };
 
   readonly #onOffline = (): void => {
-    this.#scheduler.suspend("offline");
+    this.#suspendForEnvironment("offline");
   };
 
   readonly #onOnline = (): void => {
-    this.#scheduler.resume();
+    this.#liftEnvironmentSuspension("offline");
   };
+
+  // Each browser event owns its own suspension: a wake event lifts only the
+  // ones it owns, and the schedule resumes once none is left. A `resume` after
+  // a freeze therefore leaves an offline suspension in place.
+  #suspendForEnvironment(cause: EnvironmentSuspension): void {
+    this.#environmentSuspensions.add(cause);
+    this.#scheduler.suspend(cause);
+  }
+
+  #liftEnvironmentSuspension(...causes: EnvironmentSuspension[]): void {
+    let lifted = false;
+    for (const cause of causes)
+      lifted = this.#environmentSuspensions.delete(cause) || lifted;
+    if (lifted && this.#environmentSuspensions.size === 0)
+      this.#scheduler.resume();
+  }
 
   // The Page Lifecycle `freeze` and `resume` events fire on document only; a
   // listener for them on window never runs.

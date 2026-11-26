@@ -757,18 +757,20 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
 
   // ── finding 1: a suspended job is not a stalled job ────────────────────────
   //
-  // CoverRuntime suspends the scheduler on pagehide, freeze and offline (a
-  // hidden page keeps its schedule armed on throttled timers instead; see
-  // hiddenSenderBudget.test.ts). `CoverScheduler.suspend` REQUEUES but KEEPS the
-  // job, so the sender's only progress signal freezes while the send is
-  // perfectly healthy. Spending the idle budget through that gap abandons a
-  // live send, and `sendScheduled`'s CANCEL then deletes the receiver's partial
-  // — an ordinary user action (backgrounding a tab) destroying the peer's
-  // download. These tests suspend the scheduler directly.
-  describe("a backgrounded tab is not a stalled send (finding 1)", () => {
-    // Three whole budgets hidden: far beyond anything the idle bound tolerates
+  // CoverRuntime suspends the scheduler on pagehide, freeze and offline. A
+  // hidden page no longer does: its schedule keeps running on the timer
+  // worker (hiddenSenderBudget.test.ts covers it). What still suspends a
+  // background tab is the Page Lifecycle `freeze`, which these tests model.
+  // `CoverScheduler.suspend` REQUEUES but KEEPS the job, so the sender's only
+  // progress signal freezes while the send is perfectly healthy. Spending the
+  // idle budget through that gap abandons a live send, and `sendScheduled`'s
+  // CANCEL then deletes the receiver's partial — an ordinary user action
+  // (leaving a tab in the background until the browser freezes it) destroying
+  // the peer's download.
+  describe("a frozen tab is not a stalled send (finding 1)", () => {
+    // Three whole budgets frozen: far beyond anything the idle bound tolerates
     // when it cannot tell "paused" from "stuck".
-    const HIDDEN_MS = 3 * ARITHMETIC_FLOOR_MS;
+    const FROZEN_MS = 3 * ARITHMETIC_FLOOR_MS;
 
     /** Every cell this send's lanes have put on the wire, across all cycles. */
     const jobCellsOnWire = (rig: SendRig): number =>
@@ -776,35 +778,35 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
         .filter((lane) => lane.label === rig.jobLabel)
         .reduce((total, lane) => total + lane.sent.length, 0);
 
-    interface HiddenTabRun {
+    interface FrozenTabRun {
       readonly delivered: boolean;
-      readonly hiddenUntilMs: number;
+      readonly frozenUntilMs: number;
       readonly cellsAtResume: number;
     }
 
     /**
-     * Admit the send, emit part of it, background the tab, and wait. The tab
-     * returns to the foreground HIDDEN_MS later, from inside the wait's own
-     * sleep — so a wait that gave up before then never saw it come back.
+     * Admit the send, emit part of it, freeze the tab, and wait. The tab
+     * thaws FROZEN_MS later, from inside the wait's own sleep — so a wait
+     * that gave up before then never saw it come back.
      */
-    const runHiddenTab = async (
+    const runFrozenTab = async (
       rig: SendRig,
       isSuspended: () => boolean,
-    ): Promise<HiddenTabRun> => {
+    ): Promise<FrozenTabRun> => {
       // Cycle 0 and 1 admit the four fillers; ours is admitted at cycle 2 and
-      // is part-way through emitting when the tab is hidden.
+      // is part-way through emitting when the tab is frozen.
       await rig.clock.advanceTo(2 * CYCLE_MS + Math.floor(CYCLE_MS / 2));
       const midFlight = rig.runtime.getJobProgress(rig.jobLabel);
       expect(midFlight?.state).toBe("admitted");
       expect(midFlight!.sentCells).toBeGreaterThan(0);
       expect(midFlight!.sentCells).toBeLessThan(CELLS);
 
-      rig.runtime.suspend("page-hidden");
+      rig.runtime.suspend("freeze");
       expect(rig.runtime.status).toBe("suspended");
       // Suspension keeps the job: this is a live send, not a lost one.
       expect(rig.runtime.getJobProgress(rig.jobLabel)).toBeDefined();
 
-      const hiddenUntilMs = rig.clock.now() + HIDDEN_MS;
+      const frozenUntilMs = rig.clock.now() + FROZEN_MS;
       let cellsAtResume = -1;
       let receiptLanded = false;
       const delivered = await waitForScheduledDelivery({
@@ -817,7 +819,7 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
         sleep: async (ms) => {
           await rig.clock.advanceTo(rig.clock.now() + ms);
           if (
-            rig.clock.now() >= hiddenUntilMs &&
+            rig.clock.now() >= frozenUntilMs &&
             rig.runtime.status === "suspended"
           ) {
             cellsAtResume = jobCellsOnWire(rig);
@@ -829,21 +831,21 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
             receiptLanded = true;
         },
       });
-      return { delivered, hiddenUntilMs, cellsAtResume };
+      return { delivered, frozenUntilMs, cellsAtResume };
     };
 
-    test("the send survives the hidden interval and the receiver keeps its partial", async () => {
+    test("the send survives the frozen interval and the receiver keeps its partial", async () => {
       const spy = makeSweepSpy({ [ROOT_HEX]: rowFor() });
       const receiver = makeReceiver(spy);
       const rig = makeSendRig();
 
-      const run = await runHiddenTab(rig, () =>
+      const run = await runFrozenTab(rig, () =>
         scheduledCoverIsSuspended(rig.runtime),
       );
 
       expect(run.delivered).toBe(true);
-      // It waited out the whole hidden interval instead of giving up inside it.
-      expect(rig.clock.now()).toBeGreaterThan(run.hiddenUntilMs);
+      // It waited out the whole frozen interval instead of giving up inside it.
+      expect(rig.clock.now()).toBeGreaterThan(run.frozenUntilMs);
       // ...and the transfer really did continue once the tab came back.
       expect(run.cellsAtResume).toBeGreaterThan(0);
       expect(jobCellsOnWire(rig)).toBeGreaterThan(run.cellsAtResume);
@@ -868,10 +870,10 @@ describe("A + B together: a healthy in-progress transfer survives", () => {
 
       // The ONE expression under repair, flipped back: the budget accrues
       // through a browser-imposed suspension exactly as it did before.
-      const run = await runHiddenTab(rig, () => false);
+      const run = await runFrozenTab(rig, () => false);
       expect(run.delivered).toBe(false);
-      // It gave up while the tab was still hidden and the job still healthy.
-      expect(rig.clock.now()).toBeLessThan(run.hiddenUntilMs);
+      // It gave up while the tab was still frozen and the job still healthy.
+      expect(rig.clock.now()).toBeLessThan(run.frozenUntilMs);
       expect(rig.runtime.status).toBe("suspended");
 
       // Exactly what sendScheduled does on a failed delivery. The scheduler is

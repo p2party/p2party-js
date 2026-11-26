@@ -33,6 +33,8 @@ import {
   deleteDBNewChunk,
   deleteDBPeerFromBlacklist,
   deleteReceiveTransfer,
+  answeringForRemoval,
+  retryFileRemovals,
   getAllDBAddressBookEntries,
   assembleToOPFS,
   getReceiveFile,
@@ -130,7 +132,6 @@ import {
   setRoom,
   clearPeerHandshakeFailures,
   setOnlyConnectWithKnownPeers,
-  deleteMessage,
   deleteMessageStateOnly,
   deleteRoom,
   purgeAllRooms,
@@ -769,10 +770,40 @@ const disconnectFromPeer = async (peerId: string) => {
   await dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
 };
 
+// Remove everything stored for a room's messages. First the files an earlier
+// delete of this room's messages left on disk are tried again (their messages
+// are no longer listed, so nothing else would reach them), then every stored
+// message is removed. Each file is tried once; whatever failed is thrown
+// after everything was tried.
+const deleteStoredRoomData = async (roomId: string): Promise<void> => {
+  const failures: unknown[] = [];
+  if (roomId !== "")
+    try {
+      await retryFileRemovals({ roomId });
+    } catch (error) {
+      failures.push(error);
+    }
+  try {
+    await deleteRoomDataTerminal(roomId, (merkleRootHex) => {
+      dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+    });
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(
+      failures,
+      "Room data deletion did not fully settle",
+    );
+};
+
 // With `deleteMessages`, every stored message of the room is removed after
-// the room's connections close. A received file that cannot be removed makes
-// this reject with one StorageFailedError (`failures`: each message's error)
-// once every other message was tried.
+// the room's connections close. A received file the browser refuses to remove
+// makes this reject with one StorageFailedError (`failures`: each file and
+// the browser's error for it) once every other message was tried. The
+// messages are unlisted and their records gone either way; calling this
+// again tries the files that were left.
 const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
   await dispatch(
     webrtcApi.endpoints.disconnectFromRoom.initiate({
@@ -782,9 +813,7 @@ const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
   );
   if (!deleteMessages) return;
   try {
-    await deleteRoomDataTerminal(roomId, (merkleRootHex) => {
-      dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
-    });
+    await deleteStoredRoomData(roomId);
   } catch (error) {
     throw asStorageFailure(
       error,
@@ -794,9 +823,9 @@ const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
 };
 
 // With `deleteMessages`, every stored message of every room left is removed
-// after the connections close. A received file that cannot be removed makes
-// this reject with one StorageFailedError (`failures`: each message's error)
-// once every other room and message was tried.
+// after the connections close. A received file the browser refuses to remove
+// makes this reject with one StorageFailedError (`failures`: each file and
+// the browser's error for it) once every other room and message was tried.
 const disconnectFromAllRooms = async (
   deleteMessages = false,
   exceptionRoomIds: string[] = [],
@@ -813,9 +842,7 @@ const disconnectFromAllRooms = async (
   for (const room of store.getState().rooms) {
     if (exceptions.has(room.id)) continue;
     try {
-      await deleteRoomDataTerminal(room.id, (merkleRootHex) => {
-        dispatch(deleteMessageStateOnly({ roomId: room.id, merkleRootHex }));
-      });
+      await deleteStoredRoomData(room.id);
     } catch (error) {
       failures.push(error);
     }
@@ -1459,21 +1486,47 @@ const cancelMessage = async (
       // rooms[roomIndex].messages[messageIndex].sha512Hex,
     );
 
-    await store.dispatch(
-      webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-        roomId: rooms[roomIndex].id,
-        label,
-        alsoDeleteData: true,
-      }),
-    );
-
-    store.dispatch(
-      deleteMessage({
-        roomId,
-        merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      }),
+    await removeStoredMessage(
+      rooms[roomIndex].id,
+      label,
+      rooms[roomIndex].messages[messageIndex].merkleRootHex,
     );
   }
+};
+
+// Close a listed message's channel and remove everything stored for it, for
+// a call the application made to delete it (deleteMessage, cancelMessage).
+//
+// The call answers for the message's file: while it runs, the channel's own
+// cancel and the delete the channel query dispatches are part of it and
+// report nothing themselves. If the browser refuses to remove the file, the
+// call rejects with one StorageFailedError (`cause`: the browser's error)
+// after everything else was done. The message's records are gone by then, so
+// it leaves the list either way; the file is tried again when the SDK next
+// starts and when deleteMessage is called again with its Merkle root.
+const removeStoredMessage = async (
+  roomId: string,
+  label: string,
+  merkleRootHex: string,
+): Promise<void> => {
+  try {
+    await answeringForRemoval(merkleRootHex, async () => {
+      await store.dispatch(
+        webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
+          roomId,
+          label,
+          alsoDeleteData: true,
+        }),
+      );
+      await deleteReceiveTransfer(merkleRootHex);
+      await deleteDBNewChunk({ merkleRootHex });
+    });
+  } catch (error) {
+    if (error instanceof StorageFailedError)
+      store.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+    throw error;
+  }
+  store.dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
 };
 
 const deleteMsg = async (
@@ -1563,22 +1616,21 @@ const deleteMsg = async (
       // rooms[roomIndex].messages[messageIndex].sha512Hex,
     );
 
-    await store.dispatch(
-      webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-        roomId: rooms[roomIndex].id,
-        label,
-        alsoDeleteData: true,
-      }),
+    await removeStoredMessage(
+      rooms[roomIndex].id,
+      label,
+      rooms[roomIndex].messages[messageIndex].merkleRootHex,
     );
-
-    // Remove what is stored before the message leaves the list. A received
-    // file that cannot be removed rejects this call with StorageFailedError,
-    // and the message stays listed so the delete can be tried again.
-    const stored = rooms[roomIndex].messages[messageIndex].merkleRootHex;
-    await deleteReceiveTransfer(stored);
-    await deleteDBNewChunk({ merkleRootHex: stored });
-
-    store.dispatch(deleteMessage({ roomId, merkleRootHex: stored }));
+  } else if (
+    messageIndex === -1 &&
+    merkleRootHex.length === crypto_hash_sha512_BYTES * 2
+  ) {
+    // Not listed. That is also how a message looks whose delete was refused
+    // its file earlier, in this session or before a reload: its records are
+    // gone and its file may still be on disk. Try that removal again. A file
+    // some record still owns is left alone; one that is still refused
+    // rejects this call with StorageFailedError, as the first call did.
+    await retryFileRemovals({ merkleRootHex });
   }
 };
 
@@ -1827,9 +1879,9 @@ const getIdentityBackupStatus = async (): Promise<IdentityBackupStatus> => {
  * shared signaling socket and every other room remain untouched.
  */
 // Every step runs even when an earlier one fails. A received file of the room
-// that cannot be removed makes this reject with one StorageFailedError
-// (`cause`: what the purge's steps threw; `failures`: each one) after
-// everything else was done.
+// that the browser refuses to remove makes this reject with one
+// StorageFailedError (`cause`: what the purge's steps threw; `failures`: each
+// file and the browser's error for it) after everything else was done.
 const purgeRoom = async (roomUrl: string): Promise<void> => {
   roomUrl = normalizeRoomCapability(roomUrl);
   try {
@@ -1879,13 +1931,7 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
       },
       // Awaited here, not inside the disconnect query, so a typed storage
       // failure reaches this call; closeLocalTransport already disconnected.
-      deleteLocalData: async () => {
-        await deleteRoomDataTerminal(removedRoom.id, (merkleRootHex) => {
-          dispatch(
-            deleteMessageStateOnly({ roomId: removedRoom.id, merkleRootHex }),
-          );
-        });
-      },
+      deleteLocalData: () => deleteStoredRoomData(removedRoom.id),
       clearPinAttempts: async () => {
         if (removedRoom.id) await clearPinAttempts(removedRoom.id);
       },
@@ -1895,7 +1941,10 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
 
 // Every step runs even when an earlier one fails. A received file the wipe
 // could not remove makes this reject with one StorageFailedError (`cause`:
-// what the purge's steps threw) after everything else was done.
+// what the purge's steps threw; `failures`: each file and the browser's error
+// for it) after everything else was done. The database is deleted either way,
+// so such a file has no record left; the SDK removes it when it next starts,
+// and calling purge again tries it at once.
 const purge = async () => {
   try {
     await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
@@ -2156,6 +2205,8 @@ export {
 };
 
 export type { TransferAck } from "./handlers/reconcile";
+// One entry of `StorageFailedError.failures`: a file and the browser's error.
+export type { FileRemovalFailure } from "./db/dbErrors";
 
 // The identity-backup surface: what a phrase produces, what it costs to make
 // one, and the shape `validateMnemonicWords` reports a bad phrase in.

@@ -13,7 +13,21 @@
 //   4. the same, after the handle is closed;
 //   5. a file with an open writable stream (createWritable), removed;
 //   6. the same, after the stream is closed;
-//   7. a second createSyncAccessHandle on a file whose first one is open.
+//   7. a second createSyncAccessHandle on a file whose first one is open;
+//   8. what listing a directory returns while a sync access handle on one of
+//      its files is open (and what getFile() on that file returns);
+//   9. what listing returns while a file in the directory is being created:
+//      with getFileHandle({ create: true }) requested before the listing
+//      starts, and requested after the listing has returned its first entry;
+//  10. what listing returns for a just-created file whose sync access handle
+//      is open, before anything is written and after it is pre-sized;
+//  11. with the handle held by ANOTHER Worker of the same origin (as another
+//      tab's database worker holds a file it is receiving): what the first
+//      Worker lists, whether it can remove the held file, another file of the
+//      same directory, or the directory, whether it can open the file, and
+//      whether a Web Lock the other Worker holds is granted to a request
+//      made with { ifAvailable: true }; then the same after the other Worker
+//      let go.
 //
 // Usage (the browser defaults to the headless shell of the Chromium build
 // whose Chrome for Testing docs/e2e/cover-timers/driver.mjs uses, from the
@@ -88,7 +102,133 @@ const handleStillReads = (access) => {
     return { error: error.name };
   }
 };
-onmessage = async () => {
+const listKinds = async (dir) => {
+  const entries = [];
+  try {
+    for await (const [name, handle] of dir.entries())
+      entries.push(name + ":" + handle.kind);
+  } catch (error) {
+    return "listing failed: " + error.name;
+  }
+  return entries.sort();
+};
+const HELD_DIRECTORY = "p2party-reassembled";
+const HELD_FILE = "held-elsewhere";
+const HELD_LOCK = "p2party:receive:held-elsewhere";
+// The other Worker's hold: a sync access handle and a Web Lock, kept until
+// it is told to release them.
+let heldAccess;
+let releaseHeldLock;
+const hold = async () => {
+  const root = await navigator.storage.getDirectory();
+  const dir = await freshDirectory(root, HELD_DIRECTORY);
+  await dir.getFileHandle("free", { create: true });
+  const file = await dir.getFileHandle(HELD_FILE, { create: true });
+  heldAccess = await file.createSyncAccessHandle();
+  heldAccess.write(new Uint8Array([9, 8, 7]), { at: 0 });
+  heldAccess.flush();
+  await new Promise((granted) => {
+    void navigator.locks.request(
+      HELD_LOCK,
+      () =>
+        new Promise((release) => {
+          releaseHeldLock = release;
+          granted();
+        }),
+    );
+  });
+  return { held: true };
+};
+const release = async () => {
+  heldAccess.close();
+  releaseHeldLock();
+  return { released: true };
+};
+// What a Worker that does not hold the file sees and can do.
+const observe = async (label) => {
+  const cases = [];
+  const root = await navigator.storage.getDirectory();
+  const dir = await root.getDirectoryHandle(HELD_DIRECTORY);
+  cases.push({
+    case: "directory listed " + label,
+    outcome: "resolved",
+    entries: await listKinds(dir),
+  });
+  const file = await dir.getFileHandle(HELD_FILE);
+  let size;
+  cases.push({
+    case: "getFile() on the file " + label,
+    ...(await attempt(async () => {
+      size = (await file.getFile()).size;
+    })),
+    size,
+  });
+  let access;
+  cases.push({
+    case: "createSyncAccessHandle on the file " + label,
+    ...(await attempt(async () => {
+      access = await file.createSyncAccessHandle();
+    })),
+  });
+  access?.close();
+  let lockGranted;
+  cases.push({
+    case:
+      "the Web Lock the other Worker takes with its handle, requested with { ifAvailable: true } " +
+      label,
+    ...(await attempt(async () => {
+      lockGranted = await navigator.locks.request(
+        HELD_LOCK,
+        { ifAvailable: true },
+        (lock) => lock !== null,
+      );
+    })),
+    granted: lockGranted,
+  });
+  cases.push({
+    case: "removeEntry(file) " + label,
+    ...(await attempt(() => dir.removeEntry(HELD_FILE))),
+    listedAfter: await list(dir),
+  });
+  await dir.getFileHandle("free", { create: true });
+  cases.push({
+    case: "removeEntry(another file of the directory) " + label,
+    ...(await attempt(() => dir.removeEntry("free"))),
+    listedAfter: await list(dir),
+  });
+  // A second file nobody holds: does a refused recursive removal take it?
+  await dir.getFileHandle("free", { create: true });
+  const recursive = await attempt(() =>
+    root.removeEntry(HELD_DIRECTORY, { recursive: true }),
+  );
+  const directoryKept = (await list(root)).includes(HELD_DIRECTORY);
+  cases.push({
+    case: "removeEntry(directory, { recursive: true }) " + label,
+    ...recursive,
+    rootListsDirectoryAfter: directoryKept,
+    directoryListedAfter: directoryKept ? await list(dir) : [],
+  });
+  return { cases };
+};
+onmessage = async (event) => {
+  if (event.data !== "run") {
+    try {
+      postMessage(
+        event.data === "hold"
+          ? await hold()
+          : event.data === "release"
+            ? await release()
+            : await observe(
+                event.data === "observe"
+                  ? "while another Worker holds a sync access handle on a file in it"
+                  : "after the other Worker closed its handle",
+              ),
+      );
+    } catch (error) {
+      postMessage({ failed: error.name + ": " + error.message });
+    }
+    return;
+  }
   const cases = [];
   try {
     const root = await navigator.storage.getDirectory();
@@ -183,6 +323,82 @@ onmessage = async () => {
         ...record,
       });
     }
+    // 8: listing while a sync access handle on one of the files is open.
+    {
+      const dir = await freshDirectory(root, "probe-list-held");
+      await dir.getFileHandle("closed", { create: true });
+      const file = await dir.getFileHandle("held", { create: true });
+      const access = await file.createSyncAccessHandle();
+      access.write(new Uint8Array([1, 2, 3]), { at: 0 });
+      access.flush();
+      cases.push({
+        case: "directory listed while a sync access handle on one of its files is open",
+        outcome: "resolved",
+        entries: await listKinds(dir),
+      });
+      let size;
+      cases.push({
+        case: "getFile() on a file whose sync access handle is open",
+        ...(await attempt(async () => {
+          size = (await file.getFile()).size;
+        })),
+        size,
+      });
+      access.close();
+    }
+
+    // 9: listing while a file of the directory is being created.
+    {
+      const dir = await freshDirectory(root, "probe-list-creating");
+      for (let i = 0; i < 20; i++)
+        await dir.getFileHandle("existing-" + i, { create: true });
+      const creating = dir.getFileHandle("new-a", { create: true });
+      const during = await list(dir);
+      await creating;
+      cases.push({
+        case: "directory listed while getFileHandle({ create: true }) is pending, the creation requested first",
+        outcome: Array.isArray(during) ? "resolved" : during,
+        entriesListed: Array.isArray(during) ? during.length : 0,
+        newFileListedDuring: Array.isArray(during) && during.includes("new-a"),
+        newFileListedAfter: (await list(dir)).includes("new-a"),
+      });
+      const names = [];
+      let created;
+      let failure;
+      try {
+        for await (const name of dir.keys()) {
+          names.push(name);
+          created ??= dir.getFileHandle("new-b", { create: true });
+        }
+      } catch (error) {
+        failure = error.name;
+      }
+      await created;
+      cases.push({
+        case: "directory listed while getFileHandle({ create: true }) is pending, the creation requested after the first entry was returned",
+        outcome: failure ? "listing failed: " + failure : "resolved",
+        entriesListed: names.length,
+        newFileListedDuring: names.includes("new-b"),
+        newFileListedAfter: (await list(dir)).includes("new-b"),
+      });
+    }
+
+    // 10: a just-created file whose sync access handle is open.
+    {
+      const dir = await freshDirectory(root, "probe-list-new-handle");
+      const file = await dir.getFileHandle("new", { create: true });
+      const access = await file.createSyncAccessHandle();
+      const empty = await listKinds(dir);
+      access.truncate(4096);
+      access.flush();
+      cases.push({
+        case: "directory listed while a just-created file's sync access handle is open",
+        outcome: "resolved",
+        entriesBeforeAnyWrite: empty,
+        entriesAfterPreSizing: await listKinds(dir),
+      });
+      access.close();
+    }
     postMessage({ cases });
   } catch (error) {
     postMessage({ cases, failed: error.name + ": " + error.message });
@@ -192,15 +408,38 @@ onmessage = async () => {
 const html = `<!doctype html><meta charset="utf-8"><title>opfs remove probe</title>
 <script type="text/plain" id="worker">${workerSource}</script>
 <script>
-window.__opfsProbe = new Promise((resolve) => {
-  const source = document.getElementById("worker").textContent;
-  const worker = new Worker(
+const source = document.getElementById("worker").textContent;
+const start = () =>
+  new Worker(
     URL.createObjectURL(new Blob([source], { type: "text/javascript" })),
   );
-  worker.onmessage = (event) => resolve(event.data);
-  worker.onerror = (event) => resolve({ failed: "worker error: " + event.message });
-  worker.postMessage("run");
-});
+const ask = (worker, message) =>
+  new Promise((resolve) => {
+    worker.onmessage = (event) => resolve(event.data);
+    worker.onerror = (event) => resolve({ failed: "worker error: " + event.message });
+    worker.postMessage(message);
+  });
+// One Worker runs the single-context cases; then a second one holds a file
+// and a Web Lock while the first looks, and lets go.
+window.__opfsProbe = (async () => {
+  const first = start();
+  const second = start();
+  const steps = [];
+  steps.push(await ask(first, "run"));
+  const held = await ask(second, "hold");
+  if (held.failed) steps.push(held);
+  else {
+    steps.push(await ask(first, "observe"));
+    const released = await ask(second, "release");
+    if (released.failed) steps.push(released);
+    else steps.push(await ask(first, "after"));
+  }
+  const failed = steps.map((step) => step.failed).filter(Boolean);
+  return {
+    cases: steps.flatMap((step) => step.cases ?? []),
+    ...(failed.length > 0 ? { failed: failed.join("; ") } : {}),
+  };
+})();
 </script>`;
 
 const PAGE_URL = `http://127.0.0.1:${PAGE_PORT}/`;

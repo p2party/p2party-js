@@ -34,55 +34,157 @@ export class DatabaseUpgradeBlockedError extends DatabaseUnavailableError {
 
 export const STORAGE_FAILED = "storage-failed";
 
+/** One received file a removal left on disk. */
+export interface FileRemovalFailure {
+  /**
+   * The file: its message's Merkle root in hex, which is also its name in the
+   * SDK's directory of the origin private file system. Empty when the failure
+   * is the directory's (it could not be listed or removed).
+   */
+  readonly merkleRootHex: string;
+  /** What the browser threw, with its own `name` and `message`. */
+  readonly error: Error;
+}
+
 /**
- * A storage operation failed and left its work undone (a received file not
- * removed). `cause` is the original error. When one call covered several
- * items (a room's messages, a purge's steps), `failures` holds each item's
- * error; otherwise it holds the one error.
+ * A removal left a received file on disk: the browser refused to remove it.
+ * - `failures` lists every file that is still there, each with the browser's
+ *   error for it (an `Error` with the `name` and `message` the browser
+ *   threw).
+ * - `cause` is the browser's error itself when the call was for one message
+ *   (deleteMessage, cancelMessage). For a call that covers several messages
+ *   or steps (disconnectFromRoom, disconnectFromAllRooms, purgeRoom, purge)
+ *   it is what those steps threw, usually an AggregateError; each file's own
+ *   error is in `failures`.
+ * Both hold on the page for an error raised in the database worker. An
+ * error's class, cause and fields do not survive the worker boundary, so the
+ * worker sends each file's root and the name and message of the browser's
+ * error as data (SerializedStorageFailure) and the client rebuilds them. The
+ * rebuilt errors are plain `Error`s carrying that name and message, not the
+ * browser's own DOMException objects.
  */
 export class StorageFailedError extends Error {
   readonly code = STORAGE_FAILED;
-  readonly failures: readonly unknown[];
+  readonly failures: readonly FileRemovalFailure[];
 
   constructor(
     message: string,
-    options: { cause?: unknown; failures?: readonly unknown[] } = {},
+    options: { cause?: unknown; failures?: readonly FileRemovalFailure[] } = {},
   ) {
     super(message, "cause" in options ? { cause: options.cause } : undefined);
     this.name = "StorageFailedError";
-    this.failures =
-      options.failures ?? ("cause" in options ? [options.cause] : []);
+    this.failures = options.failures ?? [];
   }
 }
 
-// Whether an error is, contains (as `errors` of an AggregateError, or as its
-// `cause`) or reports (a serialized error carrying the code) a storage
-// failure.
-const holdsStorageFailure = (error: unknown, depth = 0): boolean => {
+/** A browser error as it crosses the worker boundary: its name and message. */
+export interface SerializedError {
+  readonly name: string;
+  readonly message: string;
+}
+
+/** A StorageFailedError as the worker posts it to its client. */
+export interface SerializedStorageFailure {
+  readonly message: string;
+  readonly cause?: SerializedError;
+  readonly failures: ReadonlyArray<
+    { readonly merkleRootHex: string } & SerializedError
+  >;
+}
+
+export const serializeError = (error: unknown): SerializedError => {
+  const named = error as { name?: unknown; message?: unknown } | null;
+  return {
+    name: typeof named?.name === "string" ? named.name : "Error",
+    message: typeof named?.message === "string" ? named.message : String(error),
+  };
+};
+
+/** An Error carrying the name and message of the one that was thrown. */
+export const rebuildError = ({ name, message }: SerializedError): Error => {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+};
+
+export const serializeStorageFailure = (
+  error: StorageFailedError,
+): SerializedStorageFailure => ({
+  message: error.message,
+  ...(error.cause === undefined ? {} : { cause: serializeError(error.cause) }),
+  failures: error.failures.map((failure) => ({
+    merkleRootHex: failure.merkleRootHex,
+    ...serializeError(failure.error),
+  })),
+});
+
+export const rebuildStorageFailure = (
+  detail: SerializedStorageFailure,
+): StorageFailedError =>
+  new StorageFailedError(detail.message, {
+    ...(detail.cause === undefined
+      ? {}
+      : { cause: rebuildError(detail.cause) }),
+    failures: detail.failures.map((failure) => ({
+      merkleRootHex: failure.merkleRootHex,
+      error: rebuildError(failure),
+    })),
+  });
+
+/** A StorageFailedError for the files a removal left on disk. */
+export const filesNotRemoved = (
+  failures: readonly FileRemovalFailure[],
+  what = "p2party: could not remove",
+): StorageFailedError =>
+  new StorageFailedError(
+    failures.length === 1
+      ? `${what} the received file ${failures[0].merkleRootHex}: ${String(failures[0].error)}`
+      : `${what} ${String(failures.length)} received files (listed in failures)`,
+    {
+      cause:
+        failures.length === 1
+          ? failures[0].error
+          : new AggregateError(
+              failures.map((failure) => failure.error),
+              "Received files were not removed",
+            ),
+      failures,
+    },
+  );
+
+// Every StorageFailedError in an error: itself, the `errors` of an
+// AggregateError, or its `cause`, in order.
+const storageFailuresIn = (error: unknown, depth = 0): StorageFailedError[] => {
+  if (depth > 4 || error === null || typeof error !== "object") return [];
+  if (error instanceof StorageFailedError) return [error];
+  if (error instanceof AggregateError)
+    return error.errors.flatMap((inner) => storageFailuresIn(inner, depth + 1));
+  return storageFailuresIn((error as { cause?: unknown }).cause, depth + 1);
+};
+
+// Whether an error is or contains one that only reports a storage failure: a
+// serialized error that kept the code and lost its class and its files.
+const reportsStorageFailure = (error: unknown, depth = 0): boolean => {
   if (depth > 4 || error === null || typeof error !== "object") return false;
   if ((error as { code?: unknown }).code === STORAGE_FAILED) return true;
   if (error instanceof AggregateError)
-    return error.errors.some((inner) => holdsStorageFailure(inner, depth + 1));
-  return holdsStorageFailure((error as { cause?: unknown }).cause, depth + 1);
+    return error.errors.some((inner) =>
+      reportsStorageFailure(inner, depth + 1),
+    );
+  return reportsStorageFailure((error as { cause?: unknown }).cause, depth + 1);
 };
-
-// Every leaf of nested AggregateErrors, in order.
-const leaves = (error: unknown, depth = 0): unknown[] =>
-  error instanceof AggregateError && depth <= 4
-    ? error.errors.flatMap((inner) => leaves(inner, depth + 1))
-    : [error];
 
 /**
  * One typed error for a call whose work included removing received files: a
  * StorageFailedError when any part of `error` is a storage failure (the
- * original as `cause`; in `failures`, each item's error, nested
- * AggregateErrors flattened), else `error`.
+ * original as `cause`; in `failures`, every file any part names), else
+ * `error`.
  */
 export const asStorageFailure = (error: unknown, message: string): unknown => {
   if (error instanceof StorageFailedError) return error;
-  if (!holdsStorageFailure(error)) return error;
+  if (!reportsStorageFailure(error)) return error;
   return new StorageFailedError(message, {
     cause: error,
-    failures: leaves(error),
+    failures: storageFailuresIn(error).flatMap((failure) => failure.failures),
   });
 };

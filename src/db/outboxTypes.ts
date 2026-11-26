@@ -121,4 +121,10 @@ export interface ReceiveActivity {
   deletedAt?: number;
   writeToken?: string;
   leaseUntil?: number;
+  /**
+   * On a deleted transfer's row only: the browser refused to remove its file
+   * from the origin private file system. The row is then kept until the file
+   * is gone, and names the room whose removals a repeated room delete retries.
+   */
+  fileNotRemoved?: true;
 }

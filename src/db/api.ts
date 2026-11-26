@@ -1,4 +1,6 @@
 import type {
+  FileRemovalNotice,
+  FileRemovalRetryScope,
   HeldFileProgressNotice,
   HeldFileSettledNotice,
   ReceiveDeleteGuard,
@@ -23,7 +25,10 @@ import {
   DatabaseWorkerError,
   STORAGE_FAILED,
   StorageFailedError,
+  rebuildStorageFailure,
 } from "./dbErrors";
+import type { SerializedStorageFailure } from "./dbErrors";
+import { MAX_REPORTED_RECEIVE_STORAGE_ERRORS } from "../utils/constants";
 import {
   readIdentityEd25519AtClientBoundary,
   wipeUnclaimedWorkerSecret,
@@ -54,6 +59,71 @@ export const onVerificationProgress = (
   };
 };
 
+// ── A received file the browser refused to remove ──────────────────────────
+// One refusal reaches the application once, by one route:
+//   - a call the application made to delete rejects with it. While that call
+//     runs it answers for its file (answeringForRemoval): every other attempt
+//     to remove the same file that the call sets off is part of it, and
+//     raises nothing of its own;
+//   - a removal the SDK started itself is announced to the listeners below,
+//     once per file until the page sees that file removed, or a chunk of it
+//     stored again. The SDK raises it as the "not-removed" storage error.
+
+const fileRemovalListeners = new Set<(notice: FileRemovalNotice) => void>();
+const announcedNotRemoved = new Set<string>();
+const removalAnswers = new Map<
+  string,
+  { callers: number; failure?: StorageFailedError }
+>();
+
+/** Hear of each file a removal started by the SDK left on disk. */
+export const onFileNotRemoved = (
+  listener: (notice: FileRemovalNotice) => void,
+): (() => void) => {
+  fileRemovalListeners.add(listener);
+  return () => {
+    fileRemovalListeners.delete(listener);
+  };
+};
+
+/**
+ * Announce a file a removal left on disk, unless a call of the application
+ * answers for it or it was announced already.
+ */
+export const announceFileNotRemoved = (notice: FileRemovalNotice): void => {
+  if (removalAnswers.has(notice.merkleRoot)) return;
+  if (announcedNotRemoved.has(notice.merkleRoot)) return;
+  if (announcedNotRemoved.size >= MAX_REPORTED_RECEIVE_STORAGE_ERRORS)
+    announcedNotRemoved.clear();
+  announcedNotRemoved.add(notice.merkleRoot);
+  for (const listener of fileRemovalListeners) listener(notice);
+};
+
+/**
+ * Run a call the application made to delete one file's message. Until `run`
+ * settles, a refusal to remove that file, from whichever attempt inside the
+ * call, is kept instead of being thrown or announced. The call's last attempt
+ * decides: if that one was refused, the call rejects with it once, after
+ * everything else in `run` was done.
+ */
+export const answeringForRemoval = async <T>(
+  merkleRootHex: string,
+  run: () => Promise<T>,
+): Promise<T> => {
+  const answer = removalAnswers.get(merkleRootHex) ?? { callers: 0 };
+  answer.callers += 1;
+  removalAnswers.set(merkleRootHex, answer);
+  let value: T;
+  try {
+    value = await run();
+  } finally {
+    answer.callers -= 1;
+    if (answer.callers === 0) removalAnswers.delete(merkleRootHex);
+  }
+  if (answer.failure) throw answer.failure;
+  return value;
+};
+
 /** The part of a Worker the database client uses. */
 export interface DatabaseWorkerPort {
   postMessage(message: unknown, transfer: Transferable[]): void;
@@ -62,11 +132,21 @@ export interface DatabaseWorkerPort {
   onmessageerror: ((event: MessageEvent) => void) | null;
 }
 
-const typedWorkerError = (error: unknown, errorCode?: string): unknown =>
+// An error's class, cause and fields do not survive the worker boundary, so
+// the worker sends a storage failure's parts as data and they are put back
+// together here: `cause` is an Error with the browser's name and message, and
+// `failures` names each file.
+const typedWorkerError = (
+  error: unknown,
+  errorCode?: string,
+  errorDetail?: SerializedStorageFailure,
+): unknown =>
   errorCode === DATABASE_UPGRADE_BLOCKED
     ? new DatabaseUpgradeBlockedError()
     : errorCode === STORAGE_FAILED
-      ? new StorageFailedError(String(error))
+      ? errorDetail
+        ? rebuildStorageFailure(errorDetail)
+        : new StorageFailedError(String(error))
       : error;
 
 /**
@@ -94,9 +174,10 @@ export const createDatabaseClient = (
   };
 
   worker.onmessage = (e: MessageEvent) => {
-    const { notice, progress } = e.data as {
+    const { notice, progress, removal } = e.data as {
       notice?: HeldFileSettledNotice;
       progress?: HeldFileProgressNotice;
+      removal?: FileRemovalNotice;
     };
     if (notice) {
       for (const listener of heldFileListeners) listener(notice);
@@ -106,11 +187,16 @@ export const createDatabaseClient = (
       for (const listener of progressListeners) listener(progress);
       return;
     }
-    const { id, result, error, errorCode } = e.data as {
+    if (removal) {
+      announceFileNotRemoved(removal);
+      return;
+    }
+    const { id, result, error, errorCode, errorDetail } = e.data as {
       id: number;
       result: unknown;
       error: unknown;
       errorCode?: string;
+      errorDetail?: SerializedStorageFailure;
     };
     const p = pending.get(id);
     if (!p) {
@@ -121,7 +207,7 @@ export const createDatabaseClient = (
       return;
     }
     pending.delete(id);
-    if (error) p.reject(typedWorkerError(error, errorCode));
+    if (error) p.reject(typedWorkerError(error, errorCode, errorDetail));
     else p.resolve(result);
   };
 
@@ -359,7 +445,13 @@ export const setDBChunk = (chunk: Chunk) => callWorker("setDBChunk", chunk);
 // this distinct index was inserted and the authoritative committed byte count,
 // so a duplicate can never be mistaken for the completing chunk.
 export const storeReceiveChunk = (chunk: ReceiveChunk) =>
-  callWorker("storeReceiveChunk", chunk);
+  callWorker("storeReceiveChunk", chunk).then((result) => {
+    // The transfer's file is in use again: a later refusal to remove it is a
+    // new one, and is announced.
+    if (result.failure === undefined)
+      announcedNotRemoved.delete(chunk.merkleRoot);
+    return result;
+  });
 
 // Hash a received file held pending verification (storeReceiveChunk returned
 // `verification`) against its whole-file hash. Runs outside the per-file
@@ -428,8 +520,42 @@ export function deleteReceiveTransfer(
   merkleRootHex: string,
   guard?: ReceiveDeleteGuard,
 ): Promise<boolean | void> {
-  return callWorker("deleteReceiveTransfer", merkleRootHex, guard);
+  // Whoever answers for this file when the call is made answers for its
+  // outcome, even if the answer comes after that call has returned.
+  const answer = removalAnswers.get(merkleRootHex);
+  return callWorker("deleteReceiveTransfer", merkleRootHex, guard).then(
+    (removed) => {
+      // An unguarded delete that resolves has removed the file (or found
+      // none). A guarded one also resolves when its file was refused, which
+      // the worker announces instead.
+      if (!guard) {
+        announcedNotRemoved.delete(merkleRootHex);
+        if (answer) answer.failure = undefined;
+      }
+      return removed;
+    },
+    (error: unknown) => {
+      // The transfer's records are gone; only its file is left. Inside a
+      // call that answers for the file that is the call's to report.
+      if (!answer || !(error instanceof StorageFailedError)) throw error;
+      answer.failure = error;
+      return guard ? true : undefined;
+    },
+  );
 }
+
+/**
+ * Try again to remove files an earlier delete left on disk: one file, if no
+ * record owns it (a message deleted before, which is no longer listed), or
+ * every file a room's deleted messages left behind. Rejects with
+ * StorageFailedError while the browser still refuses.
+ */
+export const retryFileRemovals = (scope: FileRemovalRetryScope) =>
+  callWorker("retryFileRemovals", scope).then((done) => {
+    if ("merkleRootHex" in scope)
+      announcedNotRemoved.delete(scope.merkleRootHex);
+    return done;
+  });
 
 export const getDBAllNewChunks = (selector: NewChunkSelector) =>
   callWorker("getDBAllNewChunks", selector);

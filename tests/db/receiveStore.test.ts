@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { getDB } from "../../src/db/src/getDB";
 import { buildReceiveManifest } from "../../src/db/receiveManifest";
 import { fakeOpfs } from "./fakeOpfs";
+import { installFakeClock, untilTurns } from "./fakeClock";
 import { deleteRoomDataTerminal } from "../../src/api/webrtc/deleteRoomData";
 import {
   CHUNK_LEN,
@@ -1414,10 +1415,17 @@ describe("held files are verified at the next start", () => {
     return (held as { verification: string }).verification;
   };
 
+  // Turns of the event loop, not time: a held file is verified by queued
+  // work alone.
   const waitForNotices = async (count: number): Promise<void> => {
-    for (let attempt = 0; attempt < 200 && notices.length < count; attempt++)
-      await new Promise((resolve) => setTimeout(resolve, 5));
+    await untilTurns(() => notices.length >= count);
     expect(notices.length).toBe(count);
+  };
+  // A clock the test moves: the worker's retry timers and Date.now run on it.
+  const fakeClock = () => {
+    const clock = installFakeClock();
+    restores.push(clock.restore);
+    return clock;
   };
 
   test("a file whose verification was interrupted by a reload is verified at the next start without the sender", async () => {
@@ -1459,6 +1467,7 @@ describe("held files are verified at the next start", () => {
 
   test("a start does not verify a file another tab is verifying", async () => {
     notices.length = 0;
+    const clock = fakeClock();
     const files = new Map<string, Uint8Array>();
     const opfs = installOpfs(files);
     const root = "62".repeat(64);
@@ -1469,20 +1478,25 @@ describe("held files are verified at the next start", () => {
     await db.put("receiveActivity", {
       ...activity,
       writeToken: "another-tab",
-      leaseUntil: Date.now() + 80,
+      leaseUntil: clock.now() + 80,
     });
     db.close();
     const readsBefore = opfs.reads.length;
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The first try finds the lease and arms one timer for its end.
+    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    clock.advance(79);
     // Not while the other tab holds it.
     expect(notices).toEqual([]);
     expect(opfs.reads.length).toBe(readsBefore);
-    // One timer fires when that lease ends; the file is verified once.
+    expect(clock.pending()).toBe(1);
+    // The timer fires once that lease has ended; the file is verified once.
+    clock.advance(60);
     await waitForNotices(1);
     expect(notices[0]).toMatchObject({ merkleRoot: root, outcome: "complete" });
     expect(opfs.reads.length - readsBefore).toBe(3);
+    expect(clock.pending()).toBe(0);
   });
 
   // A held file of 40 chunks (three batches) in `room`.
@@ -1532,56 +1546,77 @@ describe("held files are verified at the next start", () => {
 
   test("a file held by another tab is retried until its hold ends", async () => {
     notices.length = 0;
+    const clock = fakeClock();
     const files = new Map<string, Uint8Array>();
     const opfs = installOpfs(files);
     const root = "5f".repeat(64);
     await holdFile(root);
-    await leaseTo(root, "another-tab", Date.now() + 40);
+    await leaseTo(root, "another-tab", clock.now() + 40);
     const readsBefore = opfs.reads.length;
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
-    // The other tab is still verifying: it renews its lease before it ends,
-    // and once more after the first retry has seen the renewed one.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await leaseTo(root, "another-tab", Date.now() + 120);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The first try finds the lease and arms its retry for the lease's end.
+    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    // The other tab is still verifying: it renews its lease before it ends.
+    clock.advance(20);
+    await leaseTo(root, "another-tab", clock.now() + 120);
+    // The retry fires, sees the renewed lease, and arms the next one.
+    clock.advance(100);
+    expect(await untilTurns(() => clock.armed() === 2)).toBe(true);
     expect(notices).toEqual([]);
     expect(opfs.reads.length).toBe(readsBefore);
-    await leaseTo(root, "another-tab", Date.now() + 60);
-    // Then it stops renewing: once its lease ends, the file is verified once.
+    // Then the other tab stops renewing: once its lease has ended, the next
+    // retry verifies the file, once.
+    clock.advance(100);
     await waitForNotices(1);
     expect(notices[0]).toMatchObject({ merkleRoot: root, outcome: "complete" });
     expect(opfs.reads.length - readsBefore).toBe(3);
+    expect(clock.armed()).toBe(2);
+    expect(clock.pending()).toBe(0);
   });
 
   test("a file held by another tab is left for the next start once the retry window ends", async () => {
     notices.length = 0;
-    let offset = 0;
-    const base = Date.now();
-    const clock = spyOn(Date, "now").mockImplementation(() => base + offset);
-    restores.push(() => clock.mockRestore());
+    const clock = fakeClock();
     const files = new Map<string, Uint8Array>();
     installOpfs(files);
     const root = "b1".repeat(64);
+    const other = "b0".repeat(64);
+    const otherRoom = "00000000-0000-4000-8000-000000000a07";
     await holdFile(root);
-    await leaseTo(root, "another-tab", Date.now() + 40);
+    await holdFile(other, { roomId: otherRoom });
+    await leaseTo(root, "another-tab", clock.now() + 40);
 
     await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
     // The first try finds the lease and arms its retry.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(notices).toEqual([]);
-    // The other tab keeps renewing past the window.
-    offset += RECEIVE_VERIFY_START_RETRY_WINDOW_MS;
-    await leaseTo(root, "another-tab", Date.now() + 40);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    // Its lease then ends, but this worker stopped trying: nothing happens
-    // until the next start.
-    offset += 1_000;
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(notices).toEqual([]);
-    await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
+    expect(await untilTurns(() => clock.armed() === 1)).toBe(true);
+    // The other tab keeps renewing: first for the whole retry window...
+    await leaseTo(
+      root,
+      "another-tab",
+      clock.now() + RECEIVE_VERIFY_START_RETRY_WINDOW_MS,
+    );
+    clock.advance(90);
+    expect(await untilTurns(() => clock.armed() === 2)).toBe(true);
+    // ...and again before that lease ends.
+    clock.advance(RECEIVE_VERIFY_START_RETRY_WINDOW_MS - 100);
+    await leaseTo(root, "another-tab", clock.now() + 60_000);
+    // The retry at the old lease's end is past the window: it gives up and
+    // arms nothing. The start-up queue runs one file at a time, so once a
+    // file queued behind it is verified, that try is over.
+    clock.advance(1_000);
+    await callWorker("getDBRoomMessageData", [otherRoom, { verifyHeld: true }]);
     await waitForNotices(1);
-    expect(notices[0]).toMatchObject({ merkleRoot: root, outcome: "complete" });
+    expect(notices[0]).toMatchObject({ merkleRoot: other });
+    expect(clock.armed()).toBe(2);
+    expect(clock.pending()).toBe(0);
+    // The other tab's lease then ends, and nothing happens: no timer is left
+    // to notice. The next start verifies the file.
+    clock.advance(120_000);
+    expect(notices).toHaveLength(1);
+    await callWorker("getDBRoomMessageData", [ROOM, { verifyHeld: true }]);
+    await waitForNotices(2);
+    expect(notices[1]).toMatchObject({ merkleRoot: root, outcome: "complete" });
   });
 });
 

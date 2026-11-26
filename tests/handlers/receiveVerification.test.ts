@@ -25,6 +25,7 @@ import { serializeMetadata } from "../../src/utils/metadata";
 import { MessageType } from "../../src/utils/messageTypes";
 import { createChunkReceiptToken } from "../../src/utils/receiptToken";
 import { uint8ArrayToHex } from "../../src/utils/uint8array";
+import { untilTurns } from "../db/fakeClock";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
@@ -781,6 +782,126 @@ describe("a received file is verified outside the edge's receive lock", () => {
     expect([...io.outcomes].sort()).toEqual(["aborted", "complete"]);
     await waitFor(() => newLane.sent.includes(uint8ArrayToHex(file.hash)));
     expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
+    expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
+  test("a holder that joins after the last one left gets a verdict, not an abort", async () => {
+    quietConsole();
+    const io = storage();
+    io.gate.resolve();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    // The file's first read waits, so the run is still going when its only
+    // holder leaves.
+    const stall = stallFirstChunkRead(file.rootHex);
+    restores.push(stall.restore, stall.release);
+    const before = edge();
+    const closed = new AbortController();
+    const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
+    oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
+    expect(await untilTurns(() => stall.hit())).toBe(true);
+
+    // A reconnect's copy of the held chunk is stored while the run has its
+    // holder. Before that copy asks for the verdict, the old edge is gone and
+    // its channel closes: the run has no holder left and is told to stop,
+    // which it only sees once its read returns.
+    resetRatchetGate(ROOM, PEER);
+    const after = edge();
+    const newLane = lane(file, after.epc, {
+      ...io.dependencies,
+      verifyReceivedFile: async (merkleRoot, token, holder) => {
+        closed.abort(new Error("channel closed"));
+        expect(await untilTurns(() => io.aborts() === 1)).toBe(true);
+        return io.dependencies.verifyReceivedFile(merkleRoot, token, holder);
+      },
+    });
+    newLane.push(seal(after.alice, file.plaintexts[0], file.root));
+    expect(await untilTurns(() => io.verifications() === 2)).toBe(true);
+    stall.release();
+
+    // The new edge did not leave, so it is owed a verdict: the file is
+    // verified again from the start and the new edge completes it.
+    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
+    expect(
+      await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash))),
+    ).toBe(true);
+    expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
+    expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
+  test("a copy that arrives while a left verification is ending gets a verdict", async () => {
+    quietConsole();
+    const io = storage();
+    io.gate.resolve();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    const stall = stallFirstChunkRead(file.rootHex);
+    restores.push(stall.restore, stall.release);
+    const before = edge();
+    const closed = new AbortController();
+    const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
+    oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
+    expect(await untilTurns(() => stall.hit())).toBe(true);
+
+    // The old edge is torn down and its channel closes: the run has no
+    // holder left and is told to stop.
+    resetRatchetGate(ROOM, PEER);
+    closed.abort(new Error("channel closed"));
+    expect(await untilTurns(() => io.aborts() === 1)).toBe(true);
+
+    // A reconnect's copy of the held chunk arrives while that run is ending.
+    // It is not refused over the lease the run still holds: it waits for the
+    // run to end.
+    const after = edge();
+    const newLane = lane(file, after.epc, io.dependencies);
+    newLane.push(seal(after.alice, file.plaintexts[0], file.root));
+    for (let turns = 0; turns < 200; turns++)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(io.verifications()).toBe(1);
+    stall.release();
+
+    // Then the file is verified again and this copy completes it, without
+    // the sender sending it once more.
+    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
+    expect(io.verifications()).toBe(2);
+    expect(
+      await untilTurns(() => newLane.sent.includes(uint8ArrayToHex(file.hash))),
+    ).toBe(true);
+    expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
+    expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
+  test("a connection that does not hold a run is answered without waiting for it", async () => {
+    quietConsole();
+    const io = storage();
+    io.gate.resolve();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    const stall = stallFirstChunkRead(file.rootHex);
+    restores.push(stall.restore, stall.release);
+    const { alice, epc } = edge();
+    const only = lane(file, epc, io.dependencies);
+    only.push(seal(alice, file.plaintexts[0], file.root));
+    expect(await untilTurns(() => stall.hit())).toBe(true);
+    const token = (await row(file.rootHex))?.receiveVerification?.token ?? "";
+    expect(token).not.toBe("");
+
+    // A connection that left an earlier run of this attempt settles while
+    // the run that replaced it is still reading: it has nothing to commit
+    // and nothing to wait for.
+    let answered: unknown = "pending";
+    void callWorker("settleReceivedFileVerification", [
+      file.rootHex,
+      token,
+      false,
+      "an-earlier-connection",
+    ]).then((outcome) => {
+      answered = outcome;
+    });
+    expect(await untilTurns(() => answered !== "pending")).toBe(true);
+    expect(answered).toBe("aborted");
+    expect(io.outcomes).toEqual([]);
+
+    // The run is untouched: its own holder completes the file.
+    stall.release();
+    expect(await untilTurns(() => io.outcomes.includes("complete"))).toBe(true);
     expect((await row(file.rootHex))?.savedSize).toBe(8);
   });
 

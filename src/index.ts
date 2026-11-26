@@ -206,6 +206,12 @@ import { getTransferAcks } from "./handlers/reconcile";
 import { MessageDeliveryError } from "./handlers/handleSendMessage";
 import { requestRoomFromSignalingWithRetry } from "./handlers/requestRoom";
 import {
+  assertReceivedFileIntact,
+  onReceiveStorageError,
+  ReceiveIntegrityError,
+} from "./handlers/handleReceiveMessage";
+import type { ReceiveStorageError } from "./handlers/handleReceiveMessage";
+import {
   cancelRoomRequestLifecycle,
   MAX_ACTIVE_SIGNALING_ROOMS,
 } from "./utils/roomRequestCoordinator";
@@ -1135,6 +1141,19 @@ const readMessage = async (
       retransmits: rooms[roomIndex].messages[messageIndex].retransmits ?? 0,
     };
 
+    // A received file that failed whole-file verification has no readable
+    // bytes; say so instead of handing back a partial Blob. A completed file
+    // was verified when it completed and is not re-hashed here.
+    if (
+      messageType !== MessageType.Text &&
+      materialize &&
+      percentage < 100 &&
+      rooms[roomIndex].messages[messageIndex].fromPeerId !== keyPair.peerId
+    )
+      await assertReceivedFileIntact(
+        rooms[roomIndex].messages[messageIndex].merkleRootHex,
+      );
+
     // Metadata-only read: skip the (potentially huge) file materialization for a
     // completed file when the caller only needs name/size/category (list
     // previews, file bubbles). Avoids reassembling the whole file on the render
@@ -1271,6 +1290,7 @@ const readMessage = async (
       };
     }
   } catch (error) {
+    if (error instanceof ReceiveIntegrityError) throw error;
     console.error(error);
 
     return {
@@ -1855,6 +1875,9 @@ export const p2party = {
   resumePendingMessages,
   cancelPendingMessage,
   readMessage,
+  // Typed report of a received chunk this device could not store, or a
+  // received file whose bytes failed whole-file verification.
+  onReceiveStorageError,
   // Live outbound progress for one logical send: per peer, how many chunks
   // that peer has receipted so far. Pair it with the message row's totalChunks
   // for a percentage. Empty once the transfer is cleaned up.
@@ -1978,6 +2001,7 @@ export type {
   WebSocketMessageLeaveRoomRequest,
   WebSocketMessageRoomLeftResponse,
   WebSocketMessageError,
+  ReceiveStorageError,
 };
 
 export {
@@ -1998,6 +2022,8 @@ export {
   waitForRoom,
   waitForPeers,
   onMessage,
+  onReceiveStorageError,
+  ReceiveIntegrityError,
   setDebugLogging,
 };
 

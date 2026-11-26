@@ -19,6 +19,7 @@
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { getDB } from "../../src/db/src/getDB";
 import { getWrapKey, wrapSecret } from "../../src/db/ratchetWrap";
@@ -839,6 +840,8 @@ describe("db.worker atomic receive progress", () => {
       const response = await callWorker("storeReceiveChunk", [
         receiveChunk(0, [7], {
           merkleRoot: "77".repeat(64),
+          // The file's real whole-file hash, so completion verifies.
+          hash: createHash("sha512").update(Uint8Array.of(7)).digest("hex"),
           messageType: 2,
           totalSize: 1,
           storage: "opfs",
@@ -847,6 +850,11 @@ describe("db.worker atomic receive progress", () => {
       // The storage layer safely falls back to IndexedDB, but the exclusive
       // handle acquired before truncate failed must already be released.
       expect(response.error).toBeUndefined();
+      expect(response.result).toEqual({
+        stored: true,
+        savedSize: 1,
+        complete: true,
+      });
       expect(closeCalls).toBe(1);
     } finally {
       errorLog.mockRestore();

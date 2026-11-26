@@ -10,9 +10,13 @@ import {
   test,
 } from "bun:test";
 
+import { createHash } from "node:crypto";
+
 import {
+  assertReceivedFileIntact,
   handleReceiveMessage,
   onReceiveStorageError,
+  ReceiveIntegrityError,
   storeReceiveChunkFailClosed,
   type ReceiveStorageError,
 } from "../../src/handlers/handleReceiveMessage";
@@ -144,8 +148,13 @@ const workerStore = async (
 const rand = (n: number): Uint8Array =>
   crypto.getRandomValues(new Uint8Array(n));
 
-// A one-chunk message of `realLen` bytes under a two-leaf Merkle tree.
-const buildMessage = async (messageType: number, realLen: number) => {
+// A one-chunk message of `realLen` bytes under a two-leaf Merkle tree. Its
+// metadata carries the SHA-512 of those bytes unless `claimedHash` overrides it.
+const buildMessage = async (
+  messageType: number,
+  realLen: number,
+  claimedHash?: Uint8Array,
+) => {
   const data = rand(CHUNK_LEN);
   const leaves = new Uint8Array(2 * crypto_hash_sha512_BYTES);
   const leaf = hashMerkleLeafWasm(data, module);
@@ -158,7 +167,11 @@ const buildMessage = async (messageType: number, realLen: number) => {
     serializeMetadata({
       schemaVersion: 1,
       messageType,
-      hash: rand(crypto_hash_sha512_BYTES),
+      hash:
+        claimedHash ??
+        Uint8Array.from(
+          createHash("sha512").update(data.subarray(0, realLen)).digest(),
+        ),
       totalSize: realLen,
       date: new Date(1),
       name: messageType === MessageType.Text ? "" : "a5.bin",
@@ -422,5 +435,50 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
     }
     expect(persistCalls).toBe(1);
     expect(errors).toEqual([]);
+  });
+
+  test("the sender gets no final receipt for a file that failed verification", async () => {
+    quietConsole();
+    // The file's bytes do not hash to the whole-file hash its message claims.
+    const { root, plaintext, rootedReceipt } = await buildMessage(
+      MessageType.ImagePNG,
+      8,
+      rand(crypto_hash_sha512_BYTES),
+    );
+    const { alice, epc } = edgePair();
+    const errors = collectErrors();
+
+    const refused = await receive(seal(alice, plaintext, root), epc, root);
+
+    // Not complete, so the queueing layer neither marks it complete nor sends
+    // the final (message-hash) receipt; the chunk's own receipt is a decoy.
+    expect(refused.receivedFullSize).toBe(false);
+    expect(refused.chunkIndex).toBe(-1);
+    expect(uint8ArrayToHex(wireReceipt(refused))).not.toBe(
+      uint8ArrayToHex(rootedReceipt),
+    );
+    expect(errors.map((error) => error.code)).toEqual(["integrity"]);
+    // Nothing is held, so a reconnect replays no receipt for it either.
+    const progress = await callWorker("getDBMessageData", [
+      uint8ArrayToHex(root),
+    ]);
+    expect(progress.result).toMatchObject({
+      savedSize: 0,
+      totalSize: 8,
+      integrityFailed: true,
+    });
+    // Reading it through the public API's check throws the typed error.
+    const readProgress = async (merkleRootHex: string) =>
+      (await callWorker("getDBMessageData", [merkleRootHex])).result as
+        { integrityFailed?: true } | undefined;
+    const read = assertReceivedFileIntact(
+      uint8ArrayToHex(root),
+      readProgress as never,
+    );
+    await expect(read).rejects.toBeInstanceOf(ReceiveIntegrityError);
+    await expect(read).rejects.toMatchObject({
+      code: "integrity",
+      merkleRootHex: uint8ArrayToHex(root),
+    });
   });
 });

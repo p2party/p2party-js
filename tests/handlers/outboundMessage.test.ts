@@ -388,7 +388,8 @@ describe("one OutboundMessage builds the proof levels once for every peer and pa
     // whole tree in WASM once per proof.
     expect(counts.sha512Init).toBe(staged.totalChunks - 1);
     expect(counts.wasmProof).toBe(0);
-    expect(message.proofLevelBytes).toBeGreaterThan(0);
+    // Every cell's row now carries its proof, so the levels are gone.
+    expect(message.proofLevelBytes).toBe(0);
 
     expect(a.sent.length).toBe(2);
     expect(await sentIndexes(b, staged.merkleRoot)).toEqual(
@@ -399,6 +400,45 @@ describe("one OutboundMessage builds the proof levels once for every peer and pa
     expect(await sentIndexes(a2, staged.merkleRoot)).toEqual(
       staged.realIndexes,
     );
+    message.close();
+  });
+
+  test("proof levels are released once every cell is sent", async () => {
+    const staged = await stageMessage(5, 2);
+    const store = new CountingStore(staged.rows);
+    const { module: merkleModule, counts } = countingModule();
+    const message = messageFor(staged, store, merkleModule);
+    const first = await openChannel(staged);
+    first.closeAfterSends = 3;
+    await sendChunks(
+      first as unknown as IRTCDataChannel,
+      plaintextSealer,
+      message,
+    );
+    // Part of the message is still unproven: the levels are held.
+    expect(message.proofLevelBytes).toBeGreaterThan(0);
+    const rest = await openChannel(staged);
+    await sendChunks(
+      rest as unknown as IRTCDataChannel,
+      plaintextSealer,
+      message,
+    );
+    // Every cell has gone out once, so every row carries its proof: released
+    // while the message is still being delivered.
+    expect(message.closed).toBe(false);
+    expect(message.proofLevelBytes).toBe(0);
+    // Another peer's pass reads the stored proofs and builds nothing.
+    const other = await openChannel(staged);
+    await sendChunks(
+      other as unknown as IRTCDataChannel,
+      plaintextSealer,
+      message,
+    );
+    expect(await sentIndexes(other, staged.merkleRoot)).toEqual(
+      Array.from({ length: staged.totalChunks }, (_, i) => i),
+    );
+    expect(counts.sha512Init).toBe(staged.totalChunks - 1);
+    expect(message.proofLevelBytes).toBe(0);
     message.close();
   });
 

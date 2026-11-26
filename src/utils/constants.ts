@@ -274,6 +274,10 @@ export const RECEIVER_SILENCE_LIMIT_MS =
 // that is 1,280 s + 30 s ≈ 21.8 min at the 10 GiB MAX_MESSAGE_SIZE. (This
 // machine verifies at about 15 s/GiB, roughly 70 MiB/s.)
 export const MIN_RECEIVER_VERIFY_BYTES_PER_SECOND = 8 * 1024 * 1024;
+// That wait re-checks this often, so a page that was frozen, asleep or offline
+// (a check later than this past its due time) is seen, and the time it lost is
+// not counted as the receiver's silence.
+export const REPORTED_COMPLETION_CHECK_MS = 5_000;
 // While a received file is verified the receiver re-sends that transfer's
 // ordinary receipt at most once per this interval, and only when the worker's
 // hashed byte count advanced since the receipt it last sent, so a stuck

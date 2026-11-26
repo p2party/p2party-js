@@ -107,6 +107,7 @@ import {
   MAX_RESUME_ATTEMPTS,
   MAX_SCHEDULED_SEND_RESUMES,
   RECEIPT_WINDOW_FALLBACK_MS,
+  MAX_TIMER_DELAY_MS,
   RECEIVER_SILENCE_LIMIT_MS,
   SEND_BUFFER_FALLBACK_MS,
   SEND_BUFFER_LOW_THRESHOLD,
@@ -324,6 +325,10 @@ export class OutboundMessage {
   readonly #merkleModule: LibCrypto;
   readonly #store: OutboundChunkStore;
   #kinds: Uint8Array;
+  // Cells whose staged row now carries its proof; the levels are not needed
+  // for those again.
+  #proven: Uint8Array;
+  #provenCount = 0;
   #totalSize = 0;
   #levels: MerkleProofLevels | null = null;
   #levelsError: Error | null = null;
@@ -348,6 +353,7 @@ export class OutboundMessage {
     this.#merkleModule = params.merkleModule;
     this.#store = params.store ?? stagedChunkStore;
     this.#kinds = new Uint8Array(params.totalChunks);
+    this.#proven = new Uint8Array(params.totalChunks);
   }
 
   get closed(): boolean {
@@ -435,6 +441,7 @@ export class OutboundMessage {
         ),
       );
 
+    if (hasStoredProof) this.#noteProven(index);
     const receiptToken =
       row.receiptToken.length === crypto_hash_sha512_BYTES * 2
         ? row.receiptToken
@@ -466,6 +473,7 @@ export class OutboundMessage {
         },
         outboxLease,
       );
+      this.#noteProven(index);
       throwIfTransferAborted(signal);
     }
 
@@ -491,6 +499,18 @@ export class OutboundMessage {
     this.#levels?.release();
     this.#levels = null;
     this.#kinds = new Uint8Array(0);
+  }
+
+  // Once every cell's row carries its proof, every later read finds it there:
+  // the levels (about N × 64 bytes) are released while the delivery goes on.
+  #noteProven(index: number): void {
+    if (this.#closed || this.#proven[index] === 1) return;
+    this.#proven[index] = 1;
+    this.#provenCount++;
+    if (this.#provenCount === this.totalChunks) {
+      this.#levels?.release();
+      this.#levels = null;
+    }
   }
 
   #assertOpen(): void {
@@ -641,10 +661,12 @@ export const waitForSendBuffer = async (
   });
 };
 
-/** The events the immediate-mode completion wait listens to: the transfer's own channel. */
+/** The transfer's own channel, as the immediate-mode completion wait reads it. */
 export interface TransferFrameSource {
-  addEventListener(type: "message", listener: () => void): void;
-  removeEventListener(type: "message", listener: () => void): void;
+  /** Only "closing" and "closed" end the wait; absent reads as open. */
+  readonly readyState?: string;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
 }
 
 /**
@@ -653,6 +675,10 @@ export interface TransferFrameSource {
  * channel (a re-sent receipt) re-arms the RECEIVER_SILENCE_LIMIT_MS bound;
  * the wait is capped at reportedCompletionCapMs(totalSize). Only this peer
  * can send on that channel, and only about this transfer.
+ *
+ * The channel closing ends the wait at once: a close is the edge going away
+ * or the receiver's cancel, and the caller handles it as it handles any close
+ * (resume, or the cancel outcome).
  */
 export const waitForVerifiedDelivery = (
   channel: TransferFrameSource,
@@ -674,6 +700,16 @@ export const waitForVerifiedDelivery = (
         channel.removeEventListener("message", wake);
       };
     },
+    onInterrupt: (interrupt) => {
+      for (const type of CHANNEL_END_EVENTS)
+        channel.addEventListener(type, interrupt);
+      return () => {
+        for (const type of CHANNEL_END_EVENTS)
+          channel.removeEventListener(type, interrupt);
+      };
+    },
+    isInterrupted: () =>
+      channel.readyState === "closing" || channel.readyState === "closed",
     signal: options.signal,
     clock: options.clock,
   });
@@ -683,7 +719,8 @@ export const waitForVerifiedDelivery = (
  * authenticated scheduled receipt for this transfer as coverEdge attributes
  * it (noteTransferActivity). `silenceMs` is the caller's: a scheduled receipt
  * can arrive only in a cover slot, so the bound is at least the schedule's
- * own delivery idle budget.
+ * own delivery idle budget. `onInterrupt`/`isInterrupted` end it at once for
+ * an edge that was replaced or torn down.
  */
 export const waitForScheduledVerifiedDelivery = (
   roomId: string,
@@ -692,6 +729,8 @@ export const waitForScheduledVerifiedDelivery = (
   totalSize: number,
   silenceMs: number,
   options: {
+    readonly onInterrupt?: (interrupt: () => void) => () => void;
+    readonly isInterrupted?: () => boolean;
     readonly isHeld?: () => boolean;
     readonly signal?: AbortSignal;
     readonly clock?: TransferWaitClock;
@@ -701,6 +740,8 @@ export const waitForScheduledVerifiedDelivery = (
     silenceMs,
     capMs: reportedCompletionCapMs(totalSize, silenceMs),
     onActivity: (wake) => onTransferActivity(roomId, peerId, transferId, wake),
+    onInterrupt: options.onInterrupt,
+    isInterrupted: options.isInterrupted,
     isHeld: options.isHeld,
     signal: options.signal,
     clock: options.clock,
@@ -1452,7 +1493,27 @@ export const shouldDeleteLocalMessageAfterFailure = (
 // handleReadReceipt. Selective (never resend-all) so no dup frames pile up. On a
 // full reconnect the loop re-establishes the per-message channel and continues
 // (resume), rather than giving up — the same reconcile drives both.
-const sendWithReconcile = async (
+/**
+ * Test/fault-injection seams for `sendWithReconcile`, the same shape as
+ * `ScheduledSendDependencies`. Production passes none of them.
+ */
+export interface ImmediateSendDependencies {
+  readonly ratchetStep?: DurableRatchetStep;
+  /** Remove an older runtime's ciphertext queue for this channel. */
+  readonly deleteSendQueue?: (label: string, peerId: string) => Promise<void>;
+  readonly persistCancellation?: typeof persistOutboundCancellation;
+  /** How long a resume watches for the peer's replacement connection. */
+  readonly resumeTimeoutMs?: number;
+  /** The clock of the waits between retransmit rounds. */
+  readonly clock?: TransferWaitClock;
+}
+
+/**
+ * One peer's immediate-mode transfer of one message, as described above.
+ * Exported only so its completion and close handling have focused tests. It is
+ * not part of the package's public root exports.
+ */
+export const sendWithReconcile = async (
   channel: IRTCDataChannel,
   api: BaseQueryApi,
   roomId: string,
@@ -1464,7 +1525,14 @@ const sendWithReconcile = async (
   dataChannels: IRTCDataChannel[],
   signal?: AbortSignal,
   outboxLease?: OutboxLease,
+  dependencies: ImmediateSendDependencies = {},
 ): Promise<void> => {
+  const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
+  const deleteSendQueue =
+    dependencies.deleteSendQueue ??
+    ((label: string, toPeerId: string) => deleteDBSendQueue(label, toPeerId));
+  const persistCancellation =
+    dependencies.persistCancellation ?? persistOutboundCancellation;
   const { transferId, hashHex } = message;
   throwIfTransferAborted(signal);
   clearTransfer(roomId, peerId, transferId);
@@ -1480,7 +1548,7 @@ const sendWithReconcile = async (
   // This path no longer persists ciphertext. Remove any queue records left by an
   // older runtime before this channel can drain them; plaintext newChunks are the
   // sole durable resend source.
-  await deleteDBSendQueue(roomSendQueueLabel(roomId, channel.label), peerId);
+  await deleteSendQueue(roomSendQueueLabel(roomId, channel.label), peerId);
   throwIfTransferAborted(signal);
 
   // protocol-v3: do not send until the PACE + Double-Ratchet handshake has seeded
@@ -1509,7 +1577,7 @@ const sendWithReconcile = async (
   let header: RatchetHeader;
   let pqContext: PqMessageKeyContext | null;
   try {
-    const stepped = await ratchetEncryptDurably(epc, roomId, encryptionModule);
+    const stepped = await ratchetStep(epc, roomId, encryptionModule);
     if (signal?.aborted) {
       stepped.messageKey.fill(0);
       stepped.pqContext?.rootKey.fill(0);
@@ -1570,6 +1638,7 @@ const sendWithReconcile = async (
         peerId,
         retries,
         signal,
+        dependencies.clock,
       );
       throwIfTransferAborted(signal);
       if (confirmation.done) {
@@ -1603,7 +1672,7 @@ const sendWithReconcile = async (
             currentChannel,
           )
         ) {
-          await persistOutboundCancellation({
+          await persistCancellation({
             roomId,
             peerId,
             peerPublicKey: currentEpc.withPeerPublicKey,
@@ -1625,7 +1694,7 @@ const sendWithReconcile = async (
           channelMessageLabel,
           peerConnections,
           dataChannels,
-          RECONNECT_RESUME_TIMEOUT_MS,
+          dependencies.resumeTimeoutMs ?? RECONNECT_RESUME_TIMEOUT_MS,
           signal,
         );
         if (!resumed) break;
@@ -1651,7 +1720,7 @@ const sendWithReconcile = async (
             roomId,
             encryptionModule,
             waitForRatchetGate,
-            ratchetEncryptDurably,
+            ratchetStep,
             signal,
           );
         } catch (error) {
@@ -1804,6 +1873,11 @@ export const coverRuntimeAdmitsScheduledJobs = (
   runtime.status !== "suspended" &&
   runtime.status !== "stopped";
 
+/** The edge's cover runtime is still there and not stopped (torn down). */
+const coverRuntimeIsLive = (
+  runtime: { readonly status: CoverSchedulerStatus } | undefined,
+): boolean => runtime !== undefined && runtime.status !== "stopped";
+
 /**
  * Test/fault-injection seams for `sendScheduled`. Production passes none of
  * them; they exist so the resume loop can be driven without a durable ratchet
@@ -1815,6 +1889,7 @@ export interface ScheduledSendDependencies {
   readonly ratchetStep?: DurableRatchetStep;
   readonly waitForDelivery?: (
     options: ScheduledDeliveryWaitOptions,
+    peerId: string,
   ) => Promise<boolean>;
   /** How long to watch for a replacement cover runtime before giving up (C8). */
   readonly resumeWaitMs?: number;
@@ -1862,7 +1937,6 @@ export const sendScheduled = async (
   const waitForDelivery =
     dependencies.waitForDelivery ?? waitForScheduledDelivery;
   const resumeWaitMs = dependencies.resumeWaitMs ?? RECONNECT_RESUME_TIMEOUT_MS;
-  const outcomes: PeerDeliveryOutcome[] = [];
   let startedTransfers = 0;
   // Derived from the room's authenticated policy, never a fixed constant: a
   // job is admitted only at a cycle open and the receiver's terminal receipt is
@@ -1880,44 +1954,36 @@ export const sendScheduled = async (
     coverDurationEpochs: policy.coverDurationEpochs,
   });
 
-  // DISCLOSED: this fan-out is SERIAL, so every peer waits behind the one
-  // before it, and one peer's worst case is not one idle budget. It is up to
-  // (1 + MAX_SCHEDULED_SEND_RESUMES) budgets plus as many resume watches
-  // (RECONNECT_RESUME_TIMEOUT_MS each) — three budgets and two watches on the
-  // shipped cap — before the next peer is even attempted. On the "5 min cycles"
-  // preset that is about thirty-two minutes for one peer.
+  // Every peer's send runs concurrently: each edge has its own scheduler, and
+  // one peer's waits (up to (1 + MAX_SCHEDULED_SEND_RESUMES) idle budgets and
+  // as many resume watches, then its receiver's whole-file verification) must
+  // not delay the next peer's enqueue. Outcomes keep the targets' order.
   //
-  // And with the idle-budget hold below (scheduledCoverIsSuspended) it has no
-  // upper bound at all while the page stays hidden or suspended. That is
-  // deliberate and it is not per-peer starvation: a hidden page, pagehide,
-  // freeze and offline are PAGE-wide, so every edge in the room is held
-  // together — there is no peer being starved of a schedule that is running
-  // for someone else. The wait ends when the page is visible and running
-  // again, or when `signal` aborts.
-  //
-  // Each edge has its own scheduler, so serial fan-out adds latency for later
-  // peers even when their own lanes have capacity. Concurrent per-peer sends
-  // remain a separate scheduling change.
-  for (const target of targets) {
+  // With the idle-budget hold below (scheduledCoverIsSuspended) one send has
+  // no upper bound at all while the page stays hidden or suspended. That is
+  // deliberate: a hidden page, pagehide, freeze and offline are PAGE-wide, so
+  // every edge in the room is held together. The wait ends when the page is
+  // visible and running again, or when `signal` aborts.
+  const sendToTarget = async (
+    target: PeerSendTarget,
+  ): Promise<PeerDeliveryOutcome> => {
     if (signal?.aborted) {
-      outcomes.push({
+      return {
         peerId: target.peerId,
         status: "skipped",
         reason: "cancelled",
-      });
-      continue;
+      };
     }
     const epc = target.epc;
     if (
       !epc ||
       !(await waitForConnectedEdge(epc, PEER_ADMISSION_WAIT_MS, signal))
     ) {
-      outcomes.push({
+      return {
         peerId: target.peerId,
         status: "skipped",
         reason: "not-connected",
-      });
-      continue;
+      };
     }
     // The transport is connected, so this is not a dead peer -- it is this
     // edge's own scheduled-cover pipeline (missing, suspended by a pagehide,
@@ -1925,12 +1991,11 @@ export const sendScheduled = async (
     // distinctly: it is a local condition the caller can expect to clear on
     // its own, not a reason to give up on the peer.
     if (!coverRuntimeAdmitsScheduledJobs(epc.coverRuntime)) {
-      outcomes.push({
+      return {
         peerId: target.peerId,
         status: "skipped",
         reason: "cover-unavailable",
-      });
-      continue;
+      };
     }
     let currentEpc = epc;
     let channelMessageLabel = "";
@@ -2073,29 +2138,42 @@ export const sendScheduled = async (
         // only at a cycle open, behind every other job in the room, is not a
         // failed job, and cancelling it now deletes a partial that is still
         // filling.
-        delivered = await waitForDelivery({
-          isComplete: () =>
-            isTransferComplete(roomId, target.peerId, transferId),
-          isInvalidated: () =>
-            isTransferCancelled(roomId, target.peerId, transferId) ||
-            coverEdgeGeneration(roomId, target.peerId) > generation,
-          progress: () =>
-            scheduledSendProgress(currentEpc.coverRuntime, channelMessageLabel),
-          // A pagehide, a freeze or an offline event suspends this edge's
-          // scheduler; on a hidden page the schedule stays armed, but
-          // throttled timers degrade its cycles. Either way the scheduler
-          // KEEPS the job and the signal above freezes while the send is
-          // healthy: charging the idle budget through that gap cancels it, and
-          // the CANCEL deletes the partial the peer is still holding. The
-          // predicate holds the budget in both cases; neither is a stall.
-          isSuspended: () => scheduledCoverIsSuspended(currentEpc.coverRuntime),
-          idleTimeoutMs: deliveryIdleTimeoutMs,
-          signal,
-        });
+        delivered = await waitForDelivery(
+          {
+            isComplete: () =>
+              isTransferComplete(roomId, target.peerId, transferId),
+            isInvalidated: () =>
+              isTransferCancelled(roomId, target.peerId, transferId) ||
+              coverEdgeGeneration(roomId, target.peerId) > generation,
+            progress: () =>
+              scheduledSendProgress(
+                currentEpc.coverRuntime,
+                channelMessageLabel,
+              ),
+            // A pagehide, a freeze or an offline event suspends this edge's
+            // scheduler; on a hidden page the schedule stays armed, but
+            // throttled timers degrade its cycles. Either way the scheduler
+            // KEEPS the job and the signal above freezes while the send is
+            // healthy: charging the idle budget through that gap cancels it, and
+            // the CANCEL deletes the partial the peer is still holding. The
+            // predicate holds the budget in both cases; neither is a stall.
+            isSuspended: () =>
+              scheduledCoverIsSuspended(currentEpc.coverRuntime),
+            idleTimeoutMs: deliveryIdleTimeoutMs,
+            signal,
+          },
+          target.peerId,
+        );
         // Every chunk acknowledged, no final receipt yet: the receiver is
         // verifying the whole file, and re-sends a receipt while it does. Wait
         // for as long as one keeps arriving (no less than the schedule's own
-        // idle budget between them), capped by the file's size.
+        // idle budget between them), capped by the file's size. For an edge
+        // that is already gone it returns at once, before it subscribes or
+        // arms anything, and it ends the moment the edge goes: the
+        // replacement is where the transfer resumes, at once.
+        const edgeIsGone = (): boolean =>
+          coverEdgeGeneration(roomId, target.peerId) > generation ||
+          !coverRuntimeIsLive(currentEpc.coverRuntime);
         if (
           !delivered &&
           !signal?.aborted &&
@@ -2111,7 +2189,30 @@ export const sendScheduled = async (
             message.totalSize,
             Math.max(RECEIVER_SILENCE_LIMIT_MS, deliveryIdleTimeoutMs),
             {
-              isHeld: () => scheduledCoverIsSuspended(currentEpc.coverRuntime),
+              onInterrupt: (interrupt) => {
+                const watching = new AbortController();
+                void waitForCoverEdgeGeneration(
+                  roomId,
+                  target.peerId,
+                  generation,
+                  MAX_TIMER_DELAY_MS,
+                  watching.signal,
+                ).then((next) => {
+                  if (next > generation) interrupt();
+                });
+                return () => {
+                  watching.abort();
+                };
+              },
+              isInterrupted: edgeIsGone,
+              // Held only while the scheduler still holds the job, exactly as
+              // the delivery idle budget is.
+              isHeld: () =>
+                scheduledCoverIsSuspended(currentEpc.coverRuntime) &&
+                scheduledSendProgress(
+                  currentEpc.coverRuntime,
+                  channelMessageLabel,
+                ) !== undefined,
               signal,
               clock: dependencies.clock,
             },
@@ -2204,20 +2305,18 @@ export const sendScheduled = async (
           currentEpc.coverRuntime?.complete(channelMessageLabel);
         else cancelScheduledSend(currentEpc, channelMessageLabel);
       }
-      outcomes.push(
-        delivered
-          ? { peerId: target.peerId, status: "delivered" }
-          : {
-              peerId: target.peerId,
-              status: "failed",
-              phase: "transfer",
-              reason: new Error(
-                isTransferCancelled(roomId, target.peerId, transferId)
-                  ? "Message transfer cancelled by peer"
-                  : "scheduled delivery not confirmed",
-              ),
-            },
-      );
+      return delivered
+        ? { peerId: target.peerId, status: "delivered" }
+        : {
+            peerId: target.peerId,
+            status: "failed",
+            phase: "transfer",
+            reason: new Error(
+              isTransferCancelled(roomId, target.peerId, transferId)
+                ? "Message transfer cancelled by peer"
+                : "scheduled delivery not confirmed",
+            ),
+          };
     } catch (reason) {
       // A throw after the job was admitted (a resume whose durable ratchet
       // advance fails, say) leaves the receiver holding a partial that only our
@@ -2235,12 +2334,12 @@ export const sendScheduled = async (
           console.error(cancelError);
         }
       }
-      outcomes.push({
+      return {
         peerId: target.peerId,
         status: "failed",
         phase: "transfer",
         reason,
-      });
+      };
     } finally {
       if (
         outboxLease &&
@@ -2250,7 +2349,8 @@ export const sendScheduled = async (
         queueScheduledCancel(currentEpc, channelMessageLabel);
       untrackScheduledSend(currentEpc, merkleRootHex, transferId);
     }
-  }
+  };
+  const outcomes = await Promise.all(targets.map(sendToTarget));
   return { outcomes, startedTransfers };
 };
 

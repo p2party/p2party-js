@@ -12,7 +12,9 @@ import { MessageType } from "../../src/utils/messageTypes";
 import { hexToUint8Array, uint8ArrayToHex } from "../../src/utils/uint8array";
 import {
   CHUNK_LEN,
+  MAX_TIMER_DELAY_MS,
   MIN_RECEIVER_VERIFY_BYTES_PER_SECOND,
+  REPORTED_COMPLETION_CHECK_MS,
   RATCHET_ROOT_SUITE_MLKEM512,
   RECEIVER_SILENCE_LIMIT_MS,
   RETRANSMIT_TIMEOUT_MS,
@@ -55,29 +57,45 @@ let OutboundMessage: SendModule["OutboundMessage"];
 let sendChunks: SendModule["sendChunks"];
 let sendScheduled: SendModule["sendScheduled"];
 let waitForTransferConfirmation: SendModule["waitForTransferConfirmation"];
+let sendWithReconcile: SendModule["sendWithReconcile"];
 type Reconcile = typeof import("../../src/handlers/reconcile");
 let clearTransfer: Reconcile["clearTransfer"];
 let markChunkAcked: Reconcile["markChunkAcked"];
 let markTransferComplete: Reconcile["markTransferComplete"];
 let reportedCompletionCapMs: Reconcile["reportedCompletionCapMs"];
+let waitForReportedCompletion: Reconcile["waitForReportedCompletion"];
+let noteTransferActivity: Reconcile["noteTransferActivity"];
+let onTransferActivity: Reconcile["onTransferActivity"];
 type CoverEdgeModule = typeof import("../../src/handlers/coverEdge");
 let installCoverEdge: CoverEdgeModule["installCoverEdge"];
 let teardownCoverEdge: CoverEdgeModule["teardownCoverEdge"];
 let scheduledDeliveryTimeoutMs: (typeof import("../../src/handlers/coverTransfer"))["scheduledDeliveryTimeoutMs"];
 let compileChannelMessageLabel: (typeof import("../../src/utils/channelLabel"))["compileChannelMessageLabel"];
+type GateModule = typeof import("../../src/handlers/ratchetGate");
+let claimRatchetGate: GateModule["claimRatchetGate"];
+let openRatchetGate: GateModule["openRatchetGate"];
+let resetRatchetGate: GateModule["resetRatchetGate"];
 
 let module: LibCrypto;
 
 beforeAll(async () => {
   module = await loadTestModule();
   await import("../../src/store");
-  ({ OutboundMessage, sendChunks, sendScheduled, waitForTransferConfirmation } =
-    await import("../../src/handlers/handleSendMessage"));
+  ({
+    OutboundMessage,
+    sendChunks,
+    sendScheduled,
+    sendWithReconcile,
+    waitForTransferConfirmation,
+  } = await import("../../src/handlers/handleSendMessage"));
   ({
     clearTransfer,
     markChunkAcked,
     markTransferComplete,
     reportedCompletionCapMs,
+    waitForReportedCompletion,
+    noteTransferActivity,
+    onTransferActivity,
   } = await import("../../src/handlers/reconcile"));
   ({ installCoverEdge, teardownCoverEdge } =
     await import("../../src/handlers/coverEdge"));
@@ -85,6 +103,8 @@ beforeAll(async () => {
     await import("../../src/handlers/coverTransfer"));
   ({ compileChannelMessageLabel } =
     await import("../../src/utils/channelLabel"));
+  ({ claimRatchetGate, openRatchetGate, resetRatchetGate } =
+    await import("../../src/handlers/ratchetGate"));
 });
 
 const ROOM = "room-a4-verify";
@@ -124,6 +144,15 @@ class ManualClock {
     this.timers.delete(handle as number);
   };
 
+  /** The page runs nothing: time moves on, no timer fires. */
+  jumpTo(target: number): void {
+    this.time = target;
+  }
+
+  get armed(): number {
+    return this.timers.size;
+  }
+
   /**
    * Run every timer due up to `target` in order, then stop at `target`. A wait
    * that keeps re-arming a deadline already passed would spin here forever,
@@ -154,12 +183,13 @@ const settle = async (): Promise<void> => {
 /** Settlement within a few real milliseconds (the resume watch is 1 ms). */
 const settledSoon = async <T>(
   promise: Promise<T>,
+  attempts = 40,
 ): Promise<{ settled: boolean; value?: T }> => {
   let outcome: { settled: boolean; value?: T } = { settled: false };
   void promise.then((value) => {
     outcome = { settled: true, value };
   });
-  for (let i = 0; i < 40 && !outcome.settled; i++)
+  for (let i = 0; i < attempts && !outcome.settled; i++)
     await new Promise((resolve) => setTimeout(resolve, 5));
   return outcome;
 };
@@ -260,6 +290,9 @@ class TransferChannel extends EventTarget {
     this.label = label;
   }
   send(): void {}
+  close(): void {
+    this.readyState = "closed";
+  }
   /** The receiver re-sends its receipt: one inbound frame. */
   receiveFrame(): void {
     this.dispatchEvent(new Event("message"));
@@ -452,7 +485,7 @@ const policy: RoomPolicyV1 = {
 };
 
 /** The sender's authenticated scheduled edge, with a real cover runtime. */
-const scheduledEdge = () => {
+const scheduledEdge = (peerId: string = PEER) => {
   const pq = new SparsePqHealingState({
     module,
     pqMode: "hybrid-mlkem512",
@@ -465,8 +498,8 @@ const scheduledEdge = () => {
   });
   const epc = {
     roomId: ROOM,
-    withPeerId: PEER,
-    withPeerPublicKey: "aa".repeat(32),
+    withPeerId: peerId,
+    withPeerPublicKey: peerId === PEER ? "aa".repeat(32) : "ab".repeat(32),
     connectionState: "connected",
     pqHealingState: pq,
     ratchetState: initRatchet(
@@ -490,6 +523,15 @@ const scheduledEdge = () => {
       getChunk: async () => undefined,
       persist: async () => true,
     },
+  });
+  // This connection is the peer's current authenticated transport.
+  resetRatchetGate(ROOM, peerId);
+  const lease = claimRatchetGate(ROOM, peerId);
+  openRatchetGate(ROOM, peerId, lease);
+  epc.ratchetGateLease = lease;
+  cleanups.push(() => {
+    resetRatchetGate(ROOM, peerId);
+    clearTransfer(ROOM, peerId, TRANSFER_ID);
   });
   const jobs: CoverJob[] = [];
   const runtime = epc.coverRuntime!;
@@ -534,14 +576,52 @@ const scheduledEdge = () => {
  * whose delivery wait runs out with no final receipt: the receiver is now
  * verifying the file.
  */
-const startScheduledVerification = async (totalSize: number) => {
+const ratchetStep = async (epc: IRTCPeerConnection) => {
+  const stepped = ratchetEncrypt(epc.ratchetState!, module);
+  const live = epc.pqHealingState!.currentMessageContext();
+  return {
+    messageKey: stepped.messageKey,
+    header: stepped.header,
+    pqContext: {
+      rootKey: Uint8Array.from(live.rootKey),
+      binding: Uint8Array.from(live.binding),
+      rootSuite: live.rootSuite,
+      epoch: live.epoch,
+    },
+  };
+};
+
+/** Pull every cell of a job, as the scheduler's slots would. */
+const pullAllCells = async (job: CoverJob): Promise<void> => {
+  for (let i = 0; i < 8; i++)
+    if ((await job.nextCell({} as CoverJobSlot)) === null) return;
+};
+
+/**
+ * Start a scheduled send whose every cell goes out and is acknowledged, then
+ * whose delivery wait runs out with no final receipt: the receiver is now
+ * verifying the file. `beforeFirstReturn` runs just before that wait returns;
+ * `laterDelivery` answers every later delivery wait (a resumed attempt).
+ */
+const startScheduledVerification = async (
+  totalSize: number,
+  options: {
+    readonly beforeFirstReturn?: () => void;
+    readonly laterDelivery?: () => Promise<boolean>;
+    readonly peerConnections?: IRTCPeerConnection[];
+    readonly clock?: ManualClock;
+  } = {},
+) => {
   const staged = await stageMessage(3, 1, totalSize);
   const edge = scheduledEdge();
-  const clock = new ManualClock();
+  const peerConnections = options.peerConnections ?? [edge.epc];
+  if (!peerConnections.includes(edge.epc)) peerConnections.push(edge.epc);
+  const clock = options.clock ?? new ManualClock();
   let verificationStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     verificationStarted = resolve;
   });
+  let deliveryWaits = 0;
   const sending = sendScheduled(
     ROOM,
     "chat",
@@ -551,29 +631,17 @@ const startScheduledVerification = async (totalSize: number) => {
     module,
     undefined,
     undefined,
-    [edge.epc],
+    peerConnections,
     {
       waitForGate: async () => undefined,
-      ratchetStep: async (epc) => {
-        const stepped = ratchetEncrypt(epc.ratchetState!, module);
-        const live = epc.pqHealingState!.currentMessageContext();
-        return {
-          messageKey: stepped.messageKey,
-          header: stepped.header,
-          pqContext: {
-            rootKey: Uint8Array.from(live.rootKey),
-            binding: Uint8Array.from(live.binding),
-            rootSuite: live.rootSuite,
-            epoch: live.epoch,
-          },
-        };
-      },
+      ratchetStep,
       waitForDelivery: async () => {
-        for (let i = 0; i < 8; i++) {
-          const cell = await edge.jobs[0].nextCell({} as CoverJobSlot);
-          if (cell === null) break;
-        }
+        deliveryWaits++;
+        if (deliveryWaits > 1)
+          return (await options.laterDelivery?.()) ?? false;
+        await pullAllCells(edge.jobs[0]);
         ackAll(staged.realIndexes);
+        options.beforeFirstReturn?.();
         verificationStarted();
         return false;
       },
@@ -583,7 +651,14 @@ const startScheduledVerification = async (totalSize: number) => {
   );
   await started;
   await settle();
-  return { ...staged, edge, clock, sending };
+  return {
+    ...staged,
+    edge,
+    clock,
+    sending,
+    peerConnections,
+    deliveryWaits: () => deliveryWaits,
+  };
 };
 
 const scheduledSilence = (): number =>
@@ -675,6 +750,26 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     expect(settled.value!.outcomes[0]).toMatchObject({ status: "failed" });
   });
 
+  test("a suspended schedule that no longer holds the job does not hold the silence", async () => {
+    const silence = scheduledSilence();
+    const totalSize = Math.ceil(
+      (10 * silence * MIN_RECEIVER_VERIFY_BYTES_PER_SECOND) / 1000,
+    );
+    const { edge, clock, sending, merkleRootHex } =
+      await startScheduledVerification(totalSize);
+    // The job has left the scheduler; the page is then suspended.
+    edge.epc.coverRuntime!.complete(
+      await compileChannelMessageLabel("chat", merkleRootHex),
+    );
+    edge.epc.coverRuntime!.suspend("pagehide");
+    clock.advanceTo(silence - 1);
+    expect((await settledSoon(sending)).settled).toBe(false);
+    clock.advanceTo(silence);
+    const settled = await settledSoon(sending);
+    expect(settled.settled).toBe(true);
+    expect(settled.value!.outcomes[0]).toMatchObject({ status: "failed" });
+  });
+
   test("the scheduled completion wait is capped for a receiver that keeps reporting but never finishes", async () => {
     const silence = scheduledSilence();
     const totalSize = Math.ceil(
@@ -698,5 +793,352 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       status: "failed",
       phase: "transfer",
     });
+  });
+});
+
+// ── the wait ends at once when the edge goes ───────────────────────────────
+
+const PEER_TWO = "peer-a4-verify-two";
+
+/**
+ * One immediate transfer through the real sendWithReconcile: every cell goes
+ * out, the receiver acknowledges them all as the last one is sent, and the
+ * sender is then in its verification wait on the manual clock.
+ */
+const startImmediateVerification = async (totalSize: number) => {
+  const staged = await stageMessage(3, 1, totalSize);
+  const channel = new TransferChannel(
+    await compileChannelMessageLabel("chat", staged.merkleRootHex),
+  );
+  let sent = 0;
+  channel.send = () => {
+    sent++;
+    if (sent === 4) ackAll(staged.realIndexes);
+  };
+  const pq = new SparsePqHealingState({
+    module,
+    pqMode: "hybrid-mlkem512",
+    rootSuite: RATCHET_ROOT_SUITE_MLKEM512,
+    binding: new Uint8Array(32).fill(0x42),
+    rootKey: new Uint8Array(32).fill(0x19),
+    nextOfferer: "local",
+    amInitiator: true,
+    now: 0,
+  });
+  resetRatchetGate(ROOM, PEER);
+  const lease = claimRatchetGate(ROOM, PEER);
+  openRatchetGate(ROOM, PEER, lease);
+  const epc = {
+    roomId: ROOM,
+    withPeerId: PEER,
+    withPeerPublicKey: "aa".repeat(32),
+    connectionState: "connected",
+    pqHealingState: pq,
+    ratchetGateLease: lease,
+    ratchetState: initRatchet(
+      rand(32),
+      true,
+      initRatchet(rand(32), false, null, module).dhSelfPub,
+      module,
+    ),
+  } as unknown as IRTCPeerConnection;
+  cleanups.push(() => {
+    resetRatchetGate(ROOM, PEER);
+    pq.destroy();
+  });
+  const clock = new ManualClock();
+  const cancellations: string[] = [];
+  const sending = sendWithReconcile(
+    channel as unknown as IRTCDataChannel,
+    {
+      dispatch: () => undefined,
+      getState: () => ({}),
+    } as unknown as Parameters<SendModule["sendWithReconcile"]>[1],
+    ROOM,
+    epc,
+    staged.message,
+    PEER,
+    module,
+    [epc],
+    [],
+    undefined,
+    undefined,
+    {
+      ratchetStep,
+      deleteSendQueue: async () => undefined,
+      persistCancellation: async (receipt) => {
+        cancellations.push(receipt.transferId);
+        return true;
+      },
+      resumeTimeoutMs: 1,
+      clock,
+    },
+  );
+  // Settle the send's async staging until it waits on the manual clock.
+  for (let turn = 0; turn < 200 && clock.armed === 0; turn++) await settle();
+  expect(sent).toBe(4);
+  expect(clock.armed).toBe(1);
+  return { ...staged, channel, epc, clock, sending, cancellations };
+};
+
+const closeFromTheFarSide = (channel: TransferChannel): void => {
+  channel.readyState = "closed";
+  channel.dispatchEvent(new Event("close"));
+};
+
+describe("immediate mode: a closing channel ends the verification wait at once", () => {
+  test("the completion wait ends at once when the channel closes", async () => {
+    const { channel, epc, clock, sending, cancellations } =
+      await startImmediateVerification(800 * MIB);
+    // The transport goes: what a close did before this wait existed, a
+    // resume attempt, and with nothing to resume on, the usual failure.
+    (epc as { connectionState: string }).connectionState = "disconnected";
+    closeFromTheFarSide(channel);
+    const settled = await settledSoon(
+      sending.catch((error: Error) => error),
+      400,
+    );
+    expect(settled.settled).toBe(true);
+    expect((settled.value as Error).message).toBe(
+      "Message transfer ended without receiver confirmation",
+    );
+    // No schedule time passed: not the silence bound, not a round wait.
+    expect(clock.now()).toBe(0);
+    expect(cancellations).toEqual([]);
+  });
+
+  test("a receiver's cancel during verification is reported as a cancel without waiting", async () => {
+    const { channel, clock, sending, cancellations } =
+      await startImmediateVerification(800 * MIB);
+    // Still connected, on the same authenticated generation: this close is
+    // the receiver refusing the file.
+    closeFromTheFarSide(channel);
+    const settled = await settledSoon(
+      sending.catch((error: Error) => error),
+      400,
+    );
+    expect(settled.settled).toBe(true);
+    expect((settled.value as Error).message).toBe(
+      "Message transfer cancelled by peer",
+    );
+    expect(cancellations).toEqual([TRANSFER_ID]);
+    expect(clock.now()).toBe(0);
+  });
+
+  test("a silent receiver ends sendWithReconcile after one silence bound, not one per retry", async () => {
+    const { clock, sending } = await startImmediateVerification(800 * MIB);
+    const outcome = sending.catch((error: Error) => error);
+    clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS - 1);
+    expect((await settledSoon(outcome)).settled).toBe(false);
+    clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS);
+    const settled = await settledSoon(outcome, 400);
+    expect(settled.settled).toBe(true);
+    expect((settled.value as Error).message).toBe(
+      "Message transfer ended without receiver confirmation",
+    );
+    // Ended by the first silence bound: no further retransmit round ran.
+    expect(clock.now()).toBe(RECEIVER_SILENCE_LIMIT_MS);
+  });
+});
+
+describe("scheduled mode: a replaced edge ends the verification wait at once", () => {
+  test("an edge replaced during the scheduled verification wait resumes on the new edge at once", async () => {
+    const { edge, clock, sending, peerConnections, deliveryWaits } =
+      await startScheduledVerification(800 * MIB, {
+        laterDelivery: async () => true,
+      });
+    // The receiver is verifying; the sender's edge is replaced: torn down, and
+    // a fresh connection with its own runtime becomes the current transport.
+    expect(clock.armed).toBe(1);
+    teardownCoverEdge(edge.epc);
+    peerConnections.splice(0, peerConnections.length);
+    const replacement = scheduledEdge();
+    peerConnections.push(replacement.epc);
+
+    const settled = await settledSoon(sending);
+    expect(settled.settled).toBe(true);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+    ]);
+    // Re-derived and re-offered on the new edge, with no schedule time spent.
+    expect(replacement.jobs).toHaveLength(1);
+    expect(deliveryWaits()).toBe(2);
+    expect(clock.now()).toBe(0);
+  });
+
+  test("the scheduled verification wait is not entered for a replaced edge", async () => {
+    let replacement: ReturnType<typeof scheduledEdge> | undefined;
+    const peerConnections: IRTCPeerConnection[] = [];
+    let armedAtFirstReturn = -1;
+    const clock = new ManualClock();
+    const started = await startScheduledVerification(800 * MIB, {
+      peerConnections,
+      clock,
+      // The edge is replaced while the delivery wait is still running.
+      beforeFirstReturn: () => {
+        teardownCoverEdge(peerConnections[0]);
+        peerConnections.splice(0, peerConnections.length);
+        replacement = scheduledEdge();
+        peerConnections.push(replacement.epc);
+      },
+      laterDelivery: async () => {
+        armedAtFirstReturn = clock.armed;
+        return true;
+      },
+    });
+    const settled = await settledSoon(started.sending);
+    expect(settled.settled).toBe(true);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+    ]);
+    expect(replacement!.jobs).toHaveLength(1);
+    // The verification wait never armed a timer, and no schedule time passed.
+    expect(armedAtFirstReturn).toBe(0);
+    expect(started.clock.now()).toBe(0);
+  });
+});
+
+describe("scheduled mode: one peer's verification does not hold back the next", () => {
+  test("a second peer's send starts while the first peer is still verifying", async () => {
+    const staged = await stageMessage(3, 1, 800 * MIB);
+    const first = scheduledEdge(PEER);
+    const second = scheduledEdge(PEER_TWO);
+    const clock = new ManualClock();
+    const order: string[] = [];
+    let firstVerifying!: () => void;
+    const verifying = new Promise<void>((resolve) => {
+      firstVerifying = resolve;
+    });
+    const sending = sendScheduled(
+      ROOM,
+      "chat",
+      policy,
+      [
+        { peerId: PEER, epc: first.epc },
+        { peerId: PEER_TWO, epc: second.epc },
+      ],
+      staged.message,
+      module,
+      undefined,
+      undefined,
+      [first.epc, second.epc],
+      {
+        waitForGate: async () => undefined,
+        ratchetStep,
+        waitForDelivery: async (_options, peerId) => {
+          if (peerId === PEER) {
+            await pullAllCells(first.jobs[0]);
+            ackAll(staged.realIndexes);
+            order.push("first verifying");
+            firstVerifying();
+            return false;
+          }
+          await verifying;
+          order.push("second delivery wait");
+          return true;
+        },
+        resumeWaitMs: 1,
+        clock,
+      },
+    );
+    await verifying;
+    await settle();
+    // The second peer's job was enqueued and its delivery wait ran while the
+    // first peer's verification is still open.
+    expect(second.jobs).toHaveLength(1);
+    expect(order).toEqual(["first verifying", "second delivery wait"]);
+    expect((await settledSoon(sending)).settled).toBe(false);
+
+    markTransferComplete(ROOM, PEER, TRANSFER_ID);
+    const settled = await settledSoon(sending);
+    expect(settled.settled).toBe(true);
+    expect(settled.value?.outcomes).toEqual([
+      { peerId: PEER, status: "delivered" },
+      { peerId: PEER_TWO, status: "delivered" },
+    ]);
+  });
+});
+
+// ── suspension and timer bounds of the wait itself ─────────────────────────
+
+describe("the verification wait does not count time the page did not run", () => {
+  const waitOn = (
+    clock: ManualClock,
+    silenceMs: number,
+    capMs: number,
+  ): Promise<boolean> =>
+    waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+      silenceMs,
+      capMs,
+      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+      clock,
+    });
+
+  test("time spent frozen does not count toward the silence bound", async () => {
+    const clock = new ManualClock();
+    const waiting = waitOn(clock, RECEIVER_SILENCE_LIMIT_MS, 3_600_000);
+    // Off a check boundary: checks fall every REPORTED_COMPLETION_CHECK_MS.
+    const frozenAt = 2 * REPORTED_COMPLETION_CHECK_MS + 2_300;
+    clock.advanceTo(frozenAt);
+    // Frozen for a minute: nothing runs, no timer fires.
+    const wokeAt = frozenAt + 60_000;
+    clock.jumpTo(wokeAt);
+    clock.advanceTo(wokeAt);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    // Silence counts again from the wake, not from before the freeze.
+    clock.advanceTo(wokeAt + RECEIVER_SILENCE_LIMIT_MS - 1);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    clock.advanceTo(wokeAt + RECEIVER_SILENCE_LIMIT_MS);
+    expect(await settledWithin(waiting)).toEqual({
+      settled: true,
+      value: false,
+    });
+  });
+
+  test("a wake after a long sleep does not end the wait at once", async () => {
+    const clock = new ManualClock();
+    // A cap of 40 s, and two hours asleep.
+    const waiting = waitOn(clock, RECEIVER_SILENCE_LIMIT_MS, 40_000);
+    clock.advanceTo(12_000);
+    clock.jumpTo(12_000 + 2 * 3_600_000);
+    // The first thing to run on waking is the receipt that was waiting.
+    noteTransferActivity(ROOM, PEER, TRANSFER_ID);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    clock.advanceTo(clock.now() + REPORTED_COMPLETION_CHECK_MS);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    markTransferComplete(ROOM, PEER, TRANSFER_ID);
+    expect(await settledWithin(waiting)).toEqual({
+      settled: true,
+      value: true,
+    });
+  });
+
+  test("a silence bound above the largest timer delay does not spin", async () => {
+    // A platform timer fires a delay above 2^31 - 1 ms at once.
+    const clock = new ManualClock();
+    const delays: number[] = [];
+    const platform = {
+      now: clock.now,
+      clearTimeout: clock.clearTimeout,
+      setTimeout: (callback: () => void, ms: number) => {
+        delays.push(ms);
+        return clock.setTimeout(callback, ms > MAX_TIMER_DELAY_MS ? 0 : ms);
+      },
+    };
+    // About 4.7×10^11 ms: twice a 3,600,000 ms cadence × 65,535 epochs.
+    const silenceMs = 2 * 3_600_000 * 65_535;
+    const waiting = waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+      silenceMs,
+      capMs: 2 * silenceMs,
+      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+      clock: platform,
+    });
+    clock.advanceTo(60_000);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    expect(delays.every((ms) => ms <= MAX_TIMER_DELAY_MS)).toBe(true);
+    // One re-check per REPORTED_COMPLETION_CHECK_MS, not a loop.
+    expect(clock.fired).toBe(60_000 / REPORTED_COMPLETION_CHECK_MS);
+    markTransferComplete(ROOM, PEER, TRANSFER_ID);
+    expect((await settledWithin(waiting)).settled).toBe(true);
   });
 });

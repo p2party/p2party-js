@@ -56,6 +56,7 @@ import {
   encodeOperation,
   operationPaddingFor,
   operationValidationContextAt,
+  requiredRoomRetentionWindows,
   signOperation,
 } from "../operation";
 import {
@@ -511,6 +512,14 @@ export class PairDriver {
   private localPresence: ObservedPresence | null = null;
   private remotePresence: ObservedPresence | null = null;
 
+  /**
+   * Every operation the carrier delivered, by `OperationId`, while it can
+   * still matter: an operation whose logical window is more than the room's
+   * retained-evidence horizon (`requiredRoomRetentionWindows` plus the clock
+   * skew) behind the current one is outside every input `coreReduce` uses at
+   * that window or any later one, so `ingest` drops it. Without that the map,
+   * and every reduction over it, grew with the life of the room.
+   */
   private readonly knownOperations = new Map<
     string,
     OuterValidatedIdentifiedOperationV1
@@ -581,6 +590,11 @@ export class PairDriver {
 
   get handoff(): HandoffFacts | null {
     return this.handoffFacts;
+  }
+
+  /** How many delivered operations this driver still holds for reduction. */
+  get knownOperationCount(): number {
+    return this.knownOperations.size;
   }
 
   get roomContextId(): Uint8Array {
@@ -733,9 +747,10 @@ export class PairDriver {
       if (!this.knownOperations.has(key))
         this.knownOperations.set(key, candidate);
     }
+    const logicalWindow = this.logicalWindow();
+    this.pruneKnownOperations(logicalWindow);
     if (this.isFailedEdge() || this.localPresence === null) return;
 
-    const logicalWindow = this.logicalWindow();
     const state = await coreReduce(
       [...this.knownOperations.values()],
       this.validationContextAt(logicalWindow),
@@ -935,6 +950,25 @@ export class PairDriver {
 
   private logicalWindow(): bigint {
     return this.clock.nowMs() / this.roomPolicy.protocolLimits.logicalWindowMs;
+  }
+
+  /**
+   * Drop what no reduction at `referenceWindow` or later can use.
+   *
+   * `coreReduce` keeps an operation only while the reference window is at
+   * most its logical window plus `requiredRoomRetentionWindows` plus the
+   * clock skew (its `evidenceValidThroughWindow`); the longest horizon it
+   * applies to anything, an authority's fault evidence, is inside that same
+   * bound. Past it the operation changes no reduction, so it goes. A clock
+   * that later steps back by more than that horizon does not bring it back.
+   */
+  private pruneKnownOperations(referenceWindow: bigint): void {
+    const horizon =
+      requiredRoomRetentionWindows(this.roomPolicy) +
+      BigInt(this.roomPolicy.protocolLimits.maxClockSkewWindows);
+    for (const [key, candidate] of this.knownOperations)
+      if (referenceWindow > candidate.operation.logicalWindow + horizon)
+        this.knownOperations.delete(key);
   }
 
   private get roomPqMode(): RoomPqMode {

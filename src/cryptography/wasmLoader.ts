@@ -24,9 +24,69 @@ const cdnRequest = {
     "sha384-K0QqktkF2/8IHMDEgDIcyDl/ywcUXUO8fF1ZzcwhVrUYfGn8jN8Foohn1+bw4HmZ",
 };
 
+/** `sha384-<base64>` of `bytes`, by this runtime's WebCrypto. */
+const sha384Integrity = async (bytes: BufferSource): Promise<string> => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-384", bytes));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return `sha384-${btoa(binary)}`;
+};
+
+/** True iff `bytes` are this release's WASM: their SHA-384 is the pinned one. */
+const isPinnedWasm = async (bytes: BufferSource): Promise<boolean> =>
+  (await sha384Integrity(bytes)) === cdnRequest.integrity;
+
+// Never a WASM source, even on a page served under the same scheme: these
+// name inline or locally fabricated bytes, or a local file, not a server.
+const REFUSED_WASM_SOURCE_SCHEMES: ReadonlySet<string> = new Set([
+  "data:",
+  "blob:",
+  "javascript:",
+  "file:",
+]);
+
 /**
- * Point the browser root at a self-hosted copy of this release's exact WASM.
- * The build-pinned SRI is still enforced. Configure once, before connect() or
+ * Scheme and host of the document running the loader (in a worker, of the
+ * worker's script URL). Node and Bun have none. The URL standard gives a
+ * non-special scheme such as capacitor: an opaque `origin`, so the pair is
+ * compared rather than `origin`.
+ */
+const runningOrigin = (): { protocol: string; host: string } | null => {
+  const location = (
+    globalThis as { location?: { protocol?: unknown; host?: unknown } }
+  ).location;
+  if (
+    typeof location?.protocol !== "string" ||
+    typeof location.host !== "string" ||
+    location.host === ""
+  )
+    return null;
+  return { protocol: location.protocol, host: location.host };
+};
+
+/**
+ * http: and https: from any host, or any other scheme when the URL is on the
+ * running page's own origin (the Capacitor iOS shell serves its page from
+ * capacitor://localhost). The scheme does not protect integrity: every source
+ * is fetched and its SHA-384 checked against the pinned digest.
+ */
+const isAcceptedWasmSource = (candidate: URL): boolean => {
+  if (REFUSED_WASM_SOURCE_SCHEMES.has(candidate.protocol)) return false;
+  if (candidate.protocol === "https:" || candidate.protocol === "http:")
+    return true;
+  const own = runningOrigin();
+  return (
+    own !== null &&
+    candidate.protocol === own.protocol &&
+    candidate.host === own.host
+  );
+};
+
+/**
+ * Point the browser root at a self-hosted copy of this release's exact WASM:
+ * an http: or https: URL, or a URL on the page's own origin whatever its
+ * scheme. data:, blob:, javascript: and file: URLs are refused. The
+ * build-pinned SHA-384 is still enforced. Configure once, before connect() or
  * any other operation first loads cryptography.
  */
 export const setWasmSourceUrl = (source: string | URL): void => {
@@ -34,8 +94,10 @@ export const setWasmSourceUrl = (source: string | URL): void => {
     throw new Error("WASM source cannot change after cryptography has loaded");
   const candidate =
     source instanceof URL ? new URL(source.href) : new URL(source);
-  if (candidate.protocol !== "https:" && candidate.protocol !== "http:")
-    throw new TypeError("WASM source must use http: or https:");
+  if (!isAcceptedWasmSource(candidate))
+    throw new TypeError(
+      "WASM source must use http: or https:, or the page's own origin",
+    );
   wasmUrl = candidate;
   wasmSourcePinned = true;
 };
@@ -60,31 +122,24 @@ const isNodeLike = (): boolean =>
  * the network to start, leak usage to the CDN, and fail in an air-gapped or
  * offline build. The browser has no filesystem and keeps using fetch + SRI.
  *
- * `fetch(url, { integrity })` cannot verify a file read, so this hashes the
- * bytes against the same pinned SHA-384. A local copy is a convenience, never
- * a reason to accept unverified cryptography: a mismatch returns null and the
+ * A file read has no `fetch` integrity option, so this hashes the bytes
+ * against the same pinned SHA-384. A local copy is a convenience, never a
+ * reason to accept unverified cryptography: a mismatch returns null and the
  * caller falls back to the integrity-checked CDN.
  *
  * Keeping node: builtins out of browser bundles is the build flag above, not
  * the indirection below: terser constant-folds an indirect specifier straight
- * back into `import("node:fs/promises")`. The variables and ignore comments
+ * back into `import("node:fs/promises")`. The variable and ignore comments
  * only help consumers who bundle these sources unminified.
  */
 const readLocalWasm = async (): Promise<ArrayBuffer | null> => {
   const fsSpecifier = "node:fs/promises";
-  const cryptoSpecifier = "node:crypto";
   try {
-    const [{ readFile }, { createHash }] = await Promise.all([
-      import(
-        /* @vite-ignore */ /* webpackIgnore: true */ fsSpecifier
-      ) as Promise<typeof import("node:fs/promises")>,
-      import(
-        /* @vite-ignore */ /* webpackIgnore: true */ cryptoSpecifier
-      ) as Promise<typeof import("node:crypto")>,
-    ]);
+    const { readFile } = await (import(
+      /* @vite-ignore */ /* webpackIgnore: true */ fsSpecifier
+    ) as Promise<typeof import("node:fs/promises")>);
     const bytes = await readFile(new URL("./libcrypto.wasm", import.meta.url));
-    const digest = `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
-    if (digest !== cdnRequest.integrity) return null;
+    if (!(await isPinnedWasm(bytes))) return null;
     return bytes.buffer.slice(
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
@@ -94,13 +149,23 @@ const readLocalWasm = async (): Promise<ArrayBuffer | null> => {
   }
 };
 
+/**
+ * Fetch the WASM and check its SHA-384 here, before instantiation, on every
+ * runtime. The `integrity` option is passed too, but it is not the check:
+ * browsers enforce it, Bun ignores it.
+ */
 const fetchWasm = async (): Promise<ArrayBuffer> => {
   const resp = await fetch(wasmUrl, cdnRequest);
   if (!resp.ok)
     throw new Error(
       `Unable to load p2party ${wasmVersion} WASM: HTTP ${String(resp.status)}`,
     );
-  return await resp.arrayBuffer();
+  const bytes = await resp.arrayBuffer();
+  if (!(await isPinnedWasm(bytes)))
+    throw new Error(
+      `p2party ${wasmVersion} WASM from ${wasmUrl.href} failed its SHA-384 integrity check`,
+    );
+  return bytes;
 };
 
 export const wasmLoader = async (wasmMemory: WebAssembly.Memory) => {

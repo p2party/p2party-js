@@ -979,13 +979,13 @@ const runScenario = async (name, index, profileInfo) => {
     /*
      * Design §3a item 16's rule, as a predicate.
      *
-     * `#nextEvent` in `carrierRuntime.ts` returns the first event whose instant
-     * is `>= now`, so an event at offset `o` goes out in the start window
-     * exactly when `o >= p`. The allocation is the exception in both
-     * directions: below the allocation offset the scheduled one fires, at or
-     * above it `start()` drops the queued one and issues a cold-start
-     * allocation for the next window immediately — so the count is one either
-     * way, and the source comment that says two would be "one more than the
+     * `start()` in `carrierRuntime.ts` drops every event of the start window
+     * whose instant has already passed, so an event at offset `o` goes out in
+     * the start window exactly when `o >= p`. The allocation is the exception
+     * in both directions: below the allocation offset the scheduled one
+     * fires, at or above it `start()` drops the queued one and issues a
+     * cold-start allocation for the next window immediately — so the count is
+     * one either way, and the source comment that says two would be "one more than the
      * profile's fixed shape" is what this pins.
      *
      * The descriptor GET is once per store per session, not per window, so it
@@ -1003,7 +1003,7 @@ const runScenario = async (name, index, profileInfo) => {
     );
     const tokenOffsetMs = Number(profileInfo.tokenIssueOffsetMs);
     const readOffsetMs = Number(profileInfo.publicReadOffsetMs);
-    /** Item 15's rule, evaluated at one phase. */
+    /** Item 16's rule, evaluated at one phase. */
     const predictedStartWindow = (phaseMs) => ({
       token: phaseMs <= tokenOffsetMs ? 1 : 0,
       chunk: phaseMs <= readOffsetMs ? chunkGetsPerRead : 0,

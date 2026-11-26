@@ -1,6 +1,7 @@
 import { executeOutbox, storeOutboxChunk } from "./outboxStore";
 import type { OutboxLease } from "./outboxTypes";
 import { deleteDB } from "idb";
+import type { IDBPObjectStore, StoreNames } from "idb";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import {
@@ -10,6 +11,15 @@ import {
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
+import type { RepoSchema } from "./src/getDB";
+import {
+  advanceReceiveManifest,
+  buildReceiveManifest,
+  isCurrentReceiveManifest,
+  ReceiveChunkRejectedError,
+  receiveProgress,
+  type ReceiveManifest,
+} from "./receiveManifest";
 import {
   getWrapKey,
   wrapSecret,
@@ -24,6 +34,8 @@ import type {
   Chunk,
   ChunkLeafHash,
   ReceiveChunk,
+  ReceiveChunkStored,
+  ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
   ReceiveDeleteGuard,
   ExpiredReceiveTransfer,
@@ -1191,14 +1203,49 @@ async function placeReceiveChunk(
   return true;
 }
 
+// The running manifest of a received transfer, read from its messageData row.
+// A row without a current one (written by 0.14.10, or by a writer that does
+// not maintain it) is summarized once from its chunk records instead.
+async function loadReceiveManifest<
+  Stores extends ArrayLike<StoreNames<RepoSchema>>,
+  Mode extends IDBTransactionMode,
+>(
+  chunks: IDBPObjectStore<RepoSchema, Stores, "chunks", Mode>,
+  merkleRoot: string,
+  message: MessageData | undefined,
+  totalSize: number,
+): Promise<ReceiveManifest> {
+  if (
+    message &&
+    isCurrentReceiveManifest(
+      message.receiveManifest,
+      message.savedSize,
+      totalSize,
+    )
+  )
+    return message.receiveManifest;
+  const records: Array<{ chunkIndex: number; realLen?: number }> = [];
+  let cursor = await chunks.index("merkleRoot").openCursor(merkleRoot);
+  while (cursor) {
+    records.push({
+      chunkIndex: cursor.value.chunkIndex,
+      realLen: cursor.value.realLen,
+    });
+    cursor = await cursor.continue();
+  }
+  return buildReceiveManifest(records, totalSize);
+}
+
 // Store one received real chunk and compute authoritative distinct-byte
 // progress. File bytes go to OPFS first; text bytes stay in the record. The
-// insert/dedup decision and saved-size scan share one readwrite transaction, so
-// a duplicate can never be mistaken for the chunk that completed a message.
+// insert/dedup decision and the manifest update share one readwrite
+// transaction, so a duplicate can never be mistaken for the chunk that
+// completed a message. The work per chunk does not depend on how many chunks
+// are already held: the manifest replaces a scan of every held record.
 async function storeReceiveChunkLocked(
   chunk: ReceiveChunk,
   writeToken: string,
-): Promise<ReceiveChunkStoreResult> {
+): Promise<ReceiveChunkStored> {
   const {
     schemaVersion,
     roomId,
@@ -1236,7 +1283,7 @@ async function storeReceiveChunkLocked(
     data.byteLength !== realLen ||
     !Number.isSafeInteger(timestamp)
   )
-    throw new Error("invalid receive chunk bounds");
+    throw new ReceiveChunkRejectedError("invalid receive chunk bounds");
 
   const assertManifest = (previous: MessageData | undefined): void => {
     if (
@@ -1250,137 +1297,37 @@ async function storeReceiveChunkLocked(
         previous.channelLabel !== channelLabel ||
         previous.timestamp !== timestamp)
     )
-      throw new Error("receive chunk metadata conflicts with message");
+      throw new ReceiveChunkRejectedError(
+        "receive chunk metadata conflicts with message",
+      );
   };
 
-  const validateLayout = (
-    records: Array<{ chunkIndex: number; realLen?: number }>,
-  ): { savedSize: number; complete: boolean } => {
-    const ordered = records
-      .map((record) => ({
-        chunkIndex: record.chunkIndex,
-        realLen: record.realLen ?? 0,
-      }))
-      .sort((a, b) => a.chunkIndex - b.chunkIndex);
-    let savedSize = 0;
-    for (let i = 0; i < ordered.length; i++) {
-      const record = ordered[i];
-      if (
-        !Number.isSafeInteger(record.chunkIndex) ||
-        record.chunkIndex < 0 ||
-        !Number.isSafeInteger(record.realLen) ||
-        record.realLen <= 0 ||
-        record.realLen > CHUNK_LEN ||
-        record.realLen > totalSize ||
-        record.chunkIndex >= totalSize ||
-        (i > 0 && ordered[i - 1].chunkIndex === record.chunkIndex)
-      )
-        throw new Error("invalid receive chunk layout");
-      savedSize += record.realLen;
-      if (!Number.isSafeInteger(savedSize) || savedSize > totalSize)
-        throw new Error("receive chunks exceed declared total");
-    }
-
-    const zero = ordered.find((record) => record.chunkIndex === 0);
-    let uniformSize: number | undefined;
-    if (zero) uniformSize = zero.realLen;
-    else if (ordered.length >= 2) {
-      uniformSize = 0;
-      for (const record of ordered)
-        uniformSize = Math.max(uniformSize, record.realLen);
-    }
-
-    if (uniformSize !== undefined) {
-      const expectedCount = Math.ceil(totalSize / uniformSize);
-      const finalIndex = expectedCount - 1;
-      const finalLength = totalSize - uniformSize * finalIndex;
-      for (const record of ordered) {
-        if (record.chunkIndex >= expectedCount)
-          throw new Error("receive chunk index exceeds canonical manifest");
-        const expectedLength =
-          record.chunkIndex === finalIndex ? finalLength : uniformSize;
-        if (record.realLen !== expectedLength)
-          throw new Error("receive chunk length conflicts with manifest");
-      }
-
-      const complete =
-        savedSize === totalSize &&
-        ordered.length === expectedCount &&
-        ordered.every((record, index) => record.chunkIndex === index);
-      if (savedSize === totalSize && !complete)
-        throw new Error("receive completion has a chunk-index gap");
-      return { savedSize, complete };
-    }
-
-    // One non-zero out-of-order chunk cannot establish the uniform size. It is
-    // valid partial progress, but can never by itself claim completion.
-    if (savedSize === totalSize)
-      throw new Error("receive completion is missing chunk zero");
-    return { savedSize, complete: false };
-  };
-
-  // Dedup first — also skips a redundant OPFS write for a chunk we already have.
-  const existsDb = await getDB();
-  let already: number;
+  // Dedup and validate the candidate against the manifest before touching
+  // OPFS (a duplicate needs no write, an invalid chunk must not overwrite
+  // bytes). The worker dispatcher holds the per-Merkle lock across this whole
+  // function, so this view cannot change before the committing transaction
+  // below, which nevertheless re-derives everything it decides on.
+  const readDb = await getDB();
   try {
-    const tx = existsDb.transaction(["chunks", "messageData"], "readonly");
-    already = await tx.objectStore("chunks").count([merkleRoot, chunkIndex]);
+    const tx = readDb.transaction(["chunks", "messageData"], "readonly");
+    const chunks = tx.objectStore("chunks");
+    const held = (await chunks.getKey([merkleRoot, chunkIndex])) !== undefined;
     const previous = await tx
       .objectStore("messageData")
       .index("merkleRoot")
       .get(merkleRoot);
     assertManifest(previous);
-    await tx.done;
-  } finally {
-    existsDb.close();
-  }
-  if (already > 0) {
-    const db = await getDB();
-    try {
-      const tx = db.transaction(["chunks", "messageData"], "readonly");
-      const index = tx.objectStore("chunks").index("merkleRoot");
-      const records: Chunk[] = [];
-      let cursor = await index.openCursor(merkleRoot);
-      while (cursor) {
-        records.push(cursor.value);
-        cursor = await cursor.continue();
-      }
-      assertManifest(
-        await tx.objectStore("messageData").index("merkleRoot").get(merkleRoot),
-      );
-      const progress = validateLayout(records);
-      await tx.done;
-      return {
-        stored: false,
-        ...progress,
-      };
-    } finally {
-      db.close();
-    }
-  }
-
-  // Validate the candidate manifest before touching OPFS. The worker dispatcher
-  // holds the per-Merkle lock across this whole function, so the preflight view
-  // cannot change before the committing transaction below.
-  const preflightDb = await getDB();
-  try {
-    const tx = preflightDb.transaction(["chunks", "messageData"], "readonly");
-    const records: Chunk[] = [];
-    let cursor = await tx
-      .objectStore("chunks")
-      .index("merkleRoot")
-      .openCursor(merkleRoot);
-    while (cursor) {
-      records.push(cursor.value);
-      cursor = await cursor.continue();
-    }
-    assertManifest(
-      await tx.objectStore("messageData").index("merkleRoot").get(merkleRoot),
+    const manifest = await loadReceiveManifest(
+      chunks,
+      merkleRoot,
+      previous,
+      totalSize,
     );
-    validateLayout([...records, { chunkIndex, realLen }]);
     await tx.done;
+    if (held) return { stored: false, ...receiveProgress(manifest, totalSize) };
+    advanceReceiveManifest(manifest, totalSize, chunkIndex, realLen);
   } finally {
-    preflightDb.close();
+    readDb.close();
   }
 
   // Write bytes to OPFS FIRST (durable), then record the have-set entry: if we
@@ -1420,31 +1367,36 @@ async function storeReceiveChunkLocked(
     ) {
       tx.abort();
       await tx.done.catch(() => undefined);
-      throw new Error("Receive write was fenced by cancellation or expiry");
+      throw new ReceiveChunkRejectedError(
+        "Receive write was fenced by cancellation or expiry",
+      );
     }
     const store = tx.objectStore("chunks");
     const existing = await store.getKey([merkleRoot, chunkIndex]);
+    const messageStore = tx.objectStore("messageData");
+    const previous = await messageStore.index("merkleRoot").get(merkleRoot);
+    assertManifest(previous);
+    let manifest = await loadReceiveManifest(
+      store,
+      merkleRoot,
+      previous,
+      totalSize,
+    );
     let stored = false;
-    const records: Chunk[] = [];
-    let recordsCursor = await store.index("merkleRoot").openCursor(merkleRoot);
-    while (recordsCursor) {
-      records.push(recordsCursor.value);
-      recordsCursor = await recordsCursor.continue();
-    }
     if (existing === undefined) {
-      validateLayout([...records, { chunkIndex, realLen }]);
+      manifest = advanceReceiveManifest(
+        manifest,
+        totalSize,
+        chunkIndex,
+        realLen,
+      );
       await store.add(record);
-      records.push(record);
       stored = true;
     }
 
-    const progress = validateLayout(records);
+    const progress = receiveProgress(manifest, totalSize);
 
     if (stored) {
-      const messageStore = tx.objectStore("messageData");
-      const previous = await messageStore.index("merkleRoot").get(merkleRoot);
-      assertManifest(previous);
-
       await messageStore.put({
         roomId,
         timestamp: previous?.timestamp ?? timestamp,
@@ -1456,6 +1408,7 @@ async function storeReceiveChunkLocked(
         savedSize: progress.savedSize,
         totalSize,
         channelLabel,
+        receiveManifest: manifest,
       });
 
       const roomStore = tx.objectStore("uniqueRoom");
@@ -1483,6 +1436,58 @@ async function storeReceiveChunkLocked(
 export const INCOMPLETE_RECEIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const RECEIVE_WRITE_LEASE_MS = 120_000;
 
+type StorageEstimator = () => Promise<{ quota?: number; usage?: number }>;
+
+const storageEstimator = (): StorageEstimator | undefined => {
+  const storage = (
+    globalThis as unknown as { navigator?: { storage?: StorageManager } }
+  ).navigator?.storage;
+  return typeof storage?.estimate === "function"
+    ? () => storage.estimate()
+    : undefined;
+};
+
+// Refuse a new transfer that cannot fit in the estimated free quota. An
+// estimate that is unavailable or incomplete does not block the transfer; a
+// write that then runs out of space is still reported as quota-exceeded.
+async function refuseOverQuota(
+  estimate: StorageEstimator,
+  totalSize: number,
+): Promise<ReceiveChunkStoreFailure | undefined> {
+  let quota: number | undefined;
+  let usage: number | undefined;
+  try {
+    ({ quota, usage } = await estimate());
+  } catch (error) {
+    console.error("p2party: storage estimate failed", error);
+    return undefined;
+  }
+  if (!Number.isFinite(quota) || !Number.isFinite(usage)) return undefined;
+  const availableBytes = Math.max(0, quota! - usage!);
+  return totalSize > availableBytes
+    ? {
+        failure: "insufficient-quota",
+        requiredBytes: totalSize,
+        availableBytes,
+      }
+    : undefined;
+}
+
+const QUOTA_ERROR_NAMES = new Set([
+  "QuotaExceededError",
+  // Firefox before the DOMException name was standardized.
+  "NS_ERROR_DOM_QUOTA_REACHED",
+]);
+
+// Anything thrown while storing that is not a refusal of the chunk itself.
+const receiveStorageFailure = (error: unknown): ReceiveChunkStoreFailure => ({
+  failure: QUOTA_ERROR_NAMES.has(
+    (error as { name?: unknown } | null)?.name as string,
+  )
+    ? "quota-exceeded"
+    : "storage-failed",
+});
+
 async function fnStoreReceiveChunk(
   chunk: ReceiveChunk,
   admittedAt: number,
@@ -1492,47 +1497,70 @@ async function fnStoreReceiveChunk(
     !chunk.roomId ||
     !chunk.fromPeerId
   )
-    throw new Error("Invalid receive identity");
+    throw new ReceiveChunkRejectedError("Invalid receive identity");
   const token = crypto.randomUUID();
-  const db = await getDB();
-  try {
-    const tx = db.transaction(["receiveActivity", "messageData"], "readwrite");
-    const store = tx.objectStore("receiveActivity");
-    const current = await store.get(chunk.merkleRoot);
-    const prior = await tx
-      .objectStore("messageData")
-      .index("merkleRoot")
-      .get(chunk.merkleRoot);
-    if (
-      (current &&
-        (current.roomId !== chunk.roomId ||
-          current.fromPeerId !== chunk.fromPeerId)) ||
-      (prior &&
-        (prior.roomId !== chunk.roomId ||
-          prior.fromPeerId !== chunk.fromPeerId ||
-          prior.transferId !== undefined)) ||
-      (current?.deletedAt !== undefined && admittedAt <= current.deletedAt)
-    ) {
-      tx.abort();
-      await tx.done.catch(() => undefined);
-      throw new Error("Receive transfer ownership conflicts or was cancelled");
+  const estimate = storageEstimator();
+  let quotaChecked = estimate === undefined;
+  for (;;) {
+    const db = await getDB();
+    try {
+      const tx = db.transaction(
+        ["receiveActivity", "messageData"],
+        "readwrite",
+      );
+      const store = tx.objectStore("receiveActivity");
+      const current = await store.get(chunk.merkleRoot);
+      const prior = await tx
+        .objectStore("messageData")
+        .index("merkleRoot")
+        .get(chunk.merkleRoot);
+      if (
+        (current &&
+          (current.roomId !== chunk.roomId ||
+            current.fromPeerId !== chunk.fromPeerId)) ||
+        (prior &&
+          (prior.roomId !== chunk.roomId ||
+            prior.fromPeerId !== chunk.fromPeerId ||
+            prior.transferId !== undefined)) ||
+        (current?.deletedAt !== undefined && admittedAt <= current.deletedAt)
+      ) {
+        tx.abort();
+        await tx.done.catch(() => undefined);
+        throw new ReceiveChunkRejectedError(
+          "Receive transfer ownership conflicts or was cancelled",
+        );
+      }
+      if (current?.writeToken && (current.leaseUntil ?? 0) > Date.now()) {
+        tx.abort();
+        await tx.done.catch(() => undefined);
+        throw new ReceiveChunkRejectedError(
+          "Receive transfer is active in another worker",
+        );
+      }
+      if (!prior && !quotaChecked) {
+        // No byte of this transfer is held yet. Check it fits before the
+        // first write (this lease row included); an IndexedDB transaction
+        // cannot stay open across the estimate, so drop it and start over.
+        tx.abort();
+        await tx.done.catch(() => undefined);
+        quotaChecked = true;
+        const refusal = await refuseOverQuota(estimate!, chunk.totalSize);
+        if (refusal) return refusal;
+        continue;
+      }
+      await store.put({
+        merkleRoot: chunk.merkleRoot,
+        roomId: chunk.roomId,
+        fromPeerId: chunk.fromPeerId,
+        lastActivityAt: Date.now(),
+        writeToken: token,
+        leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+      });
+      await tx.done;
+      break;
+    } finally {
+      db.close();
     }
-    if (current?.writeToken && (current.leaseUntil ?? 0) > Date.now()) {
-      tx.abort();
-      await tx.done.catch(() => undefined);
-      throw new Error("Receive transfer is active in another worker");
-    }
-    await store.put({
-      merkleRoot: chunk.merkleRoot,
-      roomId: chunk.roomId,
-      fromPeerId: chunk.fromPeerId,
-      lastActivityAt: Date.now(),
-      writeToken: token,
-      leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
-    });
-    await tx.done;
-  } finally {
-    db.close();
   }
   try {
     return await storeReceiveChunkLocked(chunk, token);
@@ -2774,12 +2802,17 @@ async function fnDeleteDBChunk(
 ): Promise<void> {
   try {
     const db = await getDB();
-    const tx = db.transaction("chunks", "readwrite");
+    const tx = db.transaction(["chunks", "messageData"], "readwrite");
     const store = tx.objectStore("chunks");
+    // Roots that lose chunk records here. A received root's running manifest
+    // would no longer describe its records, so it is dropped and rebuilt from
+    // the records on the next receive.
+    const roots = new Set<string>();
 
     if (chunkIndex !== undefined) {
       const keys = IDBKeyRange.only([hashHex, chunkIndex]);
       await store.delete(keys);
+      roots.add(hashHex);
     } else {
       const index = store.index("hash");
       const keys = await index.getAllKeys(hashHex);
@@ -2791,11 +2824,23 @@ async function fnDeleteDBChunk(
         const len = keys.length;
         for (let i = 0; i < len; i++) {
           await store.delete(keys[i]);
+          roots.add(keys[i][0]);
         }
       } else {
         for (let i = 0; i < len; i++) {
           await store.delete(keys[i]);
+          roots.add(keys[i][0]);
         }
+      }
+    }
+
+    const messages = tx.objectStore("messageData");
+    for (const root of roots) {
+      const message = await messages.index("merkleRoot").get(root);
+      if (message?.receiveManifest !== undefined) {
+        const { receiveManifest: _stale, ...rest } = message;
+        void _stale;
+        await messages.put(rest);
       }
     }
 
@@ -3172,9 +3217,17 @@ onmessage = async (e: MessageEvent) => {
       case "storeReceiveChunk": {
         const admittedAt = Date.now();
         const chunk = message.args[0];
-        result = await withReceiveLock(chunk.merkleRoot, () =>
-          fnStoreReceiveChunk(chunk, admittedAt),
-        );
+        try {
+          result = await withReceiveLock(chunk.merkleRoot, () =>
+            fnStoreReceiveChunk(chunk, admittedAt),
+          );
+        } catch (error) {
+          // A refused chunk stays an error. A storage fault becomes a typed
+          // result, so the receiver can tell its app and withhold the receipt.
+          if (error instanceof ReceiveChunkRejectedError) throw error;
+          console.error("p2party: could not store a received chunk", error);
+          result = receiveStorageFailure(error);
+        }
         break;
       }
       case "getReceiveFile": {

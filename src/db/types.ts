@@ -1,6 +1,7 @@
 import type { OutboxLease, OutboxRequest, OutboxResponse } from "./outboxTypes";
 import type { Peer } from "../reducers/roomSlice";
 import type { RatchetRootSuite } from "../utils/constants";
+import type { ReceiveManifest } from "./receiveManifest";
 // import type { MessageType } from "../utils/messageTypes";
 
 export interface UsernamedPeer extends Peer {
@@ -61,6 +62,11 @@ export interface MessageData {
   messageType: number; // MessageType;
   savedSize: number;
   totalSize: number;
+  /**
+   * Receiver only: running summary of the chunks held, rewritten with every
+   * chunk insert. Absent on sent rows and on rows written by 0.14.10.
+   */
+  receiveManifest?: ReceiveManifest;
   // recipients: number;
 }
 
@@ -128,14 +134,36 @@ export interface ReceiveDeleteGuard {
   incompleteOnly: true;
 }
 
-export interface ReceiveChunkStoreResult {
+export interface ReceiveChunkStored {
   /** True only when this call inserted a previously absent chunk index. */
   stored: boolean;
   /** Sum of distinct committed realLen values for this Merkle root. */
   savedSize: number;
   /** Authoritative distinct-byte completion after this transaction. */
   complete: boolean;
+  failure?: undefined;
 }
+
+/**
+ * Why a received chunk could not be stored. Nothing for it was committed.
+ * - `insufficient-quota`: the first chunk of a transfer larger than the
+ *   estimated free storage; refused before anything was written.
+ * - `quota-exceeded`: the browser refused a write for lack of space.
+ * - `storage-failed`: any other storage fault.
+ */
+export type ReceiveStorageFailure =
+  "insufficient-quota" | "quota-exceeded" | "storage-failed";
+
+export interface ReceiveChunkStoreFailure {
+  failure: ReceiveStorageFailure;
+  /** `insufficient-quota` only: the transfer's total size in bytes. */
+  requiredBytes?: number;
+  /** `insufficient-quota` only: estimated free bytes (quota minus usage). */
+  availableBytes?: number;
+}
+
+export type ReceiveChunkStoreResult =
+  ReceiveChunkStored | ReceiveChunkStoreFailure;
 
 // Lightweight projection of a stored chunk used by the reconnect re-emit — just
 // the receipt token and its index, never the (potentially huge) chunk body.

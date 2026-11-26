@@ -358,6 +358,42 @@ binds below 5000.
 `bunx tsc --noEmit -p tsconfig.json`, and `bun build` only transpiles. A green
 build here is not a type check.
 
+### Recorded result (2026-11-27, `prototype-v1`, commit `e4140cd`, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
+
+Run once after the protocol version bump (`c4f5411`), from a `git archive` of
+`e4140cd` with the bundle rebuilt by `build.sh` in that archive (it names
+`prototype-v1` and not `prototype-v0`):
+
+```
+PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
+  node docs/e2e/blind-two-store/run.mjs --scenario=all \
+    --store-port-base=6310 --page-port=6320
+```
+
+`TWO-STORE E2E PASS (4 of 4 scenarios)`, exit 0, 00:51:56 to 00:53:36. The
+machine's screen was locked for the whole run (`CGSSessionScreenIsLocked`
+true), other jobs were running (1-minute load average 8.0 at the start, 6.3 at
+the end), and everything bound to 127.0.0.1 or localhost on ports 6310-6317
+and 6320; the pages used `iceServers: []`. Playwright-core 1.65.1, browser from
+the existing cache. Times are from each page's own `presence-published`;
+"faults" are the client's records at the end; "audited" is the request bodies
+the privacy audit searched, with the 148 needles over 14 secrets it looked for.
+No page recorded an `append window-finalized`.
+
+| scenario | verdict | peer-observed A / B | handoff A / B | message-verified A / B | start phase A / B | faults A / B | audited, found |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `healthy` | PASS in 25.5 s | 5.4 / 5.4 s | 21.4 / 25.4 s | 25.4 / 25.4 s | +3268 / +3268 ms | none / none | 202, 0 |
+| `kill-a` | PASS in 23.4 s | 7.3 / 7.3 s | 23.3 / 19.3 s | 23.3 / 23.3 s | +1324 / +1324 ms | 87× `unreachable` vs the killed store, each page (first: `/p2party/prototype-v1/allocation: the request failed (TypeError)`) | 84, 0 |
+| `withhold-a` | PASS in 23.5 s | 7.4 / 7.4 s | 23.4 / 19.4 s | 23.4 / 23.5 s | +1217 / +1218 ms | 25× `custody-breach` vs the withholding store, each page | 174, 0 |
+| `unreachable-b-for-one` | PASS in 23.4 s | 7.3 / 7.3 s | 23.3 / 19.4 s | 23.4 / 23.4 s | +1289 / +1285 ms | none / none | 137, 0 |
+
+Topology at the end, as expected per scenario: `multi-store-union` for both
+pages in `healthy`, `single-carrier-dependent` for both in `kill-a` and
+`withhold-a`, and `multi-store-union` / `single-carrier-dependent` in
+`unreachable-b-for-one`. The start-window check (design §3a item 16) and the
+transport flights' payload class (0) held on every page. The record below is
+of `prototype-v0`, before the version bump; its fault lines name `v0` routes.
+
 ### Recorded result (2026-09-08, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
 
 `node docs/e2e/blind-two-store/run.mjs --scenario=all`, exit 0, 4 of 4

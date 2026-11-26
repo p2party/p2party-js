@@ -4,6 +4,7 @@ import {
   beforeEach,
   describe,
   expect,
+  spyOn,
   test,
 } from "bun:test";
 
@@ -26,6 +27,7 @@ import { MessageType } from "../../src/utils/messageTypes";
 import { hexToUint8Array, uint8ArrayToHex } from "../../src/utils/uint8array";
 import {
   CHUNK_LEN,
+  DECRYPTED_LEN,
   MAX_SCHEDULED_SEND_RESUMES,
   MAX_TIMER_DELAY_MS,
   MIN_RECEIVER_VERIFY_BYTES_PER_SECOND,
@@ -73,6 +75,7 @@ let sendChunks: SendModule["sendChunks"];
 let sendScheduled: SendModule["sendScheduled"];
 let waitForTransferConfirmation: SendModule["waitForTransferConfirmation"];
 let sendWithReconcile: SendModule["sendWithReconcile"];
+let makeScheduledSlotSealer: SendModule["makeScheduledSlotSealer"];
 type Reconcile = typeof import("../../src/handlers/reconcile");
 let clearTransfer: Reconcile["clearTransfer"];
 let markChunkAcked: Reconcile["markChunkAcked"];
@@ -104,6 +107,7 @@ beforeAll(async () => {
     sendChunks,
     sendScheduled,
     sendWithReconcile,
+    makeScheduledSlotSealer,
     waitForTransferConfirmation,
   } = await import("../../src/handlers/handleSendMessage"));
   ({
@@ -142,9 +146,24 @@ const MIB = 1024 * 1024;
 const rand = (n: number): Uint8Array =>
   crypto.getRandomValues(new Uint8Array(n));
 
-const cleanups: (() => void)[] = [];
-afterEach(() => {
-  while (cleanups.length > 0) cleanups.pop()?.();
+// Each test owns what it starts. When it ends, every send or wait it started
+// is aborted through `testEnd` and awaited, and only then are its messages
+// closed and its edges torn down: nothing a test started can run on into the
+// next one.
+let testEnd = new AbortController();
+const owned: Promise<unknown>[] = [];
+const own = <T>(promise: Promise<T>): Promise<T> => {
+  owned.push(promise.catch(() => undefined));
+  return promise;
+};
+beforeEach(() => {
+  testEnd = new AbortController();
+});
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  testEnd.abort(new Error("the test ended"));
+  await Promise.all(owned.splice(0));
+  while (cleanups.length > 0) await cleanups.pop()?.();
   clearTransfer(ROOM, PEER, TRANSFER_ID);
 });
 
@@ -160,11 +179,22 @@ class ManualClock {
 
   readonly now = (): number => this.time;
 
+  private armWaiters: (() => void)[] = [];
+
   readonly setTimeout = (callback: () => void, ms: number): number => {
     const id = this.nextId++;
     this.timers.set(id, { id, at: this.time + ms, callback });
+    for (const wake of this.armWaiters.splice(0)) wake();
     return id;
   };
+
+  /** Resolves once a timer is armed on this clock. */
+  whenArmed(): Promise<void> {
+    if (this.timers.size > 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.armWaiters.push(resolve);
+    });
+  }
 
   readonly clearTimeout = (handle: unknown): void => {
     this.timers.delete(handle as number);
@@ -206,19 +236,17 @@ const settle = async (): Promise<void> => {
     await new Promise((resolve) => setImmediate(resolve));
 };
 
-/** Settlement within a few real milliseconds (the resume watch is 1 ms). */
-const settledSoon = async <T>(
+/**
+ * The outcome of a promise the test expects to settle without the test's
+ * clock moving. It is awaited, not polled on the wall clock: one that never
+ * settles fails the test at its timeout.
+ */
+const outcomeOf = async <T>(
   promise: Promise<T>,
-  attempts = 40,
-): Promise<{ settled: boolean; value?: T }> => {
-  let outcome: { settled: boolean; value?: T } = { settled: false };
-  void promise.then((value) => {
-    outcome = { settled: true, value };
-  });
-  for (let i = 0; i < attempts && !outcome.settled; i++)
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  return outcome;
-};
+): Promise<{ settled: true; value: T }> => ({
+  settled: true,
+  value: await promise,
+});
 
 const settledWithin = async <T>(
   promise: Promise<T>,
@@ -269,6 +297,8 @@ const stageMessage = async (
     });
   }
   const merkleRoot = await getMerkleRoot(leaves, module);
+  // Every copy of a staged row the store handed to a reader.
+  const handedOut: NewChunk[] = [];
   const message = new OutboundMessage({
     transferId: TRANSFER_ID,
     hashHex: HASH_HEX,
@@ -279,7 +309,10 @@ const stageMessage = async (
     store: {
       get: async (_transferId, index) => {
         const row = rows.get(index);
-        return row ? structuredClone(row) : undefined;
+        if (!row) return undefined;
+        const copy = structuredClone(row);
+        handedOut.push(copy);
+        return copy;
       },
       put: async (chunk) => {
         rows.set(chunk.chunkIndex, structuredClone(chunk));
@@ -290,6 +323,7 @@ const stageMessage = async (
     message.close();
   });
   return {
+    handedOut,
     message,
     merkleRoot,
     merkleRootHex: uint8ArrayToHex(merkleRoot),
@@ -658,7 +692,7 @@ const startScheduledVerification = async (
     [{ peerId: PEER, epc: edge.epc }],
     staged.message,
     module,
-    undefined,
+    testEnd.signal,
     undefined,
     peerConnections,
     {
@@ -682,6 +716,7 @@ const startScheduledVerification = async (
       },
     },
   );
+  own(sending);
   await started;
   await settle();
   return {
@@ -722,7 +757,7 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       edge.receiveReceipt(merkleRootHex);
       await settle();
     }
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
 
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
     const result = await settledWithin(sending);
@@ -743,10 +778,10 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     edge.receiveReceipt(merkleRootHex);
     await settle();
     clock.advanceTo(silence / 2 + silence - 1);
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(silence / 2 + silence);
     // The outcome a scheduled send gives when its delivery wait runs out.
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     const result = settled.value!;
     expect(result.outcomes).toHaveLength(1);
@@ -773,13 +808,13 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     clock.advanceTo(2 * silence);
     // Real milliseconds too: a send that gave up settles after its 1 ms
     // resume watch.
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
     edge.epc.coverRuntime!.resume();
     // Silence counts again from the last check while suspended.
     clock.advanceTo(3 * silence);
     await settle();
     clock.advanceTo(4 * silence);
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     expect(settled.value!.outcomes[0]).toMatchObject({ status: "failed" });
   });
@@ -797,9 +832,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
     );
     edge.epc.coverRuntime!.suspend("pagehide");
     clock.advanceTo(silence - 1);
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(silence);
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     expect(settled.value!.outcomes[0]).toMatchObject({ status: "failed" });
   });
@@ -818,9 +853,9 @@ describe("scheduled mode: the delivery wait outlasts the receiver's verification
       await settle();
     }
     clock.advanceTo(cap - 1);
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
     clock.advanceTo(cap);
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     const result = settled.value!;
     expect(result.outcomes[0]).toMatchObject({
@@ -896,7 +931,7 @@ const startImmediateVerification = async (totalSize: number) => {
     module,
     [epc],
     [],
-    undefined,
+    testEnd.signal,
     undefined,
     {
       ratchetStep,
@@ -911,8 +946,16 @@ const startImmediateVerification = async (totalSize: number) => {
       clock,
     },
   );
-  // Settle the send's async staging until it waits on the manual clock.
-  for (let turn = 0; turn < 200 && clock.armed === 0; turn++) await settle();
+  own(sending);
+  // The send's staging awaits real work (WebCrypto digests), so it is waited
+  // for by its event, the confirmation wait arming its timer, not by a count
+  // of event-loop turns.
+  await Promise.race([
+    clock.whenArmed(),
+    sending.then(() => {
+      throw new Error("the send ended before its confirmation wait");
+    }),
+  ]);
   expect(sent).toBe(4);
   expect(clock.armed).toBe(1);
   return {
@@ -939,10 +982,7 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     // resume attempt, and with nothing to resume on, the usual failure.
     (epc as { connectionState: string }).connectionState = "disconnected";
     closeFromTheFarSide(channel);
-    const settled = await settledSoon(
-      sending.catch((error: Error) => error),
-      400,
-    );
+    const settled = await outcomeOf(sending.catch((error: Error) => error));
     expect(settled.settled).toBe(true);
     expect((settled.value as Error).message).toBe(
       "Message transfer ended without receiver confirmation",
@@ -958,10 +998,7 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     // Still connected, on the same authenticated generation: this close is
     // the receiver refusing the file.
     closeFromTheFarSide(channel);
-    const settled = await settledSoon(
-      sending.catch((error: Error) => error),
-      400,
-    );
+    const settled = await outcomeOf(sending.catch((error: Error) => error));
     expect(settled.settled).toBe(true);
     expect((settled.value as Error).message).toBe(
       "Message transfer cancelled by peer",
@@ -974,9 +1011,9 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     const { clock, sending } = await startImmediateVerification(800 * MIB);
     const outcome = sending.catch((error: Error) => error);
     clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS - 1);
-    expect((await settledSoon(outcome)).settled).toBe(false);
+    expect((await settledWithin(outcome)).settled).toBe(false);
     clock.advanceTo(RECEIVER_SILENCE_LIMIT_MS);
-    const settled = await settledSoon(outcome, 400);
+    const settled = await outcomeOf(outcome);
     expect(settled.settled).toBe(true);
     expect((settled.value as Error).message).toBe(
       "Message transfer ended without receiver confirmation",
@@ -1008,7 +1045,7 @@ describe("scheduled mode: a replaced edge ends the verification wait at once", (
     const replacement = scheduledEdge();
     peerConnections.push(replacement.epc);
 
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
@@ -1040,7 +1077,7 @@ describe("scheduled mode: a replaced edge ends the verification wait at once", (
         return true;
       },
     });
-    const settled = await settledSoon(started.sending);
+    const settled = await outcomeOf(started.sending);
     expect(settled.settled).toBe(true);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
@@ -1065,27 +1102,29 @@ describe("scheduled mode: every peer's send is observed", () => {
       withPeerId: PEER,
       connectionState: "connecting",
     } as unknown as IRTCPeerConnection;
-    const sending = sendScheduled(
-      ROOM,
-      "chat",
-      policy,
-      [
-        { peerId: PEER, epc: broken },
-        { peerId: PEER_TWO, epc: second.epc },
-      ],
-      staged.message,
-      module,
-      undefined,
-      undefined,
-      [broken, second.epc],
-      {
-        waitForGate: async () => undefined,
-        ratchetStep,
-        waitForDelivery: async () => true,
-        resumeWaitMs: 1,
-      },
+    const sending = own(
+      sendScheduled(
+        ROOM,
+        "chat",
+        policy,
+        [
+          { peerId: PEER, epc: broken },
+          { peerId: PEER_TWO, epc: second.epc },
+        ],
+        staged.message,
+        module,
+        testEnd.signal,
+        undefined,
+        [broken, second.epc],
+        {
+          waitForGate: async () => undefined,
+          ratchetStep,
+          waitForDelivery: async () => true,
+          resumeWaitMs: 1,
+        },
+      ),
     );
-    const settled = await settledSoon(sending.catch((error: Error) => error));
+    const settled = await outcomeOf(sending.catch((error: Error) => error));
     expect(settled.settled).toBe(true);
     const result = settled.value as Awaited<typeof sending>;
     expect(result.outcomes).toHaveLength(2);
@@ -1112,37 +1151,39 @@ describe("scheduled mode: one peer's verification does not hold back the next", 
     const verifying = new Promise<void>((resolve) => {
       firstVerifying = resolve;
     });
-    const sending = sendScheduled(
-      ROOM,
-      "chat",
-      policy,
-      [
-        { peerId: PEER, epc: first.epc },
-        { peerId: PEER_TWO, epc: second.epc },
-      ],
-      staged.message,
-      module,
-      undefined,
-      undefined,
-      [first.epc, second.epc],
-      {
-        waitForGate: async () => undefined,
-        ratchetStep,
-        waitForDelivery: async (_options, peerId) => {
-          if (peerId === PEER) {
-            await pullAllCells(first.jobs[0]);
-            ackAll(staged.realIndexes);
-            order.push("first verifying");
-            firstVerifying();
-            return false;
-          }
-          await verifying;
-          order.push("second delivery wait");
-          return true;
+    const sending = own(
+      sendScheduled(
+        ROOM,
+        "chat",
+        policy,
+        [
+          { peerId: PEER, epc: first.epc },
+          { peerId: PEER_TWO, epc: second.epc },
+        ],
+        staged.message,
+        module,
+        testEnd.signal,
+        undefined,
+        [first.epc, second.epc],
+        {
+          waitForGate: async () => undefined,
+          ratchetStep,
+          waitForDelivery: async (_options, peerId) => {
+            if (peerId === PEER) {
+              await pullAllCells(first.jobs[0]);
+              ackAll(staged.realIndexes);
+              order.push("first verifying");
+              firstVerifying();
+              return false;
+            }
+            await verifying;
+            order.push("second delivery wait");
+            return true;
+          },
+          resumeWaitMs: 1,
+          clock,
         },
-        resumeWaitMs: 1,
-        clock,
-      },
+      ),
     );
     await verifying;
     await settle();
@@ -1150,10 +1191,10 @@ describe("scheduled mode: one peer's verification does not hold back the next", 
     // first peer's verification is still open.
     expect(second.jobs).toHaveLength(1);
     expect(order).toEqual(["first verifying", "second delivery wait"]);
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
 
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
@@ -1170,12 +1211,15 @@ describe("the verification wait does not count time the page did not run", () =>
     silenceMs: number,
     capMs: number,
   ): Promise<boolean> =>
-    waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
-      silenceMs,
-      capMs,
-      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
-      clock,
-    });
+    own(
+      waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+        silenceMs,
+        capMs,
+        onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+        clock,
+        signal: testEnd.signal,
+      }),
+    );
 
   test("time spent frozen does not count toward the silence bound", async () => {
     const clock = new ManualClock();
@@ -1230,12 +1274,15 @@ describe("the verification wait does not count time the page did not run", () =>
     };
     // About 4.7×10^11 ms: twice a 3,600,000 ms cadence × 65,535 epochs.
     const silenceMs = 2 * 3_600_000 * 65_535;
-    const waiting = waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
-      silenceMs,
-      capMs: 2 * silenceMs,
-      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
-      clock: platform,
-    });
+    const waiting = own(
+      waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+        silenceMs,
+        capMs: 2 * silenceMs,
+        onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+        clock: platform,
+        signal: testEnd.signal,
+      }),
+    );
     clock.advanceTo(60_000);
     expect((await settledWithin(waiting)).settled).toBe(false);
     expect(delays.every((ms) => ms <= MAX_TIMER_DELAY_MS)).toBe(true);
@@ -1272,12 +1319,15 @@ const silentWait = (
   silenceMs: number,
   capMs: number,
 ): Promise<boolean> =>
-  waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
-    silenceMs,
-    capMs,
-    onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
-    clock,
-  });
+  own(
+    waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+      silenceMs,
+      capMs,
+      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+      clock,
+      signal: testEnd.signal,
+    }),
+  );
 
 describe("the verification wait's cap is fixed when it starts", () => {
   test("the cap bounds the wait on a page whose timers fire once a minute", async () => {
@@ -1402,13 +1452,13 @@ describe("a key-epoch change is not an edge going away", () => {
     // A PQ heal on the same edge publishes a new cover generation.
     started.edge.epc.coverRuntime!.onPqEpochChanged();
     await settle();
-    expect((await settledSoon(started.sending)).settled).toBe(false);
+    expect((await settledWithin(started.sending)).settled).toBe(false);
     // Not re-entered, not resumed, nothing re-offered.
     expect(started.activitySubscriptions()).toBe(1);
     expect(started.deliveryWaits()).toBe(1);
     expect(started.edge.jobs).toHaveLength(1);
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
-    const settled = await settledSoon(started.sending);
+    const settled = await outcomeOf(started.sending);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
     ]);
@@ -1427,9 +1477,9 @@ describe("a key-epoch change is not an edge going away", () => {
       started.edge.epc.coverRuntime!.onPqEpochChanged();
       await settle();
     }
-    expect((await settledSoon(started.sending)).settled).toBe(false);
+    expect((await settledWithin(started.sending)).settled).toBe(false);
     markTransferComplete(ROOM, PEER, TRANSFER_ID);
-    const settled = await settledSoon(started.sending);
+    const settled = await outcomeOf(started.sending);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
     ]);
@@ -1447,12 +1497,12 @@ describe("a replacement that arrives before the old edge is torn down", () => {
     // A rekey first: the generation watch must keep listening after it.
     edge.epc.coverRuntime!.onPqEpochChanged();
     await settle();
-    expect((await settledSoon(sending)).settled).toBe(false);
+    expect((await settledWithin(sending)).settled).toBe(false);
     // The peer's fresh connection authenticates and installs its runtime;
     // the old edge is not torn down yet.
     const replacement = scheduledEdge();
     peerConnections.push(replacement.epc);
-    const settled = await settledSoon(sending);
+    const settled = await outcomeOf(sending);
     expect(settled.settled).toBe(true);
     expect(settled.value?.outcomes).toEqual([
       { peerId: PEER, status: "delivered" },
@@ -1469,7 +1519,7 @@ describe("an edge retired with no replacement", () => {
     expect(started.clock.armed).toBe(1);
     // Torn down; nothing replaces it, so no generation is published.
     teardownCoverEdge(started.edge.epc);
-    const settled = await settledSoon(started.sending);
+    const settled = await outcomeOf(started.sending);
     // Settled with the clock never advanced, and the wait left no timer.
     expect(settled.settled).toBe(true);
     expect(started.clock.armed).toBe(0);
@@ -1511,7 +1561,7 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
       },
     });
     closeFromTheFarSide(channel);
-    const settled = await settledSoon(outcome, 400);
+    const settled = await outcomeOf(outcome);
     expect(recorded).toBe(true);
     expect(settled).toEqual({ settled: true, value: "delivered" });
   });
@@ -1526,7 +1576,12 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
     const label = roomSendQueueLabel(ROOM, channel.label);
     expect(queueDeletes).toEqual([[label, PEER]]);
     // The transport drops, then comes back before the resume looks for it;
-    // opening the new channel fails, so the resume gives up.
+    // opening the new channel fails (this test's store has no room), so the
+    // resume logs each failed open and gives up.
+    const logged = spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(() => {
+      logged.mockRestore();
+    });
     Object.defineProperty(epc, "connectionState", {
       configurable: true,
       get: () =>
@@ -1535,13 +1590,15 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
           : "connected",
     });
     closeFromTheFarSide(channel);
-    const settled = await settledSoon(outcome, 400);
+    const settled = await outcomeOf(outcome);
     expect(settled).toEqual({
       settled: true,
       value: "Message transfer ended without receiver confirmation",
     });
     expect(queueDeletes.length).toBeGreaterThan(1);
     for (const call of queueDeletes) expect(call).toEqual([label, PEER]);
+    // One logged failure per open the resume tried after its queue delete.
+    expect(logged).toHaveBeenCalledTimes(queueDeletes.length - 1);
   });
 
   test("a receiver's CANCEL frame then close is reported as a cancel without waiting", async () => {
@@ -1578,10 +1635,7 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
     ).toBe("cancel");
     channel.receiveFrame();
     closeFromTheFarSide(channel);
-    const settled = await settledSoon(
-      sending.catch((error: Error) => error),
-      400,
-    );
+    const settled = await outcomeOf(sending.catch((error: Error) => error));
     expect(settled.settled).toBe(true);
     expect((settled.value as Error).message).toBe(
       "Message transfer cancelled by peer",
@@ -1610,6 +1664,7 @@ describe("the wait's timers run on their own time", () => {
       onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
       isInterrupted: () => interrupted,
       clock: wall,
+      signal: testEnd.signal,
     });
     timers.advanceTo(2_000);
     // The wall clock steps back an hour, then the condition comes true.
@@ -1664,5 +1719,176 @@ describe("timers above the platform limit", () => {
     cancel();
     clock.advanceTo(clock.now() + 10);
     expect(fired).toBe(2);
+  });
+});
+
+// ── what a send leaves behind ──────────────────────────────────────────────
+
+/**
+ * Track the real timers started from here on. `stop` puts the platform's
+ * functions back and returns how many of those timers are still pending; the
+ * cleanup clears any that are, so a failing test leaves none behind either.
+ */
+const trackRealTimers = () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const pending = new Set<ReturnType<typeof setTimeout>>();
+  const tracking = (
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const handle = realSetTimeout(() => {
+      pending.delete(handle);
+      callback(...args);
+    }, ms);
+    pending.add(handle);
+    return handle;
+  };
+  globalThis.setTimeout = tracking as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+    pending.delete(handle);
+    realClearTimeout(handle);
+  }) as typeof clearTimeout;
+  const restore = (): void => {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  };
+  cleanups.push(() => {
+    restore();
+    for (const handle of pending) realClearTimeout(handle);
+  });
+  return {
+    stop: (): number => {
+      restore();
+      return pending.size;
+    },
+  };
+};
+
+describe("a failed send leaves nothing running", () => {
+  test("a send that fails while registering leaves no timer behind", async () => {
+    const staged = await stageMessage(3, 1, 800 * MIB);
+    // A connection still coming up, without the event methods the admission
+    // wait registers on: that registration throws.
+    const broken = {
+      roomId: ROOM,
+      withPeerId: PEER,
+      connectionState: "connecting",
+    } as unknown as IRTCPeerConnection;
+    const timers = trackRealTimers();
+    const result = await own(
+      sendScheduled(
+        ROOM,
+        "chat",
+        policy,
+        [{ peerId: PEER, epc: broken }],
+        staged.message,
+        module,
+        testEnd.signal,
+        undefined,
+        [broken],
+        {
+          waitForGate: async () => undefined,
+          ratchetStep,
+          waitForDelivery: async () => true,
+          resumeWaitMs: 1,
+        },
+      ).catch((error: Error) => error),
+    );
+    // The send has ended, as a failure, and no timer it started is pending.
+    const pendingTimers = timers.stop();
+    expect(result).not.toBeInstanceOf(Error);
+    expect((result as { outcomes: unknown[] }).outcomes[0]).toMatchObject({
+      peerId: PEER,
+      status: "failed",
+      phase: "transfer",
+    });
+    expect(pendingTimers).toBe(0);
+  });
+});
+
+describe("a sealed cell's plaintext does not outlive its sealing", () => {
+  const allZero = (bytes: ArrayBuffer | Uint8Array): boolean =>
+    (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).every(
+      (byte) => byte === 0,
+    );
+
+  test("the scheduled sealer zeroes its plaintext after sealing", async () => {
+    const staged = await stageMessage(1, 1, 800 * MIB);
+    let sealed: Uint8Array | undefined;
+    const sealCell = makeScheduledSlotSealer(
+      staged.message,
+      {
+        seal: (chunk) => {
+          sealed = chunk;
+          expect(chunk).toHaveLength(DECRYPTED_LEN);
+          expect(allZero(chunk)).toBe(false);
+          return new Uint8Array([0xc1]);
+        },
+        wipe: () => undefined,
+      },
+      () => false,
+    );
+    expect(await sealCell(0)).toEqual(new Uint8Array([0xc1]));
+    // The plaintext it built and the staged copy it read are both zero.
+    expect(allZero(sealed!)).toBe(true);
+    expect(staged.handedOut).toHaveLength(1);
+    expect(allZero(staged.handedOut[0].data)).toBe(true);
+    expect(allZero(staged.handedOut[0].metadata)).toBe(true);
+  });
+
+  test("the scheduled sealer zeroes its plaintext when sealing throws", async () => {
+    const staged = await stageMessage(1, 1, 800 * MIB);
+    let sealed: Uint8Array | undefined;
+    const sealCell = makeScheduledSlotSealer(
+      staged.message,
+      {
+        seal: (chunk) => {
+          sealed = chunk;
+          expect(allZero(chunk)).toBe(false);
+          throw new Error("sealing failed");
+        },
+        wipe: () => undefined,
+      },
+      () => false,
+    );
+    await expect(sealCell(0)).rejects.toThrow("sealing failed");
+    expect(allZero(sealed!)).toBe(true);
+    expect(staged.handedOut).toHaveLength(1);
+    expect(allZero(staged.handedOut[0].data)).toBe(true);
+    expect(allZero(staged.handedOut[0].metadata)).toBe(true);
+  });
+
+  test("the immediate sender zeroes each cell's plaintext after sealing", async () => {
+    const staged = await stageMessage(3, 1, 800 * MIB);
+    const channel = new TransferChannel(
+      await compileChannelMessageLabel("chat", staged.merkleRootHex),
+    );
+    const sealed: Uint8Array[] = [];
+    let sends = 0;
+    channel.send = () => {
+      sends++;
+    };
+    await sendChunks(
+      channel as unknown as IRTCDataChannel,
+      {
+        seal: (chunk) => {
+          expect(allZero(chunk)).toBe(false);
+          sealed.push(chunk);
+          return new Uint8Array([0xc1]);
+        },
+        wipe: () => undefined,
+      },
+      staged.message,
+    );
+    expect(sends).toBe(4);
+    expect(sealed).toHaveLength(4);
+    for (const chunk of sealed) expect(allZero(chunk)).toBe(true);
+    expect(staged.handedOut).toHaveLength(4);
+    for (const row of staged.handedOut) {
+      expect(allZero(row.data)).toBe(true);
+      expect(allZero(row.metadata)).toBe(true);
+    }
   });
 });

@@ -19,6 +19,17 @@
 //  - "store-read": the same message again, whose rows now carry token and
 //    proof: one store read, then the seal (a re-send).
 //
+// `phases` gives each edge its room's phase offset in ms (default all 0): an
+// edge with another phase is another room's grid on the same page, its slots
+// a few ms off the first grid's. `leaves` makes each message that many cells
+// (default one lane's F x D): the job still sends F x D of them, but the
+// message's Merkle proof levels, built once on its first send, cover all of
+// them, as a large file's do. `cells` makes a job send fewer than its lane's
+// slots; `gap` leaves that many cycles between one job and the next, so the
+// same slots carry a job in some cycles and dummies in others. Every cell a
+// job's producer made is fingerprinted (its AEAD tag), so each sent cell is
+// recorded with what made it.
+//
 // The slot sealer below is a copy of handleSendMessage.ts's
 // makeScheduledSlotSealer (read, cellPlaintext, seal), instrumented, without
 // an outbox lease. Every record is page-side: performance.timeOrigin +
@@ -37,7 +48,10 @@ import { createMessageChunkSealer } from "../../../src/handlers/messageChunkCryp
 import { setDBNewChunk } from "../../../src/db/api";
 import { serializeMetadata } from "../../../src/utils/metadata";
 import { hashMerkleLeaf } from "../../../src/utils/leafHash";
-import { getMerkleRoot } from "../../../src/cryptography/merkle";
+import {
+  buildMerkleProofLevels,
+  getMerkleRoot,
+} from "../../../src/cryptography/merkle";
 import { compileChannelMessageLabel } from "../../../src/utils/channelLabel";
 import { uint8ArrayToHex } from "../../../src/utils/uint8array";
 import { MessageType } from "../../../src/utils/messageTypes";
@@ -68,7 +82,17 @@ const EDGES = Number(query.get("edges") ?? 3);
 const IDLE = Number(query.get("idle") ?? 1);
 // Fresh messages staged per edge before the run: one is used per rotation.
 const POOL = Number(query.get("pool") ?? 120);
-const CELLS_PER_JOB = FRAMES; // one epoch per cycle: a lane's F x D slots
+// Cells a job sends: by default a lane's F x D slots (one epoch per cycle);
+// fewer leaves the rest of its lane's slots to dummies.
+const CELLS_PER_JOB = Math.min(FRAMES, Number(query.get("cells") ?? FRAMES));
+const LEAVES = Math.max(CELLS_PER_JOB, Number(query.get("leaves") ?? 0));
+// Cycles an edge waits after a job before its next one, so the same slots of
+// its lane carry a job in some cycles and dummies in others.
+const GAP_CYCLES = Number(query.get("gap") ?? 0);
+const PHASES = Array.from(
+  { length: EDGES },
+  (_, edge) => Number((query.get("phases") ?? "").split(",")[edge] ?? 0) || 0,
+);
 const SPACING_MS = CADENCE_MS / (LANES * FRAMES);
 const MAX_TIMER_DRIFT_MS = Math.max(
   0,
@@ -78,8 +102,29 @@ const MAX_TIMER_DRIFT_MS = Math.max(
 const perfEpoch = (): number => performance.timeOrigin + performance.now();
 const random = (length: number): Uint8Array => {
   const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
+  // getRandomValues fills at most 65,536 bytes a call.
+  for (let offset = 0; offset < length; offset += 65_536)
+    crypto.getRandomValues(bytes.subarray(offset, offset + 65_536));
   return bytes;
+};
+
+/** A sealed cell's last 16 bytes (its AEAD tag): what identifies it. */
+const fingerprint = (cell: Uint8Array): string =>
+  uint8ArrayToHex(cell.subarray(cell.length - 16));
+// Every cell a job's producer made, by fingerprint: a sent cell that is not
+// here is a dummy (the lane's dummy tail, or the slot's dummy in place of a
+// job cell that was not ready).
+const producedBy = new Map<string, Kind>();
+const noteProduced = (cell: Uint8Array, kind: Kind): Uint8Array => {
+  producedBy.set(fingerprint(cell), kind);
+  return cell;
+};
+
+/** A policy hash whose derived phase offset is `phaseMs` (CoverRuntime). */
+const phaseHash = (phaseMs: number): Uint8Array => {
+  const hash = new Uint8Array(32);
+  new DataView(hash.buffer).setBigUint64(0, BigInt(phaseMs), false);
+  return hash;
 };
 
 const loadModule = async (): Promise<LibCrypto> => {
@@ -103,9 +148,11 @@ const stageMessage = async (module: LibCrypto): Promise<StagedMessage> => {
   const hash = random(64);
   const hashHex = uint8ArrayToHex(hash);
   const realBytes = Math.ceil(CHUNK_LEN * 0.9);
-  const totalSize = CELLS_PER_JOB * realBytes;
+  const totalSize = LEAVES * realBytes;
   const date = new Date();
-  const chunkHashes = new Uint8Array(CELLS_PER_JOB * 64);
+  // Only the cells a job sends are staged; the others' leaves are random, as
+  // nothing reads them but the proof-level build.
+  const chunkHashes = random(LEAVES * 64);
   for (let index = 0; index < CELLS_PER_JOB; index++) {
     const data = random(CHUNK_LEN);
     const leaf = await hashMerkleLeaf(data);
@@ -139,7 +186,7 @@ const stageMessage = async (module: LibCrypto): Promise<StagedMessage> => {
       transferId,
       hashHex,
       merkleRoot,
-      totalChunks: CELLS_PER_JOB,
+      totalChunks: LEAVES,
       chunkHashes,
       merkleModule: module,
     }),
@@ -148,8 +195,12 @@ const stageMessage = async (module: LibCrypto): Promise<StagedMessage> => {
 };
 
 interface EdgeRecording {
-  /** [slot deadline, wake-up ran, channel.send called, lane label]. */
-  readonly cells: Array<[number, number, number, string]>;
+  /**
+   * [slot deadline, wake-up ran, channel.send called, lane label, the cell's
+   * first byte (its frame type: 2 a chunk, 4 a cover cell), what it was: the
+   * job kind whose producer made it, or "dummy"].
+   */
+  readonly cells: Array<[number, number, number, string, number, string]>;
   /** [due, ran, kind] of every scheduler wake-up. */
   readonly wakeUps: Array<[number, number, CoverTimerKind | ""]>;
   /** [at, status, reason]. */
@@ -169,17 +220,37 @@ for (const level of ["warn", "error"] as const) {
     original(...args);
   };
 }
-addEventListener("error", (event) =>
+addEventListener("error", (event: ErrorEvent) =>
   consoleLines.push([Date.now(), "uncaught", String(event.message)]),
 );
-addEventListener("unhandledrejection", (event) =>
+addEventListener("unhandledrejection", (event: PromiseRejectionEvent) =>
   consoleLines.push([Date.now(), "unhandled", String(event.reason)]),
 );
+
+/** performance.timeOrigin + now() minus Date.now(), sampled: the two clocks. */
+const clockOffsetSamples = (): number[] => {
+  const samples: number[] = [];
+  for (let i = 0; i < 200; i++) samples.push(perfEpoch() - Date.now());
+  return samples.sort((a, b) => a - b);
+};
+const summariseOffset = (samples: number[]) => ({
+  min: samples[0],
+  median: samples[Math.floor(samples.length / 2)],
+  max: samples[samples.length - 1],
+});
 
 const run = async (): Promise<void> => {
   (window as unknown as Record<string, unknown>).__coverTimersProgress =
     "loading the WASM";
   const module = await loadModule();
+  // The synchronous proof-level build a message of LEAVES cells pays once.
+  const proofLevelBuildMs: number[] = [];
+  for (let i = 0; i < 10; i++) {
+    const leaves = random(LEAVES * 64);
+    const started = performance.now();
+    buildMerkleProofLevels(leaves, module).release();
+    proofLevelBuildMs.push(performance.now() - started);
+  }
   const roomId = "00000000-0000-4000-8000-0000000000a1";
   const edges: EdgeRecording[] = [];
   const runtimes: CoverRuntime[] = [];
@@ -249,9 +320,17 @@ const run = async (): Promise<void> => {
           return readyState;
         },
         bufferedAmount: 0,
-        send: () => {
+        send: (data: ArrayBuffer) => {
           const sentAt = perfEpoch();
-          recording.cells.push([pendingDeadline, lastWake, sentAt, label]);
+          const bytes = new Uint8Array(data);
+          recording.cells.push([
+            pendingDeadline,
+            lastWake,
+            sentAt,
+            label,
+            bytes[0],
+            producedBy.get(fingerprint(bytes)) ?? "dummy",
+          ]);
         },
         close: () => {
           readyState = "closed";
@@ -302,7 +381,7 @@ const run = async (): Promise<void> => {
             plaintextEnd,
             perfEpoch(),
           ]);
-          return cell;
+          return noteProduced(cell, kind);
         } finally {
           sealer.wipe();
         }
@@ -324,11 +403,14 @@ const run = async (): Promise<void> => {
           kind: "control",
           declaredCellCount: CELLS_PER_JOB,
           nextCell: () =>
-            runtime.sealCoverContent({
-              subtype: "chunk-receipts",
-              merkleRoot: random(64),
-              tokens: [random(64)],
-            }),
+            noteProduced(
+              runtime.sealCoverContent({
+                subtype: "chunk-receipts",
+                merkleRoot: random(64),
+                tokens: [random(64)],
+              }),
+              "control",
+            ),
         };
       } else {
         const staged =
@@ -345,6 +427,10 @@ const run = async (): Promise<void> => {
           merkleRoot: staged.message.merkleRoot,
           sealSlotCell: makeSealer(staged, kind),
           isChunkAcked: () => false,
+          realChunkIndices: Array.from(
+            { length: CELLS_PER_JOB },
+            (_, index) => index,
+          ),
         });
       }
       recording.labels[job.id] = kind;
@@ -363,7 +449,7 @@ const run = async (): Promise<void> => {
         coverFramesPerCell: FRAMES,
         coverDurationEpochs: 1,
       },
-      policyHash: new Uint8Array(32),
+      policyHash: phaseHash(PHASES[edge]),
       laneLabelName: "party",
       openLaneChannel: (label) => {
         const channel = openLaneChannel(label);
@@ -382,7 +468,10 @@ const run = async (): Promise<void> => {
       onStatusChange: ({ status, reason }) =>
         recording.statuses.push([Date.now(), status, reason ?? ""]),
       onJobResult: ({ jobId }) => {
-        if (jobId === currentJob) void enqueueNext();
+        if (jobId !== currentJob) return;
+        if (GAP_CYCLES > 0)
+          setTimeout(() => void enqueueNext(), GAP_CYCLES * CADENCE_MS);
+        else void enqueueNext();
       },
       clock,
     });
@@ -397,6 +486,7 @@ const run = async (): Promise<void> => {
   document.addEventListener("visibilitychange", () =>
     visibility.push([Date.now(), document.visibilityState]),
   );
+  const clockOffsetStart = summariseOffset(clockOffsetSamples());
   for (const runtime of runtimes) runtime.start();
   (window as unknown as Record<string, unknown>).__coverTimers = {
     mode: "sealed",
@@ -410,6 +500,18 @@ const run = async (): Promise<void> => {
     maxTimerDriftMs: MAX_TIMER_DRIFT_MS,
     edgesCount: EDGES,
     idleEdges: IDLE,
+    edgePhasesMs: PHASES.map((phase) => phase % CADENCE_MS),
+    leavesPerMessage: LEAVES,
+    cellsPerJob: CELLS_PER_JOB,
+    gapCycles: GAP_CYCLES,
+    proofLevelBuildMs,
+    clockOffsetMs: { start: clockOffsetStart } as Record<string, unknown>,
+    // The driver calls this before it reads the recording.
+    sampleClockOffset: function (this: {
+      clockOffsetMs: Record<string, unknown>;
+    }) {
+      this.clockOffsetMs.end = summariseOffset(clockOffsetSamples());
+    },
     poolPerEdge: POOL,
     userAgent: navigator.userAgent,
     startedAt: Date.now(),

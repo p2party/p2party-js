@@ -226,8 +226,8 @@ So tab visibility can still be read off the wire:
   it locked), and on a visible one at most 6 ms (11 ms locked). An observer
   timing cells against the slot grid sees the difference. Closing this needs
   the cells to be sent off the page's event loop, from the worker, which is
-  not built. The shift is the same for every cell, whatever it carries (next
-  section).
+  not built. The shift was measured the same for every kind of cell, for the
+  spacings, grids and message sizes the next section lists.
 - in the cycles that still degrade at short slot spacings, as measured above;
 - in cases that were not measured:
   - a frozen or discarded page (mobile browsers, Safari), where `freeze`
@@ -243,9 +243,10 @@ while the page is hidden is detected when the page is visible again.
 
 #### When a cell leaves, and what it carries
 
-A slot's cell is produced during the slot before it, and the slot's wake-up
-only sends it. Before that, the wake-up produced the cell and sent it when it
-was ready, so a cell left at its wake-up plus however long it took to produce:
+A slot's cells are produced during the slot before it, and the slot's wake-up
+only sends one of them. Before that, the wake-up produced the cell and sent it
+when it was ready, so a cell left at its wake-up plus however long it took to
+produce:
 
 - a dummy: one AEAD seal of the 65,490-byte cell in WASM;
 - a control cell (a receipt batch, a CANCEL): the same seal of its content;
@@ -293,15 +294,46 @@ Two designs were considered:
 (a) was chosen:
 
 - a fixed offset must stay under the smallest slot spacing (25 ms), and a
-  single first-send production was measured at 29.5 ms (46 ms later). (a)
-  gives a cell about one slot spacing: 100 ms here, 312 ms in the 10 s preset;
+  single first-send production was measured at 29.5 ms (46 ms, 124 ms and
+  148 ms in later runs, from IndexedDB writes). (a) gives a cell about one slot
+  spacing: 100 ms here, 312 ms in the 10 s preset;
 - (b) needs a second wake-up per slot, which on a hidden page would run late
   as the first does (above), and it delays every cell by the offset.
 
-The costs of (a):
+How (a) works:
+
+- every slot first gets its dummy, sealed for every slot whatever the slot
+  carries; then, if the lane has a job, the job's cell is produced. So the work
+  done for a slot before the job's production does not depend on what the
+  slot will carry;
+- the wake-up sends the job's cell if it is ready, otherwise the slot's dummy,
+  on time. A job's cell that was not ready (or whose production failed) keeps
+  its chunk for a later slot of its lane, and at the cycle's end a job that
+  lost a slot this way is requeued rather than failed. Before this, a cell not
+  ready at its slot degraded the cycle, and the edge went silent for the rest
+  of it; only a slow real production could cause that, so the silence showed
+  that one was there;
+- what a late wake-up does (the timer itself past the tolerance) is
+  unchanged: the cycle degrades. That remains an open owner decision;
+- the page's timer host runs every wake-up already due on the page's clock in
+  one task, and a production starts after that task, so the edges of one grid
+  all send (or open their lanes) before any of them produces;
+- a production also does not start while a wake-up of another grid on the
+  page falls due within `COVER_PRODUCTION_CLEARANCE_MS` (6 ms). That covers
+  the first synchronous work of a production: the slot's dummy seal and, on a
+  control lane, the control cell's seal (at most 2.6 ms and 3.1 ms measured).
+  It does not cover the synchronous work that follows a store read inside the
+  producer (below).
+
+What (a) costs:
 
 - no added latency on the wire;
-- each edge holds one produced cell (65,490 bytes, sealed) between slots;
+- one dummy seal more for every slot whose lane has a job;
+- a chunk whose production overruns its slot goes one lane period later
+  (counted as `fallbackDummies` in the summaries: 5 of 877 job slots at
+  100 ms, 10 to 20 of about 1,750 at 25 ms with gaps between jobs, and 130 to
+  173 of about 3,400 at 25 ms with 1,600-cell messages);
+- each edge holds up to two produced cells (65,490 bytes each) between slots;
 - a receipt or chunk that becomes ready after its lane's next cell was
   produced waits for that lane's following slot;
 - the first slot of a cycle has half a slot spacing to be produced in, since
@@ -309,62 +341,106 @@ The costs of (a):
 - a cancel, a completion or a rekey after the next cell was produced makes the
   scheduler produce that slot's cell again (a CANCEL, or a dummy), so a
   cancelled, completed or retired job never sends a cell it produced earlier.
+  A receipt cell produced before a rekey is sealed again under the new epoch:
+  the drain job puts its receipt back at the head of the queue.
 
 A cell that is produced but not sent stays with its job and goes in the job's
 next slot (the job sends it once, and no second production of the job runs
 while one is still running). A dummy that is not sent is zeroed. A job that
 settles, including at teardown, zeroes its unsent cells. The scheduler holds
-only sealed cells; the plaintext exists while the producer seals it.
+only sealed cells. The plaintext of a real chunk (metadata, proof and data) is
+built by the producer in `handleSendMessage.ts`, which at this commit does not
+zero it after sealing.
 
-The page's timer host runs every wake-up already due on the page's clock in
-one task, and the scheduler starts each production in a microtask. So when
-edges of one room fall due together, every edge sends (or opens its lanes)
-before any edge produces its next cell. Without this, the measurement showed
-one lane's cells leaving 0.5 ms later than the other's on every edge, real or
-dummy, from the work that ran between the sends
-(`results-2026-11-26-sealed-100ms-slots-produced-ahead-unbatched.json`).
+#### What was measured after the change
 
-Measured after the change, same setup:
+All in the sealed mode of `docs/e2e/cover-timers/`, Chrome for Testing 159,
+macOS 27.2 arm64, the screen locked and the page kept visible as above, the
+host's 1-minute load average 2.6 to 5.1 unless stated. The times are those of
+`send()` on the data channel (recorder channels, no WebRTC), not of packets
+leaving the machine. Offsets subtract the scheduler's slot deadline (page
+`Date.now()`) from `performance.timeOrigin + performance.now()`, so their
+absolute value includes the offset between those two clocks, 0 to 0.9 ms in
+these runs (recorded in each summary); comparisons on one page do not. The
+Kolmogorov–Smirnov critical values quoted assume independent cells; cells of
+one instant share its lateness, so they overstate significance.
 
-| Cell (100 ms slots, page visible) | Wake-up to `send` (max) | Slot to `send` (median / p99) | Later than 99 % of dummies |
-| --------------------------------- | ----------------------- | ----------------------------- | -------------------------- |
-| dummy (1,759)                     | 0.2 ms                  | 8.6 / 11.1 ms                 | 1 % by definition          |
-| control (296)                     | 0.2 ms                  | 8.6 / 11.1 ms                 | 0.3 %                      |
-| real, re-send (291)               | 0.2 ms                  | 8.6 / 11.1 ms                 | 0.3 %                      |
-| real, first send (290)            | 0.1 ms                  | 8.6 / 11.1 ms                 | 0.3 %                      |
+One grid of three edges (two carrying a job each cycle, one idle), 5-cell
+messages:
 
-The Kolmogorov–Smirnov distances were 0.04 to 0.06, under the 0.09 that a
-difference would need at these sample sizes to show at the 5 % level; before
-the change they were 0.22 to 0.41. The idle edge's dummies left at the same
-time beside another edge's real cells as beside its dummies (distance 0.04).
-With 500 ms slots (60 s visible) every kind left at a median of 7.8 to 7.9 ms
-after its slot, with distances of 0.10 to 0.13 on 32 to 45 cells, under the
-0.24 needed there.
+| Slots, phase       | Cells          | Degraded cycles | Kinds against dummies (KS, 5 % critical)    |
+| ------------------ | -------------- | --------------- | ------------------------------------------- |
+| 100 ms, 90 s shown | 2,610 of 2,610 | 0               | 0.03 to 0.08 (0.086); medians within 0.2 ms |
+| 500 ms, 60 s shown | 300 of 300     | 0               | 0.13 to 0.18 (0.22 to 0.25)                 |
+| 500 ms, 300 s hid  | 1,770 of 1,770 | 0               | 0.06 to 0.07 (0.10)                         |
 
-On the hidden page, before and after, cells left 140 to 180 ms after their
-slots at the median, and that spread hid a 2 ms production difference from
-this test (distances 0.06 to 0.08). In the 500 ms run after the change, from
-about 200 s into the hidden phase, the host's load average rose from 12 to
-over 300 (other work on the host), and every degraded cycle of that run (39 of
-177, counted over the three edges) fell in that period. Before the change
-none degraded, at a load average of 2 to 6 during its hidden phase.
+In the 500 ms run no cycle degraded on the hidden page, at a load average of
+2.6 to 5.1. The earlier 500 ms run after the first change had 39 degraded
+cycles (13 on each of its three edges), all while the host's load average
+rose from 12 to over 300. Its summary now lists every edge's degraded cycles
+by the scheduler's reason: all were missed deadlines, and the idle edge, which
+produces no real cell, degraded in the same cycles as the busy ones, so the
+cause was late wake-ups, not cells that were not ready. A cell not ready can
+no longer degrade a cycle; a dummy not ready could (reason `dummy-not-ready`),
+and no run had one.
+
+Two grids on one page: a busy grid (two edges with jobs, one idle edge) and
+idle grids of one edge each, 1, 2, 3, 5, 7 and 10 ms off it, with a cycle
+between one job and the next on each busy edge, so the same slots carry a job
+in some cycles and dummies in others. Offsets are compared at the same slot
+position (each against the median of the dummies at that position), because
+the first slot of a cycle, armed half a slot ahead, ran earlier than the
+others: 0.8 ms after its slot against 7.3 to 7.6 ms at 25 ms slots.
+
+| Slots, message size | Busy grid kinds vs dummies (median shift, KS) | Idle grids 1–5 ms off, busy producing real vs dummy (shift, KS) | 5 % critical |
+| ------------------- | --------------------------------------------- | --------------------------------------------------------------- | ------------ |
+| 25 ms, 5 cells      | 0 ms; 0.05 to 0.08                            | +0.1 to +0.2 ms; 0.09 to 0.11                                   | 0.047–0.058  |
+| 25 ms, 1,600 cells  | 0 to −0.1 ms; 0.06 to 0.07                    | 0 to −0.1 ms; 0.05 to 0.07                                      | 0.049–0.058  |
+| 100 ms, 5 cells     | −0.4 to +0.2 ms; 0.08 to 0.09                 | −0.7 to −1.2 ms; 0.08 to 0.12                                   | 0.106–0.117  |
+| 100 ms, 1,600 cells | −0.5 to −2.2 ms; 0.10 to 0.17                 | −0.6 to −0.9 ms; 0.08 to 0.09                                   | 0.106–0.117  |
+
+With a job in every cycle (no gaps), the 100 ms runs showed no difference (KS
+under the critical value, medians within 0.2 ms). At 25 ms the pooled
+comparison did differ (KS 0.12 to 0.15), which the slot position explains:
+real cells ride their lane's slots, the first slot of every cycle among them.
+
+With the gaps, the cycles that carried jobs differed from those that did not
+on every edge of the page, the idle grids included: up to 1.2 ms earlier at
+100 ms slots, up to 0.2 ms later at 25 ms slots. Cells of one cycle still left
+alike whatever they carried. It is not synchronous work running over a
+wake-up: an idle grid's cell counted under "busy producing real" was sent in
+the same batch as the busy grid's previous slot, before that production
+started. The cause was not found. The production clearance did not change
+these figures (the same runs without it are recorded too).
+
+The proof levels of a message are built once, synchronously, when its first
+cell is produced: 4.0 ms at the median for 1,600 cells (6.2 to 7.0 ms the
+first time in a run), growing with the number of cells. That work runs inside
+the producer (`handleSendMessage.ts`), after its first store read, so the
+clearance does not cover it; a wake-up of any grid that falls due during it
+waits. The two-grid runs above did not show it separately.
 
 What remains observable:
 
-- a production that is not ready at its slot is a late slot: the cycle
-  degrades, as it does for a late wake-up (what a late slot does is an open
-  owner decision). Only a real cell is slow enough for that, so a degraded
-  cycle can follow a slow store. In the 100 ms run, 1 of 261 visible cycles
-  degraded this way: a first send's write back took 44.7 ms, for the first
-  slot of a cycle, which has 50 ms. Before the change that cell would have
-  gone 46 ms late, inside the tolerance;
+- the first slot of each cycle leaves earlier than the cycle's other slots, at
+  25 ms slots by about 6.5 ms. That is the same whatever the slots carry, and
+  shows where cycles start, which the lanes' opening at each boundary shows
+  already;
+- whether a cycle carried jobs: on this host, such cycles ran up to 1.2 ms
+  earlier (100 ms slots) or up to 0.2 ms later (25 ms slots) than cycles
+  without, on every grid of the page (above). Real and dummy cells of the same
+  cycle still leave alike;
+- a job's chunk delayed by a lane period when its production overran its slot.
+  The slot itself still went out on time;
+- the proof-level build of a large message, synchronous inside the producer
+  (above), measured up to 1,600 cells;
 - the hidden page's lateness, the same for every cell (above);
-- a control cell (a receipt) produced under a PQ epoch that a rekey retires
-  before its slot is sent as produced, and the peer drops it, as for a
-  receipt held back by backpressure before. A dummy or a CANCEL is produced
-  again under the new epoch;
 - the page's own main-thread work (rendering, the application, garbage
   collection) delays wake-ups whatever the cells carry. These runs had none.
+
+Not measured: a page with the screen unlocked, other browsers, messages
+larger than 1,600 cells, idle grids at other offsets than 1 to 10 ms, packets
+on the wire.
 
 ## Alternatives rejected
 

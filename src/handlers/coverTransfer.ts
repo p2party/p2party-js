@@ -192,6 +192,15 @@ const ensureReceiptDrainJob = (
   if (declared <= 0) return;
   state.drainJobActive = true;
   state.jobSequence += 1;
+  // The entry the last cell was sealed from, kept (unwiped) until its cell is
+  // sent. The scheduler produces a slot's cell a slot ahead; a rekey before
+  // the slot discards it, and the entry goes back to the head of the queue to
+  // be sealed again under the new epoch.
+  let sealed: PendingScheduledControlCell | undefined;
+  const wipeSealed = (): void => {
+    if (sealed) wipeControl(sealed);
+    sealed = undefined;
+  };
   const job: CoverJob = {
     // A control lane must advertise the same constant label shape as every
     // other lane; the id IS the lane label.
@@ -201,26 +210,36 @@ const ensureReceiptDrainJob = (
     nextCell: () => {
       const next = removePendingControl(state);
       if (!next) return null; // dummy substitution for an empty slot
-      try {
-        if (next.tokens)
-          return runtime.sealCoverContent({
-            subtype: "chunk-receipts",
+      wipeSealed();
+      sealed = next;
+      if (next.tokens)
+        return runtime.sealCoverContent({
+          subtype: "chunk-receipts",
+          merkleRoot: next.merkleRoot,
+          tokens: next.tokens,
+        });
+      return next.token
+        ? runtime.sealCoverContent({
+            subtype: "receipt",
             merkleRoot: next.merkleRoot,
-            tokens: next.tokens,
+            token: next.token,
+          })
+        : runtime.sealCoverContent({
+            subtype: "cancel",
+            merkleRoot: next.merkleRoot,
           });
-        return next.token
-          ? runtime.sealCoverContent({
-              subtype: "receipt",
-              merkleRoot: next.merkleRoot,
-              token: next.token,
-            })
-          : runtime.sealCoverContent({
-              subtype: "cancel",
-              merkleRoot: next.merkleRoot,
-            });
-      } finally {
-        wipeControl(next);
+    },
+    cellSent: wipeSealed,
+    cellDiscarded: () => {
+      const entry = sealed;
+      sealed = undefined;
+      if (!entry || state.released) {
+        if (entry) wipeControl(entry);
+        return;
       }
+      // Back to the head, closed to new tokens (a later batch takes those).
+      state.pending.unshift(entry);
+      state.queuedTokens += entry.tokens?.length ?? 1;
     },
   };
   try {
@@ -232,6 +251,7 @@ const ensureReceiptDrainJob = (
   }
   // Re-arm on settlement so a long receipt backlog drains across cycles.
   runtime.onJobSettled(job.id, () => {
+    wipeSealed();
     state.drainJobActive = false;
     ensureReceiptDrainJob(epc, runtime, state);
   });

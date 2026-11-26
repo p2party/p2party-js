@@ -61,6 +61,41 @@
       "degradedCycles": 0,
       "cellsSent": 2610,
       "cellsExpected": 2610,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 87,
+          "degradedCycles": 0,
+          "cellsSent": 870,
+          "cellsExpected": 870,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 2643,
         "p50": 8.6,
@@ -133,29 +168,62 @@
         "control": {
           "medianShiftMs": -0.2,
           "ks": 0.069,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0.054
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0
         },
         "store-read": {
           "medianShiftMs": 0.6,
           "ks": 0.224,
-          "flaggedAtDummyP99": 0.133,
-          "flaggedAtDummyP90": 0.321
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.133
         },
         "store-write": {
           "medianShiftMs": 2,
           "ks": 0.409,
-          "flaggedAtDummyP99": 0.382,
-          "flaggedAtDummyP90": 0.468
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.382
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.4,
+          "ks": 0.083,
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.01
+        },
+        "store-read": {
+          "medianShiftMs": 1.2,
+          "ks": 0.288,
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.174
+        },
+        "store-write": {
+          "medianShiftMs": 2.5,
+          "ks": 0.423,
+          "ksCritical5pct": 0.086,
+          "flaggedAtReferenceP99": 0.372
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 8.6,
+        "1": 9.8,
+        "2": 8.6,
+        "3": 8.5,
+        "4": 9.4,
+        "5": 10.4,
+        "6": 9.3,
+        "7": 9.5,
+        "8": 8.4,
+        "9": 9.4
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 1323,
+          "n": 441,
           "p50": 9.5,
           "p90": 11.7,
           "p99": 12.4,
-          "max": 12.7
+          "max": 12.6
         },
         "dummyBesideReal": {
           "n": 440,
@@ -164,8 +232,13 @@
           "p99": 12.1,
           "max": 12.5
         },
-        "ks": 0.083
+        "medianShiftMs": -0.8,
+        "ks": 0.102,
+        "ksCritical5pct": 0.092,
+        "flaggedAtReferenceP99": 0.002,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -234,6 +307,56 @@
       "degradedCycles": 177,
       "cellsSent": 15,
       "cellsExpected": 1770,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 66,
         "p50": 174.4,
@@ -306,29 +429,56 @@
         "control": {
           "medianShiftMs": 17.6,
           "ks": 0.542,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0
+          "ksCritical5pct": 0.921,
+          "flaggedAtReferenceP99": 0
         },
         "store-read": {
           "medianShiftMs": -3.1,
           "ks": 0.625,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0
+          "ksCritical5pct": 1.075,
+          "flaggedAtReferenceP99": 0
         },
         "store-write": {
           "medianShiftMs": 2.9,
           "ks": 0.35,
-          "flaggedAtDummyP99": 0.2,
-          "flaggedAtDummyP90": 0.2
+          "ksCritical5pct": 0.775,
+          "flaggedAtReferenceP99": 0.2
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.5,
+          "ks": 0.542,
+          "ksCritical5pct": 0.921,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0.6,
+          "ks": 0.375,
+          "ksCritical5pct": 1.075,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 3.3,
+          "ks": 0.675,
+          "ksCritical5pct": 0.775,
+          "flaggedAtReferenceP99": 0.2
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 61.4,
+        "1": 44.3,
+        "6": 9.6,
+        "undefined": 1.5
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 3,
+          "n": 1,
           "p50": 44.3,
-          "p90": 44.7,
-          "p99": 44.7,
-          "max": 44.7
+          "p90": 44.3,
+          "p99": 44.3,
+          "max": 44.3
         },
         "dummyBesideReal": {
           "n": 5,
@@ -337,8 +487,13 @@
           "p99": 91.4,
           "max": 91.4
         },
-        "ks": 0.6
+        "medianShiftMs": -4.1,
+        "ks": 0.6,
+        "ksCritical5pct": 1.49,
+        "flaggedAtReferenceP99": 0.4,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -407,6 +562,41 @@
       "degradedCycles": 0,
       "cellsSent": 0,
       "cellsExpected": 0,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 0,
         "p50": null,
@@ -476,6 +666,9 @@
         }
       },
       "versusDummy": {},
+      "versusDummyAtSamePosition": {},
+      "dummyMedianByPositionMs": {},
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
           "n": 0,
@@ -491,8 +684,9 @@
           "p99": null,
           "max": null
         },
-        "ks": null
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {}
     },
     "hiddenAll": {
@@ -500,6 +694,56 @@
       "degradedCycles": 177,
       "cellsSent": 15,
       "cellsExpected": 1770,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 59,
+          "cellsSent": 5,
+          "cellsExpected": 590,
+          "degradeEvents": {
+            "missed-deadline": 16
+          },
+          "degradedCyclesByReason": {
+            "missed-deadline": 27,
+            "(no degrade event in this or the cycle before)": 32
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 66,
         "p50": 174.4,
@@ -572,29 +816,56 @@
         "control": {
           "medianShiftMs": 17.6,
           "ks": 0.542,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0
+          "ksCritical5pct": 0.921,
+          "flaggedAtReferenceP99": 0
         },
         "store-read": {
           "medianShiftMs": -3.1,
           "ks": 0.625,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0
+          "ksCritical5pct": 1.075,
+          "flaggedAtReferenceP99": 0
         },
         "store-write": {
           "medianShiftMs": 2.9,
           "ks": 0.35,
-          "flaggedAtDummyP99": 0.2,
-          "flaggedAtDummyP90": 0.2
+          "ksCritical5pct": 0.775,
+          "flaggedAtReferenceP99": 0.2
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": 0.5,
+          "ks": 0.542,
+          "ksCritical5pct": 0.921,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 0.6,
+          "ks": 0.375,
+          "ksCritical5pct": 1.075,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 3.3,
+          "ks": 0.675,
+          "ksCritical5pct": 0.775,
+          "flaggedAtReferenceP99": 0.2
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 61.4,
+        "1": 44.3,
+        "6": 9.6,
+        "undefined": 1.5
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 3,
+          "n": 1,
           "p50": 44.3,
-          "p90": 44.7,
-          "p99": 44.7,
-          "max": 44.7
+          "p90": 44.3,
+          "p99": 44.3,
+          "max": 44.3
         },
         "dummyBesideReal": {
           "n": 5,
@@ -603,8 +874,13 @@
           "p99": 91.4,
           "max": 91.4
         },
-        "ks": 0.6
+        "medianShiftMs": -4.1,
+        "ks": 0.6,
+        "ksCritical5pct": 1.49,
+        "flaggedAtReferenceP99": 0.4,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-read": {
           "read": {
@@ -673,6 +949,47 @@
       "degradedCycles": 3,
       "cellsSent": 390,
       "cellsExpected": 420,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 14,
+          "degradedCycles": 1,
+          "cellsSent": 130,
+          "cellsExpected": 140,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {
+            "(no degrade event in this or the cycle before)": 1
+          }
+        }
+      ],
       "slotWakeUpLatenessMs": {
         "n": 411,
         "p50": 8.7,
@@ -745,29 +1062,62 @@
         "control": {
           "medianShiftMs": -0.6,
           "ks": 0.123,
-          "flaggedAtDummyP99": 0,
-          "flaggedAtDummyP90": 0.02
+          "ksCritical5pct": 0.211,
+          "flaggedAtReferenceP99": 0
         },
         "store-read": {
           "medianShiftMs": 0.1,
           "ks": 0.197,
-          "flaggedAtDummyP99": 0.159,
-          "flaggedAtDummyP90": 0.295
+          "ksCritical5pct": 0.221,
+          "flaggedAtReferenceP99": 0.159
         },
         "store-write": {
           "medianShiftMs": 2.2,
           "ks": 0.456,
-          "flaggedAtDummyP99": 0.444,
-          "flaggedAtDummyP90": 0.511
+          "ksCritical5pct": 0.219,
+          "flaggedAtReferenceP99": 0.444
         }
       },
+      "versusDummyAtSamePosition": {
+        "control": {
+          "medianShiftMs": -0.2,
+          "ks": 0.126,
+          "ksCritical5pct": 0.211,
+          "flaggedAtReferenceP99": 0.041
+        },
+        "store-read": {
+          "medianShiftMs": 1.1,
+          "ks": 0.235,
+          "ksCritical5pct": 0.221,
+          "flaggedAtReferenceP99": 0.136
+        },
+        "store-write": {
+          "medianShiftMs": 2.3,
+          "ks": 0.43,
+          "ksCritical5pct": 0.219,
+          "flaggedAtReferenceP99": 0.422
+        }
+      },
+      "dummyMedianByPositionMs": {
+        "0": 9,
+        "1": 11,
+        "2": 9.5,
+        "3": 9.1,
+        "4": 8.2,
+        "5": 9.8,
+        "6": 10,
+        "7": 9.5,
+        "8": 7.9,
+        "9": 9.2
+      },
+      "fallbackDummies": 0,
       "crossEdge": {
         "dummyBesideDummy": {
-          "n": 204,
-          "p50": 9.9,
-          "p90": 11.6,
-          "p99": 12.1,
-          "max": 12.3
+          "n": 68,
+          "p50": 10.1,
+          "p90": 11.5,
+          "p99": 11.8,
+          "max": 11.8
         },
         "dummyBesideReal": {
           "n": 69,
@@ -776,8 +1126,13 @@
           "p99": 11.5,
           "max": 11.5
         },
-        "ks": 0.178
+        "medianShiftMs": -1.8,
+        "ks": 0.207,
+        "ksCritical5pct": 0.232,
+        "flaggedAtReferenceP99": 0,
+        "atSamePosition": null
       },
+      "crossGrid": {},
       "realCellStagesMs": {
         "store-write": {
           "read": {
@@ -841,5 +1196,11 @@
         }
       }
     }
-  }
+  },
+  "sha256": {
+    "bundle": "02859d1142462a7f95f64114e6674449dcd47b20970f1d59c885476e09e7f195",
+    "docs/e2e/cover-timers/entry-sealed.ts": "83600b9d4f15ad4ce7c9cd1fcf73ff24eadaa5f0057ac42979aaa0fc4381a099"
+  },
+  "resummarised": "Phases recomputed on 2026-11-26 from the raw recording with the fix-round summarise-sealed.mjs (adds byEdge, versusDummyAtSamePosition and every cell offset); the run itself is unchanged.",
+  "cellOffsetsFile": "results-2026-11-26-sealed-100ms-slots-before.offsets.tsv"
 }

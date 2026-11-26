@@ -29,10 +29,14 @@
 //
 // Local only: the page server and the debugging endpoint bind 127.0.0.1 on
 // ports above 5000; both are stopped (Chrome by its PID) before exit. Chrome
-// resolves no host name but 127.0.0.1 (--host-resolver-rules) and its
-// background networking is off, so nothing leaves the machine.
+// resolves no host name but 127.0.0.1 (--host-resolver-rules); it sends every
+// request for any address but loopback, a literal IP address included, to a
+// proxy port on 127.0.0.1 where nothing listens (--proxy-server; loopback is
+// never proxied), so such a request fails; and its background networking and
+// component updates are off. The pages use no WebRTC.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadavg, release } from "node:os";
 import { summariseSealed } from "./summarise-sealed.mjs";
@@ -57,6 +61,16 @@ const MODE = arg("mode", "timers");
 const SEALED = MODE === "sealed";
 const QUERY = arg("query", CADENCE_MS ? `cadence=${CADENCE_MS}` : "");
 const WASM = arg("wasm", "src/cryptography/libcrypto.wasm");
+// The code the bundle was built from (a commit, or a commit plus a working
+// tree), recorded with the SHA-256 of the bundle and of the entry file.
+const CODE = arg("code", "unrecorded");
+const ENTRY = arg(
+  "entry",
+  `docs/e2e/cover-timers/${SEALED ? "entry-sealed.ts" : "entry.ts"}`,
+);
+// Nothing listens here: Chrome's requests to any address but loopback go to
+// it and fail.
+const DEAD_PROXY = "127.0.0.1:5919";
 // --occluded-visible: keep an occluded window's page visible
 // (--disable-backgrounding-occluded-windows), for a host whose screen is
 // locked or asleep, where every window is occluded and the page would be
@@ -190,6 +204,7 @@ const chromeArgs = [
   // Nothing but the page server is reachable, and Chrome fetches nothing in
   // the background. Neither flag touches timer throttling.
   "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+  `--proxy-server=http://${DEAD_PROXY}`,
   "--disable-background-networking",
   "--disable-component-update",
   // Without it a fresh profile asks the macOS Keychain for its cookie key,
@@ -284,6 +299,7 @@ try {
   sampleLoad();
   const endedAt = Date.now();
 
+  if (SEALED) await evaluate("window.__coverTimers.sampleClockOffset()");
   const raw = await evaluate("JSON.stringify(window.__coverTimers)");
   writeFileSync(OUT, raw);
   const data = JSON.parse(raw);
@@ -300,6 +316,11 @@ try {
   };
   const summary = {
     measuredAt: new Date(hiddenAt).toISOString(),
+    code: CODE,
+    sha256: {
+      bundle: createHash("sha256").update(bundle).digest("hex"),
+      [ENTRY]: createHash("sha256").update(readFileSync(ENTRY)).digest("hex"),
+    },
     browser: version.Browser,
     userAgent: data.userAgent,
     host: `${process.platform} ${release()} ${process.arch}`,
@@ -332,6 +353,10 @@ try {
       ? {
           edges: data.edgesCount,
           idleEdges: data.idleEdges,
+          edgePhasesMs: data.edgePhasesMs,
+          leavesPerMessage: data.leavesPerMessage,
+          proofLevelBuildMs: data.proofLevelBuildMs,
+          clockOffsetMs: data.clockOffsetMs,
           poolPerEdge: data.poolPerEdge,
           sealed: {},
         }
@@ -340,7 +365,7 @@ try {
   for (const [name, [from, to]] of Object.entries(phases)) {
     if (to <= from) continue;
     if (SEALED) {
-      summary.sealed[name] = summariseSealed(data, from, to);
+      summary.sealed[name] = summariseSealed(data, from, to, name);
       continue;
     }
     summary.pageTimers[name] = summarise(

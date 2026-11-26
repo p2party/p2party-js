@@ -1,4 +1,7 @@
-import { MAX_TIMER_DELAY_MS } from "../utils/constants";
+import {
+  COVER_PRODUCTION_CLEARANCE_MS,
+  MAX_TIMER_DELAY_MS,
+} from "../utils/constants";
 
 export type CoverSchedulerStatus =
   "starting" | "active" | "degraded" | "suspended" | "stopped";
@@ -23,6 +26,11 @@ export interface CoverClock {
     kind?: CoverTimerKind,
   ): unknown;
   clearTimeout(handle: unknown): void;
+  /**
+   * Run `run` once no wake-up of the page falls due within `withinMs` (the
+   * page's timer host knows them all). Absent: in a microtask.
+   */
+  whenClear?(withinMs: number, run: () => void): void;
 }
 
 /**
@@ -73,6 +81,14 @@ export interface CoverJob {
   /** No further real cells after a selective producer skips its have-set. */
   exhausted?(): boolean;
   cancelCell?(slot: CoverJobSlot): MaybePromise<Uint8Array>;
+  /** The cell nextCell produced last went on the wire. */
+  cellSent?(): void;
+  /**
+   * The cell nextCell produced last will not be sent: a rekey retired the
+   * epoch it was sealed under. A job with this hook produces it again, from
+   * the same content, at its next nextCell.
+   */
+  cellDiscarded?(): void;
 }
 
 export interface CoverJobSummary {
@@ -193,18 +209,31 @@ interface JobRuntime {
   pendingCancelCell?: Uint8Array;
   /** Set while this job's producer runs: one production per job at a time. */
   producing?: Promise<void>;
+  /**
+   * Set when a slot of this job's lane went out as a dummy because the job's
+   * cell was not ready: at the cycle's end the job is requeued, not failed.
+   */
+  lostSlot?: CoverJobInterruption["reason"];
 }
 
 /**
- * The cell for the next slot of the open cycle, produced ahead of the slot so
- * that the slot's wake-up only sends it.
+ * The cells for the next slot of the open cycle, produced ahead of the slot so
+ * that the slot's wake-up only sends one of them: the job's cell when it is
+ * ready, else the slot's dummy.
  */
 interface PreparedCell {
   readonly ordinal: number;
   readonly lane: LaneRuntime;
-  state: "producing" | "ready" | "failed";
+  readonly slot: CoverSlot;
+  /** Sealed first for every slot, whatever the slot carries. */
+  dummy?: CoverSendRequest;
+  dummyState: "producing" | "ready" | "failed";
+  /** The lane's job when the slot was prepared. */
+  readonly job?: JobRuntime;
+  /** "none": the job has no cell for this slot, so the dummy is the cell. */
+  jobState: "producing" | "ready" | "none" | "failed";
   request?: CoverSendRequest;
-  /** Its slot gave up on it; whatever it produces is released, not sent. */
+  /** Its slot is over; whatever it produces is released, not sent. */
   abandoned: boolean;
 }
 
@@ -330,7 +359,21 @@ export class CoverScheduler {
   /** Retire old-key producers while keeping this cycle's fixed dummy tail. */
   invalidateRealJobsForRekey(): void {
     for (const runtime of [...this.jobs.values()]) {
-      if (runtime.job.kind !== "real" || runtime.settled) continue;
+      if (runtime.settled) continue;
+      if (runtime.job.kind === "control") {
+        // A control cell produced ahead is sealed under the retired epoch,
+        // which the peer no longer opens: produce it again under the new one,
+        // when the job can produce the same content again.
+        if (typeof runtime.job.cellDiscarded === "function") {
+          runtime.keyEpochVersion++;
+          if (runtime.pendingCell) {
+            runtime.pendingCell.fill(0);
+            runtime.pendingCell = undefined;
+            this.safeNotify(() => runtime.job.cellDiscarded?.());
+          }
+        }
+        continue;
+      }
       runtime.keyEpochVersion++;
       if (runtime.cancelRequested) {
         // Explicit user cancellation still needs its control cell. Its producer
@@ -574,6 +617,7 @@ export class CoverScheduler {
   ): void {
     if (runtime.settled || runtime.completed || runtime.cancelSent) return;
     runtime.state = "queued";
+    runtime.lostSlot = undefined;
     if (!this.queued.includes(runtime)) this.queued.push(runtime);
     this.sortQueue();
     this.safeNotify(() =>
@@ -837,35 +881,6 @@ export class CoverScheduler {
     };
   }
 
-  /** The cell for one slot; undefined when its slot gave up on it first. */
-  private async requestForSlot(
-    lane: LaneRuntime,
-    slot: CoverSlot,
-    prepared: PreparedCell,
-  ): Promise<CoverSendRequest | undefined> {
-    const runtime = lane.job;
-    if (runtime && !runtime.settled) {
-      const produced = await this.produceJobCell(runtime, slot);
-      if (produced)
-        return {
-          cell: produced.cell,
-          source: produced.source,
-          slot,
-          jobId: runtime.job.id,
-          jobCellIndex: runtime.sentCells,
-        };
-    }
-    // No dummy for a slot that will not send it (a torn-down edge among them).
-    if (prepared.abandoned) return undefined;
-
-    return {
-      cell: assertCell("makeDummy", await this.makeDummy(slot)),
-      source: "dummy",
-      slot,
-      ...(runtime ? { jobId: runtime.job.id } : {}),
-    };
-  }
-
   /**
    * The job's next cell for its lane, or null for a dummy. What it produces
    * is the job's (pendingCell / pendingCancelCell) until it is sent, so a slot
@@ -910,12 +925,21 @@ export class CoverScheduler {
           return null;
         if (runtime.pendingCell)
           return { cell: runtime.pendingCell, source: runtime.job.kind };
+        const keyEpochVersion = runtime.keyEpochVersion;
         const produced = await runtime.job.nextCell(withJob);
         // A durable PQ commit or explicit completion may retire this producer
         // while its storage/sealing promise is pending. Never emit its old key.
         if (runtime.settled || runtime.completed) {
           produced?.fill(0);
           return null;
+        }
+        // A rekey meanwhile retired the epoch a control cell was sealed under.
+        if (keyEpochVersion !== runtime.keyEpochVersion) {
+          if (produced) {
+            produced.fill(0);
+            this.safeNotify(() => runtime.job.cellDiscarded?.());
+          }
+          continue;
         }
         if (produced === null) {
           if (runtime.job.exhausted?.()) this.finishJob(runtime);
@@ -932,13 +956,19 @@ export class CoverScheduler {
   }
 
   /**
-   * Produce the cell for the open cycle's next slot now, one slot ahead of it.
-   * The slot's wake-up then only sends what is ready, so the time a cell
+   * Produce the cells for the open cycle's next slot now, one slot ahead of
+   * it. The slot's wake-up then only sends what is ready, so the time a cell
    * leaves is the time its wake-up runs, whatever the cell carries: a dummy
    * sealed in memory and a real chunk read from the outbox store, its receipt
-   * token written back and sealed leave alike (docs/e2e/cover-timers/,
-   * sealed mode). A cell still being produced when its slot comes is a late
-   * slot, never a late send.
+   * token written back and sealed leave alike (docs/e2e/cover-timers/, sealed
+   * mode).
+   *
+   * Every slot first gets its dummy, sealed before the job's production
+   * starts, so the work done for a slot before that does not depend on what
+   * the slot will carry. A job's cell that is not ready when its slot comes
+   * does not hold the slot: the dummy goes, on time, and the job's cell takes
+   * a later slot of its lane. Otherwise a silent rest of the cycle, which
+   * only a slow real production could cause, would show that one was there.
    */
   private prepare(cycle: CycleRuntime): void {
     const slot = this.slotAt(cycle, cycle.nextSlotOrdinal);
@@ -946,42 +976,77 @@ export class CoverScheduler {
       ({ laneIndex }) => laneIndex === slot.laneIndex,
     );
     if (!lane) return;
+    const job = lane.job && !lane.job.settled ? lane.job : undefined;
     const prepared: PreparedCell = {
       ordinal: cycle.nextSlotOrdinal,
       lane,
-      state: "producing",
+      slot,
+      dummyState: "producing",
+      job,
+      jobState: job ? "producing" : "none",
       abandoned: false,
     };
     cycle.prepared = prepared;
-    // Started in a microtask: the page's timer host runs the wake-ups of every
-    // edge due at once in one task, so all of them have sent (or opened their
-    // lanes) before any edge's production runs.
-    void Promise.resolve()
-      .then(() => this.requestForSlot(lane, slot, prepared))
-      .then(
-        (request) => {
-          if (!request) return;
-          if (prepared.abandoned) {
-            this.releaseUnsent(request);
-            return;
-          }
-          prepared.request = request;
-          prepared.state = "ready";
-        },
-        () => {
-          prepared.state = "failed";
-        },
-      );
+    // Started after the current task: the page's timer host runs the wake-ups
+    // of every edge due at once in one task, so all of them have sent (or
+    // opened their lanes) before any edge's production runs. And not while
+    // another grid's wake-up falls due within the bound of a production's
+    // first synchronous work (the slot's dummy seal, a control cell's seal).
+    const start = (): void => void this.produce(prepared);
+    if (this.clock.whenClear)
+      this.clock.whenClear(COVER_PRODUCTION_CLEARANCE_MS, start);
+    else void Promise.resolve().then(start);
   }
 
-  /** The prepared cell's slot will not send it: release it. */
+  private async produce(prepared: PreparedCell): Promise<void> {
+    if (prepared.abandoned) return;
+    const { slot, job } = prepared;
+    try {
+      const cell = assertCell("makeDummy", await this.makeDummy(slot));
+      if (prepared.abandoned) {
+        cell.fill(0);
+      } else {
+        prepared.dummy = {
+          cell,
+          source: "dummy",
+          slot,
+          ...(job ? { jobId: job.job.id } : {}),
+        };
+        prepared.dummyState = "ready";
+      }
+    } catch {
+      prepared.dummyState = "failed";
+    }
+    if (!job || prepared.abandoned) return;
+    try {
+      const produced = await this.produceJobCell(job, slot);
+      // A job's cell stays its job's (pendingCell) when its slot is over.
+      if (prepared.abandoned) return;
+      if (!produced) {
+        prepared.jobState = "none";
+        return;
+      }
+      prepared.request = {
+        cell: produced.cell,
+        source: produced.source,
+        slot,
+        jobId: job.job.id,
+        jobCellIndex: job.sentCells,
+      };
+      prepared.jobState = "ready";
+    } catch {
+      prepared.jobState = "failed";
+    }
+  }
+
+  /** The prepared slot will not be sent: release what it produced. */
   private abandonPrepared(): void {
     const cycle = this.cycle;
     const prepared = cycle?.prepared;
     if (!cycle || !prepared) return;
     cycle.prepared = undefined;
     prepared.abandoned = true;
-    if (prepared.request) this.releaseUnsent(prepared.request);
+    if (prepared.dummy) this.releaseUnsent(prepared.dummy);
   }
 
   /**
@@ -1023,6 +1088,7 @@ export class CoverScheduler {
 
     runtime.pendingCell = undefined;
     runtime.sentCells++;
+    this.safeNotify(() => runtime.job.cellSent?.());
     if (
       runtime.sentCells === runtime.job.declaredCellCount ||
       runtime.job.exhausted?.()
@@ -1045,19 +1111,41 @@ export class CoverScheduler {
       return;
     }
     cycle.prepared = undefined;
-    // Its cell was produced during the slot before; this wake-up only sends
-    // it. One that is not ready is a late slot: sending it when it is ready
-    // would make the send time tell what the cell carries.
-    if (prepared.state !== "ready" || !prepared.request) {
-      prepared.abandoned = true;
+    prepared.abandoned = true;
+    // Its cells were produced during the slot before; this wake-up only sends
+    // one. The job's cell if it is ready, else the slot's dummy, on time: a
+    // job's cell still being produced (or whose production failed) keeps its
+    // chunk for a later slot of the lane. Sending it when ready would make the
+    // send time tell what it carries; a silent slot would tell it too.
+    let request: CoverSendRequest | undefined;
+    if (prepared.jobState === "ready") {
+      request = prepared.request;
+      if (prepared.dummy) this.releaseUnsent(prepared.dummy);
+    } else {
+      request = prepared.dummy;
+      if (
+        request &&
+        prepared.job &&
+        (prepared.jobState === "producing" || prepared.jobState === "failed")
+      )
+        prepared.job.lostSlot =
+          prepared.jobState === "failed"
+            ? "cell-production-failed"
+            : "missed-deadline";
+    }
+    if (!request) {
+      // Not even the dummy: the same for a slot whatever it carries.
       this.degrade(
-        prepared.state === "failed"
+        prepared.dummyState === "failed"
           ? "cell-production-failed"
           : "missed-deadline",
+        prepared.dummyState === "failed"
+          ? "cell-production-failed"
+          : "dummy-not-ready",
       );
       return;
     }
-    const { lane, request } = prepared;
+    const { lane } = prepared;
 
     let accepted: boolean | void;
     try {
@@ -1134,6 +1222,10 @@ export class CoverScheduler {
       if (!runtime || runtime.settled) continue;
       if (runtime.cancelRequested && !runtime.cancelSent) {
         this.requeue(runtime, "missed-deadline");
+      } else if (runtime.lostSlot) {
+        // A slot of its lane went out as a dummy while its cell was being
+        // produced: what it did not send is not a capacity overrun.
+        this.requeue(runtime, runtime.lostSlot);
       } else {
         this.settle(runtime, {
           jobId: runtime.job.id,

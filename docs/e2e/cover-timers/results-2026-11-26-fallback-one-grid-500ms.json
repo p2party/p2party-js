@@ -1,0 +1,1286 @@
+{
+  "code": "41e8943 + fix round 1 working tree (fallback dummy per slot)",
+  "mode": "sealed",
+  "hostState": "macOS screen locked for the whole run (ioreg IOConsoleLocked = Yes before and after), so every window was occluded; --disable-backgrounding-occluded-windows kept the page visible until a tab was opened in front of it. Other agents were running on the host (see loadAverage1m).",
+  "measuredAt": "2026-11-26T21:25:24.009Z",
+  "sha256": {
+    "bundle": "b1f2ab57522127ae29891a3813e606ad64433cfeefbee019524215077e9e9501",
+    "docs/e2e/cover-timers/entry-sealed.ts": "4d3a5f42bd8a2d228760ce6caa2254ef72a6cbf40f10f5fa50a57193aa54ef0c"
+  },
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--proxy-server=http://127.0.0.1:5919",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--use-mock-keychain",
+    "--disable-backgrounding-occluded-windows",
+    "http://127.0.0.1:5918/?cadence=5000&edges=3&idle=1&pool=30"
+  ],
+  "throttlingFlagsRemoved": [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding"
+  ],
+  "hiddenBy": "another tab opened in front (Target.createTarget, same window)",
+  "visibility": [
+    [-1, "visible"],
+    [60026, "hidden"],
+    [361065, "visible"]
+  ],
+  "schedule": {
+    "phaseOffsetMs": 0,
+    "coverCadenceMs": 5000,
+    "coverLanes": 2,
+    "coverFramesPerCell": 5,
+    "coverDurationEpochs": 1
+  },
+  "maxTimerDriftMs": 499,
+  "workerClockSource": "worker",
+  "loadAverage1m": [
+    [8, 3.0908203125],
+    [90035, 2.609375],
+    [120039, 3.00439453125],
+    [150042, 3.35205078125],
+    [180046, 3.53076171875],
+    [210048, 3.767578125],
+    [240052, 5.1298828125],
+    [270053, 4.314453125],
+    [300056, 3.427734375],
+    [330057, 3.29833984375],
+    [360060, 2.89599609375],
+    [375067, 2.90625]
+  ],
+  "phasesMs": {
+    "visible": [2000, 60011],
+    "hidden0to60s": [60011, 120011],
+    "hidden60to300s": [120011, 360011],
+    "hiddenPast300s": [360011, 360061],
+    "hiddenAll": [60011, 360061],
+    "visibleAgain": [360061, 375067]
+  },
+  "edges": 3,
+  "idleEdges": 1,
+  "edgePhasesMs": [0, 0, 0],
+  "leavesPerMessage": 5,
+  "proofLevelBuildMs": [
+    0.6000000238418579, 0, 0.10000002384185791, 0.09999996423721313, 0, 0, 0,
+    0.10000002384185791, 0, 0
+  ],
+  "clockOffsetMs": {
+    "start": {
+      "min": 0.5,
+      "median": 0.599853515625,
+      "max": 0.699951171875
+    },
+    "end": {
+      "min": 0.099853515625,
+      "median": 0.099853515625,
+      "max": 0.099853515625
+    }
+  },
+  "poolPerEdge": 30,
+  "sealed": {
+    "visible": {
+      "cycles": 30,
+      "degradedCycles": 0,
+      "cellsSent": 300,
+      "cellsExpected": 300,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 10,
+          "degradedCycles": 0,
+          "cellsSent": 100,
+          "cellsExpected": 100,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 10,
+          "degradedCycles": 0,
+          "cellsSent": 100,
+          "cellsExpected": 100,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 10,
+          "degradedCycles": 0,
+          "cellsSent": 100,
+          "cellsExpected": 100,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 348,
+        "p50": 9.9,
+        "p90": 10.9,
+        "p99": 11.1,
+        "max": 11.1,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 232,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 44,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-read": {
+          "n": 34,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-write": {
+          "n": 38,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 232,
+          "p50": 9.9,
+          "p90": 10.9,
+          "p99": 11.1,
+          "max": 11.2
+        },
+        "control": {
+          "n": 44,
+          "p50": 10.3,
+          "p90": 10.9,
+          "p99": 11.1,
+          "max": 11.1
+        },
+        "store-read": {
+          "n": 34,
+          "p50": 9.3,
+          "p90": 10.6,
+          "p99": 11.1,
+          "max": 11.1
+        },
+        "store-write": {
+          "n": 38,
+          "p50": 10.2,
+          "p90": 10.7,
+          "p99": 11.1,
+          "max": 11.1
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 0.4,
+          "ks": 0.13,
+          "ksCritical5pct": 0.224,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.6,
+          "ks": 0.184,
+          "ksCritical5pct": 0.25,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": 0.3,
+          "ks": 0.127,
+          "ksCritical5pct": 0.238,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 58,
+          "p50": 9.9,
+          "p90": 11,
+          "p99": 11.1,
+          "max": 11.1
+        },
+        "dummyBesideReal": {
+          "n": 58,
+          "p50": 10.2,
+          "p90": 10.8,
+          "p99": 11.2,
+          "max": 11.2
+        },
+        "medianShiftMs": 0.3,
+        "ks": 0.103,
+        "ksCritical5pct": 0.253,
+        "flaggedAtReferenceP99": 0.017
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 38,
+            "p50": 1.2,
+            "p90": 2.8,
+            "p99": 3.5,
+            "max": 3.5
+          },
+          "plaintext": {
+            "n": 38,
+            "p50": 2.2,
+            "p90": 2.7,
+            "p99": 4.7,
+            "max": 4.7
+          },
+          "seal": {
+            "n": 38,
+            "p50": 0.3,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 38,
+            "p50": 3.8,
+            "p90": 5.5,
+            "p99": 6.1,
+            "max": 6.1
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 35,
+            "p50": 1,
+            "p90": 2.3,
+            "p99": 2.7,
+            "max": 2.7
+          },
+          "plaintext": {
+            "n": 35,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 35,
+            "p50": 0.3,
+            "p90": 0.5,
+            "p99": 0.5,
+            "max": 0.5
+          },
+          "total": {
+            "n": 35,
+            "p50": 1.5,
+            "p90": 2.8,
+            "p99": 3.2,
+            "max": 3.2
+          }
+        }
+      }
+    },
+    "hidden0to60s": {
+      "cycles": 33,
+      "degradedCycles": 0,
+      "cellsSent": 330,
+      "cellsExpected": 330,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 11,
+          "degradedCycles": 0,
+          "cellsSent": 110,
+          "cellsExpected": 110,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 11,
+          "degradedCycles": 0,
+          "cellsSent": 110,
+          "cellsExpected": 110,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 11,
+          "degradedCycles": 0,
+          "cellsSent": 110,
+          "cellsExpected": 110,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 360,
+        "p50": 163,
+        "p90": 196.7,
+        "p99": 199.5,
+        "max": 199.6,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 240,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.5
+        },
+        "control": {
+          "n": 40,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        },
+        "store-read": {
+          "n": 40,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.2
+        },
+        "store-write": {
+          "n": 40,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.4,
+          "max": 0.4
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 240,
+          "p50": 162.1,
+          "p90": 196.8,
+          "p99": 199.6,
+          "max": 199.6
+        },
+        "control": {
+          "n": 40,
+          "p50": 175.9,
+          "p90": 197.7,
+          "p99": 199.5,
+          "max": 199.5
+        },
+        "store-read": {
+          "n": 40,
+          "p50": 165.7,
+          "p90": 197.7,
+          "p99": 199.6,
+          "max": 199.6
+        },
+        "store-write": {
+          "n": 40,
+          "p50": 159.2,
+          "p90": 192.8,
+          "p99": 196.8,
+          "max": 196.8
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 13.8,
+          "ks": 0.175,
+          "ksCritical5pct": 0.232,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": 3.6,
+          "ks": 0.1,
+          "ksCritical5pct": 0.232,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": -2.9,
+          "ks": 0.108,
+          "ksCritical5pct": 0.232,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 60,
+          "p50": 153.3,
+          "p90": 196.9,
+          "p99": 199.6,
+          "max": 199.6
+        },
+        "dummyBesideReal": {
+          "n": 60,
+          "p50": 165.8,
+          "p90": 193.6,
+          "p99": 199.6,
+          "max": 199.6
+        },
+        "medianShiftMs": 12.5,
+        "ks": 0.133,
+        "ksCritical5pct": 0.248,
+        "flaggedAtReferenceP99": 0
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 40,
+            "p50": 1.2,
+            "p90": 1.6,
+            "p99": 2.1,
+            "max": 2.1
+          },
+          "plaintext": {
+            "n": 40,
+            "p50": 2.1,
+            "p90": 3.7,
+            "p99": 5.6,
+            "max": 5.6
+          },
+          "seal": {
+            "n": 40,
+            "p50": 0.5,
+            "p90": 0.6,
+            "p99": 0.7,
+            "max": 0.7
+          },
+          "total": {
+            "n": 40,
+            "p50": 3.8,
+            "p90": 5.6,
+            "p99": 8.2,
+            "max": 8.2
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 40,
+            "p50": 1.1,
+            "p90": 1.9,
+            "p99": 2.1,
+            "max": 2.1
+          },
+          "plaintext": {
+            "n": 40,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 40,
+            "p50": 0.5,
+            "p90": 0.5,
+            "p99": 1.1,
+            "max": 1.1
+          },
+          "total": {
+            "n": 40,
+            "p50": 1.6,
+            "p90": 2.4,
+            "p99": 3.1,
+            "max": 3.1
+          }
+        }
+      }
+    },
+    "hidden60to300s": {
+      "cycles": 141,
+      "degradedCycles": 0,
+      "cellsSent": 1410,
+      "cellsExpected": 1410,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 47,
+          "degradedCycles": 0,
+          "cellsSent": 470,
+          "cellsExpected": 470,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 47,
+          "degradedCycles": 0,
+          "cellsSent": 470,
+          "cellsExpected": 470,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 47,
+          "degradedCycles": 0,
+          "cellsSent": 470,
+          "cellsExpected": 470,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 1440,
+        "p50": 148.3,
+        "p90": 195.1,
+        "p99": 200,
+        "max": 201.6,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 960,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.6
+        },
+        "control": {
+          "n": 160,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.4
+        },
+        "store-read": {
+          "n": 160,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.9
+        },
+        "store-write": {
+          "n": 160,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.4
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 960,
+          "p50": 150,
+          "p90": 194.3,
+          "p99": 200.1,
+          "max": 201.5
+        },
+        "control": {
+          "n": 160,
+          "p50": 149.5,
+          "p90": 195.8,
+          "p99": 199.9,
+          "max": 200
+        },
+        "store-read": {
+          "n": 160,
+          "p50": 148.3,
+          "p90": 197.1,
+          "p99": 200.1,
+          "max": 201.6
+        },
+        "store-write": {
+          "n": 160,
+          "p50": 137.7,
+          "p90": 192.3,
+          "p99": 199.9,
+          "max": 201.6
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": -0.5,
+          "ks": 0.043,
+          "ksCritical5pct": 0.116,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -1.7,
+          "ks": 0.072,
+          "ksCritical5pct": 0.116,
+          "flaggedAtReferenceP99": 0.006
+        },
+        "store-write": {
+          "medianShiftMs": -12.3,
+          "ks": 0.078,
+          "ksCritical5pct": 0.116,
+          "flaggedAtReferenceP99": 0.006
+        }
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 240,
+          "p50": 150.8,
+          "p90": 194,
+          "p99": 200.1,
+          "max": 200.3
+        },
+        "dummyBesideReal": {
+          "n": 240,
+          "p50": 146.6,
+          "p90": 195.6,
+          "p99": 199.8,
+          "max": 201.5
+        },
+        "medianShiftMs": -4.2,
+        "ks": 0.067,
+        "ksCritical5pct": 0.124,
+        "flaggedAtReferenceP99": 0.004
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 160,
+            "p50": 1,
+            "p90": 1.7,
+            "p99": 2.4,
+            "max": 2.6
+          },
+          "plaintext": {
+            "n": 160,
+            "p50": 1.5,
+            "p90": 2.7,
+            "p99": 7.1,
+            "max": 12.3
+          },
+          "seal": {
+            "n": 160,
+            "p50": 0.5,
+            "p90": 0.6,
+            "p99": 1.6,
+            "max": 1.8
+          },
+          "total": {
+            "n": 160,
+            "p50": 3.1,
+            "p90": 4.6,
+            "p99": 9.9,
+            "max": 13.7
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 160,
+            "p50": 1,
+            "p90": 1.5,
+            "p99": 2.5,
+            "max": 3.1
+          },
+          "plaintext": {
+            "n": 160,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.8,
+            "max": 0.8
+          },
+          "seal": {
+            "n": 160,
+            "p50": 0.4,
+            "p90": 0.6,
+            "p99": 1.6,
+            "max": 1.7
+          },
+          "total": {
+            "n": 160,
+            "p50": 1.5,
+            "p90": 2.1,
+            "p99": 3.5,
+            "max": 3.5
+          }
+        }
+      }
+    },
+    "hiddenPast300s": {
+      "cycles": 0,
+      "degradedCycles": 0,
+      "cellsSent": 0,
+      "cellsExpected": 0,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 0,
+          "degradedCycles": 0,
+          "cellsSent": 0,
+          "cellsExpected": 0,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 0,
+        "p50": null,
+        "p90": null,
+        "p99": null,
+        "max": null,
+        "beyondToleranceShare": null
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "control": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-read": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "store-write": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "versusDummy": {},
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        },
+        "dummyBesideReal": {
+          "n": 0,
+          "p50": null,
+          "p90": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {}
+    },
+    "hiddenAll": {
+      "cycles": 177,
+      "degradedCycles": 0,
+      "cellsSent": 1770,
+      "cellsExpected": 1770,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 0,
+          "cellsSent": 590,
+          "cellsExpected": 590,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 0,
+          "cellsSent": 590,
+          "cellsExpected": 590,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 59,
+          "degradedCycles": 0,
+          "cellsSent": 590,
+          "cellsExpected": 590,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 1800,
+        "p50": 151.1,
+        "p90": 195.2,
+        "p99": 200,
+        "max": 201.6,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 1200,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.6
+        },
+        "control": {
+          "n": 200,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.4
+        },
+        "store-read": {
+          "n": 200,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.2,
+          "max": 0.9
+        },
+        "store-write": {
+          "n": 200,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.4,
+          "max": 0.4
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 1200,
+          "p50": 151.7,
+          "p90": 195.1,
+          "p99": 200,
+          "max": 201.5
+        },
+        "control": {
+          "n": 200,
+          "p50": 153.2,
+          "p90": 195.9,
+          "p99": 199.9,
+          "max": 200
+        },
+        "store-read": {
+          "n": 200,
+          "p50": 151.1,
+          "p90": 197.1,
+          "p99": 200.1,
+          "max": 201.6
+        },
+        "store-write": {
+          "n": 200,
+          "p50": 144.9,
+          "p90": 192.3,
+          "p99": 199.9,
+          "max": 201.6
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": 1.5,
+          "ks": 0.061,
+          "ksCritical5pct": 0.104,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.6,
+          "ks": 0.057,
+          "ksCritical5pct": 0.104,
+          "flaggedAtReferenceP99": 0.01
+        },
+        "store-write": {
+          "medianShiftMs": -6.8,
+          "ks": 0.067,
+          "ksCritical5pct": 0.104,
+          "flaggedAtReferenceP99": 0.005
+        }
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 300,
+          "p50": 152,
+          "p90": 194.7,
+          "p99": 200.1,
+          "max": 200.3
+        },
+        "dummyBesideReal": {
+          "n": 300,
+          "p50": 150.7,
+          "p90": 195.5,
+          "p99": 199.8,
+          "max": 201.5
+        },
+        "medianShiftMs": -1.3,
+        "ks": 0.057,
+        "ksCritical5pct": 0.111,
+        "flaggedAtReferenceP99": 0.003
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 200,
+            "p50": 1.1,
+            "p90": 1.7,
+            "p99": 2.4,
+            "max": 2.6
+          },
+          "plaintext": {
+            "n": 200,
+            "p50": 1.5,
+            "p90": 2.9,
+            "p99": 7.1,
+            "max": 12.3
+          },
+          "seal": {
+            "n": 200,
+            "p50": 0.5,
+            "p90": 0.6,
+            "p99": 1.6,
+            "max": 1.8
+          },
+          "total": {
+            "n": 200,
+            "p50": 3.2,
+            "p90": 4.8,
+            "p99": 9.9,
+            "max": 13.7
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 200,
+            "p50": 1.1,
+            "p90": 1.5,
+            "p99": 2.5,
+            "max": 3.1
+          },
+          "plaintext": {
+            "n": 200,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.8,
+            "max": 0.8
+          },
+          "seal": {
+            "n": 200,
+            "p50": 0.4,
+            "p90": 0.6,
+            "p99": 1.6,
+            "max": 1.7
+          },
+          "total": {
+            "n": 200,
+            "p50": 1.5,
+            "p90": 2.1,
+            "p99": 3.5,
+            "max": 3.5
+          }
+        }
+      }
+    },
+    "visibleAgain": {
+      "cycles": 6,
+      "degradedCycles": 0,
+      "cellsSent": 60,
+      "cellsExpected": 60,
+      "byEdge": [
+        {
+          "edge": 0,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 2,
+          "degradedCycles": 0,
+          "cellsSent": 20,
+          "cellsExpected": 20,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 1,
+          "role": "busy",
+          "phaseMs": 0,
+          "cycles": 2,
+          "degradedCycles": 0,
+          "cellsSent": 20,
+          "cellsExpected": 20,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        },
+        {
+          "edge": 2,
+          "role": "idle",
+          "phaseMs": 0,
+          "cycles": 2,
+          "degradedCycles": 0,
+          "cellsSent": 20,
+          "cellsExpected": 20,
+          "degradeEvents": {},
+          "degradedCyclesByReason": {}
+        }
+      ],
+      "slotWakeUpLatenessMs": {
+        "n": 90,
+        "p50": 10,
+        "p90": 10.8,
+        "p99": 198,
+        "max": 198,
+        "beyondToleranceShare": 0
+      },
+      "productionMs": {
+        "dummy": {
+          "n": 60,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "control": {
+          "n": 10,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "store-read": {
+          "n": 10,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "store-write": {
+          "n": 10,
+          "p50": 0,
+          "p90": 0.1,
+          "p99": 0.1,
+          "max": 0.1
+        }
+      },
+      "offsetMs": {
+        "dummy": {
+          "n": 60,
+          "p50": 10.3,
+          "p90": 10.8,
+          "p99": 198,
+          "max": 198
+        },
+        "control": {
+          "n": 10,
+          "p50": 8,
+          "p90": 10.5,
+          "p99": 10.5,
+          "max": 10.5
+        },
+        "store-read": {
+          "n": 10,
+          "p50": 10,
+          "p90": 191.2,
+          "p99": 191.2,
+          "max": 191.2
+        },
+        "store-write": {
+          "n": 10,
+          "p50": 9,
+          "p90": 191.2,
+          "p99": 191.2,
+          "max": 191.2
+        }
+      },
+      "versusDummy": {
+        "control": {
+          "medianShiftMs": -2.3,
+          "ks": 0.333,
+          "ksCritical5pct": 0.465,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-read": {
+          "medianShiftMs": -0.3,
+          "ks": 0.217,
+          "ksCritical5pct": 0.465,
+          "flaggedAtReferenceP99": 0
+        },
+        "store-write": {
+          "medianShiftMs": -1.3,
+          "ks": 0.317,
+          "ksCritical5pct": 0.465,
+          "flaggedAtReferenceP99": 0
+        }
+      },
+      "fallbackDummies": 0,
+      "crossEdge": {
+        "dummyBesideDummy": {
+          "n": 15,
+          "p50": 10.3,
+          "p90": 10.8,
+          "p99": 198,
+          "max": 198
+        },
+        "dummyBesideReal": {
+          "n": 15,
+          "p50": 9,
+          "p90": 10.6,
+          "p99": 191.2,
+          "max": 191.2
+        },
+        "medianShiftMs": -1.3,
+        "ks": 0.333,
+        "ksCritical5pct": 0.497,
+        "flaggedAtReferenceP99": 0
+      },
+      "crossGrid": {},
+      "realCellStagesMs": {
+        "store-write": {
+          "read": {
+            "n": 10,
+            "p50": 0.9,
+            "p90": 1.1,
+            "p99": 1.1,
+            "max": 1.1
+          },
+          "plaintext": {
+            "n": 10,
+            "p50": 0.9,
+            "p90": 4.3,
+            "p99": 4.3,
+            "max": 4.3
+          },
+          "seal": {
+            "n": 10,
+            "p50": 0.3,
+            "p90": 0.3,
+            "p99": 0.3,
+            "max": 0.3
+          },
+          "total": {
+            "n": 10,
+            "p50": 2,
+            "p90": 5.7,
+            "p99": 5.7,
+            "max": 5.7
+          }
+        },
+        "store-read": {
+          "read": {
+            "n": 10,
+            "p50": 0.7,
+            "p90": 0.8,
+            "p99": 0.8,
+            "max": 0.8
+          },
+          "plaintext": {
+            "n": 10,
+            "p50": 0,
+            "p90": 0.1,
+            "p99": 0.1,
+            "max": 0.1
+          },
+          "seal": {
+            "n": 10,
+            "p50": 0.3,
+            "p90": 0.3,
+            "p99": 0.3,
+            "max": 0.3
+          },
+          "total": {
+            "n": 10,
+            "p50": 1,
+            "p90": 1.1,
+            "p99": 1.1,
+            "max": 1.1
+          }
+        }
+      }
+    }
+  },
+  "cellOffsetsFile": "results-2026-11-26-fallback-one-grid-500ms.offsets.tsv"
+}

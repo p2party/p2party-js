@@ -68,6 +68,7 @@ import {
 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 import type { LibCrypto } from "../../../src/cryptography/libcrypto";
+import type { PublicStoreCheckpointV1 } from "../../../src/blindRendezvous/publicWindow";
 import type { StoreDescriptorV1 } from "../../../src/blindRendezvous/storeDescriptor";
 import type {
   PublicAppendResultV1,
@@ -4077,6 +4078,423 @@ describe("prototype store client verified run", () => {
       first.stop();
       second.stop();
     }
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Overlapping scans
+   *
+   * Two scans of one store can be out at once, and the full chain
+   * verification awaits. These hold chosen verifications and release them
+   * in a chosen order, through the production entry point.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Two processes holding the store's key, so one store with two branches,
+   * whose window 0 is the same on both: every slot of it carries the same
+   * appended object, so nothing in it is random cover, and every signature
+   * over it is the same. Windows 1 and 2 hold cover from each process's own
+   * CSPRNG, so each branch's window 1 links to the shared window 0 and the
+   * two differ: an equivocation over window 1, and window 2 of one branch
+   * does not link to window 1 of the other.
+   */
+  const twoBranches = async (): Promise<{
+    readonly clock: Clock;
+    readonly first: StoreProcess;
+    readonly second: StoreProcess;
+    readonly stop: () => void;
+  }> => {
+    const clock: Clock = { now: WINDOW_START };
+    const first = await startStore(clock);
+    const second = await startStore(clock);
+    for (
+      let ordinal = 0;
+      ordinal < profile.cohortAllocationsPerWindow;
+      ordinal++
+    ) {
+      const keyPair = await newKeyPair(cryptoModule);
+      const request = {
+        version: 1 as const,
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: CHAIN_START,
+        allocationEd25519PublicKey: keyPair.publicKey,
+        privacyPassToken: new Uint8Array(32),
+      };
+      const leases = await Promise.all(
+        [first, second].map(async (store) => {
+          const result = await store.core.allocate(request);
+          if (result.kind !== "allocated") throw new Error("expected a lease");
+          return result.lease;
+        }),
+      );
+      expect(leases[0].allocationOrdinal).toBe(ordinal);
+      expect(leases[1].allocationOrdinal).toBe(ordinal);
+      for (const sizeClass of profile.sizeClasses)
+        for (let entry = 0; entry < sizeClass.appendSchedule.length; entry++) {
+          const object = new Uint8Array(
+            carrierObjectWireBytes(profile, sizeClass.id, PROFILE_HASH),
+          ).fill(0x10 + ordinal * 8 + entry);
+          for (const [index, store] of [first, second].entries()) {
+            const result = await store.core.append({
+              version: 1,
+              bucket: {
+                deliveryProfileHash: PROFILE_HASH,
+                ingressWindow: CHAIN_START,
+                sizeClass: sizeClass.id,
+              },
+              exactFixedObject: object,
+              admission: await buildAppendAdmission(
+                leases[index],
+                keyPair.secretKey,
+                sizeClass.id,
+                entry,
+                object,
+                cryptoModule,
+              ),
+            });
+            expect(result.status).toBe("stored");
+          }
+        }
+    }
+    clock.now = FINALIZE_AT + 2n * profile.deliveryWindowMs;
+    for (const store of [first, second])
+      expect(await store.core.finalizeDue()).toEqual([
+        CHAIN_START,
+        CHAIN_START + 1n,
+        CHAIN_START + 2n,
+      ]);
+    const hashOf = async (store: StoreProcess, window: bigint) =>
+      hex(await publicStoreCheckpointHash(await checkpointOf(store, window)));
+    expect(await hashOf(first, CHAIN_START)).toBe(
+      await hashOf(second, CHAIN_START),
+    );
+    expect(await hashOf(first, CHAIN_START + 1n)).not.toBe(
+      await hashOf(second, CHAIN_START + 1n),
+    );
+    return {
+      clock,
+      first,
+      second,
+      stop: () => {
+        first.stop();
+        second.stop();
+      },
+    };
+  };
+
+  const checkpointOf = async (
+    store: StoreProcess,
+    window: bigint,
+  ): Promise<PublicStoreCheckpointV1> => {
+    const read = await store.core.readCheckpoint(PROFILE_HASH, window);
+    if (read.kind !== "finalized") throw new Error("expected a checkpoint");
+    return read.checkpoint;
+  };
+
+  /** A transport that reads each window from the branch the test names. */
+  const routedBy = (
+    branches: Map<bigint, string>,
+    fallback: string,
+  ): typeof fetch =>
+    ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const window = /\/(\d+)(?:\/\d+\/\d+)?$/.exec(url.pathname);
+      const origin =
+        window === null
+          ? fallback
+          : (branches.get(BigInt(window[1])) ?? fallback);
+      return fetch(`${origin}${url.pathname}`, init);
+    }) as typeof fetch;
+
+  /**
+   * Hold a scan's full chain verification at its last await, until released.
+   *
+   * A scan hashes its own checkpoint once before it decides the chain, and
+   * the full verifier hashes the run's head again as its last step before it
+   * returns a verified run: so the second digest whose output is that
+   * checkpoint's hash is the verifier finishing. Holding it there, the run
+   * it verified is decided, and what the client does with it waits.
+   */
+  const verifierGate = (): {
+    readonly hold: (checkpointHash: Uint8Array) => {
+      readonly entered: Promise<void>;
+      readonly release: () => void;
+    };
+    readonly restore: () => void;
+  } => {
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    const armed: {
+      readonly target: string;
+      seen: number;
+      readonly enter: () => void;
+      readonly wait: Promise<void>;
+    }[] = [];
+    const spy = spyOn(crypto.subtle, "digest").mockImplementation(
+      async (algorithm, data) => {
+        const output = await digest(algorithm, data);
+        const outputHex = hex(new Uint8Array(output));
+        const holding = armed.find((entry) => entry.target === outputHex);
+        if (holding !== undefined) {
+          holding.seen += 1;
+          if (holding.seen === 2) {
+            armed.splice(armed.indexOf(holding), 1);
+            holding.enter();
+            await holding.wait;
+          }
+        }
+        return output;
+      },
+    );
+    return {
+      hold: (checkpointHash) => {
+        let enter!: () => void;
+        let release!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const wait = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        armed.push({ target: hex(checkpointHash), seen: 0, enter, wait });
+        return { entered, release };
+      },
+      restore: () => spy.mockRestore(),
+    };
+  };
+
+  /** Wait until a scan's verification is held, or fail if the scan ends first. */
+  const heldOrFail = async (
+    held: { readonly entered: Promise<void> },
+    scan: Promise<unknown>,
+  ): Promise<void> => {
+    await Promise.race([
+      held.entered,
+      scan.then(() => {
+        throw new Error("the scan ended without its verification being held");
+      }),
+    ]);
+  };
+
+  /**
+   * Window 0 and window 1 of the first branch scanned at once, each scan's
+   * full verification held: the first holds a snapshot of window 0 alone,
+   * the second one of both.
+   */
+  const overlapped = async (
+    client: PrototypeStoreClient,
+    gate: ReturnType<typeof verifierGate>,
+    branch: StoreProcess,
+  ) => {
+    const olderHeld = gate.hold(
+      await publicStoreCheckpointHash(await checkpointOf(branch, CHAIN_START)),
+    );
+    const older = client.scanWindow(CHAIN_START);
+    await heldOrFail(olderHeld, older);
+    const newerHeld = gate.hold(
+      await publicStoreCheckpointHash(
+        await checkpointOf(branch, CHAIN_START + 1n),
+      ),
+    );
+    const newer = client.scanWindow(CHAIN_START + 1n);
+    await heldOrFail(newerHeld, newer);
+    return { older, olderHeld, newer, newerHeld };
+  };
+
+  test("a run verified from a snapshot that an overlapping scan has outgrown is not kept", async () => {
+    const world = await twoBranches();
+    const gate = verifierGate();
+    try {
+      const branches = new Map<bigint, string>();
+      const client = await connect(world.first.origin, world.clock, {
+        fetch: routedBy(branches, world.first.origin),
+      });
+      const { older, olderHeld, newer, newerHeld } = await overlapped(
+        client,
+        gate,
+        world.first,
+      );
+      // The verification of window 0 alone finishes while window 1 has been
+      // observed meanwhile: what it verified is not the run any more.
+      olderHeld.release();
+      expect((await older).status).toBe("finalized");
+      // Window 2 of the second branch does not link to the observed window
+      // 1. A run kept from the outgrown snapshot (window 0 alone) has no
+      // window 1 to hold it against, so it would take window 2 unchecked.
+      branches.set(CHAIN_START + 2n, world.second.origin);
+      expect((await client.scanWindow(CHAIN_START + 2n)).status).toBe(
+        "finalized",
+      );
+      expect(client.inert).toBe(true);
+      expect(client.faults.map((fault) => fault.kind)).toEqual(["chain-fault"]);
+      expect(client.faults[0].detail).toContain("chain-breach");
+      newerHeld.release();
+      await newer;
+    } finally {
+      gate.restore();
+      world.stop();
+    }
+  });
+
+  test("an older verification that finishes last does not replace a newer run", async () => {
+    const world = await twoBranches();
+    const gate = verifierGate();
+    try {
+      const branches = new Map<bigint, string>();
+      const client = await connect(world.first.origin, world.clock, {
+        fetch: routedBy(branches, world.first.origin),
+      });
+      const { older, olderHeld, newer, newerHeld } = await overlapped(
+        client,
+        gate,
+        world.first,
+      );
+      // The newer verification (windows 0 and 1) finishes first and is the
+      // run; the older one (window 0 alone) finishes after it.
+      newerHeld.release();
+      expect((await newer).status).toBe("finalized");
+      olderHeld.release();
+      expect((await older).status).toBe("finalized");
+      expect(client.faults).toEqual([]);
+      // The run still holds window 1, so window 2 of the other branch is
+      // held against it and refused.
+      branches.set(CHAIN_START + 2n, world.second.origin);
+      await client.scanWindow(CHAIN_START + 2n);
+      expect(client.inert).toBe(true);
+      expect(client.faults.map((fault) => fault.kind)).toEqual(["chain-fault"]);
+      expect(client.faults[0].detail).toContain("chain-breach");
+    } finally {
+      gate.restore();
+      world.stop();
+    }
+  });
+
+  test("a second checkpoint for a window already observed never takes the fast path, and the store is blamed for equivocation", async () => {
+    for (const order of ["older first", "newer first"] as const) {
+      const world = await twoBranches();
+      const gate = verifierGate();
+      try {
+        const counting = countingModule();
+        const branches = new Map<bigint, string>();
+        const client = await connectCounting(
+          world.first.origin,
+          world.clock,
+          counting,
+          routedBy(branches, world.first.origin),
+        );
+        const { older, olderHeld, newer, newerHeld } = await overlapped(
+          client,
+          gate,
+          world.first,
+        );
+        if (order === "older first") {
+          olderHeld.release();
+          await older;
+        } else {
+          newerHeld.release();
+          await newer;
+          olderHeld.release();
+          await older;
+        }
+        // Window 1 of the other branch: the same predecessor, another
+        // checkpoint. It goes to the full verifier, which re-verifies the
+        // three observations it then holds, and names the equivocation.
+        branches.set(CHAIN_START + 1n, world.second.origin);
+        counting.take();
+        await client.scanWindow(CHAIN_START + 1n);
+        expect([order, counting.take()]).toEqual([
+          order,
+          OWN_VERIFICATIONS + 3 * PER_REVERIFIED_OBSERVATION,
+        ]);
+        expect([order, client.inert]).toEqual([order, true]);
+        expect(client.faults.map((fault) => fault.kind)).toEqual([
+          "chain-fault",
+        ]);
+        expect(client.faults[0].detail).toContain("checkpoint-conflict");
+        if (order === "older first") {
+          newerHeld.release();
+          await newer;
+        }
+      } finally {
+        gate.restore();
+        world.stop();
+      }
+    }
+  });
+
+  test("a run verified across a blame is not kept", async () => {
+    await withStore(async (store, clock) => {
+      await finalizeThrough(store, clock, CHAIN_START + 4n);
+      // A blame that observes nothing: a signed out-of-range for window 3,
+      // inside the stated retention.
+      const value = {
+        version: 1 as const,
+        storeId: store.core.storeId,
+        descriptorHash: store.core.descriptorHash,
+        deliveryProfileHash: PROFILE_HASH,
+        ingressWindow: CHAIN_START + 3n,
+        storeIngressWindow: CHAIN_START + 4n,
+        status: "out-of-range" as const,
+      };
+      const refusal = encodePublicStoreCheckpointReadV1({
+        kind: "status",
+        value,
+        storeSignature: await sign(
+          await publicCheckpointStatusSigningHash(value),
+          await storeSecretKey(),
+          cryptoModule,
+        ),
+      });
+      const refusingWindow3 = ((
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const url = new URL(String(input));
+        if (
+          url.pathname ===
+          `${PROTOTYPE_STORE_ROUTES.checkpoint}/${PROFILE_HEX}/${String(CHAIN_START + 3n)}`
+        )
+          return Promise.resolve(
+            new Response(asBody(refusal), {
+              status: 200,
+              headers: headersOf(PROTOTYPE_STORE_MEDIA_TYPES.checkpoint),
+            }),
+          );
+        return fetch(`${store.origin}${url.pathname}`, init);
+      }) as typeof fetch;
+      const counting = countingModule();
+      const client = await connectCounting(
+        store.origin,
+        clock,
+        counting,
+        refusingWindow3,
+      );
+      const gate = verifierGate();
+      try {
+        const held = gate.hold(
+          await publicStoreCheckpointHash(
+            await checkpointOf(store, CHAIN_START),
+          ),
+        );
+        const first = client.scanWindow(CHAIN_START);
+        await heldOrFail(held, first);
+        expect((await client.scanWindow(CHAIN_START + 3n)).status).toBe(
+          "unreachable",
+        );
+        expect(client.faults.map((fault) => fault.kind)).toEqual([
+          "retention-breach",
+        ]);
+        held.release();
+        expect((await first).status).toBe("finalized");
+      } finally {
+        gate.restore();
+      }
+      // Verified before the blame and finished after it: not kept, so the
+      // next scan verifies everything observed.
+      counting.take();
+      await client.scanWindow(CHAIN_START + 1n);
+      expect(counting.take()).toBe(
+        OWN_VERIFICATIONS + 2 * PER_REVERIFIED_OBSERVATION,
+      );
+    });
   });
 
   test("the verified run is dropped on blame, on a changed descriptor and on reconnect", async () => {

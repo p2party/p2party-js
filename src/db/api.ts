@@ -13,6 +13,11 @@ import type {
   IdentityX25519,
 } from "./types";
 import {
+  DATABASE_UPGRADE_BLOCKED,
+  DatabaseUpgradeBlockedError,
+  DatabaseWorkerError,
+} from "./dbErrors";
+import {
   readIdentityEd25519AtClientBoundary,
   wipeUnclaimedWorkerSecret,
   writeIdentityEd25519AtClientBoundary,
@@ -32,10 +37,11 @@ const pending = new Map<
 >();
 
 worker.onmessage = (e: MessageEvent) => {
-  const { id, result, error } = e.data as {
+  const { id, result, error, errorCode } = e.data as {
     id: number;
     result: unknown;
     error: unknown;
+    errorCode?: string;
   };
   const p = pending.get(id);
   if (!p) {
@@ -46,7 +52,12 @@ worker.onmessage = (e: MessageEvent) => {
     return;
   }
   pending.delete(id);
-  if (error) p.reject(error);
+  if (error)
+    p.reject(
+      errorCode === DATABASE_UPGRADE_BLOCKED
+        ? new DatabaseUpgradeBlockedError()
+        : error,
+    );
   else p.resolve(result);
 };
 
@@ -65,7 +76,7 @@ const rejectAllPending = (reason: Error): void => {
 
 worker.onerror = (event) => {
   rejectAllPending(
-    new Error(
+    new DatabaseWorkerError(
       `p2party: the database worker failed: ${
         (event as ErrorEvent).message || "unknown error"
       }`,
@@ -75,7 +86,9 @@ worker.onerror = (event) => {
 
 worker.onmessageerror = () => {
   rejectAllPending(
-    new Error("p2party: a database worker message could not be deserialized"),
+    new DatabaseWorkerError(
+      "p2party: a database worker message could not be deserialized",
+    ),
   );
 };
 
@@ -89,7 +102,7 @@ const callWorkerOwned = (
     // hang rather than fail. Say why instead of stalling the caller.
     if (workerSrc.length === 0) {
       reject(
-        new Error(
+        new DatabaseWorkerError(
           `p2party: cannot run "${method}" — the database worker bundle is ` +
             "missing (INDEXEDDB_WORKER_JS was not inlined at build time).",
         ),
@@ -260,6 +273,27 @@ export const setDBChunk = (chunk: Chunk) => callWorker("setDBChunk", chunk);
 // so a duplicate can never be mistaken for the completing chunk.
 export const storeReceiveChunk = (chunk: ReceiveChunk) =>
   callWorker("storeReceiveChunk", chunk);
+
+// Hash a received file held pending verification (storeReceiveChunk returned
+// `verification`) against its whole-file hash. Runs outside the per-file
+// lock; the worker keeps serving other requests between reads.
+export const verifyReceivedFile = (merkleRootHex: string, token: string) =>
+  callWorker("verifyReceivedFile", merkleRootHex, token);
+
+// Commit a verification's verdict (complete, or drop the file as failed) when
+// `commit` is true; otherwise leave the file to be verified again by the next
+// copy of its last chunk.
+export const settleReceivedFileVerification = (
+  merkleRootHex: string,
+  token: string,
+  commit: boolean,
+) => callWorker("settleReceivedFileVerification", merkleRootHex, token, commit);
+
+// Stop a running verification at its next read; settle it with commit false.
+export const abortReceivedFileVerification = (
+  merkleRootHex: string,
+  token: string,
+) => callWorker("abortReceivedFileVerification", merkleRootHex, token);
 
 // Open the finished (all offsets filled) OPFS file for a fully-received message
 // and hand it back as a disk-backed File — no reassembly. Returns null if OPFS

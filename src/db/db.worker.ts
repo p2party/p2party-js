@@ -8,9 +8,12 @@ import {
   CHUNK_LEN,
   MAX_MESSAGE_SIZE,
   OPFS_REASSEMBLE_DIR,
+  RECEIVE_VERIFY_BATCH_CHUNKS,
+  RECEIVE_VERIFY_LEASE_RENEW_MS,
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
+import { DatabaseUpgradeBlockedError } from "./dbErrors";
 import type { RepoSchema } from "./src/getDB";
 import { Sha512Stream } from "./sha512Stream";
 import { uint8ArrayToHex } from "../utils/uint8array";
@@ -37,8 +40,12 @@ import type {
   Chunk,
   ChunkLeafHash,
   ReceiveChunk,
+  ReceiveChunkStored,
   ReceiveChunkStoreFailure,
   ReceiveChunkStoreResult,
+  ReceiveVerificationMarker,
+  ReceiveVerificationOutcome,
+  ReceiveVerificationVerdict,
   ReceiveDeleteGuard,
   ExpiredReceiveTransfer,
   SendQueue,
@@ -1004,10 +1011,10 @@ async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
 // chunks read as zeros and resume just overwrites the gaps.
 //
 // uniformSize (real bytes per full chunk) is NOT in the wire metadata and is a
-// per-send tunable, so it is learned empirically: max(realLen) over received
-// chunks — exact once >=2 chunks have been seen, or immediately from chunk 0
-// (always a full chunk unless the file is a single chunk). The <=1 chunk that
-// arrives before uniformSize is known (a non-zero index as the first received
+// per-send tunable, so it is learned from the transfer's own chunks and kept
+// in its running manifest (receiveManifest.ts): chunk 0's length, or the larger
+// of the first two chunks held (only the last chunk is short). The one chunk
+// that can arrive before it is known (a non-zero index as the transfer's first
 // chunk) can't be offset-placed yet, so it is kept in IndexedDB WITH its bytes
 // (durable, acked normally) and migrated into OPFS later by getReceiveFile.
 //
@@ -1019,10 +1026,8 @@ async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
 
 interface ReceiveFileEntry {
   access: OPFSSyncAccessHandle;
-  uniformSize: number; // real bytes per full chunk; 0 until known
-  uniformKnown: boolean;
-  maxRealLen: number;
-  seenCount: number;
+  /** Readers that need the handle to stay open; never evicted while > 0. */
+  pins: number;
 }
 
 // One open sync-access-handle per active transfer, held across all its writes.
@@ -1096,10 +1101,7 @@ async function openReceiveHandleImpl(
       access.truncate(totalSize);
     return {
       access,
-      uniformSize: 0,
-      uniformKnown: false,
-      maxRealLen: 0,
-      seenCount: 0,
+      pins: 0,
     };
   } catch (error) {
     // createSyncAccessHandle is exclusive. Never strand that lock when setup or
@@ -1124,8 +1126,8 @@ async function ensureReceiveHandle(
   // Cap open handles: evict the oldest (never the one we're opening) so a set of
   // stalled, never-completed transfers can't pin exclusive handles forever.
   if (opfsReceiving.size >= MAX_OPEN_RECEIVE_HANDLES) {
-    for (const k of opfsReceiving.keys()) {
-      if (k !== merkleRootHex) {
+    for (const [k, open] of opfsReceiving) {
+      if (k !== merkleRootHex && open.pins === 0) {
         await fnCloseReceiveFile(k);
         break;
       }
@@ -1161,41 +1163,24 @@ function writeReceiveAt(
   }
 }
 
-// Place a real chunk's bytes into the OPFS file if its offset is computable;
-// return false if it isn't yet (uniformSize unknown for a non-zero chunk) or
-// OPFS is unavailable — in which case the caller keeps the bytes in IndexedDB.
+// Place a real chunk's bytes into the OPFS file at chunkIndex × uniformSize,
+// the uniform size of the transfer's manifest with this chunk added. Return
+// false when that size is not known yet (a lone out-of-order chunk) or OPFS is
+// unavailable; the caller then keeps the bytes in IndexedDB. The offset never
+// comes from what one handle happened to see: after a reload or an eviction a
+// fresh handle may first see only the short last chunk.
 async function placeReceiveChunk(
   merkleRootHex: string,
   chunkIndex: number,
-  realLen: number,
+  uniformSize: number,
   totalSize: number,
   data: ArrayBuffer,
 ): Promise<boolean> {
+  if (uniformSize <= 0) return false;
   const entry = await ensureReceiveHandle(merkleRootHex, totalSize);
   if (!entry) return false; // OPFS unavailable
 
-  entry.maxRealLen = Math.max(entry.maxRealLen, realLen);
-  entry.seenCount += 1;
-
-  if (!entry.uniformKnown) {
-    if (chunkIndex === 0) {
-      // Chunk 0 is a full chunk whenever the file has >1 chunk, so it pins
-      // uniformSize exactly. A single-chunk file (realLen === totalSize) writes
-      // at offset 0 regardless, so uniformSize stays irrelevant.
-      if (realLen < totalSize) entry.uniformSize = realLen;
-      entry.uniformKnown = true;
-    } else if (entry.seenCount >= 2) {
-      // Any 2 chunks include >=1 full one (only the last chunk is short), so
-      // max(realLen) is the exact uniform size.
-      entry.uniformSize = entry.maxRealLen;
-      entry.uniformKnown = true;
-    }
-  }
-
-  if (!entry.uniformKnown) return false; // first non-zero chunk — keep in IDB
-
-  const offset = chunkIndex === 0 ? 0 : chunkIndex * entry.uniformSize;
-  writeReceiveAt(entry.access, offset, data);
+  writeReceiveAt(entry.access, chunkIndex * uniformSize, data);
   // Flush so the bytes are durable BEFORE fnStoreReceiveChunk commits the
   // (bytesless) have-set record. Without this a bytesless record could reach
   // disk while its OPFS write is still buffered (independent storage backends,
@@ -1220,88 +1205,414 @@ function readReceiveAt(
   }
 }
 
-// SHA-512 of a received file, reading each byte once in chunk order: from OPFS
-// for chunks placed there, from the record for chunks kept in IndexedDB, and
-// from `pending` for the chunk being stored now (not yet recorded). Returns
-// undefined when a chunk's bytes are in OPFS but no handle was supplied.
-async function hashReceivedFileOnce(
+// ---------------------------------------------------------------------------
+// Whole-file verification of a received file.
+//
+// The chunk that would complete a file is not recorded by storeReceiveChunk:
+// it is held on the row (receiveVerification marker) with its bytes in OPFS,
+// and the caller then
+//   1. verifyReceivedFile: hashes the stored file once, in chunk order,
+//      outside the per-file lock and yielding between batches, so neither the
+//      file's other requests nor the worker as a whole wait for it;
+//   2. settleReceivedFileVerification: under the per-file lock, commits the
+//      verdict (complete, or drop the file as failed) or, when told not to
+//      commit, leaves the marker for the next copy of that chunk to verify
+//      again.
+// While a verification runs in this worker, any copy of any of the file's
+// chunks counts as held and changes nothing. A marker no running
+// verification owns (the page reloaded, or the caller did not commit) is
+// verified again when that chunk next arrives.
+// ---------------------------------------------------------------------------
+
+interface LiveVerification {
+  readonly token: string;
+  aborted: boolean;
+  verdict?: Promise<ReceiveVerificationVerdict>;
+}
+const liveVerifications = new Map<string, LiveVerification>();
+
+class VerificationAborted extends Error {}
+
+const renewVerificationLease = async (
   merkleRoot: string,
-  manifest: ReceiveManifest,
-  pending: { chunkIndex: number; data: ArrayBuffer },
-  entry: ReceiveFileEntry | undefined,
-): Promise<string | undefined> {
-  const hasher = new Sha512Stream();
-  const scratch = new Uint8Array(manifest.uniformSize);
-  let next = 0;
+  token: string,
+): Promise<void> => {
   const db = await getDB();
   try {
-    const tx = db.transaction("chunks", "readonly");
-    let cursor = await tx.store.openCursor(
-      IDBKeyRange.bound([merkleRoot, 0], [merkleRoot, Number.MAX_SAFE_INTEGER]),
-    );
-    while (cursor) {
-      const record = cursor.value;
-      if (next === pending.chunkIndex) {
-        hasher.update(new Uint8Array(pending.data));
-        next += 1;
-      }
-      const length = record.realLen ?? -1;
-      if (record.chunkIndex !== next || length <= 0 || length > scratch.length)
-        throw new Error("received file layout does not match its manifest");
-      if (record.data) {
-        if (record.data.byteLength !== length)
-          throw new Error("received chunk length does not match its record");
-        hasher.update(new Uint8Array(record.data));
-      } else {
-        if (!entry) return undefined;
-        const bytes = scratch.subarray(0, length);
-        readReceiveAt(entry.access, next * manifest.uniformSize, bytes);
-        hasher.update(bytes);
-      }
-      next += 1;
-      cursor = await cursor.continue();
-    }
-    if (next === pending.chunkIndex) {
-      hasher.update(new Uint8Array(pending.data));
-      next += 1;
-    }
-    if (next !== manifest.count)
-      throw new Error("received file layout does not match its manifest");
+    const tx = db.transaction("receiveActivity", "readwrite");
+    const activity = await tx.store.get(merkleRoot);
+    if (activity?.writeToken !== token) throw new VerificationAborted();
+    await tx.store.put({
+      ...activity,
+      leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+      lastActivityAt: Date.now(),
+    });
     await tx.done;
   } finally {
     db.close();
   }
+};
+
+// The chunk records `first`..`last` of a file, in index order.
+const readChunkRecords = async (
+  merkleRoot: string,
+  first: number,
+  last: number,
+): Promise<Chunk[]> => {
+  const db = await getDB();
+  try {
+    return await db.getAll(
+      "chunks",
+      IDBKeyRange.bound([merkleRoot, first], [merkleRoot, last]),
+    );
+  } finally {
+    db.close();
+  }
+};
+
+interface VerificationStart {
+  row: MessageData;
+  marker: ReceiveVerificationMarker;
+  /** The manifest with the held chunk added: the whole file. */
+  manifest: ReceiveManifest;
+}
+
+// Hash the stored file once, in chunk order: from OPFS for chunks placed
+// there, from a record or the marker for bytes kept in IndexedDB. Yields after
+// every batch so the worker answers other requests in between.
+async function hashHeldFile(
+  merkleRoot: string,
+  token: string,
+  { row, marker, manifest }: VerificationStart,
+  live: LiveVerification,
+): Promise<string> {
+  const hasher = new Sha512Stream();
+  const scratch = new Uint8Array(manifest.uniformSize);
+  let handle: ReceiveFileEntry | undefined;
+  const fromOpfs = async (index: number, length: number) => {
+    if (!handle) {
+      const opened = await ensureReceiveHandle(merkleRoot, row.totalSize);
+      if (!opened)
+        throw new Error("received file bytes are in unavailable OPFS");
+      handle = opened;
+      handle.pins += 1;
+    }
+    const bytes = scratch.subarray(0, length);
+    readReceiveAt(handle.access, index * manifest.uniformSize, bytes);
+    return bytes;
+  };
+  let renewedAt = Date.now();
+  try {
+    for (
+      let first = 0;
+      first < manifest.count;
+      first += RECEIVE_VERIFY_BATCH_CHUNKS
+    ) {
+      if (live.aborted) throw new VerificationAborted();
+      const last =
+        Math.min(manifest.count, first + RECEIVE_VERIFY_BATCH_CHUNKS) - 1;
+      const records = await readChunkRecords(merkleRoot, first, last);
+      let next = 0;
+      for (let index = first; index <= last; index++) {
+        if (index === marker.chunkIndex) {
+          hasher.update(
+            marker.data
+              ? new Uint8Array(marker.data)
+              : await fromOpfs(index, marker.realLen),
+          );
+          continue;
+        }
+        const record = records[next++] as Chunk | undefined;
+        const length = record?.realLen ?? -1;
+        if (
+          record?.chunkIndex !== index ||
+          length <= 0 ||
+          length > scratch.length
+        )
+          throw new Error("received file layout does not match its manifest");
+        if (record.data) {
+          if (record.data.byteLength !== length)
+            throw new Error("received chunk length does not match its record");
+          hasher.update(new Uint8Array(record.data));
+        } else hasher.update(await fromOpfs(index, length));
+      }
+      if (next !== records.length)
+        throw new Error("received file layout does not match its manifest");
+      if (Date.now() - renewedAt >= RECEIVE_VERIFY_LEASE_RENEW_MS) {
+        await renewVerificationLease(merkleRoot, token);
+        renewedAt = Date.now();
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  } finally {
+    if (handle) handle.pins -= 1;
+  }
+  if (live.aborted) throw new VerificationAborted();
   return uint8ArrayToHex(hasher.digest());
 }
 
-async function hashReceivedFile(
+async function runVerification(
   merkleRoot: string,
-  totalSize: number,
-  manifest: ReceiveManifest,
-  pending: { chunkIndex: number; data: ArrayBuffer },
-): Promise<string> {
-  const open = opfsReceiving.get(merkleRoot);
-  const digest = await hashReceivedFileOnce(
-    merkleRoot,
-    manifest,
-    pending,
-    open,
-  );
-  if (digest !== undefined) return digest;
-  // Chunk bytes are in OPFS but this worker holds no handle for the file
-  // (only when the completing chunk itself could not be placed there).
-  const entry = await ensureReceiveHandle(merkleRoot, totalSize);
-  if (!entry) throw new Error("received file bytes are in unavailable OPFS");
-  const reopened = await hashReceivedFileOnce(
-    merkleRoot,
-    manifest,
-    pending,
-    entry,
-  );
-  if (reopened === undefined)
-    throw new Error("received file bytes are in unavailable OPFS");
-  return reopened;
+  token: string,
+  live: LiveVerification,
+): Promise<ReceiveVerificationVerdict> {
+  // Confirm the marker under the per-file lock and take the receive lease, so
+  // a sweep or another tab leaves the transfer alone while it is hashed.
+  const start = await withReceiveLock(merkleRoot, async () => {
+    const db = await getDB();
+    try {
+      const tx = db.transaction(
+        ["chunks", "messageData", "receiveActivity"],
+        "readwrite",
+      );
+      const row = await tx
+        .objectStore("messageData")
+        .index("merkleRoot")
+        .get(merkleRoot);
+      const marker = row?.receiveVerification;
+      const activity = await tx.objectStore("receiveActivity").get(merkleRoot);
+      if (
+        !row ||
+        !marker ||
+        marker.token !== token ||
+        activity?.deletedAt !== undefined ||
+        (activity?.writeToken !== undefined &&
+          (activity.leaseUntil ?? 0) > Date.now())
+      ) {
+        await tx.done;
+        return undefined;
+      }
+      const manifest = await loadReceiveManifest(
+        tx.objectStore("chunks"),
+        merkleRoot,
+        row,
+        row.totalSize,
+      );
+      await tx.objectStore("receiveActivity").put({
+        merkleRoot,
+        roomId: row.roomId,
+        fromPeerId: row.fromPeerId,
+        lastActivityAt: Date.now(),
+        writeToken: token,
+        leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+      });
+      await tx.done;
+      return {
+        row,
+        marker,
+        manifest: advanceReceiveManifest(
+          manifest,
+          row.totalSize,
+          marker.chunkIndex,
+          marker.realLen,
+        ),
+      };
+    } finally {
+      db.close();
+    }
+  });
+  if (!start) return "aborted";
+  try {
+    const digest = await hashHeldFile(merkleRoot, token, start, live);
+    return digest === start.row.hash ? "match" : "mismatch";
+  } catch (error) {
+    if (live.aborted || error instanceof VerificationAborted) return "aborted";
+    console.error("p2party: could not verify a received file", error);
+    return "storage-failed";
+  }
 }
+
+async function fnVerifyReceivedFile(
+  merkleRoot: string,
+  token: string,
+): Promise<ReceiveVerificationVerdict> {
+  const running = liveVerifications.get(merkleRoot);
+  // A second request for the same attempt joins it; it never hashes twice.
+  if (running)
+    return running.token === token && running.verdict
+      ? running.verdict
+      : "aborted";
+  const live: LiveVerification = { token, aborted: false };
+  liveVerifications.set(merkleRoot, live);
+  live.verdict = runVerification(merkleRoot, token, live);
+  return live.verdict;
+}
+
+function fnAbortReceivedFileVerification(
+  merkleRoot: string,
+  token: string,
+): void {
+  const live = liveVerifications.get(merkleRoot);
+  if (live?.token === token) live.aborted = true;
+}
+
+async function fnSettleReceivedFileVerification(
+  merkleRoot: string,
+  token: string,
+  commit: boolean,
+): Promise<ReceiveVerificationOutcome> {
+  const live = liveVerifications.get(merkleRoot);
+  const verdict =
+    live?.token === token && live.verdict ? await live.verdict : "aborted";
+  return withReceiveLock(merkleRoot, async () => {
+    try {
+      const decided =
+        commit && (verdict === "match" || verdict === "mismatch")
+          ? verdict
+          : undefined;
+      let outcome: ReceiveVerificationOutcome = "aborted";
+      const db = await getDB();
+      const tx = db.transaction(
+        ["chunks", "messageData", "receiveActivity"],
+        "readwrite",
+      );
+      try {
+        const chunks = tx.objectStore("chunks");
+        const messages = tx.objectStore("messageData");
+        const activityStore = tx.objectStore("receiveActivity");
+        const row = await messages.index("merkleRoot").get(merkleRoot);
+        const activity = await activityStore.get(merkleRoot);
+        const leased =
+          activity?.writeToken === token && activity.deletedAt === undefined;
+        const marker = row?.receiveVerification;
+        if (row && marker?.token === token && leased && decided) {
+          const manifest = await loadReceiveManifest(
+            chunks,
+            merkleRoot,
+            row,
+            row.totalSize,
+          );
+          const {
+            receiveVerification: _held,
+            integrityFailed: _failed,
+            ...rest
+          } = row;
+          void _held;
+          void _failed;
+          if (decided === "match") {
+            const completed = advanceReceiveManifest(
+              manifest,
+              row.totalSize,
+              marker.chunkIndex,
+              marker.realLen,
+            );
+            const progress = receiveProgress(completed, row.totalSize);
+            await chunks.add({
+              merkleRoot,
+              hash: row.hash,
+              chunkIndex: marker.chunkIndex,
+              mimeType: marker.mimeType,
+              realLen: marker.realLen,
+              leafHash: marker.leafHash,
+              ...(marker.data ? { data: marker.data } : {}),
+            });
+            await messages.put({
+              ...rest,
+              savedSize: progress.savedSize,
+              receiveManifest: completed,
+            });
+            await activityStore.delete(merkleRoot);
+            outcome = "complete";
+          } else {
+            // The sender's resume replays only what this device still holds,
+            // so a dropped have-set lets the next connection fetch it again.
+            const keys = await chunks
+              .index("merkleRoot")
+              .getAllKeys(merkleRoot);
+            for (const key of keys) await chunks.delete(key);
+            await messages.put({
+              ...rest,
+              savedSize: 0,
+              receiveManifest: { ...EMPTY_RECEIVE_MANIFEST },
+              integrityFailed: true,
+            });
+            await activityStore.put({
+              ...activity,
+              writeToken: undefined,
+              leaseUntil: 0,
+              lastActivityAt: Date.now(),
+            });
+            outcome = "integrity";
+          }
+        } else if (leased)
+          // Not committed: the marker stays, and the next copy of the held
+          // chunk verifies the file again.
+          await activityStore.put({
+            ...activity,
+            writeToken: undefined,
+            leaseUntil: 0,
+            lastActivityAt: Date.now(),
+          });
+        await tx.done;
+      } catch (error) {
+        // Nothing commits; the marker stays for the next copy of the chunk.
+        await abortQuietly(tx);
+        throw error;
+      } finally {
+        db.close();
+      }
+      if (outcome === "integrity") {
+        await fnCloseReceiveFile(merkleRoot);
+        await fnDeleteOPFSFile(merkleRoot);
+      }
+      return outcome;
+    } finally {
+      if (liveVerifications.get(merkleRoot) === live && live)
+        liveVerifications.delete(merkleRoot);
+    }
+  });
+}
+
+// A store that arrives while this worker verifies the file: every chunk of it
+// is already held (in the have-set, or as the marker), so nothing changes.
+async function storeWhileVerifying(
+  chunk: ReceiveChunk,
+  live: LiveVerification,
+): Promise<ReceiveChunkStored> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction(["chunks", "messageData"], "readonly");
+    const row = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(chunk.merkleRoot);
+    const held =
+      (await tx
+        .objectStore("chunks")
+        .getKey([chunk.merkleRoot, chunk.chunkIndex])) !== undefined ||
+      row?.receiveVerification?.chunkIndex === chunk.chunkIndex;
+    await tx.done;
+    if (
+      !row ||
+      row.receiveVerification?.token !== live.token ||
+      row.roomId !== chunk.roomId ||
+      row.fromPeerId !== chunk.fromPeerId ||
+      row.hash !== chunk.hash ||
+      !held
+    )
+      throw new ReceiveChunkRejectedError(
+        "receive chunk conflicts with a file being verified",
+      );
+    return { stored: false, savedSize: row.savedSize, complete: false };
+  } finally {
+    db.close();
+  }
+}
+
+// Abort a transaction whose body threw, so none of its writes commit. An
+// exception in our code does not abort an IndexedDB transaction by itself: the
+// requests it already issued would commit when it goes idle.
+const abortQuietly = async (tx: {
+  abort(): void;
+  done: Promise<void>;
+}): Promise<void> => {
+  try {
+    tx.abort();
+  } catch {
+    /* already finished or aborted */
+  }
+  await tx.done.catch(() => undefined);
+};
 
 // The running manifest of a received transfer, read from its messageData row.
 // A row without a current one (written by 0.14.10, or by a writer that does
@@ -1344,13 +1655,13 @@ async function loadReceiveManifest<
 // are already held: the manifest replaces a scan of every held record.
 //
 // A file is complete only once its stored bytes hash to the whole-file hash
-// its message carries. The chunk that would complete it is verified before it
-// is recorded; on a mismatch nothing completes, the transfer's have-set and
-// OPFS file are dropped, and its row is marked integrityFailed.
+// its message carries. The chunk that would complete a file is written but not
+// recorded: it is held on the row and returned with a `verification` token
+// (see "Whole-file verification" above).
 async function storeReceiveChunkLocked(
   chunk: ReceiveChunk,
   writeToken: string,
-): Promise<ReceiveChunkStoreResult> {
+): Promise<ReceiveChunkStored> {
   const {
     schemaVersion,
     roomId,
@@ -1431,6 +1742,8 @@ async function storeReceiveChunkLocked(
     );
     await tx.done;
     if (held) return { stored: false, ...receiveProgress(manifest, totalSize) };
+    // A held chunk no running verification owns arrives again: write it and
+    // verify the file again below.
     completed = advanceReceiveManifest(
       manifest,
       totalSize,
@@ -1440,7 +1753,8 @@ async function storeReceiveChunkLocked(
   } finally {
     readDb.close();
   }
-  const completes = receiveProgress(completed, totalSize).complete;
+  const verifies =
+    storage === "opfs" && receiveProgress(completed, totalSize).complete;
 
   // Write bytes to OPFS FIRST (durable), then record the have-set entry: if we
   // crash between the two we get bytes-without-record (resent + rewritten
@@ -1451,7 +1765,7 @@ async function storeReceiveChunkLocked(
       wroteToOPFS = await placeReceiveChunk(
         merkleRoot,
         chunkIndex,
-        realLen,
+        completed.uniformSize,
         totalSize,
         data,
       );
@@ -1466,108 +1780,115 @@ async function storeReceiveChunkLocked(
       ? { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash }
       : { merkleRoot, hash, chunkIndex, mimeType, realLen, leafHash, data };
 
-  const intact =
-    storage !== "opfs" ||
-    !completes ||
-    (await hashReceivedFile(merkleRoot, totalSize, completed, {
-      chunkIndex,
-      data,
-    })) === hash;
-
   const db = await getDB();
+  const tx = db.transaction(
+    ["chunks", "messageData", "uniqueRoom", "receiveActivity"],
+    "readwrite",
+  );
   try {
-    const tx = db.transaction(
-      ["chunks", "messageData", "uniqueRoom", "receiveActivity"],
-      "readwrite",
-    );
     const activity = await tx.objectStore("receiveActivity").get(merkleRoot);
-    if (
-      activity?.writeToken !== writeToken ||
-      activity.deletedAt !== undefined
-    ) {
-      tx.abort();
-      await tx.done.catch(() => undefined);
+    if (activity?.writeToken !== writeToken || activity.deletedAt !== undefined)
       throw new ReceiveChunkRejectedError(
         "Receive write was fenced by cancellation or expiry",
       );
-    }
     const store = tx.objectStore("chunks");
     const existing = await store.getKey([merkleRoot, chunkIndex]);
     const messageStore = tx.objectStore("messageData");
     const previous = await messageStore.index("merkleRoot").get(merkleRoot);
     assertManifest(previous);
-    let manifest = await loadReceiveManifest(
+    const manifest = await loadReceiveManifest(
       store,
       merkleRoot,
       previous,
       totalSize,
     );
-    let stored = false;
-    let integrityFailed = false;
-    if (existing === undefined) {
-      manifest = advanceReceiveManifest(
-        manifest,
-        totalSize,
-        chunkIndex,
-        realLen,
-      );
-      if (receiveProgress(manifest, totalSize).complete !== completes)
-        throw new Error("receive state changed during verification");
-      if (intact) {
-        await store.add(record);
-        stored = true;
-      } else {
-        // The sender's resume replays only what this device still holds, so
-        // a dropped have-set lets a later resume send the whole file again.
-        const keys = await store.index("merkleRoot").getAllKeys(merkleRoot);
-        for (const key of keys) await store.delete(key);
-        manifest = { ...EMPTY_RECEIVE_MANIFEST };
-        integrityFailed = true;
-      }
+    if (existing !== undefined) {
+      await tx.done;
+      return { stored: false, ...receiveProgress(manifest, totalSize) };
     }
+    const next = advanceReceiveManifest(
+      manifest,
+      totalSize,
+      chunkIndex,
+      realLen,
+    );
+    if (
+      (storage === "opfs" && receiveProgress(next, totalSize).complete) !==
+      verifies
+    )
+      throw new Error("receive state changed while storing a chunk");
 
-    const progress = receiveProgress(manifest, totalSize);
-
-    if (stored || integrityFailed) {
-      await messageStore.put({
-        roomId,
-        timestamp: previous?.timestamp ?? timestamp,
-        merkleRoot,
-        hash,
-        fromPeerId,
-        filename,
-        messageType,
-        savedSize: progress.savedSize,
-        totalSize,
-        channelLabel,
+    let result: ReceiveChunkStored;
+    let row: MessageData = {
+      roomId,
+      timestamp: previous?.timestamp ?? timestamp,
+      merkleRoot,
+      hash,
+      fromPeerId,
+      filename,
+      messageType,
+      savedSize: 0,
+      totalSize,
+      channelLabel,
+      // Cleared only by a verified completion.
+      ...(previous?.integrityFailed === true ? { integrityFailed: true } : {}),
+    };
+    if (verifies) {
+      // Hold the completing chunk on the row, outside the have-set, until the
+      // file verifies. The progress it reports does not include it yet.
+      const verification = crypto.randomUUID();
+      row = {
+        ...row,
+        savedSize: manifest.savedSize,
         receiveManifest: manifest,
-        // Cleared only by a verified completion.
-        ...(integrityFailed ||
-        (previous?.integrityFailed === true && !progress.complete)
-          ? { integrityFailed: true }
-          : {}),
-      });
+        receiveVerification: {
+          token: verification,
+          chunkIndex,
+          realLen,
+          leafHash,
+          mimeType,
+          ...(wroteToOPFS ? {} : { data }),
+        },
+      };
+      result = {
+        stored: true,
+        savedSize: manifest.savedSize,
+        complete: false,
+        verification,
+      };
+    } else {
+      await store.add(record);
+      const progress = receiveProgress(next, totalSize);
+      const { integrityFailed: _cleared, ...unflagged } = row;
+      void _cleared;
+      row = {
+        ...(progress.complete ? unflagged : row),
+        savedSize: progress.savedSize,
+        receiveManifest: next,
+      };
+      result = { stored: true, ...progress };
+    }
+    await messageStore.put(row);
 
-      const roomStore = tx.objectStore("uniqueRoom");
-      const room = await roomStore.index("roomId").get(roomId);
-      if (room && room.lastMessageMerkleRoot !== merkleRoot) {
-        await roomStore.put({
-          ...room,
-          lastMessageMerkleRoot: merkleRoot,
-          messageCount: room.messageCount + 1,
-          updatedAt: timestamp,
-        });
-      }
+    const roomStore = tx.objectStore("uniqueRoom");
+    const room = await roomStore.index("roomId").get(roomId);
+    if (room && room.lastMessageMerkleRoot !== merkleRoot) {
+      await roomStore.put({
+        ...room,
+        lastMessageMerkleRoot: merkleRoot,
+        messageCount: room.messageCount + 1,
+        updatedAt: timestamp,
+      });
     }
 
     await tx.done;
-    if (!integrityFailed) return { stored, ...progress };
+    return result;
+  } catch (error) {
+    await abortQuietly(tx);
+    throw error;
   } finally {
     db.close();
   }
-  await fnCloseReceiveFile(merkleRoot);
-  await fnDeleteOPFSFile(merkleRoot);
-  return { failure: "integrity" };
 }
 
 export const INCOMPLETE_RECEIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -1635,6 +1956,8 @@ async function fnStoreReceiveChunk(
     !chunk.fromPeerId
   )
     throw new ReceiveChunkRejectedError("Invalid receive identity");
+  const verifying = liveVerifications.get(chunk.merkleRoot);
+  if (verifying) return storeWhileVerifying(chunk, verifying);
   const token = crypto.randomUUID();
   const estimate = storageEstimator();
   let quotaChecked = estimate === undefined;
@@ -3116,6 +3439,11 @@ async function fnDeleteReceiveTransferLocked(
   )
     throw new Error("invalid receive transfer Merkle root");
 
+  // A verification of this file stops at its next read; deleting the row
+  // below keeps its verdict from ever being committed.
+  const verifying = liveVerifications.get(merkleRootHex);
+  if (verifying) verifying.aborted = true;
+
   await fnCloseReceiveFile(merkleRootHex);
 
   const db = await getDB();
@@ -3367,6 +3695,17 @@ onmessage = async (e: MessageEvent) => {
         }
         break;
       }
+      case "verifyReceivedFile":
+        // Takes the per-file lock itself, only to start and not to hash.
+        result = await fnVerifyReceivedFile(...message.args);
+        break;
+      case "settleReceivedFileVerification":
+        result = await fnSettleReceivedFileVerification(...message.args);
+        break;
+      case "abortReceivedFileVerification":
+        fnAbortReceivedFileVerification(...message.args);
+        result = undefined;
+        break;
       case "getReceiveFile": {
         const args = message.args;
         result = await withReceiveLock(args[0], () =>
@@ -3503,6 +3842,12 @@ onmessage = async (e: MessageEvent) => {
       postMessage({ id, result });
     }
   } catch (error: unknown) {
-    postMessage({ id, error: String(error) });
+    postMessage({
+      id,
+      error: String(error),
+      ...(error instanceof DatabaseUpgradeBlockedError
+        ? { errorCode: error.code }
+        : {}),
+    });
   }
 };

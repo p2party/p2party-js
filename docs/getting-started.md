@@ -342,22 +342,51 @@ is stored again.
   (`quota - usage`). A larger transfer is refused and nothing is written;
   `requiredBytes` and `availableBytes` say by how much. If no estimate is
   available, the transfer is accepted and the next code covers a full disk.
+  Two consequences for a room member, who may send any announced size:
+  - The refusal is visible to the sender, who can learn roughly how much free
+    storage this device has by announcing different sizes.
+  - Once one chunk of a transfer is accepted, its file is sized to the
+    announced total, so a member can reserve that much storage here until the
+    transfer completes or expires after 24 hours without receive activity.
 - `quota-exceeded`: the browser refused a write for lack of space.
-- `storage-failed`: any other storage fault.
+- `storage-failed`: any other storage fault, including the database worker
+  failing or the database being unavailable (see below).
 - `integrity`: the last chunk of a received file arrived, but the stored file
   does not hash to the whole-file SHA-512 its message carries. The file is not
   marked complete, the sender gets no final receipt, and its stored chunks are
-  dropped. `readMessage` for that file throws `p2party.ReceiveIntegrityError`
-  instead of returning bytes, until a later resend of the whole file (for
-  example after a reconnect) completes and verifies. While the connection
-  stays up, the sender resends only the last chunk, which cannot complete the
-  file, so recovery needs that later full resend.
+  dropped. The progress shown for it returns to 0 at once. `readMessage` for
+  that file throws `p2party.ReceiveIntegrityError` instead of returning bytes.
+  Nothing is requested again while the connection stays up: every chunk was
+  already acknowledged, so the sender only waits for the final receipt and
+  then gives up. On the next connection the sender's resume finds that this
+  device holds none of the file and sends it again in full; once that copy
+  completes and verifies, the file reads normally.
 
-Each received file is verified once, when its last chunk arrives: the database
-worker reads the stored file once in chunk order and hashes it. Reading a
-completed file later does not re-verify it. Text messages are not
-re-verified; each of their chunks is checked against the message's Merkle root
-as it arrives, like every file chunk.
+Each received file is verified once, when its last chunk arrives. That chunk
+is stored and acknowledged, but held out of the file's progress until the
+database worker has read the stored file once in chunk order, including the
+last chunk as written, and hashed it. The hashing runs outside the
+connection's receive queue, so chat messages, receipts and other transfers on
+the same connection keep flowing, and the worker answers other requests
+between reads of about 1 MiB. Only then is the file marked complete and the
+final receipt sent. If the connection to that peer is torn down first, or the
+room is left, nothing completes; the next copy of that last chunk (which the
+sender's resume sends, because this device does not report it as held)
+verifies the file again. A page reload during verification leaves the same
+state. Reading a completed file later does not re-verify it. Text messages are
+not verified as a whole; each of their chunks is checked against the
+message's Merkle root as it arrives, like every file chunk.
+
+The database stays usable across tabs of different versions in one
+direction. A tab of this version closes its database connection when another
+tab needs to upgrade the database. When this version's own upgrade is blocked
+by an older tab that keeps its connection open, calls that need the database
+fail at once instead of waiting: those that report errors reject with
+`p2party.DatabaseUpgradeBlockedError` (a `p2party.DatabaseUnavailableError`),
+some lookups return an empty result, and received chunks are reported as
+`storage-failed`. Ask the user to close the site's other tabs and reload.
+A tab still running 0.14.10 cannot open the database once a tab of this
+version has upgraded it.
 
 The first received file in a page also asks the browser once for persistent
 storage (`navigator.storage.persist()`), so storage pressure does not evict a

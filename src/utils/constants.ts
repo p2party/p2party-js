@@ -193,6 +193,14 @@ export const RETRANSMIT_TIMEOUT_MS = 2000;
 // Forgetting one only means its next failure is reported again.
 export const MAX_REPORTED_RECEIVE_STORAGE_ERRORS = 1_024;
 
+// Whole-file verification of a received file reads this many chunks (about
+// 1 MiB of real bytes at full chunks) per batch, then yields, so the database
+// worker keeps answering other requests while it hashes a large file.
+export const RECEIVE_VERIFY_BATCH_CHUNKS = 16;
+// ...and renews its receive lease this often, so another tab cannot take the
+// transfer over while it runs.
+export const RECEIVE_VERIFY_LEASE_RENEW_MS = 30_000;
+
 // Wait this long for a per-message data channel to reach "open" before sending,
 // so its first frames aren't spilled to the WS relay while it is still
 // "connecting" (anything that still slips is recovered by reconcile()).

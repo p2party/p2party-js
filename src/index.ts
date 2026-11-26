@@ -210,6 +210,10 @@ import {
   onReceiveStorageError,
   ReceiveIntegrityError,
 } from "./handlers/handleReceiveMessage";
+import {
+  DatabaseUnavailableError,
+  DatabaseUpgradeBlockedError,
+} from "./db/dbErrors";
 import type { ReceiveStorageError } from "./handlers/handleReceiveMessage";
 import {
   cancelRoomRequestLifecycle,
@@ -2027,6 +2031,8 @@ export {
   onMessage,
   onReceiveStorageError,
   ReceiveIntegrityError,
+  DatabaseUnavailableError,
+  DatabaseUpgradeBlockedError,
   setDebugLogging,
 };
 

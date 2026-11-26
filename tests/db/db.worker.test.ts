@@ -850,11 +850,24 @@ describe("db.worker atomic receive progress", () => {
       // The storage layer safely falls back to IndexedDB, but the exclusive
       // handle acquired before truncate failed must already be released.
       expect(response.error).toBeUndefined();
-      expect(response.result).toEqual({
-        stored: true,
-        savedSize: 1,
-        complete: true,
-      });
+      // Its only chunk is held until the file verifies, from the bytes kept
+      // in IndexedDB since OPFS failed.
+      const held = response.result as { verification: string };
+      expect(held).toMatchObject({ stored: true, complete: false });
+      const root = "77".repeat(64);
+      expect(
+        (await callWorker("verifyReceivedFile", [root, held.verification]))
+          .result,
+      ).toBe("match");
+      expect(
+        (
+          await callWorker("settleReceivedFileVerification", [
+            root,
+            held.verification,
+            true,
+          ])
+        ).result,
+      ).toBe("complete");
       expect(closeCalls).toBe(1);
     } finally {
       errorLog.mockRestore();

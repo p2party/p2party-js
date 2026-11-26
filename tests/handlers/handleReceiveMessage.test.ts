@@ -1,6 +1,22 @@
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
+
+// Process-wide state this file changes, restored in afterAll.
+const indexedDBBefore = (globalThis as unknown as { indexedDB: IDBFactory })
+  .indexedDB;
+const postMessageBefore = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "postMessage",
+);
+afterAll(() => {
+  (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB =
+    indexedDBBefore;
+  if (postMessageBefore)
+    Object.defineProperty(globalThis, "postMessage", postMessageBefore);
+  else delete (globalThis as { postMessage?: unknown }).postMessage;
+});
 import {
+  afterAll,
   afterEach,
   beforeAll,
   beforeEach,
@@ -17,9 +33,12 @@ import {
   handleReceiveMessage,
   onReceiveStorageError,
   ReceiveIntegrityError,
+  settleHeldFile,
   storeReceiveChunkFailClosed,
+  verifyHeldFile,
   type ReceiveStorageError,
 } from "../../src/handlers/handleReceiveMessage";
+import { DatabaseWorkerError } from "../../src/db/dbErrors";
 import { sendReceiveFrameReceipt } from "../../src/handlers/handleMessageQueueing";
 import { allowClassicalOnlyReceiveForTests } from "../../src/handlers/ratchetPersist";
 import * as chunkCrypto from "../../src/handlers/messageChunkCrypto";
@@ -35,6 +54,7 @@ import { uint8ArrayToHex } from "../../src/utils/uint8array";
 import {
   CHUNK_LEN,
   DECRYPTED_LEN,
+  MAX_REPORTED_RECEIVE_STORAGE_ERRORS,
   METADATA_LEN,
   PROOF_LEN,
 } from "../../src/utils/constants";
@@ -48,7 +68,12 @@ import type {
   IRTCDataChannel,
   IRTCPeerConnection,
 } from "../../src/api/webrtc/interfaces";
-import type { ReceiveChunk, ReceiveChunkStoreResult } from "../../src/db/types";
+import type {
+  ReceiveChunk,
+  ReceiveChunkStoreResult,
+  ReceiveVerificationOutcome,
+  ReceiveVerificationVerdict,
+} from "../../src/db/types";
 
 const storedChunk = (): Omit<ReceiveChunk, "data"> => ({
   schemaVersion: 1,
@@ -143,6 +168,56 @@ const workerStore = async (
   const reply = await callWorker("storeReceiveChunk", [chunk]);
   if (reply.error !== undefined) throw new Error(String(reply.error));
   return reply.result as ReceiveChunkStoreResult;
+};
+
+// The worker's verification calls, reached the same way.
+const workerCall =
+  <T>(method: string) =>
+  async (...args: unknown[]): Promise<T> => {
+    const reply = await callWorker(method, args);
+    if (reply.error !== undefined) throw new Error(String(reply.error));
+    return reply.result as T;
+  };
+const workerVerification = {
+  verifyReceivedFile:
+    workerCall<ReceiveVerificationVerdict>("verifyReceivedFile"),
+  settleReceivedFileVerification: workerCall<ReceiveVerificationOutcome>(
+    "settleReceivedFileVerification",
+  ),
+  abortReceivedFileVerification: workerCall<undefined>(
+    "abortReceivedFileVerification",
+  ),
+  closeReceiveFile: workerCall<undefined>("closeReceiveFile"),
+};
+
+// Verify and settle a held file as the queueing layer does, edge current.
+const finishHeld = async (
+  result: Awaited<ReturnType<typeof handleReceiveMessage>>,
+  root: Uint8Array,
+) => {
+  const merkleRoot = uint8ArrayToHex(root);
+  const token = result.verification!;
+  const verdict = await verifyHeldFile(
+    merkleRoot,
+    token,
+    undefined,
+    () => true,
+    workerVerification,
+  );
+  return settleHeldFile(
+    {
+      roomId: ROOM,
+      fromPeerId: PEER,
+      merkleRoot,
+      filename: result.filename,
+      totalSize: result.totalSize,
+      chunkIndex: result.chunkIndex,
+    },
+    token,
+    verdict,
+    true,
+    workerVerification,
+  );
 };
 
 const rand = (n: number): Uint8Array =>
@@ -428,19 +503,23 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
         epc,
         message.root,
       );
-      expect(result.receivedFullSize).toBe(true);
+      // The file's only chunk is held and acknowledged; the file completes
+      // once it verifies.
+      expect(result.receivedFullSize).toBe(false);
+      expect(result.verification).toBeDefined();
       expect(uint8ArrayToHex(wireReceipt(result))).toBe(
         uint8ArrayToHex(message.rootedReceipt),
       );
+      expect(await finishHeld(result, message.root)).toBe("complete");
     }
     expect(persistCalls).toBe(1);
     expect(errors).toEqual([]);
   });
 
-  test("the sender gets no final receipt for a file that failed verification", async () => {
+  test("a file that fails verification is reported and its read throws", async () => {
     quietConsole();
     // The file's bytes do not hash to the whole-file hash its message claims.
-    const { root, plaintext, rootedReceipt } = await buildMessage(
+    const { root, plaintext } = await buildMessage(
       MessageType.ImagePNG,
       8,
       rand(crypto_hash_sha512_BYTES),
@@ -448,15 +527,9 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
     const { alice, epc } = edgePair();
     const errors = collectErrors();
 
-    const refused = await receive(seal(alice, plaintext, root), epc, root);
-
-    // Not complete, so the queueing layer neither marks it complete nor sends
-    // the final (message-hash) receipt; the chunk's own receipt is a decoy.
-    expect(refused.receivedFullSize).toBe(false);
-    expect(refused.chunkIndex).toBe(-1);
-    expect(uint8ArrayToHex(wireReceipt(refused))).not.toBe(
-      uint8ArrayToHex(rootedReceipt),
-    );
+    const held = await receive(seal(alice, plaintext, root), epc, root);
+    expect(held.receivedFullSize).toBe(false);
+    expect(await finishHeld(held, root)).toBe("integrity");
     expect(errors.map((error) => error.code)).toEqual(["integrity"]);
     // Nothing is held, so a reconnect replays no receipt for it either.
     const progress = await callWorker("getDBMessageData", [
@@ -480,5 +553,92 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
       code: "integrity",
       merkleRootHex: uint8ArrayToHex(root),
     });
+  });
+
+  test("a worker crash during a store is reported as a storage failure", async () => {
+    quietConsole();
+    const { root, plaintext, rootedReceipt } = await buildMessage(
+      MessageType.Text,
+      8,
+    );
+    const { alice, epc } = edgePair();
+    const errors = collectErrors();
+    // What src/db/api.ts rejects every pending call with when the worker dies.
+    const crashed = await handleReceiveMessage(
+      seal(alice, plaintext, root),
+      ROOM,
+      "chat",
+      epc,
+      root,
+      module,
+      undefined,
+      {
+        persistRatchetState: async () => undefined,
+        storeReceiveChunk: async () => {
+          throw new DatabaseWorkerError(
+            "p2party: the database worker failed: injected",
+          );
+        },
+      },
+    );
+    expect(errors.map((error) => error.code)).toEqual(["storage-failed"]);
+    expect(crashed.chunkIndex).toBe(-1);
+    expect(uint8ArrayToHex(wireReceipt(crashed))).not.toBe(
+      uint8ArrayToHex(rootedReceipt),
+    );
+
+    // A chunk the worker refused is not a storage failure: no event.
+    const refused = await buildMessage(MessageType.Text, 8);
+    await handleReceiveMessage(
+      seal(alice, refused.plaintext, refused.root),
+      ROOM,
+      "chat",
+      epc,
+      refused.root,
+      module,
+      undefined,
+      {
+        persistRatchetState: async () => undefined,
+        storeReceiveChunk: async () => {
+          throw new Error("Error: invalid receive chunk bounds");
+        },
+      },
+    );
+    expect(errors).toHaveLength(1);
+  });
+
+  test("reported failures are capped and a forgotten one is reported again", async () => {
+    quietConsole();
+    const errors = collectErrors();
+    const failing = {
+      settleReceivedFileVerification: async () => "integrity" as const,
+    };
+    const report = (index: number) =>
+      settleHeldFile(
+        {
+          roomId: ROOM,
+          fromPeerId: PEER,
+          merkleRoot: index.toString(16).padStart(128, "0"),
+          filename: "f.bin",
+          totalSize: 8,
+          chunkIndex: 0,
+        },
+        "token",
+        "mismatch",
+        true,
+        failing,
+      );
+    // Whatever earlier tests left behind, a repeat is reported once.
+    const repeated = MAX_REPORTED_RECEIVE_STORAGE_ERRORS * 2;
+    await report(repeated);
+    await report(repeated);
+    expect(errors).toHaveLength(1);
+    // The memory holds at most the cap: after that many other transfers fail,
+    // it has been reset rather than grown, so the repeat is reported again.
+    for (let index = 0; index < MAX_REPORTED_RECEIVE_STORAGE_ERRORS; index++)
+      await report(index);
+    expect(errors).toHaveLength(1 + MAX_REPORTED_RECEIVE_STORAGE_ERRORS);
+    await report(repeated);
+    expect(errors).toHaveLength(2 + MAX_REPORTED_RECEIVE_STORAGE_ERRORS);
   });
 });

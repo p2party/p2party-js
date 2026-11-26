@@ -41,7 +41,7 @@ let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")[
 let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
 let coverRuntimeAdmitsScheduledJobs: typeof import("../../src/handlers/handleSendMessage")["coverRuntimeAdmitsScheduledJobs"];
 let sendScheduled: typeof import("../../src/handlers/handleSendMessage")["sendScheduled"];
-let OutboundMessage: typeof import("../../src/handlers/handleSendMessage")["OutboundMessage"];
+let OutboundMessage: (typeof import("../../src/handlers/handleSendMessage"))["OutboundMessage"];
 let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
 let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
 let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
@@ -588,10 +588,13 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
 });
 
 describe("sender receipt-window flow control", () => {
+  // These change their state without any wake-up, so the wait sees each
+  // change at its own 5 ms re-check, as it did through the old 5 ms poll.
   const params = (over: Record<string, unknown>) => ({
     windowSize: 4,
     stallTimeoutMs: 200,
-    pollMs: 5,
+    fallbackMs: 5,
+    subscribe: () => () => undefined,
     isOpen: () => true,
     inFlight: () => 0,
     ...over,

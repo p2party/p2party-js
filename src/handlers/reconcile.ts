@@ -1,3 +1,5 @@
+import { COMPLETION_WAIT_FALLBACK_MS } from "../utils/constants";
+
 // Selective retransmit / resume state — in-memory, per
 // (roomId, peerId, random transferId). Content hashes are not identities:
 // concurrent sends of the same bytes must never share acknowledgements.
@@ -27,6 +29,49 @@ const edge = (roomId: string, peerId: string, transferId: string): Edge => {
   return e;
 };
 
+// Waiters on one edge's state. Every change below notifies them, so a wait
+// re-checks when what it waits for changed instead of on a polling timer.
+const progressListeners = new Map<string, Set<() => void>>();
+
+const notifyProgress = (k: string): void => {
+  const listeners = progressListeners.get(k);
+  if (!listeners) return;
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch (error) {
+      console.error(error);
+    }
+  }
+};
+
+/**
+ * Call `listener` after every change to this edge's transfer state: a newly
+ * acknowledged chunk, completion, cancellation, or a clear. It is a wake-up,
+ * not a value: the listener reads the state it cares about. Returns the
+ * unsubscribe, which a wait must call when it settles.
+ */
+export const onTransferProgress = (
+  roomId: string,
+  peerId: string,
+  transferId: string,
+  listener: () => void,
+): (() => void) => {
+  const k = key(roomId, peerId, transferId);
+  let listeners = progressListeners.get(k);
+  if (!listeners) {
+    listeners = new Set();
+    progressListeners.set(k, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    const current = progressListeners.get(k);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) progressListeners.delete(k);
+  };
+};
+
 export const markChunkAcked = (
   roomId: string,
   peerId: string,
@@ -38,7 +83,9 @@ export const markChunkAcked = (
   const acked = state.acked;
   const previousSize = acked.size;
   acked.add(chunkIndex);
-  return acked.size !== previousSize;
+  if (acked.size === previousSize) return false;
+  notifyProgress(key(roomId, peerId, transferId));
+  return true;
 };
 
 // A defensive copy — the caller (sendChunks reconcile filter) must not mutate
@@ -74,6 +121,7 @@ export const markTransferComplete = (
   const state = edge(roomId, peerId, transferId);
   if (state.complete || state.cancelled) return false;
   state.complete = true;
+  notifyProgress(key(roomId, peerId, transferId));
   return true;
 };
 
@@ -116,6 +164,7 @@ export const markTransferCancelled = (
   const state = edge(roomId, peerId, transferId);
   if (state.cancelled || state.complete) return false;
   state.cancelled = true;
+  notifyProgress(key(roomId, peerId, transferId));
   return true;
 };
 
@@ -172,26 +221,93 @@ export const clearTransfer = (
   peerId: string,
   transferId: string,
 ): void => {
-  edges.delete(key(roomId, peerId, transferId));
+  const k = key(roomId, peerId, transferId);
+  edges.delete(k);
+  notifyProgress(k);
 };
 
-// Poll for completion up to timeoutMs; returns true as soon as complete so a
-// healthy transfer isn't delayed a full interval.
+/** The clock a transfer wait arms its timers on; injectable for tests. */
+export interface TransferWaitClock {
+  readonly now: () => number;
+  readonly setTimeout: (callback: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+}
+
+export const transferWaitClock: TransferWaitClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+export interface CompletionWaitDependencies {
+  readonly clock?: TransferWaitClock;
+  /** How the wait is woken; `onTransferProgress` in production. */
+  readonly subscribe?: typeof onTransferProgress;
+}
+
+/**
+ * Wait up to timeoutMs for this edge's transfer to complete. Woken by the
+ * final receipt (markTransferComplete), a refusal (markTransferCancelled) or
+ * an abort, with a COMPLETION_WAIT_FALLBACK_MS re-check in case a wake-up is
+ * lost. Resolves true only when complete and not aborted.
+ *
+ * It does not end early when the channel closes, as the 200 ms poll it
+ * replaces did not: a final receipt already read off a closing channel is
+ * still being persisted when `close` fires, and only lands in this state
+ * after that.
+ */
 export const waitForCompletion = async (
   roomId: string,
   peerId: string,
   transferId: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  dependencies: CompletionWaitDependencies = {},
 ): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (
-    Date.now() < deadline &&
-    !isTransferComplete(roomId, peerId, transferId) &&
-    !isTransferCancelled(roomId, peerId, transferId) &&
-    !signal?.aborted
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+  const clock = dependencies.clock ?? transferWaitClock;
+  const subscribe = dependencies.subscribe ?? onTransferProgress;
+  const deadline = clock.now() + timeoutMs;
+  const settled = (): boolean =>
+    clock.now() >= deadline ||
+    isTransferComplete(roomId, peerId, transferId) ||
+    isTransferCancelled(roomId, peerId, transferId) ||
+    signal?.aborted === true;
+
+  if (!settled())
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let timer: unknown;
+      let unsubscribe = (): void => undefined;
+      const check = (): void => {
+        if (done || !settled()) return;
+        done = true;
+        if (timer !== undefined) clock.clearTimeout(timer);
+        unsubscribe();
+        signal?.removeEventListener("abort", check);
+        resolve();
+      };
+      const arm = (): void => {
+        timer = clock.setTimeout(
+          onTimer,
+          Math.max(
+            0,
+            Math.min(COMPLETION_WAIT_FALLBACK_MS, deadline - clock.now()),
+          ),
+        );
+      };
+      const onTimer = (): void => {
+        timer = undefined;
+        check();
+        if (!done) arm();
+      };
+      // Registered before the state is checked again, so a change between
+      // the first check and the subscription cannot be missed.
+      unsubscribe = subscribe(roomId, peerId, transferId, check);
+      signal?.addEventListener("abort", check);
+      check();
+      if (!done) arm();
+    });
   return !signal?.aborted && isTransferComplete(roomId, peerId, transferId);
 };

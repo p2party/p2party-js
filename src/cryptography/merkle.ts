@@ -8,6 +8,7 @@ import {
   crypto_hash_sha512_STATEBYTES,
 } from "./interfaces";
 import { hashMerkleLeaf, hashMerkleLeafWasm } from "../utils/leafHash";
+import { MERKLE_NODE_DOMAIN } from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
 
@@ -247,8 +248,6 @@ export const getMerkleProof = async (
   }
 };
 
-// merkle.c's internal-node hash: SHA-512(0x01 ‖ left ‖ right).
-const MERKLE_NODE_DOMAIN = 0x01;
 const MERKLE_NODE_INPUT_BYTES = 1 + 2 * crypto_hash_sha512_BYTES;
 const MERKLE_PROOF_ARTIFACT_BYTES = crypto_hash_sha512_BYTES + 1;
 

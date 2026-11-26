@@ -22,6 +22,9 @@ import {
   METADATA_LEN,
   PROOF_LEN,
   RATCHET_ROOT_SUITE_MLKEM512,
+  RECEIPT_WINDOW_FALLBACK_MS,
+  SEND_BUFFER_FALLBACK_MS,
+  SEND_BUFFER_LOW_THRESHOLD,
   WIRE_CHUNK_FRAME_LEN,
 } from "../../src/utils/constants";
 import {
@@ -66,8 +69,10 @@ let withOutboundMessage: SendModule["withOutboundMessage"];
 let sendChunks: SendModule["sendChunks"];
 let sendScheduled: SendModule["sendScheduled"];
 let waitForSendBuffer: SendModule["waitForSendBuffer"];
-let SEND_BUFFER_LOW_THRESHOLD: number;
-let SEND_BUFFER_FALLBACK_MS: number;
+let waitForReceiptWindow: SendModule["waitForReceiptWindow"];
+let edgeReceiptProgress: SendModule["edgeReceiptProgress"];
+let SEND_RECEIPT_WINDOW: number;
+let markChunkAcked: (typeof import("../../src/handlers/reconcile"))["markChunkAcked"];
 let compileChannelMessageLabel: (typeof import("../../src/utils/channelLabel"))["compileChannelMessageLabel"];
 let clearTransfer: (typeof import("../../src/handlers/reconcile"))["clearTransfer"];
 
@@ -78,16 +83,18 @@ beforeAll(async () => {
   await import("../../src/store");
   ({
     OutboundMessage,
-    SEND_BUFFER_FALLBACK_MS,
-    SEND_BUFFER_LOW_THRESHOLD,
+    SEND_RECEIPT_WINDOW,
+    edgeReceiptProgress,
     sendChunks,
     sendScheduled,
+    waitForReceiptWindow,
     waitForSendBuffer,
     withOutboundMessage,
   } = await import("../../src/handlers/handleSendMessage"));
   ({ compileChannelMessageLabel } =
     await import("../../src/utils/channelLabel"));
-  ({ clearTransfer } = await import("../../src/handlers/reconcile"));
+  ({ clearTransfer, markChunkAcked } =
+    await import("../../src/handlers/reconcile"));
 });
 
 const ROOM = "room-a4";
@@ -769,9 +776,9 @@ describe("the proof levels do not outlive the delivery", () => {
     expect(counts.sha512Init).toBe(staged.totalChunks - 1);
     expect(captured!.closed).toBe(true);
     expect(captured!.proofLevelBytes).toBe(0);
-    // Asked for another cell after the cancel, the job refuses and builds
-    // nothing.
-    await expect(edge.jobs[0].nextCell(slot)).rejects.toThrow("cancelled");
+    // Asked for another cell after the cancel, the job has nothing to send
+    // (a dummy, never a throw that would degrade the edge) and builds nothing.
+    expect(await edge.jobs[0].nextCell(slot)).toBeNull();
     expect(counts.sha512Init).toBe(staged.totalChunks - 1);
   });
 
@@ -895,7 +902,12 @@ const manualTimers = () => {
   };
 };
 
-const settledState = async <T>(promise: Promise<T>) => {
+// Settlement within a bounded number of microtask turns. A wait on a manual
+// clock settles synchronously once woken, so "still pending" here is a
+// failure, not a hang.
+const settledState = async <T>(
+  promise: Promise<T>,
+): Promise<{ state: "pending" | "resolved" | "rejected"; value: unknown }> => {
   let state: "pending" | "resolved" | "rejected" = "pending";
   let value: unknown;
   promise.then(
@@ -908,9 +920,12 @@ const settledState = async <T>(promise: Promise<T>) => {
       value = e;
     },
   );
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
   return { state, value };
 };
+
+// A driver loop that gives up instead of spinning forever under a regression.
+const MAX_DRIVER_TURNS = 200_000;
 
 describe("sender backpressure", () => {
   test("send waits for bufferedamountlow", async () => {
@@ -1024,7 +1039,8 @@ describe("sender backpressure", () => {
         done = true;
       });
       let pauses = 0;
-      while (!done) {
+      for (let turns = 0; !done; turns++) {
+        if (turns > MAX_DRIVER_TURNS) throw new Error("the pass never ended");
         await new Promise((resolve) => setImmediate(resolve));
         if (channel.listenerCount === 0) continue;
         // Paused on the full buffer: listening, and nothing more is sent
@@ -1050,5 +1066,259 @@ describe("sender backpressure", () => {
       globalThis.setTimeout = realSetTimeout;
       message.close();
     }
+  });
+});
+
+// ── receipt window: woken by the receipt, not by a timer ───────────────────
+
+/** Timers on a clock the test owns: what is armed is counted, nothing fires by itself. */
+const manualClock = () => {
+  let now = 0;
+  const armed = new Map<number, { callback: () => void; at: number }>();
+  let next = 1;
+  let fired = 0;
+  return {
+    armed,
+    get fired() {
+      return fired;
+    },
+    clock: {
+      now: () => now,
+      setTimeout: (callback: () => void, ms: number) => {
+        const id = next++;
+        armed.set(id, { callback, at: now + ms });
+        return id;
+      },
+      clearTimeout: (handle: unknown) => {
+        armed.delete(handle as number);
+      },
+    },
+    /** Move the clock to the next armed timer and run it. */
+    fireNext: () => {
+      const [id, timer] = [...armed.entries()].sort(
+        (a, b) => a[1].at - b[1].at,
+      )[0];
+      armed.delete(id);
+      now = Math.max(now, timer.at);
+      fired++;
+      timer.callback();
+    },
+  };
+};
+
+/**
+ * A windowed first pass of `cells` reals. The receiver acknowledges one cell
+ * each time the sender has a full window in flight, through the real
+ * reconcile state, exactly where handleReadReceipt records it. Counts the
+ * timer callbacks that actually ran during the pass.
+ */
+const windowedPass = async (
+  cells: number,
+  closeAfterWaits = Number.POSITIVE_INFINITY,
+): Promise<{
+  fired: number;
+  waits: number;
+  sent: number;
+  heldSubscriptions: number;
+  channelListeners: number;
+}> => {
+  const staged = await stageMessage(cells, 0);
+  const store = new CountingStore(staged.rows);
+  const message = messageFor(staged, store, module);
+  const channel = await openChannel(staged);
+  const progress = edgeReceiptProgress(ROOM, PEER, TRANSFER_ID);
+  let waits = 0;
+  let heldSubscriptions = 0;
+  const receipts = {
+    count: progress.count,
+    subscribe: (wake: () => void) => {
+      waits++;
+      heldSubscriptions++;
+      const unsubscribe = progress.subscribe(wake);
+      return () => {
+        heldSubscriptions--;
+        unsubscribe();
+      };
+    },
+  };
+
+  const realSetTimeout = globalThis.setTimeout;
+  let fired = 0;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...rest: unknown[]
+  ) =>
+    realSetTimeout(() => {
+      fired++;
+      callback(...rest);
+    }, ms)) as typeof setTimeout;
+  try {
+    let done = false;
+    const pass = sendChunks(
+      channel as unknown as IRTCDataChannel,
+      plaintextSealer,
+      message,
+      undefined,
+      undefined,
+      receipts,
+    ).then(() => {
+      done = true;
+    });
+    let acked = 0;
+    for (let turns = 0; !done; turns++) {
+      if (turns > MAX_DRIVER_TURNS) throw new Error("the pass never ended");
+      await new Promise((resolve) => setImmediate(resolve));
+      if (channel.sent.length - acked < SEND_RECEIPT_WINDOW) continue;
+      if (waits >= closeAfterWaits) {
+        // The edge goes away under a full window; no receipt will come.
+        if (channel.readyState === "open") channel.close();
+        continue;
+      }
+      const index = deserializeMetadata(
+        channel.sent[acked].subarray(0, METADATA_LEN),
+      ).chunkIndex;
+      markChunkAcked(ROOM, PEER, TRANSFER_ID, index);
+      acked++;
+    }
+    await pass;
+    return {
+      fired,
+      waits,
+      sent: channel.sent.length,
+      heldSubscriptions,
+      channelListeners: channel.listenerCount,
+    };
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    message.close();
+    clearTransfer(ROOM, PEER, TRANSFER_ID);
+  }
+};
+
+describe("the receipt window waits for receipts, not for a timer", () => {
+  test("the receipt-window wait is woken by a receipt, not a timer", async () => {
+    const small = await windowedPass(60);
+    const large = await windowedPass(120);
+    expect(small.sent).toBe(60);
+    expect(large.sent).toBe(120);
+    // The window really was full: every cell past the first window waited.
+    expect(small.waits).toBe(60 - SEND_RECEIPT_WINDOW);
+    expect(large.waits).toBe(120 - SEND_RECEIPT_WINDOW);
+    // Each wait ended on the receipt that freed it. No timer ran, so the
+    // count cannot grow with the number of chunks (the 25 ms poll it
+    // replaces ran at least once per wait).
+    expect(small.fired).toBe(0);
+    expect(large.fired).toBe(0);
+    // Every wait let go of its receipt and channel listeners.
+    expect(large.heldSubscriptions).toBe(0);
+    expect(large.channelListeners).toBe(0);
+  });
+
+  test("a channel that closes under a full window ends the pass at once", async () => {
+    const result = await windowedPass(60, 1);
+    // One window went out, the edge closed during the first wait, and the
+    // pass ended on the close event rather than on a timer.
+    expect(result.sent).toBe(SEND_RECEIPT_WINDOW);
+    expect(result.waits).toBe(1);
+    expect(result.fired).toBe(0);
+    expect(result.heldSubscriptions).toBe(0);
+    expect(result.channelListeners).toBe(0);
+  });
+
+  test("a missed receipt notification still frees the window through the fallback", async () => {
+    const { armed, clock, fireNext } = manualClock();
+    let inFlight = SEND_RECEIPT_WINDOW;
+    const waiting = waitForReceiptWindow({
+      windowSize: SEND_RECEIPT_WINDOW,
+      stallTimeoutMs: 10_000,
+      fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
+      isOpen: () => true,
+      inFlight: () => inFlight,
+      // The wake-up is lost.
+      subscribe: () => () => undefined,
+      clock,
+    });
+    inFlight -= 1;
+    expect((await settledState(waiting)).state).toBe("pending");
+    expect([...armed.values()].map((timer) => timer.at)).toEqual([
+      RECEIPT_WINDOW_FALLBACK_MS,
+    ]);
+    fireNext();
+    expect((await settledState(waiting)).state).toBe("resolved");
+    expect(armed.size).toBe(0);
+  });
+
+  test("a channel that closes ends the window wait without a timer", async () => {
+    const { armed, clock } = manualClock();
+    let open = true;
+    let wake = (): void => undefined;
+    let subscribed = 0;
+    const waiting = waitForReceiptWindow({
+      windowSize: 4,
+      stallTimeoutMs: 10_000,
+      fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
+      isOpen: () => open,
+      inFlight: () => 4,
+      subscribe: (listener) => {
+        subscribed++;
+        wake = listener;
+        return () => {
+          subscribed--;
+        };
+      },
+      clock,
+    });
+    expect(subscribed).toBe(1);
+    open = false;
+    wake();
+    expect((await settledState(waiting)).state).toBe("resolved");
+    expect(subscribed).toBe(0);
+    expect(armed.size).toBe(0);
+  });
+
+  test("with no receipt at all the window unblocks at the stall deadline", async () => {
+    const { armed, clock, fireNext } = manualClock();
+    const stallTimeoutMs = 1_200;
+    const waiting = waitForReceiptWindow({
+      windowSize: 4,
+      stallTimeoutMs,
+      fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
+      isOpen: () => true,
+      inFlight: () => 9,
+      subscribe: () => () => undefined,
+      clock,
+    });
+    // 500 ms, 1,000 ms, then exactly the stall deadline.
+    fireNext();
+    fireNext();
+    expect((await settledState(waiting)).state).toBe("pending");
+    expect([...armed.values()].map((timer) => timer.at)).toEqual([
+      stallTimeoutMs,
+    ]);
+    fireNext();
+    expect((await settledState(waiting)).state).toBe("resolved");
+  });
+
+  test("an abort ends the window wait with the transfer's abort reason", async () => {
+    const { armed, clock } = manualClock();
+    const controller = new AbortController();
+    const reason = new Error("Message transfer cancelled");
+    const waiting = waitForReceiptWindow({
+      windowSize: 4,
+      stallTimeoutMs: 10_000,
+      fallbackMs: RECEIPT_WINDOW_FALLBACK_MS,
+      isOpen: () => true,
+      inFlight: () => 4,
+      subscribe: () => () => undefined,
+      signal: controller.signal,
+      clock,
+    });
+    controller.abort(reason);
+    expect(await settledState(waiting)).toEqual({
+      state: "rejected",
+      value: reason,
+    });
+    expect(armed.size).toBe(0);
   });
 });

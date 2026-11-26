@@ -30,6 +30,10 @@ export const METADATA_LEN =
   8 + // chunkStartIndex (8 bytes)
   8 + // chunkEndIndex (8 bytes)
   8; // chunkIndex (8 bytes)
+// Merkle internal-node domain byte: a node is SHA-512(0x01 ‖ left ‖ right),
+// byte-matched with MERKLE_NODE_DOMAIN in src/cryptography/merkle.c. Leaves use
+// 0x00 (src/utils/leafHash.ts).
+export const MERKLE_NODE_DOMAIN = 0x01;
 export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
@@ -206,6 +210,24 @@ export const RECEIVE_VERIFY_LEASE_RENEW_MS = 30_000;
 // "connecting" (anything that still slips is recovered by reconcile()).
 export const CHANNEL_OPEN_TIMEOUT_MS = 3000;
 export const CHANNEL_OPEN_POLL_MS = 25;
+
+// ── Sender waits (handleSendMessage.ts, reconcile.ts) ───────────────────────
+// Every wait below is woken by the event it waits for. Its timer is the
+// fallback for a wake-up that never comes, not a polling cadence.
+//
+// A sender held at MAX_BUFFERED_AMOUNT resumes once its data channel's buffer
+// drains to this (`bufferedAmountLowThreshold`): one wake-up refills about
+// eight 64 KiB frames instead of one.
+export const SEND_BUFFER_LOW_THRESHOLD = MAX_BUFFERED_AMOUNT / 2;
+// A full send buffer is re-checked this often in case `bufferedamountlow` is
+// never delivered.
+export const SEND_BUFFER_FALLBACK_MS = 250;
+// A full receipt window is re-checked this often if no receipt or close wakes
+// it, so a lost wake-up costs at most this much per wait.
+export const RECEIPT_WINDOW_FALLBACK_MS = 500;
+// A completion wait is re-checked this often if no final receipt, refusal or
+// abort wakes it.
+export const COMPLETION_WAIT_FALLBACK_MS = 1_000;
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

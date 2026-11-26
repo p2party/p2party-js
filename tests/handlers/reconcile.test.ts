@@ -10,8 +10,10 @@ import {
   clearTransfer,
   getPeerTransferOutcome,
   getTransferAcks,
+  onTransferProgress,
   waitForCompletion,
 } from "../../src/handlers/reconcile";
+import { COMPLETION_WAIT_FALLBACK_MS } from "../../src/utils/constants";
 
 describe("reconcile state (selective retransmit / resume)", () => {
   test("recipient refusal wakes completion waits without cancelling or completing sibling sends", async () => {
@@ -156,5 +158,228 @@ describe("reconcile state (selective retransmit / resume)", () => {
 
     clearTransfer("r", "evil\u0000t9", "t1");
     clearTransfer("r", "plain", "t1");
+  });
+});
+
+/** Timers on a clock the test owns: nothing fires unless the test fires it. */
+const manualClock = () => {
+  let now = 0;
+  let next = 1;
+  let fired = 0;
+  const armed = new Map<number, { callback: () => void; at: number }>();
+  return {
+    armed,
+    get fired() {
+      return fired;
+    },
+    clock: {
+      now: () => now,
+      setTimeout: (callback: () => void, ms: number) => {
+        const id = next++;
+        armed.set(id, { callback, at: now + ms });
+        return id;
+      },
+      clearTimeout: (handle: unknown) => {
+        armed.delete(handle as number);
+      },
+    },
+    fireNext: () => {
+      const [id, timer] = [...armed.entries()].sort(
+        (a, b) => a[1].at - b[1].at,
+      )[0];
+      armed.delete(id);
+      now = Math.max(now, timer.at);
+      fired++;
+      timer.callback();
+    },
+  };
+};
+
+/** onTransferProgress, with the subscriptions still held counted. */
+const countedSubscribe = () => {
+  const held = { count: 0 };
+  const subscribe: typeof onTransferProgress = (
+    roomId,
+    peerId,
+    transferId,
+    listener,
+  ) => {
+    held.count++;
+    const unsubscribe = onTransferProgress(
+      roomId,
+      peerId,
+      transferId,
+      listener,
+    );
+    return () => {
+      held.count--;
+      unsubscribe();
+    };
+  };
+  return { held, subscribe };
+};
+
+// Settlement within a bounded number of microtask turns. A wait on a manual
+// clock settles synchronously once woken, so "still pending" here is a
+// failure, not a hang.
+const settledWithin = async <T>(
+  promise: Promise<T>,
+): Promise<{ settled: boolean; value?: T }> => {
+  let outcome: { settled: boolean; value?: T } = { settled: false };
+  void promise.then((value) => {
+    outcome = { settled: true, value };
+  });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  return outcome;
+};
+
+const pendingAfterMicrotasks = async (
+  promise: Promise<unknown>,
+): Promise<boolean> => !(await settledWithin(promise)).settled;
+
+describe("the completion wait is event-driven", () => {
+  const room = "wait-room",
+    peer = "wait-peer",
+    transfer = "wait-transfer";
+
+  test("the completion wait is woken by the final receipt", async () => {
+    try {
+      const timers = manualClock();
+      const { armed, clock } = timers;
+      const { held, subscribe } = countedSubscribe();
+      const waiting = waitForCompletion(
+        room,
+        peer,
+        transfer,
+        60_000,
+        undefined,
+        {
+          clock,
+          subscribe,
+        },
+      );
+      expect(await pendingAfterMicrotasks(waiting)).toBe(true);
+      expect(held.count).toBe(1);
+      // One fallback re-check is armed; it is not a 200 ms poll.
+      expect([...armed.values()].map((timer) => timer.at)).toEqual([
+        COMPLETION_WAIT_FALLBACK_MS,
+      ]);
+
+      expect(markTransferComplete(room, peer, transfer)).toBe(true);
+      expect(await settledWithin(waiting)).toEqual({
+        settled: true,
+        value: true,
+      });
+      expect(timers.fired).toBe(0);
+      expect(armed.size).toBe(0);
+      expect(held.count).toBe(0);
+    } finally {
+      clearTransfer(room, peer, transfer);
+    }
+  });
+
+  test("a refusal or an abort also wakes the completion wait, with no timer", async () => {
+    try {
+      const refused = manualClock();
+      const waitingRefusal = waitForCompletion(
+        room,
+        peer,
+        transfer,
+        60_000,
+        undefined,
+        { clock: refused.clock },
+      );
+      markTransferCancelled(room, peer, transfer);
+      expect(await settledWithin(waitingRefusal)).toEqual({
+        settled: true,
+        value: false,
+      });
+      expect(refused.fired).toBe(0);
+      expect(refused.armed.size).toBe(0);
+      clearTransfer(room, peer, transfer);
+
+      const aborted = manualClock();
+      const controller = new AbortController();
+      const waitingAbort = waitForCompletion(
+        room,
+        peer,
+        transfer,
+        60_000,
+        controller.signal,
+        { clock: aborted.clock },
+      );
+      controller.abort();
+      expect(await settledWithin(waitingAbort)).toEqual({
+        settled: true,
+        value: false,
+      });
+      expect(aborted.fired).toBe(0);
+      expect(aborted.armed.size).toBe(0);
+    } finally {
+      clearTransfer(room, peer, transfer);
+    }
+  });
+
+  test("a missed notification still completes through the fallback", async () => {
+    try {
+      const { armed, clock, fireNext } = manualClock();
+      const waiting = waitForCompletion(
+        room,
+        peer,
+        transfer,
+        60_000,
+        undefined,
+        {
+          clock,
+          // The wake-up is lost.
+          subscribe: () => () => undefined,
+        },
+      );
+      markTransferComplete(room, peer, transfer);
+      expect(await pendingAfterMicrotasks(waiting)).toBe(true);
+      // The re-check that catches it comes long before the 60 s deadline.
+      expect([...armed.values()].map((timer) => timer.at)).toEqual([
+        COMPLETION_WAIT_FALLBACK_MS,
+      ]);
+      fireNext();
+      expect(await settledWithin(waiting)).toEqual({
+        settled: true,
+        value: true,
+      });
+      expect(armed.size).toBe(0);
+    } finally {
+      clearTransfer(room, peer, transfer);
+    }
+  });
+
+  test("with no final receipt the wait ends at its deadline, re-checking once per fallback", async () => {
+    try {
+      const timers = manualClock();
+      const { armed, clock, fireNext } = timers;
+      const waiting = waitForCompletion(
+        room,
+        peer,
+        transfer,
+        2_500,
+        undefined,
+        {
+          clock,
+        },
+      );
+      const deadlines: number[] = [];
+      while (armed.size > 0) {
+        deadlines.push([...armed.values()][0].at);
+        fireNext();
+        await Promise.resolve();
+      }
+      expect(await settledWithin(waiting)).toEqual({
+        settled: true,
+        value: false,
+      });
+      expect(deadlines).toEqual([1_000, 2_000, 2_500]);
+      expect(timers.fired).toBe(3);
+    } finally {
+      clearTransfer(room, peer, transfer);
+    }
   });
 });

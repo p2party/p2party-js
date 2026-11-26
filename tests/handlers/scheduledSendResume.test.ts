@@ -513,6 +513,7 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     const ratchet = { state: first.epc.ratchetState as RatchetState };
     let second: Edge | undefined;
     const label = jobLabel();
+    let reofferedOnReplacement = false;
 
     const result = await runSend({
       peerConnections,
@@ -535,6 +536,11 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
           peerConnections.push(second.epc);
           return false;
         }
+        // ...and actually re-offered on the replacement runtime, while the
+        // second attempt waits for its confirmation.
+        reofferedOnReplacement = second!.runtime
+          .getQueuedJobIds()
+          .includes(label);
         return true;
       },
     });
@@ -546,8 +552,9 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     expect(steppedOn).toEqual([first.epc, second!.epc]);
     expect(keyHexes).toHaveLength(2);
     expect(keyHexes[0]).not.toBe(keyHexes[1]);
-    // ...and actually re-offered on the replacement runtime.
-    expect(second!.runtime.getQueuedJobIds()).toContain(label);
+    expect(reofferedOnReplacement).toBe(true);
+    // Delivery settles the re-offered job at once.
+    expect(second!.runtime.getQueuedJobIds()).not.toContain(label);
   });
 
   test("a replacement installed BEFORE this attempt is enqueued is still a replacement", async () => {
@@ -601,6 +608,7 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     const keyHexes: string[] = [];
     const ratchet = { state: first.epc.ratchetState as RatchetState };
     let keyAtResume: string | undefined;
+    let resumedKeyWhileWaiting: string | undefined;
 
     await runSend({
       peerConnections,
@@ -620,6 +628,7 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
           return false;
         }
         keyAtResume = uint8ArrayToHex(keys[0]);
+        resumedKeyWhileWaiting = uint8ArrayToHex(keys[1]);
         return true;
       },
     });
@@ -628,7 +637,10 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
     // may keep the retired generation's key alive.
     expect(keyHexes[0]).not.toBe("00".repeat(keys[0].length));
     expect(keyAtResume).toBe("00".repeat(keys[0].length));
-    expect(uint8ArrayToHex(keys[1])).not.toBe("00".repeat(keys[1].length));
+    // The resumed attempt's key is live while it waits, and wiped when its
+    // delivery is confirmed.
+    expect(resumedKeyWhileWaiting).not.toBe("00".repeat(keys[1].length));
+    expect(uint8ArrayToHex(keys[1])).toBe("00".repeat(keys[1].length));
   });
 
   test("a step without a PQ context fails the send before any job is enqueued", async () => {
@@ -961,6 +973,7 @@ describe("sendScheduled confirms delivery through the progress-gated wait (findi
     const peerConnections: IRTCPeerConnection[] = [first.epc];
     const seen: ScheduledDeliveryWaitOptions[] = [];
     const label = jobLabel();
+    const observed: Record<string, unknown> = {};
 
     const result = await runSend({
       peerConnections,
@@ -969,45 +982,55 @@ describe("sendScheduled confirms delivery through the progress-gated wait (findi
       keyHexes: [],
       ratchet: { state: first.epc.ratchetState as RatchetState },
       onWaitOptions: (waitOptions) => seen.push(waitOptions),
-      onWait: () => true,
+      // The probe is read while the send waits: a confirmed delivery settles
+      // the job, after which there is nothing left to probe.
+      onWait: () => {
+        const probe = seen[0].progress;
+        observed.probeType = typeof probe;
+        // ...and the probe reads the REAL job, not a captured constant:
+        // pushing a control job in front of it (jobTier ranks control ahead
+        // of real) moves this send's admission position, and the probe moves
+        // with it.
+        observed.atHead = probe();
+        first.runtime.enqueue({
+          id: first.runtime.randomLaneLabel(),
+          kind: "control",
+          declaredCellCount: 1,
+          nextCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
+        });
+        observed.behindControl = probe();
+        observed.suspendedBefore = seen[0].isSuspended?.();
+        // A hidden page no longer suspends cover; a frozen one does.
+        first.runtime.suspend("freeze");
+        observed.suspendedDuring = seen[0].isSuspended?.();
+        first.runtime.resume();
+        observed.suspendedAfter = seen[0].isSuspended?.();
+        // ...and it reports the job leaving the scheduler, which is the only
+        // other thing the wait can learn locally.
+        first.runtime.complete(label);
+        observed.afterComplete = probe();
+        return true;
+      },
     });
 
     expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
     // A delivery wait that is not progress-gated is handed no probe at all.
     expect(seen).toHaveLength(1);
-    const probe = seen[0].progress;
-    expect(typeof probe).toBe("function");
-
-    // ...and the probe reads the REAL job, not a captured constant: pushing a
-    // control job in front of it (jobTier ranks control ahead of real) moves
-    // this send's admission position, and the probe moves with it.
-    const atHead = probe();
-    expect(atHead).toBeDefined();
-    first.runtime.enqueue({
-      id: first.runtime.randomLaneLabel(),
-      kind: "control",
-      declaredCellCount: 1,
-      nextCell: () => new Uint8Array(WIRE_CHUNK_FRAME_LEN),
+    expect(observed.probeType).toBe("function");
+    expect(observed.atHead).toEqual({
+      state: "queued",
+      queuePosition: 0,
+      sentCells: 0,
     });
-    const behindControl = probe();
-    expect(behindControl).toBeDefined();
-    expect(atHead).toEqual({ state: "queued", queuePosition: 0, sentCells: 0 });
-    expect(behindControl).toEqual({
+    expect(observed.behindControl).toEqual({
       state: "queued",
       queuePosition: 1,
       sentCells: 0,
     });
-
-    expect(seen[0].isSuspended?.()).toBe(false);
-    first.runtime.suspend("page-hidden");
-    expect(seen[0].isSuspended?.()).toBe(true);
-    first.runtime.resume();
-    expect(seen[0].isSuspended?.()).toBe(false);
-
-    // ...and it reports the job leaving the scheduler, which is the only other
-    // thing the wait can learn locally.
-    first.runtime.complete(label);
-    expect(probe()).toBeUndefined();
+    expect(observed.suspendedBefore).toBe(false);
+    expect(observed.suspendedDuring).toBe(true);
+    expect(observed.suspendedAfter).toBe(false);
+    expect(observed.afterComplete).toBeUndefined();
   });
 
   test("the idle budget it is given is derived from the room's schedule", async () => {
@@ -1052,6 +1075,22 @@ describe("sendScheduled confirms delivery through the progress-gated wait (findi
 // message the peer had already assembled. Before 47d4691 the window was
 // effectively zero, so this is a regression that commit introduced.
 
+/** Record what the send asks of a runtime: CANCEL vs settle-as-delivered. */
+const watchSettlement = (runtime: CoverRuntime) => {
+  const calls = { cancelled: [] as string[], completed: [] as string[] };
+  const cancel = runtime.cancel.bind(runtime);
+  const complete = runtime.complete.bind(runtime);
+  runtime.cancel = (jobId) => {
+    calls.cancelled.push(jobId);
+    return cancel(jobId);
+  };
+  runtime.complete = (jobId) => {
+    calls.completed.push(jobId);
+    complete(jobId);
+  };
+  return calls;
+};
+
 describe("a receipt inside the resume watch is a delivery, not a failure (finding 5)", () => {
   test("no replacement is published: the receipt still settles the send", async () => {
     const bob = initRatchet(rand(32), false, null, module);
@@ -1061,6 +1100,7 @@ describe("a receipt inside the resume watch is a delivery, not a failure (findin
     const peerConnections: IRTCPeerConnection[] = [first.epc];
     const ratchet = { state: first.epc.ratchetState as RatchetState };
     const label = jobLabel();
+    const settlement = watchSettlement(first.runtime);
 
     const result = await runSend({
       peerConnections,
@@ -1079,9 +1119,11 @@ describe("a receipt inside the resume watch is a delivery, not a failure (findin
 
     expect(isTransferComplete(ROOM, PEER, TRANSFER_ID)).toBe(true);
     expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
-    // ...and no wire CANCEL was raised for a message that actually arrived: a
-    // cancel of this still-queued job would have dropped it from the scheduler.
-    expect(first.runtime.getQueuedJobIds()).toContain(label);
+    // ...and no wire CANCEL was raised for a message that actually arrived:
+    // the job is settled as delivered (no frame) instead.
+    expect(settlement.cancelled).toEqual([]);
+    expect(settlement.completed).toEqual([label]);
+    expect(first.runtime.getQueuedJobIds()).not.toContain(label);
   });
 
   test("a replacement with no adoptable transport: the receipt still settles the send", async () => {
@@ -1092,6 +1134,7 @@ describe("a receipt inside the resume watch is a delivery, not a failure (findin
     const peerConnections: IRTCPeerConnection[] = [first.epc];
     const ratchet = { state: first.epc.ratchetState as RatchetState };
     const label = jobLabel();
+    const settlement = watchSettlement(first.runtime);
 
     const result = await runSend({
       peerConnections,
@@ -1113,7 +1156,8 @@ describe("a receipt inside the resume watch is a delivery, not a failure (findin
     });
 
     expect(result.outcomes).toEqual([{ peerId: PEER, status: "delivered" }]);
-    expect(first.runtime.getQueuedJobIds()).toContain(label);
+    expect(settlement.cancelled).toEqual([]);
+    expect(settlement.completed).toEqual([label]);
   });
 
   test("a send that really did NOT arrive is still failed and still cancelled", async () => {

@@ -40,6 +40,7 @@ import type {
   IRTCPeerConnection,
 } from "../../src/api/webrtc/interfaces";
 import type {
+  HeldFileSettledNotice,
   MessageData,
   ReceiveChunk,
   ReceiveChunkStoreResult,
@@ -81,7 +82,8 @@ const { store } = await import("../../src/store");
 const { deleteRoom, setRoom } = await import("../../src/reducers/roomSlice");
 const { DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy");
 const { normalizeRoomCapability } = await import("../../src/roomInvite");
-const { enqueue } = await import("../../src/handlers/handleMessageQueueing");
+const { applyHeldFileSettled, enqueue } =
+  await import("../../src/handlers/handleMessageQueueing");
 const { claimRatchetGate, openRatchetGate, resetRatchetGate } =
   await import("../../src/handlers/ratchetGate");
 const { allowClassicalOnlyReceiveForTests } =
@@ -116,6 +118,7 @@ interface WorkerResponse {
 }
 let nextId = 1;
 const pendingReplies = new Map<number, (reply: WorkerResponse) => void>();
+const notices: HeldFileSettledNotice[] = [];
 const callWorker = async (
   method: string,
   args: unknown[],
@@ -123,6 +126,11 @@ const callWorker = async (
   await import("../../src/db/db.worker");
   (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
     (message: unknown) => {
+      const { notice } = message as { notice?: HeldFileSettledNotice };
+      if (notice) {
+        notices.push(structuredClone(notice));
+        return;
+      }
       const reply = structuredClone(message) as WorkerResponse;
       pendingReplies.get(reply.id)?.(reply);
       pendingReplies.delete(reply.id);
@@ -161,12 +169,14 @@ const storage = () => {
   const started = deferred();
   const settled = deferred<ReceiveVerificationOutcome>();
   const hashed = deferred<ReceiveVerificationVerdict>();
+  const outcomes: ReceiveVerificationOutcome[] = [];
   let verifications = 0;
   return {
     gate,
     started,
     settled,
     hashed,
+    outcomes,
     verifications: () => verifications,
     dependencies: {
       persistRatchetState: async () => undefined,
@@ -194,6 +204,7 @@ const storage = () => {
           token,
           commit,
         ])) as ReceiveVerificationOutcome;
+        outcomes.push(outcome);
         settled.resolve(outcome);
         return outcome;
       },
@@ -526,9 +537,131 @@ describe("a received file is verified outside the edge's receive lock", () => {
     expect(messageView(file.rootHex)?.savedSize).toBe(8);
     io.gate.resolve();
     expect(await io.settled.promise).toBe("integrity");
-    // The app sees the reset at once, matching the dropped chunks on disk.
+    const position = () =>
+      store
+        .getState()
+        .rooms.find((room) => room.id === ROOM)!
+        .messages.findIndex(
+          (message) => message.merkleRootHex === file.rootHex,
+        );
+    const before = position();
+    // The app sees the reset at once, matching the dropped chunks on disk,
+    // and the message keeps its place in the room's list.
     await waitFor(() => messageView(file.rootHex)?.savedSize === 0);
+    expect(position()).toBe(before);
     expect(messageView(file.rootHex)?.totalSize).toBe(11);
     expect((await row(file.rootHex))?.savedSize).toBe(0);
+  });
+
+  test("a reconnect during verification completes the file without a second reconnect", async () => {
+    quietConsole();
+    const io = storage();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    const before = edge();
+    const closed = new AbortController();
+    const oldLane = lane(file, before.epc, io.dependencies, closed.signal);
+    oldLane.push(seal(before.alice, file.plaintexts[0], file.root));
+    await io.started.promise;
+
+    // The connection drops: its channel closes first, while its gate lease is
+    // still current, so the run is not stopped and keeps hashing.
+    closed.abort(new Error("channel closed"));
+    // Then the old edge is torn down and the reconnect builds a new one,
+    // whose sender resends the held last chunk.
+    resetRatchetGate(ROOM, PEER);
+    const after = edge();
+    const newLane = lane(file, after.epc, io.dependencies);
+    newLane.push(seal(after.alice, file.plaintexts[0], file.root));
+    await waitFor(() => io.verifications() === 2);
+
+    io.gate.resolve();
+    await waitFor(() => io.outcomes.length === 2);
+    // The old connection does not commit; the new one does, on this reconnect.
+    expect([...io.outcomes].sort()).toEqual(["aborted", "complete"]);
+    await waitFor(() => newLane.sent.includes(uint8ArrayToHex(file.hash)));
+    expect(oldLane.sent).not.toContain(uint8ArrayToHex(file.hash));
+    expect(messageView(file.rootHex)?.savedSize).toBe(8);
+    expect((await row(file.rootHex))?.savedSize).toBe(8);
+  });
+
+  test("a resent last chunk for an already verified file gets the final receipt without a second verification", async () => {
+    quietConsole();
+    notices.length = 0;
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    // The page that received it went away before verifying it.
+    const gone = storage();
+    const deadPage = {
+      ...gone.dependencies,
+      verifyReceivedFile: () =>
+        new Promise<ReceiveVerificationVerdict>(() => {}),
+    };
+    const first = edge();
+    const firstLane = lane(file, first.epc, deadPage);
+    firstLane.push(seal(first.alice, file.plaintexts[0], file.root));
+    await waitFor(() => firstLane.sent.length === 1);
+
+    // The next start loads the room; the worker verifies the file on its own
+    // and the app shows the outcome.
+    await callWorker("getDBRoomMessageData", [ROOM]);
+    await waitFor(() => notices.length === 1);
+    expect(notices[0]).toMatchObject({
+      merkleRoot: file.rootHex,
+      outcome: "complete",
+    });
+    await applyHeldFileSettled(notices[0], store.dispatch);
+    expect(messageView(file.rootHex)?.savedSize).toBe(8);
+
+    // The sender's resume resends the last chunk: it is answered from the
+    // recorded outcome, with the final receipt, and not verified again.
+    const io = storage();
+    const second = edge();
+    const secondLane = lane(file, second.epc, io.dependencies);
+    secondLane.push(seal(second.alice, file.plaintexts[0], file.root));
+    await waitFor(() => secondLane.sent.length === 2);
+    expect(secondLane.sent).toEqual([
+      uint8ArrayToHex(file.receipts[0]),
+      uint8ArrayToHex(file.hash),
+    ]);
+    expect(io.verifications()).toBe(0);
+  });
+
+  test("a failed verification start is reported as a storage failure", async () => {
+    quietConsole();
+    const io = storage();
+    io.gate.resolve();
+    // The start's lease write fails for lack of space.
+    const proto = (
+      globalThis as unknown as {
+        IDBObjectStore: { prototype: { put: (...a: unknown[]) => unknown } };
+      }
+    ).IDBObjectStore.prototype;
+    const put = proto.put;
+    let armed = false;
+    proto.put = function (this: { name: string }, ...args: unknown[]) {
+      if (armed && this.name === "receiveActivity") {
+        armed = false;
+        throw new DOMException("injected", "QuotaExceededError");
+      }
+      return put.apply(this, args);
+    };
+    restores.push(() => {
+      proto.put = put;
+    });
+    const dependencies = {
+      ...io.dependencies,
+      verifyReceivedFile: (merkleRoot: string, token: string) => {
+        armed = true;
+        return io.dependencies.verifyReceivedFile(merkleRoot, token);
+      },
+    };
+    const errors = collectErrors();
+    const { alice, epc } = edge();
+    const file = await buildMessage(MessageType.ImagePNG, [8]);
+    lane(file, epc, dependencies).push(
+      seal(alice, file.plaintexts[0], file.root),
+    );
+    expect(await io.settled.promise).toBe("aborted");
+    await waitFor(() => errors.length === 1);
+    expect(errors.map((error) => error.code)).toEqual(["storage-failed"]);
   });
 });

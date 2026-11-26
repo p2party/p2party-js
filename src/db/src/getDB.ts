@@ -112,10 +112,13 @@ export interface RepoSchema extends DBSchema {
   };
 }
 
-// The open whose upgrade another tab blocks. While it is pending every open
-// fails at once instead of queueing behind it, and it is closed when it
-// finally succeeds.
-let blockedUpgrade: Promise<void> | undefined;
+// Opens that have not settled yet. When one of them is blocked by an older
+// tab, IndexedDB queues every other open behind it, so all of them fail at
+// once rather than only the one that saw `blocked`.
+const unsettledOpens = new Set<(error: DatabaseUpgradeBlockedError) => void>();
+// Opens that failed as blocked but are still queued in IndexedDB. Each is
+// closed when it finally succeeds; until the last has, new opens fail at once.
+let blockedOpensPending = 0;
 
 /**
  * Open the database. The connection closes itself when another context asks
@@ -124,14 +127,16 @@ let blockedUpgrade: Promise<void> | undefined;
  * open rejects with DatabaseUpgradeBlockedError instead of waiting.
  */
 export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
-  if (blockedUpgrade) throw new DatabaseUpgradeBlockedError();
+  if (blockedOpensPending > 0) throw new DatabaseUpgradeBlockedError();
   let rejectBlocked!: (error: DatabaseUpgradeBlockedError) => void;
   const blocked = new Promise<never>((_resolve, reject) => {
     rejectBlocked = reject;
   });
+  unsettledOpens.add(rejectBlocked);
   const opening = openDB<RepoSchema>(dbName, dbVersion, {
     blocked() {
-      rejectBlocked(new DatabaseUpgradeBlockedError());
+      for (const reject of unsettledOpens)
+        reject(new DatabaseUpgradeBlockedError());
     },
     blocking(_currentVersion, _blockedVersion, event) {
       (event.target as IDBDatabase).close();
@@ -390,16 +395,18 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
     return await Promise.race([opening, blocked]);
   } catch (error) {
     if (error instanceof DatabaseUpgradeBlockedError) {
-      const pending: Promise<void> = opening
+      blockedOpensPending += 1;
+      void opening
         .then(
           (db) => db.close(),
           () => undefined,
         )
         .finally(() => {
-          if (blockedUpgrade === pending) blockedUpgrade = undefined;
+          blockedOpensPending -= 1;
         });
-      blockedUpgrade = pending;
     }
     throw error;
+  } finally {
+    unsettledOpens.delete(rejectBlocked);
   }
 }

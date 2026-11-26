@@ -20,6 +20,7 @@ const {
   deleteRoom,
   defaultRTCConfig,
   setMessage,
+  resetMessageReceiveProgress,
   setIceServers,
   setChannel,
   setPeer,
@@ -662,5 +663,46 @@ describe("per-peer handshake status", () => {
       retryAfter: undefined,
       peerPublicKey,
     });
+  });
+});
+
+describe("received message progress", () => {
+  test("a failed verification resets the message's progress without moving it", () => {
+    const roomId = "00000000-0000-4000-8000-0000000000e7";
+    const fromPeerId = "00000000-0000-4000-8000-0000000000e8";
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "e7".repeat(32), id: roomId }),
+    );
+    const roots = ["a1", "b2", "c3"].map((byte) => byte.repeat(64));
+    for (const merkleRootHex of roots)
+      state = roomReducer(
+        state,
+        setMessage({
+          roomId,
+          merkleRootHex,
+          sha512Hex: "cd".repeat(64),
+          fromPeerId,
+          chunkSize: 5,
+          totalSize: 8,
+          messageType: 2,
+          filename: "f.bin",
+          channelLabel: "chat",
+          timestamp: 1,
+        }),
+      );
+    const before = state[0].messages.map((message) => ({ ...message }));
+
+    state = roomReducer(
+      state,
+      resetMessageReceiveProgress({ roomId, merkleRootHex: roots[1] }),
+    );
+
+    expect(state[0].messages.map((message) => message.merkleRootHex)).toEqual(
+      roots,
+    );
+    expect(state[0].messages[1]).toEqual({ ...before[1], savedSize: 0 });
+    expect(state[0].messages[0]).toEqual(before[0]);
+    expect(state[0].messages[2]).toEqual(before[2]);
   });
 });

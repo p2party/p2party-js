@@ -149,7 +149,7 @@ export type ReceivedChunkContext = Pick<
   | "chunkIndex"
 >;
 
-const reportReceiveStorageError = (
+export const reportReceiveStorageError = (
   chunk: ReceivedChunkContext,
   failure: ReceiveChunkStoreFailure,
 ): void => {

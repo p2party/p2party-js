@@ -38,7 +38,10 @@ import {
   verifyHeldFile,
   type ReceiveStorageError,
 } from "../../src/handlers/handleReceiveMessage";
-import { DatabaseWorkerError } from "../../src/db/dbErrors";
+import {
+  createDatabaseClient,
+  type DatabaseWorkerPort,
+} from "../../src/db/api";
 import { sendReceiveFrameReceipt } from "../../src/handlers/handleMessageQueueing";
 import { allowClassicalOnlyReceiveForTests } from "../../src/handlers/ratchetPersist";
 import * as chunkCrypto from "../../src/handlers/messageChunkCrypto";
@@ -563,7 +566,19 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
     );
     const { alice, epc } = edgePair();
     const errors = collectErrors();
-    // What src/db/api.ts rejects every pending call with when the worker dies.
+    // The real database client over a worker that dies while the store is
+    // in flight: its onerror rejects the pending call.
+    const port: DatabaseWorkerPort = {
+      postMessage: () => {
+        queueMicrotask(() =>
+          port.onerror!({ message: "injected crash" } as ErrorEvent),
+        );
+      },
+      onmessage: null,
+      onerror: null,
+      onmessageerror: null,
+    };
+    const client = createDatabaseClient(port, true);
     const crashed = await handleReceiveMessage(
       seal(alice, plaintext, root),
       ROOM,
@@ -574,11 +589,10 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
       undefined,
       {
         persistRatchetState: async () => undefined,
-        storeReceiveChunk: async () => {
-          throw new DatabaseWorkerError(
-            "p2party: the database worker failed: injected",
-          );
-        },
+        storeReceiveChunk: (chunk) =>
+          client.call("storeReceiveChunk", [
+            chunk,
+          ]) as Promise<ReceiveChunkStoreResult>,
       },
     );
     expect(errors.map((error) => error.code)).toEqual(["storage-failed"]);

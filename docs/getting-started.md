@@ -350,7 +350,10 @@ is stored again.
     transfer completes or expires after 24 hours without receive activity.
 - `quota-exceeded`: the browser refused a write for lack of space.
 - `storage-failed`: any other storage fault, including the database worker
-  failing or the database being unavailable (see below).
+  failing or the database being unavailable (see below). Once the database
+  worker has failed, every later database call rejects at once with
+  `p2party.DatabaseWorkerError`; the worker is not restarted, so the
+  application should reload the page.
 - `integrity`: the last chunk of a received file arrived, but the stored file
   does not hash to the whole-file SHA-512 its message carries. The file is not
   marked complete, the sender gets no final receipt, and its stored chunks are
@@ -370,12 +373,21 @@ connection's receive queue, so chat messages, receipts and other transfers on
 the same connection keep flowing, and the worker answers other requests
 between reads of about 1 MiB. Only then is the file marked complete and the
 final receipt sent. If the connection to that peer is torn down first, or the
-room is left, nothing completes; the next copy of that last chunk (which the
-sender's resume sends, because this device does not report it as held)
-verifies the file again. A page reload during verification leaves the same
-state. Reading a completed file later does not re-verify it. Text messages are
-not verified as a whole; each of their chunks is checked against the
-message's Merkle root as it arrives, like every file chunk.
+room is left, nothing completes on that connection. When the sender
+reconnects while the file is still being verified, its copy of the last chunk
+joins that verification and the file completes on the new connection. A file
+left unverified (the page was reloaded mid-verification, or its connection
+went away) holds every byte it needs: it is verified without the sender the
+next time the SDK loads its room's messages, one file at a time, with the same
+events and outcomes; if another tab of this site is busy with that file, it is
+tried once more when that tab's hold on it ends. A later copy of the last
+chunk is then answered from the recorded outcome. Deleting the message, its
+room or all data stops a running verification and removes the file; if the
+file cannot be removed, the call that deleted it rejects with
+`p2party.StorageFailedError`. Reading a completed file later does not
+re-verify it. Text messages are not verified as a whole; each of their chunks
+is checked against the message's Merkle root as it arrives, like every file
+chunk.
 
 The database stays usable across tabs of different versions in one
 direction. A tab of this version closes its database connection when another

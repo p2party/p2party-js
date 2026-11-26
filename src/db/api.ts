@@ -1,4 +1,4 @@
-import type { ReceiveDeleteGuard } from "./types";
+import type { HeldFileSettledNotice, ReceiveDeleteGuard } from "./types";
 import type { OutboxLease, OutboxRequest } from "./outboxTypes";
 import type {
   WorkerMessages,
@@ -16,6 +16,8 @@ import {
   DATABASE_UPGRADE_BLOCKED,
   DatabaseUpgradeBlockedError,
   DatabaseWorkerError,
+  STORAGE_FAILED,
+  StorageFailedError,
 } from "./dbErrors";
 import {
   readIdentityEd25519AtClientBoundary,
@@ -24,104 +26,150 @@ import {
 } from "./identityEd25519ClientBoundary";
 // import type { MessageType } from "../utils/messageTypes";
 
+// Notices the worker posts outside any request: a held file it verified on
+// its own at the next start (see verifyHeldFileAtStart in db.worker.ts).
+const heldFileListeners = new Set<(notice: HeldFileSettledNotice) => void>();
+export const onHeldFileSettled = (
+  listener: (notice: HeldFileSettledNotice) => void,
+): (() => void) => {
+  heldFileListeners.add(listener);
+  return () => {
+    heldFileListeners.delete(listener);
+  };
+};
+
+/** The part of a Worker the database client uses. */
+export interface DatabaseWorkerPort {
+  postMessage(message: unknown, transfer: Transferable[]): void;
+  onmessage: ((event: MessageEvent) => void) | null;
+  onerror: ((event: ErrorEvent) => void) | null;
+  onmessageerror: ((event: MessageEvent) => void) | null;
+}
+
+const typedWorkerError = (error: unknown, errorCode?: string): unknown =>
+  errorCode === DATABASE_UPGRADE_BLOCKED
+    ? new DatabaseUpgradeBlockedError()
+    : errorCode === STORAGE_FAILED
+      ? new StorageFailedError(String(error))
+      : error;
+
+/**
+ * The request/reply client over the database worker. A pending call is only
+ * drained by a reply carrying its id, so anything that kills the worker (a
+ * module-load failure, a structured-clone failure posting a large chunk, an
+ * OOM) would otherwise leave every in-flight call unsettled forever. After the
+ * worker fails, every pending and every later call rejects at once with
+ * DatabaseWorkerError; the worker is not restarted (the application reloads).
+ */
+export const createDatabaseClient = (
+  worker: DatabaseWorkerPort,
+  bundled: boolean,
+) => {
+  let msgId = 0;
+  let failed: DatabaseWorkerError | undefined;
+  const pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
+  >();
+  const rejectAllPending = (reason: Error): void => {
+    const inFlight = [...pending.values()];
+    pending.clear();
+    for (const p of inFlight) p.reject(reason);
+  };
+
+  worker.onmessage = (e: MessageEvent) => {
+    const { notice } = e.data as { notice?: HeldFileSettledNotice };
+    if (notice) {
+      for (const listener of heldFileListeners) listener(notice);
+      return;
+    }
+    const { id, result, error, errorCode } = e.data as {
+      id: number;
+      result: unknown;
+      error: unknown;
+      errorCode?: string;
+    };
+    const p = pending.get(id);
+    if (!p) {
+      // A worker-wide error may already have rejected and removed this call.
+      // Explicitly retire any late transferred identity secret instead of
+      // leaving its lifetime to garbage collection.
+      wipeUnclaimedWorkerSecret(result);
+      return;
+    }
+    pending.delete(id);
+    if (error) p.reject(typedWorkerError(error, errorCode));
+    else p.resolve(result);
+  };
+
+  worker.onerror = (event: ErrorEvent) => {
+    failed = new DatabaseWorkerError(
+      `p2party: the database worker failed: ${event.message || "unknown error"}`,
+    );
+    rejectAllPending(failed);
+  };
+
+  worker.onmessageerror = () => {
+    rejectAllPending(
+      new DatabaseWorkerError(
+        "p2party: a database worker message could not be deserialized",
+      ),
+    );
+  };
+
+  const call = (
+    method: WorkerMessages["method"],
+    args: readonly unknown[],
+    transfer: Transferable[] = [],
+  ): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      // An empty bundle builds a worker that never replies, so the call would
+      // hang rather than fail. Say why instead of stalling the caller.
+      if (!bundled) {
+        reject(
+          new DatabaseWorkerError(
+            `p2party: cannot run "${method}" — the database worker bundle is ` +
+              "missing (INDEXEDDB_WORKER_JS was not inlined at build time).",
+          ),
+        );
+        return;
+      }
+      if (failed) {
+        reject(failed);
+        return;
+      }
+      const id = ++msgId;
+      pending.set(id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
+      try {
+        worker.postMessage({ id, method, args }, transfer);
+      } catch (error) {
+        pending.delete(id);
+        reject(error);
+      }
+    });
+
+  return { call };
+};
+
 const workerSrc = process.env.INDEXEDDB_WORKER_JS ?? "";
 const workerBlob = new Blob([workerSrc], {
   type: "application/javascript",
 });
-const worker = new Worker(URL.createObjectURL(workerBlob), { type: "module" });
-
-let msgId = 0;
-const pending = new Map<
-  number,
-  { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
->();
-
-worker.onmessage = (e: MessageEvent) => {
-  const { id, result, error, errorCode } = e.data as {
-    id: number;
-    result: unknown;
-    error: unknown;
-    errorCode?: string;
-  };
-  const p = pending.get(id);
-  if (!p) {
-    // A worker-wide error may already have rejected and removed this call.
-    // Explicitly retire any late transferred identity secret instead of
-    // leaving its lifetime to garbage collection.
-    wipeUnclaimedWorkerSecret(result);
-    return;
-  }
-  pending.delete(id);
-  if (error)
-    p.reject(
-      errorCode === DATABASE_UPGRADE_BLOCKED
-        ? new DatabaseUpgradeBlockedError()
-        : error,
-    );
-  else p.resolve(result);
-};
-
-/**
- * A pending entry is only ever drained by a reply carrying its id, so anything
- * that kills the worker — a module-load failure, a structured-clone failure
- * posting a large chunk, an OOM — would otherwise leave every in-flight call
- * unsettled forever. Callers await these, so the transfer or handshake waiting
- * on one would hang silently rather than fail.
- */
-const rejectAllPending = (reason: Error): void => {
-  const inFlight = [...pending.values()];
-  pending.clear();
-  for (const p of inFlight) p.reject(reason);
-};
-
-worker.onerror = (event) => {
-  rejectAllPending(
-    new DatabaseWorkerError(
-      `p2party: the database worker failed: ${
-        (event as ErrorEvent).message || "unknown error"
-      }`,
-    ),
-  );
-};
-
-worker.onmessageerror = () => {
-  rejectAllPending(
-    new DatabaseWorkerError(
-      "p2party: a database worker message could not be deserialized",
-    ),
-  );
-};
+const client = createDatabaseClient(
+  new Worker(URL.createObjectURL(workerBlob), {
+    type: "module",
+  }) as unknown as DatabaseWorkerPort,
+  workerSrc.length > 0,
+);
 
 const callWorkerOwned = (
   method: WorkerMessages["method"],
   args: readonly unknown[],
   transfer: Transferable[] = [],
-): Promise<unknown> => {
-  return new Promise((resolve, reject) => {
-    // An empty bundle builds a worker that never replies, so the call would
-    // hang rather than fail. Say why instead of stalling the caller.
-    if (workerSrc.length === 0) {
-      reject(
-        new DatabaseWorkerError(
-          `p2party: cannot run "${method}" — the database worker bundle is ` +
-            "missing (INDEXEDDB_WORKER_JS was not inlined at build time).",
-        ),
-      );
-      return;
-    }
-    const id = ++msgId;
-    pending.set(id, {
-      resolve: resolve as (value: unknown) => void,
-      reject,
-    });
-    try {
-      worker.postMessage({ id, method, args }, transfer);
-    } catch (error) {
-      pending.delete(id);
-      reject(error);
-    }
-  });
-};
+): Promise<unknown> => client.call(method, args, transfer);
 
 function callWorker<M extends WorkerMessages["method"]>(
   method: M,

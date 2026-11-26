@@ -31,3 +31,15 @@ export class DatabaseUpgradeBlockedError extends DatabaseUnavailableError {
     this.name = "DatabaseUpgradeBlockedError";
   }
 }
+
+export const STORAGE_FAILED = "storage-failed";
+
+/** A storage operation failed and left its work undone (a file not removed). */
+export class StorageFailedError extends Error {
+  readonly code = STORAGE_FAILED;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "StorageFailedError";
+  }
+}

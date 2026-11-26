@@ -34,6 +34,7 @@ import { buildReceiveManifest } from "../../src/db/receiveManifest";
 
 import type {
   Chunk,
+  HeldFileSettledNotice,
   MessageData,
   ReceiveChunk,
   ReceiveChunkStoreResult,
@@ -51,6 +52,9 @@ interface WorkerResponse {
 // Replies are routed by id, so calls may overlap as they do in a real worker.
 let nextId = 1;
 const pendingReplies = new Map<number, (reply: WorkerResponse) => void>();
+// Notices the worker posts outside any request (a held file it verified on
+// its own), in arrival order.
+const notices: HeldFileSettledNotice[] = [];
 async function callWorker(
   method: string,
   args: unknown[],
@@ -58,6 +62,11 @@ async function callWorker(
   await import("../../src/db/db.worker");
   (globalThis as unknown as { postMessage: (m: unknown) => void }).postMessage =
     (message: unknown) => {
+      const { notice } = message as { notice?: HeldFileSettledNotice };
+      if (notice) {
+        notices.push(notice);
+        return;
+      }
       const reply = message as WorkerResponse;
       pendingReplies.get(reply.id)?.(reply);
       pendingReplies.delete(reply.id);
@@ -249,11 +258,13 @@ const installOpfs = (
 ): {
   directoryOpens: number;
   closes: string[];
+  fileOpens: Array<{ name: string; create: boolean }>;
   reads: Array<{ name: string; at: number; length: number }>;
 } => {
   const stats = {
     directoryOpens: 0,
     closes: [] as string[],
+    fileOpens: [] as Array<{ name: string; create: boolean }>,
     reads: [] as Array<{ name: string; at: number; length: number }>,
   };
   const access = (name: string) => {
@@ -315,17 +326,25 @@ const installOpfs = (
           removeEntry: async (name: string) => {
             files.delete(name);
           },
-          getFileHandle: async (name: string) => ({
-            createSyncAccessHandle: async () => access(name),
-            getFile: async () =>
-              new File(
-                [
-                  (files.get(name) ??
-                    new Uint8Array()) as Uint8Array<ArrayBuffer>,
-                ],
-                name,
-              ),
-          }),
+          getFileHandle: async (
+            name: string,
+            options: { create?: boolean } = {},
+          ) => {
+            if (!options.create && !files.has(name))
+              throw new DOMException("no such file", "NotFoundError");
+            stats.fileOpens.push({ name, create: options.create === true });
+            return {
+              createSyncAccessHandle: async () => access(name),
+              getFile: async () =>
+                new File(
+                  [
+                    (files.get(name) ??
+                      new Uint8Array()) as Uint8Array<ArrayBuffer>,
+                  ],
+                  name,
+                ),
+            };
+          },
         }),
       };
     },
@@ -765,10 +784,13 @@ describe("whole-file verification", () => {
         { method: "storeReceiveChunk", args: [fileChunk(root, 0, 13)] },
         { method: "verifyReceivedFile", args: [root, token] },
       ]);
+    // The held chunk's copy is handed the running attempt, so the connection
+    // it came on can settle it; nothing is written for it.
     expect(resentHeld.result).toEqual({
       stored: false,
       savedSize: 10,
       complete: false,
+      verification: token,
     });
     expect(resentRecorded.result).toEqual({
       stored: false,
@@ -919,6 +941,327 @@ describe("whole-file verification", () => {
     expect(opfs.closes).not.toContain(root);
     expect(opfs.closes.length).toBeGreaterThan(0);
     expect(await settle(root, token)).toBe("complete");
+  });
+});
+
+describe("no failure leaves a verification behind", () => {
+  const fileChunk = (root: string, index: number) =>
+    chunkOf(root, index, 13, 5, {
+      messageType: 2,
+      filename: "f.bin",
+      mimeType: "application/octet-stream",
+      storage: "opfs",
+    });
+  const holdFile = async (root: string) => {
+    await store(fileChunk(root, 0));
+    await store(fileChunk(root, 1));
+    const held = await store(fileChunk(root, 2));
+    return (held as { verification: string }).verification;
+  };
+  // A copy of the held chunk: it must start a fresh attempt, and complete.
+  const resendCompletes = async (root: string, lost: string) => {
+    const again = (await store(fileChunk(root, 2))) as {
+      verification?: string;
+    };
+    expect(again).toMatchObject({ stored: true, complete: false });
+    expect(again.verification).toBeDefined();
+    expect(again.verification).not.toBe(lost);
+    expect(await verify(root, again.verification!)).toBe("match");
+    expect(await settle(root, again.verification!)).toBe("complete");
+  };
+
+  test("a failed verification start leaves no live entry and a resend verifies again", async () => {
+    quietConsole();
+    const root = "63".repeat(64);
+    installOpfs(new Map());
+    const token = await holdFile(root);
+    // The start's first write (taking the receive lease) fails: disk full.
+    const proto = (
+      globalThis as unknown as {
+        IDBObjectStore: { prototype: { put: (...a: unknown[]) => unknown } };
+      }
+    ).IDBObjectStore.prototype;
+    const put = proto.put;
+    let armed = true;
+    proto.put = function (this: { name: string }, ...args: unknown[]) {
+      if (armed && this.name === "receiveActivity") {
+        armed = false;
+        throw new DOMException("injected", "QuotaExceededError");
+      }
+      return put.apply(this, args);
+    };
+    restores.push(() => {
+      proto.put = put;
+    });
+
+    expect(await verify(root, token)).toBe("storage-failed");
+    expect(await settle(root, token)).toBe("aborted");
+    // Nothing committed, nothing leased: the attempt is gone, and the next
+    // copy of the held chunk is not answered "held" but verified afresh.
+    const activity = (await rows()).receiveActivity.find(
+      (row) => row.merkleRoot === root,
+    );
+    expect(activity?.writeToken).toBeUndefined();
+    await resendCompletes(root, token);
+  });
+
+  // Fail one transaction the run asks for, as a connection that another tab's
+  // upgrade has closed refuses it.
+  const closeConnectionAt = (matches: (args: unknown[]) => boolean) => {
+    const proto = (
+      globalThis as unknown as {
+        IDBDatabase: {
+          prototype: { transaction: (...a: unknown[]) => unknown };
+        };
+      }
+    ).IDBDatabase.prototype;
+    const transaction = proto.transaction;
+    let armed = true;
+    proto.transaction = function (this: unknown, ...args: unknown[]) {
+      if (armed && matches(args)) {
+        armed = false;
+        throw new DOMException("connection closed", "InvalidStateError");
+      }
+      return transaction.apply(this, args);
+    };
+    restores.push(() => {
+      proto.transaction = transaction;
+    });
+  };
+
+  test("a verification whose connection another tab's upgrade closed leaves no live entry", async () => {
+    quietConsole();
+    const root = "64".repeat(64);
+    installOpfs(new Map());
+    const token = await holdFile(root);
+    // The run's start: its lease transaction is refused.
+    closeConnectionAt(
+      ([stores, mode]) =>
+        mode === "readwrite" &&
+        Array.isArray(stores) &&
+        stores.includes("receiveActivity") &&
+        stores.includes("chunks"),
+    );
+
+    expect(await verify(root, token)).toBe("storage-failed");
+    expect(await settle(root, token)).toBe("aborted");
+    await resendCompletes(root, token);
+  });
+
+  test("a verification that loses its connection mid-run gives its lease back", async () => {
+    quietConsole();
+    const root = "68".repeat(64);
+    installOpfs(new Map());
+    const token = await holdFile(root);
+    // After the lease was taken: the next batch read is refused.
+    closeConnectionAt(
+      ([stores, mode]) => stores === "chunks" && mode === "readonly",
+    );
+
+    expect(await verify(root, token)).toBe("storage-failed");
+    expect(await settle(root, token)).toBe("aborted");
+    const activity = (await rows()).receiveActivity.find(
+      (row) => row.merkleRoot === root,
+    );
+    expect(activity?.writeToken).toBeUndefined();
+    await resendCompletes(root, token);
+  });
+
+  test("a verification run opens one connection", async () => {
+    const root = "65".repeat(64);
+    installOpfs(new Map());
+    // 40 chunks: three batches.
+    for (let index = 0; index < 39; index++)
+      await store(
+        chunkOf(root, index, 200, 5, {
+          messageType: 2,
+          storage: "opfs",
+          mimeType: "application/octet-stream",
+        }),
+      );
+    const held = (await store(
+      chunkOf(root, 39, 200, 5, {
+        messageType: 2,
+        storage: "opfs",
+        mimeType: "application/octet-stream",
+      }),
+    )) as { verification: string };
+    const factory = (globalThis as unknown as { indexedDB: IDBFactory })
+      .indexedDB;
+    const open = factory.open.bind(factory);
+    let opens = 0;
+    factory.open = ((...args: Parameters<IDBFactory["open"]>) => {
+      opens += 1;
+      return open(...args);
+    }) as IDBFactory["open"];
+    restores.push(() => {
+      factory.open = open;
+    });
+    expect(await verify(root, held.verification)).toBe("match");
+    expect(opens).toBe(1);
+    expect(await settle(root, held.verification)).toBe("complete");
+  });
+
+  test("deleting a message during its verification removes the file and emits nothing", async () => {
+    const root = "66".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    let deleting: Promise<WorkerResponse> | undefined;
+    const opfs = installOpfs(
+      files,
+      {},
+      {
+        // The message is deleted while its file is being read.
+        onRead: () => {
+          deleting ??= callWorker("deleteDBMessageData", [root]);
+        },
+      },
+    );
+    for (let index = 0; index < 39; index++)
+      await store(
+        chunkOf(root, index, 200, 5, {
+          messageType: 2,
+          storage: "opfs",
+          mimeType: "application/octet-stream",
+        }),
+      );
+    const held = (await store(
+      chunkOf(root, 39, 200, 5, {
+        messageType: 2,
+        storage: "opfs",
+        mimeType: "application/octet-stream",
+      }),
+    )) as { verification: string };
+    const opensBefore = opfs.fileOpens.length;
+
+    // Stopped, not failed: no storage-failed verdict, so no event goes out.
+    expect(await verify(root, held.verification)).toBe("aborted");
+    expect((await deleting!).error).toBeUndefined();
+    expect(await settle(root, held.verification)).toBe("aborted");
+    // The file is gone, its handle closed, nothing reopened or recreated.
+    expect(files.has(root)).toBe(false);
+    expect(opfs.closes).toContain(root);
+    expect(
+      opfs.fileOpens.slice(opensBefore).filter((open) => open.create),
+    ).toEqual([]);
+    expect(await messageRow(root)).toBeUndefined();
+  });
+
+  test("verification never creates a file", async () => {
+    quietConsole();
+    const root = "67".repeat(64);
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const token = await holdFile(root);
+    // The file vanished (another context removed it) and no handle is open.
+    await callWorker("closeReceiveFile", [root]);
+    files.delete(root);
+    const opensBefore = opfs.fileOpens.length;
+
+    expect(await verify(root, token)).toBe("storage-failed");
+    expect(files.has(root)).toBe(false);
+    expect(
+      opfs.fileOpens.slice(opensBefore).filter((open) => open.create),
+    ).toEqual([]);
+    expect(await settle(root, token)).toBe("aborted");
+  });
+});
+
+describe("held files are verified at the next start", () => {
+  const fileChunk = (
+    root: string,
+    index: number,
+    totalSize: number,
+    overrides: Partial<ReceiveChunk> = {},
+  ) =>
+    chunkOf(root, index, totalSize, 5, {
+      messageType: 2,
+      filename: "f.bin",
+      mimeType: "application/octet-stream",
+      storage: "opfs",
+      ...overrides,
+    });
+  const ROOM = "00000000-0000-4000-8000-000000000a05";
+
+  // Hold a file's last chunk as an interrupted verification leaves it: the
+  // page went away before (or while) the file was verified.
+  const holdFile = async (
+    root: string,
+    overrides: Partial<ReceiveChunk> = {},
+  ) => {
+    await store(fileChunk(root, 0, 13, overrides));
+    await store(fileChunk(root, 1, 13, overrides));
+    const held = await store(fileChunk(root, 2, 13, overrides));
+    return (held as { verification: string }).verification;
+  };
+
+  const waitForNotices = async (count: number): Promise<void> => {
+    for (let attempt = 0; attempt < 200 && notices.length < count; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(notices.length).toBe(count);
+  };
+
+  test("a file whose verification was interrupted by a reload is verified at the next start without the sender", async () => {
+    quietConsole();
+    notices.length = 0;
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const intact = "60".repeat(64);
+    const lying = "61".repeat(64);
+    await holdFile(intact);
+    await holdFile(lying, { hash: contentHash(14) });
+    const readsBefore = opfs.reads.length;
+
+    // The next start: the SDK loads the room's messages. The reply carries the
+    // rows as they are; both files are then verified, one after the other.
+    const rows = (await callWorker("getDBRoomMessageData", [ROOM]))
+      .result as MessageData[];
+    expect(rows.find((r) => r.merkleRoot === intact)?.savedSize).toBe(10);
+    await waitForNotices(2);
+    expect(notices).toMatchObject([
+      { merkleRoot: intact, verdict: "match", outcome: "complete" },
+      { merkleRoot: lying, verdict: "mismatch", outcome: "integrity" },
+    ]);
+    // Each file was read back once (three chunks each).
+    expect(opfs.reads.length - readsBefore).toBe(6);
+    const verified = await messageRow(intact);
+    expect(verified?.savedSize).toBe(13);
+    expect(verified?.receiveVerification).toBeUndefined();
+    expect(await messageRow(lying)).toMatchObject({
+      savedSize: 0,
+      integrityFailed: true,
+    });
+    // A later load verifies nothing again.
+    await callWorker("getDBRoomMessageData", [ROOM]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(notices.length).toBe(2);
+  });
+
+  test("a start does not verify a file another tab is verifying", async () => {
+    notices.length = 0;
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const root = "62".repeat(64);
+    await holdFile(root);
+    // Another tab holds the file's receive lease for a little longer.
+    const db = await getDB();
+    const activity = (await db.get("receiveActivity", root))!;
+    await db.put("receiveActivity", {
+      ...activity,
+      writeToken: "another-tab",
+      leaseUntil: Date.now() + 80,
+    });
+    db.close();
+    const readsBefore = opfs.reads.length;
+
+    await callWorker("getDBRoomMessageData", [ROOM]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Not while the other tab holds it.
+    expect(notices).toEqual([]);
+    expect(opfs.reads.length).toBe(readsBefore);
+    // One timer fires when that lease ends; the file is verified once.
+    await waitForNotices(1);
+    expect(notices[0]).toMatchObject({ merkleRoot: root, outcome: "complete" });
+    expect(opfs.reads.length - readsBefore).toBe(3);
   });
 });
 

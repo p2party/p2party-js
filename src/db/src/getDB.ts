@@ -23,7 +23,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 20;
+export const dbVersion = 21;
 
 export interface RepoSchema extends DBSchema {
   outbox: {
@@ -350,6 +350,12 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         tx.objectStore("ratchetSessions").clear();
         tx.objectStore("sendQueue").clear();
       }
+      // v21 wraps ratchet rows in envelope version 3. A row in an older form
+      // is refused before anything is decrypted, but would stay on disk until
+      // its edge persists again, or forever for a peer who never returns.
+      // Clear them at upgrade; each edge re-handshakes once.
+      if (oldVersion > 0 && oldVersion < 21)
+        tx.objectStore("ratchetSessions").clear();
 
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta");

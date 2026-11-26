@@ -1,8 +1,21 @@
 import { describe, expect, test } from "bun:test";
 
-import { applyRoomIceConfiguration } from "../../../src/api/webrtc/applyIceConfiguration";
-
 import type { IRTCPeerConnection } from "../../../src/api/webrtc/interfaces";
+
+// applyIceConfiguration retires a transport through the shared edge teardown,
+// whose module graph reaches the Redux store, whose identity slice reads
+// localStorage at module initialization. Install the shim before importing.
+(globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
+  getItem: () => null,
+  setItem: () => undefined,
+  removeItem: () => undefined,
+  clear: () => undefined,
+  key: () => null,
+  length: 0,
+} as Storage;
+
+const { applyRoomIceConfiguration } =
+  await import("../../../src/api/webrtc/applyIceConfiguration");
 
 const connection = (
   roomId: string,

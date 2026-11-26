@@ -1,4 +1,5 @@
 import {
+  clearPeerHandshakeStatus,
   deleteChannel,
   deleteMessage,
   deletePeer,
@@ -6,6 +7,7 @@ import {
 import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
 import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
+import { releaseRatchetPersistence } from "../../handlers/ratchetPersist";
 import { teardownCoverEdge } from "../../handlers/coverEdge";
 import {
   isCurrentRatchetGateLease,
@@ -52,40 +54,75 @@ const releaseDataChannel = (
   if (index > -1) dataChannels.splice(index, 1);
 };
 
+/** What a caller of the shared edge teardown can hand it. */
+export interface EdgeTeardownContext {
+  /**
+   * The shared data-channel registry. A caller that does not hold it passes
+   * none: the channels the connection references itself are still detached
+   * and closed, and whatever else this room/peer has registered is
+   * unregistered by the later teardown that retires the closed transport.
+   */
+  readonly dataChannels?: IRTCDataChannel[];
+  /**
+   * Redux dispatch. With it, the generation's non-failed handshake status is
+   * cleared at once; without it, that happens when the closed transport is
+   * retired.
+   */
+  readonly dispatch?: (
+    action: ReturnType<typeof clearPeerHandshakeStatus>,
+  ) => unknown;
+}
+
 /**
  * Release everything one transport generation of a room/peer edge owns, and
  * close it. This is the one teardown behind every path that abandons a
  * transport: `disconnectFromPeer` (and through it room leave, purge, the
  * grace-timer and ICE-failure teardowns and the certificate-change
- * replacement), the generation retire in baseQuery, and a failed handshake in
- * handleOpenChannel.
+ * replacement), the generation retire in baseQuery, a failed handshake and a
+ * failed PQ healing exchange in handleOpenChannel, a failed transport
+ * initialization in handleConnectToPeer, and an ICE configuration that could
+ * not be applied or restored (applyIceConfiguration).
  *
  * It wipes the ratchet, the sparse-PQ runtime and the derived message keys,
  * stops the PQ healing interval, stops scheduled cover (which releases its
  * queued receipts), releases the generation's data channels and its re-bind
- * deadline, detaches every handler and closes the RTCPeerConnection. It does
- * NOT remove the connection from the registry or touch Redux: a caller that
- * replaces the transport and a terminal handshake failure (which leaves the
- * closed transport registered on purpose, C2) both need that left to them.
+ * deadline, deletes the edge's persisted ratchet row while this connection
+ * still owns it (releaseRatchetPersistence, ordered under the per-edge
+ * persistence lock), clears its non-failed handshake status, detaches every
+ * handler and closes the RTCPeerConnection. It does NOT remove the connection
+ * from the registry or touch the roster: a caller that replaces the transport
+ * and a terminal handshake failure (which leaves the closed transport
+ * registered on purpose, C2) both need that left to them.
  *
  * State kept per ROOM/PEER rather than per connection (the ratchet gate, the
- * handshake inbox, the channels registered for this room/peer) is released
- * only while this connection still holds the current gate lease. Once a
- * replacement has claimed the gate, that state is the replacement's, and a
- * teardown that reaches a superseded generation late releases only what the
- * connection itself references. A connection without a lease (it never
- * claimed one) keeps the force-teardown behaviour.
+ * handshake inbox, the handshake status, the channels registered for this
+ * room/peer) is released only while this connection still holds the current
+ * gate lease. Once a replacement has claimed the gate, that state is the
+ * replacement's, and a teardown that reaches a superseded generation late
+ * releases only what the connection itself references. A connection without a
+ * lease (it never claimed one) keeps the force-teardown behaviour.
  *
  * Idempotent: a second call finds nothing left to release.
  */
 export const teardownEdgeGeneration = (
   connection: IRTCPeerConnection,
-  dataChannels: IRTCDataChannel[],
+  { dataChannels = [], dispatch }: EdgeTeardownContext = {},
 ): void => {
   const { roomId, withPeerId: peerId } = connection;
   const ownsRoomPeerState =
     connection.ratchetGateLease === undefined ||
     isCurrentRatchetGateLease(roomId, peerId, connection.ratchetGateLease);
+
+  // The wrapped row on disk goes with the generation that wrote it. Its own
+  // ownership check (not the gate lease) decides: only the connection that
+  // currently owns the edge's row deletes it, so a late teardown never
+  // removes a replacement's seed.
+  void releaseRatchetPersistence(connection, roomId).catch((error: unknown) => {
+    console.error(
+      "p2party: could not delete a retired edge's persisted ratchet",
+      error,
+    );
+  });
 
   // This side stops believing in the remote transport this connection was
   // bound to. The peer may still hold it (its ICE consent survived a freeze
@@ -103,6 +140,7 @@ export const teardownEdgeGeneration = (
     );
     clearHandshakeChannel(roomId, peerId, teardownError);
     rejectRatchetGate(roomId, peerId, teardownError);
+    dispatch?.(clearPeerHandshakeStatus({ roomId, peerId }));
   }
   if (connection.ratchetState) {
     wipeRatchet(connection.ratchetState);
@@ -190,7 +228,10 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
     )
       continue;
     terminalRoomIds.add(connection.roomId);
-    teardownEdgeGeneration(connection, dataChannels);
+    teardownEdgeGeneration(connection, {
+      dataChannels,
+      dispatch: api.dispatch,
+    });
     peerConnections.splice(i, 1);
   }
 

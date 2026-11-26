@@ -26,6 +26,7 @@ const {
   setKnownRoomPeers,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
+  clearPeerHandshakeStatus,
   setRoom,
   setRoomPolicy,
   purgeAllRooms,
@@ -592,6 +593,41 @@ describe("per-peer handshake status", () => {
     );
     state = roomReducer(state, deletePeer({ roomId, peerId }));
     expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
+  });
+
+  test("a retired generation's status is cleared, its roster entry and a failure are kept", () => {
+    const peerPublicKey = "d".repeat(64);
+    const otherPeerId = "00000000-0000-4000-8000-0000000000ef";
+    let state = roomReducer(
+      undefined,
+      setRoom({ url: "c".repeat(63) + "d", id: roomId }),
+    );
+    state = roomReducer(state, setPeer({ roomId, peerId, peerPublicKey }));
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({ roomId, peerId, status: "authenticated" }),
+    );
+    state = roomReducer(
+      state,
+      setPeerHandshakeStatus({
+        roomId,
+        peerId: otherPeerId,
+        status: "failed",
+        reason: "policy",
+      }),
+    );
+
+    state = roomReducer(state, clearPeerHandshakeStatus({ roomId, peerId }));
+    state = roomReducer(
+      state,
+      clearPeerHandshakeStatus({ roomId, peerId: otherPeerId }),
+    );
+
+    expect(state[0].handshakeStatusByPeer?.[peerId]).toBeUndefined();
+    expect(state[0].peers).toEqual([{ peerId, peerPublicKey }]);
+    expect(state[0].handshakeStatusByPeer?.[otherPeerId]?.status).toBe(
+      "failed",
+    );
   });
 
   test("a failure carries the stable peer identity, not just the peerId", () => {

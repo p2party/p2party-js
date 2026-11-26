@@ -89,6 +89,40 @@ export const claimRatchetPersistence = (
   edgeOwnerTokens.set(key, token);
 };
 
+/**
+ * Retire a torn-down connection's claim on its edge's persisted ratchet row and
+ * delete the row, so no wrapped key material of a dead generation stays on
+ * disk. Called by the shared edge teardown (generation retire, explicit
+ * disconnect, failed handshake, every other transport close).
+ *
+ * Only the connection that currently owns the edge's row deletes it. Once a
+ * replacement has claimed the edge (`claimRatchetPersistence`), the row is the
+ * replacement's, or is about to be, and a late teardown of its predecessor
+ * leaves it alone.
+ *
+ * The decision is synchronous and so is the enqueue: ownership is revoked at
+ * once, so every write this connection still has queued fails its owner check
+ * and none it starts later can reclaim the edge, and the delete takes its place
+ * in the per-edge lock now. It therefore runs after any write already queued
+ * for the edge and before the seed of any replacement that claims the edge
+ * afterwards.
+ */
+export const releaseRatchetPersistence = (
+  epc: IRTCPeerConnection,
+  roomId: string,
+  remove: RollbackInitialRatchetState = deleteRatchetSession,
+): Promise<void> => {
+  const token = epcOwnerTokens.get(epc);
+  if (!token) return Promise.resolve();
+  const peerPublicKey = epc.withPeerPublicKey;
+  const key = persistenceKey(roomId, peerPublicKey);
+  if (edgeOwnerTokens.get(key) !== token) return Promise.resolve();
+  edgeOwnerTokens.delete(key);
+  return withEdgePersistenceLock(roomId, peerPublicKey, () =>
+    remove(roomId, peerPublicKey),
+  );
+};
+
 const assertCurrentPersistenceOwner = (
   epc: IRTCPeerConnection,
   roomId: string,

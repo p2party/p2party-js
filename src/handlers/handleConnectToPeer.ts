@@ -9,6 +9,7 @@ import signalingServerApi, {
   sendRoomRequestMessage,
 } from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
+import { teardownEdgeGeneration } from "../api/webrtc/disconnectFromPeerQuery";
 import { repairIceTransportAfterCandidateFailure } from "../api/webrtc/iceRepair";
 import {
   findRoomIdentityAliases,
@@ -258,7 +259,11 @@ export const handleConnectToPeer = async (
     } catch (error) {
       const index = peerConnections.indexOf(epc);
       if (index > -1) peerConnections.splice(index, 1);
-      if (epc.connectionState !== "closed") epc.close();
+      // The same teardown as every other abandoned transport. A transport
+      // that failed to initialize holds little (no channel exists yet), but
+      // it did claim the edge's gate, which would otherwise stay pending for
+      // every awaiter, and the edge's persisted ratchet row.
+      teardownEdgeGeneration(epc, { dispatch: api.dispatch });
       throw error;
     } finally {
       epc.initialization = undefined;

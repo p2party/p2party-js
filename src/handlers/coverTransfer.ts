@@ -6,6 +6,7 @@ import {
   WIRE_CHUNK_FRAME_LEN,
 } from "../utils/constants";
 import { coverSlotSpacingMs } from "./coverScheduler";
+import { isPageHidden } from "./coverRuntime";
 
 import type {
   CoverJob,
@@ -426,19 +427,27 @@ export const isForwardScheduledProgress = (
 };
 
 /**
- * True while this edge's cover scheduler is SUSPENDED: a browser-imposed gap
- * (a hidden tab, pagehide, freeze, offline) in which the schedule is not
- * running at all.
+ * True while a browser-imposed gap holds this edge's delivery idle budget:
+ *
+ * - the cover scheduler is SUSPENDED (pagehide, freeze, offline): the schedule
+ *   is not running at all;
+ * - the page is HIDDEN. Its schedule stays armed (suspending it made tab
+ *   visibility readable off the wire), but the browser may throttle its
+ *   timers, and a cycle whose cells fire late degrades without sending. The
+ *   send is as healthy as a suspended one and is held exactly as one is.
  *
  * Deliberately narrow. An absent runtime (the edge was torn down) and a stopped
- * one are NOT this: they are conditions the idle budget must still expire on,
- * so the send can reach its resume — or, failing that, tell the receiver.
- * Only the state that both keeps the job alive and makes progress impossible
- * holds the clock.
+ * one are NOT this, hidden page or not: they are conditions the idle budget
+ * must still expire on, so the send can reach its resume — or, failing that,
+ * tell the receiver. Only a state that keeps the job alive while progress may
+ * be impossible holds the clock.
  */
 export const scheduledCoverIsSuspended = (
   runtime: { readonly status: CoverSchedulerStatus } | undefined,
-): boolean => runtime?.status === "suspended";
+): boolean =>
+  runtime !== undefined &&
+  (runtime.status === "suspended" ||
+    (runtime.status !== "stopped" && isPageHidden()));
 
 export interface ScheduledDeliveryWaitOptions {
   /** True once the receiver's terminal scheduled receipt has settled the send. */
@@ -487,14 +496,17 @@ const SCHEDULED_DELIVERY_POLL_MS = 200;
  * one floor after its last sign of life.
  *
  * The budget measures time in which progress was POSSIBLE and did not happen.
- * `CoverRuntime` suspends the scheduler on visibilitychange→hidden, pagehide,
- * freeze and offline, and `CoverScheduler.suspend` requeues but KEEPS the job:
- * the signal freezes while the send is perfectly healthy. Spending the budget
- * through that gap abandons a live send, and the CANCEL that follows deletes a
- * partial the peer is still holding — so the clock is held while the scheduler
- * is suspended AND still holds this job. It is deliberately not held for a
- * runtime that is merely gone: only the state that makes progress impossible
- * without ending the job counts, so a genuinely stalled send is still caught.
+ * `CoverRuntime` suspends the scheduler on pagehide, freeze and offline, and
+ * `CoverScheduler.suspend` requeues but KEEPS the job; on a hidden page the
+ * schedule stays armed but throttled timers degrade its cycles, which also
+ * requeues and keeps the job. Either way the signal freezes while the send is
+ * perfectly healthy. Spending the budget through that gap abandons a live
+ * send, and the CANCEL that follows deletes a partial the peer is still
+ * holding — so the clock is held while the scheduler is suspended or the page
+ * is hidden (scheduledCoverIsSuspended) AND the scheduler still holds this
+ * job. It is deliberately not held for a runtime that is merely gone: only a
+ * state that keeps the job while progress may be impossible counts, so a
+ * genuinely stalled send is still caught.
  *
  * The boundary of holding the clock is a page that is hidden and never comes
  * back: this wait then does not return until it does, or until `signal` aborts.

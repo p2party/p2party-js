@@ -270,9 +270,9 @@ const heldStore = (): {
 };
 
 /**
- * Let the runtime run what it has queued: a bounded number of microtask
- * turns and event-loop yields, never a wall-clock wait. Microtask turns alone
- * are not enough: some of a released handler's work resolves on a later
+ * Let the runtime run what it has queued: bounded rounds of microtask turns
+ * and event-loop yields, never a wall-clock wait. Microtask turns alone are
+ * not enough: some of a released handler's work resolves on a later
  * event-loop turn.
  */
 const turns = async (rounds = 3, count = 2_000): Promise<void> => {
@@ -280,6 +280,17 @@ const turns = async (rounds = 3, count = 2_000): Promise<void> => {
     for (let turn = 0; turn < count; turn += 1) await Promise.resolve();
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
+};
+
+/**
+ * Turn the event loop until `condition` holds, at most `rounds` rounds, and
+ * then some more: what is asserted not to have happened has had every chance
+ * to happen first.
+ */
+const until = async (condition: () => boolean, rounds = 500): Promise<void> => {
+  for (let round = 0; round < rounds && !condition(); round += 1)
+    await turns(1, 200);
+  await turns();
 };
 
 describe("carrier catch-up gate", () => {
@@ -330,7 +341,7 @@ describe("carrier catch-up gate", () => {
       // Resumed in window 2: the read of window 1 (due at 8,600) is on time
       // and scheduled; the read of window 0 (due at 4,600) is caught up.
       resumeAt(9_100n);
-      await turns();
+      await until(() => held.started.length >= 1);
       // The catch-up is refused while the store has a scheduled read in
       // flight: it waits rather than share the store with it.
       expect(held.started).toEqual([1n]);
@@ -339,21 +350,21 @@ describe("carrier catch-up gate", () => {
       // read of window 3 is scheduled, the one of window 2 is caught up. The
       // catch-up already waiting takes it; none is started beside it.
       resumeAt(17_100n);
-      await turns();
+      await until(() => held.started.length >= 2);
       expect(held.started).toEqual([1n, 3n]);
 
       held.release(1n);
       held.release(3n);
-      await turns();
+      await until(() => held.started.length >= 3);
       // Newest first, and alone: nothing else of this store is in flight.
       expect(held.started).toEqual([1n, 3n, 2n]);
       expect(held.inFlightAtStart.get(2n)).toEqual([]);
       held.release(2n);
-      await turns();
+      await until(() => held.started.length >= 4);
       expect(held.started).toEqual([1n, 3n, 2n, 0n]);
       expect(held.inFlightAtStart.get(0n)).toEqual([]);
       held.release(0n);
-      await turns();
+      await until(() => scansOf(0n) === 1);
 
       // Every window was read once and reported once.
       expect(held.started).toHaveLength(4);

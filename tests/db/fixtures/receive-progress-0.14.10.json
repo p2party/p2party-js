@@ -1,0 +1,230 @@
+{
+  "generatedBy": "p2party-js 9eec3a3 db worker (src/db unchanged since v0.14.10 9b3dbd8), fake-indexeddb + in-memory OPFS",
+  "dbVersion": 20,
+  "roots": {
+    "partialFile": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "partialText": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+    "stragglerOnlyText": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "completeText": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+  },
+  "results": {
+    "partialFile": [
+      {
+        "stored": true,
+        "savedSize": 5,
+        "complete": false
+      },
+      {
+        "stored": true,
+        "savedSize": 10,
+        "complete": false
+      },
+      {
+        "stored": true,
+        "savedSize": 15,
+        "complete": false
+      },
+      {
+        "stored": true,
+        "savedSize": 20,
+        "complete": false
+      },
+      {
+        "stored": true,
+        "savedSize": 23,
+        "complete": false
+      }
+    ],
+    "partialText": [
+      {
+        "stored": true,
+        "savedSize": 5,
+        "complete": false
+      }
+    ],
+    "stragglerOnlyText": [
+      {
+        "stored": true,
+        "savedSize": 5,
+        "complete": false
+      }
+    ],
+    "completeText": [
+      {
+        "stored": true,
+        "savedSize": 5,
+        "complete": false
+      },
+      {
+        "stored": true,
+        "savedSize": 10,
+        "complete": true
+      }
+    ]
+  },
+  "messageData": [
+    {
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "timestamp": 1790000000000,
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "fromPeerId": "peer-a5-sender",
+      "filename": "report.bin",
+      "messageType": 2,
+      "savedSize": 23,
+      "totalSize": 48,
+      "channelLabel": "chat"
+    },
+    {
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "timestamp": 1790000000000,
+      "merkleRoot": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "fromPeerId": "peer-a5-sender",
+      "filename": "",
+      "messageType": 1,
+      "savedSize": 5,
+      "totalSize": 10,
+      "channelLabel": "chat"
+    },
+    {
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "timestamp": 1790000000000,
+      "merkleRoot": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "fromPeerId": "peer-a5-sender",
+      "filename": "",
+      "messageType": 1,
+      "savedSize": 5,
+      "totalSize": 10,
+      "channelLabel": "chat"
+    },
+    {
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "timestamp": 1790000000000,
+      "merkleRoot": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "fromPeerId": "peer-a5-sender",
+      "filename": "",
+      "messageType": 1,
+      "savedSize": 10,
+      "totalSize": 10,
+      "channelLabel": "chat"
+    }
+  ],
+  "chunks": [
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 0,
+      "mimeType": "application/octet-stream",
+      "realLen": 5,
+      "leafHash": "10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010"
+    },
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 1,
+      "mimeType": "application/octet-stream",
+      "realLen": 5,
+      "leafHash": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 3,
+      "mimeType": "application/octet-stream",
+      "realLen": 5,
+      "leafHash": "13131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313",
+      "data": {
+        "$hex": "0f10111213"
+      }
+    },
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 7,
+      "mimeType": "application/octet-stream",
+      "realLen": 5,
+      "leafHash": "17171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717171717"
+    },
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 9,
+      "mimeType": "application/octet-stream",
+      "realLen": 3,
+      "leafHash": "19191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919191919"
+    },
+    {
+      "merkleRoot": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 0,
+      "mimeType": "text/plain",
+      "realLen": 5,
+      "leafHash": "10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010",
+      "data": {
+        "$hex": "0001020304"
+      }
+    },
+    {
+      "merkleRoot": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 1,
+      "mimeType": "text/plain",
+      "realLen": 5,
+      "leafHash": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "data": {
+        "$hex": "0506070809"
+      }
+    },
+    {
+      "merkleRoot": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 0,
+      "mimeType": "text/plain",
+      "realLen": 5,
+      "leafHash": "10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010",
+      "data": {
+        "$hex": "0001020304"
+      }
+    },
+    {
+      "merkleRoot": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "chunkIndex": 1,
+      "mimeType": "text/plain",
+      "realLen": 5,
+      "leafHash": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "data": {
+        "$hex": "0506070809"
+      }
+    }
+  ],
+  "receiveActivity": [
+    {
+      "merkleRoot": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "fromPeerId": "peer-a5-sender",
+      "lastActivityAt": 1795710361208,
+      "leaseUntil": 0
+    },
+    {
+      "merkleRoot": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "fromPeerId": "peer-a5-sender",
+      "lastActivityAt": 1795710361209,
+      "leaseUntil": 0
+    },
+    {
+      "merkleRoot": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "roomId": "00000000-0000-4000-8000-000000000a05",
+      "fromPeerId": "peer-a5-sender",
+      "lastActivityAt": 1795710361209,
+      "leaseUntil": 0
+    }
+  ],
+  "opfs": {
+    "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "0001020304050607080900000000000000000000000000000000000000000000000000232425262700000000002d2e2f"
+  }
+}

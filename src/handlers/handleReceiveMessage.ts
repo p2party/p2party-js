@@ -15,7 +15,12 @@ import { storeReceiveChunk as persistReceiveChunk } from "../db/api";
 
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
-import type { ReceiveChunk, ReceiveChunkStoreResult } from "../db/types";
+import type {
+  ReceiveChunk,
+  ReceiveChunkStoreFailure,
+  ReceiveChunkStoreResult,
+  ReceiveStorageFailure,
+} from "../db/types";
 import type { PersistRatchetState } from "./ratchetPersist";
 
 export interface ReceiveMessageResult {
@@ -58,6 +63,119 @@ export interface ReceiveMessageDependencies {
   /** Test/fault-injection seam; production uses the receive-chunk worker. */
   storeReceiveChunk?: ReceiveChunkStore;
 }
+
+/**
+ * A received chunk this device could not store. The chunk was not
+ * acknowledged: its sender sees no receipt for it and will retransmit or give
+ * up, so the transfer stays incomplete until storage is available again.
+ */
+export interface ReceiveStorageError {
+  /**
+   * - `insufficient-quota`: the transfer is larger than the estimated free
+   *   storage and was refused before anything was written.
+   * - `quota-exceeded`: the browser refused a write for lack of space.
+   * - `storage-failed`: any other storage fault.
+   */
+  readonly code: ReceiveStorageFailure;
+  readonly roomId: string;
+  readonly fromPeerId: string;
+  readonly merkleRootHex: string;
+  readonly filename: string;
+  readonly totalSize: number;
+  readonly chunkIndex: number;
+  /** `insufficient-quota` only: the bytes the transfer needs. */
+  readonly requiredBytes?: number;
+  /** `insufficient-quota` only: the estimated free bytes. */
+  readonly availableBytes?: number;
+}
+
+const receiveStorageErrorListeners = new Set<
+  (error: ReceiveStorageError) => void
+>();
+
+// Each (transfer, code) is reported once until a later chunk of that transfer
+// stores again, so a full disk does not raise one event per retransmitted
+// chunk. Bounded: a forgotten entry only means one repeated event.
+const MAX_REPORTED_RECEIVE_STORAGE_ERRORS = 1_024;
+const reportedReceiveStorageErrors = new Set<string>();
+
+/**
+ * Call `listener` when a received chunk cannot be stored. Returns an
+ * unsubscribe function. Listener errors are caught and logged.
+ */
+export const onReceiveStorageError = (
+  listener: (error: ReceiveStorageError) => void,
+): (() => void) => {
+  receiveStorageErrorListeners.add(listener);
+  return () => {
+    receiveStorageErrorListeners.delete(listener);
+  };
+};
+
+const reportReceiveStorageError = (
+  chunk: Omit<ReceiveChunk, "data">,
+  failure: ReceiveChunkStoreFailure,
+): void => {
+  const key = `${chunk.merkleRoot}:${failure.failure}`;
+  if (reportedReceiveStorageErrors.has(key)) return;
+  if (reportedReceiveStorageErrors.size >= MAX_REPORTED_RECEIVE_STORAGE_ERRORS)
+    reportedReceiveStorageErrors.clear();
+  reportedReceiveStorageErrors.add(key);
+  const error: ReceiveStorageError = {
+    code: failure.failure,
+    roomId: chunk.roomId,
+    fromPeerId: chunk.fromPeerId,
+    merkleRootHex: chunk.merkleRoot,
+    filename: chunk.filename,
+    totalSize: chunk.totalSize,
+    chunkIndex: chunk.chunkIndex,
+    ...(failure.requiredBytes === undefined
+      ? {}
+      : { requiredBytes: failure.requiredBytes }),
+    ...(failure.availableBytes === undefined
+      ? {}
+      : { availableBytes: failure.availableBytes }),
+  };
+  console.error("p2party: a received chunk could not be stored", error);
+  for (const listener of receiveStorageErrorListeners) {
+    try {
+      listener(error);
+    } catch (listenerError) {
+      console.error(
+        "p2party: onReceiveStorageError listener threw",
+        listenerError,
+      );
+    }
+  }
+};
+
+const clearReceiveStorageErrors = (merkleRootHex: string): void => {
+  if (reportedReceiveStorageErrors.size === 0) return;
+  for (const code of [
+    "insufficient-quota",
+    "quota-exceeded",
+    "storage-failed",
+  ] satisfies ReceiveStorageFailure[])
+    reportedReceiveStorageErrors.delete(`${merkleRootHex}:${code}`);
+};
+
+// Ask once per page for persistent storage, so the browser does not evict a
+// partially received file under storage pressure. Window-only API (workers
+// cannot call it); the answer is not awaited and a refusal changes nothing.
+let persistentStorageRequested = false;
+const requestPersistentStorageOnce = (): void => {
+  if (persistentStorageRequested) return;
+  const storage = (
+    globalThis as { navigator?: { storage?: Partial<StorageManager> } }
+  ).navigator?.storage;
+  if (typeof storage?.persist !== "function") return;
+  persistentStorageRequested = true;
+  try {
+    void storage.persist().catch(() => undefined);
+  } catch {
+    /* a refusal is not an error */
+  }
+};
 
 /**
  * Worker storage is the durability boundary for a receipt. A failed write must
@@ -250,6 +368,26 @@ export const handleReceiveMessage = async (
       return dropped();
     }
     const mimeType = getMimeType(metadata.messageType);
+    const storedChunk: Omit<ReceiveChunk, "data"> = {
+      schemaVersion: metadata.schemaVersion,
+      roomId,
+      fromPeerId: epc.withPeerId,
+      channelLabel,
+      timestamp: metadata.date.getTime(),
+      merkleRoot: merkleRootHex,
+      hash: uint8ArrayToHex(metadata.hash),
+      filename: metadata.name,
+      messageType: metadata.messageType,
+      chunkIndex: metadata.chunkIndex,
+      mimeType,
+      // Keep the leaf on the receiver so reconnect can derive the same scoped
+      // token without retaining the padded body.
+      leafHash: uint8ArrayToHex(leafHash),
+      realLen: chunkSize,
+      totalSize: metadata.totalSize,
+      storage: metadata.messageType === MessageType.Text ? "indexeddb" : "opfs",
+    };
+    if (storedChunk.storage === "opfs") requestPersistentStorageOnce();
     // Create this owned plaintext copy only once all fallible preprocessing is
     // done; storeReceiveChunkFailClosed assumes ownership and always wipes it.
     const realChunk = chunk.slice(
@@ -258,26 +396,7 @@ export const handleReceiveMessage = async (
     );
 
     const progress = await storeReceiveChunkFailClosed(
-      {
-        schemaVersion: metadata.schemaVersion,
-        roomId,
-        fromPeerId: epc.withPeerId,
-        channelLabel,
-        timestamp: metadata.date.getTime(),
-        merkleRoot: merkleRootHex,
-        hash: uint8ArrayToHex(metadata.hash),
-        filename: metadata.name,
-        messageType: metadata.messageType,
-        chunkIndex: metadata.chunkIndex,
-        mimeType,
-        // Keep the leaf on the receiver so reconnect can derive the same scoped
-        // token without retaining the padded body.
-        leafHash: uint8ArrayToHex(leafHash),
-        realLen: chunkSize,
-        totalSize: metadata.totalSize,
-        storage:
-          metadata.messageType === MessageType.Text ? "indexeddb" : "opfs",
-      },
+      storedChunk,
       realChunk,
       dependencies.storeReceiveChunk,
     );
@@ -285,6 +404,14 @@ export const handleReceiveMessage = async (
       receiptToken.fill(0);
       return dropped();
     }
+    if (progress.failure !== undefined) {
+      // Not stored, so not acknowledged: the sender gets the same decoy as for
+      // a dropped frame and the app is told why.
+      receiptToken.fill(0);
+      reportReceiveStorageError(storedChunk, progress);
+      return dropped();
+    }
+    clearReceiveStorageErrors(merkleRootHex);
     if (signal?.aborted) {
       // The worker write may already have crossed its durability boundary.
       // cancelReceiveTransfer queues a locked delete after this handler exits.

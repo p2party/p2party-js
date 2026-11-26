@@ -77,7 +77,10 @@ import type {
   TransportCandidateProvider,
 } from "./pairDriver";
 import type { DeliveryProfileV1 } from "./profile";
-import type { StoreFaultRecord } from "./storeClient";
+import type {
+  StoreAdmissionTokenProvider,
+  StoreFaultRecord,
+} from "./storeClient";
 import type { DataChannelTransport } from "./webrtcProvider";
 
 /**
@@ -261,6 +264,13 @@ export interface PrototypeRunOptions {
    * geometry, and a store serving a different hash serves a different bucket.
    */
   readonly deliveryWindowMs?: bigint;
+  /**
+   * Admission tokens for stores that gate their allocation, append and
+   * witness routes, handed to every store client this run connects
+   * (`StoreClientOptions.admissionTokens`). Absent, every store is spoken to
+   * under open admission.
+   */
+  readonly admissionTokens?: StoreAdmissionTokenProvider;
   readonly onEvent: (event: PrototypeRunEvent) => void;
 }
 
@@ -1294,6 +1304,7 @@ const connectStores = async (
         profileHash,
         module,
         nowMs: () => BigInt(Date.now()),
+        admissionTokens: options.admissionTokens,
       });
       connected.push(client);
       emit("store-connected", `${origin} storeId=${client.storeIdHex}`);

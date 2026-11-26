@@ -1,0 +1,98 @@
+{
+  "description": "Known answers for the protocol-v4 per-message PQ key combiner and chunk seal, computed by p2party 0.14.10. Produced by running combinePqMessageKey and sealChunk from `git archive 62661e0` (the 0.14.10 release tree; pqMessageKey.ts and sealChunk are unchanged up to 276afe7) under Bun 1.4.4 with its libcrypto.wasm (sha384-K0QqktkF2/8IHMDEgDIcyDl/ywcUXUO8fF1ZzcwhVrUYfGn8jN8Foohn1+bw4HmZ). Inputs are SHA-512 of the labels `<case>/<field>/<block>`; chunk bytes are det(chunkLabel, chunkLength) the same way. crypto.getRandomValues was stubbed to return each listed nonce for its seal, so every frame is fully determined by the inputs.",
+  "release": "0.14.10",
+  "commit": "62661e0",
+  "labelDerivation": "bytes(label, n) = first n bytes of SHA-512(utf8(label + '/0')) || SHA-512(utf8(label + '/1')) || ...",
+  "cases": [
+    {
+      "name": "mlkem768-epoch0",
+      "rootSuite": "hybrid-3dh-mlkem768-cpace21-v4",
+      "epoch": "0",
+      "header": {
+        "dhPub": "06f56a3ba5dc1eed5809a75a0c4e5599a8580de961a28a9d92ba6bc0742f9f1b",
+        "N": 0,
+        "PN": 0
+      },
+      "classicalKey": "74c332332097cee2ef309cbb22c26082671f3f07d0c207253ee30a61dea5b265",
+      "pqRootKey": "0d1fe5b0e0c7fceb1288b4969e529e799e3644aaffcdcad2f3266e77c58e6f54",
+      "binding": "9cc0202bde06d45cf1037c147b23767c26dc9024c84d5f586e53bf763fcf9033",
+      "merkleRoot": "0c6bccce0e308b6279039ae2f4746a0c467b837ecf52fc23a20bd1bee792f9b737f82918764ddfef8442f639085432b6a650a9cb8f369032df79e7d0d4ec7d35",
+      "combinedKey": "55b4307ce7aa862d0ffe723ad3be8ea1d81008c2fcb7f1a97696c09ef875d43c",
+      "frames": [
+        {
+          "chunkLabel": "mlkem768-epoch0/shortChunk",
+          "chunkLength": 37,
+          "nonce": "c37732d28db77c09c63457d4",
+          "frame": "0206f56a3ba5dc1eed5809a75a0c4e5599a8580de961a28a9d92ba6bc0742f9f1b000000000000000000000000000000000000000000000000c37732d28db77c09c63457d48c0792023b9efda202f8f81960d4143099c4f83e44a70620e01924e992bc07362676eebbeef02d6efa16a16261bc80f7976cd88cf8"
+        },
+        {
+          "chunkLabel": "mlkem768-epoch0/fullChunk",
+          "chunkLength": 65405,
+          "nonce": "d014a2f55531bdba13a45831",
+          "frameLength": 65490,
+          "frameSha512": "989e1dc3231549b6ba25f6e1f219229a048ade615e18e2b40e140ae648bbe48dab7dd6accd83f939d556ea2fb651a081b34165ce4ae296a69723b925f68b3c2b"
+        }
+      ]
+    },
+    {
+      "name": "mlkem1024-epoch5",
+      "rootSuite": "hybrid-3dh-mlkem1024-cpace21-v4",
+      "epoch": "5",
+      "header": {
+        "dhPub": "cee1ed2f73fce07870aa71a0e5b6f02eb09710b2ba0fafc05d137a2a762f49f3",
+        "N": 7,
+        "PN": 3
+      },
+      "classicalKey": "7fd875eb1c993a1280640d3152e59275da385a6418620dd3add856c53b7e890c",
+      "pqRootKey": "ed55a7b964867a152fa77084778c245e302cf13bfd678792b9f74e206c75c4a5",
+      "binding": "df7ad814cedfef7156ede64ce1b2ffd580a753ddeae2528df989718b19bd8c44",
+      "merkleRoot": "c3e1fb095acd0cd4bb928221c02e3f5cf4e0467d880860f7f2cefe46e66aa32f7ca6f35692d8287f5b9e957bb343974a224e5151668103fcbfeaf3ee6ff66c7c",
+      "combinedKey": "59716af9570382b498b0570857f35d461592c69187ab913e92e0d267a101e49f",
+      "frames": [
+        {
+          "chunkLabel": "mlkem1024-epoch5/shortChunk",
+          "chunkLength": 37,
+          "nonce": "38be11a4023dd86e109cf50f",
+          "frame": "02cee1ed2f73fce07870aa71a0e5b6f02eb09710b2ba0fafc05d137a2a762f49f300000000000000070000000000000003000000000000000538be11a4023dd86e109cf50fbb4b4aabe4fdc1497c37f9161d322d44145d98f142ca11fe1a7958ab5a8656b614f0aed917297d20913c55e623539c3433c80b56bc"
+        },
+        {
+          "chunkLabel": "mlkem1024-epoch5/fullChunk",
+          "chunkLength": 65405,
+          "nonce": "9f7abf8537ebd9de47af952b",
+          "frameLength": 65490,
+          "frameSha512": "5480cd6ee2b98c3e0d683d247bd5ddcf4df0c9efff0d5db647604a1c8154d6c42b551dc2e8ec0e43b5608896f3438bc3dc4305410578a7fc5be81e32b03b034f"
+        }
+      ]
+    },
+    {
+      "name": "mlkem512-max-counters",
+      "rootSuite": "hybrid-3dh-mlkem512-cpace21-v4",
+      "epoch": "18446744073709551615",
+      "header": {
+        "dhPub": "09c8a4fb1e91b99e60971cc1016a520da26e8c2e92361a812bf3538f1fa6afc2",
+        "N": 9007199254740991,
+        "PN": 1
+      },
+      "classicalKey": "e1e8c1d800b4026721365c8e6b3bb288c19e3c4aef4d74ff2fed5d86924ec3a1",
+      "pqRootKey": "7cabbe5c4849406b2b4eb29eaf69aa06feb5e038ea3e9ba7140d8111d18b4403",
+      "binding": "a1bb1cb04128e1f57496f704d1fd61b23abedc882efc9e5ee7933364cca155f8",
+      "merkleRoot": "b920143d6d656deaad60450430499f835f3e89f51fa76e4ce811411a6a35e76d911b489d70912e8a8d13326397248d2a7c27fbcd99461a74b679b1dc72b4d70a",
+      "combinedKey": "7431bbbadba6c3b251a09198d5ec7fcf4d98c6abe44acb79b01806c669209271",
+      "frames": [
+        {
+          "chunkLabel": "mlkem512-max-counters/shortChunk",
+          "chunkLength": 37,
+          "nonce": "8ab4aa74b82793e67baeca76",
+          "frame": "0209c8a4fb1e91b99e60971cc1016a520da26e8c2e92361a812bf3538f1fa6afc2001fffffffffffff0000000000000001ffffffffffffffff8ab4aa74b82793e67baeca763f91c0815aedf0331930b83baedd659448857e5bd490211395eda8eb1866a7e98503ff0a7d6b73a7cfc931d51244842def9b918b2c"
+        },
+        {
+          "chunkLabel": "mlkem512-max-counters/fullChunk",
+          "chunkLength": 65405,
+          "nonce": "6e650b68f8e5859c78efb2b5",
+          "frameLength": 65490,
+          "frameSha512": "4ece1f59b7738f057f84c62cfd706b68c982efd087fa049a9dcc99d5100010d15a17b4e0018698af476d948e4595d42ec536923b6cbc5f5524d1b55d817866e1"
+        }
+      ]
+    }
+  ]
+}

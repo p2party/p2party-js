@@ -1,0 +1,119 @@
+{
+  "description": "Ratchet sessions wrapped at rest by p2party 0.14.10 (envelope version 2). Produced by running wrapRatchetSession from `git archive 62661e0` (the 0.14.10 release tree, whose src/db/ratchetWrap.ts is unchanged up to 276afe7) under Bun 1.4.4, with an AES-GCM-256 wrap key imported from wrapKeyHex. Every other input is SHA-512 of a fixed label. IVs and record IDs are the random values that run drew. The release code unwrapped each record back to its plaintext before it was written here.",
+  "release": "0.14.10",
+  "commit": "62661e0",
+  "wrapVersion": 2,
+  "wrapKeyHex": "7cde91321478cb8ee7ac1054e945dfe8a3cdcb63cd64996c32984910cef26def",
+  "sessions": [
+    {
+      "name": "full",
+      "plaintext": {
+        "rootSuite": "hybrid-3dh-mlkem768-cpace21-v4",
+        "roomId": "room-fixture-1",
+        "peerPublicKey": "17e76c623237e78e6ab9876b3729e704075e5f2ce0b63b475b00a574e86c3a8a",
+        "peerId": "peer-fixture-1",
+        "rootKey": "01680a4156943836e4a9f85e633acadab95b5cc48fbf810d9b9df24c8afc0854",
+        "sendingChainKey": "f6ddad3d4bc1ba9b879c11f8e0e9bf5edc0370e80b63904542cdeaf0713bb3bc",
+        "receivingChainKey": "4b6cba7137070bf5f699c6c06ef0c58a9a4e102578d25fa27c653f454452152d",
+        "dhSelfPub": "5646d3b0e89f877b092f1d267f3ce1b9d0ae9451efc087f6ec6c529bcc9db96a",
+        "dhSelfSec": "cf2c0bc92cb8adc6be14d9845b9959ee52abe8e8e2758c9c5eb05107b2f3a919",
+        "dhRemotePub": "17b7dd7422da0e3286304b49bf078a7af0e64f1d69fe5273d64895c41c1a413c",
+        "Ns": 5,
+        "Nr": 3,
+        "PN": 2,
+        "skippedMessageKeys": [
+          {
+            "dhPub": "3384189497bbf5b5e9e3b473ca1e46f51b590e7c10e4df2919162684a813e68d",
+            "n": 0,
+            "messageKey": "d56e9ee5d72029aa36c1d41ac6b911b8de8d6be2d78d2077f5e1c8305e942fd1"
+          },
+          {
+            "dhPub": "678fa9e4ee5571fddb1345744bfe650705d021a8086af39ad57aea80f220037d",
+            "n": 1,
+            "messageKey": "027dbfa986b5663ba9299a05104f841eeaf049b4b31c21b44b83f8bb700c69eb"
+          },
+          {
+            "dhPub": "f81d3e4280d4797001a0075eeeab17e207b7df967f7fd7c9b2da76bf728425c9",
+            "n": 4,
+            "messageKey": "19c734a73d4311b8de77c7fd8f466f9294d60fd44172ad61ca938ce8db12469f"
+          }
+        ],
+        "edgeCryptoState": "e9ebae54e206ec5cb3d8e49347604f00c692f6616d0bd91102eee7fe01041842f9daa960836774066259a9fc29c28d414244024017e52f90e7891f2ece7a2c33f53b8bcb6fca4f77e1e192bc41d0ab8ad40da591024c96e7adde7c0feb3e1622138f76b2585f0f6e15e047da76cf49f21015f35bfbb7d6f64290df6784ded21d2f999529c3bfac3c83ea8871228c25ce0dc6f5384387882b9f2dba114867d6464126423284176d8bf0085f96696cc0e24a834342e42f585cf4213657de5bf4b2f3accfa2c17e4d2fc6a6ebe9df15ad4fae4868cff4783ba38bb4a7c1f10e8f055b8bc1599f62e515de565d5e1ae39f36b07554459e5f0487d1fdd81d17e7fbbfadcd1399820076e72fc5944f3fe6c01326326f44b42e50f99f252aac0ce4c2a48d3b8fbfaa6d854eb76c50de",
+        "updatedAt": 1764158400000
+      },
+      "wrapped": {
+        "rootSuite": "hybrid-3dh-mlkem768-cpace21-v4",
+        "roomId": "room-fixture-1",
+        "peerPublicKey": "17e76c623237e78e6ab9876b3729e704075e5f2ce0b63b475b00a574e86c3a8a",
+        "peerId": "peer-fixture-1",
+        "rootKey": "503252570210eea180c836e6cc7b57cfd2c3716dcd1e3883fba675d01b274c7418fe1e21edc2acb7aa1e8ef0a849323d89e3f9fd650c32cab09b74573c9203b7814a792fba057bd32b0b03fb7e5da789a7",
+        "sendingChainKey": "503252570210eea180c836e6cc7b57cfd2c3716dcd8faae31ff3d514ccc60345eb1cb852b7f4b72f6cf3ad1a9dbab1df1bc84b2922f53ee41affdc451a99318b9fe2c84bce7ec7cd1b6b5a130349ab5cef",
+        "receivingChainKey": "503252570210eea180c836e6cc7b57cfd2c3716dcd5caf5166e1343e48fcfa792e863b2f1d00c1d3c7f6d99b2993d25791aa8b021a5d15edb8eac4c63fab6099b883fdb9f647acdaa030b97abe30d5ac5d",
+        "dhSelfPub": "5646d3b0e89f877b092f1d267f3ce1b9d0ae9451efc087f6ec6c529bcc9db96a",
+        "dhSelfSec": "503252570210eea180c836e6cc7b57cfd2c3716dcd0c21408c63d466c0a8f2d5906a4462cce23c9553b9362b1a4c6cefa4299c647b74b4051923ce755aab72e79dcc9869db711dd72f9a493e069526422d",
+        "dhRemotePub": "17b7dd7422da0e3286304b49bf078a7af0e64f1d69fe5273d64895c41c1a413c",
+        "Ns": 5,
+        "Nr": 3,
+        "PN": 2,
+        "skippedMessageKeys": [
+          {
+            "dhPub": "3384189497bbf5b5e9e3b473ca1e46f51b590e7c10e4df2919162684a813e68d",
+            "n": 0,
+            "messageKey": "503252570210eea180c836e6cc7b57cfd2c3716dcda99cf3a247a7cb5567a697108f29c60775ed4216a938584fd1e55a92e8915581dc313e38e2fedf20d3875d8c7f2a61a2e07fa415403c9cbda10462fd"
+          },
+          {
+            "dhPub": "678fa9e4ee5571fddb1345744bfe650705d021a8086af39ad57aea80f220037d",
+            "n": 1,
+            "messageKey": "503252570210eea180c836e6cc7b57cfd2c3716dcdbe75fdf0260bb7b57c954f01fed3617f2f8a17b3759fca90ecaf727dfab27d0226818154c7216bfce4931b3a04fe0599089e9f96c540c5e515261c26"
+          },
+          {
+            "dhPub": "f81d3e4280d4797001a0075eeeab17e207b7df967f7fd7c9b2da76bf728425c9",
+            "n": 4,
+            "messageKey": "503252570210eea180c836e6cc7b57cfd2c3716dcdd3c5602254164d234de968972398a1169eb1361ee4dd48300b02acf69663023fb183fb746dd6454d66942be7152997fe45829dbc22c7e297a1596c62"
+          }
+        ],
+        "edgeCryptoState": "503252570210eea180c836e6cc7b57cfd2c3716dcd0106f2a00fb22cd2ed15472f11b961f0d984eff8172e9c4472af2090bbaf38721f8832da9a7029a142232610f62deba6c591388c72e7ac982c99f8c0efa80ede20d219068021854e7c5e2a9b05fc0a0589a800c639dc11d3c4a84c888e73b5f089b9e609ac3c5c3a6068e2d8e1c65df35b86ba7161fe1c1c56b92cfd140cfddd6ffebd1c39ada8c8aa6199c3fa83e5cb98f5343f4b4b0d92c1e9f3ddc78cc629ff7a5e4f41f74b94edfd0fc1ef606118ae2e76763e8ca8cf07cee1450ed64aeacb561f1a9490b4f0bd57c68834a607763aaebaeb0e5e784fb1abd8c90f979045e7a8e2d8d6db087686ff51e2c93d09ab39a6b3765baf4237fb848a9664aff57e9d82786eafa10d47f185147ba22c3d623e7a8d7f7941ca0a19f8ba67a7d637ce5a1760aa9b8d80d19c7029ccb3f75a145ac183c4cae0718c6cd464c2ce57b6ff9bfa65c2caf4a04f",
+        "updatedAt": 1764158400000
+      }
+    },
+    {
+      "name": "minimal",
+      "plaintext": {
+        "rootSuite": "hybrid-3dh-mlkem512-cpace21-v4",
+        "roomId": "room-fixture-2",
+        "peerPublicKey": "34637d3b20ac9e46a8eb6824cc3ef8067ec2e6ef77fc683563ad98737a8f88dc",
+        "peerId": "peer-fixture-2",
+        "rootKey": "ea02aca045f144c8a54f40c0f5b611743d7b600806820975bddc5e8d978a2349",
+        "sendingChainKey": null,
+        "receivingChainKey": null,
+        "dhSelfPub": "dadcfcf3ca02f368e69ad40b7a2d29e6b2cd0bfc06143fd047a409ea0cb5ccf1",
+        "dhSelfSec": "6c45e2cd9156e68cbc4c60ea6a35ec457f09a3b24fe2ffa7f8e5ad1f5ad4eb68",
+        "dhRemotePub": null,
+        "Ns": 0,
+        "Nr": 0,
+        "PN": 0,
+        "skippedMessageKeys": [],
+        "edgeCryptoState": null,
+        "updatedAt": 1764158400001
+      },
+      "wrapped": {
+        "rootSuite": "hybrid-3dh-mlkem512-cpace21-v4",
+        "roomId": "room-fixture-2",
+        "peerPublicKey": "34637d3b20ac9e46a8eb6824cc3ef8067ec2e6ef77fc683563ad98737a8f88dc",
+        "peerId": "peer-fixture-2",
+        "rootKey": "5032525702a47ea0263352ec576433bf021dd6a9f2c2c77f7797e9659ac7292d316925b4a5be7165e8c7552f2a72ad0b1032caf5063c07be668ddb5a231d380ba4fec9317226418d06a25d2e9c24ad3a8a",
+        "sendingChainKey": null,
+        "receivingChainKey": null,
+        "dhSelfPub": "dadcfcf3ca02f368e69ad40b7a2d29e6b2cd0bfc06143fd047a409ea0cb5ccf1",
+        "dhSelfSec": "5032525702a47ea0263352ec576433bf021dd6a9f29ee0b0720f94fe466f561c3cd895618ffefc826648a4b6461e3a5bf79ec5e4932cae3a5e289485ff7ce2f959cf8e650e7c97364779c1cbcad2b50181",
+        "dhRemotePub": null,
+        "Ns": 0,
+        "Nr": 0,
+        "PN": 0,
+        "skippedMessageKeys": [],
+        "edgeCryptoState": null,
+        "updatedAt": 1764158400001
+      }
+    }
+  ]
+}

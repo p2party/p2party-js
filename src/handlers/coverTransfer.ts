@@ -393,8 +393,8 @@ const ADMISSION_STAGE: Readonly<
  * — backpressure, a lane that failed to open, a missed deadline, a suspension —
  * sends an admitted job back to "queued". Counting either as progress lets an
  * oscillating signal reset the budget forever: the send is never abandoned, the
- * receiver's partial is never cancelled, and because `sendScheduled` fans out
- * serially, every later peer in the room waits behind it unboundedly.
+ * receiver's partial is never cancelled, and the whole send's result, which
+ * waits for every peer's outcome, never arrives.
  *
  * So exactly three things count, in this order:
  *

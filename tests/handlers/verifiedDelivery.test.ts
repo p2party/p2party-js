@@ -1591,6 +1591,42 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
   });
 });
 
+describe("the wait's timers run on their own time", () => {
+  test("a wall clock stepped backwards does not pause the re-check", async () => {
+    // The platform's timers run on their own time; the wall clock the wait
+    // reads is that time plus an offset the system can step.
+    const timers = new ManualClock();
+    let offsetMs = 0;
+    const wall = {
+      now: () => timers.now() + offsetMs,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    };
+    // A condition only a check sees: nothing announces it.
+    let interrupted = false;
+    const waiting = waitForReportedCompletion(ROOM, PEER, TRANSFER_ID, {
+      silenceMs: RECEIVER_SILENCE_LIMIT_MS,
+      capMs: 10 * RECEIVER_SILENCE_LIMIT_MS,
+      onActivity: (wake) => onTransferActivity(ROOM, PEER, TRANSFER_ID, wake),
+      isInterrupted: () => interrupted,
+      clock: wall,
+    });
+    timers.advanceTo(2_000);
+    // The wall clock steps back an hour, then the condition comes true.
+    offsetMs = -3_600_000;
+    interrupted = true;
+    timers.advanceTo(REPORTED_COMPLETION_CHECK_MS - 1);
+    expect((await settledWithin(waiting)).settled).toBe(false);
+    // The re-check runs on time, one check interval after it was armed.
+    timers.advanceTo(REPORTED_COMPLETION_CHECK_MS);
+    expect(await settledWithin(waiting)).toEqual({
+      settled: true,
+      value: false,
+    });
+    expect(timers.armed).toBe(0);
+  });
+});
+
 describe("timers above the platform limit", () => {
   test("clampTimerDelayMs and armTimer at the largest delay and one more", () => {
     expect(clampTimerDelayMs(MAX_TIMER_DELAY_MS)).toBe(MAX_TIMER_DELAY_MS);

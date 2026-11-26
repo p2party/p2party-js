@@ -213,13 +213,6 @@ export interface InstallCoverEdgeOptions {
   readonly timerEnvironment?: CoverTimerEnvironment;
 }
 
-/**
- * Stop scheduled cover on an edge and release its lanes.
- *
- * destroy() emits the terminal "stopped" status, so any observer of
- * rooms[].coverStatusByPeer stops claiming cover for this edge. Safe to call
- * on an edge that never had a runtime.
- */
 // A retired runtime with no replacement publishes no generation, so a sender
 // waiting on one of its transfers hears the teardown here instead.
 const retirementListeners = new Map<string, Set<() => void>>();
@@ -248,6 +241,14 @@ export const onCoverEdgeRetired = (
   };
 };
 
+/**
+ * Stop scheduled cover on an edge and release its lanes.
+ *
+ * destroy() emits the terminal "stopped" status, so any observer of
+ * rooms[].coverStatusByPeer stops claiming cover for this edge. When a runtime
+ * was torn down, the edge's onCoverEdgeRetired listeners are then called. Safe
+ * to call on an edge that never had a runtime; nothing is published then.
+ */
 export const teardownCoverEdge = (epc: IRTCPeerConnection): void => {
   const queue = scheduledReceiptQueues.get(epc);
   if (queue) releaseQueuedReceipts(queue);

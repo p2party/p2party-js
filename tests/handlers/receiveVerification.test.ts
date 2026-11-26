@@ -53,6 +53,7 @@ import type {
   ReceiveVerificationVerdict,
 } from "../../src/db/types";
 import type { ReceiveStorageError } from "../../src/handlers/handleReceiveMessage";
+import type { NewChunk } from "../../src/db/types";
 import type { CoverRuntime } from "../../src/handlers/coverRuntime";
 import type { CoverJob, CoverJobSlot } from "../../src/handlers/coverScheduler";
 import type { CoverCellContent } from "../../src/cryptography/coverCell";
@@ -103,13 +104,19 @@ const { sealChunkClassicalOnlyForTests } =
   await import("../../src/handlers/messageChunkCrypto");
 const { onReceiveStorageError } =
   await import("../../src/handlers/handleReceiveMessage");
-const { releaseScheduledReceipts } =
+const { releaseScheduledReceipts, scheduledDeliveryTimeoutMs } =
   await import("../../src/handlers/coverTransfer");
-const { waitForScheduledVerifiedDelivery, waitForVerifiedDelivery } =
-  await import("../../src/handlers/handleSendMessage");
+const {
+  OutboundMessage,
+  sendScheduled,
+  waitForTransferConfirmation,
+  waitForVerifiedDelivery,
+} = await import("../../src/handlers/handleSendMessage");
 const {
   clearTransfer,
+  hasChunkAcked,
   isTransferComplete,
+  markChunkAcked,
   markTransferComplete,
   onTransferActivity,
   onTransferProgress,
@@ -415,6 +422,8 @@ const buildMessage = async (
     totalSize,
     plaintexts,
     receipts,
+    leaves,
+    leafHashes,
   };
 };
 
@@ -1323,6 +1332,17 @@ const pqState = (amInitiator: boolean) =>
 const scheduledSender = (
   file: Awaited<ReturnType<typeof buildMessage>>,
   transferId: string,
+  schedule: {
+    readonly coverCadenceMs: number;
+    readonly coverLanes: number;
+    readonly coverFramesPerCell: number;
+    readonly coverDurationEpochs: number;
+  } = {
+    coverCadenceMs: 400,
+    coverLanes: 2,
+    coverFramesPerCell: 2,
+    coverDurationEpochs: 1,
+  },
 ) => {
   const senderPq = pqState(true);
   const receiverPq = pqState(false);
@@ -1330,7 +1350,14 @@ const scheduledSender = (
     roomId: ROOM,
     withPeerId: RECEIVER,
     withPeerPublicKey: "a8".repeat(32),
+    connectionState: "connected",
     pqHealingState: senderPq,
+    ratchetState: initRatchet(
+      rand(32),
+      true,
+      initRatchet(rand(32), false, null, module).dhSelfPub,
+      module,
+    ),
     createDataChannel: (label: string) => {
       const lane = {
         label,
@@ -1348,17 +1375,15 @@ const scheduledSender = (
   const chunkOf = new Map(
     file.receipts.map((token, index) => [uint8ArrayToHex(token), index]),
   );
+  const policy = {
+    ...DEFAULT_ROOM_POLICY_V1,
+    coverMode: "scheduled" as const,
+    ...schedule,
+  };
   installCoverEdge({
     epc,
     roomId: ROOM,
-    policy: {
-      ...DEFAULT_ROOM_POLICY_V1,
-      coverMode: "scheduled",
-      coverCadenceMs: 400,
-      coverLanes: 2,
-      coverFramesPerCell: 2,
-      coverDurationEpochs: 1,
-    },
+    policy,
     policyHash: new Uint8Array(32),
     amInitiator: true,
     module,
@@ -1381,9 +1406,36 @@ const scheduledSender = (
     senderPq.destroy();
     receiverPq.destroy();
   });
+  // The jobs a scheduled send enqueues on this edge. No lane ever opens here,
+  // so the scheduler never runs them: a test pulls their cells itself.
+  const jobs: CoverJob[] = [];
+  const runtime = epc.coverRuntime!;
+  const enqueue = runtime.enqueue.bind(runtime);
+  runtime.enqueue = (job) => {
+    jobs.push(job);
+    return enqueue(job);
+  };
   let counter = 0n;
   let refused = 0;
   return {
+    epc,
+    policy,
+    jobs,
+    /** The message step a scheduled send takes on this edge. */
+    ratchetStep: async () => {
+      const stepped = ratchetEncrypt(epc.ratchetState!, module);
+      const live = senderPq.currentMessageContext();
+      return {
+        messageKey: stepped.messageKey,
+        header: stepped.header,
+        pqContext: {
+          rootKey: Uint8Array.from(live.rootKey),
+          binding: Uint8Array.from(live.binding),
+          rootSuite: live.rootSuite,
+          epoch: live.epoch,
+        },
+      };
+    },
     refused: () => refused,
     deliverCell: (content: CoverCellContent) => {
       const context = receiverPq.currentMessageContext();
@@ -1401,6 +1453,54 @@ const scheduledSender = (
       if (!epc.coverRuntime!.processInboundCoverCell(frame)) refused += 1;
     },
   };
+};
+
+// The sender's staged message for `file`: its rows carry each cell's
+// metadata, proof, chunk and receipt token as the sender staged them.
+const outboundMessage = (
+  file: Awaited<ReturnType<typeof buildMessage>>,
+  transferId: string,
+) => {
+  const hashHex = uint8ArrayToHex(file.hash);
+  const rows = new Map<number, NewChunk>(
+    file.plaintexts.map((plaintext, chunkIndex) => [
+      chunkIndex,
+      {
+        transferId,
+        hash: hashHex,
+        merkleRoot: file.rootHex,
+        chunkIndex,
+        leafHash: uint8ArrayToHex(file.leafHashes[chunkIndex]),
+        receiptToken: uint8ArrayToHex(file.receipts[chunkIndex]),
+        metadata: plaintext.slice(0, METADATA_LEN).buffer as ArrayBuffer,
+        merkleProof: plaintext.slice(METADATA_LEN, METADATA_LEN + PROOF_LEN)
+          .buffer as ArrayBuffer,
+        data: plaintext.slice(METADATA_LEN + PROOF_LEN).buffer as ArrayBuffer,
+      },
+    ]),
+  );
+  const message = new OutboundMessage({
+    transferId,
+    hashHex,
+    merkleRoot: file.root,
+    totalChunks: file.plaintexts.length,
+    chunkHashes: file.leaves.slice(
+      0,
+      file.plaintexts.length * crypto_hash_sha512_BYTES,
+    ),
+    merkleModule: module,
+    store: {
+      get: async (_transferId, index) => {
+        const row = rows.get(index);
+        return row ? structuredClone(row) : undefined;
+      },
+      put: async (chunk) => {
+        rows.set(chunk.chunkIndex, structuredClone(chunk));
+      },
+    },
+  });
+  restores.push(() => message.close());
+  return message;
 };
 
 // A receiver-side cover runtime whose control jobs run as the clock moves.
@@ -1445,11 +1545,30 @@ const receiverCoverRuntime = (
 };
 
 describe("the sender waits while its receiver verifies", () => {
-  // 400 full chunks (about 23.6 MiB) in 25 batches of 1.26 s: the
-  // verification takes 31.5 s, longer than the 30 s silence bound and inside
-  // the sender's cap for this size (about 33 s).
+  // 400 full chunks (about 23.6 MiB), verified in 25 batches.
   const CHUNKS = 400;
-  const BATCH_MS = 1_260;
+  // A scheduled room whose one-lane cycle holds the whole file: F×D = 400 at
+  // the 25 ms slot floor. Its delivery idle budget, and with it the sender's
+  // silence bound while the receiver verifies, is 40.025 s.
+  const SCHEDULE = {
+    coverCadenceMs: 10_000,
+    coverLanes: 1,
+    coverFramesPerCell: CHUNKS,
+    coverDurationEpochs: 1,
+  };
+  // Immediate: 25 batches of 1.26 s, 31.5 s from the last chunk receipt,
+  // past the 30 s silence bound and inside the cap (about 33 s). Scheduled:
+  // the receipts reach the sender in the first batch's slots, and the
+  // remaining 24 batches of 1.72 s (41.28 s) run past the 40.025 s bound and
+  // inside the cap (about 43 s).
+  const BATCH_MS = { immediate: 1_260, scheduled: 1_720 } as const;
+  const silenceMs = {
+    immediate: RECEIVER_SILENCE_LIMIT_MS,
+    scheduled: Math.max(
+      RECEIVER_SILENCE_LIMIT_MS,
+      scheduledDeliveryTimeoutMs(SCHEDULE),
+    ),
+  } as const;
   const fullFile = () =>
     buildMessage(
       MessageType.ImagePNG,
@@ -1459,7 +1578,7 @@ describe("the sender waits while its receiver verifies", () => {
   const run = async (mode: "immediate" | "scheduled") => {
     const file = await fullFile();
     const { alice, epc } = edge();
-    const time = batchClock(file.rootHex, BATCH_MS);
+    const time = batchClock(file.rootHex, BATCH_MS[mode]);
     const transferId = `a6-${mode}`;
     restores.push(() => clearTransfer(ROOM, RECEIVER, transferId));
     const finalHex = uint8ArrayToHex(file.hash);
@@ -1479,7 +1598,7 @@ describe("the sender waits while its receiver verifies", () => {
     let scheduled: ReturnType<typeof scheduledSender> | undefined;
     let runSlots: () => Promise<void> = async () => {};
     if (mode === "scheduled") {
-      scheduled = scheduledSender(file, transferId);
+      scheduled = scheduledSender(file, transferId, SCHEDULE);
       runSlots = receiverCoverRuntime(epc, time, scheduled.deliverCell);
       restores.push(
         onTransferActivity(ROOM, RECEIVER, transferId, () =>
@@ -1490,27 +1609,98 @@ describe("the sender waits while its receiver verifies", () => {
 
     const io = storage();
     io.gate.resolve();
-    const startedAt = time.now();
-    const waiting =
-      mode === "immediate"
-        ? waitForVerifiedDelivery(
+    const message = outboundMessage(file, transferId);
+    const allAcknowledged = () =>
+      message.allRealsAcknowledged((index) =>
+        hasChunkAcked(ROOM, RECEIVER, transferId, index),
+      );
+    const chunkOf = new Map(
+      file.receipts.map((token, index) => [uint8ArrayToHex(token), index]),
+    );
+    const sentAt = time.now();
+    // When the sender's wait for the receiver's verification began.
+    let waitStartedAt: number | undefined;
+    let batchesAtStart = -1;
+    let waiting: Promise<boolean> | undefined;
+    let deliver = (frameHex: string): void => immediate.deliver(frameHex);
+    if (mode === "immediate") {
+      // The sender's first pass read every cell once.
+      for (let index = 0; index < message.totalChunks; index++)
+        await message.read(index);
+      // The sender's receipt handler acknowledges each chunk receipt; at the
+      // receipt that acknowledges the last one, the sender's next
+      // confirmation round starts.
+      deliver = (frameHex) => {
+        const index = chunkOf.get(frameHex);
+        if (index !== undefined)
+          markChunkAcked(ROOM, RECEIVER, transferId, index);
+        immediate.deliver(frameHex);
+        if (waiting === undefined && allAcknowledged()) {
+          waitStartedAt = time.now();
+          batchesAtStart = time.batches();
+          waiting = waitForTransferConfirmation(
+            message,
             immediate.channel,
             ROOM,
             RECEIVER,
-            transferId,
-            file.totalSize,
-            { clock: time.clock },
-          )
-        : waitForScheduledVerifiedDelivery(
-            ROOM,
-            RECEIVER,
-            transferId,
-            file.totalSize,
-            RECEIVER_SILENCE_LIMIT_MS,
-            { clock: time.clock },
-          );
+            0,
+            undefined,
+            time.clock,
+          ).then((confirmation) => {
+            expect(confirmation.verifying).toBe(true);
+            return confirmation.done;
+          });
+        }
+      };
+    } else {
+      // The real scheduled send on the sender's real cover edge. Its delivery
+      // wait is the scheduler's: it pulls every cell of the job, and runs out
+      // once every chunk is acknowledged and no cell is left to send.
+      waiting = sendScheduled(
+        ROOM,
+        "chat",
+        scheduled!.policy,
+        [{ peerId: RECEIVER, epc: scheduled!.epc }],
+        message,
+        module,
+        undefined,
+        undefined,
+        [scheduled!.epc],
+        {
+          waitForGate: async () => undefined,
+          ratchetStep: scheduled!.ratchetStep,
+          waitForDelivery: async (options) => {
+            const job = scheduled!.jobs[0];
+            for (let cell = 0; cell <= message.totalChunks; cell++)
+              if ((await job.nextCell({} as CoverJobSlot)) === null) break;
+            await new Promise<void>((resolve) => {
+              const check = () => {
+                if (!allAcknowledged() && !options.isComplete()) return;
+                unsubscribe();
+                resolve();
+              };
+              const unsubscribe = onTransferProgress(
+                ROOM,
+                RECEIVER,
+                transferId,
+                check,
+              );
+              check();
+            });
+            waitStartedAt = time.now();
+            batchesAtStart = time.batches();
+            return options.isComplete();
+          },
+          resumeWaitMs: 1,
+          clock: time.clock,
+        },
+      ).then(({ outcomes }) => {
+        expect(outcomes).toEqual([{ peerId: RECEIVER, status: "delivered" }]);
+        return true;
+      });
+    }
     const fileLane = lane(file, epc, io.dependencies, undefined, (frame) =>
-      immediate.deliver(frame),
+      deliver(frame),
     );
     await feed(fileLane, alice, file);
     expect(await io.settled.promise).toBe("complete");
@@ -1525,16 +1715,21 @@ describe("the sender waits while its receiver verifies", () => {
     expect(time.batches()).toBe(
       Math.ceil(CHUNKS / RECEIVE_VERIFY_BATCH_CHUNKS),
     );
-    expect(completedAt! - startedAt).toBeGreaterThan(RECEIVER_SILENCE_LIMIT_MS);
-    expect(completedAt! - startedAt).toBeLessThan(
-      reportedCompletionCapMs(file.totalSize, RECEIVER_SILENCE_LIMIT_MS),
+    // The sender's wait for the verification began once every chunk was
+    // acknowledged (before the first batch, immediate; in its slots,
+    // scheduled), and lasted past its silence bound and inside its cap.
+    expect(batchesAtStart).toBe(mode === "immediate" ? 0 : 1);
+    expect(silenceMs.scheduled).toBe(40_025);
+    expect(completedAt! - waitStartedAt!).toBeGreaterThan(silenceMs[mode]);
+    expect(completedAt! - waitStartedAt!).toBeLessThan(
+      reportedCompletionCapMs(file.totalSize, silenceMs[mode]),
     );
     // The receiver kept the sender's silence bound from expiring: every gap
     // between frames the sender attributed to the transfer is under it.
     const activityAt =
       mode === "immediate" ? immediate.activityAt : scheduledActivityAt;
     const gaps = activityAt.map(
-      (at, index) => at - (index === 0 ? startedAt : activityAt[index - 1]),
+      (at, index) => at - (index === 0 ? sentAt : activityAt[index - 1]),
     );
     expect(Math.max(...gaps)).toBeLessThan(RECEIVER_SILENCE_LIMIT_MS);
     if (scheduled) {

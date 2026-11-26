@@ -20,6 +20,7 @@ import {
 } from "../db/api";
 
 import { uint8ArrayToHex } from "../utils/uint8array";
+import { RECEIVE_VERIFY_RECEIPT_INTERVAL_MS } from "../utils/constants";
 
 import {
   resetMessageReceiveProgress,
@@ -440,9 +441,14 @@ const finishHeldFile = async (
   const edgeIsCurrent = (): boolean =>
     lease !== undefined && isCurrentRatchetGateLease(roomId, peerId, lease);
   // While the worker reports progress on this attempt, tell the sender the
-  // file is still being verified; silence once it ends, stalls, or this edge
-  // closes.
+  // file is still being verified: at most once per
+  // RECEIVE_VERIFY_RECEIPT_INTERVAL_MS, and only when the hash advanced since
+  // the last receipt, so the wire carries neither the hash rate nor a stuck
+  // run. Silence once it ends, stalls, or this edge closes. The held chunk's
+  // own receipt has just gone out.
   let reporting = true;
+  let lastReceiptAt = Date.now();
+  let lastReceiptBytes = 0;
   const unsubscribe = (
     dependencies.onVerificationProgress ?? onVerificationProgress
   )((progress) => {
@@ -456,6 +462,14 @@ const finishHeldFile = async (
       stopReporting();
       return;
     }
+    const now = Date.now();
+    if (
+      progress.hashedBytes <= lastReceiptBytes ||
+      now - lastReceiptAt < RECEIVE_VERIFY_RECEIPT_INTERVAL_MS
+    )
+      return;
+    lastReceiptAt = now;
+    lastReceiptBytes = progress.hashedBytes;
     resendHeldReceipt(held, merkleRoot, extChannel, epc);
   });
   const stopReporting = (): void => {

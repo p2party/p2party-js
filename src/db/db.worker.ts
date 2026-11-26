@@ -11,7 +11,7 @@ import {
   RECEIVE_VERIFY_BATCH_CHUNKS,
   RECEIVE_VERIFY_LEASE_RENEW_MS,
   RECEIVE_VERIFY_PROGRESS_BYTES,
-  RECEIVE_VERIFY_PROGRESS_CEILING_MS,
+  RECEIVE_VERIFY_RECEIPT_INTERVAL_MS,
   RECEIVE_VERIFY_SETTLED_MEMORY,
 } from "../utils/constants";
 
@@ -1471,7 +1471,7 @@ async function hashHeldFile(
             : manifest.uniformSize;
       if (
         hashedBytes - reportedBytes >= RECEIVE_VERIFY_PROGRESS_BYTES ||
-        Date.now() - reportedAt >= RECEIVE_VERIFY_PROGRESS_CEILING_MS
+        Date.now() - reportedAt >= RECEIVE_VERIFY_RECEIPT_INTERVAL_MS
       ) {
         const progress: HeldFileProgressNotice = {
           merkleRoot,

@@ -371,15 +371,25 @@ database worker has read the stored file once in chunk order, including the
 last chunk as written, and hashed it. The hashing runs outside the
 connection's receive queue, so chat messages, receipts and other transfers on
 the same connection keep flowing, and the worker answers other requests
-between reads of about 1 MiB. While it hashes, the worker reports progress
-after every 8 MiB and at least every 10 s while reads keep finishing, and on
-each report the receiver re-sends that transfer's ordinary receipt (all chunks
-acknowledged, not complete) the way it sent it before: on the message channel,
-or in a scheduled reverse cover slot. A stalled verification reports nothing,
-so the sender's own silence bound ends its wait. Nothing is re-sent for a
-verification that runs without its sender (at the next start, below) until
-that sender reconnects. Only when the hash is done is the file marked complete
-and the final receipt sent. If the connection to that peer is torn down first, or the
+between reads of about 1 MiB. While it hashes, the receiver re-sends that
+transfer's ordinary receipt (all chunks acknowledged, not complete) at most
+once every 10 s (a third of the sender's 30 s silence bound), and only when
+the hash has advanced since the receipt it last sent. A stuck verification
+sends nothing, so the sender's silence bound ends its wait. What is visible on
+the wire meanwhile:
+
+- Immediate mode: the same 65-byte receipt frame the receiver already sent
+  for the held last chunk, repeated on the transfer's message channel about
+  every 10 s, then the final receipt. The repeats say a verification is still
+  running. Their rate does not depend on how fast the device hashes, and they
+  stop when it stalls.
+- Scheduled mode: nothing new. The repeated token rides in a reverse cover
+  cell, in a slot that would otherwise carry a dummy, so cell size and cadence
+  are unchanged.
+
+Nothing is re-sent for a verification that runs without its sender (at the
+next start, below) until that sender reconnects. Only when the hash is done is
+the file marked complete and the final receipt sent. If the connection to that peer is torn down first, or the
 room is left, nothing completes on that connection. When the sender
 reconnects while the file is still being verified, its copy of the last chunk
 joins that verification and the file completes on the new connection. A file

@@ -793,16 +793,41 @@ const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
   }
 };
 
+// With `deleteMessages`, every stored message of every room left is removed
+// after the connections close. A received file that cannot be removed makes
+// this reject with one StorageFailedError (`failures`: each message's error)
+// once every other room and message was tried.
 const disconnectFromAllRooms = async (
   deleteMessages = false,
   exceptionRoomIds: string[] = [],
 ) => {
   await dispatch(
     webrtcApi.endpoints.disconnectFromAllRooms.initiate({
-      deleteMessages,
+      deleteMessages: false,
       exceptionRoomIds,
     }),
   );
+  if (!deleteMessages) return;
+  const exceptions = new Set(exceptionRoomIds);
+  const failures: unknown[] = [];
+  for (const room of store.getState().rooms) {
+    if (exceptions.has(room.id)) continue;
+    try {
+      await deleteRoomDataTerminal(room.id, (merkleRootHex) => {
+        dispatch(deleteMessageStateOnly({ roomId: room.id, merkleRootHex }));
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0)
+    throw asStorageFailure(
+      new AggregateError(
+        failures,
+        "All-room data deletion did not fully settle",
+      ),
+      "p2party: leaving the rooms left received files on disk",
+    );
 };
 
 const allowConnectionRelay = (roomId: string, allowed = true) => {
@@ -1801,8 +1826,23 @@ const getIdentityBackupStatus = async (): Promise<IdentityBackupStatus> => {
  * transports, and durable data have reached their terminal boundary. The
  * shared signaling socket and every other room remain untouched.
  */
+// Every step runs even when an earlier one fails. A received file of the room
+// that cannot be removed makes this reject with one StorageFailedError
+// (`cause`: what the purge's steps threw; `failures`: each one) after
+// everything else was done.
 const purgeRoom = async (roomUrl: string): Promise<void> => {
   roomUrl = normalizeRoomCapability(roomUrl);
+  try {
+    await purgeRoomSettled(roomUrl);
+  } catch (error) {
+    throw asStorageFailure(
+      error,
+      "p2party: purging the room left received files on disk",
+    );
+  }
+};
+
+const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
   await signalingRoomOperationLifecycle.runRoomTerminal(roomUrl, async () => {
     const { rooms } = store.getState();
     const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
@@ -1837,13 +1877,14 @@ const purgeRoom = async (roomUrl: string): Promise<void> => {
         if (!needsRemoteRevocation) return;
         await requestCurrentSocketRoomLeave(store, roomUrl);
       },
+      // Awaited here, not inside the disconnect query, so a typed storage
+      // failure reaches this call; closeLocalTransport already disconnected.
       deleteLocalData: async () => {
-        await dispatch(
-          webrtcApi.endpoints.disconnectFromRoom.initiate({
-            roomId: removedRoom.id,
-            deleteMessages: true,
-          }),
-        ).unwrap();
+        await deleteRoomDataTerminal(removedRoom.id, (merkleRootHex) => {
+          dispatch(
+            deleteMessageStateOnly({ roomId: removedRoom.id, merkleRootHex }),
+          );
+        });
       },
       clearPinAttempts: async () => {
         if (removedRoom.id) await clearPinAttempts(removedRoom.id);

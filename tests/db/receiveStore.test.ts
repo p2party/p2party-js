@@ -1115,7 +1115,7 @@ describe("no failure leaves a verification behind", () => {
 
   test("a cancelled transfer's delete during its verification removes the file", async () => {
     // What a remote CANCEL's sweep and a channel's cancelReceiveTransfer call.
-    const root = "6c".repeat(64);
+    const root = "b5".repeat(64);
     const reply = (await deleteMidRead(root, () =>
       callWorker("deleteReceiveTransfer", [
         root,
@@ -1148,6 +1148,128 @@ describe("no failure leaves a verification behind", () => {
       callWorker("deleteDB", []),
     )) as WorkerResponse;
     expect(reply.error).toBeUndefined();
+  });
+
+  // Another context holds the file: a sync access handle the worker did not
+  // open and cannot close, as another tab writing it would hold.
+  const holdOpenElsewhere = async (root: string) => {
+    const storage = (
+      globalThis as unknown as {
+        navigator: {
+          storage: {
+            getDirectory: () => Promise<{
+              getDirectoryHandle: (name: string) => Promise<{
+                getFileHandle: (name: string) => Promise<{
+                  createSyncAccessHandle: () => Promise<{ close: () => void }>;
+                }>;
+              }>;
+            }>;
+          };
+        };
+      }
+    ).navigator.storage;
+    const dir = await (
+      await storage.getDirectory()
+    ).getDirectoryHandle("p2party-reassembled");
+    return (await dir.getFileHandle(root)).createSyncAccessHandle();
+  };
+
+  test("a delete that meets a handle still open reports the file it could not remove", async () => {
+    quietConsole();
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const root = "b3".repeat(64);
+    await holdFile(root);
+    await callWorker("closeReceiveFile", [root]);
+    const elsewhere = await holdOpenElsewhere(root);
+
+    // The device refuses to remove a file that is open: the delete says so.
+    const refused = await callWorker("deleteReceiveTransfer", [root]);
+    expect(refused.error).toBeDefined();
+    expect((refused as { errorCode?: string }).errorCode).toBe(
+      "storage-failed",
+    );
+    expect(String(refused.error)).toContain(root);
+    expect(opfs.list()).toEqual([root]);
+
+    // Once it is closed there, the same delete removes it.
+    elsewhere.close();
+    expect(
+      (await callWorker("deleteReceiveTransfer", [root])).error,
+    ).toBeUndefined();
+    expect(opfs.list()).toEqual([]);
+  });
+
+  test("a purge that meets a handle still open does everything else and reports it", async () => {
+    quietConsole();
+    const files = new Map<string, Uint8Array>();
+    const opfs = installOpfs(files);
+    const root = "b4".repeat(64);
+    await holdFile(root);
+    await callWorker("closeReceiveFile", [root]);
+    const elsewhere = await holdOpenElsewhere(root);
+
+    const purged = await callWorker("deleteDB", []);
+    expect((purged as { errorCode?: string }).errorCode).toBe("storage-failed");
+    // The database is gone, the open file is not.
+    expect(await messageRow(root)).toBeUndefined();
+    expect(opfs.list()).toEqual([root]);
+    elsewhere.close();
+  });
+
+  // A sent copy being assembled into OPFS holds its own sync access handle
+  // while it streams; a delete or purge started during its first write waits
+  // for it, then removes the file.
+  const deleteDuringAssembly = async (
+    root: string,
+    during: () => Promise<WorkerResponse>,
+  ) => {
+    const files = new Map<string, Uint8Array>();
+    let deleting: Promise<WorkerResponse> | undefined;
+    const opfs = installOpfs(
+      files,
+      {},
+      {
+        onWrite: () => {
+          deleting ??= during();
+        },
+      },
+    );
+    const chunks = 200;
+    for (let index = 0; index < chunks; index++)
+      await workerResult("setDBChunk", [
+        {
+          merkleRoot: root,
+          hash: "b8".repeat(64),
+          chunkIndex: index,
+          mimeType: "application/octet-stream",
+          realLen: 5,
+          data: new Uint8Array(5).fill(index & 0xff).buffer,
+        },
+      ]);
+    await callWorker("assembleToOPFS", [
+      root,
+      chunks * 5,
+      "sent.bin",
+      "application/octet-stream",
+    ]);
+    const reply = await deleting!;
+    expect(reply.error).toBeUndefined();
+    expect(opfs.list()).toEqual([]);
+    expect(opfs.openHandles()).toBe(0);
+  };
+
+  test("a message delete during an assembly removes the file", async () => {
+    const root = "b6".repeat(64);
+    await deleteDuringAssembly(root, () =>
+      callWorker("deleteReceiveTransfer", [root]),
+    );
+  });
+
+  test("a purge during an assembly removes the file", async () => {
+    await deleteDuringAssembly("b7".repeat(64), () =>
+      callWorker("deleteDB", []),
+    );
   });
 
   test("deleting a room starts no verification", async () => {
@@ -1384,7 +1506,7 @@ describe("held files are verified at the next start", () => {
     const files = new Map<string, Uint8Array>();
     const order: string[] = [];
     installOpfs(files, {}, { onRead: (name) => order.push(name) });
-    const first = "5d".repeat(64);
+    const first = "b2".repeat(64);
     const second = "5e".repeat(64);
     const otherRoom = "00000000-0000-4000-8000-000000000a06";
     await holdLargeFile(first, ROOM);
@@ -1440,7 +1562,7 @@ describe("held files are verified at the next start", () => {
     restores.push(() => clock.mockRestore());
     const files = new Map<string, Uint8Array>();
     installOpfs(files);
-    const root = "5c".repeat(64);
+    const root = "b1".repeat(64);
     await holdFile(root);
     await leaseTo(root, "another-tab", Date.now() + 40);
 

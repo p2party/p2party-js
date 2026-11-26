@@ -1,0 +1,74 @@
+{
+  "measuredAt": "2026-11-26T19:56:34.334Z",
+  "browser": "HeadlessChrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/159.0.8154.6 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "serve": "cdp",
+  "chromeArgs": [
+    "--headless=new",
+    "--remote-debugging-port=5930",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "about:blank"
+  ],
+  "cases": [
+    {
+      "case": "removeEntry(file) while its sync access handle is open",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'removeEntry' on 'FileSystemDirectoryHandle': An attempt was made to modify an object where modifications are not allowed.",
+      "listedAfter": ["held"],
+      "handleAfter": {
+        "read": 3,
+        "bytes": [1, 2, 3]
+      }
+    },
+    {
+      "case": "removeEntry(file) after its sync access handle is closed",
+      "outcome": "resolved",
+      "listedAfter": []
+    },
+    {
+      "case": "removeEntry(directory, { recursive: true }) while a sync access handle inside is open",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'removeEntry' on 'FileSystemDirectoryHandle': An attempt was made to modify an object where modifications are not allowed.",
+      "rootListedAfter": ["p2party-reassembled", "probe-file"],
+      "directoryListedAfter": ["held"],
+      "handleAfter": {
+        "read": 3,
+        "bytes": [4, 5, 6]
+      }
+    },
+    {
+      "case": "removeEntry(directory, { recursive: true }) after the handle inside is closed",
+      "outcome": "resolved",
+      "rootListedAfter": ["probe-file"]
+    },
+    {
+      "case": "removeEntry(file) while a writable stream on it is open",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'removeEntry' on 'FileSystemDirectoryHandle': An attempt was made to modify an object where modifications are not allowed.",
+      "listedAfter": ["held", "held.crswap"],
+      "writableCloseAfter": {
+        "outcome": "resolved"
+      }
+    },
+    {
+      "case": "removeEntry(file) after its writable stream is closed",
+      "outcome": "resolved",
+      "listedAfter": []
+    },
+    {
+      "case": "createSyncAccessHandle while another sync access handle on the file is open",
+      "outcome": "rejected",
+      "error": "NoModificationAllowedError",
+      "message": "Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be created if there is another open Access Handle or Writable stream associated with the same file."
+    }
+  ]
+}

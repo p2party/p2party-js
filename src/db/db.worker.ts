@@ -827,6 +827,18 @@ const opfsStorage = ():
 // At most one assemble per merkleRoot is ever in flight; the rest share it.
 const opfsAssembling = new Map<string, Promise<File | null>>();
 
+// Wait for an assembly of this file (or of every file) to finish: it holds a
+// sync access handle the receive-handle cache does not know, and the browser
+// refuses to remove a file, or a directory holding one, while that is open
+// (NoModificationAllowedError, measured: docs/e2e/opfs-remove/).
+const settleAssemblies = async (merkleRootHex?: string): Promise<void> => {
+  const runs =
+    merkleRootHex === undefined
+      ? [...opfsAssembling.values()]
+      : [opfsAssembling.get(merkleRootHex)];
+  for (const run of runs) await run?.catch(() => null);
+};
+
 // The worker-only synchronous OPFS file access handle (Safari-safe). getSize is
 // used by the receive path to detect whether the file is already pre-sized.
 type OPFSSyncAccessHandle = {
@@ -3693,8 +3705,11 @@ async function fnDeleteReceiveTransferLocked(
     throw new Error("invalid receive transfer Merkle root");
 
   // A verification of this file stops and releases its handle first; deleting
-  // the row below keeps its verdict from ever being committed.
+  // the row below keeps its verdict from ever being committed. An assembly of
+  // it finishes and closes its own handle; then the receive handle is closed.
+  // The browser refuses to remove a file while any handle on it is open.
   await stopVerification(merkleRootHex);
+  await settleAssemblies(merkleRootHex);
 
   await fnCloseReceiveFile(merkleRootHex);
 
@@ -3805,13 +3820,15 @@ async function fnDeleteReceiveTransferLocked(
 async function fnDeleteDB(): Promise<void> {
   let leftBehind: unknown;
   try {
-    // Stop every verification and close every receive handle first, so no
-    // reader or writer keeps using a file while it is removed. (The File
-    // System Standard's removeEntry neither waits for nor checks open sync
-    // access handles.)
+    // Stop every verification, let every assembly finish, and close every
+    // receive handle first: the browser refuses to remove the directory while
+    // a handle on a file inside it is open (NoModificationAllowedError, as
+    // measured by docs/e2e/opfs-remove/), though the File System Standard's
+    // removeEntry steps name no lock.
     forgetStartupRetries();
     for (const merkleRoot of [...liveVerifications.keys()])
       await stopVerification(merkleRoot);
+    await settleAssemblies();
     await closeAllReceiveFiles();
     // Also remove the whole OPFS reassembly subtree (a separate storage system
     // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.

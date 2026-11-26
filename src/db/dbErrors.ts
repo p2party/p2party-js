@@ -66,16 +66,23 @@ const holdsStorageFailure = (error: unknown, depth = 0): boolean => {
   return holdsStorageFailure((error as { cause?: unknown }).cause, depth + 1);
 };
 
+// Every leaf of nested AggregateErrors, in order.
+const leaves = (error: unknown, depth = 0): unknown[] =>
+  error instanceof AggregateError && depth <= 4
+    ? error.errors.flatMap((inner) => leaves(inner, depth + 1))
+    : [error];
+
 /**
  * One typed error for a call whose work included removing received files: a
  * StorageFailedError when any part of `error` is a storage failure (the
- * original as `cause`, each item's failure in `failures`), else `error`.
+ * original as `cause`; in `failures`, each item's error, nested
+ * AggregateErrors flattened), else `error`.
  */
 export const asStorageFailure = (error: unknown, message: string): unknown => {
   if (error instanceof StorageFailedError) return error;
   if (!holdsStorageFailure(error)) return error;
   return new StorageFailedError(message, {
     cause: error,
-    failures: error instanceof AggregateError ? [...error.errors] : [error],
+    failures: leaves(error),
   });
 };

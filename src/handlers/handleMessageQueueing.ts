@@ -478,11 +478,14 @@ const finishHeldFile = async (
     signal?.removeEventListener("abort", stopReporting);
   };
   signal?.addEventListener("abort", stopReporting, { once: true });
+  // This edge's name on the attempt: a reconnect's edge holds it under its own.
+  const holder = crypto.randomUUID();
   let verdict: Awaited<ReturnType<typeof verifyHeldFile>>;
   try {
     verdict = await verifyHeldFile(
       merkleRootHex,
       held.token,
+      holder,
       signal,
       edgeIsCurrent,
       dependencies,
@@ -501,6 +504,7 @@ const finishHeldFile = async (
         chunkIndex: held.chunkIndex,
       },
       held.token,
+      holder,
       verdict,
       edgeIsCurrent(),
       dependencies,

@@ -173,6 +173,16 @@ export interface ReceiveVerificationMarker {
   data?: ArrayBuffer;
 }
 
+/**
+ * How a room's messages are loaded (getDBRoomMessageData). `verifyHeld` is set
+ * only when the SDK loads a room to show it: that room's held files are then
+ * queued for verification without their sender. A room delete reads the same
+ * rows without it, so it starts no verification.
+ */
+export interface RoomMessageLoadOptions {
+  verifyHeld?: boolean;
+}
+
 /** What hashing the stored file found (verifyReceivedFile). */
 export type ReceiveVerificationVerdict =
   "match" | "mismatch" | "aborted" | "storage-failed";
@@ -221,7 +231,11 @@ export interface HeldFileSettledNotice {
  *   not hash to the message's whole-file hash; the file's chunks were dropped.
  */
 export type ReceiveStorageFailure =
-  "insufficient-quota" | "quota-exceeded" | "storage-failed" | "integrity";
+  | "insufficient-quota"
+  | "quota-exceeded"
+  | "storage-failed"
+  | "integrity"
+  | "not-removed";
 
 export interface ReceiveChunkStoreFailure {
   failure: ReceiveStorageFailure;
@@ -447,7 +461,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBRoomMessageData";
-      args: [roomId: string];
+      args: [roomId: string, options?: RoomMessageLoadOptions];
     }
   | {
       id: number;
@@ -535,17 +549,22 @@ export type WorkerMessages =
   | {
       id: number;
       method: "verifyReceivedFile";
-      args: [merkleRootHex: string, token: string];
+      args: [merkleRootHex: string, token: string, holder: string];
     }
   | {
       id: number;
       method: "settleReceivedFileVerification";
-      args: [merkleRootHex: string, token: string, commit: boolean];
+      args: [
+        merkleRootHex: string,
+        token: string,
+        commit: boolean,
+        holder: string,
+      ];
     }
   | {
       id: number;
       method: "abortReceivedFileVerification";
-      args: [merkleRootHex: string, token: string];
+      args: [merkleRootHex: string, token: string, holder: string];
     }
   | {
       id: number;
@@ -593,11 +612,6 @@ export type WorkerMessages =
       id: number;
       method: "deleteDBNewChunk";
       args: [selector: NewChunkSelector];
-    }
-  | {
-      id: number;
-      method: "deleteDBMessageData";
-      args: [merkleRootHex: string];
     }
   | {
       id: number;
@@ -742,7 +756,6 @@ export interface WorkerMethodReturnTypes {
   countDBSendQueue: number;
   deleteDBChunk: undefined;
   deleteDBNewChunk: undefined;
-  deleteDBMessageData: undefined;
   deleteDBSendQueue: undefined;
   deleteDBUniqueRoom: undefined;
   getRatchetSession: RatchetSession | undefined;

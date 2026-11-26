@@ -203,6 +203,7 @@ const finishHeld = async (
   const verdict = await verifyHeldFile(
     merkleRoot,
     token,
+    "edge",
     undefined,
     () => true,
     workerVerification,
@@ -217,6 +218,7 @@ const finishHeld = async (
       chunkIndex: result.chunkIndex,
     },
     token,
+    "edge",
     verdict,
     true,
     workerVerification,
@@ -638,6 +640,7 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
           chunkIndex: 0,
         },
         "token",
+        "edge",
         "mismatch",
         true,
         failing,

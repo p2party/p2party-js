@@ -856,8 +856,13 @@ describe("db.worker atomic receive progress", () => {
       expect(held).toMatchObject({ stored: true, complete: false });
       const root = "77".repeat(64);
       expect(
-        (await callWorker("verifyReceivedFile", [root, held.verification]))
-          .result,
+        (
+          await callWorker("verifyReceivedFile", [
+            root,
+            held.verification,
+            "test-holder",
+          ])
+        ).result,
       ).toBe("match");
       expect(
         (
@@ -865,6 +870,7 @@ describe("db.worker atomic receive progress", () => {
             root,
             held.verification,
             true,
+            "test-holder",
           ])
         ).result,
       ).toBe("complete");

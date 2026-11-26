@@ -28,8 +28,11 @@ import { setDebugLogging } from "./utils/debug";
 import { getCoverTimerSource as readCoverTimerSource } from "./handlers/coverTimerWorker";
 
 import {
+  deleteDB,
   deleteDBAddressBookEntry,
+  deleteDBNewChunk,
   deleteDBPeerFromBlacklist,
+  deleteReceiveTransfer,
   getAllDBAddressBookEntries,
   assembleToOPFS,
   getReceiveFile,
@@ -212,11 +215,13 @@ import {
   ReceiveIntegrityError,
 } from "./handlers/handleReceiveMessage";
 import {
+  asStorageFailure,
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
   DatabaseWorkerError,
   StorageFailedError,
 } from "./db/dbErrors";
+import { deleteRoomDataTerminal } from "./api/webrtc/deleteRoomData";
 import type { ReceiveStorageError } from "./handlers/handleReceiveMessage";
 import {
   cancelRoomRequestLifecycle,
@@ -764,10 +769,28 @@ const disconnectFromPeer = async (peerId: string) => {
   await dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
 };
 
+// With `deleteMessages`, every stored message of the room is removed after
+// the room's connections close. A received file that cannot be removed makes
+// this reject with one StorageFailedError (`failures`: each message's error)
+// once every other message was tried.
 const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
   await dispatch(
-    webrtcApi.endpoints.disconnectFromRoom.initiate({ roomId, deleteMessages }),
+    webrtcApi.endpoints.disconnectFromRoom.initiate({
+      roomId,
+      deleteMessages: false,
+    }),
   );
+  if (!deleteMessages) return;
+  try {
+    await deleteRoomDataTerminal(roomId, (merkleRootHex) => {
+      dispatch(deleteMessageStateOnly({ roomId, merkleRootHex }));
+    });
+  } catch (error) {
+    throw asStorageFailure(
+      error,
+      "p2party: leaving the room left received files on disk",
+    );
+  }
 };
 
 const disconnectFromAllRooms = async (
@@ -1523,12 +1546,14 @@ const deleteMsg = async (
       }),
     );
 
-    store.dispatch(
-      deleteMessage({
-        roomId,
-        merkleRootHex: rooms[roomIndex].messages[messageIndex].merkleRootHex,
-      }),
-    );
+    // Remove what is stored before the message leaves the list. A received
+    // file that cannot be removed rejects this call with StorageFailedError,
+    // and the message stays listed so the delete can be tried again.
+    const stored = rooms[roomIndex].messages[messageIndex].merkleRootHex;
+    await deleteReceiveTransfer(stored);
+    await deleteDBNewChunk({ merkleRootHex: stored });
+
+    store.dispatch(deleteMessage({ roomId, merkleRootHex: stored }));
   }
 };
 
@@ -1827,26 +1852,41 @@ const purgeRoom = async (roomUrl: string): Promise<void> => {
   });
 };
 
+// Every step runs even when an earlier one fails. A received file the wipe
+// could not remove makes this reject with one StorageFailedError (`cause`:
+// what the purge's steps threw) after everything else was done.
 const purge = async () => {
-  await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
-    abortAllTransfers();
-    await stopSignalingAndDeleteIdentity(async () => {
-      await runTerminalSettlement(
-        "Full purge did not fully settle local data",
-        [
-          async () => {
-            await dispatch(
-              webrtcApi.endpoints.disconnect.initiate({ alsoDeleteDB: true }),
-            ).unwrap();
-          },
-          () => {
-            dispatch(purgeAllRooms());
-            dispatch(setCurrentRoomUrl(""));
-          },
-        ],
-      );
+  try {
+    await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+      abortAllTransfers();
+      await stopSignalingAndDeleteIdentity(async () => {
+        await runTerminalSettlement(
+          "Full purge did not fully settle local data",
+          [
+            async () => {
+              await dispatch(
+                webrtcApi.endpoints.disconnect.initiate({
+                  alsoDeleteDB: false,
+                }),
+              ).unwrap();
+            },
+            // Awaited here, not inside the disconnect query, so its typed
+            // error reaches this call.
+            () => deleteDB(),
+            () => {
+              dispatch(purgeAllRooms());
+              dispatch(setCurrentRoomUrl(""));
+            },
+          ],
+        );
+      });
     });
-  });
+  } catch (error) {
+    throw asStorageFailure(
+      error,
+      "p2party: the purge left received files on disk",
+    );
+  }
 };
 
 const newRoomUrl = async () => {

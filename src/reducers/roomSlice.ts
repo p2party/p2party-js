@@ -1207,11 +1207,15 @@ const roomSlice = createSlice({
       action: PayloadAction<ResetMessageReceiveProgressArgs>,
     ) => {
       const { roomId, merkleRootHex } = action.payload;
-      const room = state.find((candidate) => candidate.id === roomId);
-      const message = room?.messages.find(
-        (candidate) => candidate.merkleRootHex === merkleRootHex,
+      const roomIndex = state.findIndex((r) => r.id === roomId);
+      if (roomIndex === -1) return;
+      // The same entry setMessage and setMessageAllChunks update: the last one
+      // for this root.
+      const messageIndex = state[roomIndex].messages.findLastIndex(
+        (m) => m.merkleRootHex === merkleRootHex,
       );
-      if (message) message.savedSize = 0;
+      if (messageIndex > -1)
+        state[roomIndex].messages[messageIndex].savedSize = 0;
     },
 
     deleteMessage: (state, action: PayloadAction<DeleteMessageArgs>) => {

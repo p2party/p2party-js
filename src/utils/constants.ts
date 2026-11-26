@@ -285,6 +285,15 @@ export const REPORTED_COMPLETION_CHECK_MS = 5_000;
 // third of that bound leaves room for one late report. The worker reports at
 // least this often while its reads finish.
 export const RECEIVE_VERIFY_RECEIPT_INTERVAL_MS = RECEIVER_SILENCE_LIMIT_MS / 3;
+// A held file that another context (another tab) is verifying when this
+// worker would verify it at a room load is retried when that context's
+// receive lease ends, and re-armed while the lease keeps being renewed, for at
+// most this long from the first try; after that it is left for the next
+// start. It is the longest a sender waits for a verification at the
+// MAX_MESSAGE_SIZE: about 21.8 min.
+export const RECEIVE_VERIFY_START_RETRY_WINDOW_MS =
+  Math.ceil((MAX_MESSAGE_SIZE / MIN_RECEIVER_VERIFY_BYTES_PER_SECOND) * 1000) +
+  RECEIVER_SILENCE_LIMIT_MS;
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

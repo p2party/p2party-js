@@ -34,12 +34,48 @@ export class DatabaseUpgradeBlockedError extends DatabaseUnavailableError {
 
 export const STORAGE_FAILED = "storage-failed";
 
-/** A storage operation failed and left its work undone (a file not removed). */
+/**
+ * A storage operation failed and left its work undone (a received file not
+ * removed). `cause` is the original error. When one call covered several
+ * items (a room's messages, a purge's steps), `failures` holds each item's
+ * error; otherwise it holds the one error.
+ */
 export class StorageFailedError extends Error {
   readonly code = STORAGE_FAILED;
+  readonly failures: readonly unknown[];
 
-  constructor(message: string) {
-    super(message);
+  constructor(
+    message: string,
+    options: { cause?: unknown; failures?: readonly unknown[] } = {},
+  ) {
+    super(message, "cause" in options ? { cause: options.cause } : undefined);
     this.name = "StorageFailedError";
+    this.failures =
+      options.failures ?? ("cause" in options ? [options.cause] : []);
   }
 }
+
+// Whether an error is, contains (as `errors` of an AggregateError, or as its
+// `cause`) or reports (a serialized error carrying the code) a storage
+// failure.
+const holdsStorageFailure = (error: unknown, depth = 0): boolean => {
+  if (depth > 4 || error === null || typeof error !== "object") return false;
+  if ((error as { code?: unknown }).code === STORAGE_FAILED) return true;
+  if (error instanceof AggregateError)
+    return error.errors.some((inner) => holdsStorageFailure(inner, depth + 1));
+  return holdsStorageFailure((error as { cause?: unknown }).cause, depth + 1);
+};
+
+/**
+ * One typed error for a call whose work included removing received files: a
+ * StorageFailedError when any part of `error` is a storage failure (the
+ * original as `cause`, each item's failure in `failures`), else `error`.
+ */
+export const asStorageFailure = (error: unknown, message: string): unknown => {
+  if (error instanceof StorageFailedError) return error;
+  if (!holdsStorageFailure(error)) return error;
+  return new StorageFailedError(message, {
+    cause: error,
+    failures: error instanceof AggregateError ? [...error.errors] : [error],
+  });
+};

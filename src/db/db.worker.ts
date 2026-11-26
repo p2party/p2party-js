@@ -13,6 +13,7 @@ import {
   RECEIVE_VERIFY_PROGRESS_BYTES,
   RECEIVE_VERIFY_RECEIPT_INTERVAL_MS,
   RECEIVE_VERIFY_SETTLED_MEMORY,
+  RECEIVE_VERIFY_START_RETRY_WINDOW_MS,
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
@@ -52,6 +53,7 @@ import type {
   ReceiveVerificationOutcome,
   ReceiveVerificationVerdict,
   ReceiveDeleteGuard,
+  RoomMessageLoadOptions,
   ExpiredReceiveTransfer,
   SendQueue,
   WorkerMessages,
@@ -492,15 +494,21 @@ async function fnGetDBRoomStats(roomId: string): Promise<RoomStats> {
   };
 }
 
-async function fnGetDBRoomMessageData(roomId: string): Promise<MessageData[]> {
+async function fnGetDBRoomMessageData(
+  roomId: string,
+  options: RoomMessageLoadOptions = {},
+): Promise<MessageData[]> {
   const db = await getDB();
   const messages = await db.getAllFromIndex("messageData", "roomId", roomId);
   db.close();
 
-  // The SDK loads a room's messages here once per room load. Files of this
-  // room left held by an interrupted verification are verified now, after
-  // this reply, so the room's list never waits for a hash.
-  void verifyHeldFilesOfRoom(messages);
+  // A room load (not a delete) queues this room's files left held by an
+  // interrupted verification; they are verified after this reply, so the
+  // room's list never waits for a hash.
+  if (options.verifyHeld === true)
+    for (const message of messages)
+      if (message.receiveVerification && message.transferId === undefined)
+        queueHeldFileAtStart(message.merkleRoot);
 
   const messagesLen = messages.length;
 
@@ -1022,7 +1030,8 @@ async function fnDeleteOPFSFile(merkleRootHex: string): Promise<void> {
       await remove();
     } catch (error) {
       throw new StorageFailedError(
-        `p2party: could not remove a received file: ${String(error)}`,
+        `p2party: could not remove the received file ${merkleRootHex}: ${String(error)}`,
+        { cause: error },
       );
     }
   }
@@ -1262,8 +1271,10 @@ function readReceiveAt(
 interface LiveVerification {
   readonly token: string;
   aborted: boolean;
-  /** Callers that asked to verify this attempt and have not settled it. */
-  holders: number;
+  /** Callers that hold this attempt: asked to verify it, not yet settled or detached. */
+  holders: Set<string>;
+  /** Callers that detached (abort) and have not settled yet. */
+  detached: Set<string>;
   /** Always resolves; a failure is a verdict, never a rejection. */
   verdict: Promise<ReceiveVerificationVerdict>;
   /** While the file is being read: resolves once its handle is released. */
@@ -1550,6 +1561,7 @@ async function runVerification(
 async function fnVerifyReceivedFile(
   merkleRoot: string,
   token: string,
+  holder: string,
 ): Promise<ReceiveVerificationVerdict> {
   const settled = settledVerifications.get(token);
   if (settled) return settled.verdict;
@@ -1557,31 +1569,39 @@ async function fnVerifyReceivedFile(
   if (running) {
     if (running.token !== token) return "aborted";
     // Another caller holds the same attempt: it joins, it never hashes twice.
-    running.holders += 1;
+    running.holders.add(holder);
     return running.verdict;
   }
   const live = {
     token,
     aborted: false,
-    holders: 1,
+    holders: new Set([holder]),
+    detached: new Set<string>(),
   } as LiveVerification;
   liveVerifications.set(merkleRoot, live);
   live.verdict = runVerification(merkleRoot, token, live);
   return live.verdict;
 }
 
+// One holder leaves (its edge went away). The others keep the attempt; the
+// run stops only when no holder is left to commit it. The detached holder
+// still settles, with commit false.
 function fnAbortReceivedFileVerification(
   merkleRoot: string,
   token: string,
+  holder: string,
 ): void {
   const live = liveVerifications.get(merkleRoot);
-  if (live?.token === token) live.aborted = true;
+  if (live?.token !== token || !live.holders.delete(holder)) return;
+  live.detached.add(holder);
+  if (live.holders.size === 0) live.aborted = true;
 }
 
 async function fnSettleReceivedFileVerification(
   merkleRoot: string,
   token: string,
   commit: boolean,
+  holder: string,
 ): Promise<ReceiveVerificationOutcome> {
   const recorded = settledVerifications.get(token);
   if (recorded) return commit ? recorded.outcome : "aborted";
@@ -1593,14 +1613,16 @@ async function fnSettleReceivedFileVerification(
     return await withReceiveLock(merkleRoot, async () => {
       // Another holder may have committed this attempt while we waited.
       const already = settledVerifications.get(token);
-      live.holders -= 1;
+      const held = live.holders.delete(holder);
+      live.detached.delete(holder);
       if (already) return commit ? already.outcome : "aborted";
+      // A detached holder no longer commits anything.
       const decided =
-        commit && (verdict === "match" || verdict === "mismatch")
+        held && commit && (verdict === "match" || verdict === "mismatch")
           ? verdict
           : undefined;
       // Someone else may still commit it: leave the attempt to them.
-      if (!decided && live.holders > 0) return "aborted";
+      if (!decided && live.holders.size > 0) return "aborted";
       retire = true;
       let outcome: ReceiveVerificationOutcome = "aborted";
       const db = await getDB();
@@ -1710,7 +1732,7 @@ async function fnSettleReceivedFileVerification(
     // Retire the attempt once nothing can commit it any more, whatever
     // happened above; a later copy of the held chunk starts a fresh one.
     if (
-      (retire || live.holders <= 0) &&
+      (retire || (live.holders.size === 0 && live.detached.size === 0)) &&
       liveVerifications.get(merkleRoot) === live
     )
       liveVerifications.delete(merkleRoot);
@@ -1722,19 +1744,47 @@ async function fnSettleReceivedFileVerification(
 //
 // A file whose last chunk is held but whose verification no running worker
 // owns (the page reloaded mid-verification, or its edge went away first) holds
-// every byte it needs. It is verified without the sender when the SDK next
-// loads that file's room (getDBRoomMessageData, below), one file at a time,
-// through the same verification as a live one. The outcome is posted to the
-// main thread as a HeldFileSettledNotice. If another context holds the file's
-// receive lease, one timer retries when that lease ends; nothing polls.
+// every byte it needs. It is verified without the sender when the SDK loads
+// that file's room to show it (getDBRoomMessageData with `verifyHeld`; a room
+// delete reads the same rows without it), through the same verification as a
+// live one. Every such file goes through one queue for the whole worker, so
+// these verifications run one at a time whatever rooms are loaded. The
+// outcome is posted to the main thread as a HeldFileSettledNotice.
+//
+// A file whose receive lease another context holds (another tab verifying or
+// writing it) is retried when that lease ends, by one timer per file. If the
+// lease was renewed meanwhile the timer is re-armed to the new end; after
+// RECEIVE_VERIFY_START_RETRY_WINDOW_MS from the first try the file is left
+// for the next start. Nothing polls.
 // ---------------------------------------------------------------------------
 
-const startupRetries = new Map<string, ReturnType<typeof setTimeout>>();
+let startupQueue: Promise<void> = Promise.resolve();
+const startupQueued = new Set<string>();
+const startupRetries = new Map<
+  string,
+  { since: number; timer?: ReturnType<typeof setTimeout> }
+>();
 
-async function verifyHeldFileAtStart(
-  merkleRoot: string,
-  retried = false,
-): Promise<void> {
+const queueHeldFileAtStart = (merkleRoot: string): void => {
+  if (startupQueued.has(merkleRoot)) return;
+  startupQueued.add(merkleRoot);
+  startupQueue = startupQueue.then(async () => {
+    try {
+      await verifyHeldFileAtStart(merkleRoot);
+    } catch (error) {
+      console.error("p2party: could not verify a held file", error);
+    } finally {
+      startupQueued.delete(merkleRoot);
+    }
+  });
+};
+
+const forgetStartupRetries = (): void => {
+  for (const retry of startupRetries.values()) clearTimeout(retry.timer);
+  startupRetries.clear();
+};
+
+async function verifyHeldFileAtStart(merkleRoot: string): Promise<void> {
   if (liveVerifications.has(merkleRoot)) return;
   const db = await getDB();
   let row: MessageData | undefined;
@@ -1751,37 +1801,41 @@ async function verifyHeldFileAtStart(
     db.close();
   }
   const marker = row?.receiveVerification;
-  if (!row || !marker || activity?.deletedAt !== undefined) return;
+  if (!row || !marker || activity?.deletedAt !== undefined) {
+    startupRetries.delete(merkleRoot);
+    return;
+  }
   const leasedUntil =
     activity?.writeToken !== undefined ? (activity.leaseUntil ?? 0) : 0;
   if (leasedUntil > Date.now()) {
-    // Another context is verifying or writing this file: try once more when
-    // its lease ends, and leave it to that context if it is still busy then.
-    if (!retried && !startupRetries.has(merkleRoot))
-      startupRetries.set(
-        merkleRoot,
-        setTimeout(
-          () => {
-            startupRetries.delete(merkleRoot);
-            void verifyHeldFileAtStart(merkleRoot, true).catch(
-              (error: unknown) => {
-                console.error("p2party: could not verify a held file", error);
-              },
-            );
-          },
-          leasedUntil - Date.now() + 50,
-        ),
-      );
+    // Another context holds the file: try again when its lease ends.
+    const retry = startupRetries.get(merkleRoot);
+    const since = retry?.since ?? Date.now();
+    clearTimeout(retry?.timer);
+    if (Date.now() - since >= RECEIVE_VERIFY_START_RETRY_WINDOW_MS) {
+      startupRetries.delete(merkleRoot);
+      return;
+    }
+    startupRetries.set(merkleRoot, {
+      since,
+      timer: setTimeout(
+        () => queueHeldFileAtStart(merkleRoot),
+        leasedUntil - Date.now() + 50,
+      ),
+    });
     return;
   }
-  const verdict = await fnVerifyReceivedFile(merkleRoot, marker.token);
+  startupRetries.delete(merkleRoot);
   // No edge is involved: a device holding every byte commits the verdict.
+  const holder = `start:${crypto.randomUUID()}`;
+  const verdict = await fnVerifyReceivedFile(merkleRoot, marker.token, holder);
   let outcome: ReceiveVerificationOutcome;
   try {
     outcome = await fnSettleReceivedFileVerification(
       merkleRoot,
       marker.token,
       verdict === "match" || verdict === "mismatch",
+      holder,
     );
   } catch (error) {
     console.error("p2party: could not settle a held file", error);
@@ -1805,14 +1859,6 @@ async function verifyHeldFileAtStart(
     outcome,
   };
   postMessage({ notice });
-}
-
-async function verifyHeldFilesOfRoom(rows: MessageData[]): Promise<void> {
-  for (const row of rows)
-    if (row.receiveVerification && row.transferId === undefined)
-      await verifyHeldFileAtStart(row.merkleRoot).catch((error: unknown) => {
-        console.error("p2party: could not verify a held file", error);
-      });
 }
 
 // A store that arrives while this worker verifies the file: every chunk of it
@@ -3625,68 +3671,6 @@ async function fnDeleteDBSendQueue(
   }
 }
 
-async function fnDeleteDBMessageData(merkleRootHex: string): Promise<void> {
-  try {
-    const db = await getDB();
-    const tx = db.transaction(["messageData", "uniqueRoom"], "readwrite");
-    const messageStore = tx.objectStore("messageData");
-    const roomStore = tx.objectStore("uniqueRoom");
-
-    const messageIndex = messageStore.index("merkleRoot");
-    const keys = await messageIndex.getAllKeys(merkleRootHex);
-    const len = keys.length;
-    let roomId = "";
-    for (let i = 0; i < len; i++) {
-      if (i === 0 || roomId.length === 0) {
-        const msg = await messageStore.get(keys[i]);
-        roomId = msg?.roomId ?? "";
-      }
-
-      await messageStore.delete(keys[i]);
-    }
-
-    if (roomId.length > 0) {
-      const roomIndex = roomStore.index("roomId");
-      const room = await roomIndex.get(roomId);
-      if (room) {
-        const messageRoomIndex = messageStore.index("roomId");
-        const messageKeys = await messageRoomIndex.getAllKeys(roomId);
-
-        const messageKeysLen = messageKeys.length;
-        const lastMessage =
-          messageKeysLen > 0
-            ? await messageStore.get(messageKeys[messageKeysLen - 1])
-            : undefined;
-
-        await roomStore.put({
-          ...room,
-          messageCount: room.messageCount > 0 ? room.messageCount - 1 : 0,
-          updatedAt: lastMessage?.timestamp ?? Date.now(),
-          lastMessageMerkleRoot: lastMessage?.merkleRoot ?? "",
-        });
-      }
-    }
-
-    await tx.done;
-    db.close();
-
-    // Drop any open receive write handle FIRST — removeEntry fails while the
-    // exclusive sync-access-handle is held — then reclaim the OPFS file, which
-    // IndexedDB deletion alone would leave as an orphaned full-size copy. Under
-    // the per-merkleRoot lock so a chunk arriving mid-delete can't reopen the
-    // handle between the close and the removeEntry (which would throw + leak).
-    await withReceiveLock(merkleRootHex, async () => {
-      // A verification of this file stops and releases its handle first.
-      await stopVerification(merkleRootHex);
-      await fnCloseReceiveFile(merkleRootHex);
-      await fnDeleteOPFSFile(merkleRootHex);
-    });
-  } catch (error) {
-    // A file left on disk is a failed delete; the caller must hear of it.
-    if (error instanceof StorageFailedError) throw error;
-  }
-}
-
 /**
  * Remove every receiver-owned artifact for one Merkle root.
  *
@@ -3815,33 +3799,40 @@ async function fnDeleteReceiveTransferLocked(
   return true;
 }
 
+// A full wipe. It does everything it can, and then reports a received file it
+// could not remove: a purge never reports done while plaintext it tried to
+// remove is still on disk.
 async function fnDeleteDB(): Promise<void> {
-  // Also remove the whole OPFS reassembly subtree (a separate storage system
-  // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
+  let leftBehind: unknown;
   try {
-    // Stop every verification and close every open receive handle first, or
-    // removeEntry(recursive) trips over the still-held exclusive locks.
+    // Stop every verification and close every receive handle first, so no
+    // reader or writer keeps using a file while it is removed. (The File
+    // System Standard's removeEntry neither waits for nor checks open sync
+    // access handles.)
+    forgetStartupRetries();
     for (const merkleRoot of [...liveVerifications.keys()])
       await stopVerification(merkleRoot);
     await closeAllReceiveFiles();
+    // Also remove the whole OPFS reassembly subtree (a separate storage system
+    // that deleteDatabase cannot touch), so a full wipe reclaims that disk too.
     const storage = opfsStorage();
     if (storage && typeof storage.getDirectory === "function") {
-      const root = await storage.getDirectory();
-      await (
-        root as unknown as {
-          removeEntry: (
-            name: string,
-            opts: { recursive: boolean },
-          ) => Promise<void>;
-        }
-      )
-        .removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true })
-        .catch(() => {
-          /* not present — fine */
-        });
+      const root = (await storage.getDirectory()) as unknown as {
+        removeEntry: (
+          name: string,
+          options: { recursive: boolean },
+        ) => Promise<void>;
+      };
+      try {
+        await root.removeEntry(OPFS_REASSEMBLE_DIR, { recursive: true });
+      } catch (error) {
+        // Not there is fine: nothing was left.
+        if ((error as { name?: string } | null)?.name !== "NotFoundError")
+          leftBehind = error;
+      }
     }
-  } catch {
-    /* ignore */
+  } catch (error) {
+    leftBehind = error;
   }
 
   await deleteDB(dbName, {
@@ -3851,6 +3842,11 @@ async function fnDeleteDB(): Promise<void> {
   });
   ratchetRollbackGuard.clear();
   ratchetLastWrite.clear();
+  if (leftBehind !== undefined)
+    throw new StorageFailedError(
+      `p2party: the purge could not remove received files: ${String(leftBehind)}`,
+      { cause: leftBehind },
+    );
 }
 
 onmessage = async (e: MessageEvent) => {
@@ -4020,10 +4016,6 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteDBNewChunk":
         await fnDeleteDBNewChunk(...message.args);
-        result = undefined;
-        break;
-      case "deleteDBMessageData":
-        await fnDeleteDBMessageData(...message.args);
         result = undefined;
         break;
       case "deleteDBUniqueRoom":

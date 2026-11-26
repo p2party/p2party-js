@@ -105,6 +105,11 @@ export interface ReceiveStorageError {
    * - `integrity`: the file's last chunk arrived, but the stored bytes do not
    *   hash to the whole-file hash its message carries. The file's chunks were
    *   dropped and reading it throws ReceiveIntegrityError.
+   * - `not-removed`: a `deleteMessage` action dispatched to the store removed
+   *   the message from the list, but its received file could not be removed
+   *   from disk and is still there. (`p2party.deleteMessage` rejects with
+   *   StorageFailedError instead.) Reported for every such delete;
+   *   `chunkIndex` is -1.
    */
   readonly code: ReceiveStorageFailure;
   readonly roomId: string;
@@ -156,11 +161,17 @@ export const reportReceiveStorageError = (
   chunk: ReceivedChunkContext,
   failure: ReceiveChunkStoreFailure,
 ): void => {
-  const key = `${chunk.merkleRoot}:${failure.failure}`;
-  if (reportedReceiveStorageErrors.has(key)) return;
-  if (reportedReceiveStorageErrors.size >= MAX_REPORTED_RECEIVE_STORAGE_ERRORS)
-    reportedReceiveStorageErrors.clear();
-  reportedReceiveStorageErrors.add(key);
+  // A refused chunk is retransmitted, so it is reported once; every failed
+  // delete is its own call, so each is reported.
+  if (failure.failure !== "not-removed") {
+    const key = `${chunk.merkleRoot}:${failure.failure}`;
+    if (reportedReceiveStorageErrors.has(key)) return;
+    if (
+      reportedReceiveStorageErrors.size >= MAX_REPORTED_RECEIVE_STORAGE_ERRORS
+    )
+      reportedReceiveStorageErrors.clear();
+    reportedReceiveStorageErrors.add(key);
+  }
   const error: ReceiveStorageError = {
     code: failure.failure,
     roomId: chunk.roomId,
@@ -176,7 +187,12 @@ export const reportReceiveStorageError = (
       ? {}
       : { availableBytes: failure.availableBytes }),
   };
-  console.error("p2party: a received chunk could not be stored", error);
+  console.error(
+    failure.failure === "not-removed"
+      ? "p2party: a received file could not be removed"
+      : "p2party: a received chunk could not be stored",
+    error,
+  );
   for (const listener of receiveStorageErrorListeners) {
     try {
       listener(error);
@@ -536,6 +552,7 @@ export const handleReceiveMessage = async (
 export const verifyHeldFile = async (
   merkleRootHex: string,
   token: string,
+  holder: string,
   signal: AbortSignal | undefined,
   edgeIsCurrent: () => boolean,
   dependencies: ReceiveMessageDependencies = {},
@@ -543,16 +560,18 @@ export const verifyHeldFile = async (
   const verify = dependencies.verifyReceivedFile ?? verifyReceivedFile;
   const abort =
     dependencies.abortReceivedFileVerification ?? abortReceivedFileVerification;
+  // Only this edge leaves the attempt: another edge holding it (a reconnect)
+  // keeps it running.
   const onAbort = (): void => {
     if (edgeIsCurrent()) return;
-    void abort(merkleRootHex, token).catch((error: unknown) => {
+    void abort(merkleRootHex, token, holder).catch((error: unknown) => {
       console.error("p2party: could not stop a file verification", error);
     });
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
   try {
-    return await verify(merkleRootHex, token);
+    return await verify(merkleRootHex, token, holder);
   } catch (error) {
     console.error("p2party: could not verify a received file", error);
     return "storage-failed";
@@ -570,6 +589,7 @@ export const verifyHeldFile = async (
 export const settleHeldFile = async (
   context: ReceivedChunkContext,
   token: string,
+  holder: string,
   verdict: ReceiveVerificationVerdict,
   commit: boolean,
   dependencies: ReceiveMessageDependencies = {},
@@ -579,7 +599,7 @@ export const settleHeldFile = async (
     settleReceivedFileVerification;
   let outcome: ReceiveVerificationOutcome;
   try {
-    outcome = await settle(context.merkleRoot, token, commit);
+    outcome = await settle(context.merkleRoot, token, commit, holder);
   } catch (error) {
     // The commit itself failed (nothing was written): the file stays to be
     // verified again by the next copy of its last chunk.

@@ -28,6 +28,10 @@ import {
 import { ingressWindowStartMs } from "../../../src/blindRendezvous/publicWindow";
 import { copyBlindDefaultPolicy } from "../../../src/blindRendezvous/roomPolicyV4";
 import { CarrierRuntime } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import {
+  BlindRendezvousRun,
+  PrototypeRunTimeoutError,
+} from "../../../src/blindRendezvous/prototype/index";
 import { PairDriver } from "../../../src/blindRendezvous/prototype/pairDriver";
 import {
   PROTOTYPE_DELIVERY_PROFILE_V0,
@@ -62,8 +66,15 @@ import type {
   CarrierEvent,
   CarrierTimers,
 } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import type {
+  RunTransport,
+  SessionTransportProvider,
+} from "../../../src/blindRendezvous/prototype/index";
 import type { DeliveryProfileV1 } from "../../../src/blindRendezvous/prototype/profile";
-import type { TransportCandidateProvider } from "../../../src/blindRendezvous/prototype/pairDriver";
+import type {
+  HandoffFacts,
+  TransportCandidateProvider,
+} from "../../../src/blindRendezvous/prototype/pairDriver";
 import type { StoreWitnessRecordV1 } from "../../../src/blindRendezvous/prototype/storeWire";
 
 const module = await loadTestModule();
@@ -178,6 +189,22 @@ interface PendingTimer {
 }
 
 /**
+ * How late the engine delivers a timer, which is the one thing a page does not
+ * control: a busy main thread adds a constant, a background tab clamps every
+ * timer up to the next whole second, and a single stall delays one callback.
+ */
+interface TimerLateness {
+  /** Added to every timer. */
+  readonly everyMs?: bigint;
+  /** Delivery is rounded up to the next `phaseMs + k * alignMs`. */
+  readonly alignMs?: bigint;
+  readonly phaseMs?: bigint;
+  /** One extra delay for the timer that was due at exactly `onceAtMs`. */
+  readonly onceAtMs?: bigint;
+  readonly onceByMs?: bigint;
+}
+
+/**
  * The whole point of the runtime taking its clock and timers from options: the
  * schedule is driven here, event by event, with no wall clock and no real
  * delay. `advanceTo` fires every timer due at or before the target in
@@ -186,6 +213,8 @@ interface PendingTimer {
  */
 class FakeScheduler {
   nowMs: bigint;
+  /** Applied to every timer armed from now on; `null` delivers on time. */
+  lateness: TimerLateness | null = null;
 
   readonly clock = { nowMs: (): bigint => this.nowMs };
 
@@ -195,7 +224,7 @@ class FakeScheduler {
       const delay = BigInt(Math.max(0, Math.trunc(delayMs)));
       this.#pending.set(id, {
         id,
-        dueMs: this.nowMs + delay,
+        dueMs: this.#deliveredAt(this.nowMs + delay),
         sequence: this.#nextSequence++,
         callback,
       });
@@ -218,6 +247,19 @@ class FakeScheduler {
     return this.#pending.size;
   }
 
+  #deliveredAt(dueMs: bigint): bigint {
+    const lateness = this.lateness;
+    if (lateness === null) return dueMs;
+    let atMs = dueMs + (lateness.everyMs ?? 0n);
+    if (lateness.onceAtMs === dueMs) atMs += lateness.onceByMs ?? 0n;
+    const alignMs = lateness.alignMs ?? 0n;
+    if (alignMs > 0n) {
+      const phaseMs = lateness.phaseMs ?? 0n;
+      atMs = ((atMs - phaseMs + alignMs - 1n) / alignMs) * alignMs + phaseMs;
+    }
+    return atMs;
+  }
+
   async advanceTo(
     targetMs: bigint,
     settle: () => Promise<void>,
@@ -234,13 +276,15 @@ class FakeScheduler {
           due = timer;
       }
       if (due === null) break;
-      this.nowMs = due.dueMs;
+      // Never backwards: work a callback did may have moved the clock past
+      // the next timer, and that timer is then simply delivered late.
+      if (due.dueMs > this.nowMs) this.nowMs = due.dueMs;
       this.#pending.delete(due.id);
       await settle();
       due.callback();
       await settle();
     }
-    this.nowMs = targetMs;
+    if (targetMs > this.nowMs) this.nowMs = targetMs;
     await settle();
   }
 }
@@ -521,11 +565,21 @@ const createWorld = async (
   };
 };
 
-/** Connect one client per named store and start one runtime over them. */
+/**
+ * Connect one client per named store and start one runtime over them.
+ *
+ * `onOperations`, when given, is the application callback; `received` still
+ * records every batch, before the callback sees it.
+ */
 const addCarrier = async (
   world: World,
   room: Room,
   storeIndexes: readonly number[],
+  options: {
+    readonly onOperations?: (
+      fresh: readonly OuterValidatedIdentifiedOperationV1[],
+    ) => void | Promise<void>;
+  } = {},
 ): Promise<Carrier> => {
   const clients: PrototypeStoreClient[] = [];
   for (const index of storeIndexes) {
@@ -547,6 +601,7 @@ const addCarrier = async (
     timers: world.scheduler.timers,
     onOperations: (fresh) => {
       received.push(...fresh);
+      return options.onOperations?.(fresh);
     },
     onEvent: (event) => events.push(event),
   });
@@ -1593,4 +1648,490 @@ describe("prototype carrier runtime", () => {
       world.stop();
     }
   }, 180_000);
+});
+
+/* ------------------------------------------------------------------ *
+ * Late timers, the application callback, and the run around them
+ * ------------------------------------------------------------------ */
+
+/** Every request one transport made in `[fromMs, toMs)`. */
+const requestsIn = (
+  transport: Transport,
+  fromMs: bigint,
+  toMs: bigint,
+): RequestRecord[] =>
+  transport.log.filter(
+    (request) => request.atMs >= fromMs && request.atMs < toMs,
+  );
+
+/** The witness requests one transport made in `window`, as `METHOD @offset`. */
+const witnessGrid = (transport: Transport, window: bigint): string[] =>
+  requestsIn(transport, windowStartMs(window), windowStartMs(window + 1n))
+    .filter(
+      (request) =>
+        request.path === PROTOTYPE_STORE_ROUTES.witness ||
+        request.path.startsWith(`${PROTOTYPE_STORE_ROUTES.witness}/`),
+    )
+    .map(
+      (request) =>
+        `${request.method} @${String(request.atMs - windowStartMs(window))}`,
+    )
+    .sort();
+
+const scanStatuses = (
+  carrier: Carrier,
+  window: bigint,
+  storeIdHex: string,
+): (string | undefined)[] =>
+  carrier.events
+    .filter(
+      (event) =>
+        event.kind === "scan" &&
+        event.window === window &&
+        event.storeIdHex === storeIdHex,
+    )
+    .map((event) => event.detail);
+
+describe("prototype carrier runtime under late timers", () => {
+  test("a read 201 ms late still scans the window", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0xc1);
+      const room = await makeRoom(capability, START_MS);
+      const publisher = await addCarrier(world, room, [0]);
+      const reader = await addCarrier(world, room, [0]);
+      const presence = await presenceFor(capability, world.scheduler);
+      const presenceId = hex(await deriveOperationId(presence));
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      // Only the read of W1 is late, by one millisecond past the skew budget:
+      // the smallest stall the removed overdue guard used to turn into a
+      // window this client never read.
+      world.scheduler.lateness = {
+        onceAtMs: windowStartMs(W2) + profile.publicReadOffsetMs,
+        onceByMs: profile.maxScheduleSkewMs + 1n,
+      };
+      await world.advance(windowStartMs(W3));
+
+      expect(scanStatuses(reader, W1, reader.clients[0].storeIdHex)).toEqual([
+        "finalized",
+      ]);
+      expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+        presenceId,
+      ]);
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test.each([0n, 500n])(
+    "1000 ms timer clamping reads every window (phase %p ms)",
+    async (phaseMs) => {
+      const world = await createWorld();
+      try {
+        const capability = new Uint8Array(32).fill(0xc2);
+        const room = await makeRoom(capability, START_MS);
+        const publisher = await addCarrier(world, room, [0, 1]);
+        const reader = await addCarrier(world, room, [0, 1]);
+        const presence = await presenceFor(capability, world.scheduler);
+        const presenceId = hex(await deriveOperationId(presence));
+
+        await world.advance(windowStartMs(W1));
+        publisher.runtime.publish(presence, "PRESENCE");
+        // The presence is appended on time in W1. From then on every timer
+        // of every page is held to the next whole second, the way a
+        // background tab delivers them.
+        await world.advance(windowStartMs(W1) + LATEST_APPEND_OFFSET_MS + 1n);
+        world.scheduler.lateness = { alignMs: 1_000n, phaseMs };
+
+        const last = W1 + 4n;
+        // The read of `last` is due in the window after it and is at most a
+        // second late.
+        await world.advance(
+          windowStartMs(last + 1n) + profile.publicReadOffsetMs + 1_000n,
+        );
+
+        for (let window = W1; window <= last; window += 1n)
+          for (const client of reader.clients)
+            expect(scanStatuses(reader, window, client.storeIdHex)).toEqual([
+              "finalized",
+            ]);
+        expect(reader.received.map((entry) => hex(entry.operationId))).toEqual([
+          presenceId,
+        ]);
+      } finally {
+        world.stop();
+      }
+    },
+    180_000,
+  );
+
+  test.each([0n, 150n, 1_000n])(
+    "13 requests per window at 0, 150 and 1000 ms lateness (%p ms)",
+    async (lateMs) => {
+      const world = await createWorld();
+      try {
+        const room = await makeRoom(new Uint8Array(32).fill(0xc3), START_MS);
+        // One store, so the conditional witness pair is out of the count and
+        // every request below is part of the fixed schedule.
+        await addCarrier(world, room, [0]);
+        await world.advance(windowStartMs(W2));
+        world.scheduler.lateness = { everyMs: lateMs };
+
+        const first = W2 + 2n;
+        const end = W2 + 6n;
+        await world.advance(windowStartMs(end));
+        const transport = world.transports[0];
+        for (let window = first; window < end; window += 1n) {
+          const fromMs = windowStartMs(window);
+          const toMs = windowStartMs(window + 1n);
+          expect(windowShape(transport, fromMs, toMs)).toEqual(
+            FIXED_WINDOW_SHAPE,
+          );
+          expect(requestsIn(transport, fromMs, toMs)).toHaveLength(13);
+        }
+      } finally {
+        world.stop();
+      }
+    },
+    180_000,
+  );
+});
+
+describe("prototype carrier runtime and its application callback", () => {
+  test("witness timing is identical with and without decryption hits", async () => {
+    const world = await createWorld();
+    try {
+      const capability = new Uint8Array(32).fill(0xc4);
+      const room = await makeRoom(capability, START_MS);
+      const publisher = await addCarrier(world, room, [0, 1]);
+      // A hit costs the reader 300 ms of its clock: the work an application
+      // does with an operation on a real main thread.
+      const reader = await addCarrier(world, room, [0, 1], {
+        onOperations: () => {
+          world.scheduler.nowMs += 300n;
+        },
+      });
+      const presence = await presenceFor(capability, world.scheduler);
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W3 + 1n));
+
+      // W2 reads W1, which carries the presence: a hit. W3 reads W2, which
+      // carries nothing for this room.
+      expect(
+        reader.events
+          .filter((event) => event.kind === "operations")
+          .map((event) => event.window),
+      ).toEqual([W1]);
+      for (const transport of world.transports.slice(2, 4)) {
+        const withHit = witnessGrid(transport, W2);
+        expect(withHit).toHaveLength(2);
+        expect(withHit).toEqual(witnessGrid(transport, W3));
+      }
+    } finally {
+      world.stop();
+    }
+  }, 180_000);
+
+  test("a hanging callback does not delay the witness", async () => {
+    const world = await createWorld();
+    let release = (): void => undefined;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const capability = new Uint8Array(32).fill(0xc5);
+      const room = await makeRoom(capability, START_MS);
+      const publisher = await addCarrier(world, room, [0, 1]);
+      const reader = await addCarrier(world, room, [0, 1], {
+        onOperations: () => hanging,
+      });
+      const presence = await presenceFor(capability, world.scheduler);
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(presence, "PRESENCE");
+      await world.advance(windowStartMs(W3 + 1n));
+
+      expect(reader.received).toHaveLength(1);
+      for (const transport of world.transports.slice(2, 4)) {
+        expect(witnessGrid(transport, W2)).toHaveLength(2);
+        expect(witnessGrid(transport, W2)).toEqual(witnessGrid(transport, W3));
+        expect(
+          windowShape(transport, windowStartMs(W3), windowStartMs(W3 + 1n)),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+      }
+    } finally {
+      release();
+      world.stop();
+    }
+  }, 60_000);
+
+  test("concurrent ingests are serialized", async () => {
+    const world = await createWorld();
+    const gates: (() => void)[] = [];
+    const batches: string[][] = [];
+    let active = 0;
+    let maxActive = 0;
+    let secondEntered = (): void => undefined;
+    const second = new Promise<void>((resolve) => {
+      secondEntered = resolve;
+    });
+    try {
+      const capability = new Uint8Array(32).fill(0xc6);
+      const room = await makeRoom(capability, START_MS);
+      const publisher = await addCarrier(world, room, [0, 1]);
+      // The composition hands `driver.ingest` to the runtime, and an ingest
+      // that waits for ICE gathering outlives a delivery window.
+      const reader = await addCarrier(world, room, [0, 1], {
+        onOperations: async (fresh) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          batches.push(fresh.map((entry) => hex(entry.operationId)));
+          if (batches.length === 2) secondEntered();
+          await new Promise<void>((resolve) => gates.push(resolve));
+          active -= 1;
+        },
+      });
+      const firstPresence = await presenceFor(capability, world.scheduler);
+      const secondPresence = await presenceFor(capability, world.scheduler);
+      const firstId = hex(await deriveOperationId(firstPresence));
+      const secondId = hex(await deriveOperationId(secondPresence));
+
+      await world.advance(windowStartMs(W1));
+      publisher.runtime.publish(firstPresence, "PRESENCE");
+      await world.advance(windowStartMs(W2));
+      publisher.runtime.publish(secondPresence, "PRESENCE");
+      // W2's read delivers the first presence and its callback does not
+      // return; W3's read finds the second while that callback is pending.
+      await world.advance(windowStartMs(W3) + profile.publicReadOffsetMs + 1n);
+
+      expect(
+        reader.events
+          .filter((event) => event.kind === "operations")
+          .map((event) => event.window),
+      ).toEqual([W1, W2]);
+      expect(batches).toEqual([[firstId]]);
+
+      gates.shift()?.();
+      await second;
+      expect(batches).toEqual([[firstId], [secondId]]);
+      expect(maxActive).toBe(1);
+    } finally {
+      for (const gate of gates) gate();
+      world.stop();
+    }
+  }, 60_000);
+});
+
+/* ------------------------------------------------------------------ *
+ * The run composition around the runtime
+ * ------------------------------------------------------------------ */
+
+const runIdentity = await generateSessionIdentity({ wasmBinary });
+const peerIdentity = await generateSessionIdentity({ wasmBinary });
+peerIdentity.x25519SecretKey.fill(0);
+
+/** What a finished pair exchange hands the run: enough for `createSession`. */
+const HANDOFF: HandoffFacts = {
+  rendezvousChannelId: new Uint8Array(32).fill(0x31),
+  localFingerprint: new Uint8Array(32).fill(0x32),
+  remoteFingerprint: new Uint8Array(32).fill(0x33),
+  sessionRole: "initiator",
+  rendezvousRole: "initiator",
+  peerStableEd25519PublicKey: peerIdentity.ed25519PublicKey,
+  stableEdgeId: new Uint8Array(32).fill(0x34),
+};
+
+/** An open data channel whose peer never answers. */
+class SilentChannel extends EventTarget {
+  binaryType = "arraybuffer";
+  readyState: RTCDataChannelState = "open";
+  sent = 0;
+
+  send(): void {
+    this.sent += 1;
+  }
+
+  close(): void {
+    if (this.readyState === "closed") return;
+    this.readyState = "closed";
+    this.dispatchEvent(new Event("close"));
+  }
+}
+
+interface FakeRunTransport {
+  readonly transport: RunTransport;
+  readonly channel: SilentChannel;
+  closed: number;
+}
+
+const fakeRunTransport = (
+  verifyCertificates: SessionTransportProvider["verifyCertificates"],
+): FakeRunTransport => {
+  const channel = new SilentChannel();
+  const provider: SessionTransportProvider = {
+    role: "initiator",
+    peerConnection: {
+      connectionState: "connected",
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as RTCPeerConnection,
+    channel: () => Promise.resolve(channel as unknown as RTCDataChannel),
+    verifyCertificates,
+  };
+  const fake: FakeRunTransport = {
+    channel,
+    closed: 0,
+    transport: {
+      provider,
+      // What `WebRtcCandidateProvider.close()` does to its channel.
+      close: (): void => {
+        fake.closed += 1;
+        channel.close();
+      },
+    },
+  };
+  return fake;
+};
+
+/** Only the two members the run reads; the driver itself is not under test. */
+const stubDriver = (handoff: HandoffFacts | null): PairDriver =>
+  ({ handoff }) as unknown as PairDriver;
+
+interface RunUnderTest {
+  readonly run: BlindRendezvousRun;
+  readonly events: { readonly kind: string; readonly detail?: string }[];
+  readonly reached: (kind: string) => Promise<string | undefined>;
+}
+
+const runOver = (
+  carrier: Carrier,
+  driver: PairDriver,
+  transport: RunTransport,
+  handshakeTimeoutMs: number,
+): RunUnderTest => {
+  const events: { readonly kind: string; readonly detail?: string }[] = [];
+  const waiters: {
+    readonly kind: string;
+    readonly resolve: (detail: string | undefined) => void;
+  }[] = [];
+  const run = new BlindRendezvousRun({
+    driver,
+    runtime: carrier.runtime,
+    transport,
+    identity: runIdentity,
+    pqMode: "hybrid-mlkem768",
+    wasmBinary,
+    handshakeTimeoutMs,
+    emit: (kind, detail) => {
+      events.push({ kind, detail });
+      for (const waiter of waiters.splice(0))
+        if (waiter.kind === kind) waiter.resolve(detail);
+        else waiters.push(waiter);
+    },
+  });
+  return {
+    run,
+    events,
+    reached: (kind) => {
+      const seen = events.find((event) => event.kind === kind);
+      if (seen !== undefined) return Promise.resolve(seen.detail);
+      return new Promise((resolve) => waiters.push({ kind, resolve }));
+    },
+  };
+};
+
+describe("prototype run composition", () => {
+  test.each(["dtls-mismatch", "stalled-handshake"] as const)(
+    "session failure leaves the schedule armed (%s)",
+    async (failure) => {
+      const world = await createWorld();
+      let ended: RunUnderTest | null = null;
+      try {
+        const room = await makeRoom(new Uint8Array(32).fill(0xd7), START_MS);
+        const carrier = await addCarrier(world, room, [0]);
+        await world.advance(windowStartMs(W1));
+
+        const fake = fakeRunTransport(
+          failure === "dtls-mismatch"
+            ? () =>
+                Promise.reject(new Error("DTLS fingerprint mismatch (test)"))
+            : () => Promise.resolve("verified"),
+        );
+        const subject = runOver(
+          carrier,
+          stubDriver(HANDOFF),
+          fake.transport,
+          50,
+        );
+        ended = subject;
+        subject.run.handlePhase("handoff");
+        const detail = await subject.reached("session-failed");
+
+        if (failure === "stalled-handshake") {
+          // The handshake did start: the initiator spoke first, and nobody
+          // answered.
+          expect(fake.channel.sent).toBeGreaterThan(0);
+          expect(detail).toContain("session handshake");
+          await expect(
+            subject.run.sendMessage(new Uint8Array([1]), 1_000),
+          ).rejects.toBeInstanceOf(PrototypeRunTimeoutError);
+        } else {
+          expect(detail).toContain("DTLS fingerprint mismatch");
+          await expect(
+            subject.run.sendMessage(new Uint8Array([1]), 1_000),
+          ).rejects.toThrow("DTLS fingerprint mismatch");
+        }
+        // The session and its peer connection are gone ...
+        expect(fake.closed).toBeGreaterThan(0);
+        expect(fake.channel.readyState).toBe("closed");
+        // ... and nothing else: the run was not stopped, so the schedule
+        // goes on at its fixed shape in the windows after the failure.
+        expect(subject.events.map((event) => event.kind)).not.toContain(
+          "run-stopped",
+        );
+        await world.advance(windowStartMs(W3));
+        expect(
+          windowShape(
+            world.transports[0],
+            windowStartMs(W2),
+            windowStartMs(W3),
+          ),
+        ).toEqual(FIXED_WINDOW_SHAPE);
+      } finally {
+        ended?.run.stop();
+        world.stop();
+      }
+    },
+    60_000,
+  );
+
+  test("sendMessage rejects at its deadline", async () => {
+    const world = await createWorld();
+    let subject: RunUnderTest | null = null;
+    try {
+      const room = await makeRoom(new Uint8Array(32).fill(0xd8), START_MS);
+      const carrier = await addCarrier(world, room, [0]);
+      // No handoff ever comes, so there is no session to send on.
+      subject = runOver(
+        carrier,
+        stubDriver(null),
+        { provider: null, close: () => undefined },
+        50,
+      );
+      await expect(
+        subject.run.sendMessage(new Uint8Array([1, 2, 3]), 20),
+      ).rejects.toBeInstanceOf(PrototypeRunTimeoutError);
+      // A deadline is not a failure of the edge: the run is still live.
+      expect(subject.events.map((event) => event.kind)).not.toContain(
+        "run-stopped",
+      );
+    } finally {
+      subject?.run.stop();
+      world.stop();
+    }
+  }, 30_000);
 });

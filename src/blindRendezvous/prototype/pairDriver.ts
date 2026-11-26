@@ -473,8 +473,10 @@ const validateAuthenticatedHelloPrototype = async (options: {
  * operations a carrier hands back.
  *
  * The driver is asynchronous but not reentrant: `start()` and `ingest()` must
- * be awaited in sequence. Duplicate delivery is free — operations are keyed by
- * `OperationId` and each pair operation is handled at most once.
+ * be awaited in sequence. The composition (`index.ts`) keeps to that by
+ * finishing `start()` before it arms the carrier schedule, whose deliveries
+ * reach `ingest` one call at a time. Duplicate delivery is free — operations
+ * are keyed by `OperationId` and each pair operation is handled at most once.
  */
 export class PairDriver {
   readonly roomPolicy: RoomPolicyV4;

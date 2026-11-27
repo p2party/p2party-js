@@ -720,8 +720,11 @@ try {
       capture: true,
     },
   );
-  const [packResult] = JSON.parse(packJson);
-  if (!packResult || packResult.version !== packageJson.version)
+  const packResult = JSON.parse(packJson)[packageJson.name];
+  if (
+    packResult?.name !== packageJson.name ||
+    packResult.version !== packageJson.version
+  )
     fail("npm pack reported an unexpected package version");
   validatePackList(packResult, declarationResult.retained);
 

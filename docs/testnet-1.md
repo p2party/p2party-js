@@ -20,6 +20,19 @@ curl -fsS -H 'Content-Type: application/json' \
 
 The first reply gives the numeric chain ID. The second gives the full native chain ID and the validator's current height. Compare both IDs with the table before signing. The genesis digest is SHA-256 `38d42d50a5a6d5ceb43fd6f63235e542716b1df5ccff59161c5fd7810aed17c6`. [Public genesis](https://p2party.com/downloads/testnet-1/genesis.json) · [Genesis checksum](https://p2party.com/downloads/testnet-1/genesis.json.sha256)
 
+### Verify the first public transfers
+
+Height 1 granted one existing weight-one unit. At height 2 an ethers client spent it with ML-DSA-65 into a suite-2 commitment. At height 3 a viem client spent the same unit with SLH-DSA-SHA2-192s into a fresh suite-1 commitment. Both clients checked historical balances. Replaying their exact signed bytes returned their existing receipts. The final output retained weight one.
+
+```sh
+curl -fsS -H 'Content-Type: application/json' \
+  --data '[{"jsonrpc":"2.0","id":2,"method":"demos_getTransferByHeight","params":["0x2"]},{"jsonrpc":"2.0","id":3,"method":"demos_getTransferByHeight","params":["0x3"]}]' \
+  https://signaling.p2party.com/rpc |
+  jq 'sort_by(.id) | map(.result | {height, id, inputId, outputId})'
+```
+
+Compare the height-2 `outputId` with the height-3 `inputId`. Query `demos_getUnit` with the height-3 `outputId` to read its suite and `0x1` weight. The by-height queries identify the transfers even after a later spend.
+
 ## Install the wallet client
 
 Use Node 26.13.1 or later in a new local directory. Download the package and checksum, verify the archive, then install that file. The expected wallet SHA-256 is `8f1c5ac9fd9fe2ea4a192c6b541a273d2c168057ad75bafd75f251ac1236700b`. The source archive includes the client implementation, lockfile and tests. [Client source](https://p2party.com/downloads/testnet-1/ledger-client-source.tar.gz) · [Source checksum](https://p2party.com/downloads/testnet-1/ledger-client-source.tar.gz.sha256)

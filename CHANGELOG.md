@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## [Unreleased]
 
-- Published a guide to the separate, valueless P2Party Testnet 1. A fresh wallet client verified the live RPC chain IDs and genesis head. [Public guide](docs/testnet-1.md)
+- Published a guide to the separate, valueless P2Party Testnet 1. One funded unit was spent by ethers with ML-DSA-65 at height 2 and by viem with SLH-DSA-SHA2-192s at height 3. Both clients verified receipts, exact retries and historical balances. [Public guide and receipt query](docs/testnet-1.md#verify-the-first-public-transfers)
 
 ## [0.15.0] — 2026-11-27
 

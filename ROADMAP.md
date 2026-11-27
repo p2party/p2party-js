@@ -24,7 +24,9 @@ file across a sender reload. [Public web client](https://p2party.com) ·
 
 P2Party Testnet 1 is a separate, live server and native-library experiment.
 A fresh wallet installation read the public genesis head at height zero. The
-genesis defines 128 valueless units and one validator orders native transfers. Rooms, peer
+genesis defines 128 valueless units and one validator orders native transfers.
+An ethers client and a viem client moved the same funded unit at heights 2
+and 3 using the two supported post-quantum signature suites. Rooms, peer
 authentication and file transfer use no ledger, staking or payment step.
 Independent validators, proof of stake, EVM execution and mainnet monetary
 rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·

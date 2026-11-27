@@ -5,7 +5,7 @@ Contributions and adversarial review are welcome.
 ## Development setup
 
 Use a fresh recursive clone and the pinned release toolchain: Node 26.13.1, npm
-12.2.3, Bun 1.4.5, and Emscripten 7.0.0. npm and `package-lock.json` are the
+12.2.3, Bun 1.4.5, and Emscripten 7.0.1. npm and `package-lock.json` are the
 dependency authority. Bun runs the tests. Type checking uses the native
 TypeScript 7 compiler. Rollup and ESLint use the TypeScript 6 JavaScript API.
 
@@ -55,7 +55,7 @@ than emit an artifact it cannot attest, so the toolchain is exact:
 | ----------- | ------------------------------------------------------------ |
 | Node        | 26.x (exact major)                                           |
 | npm         | 12.2.3                                                       |
-| Emscripten  | 7.0.0, with `emsdk` on `PATH`                                |
+| Emscripten  | 7.0.1, with `emsdk` on `PATH`                                |
 | Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
 
 ```sh

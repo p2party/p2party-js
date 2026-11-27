@@ -29,7 +29,7 @@
     }
   },
   "toolchain": {
-    "emscripten": "7.0.0"
+    "emscripten": "7.0.1"
   },
   "build": {
     "mode": "production",

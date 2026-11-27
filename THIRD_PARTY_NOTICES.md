@@ -68,7 +68,7 @@ SOFTWARE.
 
 ## Emscripten-generated runtime
 
-The WebAssembly and JavaScript glue are built with Emscripten 7.0.0.
+The WebAssembly and JavaScript glue are built with Emscripten 7.0.1.
 
 Verbatim upstream license:
 

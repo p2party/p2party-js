@@ -11,7 +11,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.15.1` includes durable sender recovery, selective scheduled receipts,
+The SDK `0.15.2` includes durable sender recovery, selective scheduled receipts,
 sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
 Signaling protocol 5 provides authenticated room membership snapshots and targeted
 mesh repair. On November 27 the public browser app used the tagged SDK archive

@@ -12,7 +12,7 @@ room mesh.
 Apache-2.0 · [License](LICENSE.md) · [Getting started](docs/getting-started.md) ·
 [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)
 
-This release pairs **SDK 0.15.1** with signaling protocol **5**. The
+This release pairs **SDK 0.15.2** with signaling protocol **5**. The
 protocol between peers remains **4**. Upgrade a self-hosted signaling server
 to 0.2.0 or later before updating its clients. This SDK opens a keyless
 WebSocket URL, signs a challenge bound to the host, and joins with a hash of the
@@ -25,7 +25,7 @@ action on a message with a proved sender key. A retained, prepared file can
 resume after sender reload. If deletion leaves a file on disk, the SDK reports
 it and can retry cleanup after restart. Protocol-v3 peer sessions and saved v3
 crypto state require a fresh handshake. Independent security review remains
-open. [0.15.1 migration notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
+open. [Release notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
 
 P2Party Testnet 1 is a separate, valueless native-transfer experiment. Its
 first funded unit was spent with ML-DSA-65 by ethers at height 2 and with
@@ -91,35 +91,37 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
-The tagged GitHub release provides the checked 0.15.1 archive.
-[Archive and SHA-256 checksum](https://github.com/p2party/p2party-js/releases/tag/v0.15.1)
+The tagged GitHub release provides the checked 0.15.2 archive.
+[Archive and SHA-256 checksum](https://github.com/p2party/p2party-js/releases/tag/v0.15.2)
 
 ```sh
-npm install https://github.com/p2party/p2party-js/releases/download/v0.15.1/p2party-0.15.1.tgz
+npm install https://github.com/p2party/p2party-js/releases/download/v0.15.2/p2party-0.15.2.tgz
 ```
 
-For the registry copy, check the version before installing. The expected
-integrity is `sha512-7Uhf17GnctiRuuZnNF8gU0oAYfeocGiF5ja6Fjel2kUeWqVj7rl7fzfk3vxKZkKyAOAGXagUP0nLW+YU9qID5Q==`.
+Download the archive and its companion checksum from the GitHub release to
+verify a local copy before installation. These commands run in the download
+directory.
 
 ```sh
-npm view p2party@0.15.1 dist.integrity
-npm install p2party@0.15.1
+shasum -a 256 -c p2party-0.15.2.tgz.sha256
+npm install ./p2party-0.15.2.tgz
 ```
 
-That is the whole setup. The package ships its own WebAssembly cryptography and
-its own database worker; there is no build step, no postinstall, and no native
-dependency to compile.
-
-Releases are published with npm provenance, so you can check that the tarball
-was built by the tagged GitHub Actions run rather than uploaded by hand:
+The archive includes its WebAssembly cryptography and database worker.
+The maintainer publishes to the npm registry separately. When that version
+is available, compare its registry integrity with the SHA-512 digest of the
+verified archive. A matching digest identifies the same bytes.
 
 ```sh
-npm audit signatures
+npm view p2party@0.15.2 dist.integrity
+openssl dgst -sha512 -binary p2party-0.15.2.tgz | openssl base64 -A
 ```
+
+The registry value prefixes the Base64 digest with `sha512-`.
 
 To build the artifact yourself instead, see
 [Building from source](CONTRIBUTING.md#building-from-source). That path needs an
-exact toolchain (Node 26, Emscripten 7.0.0, pinned submodules), because the
+exact toolchain (Node 26, Emscripten 7.0.1, pinned submodules), because the
 release build reproduces the pinned WASM and refuses to emit an artifact it
 cannot attest.
 
@@ -848,8 +850,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.15.1/p2party.min.js"
-  integrity="sha384-0R1rSTGF+C6fd8VR8rs5aqWwruIJNTV8aq6JML/iqbqj46QcHbuTGlnXeeorw/R1"
+  src="https://cdn.p2party.com/@0.15.2/p2party.min.js"
+  integrity="sha384-Y5BNUVMRBF86TdjjsmrzNO93Pytfhv3k/d6bbM6XcFWTNB8oRgM7OWKq051fQAG1"
   crossorigin="anonymous"
 ></script>
 
@@ -1002,7 +1004,7 @@ release rather than surfacing later as a broken offline install.
 ## Development
 
 The reproducible release toolchain is Node 26.13.1, npm 12.2.3, Bun 1.4.5,
-Emscripten 7.0.0, and the repository's pinned libsodium source object. npm and
+Emscripten 7.0.1, and the repository's pinned libsodium source object. npm and
 `package-lock.json` are the dependency authority; Bun is the test runner.
 
 ```sh

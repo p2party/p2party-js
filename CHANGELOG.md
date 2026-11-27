@@ -4,6 +4,12 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.2] — 2026-11-27
+
+- Build the cryptography Wasm and browser glue with Emscripten 7.0.1.
+- Update the release bundler to Rollup 4.68.9 and ESLint to 10.16.0. The SDK typechecks with TypeScript 7.0.2 and uses the TypeScript 6.0.3 compiler API for emitting declarations.
+- Protocol v4 rooms use the existing signaling v5 service. The new SDK version has its own integrity-pinned CDN assets.
+
 ## [0.15.1] — 2026-11-27
 
 - Browser peer ratchets now live only in memory. IndexedDB version 24 removes the obsolete ratchet store and preserves identity keys, room policy and message history. The standalone session API still supports explicit snapshot export and restore.

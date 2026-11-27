@@ -23,7 +23,6 @@
  */
 
 #include "poly_k.h"
-
 #include "debug.h"
 #include "sampling.h"
 #include "symmetric.h"
@@ -39,6 +38,7 @@
   MLK_ADD_PARAM_SET(mlk_polyvec_basemul_acc_montgomery_cached_c)
 /* End of parameter set namespacing */
 
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 /* Reference: `polyvec_compress()` in the reference implementation @[REF]
  *            - In contrast to the reference implementation, we assume
  *              unsigned canonical coefficients here.
@@ -56,7 +56,9 @@ void mlk_polyvec_compress_du(uint8_t r[MLKEM_POLYVECCOMPRESSEDBYTES_DU],
     mlk_poly_compress_du(r + i * MLKEM_POLYCOMPRESSEDBYTES_DU, &a->vec[i]);
   }
 }
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 /* Reference: `polyvec_decompress()` in the reference implementation @[REF]. */
 MLK_INTERNAL_API
 void mlk_polyvec_decompress_du(mlk_polyvec *r,
@@ -70,7 +72,9 @@ void mlk_polyvec_decompress_du(mlk_polyvec *r,
 
   mlk_assert_bound_2d(r->vec, MLKEM_K, MLKEM_N, 0, MLKEM_Q);
 }
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API) || !defined(MLK_CONFIG_NO_ENCAPS_API)
 /* Reference: `polyvec_tobytes()` in the reference implementation @[REF].
  *            - In contrast to the reference implementation, we assume
  *              unsigned canonical coefficients here.
@@ -92,7 +96,9 @@ void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
     mlk_poly_tobytes(&r[i * MLKEM_POLYBYTES], &a->vec[i]);
   }
 }
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API || !MLK_CONFIG_NO_ENCAPS_API */
 
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 /* Reference: `polyvec_frombytes()` in the reference implementation @[REF]. */
 MLK_INTERNAL_API
 void mlk_polyvec_frombytes(mlk_polyvec *r, const uint8_t a[MLKEM_POLYVECBYTES])
@@ -105,6 +111,7 @@ void mlk_polyvec_frombytes(mlk_polyvec *r, const uint8_t a[MLKEM_POLYVECBYTES])
 
   mlk_assert_bound_2d(r->vec, MLKEM_K, MLKEM_N, 0, MLKEM_UINT12_LIMIT);
 }
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
 /* Reference: `polyvec_ntt()` in the reference implementation @[REF]. */
 MLK_INTERNAL_API
@@ -124,6 +131,7 @@ void mlk_polyvec_ntt(mlk_polyvec *r)
  *              while the reference implementation normalizes at
  *              the end. This allows us to drop a call to `poly_reduce()`
  *              from the base multiplication. */
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 MLK_INTERNAL_API
 void mlk_polyvec_invntt_tomont(mlk_polyvec *r)
 {
@@ -135,6 +143,7 @@ void mlk_polyvec_invntt_tomont(mlk_polyvec *r)
 
   mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLK_INVNTT_BOUND);
 }
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
 /* Reference: `polyvec_basemul_acc_montgomery()` in the
  *            reference implementation @[REF].
@@ -279,6 +288,7 @@ void mlk_polyvec_add(mlk_polyvec *r, const mlk_polyvec *b)
   }
 }
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API)
 /* Reference: `polyvec_tomont()` in the reference implementation @[REF]. */
 MLK_INTERNAL_API
 void mlk_polyvec_tomont(mlk_polyvec *r)
@@ -291,6 +301,7 @@ void mlk_polyvec_tomont(mlk_polyvec *r)
 
   mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLKEM_Q);
 }
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API */
 
 
 /**
@@ -325,6 +336,9 @@ __contract__(
 #endif
 }
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API) ||                              \
+    (MLKEM_ETA1 == MLKEM_ETA2 && (!defined(MLK_CONFIG_NO_ENCAPS_API) || \
+                                  !defined(MLK_CONFIG_NO_DECAPS_API)))
 /* Reference: Does not exist in the reference implementation @[REF].
  *            - This implements a x4-batched version of `poly_getnoise_eta1()`
  *              from the reference implementation, to leverage
@@ -346,8 +360,7 @@ void mlk_poly_getnoise_eta1_4x(mlk_poly *r0, mlk_poly *r1, mlk_poly *r2,
   extkey[2][MLKEM_SYMBYTES] = nonce2;
   extkey[3][MLKEM_SYMBYTES] = nonce3;
 
-#if !defined(FIPS202_X4_DEFAULT_IMPLEMENTATION) && \
-    !defined(MLK_CONFIG_SERIAL_FIPS202_ONLY)
+#if !defined(MLK_CONFIG_SERIAL_FIPS202_ONLY)
   mlk_prf_eta1_x4(buf, extkey);
 #else
   mlk_prf_eta1(buf[0], extkey[0]);
@@ -357,8 +370,7 @@ void mlk_poly_getnoise_eta1_4x(mlk_poly *r0, mlk_poly *r1, mlk_poly *r2,
   {
     mlk_prf_eta1(buf[3], extkey[3]);
   }
-#endif /* !(!FIPS202_X4_DEFAULT_IMPLEMENTATION && \
-          !MLK_CONFIG_SERIAL_FIPS202_ONLY) */
+#endif /* MLK_CONFIG_SERIAL_FIPS202_ONLY */
 
   mlk_poly_cbd_eta1(r0, buf[0]);
   mlk_poly_cbd_eta1(r1, buf[1]);
@@ -378,8 +390,11 @@ void mlk_poly_getnoise_eta1_4x(mlk_poly *r0, mlk_poly *r1, mlk_poly *r2,
   mlk_zeroize(buf, sizeof(buf));
   mlk_zeroize(extkey, sizeof(extkey));
 }
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API || (MLKEM_ETA1 == MLKEM_ETA2 && \
+          (!MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API)) */
 
-#if MLKEM_K == 2 || MLKEM_K == 4
+#if (MLKEM_K == 2 || MLKEM_K == 4) && \
+    (!defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API))
 /**
  * Given an array of uniformly random bytes, compute a polynomial with
  * coefficients distributed according to a centered binomial distribution
@@ -431,9 +446,11 @@ void mlk_poly_getnoise_eta2(mlk_poly *r, const uint8_t seed[MLKEM_SYMBYTES],
   mlk_zeroize(buf, sizeof(buf));
   mlk_zeroize(extkey, sizeof(extkey));
 }
-#endif /* MLKEM_K == 2 || MLKEM_K == 4 */
+#endif /* (MLKEM_K == 2 || MLKEM_K == 4) && (!MLK_CONFIG_NO_ENCAPS_API || \
+          !MLK_CONFIG_NO_DECAPS_API) */
 
-#if MLKEM_K == 2
+#if MLKEM_K == 2 && \
+    (!defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API))
 /* Reference: Does not exist in the reference implementation @[REF].
  *            - This implements a x4-batched version of `poly_getnoise_eta1()`
  *              and `poly_getnoise_eta2()` from the reference implementation,
@@ -466,16 +483,14 @@ void mlk_poly_getnoise_eta1122_4x(mlk_poly *r0, mlk_poly *r1, mlk_poly *r2,
   /* On systems with fast batched Keccak, we use 4-fold batched PRF,
    * even though that means generating more random data in buf[2] and buf[3]
    * than necessary. */
-#if !defined(FIPS202_X4_DEFAULT_IMPLEMENTATION) && \
-    !defined(MLK_CONFIG_SERIAL_FIPS202_ONLY)
+#if !defined(MLK_CONFIG_SERIAL_FIPS202_ONLY)
   mlk_prf_eta1_x4(buf, extkey);
 #else
   mlk_prf_eta1(buf[0], extkey[0]);
   mlk_prf_eta1(buf[1], extkey[1]);
   mlk_prf_eta2(buf[2], extkey[2]);
   mlk_prf_eta2(buf[3], extkey[3]);
-#endif /* !(!FIPS202_X4_DEFAULT_IMPLEMENTATION && \
-          !MLK_CONFIG_SERIAL_FIPS202_ONLY) */
+#endif /* MLK_CONFIG_SERIAL_FIPS202_ONLY */
 
   mlk_poly_cbd_eta1(r0, buf[0]);
   mlk_poly_cbd_eta1(r1, buf[1]);
@@ -492,7 +507,8 @@ void mlk_poly_getnoise_eta1122_4x(mlk_poly *r0, mlk_poly *r1, mlk_poly *r2,
   mlk_zeroize(buf, sizeof(buf));
   mlk_zeroize(extkey, sizeof(extkey));
 }
-#endif /* MLKEM_K == 2 */
+#endif /* MLKEM_K == 2 && (!MLK_CONFIG_NO_ENCAPS_API || \
+          !MLK_CONFIG_NO_DECAPS_API) */
 
 /* To facilitate single-compilation-unit (SCU) builds, undefine all macros.
  * Don't modify by hand -- this is auto-generated by scripts/autogen. */

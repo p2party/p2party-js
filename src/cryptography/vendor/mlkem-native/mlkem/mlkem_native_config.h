@@ -100,30 +100,54 @@
 /* #define MLK_CONFIG_EXTERNAL_API_QUALIFIER */
 
 /**
+ * MLK_CONFIG_NO_KEYPAIR_API
+ *
+ * By default, mlkem-native includes support for generating key pairs.
+ * If you don't need this, set MLK_CONFIG_NO_KEYPAIR_API to exclude
+ * keypair and keypair_derand, and all internal
+ * APIs only needed by those functions.
+ */
+/* #define MLK_CONFIG_NO_KEYPAIR_API */
+
+/**
+ * MLK_CONFIG_NO_ENCAPS_API
+ *
+ * By default, mlkem-native includes support for encapsulation. If you
+ * don't need this, set MLK_CONFIG_NO_ENCAPS_API to exclude
+ * enc, enc_derand, check_pk, and
+ * all internal APIs only needed by those functions.
+ *
+ * @note Setting this option is incompatible with MLK_CONFIG_KEYGEN_PCT
+ *       as the current PCT implementation requires enc().
+ */
+/* #define MLK_CONFIG_NO_ENCAPS_API */
+
+/**
+ * MLK_CONFIG_NO_DECAPS_API
+ *
+ * By default, mlkem-native includes support for decapsulation. If you
+ * don't need this, set MLK_CONFIG_NO_DECAPS_API to exclude
+ * dec, check_sk, and all internal APIs only
+ * needed by those functions.
+ *
+ * @note Setting this option is incompatible with MLK_CONFIG_KEYGEN_PCT
+ *       as the current PCT implementation requires dec().
+ */
+/* #define MLK_CONFIG_NO_DECAPS_API */
+
+/**
  * MLK_CONFIG_NO_RANDOMIZED_API
  *
  * If this option is set, mlkem-native will be built without the randomized
- * API functions (crypto_kem_keypair and crypto_kem_enc). This allows users
+ * API functions (keypair and enc). This allows users
  * to build mlkem-native without providing a randombytes() implementation
- * if they only need the deterministic API (crypto_kem_keypair_derand,
- * crypto_kem_enc_derand, crypto_kem_dec).
+ * if they only need the deterministic API (keypair_derand,
+ * enc_derand, dec).
  *
  * @note This option is incompatible with MLK_CONFIG_KEYGEN_PCT as the
- *       current PCT implementation requires crypto_kem_enc().
+ *       current PCT implementation requires enc().
  */
 /* #define MLK_CONFIG_NO_RANDOMIZED_API */
-
-/**
- * MLK_CONFIG_NO_SUPERCOP
- *
- * By default, mlkem_native.h exposes the mlkem-native API in the SUPERCOP
- * naming convention (crypto_kem_xxx). If you don't need this, set
- * MLK_CONFIG_NO_SUPERCOP.
- *
- * @note You must set this for a multi-level build as the SUPERCOP naming
- *       does not disambiguate between the parameter sets.
- */
-/* #define MLK_CONFIG_NO_SUPERCOP */
 
 /**
  * MLK_CONFIG_CONSTANTS_ONLY
@@ -136,16 +160,55 @@
  */
 /* #define MLK_CONFIG_CONSTANTS_ONLY */
 
+/**
+ * MLK_CONFIG_KEYGEN_PCT
+ *
+ * Compliance with @[FIPS140_3_IG, p.87] requires a Pairwise Consistency
+ * Test (PCT) to be carried out on a freshly generated keypair before it
+ * can be exported.
+ *
+ * Set this option if such a check should be implemented. In this case,
+ * keypair_derand and keypair will return
+ * MLK_ERR_PCT_FAIL if the PCT failed.
+ *
+ * @note This feature will drastically lower the performance of key
+ *       generation.
+ */
+/* #define MLK_CONFIG_KEYGEN_PCT */
+
+/**
+ * MLK_CONFIG_CONTEXT_PARAMETER
+ *
+ * Set this to add a context parameter that is provided to public API
+ * functions and is then available in custom callbacks.
+ *
+ * The type of the context parameter is configured via
+ * MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
+ *
+ * The context is passed to MLK_CUSTOM_ALLOC and MLK_CUSTOM_FREE; see
+ * MLK_CONFIG_CUSTOM_ALLOC_FREE.
+ */
+/* #define MLK_CONFIG_CONTEXT_PARAMETER */
+
+/**
+ * MLK_CONFIG_CONTEXT_PARAMETER_TYPE
+ *
+ * Set this to define the type for the context parameter used by
+ * MLK_CONFIG_CONTEXT_PARAMETER.
+ *
+ * This is only relevant if MLK_CONFIG_CONTEXT_PARAMETER is set.
+ */
+/* #define MLK_CONFIG_CONTEXT_PARAMETER_TYPE void* */
+
 /******************************************************************************
  *
  * Build-only configuration options
  *
- * The remaining configurations are build-options only.
- * They do not affect the API described in mlkem_native.h.
+ * The remaining configurations only affect the build, not the API
+ * described in mlkem_native.h.
  *
  *****************************************************************************/
 
-#if defined(MLK_BUILD_INTERNAL)
 /**
  * MLK_CONFIG_MULTILEVEL_WITH_SHARED
  *
@@ -292,7 +355,7 @@
  * implementation, different from the one shipped with mlkem-native.
  *
  * If set, it must be the name of a file serving as the replacement for
- * mlkem/fips202/fips202.h, and exposing the same API (see FIPS202.md).
+ * mlkem/src/fips202/fips202.h, and exposing the same API (see FIPS202.md).
  */
 /* #define MLK_CONFIG_FIPS202_CUSTOM_HEADER "SOME_FILE.h" */
 
@@ -305,7 +368,7 @@
  * implementation, different from the one shipped with mlkem-native.
  *
  * If set, it must be the name of a file serving as the replacement for
- * mlkem/fips202/fips202x4.h, and exposing the same API (see FIPS202.md).
+ * mlkem/src/fips202/fips202x4.h, and exposing the same API (see FIPS202.md).
  */
 /* #define MLK_CONFIG_FIPS202X4_CUSTOM_HEADER "SOME_FILE.h" */
 
@@ -313,25 +376,35 @@
  * MLK_CONFIG_CUSTOM_ZEROIZE
  *
  * In compliance with @[FIPS203, Section 3.3], mlkem-native zeroizes
- * intermediate stack buffers before returning from function calls.
+ * intermediate buffers before returning from function calls. By default,
+ * those buffers are allocated from the stack; if MLK_CONFIG_CUSTOM_ALLOC_FREE
+ * is set, they are (mostly -- few exceptions remain at present) allocated from
+ * the configured custom allocator.
+ *
+ * mlkem-native also zeroizes caller-owned output buffers as needed to uphold
+ * the API convention that outputs be either unmodified or zeroized upon
+ * failure.
  *
  * Set this option and define `mlk_zeroize` if you want to use a custom
- * method to zeroize intermediate stack buffers. The default implementation
- * uses SecureZeroMemory on Windows and a memset + compiler barrier
- * otherwise. If neither of those is available on the target platform,
- * compilation will fail, and you will need to use MLK_CONFIG_CUSTOM_ZEROIZE
- * to provide a custom implementation of `mlk_zeroize()`.
+ * method to zeroize intermediate and output buffers.
  *
- * @warning The explicit stack zeroization conducted by mlkem-native reduces
- *          the likelihood of data leaking on the stack, but does not
- *          eliminate it. The C standard makes no guarantee about where a
- *          compiler allocates structures and whether/where it makes copies
- *          of them. Also, in addition to entire structures, there may also
- *          be potentially exploitable leakage of individual values on the
- *          stack. If you need bullet-proof zeroization of the stack, you
- *          need to consider additional measures instead of what this
- *          feature provides. In this case, you can set mlk_zeroize to a
- *          no-op.
+ * The default implementation uses SecureZeroMemory on Windows and a
+ * memset + compiler barrier otherwise. If neither of those is available on
+ * the target platform, compilation will fail, and you will need to use
+ * MLK_CONFIG_CUSTOM_ZEROIZE to provide a custom implementation of
+ * `mlk_zeroize()`.
+ *
+ * @warning
+ *   The zeroization conducted by mlkem-native reduces the likelihood of data
+ *   leaking on the stack or custom allocators, but it does not eliminate it.
+ *   For example, the C standard makes no guarantee about where a compiler
+ *   allocates local structures and whether/where it makes copies of them.
+ *   Also, in addition to entire structures, there may also be potentially
+ *   exploitable leakage of individual values on the stack. If you need
+ *   bullet-proof zeroization of the stack, you need to consider additional
+ *   measures instead of what this feature provides. In this case, you can
+ *   set mlk_zeroize to a no-op. Note that in this case you are also responsible
+ *   for zeroizing output buffers upon failure.
  */
 /* #define MLK_CONFIG_CUSTOM_ZEROIZE
    #if !defined(__ASSEMBLER__)
@@ -392,6 +465,8 @@
  * must use this option.
  */
 /* #define MLK_CONFIG_CUSTOM_CAPABILITY_FUNC
+   #if !defined(__ASSEMBLER__)
+   #include "src/sys.h"
    static MLK_INLINE int mlk_sys_check_capability(mlk_sys_cap cap)
    __contract__(
      ensures(return_value == 0 || return_value == 1)
@@ -399,10 +474,11 @@
    {
        ... your implementation ...
    }
+   #endif
 */
 
 /**
- * MLK_CONFIG_CUSTOM_ALLOC_FREE [EXPERIMENTAL]
+ * MLK_CONFIG_CUSTOM_ALLOC_FREE
  *
  * Set this option and define `MLK_CUSTOM_ALLOC` and `MLK_CUSTOM_FREE` if
  * you want to use custom allocation for large local structures or buffers.
@@ -420,9 +496,10 @@
  *  - T: Type of structure to be freed.
  *  - N: Number of elements to be freed.
  *
- * @warning This option is experimental. Its scope, configuration and
- *          function/macro signatures may change at any time. We expect a
- *          stable API for v2.
+ * If MLK_CONFIG_CONTEXT_PARAMETER is set, both macros receive the
+ * context as a fourth parameter, e.g. MLK_CUSTOM_ALLOC(v, T, N, context):
+ *  - context: The context passed to the public API function, of type
+ *    MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @note Even if this option is set, some allocations further down the call
  *       stack will still be made from the stack, consuming up to 3KB of
@@ -542,22 +619,6 @@
 /* #define MLK_CONFIG_NO_ASM_VALUE_BARRIER */
 
 /**
- * MLK_CONFIG_KEYGEN_PCT
- *
- * Compliance with @[FIPS140_3_IG, p.87] requires a Pairwise Consistency
- * Test (PCT) to be carried out on a freshly generated keypair before it
- * can be exported.
- *
- * Set this option if such a check should be implemented. In this case,
- * crypto_kem_keypair_derand and crypto_kem_keypair will return a non-zero
- * error code if the PCT failed.
- *
- * @note This feature will drastically lower the performance of key
- *       generation.
- */
-/* #define MLK_CONFIG_KEYGEN_PCT */
-
-/**
  * MLK_CONFIG_KEYGEN_PCT_BREAKAGE_TEST
  *
  * If this option is set, the user must provide a runtime function
@@ -597,30 +658,7 @@
  */
 /* #define MLK_CONFIG_SERIAL_FIPS202_ONLY */
 
-/**
- * MLK_CONFIG_CONTEXT_PARAMETER
- *
- * Set this to add a context parameter that is provided to public API
- * functions and is then available in custom callbacks.
- *
- * The type of the context parameter is configured via
- * MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
- */
-/* #define MLK_CONFIG_CONTEXT_PARAMETER */
-
-/**
- * MLK_CONFIG_CONTEXT_PARAMETER_TYPE
- *
- * Set this to define the type for the context parameter used by
- * MLK_CONFIG_CONTEXT_PARAMETER.
- *
- * This is only relevant if MLK_CONFIG_CONTEXT_PARAMETER is set.
- */
-/* #define MLK_CONFIG_CONTEXT_PARAMETER_TYPE void* */
-
 /*************************  Config internals  ********************************/
-
-#endif /* MLK_BUILD_INTERNAL */
 
 /* Default namespace
  *
@@ -634,7 +672,11 @@
  * e.g., PQCP_MLKEM_NATIVE_MLKEM512_
  */
 
-#if MLK_CONFIG_PARAMETER_SET == 512
+#if defined(MLK_CONFIG_MULTILEVEL_BUILD)
+/* In a multi-level build the parameter set is appended by the namespacing
+ * machinery, so the default prefix must not embed it. */
+#define MLK_DEFAULT_NAMESPACE_PREFIX PQCP_MLKEM_NATIVE_MLKEM
+#elif MLK_CONFIG_PARAMETER_SET == 512
 #define MLK_DEFAULT_NAMESPACE_PREFIX PQCP_MLKEM_NATIVE_MLKEM512
 #elif MLK_CONFIG_PARAMETER_SET == 768
 #define MLK_DEFAULT_NAMESPACE_PREFIX PQCP_MLKEM_NATIVE_MLKEM768

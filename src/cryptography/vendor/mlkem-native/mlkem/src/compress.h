@@ -127,7 +127,7 @@ __contract__(
 static MLK_INLINE int16_t mlk_scalar_decompress_d4(uint8_t u)
 __contract__(
   requires(0 <= u && u < 16)
-  ensures(return_value <= (MLKEM_Q - 1))
+  ensures(0 <= return_value && return_value <= (MLKEM_Q - 1))
 )
 {
   /* The return value is in 0..MLKEM_Q-1, hence not altered by the
@@ -333,6 +333,7 @@ __contract__(
   return (int16_t)((((uint32_t)u * MLKEM_Q) + 1024) >> 11);
 }
 
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 #if defined(MLK_CONFIG_MULTILEVEL_WITH_SHARED) || (MLKEM_K == 2 || MLKEM_K == 3)
 #define mlk_poly_compress_d4 MLK_NAMESPACE(poly_compress_d4)
 /**
@@ -374,6 +375,7 @@ MLK_INTERNAL_API
 void mlk_poly_compress_d10(uint8_t r[MLKEM_POLYCOMPRESSEDBYTES_D10],
                            const mlk_poly *a);
 
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 #define mlk_poly_decompress_d4 MLK_NAMESPACE(poly_decompress_d4)
 /**
  * De-serialization and subsequent decompression (4 bits) of a polynomial;
@@ -419,6 +421,7 @@ void mlk_poly_decompress_d4(mlk_poly *r,
 MLK_INTERNAL_API
 void mlk_poly_decompress_d10(mlk_poly *r,
                              const uint8_t a[MLKEM_POLYCOMPRESSEDBYTES_D10]);
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 #endif /* MLK_CONFIG_MULTILEVEL_WITH_SHARED || MLKEM_K == 2 || MLKEM_K == 3 */
 
 #if defined(MLK_CONFIG_MULTILEVEL_WITH_SHARED) || MLKEM_K == 4
@@ -462,6 +465,7 @@ MLK_INTERNAL_API
 void mlk_poly_compress_d11(uint8_t r[MLKEM_POLYCOMPRESSEDBYTES_D11],
                            const mlk_poly *a);
 
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 #define mlk_poly_decompress_d5 MLK_NAMESPACE(poly_decompress_d5)
 /**
  * De-serialization and subsequent decompression (5 bits) of a polynomial;
@@ -507,12 +511,14 @@ void mlk_poly_decompress_d5(mlk_poly *r,
 MLK_INTERNAL_API
 void mlk_poly_decompress_d11(mlk_poly *r,
                              const uint8_t a[MLKEM_POLYCOMPRESSEDBYTES_D11]);
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 #endif /* MLK_CONFIG_MULTILEVEL_WITH_SHARED || MLKEM_K == 4 */
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API) || !defined(MLK_CONFIG_NO_ENCAPS_API)
 #define mlk_poly_tobytes MLK_NAMESPACE(poly_tobytes)
 /**
- * Serialization of a polynomial. Signed coefficients are converted to
- * unsigned form before serialization.
+ * Serialization of a polynomial.
  *
  * @spec{Implements ByteEncode_12 @[FIPS203, Algorithm 5]. Extended to
  * vectors as per @[FIPS203, 2.4.8 Applying Algorithms to Arrays].}
@@ -529,8 +535,10 @@ __contract__(
   requires(array_bound(a->coeffs, 0, MLKEM_N, 0, MLKEM_Q))
   assigns(memory_slice(r, MLKEM_POLYBYTES))
 );
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API || !MLK_CONFIG_NO_ENCAPS_API */
 
 
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 #define mlk_poly_frombytes MLK_NAMESPACE(poly_frombytes)
 /**
  * De-serialization of a polynomial.
@@ -550,8 +558,10 @@ __contract__(
   assigns(memory_slice(r, sizeof(mlk_poly)))
   ensures(array_bound(r->coeffs, 0, MLKEM_N, 0, MLKEM_UINT12_LIMIT))
 );
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
 
+#if !defined(MLK_CONFIG_NO_ENCAPS_API) || !defined(MLK_CONFIG_NO_DECAPS_API)
 #define mlk_poly_frommsg MLK_NAMESPACE(poly_frommsg)
 /**
  * Convert a 32-byte message to a polynomial.
@@ -559,7 +569,7 @@ __contract__(
  * @spec{Implements `Decompress_1 (ByteDecode_1 (a))`: ByteDecode_d
  * @[FIPS203, Algorithm 6], Decompress_d @[FIPS203, Eq (4.8)], extended to
  * vectors as per @[FIPS203, 2.4.8 Applying Algorithms to Arrays].
- * `Decompress_1 (ByteDecode_1 (w))` appears in @[FIPS203, Algorithm 15
+ * `Decompress_1 (ByteDecode_1 (w))` appears in @[FIPS203, Algorithm 14
  * (K-PKE.Encrypt), L20].}
  *
  * @param[out] r   Output polynomial.
@@ -573,7 +583,9 @@ __contract__(
   assigns(memory_slice(r, sizeof(mlk_poly)))
   ensures(array_bound(r->coeffs, 0, MLKEM_N, 0, MLKEM_Q))
 );
+#endif /* !MLK_CONFIG_NO_ENCAPS_API || !MLK_CONFIG_NO_DECAPS_API */
 
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 #define mlk_poly_tomsg MLK_NAMESPACE(poly_tomsg)
 /**
  * Convert a polynomial to a 32-byte message.
@@ -581,7 +593,7 @@ __contract__(
  * @spec{Implements `ByteEncode_1 (Compress_1 (a))`: ByteEncode_d
  * @[FIPS203, Algorithm 5], Compress_d @[FIPS203, Eq (4.7)], extended to
  * vectors as per @[FIPS203, 2.4.8 Applying Algorithms to Arrays].
- * `ByteEncode_1 (Compress_1 (w))` appears in @[FIPS203, Algorithm 14
+ * `ByteEncode_1 (Compress_1 (w))` appears in @[FIPS203, Algorithm 15
  * (K-PKE.Decrypt), L7].}
  *
  * @param[out] msg Output message.
@@ -595,5 +607,6 @@ __contract__(
   requires(array_bound(r->coeffs, 0, MLKEM_N, 0, MLKEM_Q))
   assigns(memory_slice(msg, MLKEM_INDCPA_MSGBYTES))
 );
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 
 #endif /* !MLK_COMPRESS_H */

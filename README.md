@@ -978,7 +978,7 @@ Emscripten 7.0.0, and the repository's pinned libsodium source object. npm and
 ```sh
 git clone --recurse-submodules https://github.com/p2party/p2party-js.git
 cd p2party-js
-git -C libsodium fetch --depth=1 origin 2ce4d906a68eae82b27b4867f3d4172ec508cb27
+git -C libsodium fetch --depth=1 origin 05de1ce8088d4281a6264800070baf4ddf17b6a4
 npm ci
 npm run predist
 npm run check

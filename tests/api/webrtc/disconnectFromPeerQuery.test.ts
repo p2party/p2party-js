@@ -137,7 +137,6 @@ describe("disconnectFromPeer room isolation", () => {
         pqDestroyed += 1;
       },
     } as unknown as NonNullable<IRTCPeerConnection["pqHealingState"]>;
-    target.value.serializeEdgeCryptoState = () => new Uint8Array(1);
 
     await webrtcDisconnectPeerQuery(
       {
@@ -165,6 +164,5 @@ describe("disconnectFromPeer room isolation", () => {
     expect(target.value.messageKeyByMerkleRoot).toBeUndefined();
     expect(pqDestroyed).toBe(1);
     expect(target.value.pqHealingState).toBeUndefined();
-    expect(target.value.serializeEdgeCryptoState).toBeUndefined();
   });
 });

@@ -17,7 +17,6 @@ import type {
   BlacklistedPeer,
   UniqueRoom,
   NewChunk,
-  RatchetSession,
   StoredIdentityX25519,
   StoredIdentityEd25519,
   StoredIdentityEd25519Revision,
@@ -26,7 +25,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 23;
+export const dbVersion = 24;
 
 export interface RepoSchema extends DBSchema {
   outbox: {
@@ -91,11 +90,6 @@ export interface RepoSchema extends DBSchema {
     value: SendQueue;
     key: [number, string, string];
     indexes: { labelPeer: string };
-  };
-  ratchetSessions: {
-    value: RatchetSession;
-    key: [string, string];
-    indexes: { peerId: string; peerPublicKey: string; roomId: string };
   };
   // Out-of-line store for the single non-extractable AES-GCM wrap CryptoKey
   // (key = "ratchetWrapKey"). Value is a live CryptoKey object (structured-
@@ -337,22 +331,12 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         }
       }
 
-      if (!db.objectStoreNames.contains("ratchetSessions")) {
-        const ratchetSessions = db.createObjectStore("ratchetSessions", {
-          keyPath: ["roomId", "peerPublicKey"],
-        });
-        ratchetSessions.createIndex("peerId", "peerId", { unique: false });
-        ratchetSessions.createIndex("peerPublicKey", "peerPublicKey", {
-          unique: false,
-        });
-        ratchetSessions.createIndex("roomId", "roomId", { unique: false });
-      }
+      // Each new browser connection establishes fresh edge keys. Remove unused
+      // checkpoints in the same upgrade transaction that advances the schema.
+      const rawDatabase = unwrap(db);
+      if (rawDatabase.objectStoreNames.contains("ratchetSessions"))
+        rawDatabase.deleteObjectStore("ratchetSessions");
 
-      // Protocol v4 changes the authenticated wire epoch, handshake domains,
-      // root-suite provenance, and the at-rest edge row by adding one atomic
-      // PQ/outbox checkpoint. A v3 ratchet must never be interpreted as a v4
-      // root. Both stores are cryptographic/transient state, so discard them
-      // while preserving rooms, message history, and received chunks.
       if (oldVersion > 0 && oldVersion < 20) {
         // Old staging had no durable manifest/owner and could never resume after
         // reload. Preserve received history while retiring those orphan bytes.
@@ -377,16 +361,8 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         };
         void seedActivity();
       }
-      if (oldVersion > 0 && oldVersion < 19) {
-        tx.objectStore("ratchetSessions").clear();
-        tx.objectStore("sendQueue").clear();
-      }
-      // v21 wraps ratchet rows in envelope version 3. A row in an older form
-      // is refused before anything is decrypted, but would stay on disk until
-      // its edge persists again, or forever for a peer who never returns.
-      // Clear them at upgrade; each edge re-handshakes once.
-      if (oldVersion > 0 && oldVersion < 21)
-        tx.objectStore("ratchetSessions").clear();
+      if (oldVersion > 0 && oldVersion < 19)
+        void tx.objectStore("sendQueue").clear();
 
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta");

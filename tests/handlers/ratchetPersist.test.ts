@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  claimRatchetPersistence,
-  persistAndActivateClaimedRatchetState,
+  claimRatchetGeneration,
+  assertCurrentRatchetGeneration,
+  releaseRatchetGeneration,
+  withEdgeCryptoMutationLock,
 } from "../../src/handlers/ratchetPersist";
 
 import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
-import type { RatchetState } from "../../src/cryptography/ratchet";
 
 const connection = (
   roomId: string,
@@ -19,101 +20,21 @@ const connection = (
     withPeerPublicKey: peerPublicKey,
   }) as unknown as IRTCPeerConnection;
 
-const state = (): RatchetState => ({
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
-  rootKey: new Uint8Array(32),
-  sendingChainKey: null,
-  receivingChainKey: null,
-  dhSelfPub: new Uint8Array(32),
-  dhSelfSec: new Uint8Array(32),
-  dhRemotePub: null,
-  Ns: 0,
-  Nr: 0,
-  PN: 0,
-  skipped: new Map(),
-});
-
-describe("initial ratchet persistence/activation", () => {
-  test("gate activation failure rolls back the just-written seed", async () => {
-    const epc = connection("room-establish-1", "peer-1", "11".repeat(32));
-    claimRatchetPersistence(epc, epc.roomId);
-    const events: string[] = [];
-
-    await expect(
-      persistAndActivateClaimedRatchetState(
-        epc,
-        state(),
-        epc.roomId,
-        () => {
-          events.push("activate");
-          throw new Error("gate already closed");
-        },
-        async () => {
-          events.push("persist");
-        },
-        async () => {
-          events.push("rollback");
-        },
-      ),
-    ).rejects.toThrow("gate already closed");
-
-    expect(events).toEqual(["persist", "activate", "rollback"]);
-  });
-
-  test("replacement during the write rolls back before the replacement writes", async () => {
-    const roomId = "room-establish-2";
-    const peerPublicKey = "22".repeat(32);
-    const oldEpc = connection(roomId, "old-peer", peerPublicKey);
-    const replacement = connection(roomId, "new-peer", peerPublicKey);
-    claimRatchetPersistence(oldEpc, roomId);
-
-    let releaseWrite!: () => void;
-    const blocked = new Promise<void>((resolve) => {
-      releaseWrite = resolve;
-    });
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const events: string[] = [];
-
-    const oldAttempt = persistAndActivateClaimedRatchetState(
-      oldEpc,
-      state(),
-      roomId,
-      () => events.push("old-activate"),
-      async () => {
-        events.push("old-persist");
-        markStarted();
-        await blocked;
-      },
-      async () => {
-        events.push("old-rollback");
-      },
+describe("browser ratchet generation", () => {
+  test("queued work cannot adopt or expose a key after its generation is replaced", async () => {
+    const room = "room-generation";
+    const identity = "22".repeat(32);
+    const old = connection(room, "old", identity);
+    const fresh = connection(room, "new", identity);
+    claimRatchetGeneration(old, room);
+    const queued = withEdgeCryptoMutationLock(old, async () =>
+      assertCurrentRatchetGeneration(old, room),
     );
-    await started;
-    claimRatchetPersistence(replacement, roomId);
-    releaseWrite();
-    await expect(oldAttempt).rejects.toThrow("stale connection owner");
-
-    await persistAndActivateClaimedRatchetState(
-      replacement,
-      state(),
-      roomId,
-      () => events.push("new-activate"),
-      async () => {
-        events.push("new-persist");
-      },
-      async () => {
-        events.push("new-rollback");
-      },
-    );
-
-    expect(events).toEqual([
-      "old-persist",
-      "old-rollback",
-      "new-persist",
-      "new-activate",
-    ]);
+    claimRatchetGeneration(fresh, room);
+    releaseRatchetGeneration(old, room);
+    await expect(queued).rejects.toThrow("stale connection owner");
+    assertCurrentRatchetGeneration(fresh, room);
+    releaseRatchetGeneration(fresh, room);
+    expect(() => assertCurrentRatchetGeneration(fresh, room)).toThrow();
   });
 });

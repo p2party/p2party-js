@@ -448,7 +448,7 @@ describe("an in-flight scheduled send survives an edge replacement (C8)", () => 
         failEdge: (error) => {
           failures.push(error);
         },
-        persistEdge: async (_epc, _state, _room, serialize) => {
+        beforeCommit: async (_epc, _state, _room, serialize) => {
           serialize().fill(0);
           persisted++;
         },
@@ -1391,7 +1391,7 @@ describe("a resumed send is idempotent at the receiver", () => {
       module,
       undefined,
       {
-        persistRatchetState: async () => undefined,
+        beforeRatchetCommit: async () => undefined,
         storeReceiveChunk: async () => ({
           stored: false,
           savedSize: 8,

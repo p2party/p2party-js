@@ -85,7 +85,6 @@ type HandleConnectToPeer =
   typeof import("../../src/handlers/handleConnectToPeer");
 type RatchetGate = typeof import("../../src/handlers/ratchetGate");
 type Orchestrator = typeof import("../../src/handlers/pqHealingOrchestrator");
-type DbApi = typeof import("../../src/db/api");
 
 let handleConnectToPeer: HandleConnectToPeer["handleConnectToPeer"];
 let resetRatchetGate: RatchetGate["resetRatchetGate"];
@@ -93,11 +92,9 @@ let isRatchetGatePending: RatchetGate["isRatchetGatePending"];
 let installPqHealingOrchestrator: Orchestrator["installPqHealingOrchestrator"];
 let destroyPqHealingOrchestrator: Orchestrator["destroyPqHealingOrchestrator"];
 let roomReducer: (typeof import("../../src/reducers/roomSlice"))["default"];
-let dbApi: DbApi;
 
 beforeAll(async () => {
   await import("../../src/store");
-  dbApi = await import("../../src/db/api");
   ({ default: roomReducer } = await import("../../src/reducers/roomSlice"));
   ({ handleConnectToPeer } =
     await import("../../src/handlers/handleConnectToPeer"));
@@ -121,18 +118,9 @@ describe("a transport whose initialization fails is retired through the edge tea
     const pq = { destroyed: 0 };
     const setIntervalSpy = spyOn(globalThis, "setInterval");
     const clearIntervalSpy = spyOn(globalThis, "clearInterval");
-    // The transport claimed the edge's persisted ratchet row when it was
-    // registered; the database worker is not available under bun test.
-    const deletedRows: string[] = [];
-    const deleteSpy = spyOn(dbApi, "deleteRatchetSession").mockImplementation(
-      async (roomId: string, peerPublicKey: string) => {
-        deletedRows.push(`${roomId}/${peerPublicKey}`);
-      },
-    );
     cleanups.push(() => {
       setIntervalSpy.mockRestore();
       clearIntervalSpy.mockRestore();
-      deleteSpy.mockRestore();
     });
     let attached: IRTCPeerConnection | undefined;
 
@@ -249,9 +237,8 @@ describe("a transport whose initialization fails is retired through the edge tea
     );
     // Nor does the room describe the edge as authenticated.
     expect(state.rooms[0].handshakeStatusByPeer[PEER_ID]).toBeUndefined();
-    // And the edge's persisted ratchet row this transport owned is deleted.
-    for (let turn = 0; turn < 5 && deletedRows.length === 0; turn++)
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(deletedRows).toEqual([`${ROOM_ID}/${LOWER_PUBLIC_KEY}`]);
+    const { assertCurrentRatchetGeneration } =
+      await import("../../src/handlers/ratchetPersist");
+    expect(() => assertCurrentRatchetGeneration(attached!, ROOM_ID)).toThrow();
   }, 20000);
 });

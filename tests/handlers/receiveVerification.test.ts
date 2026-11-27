@@ -320,7 +320,7 @@ const storage = () => {
     aborts: () => aborts,
     dependencies: {
       onVerificationProgress,
-      persistRatchetState: async () => undefined,
+      beforeRatchetCommit: async () => undefined,
       storeReceiveChunk: async (chunk: ReceiveChunk) =>
         (await callWorker("storeReceiveChunk", [
           chunk,

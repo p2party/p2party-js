@@ -295,7 +295,6 @@ export const resetEdgeAuthenticationForNewRemoteTransport = ({
   }
   epc.messageKeyByMerkleRoot?.clear();
   epc.messageKeyByMerkleRoot = undefined;
-  epc.serializeEdgeCryptoState = undefined;
   // Cover lanes are owned by teardownCoverEdge, which closes every one of
   // them; the close listener registerCoverChannelUntilClose installed then
   // unregisters the lane from `epc.coverChannels` AND from the shared array.

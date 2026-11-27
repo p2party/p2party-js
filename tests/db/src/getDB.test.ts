@@ -69,8 +69,8 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
 }
 
 describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
-  test("dbVersion is bumped to exactly 23", () => {
-    expect(dbVersion).toBe(23);
+  test("dbVersion is bumped to exactly 24", () => {
+    expect(dbVersion).toBe(24);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -98,20 +98,8 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
     openDbs.push(db as unknown as IDBDatabase);
 
     // Stores introduced before this migration still exist.
-    expect(db.objectStoreNames.contains("ratchetSessions")).toBe(true);
+    expect(Array.from(db.objectStoreNames)).not.toContain("ratchetSessions");
     expect(db.objectStoreNames.contains("meta")).toBe(true);
-
-    // Assert: ratchetSessions has the documented keyPath + non-unique indexes.
-    const tx = db.transaction("ratchetSessions");
-    const ratchetSessions = tx.objectStore("ratchetSessions");
-    expect(ratchetSessions.keyPath).toEqual(["roomId", "peerPublicKey"]);
-    expect((Array.from(ratchetSessions.indexNames) as string[]).sort()).toEqual(
-      ["peerId", "peerPublicKey", "roomId"].sort(),
-    );
-    expect(ratchetSessions.index("peerId").unique).toBe(false);
-    expect(ratchetSessions.index("peerPublicKey").unique).toBe(false);
-    expect(ratchetSessions.index("roomId").unique).toBe(false);
-    await tx.done;
 
     // Received data survives the migration completely untouched.
     expect(db.objectStoreNames.contains("chunks")).toBe(true);
@@ -152,7 +140,7 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
-    expect(db.objectStoreNames.contains("ratchetSessions")).toBe(true);
+    expect(Array.from(db.objectStoreNames)).not.toContain("ratchetSessions");
     expect(db.objectStoreNames.contains("meta")).toBe(true);
     // All pre-existing stores are still created as before.
     expect(db.objectStoreNames.contains("addressBook")).toBe(true);
@@ -252,13 +240,16 @@ const releaseRatchetRows = (): Record<string, unknown>[] => {
 
 // A database at version 20 (the 0.14.10 schema) holding those rows and one
 // received message, opened without the current upgrade code.
-function openVersion20WithRows(
+function openLegacyWithRatchets(
   ratchetRows: Record<string, unknown>[],
+  version = 20,
+  populate?: (db: IDBDatabase) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(dbName, 20);
+    const req = indexedDB.open(dbName, version);
     req.onupgradeneeded = () => {
       const db = req.result;
+      populate?.(db);
       const ratchets = db.createObjectStore("ratchetSessions", {
         keyPath: ["roomId", "peerPublicKey"],
       });
@@ -291,34 +282,90 @@ function openVersion20WithRows(
   });
 }
 
-describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
+describe("getDB removes legacy browser ratchet checkpoints", () => {
   test("upgrading the database removes ratchet rows in an older envelope form", async () => {
     const rows = releaseRatchetRows();
     expect(rows.length).toBeGreaterThan(0);
     // Envelope version byte of each row's root key: 2, the 0.14.10 form.
     for (const row of rows)
       expect(new Uint8Array(row.rootKey as ArrayBuffer)[4]).toBe(2);
-    await openVersion20WithRows(rows);
+    await openLegacyWithRatchets(rows);
 
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
     expect(db.version).toBe(dbVersion);
-    expect(await db.count("ratchetSessions")).toBe(0);
+    expect(Array.from(db.objectStoreNames)).not.toContain("ratchetSessions");
     // Other stores are untouched; the schema is complete.
     expect(await db.count("messageData")).toBe(1);
     expect(db.objectStoreNames.contains("receiveActivity")).toBe(true);
     expect(db.objectStoreNames.contains("meta")).toBe(true);
   });
 
-  test("a database already on the new version keeps its ratchet rows", async () => {
-    const [row] = releaseRatchetRows();
-    const first = await getDB();
-    await first.put("ratchetSessions", row as never);
-    first.close();
-
+  test("upgrade from the last released schema drops every checkpoint, including dormant peers, and keeps messages", async () => {
+    const savedRoom = {
+      roomId: "room-v20",
+      roomUrl: "ab".repeat(32),
+      roomPolicy: new Uint8Array(32).buffer,
+      signalingServerUrl: "wss://signal.example",
+      membershipPublicKey: "cd".repeat(32),
+      onlyConnectWithKnownPeers: true,
+      messageCount: 1,
+      lastMessageMerkleRoot: "ab".repeat(64),
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const accountSecret = crypto.getRandomValues(new Uint8Array(32));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      accountSecret,
+    );
+    await openLegacyWithRatchets(releaseRatchetRows(), 23, (db) => {
+      db.createObjectStore("uniqueRoom", { keyPath: ["roomId"] }).put(
+        savedRoom,
+      );
+      const meta = db.createObjectStore("meta");
+      meta.put(key, "ratchetWrapKey");
+      meta.put({ version: 1, lastRevision: 7n }, "identityEd25519Revision");
+    });
+    const upgraded = await getDB();
+    expect(Array.from(upgraded.objectStoreNames)).not.toContain(
+      "ratchetSessions",
+    );
+    expect(await upgraded.count("messageData")).toBe(1);
+    upgraded.close();
     const reopened = await getDB();
     openDbs.push(reopened as unknown as IDBDatabase);
-    expect(await reopened.count("ratchetSessions")).toBe(1);
+    expect(Array.from(reopened.objectStoreNames)).not.toContain(
+      "ratchetSessions",
+    );
+    expect(await reopened.count("messageData")).toBe(1);
+    expect(await reopened.get("uniqueRoom", [savedRoom.roomId])).toEqual(
+      savedRoom,
+    );
+    expect(await reopened.get("meta", "identityEd25519Revision")).toEqual({
+      version: 1,
+      lastRevision: 7n,
+    });
+    const retainedKey = (await reopened.get(
+      "meta",
+      "ratchetWrapKey",
+    )) as CryptoKey;
+    expect(
+      new Uint8Array(
+        await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          retainedKey,
+          ciphertext,
+        ),
+      ),
+    ).toEqual(accountSecret);
   });
 });
 

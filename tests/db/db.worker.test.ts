@@ -1,21 +1,3 @@
-// Stage 3 / Task 4 — db.worker.ts wiring for the `ratchetSessions` store:
-// fnGetRatchetSession / fnSetRatchetSession / fnDeleteRatchetSession, plus the
-// onmessage cases that dispatch "getRatchetSession" / "setRatchetSession" /
-// "deleteRatchetSession" to them.
-//
-// db.worker.ts has no exports (it's a worker entry point that wires up a
-// global `onmessage`), so it is exercised here the same way the real caller
-// (src/db/api.ts, via a Worker) exercises it: by importing the module (which
-// installs `onmessage` as a side effect) and dispatching real
-// `{ id, method, args }` messages through that handler, capturing whatever it
-// posts back via `postMessage`. This covers the actual wiring end-to-end
-// (onmessage -> fn* -> getDB / getWrapKey / wrap|unwrapRatchetSession), not a
-// re-implemented test double.
-//
-// The key security assertion: after fnSetRatchetSession, the RAW row read
-// directly from the `ratchetSessions` store (bypassing fnGetRatchetSession's
-// unwrap step) must be ciphertext — the plaintext ratchet secrets must never
-// touch disk.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -27,7 +9,6 @@ import { MAX_MESSAGE_SIZE } from "../../src/utils/constants";
 
 import type {
   MessageData,
-  RatchetSession,
   ReceiveChunk,
   ReceiveChunkStoreResult,
   RoomStats,
@@ -43,25 +24,6 @@ beforeEach(() => {
 const rnd = (n: number) => crypto.getRandomValues(new Uint8Array(n)).buffer;
 const eq = (a: ArrayBuffer, b: ArrayBuffer) =>
   Buffer.from(new Uint8Array(a)).equals(Buffer.from(new Uint8Array(b)));
-
-const sampleSession = (): RatchetSession => ({
-  rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
-  roomId: "room-1",
-  peerPublicKey: "aa".repeat(32),
-  peerId: "peer-abc-123",
-  rootKey: rnd(32),
-  sendingChainKey: rnd(32),
-  receivingChainKey: null,
-  dhSelfPub: rnd(32),
-  dhSelfSec: rnd(32),
-  dhRemotePub: rnd(32),
-  Ns: 3,
-  Nr: 1,
-  PN: 2,
-  skippedMessageKeys: [{ dhPub: rnd(32), n: 0, messageKey: rnd(32) }],
-  edgeCryptoState: rnd(6_144),
-  updatedAt: 111,
-});
 
 interface WorkerResponse {
   id: number;
@@ -166,188 +128,14 @@ async function callWorkersConcurrently(
   });
 }
 
-describe("db.worker ratchetSessions wiring", () => {
-  test("setRatchetSession -> getRatchetSession round-trips the ORIGINAL session (secrets intact)", async () => {
-    const s = sampleSession();
-    const setResp = await callWorker("setRatchetSession", [s]);
-    expect(setResp.error).toBeUndefined();
-
-    const getResp = await callWorker("getRatchetSession", [
-      s.roomId,
-      s.peerPublicKey,
-    ]);
-    expect(getResp.error).toBeUndefined();
-    const got = getResp.result as RatchetSession;
-    expect(got).toBeDefined();
-    expect(eq(got.rootKey, s.rootKey)).toBe(true);
-    expect(eq(got.dhSelfSec, s.dhSelfSec)).toBe(true);
-    expect(
-      got.sendingChainKey != null &&
-        eq(got.sendingChainKey, s.sendingChainKey as ArrayBuffer),
-    ).toBe(true);
-    expect(got.receivingChainKey).toBe(null);
-    expect(
-      eq(
-        got.skippedMessageKeys[0].messageKey,
-        s.skippedMessageKeys[0].messageKey,
-      ),
-    ).toBe(true);
-    expect(
-      eq(got.skippedMessageKeys[0].dhPub, s.skippedMessageKeys[0].dhPub),
-    ).toBe(true);
-    expect(got.Ns).toBe(3);
-    expect(got.Nr).toBe(1);
-    expect(got.PN).toBe(2);
-    expect(
-      got.edgeCryptoState !== null &&
-        s.edgeCryptoState !== null &&
-        eq(got.edgeCryptoState, s.edgeCryptoState),
-    ).toBe(true);
-    expect(got.peerId).toBe("peer-abc-123");
-    expect(got.roomId).toBe("room-1");
-    expect(got.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v4");
-  });
-
-  test("KEY SECURITY ASSERTION: the raw stored row in `ratchetSessions` is ciphertext, not plaintext", async () => {
-    const s = sampleSession();
-    await callWorker("setRatchetSession", [s]);
-
-    // Read the RAW row directly from the store, bypassing fnGetRatchetSession's
-    // unwrap step entirely — this is what would be visible to anything reading
-    // the on-disk IndexedDB directly.
-    const db = await getDB();
-    const raw = (await db.get("ratchetSessions", [
-      s.roomId,
-      s.peerPublicKey,
-    ])) as RatchetSession;
-    db.close();
-
-    expect(raw).toBeDefined();
-    expect(eq(raw.rootKey, s.rootKey)).toBe(false);
-    expect(eq(raw.dhSelfSec, s.dhSelfSec)).toBe(false);
-    expect(
-      raw.sendingChainKey != null &&
-        eq(raw.sendingChainKey, s.sendingChainKey as ArrayBuffer),
-    ).toBe(false);
-    expect(
-      eq(
-        raw.skippedMessageKeys[0].messageKey,
-        s.skippedMessageKeys[0].messageKey,
-      ),
-    ).toBe(false);
-    expect(
-      raw.edgeCryptoState !== null &&
-        s.edgeCryptoState !== null &&
-        eq(raw.edgeCryptoState, s.edgeCryptoState),
-    ).toBe(false);
-    // Public / counter fields pass through unwrapped — stored plaintext.
-    expect(eq(raw.dhSelfPub, s.dhSelfPub)).toBe(true);
-    expect(
-      eq(raw.skippedMessageKeys[0].dhPub, s.skippedMessageKeys[0].dhPub),
-    ).toBe(true);
-    expect(raw.receivingChainKey).toBe(null);
-    expect(raw.Ns).toBe(3);
-    expect(raw.roomId).toBe("room-1");
-    expect(raw.rootSuite).toBe("hybrid-3dh-mlkem768-cpace21-v4");
-    expect(raw.peerPublicKey).toBe("aa".repeat(32));
-  });
-
-  test("deleteRatchetSession removes the row", async () => {
-    const s = sampleSession();
-    await callWorker("setRatchetSession", [s]);
-
-    const before = await callWorker("getRatchetSession", [
-      s.roomId,
-      s.peerPublicKey,
-    ]);
-    expect(before.result).toBeDefined();
-
-    const delResp = await callWorker("deleteRatchetSession", [
-      s.roomId,
-      s.peerPublicKey,
-    ]);
-    expect(delResp.error).toBeUndefined();
-
-    const after = await callWorker("getRatchetSession", [
-      s.roomId,
-      s.peerPublicKey,
-    ]);
-    expect(after.result).toBeUndefined();
-  });
-
-  test("stamps and authenticates a strictly monotonic write version before wrapping", async () => {
-    const first = sampleSession();
-    await callWorker("setRatchetSession", [first]);
-    let db = await getDB();
-    const firstRaw = await db.get("ratchetSessions", [
-      first.roomId,
-      first.peerPublicKey,
-    ]);
-    db.close();
-    expect(firstRaw).toBeDefined();
-
-    const second = { ...sampleSession(), Ns: first.Ns + 1 };
-    await callWorker("setRatchetSession", [second]);
-    db = await getDB();
-    const secondRaw = await db.get("ratchetSessions", [
-      second.roomId,
-      second.peerPublicKey,
-    ]);
-    db.close();
-    expect(secondRaw).toBeDefined();
-    expect(secondRaw!.updatedAt).toBeGreaterThan(firstRaw!.updatedAt);
-
-    // updatedAt and Ns were both present before AES-GCM wrapping, so the row
-    // remains decryptable rather than being mutated after authentication.
-    const restored = await callWorker("getRatchetSession", [
-      second.roomId,
-      second.peerPublicKey,
-    ]);
-    expect(restored.error).toBeUndefined();
-    expect(restored.result).toMatchObject({
-      Ns: second.Ns,
-      updatedAt: secondRaw!.updatedAt,
-    });
-  });
-
-  test("deleting a room purges only that room's persisted ratchets", async () => {
-    const first = sampleSession();
-    const second = {
-      ...sampleSession(),
-      roomId: "room-2",
-      peerPublicKey: "bb".repeat(32),
-    };
-    await callWorker("setRatchetSession", [first]);
-    await callWorker("setRatchetSession", [second]);
-
-    await callWorker("deleteDBUniqueRoom", [first.roomId]);
-
-    expect(
-      (
-        await callWorker("getRatchetSession", [
-          first.roomId,
-          first.peerPublicKey,
-        ])
-      ).result,
-    ).toBeUndefined();
-    expect(
-      (
-        await callWorker("getRatchetSession", [
-          second.roomId,
-          second.peerPublicKey,
-        ])
-      ).result,
-    ).toBeDefined();
-  });
-
-  test("getRatchetSession on a missing row returns undefined (not an error)", async () => {
-    const resp = await callWorker("getRatchetSession", [
-      "no-such-room",
-      "bb".repeat(32),
-    ]);
-    expect(resp.error).toBeUndefined();
-    expect(resp.result).toBeUndefined();
-  });
+test("the worker refuses the obsolete browser ratchet checkpoint API", async () => {
+  for (const method of [
+    "setRatchetSession",
+    "getRatchetSession",
+    "deleteRatchetSession",
+  ]) {
+    expect((await callWorker(method, [])).error).toBe("Method not found");
+  }
 });
 
 describe("db.worker PIN attempt state", () => {
@@ -1072,11 +860,9 @@ describe("db.worker identityX25519 wiring (WebCrypto-wrapped at rest)", () => {
     expect(eq(raw.crossSig, idn.crossSig)).toBe(true);
   });
 
-  test("deleteIdentityX25519 removes the identity and every bound ratchet", async () => {
+  test("deleteIdentityX25519 removes the identity", async () => {
     const idn = sampleIdentity();
     await callWorker("setIdentityX25519", [idn]);
-    const session = sampleSession();
-    await callWorker("setRatchetSession", [session]);
     expect((await callWorker("getIdentityX25519", [])).result).toBeDefined();
 
     const delResp = await callWorker("deleteIdentityX25519", []);
@@ -1084,14 +870,6 @@ describe("db.worker identityX25519 wiring (WebCrypto-wrapped at rest)", () => {
 
     const after = await callWorker("getIdentityX25519", []);
     expect(after.result).toBeUndefined();
-    expect(
-      (
-        await callWorker("getRatchetSession", [
-          session.roomId,
-          session.peerPublicKey,
-        ])
-      ).result,
-    ).toBeUndefined();
   });
 
   test("getIdentityX25519 with no record returns undefined (not an error)", async () => {
@@ -1272,12 +1050,10 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
     expect(eq(restored.pub, second.pub)).toBe(true);
   });
 
-  test("concurrent identity set/delete linearizes revisions and clears ratchets present at delete", async () => {
+  test("concurrent identity set/delete linearizes revisions", async () => {
     const first = sampleIdentity();
     const replacement = sampleIdentity();
-    const session = sampleSession();
     expect((await callWorker("setIdentityEd25519", [first])).result).toBe(1n);
-    await callWorker("setRatchetSession", [session]);
 
     const [set, del] = await callWorkersConcurrently([
       { method: "setIdentityEd25519", args: [replacement] },
@@ -1308,9 +1084,6 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
       version: 1,
       lastRevision: 3n,
     });
-    expect(
-      await db.get("ratchetSessions", [session.roomId, session.peerPublicKey]),
-    ).toBeUndefined();
     db.close();
   });
 
@@ -1353,14 +1126,12 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
     migratedDb.close();
   });
 
-  test("direct legacy delete reserves revision 1, writes tombstone 2, and clears ratchets", async () => {
+  test("direct legacy delete reserves revision 1, writes tombstone 2", async () => {
     const legacyIdentity = sampleIdentity();
     const wrappedSecret = await wrapSecret(
       await getWrapKey(),
       legacyIdentity.secret,
     );
-    const session = sampleSession();
-    await callWorker("setRatchetSession", [session]);
     const db = await getDB();
     await db.put(
       "meta",
@@ -1378,12 +1149,6 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
       version: 1,
       lastRevision: 2n,
     });
-    expect(
-      await after.get("ratchetSessions", [
-        session.roomId,
-        session.peerPublicKey,
-      ]),
-    ).toBeUndefined();
     after.close();
   });
 
@@ -1581,11 +1346,9 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
     afterOverflow.close();
   });
 
-  test("overflowing delete retains both the identity and its ratchet", async () => {
+  test("overflowing delete retains the identity", async () => {
     const identity = sampleIdentity();
     const wrappedSecret = await wrapSecret(await getWrapKey(), identity.secret);
-    const session = sampleSession();
-    await callWorker("setRatchetSession", [session]);
     const db = await getDB();
     const tx = db.transaction("meta", "readwrite");
     await Promise.all([
@@ -1612,32 +1375,16 @@ describe("db.worker identityEd25519 wiring (WebCrypto-wrapped at rest)", () => {
       version: 1,
       lastRevision: uint64Max,
     });
-    expect(
-      await after.get("ratchetSessions", [
-        session.roomId,
-        session.peerPublicKey,
-      ]),
-    ).toBeDefined();
     after.close();
   });
 
-  test("delete clears currently persisted ratchets while retaining the tombstone", async () => {
+  test("delete retains the identity tombstone", async () => {
     const identity = sampleIdentity();
-    const session = sampleSession();
     await callWorker("setIdentityEd25519", [identity]);
-    await callWorker("setRatchetSession", [session]);
 
     const del = await callWorker("deleteIdentityEd25519", []);
     expect(del.error).toBeUndefined();
     expect((await callWorker("getIdentityEd25519", [])).result).toBeUndefined();
-    expect(
-      (
-        await callWorker("getRatchetSession", [
-          session.roomId,
-          session.peerPublicKey,
-        ])
-      ).result,
-    ).toBeUndefined();
 
     const db = await getDB();
     expect(await db.get("meta", revisionMetaId)).toEqual({

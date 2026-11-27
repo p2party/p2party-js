@@ -93,7 +93,7 @@ import {
   scheduledSendProgress,
   waitForScheduledDelivery,
 } from "./coverTransfer";
-import { ratchetEncryptDurably } from "./ratchetPersist";
+import { advanceSendingRatchet } from "./ratchetPersist";
 import {
   claimTransfer,
   throwIfTransferAborted,
@@ -925,7 +925,7 @@ export const waitForTransferConfirmation = async (
 export const sendChunks = async (
   channel: IRTCDataChannel,
   // v4: the sealer holds the combined key derived ONCE for the whole message
-  // from the caller's ratchet step (`ratchetEncryptDurably`). Every chunk of
+  // from the caller's ratchet step (`advanceSendingRatchet`). Every chunk of
   // the message — across the initial pass AND every selective-retransmit
   // round — is sealed under this same key with a FRESH random nonce
   // (streaming-safe; no per-message frame cache needed).
@@ -1132,7 +1132,7 @@ const waitForConnectedEdge = (
  * such a transport is what let the peer's replayed receipts arrive ahead of
  * THIS side's ratchet gate: the identity responder authenticates on SENDING
  * finish and replays immediately, while the initiator authenticates on
- * RECEIVING it, one IndexedDB persist later (C7). Requiring the gate to be
+ * RECEIVING it, after its final confirmation (C7). Requiring the gate to be
  * open, on this connection's own lease, removes that window at its source
  * instead of relying on the receiving guard to park the early frame.
  *
@@ -1338,7 +1338,7 @@ export const bindTransferCipherToConnection = async (
   roomId: string,
   module: LibCrypto,
   waitForGate: WaitForRatchetGate = waitForRatchetGate,
-  ratchetStep: DurableRatchetStep = ratchetEncryptDurably,
+  ratchetStep: DurableRatchetStep = advanceSendingRatchet,
   signal?: AbortSignal,
 ): Promise<TransferCipher> => {
   throwIfTransferAborted(signal);
@@ -1669,7 +1669,7 @@ export const sendWithReconcile = async (
   outboxLease?: OutboxLease,
   dependencies: ImmediateSendDependencies = {},
 ): Promise<void> => {
-  const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
+  const ratchetStep = dependencies.ratchetStep ?? advanceSendingRatchet;
   const deleteSendQueue =
     dependencies.deleteSendQueue ??
     ((label: string, toPeerId: string) => deleteDBSendQueue(label, toPeerId));
@@ -1710,11 +1710,7 @@ export const sendWithReconcile = async (
   // traffic gate before deriving the message key/context.
   await waitForPqTrafficAdmission(epc, signal);
 
-  // Stage one ratchet step for the whole message, persist its successor, then
-  // adopt it in memory. No frame is built or sent until durability succeeds.
-  // The per-edge transaction lock also prevents concurrent sends from deriving
-  // the same message key or persisting snapshots out of order, and captures
-  // the PQ message context atomically with the step.
+  // The per-edge lock reserves one message key and its matching PQ context.
   let messageKey: Uint8Array;
   let header: RatchetHeader;
   let pqContext: PqMessageKeyContext | null;
@@ -1729,7 +1725,7 @@ export const sendWithReconcile = async (
     header = stepped.header;
     pqContext = stepped.pqContext;
   } catch (error) {
-    throw new Error("v3 send: durable ratchet advance failed", {
+    throw new Error("v3 send: ratchet advance failed", {
       cause: error,
     });
   }
@@ -2090,7 +2086,7 @@ export const sendScheduled = async (
 ): Promise<PeerSendFanoutResult> => {
   const { totalChunks, merkleRoot, merkleRootHex, transferId } = message;
   const waitForGate = dependencies.waitForGate ?? waitForRatchetGate;
-  const ratchetStep = dependencies.ratchetStep ?? ratchetEncryptDurably;
+  const ratchetStep = dependencies.ratchetStep ?? advanceSendingRatchet;
   const waitForDelivery =
     dependencies.waitForDelivery ?? waitForScheduledDelivery;
   const resumeWaitMs = dependencies.resumeWaitMs ?? RECONNECT_RESUME_TIMEOUT_MS;
@@ -2171,7 +2167,7 @@ export const sendScheduled = async (
         // compared. The two directions are NOT symmetric:
         //
         //  - read early, and a replacement installed during the gate wait, the
-        //    PQ admission wait or the durable ratchet step reads as an advance
+        //    PQ admission wait or the ratchet step reads as an advance
         //    that this attempt may not have needed. The cost is one extra trip
         //    round the resume check, which the `nextEpc.coverRuntime === runtime`
         //    guard below turns into a `break` without re-sending anything.

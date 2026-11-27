@@ -94,11 +94,6 @@ mock.module("../../src/db/api", () => ({
     if (!db.armed) return await realDb.setDBNewChunk(chunk, lease);
     db.rows.set(chunk.chunkIndex, structuredClone(chunk));
   },
-  setRatchetSession: async (
-    ...args: Parameters<typeof realDb.setRatchetSession>
-  ) => {
-    if (!db.armed) return await realDb.setRatchetSession(...args);
-  },
 }));
 
 afterAll(() => {
@@ -110,7 +105,7 @@ let handleSendMessage: SendModule["handleSendMessage"];
 let claimRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["claimRatchetGate"];
 let openRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["openRatchetGate"];
 let resetRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["resetRatchetGate"];
-let claimRatchetPersistence: (typeof import("../../src/handlers/ratchetPersist"))["claimRatchetPersistence"];
+let claimRatchetGeneration: (typeof import("../../src/handlers/ratchetPersist"))["claimRatchetGeneration"];
 let markTransferComplete: (typeof import("../../src/handlers/reconcile"))["markTransferComplete"];
 let clearTransfer: (typeof import("../../src/handlers/reconcile"))["clearTransfer"];
 
@@ -123,7 +118,7 @@ beforeAll(async () => {
     await import("../../src/handlers/handleSendMessage"));
   ({ claimRatchetGate, openRatchetGate, resetRatchetGate } =
     await import("../../src/handlers/ratchetGate"));
-  ({ claimRatchetPersistence } =
+  ({ claimRatchetGeneration } =
     await import("../../src/handlers/ratchetPersist"));
   ({ markTransferComplete, clearTransfer } =
     await import("../../src/handlers/reconcile"));
@@ -318,7 +313,7 @@ const scheduledEdge = (): {
   const lease = claimRatchetGate(ROOM, PEER);
   openRatchetGate(ROOM, PEER, lease);
   epc.ratchetGateLease = lease;
-  claimRatchetPersistence(epc, ROOM);
+  claimRatchetGeneration(epc, ROOM);
   return { epc, enqueued };
 };
 

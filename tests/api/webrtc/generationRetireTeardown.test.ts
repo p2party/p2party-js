@@ -14,7 +14,6 @@ import type {
   ManagedRoom,
   PeerHandshakeStatus,
 } from "../../../src/reducers/roomSlice";
-import type { RatchetSession } from "../../../src/db/types";
 import { RATCHET_ROOT_SUITE_MLKEM512 } from "../../../src/utils/constants";
 import type {
   IRTCDataChannel,
@@ -114,7 +113,6 @@ type DisconnectFromPeerQuery =
   typeof import("../../../src/api/webrtc/disconnectFromPeerQuery");
 type RatchetPersist = typeof import("../../../src/handlers/ratchetPersist");
 type PqRuntime = typeof import("../../../src/handlers/pqHealingRuntime");
-type DbApi = typeof import("../../../src/db/api");
 
 let webrtcBaseQuery: BaseQuery["default"];
 let clearRetiredPeerSocketGenerations: PeerSocketGeneration["clearRetiredPeerSocketGenerations"];
@@ -127,9 +125,8 @@ let tickPqHealing: Orchestrator["tickPqHealing"];
 let setHandshakeChannel: Handshake["setHandshakeChannel"];
 let clearHandshakeChannel: Handshake["clearHandshakeChannel"];
 let disconnectModule: DisconnectFromPeerQuery;
-let claimRatchetPersistence: RatchetPersist["claimRatchetPersistence"];
-let persistClaimedRatchetState: RatchetPersist["persistClaimedRatchetState"];
-let dbApiModule: DbApi;
+let claimRatchetGeneration: RatchetPersist["claimRatchetGeneration"];
+let assertCurrentRatchetGeneration: RatchetPersist["assertCurrentRatchetGeneration"];
 let SparsePqHealingState: PqRuntime["SparsePqHealingState"];
 let pqModule: Awaited<
   ReturnType<
@@ -146,7 +143,6 @@ beforeAll(async () => {
   // fail-closed blacklist lookup would report every peer as blocked and
   // baseQuery would return before it ever looked at a transport.
   const dbApi = await import("../../../src/db/api");
-  dbApiModule = dbApi;
   const spy = spyOn(dbApi, "getDBPeerIsBlacklisted").mockImplementation(
     async () => false,
   );
@@ -168,7 +164,7 @@ beforeAll(async () => {
     await import("../../../src/handlers/handleHandshake"));
   disconnectModule =
     await import("../../../src/api/webrtc/disconnectFromPeerQuery");
-  ({ claimRatchetPersistence, persistClaimedRatchetState } =
+  ({ claimRatchetGeneration, assertCurrentRatchetGeneration } =
     await import("../../../src/handlers/ratchetPersist"));
   ({ SparsePqHealingState } =
     await import("../../../src/handlers/pqHealingRuntime"));
@@ -350,7 +346,6 @@ describe("a generation retire releases what the retired edge held", () => {
         pqDestroyed += 1;
       },
     } as unknown as NonNullable<IRTCPeerConnection["pqHealingState"]>;
-    old.serializeEdgeCryptoState = () => new Uint8Array(1);
     const peerConnections: IRTCPeerConnection[] = [old];
 
     await retireForNewGeneration(peerConnections);
@@ -372,7 +367,6 @@ describe("a generation retire releases what the retired edge held", () => {
     expect(old.ratchetState).toBeUndefined();
     expect(pqDestroyed).toBe(1);
     expect(old.pqHealingState).toBeUndefined();
-    expect(old.serializeEdgeCryptoState).toBeUndefined();
     expect(old.messageKeyCache).toBeUndefined();
     expect(old.messageKeyByMerkleRoot).toBeUndefined();
   }, 20000);
@@ -551,211 +545,23 @@ describe("a retired generation's handshake status", () => {
 // the transport, and every generation writes it. A retired generation's row
 // must not stay on disk, and a late teardown must never take the row a
 // replacement has written since.
-describe("a retired generation's persisted ratchet row", () => {
-  const ROW = `${ROOM_ID}/${LOWER_PUBLIC_KEY}`;
-
-  interface RowStore {
-    /** Row key -> the writer's tag (the `Ns` counter of what it wrote). */
-    readonly rows: Map<string, string>;
-    /** Completed store operations, in order. */
-    readonly log: string[];
-    releaseHeldWrite(): void;
-    restore(): void;
-  }
-
-  /** The worker's three ratchet-row methods over a Map. */
-  const installRowStore = ({ holdFirstWrite = false } = {}): RowStore => {
-    const rows = new Map<string, string>();
-    const log: string[] = [];
-    let hold = holdFirstWrite;
-    let releaseHeld: (() => void) | undefined;
-    const setSpy = spyOn(dbApiModule, "setRatchetSession").mockImplementation(
-      async (session: RatchetSession) => {
-        // Copied before the caller's finally wipes the serialized buffers.
-        const tag = `Ns=${session.Ns}`;
-        const key = `${session.roomId}/${session.peerPublicKey}`;
-        if (hold) {
-          hold = false;
-          await new Promise<void>((resolve) => {
-            releaseHeld = resolve;
-          });
-        }
-        rows.set(key, tag);
-        log.push(`set:${tag}`);
-      },
-    );
-    const deleteSpy = spyOn(
-      dbApiModule,
-      "deleteRatchetSession",
-    ).mockImplementation(async (roomId: string, peerPublicKey: string) => {
-      rows.delete(`${roomId}/${peerPublicKey}`);
-      log.push("delete");
-    });
-    return {
-      rows,
-      log,
-      releaseHeldWrite: () => releaseHeld?.(),
-      restore: () => {
-        setSpy.mockRestore();
-        deleteSpy.mockRestore();
-      },
-    };
-  };
-
-  const ratchetState = (
-    Ns: number,
-  ): NonNullable<RetiredEdge["ratchetState"]> => ({
-    rootSuite: "hybrid-3dh-mlkem768-cpace21-v4",
-    rootKey: new Uint8Array(32).fill(1),
-    sendingChainKey: new Uint8Array(32).fill(2),
-    receivingChainKey: new Uint8Array(32).fill(3),
-    dhSelfPub: new Uint8Array(32).fill(7),
-    dhSelfSec: new Uint8Array(32).fill(4),
-    dhRemotePub: null,
-    Ns,
-    Nr: 0,
-    PN: 0,
-    skipped: new Map(),
-  });
-
-  /** Let every queued operation on the edge's persistence lock run. */
-  const settleLock = async (): Promise<void> => {
-    for (let turn = 0; turn < 5; turn++) {
-      for (let i = 0; i < 20; i++) await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-  };
-
-  test("retiring a generation deletes its persisted ratchet row", async () => {
-    const store = installRowStore();
-    try {
-      const old = seedAuthenticatedEdge();
-      claimRatchetPersistence(old, ROOM_ID);
-      await persistClaimedRatchetState(old, ratchetState(1), ROOM_ID);
-      expect(store.rows.get(ROW)).toBe("Ns=1");
-
-      await retireForNewGeneration([old]);
-      await settleLock();
-
-      expect(store.rows.has(ROW)).toBe(false);
-      expect(store.log).toEqual(["set:Ns=1", "delete"]);
-      // The retired generation can never write the row again.
-      await expect(
-        persistClaimedRatchetState(old, ratchetState(9), ROOM_ID),
-      ).rejects.toThrow("stale connection owner");
-      expect(store.rows.has(ROW)).toBe(false);
-    } finally {
-      store.restore();
-    }
-  }, 20000);
-
-  test("an explicit disconnect deletes the edge's persisted ratchet row", async () => {
-    const store = installRowStore();
-    try {
-      const edge = seedAuthenticatedEdge();
-      claimRatchetPersistence(edge, ROOM_ID);
-      await persistClaimedRatchetState(edge, ratchetState(1), ROOM_ID);
-
-      await disconnectModule.default(
-        {
-          peerId: PEER_ID,
-          roomId: ROOM_ID,
-          peerConnections: [edge],
-          dataChannels: [],
-          iceCandidates: [],
-        },
-        fakeApi(),
-        {},
-      );
-      await settleLock();
-
-      expect(store.rows.has(ROW)).toBe(false);
-      expect(store.log).toEqual(["set:Ns=1", "delete"]);
-    } finally {
-      store.restore();
-    }
-  });
-
-  test("a late teardown of the old generation does not delete the new generation's row", async () => {
-    const store = installRowStore();
-    try {
-      const old = seedAuthenticatedEdge();
-      claimRatchetPersistence(old, ROOM_ID);
-      await persistClaimedRatchetState(old, ratchetState(1), ROOM_ID);
-      // A replacement claims the same edge and writes its own seed.
-      const replacement = seedAuthenticatedEdge();
-      claimRatchetPersistence(replacement, ROOM_ID);
-      await persistClaimedRatchetState(replacement, ratchetState(2), ROOM_ID);
-      expect(store.rows.get(ROW)).toBe("Ns=2");
-
-      // The predecessor's teardown arrives only now.
-      disconnectModule.teardownEdgeGeneration(old, {});
-      await settleLock();
-
-      expect(store.rows.get(ROW)).toBe("Ns=2");
-      expect(store.log).toEqual(["set:Ns=1", "set:Ns=2"]);
-    } finally {
-      store.restore();
-    }
-  });
-
-  test("a retire orders the delete after the old generation's in-flight write and before the replacement's seed", async () => {
-    const store = installRowStore({ holdFirstWrite: true });
-    try {
-      const old = seedAuthenticatedEdge();
-      claimRatchetPersistence(old, ROOM_ID);
-      // One write is already in the worker, another is queued behind it.
-      const inFlight = persistClaimedRatchetState(
-        old,
-        ratchetState(1),
-        ROOM_ID,
-      );
-      await settleLock();
-      const queued = persistClaimedRatchetState(old, ratchetState(3), ROOM_ID);
-
-      disconnectModule.teardownEdgeGeneration(old, {});
-      const replacement = seedAuthenticatedEdge();
-      claimRatchetPersistence(replacement, ROOM_ID);
-      const seed = persistClaimedRatchetState(
-        replacement,
-        ratchetState(2),
-        ROOM_ID,
-      );
-
-      // Both old writes settle while the test is still waiting on others, so
-      // their outcomes are captured as they happen.
-      const outcome = (write: Promise<void>): Promise<string> =>
-        write.then(
-          () => "written",
-          (error: unknown) => (error as Error).message,
-        );
-      const inFlightOutcome = outcome(inFlight);
-      const queuedOutcome = outcome(queued);
-
-      store.releaseHeldWrite();
-      // The in-flight write lands but its owner is gone by the time it
-      // returns; the queued one never reaches the store.
-      expect(await inFlightOutcome).toBe(
-        "ratchet persistence: stale connection owner",
-      );
-      expect(await queuedOutcome).toBe(
-        "ratchet persistence: stale connection owner",
-      );
-      await seed;
-      await settleLock();
-
-      expect(store.log).toEqual(["set:Ns=1", "delete", "set:Ns=2"]);
-      expect(store.rows.get(ROW)).toBe("Ns=2");
-    } finally {
-      store.restore();
-    }
+describe("ratchet generation ownership", () => {
+  test("late teardown cannot revoke a replacement and retired transports cannot reclaim their generation", () => {
+    const old = seedAuthenticatedEdge();
+    claimRatchetGeneration(old, ROOM_ID);
+    const replacement = seedAuthenticatedEdge();
+    claimRatchetGeneration(replacement, ROOM_ID);
+    disconnectModule.teardownEdgeGeneration(old);
+    expect(() => claimRatchetGeneration(old, ROOM_ID)).toThrow();
+    expect(() => assertCurrentRatchetGeneration(old, ROOM_ID)).toThrow();
+    assertCurrentRatchetGeneration(replacement, ROOM_ID);
+    disconnectModule.teardownEdgeGeneration(replacement);
+    expect(() =>
+      assertCurrentRatchetGeneration(replacement, ROOM_ID),
+    ).toThrow();
   });
 });
 
-// The generation retire and an explicit disconnect go through one teardown.
-// Each path is run against the same fully loaded edge and must release every
-// part of it; a path that stops going through the shared teardown (and does
-// not reproduce all of it) fails here.
 describe("both teardown paths release the same things", () => {
   const paths: Array<{
     readonly name: string;
@@ -790,16 +596,6 @@ describe("both teardown paths release the same things", () => {
 
   for (const path of paths)
     test(`${path.name} releases everything the generation held`, async () => {
-      const deletedRows: string[] = [];
-      const setRow = spyOn(dbApiModule, "setRatchetSession").mockImplementation(
-        async () => undefined,
-      );
-      const deleteRow = spyOn(
-        dbApiModule,
-        "deleteRatchetSession",
-      ).mockImplementation(async (roomId: string, peerPublicKey: string) => {
-        deletedRows.push(`${roomId}/${peerPublicKey}`);
-      });
       const setIntervalSpy = spyOn(globalThis, "setInterval");
       const clearIntervalSpy = spyOn(globalThis, "clearInterval");
       const edge = seedAuthenticatedEdge();
@@ -842,7 +638,7 @@ describe("both teardown paths release the same things", () => {
         edge.rebindDeadlineClear = (handle) => {
           deadlinesCleared.push(handle);
         };
-        claimRatchetPersistence(edge, ROOM_ID);
+        claimRatchetGeneration(edge, ROOM_ID);
         const api = fakeApi({
           [PEER_ID]: {
             status: "authenticated",
@@ -872,11 +668,9 @@ describe("both teardown paths release the same things", () => {
           (api.getState() as { rooms: ManagedRoom[] }).rooms[0]
             .handshakeStatusByPeer?.[PEER_ID],
         ).toBeUndefined();
-        expect(deletedRows).toEqual([`${ROOM_ID}/${LOWER_PUBLIC_KEY}`]);
+        expect(() => assertCurrentRatchetGeneration(edge, ROOM_ID)).toThrow();
       } finally {
         destroyPqHealingOrchestrator(edge);
-        setRow.mockRestore();
-        deleteRow.mockRestore();
         setIntervalSpy.mockRestore();
         clearIntervalSpy.mockRestore();
       }

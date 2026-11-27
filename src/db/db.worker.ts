@@ -50,9 +50,6 @@ import {
   getWrapKey,
   wrapSecret,
   unwrapSecret,
-  wrapRatchetSession,
-  unwrapRatchetSession,
-  RatchetRollbackGuard,
 } from "./ratchetWrap";
 
 import type {
@@ -82,7 +79,6 @@ import type {
   RoomStats,
   NewChunk,
   NewChunkSelector,
-  RatchetSession,
   IdentityEd25519,
   IdentityEd25519KeyMaterial,
   IdentityX25519,
@@ -2853,132 +2849,6 @@ async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
   db.close();
 }
 
-const ratchetRollbackGuard = new RatchetRollbackGuard();
-const ratchetLastWrite = new Map<string, number>();
-const ratchetWorkerLocks = new Map<string, Promise<void>>();
-
-const ratchetWorkerKey = (roomId: string, peerPublicKey: string): string =>
-  `${String(roomId.length)}:${roomId}${String(peerPublicKey.length)}:${peerPublicKey}`;
-
-const withRatchetWorkerLock = async <T>(
-  roomId: string,
-  peerPublicKey: string,
-  operation: () => Promise<T>,
-): Promise<T> => {
-  const key = ratchetWorkerKey(roomId, peerPublicKey);
-  const previous = ratchetWorkerLocks.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.catch(() => undefined).then(() => held);
-  ratchetWorkerLocks.set(key, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (ratchetWorkerLocks.get(key) === tail) ratchetWorkerLocks.delete(key);
-  }
-};
-
-const wipeWorkerRatchetSecrets = (session: RatchetSession): void => {
-  new Uint8Array(session.rootKey).fill(0);
-  if (session.sendingChainKey) new Uint8Array(session.sendingChainKey).fill(0);
-  if (session.receivingChainKey)
-    new Uint8Array(session.receivingChainKey).fill(0);
-  new Uint8Array(session.dhSelfSec).fill(0);
-  for (const skipped of session.skippedMessageKeys)
-    new Uint8Array(skipped.messageKey).fill(0);
-  if (session.edgeCryptoState) new Uint8Array(session.edgeCryptoState).fill(0);
-};
-
-async function fnGetRatchetSession(
-  roomId: string,
-  peerPublicKey: string,
-): Promise<RatchetSession | undefined> {
-  return withRatchetWorkerLock(roomId, peerPublicKey, async () => {
-    try {
-      const db = await getDB();
-      let stored: RatchetSession | undefined;
-      try {
-        stored = await db.get("ratchetSessions", [roomId, peerPublicKey]);
-      } finally {
-        db.close();
-      }
-      if (!stored) return undefined;
-      const key = await getWrapKey();
-      const restored = await unwrapRatchetSession(
-        stored,
-        key,
-        ratchetRollbackGuard,
-      );
-      const edge = ratchetWorkerKey(roomId, peerPublicKey);
-      ratchetLastWrite.set(
-        edge,
-        Math.max(ratchetLastWrite.get(edge) ?? 0, restored.updatedAt),
-      );
-      return restored;
-    } catch (error) {
-      console.error(error);
-      return undefined;
-    }
-  });
-}
-
-async function fnSetRatchetSession(session: RatchetSession): Promise<void> {
-  await withRatchetWorkerLock(
-    session.roomId,
-    session.peerPublicKey,
-    async () => {
-      const edge = ratchetWorkerKey(session.roomId, session.peerPublicKey);
-      const previous = ratchetLastWrite.get(edge) ?? 0;
-      const requested = Math.max(Date.now(), session.updatedAt);
-      const updatedAt = requested > previous ? requested : previous + 1;
-      if (!Number.isSafeInteger(updatedAt))
-        throw new Error("Ratchet persistence timestamp exhausted");
-
-      const stamped: RatchetSession = { ...session, updatedAt };
-      try {
-        const key = await getWrapKey();
-        const wrapped = await wrapRatchetSession(stamped, key);
-        const db = await getDB();
-        try {
-          await db.put("ratchetSessions", wrapped);
-        } finally {
-          db.close();
-        }
-        // Advance the process-local high-water mark only after the row is
-        // durable. This is a locally produced envelope, so no redundant
-        // decrypt-all-fields pass is needed.
-        await ratchetRollbackGuard.rememberTrustedWrite(wrapped);
-        ratchetLastWrite.set(edge, updatedAt);
-      } finally {
-        // postMessage cloned these inputs into the worker; erase that worker
-        // copy after wrapping regardless of storage success.
-        wipeWorkerRatchetSecrets(stamped);
-      }
-    },
-  );
-}
-
-async function fnDeleteRatchetSession(
-  roomId: string,
-  peerPublicKey: string,
-): Promise<void> {
-  await withRatchetWorkerLock(roomId, peerPublicKey, async () => {
-    try {
-      const db = await getDB();
-      await db.delete("ratchetSessions", [roomId, peerPublicKey]);
-      db.close();
-      ratchetRollbackGuard.forget(roomId, peerPublicKey);
-      ratchetLastWrite.delete(ratchetWorkerKey(roomId, peerPublicKey));
-    } catch (error) {
-      console.error(error);
-    }
-  });
-}
-
 const PIN_ATTEMPT_META_PREFIX = "pinAttempts:v2:";
 const PIN_IDENTITY_RE = /^[0-9a-f]{64}$/;
 
@@ -3149,21 +3019,16 @@ async function fnSetIdentityX25519(identity: IdentityX25519): Promise<void> {
 async function fnDeleteIdentityX25519(): Promise<void> {
   const db = await getDB();
   try {
-    const tx = db.transaction(["meta", "ratchetSessions"], "readwrite");
+    const tx = db.transaction("meta", "readwrite");
     await tx.objectStore("meta").delete(IDENTITY_X25519_META_ID);
-    // Every persisted ratchet is authenticated to the identity being purged;
-    // retaining one across identity rotation would restore an orphaned edge.
-    await tx.objectStore("ratchetSessions").clear();
     await tx.done;
   } finally {
     db.close();
   }
-  ratchetRollbackGuard.clear();
-  ratchetLastWrite.clear();
 }
 
 // The account-signing identity is no longer persisted in localStorage. Its
-// secret uses the same non-extractable AES-GCM wrapping key as ratchet/X25519
+// secret uses the same non-extractable AES-GCM wrapping key as the X25519
 // secrets; the public half remains inspectable. The high-water record is kept
 // separately so deleting the identity cannot make a later key reuse a revision.
 // Both values live in the existing out-of-line `meta` store, so this adds no
@@ -3556,7 +3421,7 @@ async function fnSetIdentityEd25519(
 async function fnDeleteIdentityEd25519(): Promise<void> {
   const db = await getDB();
   try {
-    const tx = db.transaction(["meta", "ratchetSessions"], "readwrite");
+    const tx = db.transaction("meta", "readwrite");
     const meta = tx.objectStore("meta");
     const [identityValue, revisionValue] = await Promise.all([
       meta.get(IDENTITY_ED25519_META_ID),
@@ -3577,13 +3442,10 @@ async function fnDeleteIdentityEd25519(): Promise<void> {
       );
       await meta.delete(IDENTITY_ED25519_META_ID);
     }
-    await tx.objectStore("ratchetSessions").clear();
     await tx.done;
   } finally {
     db.close();
   }
-  ratchetRollbackGuard.clear();
-  ratchetLastWrite.clear();
 }
 
 // Whether the account identity was derived from a recovery phrase. Non-secret
@@ -3710,7 +3572,7 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<string[]> {
   const db = await getDB();
   try {
     const tx = db.transaction(
-      ["uniqueRoom", "ratchetSessions", "messageData", "receiveActivity"],
+      ["uniqueRoom", "messageData", "receiveActivity"],
       "readwrite",
     );
     const store = tx.objectStore("uniqueRoom");
@@ -3736,16 +3598,6 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<string[]> {
       }
       await store.delete(item);
     }
-    const ratchets = tx.objectStore("ratchetSessions");
-    const ratchetKeys = await ratchets.index("roomId").getAllKeys(roomId);
-    for (const key of ratchetKeys) {
-      await ratchets.delete(key);
-      if (Array.isArray(key) && typeof key[1] === "string") {
-        ratchetRollbackGuard.forget(roomId, key[1]);
-        ratchetLastWrite.delete(ratchetWorkerKey(roomId, key[1]));
-      }
-    }
-
     await tx.done;
     return [...roots];
   } finally {
@@ -4663,8 +4515,6 @@ async function fnDeleteDB(): Promise<void> {
       console.error("DB deletion BLOCKED");
     },
   });
-  ratchetRollbackGuard.clear();
-  ratchetLastWrite.clear();
   if (leftBehind.length > 0)
     throw filesNotRemoved(leftBehind, "p2party: the purge could not remove");
 }
@@ -4945,17 +4795,6 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "deleteDBSendQueue":
         await fnDeleteDBSendQueue(...message.args);
-        result = undefined;
-        break;
-      case "getRatchetSession":
-        result = await fnGetRatchetSession(...message.args);
-        break;
-      case "setRatchetSession":
-        await fnSetRatchetSession(...message.args);
-        result = undefined;
-        break;
-      case "deleteRatchetSession":
-        await fnDeleteRatchetSession(...message.args);
         result = undefined;
         break;
       case "getPinAttemptState":

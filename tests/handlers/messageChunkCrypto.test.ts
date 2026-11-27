@@ -28,9 +28,9 @@ import { forgetCompletedReceiveMessageKey } from "../../src/handlers/receiveMess
 import {
   allowClassicalOnlyReceiveForTests,
   allowClassicalOnlySendForTests,
-  decryptMessageChunkDurably,
-  forgetReceiveMessageKeyDurably,
-  ratchetEncryptDurably,
+  decryptChunkWithLiveRatchet,
+  forgetReceiveMessageKey,
+  advanceSendingRatchet,
 } from "../../src/handlers/ratchetPersist";
 import { crypto_hash_sha512_BYTES } from "../../src/cryptography/interfaces";
 import {
@@ -352,7 +352,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
       persisted += 1;
     };
     await expect(
-      decryptMessageChunkDurably(
+      decryptChunkWithLiveRatchet(
         edge(bob),
         "room-1",
         frame,
@@ -375,7 +375,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
         module,
         undefined,
         {
-          persistRatchetState: countPersist,
+          beforeRatchetCommit: countPersist,
           storeReceiveChunk: async () => {
             throw new Error("a classical-only frame must not reach storage");
           },
@@ -414,7 +414,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     // The durable send step refuses an edge that has a ratchet but no PQ
     // runtime, before it steps the ratchet or persists anything.
     await expect(
-      ratchetEncryptDurably(edge(alice), "room-1", module, countPersist),
+      advanceSendingRatchet(edge(alice), "room-1", module, countPersist),
     ).rejects.toThrow("edge has no PQ runtime");
     expect(persisted).toBe(0);
     expect(alice.Ns).toBe(0);
@@ -459,7 +459,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
         module,
       ).ok,
     ).toBe(true);
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       classicalSendEdge(alice),
       "room-1",
       module,
@@ -803,7 +803,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     let stagedChain: Uint8Array | undefined;
 
     await expect(
-      ratchetEncryptDurably(epc, "room-1", module, async (candidate) => {
+      advanceSendingRatchet(epc, "room-1", module, async (candidate) => {
         stagedChain = candidate.sendingChainKey!;
         throw new Error("injected persistence failure");
       }),
@@ -835,7 +835,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     let stagedReceivingChain: Uint8Array | undefined;
 
     await expect(
-      decryptMessageChunkDurably(
+      decryptChunkWithLiveRatchet(
         epc,
         "room-1",
         frame,
@@ -873,7 +873,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const persist = async () => {};
 
     const firstCache = new Map<string, Uint8Array>();
-    const first = await decryptMessageChunkDurably(
+    const first = await decryptChunkWithLiveRatchet(
       classicalReceiveEdge(bob),
       "room-1",
       frames[0],
@@ -891,7 +891,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     const restored = cloneRatchet(bob);
     const restoredEpc = classicalReceiveEdge(restored);
     const restoredCache = new Map<string, Uint8Array>();
-    const second = await decryptMessageChunkDurably(
+    const second = await decryptChunkWithLiveRatchet(
       restoredEpc,
       "room-1",
       frames[1],
@@ -907,7 +907,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
     expect(restored.skipped.has(cacheKey)).toBe(true);
     expect(restoredCache.has(cacheKey)).toBe(true);
 
-    await forgetReceiveMessageKeyDurably(
+    await forgetReceiveMessageKey(
       restoredEpc,
       "room-1",
       restoredCache,
@@ -958,7 +958,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
           module,
           undefined,
           {
-            persistRatchetState: persist,
+            beforeRatchetCommit: persist,
             storeReceiveChunk: async () => {
               if (stored)
                 throw new Error("cover cell must not reach durable storage");
@@ -992,7 +992,7 @@ describe("messageChunkCrypto (single-call C receive)", () => {
         key: string,
       ): Promise<void> => {
         forgetCalls += 1;
-        await forgetReceiveMessageKeyDurably(
+        await forgetReceiveMessageKey(
           target,
           roomId,
           cache,
@@ -1047,8 +1047,8 @@ describe("messageChunkCrypto (single-call C receive)", () => {
         await firstBlocked;
       }
     };
-    const first = ratchetEncryptDurably(epc, "room-1", module, persist);
-    const second = ratchetEncryptDurably(epc, "room-1", module, persist);
+    const first = advanceSendingRatchet(epc, "room-1", module, persist);
+    const second = advanceSendingRatchet(epc, "room-1", module, persist);
 
     await firstStarted;
     expect(persistedNs).toEqual([1]);
@@ -1201,7 +1201,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcA = pqEdge(alice, runtimeA);
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1232,7 +1232,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
 
     // Every chunk opens at the peer: one ratchet step, then the cached key.
     for (let i = 0; i < frames.length; i++) {
-      const opened = await decryptMessageChunkDurably(
+      const opened = await decryptChunkWithLiveRatchet(
         epcB,
         "room-1",
         frames[i],
@@ -1276,7 +1276,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
 
     // The sender's durable step captures an OWNED context copy atomically and
     // counts exactly one application message.
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1311,7 +1311,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     );
 
     const captures: EdgeCapture[] = [];
-    const d0 = await decryptMessageChunkDurably(
+    const d0 = await decryptChunkWithLiveRatchet(
       epcB,
       "room-1",
       frames[0],
@@ -1337,7 +1337,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     expect(runtimeB.messagesSinceHealing).toBe(1);
 
     // Second chunk rides the epoch-bound cached key without persistence.
-    const d1 = await decryptMessageChunkDurably(
+    const d1 = await decryptChunkWithLiveRatchet(
       epcB,
       "room-1",
       frames[1],
@@ -1363,7 +1363,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
 
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1380,7 +1380,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
       ),
     );
 
-    const first = await decryptMessageChunkDurably(
+    const first = await decryptChunkWithLiveRatchet(
       epcB,
       "room-1",
       frames[0],
@@ -1406,7 +1406,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     expect(restoredRuntime.activeReceiveKeys.has(epochKey)).toBe(true);
     const epcB2 = pqEdge(restoredState, restoredRuntime);
 
-    const second = await decryptMessageChunkDurably(
+    const second = await decryptChunkWithLiveRatchet(
       epcB2,
       "room-1",
       frames[1],
@@ -1437,7 +1437,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
 
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1455,7 +1455,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     unknownEpoch[56] = 1; // pqEpoch u64 BE low byte: 0 -> 1
 
     const captures: EdgeCapture[] = [];
-    const rejected = await decryptMessageChunkDurably(
+    const rejected = await decryptChunkWithLiveRatchet(
       epcB,
       "room-1",
       unknownEpoch,
@@ -1483,7 +1483,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
 
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1499,7 +1499,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     );
 
     await expect(
-      decryptMessageChunkDurably(
+      decryptChunkWithLiveRatchet(
         epcB,
         "room-1",
         frame,
@@ -1531,7 +1531,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
 
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1551,7 +1551,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
       0n,
     );
 
-    const received = await decryptMessageChunkDurably(
+    const received = await decryptChunkWithLiveRatchet(
       epcB,
       "room-1",
       frame,
@@ -1565,7 +1565,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     expect(ramCopy).toBeDefined();
 
     const captures: EdgeCapture[] = [];
-    await forgetReceiveMessageKeyDurably(
+    await forgetReceiveMessageKey(
       epcB,
       "room-1",
       epcB.messageKeyCache!,
@@ -1582,7 +1582,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     expect(bob.skipped.size).toBe(0);
 
     // Retirement is idempotent and does not write again for a missing key.
-    await forgetReceiveMessageKeyDurably(
+    await forgetReceiveMessageKey(
       epcB,
       "room-1",
       epcB.messageKeyCache!,
@@ -1603,7 +1603,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     const epcB = pqEdge(bob, runtimeB);
     const persistNoop = async (): Promise<void> => {};
 
-    const stepped = await ratchetEncryptDurably(
+    const stepped = await advanceSendingRatchet(
       epcA,
       "room-1",
       module,
@@ -1624,7 +1624,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
     );
 
     const [received, bobStep] = await Promise.all([
-      decryptMessageChunkDurably(
+      decryptChunkWithLiveRatchet(
         epcB,
         "room-1",
         frame,
@@ -1633,7 +1633,7 @@ describe("v4 durable PQ-combined receive/send paths", () => {
         module,
         persistNoop,
       ),
-      ratchetEncryptDurably(epcB, "room-1", module, persistNoop),
+      advanceSendingRatchet(epcB, "room-1", module, persistNoop),
     ]);
     expect(received.ok).toBe(true);
     expect(bobStep.pqContext).not.toBeNull();

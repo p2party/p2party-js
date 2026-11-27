@@ -7,7 +7,7 @@ import {
 import { wipeRatchet } from "../../cryptography/ratchet";
 import { clearHandshakeChannel } from "../../handlers/handleHandshake";
 import { destroyPqHealingOrchestrator } from "../../handlers/pqHealingOrchestrator";
-import { releaseRatchetPersistence } from "../../handlers/ratchetPersist";
+import { releaseRatchetGeneration } from "../../handlers/ratchetPersist";
 import { teardownCoverEdge } from "../../handlers/coverEdge";
 import {
   isCurrentRatchetGateLease,
@@ -86,9 +86,7 @@ export interface EdgeTeardownContext {
  * It wipes the ratchet, the sparse-PQ runtime and the derived message keys,
  * stops the PQ healing interval, stops scheduled cover (which releases its
  * queued receipts), releases the generation's data channels and its re-bind
- * deadline, deletes the edge's persisted ratchet row while this connection
- * still owns it (releaseRatchetPersistence, ordered under the per-edge
- * persistence lock), clears its non-failed handshake status, detaches every
+ * deadline, revokes its ratchet generation, clears its non-failed handshake status, detaches every
  * handler and closes the RTCPeerConnection. It does NOT remove the connection
  * from the registry or touch the roster: a caller that replaces the transport
  * and a terminal handshake failure (which leaves the closed transport
@@ -113,16 +111,8 @@ export const teardownEdgeGeneration = (
     connection.ratchetGateLease === undefined ||
     isCurrentRatchetGateLease(roomId, peerId, connection.ratchetGateLease);
 
-  // The wrapped row on disk goes with the generation that wrote it. Its own
-  // ownership check (not the gate lease) decides: only the connection that
-  // currently owns the edge's row deletes it, so a late teardown never
-  // removes a replacement's seed.
-  void releaseRatchetPersistence(connection, roomId).catch((error: unknown) => {
-    console.error(
-      "p2party: could not delete a retired edge's persisted ratchet",
-      error,
-    );
-  });
+  // A late teardown only revokes its own authenticated generation.
+  releaseRatchetGeneration(connection, roomId);
 
   // This side stops believing in the remote transport this connection was
   // bound to. The peer may still hold it (its ICE consent survived a freeze
@@ -160,7 +150,6 @@ export const teardownEdgeGeneration = (
     connection.pqHealingState.destroy();
     connection.pqHealingState = undefined;
   }
-  connection.serializeEdgeCryptoState = undefined;
   if (connection.messageKeyCache) {
     for (const messageKey of connection.messageKeyCache.values())
       messageKey.fill(0);

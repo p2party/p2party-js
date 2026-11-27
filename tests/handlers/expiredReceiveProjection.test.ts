@@ -9,7 +9,7 @@ import {
   forgetExpiredReceiveMessageKey,
 } from "../../src/handlers/receiveMessageKeyLifetime";
 import {
-  forgetReceiveMessageKeyIfCurrentDurably,
+  forgetReceiveMessageKeyIfCurrent,
   withEdgeCryptoMutationLock,
 } from "../../src/handlers/ratchetPersist";
 import {
@@ -82,7 +82,7 @@ const realRetirement: typeof forgetExpiredReceiveMessageKey = (
     snapshot,
     absent,
     (peer, room, cache, key, check) =>
-      forgetReceiveMessageKeyIfCurrentDurably(
+      forgetReceiveMessageKeyIfCurrent(
         peer,
         room,
         cache,

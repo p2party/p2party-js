@@ -57,8 +57,7 @@ export interface RatchetHeader {
 }
 
 /**
- * Serializable projection of a `RatchetState` — maps 1:1 onto the wrapped
- * secret fields of the `RatchetSession` IndexedDB row (Stage 3). All buffers
+ * Serializable projection used by the explicit store-free session API. All buffers
  * are owned copies; the skipped map is flattened to an array keyed by
  * `(dhPub, n)`.
  */

@@ -16,7 +16,6 @@ import type {
   NewChunk,
   NewChunkSelector,
   SendQueue,
-  RatchetSession,
   IdentityDerivation,
   IdentityEd25519KeyMaterial,
   IdentityX25519,
@@ -642,15 +641,6 @@ export const deleteDBSendQueue = (
   toPeerId: string,
   position?: number,
 ) => callWorker("deleteDBSendQueue", label, toPeerId, position);
-
-export const getRatchetSession = (roomId: string, peerPublicKey: string) =>
-  callWorker("getRatchetSession", roomId, peerPublicKey);
-
-export const setRatchetSession = (session: RatchetSession) =>
-  callWorker("setRatchetSession", session);
-
-export const deleteRatchetSession = (roomId: string, peerPublicKey: string) =>
-  callWorker("deleteRatchetSession", roomId, peerPublicKey);
 
 export const getPinAttemptState = (
   roomId: string,

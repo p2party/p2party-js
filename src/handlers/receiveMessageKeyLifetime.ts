@@ -1,6 +1,6 @@
 import {
-  forgetReceiveMessageKeyDurably,
-  forgetReceiveMessageKeyIfCurrentDurably,
+  forgetReceiveMessageKey,
+  forgetReceiveMessageKeyIfCurrent,
 } from "./ratchetPersist";
 import { isRatchetGateOpen } from "./ratchetGate";
 
@@ -9,7 +9,7 @@ import type { MessageData } from "../db/types";
 
 const bindingRevisions = new WeakMap<IRTCPeerConnection, Map<string, symbol>>();
 
-type ForgetReceiveMessageKey = typeof forgetReceiveMessageKeyDurably;
+type ForgetReceiveMessageKey = typeof forgetReceiveMessageKey;
 type ReceiveProgress = Pick<MessageData, "savedSize" | "totalSize">;
 const retirements = new WeakMap<
   IRTCPeerConnection,
@@ -50,14 +50,13 @@ const isComplete = (progress: ReceiveProgress | undefined): boolean =>
   progress.savedSize === progress.totalSize;
 
 /**
- * Durably retire the key mapped to one transfer. The root binding is removed
- * only after persistence succeeds, so failure leaves an idempotent retry path.
+ * Retire the live message key before releasing its transfer-root binding.
  */
 export const forgetMappedReceiveMessageKey = async (
   epc: IRTCPeerConnection,
   roomId: string,
   merkleRootHex: string,
-  forget: ForgetReceiveMessageKey = forgetReceiveMessageKeyDurably,
+  forget: ForgetReceiveMessageKey = forgetReceiveMessageKey,
 ): Promise<boolean> => {
   let connectionRetirements = retirements.get(epc);
   const existing = connectionRetirements?.get(merkleRootHex);
@@ -97,7 +96,7 @@ export const forgetCompletedReceiveMessageKey = async (
   roomId: string,
   merkleRootHex: string,
   progress: ReceiveProgress | undefined,
-  forget: ForgetReceiveMessageKey = forgetReceiveMessageKeyDurably,
+  forget: ForgetReceiveMessageKey = forgetReceiveMessageKey,
 ): Promise<boolean> => {
   if (!isComplete(progress)) return false;
   return forgetMappedReceiveMessageKey(epc, roomId, merkleRootHex, forget);
@@ -153,7 +152,7 @@ export type ReceiveMessageKeySnapshot = NonNullable<
 export const forgetExpiredReceiveMessageKey = async (
   snapshot: ReceiveMessageKeySnapshot,
   stillAbsent: () => Promise<boolean>,
-  forget = forgetReceiveMessageKeyIfCurrentDurably,
+  forget = forgetReceiveMessageKeyIfCurrent,
 ): Promise<boolean> => {
   if (!snapshot.isCurrent()) return false;
   const retired = await forget(

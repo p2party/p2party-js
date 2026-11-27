@@ -53,6 +53,14 @@ message consumes one message-key step; its chunks share the authenticated
 ratchet header and use fresh nonces. Failed authentication rolls back the
 candidate receive state, and skipped-key storage is bounded.
 
+The browser keeps each connection’s ratchet roots, chain keys, skipped message
+keys, and sparse-PQ state in memory. A reload or replacement connection
+performs a fresh authenticated handshake. The database upgrade removes
+checkpoints created by older versions. Account identity keys and transfer
+history keep their existing storage lifetimes. Applications using the
+store-free `p2party/session` API can still explicitly export and restore a
+session and control how they protect the exported bytes.
+
 Each chunk frame is exactly 65,490 bytes:
 
 ```text

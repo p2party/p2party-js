@@ -37,11 +37,10 @@ import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 /**
  * Store-free protocol-v4 sparse-PQ controller.
  *
- * The class owns no Redux, IndexedDB, timers, or transport. Callers clone it,
- * perform one transition on the clone, persist `clone.serialize()` together
- * with the Double-Ratchet successor, adopt the clone, and only then dispatch
- * the returned exact frame. That ordering is what prevents crash-induced
- * OFFER/ADVANCE forks and root/message-key rollback.
+ * Callers stage an authenticated transition on a clone, publish its new
+ * state, then dispatch the exact resulting frame. Browser transports keep
+ * the state in memory and renegotiate on replacement. Store-free sessions
+ * can explicitly serialize it with the corresponding Double Ratchet state.
  */
 
 const EDGE_MAGIC = new Uint8Array([

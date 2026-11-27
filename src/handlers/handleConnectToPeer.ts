@@ -41,7 +41,7 @@ import { setPeer } from "../reducers/roomSlice";
 import cryptoMemory from "../cryptography/memory";
 import { wasmLoader } from "../cryptography/wasmLoader";
 import { resetRatchetGate } from "./ratchetGate";
-import { claimRatchetPersistence } from "./ratchetPersist";
+import { claimRatchetGeneration } from "./ratchetPersist";
 import {
   assertCanonicalEd25519Identity,
   isIdentityInitiator,
@@ -219,7 +219,7 @@ export const handleConnectToPeer = async (
       };
       // Claim and registry insertion remain inside the room-config critical
       // section, so a response sweep cannot miss this concrete transport.
-      claimRatchetPersistence(epc, roomId);
+      claimRatchetGeneration(epc, roomId);
       peerConnections.push(epc);
     } finally {
       roomIceConfigurationMutex.release();

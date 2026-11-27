@@ -312,7 +312,7 @@ const receive = (
   root: Uint8Array,
 ) =>
   handleReceiveMessage(frame, ROOM, "chat", epc, root, module, undefined, {
-    persistRatchetState: async () => undefined,
+    beforeRatchetCommit: async () => undefined,
     storeReceiveChunk: workerStore,
   });
 
@@ -590,7 +590,7 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
       module,
       undefined,
       {
-        persistRatchetState: async () => undefined,
+        beforeRatchetCommit: async () => undefined,
         storeReceiveChunk: (chunk) =>
           client.call("storeReceiveChunk", [
             chunk,
@@ -614,7 +614,7 @@ describe("receive storage failure is surfaced and not acknowledged", () => {
       module,
       undefined,
       {
-        persistRatchetState: async () => undefined,
+        beforeRatchetCommit: async () => undefined,
         storeReceiveChunk: async () => {
           throw new Error("Error: invalid receive chunk bounds");
         },

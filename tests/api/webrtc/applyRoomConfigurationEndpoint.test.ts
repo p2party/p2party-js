@@ -158,9 +158,6 @@ beforeAll(async () => {
   const blacklist = spyOn(dbApi, "getDBPeerIsBlacklisted").mockImplementation(
     async () => false,
   );
-  const deleteRow = spyOn(dbApi, "deleteRatchetSession").mockImplementation(
-    async () => undefined,
-  );
   ({ default: webrtcApi, snapshotPeerConnections } =
     await import("../../../src/api/webrtc"));
   ({ installPqHealingOrchestrator, destroyPqHealingOrchestrator } =
@@ -208,7 +205,6 @@ beforeAll(async () => {
 
   restore = () => {
     blacklist.mockRestore();
-    deleteRow.mockRestore();
   };
 });
 

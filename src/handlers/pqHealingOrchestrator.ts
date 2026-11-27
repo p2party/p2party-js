@@ -1,5 +1,5 @@
 import { PQ_HEAL_MAX_RETRIES } from "./pqHealingRuntime";
-import { persistClaimedRatchetState } from "./ratchetPersist";
+import { assertCurrentRatchetGeneration } from "./ratchetPersist";
 import { withEdgeCryptoMutationLock } from "./ratchetPersist";
 import {
   hasQueuedEdgeReceiveWork,
@@ -18,18 +18,13 @@ import type { SparsePqHealingState } from "./pqHealingRuntime";
 // routing, and application-traffic admission. Every state transition follows
 // the v4 edge-crypto transaction:
 //
-//   clone runtime → mutate/authenticate clone → persist ratchet + candidate
-//   checkpoint in ONE row → adopt clone → dispatch exact bytes
+//   clone → authenticate and mutate → check generation → adopt → dispatch
 //
-// under the same per-edge mutation lock the message send/receive paths use, so
-// a PQ transition can never interleave with a Double-Ratchet step. A storage
-// failure destroys the clone and leaves the live runtime byte-identical; the
-// next tick retries. Retry exhaustion and unauthenticated/forked control
-// frames fail the authenticated edge — there is no fallback root, epoch, or
-// suite.
+// The same per-edge lock serializes PQ and message-key transitions. Each
+// replacement connection negotiates fresh keys, including its initial epoch.
 
-/** Persist the (unchanged) live ratchet plus one candidate edge checkpoint. */
-export type PersistEdgeCheckpoint = (
+/** Observe a candidate transition in a test before its live adoption. */
+export type PqTransitionHook = (
   epc: IRTCPeerConnection,
   state: RatchetState,
   roomId: string,
@@ -43,8 +38,8 @@ export interface PqOrchestratorHooks {
   readonly failEdge: (reason: Error) => void;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => number;
-  /** Injectable persistence for fault-injection tests. */
-  readonly persistEdge?: PersistEdgeCheckpoint;
+  /** Optional pre-commit hook for fault-injection tests. */
+  readonly beforeCommit?: PqTransitionHook;
   /** Tick cadence for the due/retry timer; 0 disables the interval (tests). */
   readonly tickMs?: number;
 }
@@ -53,7 +48,7 @@ interface OrchestratorState {
   readonly roomId: string;
   readonly hooks: PqOrchestratorHooks;
   readonly now: () => number;
-  readonly persistEdge: PersistEdgeCheckpoint;
+  readonly beforeCommit?: PqTransitionHook;
   interval: ReturnType<typeof setInterval> | null;
   /** Serializes orchestrator-level operations (tick vs inbound frame). */
   busy: boolean;
@@ -113,28 +108,17 @@ const waitForApplicationReservations = (
 
 const DEFAULT_TICK_MS = 1_000;
 
-const defaultPersistEdge: PersistEdgeCheckpoint = (
-  epc,
-  state,
-  roomId,
-  serializeCandidate,
-) => persistClaimedRatchetState(epc, state, roomId, serializeCandidate);
-
 const fail = (message: string): never => {
   throw new Error(`pqHealingOrchestrator: ${message}`);
 };
 
-/**
- * A durable-write failure is transient: the live runtime is byte-identical and
- * the exchange recovers through the peer's (or our own) exact retransmit. It
- * must never be classified as a protocol fork.
- */
-class PqPersistenceError extends Error {
+/** A failed test checkpoint leaves the live runtime available for retransmission. */
+class PqTransitionInterrupted extends Error {
   constructor(cause: unknown) {
-    super("pqHealingOrchestrator: edge checkpoint persistence failed", {
+    super("pqHealingOrchestrator: edge transition interrupted", {
       cause,
     });
-    this.name = "PqPersistenceError";
+    this.name = "PqTransitionInterrupted";
   }
 }
 
@@ -170,17 +154,17 @@ const isEdgeQuiescentForHealing = (
   !hasQueuedEdgeReceiveWork(roomId, epc.withPeerId);
 
 /**
- * Run one durable PQ transition. `mutate` receives the CLONE and returns the
+ * Stage one authenticated PQ transition. `mutate` receives the CLONE and returns the
  * exact cell(s) to dispatch after adoption (empty for no-op transitions).
- * Duplicate responses (mutate returns `dispatch` with `persist: false`) are
- * sent without a write, exactly as persisted earlier.
+ * Duplicate responses (mutate returns `dispatch` with `changed: false`) are
+ * sent without a write, exactly as cached earlier.
  */
-const mutatePqDurably = async (
+const mutateLivePq = async (
   epc: IRTCPeerConnection,
   state: OrchestratorState,
   mutate: (
     candidate: SparsePqHealingState,
-  ) => Promise<{ dispatch: Uint8Array | null; persist: boolean }>,
+  ) => Promise<{ dispatch: Uint8Array | null; changed: boolean }>,
 ): Promise<void> =>
   withEdgeCryptoMutationLock(epc, async () => {
     if (state.destroyed || orchestrators.get(epc) !== state) return;
@@ -190,25 +174,29 @@ const mutatePqDurably = async (
       return fail("edge has no live PQ runtime or ratchet");
 
     const candidate = live.clone();
-    let outcome: { dispatch: Uint8Array | null; persist: boolean };
+    let outcome: { dispatch: Uint8Array | null; changed: boolean };
     try {
       outcome = await mutate(candidate);
-      if (outcome.persist) {
+      if (state.beforeCommit && outcome.changed) {
         try {
-          await state.persistEdge(epc, ratchet, state.roomId, () =>
+          await state.beforeCommit(epc, ratchet, state.roomId, () =>
             candidate.serialize(),
           );
-        } catch (persistError) {
-          throw new PqPersistenceError(persistError);
+        } catch (error) {
+          throw new PqTransitionInterrupted(error);
         }
-        if (
-          epc.pqHealingState !== live ||
-          state.destroyed ||
-          orchestrators.get(epc) !== state
-        )
-          throw new PqPersistenceError(
-            new Error("live PQ runtime changed during persistence"),
-          );
+      }
+      if (
+        state.destroyed ||
+        orchestrators.get(epc) !== state ||
+        epc.pqHealingState !== live
+      ) {
+        candidate.destroy();
+        return;
+      }
+      if (!state.beforeCommit)
+        assertCurrentRatchetGeneration(epc, state.roomId);
+      if (outcome.changed) {
         const previousEpoch = live.epoch;
         live.adopt(candidate);
         // adopt() moves the clone's active-key map INTO the live runtime, so
@@ -226,8 +214,8 @@ const mutatePqDurably = async (
     if (outcome.dispatch) {
       outcome.dispatch = Uint8Array.from(outcome.dispatch);
       if (!state.hooks.sendControlFrame(outcome.dispatch))
-        // The lane is closed; the persisted outbox retries on a later tick or
-        // on the replacement transport after a fresh handshake.
+        // The lane is closed; the live outbox retries on a later tick or
+        // while this authenticated generation is live.
         outcome.dispatch.fill(0);
     }
   });
@@ -249,7 +237,7 @@ export const installPqHealingOrchestrator = (
     roomId,
     hooks,
     now: hooks.now ?? Date.now,
-    persistEdge: hooks.persistEdge ?? defaultPersistEdge,
+    beforeCommit: hooks.beforeCommit,
     interval: null,
     busy: false,
     inboundBlocked: 0,
@@ -281,8 +269,8 @@ const failEdgeOnce = (state: OrchestratorState, reason: Error): void => {
 };
 
 /**
- * One due/retry pass. Retransmits the exact persisted control frame when its
- * 5-second deadline passed (durably counting the attempt first), fails the
+ * One due/retry pass. Retransmits the exact pending control frame when its
+ * 5-second deadline passed (counting the attempt in the live epoch first), fails the
  * edge after the 8-attempt budget, and starts a due local exchange only when
  * the stable role owns the turn and the edge is at a quiescent boundary.
  * Exported for deterministic tests; the installed interval calls it.
@@ -306,11 +294,11 @@ export const tickPqHealing = async (epc: IRTCPeerConnection): Promise<void> => {
         );
         return;
       }
-      await mutatePqDurably(epc, state, (candidate) => {
+      await mutateLivePq(epc, state, (candidate) => {
         candidate.markPendingDispatched(now);
         const frame = candidate.copyPendingFrame();
-        if (!frame) return fail("retry tick found no persisted outbox");
-        return Promise.resolve({ dispatch: frame, persist: true });
+        if (!frame) return fail("retry tick found no live outbox");
+        return Promise.resolve({ dispatch: frame, changed: true });
       });
       return;
     }
@@ -322,21 +310,21 @@ export const tickPqHealing = async (epc: IRTCPeerConnection): Promise<void> => {
       isEdgeQuiescentForHealing(epc, state.roomId)
     ) {
       state.localInitiating = true;
-      await mutatePqDurably(epc, state, async (candidate) => {
+      await mutateLivePq(epc, state, async (candidate) => {
         // Admission or a real job may have appeared while the crypto lock was
-        // held by another durable write. The gate above blocks later arrivals.
+        // held by another transition. The gate above blocks later arrivals.
         if (
           !isEdgeQuiescentForHealing(epc, state.roomId) ||
           state.inboundBlocked > 0
         )
-          return { dispatch: null, persist: false };
+          return { dispatch: null, changed: false };
         const frame = await candidate.prepareHealingOffer(now);
         candidate.markPendingDispatched(now);
-        return { dispatch: frame, persist: true };
+        return { dispatch: frame, changed: true };
       });
     }
   } catch (error) {
-    // A failed durable transition left the live runtime untouched; retry on a
+    // A failed transition left the live runtime untouched; retry on a
     // later tick. Only exhaustion/forks fail the edge.
     console.error("pqHealingOrchestrator: tick transition failed", error);
   } finally {
@@ -348,8 +336,8 @@ export const tickPqHealing = async (epc: IRTCPeerConnection): Promise<void> => {
 /**
  * Route one authenticated-transport FRAME_TYPE_PQ_CONTROL cell. Closes the
  * local application gate, drains queued inbound frames to the quiescent
- * boundary, then runs the exact durable OFFER/ADVANCE/ACK ordering. An exact
- * duplicate re-emits the exact persisted response without a write. Any
+ * boundary, then runs the exact authenticated OFFER/ADVANCE/ACK ordering. An exact
+ * duplicate re-emits the exact cached response without a write. Any
  * authentication failure is a fork/replay outside the protocol and fails the
  * authenticated edge.
  */
@@ -377,23 +365,23 @@ export const handleInboundPqControlFrame = async (
     // the transition; new first-chunks must not race the epoch commit.
     await waitForEdgeReceiveQuiescence(roomId, epc.withPeerId);
     const now = state.now();
-    await mutatePqDurably(epc, state, async (candidate) => {
+    await mutateLivePq(epc, state, async (candidate) => {
       const result = await candidate.acceptControlFrame(
         Uint8Array.from(frame),
         now,
       );
-      if (!result.changed) return { dispatch: result.dispatch, persist: false };
+      if (!result.changed) return { dispatch: result.dispatch, changed: false };
       // A produced ADVANCE enters the retry schedule with its dispatch.
       if (result.dispatch !== null && candidate.pendingRetryAt !== null)
         candidate.markPendingDispatched(now);
-      return { dispatch: result.dispatch, persist: true };
+      return { dispatch: result.dispatch, changed: true };
     });
   } catch (error) {
-    if (error instanceof PqPersistenceError) {
+    if (error instanceof PqTransitionInterrupted) {
       // Live state is untouched; the peer's exact retransmit reprocesses the
-      // same slot once storage recovers.
+      // same slot on a later delivery.
       console.error(
-        "pqHealingOrchestrator: inbound transition not durable",
+        "pqHealingOrchestrator: inbound transition interrupted",
         error,
       );
       return;

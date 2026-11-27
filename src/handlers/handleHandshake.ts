@@ -7,10 +7,8 @@ import {
   rejectRatchetGate,
 } from "./ratchetGate";
 import {
-  claimRatchetPersistence,
-  persistAndActivateClaimedRatchetState,
-  type PersistInitialRatchetState,
-  type RollbackInitialRatchetState,
+  assertCurrentRatchetGeneration,
+  claimRatchetGeneration,
 } from "./ratchetPersist";
 import { SparsePqHealingState } from "./pqHealingRuntime";
 import { HandshakeFailure } from "./handshakeFailure";
@@ -361,67 +359,29 @@ export interface EdgeCryptoCandidate {
   readonly pqRuntime: SparsePqHealingState;
 }
 
-/**
- * Atomically persist the handshake-established Double Ratchet together with
- * the initial sparse-PQ checkpoint in ONE stable-edge row, then synchronously
- * install both on the live connection. The candidate serializer hook is
- * installed before the row is written, so even the very first persisted row
- * carries a non-null encrypted edge state. `beforeInstall` runs inside the
- * synchronous activation (lease/gate checks); if it — or persistence — throws,
- * the hook is removed, the seed row is rolled back by the persistence layer,
- * nothing is installed, and ownership of both candidates stays with the
- * caller (which must wipe/destroy them). Ownership transfers to `epc` only
- * when this resolves.
- */
-export const persistAndActivateEdgeCrypto = async (
+/** Install both freshly authenticated ratchets in RAM under the current gate lease. */
+export const activateEdgeCrypto = (
   epc: IRTCPeerConnection,
   roomId: string,
   candidate: EdgeCryptoCandidate,
   beforeInstall: () => void,
-  persist?: PersistInitialRatchetState,
-  rollback?: RollbackInitialRatchetState,
-): Promise<void> => {
-  const serializer = (): Uint8Array => candidate.pqRuntime.serialize();
-  epc.serializeEdgeCryptoState = serializer;
-  try {
-    await persistAndActivateClaimedRatchetState(
-      epc,
-      candidate.state,
-      roomId,
-      () => {
-        beforeInstall();
-        if (epc.ratchetState) wipeRatchet(epc.ratchetState);
-        epc.ratchetState = candidate.state;
-        epc.pqHealingState?.destroy();
-        epc.pqHealingState = candidate.pqRuntime;
-        // The per-edge message-key cache IS the runtime's active combined
-        // receive-key collection, so every later persisted edge checkpoint
-        // carries the exact keys the receive path is using.
-        epc.messageKeyCache = candidate.pqRuntime.activeReceiveKeys;
-      },
-      persist,
-      rollback,
-    );
-  } catch (error) {
-    if (epc.serializeEdgeCryptoState === serializer)
-      epc.serializeEdgeCryptoState = undefined;
-    throw error;
-  }
+): void => {
+  assertCurrentRatchetGeneration(epc, roomId);
+  // Resolving the gate queues its waiters. Install both handles synchronously
+  // before any waiting channel can resume.
+  beforeInstall();
+  if (epc.ratchetState) wipeRatchet(epc.ratchetState);
+  epc.pqHealingState?.destroy();
+  epc.ratchetState = candidate.state;
+  epc.pqHealingState = candidate.pqRuntime;
+  epc.messageKeyCache = candidate.pqRuntime.activeReceiveKeys;
 };
 
 /**
  * Orchestrates the handshake on the persistent `main` channel (spec §5): verifies
  * the DTLS fingerprints (getStats vs SDP), runs the triple-confirmation core,
- * then — ONLY
- * on success — seeds + persists the (wrapped) ratchet together with the
- * initial sparse-PQ checkpoint in one row, sets epc.ratchetState /
- * epc.pqHealingState, and opens the per-peer gate. Any failure (fingerprint
- * mismatch,
- * CPace/interactive-3DH error, key-confirmation mismatch, a bad/short frame,
- * a transport or
- * persistence error) rejects the gate and re-throws, having persisted NOTHING —
- * the caller tears the channel down. No PQ root, binding, or runtime survives
- * a failure path outside this function.
+ * then installs both ratchets on the authenticated connection and opens its gate.
+ * A rejected handshake discards both candidates.
  */
 export const runHandshake = async (
   epc: IRTCPeerConnection,
@@ -508,20 +468,15 @@ export const runHandshake = async (
     // Invalidate queued mutations from any replaced PC before writing this new
     // handshake seed. The stable-edge persistence lock makes this seed land
     // after any old write already in flight.
-    claimRatchetPersistence(epc, roomId);
-    await persistAndActivateEdgeCrypto(
-      epc,
-      roomId,
-      { state, pqRuntime },
-      () => {
-        if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
-          throw new Error(
-            "Handshake transport lease was replaced during persistence",
-          );
-        if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
-          throw new Error("Handshake transport gate is already settled");
-      },
-    );
+    claimRatchetGeneration(epc, roomId);
+    activateEdgeCrypto(epc, roomId, { state, pqRuntime }, () => {
+      if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
+        throw new Error(
+          "Handshake transport lease was replaced during persistence",
+        );
+      if (!openRatchetGate(roomId, epc.withPeerId, gateLease))
+        throw new Error("Handshake transport gate is already settled");
+    });
     // Ownership of both candidates transferred to the live connection.
     state = null;
     pqRuntime = null;

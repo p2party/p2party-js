@@ -2,10 +2,8 @@ import {
   adoptRatchet,
   cloneRatchet,
   ratchetEncrypt,
-  serializeRatchet,
   wipeRatchet,
 } from "../cryptography/ratchet";
-import { deleteRatchetSession, setRatchetSession } from "../db/api";
 import { MAX_SKIP_SESSION } from "../utils/constants";
 import {
   decryptMessageChunk,
@@ -17,71 +15,26 @@ import { parseChunkFrameHeader } from "./chunkFrame";
 import type { LibCrypto } from "../cryptography/libcrypto";
 import type { IRTCPeerConnection } from "../api/webrtc/interfaces";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
-import type { RatchetSession } from "../db/types";
 import type { RatchetHeader, RatchetState } from "../cryptography/ratchet";
 import type { DecryptedChunk } from "./messageChunkCrypto";
 
-const wipeSerializedSession = (session: RatchetSession): void => {
-  new Uint8Array(session.rootKey).fill(0);
-  if (session.sendingChainKey) new Uint8Array(session.sendingChainKey).fill(0);
-  if (session.receivingChainKey)
-    new Uint8Array(session.receivingChainKey).fill(0);
-  new Uint8Array(session.dhSelfSec).fill(0);
-  for (const skipped of session.skippedMessageKeys)
-    new Uint8Array(skipped.messageKey).fill(0);
-  if (session.edgeCryptoState) new Uint8Array(session.edgeCryptoState).fill(0);
-};
-
-const persistenceKey = (roomId: string, peerPublicKey: string): string =>
+const edgeIdentityKey = (roomId: string, peerPublicKey: string): string =>
   `${roomId.length}:${roomId}${peerPublicKey.length}:${peerPublicKey}`;
 
-// Persistence must be ordered by the stable room/identity edge, not by one
-// transient RTCPeerConnection. A replacement connection can exist while an old
-// worker write is still in flight.
-const edgePersistenceTails = new Map<string, Promise<void>>();
+// Only the current transport generation may publish a state transition.
 const edgeOwnerTokens = new Map<string, symbol>();
 const epcOwnerTokens = new WeakMap<IRTCPeerConnection, symbol>();
 
-const withEdgePersistenceLock = async <T>(
-  roomId: string,
-  peerPublicKey: string,
-  operation: () => Promise<T>,
-): Promise<T> => {
-  const key = persistenceKey(roomId, peerPublicKey);
-  const previous = edgePersistenceTails.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.catch(() => undefined).then(() => held);
-  edgePersistenceTails.set(key, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (edgePersistenceTails.get(key) === tail)
-      edgePersistenceTails.delete(key);
-  }
-};
-
-/**
- * Claim the stable persistence edge before a replacement handshake writes its
- * seed. The synchronous claim invalidates queued mutations from the old PC;
- * the edge-wide write lock ensures any already-running old write finishes
- * before the replacement seed is written last.
- */
-export const claimRatchetPersistence = (
+/** Claim this authenticated identity edge for its new transport generation. */
+export const claimRatchetGeneration = (
   epc: IRTCPeerConnection,
   roomId: string,
 ): void => {
-  const key = persistenceKey(roomId, epc.withPeerPublicKey);
+  const key = edgeIdentityKey(roomId, epc.withPeerPublicKey);
   const existing = epcOwnerTokens.get(epc);
   if (existing) {
     if (edgeOwnerTokens.get(key) !== existing)
-      throw new Error(
-        "ratchet persistence: stale connection cannot reclaim edge",
-      );
+      throw new Error("browser ratchet: stale connection cannot reclaim edge");
     return;
   }
   const token = Symbol(key);
@@ -89,133 +42,29 @@ export const claimRatchetPersistence = (
   edgeOwnerTokens.set(key, token);
 };
 
-/**
- * Retire a torn-down connection's claim on its edge's persisted ratchet row and
- * delete the row, so no wrapped key material of a dead generation stays on
- * disk. Called by the shared edge teardown (generation retire, explicit
- * disconnect, failed handshake, every other transport close).
- *
- * Only the connection that currently owns the edge's row deletes it. Once a
- * replacement has claimed the edge (`claimRatchetPersistence`), the row is the
- * replacement's, or is about to be, and a late teardown of its predecessor
- * leaves it alone.
- *
- * The decision is synchronous and so is the enqueue: ownership is revoked at
- * once, so every write this connection still has queued fails its owner check
- * and none it starts later can reclaim the edge, and the delete takes its place
- * in the per-edge lock now. It therefore runs after any write already queued
- * for the edge and before the seed of any replacement that claims the edge
- * afterwards.
- */
-export const releaseRatchetPersistence = (
-  epc: IRTCPeerConnection,
-  roomId: string,
-  remove: RollbackInitialRatchetState = deleteRatchetSession,
-): Promise<void> => {
-  const token = epcOwnerTokens.get(epc);
-  if (!token) return Promise.resolve();
-  const peerPublicKey = epc.withPeerPublicKey;
-  const key = persistenceKey(roomId, peerPublicKey);
-  if (edgeOwnerTokens.get(key) !== token) return Promise.resolve();
-  edgeOwnerTokens.delete(key);
-  return withEdgePersistenceLock(roomId, peerPublicKey, () =>
-    remove(roomId, peerPublicKey),
-  );
-};
-
-const assertCurrentPersistenceOwner = (
+/** Revocation is synchronous so queued work cannot reactivate a retired edge. */
+export const releaseRatchetGeneration = (
   epc: IRTCPeerConnection,
   roomId: string,
 ): void => {
-  const key = persistenceKey(roomId, epc.withPeerPublicKey);
+  const owner = epcOwnerTokens.get(epc);
+  if (!owner) return;
+  const key = edgeIdentityKey(roomId, epc.withPeerPublicKey);
+  if (edgeOwnerTokens.get(key) === owner) edgeOwnerTokens.delete(key);
+};
+
+export const assertCurrentRatchetGeneration = (
+  epc: IRTCPeerConnection,
+  roomId: string,
+): void => {
+  const key = edgeIdentityKey(roomId, epc.withPeerPublicKey);
   const token = epcOwnerTokens.get(epc);
   if (!token || edgeOwnerTokens.get(key) !== token)
-    throw new Error("ratchet persistence: stale connection owner");
+    throw new Error("browser ratchet: stale connection owner");
 };
 
-/**
- * Persist one live ratchet state. The worker owns the at-rest wrapping; this
- * boundary owns and erases the plaintext serialization copy after postMessage
- * has completed.
- */
-const persistRatchetStateUnlocked = async (
-  state: RatchetState,
-  roomId: string,
-  peerPublicKey: string,
-  peerId: string,
-  edgeCryptoState: Uint8Array | null = null,
-): Promise<void> => {
-  const s = serializeRatchet(state);
-  const session: RatchetSession = {
-    rootSuite: s.rootSuite,
-    roomId,
-    peerPublicKey,
-    peerId,
-    rootKey: s.rootKey,
-    sendingChainKey: s.sendingChainKey,
-    receivingChainKey: s.receivingChainKey,
-    dhSelfPub: s.dhSelfPub,
-    dhSelfSec: s.dhSelfSec,
-    dhRemotePub: s.dhRemotePub,
-    Ns: s.Ns,
-    Nr: s.Nr,
-    PN: s.PN,
-    skippedMessageKeys: s.skippedMessageKeys,
-    edgeCryptoState:
-      edgeCryptoState === null
-        ? null
-        : (edgeCryptoState.slice().buffer as ArrayBuffer),
-    updatedAt: Date.now(),
-  };
-  try {
-    await setRatchetSession(session);
-  } finally {
-    wipeSerializedSession(session);
-  }
-};
-
-export const persistRatchetState = async (
-  state: RatchetState,
-  roomId: string,
-  peerPublicKey: string,
-  peerId: string,
-  edgeCryptoState: Uint8Array | null = null,
-): Promise<void> =>
-  withEdgePersistenceLock(roomId, peerPublicKey, () =>
-    persistRatchetStateUnlocked(
-      state,
-      roomId,
-      peerPublicKey,
-      peerId,
-      edgeCryptoState,
-    ),
-  );
-
-export const persistClaimedRatchetState = async (
-  epc: IRTCPeerConnection,
-  state: RatchetState,
-  roomId: string,
-  edgeCryptoStateOverride?: () => Uint8Array,
-): Promise<void> =>
-  withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
-    assertCurrentPersistenceOwner(epc, roomId);
-    const edgeCryptoState =
-      edgeCryptoStateOverride?.() ?? epc.serializeEdgeCryptoState?.() ?? null;
-    try {
-      await persistRatchetStateUnlocked(
-        state,
-        roomId,
-        epc.withPeerPublicKey,
-        epc.withPeerId,
-        edgeCryptoState,
-      );
-    } finally {
-      edgeCryptoState?.fill(0);
-    }
-    assertCurrentPersistenceOwner(epc, roomId);
-  });
-
-export type PersistInitialRatchetState = (
+/** Optional instrumentation for testing staged transitions. */
+export type RatchetTransitionHook = (
   state: RatchetState,
   roomId: string,
   peerPublicKey: string,
@@ -223,68 +72,8 @@ export type PersistInitialRatchetState = (
   edgeCryptoState?: Uint8Array | null,
 ) => Promise<void>;
 
-export type RollbackInitialRatchetState = (
-  roomId: string,
-  peerPublicKey: string,
-) => Promise<void>;
-
-/**
- * Atomically order the initial durable seed and its synchronous gate/RAM
- * activation under the stable-edge lock. If close/replacement settles the gate
- * while the worker write is in flight, delete that just-written seed before a
- * replacement is allowed to write. This prevents a never-established root from
- * being restored later.
- */
-export const persistAndActivateClaimedRatchetState = async (
-  epc: IRTCPeerConnection,
-  state: RatchetState,
-  roomId: string,
-  activate: () => void,
-  persist: PersistInitialRatchetState = persistRatchetStateUnlocked,
-  rollback: RollbackInitialRatchetState = deleteRatchetSession,
-): Promise<void> =>
-  withEdgePersistenceLock(roomId, epc.withPeerPublicKey, async () => {
-    assertCurrentPersistenceOwner(epc, roomId);
-    let writeStarted = false;
-    const edgeCryptoState = epc.serializeEdgeCryptoState?.() ?? null;
-    try {
-      writeStarted = true;
-      await persist(
-        state,
-        roomId,
-        epc.withPeerPublicKey,
-        epc.withPeerId,
-        edgeCryptoState,
-      );
-      assertCurrentPersistenceOwner(epc, roomId);
-      // Must remain synchronous: resolving the gate schedules its waiters for
-      // a later microtask, so activate can install epc.ratchetState in the
-      // same stack before any queued channel resumes.
-      activate();
-    } catch (error) {
-      if (writeStarted) {
-        try {
-          await rollback(roomId, epc.withPeerPublicKey);
-        } catch (rollbackError) {
-          throw new AggregateError(
-            [error, rollbackError],
-            "Ratchet establishment failed and persisted-seed rollback failed",
-            { cause: rollbackError },
-          );
-        }
-      }
-      throw error;
-    } finally {
-      edgeCryptoState?.fill(0);
-    }
-  });
-
-export type PersistRatchetState = typeof persistRatchetState;
-
-// Ratchet transitions contain an async durability boundary. Without a per-edge
-// lock, two concurrent sends can clone the same state and derive the same
-// message key, while concurrent send/receive writes can persist snapshots out
-// of order. Keep the queue outside Redux/DB and key it by the live transport.
+// Serialize sends, receives and PQ transitions on the live transport so two
+// concurrent operations cannot derive or publish from the same state.
 const ratchetMutationTails = new WeakMap<IRTCPeerConnection, Promise<void>>();
 
 export const withEdgeCryptoMutationLock = async <T>(
@@ -311,45 +100,31 @@ export const withEdgeCryptoMutationLock = async <T>(
 
 interface StagedRatchetMutation<T> {
   value: T;
-  /** True only when `candidate` contains a successor that must be durable. */
+  /** True only when `candidate` contains a successor to adopt. */
   advanced: boolean;
-  /**
-   * Serialize the STAGED encrypted edge checkpoint (for example the PQ runtime
-   * with the staged active receive-key map) for this durable write. When
-   * absent, the connection's live `serializeEdgeCryptoState` hook is used.
-   * This is what lets a staged active-key mutation become durable in the same
-   * row/transaction as the ratchet successor, before the RAM cache publishes.
-   */
+  /** Optional diagnostic snapshot, evaluated only by an explicit test hook. */
   stageEdgeCryptoState?: () => Uint8Array;
   /** Publish non-ratchet side state (for example the message-key cache). */
   commit?: () => void;
-  /** Erase staged side state if persistence/adoption cannot complete. */
+  /** Erase staged side state if adoption cannot complete. */
   rollback?: () => void;
 }
 
-/**
- * Run one mutation as a write-ahead ratchet transaction:
- *
- *   clone live -> mutate clone -> persist clone -> adopt live -> publish cache
- *
- * No caller-observable ciphertext/plaintext is returned before the successor is
- * durable. A failed write leaves the live state untouched and erases staged
- * secrets. Successful persistence followed by an in-process failure may consume
- * one ratchet step without sending/delivering it; that is an availability loss,
- * but it fails closed and can never reuse a message key after restart.
- */
-const mutateRatchetDurably = async <T>(
+/** Stage a transition, recheck the live generation and adopt it before exposing its result. */
+const mutateLiveRatchet = async <T>(
   epc: IRTCPeerConnection,
   roomId: string,
   stage: (candidate: RatchetState) => StagedRatchetMutation<T>,
-  persist: PersistRatchetState,
+  beforeCommit: RatchetTransitionHook | undefined,
   precondition?: { check: () => Promise<boolean>; skipped: T },
 ): Promise<T> =>
   withEdgeCryptoMutationLock(epc, async () => {
     if (precondition && !(await precondition.check()))
       return precondition.skipped;
+    const requireOwner = !beforeCommit || epcOwnerTokens.has(epc);
+    if (requireOwner) assertCurrentRatchetGeneration(epc, roomId);
     const live = epc.ratchetState;
-    if (!live) throw new Error("ratchet persistence: no live ratchet state");
+    if (!live) throw new Error("browser ratchet: no live ratchet state");
 
     const candidate = cloneRatchet(live);
     let staged: StagedRatchetMutation<T> | undefined;
@@ -357,40 +132,13 @@ const mutateRatchetDurably = async <T>(
     try {
       staged = stage(candidate);
       if (staged.advanced) {
-        const stagedEdgeSerializer = staged.stageEdgeCryptoState;
-        if (persist === persistRatchetState) {
-          await withEdgePersistenceLock(
-            roomId,
-            epc.withPeerPublicKey,
-            async () => {
-              assertCurrentPersistenceOwner(epc, roomId);
-              if (epc.ratchetState !== live)
-                throw new Error("ratchet persistence: live state changed");
-              const edgeCryptoState =
-                stagedEdgeSerializer?.() ??
-                epc.serializeEdgeCryptoState?.() ??
-                null;
-              try {
-                await persistRatchetStateUnlocked(
-                  candidate,
-                  roomId,
-                  epc.withPeerPublicKey,
-                  epc.withPeerId,
-                  edgeCryptoState,
-                );
-              } finally {
-                edgeCryptoState?.fill(0);
-              }
-              assertCurrentPersistenceOwner(epc, roomId);
-            },
-          );
-        } else {
+        if (beforeCommit) {
           const edgeCryptoState =
-            stagedEdgeSerializer?.() ??
-            epc.serializeEdgeCryptoState?.() ??
+            staged.stageEdgeCryptoState?.() ??
+            epc.pqHealingState?.serialize() ??
             null;
           try {
-            await persist(
+            await beforeCommit(
               candidate,
               roomId,
               epc.withPeerPublicKey,
@@ -400,12 +148,12 @@ const mutateRatchetDurably = async <T>(
           } finally {
             edgeCryptoState?.fill(0);
           }
+          if (requireOwner) assertCurrentRatchetGeneration(epc, roomId);
         }
 
-        // A connection teardown/handshake replacement must not let an old async
-        // write overwrite a newly installed live handle.
+        // Adoption and publication happen together in this turn.
         if (epc.ratchetState !== live)
-          throw new Error("ratchet persistence: live state changed");
+          throw new Error("browser ratchet: live state changed");
 
         adoptRatchet(live, candidate);
         adopted = true;
@@ -427,7 +175,7 @@ const mutateRatchetDurably = async <T>(
 const classicalOnlySendTestEdges = new WeakSet<IRTCPeerConnection>();
 
 /**
- * TESTS ONLY. Lets `ratchetEncryptDurably` step this edge without an
+ * TESTS ONLY. Lets `advanceSendingRatchet` step this edge without an
  * installed PQ runtime; the step then returns a null PQ context, which only
  * `sealChunkClassicalOnlyForTests` accepts. Without this the step refuses
  * such an edge. tests/handlers/messageChunkCrypto.test.ts checks that no
@@ -440,7 +188,7 @@ export const allowClassicalOnlySendForTests = (
 };
 
 /**
- * Advance the sending chain exactly once, durably, before its key/header can be
+ * Advance the sending chain exactly once before its key/header can be
  * used to build a frame. The returned message key remains caller-owned, as is
  * the returned OWNED copy of the current PQ message context. Capturing the
  * context and counting the application message happen inside the same edge
@@ -448,29 +196,29 @@ export const allowClassicalOnlySendForTests = (
  * cannot interleave.
  *
  * A live edge always installs its PQ runtime together with its ratchet
- * (`persistAndActivateEdgeCrypto`), and every v4 message key is PQ-combined.
+ * (`activateEdgeCrypto`), and every v4 message key is PQ-combined.
  * An edge with a ratchet but no PQ runtime therefore means that invariant
  * broke; the step rejects before touching the ratchet. The context is null
  * only for an edge a test opted in with `allowClassicalOnlySendForTests`.
  */
-export const ratchetEncryptDurably = async (
+export const advanceSendingRatchet = async (
   epc: IRTCPeerConnection,
   roomId: string,
   module: LibCrypto,
-  persist: PersistRatchetState = persistRatchetState,
+  beforeCommit?: RatchetTransitionHook,
 ): Promise<{
   messageKey: Uint8Array;
   header: RatchetHeader;
   pqContext: PqMessageKeyContext | null;
 }> =>
-  mutateRatchetDurably(
+  mutateLiveRatchet(
     epc,
     roomId,
     (candidate) => {
       const pq = epc.pqHealingState;
       if (!pq && !classicalOnlySendTestEdges.has(epc))
         throw new Error(
-          "ratchet persistence: edge has no PQ runtime; refusing a classical-only encrypt",
+          "browser ratchet: edge has no PQ runtime; refusing a classical-only encrypt",
         );
       const stepped = ratchetEncrypt(candidate, module);
       let pqContext: PqMessageKeyContext | null = null;
@@ -499,7 +247,7 @@ export const ratchetEncryptDurably = async (
         },
       };
     },
-    persist,
+    beforeCommit,
   );
 
 // Edges a test explicitly allowed to receive under raw classical ratchet keys.
@@ -509,8 +257,8 @@ const classicalOnlyReceiveTestEdges = new WeakSet<IRTCPeerConnection>();
 /**
  * TESTS ONLY. Lets this edge receive without an installed PQ runtime, under
  * raw classical ratchet keys (`decryptMessageChunkClassicalOnlyForTests`),
- * with the classical key kept in the persisted skipped map until retirement.
- * Without this, `decryptMessageChunkDurably` refuses such an edge.
+ * with the classical key kept in the skipped map until retirement.
+ * Without this, `decryptChunkWithLiveRatchet` refuses such an edge.
  * tests/handlers/messageChunkCrypto.test.ts checks that no production module
  * calls it.
  */
@@ -522,33 +270,32 @@ export const allowClassicalOnlyReceiveForTests = (
 
 /**
  * Decrypt one inbound chunk with a staged state/cache. An authenticated ratchet
- * advance becomes visible only after its snapshot is durable; persistence
- * failure rejects without advancing live state, caching a key, or exposing the
- * decrypted bytes. Cache hits do not advance or persist the ratchet.
+ * advance is adopted before exposing decrypted bytes. A cache hit reuses the
+ * message key held by this live generation.
  *
  * A live edge always installs its PQ runtime together with its ratchet
- * (`persistAndActivateEdgeCrypto`), and every v4 message key is PQ-combined.
+ * (`activateEdgeCrypto`), and every v4 message key is PQ-combined.
  * An edge with a ratchet but no PQ runtime therefore means that invariant
  * broke; the decrypt rejects before touching the ratchet rather than falling
  * back to the raw classical key.
  */
-export const decryptMessageChunkDurably = async (
+export const decryptChunkWithLiveRatchet = async (
   epc: IRTCPeerConnection,
   roomId: string,
   frame: Uint8Array,
   cache: Map<string, Uint8Array>,
   merkleRoot: Uint8Array,
   module: LibCrypto,
-  persist: PersistRatchetState = persistRatchetState,
+  beforeCommit?: RatchetTransitionHook,
 ): Promise<DecryptedChunk> =>
-  mutateRatchetDurably(
+  mutateLiveRatchet(
     epc,
     roomId,
     (candidate) => {
       const pq = epc.pqHealingState;
       if (!pq && !classicalOnlyReceiveTestEdges.has(epc))
         throw new Error(
-          "ratchet persistence: edge has no PQ runtime; refusing a classical-only decrypt",
+          "browser ratchet: edge has no PQ runtime; refusing a classical-only decrypt",
         );
       const { header, pqEpoch } = parseChunkFrameHeader(frame);
       const cacheKey = messageCacheKey(
@@ -581,15 +328,12 @@ export const decryptMessageChunkDurably = async (
       const stagedMessageKey = stagedCache.get(cacheKey);
       if (!stagedMessageKey || cache.has(cacheKey)) {
         decrypted.decrypted?.fill(0);
-        throw new Error("ratchet persistence: invalid staged receive cache");
+        throw new Error("browser ratchet: invalid staged receive cache");
       }
 
       if (pq) {
-        // v4: the staged key is ALREADY PQ-combined. It lives exclusively in
-        // the epoch-bound active receive-key collection, persisted inside the
-        // encrypted edge checkpoint in the same row as the ratchet successor.
-        // It must never enter `candidate.skipped` — a restore would either
-        // combine it a second time or misparse it as a classical skipped key.
+        // This epoch-bound key is already PQ-combined; keep it out of the
+        // classical skipped-key collection.
         return {
           value: decrypted,
           advanced: true,
@@ -607,12 +351,9 @@ export const decryptMessageChunkDurably = async (
         };
       }
 
-      // Test-only classical path (allowClassicalOnlyReceiveForTests): retain
-      // an independently owned copy in the persisted skipped-key map until the
-      // authoritative chunk manifest completes. A restored state can therefore
-      // rebuild the RAM cache and decrypt the remaining chunks.
-      const durableMessageKey = Uint8Array.from(stagedMessageKey);
-      candidate.skipped.set(cacheKey, durableMessageKey);
+      // A classical-only test edge keeps an independently owned skipped key.
+      const skippedKey = Uint8Array.from(stagedMessageKey);
+      candidate.skipped.set(cacheKey, skippedKey);
       while (candidate.skipped.size > MAX_SKIP_SESSION) {
         const oldest = candidate.skipped.keys().next().value as
           string | undefined;
@@ -626,44 +367,42 @@ export const decryptMessageChunkDurably = async (
         advanced: true,
         commit: () => cache.set(cacheKey, stagedMessageKey),
         rollback: () => {
-          durableMessageKey.fill(0);
+          skippedKey.fill(0);
           stagedMessageKey.fill(0);
           decrypted.decrypted?.fill(0);
         },
       };
     },
-    persist,
+    beforeCommit,
   );
 
 /**
- * Durably retire the active receive key after the atomic chunk manifest reports
- * completion, then erase the RAM cache copy. If persistence fails, both copies
- * remain usable for an idempotent retransmit/retry rather than diverging.
+ * Erase the active receive key when the atomic chunk manifest is complete.
  */
-export const forgetReceiveMessageKeyIfCurrentDurably = async (
+export const forgetReceiveMessageKeyIfCurrent = async (
   epc: IRTCPeerConnection,
   roomId: string,
   cache: Map<string, Uint8Array>,
   cacheKey: string,
   canRetire: (() => Promise<boolean>) | undefined,
-  persist: PersistRatchetState = persistRatchetState,
+  beforeCommit?: RatchetTransitionHook,
 ): Promise<boolean> =>
-  mutateRatchetDurably(
+  mutateLiveRatchet(
     epc,
     roomId,
     (candidate) => {
       const pq = epc.pqHealingState;
       if (pq) {
-        // v4: retire the combined key from the STAGED active-key collection so
-        // its removal is durable in the encrypted edge checkpoint before the
-        // RAM copy is wiped. The classical skipped map never held it.
+        // A PQ-combined key belongs only to the live epoch-bound cache.
         if (!cache.has(cacheKey)) return { value: true, advanced: false };
-        const stagedCache = new Map(cache);
-        stagedCache.delete(cacheKey);
         return {
           value: true,
           advanced: true,
-          stageEdgeCryptoState: () => pq.serialize(stagedCache),
+          stageEdgeCryptoState: () => {
+            const view = new Map(cache);
+            view.delete(cacheKey);
+            return pq.serialize(view);
+          },
           commit: () => {
             cache.get(cacheKey)?.fill(0);
             cache.delete(cacheKey);
@@ -671,47 +410,37 @@ export const forgetReceiveMessageKeyIfCurrentDurably = async (
         };
       }
 
-      const durableMessageKey = candidate.skipped.get(cacheKey);
-      if (durableMessageKey) {
+      const skippedKey = candidate.skipped.get(cacheKey);
+      if (skippedKey) {
         candidate.skipped.delete(cacheKey);
-        durableMessageKey.fill(0);
+        skippedKey.fill(0);
       }
       return {
         value: true,
-        advanced: durableMessageKey !== undefined,
+        advanced: skippedKey !== undefined,
         commit: () => {
           cache.get(cacheKey)?.fill(0);
           cache.delete(cacheKey);
         },
       };
     },
-    persist,
+    beforeCommit,
     canRetire ? { check: canRetire, skipped: false } : undefined,
   );
 
-export const forgetReceiveMessageKeyDurably = async (
+export const forgetReceiveMessageKey = async (
   epc: IRTCPeerConnection,
   roomId: string,
   cache: Map<string, Uint8Array>,
   cacheKey: string,
-  persist: PersistRatchetState = persistRatchetState,
+  beforeCommit?: RatchetTransitionHook,
 ): Promise<void> => {
-  await forgetReceiveMessageKeyIfCurrentDurably(
+  await forgetReceiveMessageKeyIfCurrent(
     epc,
     roomId,
     cache,
     cacheKey,
     undefined,
-    persist,
+    beforeCommit,
   );
-};
-
-// Persist the peer's LIVE ratchet after it advances. The stable DB key is
-// (roomId, peerPublicKey); peerId is reconnect-local metadata.
-export const persistRatchetSession = async (
-  epc: IRTCPeerConnection,
-  roomId: string,
-): Promise<void> => {
-  if (!epc.ratchetState) return;
-  await persistClaimedRatchetState(epc, epc.ratchetState, roomId);
 };

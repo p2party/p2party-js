@@ -1,6 +1,5 @@
 import type { OutboxLease, OutboxRequest, OutboxResponse } from "./outboxTypes";
 import type { Peer } from "../reducers/roomSlice";
-import type { RatchetRootSuite } from "../utils/constants";
 import type { ReceiveManifest } from "./receiveManifest";
 import type { SerializedError } from "./dbErrors";
 // import type { MessageType } from "../utils/messageTypes";
@@ -343,49 +342,6 @@ export interface SendQueue {
   encryptedData: ArrayBuffer;
 }
 
-// One Double-Ratchet session per STABLE identity edge (roomId, peerPublicKey) —
-// not per per-session peerId, which changes on reconnect — so the ratchet
-// survives reconnect/reload. All secret fields (rootKey, both chain keys,
-// dhSelfSec, and each skipped messageKey) are stored WRAPPED (AES-GCM under the
-// non-extractable CryptoKey in the `meta` store); public/counter fields are
-// stored plaintext. See src/db/ratchetWrap.ts.
-export interface RatchetSession {
-  /**
-   * Mandatory identity-possession root: interactive 3DH + ML-KEM-768 in every
-   * room, with draft-21 CPace ISK additionally mixed for PIN rooms.
-   */
-  rootSuite: RatchetRootSuite;
-  roomId: string;
-  peerPublicKey: string;
-  peerId: string;
-  rootKey: ArrayBuffer;
-  sendingChainKey: ArrayBuffer | null;
-  receivingChainKey: ArrayBuffer | null;
-  dhSelfPub: ArrayBuffer;
-  dhSelfSec: ArrayBuffer;
-  dhRemotePub: ArrayBuffer | null;
-  Ns: number;
-  Nr: number;
-  PN: number;
-  skippedMessageKeys: Array<{
-    dhPub: ArrayBuffer;
-    n: number;
-    messageKey: ArrayBuffer;
-  }>; // capped at MAX_SKIP_SESSION (total, evict-oldest) by the ratchet layer (Stage 2)
-  /**
-   * Protocol-v4 edge checkpoint. The plaintext API value is a bounded,
-   * canonical snapshot containing the sparse-PQ machine, exact sealed control
-   * outbox/replay cache, and epoch-bound active receive keys. ratchetWrap wraps
-   * this whole blob as one variable-length secret field before it reaches disk.
-   *
-   * `null` exists only for store-free/legacy test fixtures. A live v4 edge
-   * always persists a non-null checkpoint in the same row as the Double
-   * Ratchet, so the two ratchets cannot cross a crash boundary independently.
-   */
-  edgeCryptoState: ArrayBuffer | null;
-  updatedAt: number;
-}
-
 // The dedicated X25519 identity keypair (D2=B). `secret` is plaintext at the api
 // boundary; it is WebCrypto-wrapped (getWrapKey/wrapSecret) before it touches disk.
 export interface IdentityX25519 {
@@ -706,21 +662,6 @@ export type WorkerMessages =
     }
   | {
       id: number;
-      method: "getRatchetSession";
-      args: [roomId: string, peerPublicKey: string];
-    }
-  | {
-      id: number;
-      method: "setRatchetSession";
-      args: [session: RatchetSession];
-    }
-  | {
-      id: number;
-      method: "deleteRatchetSession";
-      args: [roomId: string, peerPublicKey: string];
-    }
-  | {
-      id: number;
       method: "getPinAttemptState";
       args: [roomId: string, peerIdentityEd25519: string];
     }
@@ -847,9 +788,6 @@ export interface WorkerMethodReturnTypes {
   deleteDBNewChunk: undefined;
   deleteDBSendQueue: undefined;
   deleteDBUniqueRoom: string[];
-  getRatchetSession: RatchetSession | undefined;
-  setRatchetSession: undefined;
-  deleteRatchetSession: undefined;
   getPinAttemptState: PinAttemptState | undefined;
   incrementPinAttemptState: PinAttemptState;
   deletePinAttemptState: undefined;

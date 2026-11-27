@@ -316,7 +316,6 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
           pqDestroyed += 1;
         },
       },
-      serializeEdgeCryptoState: () => new Uint8Array(1),
       coverRuntime: {
         destroy: () => {
           coverDestroyed += 1;
@@ -371,7 +370,6 @@ describe("resetEdgeAuthenticationForNewRemoteTransport", () => {
     expect(epc.pqHealingState).toBeUndefined();
     expect(epc.messageKeyCache).toBeUndefined();
     expect(epc.messageKeyByMerkleRoot).toBeUndefined();
-    expect(epc.serializeEdgeCryptoState).toBeUndefined();
     expect(coverDestroyed).toBe(1);
     expect(epc.coverRuntime).toBeUndefined();
 

@@ -1,5 +1,5 @@
 import type { Chunk, MessageData } from "./types";
-/** Durable resend metadata; secrets remain exclusively in the ratchet vault. */
+/** Durable resend metadata; edge keys stay in memory. */
 export interface OutboxLease {
   transferId: string;
   owner: string;

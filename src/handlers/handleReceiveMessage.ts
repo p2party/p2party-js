@@ -14,7 +14,7 @@ import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 
 import { messageCacheKey } from "./messageChunkCrypto";
 import { parseChunkFrameHeader } from "./chunkFrame";
-import { decryptMessageChunkDurably } from "./ratchetPersist";
+import { decryptChunkWithLiveRatchet } from "./ratchetPersist";
 import { bindReceiveMessageKey } from "./receiveMessageKeyLifetime";
 
 import {
@@ -36,7 +36,7 @@ import type {
   ReceiveVerificationOutcome,
   ReceiveVerificationVerdict,
 } from "../db/types";
-import type { PersistRatchetState } from "./ratchetPersist";
+import type { RatchetTransitionHook } from "./ratchetPersist";
 
 export interface ReceiveMessageResult {
   date: Date;
@@ -80,7 +80,7 @@ type ReceiveChunkStore = (
 
 export interface ReceiveMessageDependencies {
   /** Test/fault-injection seam; production uses the ratchet worker database. */
-  persistRatchetState?: PersistRatchetState;
+  beforeRatchetCommit?: RatchetTransitionHook;
   /** Test/fault-injection seam; production uses the receive-chunk worker. */
   storeReceiveChunk?: ReceiveChunkStore;
   /** Test seams for whole-file verification; production uses the worker. */
@@ -362,11 +362,7 @@ export const handleReceiveMessage = async (
     console.error("v3 receive: no ratchet state for peer");
     return dropped();
   }
-  // v4: the per-edge cache IS the PQ runtime's active combined receive-key
-  // collection (aliased at handshake activation) so every persisted edge
-  // checkpoint carries it. An edge without a PQ runtime gets a bare Map here,
-  // but decryptMessageChunkDurably refuses to decrypt for it unless a test
-  // opted the edge in through ratchetPersist's test-only classical opt-in.
+  // The receiver shares its active keys with this generation's PQ runtime.
   if (!epc.messageKeyCache)
     epc.messageKeyCache =
       epc.pqHealingState?.activeReceiveKeys ?? new Map<string, Uint8Array>();
@@ -390,9 +386,8 @@ export const handleReceiveMessage = async (
 
   // Anti-DoS backstop: a normally closed complete message is retired after its
   // queue drains, but a peer could pin keys with never-completing messages.
-  // Bound the per-edge cache BEFORE the durable decrypt (oldest first, Map
-  // insertion order) so the staged active-key map can never exceed the
-  // encrypted edge checkpoint's key budget.
+  // Bound the per-edge cache BEFORE the authenticated decrypt (oldest first, Map
+  // insertion order) to bound the live generation's active receive keys.
   const MESSAGE_KEY_CACHE_MAX = 256;
   if (cache.size >= MESSAGE_KEY_CACHE_MAX) {
     for (const k of cache.keys()) {
@@ -407,28 +402,23 @@ export const handleReceiveMessage = async (
     }
   }
 
-  // 1) Derive/decrypt against a staged clone, then persist and adopt the
-  //    authenticated successor before exposing any plaintext. The per-edge lock
-  //    also serializes concurrent send/receive/PQ ratchet transitions. With a
-  //    PQ runtime the staged combined key is persisted inside the encrypted
-  //    edge checkpoint (same row as the ratchet successor), never in the
-  //    classical skipped map.
+  // Authenticate and adopt the successor before exposing plaintext.
   let decrypted: Uint8Array | null;
   let ok: boolean;
   try {
-    const d = await decryptMessageChunkDurably(
+    const d = await decryptChunkWithLiveRatchet(
       epc,
       roomId,
       frame,
       cache,
       merkleRoot,
       module,
-      dependencies.persistRatchetState,
+      dependencies.beforeRatchetCommit,
     );
     decrypted = d.decrypted;
     ok = d.ok;
   } catch (error) {
-    console.error("Could not durably decrypt message", error);
+    console.error("Could not decrypt message", error);
     return dropped();
   }
 

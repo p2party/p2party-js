@@ -172,6 +172,8 @@ _Source:_ `src/index.ts`; `src/handlers/transferAbort.ts`; `src/handlers/handleS
 _Paper:_ A refresh discards the live ratchet (collapsing forward-secrecy continuity), but plaintext IndexedDB persistence would hand a DB dump every root/chain key the ratchet rotates away; resolved with an additive `ratchetSessions` store (dbVersion 16→17) keyed by `(roomId, peerPublicKey)`, secret fields wrapped under a single non-extractable WebCrypto AES-GCM key (fresh 12-byte IV per wrap), public/counter fields left cleartext so the non-unique indexes stay queryable without decrypting.
 _Source:_ Stage 3; commits `5bedc9b`, `7ec1776`, `fe4f159`, `1da2c27`, `4da1719`.
 
+_Browser follow-up:_ Schema version 24 removes these rows. Reconnection establishes a fresh authenticated generation, so the browser never needed these checkpoints. Explicit export and restore remain available to store-free session users.
+
 **P-2 — Cross-tab race creating the wrap key on first run.**
 _Paper:_ Two tabs racing to create the AES-GCM wrap key could each persist a different key; `getWrapKey()` uses double-checked locking (cheap read → speculative `generateKey` outside any txn → authoritative re-check inside a `readwrite` txn on `meta` before `put`), and IndexedDB serializing `readwrite` txns across connections makes the re-check a real mutex — the race was already structurally closed, with only a rare-re-handshake liveness note and a doc-wording polish remaining.
 _Source:_ Stage 3 "a race found already closed."

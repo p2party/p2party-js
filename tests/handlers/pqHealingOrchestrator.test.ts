@@ -110,7 +110,7 @@ const makeEdgePair = (): { a: Peer; b: Peer } => {
       failEdge: (reason) => {
         peer.edgeFailures.push(reason);
       },
-      persistEdge: async (_epc, state, _roomId, serializeCandidate) => {
+      beforeCommit: async (_epc, state, _roomId, serializeCandidate) => {
         peer.persistCalls += 1;
         expect(state).toBe(peer.epc.ratchetState!);
         if (peer.persistFailures > 0) {

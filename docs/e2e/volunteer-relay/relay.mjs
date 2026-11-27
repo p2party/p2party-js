@@ -41,7 +41,13 @@ export function decode(data) {
 
 // The volunteer only forwards to the channel supplied at setup. Each call
 // decides synchronously. Nothing is held for retry or for a later grant.
-export function volunteer(egress) {
+export function volunteer(egress, byteLimit = grantBytes) {
+  if (
+    !Number.isSafeInteger(byteLimit) ||
+    byteLimit < recordBytes ||
+    byteLimit > grantBytes
+  )
+    throw new Error("Invalid grant byte limit");
   let state = "disabled",
     expires = 0,
     used = 0,
@@ -63,7 +69,7 @@ export function volunteer(egress) {
       if (state === "enabled" && performance.now() >= expires) stop("expired");
       if (state !== "enabled") return state;
       if (!isRecord(data)) return "unsupported";
-      if (data.byteLength > grantBytes - used) {
+      if (data.byteLength > byteLimit - used) {
         stop("exhausted");
         return state;
       }
@@ -76,7 +82,7 @@ export function volunteer(egress) {
         return state;
       }
       used += data.byteLength;
-      if (used === grantBytes) stop("exhausted");
+      if (used === byteLimit) stop("exhausted");
       return "forwarded";
     },
     get state() {

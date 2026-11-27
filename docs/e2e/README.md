@@ -18,7 +18,7 @@ The source-built harnesses use the **development** WASM (`src/cryptography/libcr
 `npm run predist` before these — it overwrites that artifact with the
 web-only production build that cannot instantiate under Bun.
 
-The [volunteer relay experiment](volunteer-relay/README.md) uses the released SDK 0.15.1 package and its WASM. Three local Chromium peers verify consent, bounded forwarding and endpoint decryption across two WebRTC hops.
+The [volunteer relay experiment](volunteer-relay/README.md) uses the released SDK 0.15.1 package and its WASM. Three local Chromium peers verify consent, bounded forwarding and endpoint decryption across two WebRTC hops. Its paid-route driver accepts an ordered list and a total budget, tests two or three distinct volunteers, and verifies every signed forwarding observation against the recipient’s ciphertext digest before checking the one-unit payouts against a disposable native validator after recovery and replay.
 
 ## `webrtc-e2e/` — session-API + CoverRuntime over real WebRTC
 

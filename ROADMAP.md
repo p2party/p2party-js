@@ -22,6 +22,8 @@ file across a sender reload. [Public web client](https://p2party.com) ·
 [SDK release evidence](docs/e2e/README.md) ·
 [Signaling health](https://signaling.p2party.com/health)
 
+A local payer can select two or three consenting browser relays and set a total budget. Tests forwarded one authenticated message and paid each relay one valueless native unit to a fresh commitment, including recovery after the first payment. Independently operated relays and conditional settlement remain research work. [Run the multi-relay fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route)
+
 P2Party Testnet 1 is a separate, live server and native-library experiment.
 A fresh wallet installation read the public genesis head at height zero. The
 genesis defines 128 valueless units and one validator orders native transfers.

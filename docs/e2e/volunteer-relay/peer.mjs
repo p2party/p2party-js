@@ -9,7 +9,41 @@ const identity = await generateSessionIdentity(cryptoOptions);
 const sessions = new Map(),
   links = new Map(),
   inbox = new Map();
-let gate, sample, lastForwarded;
+let gate, sample, lastForwarded, sourceChannel, paidGrant;
+const deliveryKey =
+  role !== "A"
+    ? await crypto.subtle.generateKey("Ed25519", false, ["sign", "verify"])
+    : null;
+let paidOrder, receivedRecordHash;
+function joinBytes(...parts) {
+  const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+const domain = (label) =>
+  new TextEncoder().encode("p2party/local-paid-relay/" + label + "/v1\0");
+async function hash(label, bytes) {
+  return new Uint8Array(
+    await crypto.subtle.digest("SHA-512", joinBytes(domain(label), bytes)),
+  );
+}
+async function attest(label, binding) {
+  return hex(
+    await crypto.subtle.sign(
+      "Ed25519",
+      deliveryKey.privateKey,
+      joinBytes(domain(label), binding),
+    ),
+  );
+}
+const hex = (bytes) =>
+  Array.from(new Uint8Array(bytes), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 const verdicts = [],
   received = [];
 let rejected = 0;
@@ -21,6 +55,50 @@ function mailbox(name) {
 
 window.peer = {
   publicKey: [...identity.ed25519PublicKey],
+  async deliveryKey() {
+    return hex(await crypto.subtle.exportKey("raw", deliveryKey.publicKey));
+  },
+  async acknowledge() {
+    if (received.length !== 1 || received[0].length !== 1024)
+      throw new Error("Missing authenticated delivery");
+    const data = Uint8Array.from(received[0]);
+    const binding = joinBytes(
+      data.subarray(0, 96),
+      await hash("content", data.subarray(96)),
+      receivedRecordHash,
+    );
+    return {
+      binding: hex(binding),
+      signature: await attest("delivered", binding),
+    };
+  },
+  async forwardingReceipt() {
+    if (!paidOrder || !lastForwarded)
+      throw new Error("No forwarding observation");
+    const slot = new Uint8Array(8);
+    new DataView(slot.buffer).setBigUint64(0, BigInt(paidOrder.index));
+    const binding = joinBytes(
+      Uint8Array.fromHex(paidOrder.id),
+      slot,
+      await hash("record", new Uint8Array(lastForwarded)),
+    );
+    return attest("forwarded", binding);
+  },
+  setPaidGrant({ bytes, id, index }) {
+    if (
+      gate ||
+      paidOrder ||
+      !Number.isSafeInteger(bytes) ||
+      bytes <= 0 ||
+      !/^[0-9a-f]{128}$/.test(id) ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= 8
+    )
+      throw new Error("Configure paid order before connecting");
+    paidGrant = bytes;
+    paidOrder = { id, index };
+  },
   handshakeInput({ name, bytes }) {
     const box = mailbox(name),
       message = Uint8Array.from(bytes);
@@ -64,21 +142,31 @@ window.peer = {
     });
     dc.binaryType = "arraybuffer";
     links.set(name, { pc, dc });
-    if (role === "B" && name === "BC") {
-      gate = volunteer(dc);
-      document.querySelector("#enable").onclick = () => gate.enable();
+    if (role === "A" && name.startsWith("A")) sourceChannel = dc;
+    const intermediate = role !== "A" && role !== "C";
+    if (intermediate && name.startsWith(role)) {
+      gate = volunteer(dc, paidGrant);
+      if (paidGrant)
+        document.querySelector("#enable").textContent =
+          "Enable forwarding for two seconds, one record at 1 test P2PARTY on delivery";
+      document.querySelector("#enable").onclick = () => {
+        if (gate.state !== "enabled") lastForwarded = null;
+        gate.enable();
+      };
       document.querySelector("#stop").onclick = () => gate.stop();
     }
-    if (role === "B" && name === "AB")
+    if (intermediate && name.endsWith(role))
       dc.onmessage = ({ data }) => {
-        const verdict = gate.forward(data);
+        const verdict = gate?.forward(data) ?? "disabled";
         if (verdict === "forwarded") lastForwarded = data; // test observer for the wrong-key check
         if (verdicts.length < 32) verdicts.push(verdict);
       };
     if (role === "C")
       dc.onmessage = async ({ data }) => {
         try {
-          received.push([...(await sessions.get("AC").decrypt(decode(data)))]);
+          const plaintext = await sessions.get("AC").decrypt(decode(data));
+          receivedRecordHash = await hash("record", new Uint8Array(data));
+          received.push([...plaintext]);
         } catch {
           rejected++;
         }
@@ -131,6 +219,7 @@ window.peer = {
   },
   async prepare(bytes) {
     sample = encode(await sessions.get("AC").encrypt(Uint8Array.from(bytes)));
+    return hex(await hash("record", new Uint8Array(sample)));
   },
   async diagnosticMessage() {
     return [
@@ -154,7 +243,7 @@ window.peer = {
       data = sample.slice(0);
       new Uint8Array(data)[kind === "version" ? 3 : data.byteLength - 1] ^= 1;
     }
-    links.get("AB").dc.send(data);
+    sourceChannel.send(data);
   },
   async canOpenAsVolunteer() {
     const diagnostic = sessions.get("AB");

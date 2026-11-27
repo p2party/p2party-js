@@ -4,6 +4,10 @@ All notable changes to the **p2party** SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased research
+
+- The [local multi-relay purchase fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route) lets a payer choose two or three volunteers, verify their signed quotes and forwarding observations, and check native payouts after a receipt from the recipient.
+
 ## [0.15.1] — 2026-11-27
 
 - Browser peer ratchets now live only in memory. IndexedDB version 24 removes the obsolete ratchet store and preserves identity keys, room policy and message history. The standalone session API still supports explicit snapshot export and restore.

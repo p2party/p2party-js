@@ -91,7 +91,7 @@ npm audit signatures
 
 To build the artifact yourself instead, see
 [Building from source](CONTRIBUTING.md#building-from-source). That path needs an
-exact toolchain (Node 24, Emscripten 7.0.0, pinned submodules), because the
+exact toolchain (Node 26, Emscripten 7.0.0, pinned submodules), because the
 release build reproduces the pinned WASM and refuses to emit an artifact it
 cannot attest.
 
@@ -799,9 +799,9 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.15.0-rc.1` is a local release candidate.** This work does not publish npm
-> packages or CDN assets. The snippet names the candidate's intended release
-> path; use the generated local bundle until that version is published.
+The script below loads the version built from this source. Until its release tag
+has published the CDN objects, use the generated local bundle and self-hosted
+WASM for that version.
 
 A release publishes its browser bundle, its database worker and its
 cryptographic module as immutable, versioned CDN objects. The version is in the
@@ -814,7 +814,7 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.15.0-rc.1/p2party.min.js"
+  src="https://cdn.p2party.com/@0.15.0/p2party.min.js"
   integrity="sha384-1tQiCHCnXdR5Ia/lptaPlNKaPEUCOSy4V4zTJlkSofjMl13UTEYcieKRtSa947n2"
   crossorigin="anonymous"
 ></script>
@@ -911,13 +911,9 @@ cache forever:
 curl --compressed -O "https://cdn.p2party.com/@$(npm view p2party version)/libcrypto.wasm"
 ```
 
-Two caveats, both current as of this release. The CDN carries only three
-objects — `p2party.min.js`, `db.worker.js` and `libcrypto.wasm` (see the
-`assets` array in `scripts/uploadToCDN.mjs`) — so
-**`libcrypto.provenance.json` is not on the CDN for any version**; take it from
-the tarball. And nothing is uploaded for this release yet, which is why the
-command above asks npm for a version that is actually published instead of
-naming this one.
+The CDN carries `p2party.min.js`, `db.worker.js` and `libcrypto.wasm`.
+Use `lib/libcrypto.provenance.json` from the matching npm tarball to check the
+WASM. The command above selects the published npm version.
 
 New CDN uploads gzip all three objects; WASM keeps `Content-Type:
 application/wasm` and uses `Content-Encoding: gzip`. Browsers decode it before
@@ -971,7 +967,7 @@ release rather than surfacing later as a broken offline install.
 
 ## Development
 
-The reproducible release toolchain is Node 24.11.1, npm 11.6.2, Bun 1.3.14,
+The reproducible release toolchain is Node 26.13.1, npm 12.2.3, Bun 1.4.5,
 Emscripten 7.0.0, and the repository's pinned libsodium source object. npm and
 `package-lock.json` are the dependency authority; Bun is the test runner.
 

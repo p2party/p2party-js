@@ -6,7 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## [Unreleased]
 
-### 0.15.0-rc.1
+## [0.15.0]
+
+### Breaking
+
+- The npm package requires Node 26.13.1 or later. The release build uses
+  Node 26.13.1, npm 12.2.3 and Bun 1.4.5.
+- The SDK requires a protocol-5 signaling server, beginning with server 0.2.0.
+  Deploy the server before clients. Peer handshakes and data cells keep protocol 4.
+  The login URL, signed challenge, room join/leave and TURN username have changed.
+- Address-book and blacklist lookups, removal and unblocking take the Ed25519
+  public key. IndexedDB v23 migrates rows carrying a usable key. It also discards
+  obsolete ratchet envelopes and PIN records keyed by server-assigned room ID
+  when upgrading from their respective earlier schemas. Affected peers perform
+  a fresh handshake. Existing messages with no authenticated sender key retain
+  their history without gaining a contact or block action.
+- Standalone sessions write snapshot format 5 and restore format 4. Replayed
+  messages on retained chains are rejected with `SessionReplayError`.
+- File deletion can reject with `StorageFailedError` if the browser retains a
+  file. `cancelMessage` rejects missing identifiers and malformed transfer IDs
+  with `MissingMessageIdentifierError` and `InvalidTransferIdError`.
+
+### Cryptographic dependencies
+
+- The SDK builds libsodium stable at `05de1ce8` and mlkem-native v2.1.0 with
+  Emscripten 7.0.0. The ML-KEM ABI retains its portable deterministic entry points
+  for all three parameter sets. FIPS 203 known-answer tests passed, as did
+  byte-for-byte ML-KEM and Ed25519 comparisons against the prior candidate.
+
+### Changes verified in 0.15.0-rc.1
 
 - Blacklist and address-book entries follow the Ed25519 identity across server
   peer-ID changes. IndexedDB upgrades existing entries, and the SDK applies the
@@ -14,7 +42,7 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
   unblocking now take the public key.
 - The release workflow builds the cryptographic module with Emscripten 7.0.0.
 
-### 0.15.0-rc.0
+### Changes verified in 0.15.0-rc.0
 
 - The browser SDK requires signaling protocol 5. Upgrade the server first.
   The browser opens a keyless WebSocket URL, signs a challenge bound to the

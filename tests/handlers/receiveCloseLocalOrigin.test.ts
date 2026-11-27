@@ -1,4 +1,12 @@
-import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  test,
+} from "bun:test";
 
 import {
   claimRatchetGate,
@@ -39,7 +47,7 @@ const localStorageMemory: Record<string, string> = {};
 // which would make any assertion about that decision vacuous. Stand in for the
 // two calls it depends on and record the deletion it may order. Everything else
 // stays the real module.
-const realDb = await import("../../src/db/api");
+const realDb = { ...(await import("../../src/db/api")) };
 const dbState: {
   messageData: MessageData | undefined;
   deletedTransfers: string[];
@@ -54,18 +62,20 @@ mock.module("../../src/db/api", () => ({
   },
 }));
 
+afterAll(() => {
+  mock.module("../../src/db/api", () => realDb);
+});
+
 let handleOpenChannel: (typeof import("../../src/handlers/handleOpenChannel"))["handleOpenChannel"];
 let compileChannelMessageLabel: (typeof import("../../src/utils/channelLabel"))["compileChannelMessageLabel"];
 let DEFAULT_ROOM_POLICY_V1: (typeof import("../../src/roomPolicy"))["DEFAULT_ROOM_POLICY_V1"];
 
 beforeAll(async () => {
   await import("../../src/store");
-  ({ handleOpenChannel } = await import(
-    "../../src/handlers/handleOpenChannel"
-  ));
-  ({ compileChannelMessageLabel } = await import(
-    "../../src/utils/channelLabel"
-  ));
+  ({ handleOpenChannel } =
+    await import("../../src/handlers/handleOpenChannel"));
+  ({ compileChannelMessageLabel } =
+    await import("../../src/utils/channelLabel"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy"));
 });
 

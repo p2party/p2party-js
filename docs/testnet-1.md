@@ -2,6 +2,8 @@
 
 The public RPC is live. On November 27 a fresh installation of the wallet client verified both chain IDs and read the genesis head at height zero. The published genesis contains 128 valueless units of weight one. One validator orders accepted native post-quantum transfers. You can request a test unit, sign locally and look up the resulting receipt. Chat rooms, peer identities and files use no ledger. [Web release article](https://p2party.com/blog/rooms-after-signaling-v5) · [Native verifier source](https://github.com/p2party/libdemos/tree/ceef24a8bf1f5dee045e72c838ffdbf080d9cd83/ledger)
 
+The browser wallet lets you create a Testnet 1 wallet, restore your latest encrypted backup with its separate recovery code, and check for payments received while you were away. The examples below use the JavaScript client. [Open the P2PARTY wallet](https://p2party.com/wallet/) · [Wallet help](https://p2party.com/wallet/help/)
+
 | Setting                                    | Testnet value                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------- |
 | JSON-RPC 2.0                               | `https://signaling.p2party.com/rpc`                                   |

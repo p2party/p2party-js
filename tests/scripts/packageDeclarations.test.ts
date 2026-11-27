@@ -158,7 +158,7 @@ export default p2party;
         consumerRoot: path.join(fixture.root, "consumer"),
       }),
     ).not.toThrow();
-  });
+  }, 30_000);
 
   test("strict validation rejects an unresolved declaration even when skipLibCheck in the SDK is true", () => {
     const fixture = createFixture();

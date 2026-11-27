@@ -33,7 +33,7 @@ jobs:
       - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
-          version: 6.0.9
+          version: 7.0.0
           actions-cache-folder: emsdk-cache
           update: true
 
@@ -54,7 +54,7 @@ jobs:
           test "$(npm --version)" = "11.6.2"
           test "$(bun --version)" = "1.3.14"
           emcc --version
-          node -e "const expected = 'v' + require('./package.json').version; if (process.env.GITHUB_REF_NAME !== expected) throw new Error('tag ' + process.env.GITHUB_REF_NAME + ' does not match ' + expected)"
+          node scripts/verifyReleaseTag.mjs
 
       - name: Install locked dependencies
         run: npm ci

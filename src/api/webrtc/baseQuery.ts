@@ -69,7 +69,7 @@ const webrtcBaseQuery: BaseQueryFn<
       throw new Error("Cannot create a connection with oneself.");
     const opensMain = isIdentityInitiator(keyPair.publicKey, peerPublicKey);
 
-    const blacklisted = await getDBPeerIsBlacklisted(peerId);
+    const blacklisted = await getDBPeerIsBlacklisted(peerPublicKey);
     if (blacklisted) return { data: undefined };
 
     // A server `connection` follows the peer building a fresh transport. It

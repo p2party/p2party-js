@@ -1,3 +1,4 @@
+import { isCanonicalEd25519Identity } from "../utils/identityRole";
 import type {
   FileRemovalNotice,
   FileRemovalRetryScope,
@@ -303,10 +304,16 @@ function callWorker<M extends WorkerMessages["method"]>(
   >;
 }
 
-export const getDBAddressBookEntry = (
-  peerId?: string,
-  peerPublicKey?: string,
-) => callWorker("getDBAddressBookEntry", peerId, peerPublicKey);
+const checkedPeerKey = (peerPublicKey: string): string => {
+  if (!isCanonicalEd25519Identity(peerPublicKey))
+    throw new TypeError(
+      "Expected a 32-byte lowercase hexadecimal Ed25519 public key",
+    );
+  return peerPublicKey;
+};
+
+export const getDBAddressBookEntry = (peerPublicKey: string) =>
+  callWorker("getDBAddressBookEntry", checkedPeerKey(peerPublicKey));
 
 export const getAllDBAddressBookEntries = () =>
   callWorker("getAllDBAddressBookEntries");
@@ -315,27 +322,29 @@ export const setDBAddressBookEntry = (
   username: string,
   peerId: string,
   peerPublicKey: string,
-) => callWorker("setDBAddressBookEntry", username, peerId, peerPublicKey);
+) =>
+  callWorker(
+    "setDBAddressBookEntry",
+    username,
+    peerId,
+    checkedPeerKey(peerPublicKey),
+  );
 
-export const deleteDBAddressBookEntry = (
-  username?: string,
-  peerId?: string,
-  peerPublicKey?: string,
-) => callWorker("deleteDBAddressBookEntry", username, peerId, peerPublicKey);
+export const deleteDBAddressBookEntry = (peerPublicKey: string) =>
+  callWorker("deleteDBAddressBookEntry", checkedPeerKey(peerPublicKey));
 
-/**
- * Fails CLOSED. This is the sole admission gate on every connection path, and
- * an indeterminate answer must never be reported as "not blacklisted" — that
- * would let a storage fault silently readmit every blocked peer. The denial is
- * scoped to the one peer being checked, so a transient fault cannot lock the
- * whole room out.
- */
+export const recordAuthenticatedPeer = (
+  peerId: string,
+  peerPublicKey: string,
+) =>
+  callWorker("recordAuthenticatedPeer", peerId, checkedPeerKey(peerPublicKey));
+
 export const getDBPeerIsBlacklisted = async (
-  peerId?: string,
-  peerPublicKey?: string,
+  peerPublicKey: string,
 ): Promise<boolean> => {
+  checkedPeerKey(peerPublicKey);
   try {
-    return await callWorker("getDBPeerIsBlacklisted", peerId, peerPublicKey);
+    return await callWorker("getDBPeerIsBlacklisted", peerPublicKey);
   } catch (error) {
     console.error(
       "p2party: blacklist lookup failed; treating this peer as blocked",
@@ -348,12 +357,10 @@ export const getDBPeerIsBlacklisted = async (
 export const getAllDBBlacklisted = () => callWorker("getAllDBBlacklisted");
 
 export const setDBPeerInBlacklist = (peerId: string, peerPublicKey: string) =>
-  callWorker("setDBPeerInBlacklist", peerId, peerPublicKey);
+  callWorker("setDBPeerInBlacklist", peerId, checkedPeerKey(peerPublicKey));
 
-export const deleteDBPeerFromBlacklist = (
-  peerId?: string,
-  peerPublicKey?: string,
-) => callWorker("deleteDBPeerFromBlacklist", peerId, peerPublicKey);
+export const deleteDBPeerFromBlacklist = (peerPublicKey: string) =>
+  callWorker("deleteDBPeerFromBlacklist", checkedPeerKey(peerPublicKey));
 
 export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
 
@@ -386,6 +393,7 @@ export const setDBRoomMessageData = (
   channelLabel: string,
   timestamp: number,
   transferId?: string,
+  fromPeerPublicKey?: string,
 ) =>
   callWorker(
     "setDBRoomMessageData",
@@ -400,6 +408,7 @@ export const setDBRoomMessageData = (
     channelLabel,
     timestamp,
     transferId,
+    fromPeerPublicKey,
   );
 
 export const getDBChunk = (merkleRootHex: string, chunkIndex: number) =>

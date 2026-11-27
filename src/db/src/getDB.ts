@@ -3,7 +3,8 @@ import type {
   OutboxAckRecord,
   ReceiveActivity,
 } from "../outboxTypes";
-import { openDB } from "idb";
+import { openDB, unwrap } from "idb";
+import { isCanonicalEd25519Identity } from "../../utils/identityRole";
 
 import { DatabaseUpgradeBlockedError } from "../dbErrors";
 
@@ -25,7 +26,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 22;
+export const dbVersion = 23;
 
 export interface RepoSchema extends DBSchema {
   outbox: {
@@ -49,13 +50,11 @@ export interface RepoSchema extends DBSchema {
   };
   addressBook: {
     value: AddressBook;
-    key: [string];
-    indexes: { peerId: string; peerPublicKey: string; username: string };
+    key: string;
   };
   blacklist: {
     value: BlacklistedPeer;
-    key: [string];
-    indexes: { peerId: string; peerPublicKey: string; username: string };
+    key: string;
   };
   uniqueRoom: {
     value: UniqueRoom;
@@ -172,57 +171,41 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         });
         activity.createIndex("lastActivityAt", "lastActivityAt");
       }
-      if (!db.objectStoreNames.contains("addressBook")) {
-        const addressBook = db.createObjectStore("addressBook", {
-          keyPath: ["peerId"],
-        });
-        addressBook.createIndex("username", "username", { unique: false });
-        addressBook.createIndex("peerId", "peerId", { unique: true });
-        addressBook.createIndex("peerPublicKey", "peerPublicKey", {
-          unique: true,
-        });
-      } else {
-        const store = tx.objectStore("addressBook");
-
-        if (!store.indexNames.contains("username")) {
-          store.createIndex("username", "username", { unique: false });
-        }
-
-        if (!store.indexNames.contains("peerId")) {
-          store.createIndex("peerId", "peerId", { unique: true });
-        }
-
-        if (!store.indexNames.contains("peerPublicKey")) {
-          store.createIndex("peerPublicKey", "peerPublicKey", {
-            unique: true,
+      // Keep the old store available to its cursor until every row has moved.
+      // Store creation, copying, and deletion share one versionchange transaction.
+      if (oldVersion < 23) {
+        const database = unwrap(db);
+        for (const name of ["addressBook", "blacklist"]) {
+          const legacy = database.objectStoreNames.contains(name)
+            ? unwrap(tx).objectStore(name)
+            : undefined;
+          if (legacy) legacy.name = `${name}Before23`;
+          const target = database.createObjectStore(name, {
+            keyPath: "peerPublicKey",
           });
-        }
-      }
-
-      if (!db.objectStoreNames.contains("blacklist")) {
-        const blacklist = db.createObjectStore("blacklist", {
-          keyPath: ["peerId"],
-        });
-        blacklist.createIndex("username", "username", { unique: false });
-        blacklist.createIndex("peerId", "peerId", { unique: true });
-        blacklist.createIndex("peerPublicKey", "peerPublicKey", {
-          unique: true,
-        });
-      } else {
-        const store = tx.objectStore("blacklist");
-
-        if (!store.indexNames.contains("username")) {
-          store.createIndex("username", "username", { unique: false });
-        }
-
-        if (!store.indexNames.contains("peerId")) {
-          store.createIndex("peerId", "peerId", { unique: true });
-        }
-
-        if (!store.indexNames.contains("peerPublicKey")) {
-          store.createIndex("peerPublicKey", "peerPublicKey", {
-            unique: true,
-          });
+          if (!legacy) continue;
+          let invalid = 0;
+          const request = legacy.openCursor();
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) {
+              database.deleteObjectStore(legacy.name);
+              if (invalid)
+                console.debug(
+                  `p2party: ${name} upgrade skipped ${String(invalid)} rows without a usable identity key`,
+                );
+              return;
+            }
+            const row = cursor.value as AddressBook | BlacklistedPeer;
+            const key =
+              typeof row.peerPublicKey === "string"
+                ? row.peerPublicKey.toLowerCase()
+                : undefined;
+            if (isCanonicalEd25519Identity(key))
+              target.put({ ...row, peerPublicKey: key });
+            else invalid++;
+            cursor.continue();
+          };
         }
       }
 

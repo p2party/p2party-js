@@ -107,48 +107,22 @@ const keptRoomKey = (
 };
 
 async function fnGetDBAddressBookEntry(
-  peerId?: string,
-  peerPublicKey?: string,
+  peerPublicKey: string,
 ): Promise<UsernamedPeer | undefined> {
-  if (!peerId && !peerPublicKey) return undefined;
-  if (peerId && peerId.length < 10 && !peerPublicKey) return undefined;
-  if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return undefined;
-
   const db = await getDB();
-
   try {
-    const tx = db.transaction("addressBook", "readonly");
-    const index = peerId
-      ? tx.objectStore("addressBook").index("peerId")
-      : tx.objectStore("addressBook").index("peerPublicKey");
-    const peer = peerId
-      ? await index.get(peerId)
-      : await index.get(peerPublicKey ?? "");
-    await tx.done;
+    return await db.get("addressBook", peerPublicKey);
+  } finally {
     db.close();
-    return peer
-      ? {
-          username: peer.username,
-          peerId: peer.peerId,
-          peerPublicKey: peer.peerPublicKey,
-        }
-      : undefined;
-  } catch {
-    db.close();
-
-    return undefined;
   }
 }
 
 async function fnGetAllDBAddressBookEntries(): Promise<UsernamedPeer[]> {
+  const db = await getDB();
   try {
-    const db = await getDB();
-    const peers = await db.getAll("addressBook");
+    return await db.getAll("addressBook");
+  } finally {
     db.close();
-
-    return peers;
-  } catch {
-    return [];
   }
 }
 
@@ -157,118 +131,40 @@ async function fnSetDBAddressBookEntry(
   peerId: string,
   peerPublicKey: string,
 ): Promise<void> {
+  const db = await getDB();
   try {
-    const db = await getDB();
-    const tx = db.transaction(["addressBook"], "readwrite");
-    const store = tx.objectStore("addressBook");
-    const index1 = store.index("peerId");
-    const index2 = store.index("peerPublicKey");
-
-    const item1 = await index1.get(peerId);
-    const item2 = await index2.get(peerPublicKey);
-
-    if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
-      await store.put({
-        username,
-        peerId,
-        peerPublicKey,
-        dateAdded: Date.now(),
-      });
-    }
-
+    const tx = db.transaction("addressBook", "readwrite");
+    const previous = await tx.store.get(peerPublicKey);
+    await tx.store.put({
+      ...previous,
+      dateAdded: previous?.dateAdded ?? Date.now(),
+      peerId,
+      peerPublicKey,
+      username,
+    });
     await tx.done;
+  } finally {
     db.close();
-  } catch (error) {
-    // await db.put("addressBook", {
-    //   username,
-    //   peerId,
-    //   peerPublicKey,
-    //   dateAdded: Date.now(),
-    // });
-    console.error(error);
   }
 }
 
 async function fnDeleteDBAddressBookEntry(
-  username?: string,
-  peerId?: string,
-  peerPublicKey?: string,
-): Promise<string> {
-  const noUsername = !username || username.length === 0;
-  const noPeerId = !peerId || peerId.length < 10;
-  const noPeerPublicKey = peerPublicKey?.length !== 64;
-
-  if (noUsername && noPeerId && noPeerPublicKey)
-    throw new Error("Cannot delete address book with no data");
-
-  let pId = peerId ?? "";
-
-  try {
-    const db = await getDB();
-
-    const tx = db.transaction("addressBook", "readwrite");
-    const store = tx.objectStore("addressBook");
-
-    if (!noPeerId) {
-      const index = store.index("peerId");
-      const item = await index.getKey(peerId);
-
-      if (item) await store.delete(item);
-    } else if (!noPeerPublicKey) {
-      const index = store.index("peerPublicKey");
-      const item = await index.getKey(peerPublicKey);
-
-      if (item) {
-        const entry = await index.get(peerPublicKey);
-        pId = entry?.peerId ?? "";
-
-        await store.delete(item);
-      }
-    } else {
-      const index = store.index("username");
-      const item = await index.getKey(username ?? "");
-
-      if (item) {
-        const entry = await index.get(username ?? "");
-        pId = entry?.peerId ?? "";
-
-        await store.delete(item);
-      }
-    }
-
-    await tx.done;
-    db.close();
-  } catch {
-    /* empty */
-  }
-
-  return pId;
-}
-
-async function fnGetDBPeerIsBlackisted(
-  peerId?: string,
-  peerPublicKey?: string,
-): Promise<boolean> {
-  if (!peerId && !peerPublicKey) return false;
-  if (peerId && peerId.length < 10 && !peerPublicKey) return false;
-  if (peerPublicKey && peerPublicKey.length !== 64 && !peerId) return false;
-
-  // Deliberately unguarded: `false` is also the legitimate "not blacklisted"
-  // answer, so swallowing a storage fault here would be indistinguishable from
-  // a clean miss and would silently admit a blocked peer. Let the rejection
-  // reach db/api.ts, which turns it into a fail-closed answer for this peer.
+  peerPublicKey: string,
+): Promise<void> {
   const db = await getDB();
   try {
-    const tx = db.transaction("blacklist", "readonly");
-    const index = peerId
-      ? tx.objectStore("blacklist").index("peerId")
-      : tx.objectStore("blacklist").index("peerPublicKey");
-    const peer = peerId
-      ? await index.get(peerId)
-      : await index.get(peerPublicKey ?? "");
-    await tx.done;
+    await db.delete("addressBook", peerPublicKey);
+  } finally {
+    db.close();
+  }
+}
 
-    return peer ? true : false;
+async function fnGetDBPeerIsBlacklisted(
+  peerPublicKey: string,
+): Promise<boolean> {
+  const db = await getDB();
+  try {
+    return (await db.getKey("blacklist", peerPublicKey)) !== undefined;
   } finally {
     db.close();
   }
@@ -276,86 +172,65 @@ async function fnGetDBPeerIsBlackisted(
 
 async function fnGetAllDBBlacklisted(): Promise<BlacklistedPeer[]> {
   const db = await getDB();
-
   try {
-    const peers = await db.getAll("blacklist");
+    return await db.getAll("blacklist");
+  } finally {
     db.close();
-
-    return peers;
-  } catch {
-    db.close();
-
-    return [];
   }
 }
 
 async function fnSetDBPeerInBlacklist(
-  // username: string,
   peerId: string,
   peerPublicKey: string,
 ): Promise<void> {
+  const db = await getDB();
   try {
-    const db = await getDB();
-    const tx = db.transaction(["blacklist"], "readwrite");
-    const store = tx.objectStore("blacklist");
-    const index1 = store.index("peerId");
-    const index2 = store.index("peerPublicKey");
-
-    const item1 = await index1.get(peerId);
-    const item2 = await index2.get(peerPublicKey);
-
-    if ((!item1 && !item2) || (item1 && !item2) || (!item1 && item2)) {
-      await store.put({
-        // username,
-        peerId,
-        peerPublicKey,
-        dateAdded: Date.now(),
-      });
-    }
-
+    const tx = db.transaction("blacklist", "readwrite");
+    const previous = await tx.store.get(peerPublicKey);
+    await tx.store.put({
+      dateAdded: previous?.dateAdded ?? Date.now(),
+      peerId,
+      peerPublicKey,
+    });
     await tx.done;
+  } finally {
     db.close();
-  } catch (error) {
-    // Reject rather than resolve: a caller that blacklists a peer and is told
-    // it succeeded will disconnect them and show them as blocked, while the
-    // block survives only until reload.
-    console.error(error);
-    throw error;
   }
 }
 
 async function fnDeleteDBPeerFromBlacklist(
-  // username: string,
-  peerId?: string,
-  peerPublicKey?: string,
+  peerPublicKey: string,
 ): Promise<void> {
-  const noPeerId = !peerId || peerId.length < 10;
-  const noPeerPublicKey = peerPublicKey?.length !== 64;
-
-  if (noPeerId && noPeerPublicKey)
-    throw new Error("Cannot delete blacklisted with no data");
-
+  const db = await getDB();
   try {
-    const db = await getDB();
-    const tx = db.transaction("blacklist", "readwrite");
-    const store = tx.objectStore("blacklist");
-
-    if (!noPeerId) {
-      const index = store.index("peerId");
-      const item = await index.getKey(peerId);
-
-      if (item) await store.delete(item);
-    } else {
-      const index = store.index("peerPublicKey");
-      const item = await index.getKey(peerPublicKey ?? "");
-
-      if (item) await store.delete(item);
-    }
-
-    await tx.done;
+    await db.delete("blacklist", peerPublicKey);
+  } finally {
     db.close();
-  } catch (error) {
-    console.error(error);
+  }
+}
+
+// Only a completed identity proof can update the routing ID for a saved key.
+async function fnRecordAuthenticatedPeer(
+  peerId: string,
+  peerPublicKey: string,
+) {
+  const db = await getDB();
+  try {
+    const tx = db.transaction(["addressBook", "blacklist"], "readwrite");
+    const contacts = tx.objectStore("addressBook");
+    const blocks = tx.objectStore("blacklist");
+    const [contact, block] = await Promise.all([
+      contacts.get(peerPublicKey),
+      blocks.get(peerPublicKey),
+    ]);
+    if (contact && contact.peerId !== peerId)
+      await contacts.put({ ...contact, peerId });
+    if (block && block.peerId !== peerId)
+      await blocks.put({ ...block, peerId });
+    await tx.done;
+    return { known: !!contact, blocked: !!block };
+  } finally {
+    db.close();
   }
 }
 
@@ -549,6 +424,7 @@ async function fnGetDBRoomMessageData(
       merkleRoot: messages[i].merkleRoot,
       hash: messages[i].hash,
       fromPeerId: messages[i].fromPeerId,
+      fromPeerPublicKey: messages[i].fromPeerPublicKey,
       filename: messages[i].filename,
       messageType: messages[i].messageType,
       savedSize: messages[i].savedSize,
@@ -573,6 +449,7 @@ async function fnSetDBRoomMessageData(
   channelLabel: string,
   timestamp: number,
   transferId?: string,
+  fromPeerPublicKey?: string,
 ): Promise<void> {
   try {
     const db = await getDB();
@@ -599,6 +476,7 @@ async function fnSetDBRoomMessageData(
         merkleRoot: merkleRootHex,
         hash: sha512Hex,
         fromPeerId,
+        fromPeerPublicKey,
         filename,
         messageType,
         savedSize:
@@ -2004,6 +1882,7 @@ async function verifyHeldFileAtStart(merkleRoot: string): Promise<void> {
   const notice: HeldFileSettledNotice = {
     roomId: row.roomId,
     fromPeerId: row.fromPeerId,
+    fromPeerPublicKey: row.fromPeerPublicKey,
     merkleRoot,
     hash: row.hash,
     filename: row.filename,
@@ -2049,6 +1928,8 @@ async function storeWhileVerifying(
       row.receiveVerification?.token !== live.token ||
       row.roomId !== chunk.roomId ||
       row.fromPeerId !== chunk.fromPeerId ||
+      (row.fromPeerPublicKey !== undefined &&
+        row.fromPeerPublicKey !== chunk.fromPeerPublicKey) ||
       row.hash !== chunk.hash ||
       !(recorded || isHeldChunk)
     )
@@ -2057,6 +1938,7 @@ async function storeWhileVerifying(
       );
     return {
       stored: false,
+      fromPeerPublicKey: row.fromPeerPublicKey,
       savedSize: row.savedSize,
       complete: false,
       ...(isHeldChunk ? { verification: live.token } : {}),
@@ -2173,6 +2055,8 @@ async function storeReceiveChunkLocked(
       previous &&
       (previous.roomId !== roomId ||
         previous.fromPeerId !== fromPeerId ||
+        (previous.fromPeerPublicKey !== undefined &&
+          previous.fromPeerPublicKey !== chunk.fromPeerPublicKey) ||
         previous.hash !== hash ||
         previous.totalSize !== totalSize ||
         previous.messageType !== messageType ||
@@ -2208,7 +2092,12 @@ async function storeReceiveChunkLocked(
       totalSize,
     );
     await tx.done;
-    if (held) return { stored: false, ...receiveProgress(manifest, totalSize) };
+    if (held)
+      return {
+        stored: false,
+        fromPeerPublicKey: previous?.fromPeerPublicKey,
+        ...receiveProgress(manifest, totalSize),
+      };
     // A held chunk no running verification owns arrives again: write it and
     // verify the file again below.
     completed = advanceReceiveManifest(
@@ -2271,7 +2160,11 @@ async function storeReceiveChunkLocked(
     );
     if (existing !== undefined) {
       await tx.done;
-      return { stored: false, ...receiveProgress(manifest, totalSize) };
+      return {
+        stored: false,
+        fromPeerPublicKey: previous?.fromPeerPublicKey,
+        ...receiveProgress(manifest, totalSize),
+      };
     }
     const next = advanceReceiveManifest(
       manifest,
@@ -2292,6 +2185,10 @@ async function storeReceiveChunkLocked(
       merkleRoot,
       hash,
       fromPeerId,
+      // A later retransmission cannot establish who sent an old row.
+      fromPeerPublicKey: previous
+        ? previous.fromPeerPublicKey
+        : chunk.fromPeerPublicKey,
       filename,
       messageType,
       savedSize: 0,
@@ -2350,7 +2247,7 @@ async function storeReceiveChunkLocked(
     }
 
     await tx.done;
-    return result;
+    return { ...result, fromPeerPublicKey: row.fromPeerPublicKey };
   } catch (error) {
     await abortQuietly(tx);
     throw error;
@@ -2455,6 +2352,8 @@ async function fnStoreReceiveChunk(
         (prior &&
           (prior.roomId !== chunk.roomId ||
             prior.fromPeerId !== chunk.fromPeerId ||
+            (prior.fromPeerPublicKey !== undefined &&
+              prior.fromPeerPublicKey !== chunk.fromPeerPublicKey) ||
             prior.transferId !== undefined)) ||
         (current?.deletedAt !== undefined && admittedAt <= current.deletedAt)
       ) {
@@ -4825,10 +4724,13 @@ onmessage = async (e: MessageEvent) => {
         result = undefined;
         break;
       case "deleteDBAddressBookEntry":
-        result = await fnDeleteDBAddressBookEntry(...message.args);
+        await fnDeleteDBAddressBookEntry(...message.args);
+        break;
+      case "recordAuthenticatedPeer":
+        result = await fnRecordAuthenticatedPeer(...message.args);
         break;
       case "getDBPeerIsBlacklisted":
-        result = await fnGetDBPeerIsBlackisted(...message.args);
+        result = await fnGetDBPeerIsBlacklisted(...message.args);
         break;
       case "getAllDBBlacklisted":
         result = await fnGetAllDBBlacklisted(...message.args);

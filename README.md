@@ -91,7 +91,7 @@ npm audit signatures
 
 To build the artifact yourself instead, see
 [Building from source](CONTRIBUTING.md#building-from-source). That path needs an
-exact toolchain (Node 24, Emscripten 6.0.9, pinned submodules), because the
+exact toolchain (Node 24, Emscripten 7.0.0, pinned submodules), because the
 release build reproduces the pinned WASM and refuses to emit an artifact it
 cannot attest.
 
@@ -799,7 +799,7 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.15.0-rc.0` is a local release candidate.** This work does not publish npm
+> **`0.15.0-rc.1` is a local release candidate.** This work does not publish npm
 > packages or CDN assets. The snippet names the candidate's intended release
 > path; use the generated local bundle until that version is published.
 
@@ -814,8 +814,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.15.0-rc.0/p2party.min.js"
-  integrity="sha384-RNjMsrVUi7lC3KP7la/Y1SyLeA+Umlvrpl4FlKpAlkP3VcyggnzwCNX7VPyUGuWD"
+  src="https://cdn.p2party.com/@0.15.0-rc.1/p2party.min.js"
+  integrity="sha384-1tQiCHCnXdR5Ia/lptaPlNKaPEUCOSy4V4zTJlkSofjMl13UTEYcieKRtSa947n2"
   crossorigin="anonymous"
 ></script>
 
@@ -854,7 +854,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-z9beL8iWayubbCW6R8E71jPW8D7JpLva/ho642pIMLCI61Iz4b6jR27bQ5a3S+G+`.
+`integrity=sha384-Ca9YAXcgPQ0RJaTsdvk1Hs1eZUabKNSegSYYdxOa7zLOB1pXvwr/HSqYPvGXrkuH`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.
@@ -972,7 +972,7 @@ release rather than surfacing later as a broken offline install.
 ## Development
 
 The reproducible release toolchain is Node 24.11.1, npm 11.6.2, Bun 1.3.14,
-Emscripten 6.0.9, and the repository's pinned libsodium source object. npm and
+Emscripten 7.0.0, and the repository's pinned libsodium source object. npm and
 `package-lock.json` are the dependency authority; Bun is the test runner.
 
 ```sh

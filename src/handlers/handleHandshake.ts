@@ -1,5 +1,5 @@
 import { wipeRatchet } from "../cryptography/ratchet";
-import { getIdentityX25519 } from "../db/api";
+import { getIdentityX25519, recordAuthenticatedPeer } from "../db/api";
 import { store } from "../store";
 import {
   isCurrentRatchetGateLease,
@@ -483,6 +483,24 @@ export const runHandshake = async (
       amInitiator,
       result.pqHealing,
     );
+
+    // performHandshakeCore verified the remote cross-signature under this
+    // Ed25519 key. Consult the durable policy before persisting or opening
+    // any edge for it, including when the block changed during the handshake.
+    const membership = await recordAuthenticatedPeer(
+      epc.withPeerId,
+      epc.withPeerPublicKey,
+    );
+    const room = store.getState().rooms.find((entry) => entry.id === roomId);
+    if (
+      !room ||
+      membership.blocked ||
+      (room.onlyConnectWithKnownAddresses && !membership.known)
+    )
+      throw new HandshakeFailure(
+        "Authenticated identity is refused by this room",
+        "policy",
+      );
 
     if (!isCurrentRatchetGateLease(roomId, epc.withPeerId, gateLease))
       throw new Error("Handshake transport lease is stale");

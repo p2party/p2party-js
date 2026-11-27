@@ -43,6 +43,8 @@ export interface Message {
   merkleRootHex: string;
   sha512Hex: string;
   fromPeerId: string;
+  /** Identity recorded at receipt or local send. Absent on older history. */
+  fromPeerPublicKey?: string;
   filename: string;
   messageType: number;
   savedSize: number;
@@ -126,6 +128,8 @@ export interface SetMessageArgs {
   totalChunks?: number;
   timestamp?: number;
   fromPeerId: string;
+  /** Identity recorded at receipt or local send. Absent on older history. */
+  fromPeerPublicKey?: string;
   filename: string;
   messageType: number;
   channelLabel: string;
@@ -137,6 +141,8 @@ export interface SetMessageAllChunksArgs {
   merkleRootHex: string;
   sha512Hex: string;
   fromPeerId: string;
+  /** Identity recorded at receipt or local send. Absent on older history. */
+  fromPeerPublicKey?: string;
   filename: string;
   messageType: number;
   totalSize: number;
@@ -1154,6 +1160,7 @@ const roomSlice = createSlice({
         filename,
         channelLabel,
         fromPeerId,
+        fromPeerPublicKey,
         messageType,
         chunkSize,
         totalSize,
@@ -1192,6 +1199,7 @@ const roomSlice = createSlice({
               filename: filename.length > 0 ? filename : "txt",
               messageType,
               fromPeerId,
+              fromPeerPublicKey,
               timestamp: timestamp ?? Date.now(),
               savedSize: chunkSize > 0 ? chunkSize : 0,
               totalSize,
@@ -1217,6 +1225,7 @@ const roomSlice = createSlice({
             filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
+            fromPeerPublicKey,
             timestamp: timestamp ?? Date.now(),
             savedSize: chunkSize,
             totalSize,
@@ -1271,6 +1280,7 @@ const roomSlice = createSlice({
         filename,
         messageType,
         fromPeerId,
+        fromPeerPublicKey,
         timestamp,
         totalSize,
       } = action.payload;
@@ -1298,6 +1308,7 @@ const roomSlice = createSlice({
             filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
+            fromPeerPublicKey,
             timestamp,
             savedSize: totalSize,
             totalSize,
@@ -1316,6 +1327,7 @@ const roomSlice = createSlice({
             filename: filename.length > 0 ? filename : "txt",
             messageType,
             fromPeerId,
+            fromPeerPublicKey,
             timestamp,
             savedSize: totalSize,
             totalSize,

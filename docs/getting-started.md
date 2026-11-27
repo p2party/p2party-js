@@ -618,3 +618,13 @@ never pair 0.14 JavaScript with an older WASM.
 Self-hosting those bytes, and passing them directly to `p2party/session`, are
 both covered in the
 [README](../README.md#local-self-hosted-or-release-pinned-wasm).
+
+## Saving and blocking peers
+
+Save a verified identity with `addPeerToAddressBook(username, peerId, peerPublicKey)`
+or block it with `blacklistPeer(peerId, peerPublicKey)`. Supply its Ed25519 public
+key (64 lowercase hexadecimal characters) to `getPeerAddressBookEntry`,
+`getPeerIsBlacklisted`, `deletePeerFromAddressBook` and `removePeerFromBlacklist`.
+An ID alone raises `TypeError`. Stored entries keep their key when a signaling
+server reassigns IDs. The SDK checks that key again after the peer authenticates
+and before its encrypted connection opens.

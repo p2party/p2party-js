@@ -5,7 +5,7 @@ Contributions and adversarial review are welcome.
 ## Development setup
 
 Use a fresh recursive clone and the pinned release toolchain: Node 24.11.1, npm
-11.6.2, Bun 1.3.14, and Emscripten 6.0.9. npm and `package-lock.json` are the
+11.6.2, Bun 1.3.14, and Emscripten 7.0.0. npm and `package-lock.json` are the
 dependency authority; Bun is the test runner.
 
 ```sh
@@ -27,7 +27,7 @@ than emit an artifact it cannot attest, so the toolchain is exact:
 | ----------- | ------------------------------------------------------------ |
 | Node        | 24.x (exact major)                                           |
 | npm         | 11.6.2                                                       |
-| Emscripten  | 6.0.9, with `emsdk` on `PATH`                                |
+| Emscripten  | 7.0.0, with `emsdk` on `PATH`                                |
 | Submodules  | pinned libsodium (`git submodule update --init --recursive`) |
 
 ```sh
@@ -65,8 +65,10 @@ Security reports belong at `security@p2party.com`, not in a public issue.
 ## Public history
 
 `master` carries the public history. Publish from this repository root with
-`git push`; a separate export checkout is not needed. Push a release tag
-explicitly when ready: the `v*` workflow publishes the SDK to npm and the CDN.
+`git push`; a separate export checkout is not needed. When ready, push the
+stable tag matching `package.json` (for example `vX.Y.Z`). The tagged workflow
+publishes the SDK to npm and the CDN. Prerelease versions use `release:pack`
+for local testing.
 
 Start public changes from `master`. Keep older private research histories on
 their existing branches, and bring reviewed changes across with selected

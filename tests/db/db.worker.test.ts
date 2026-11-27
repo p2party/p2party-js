@@ -447,6 +447,47 @@ describe("db.worker atomic receive progress", () => {
     ...overrides,
   });
 
+  test("history keeps the authenticated sender key when a routing ID is reassigned", async () => {
+    const fromPeerPublicKey = "ab".repeat(32);
+    const first = receiveChunk(0, [1, 2, 3, 4, 5], { fromPeerPublicKey });
+    const store = (chunk: ReceiveChunk) =>
+      callWorker("storeReceiveChunk", [chunk]);
+    expect((await store(first)).result).toMatchObject({
+      fromPeerPublicKey,
+      stored: true,
+    });
+    const otherKey = "cd".repeat(32);
+    const next = receiveChunk(1, [6, 7, 8, 9, 10], { fromPeerPublicKey });
+    const replaced = await store({ ...next, fromPeerPublicKey: otherKey });
+    expect(String(replaced.error)).toContain("ownership conflicts");
+    expect((await store(next)).result).toMatchObject({
+      fromPeerPublicKey,
+      complete: true,
+    });
+    expect((await store(first)).result).toMatchObject({
+      fromPeerPublicKey,
+      stored: false,
+    });
+    const history = await callWorker("getDBRoomMessageData", [first.roomId]);
+    expect(history.result).toEqual([
+      expect.objectContaining({ fromPeerPublicKey, savedSize: 10 }),
+    ]);
+  });
+
+  test("a retransmission never attributes a legacy message to the current user of its routing ID", async () => {
+    await callWorker("storeReceiveChunk", [receiveChunk(0, [1, 2, 3, 4, 5])]);
+    const next = receiveChunk(1, [6, 7, 8, 9, 10], {
+      fromPeerPublicKey: "ef".repeat(32),
+    });
+    const reply = await callWorker("storeReceiveChunk", [next]);
+    expect(reply.result).toMatchObject({ complete: true });
+    expect(reply.result).toMatchObject({ fromPeerPublicKey: undefined });
+    const history = await callWorker("getDBRoomMessageData", [next.roomId]);
+    expect(history.result).toEqual([
+      expect.objectContaining({ fromPeerPublicKey: undefined }),
+    ]);
+  });
+
   test("stale receive expiry uses local activity, not attacker-controlled message timestamps", async () => {
     let now = 1_800_000_000_000;
     const clock = spyOn(Date, "now").mockImplementation(() => now);
@@ -1815,4 +1856,57 @@ test("receipt lookup returns only its scope and index, while a full staged read 
   expect(
     lastWorkerTransferredBuffers.map((buffer) => buffer.byteLength),
   ).toEqual([0, 0, 0]);
+});
+
+describe("contact and blacklist identity", () => {
+  test("a blocked key stays blocked across routing IDs and repeated writes keep one record", async () => {
+    const key = "ab".repeat(32);
+    const other = "cd".repeat(32);
+    expect(
+      (await callWorker("setDBPeerInBlacklist", ["old-id", key])).error,
+    ).toBeUndefined();
+    expect((await callWorker("getDBPeerIsBlacklisted", [key])).result).toBe(
+      true,
+    );
+    expect(
+      (await callWorker("recordAuthenticatedPeer", ["new-id", key])).result,
+    ).toEqual({ blocked: true, known: false });
+    expect(
+      (await callWorker("setDBPeerInBlacklist", ["latest-id", key])).error,
+    ).toBeUndefined();
+    const blocks = (await callWorker("getAllDBBlacklisted", [])).result;
+    expect(blocks).toEqual([
+      {
+        peerId: "latest-id",
+        peerPublicKey: key,
+        dateAdded: expect.any(Number),
+      },
+    ]);
+    expect((await callWorker("getDBPeerIsBlacklisted", [other])).result).toBe(
+      false,
+    );
+  });
+
+  test("a saved contact follows the authenticated key and a reused ID does not grant admission", async () => {
+    const key = "ab".repeat(32);
+    const other = "cd".repeat(32);
+    expect(
+      (await callWorker("setDBAddressBookEntry", ["Ada", "old-id", key])).error,
+    ).toBeUndefined();
+    expect(
+      (await callWorker("recordAuthenticatedPeer", ["new-id", key])).result,
+    ).toEqual({ blocked: false, known: true });
+    expect(
+      (await callWorker("getDBAddressBookEntry", [key])).result,
+    ).toMatchObject({ username: "Ada", peerId: "new-id", peerPublicKey: key });
+    expect(
+      (await callWorker("recordAuthenticatedPeer", ["old-id", other])).result,
+    ).toEqual({ blocked: false, known: false });
+    expect(
+      (await callWorker("deleteDBAddressBookEntry", [key])).error,
+    ).toBeUndefined();
+    expect(
+      (await callWorker("getDBAddressBookEntry", [key])).result,
+    ).toBeUndefined();
+  });
 });

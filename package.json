@@ -1,7 +1,7 @@
 {
   "name": "p2party",
   "description": "Protocol-v4 end-to-end encryption and reliable file transfer over a WebRTC room mesh",
-  "version": "0.15.0-rc.0",
+  "version": "0.15.0-rc.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/p2party/p2party-js.git"
@@ -108,7 +108,7 @@
     "format": "bun prettier --write '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md ROADMAP.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v4-security.md,references.md}' 'src/cryptography/{mnemonic.ts,random.ts,testModule.ts,wasmLoader.ts}' 'tests/cryptography/pake_ratchet.test.ts' 'src/handlers/{handleHandshake.ts,ratchetPersist.ts}' 'tests/handlers/handleHandshake.test.ts' src/index.ts src/session.ts && clang-format -i src/cryptography/mlkem*.[ch]",
     "format:check": "bun prettier --check '.github/**/*.{yml,yaml}' 'scripts/**/*.{js,mjs,ts,json}' 'examples/**/*.ts' '*.{json,mjs,ts}' README.md ROADMAP.md CHANGELOG.md SECURITY.md CONTRIBUTING.md THIRD_PARTY_NOTICES.md 'docs/{getting-started.md,session-api.md,protocol-v4-security.md,references.md}' 'src/cryptography/{mnemonic.ts,random.ts,testModule.ts,wasmLoader.ts}' 'tests/cryptography/pake_ratchet.test.ts' 'src/handlers/{handleHandshake.ts,ratchetPersist.ts}' 'tests/handlers/handleHandshake.test.ts' src/index.ts src/session.ts && clang-format --dry-run --Werror src/cryptography/mlkem*.[ch]",
     "lint": "eslint .",
-    "test": "bun test tests",
+    "test": "bun test ./tests",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "example:standalone": "bun run examples/standalone-e2ee.ts",
     "store:prototype": "bun run src/blindRendezvous/prototype/store/storeServer.ts",

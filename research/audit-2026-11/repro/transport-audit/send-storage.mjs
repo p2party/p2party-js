@@ -6,7 +6,9 @@
 // 3,000 -> 1 opens; 3,000 -> 3,000 transactions; 3,000 -> 1,000 staged value reads;
 // 193,091,000 -> 0 cloned binary bytes. Transferred buffers still cross the worker boundary.
 // This excludes disk staging, network, encryption, and receipt persistence at the recipient.
-import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+import { build } from "bun";
+import process from "node:process";
+import { mkdtempSync, writeFileSync, rmSync, rmdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 const root = process.cwd(),
@@ -30,7 +32,7 @@ try {
       ]
     : [["current", root]]) {
     async function bundle(path, define = {}) {
-      const result = await Bun.build({
+      const result = await build({
         entrypoints: [path],
         target: "browser",
         format: "iife",
@@ -143,10 +145,6 @@ try {
   }
 } finally {
   await browser.close();
-  try {
-    unlinkSync(join(dir, "page.js"));
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
+  rmSync(join(dir, "page.js"), { force: true });
   rmdirSync(dir);
 }

@@ -56,6 +56,7 @@ export interface MessageData {
   roomId: string;
   timestamp: number;
   fromPeerId: string;
+  fromPeerPublicKey?: string;
   channelLabel: string;
   hash: string;
   merkleRoot: string;
@@ -125,6 +126,7 @@ export interface ReceiveChunk {
   schemaVersion: number;
   roomId: string;
   fromPeerId: string;
+  fromPeerPublicKey?: string;
   channelLabel: string;
   timestamp: number;
   merkleRoot: string;
@@ -194,6 +196,7 @@ export type FileRemovalRetryScope =
 export interface ReceiveChunkStored {
   /** True only when this call inserted a previously absent chunk index. */
   stored: boolean;
+  fromPeerPublicKey?: string;
   /** Sum of distinct committed realLen values for this Merkle root. */
   savedSize: number;
   /** Authoritative distinct-byte completion after this transaction. */
@@ -255,6 +258,7 @@ export interface HeldFileProgressNotice {
 export interface HeldFileSettledNotice {
   roomId: string;
   fromPeerId: string;
+  fromPeerPublicKey?: string;
   merkleRoot: string;
   hash: string;
   filename: string;
@@ -452,7 +456,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getDBAddressBookEntry";
-      args: [peerId?: string, peerPublicKey?: string];
+      args: [peerPublicKey: string];
     }
   | {
       id: number;
@@ -467,12 +471,17 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteDBAddressBookEntry";
-      args: [username?: string, peerId?: string, peerPublicKey?: string];
+      args: [peerPublicKey: string];
+    }
+  | {
+      id: number;
+      method: "recordAuthenticatedPeer";
+      args: [peerId: string, peerPublicKey: string];
     }
   | {
       id: number;
       method: "getDBPeerIsBlacklisted";
-      args: [peerId?: string, peerPublicKey?: string];
+      args: [peerPublicKey: string];
     }
   | {
       id: number;
@@ -497,7 +506,7 @@ export type WorkerMessages =
   | {
       id: number;
       method: "deleteDBPeerFromBlacklist";
-      args: [peerId?: string, peerPublicKey?: string];
+      args: [peerPublicKey: string];
     }
   | {
       id: number;
@@ -529,6 +538,7 @@ export type WorkerMessages =
         channelLabel: string,
         timestamp: number,
         transferId?: string,
+        fromPeerPublicKey?: string,
       ];
     }
   | {
@@ -770,7 +780,8 @@ export interface WorkerMethodReturnTypes {
   getDBAddressBookEntry: UsernamedPeer | undefined;
   getAllDBAddressBookEntries: UsernamedPeer[];
   setDBAddressBookEntry: undefined;
-  deleteDBAddressBookEntry: string;
+  deleteDBAddressBookEntry: undefined;
+  recordAuthenticatedPeer: { known: boolean; blocked: boolean };
   getDBPeerIsBlacklisted: boolean;
   getAllDBBlacklisted: BlacklistedPeer[];
   setDBPeerInBlacklist: undefined;

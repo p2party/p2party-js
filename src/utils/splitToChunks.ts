@@ -280,6 +280,7 @@ export const splitToChunks = async (
         merkleRootHex: "",
         sha512Hex,
         fromPeerId: keyPair.peerId,
+        fromPeerPublicKey: keyPair.publicKey,
         chunkSize: 0,
         totalSize,
         chunksCreated: i + 1,
@@ -396,6 +397,7 @@ export const splitToChunks = async (
           merkleRoot: merkleRootHex,
           hash: sha512Hex,
           fromPeerId: keyPair.peerId,
+          fromPeerPublicKey: keyPair.publicKey,
           savedSize: totalSize,
           totalSize,
           messageType,
@@ -418,6 +420,7 @@ export const splitToChunks = async (
         label,
         date.getTime(),
         transfer.transferId,
+        keyPair.publicKey,
       );
   } catch (error) {
     if (!transfer.outboxLease) await deleteReceiveTransfer(merkleRootHex);
@@ -431,6 +434,7 @@ export const splitToChunks = async (
       merkleRootHex,
       sha512Hex,
       fromPeerId: keyPair.peerId,
+      fromPeerPublicKey: keyPair.publicKey,
       chunkSize: 0,
       totalSize,
       chunksCreated: totalChunks,

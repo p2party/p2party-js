@@ -450,7 +450,6 @@ const handleWebSocketMessage = async (
         )
           break;
         const blacklisted = await getDBPeerIsBlacklisted(
-          message.peer.id,
           message.peer.publicKey,
         );
         if (!isCurrentSocket()) break;
@@ -464,7 +463,6 @@ const handleWebSocketMessage = async (
 
         if (rooms[roomIndex].onlyConnectWithKnownAddresses) {
           const inAddressBook = await getDBAddressBookEntry(
-            message.peer.id,
             message.peer.publicKey,
           );
           if (!isCurrentSocket()) break;
@@ -583,20 +581,11 @@ const handleWebSocketMessage = async (
             const members = parsePeerRosterSnapshot(message.peers, keyPair);
             const eligible = [];
             for (const member of members) {
-              if (
-                await getDBPeerIsBlacklisted(
-                  member.peerId,
-                  member.peerPublicKey,
-                )
-              )
-                continue;
+              if (await getDBPeerIsBlacklisted(member.peerPublicKey)) continue;
               if (!isCurrentSnapshot()) return;
               if (
                 rooms[roomIndex].onlyConnectWithKnownAddresses &&
-                !(await getDBAddressBookEntry(
-                  member.peerId,
-                  member.peerPublicKey,
-                ))
+                !(await getDBAddressBookEntry(member.peerPublicKey))
               )
                 continue;
               if (!isCurrentSnapshot()) return;
@@ -665,17 +654,13 @@ const handleWebSocketMessage = async (
             if (!accepted) continue;
 
             const blacklisted = await getDBPeerIsBlacklisted(
-              message.peers[i].id,
               message.peers[i].publicKey,
             );
             if (!isCurrentSocket()) return;
             if (blacklisted) continue;
 
             if (canOnlyConnectToKnownPeers) {
-              const p = await getDBAddressBookEntry(
-                message.peers[i].id,
-                message.peers[i].publicKey,
-              );
+              const p = await getDBAddressBookEntry(message.peers[i].publicKey);
               if (!isCurrentSocket()) return;
 
               if (!p) continue;
@@ -749,7 +734,6 @@ const handleWebSocketMessage = async (
           break;
         }
         const blacklisted = await getDBPeerIsBlacklisted(
-          message.fromPeerId,
           message.fromPeerPublicKey,
         );
         if (!isCurrentSocket()) break;
@@ -763,10 +747,7 @@ const handleWebSocketMessage = async (
             rooms[roomIndex].onlyConnectWithKnownAddresses;
 
           if (canOnlyConnectToKnownPeers) {
-            const p = await getDBAddressBookEntry(
-              message.fromPeerId,
-              message.fromPeerPublicKey,
-            );
+            const p = await getDBAddressBookEntry(message.fromPeerPublicKey);
             if (!isCurrentSocket()) break;
 
             if (!p) break;
@@ -797,33 +778,31 @@ const handleWebSocketMessage = async (
           console.error("Rejecting malformed or incompatible ICE signaling");
           break;
         }
-        const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
+        const { rooms } = api.getState() as State;
+        const roomIndex = findActiveSignalingRoomIndex(rooms, message.roomId);
+        if (roomIndex === -1) break;
+        const room = rooms[roomIndex];
+        const peer =
+          room.peers.find((entry) => entry.peerId === message.fromPeerId) ??
+          room.knownPeers?.find((entry) => entry.peerId === message.fromPeerId);
+        // A candidate can precede the description naming its sender's key.
+        // Such ICE is bounded and queued only. Admission of the transport and
+        // opening its ratchet gate both require the public identity key.
+        if (
+          peer &&
+          ((await getDBPeerIsBlacklisted(peer.peerPublicKey)) ||
+            (room.onlyConnectWithKnownAddresses &&
+              !(await getDBAddressBookEntry(peer.peerPublicKey))))
+        )
+          break;
         if (!isCurrentSocket()) break;
-
-        if (!blacklisted) {
-          const { rooms } = api.getState() as State;
-          const roomIndex = findActiveSignalingRoomIndex(rooms, message.roomId);
-          if (roomIndex === -1) break;
-
-          const canOnlyConnectToKnownPeers =
-            rooms[roomIndex].onlyConnectWithKnownAddresses;
-
-          if (canOnlyConnectToKnownPeers) {
-            const p = await getDBAddressBookEntry(message.fromPeerId);
-            if (!isCurrentSocket()) break;
-
-            if (!p) break;
-          }
-
-          if (!isCurrentSocket()) break;
-          await api.dispatch(
-            webrtcApi.endpoints.setCandidate.initiate({
-              peerId: message.fromPeerId,
-              roomId: message.roomId,
-              candidate: message.candidate,
-            }),
-          );
-        }
+        await api.dispatch(
+          webrtcApi.endpoints.setCandidate.initiate({
+            peerId: message.fromPeerId,
+            roomId: message.roomId,
+            candidate: message.candidate,
+          }),
+        );
 
         break;
       }
@@ -848,7 +827,6 @@ const handleWebSocketMessage = async (
           areCanonicalConnectionLabels(message.labels)
         ) {
           const blacklisted = await getDBPeerIsBlacklisted(
-            message.fromPeerId,
             message.fromPeerPublicKey,
           );
           if (!isCurrentSocket()) break;
@@ -856,7 +834,6 @@ const handleWebSocketMessage = async (
 
           if (rooms[roomIndex].onlyConnectWithKnownAddresses) {
             const known = await getDBAddressBookEntry(
-              message.fromPeerId,
               message.fromPeerPublicKey,
             );
             if (!isCurrentSocket()) break;

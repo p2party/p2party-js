@@ -134,6 +134,7 @@ import {
   setRoom,
   clearPeerHandshakeFailures,
   setOnlyConnectWithKnownPeers,
+  deleteMessage as deleteMessageAction,
   deleteMessageStateOnly,
   deleteRoom,
   purgeAllRooms,
@@ -947,7 +948,6 @@ const onlyAllowConnectionsFromAddressBook = async (
     const peersLen = rooms[roomIndex].peers.length;
     for (let i = 0; i < peersLen; i++) {
       const address = await getDBAddressBookEntry(
-        rooms[roomIndex].peers[i].peerId,
         rooms[roomIndex].peers[i].peerPublicKey,
       );
 
@@ -972,30 +972,44 @@ const onlyAllowConnectionsFromAddressBook = async (
   );
 };
 
-const deletePeerFromAddressBook = async (
-  username?: string,
-  peerId?: string,
-  peerPublicKey?: string,
+// A remembered routing ID can now belong to a different key. Only disconnect
+// current room edges that name the key the user actually edited.
+const disconnectIdentity = async (
+  peerPublicKey: string,
+  alsoDeleteData: boolean,
 ) => {
-  const pId = await deleteDBAddressBookEntry(username, peerId, peerPublicKey);
-  if (isUUID(pId)) {
+  for (const connection of snapshotPeerConnections()) {
+    if (connection.withPeerPublicKey !== peerPublicKey) continue;
     await dispatch(
       webrtcApi.endpoints.disconnectFromPeer.initiate({
-        peerId: pId,
+        roomId: connection.roomId,
+        peerId: connection.withPeerId,
+        expectedPeerPublicKey: peerPublicKey,
         alsoDeleteData: false,
       }),
     );
   }
+  if (alsoDeleteData) {
+    for (const room of store.getState().rooms)
+      for (const message of room.messages)
+        if (message.fromPeerPublicKey === peerPublicKey)
+          dispatch(
+            deleteMessageAction({
+              roomId: room.id,
+              merkleRootHex: message.merkleRootHex,
+            }),
+          );
+  }
+};
+
+const deletePeerFromAddressBook = async (peerPublicKey: string) => {
+  await deleteDBAddressBookEntry(peerPublicKey);
+  await disconnectIdentity(peerPublicKey, false);
 };
 
 const blacklistPeer = async (peerId: string, peerPublicKey: string) => {
   await setDBPeerInBlacklist(peerId, peerPublicKey);
-  await dispatch(
-    webrtcApi.endpoints.disconnectFromPeer.initiate({
-      peerId,
-      alsoDeleteData: true,
-    }),
-  );
+  await disconnectIdentity(peerPublicKey, true);
 };
 
 // const openChannel = async (

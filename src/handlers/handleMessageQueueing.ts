@@ -329,6 +329,7 @@ export const sendReceiveFrameReceipt = (
 /** What completing (or resetting) one received message needs to know. */
 interface ReceivedMessage {
   date: Date;
+  fromPeerPublicKey?: string;
   totalSize: number;
   messageType: number;
   filename: string;
@@ -365,6 +366,7 @@ const completeReceivedMessage = async (
       merkleRootHex,
       sha512Hex: uint8ArrayToHex(message.messageHash),
       fromPeerId: peerId,
+      fromPeerPublicKey: message.fromPeerPublicKey,
       totalSize: message.totalSize,
       messageType: message.messageType,
       filename: message.filename,
@@ -572,6 +574,7 @@ export const applyHeldFileSettled = async (
       merkleRootHex: notice.merkleRoot,
       sha512Hex: notice.hash,
       fromPeerId: notice.fromPeerId,
+      fromPeerPublicKey: notice.fromPeerPublicKey,
       totalSize: notice.totalSize,
       messageType: notice.messageType,
       filename: notice.filename,
@@ -657,6 +660,7 @@ const processMessage = async (
       const hashHex = uint8ArrayToHex(messageHash);
       const message: ReceivedMessage = {
         date,
+        fromPeerPublicKey: receiveResult.fromPeerPublicKey,
         totalSize,
         messageType,
         filename,
@@ -683,6 +687,7 @@ const processMessage = async (
             merkleRootHex,
             sha512Hex: hashHex,
             fromPeerId: peerId,
+            fromPeerPublicKey: receiveResult.fromPeerPublicKey,
             // A held last chunk counts only once its file verifies; reaching
             // the total here would also close the message channel.
             chunkSize: receiveResult.verification === undefined ? chunkSize : 0,

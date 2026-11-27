@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
-export async function openPayerScreen(mode) {
+export async function openPayerScreen(mode, directory) {
   const automatic = mode !== "--interactive",
     cancel = mode === "--test-ui-cancel";
   const require = createRequire(
@@ -34,10 +34,34 @@ export async function openPayerScreen(mode) {
       return route.abort();
     });
     const page = await context.newPage();
+    await page.exposeFunction("findLocalRoute", (request) =>
+      directory.find(request),
+    );
     await page.goto(origin);
+    let suggestion;
     return {
       async choose() {
-        if (automatic) {
+        if (mode === "--test-ui-discovery") {
+          await page.getByLabel("Maximum total").fill("1");
+          await page
+            .getByRole("button", { name: "Find a route under my cap" })
+            .click();
+          await page.getByText("No available route fits this cap.").waitFor();
+          await page.getByLabel("Maximum total").fill("2");
+          await page
+            .getByRole("button", { name: "Find a route under my cap" })
+            .click();
+          await page.getByText(/^Suggested route:/).waitFor();
+          suggestion = await Promise.all(
+            ["First relay", "Second relay"].map((l) =>
+              page.getByLabel(l).inputValue(),
+            ),
+          );
+          assert.equal(new Set(suggestion).size, 2);
+          await page
+            .getByRole("button", { name: "Review signed quotes" })
+            .click();
+        } else if (automatic) {
           await page.getByLabel("First relay").selectOption("B");
           assert(
             await page
@@ -65,18 +89,33 @@ export async function openPayerScreen(mode) {
         await page.evaluate((terms) => window.payer.showQuotes(terms), q);
         if (automatic) {
           assert.equal(
-            await page.getByText("A → B → E → D → C", { exact: true }).count(),
+            await page
+              .getByText(
+                suggestion
+                  ? ["A", ...suggestion, "C"].join(" → ")
+                  : "A → B → E → D → C",
+                { exact: true },
+              )
+              .count(),
             1,
           );
           assert.equal(
             await page
-              .getByText("3 test P2PARTY total · Budget 4 P2PARTY", {
-                exact: true,
-              })
+              .getByText(
+                suggestion
+                  ? "2 test P2PARTY total · Budget 2 P2PARTY"
+                  : "3 test P2PARTY total · Budget 4 P2PARTY",
+                {
+                  exact: true,
+                },
+              )
               .count(),
             1,
           );
-          assert.equal(await page.locator("article").count(), 3);
+          assert.equal(
+            await page.locator("article").count(),
+            suggestion?.length ?? 3,
+          );
           await page.locator("summary").first().click();
           assert.equal(
             await page.locator("article code").first().textContent(),
@@ -130,13 +169,13 @@ export async function openPayerScreen(mode) {
           else {
             assert.equal(
               await page.getByText(/Received 1 test P2PARTY/).count(),
-              3,
+              suggestion?.length ?? 3,
             );
             assert.equal(
               await page
                 .getByText("Inspect payment receipt", { exact: true })
                 .count(),
-              3,
+              suggestion?.length ?? 3,
             );
           }
           await page.getByRole("button", { name: "Close test wallet" }).click();

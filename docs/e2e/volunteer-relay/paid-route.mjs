@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createLocalDirectory } from "./discovery-fixture.mjs";
 import { openPayerScreen } from "./payer-screen.mjs";
 import { withRelayBrowsers } from "./browser-fixture.mjs";
 import { connectOrder, refusalTrials } from "./refusal-trials.mjs";
@@ -22,12 +23,30 @@ import {
 } from "./payment-protocol.mjs";
 
 const args = process.argv.slice(2);
+const localDirectory = createLocalDirectory();
 const screenMode =
   args.length === 1 &&
-  ["--interactive", "--test-ui", "--test-ui-cancel"].includes(args[0])
+  [
+    "--interactive",
+    "--test-ui",
+    "--test-ui-cancel",
+    "--test-ui-discovery",
+  ].includes(args[0])
     ? args[0]
     : null;
 function cliSelection() {
+  if (
+    args.length === 2 &&
+    /^--discover=[23]$/.test(args[0]) &&
+    /^--max=\d+$/.test(args[1])
+  ) {
+    const selection = localDirectory.find({
+      hops: Number(args[0].slice(11)),
+      cap: Number(args[1].slice(6)),
+    });
+    if (!selection) throw Error("No available route fits this cap");
+    return selection;
+  }
   const [via = "--via=D,B", maximum = "--max=2", replaces] = args;
   if (
     args.length > 3 ||
@@ -94,7 +113,7 @@ async function purchase({ chosen, cap, replaces }, screen) {
     rpcChainId = 8123;
   const providers = chosen.map((role, i) => ({
     role,
-    key: makeKey(),
+    key: localDirectory.keys.get(role),
     payee: wallet(i % 2 ? "slh-dsa-sha2-192s" : "ml-dsa-65"),
     funding: wallet(),
     id: hex(64),
@@ -566,6 +585,7 @@ async function purchase({ chosen, cap, replaces }, screen) {
             "0x0",
           );
         }
+        localDirectory.recordDelivered(chosen);
         completion =
           "Delivery verified. " +
           chosen.length +
@@ -620,7 +640,9 @@ async function purchase({ chosen, cap, replaces }, screen) {
 
   return completion;
 }
-const screen = screenMode ? await openPayerScreen(screenMode) : null;
+const screen = screenMode
+  ? await openPayerScreen(screenMode, localDirectory)
+  : null;
 try {
   const selection = screen ? await screen.choose() : cliSelection();
   const message = await purchase(selection, screen);

@@ -229,6 +229,14 @@
               value="2"
               required
           /></label>
+          <label
+            >Requested relays<select id="hops">
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select></label
+          >
+          <button type="button" id="find">Find a route under my cap</button>
+          <p id="suggestion" aria-live="polite"></p>
           <p id="validation" aria-live="polite"></p>
           <button class="primary" id="review" type="submit">
             Review signed quotes
@@ -287,7 +295,36 @@
         el("validation").textContent = message;
         el("review").disabled = Boolean(message);
       }
-      el("request").addEventListener("input", check);
+      el("find").onclick = async () => {
+        const cap = Number(el("cap").value),
+          hops = Number(el("hops").value);
+        if (!Number.isSafeInteger(cap) || cap < 0) return;
+        const found = await window.findLocalRoute({ hops, cap });
+        if (
+          Number(el("cap").value) !== cap ||
+          Number(el("hops").value) !== hops ||
+          state.selection
+        )
+          return;
+        if (!found) {
+          el("suggestion").textContent = "No available route fits this cap.";
+          return;
+        }
+        ["first", "second", "third"].forEach(
+          (id, i) => (el(id).value = found.chosen[i] ?? ""),
+        );
+        el("suggestion").textContent =
+          "Suggested route: " +
+          found.chosen.join(" → ") +
+          ". Estimated total " +
+          found.total +
+          " test P2PARTY. Review the signed quotes to continue.";
+        check();
+      };
+      el("request").addEventListener("input", () => {
+        el("suggestion").textContent = "";
+        check();
+      });
       check();
       el("request").onsubmit = (e) => {
         e.preventDefault();

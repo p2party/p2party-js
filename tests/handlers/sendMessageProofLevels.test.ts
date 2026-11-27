@@ -1,4 +1,12 @@
-import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  test,
+} from "bun:test";
 
 import { loadTestModule } from "../../src/cryptography/testModule";
 import { getMerkleRoot } from "../../src/cryptography/merkle";
@@ -56,7 +64,7 @@ const localStorageMemory: Record<string, string> = {};
 // rejects. Stand in for the outbox, the staged cells and the ratchet row while
 // a test is armed; otherwise every call reaches the real module, so other test
 // files see no change. Everything else on the send path is the real code.
-const realDb = await import("../../src/db/api");
+const realDb = { ...(await import("../../src/db/api")) };
 const db: {
   armed: boolean;
   rows: Map<number, NewChunk>;
@@ -92,6 +100,10 @@ mock.module("../../src/db/api", () => ({
     if (!db.armed) return await realDb.setRatchetSession(...args);
   },
 }));
+
+afterAll(() => {
+  mock.module("../../src/db/api", () => realDb);
+});
 
 type SendModule = typeof import("../../src/handlers/handleSendMessage");
 let handleSendMessage: SendModule["handleSendMessage"];

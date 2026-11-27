@@ -64,6 +64,14 @@ jobs:
       - name: Build and validate the release tarball
         run: npm run release:pack
 
+      - name: Retain the validated tarball for release comparison
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tarball
+          path: p2party-*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Verify generated crypto sources are reproducible
         run: git diff --exit-code -- src/cryptography/libcrypto.js src/cryptography/libcrypto.d.ts src/cryptography/libcrypto.provenance.json src/cryptography/wasmLoader.ts
 

@@ -7,12 +7,24 @@ encryption protocol remains 4.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `p2party-0.15.0.tgz` | `813e9035cf57ba900f8179e0bf0bed6271644aa8dd62fd9f487432b9ed1d0473` |
+| `p2party-0.15.0.tgz` from Linux CI (871,783 bytes) | `d2eb1fbc40a585da0144413a0da9bbf5b17a03536cd5f982e0c20d429078353b` |
 | `libcrypto.wasm` (232,181 bytes) | `34a866df90d13b43292a0b1eaa3182b01d1994e03fc533c799ce01bdf11691a2` |
 
-Two independent builds of the SDK implementation at `eaca5e6` with Node 26.13.1, npm 12.2.3, Bun 1.4.5 and
-Emscripten 7.0.0 produced these hashes. The site vendors that tarball and
-self-hosts the matching WASM. The native TypeScript 7.0.2 compiler checks
+The website vendors the Linux CI archive and self-hosts its WASM at site
+revision `c30b968`. Verify the compressed archive against the first digest
+in the table. [SDK CI archive](https://github.com/p2party/p2party-js/actions/runs/45983904833)
+
+The two local builds of SDK implementation `eaca5e6` used Homebrew Node
+26.13.1, npm 12.2.3, Bun 1.4.5 and Emscripten 7.0.0. Homebrew Node's
+system zlib produced an 870,702-byte gzip stream with SHA-256
+`813e9035cf57ba900f8179e0bf0bed6271644aa8dd62fd9f487432b9ed1d0473`.
+Both gzip streams decompress to the same 2,878,464-byte tar archive,
+SHA-256 `9d0773b2488366cd5c76b5d903481b13b31bfca92eae527e23bf1e416137e4e6`.
+All 73 files, their metadata and their order match. Recompressing the local
+tar stream with the official Node distribution's bundled zlib reproduces
+the Linux CI digest.
+
+The native TypeScript 7.0.2 compiler checks
 both projects. The SDK declaration packager, Rollup and ESLint use the
 TypeScript 6 JavaScript API.
 

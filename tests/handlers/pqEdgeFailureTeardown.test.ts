@@ -153,7 +153,9 @@ const fakePeerConnection = (): FakeEdge => {
   return epc;
 };
 
-const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
+const fakeApi = () => {
+  const authenticated = Promise.withResolvers<void>();
+  const redial = Promise.withResolvers<void>();
   const dispatched: unknown[] = [];
   const state = {
     keyPair: {
@@ -186,16 +188,26 @@ const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
   const api = {
     dispatch: (action: unknown) => {
       dispatched.push(action);
+      if (
+        setPeerHandshakeStatus.match(action) &&
+        action.payload.status === "authenticated"
+      )
+        authenticated.resolve();
+      if (
+        setConnectingToPeers.match(action) &&
+        action.payload.reason === "redial"
+      )
+        redial.resolve();
       return { unwrap: async () => undefined };
     },
     getState: () => state,
   } as unknown as BaseQueryApi;
-  return { api, dispatched };
-};
-
-const turns = async (count: number): Promise<void> => {
-  for (let turn = 0; turn < count; turn++)
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  return {
+    api,
+    dispatched,
+    authenticated: authenticated.promise,
+    redial: redial.promise,
+  };
 };
 
 describe("a failed PQ healing exchange retires its generation through the edge teardown", () => {
@@ -203,7 +215,7 @@ describe("a failed PQ healing exchange retires its generation through the edge t
     const epc = fakePeerConnection();
     const main = fakeMain();
     const dataChannels: IRTCDataChannel[] = [];
-    const { api, dispatched } = fakeApi();
+    const { api, dispatched, authenticated, redial } = fakeApi();
     const rootKey = new Uint8Array(32).fill(1);
     const dhSelfSec = new Uint8Array(32).fill(4);
     const pq = { destroyed: 0 };
@@ -243,16 +255,7 @@ describe("a failed PQ healing exchange retires its generation through the edge t
         api,
       );
       channel.onopen?.call(channel, new Event("open"));
-      const authenticated = () =>
-        dispatched.some(
-          (action) =>
-            (action as { type?: string }).type ===
-              setPeerHandshakeStatus.type &&
-            (action as { payload: { status: string } }).payload.status ===
-              "authenticated",
-        );
-      for (let turn = 0; turn < 200 && !authenticated(); turn++) await turns(1);
-      expect(authenticated()).toBe(true);
+      await authenticated;
       const handle = setIntervalSpy.mock.results.at(-1)?.value as unknown;
       expect(handle).toBeDefined();
       expect(dataChannels).toContain(channel);
@@ -261,7 +264,7 @@ describe("a failed PQ healing exchange retires its generation through the edge t
       // One deterministic orchestrator pass: the retry budget is spent, so it
       // fails the authenticated edge through failEdge.
       await tickPqHealing(epc);
-      await turns(3);
+      await redial;
 
       expect(epc.closes).toBe(1);
       expect(main.closes).toBe(1);
@@ -290,6 +293,7 @@ describe("a failed PQ healing exchange retires its generation through the edge t
           roomId: ROOM_ID,
           connectingToPeers: true,
           reason: "redial",
+          peerId: PEER_ID,
         }),
       );
     } finally {

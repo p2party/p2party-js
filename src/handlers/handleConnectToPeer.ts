@@ -7,10 +7,14 @@ import { hasTerminalPeerHandshakeFailure } from "./handshakeFailure";
 
 import signalingServerApi, {
   sendRoomRequestMessage,
+  captureSignalingSendLease,
 } from "../api/signalingServerApi";
 import webrtcApi from "../api/webrtc";
 import { teardownEdgeGeneration } from "../api/webrtc/disconnectFromPeerQuery";
-import { repairIceTransportAfterCandidateFailure } from "../api/webrtc/iceRepair";
+import {
+  repairIceTransportAfterCandidateFailure,
+  type IceCandidateRepairResult,
+} from "../api/webrtc/iceRepair";
 import {
   findRoomIdentityAliases,
   findRoomPeerConnection,
@@ -43,9 +47,11 @@ import {
   isIdentityInitiator,
 } from "../utils/identityRole";
 import { assertTransportIdentityCurrent } from "../utils/transportIdentity";
-import { SIGNALING_PROTOCOL_VERSION } from "../utils/constants";
+import {
+  ICE_REPAIR_GRACE_MS,
+  SIGNALING_PROTOCOL_VERSION,
+} from "../utils/constants";
 import { requestRoomFromSignaling } from "./requestRoom";
-import { waitForFreshSocketProof } from "../utils/roomRequestCoordinator";
 // import libcrypto from "../cryptography/libcrypto";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -190,31 +196,14 @@ export const handleConnectToPeer = async (
       epc.ratchetGateLease = ratchetGateLease;
       epc.remoteTransportRebinds = 0;
       epc.ensureFreshIceConfiguration = async (): Promise<boolean> => {
-        let state = api.getState() as State;
-        const proof = waitForFreshSocketProof(state.signalingServer.isVerified);
-        if (
-          !state.signalingServer.isConnected &&
-          !state.signalingServer.isEstablishingConnection
-        ) {
-          if (state.signalingServer.serverUrl.length === 0)
-            throw new Error(
-              "Cannot refresh ICE without a signaling server URL",
-            );
-          await api.dispatch(
-            signalingServerApi.endpoints.connectWebSocket.initiate(
-              state.signalingServer.serverUrl,
-              { track: false },
-            ),
-          );
-        }
-
-        await proof;
-        state = api.getState() as State;
+        const state = api.getState() as State;
+        // Only the signaling reconnect controller may reopen a dead socket.
+        // A transport repair cannot override a terminal server refusal.
         if (
           !state.signalingServer.isConnected ||
           !state.signalingServer.isVerified
         )
-          throw new Error("Signaling socket did not complete identity proof");
+          throw new Error("ICE repair requires a verified signaling socket");
         const room = state.rooms.find(
           (candidate) =>
             candidate.id === roomId && candidate.signalingActive !== false,
@@ -226,7 +215,7 @@ export const handleConnectToPeer = async (
         await requestRoomFromSignaling(api, room.url, (request) =>
           sendRoomRequestMessage(api, request),
         );
-        return true;
+        return false;
       };
       // Claim and registry insertion remain inside the room-config critical
       // section, so a response sweep cannot miss this concrete transport.
@@ -311,7 +300,7 @@ export const handleConnectToPeer = async (
             ),
           )
           .then(() => {
-            requestPeersAfterEdgeTeardown(api, roomId);
+            requestPeersAfterEdgeTeardown(api, roomId, peerId);
           });
       }, PENDING_OFFER_TIMEOUT_MS);
     };
@@ -353,7 +342,7 @@ export const handleConnectToPeer = async (
             ),
           )
           .then(() => {
-            requestPeersAfterEdgeTeardown(api, roomId);
+            requestPeersAfterEdgeTeardown(api, roomId, peerId);
           });
       }, PENDING_OFFER_TIMEOUT_MS);
     };
@@ -367,6 +356,24 @@ export const handleConnectToPeer = async (
 
     epc.onnegotiationneeded = async () => {
       // Don't start a new negotiation if we're already making an offer or not in stable state
+      const canPublish = captureSignalingSendLease();
+      const { signalingServer } = api.getState() as State;
+      if (!peerConnections.includes(epc) || epc.signalingState === "closed")
+        return;
+      if (
+        !canPublish ||
+        !signalingServer.isConnected ||
+        !signalingServer.isVerified
+      ) {
+        epc.resumeDeferredNegotiation = () => {
+          epc.resumeDeferredNegotiation = undefined;
+          void epc.onnegotiationneeded?.call(
+            epc,
+            new Event("negotiationneeded"),
+          );
+        };
+        return;
+      }
       if (epc.makingOffer || epc.signalingState !== "stable") {
         debugLog(
           `Skipping negotiation with ${peerId} - already making offer: ${String(epc.makingOffer)}, state: ${epc.signalingState}`,
@@ -380,8 +387,8 @@ export const handleConnectToPeer = async (
         // Only the first offer on a fresh transport is watched; an ICE-restart
         // offer keeps the previous remote description and is owned by the ICE
         // repair paths.
-        if (hasUnansweredFirstOffer(epc)) armPendingOfferWatchdog();
-
+        if (!canPublish())
+          throw new Error("Signaling socket changed while creating an offer");
         if (epc.localDescription) {
           const currentKeyPair = (api.getState() as State).keyPair;
           await api
@@ -402,12 +409,34 @@ export const handleConnectToPeer = async (
               ),
             )
             .unwrap();
+          if (hasUnansweredFirstOffer(epc)) armPendingOfferWatchdog();
 
           debugLog(
             `Negotiation was needed with ${peerId} and you sent a description ${epc.localDescription.type}.`,
           );
         }
       } catch (error) {
+        if (
+          (epc.signalingState as string) === "have-local-offer" &&
+          peerConnections.includes(epc)
+        ) {
+          try {
+            await epc.setLocalDescription({ type: "rollback" });
+          } catch {
+            // This exact transport cannot negotiate again with an unsent offer.
+            if (peerConnections.includes(epc))
+              await api.dispatch(
+                webrtcApi.endpoints.disconnectFromPeer.initiate(
+                  {
+                    roomId,
+                    peerId,
+                  },
+                  { track: false },
+                ),
+              );
+          }
+          requestPeersAfterEdgeTeardown(api, roomId, peerId);
+        }
         console.error(error);
       } finally {
         epc.makingOffer = false;
@@ -457,8 +486,19 @@ export const handleConnectToPeer = async (
     let lastIceRestartTime = 0;
     const ICE_RESTART_DEBOUNCE_MS = 3000;
     let disconnectTimeout: ReturnType<typeof setTimeout> | undefined;
-    let iceRepairInFlight: Promise<"restarted" | "disconnected"> | undefined;
-    const repairIce = (): Promise<"restarted" | "disconnected"> => {
+    const clearDisconnectTimeout = (): void => {
+      if (disconnectTimeout !== undefined) clearTimeout(disconnectTimeout);
+      disconnectTimeout = undefined;
+    };
+    epc.clearTransportTimers = () => {
+      if (pendingOfferWatchdog !== undefined)
+        clearTimeout(pendingOfferWatchdog);
+      pendingOfferWatchdog = undefined;
+      clearUnnegotiatedTransportWatchdog();
+      clearDisconnectTimeout();
+    };
+    let iceRepairInFlight: Promise<IceCandidateRepairResult> | undefined;
+    const repairIce = (): Promise<IceCandidateRepairResult> => {
       if (iceRepairInFlight) return iceRepairInFlight;
       iceRepairInFlight = repairIceTransportAfterCandidateFailure(
         epc,
@@ -470,10 +510,8 @@ export const handleConnectToPeer = async (
     };
 
     epc.oniceconnectionstatechange = async () => {
-      if (
-        epc.iceConnectionState === "failed" ||
-        epc.iceConnectionState === "disconnected"
-      ) {
+      if (epc.iceConnectionState === "disconnected") observeDisconnect();
+      if (epc.iceConnectionState === "failed") {
         const now = Date.now();
 
         if (now - lastIceRestartTime > ICE_RESTART_DEBOUNCE_MS) {
@@ -506,45 +544,55 @@ export const handleConnectToPeer = async (
         await handleQueuedIceCandidates(epc);
     };
 
+    const stillBroken = (): boolean =>
+      peerConnections.includes(epc) &&
+      (epc.iceConnectionState === "failed" ||
+        epc.iceConnectionState === "disconnected" ||
+        epc.connectionState === "disconnected");
+    const retireAfterRepair = (): void => {
+      clearDisconnectTimeout();
+      if (!stillBroken()) return;
+      void api
+        .dispatch(
+          webrtcApi.endpoints.disconnectFromPeer.initiate(
+            { roomId, peerId },
+            { track: false },
+          ),
+        )
+        .then(() => {
+          if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId, peerId);
+        });
+    };
+    const observeDisconnect = (): void => {
+      if (disconnectTimeout !== undefined) return;
+      disconnectTimeout = setTimeout(() => {
+        if (!stillBroken()) {
+          clearDisconnectTimeout();
+          return;
+        }
+        // Only this edge requests fresh credentials and restarts once the
+        // ordinary disconnect grace has passed.
+        void repairIce().catch((error: unknown) =>
+          debugLog("ICE restart failed", error),
+        );
+        disconnectTimeout = setTimeout(retireAfterRepair, ICE_REPAIR_GRACE_MS);
+      }, ICE_REPAIR_GRACE_MS);
+    };
     epc.onconnectionstatechange = async () => {
       if (epc.connectionState === "disconnected") {
-        // Try to repair before giving up. "disconnected" is usually a transient
-        // ICE failure -- a NAT binding expiring on an idle edge, a network
-        // change -- and an ICE restart is the standard recovery. Tearing the
-        // edge down was the only response, so a room that had been quiet for a
-        // few minutes reported "not-connected" on the next send while the peer
-        // was still listed in the roster and the UI still said two peers.
-        //
-        // The teardown below stays as the fallback: if the restart does not get
-        // us back to connected within the grace period, the edge really is gone.
-        await repairIce().catch(() => undefined);
-
-        if (disconnectTimeout) clearTimeout(disconnectTimeout);
-        disconnectTimeout = setTimeout(() => {
-          if (epc.connectionState !== "disconnected") return;
-
-          // disconnectFromPeer nulls every handler before it closes the PC, so
-          // nothing downstream re-dials. Re-request the roster once the edge is
-          // gone: the peer usually still holds its side (its ICE consent has
-          // not expired while it was frozen) and will not offer on its own.
-          void api
-            .dispatch(
-              webrtcApi.endpoints.disconnectFromPeer.initiate(
-                {
-                  peerId,
-                  roomId,
-                },
-                { track: false },
-              ),
-            )
-            .then(() => {
-              if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId);
-            });
-
-          console.error(
-            `RTC Connection with peer ${peerId} in room ${roomId} has disconnected.`,
+        observeDisconnect();
+      } else if (
+        epc.connectionState === "failed" &&
+        epc.iceConnectionState === "failed"
+      ) {
+        if (disconnectTimeout === undefined)
+          disconnectTimeout = setTimeout(
+            retireAfterRepair,
+            ICE_REPAIR_GRACE_MS,
           );
-        }, 8000);
+        await repairIce().catch((error: unknown) =>
+          debugLog("ICE restart failed", error),
+        );
       } else if (
         epc.connectionState === "closed" ||
         epc.connectionState === "failed"
@@ -566,7 +614,7 @@ export const handleConnectToPeer = async (
           `RTC Connection with peer ${peerId} in room ${roomId} has ${epc.connectionState}.`,
         );
 
-        if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId);
+        if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId, peerId);
       } else {
         if (disconnectTimeout) {
           clearTimeout(disconnectTimeout);

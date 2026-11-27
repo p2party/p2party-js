@@ -132,7 +132,7 @@ export const armRebindAuthenticationDeadline = ({
         );
       })
       .then(() => {
-        requestPeersAfterEdgeTeardown(api, roomId);
+        requestPeersAfterEdgeTeardown(api, roomId, peerId);
       });
   };
 

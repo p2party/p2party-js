@@ -4,7 +4,6 @@ import {
   IMMEDIATE_RESUME_PROTOCOL,
   FRAME_TYPE_IMMEDIATE_DISPOSITION,
   bindImmediateDisposition,
-  immediateCloseMeansPause,
   acceptImmediateDisposition,
   sendImmediateResumeCapability,
 } from "./immediateDisposition";
@@ -38,10 +37,7 @@ import {
   rejectRatchetGate,
 } from "./ratchetGate";
 import { admitPreAuthenticatedFrame } from "./ratchetGateWait";
-import {
-  markChannelClosedLocally,
-  wasChannelClosedLocally,
-} from "../api/webrtc/localChannelClose";
+import { markChannelClosedLocally } from "../api/webrtc/localChannelClose";
 import {
   classifyHandshakeFailure,
   isTerminalHandshakeFailure,
@@ -97,7 +93,6 @@ import {
   shouldAcceptIncomingMain,
 } from "../utils/identityRole";
 import { MAX_DATA_CHANNEL_LABEL_CHARS } from "../utils/signalingBounds";
-import { isRemoteCancelClose } from "./transferAbort";
 import {
   forgetCompletedReceiveMessageKey,
   forgetMappedReceiveMessageKey,
@@ -468,7 +463,7 @@ export const handleOpenChannel = async (
       // dedicated "redial" budget: the "join" budget may have just been
       // consumed by a socket reconnect's roster request, which would swallow
       // the one re-dial that can rebuild this edge.
-      requestPeersAfterEdgeTeardown(api, roomId);
+      requestPeersAfterEdgeTeardown(api, roomId, epc.withPeerId);
     } else {
       if (!dataChannels.includes(extChannel)) return;
       // SCTP delivers queued `message` events before `close`, but our decrypt /
@@ -490,44 +485,8 @@ export const handleOpenChannel = async (
       } else if (merkleRootHex !== "") {
         try {
           receiveProgress = await getDBMessageData(merkleRootHex);
-          const authenticatedTransportStillAlive =
-            epc.connectionState === "connected" &&
-            isCurrentRatchetGateLease(
-              roomId,
-              epc.withPeerId,
-              transportGateLease,
-            );
-          // ONE assignment, deliberately: both reasons to call a close a cancel
-          // share the same two disqualifiers, and a second branch that set this
-          // flag independently is how the local-close test came to be missing
-          // from one of them.
-          //
-          // - A close THIS side performed is never the peer cancelling. Our own
-          //   guards close this channel (pre-authentication, receipt-queue
-          //   budget, receive-queue budget) and the sender already refuses to
-          //   read those as a cancel (isAuthenticatedPeerCancel); the receiver
-          //   must refuse too, or our own guard deletes our own partial file.
-          //   This is the one direction the marker CAN discriminate: it is
-          //   RAM-local and never transmitted, so it says nothing about a close
-          //   the PEER performed.
-          // - In scheduled-cover mode a lane closes at every fixed cycle
-          //   boundary regardless of transfer state, so a channel close is
-          //   NEVER the cancel signal — an explicit encrypted CANCEL cover cell
-          //   is. Only an immediate-mode live-edge close means remote cancel.
-          deleteIncompleteReceive =
-            !wasChannelClosedLocally(extChannel) &&
-            !immediateCloseMeansPause(extChannel) &&
-            epc.coverRuntime === undefined &&
-            (isRemoteCancelClose(
-              receiveProgress,
-              epc.withPeerId,
-              authenticatedTransportStillAlive,
-            ) ||
-              // An authenticated key may have advanced before the first storage
-              // write. A live-edge close still cancels that zero-byte transfer.
-              (!receiveProgress &&
-                authenticatedTransportStillAlive &&
-                (epc.messageKeyByMerkleRoot?.has(merkleRootHex) ?? false)));
+          // Only a received, authenticated CANCEL sets cancellationRequested.
+          // A parked, disconnected or remotely closed channel may still resume.
         } catch (error) {
           // Preserve partial state on storage uncertainty; a reconnect can still
           // resume it, while deleting here would be irreversible.
@@ -619,7 +578,7 @@ export const handleOpenChannel = async (
     // dedicated "redial" budget for the same reason main's onclose does: the
     // "join" budget may have just been consumed by a socket reconnect's
     // roster request. A replaced transport's stale lease returned above.
-    requestPeersAfterEdgeTeardown(api, roomId);
+    requestPeersAfterEdgeTeardown(api, roomId, epc.withPeerId);
   };
 
   // Bytes currently pinned by frames parked waiting for this transport's gate
@@ -998,7 +957,7 @@ export const handleOpenChannel = async (
                   ),
                 ),
               ).then(() => {
-                requestPeersAfterEdgeTeardown(api, roomId);
+                requestPeersAfterEdgeTeardown(api, roomId, epc.withPeerId);
               });
             },
           });
@@ -1202,7 +1161,7 @@ export const handleOpenChannel = async (
           // or policy mismatch fails again on any fresh transport and a
           // re-dial would only burn another attempt against the PIN throttle.
           if (failureReason === "transport" && !transportAlreadyClosed)
-            requestPeersAfterEdgeTeardown(api, roomId);
+            requestPeersAfterEdgeTeardown(api, roomId, epc.withPeerId);
         } finally {
           pin?.fill(0);
         }

@@ -325,7 +325,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           // connectWithPeer builds our fresh transport; the peer's fresh PC,
           // currently connecting towards our closed one, receives that new
           // offer and restarts ICE on it.
-          requestPeersAfterEdgeTeardown(api, roomId);
+          requestPeersAfterEdgeTeardown(api, roomId, peerId);
           return { data: undefined };
         }
         try {
@@ -339,7 +339,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
           // inactive room, the room edge budget, a WASM or identity problem)
           // is reported to the caller as on the no-transport path, but the
           // next roster round must still get a chance to rebuild the edge.
-          requestPeersAfterEdgeTeardown(api, roomId);
+          requestPeersAfterEdgeTeardown(api, roomId, peerId);
           throw error;
         }
         attachDataChannelHandler(epc, dataChannels, api);

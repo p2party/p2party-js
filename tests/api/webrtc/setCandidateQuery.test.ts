@@ -42,12 +42,10 @@ beforeAll(async () => {
   // Enter the store/API cycle through its normal application root so every
   // createApi initializer has run before the WebRTC query modules load.
   await import("../../../src/store");
-  ({ default: webrtcSetIceCandidateQuery } = await import(
-    "../../../src/api/webrtc/setCandidateQuery"
-  ));
-  ({ runRoomPeerExclusive } = await import(
-    "../../../src/api/webrtc/negotiationLock"
-  ));
+  ({ default: webrtcSetIceCandidateQuery } =
+    await import("../../../src/api/webrtc/setCandidateQuery"));
+  ({ runRoomPeerExclusive } =
+    await import("../../../src/api/webrtc/negotiationLock"));
 });
 
 const fakeApi = (): { api: BaseQueryApi; dispatched: unknown[] } => {
@@ -187,14 +185,49 @@ describe("setCandidateQuery on a transport that closes underneath it", () => {
     const next = runRoomPeerExclusive(ROOM_ID, PEER_ID, async () => {
       ran = true;
     });
-    const stuck = Symbol("stuck");
-    const outcome = await Promise.race([
-      next.then(() => "acquired"),
-      new Promise((resolve) => setTimeout(() => {
-        resolve(stuck);
-      }, 1000)),
-    ]);
-    expect(outcome).toBe("acquired");
+    // Bun's test deadline bounds this await when the mutex was left held.
+    await next;
     expect(ran).toBe(true);
   }, 20000);
+});
+
+test("a failed candidate never waits in the ingress queue for its credential response", async () => {
+  const { api } = fakeApi();
+  const { epc } = stuckPeerConnection();
+  Object.assign(epc, {
+    iceConnectionState: "failed",
+    addIceCandidate: async () => {
+      throw new Error("failed candidate");
+    },
+  });
+  let release!: () => void;
+  let started = false;
+  epc.ensureFreshIceConfiguration = () => {
+    started = true;
+    return new Promise((resolve) => {
+      release = () => resolve(false);
+    });
+  };
+  let restarted = false;
+  epc.restartIce = () => {
+    restarted = true;
+  };
+  const outbound = webrtcSetIceCandidateQuery(
+    {
+      roomId: ROOM_ID,
+      peerId: PEER_ID,
+      candidate: { candidate: "candidate:1 1 UDP 1 127.0.0.1 6000 typ host" },
+      peerConnections: [epc],
+      iceCandidates: [],
+    },
+    api,
+    {},
+  );
+  await outbound;
+  expect(started).toBe(true);
+  expect(restarted).toBe(false);
+  // The response is free to enter on the same ordered socket queue.
+  release();
+  await Promise.resolve();
+  expect(restarted).toBe(true);
 });

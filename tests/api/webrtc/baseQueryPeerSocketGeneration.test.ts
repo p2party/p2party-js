@@ -1,3 +1,4 @@
+import { ownTestTransports } from "../../support/transportFixture";
 import {
   afterAll,
   afterEach,
@@ -40,6 +41,8 @@ const localStorageMemory: Record<string, string> = {};
 } as Storage;
 
 /** The slice of RTCPeerConnection handleConnectToPeer builds and drives. */
+const ownTransport = ownTestTransports();
+
 class FakeRTCPeerConnection {
   connectionState: RTCPeerConnectionState = "new";
   signalingState: RTCSignalingState = "stable";
@@ -50,6 +53,7 @@ class FakeRTCPeerConnection {
   readonly configuration: RTCConfiguration;
 
   constructor(configuration: RTCConfiguration) {
+    ownTransport(this);
     this.configuration = configuration;
   }
 

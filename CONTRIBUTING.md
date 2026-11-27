@@ -18,6 +18,13 @@ npm run predist
 npm run check
 ```
 
+### Check test isolation
+
+The ordinary Bun suite checks each file for timers it leaves running. To run
+the same files in reverse order, use `npm run test:reverse`. To reproduce a
+shuffled run, use `npm run test:shuffle -- 1345474613` with the
+same Bun version. These commands use the regular test suite.
+
 ### Check Merkle proofs against the compiled WASM
 
 After building the production WASM, invoke the bounded property check locally.

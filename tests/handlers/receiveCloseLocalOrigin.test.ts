@@ -190,16 +190,13 @@ const closeAndSettle = async (channel: IRTCDataChannel): Promise<void> => {
 };
 
 describe("I-1: the receiver's own close is not the peer cancelling either", () => {
-  // Control for the recorded-progress branch. It proves these tests can SEE a
-  // deletion: a close this side did NOT perform, on a live authenticated edge,
-  // is the immediate-mode cancel signal and must still destroy the partial.
-  test("a genuine remote close on a live edge still deletes the partial", async () => {
+  test("a bare remote close on a live edge preserves the partial for resume", async () => {
     dbState.messageData = partialReceive();
     const { channel } = await openReceivingChannel();
 
     await closeAndSettle(channel);
 
-    expect(dbState.deletedTransfers).toEqual([MERKLE_ROOT_HEX]);
+    expect(dbState.deletedTransfers).toEqual([]);
   });
 
   test("a close THIS side performed does not delete a partial with recorded progress", async () => {
@@ -216,14 +213,14 @@ describe("I-1: the receiver's own close is not the peer cancelling either", () =
 
   // Control for the zero-progress branch: an authenticated key advanced before
   // the first storage write, so there is no progress row to consult.
-  test("a genuine remote close still deletes a zero-byte transfer that holds a key", async () => {
+  test("a bare remote close preserves a transfer that holds a key before its first write", async () => {
     dbState.messageData = undefined;
     const { channel, epc } = await openReceivingChannel();
     epc.messageKeyByMerkleRoot = new Map([[MERKLE_ROOT_HEX, "cache-key"]]);
 
     await closeAndSettle(channel);
 
-    expect(dbState.deletedTransfers).toEqual([MERKLE_ROOT_HEX]);
+    expect(dbState.deletedTransfers).toEqual([]);
   });
 
   test("a close THIS side performed does not delete a zero-byte transfer that holds a key", async () => {

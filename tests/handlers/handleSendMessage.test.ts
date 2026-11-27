@@ -6,7 +6,10 @@ import type {
 } from "../../src/api/webrtc/interfaces";
 import type { LibCrypto } from "../../src/cryptography/libcrypto";
 import type { RatchetHeader } from "../../src/cryptography/ratchet";
-import { DEFAULT_ROOM_POLICY_V1, type RoomPolicyV1 } from "../../src/roomPolicy";
+import {
+  DEFAULT_ROOM_POLICY_V1,
+  type RoomPolicyV1,
+} from "../../src/roomPolicy";
 
 // The live send orchestration imports the Redux store, whose browser identity
 // slice reads localStorage at module initialization. Install the minimal browser
@@ -30,20 +33,20 @@ const localStorageMemory: Record<string, string> = {};
 } as Storage;
 
 type BindTransferCipherToConnection =
-  typeof import("../../src/handlers/handleSendMessage")["bindTransferCipherToConnection"];
+  (typeof import("../../src/handlers/handleSendMessage"))["bindTransferCipherToConnection"];
 let bindTransferCipherToConnection: BindTransferCipherToConnection;
-let isAuthenticatedPeerCancel: typeof import("../../src/handlers/handleSendMessage")["isAuthenticatedPeerCancel"];
-let closeTransferChannel: typeof import("../../src/handlers/handleSendMessage")["closeTransferChannel"];
-let runWithTerminalChannelClose: typeof import("../../src/handlers/handleSendMessage")["runWithTerminalChannelClose"];
-let runPeerSendFanout: typeof import("../../src/handlers/handleSendMessage")["runPeerSendFanout"];
-let shouldDeleteLocalMessageAfterFailure: typeof import("../../src/handlers/handleSendMessage")["shouldDeleteLocalMessageAfterFailure"];
-let waitForReceiptWindow: typeof import("../../src/handlers/handleSendMessage")["waitForReceiptWindow"];
-let isResumableRebindFailure: typeof import("../../src/handlers/handleSendMessage")["isResumableRebindFailure"];
-let coverRuntimeAdmitsScheduledJobs: typeof import("../../src/handlers/handleSendMessage")["coverRuntimeAdmitsScheduledJobs"];
-let sendScheduled: typeof import("../../src/handlers/handleSendMessage")["sendScheduled"];
+let isAuthenticatedPeerCancel: (typeof import("../../src/handlers/handleSendMessage"))["isAuthenticatedPeerCancel"];
+let closeTransferChannel: (typeof import("../../src/handlers/handleSendMessage"))["closeTransferChannel"];
+let runWithTerminalChannelClose: (typeof import("../../src/handlers/handleSendMessage"))["runWithTerminalChannelClose"];
+let runPeerSendFanout: (typeof import("../../src/handlers/handleSendMessage"))["runPeerSendFanout"];
+let shouldDeleteLocalMessageAfterFailure: (typeof import("../../src/handlers/handleSendMessage"))["shouldDeleteLocalMessageAfterFailure"];
+let waitForReceiptWindow: (typeof import("../../src/handlers/handleSendMessage"))["waitForReceiptWindow"];
+let isResumableRebindFailure: (typeof import("../../src/handlers/handleSendMessage"))["isResumableRebindFailure"];
+let coverRuntimeAdmitsScheduledJobs: (typeof import("../../src/handlers/handleSendMessage"))["coverRuntimeAdmitsScheduledJobs"];
+let sendScheduled: (typeof import("../../src/handlers/handleSendMessage"))["sendScheduled"];
 let OutboundMessage: (typeof import("../../src/handlers/handleSendMessage"))["OutboundMessage"];
-let claimRatchetGate: typeof import("../../src/handlers/ratchetGate")["claimRatchetGate"];
-let resetRatchetGate: typeof import("../../src/handlers/ratchetGate")["resetRatchetGate"];
+let claimRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["claimRatchetGate"];
+let resetRatchetGate: (typeof import("../../src/handlers/ratchetGate"))["resetRatchetGate"];
 let RATCHET_GATE_WAIT_TIMEOUT_MESSAGE: string;
 
 beforeAll(async () => {
@@ -64,12 +67,10 @@ beforeAll(async () => {
     shouldDeleteLocalMessageAfterFailure,
     waitForReceiptWindow,
   } = await import("../../src/handlers/handleSendMessage"));
-  ({ claimRatchetGate, resetRatchetGate } = await import(
-    "../../src/handlers/ratchetGate"
-  ));
-  ({ RATCHET_GATE_WAIT_TIMEOUT_MESSAGE } = await import(
-    "../../src/handlers/ratchetGateWait"
-  ));
+  ({ claimRatchetGate, resetRatchetGate } =
+    await import("../../src/handlers/ratchetGate"));
+  ({ RATCHET_GATE_WAIT_TIMEOUT_MESSAGE } =
+    await import("../../src/handlers/ratchetGateWait"));
 });
 
 describe("per-message DataChannel close semantics", () => {
@@ -120,7 +121,7 @@ describe("per-message DataChannel close semantics", () => {
     expect(closeCalls).toBe(1);
   });
 
-  test("same connected authenticated PC on the same generation means peer cancel", () => {
+  test("a bare channel close on the same authenticated generation is an interruption", () => {
     const lease = claimRatchetGate("room", "cancel-live");
     const current = {
       ...fakeConnection("cancel-live"),
@@ -137,7 +138,7 @@ describe("per-message DataChannel close semantics", () => {
         lease,
         undefined,
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("a replacement or failed PC remains eligible for resume", () => {
@@ -261,9 +262,7 @@ const header = (marker: number): RatchetHeader => ({
   PN: 0,
 });
 
-const connectedAuthenticatedPeer = (
-  peerId: string,
-): IRTCPeerConnection =>
+const connectedAuthenticatedPeer = (peerId: string): IRTCPeerConnection =>
   ({
     ...fakeConnection(peerId),
     roomId: "room",
@@ -345,18 +344,16 @@ describe("room-mesh send fanout", () => {
   });
 
   test("only pre-commit failure or explicit local cancellation removes sender history", () => {
-    expect(
-      shouldDeleteLocalMessageAfterFailure(false, false, false),
-    ).toBe(true);
-    expect(
-      shouldDeleteLocalMessageAfterFailure(true, false, false),
-    ).toBe(false);
-    expect(
-      shouldDeleteLocalMessageAfterFailure(false, true, false),
-    ).toBe(false);
-    expect(
-      shouldDeleteLocalMessageAfterFailure(true, true, true),
-    ).toBe(true);
+    expect(shouldDeleteLocalMessageAfterFailure(false, false, false)).toBe(
+      true,
+    );
+    expect(shouldDeleteLocalMessageAfterFailure(true, false, false)).toBe(
+      false,
+    );
+    expect(shouldDeleteLocalMessageAfterFailure(false, true, false)).toBe(
+      false,
+    );
+    expect(shouldDeleteLocalMessageAfterFailure(true, true, true)).toBe(true);
   });
 });
 
@@ -511,9 +508,7 @@ describe("in-flight message cipher follows the cryptographic transport", () => {
         events.push(`gate:${roomId}:${peerId}`);
       },
       async (epc, roomId) => {
-        events.push(
-          `step:${roomId}:${String(epc === replacement)}`,
-        );
+        events.push(`step:${roomId}:${String(epc === replacement)}`);
         return { messageKey: newKey, header: header(2), pqContext: null };
       },
     );
@@ -620,7 +615,9 @@ describe("sender receipt-window flow control", () => {
 
   test("unblocks after the stall timeout when no receipt progress occurs", async () => {
     const start = Date.now();
-    await waitForReceiptWindow(params({ inFlight: () => 10, stallTimeoutMs: 60 }));
+    await waitForReceiptWindow(
+      params({ inFlight: () => 10, stallTimeoutMs: 60 }),
+    );
     const elapsed = Date.now() - start;
     expect(elapsed).toBeGreaterThanOrEqual(55);
     expect(elapsed).toBeLessThan(500);

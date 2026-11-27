@@ -85,7 +85,7 @@ describe("prototype public entry point", () => {
       ingressWindowStartMs(CHAIN_START, profile.deliveryWindowMs),
     );
     const asked: StoreAdmissionTokenRequest[] = [];
-    const admitted: StoreAdmissionRequestV1[] = [];
+    const admission = Promise.withResolvers<StoreAdmissionRequestV1>();
 
     let handler: ((request: Request) => Promise<Response>) | null = null;
     const server = Bun.serve({
@@ -112,7 +112,7 @@ describe("prototype public entry point", () => {
         allocationAdmission: {
           authorize: (request) => {
             if (!bytesEqual(request.privacyPassToken, token)) return null;
-            admitted.push(request);
+            admission.resolve(request);
             return quotaKey;
           },
         },
@@ -146,9 +146,8 @@ describe("prototype public entry point", () => {
         expect(request.route).toBe("allocation");
         expect(request.ingressWindow).toBe(CHAIN_START + 1n);
         // And the store saw the token the provider returned.
-        await until(() => admitted.length > 0);
-        expect(admitted.length).toBeGreaterThan(0);
-        expect(bytesEqual(admitted[0].privacyPassToken, token)).toBe(true);
+        const admitted = await admission.promise;
+        expect(bytesEqual(admitted.privacyPassToken, token)).toBe(true);
       } finally {
         await run.stop();
       }

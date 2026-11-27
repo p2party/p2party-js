@@ -10,6 +10,14 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 - Keep the contacts-only preference in the room database. Existing installations migrate the old preference and remove the invitation from the localStorage key. `connect` accepts `{ relayOnly: true }` to select TURN and suppress local host and server-reflexive candidates.
 - Identity purge attempts an acknowledged departure from each room associated with the current key and signaling host. It returns a count of unconfirmed departures when the server is unavailable.
 
+- Signaling recovery now retries only the failed member, retains a deferred
+  request until fresh socket proof, rolls back unsent offers and stops automatic
+  redials after six consecutive attempts for the same member. Healthy peer
+  transports keep their connection during a signaling or credential refresh.
+- Immediate transfers require an authenticated, channel-bound CANCEL to
+  classify a remote cancellation. A bare channel close leaves partial data
+  recoverable.
+
 - Published a guide to the separate, valueless P2Party Testnet 1. One funded unit was spent by ethers with ML-DSA-65 at height 2 and by viem with SLH-DSA-SHA2-192s at height 3. Both clients verified receipts, exact retries and historical balances. [Public guide and receipt query](docs/testnet-1.md#verify-the-first-public-transfers)
 
 ## [0.15.0] — 2026-11-27

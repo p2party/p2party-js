@@ -1,3 +1,4 @@
+import { ownTestTransports } from "../../support/transportFixture";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
@@ -84,6 +85,8 @@ const fakeChannel = (
  * channel creation, and close. Every instance is recorded so a test can find
  * the transport a replacement path built.
  */
+const ownTransport = ownTestTransports();
+
 class FakeRTCPeerConnection {
   static created: FakeRTCPeerConnection[] = [];
 
@@ -99,6 +102,7 @@ class FakeRTCPeerConnection {
   closes = 0;
 
   constructor(configuration: RTCConfiguration) {
+    ownTransport(this);
     this.configuration = configuration;
     FakeRTCPeerConnection.created.push(this);
   }
@@ -132,12 +136,14 @@ class FakeRTCPeerConnection {
   async setRemoteDescription(init: RTCSessionDescriptionInit): Promise<void> {
     this.appliedRemote.push(init);
     this.remoteDescription = init as RTCSessionDescription;
-    this.signalingState = init.type === "offer" ? "have-remote-offer" : "stable";
+    this.signalingState =
+      init.type === "offer" ? "have-remote-offer" : "stable";
   }
 
   createDataChannel(label: string): RTCDataChannel {
     this.createdLabels.push(label);
-    return fakeChannel(label, "connecting").channel as unknown as RTCDataChannel;
+    return fakeChannel(label, "connecting")
+      .channel as unknown as RTCDataChannel;
   }
 
   restartIce(): void {}
@@ -318,6 +324,7 @@ const fakePeerConnection = ({
     signalingState: RTCSignalingState;
     connectionState: RTCPeerConnectionState;
   };
+  ownTransport(epc);
   return {
     epc,
     createdLabels,
@@ -399,6 +406,7 @@ const REDIAL = () =>
     roomId: ROOM_ID,
     connectingToPeers: true,
     reason: "redial",
+    peerId: PEER_ID,
   });
 
 interface Applied {

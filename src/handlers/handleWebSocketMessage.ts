@@ -301,7 +301,7 @@ const handleWebSocketMessage = async (
                           {
                             roomId,
                             rtcConfig,
-                            restartIce: true,
+                            restartIce: false,
                             failurePolicy,
                           },
                           { track: false },
@@ -354,7 +354,7 @@ const handleWebSocketMessage = async (
                                 {
                                   roomId: room.id,
                                   rtcConfig: room.rtcConfig,
-                                  restartIce: true,
+                                  restartIce: false,
                                   failurePolicy: "close",
                                 },
                                 { track: false },
@@ -411,6 +411,10 @@ const handleWebSocketMessage = async (
         }
 
         if (!isCurrentSocket()) break;
+        // A negotiationneeded event raised while offline may not fire again.
+        // Resume only after this socket has committed fresh room membership.
+        for (const peer of snapshotPeerConnections())
+          if (peer.roomId === plan.roomId) peer.resumeDeferredNegotiation?.();
         api.dispatch(
           setConnectingToPeers({
             roomId: plan.roomId,

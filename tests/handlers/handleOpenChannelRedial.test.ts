@@ -261,7 +261,12 @@ const settle = async (): Promise<void> => {
 };
 
 const REDIAL = (roomId: string) =>
-  setConnectingToPeers({ roomId, connectingToPeers: true, reason: "redial" });
+  setConnectingToPeers({
+    roomId,
+    connectingToPeers: true,
+    reason: "redial",
+    peerId: PEER_ID,
+  });
 
 const redials = (dispatched: unknown[]): unknown[] =>
   dispatched.filter(

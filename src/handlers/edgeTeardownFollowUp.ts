@@ -19,9 +19,9 @@ export interface EdgeTeardownFollowUpApi {
  * will not offer either, and the edge stays down until an unrelated event
  * happens to trigger a roster request.
  *
- * Only a connected and verified socket can carry a peers request. Without one
- * the signaling reconnect path re-requests the roster on its own once the new
- * socket proves identity, so there is nothing to do here.
+ * The room listener queues the intent while the socket is unavailable and
+ * flushes it once that socket proves the identity. A left room or reset identity
+ * must never inherit a deferred repair.
  *
  * The request goes through setConnectingToPeers, whose listener debounces it
  * under the dedicated "redial" key: a teardown that happens to land inside
@@ -39,15 +39,21 @@ export interface EdgeTeardownFollowUpApi {
 export const requestPeersAfterEdgeTeardown = (
   api: EdgeTeardownFollowUpApi,
   roomId: string,
+  peerId?: string,
 ): boolean => {
   const { signalingServer } = api.getState() as {
     signalingServer: SignalingState;
   };
-  if (!signalingServer.isConnected || !signalingServer.isVerified) return false;
+  if (signalingServer.refusal) return false;
 
   api.dispatch(
-    setConnectingToPeers({ roomId, connectingToPeers: true, reason: "redial" }),
+    setConnectingToPeers({
+      roomId,
+      connectingToPeers: true,
+      reason: "redial",
+      ...(peerId ? { peerId } : {}),
+    }),
   );
 
-  return true;
+  return signalingServer.isConnected && signalingServer.isVerified;
 };

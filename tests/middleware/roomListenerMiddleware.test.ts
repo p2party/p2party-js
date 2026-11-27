@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach } from "bun:test";
 import { configureStore } from "@reduxjs/toolkit";
 import { signalingPeerRequestDebouncer } from "../../src/utils/signalingPeerRequestDebouncer";
 
@@ -103,6 +104,11 @@ interface TestStoreOptions {
   readonly middleware?: Middleware;
 }
 
+const resetTestStores = new Set<() => void>();
+afterEach(() => {
+  for (const reset of resetTestStores) reset();
+  resetTestStores.clear();
+});
 const testStore = (options: TestStoreOptions = {}) => {
   const roomId = options.roomId ?? ROOM_ID;
   let peersRequests = 0;
@@ -212,6 +218,11 @@ const testStore = (options: TestStoreOptions = {}) => {
         webrtcApi.middleware,
         options.middleware ?? roomListenerMiddleware.middleware,
       ]),
+    enhancers: (defaults) => defaults({ autoBatch: { type: "tick" } }),
+  });
+  resetTestStores.add(() => {
+    store.dispatch({ type: "rooms/purgeAllRooms" });
+    store.dispatch({ type: "signalingServer/disconnect" });
   });
   return {
     store,
@@ -571,5 +582,82 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
     timeouts.advance(600_000);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(peersRequests()).toBe(afterJoin);
+  });
+});
+
+describe("deferred edge repair", () => {
+  test("a failed edge is requested once after fresh proof, and healthy siblings are omitted", async () => {
+    const h = reconcilingStore();
+    const otherKey = "22".repeat(32);
+    const siblingId = "00000000-0000-4000-8000-000000000011";
+    h.store.dispatch(
+      setKnownRoomPeers({
+        roomId: h.roomId,
+        peers: [
+          { peerId: OTHER_PEER_ID, peerPublicKey: otherKey },
+          { peerId: siblingId, peerPublicKey: "33".repeat(32) },
+        ],
+      }),
+    );
+    h.store.dispatch({ type: "signalingServer/disconnect" });
+    const repair = setConnectingToPeers({
+      roomId: h.roomId,
+      peerId: OTHER_PEER_ID,
+      connectingToPeers: true,
+      reason: "redial",
+    });
+    h.store.dispatch(repair);
+    h.store.dispatch(repair);
+    expect(h.peersRequests()).toBe(0);
+    h.store.dispatch({ type: "signalingServer/connectionEstablished" });
+    expect(h.peersRequests()).toBe(0);
+    h.store.dispatch({ type: "signalingServer/connectionVerified" });
+    await waitFor(() =>
+      h.requestFrames.some(
+        (frame) => frame.targetPeerIds?.includes(OTHER_PEER_ID) === true,
+      ),
+    );
+    expect(
+      h.requestFrames.filter((frame) => frame.targetPeerIds?.length),
+    ).toEqual([expect.objectContaining({ targetPeerIds: [OTHER_PEER_ID] })]);
+  });
+
+  test("the seventh failed attempt stays stopped until the member changes generation or the user retries", async () => {
+    const h = reconcilingStore();
+    const {
+      recordTransportRedial,
+      notePeerPresence,
+      clearPeerHandshakeFailures,
+    } = await import("../../src/reducers/roomSlice");
+    const room = h.store.getState().rooms[0];
+    const peer = { peerId: OTHER_PEER_ID, peerPublicKey: "22".repeat(32) };
+    h.store.dispatch(setKnownRoomPeers({ roomId: h.roomId, peers: [peer] }));
+    const presence = (id: string) =>
+      notePeerPresence({
+        roomId: h.roomId,
+        peerId: peer.peerId,
+        socketGeneration: id,
+        evidence: "membership",
+      });
+    h.store.dispatch(presence("00000000-0000-4000-8000-000000000011"));
+    const retry = () =>
+      h.store.dispatch(
+        recordTransportRedial({ roomId: h.roomId, peerId: peer.peerId }),
+      );
+    const status = () =>
+      h.store.getState().rooms[0].handshakeStatusByPeer?.[peer.peerId];
+    for (let i = 0; i < 6; i++) retry();
+    expect(status()).toBeUndefined();
+    retry();
+    expect(status()?.reason).toBe("transport-exhausted");
+    h.store.dispatch(setKnownRoomPeers({ roomId: h.roomId, peers: [peer] }));
+    expect(status()?.reason).toBe("transport-exhausted");
+    h.store.dispatch(presence("00000000-0000-4000-8000-000000000012"));
+    expect(status()).toBeUndefined();
+    for (let i = 0; i < 7; i++) retry();
+    expect(status()?.reason).toBe("transport-exhausted");
+    h.store.dispatch(clearPeerHandshakeFailures(room.url));
+    expect(status()).toBeUndefined();
+    expect(h.store.getState().rooms[0].transportRedialsByPeer).toBeUndefined();
   });
 });

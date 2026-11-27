@@ -130,10 +130,8 @@ const fakePeerConnection = (): IRTCPeerConnection =>
     close: () => undefined,
   }) as unknown as IRTCPeerConnection;
 
-const fakeApi = (
-  rooms: unknown[],
-): { api: BaseQueryApi; dispatched: unknown[] } => {
-  const dispatched: unknown[] = [];
+const fakeApi = (rooms: unknown[]) => {
+  const authenticated = Promise.withResolvers<void>();
   const state = {
     keyPair: {
       peerId: SELF_PEER_ID,
@@ -153,24 +151,37 @@ const fakeApi = (
   };
   const api = {
     dispatch: (action: unknown) => {
-      dispatched.push(action);
+      if (
+        setPeerHandshakeStatus.match(action) &&
+        action.payload.status === "authenticated"
+      )
+        authenticated.resolve();
       return { unwrap: async () => undefined };
     },
     getState: () => state,
   } as unknown as BaseQueryApi;
-  return { api, dispatched };
+  return { api, authenticated: authenticated.promise };
 };
 
 /** Counts store operations still in flight, so the test can wait them out. */
 const trackedStore = (
   inner: PinAttemptStore,
-): { store: PinAttemptStore; idle: () => boolean; deletes: () => number } => {
+): {
+  store: PinAttemptStore;
+  whenIdle: () => Promise<void>;
+  deletes: () => number;
+} => {
   let inFlight = 0;
+  let idle = Promise.withResolvers<void>();
   let deleteCount = 0;
   const track = <T>(operation: Promise<T>): Promise<T> => {
     inFlight += 1;
     return operation.finally(() => {
       inFlight -= 1;
+      if (inFlight === 0) {
+        idle.resolve();
+        idle = Promise.withResolvers<void>();
+      }
     });
   };
   return {
@@ -182,7 +193,7 @@ const trackedStore = (
         return track(inner.delete(roomId, id));
       },
     },
-    idle: () => inFlight === 0,
+    whenIdle: () => (inFlight === 0 ? Promise.resolve() : idle.promise),
     deletes: () => deleteCount,
   };
 };
@@ -220,7 +231,7 @@ describe("handleOpenChannel PIN success", () => {
     };
     putRoomPin(PIN_ROOM_URL, new Uint8Array([1, 2, 3, 4]));
     const epc = fakePeerConnection();
-    const { api, dispatched } = fakeApi([pinRoom]);
+    const { api, authenticated } = fakeApi([pinRoom]);
     try {
       const channel = await handleOpenChannel(
         { channel: fakeMain(), epc, roomId: PIN_ROOM_ID, dataChannels: [] },
@@ -228,30 +239,11 @@ describe("handleOpenChannel PIN success", () => {
       );
       channel.onopen?.call(channel, new Event("open"));
 
-      // Wait (in turns, not time) for the authenticated status and for every
-      // limiter write the success path started to settle.
-      const authenticated = () =>
-        dispatched.some(
-          (action) =>
-            (action as { type?: string }).type ===
-              setPeerHandshakeStatus.type &&
-            (action as { payload: { status: string } }).payload.status ===
-              "authenticated",
-        );
-      for (
-        let turn = 0;
-        turn < 500 &&
-        !(
-          authenticated() &&
-          tracked.deletes() > deletesBefore &&
-          tracked.idle()
-        );
-        turn++
-      )
-        await new Promise((resolve) => setTimeout(resolve, 0));
-
+      // Wait for the authenticated dispatch and for all limiter writes to settle.
+      await authenticated;
       expect(handshakes).toBe(1);
-      expect(authenticated()).toBe(true);
+      expect(tracked.deletes()).toBeGreaterThan(deletesBefore);
+      await tracked.whenIdle();
       // Its backoff is gone: a reload finds no throttle for it.
       expect(
         await callPinWorker(

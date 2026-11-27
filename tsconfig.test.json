@@ -8,6 +8,10 @@
     // only typechecks, so widening the root emits nothing.
     "rootDir": "."
   },
-  "include": ["tests/**/*.test.ts", "tests/**/*.spec.ts"],
+  "include": [
+    "tests/**/*.test.ts",
+    "tests/**/*.spec.ts",
+    "tests/support/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }

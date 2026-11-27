@@ -1050,19 +1050,15 @@ describe("immediate mode: a closing channel ends the verification wait at once",
     expect(cancellations).toEqual([]);
   });
 
-  test("a receiver's cancel during verification is reported as a cancel without waiting", async () => {
-    const { channel, clock, sending, cancellations } =
-      await startImmediateVerification(800 * MIB);
-    // Still connected, on the same authenticated generation: this close is
-    // the receiver refusing the file.
+  test("a parked receiver closing without CANCEL leaves the transfer resumable", async () => {
+    const { channel, sending, cancellations } =
+      await startImmediateVerification(800 * MIB, { resumeBudgetMs: 0 });
     closeFromTheFarSide(channel);
     const settled = await outcomeOf(sending.catch((error: Error) => error));
     expect(settled.settled).toBe(true);
-    expect((settled.value as Error).message).toBe(
-      "Message transfer cancelled by peer",
-    );
-    expect(cancellations).toEqual([TRANSFER_ID]);
-    expect(clock.armed).toBe(0);
+    expect(settled.value).toBeInstanceOf(Error);
+    expect((settled.value as Error).message).not.toContain("cancelled by peer");
+    expect(cancellations).toEqual([]);
   });
 
   test("a silent receiver ends sendWithReconcile after one silence bound, not one per retry", async () => {

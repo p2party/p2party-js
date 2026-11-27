@@ -1,3 +1,4 @@
+import { resetIdentity } from "../reducers/keyPairSlice";
 import { debugLog } from "../utils/debug";
 import { hasTerminalPeerHandshakeFailure } from "../handlers/handshakeFailure";
 import { createListenerMiddleware, isAnyOf } from "@reduxjs/toolkit";
@@ -14,6 +15,7 @@ import {
   setKnownRoomPeers,
   deletePeer,
   setPeerHandshakeStatus,
+  recordTransportRedial,
   deleteRoom,
   purgeAllRooms,
   notePeerPresence,
@@ -45,6 +47,7 @@ import {
 import {
   discardRoomOutbox,
   resumeRoomOutbox,
+  stopRoomOutboxResume,
 } from "../handlers/outboxCoordinator";
 import {
   createRoomRosterReconciler,
@@ -222,6 +225,7 @@ export const createRoomListenerMiddleware = (
 ) => {
   // null means a full discovery; sets coalesce simultaneous member retries.
   const pendingTargets = new Map<string, Set<string> | null>();
+  const deferredRedials = new Map<string, Set<string | undefined>>();
   const roomListenerMiddleware = createListenerMiddleware();
   roomListenerMiddleware.startListening({
     matcher: isAnyOf(
@@ -236,6 +240,7 @@ export const createRoomListenerMiddleware = (
       setPeerHandshakeStatus,
       deleteRoom,
       purgeAllRooms,
+      resetIdentity,
       notePeerPresence,
       peerDeparted,
       signalingServerActions.startConnecting,
@@ -259,11 +264,17 @@ export const createRoomListenerMiddleware = (
       // rejection in the host application — a library has no business taking a
       // page down because it could not cache a room.
       try {
+        if (resetIdentity.match(action)) {
+          deferredRedials.clear();
+          stopRoomOutboxResume();
+        }
         if (deleteRoom.match(action)) {
           const original = (listenerApi.getOriginalState() as State).rooms.find(
             (r) => r.id === action.payload || r.url === action.payload,
           );
           if (original) {
+            deferredRedials.delete(original.id);
+            stopRoomOutboxResume(original.id);
             signalingPeerRequestDebouncer.cancelRoom(original.id);
             for (const kind of ["join", "empty-roster", "redial", "reconcile"])
               pendingTargets.delete(`${kind}:${original.id}`);
@@ -273,6 +284,8 @@ export const createRoomListenerMiddleware = (
             }
           }
         } else if (purgeAllRooms.match(action)) {
+          deferredRedials.clear();
+          stopRoomOutboxResume();
           stopOutboxOwners("rooms purged");
           pendingTargets.clear();
           signalingPeerRequestDebouncer.resetSocketLifecycle();
@@ -304,7 +317,29 @@ export const createRoomListenerMiddleware = (
           signalingServerActions.disconnect.match(action)
         ) {
           pendingTargets.clear();
+          if (signalingServerActions.disconnect.match(action) && action.payload)
+            deferredRedials.clear();
           signalingPeerRequestDebouncer.resetSocketLifecycle();
+        } else if (signalingServerActions.connectionVerified.match(action)) {
+          const { rooms } = listenerApi.getState() as State;
+          for (const [roomId, peers] of deferredRedials) {
+            deferredRedials.delete(roomId);
+            if (
+              !rooms.some(
+                (room) => room.id === roomId && room.signalingActive !== false,
+              )
+            )
+              continue;
+            for (const peerId of peers)
+              listenerApi.dispatch(
+                setConnectingToPeers({
+                  roomId,
+                  peerId,
+                  connectingToPeers: true,
+                  reason: "redial",
+                }),
+              );
+          }
         } else if (setConnectingToPeers.match(action)) {
           const { roomId, connectingToPeers, reason, peerId } = action.payload;
           debugLog("[roomListenerMiddleware] setConnectingToPeers:", {
@@ -317,6 +352,18 @@ export const createRoomListenerMiddleware = (
               listenerApi.getState() as State;
 
             const roomIndex = rooms.findIndex((r) => r.id === roomId);
+            if (
+              reason === "redial" &&
+              (!signalingServer.isConnected || !signalingServer.isVerified) &&
+              !signalingServer.refusal &&
+              roomIndex >= 0 &&
+              rooms[roomIndex].signalingActive !== false
+            ) {
+              const targets =
+                deferredRedials.get(roomId) ?? new Set<string | undefined>();
+              targets.add(peerId);
+              deferredRedials.set(roomId, targets);
+            }
             debugLog("[roomListenerMiddleware] setConnectingToPeers check:", {
               isConnected: signalingServer.isConnected,
               peerId: keyPair.peerId,
@@ -376,22 +423,40 @@ export const createRoomListenerMiddleware = (
                     hasOnlyTerminalPeerHandshakeFailures(room)
                   )
                     return;
-                  const targetPeerIds = pending
-                    ? [...pending].filter((id) =>
-                        room.knownPeers?.some(
-                          (peer) =>
-                            peer.peerId === id &&
-                            !hasTerminalPeerHandshakeFailure(
-                              room.handshakeStatusByPeer,
-                              id,
-                              peer.peerPublicKey,
-                            ) &&
-                            !hasReportedDeparture(room, id) &&
-                            room.handshakeStatusByPeer?.[id]?.status !==
-                              "authenticated",
-                        ),
+                  if (kind === "redial" && pending) {
+                    for (const id of pending) {
+                      if (
+                        !hasTerminalPeerHandshakeFailure(
+                          room.handshakeStatusByPeer,
+                          id,
+                        )
                       )
-                    : undefined;
+                        listenerApi.dispatch(
+                          recordTransportRedial({ roomId, peerId: id }),
+                        );
+                    }
+                  }
+                  const currentRoom = (
+                    listenerApi.getState() as State
+                  ).rooms.find((r) => r.id === roomId);
+                  if (!currentRoom) return;
+                  const targetPeerIds =
+                    pending && currentRoom.knownPeers
+                      ? [...pending].filter((id) =>
+                          currentRoom.knownPeers?.some(
+                            (peer) =>
+                              peer.peerId === id &&
+                              !hasTerminalPeerHandshakeFailure(
+                                currentRoom.handshakeStatusByPeer,
+                                id,
+                                peer.peerPublicKey,
+                              ) &&
+                              !hasReportedDeparture(currentRoom, id) &&
+                              currentRoom.handshakeStatusByPeer?.[id]
+                                ?.status !== "authenticated",
+                          ),
+                        )
+                      : undefined;
                   if (targetPeerIds?.length === 0) return;
                   listenerApi.dispatch(
                     signalingServerApi.endpoints.sendMessage.initiate(

@@ -3,10 +3,11 @@ export { discardRoomOutbox } from "./outbox";
 type Resume = (roomId: string) => Promise<unknown>;
 interface Clock {
   now(): number;
-  sleep(delayMs: number): Promise<void>;
+  sleep(delayMs: number, signal: AbortSignal): Promise<void>;
 }
 
 interface PendingPass {
+  controller: AbortController;
   requested: boolean;
   scheduled: boolean;
   running: boolean;
@@ -21,7 +22,16 @@ interface PendingPass {
 export const createOutboxResumeCoordinator = (
   clock: Clock = {
     now: () => Date.now(),
-    sleep: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+    sleep: (delayMs, signal) =>
+      new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, delayMs);
+        signal.addEventListener("abort", done, { once: true });
+      }),
   },
   debounceMs = 5000,
 ) => {
@@ -35,8 +45,12 @@ export const createOutboxResumeCoordinator = (
     const last = attemptedAt.get(roomId);
     const delay =
       last === undefined ? 0 : Math.max(0, last + debounceMs - clock.now());
-    const ready = delay > 0 ? clock.sleep(delay) : Promise.resolve();
+    const ready =
+      delay > 0
+        ? clock.sleep(delay, pass.controller.signal)
+        : Promise.resolve();
     void ready.then(async () => {
+      if (pass.controller.signal.aborted) return;
       pass.scheduled = false;
       pass.running = true;
       // Events before this pass starts are covered by this pass. Events during
@@ -52,6 +66,7 @@ export const createOutboxResumeCoordinator = (
         pass.error = error;
       }
       pass.running = false;
+      if (pass.controller.signal.aborted) return;
       if (pass.requested) pump(roomId, pass);
       else {
         // Delete and settle together: a new event after this point creates a
@@ -64,6 +79,18 @@ export const createOutboxResumeCoordinator = (
   };
 
   return {
+    stop(roomId?: string): void {
+      const ids = roomId === undefined ? [...pending.keys()] : [roomId];
+      if (roomId === undefined) attemptedAt.clear();
+      else attemptedAt.delete(roomId);
+      for (const id of ids) {
+        const pass = pending.get(id);
+        if (!pass) continue;
+        pending.delete(id);
+        pass.controller.abort();
+        pass.resolve();
+      }
+    },
     register(handler: Resume): void {
       resume = handler;
     },
@@ -82,6 +109,7 @@ export const createOutboxResumeCoordinator = (
         reject = fail;
       });
       const pass: PendingPass = {
+        controller: new AbortController(),
         requested: true,
         scheduled: false,
         running: false,
@@ -100,3 +128,5 @@ export const createOutboxResumeCoordinator = (
 const coordinator = createOutboxResumeCoordinator();
 export const registerOutboxResume = coordinator.register;
 export const resumeRoomOutbox = coordinator.resume;
+
+export const stopRoomOutboxResume = coordinator.stop;

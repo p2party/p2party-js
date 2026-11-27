@@ -192,6 +192,9 @@ export const teardownEdgeGeneration = (
   // connection owns: the edge is going away now, and the deadline's own job
   // — tearing it down and re-dialling — is exactly what is happening.
   clearRebindAuthenticationDeadline(connection);
+  connection.clearTransportTimers?.();
+  connection.clearTransportTimers = undefined;
+  connection.resumeDeferredNegotiation = undefined;
 
   connection.ontrack = null;
   connection.ondatachannel = null;

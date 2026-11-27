@@ -1,5 +1,4 @@
 import {
-  immediateCloseMeansPause,
   hasImmediateRemoteCancel,
   sendImmediateCancel,
 } from "./immediateDisposition";
@@ -1373,20 +1372,9 @@ export const bindTransferCipherToConnection = async (
 /**
  * True iff a per-message channel closing is the PEER cancelling this transfer.
  *
- * Immediate mode has no CANCEL frame: one DataChannel is one logical message,
- * so its close IS the signal — but only when nothing on OUR side retired it.
- * Three things must hold: the RTCPeerConnection is still connected, it is
- * still the registered transport for this room/peer, and the ratchet
- * generation the transfer was sealed under is still the current one.
- *
- * That last test is what separates a remote cancel from a local retirement.
- * An in-place edge re-bind (remoteTransportChange) closes the generation's
- * message channels while KEEPING the connection connected and registered, so
- * the first two tests still pass; the gate lease it replaces is the only
- * evidence that the close was ours. Without it the sender abandons a perfectly
- * resumable transfer — and reports "cancelled by peer", which an application
- * may act on by deleting its outgoing message. Mirrors the receiver's
- * `authenticatedTransportStillAlive` test in handleOpenChannel.
+ * An authenticated control bound to this channel and Merkle root signals
+ * cancellation. A bare channel close, including receiver park expiry, leaves
+ * the transfer resumable even while its peer connection stays connected.
  */
 export const isAuthenticatedPeerCancel = (
   currentEpc: IRTCPeerConnection,
@@ -1402,8 +1390,7 @@ export const isAuthenticatedPeerCancel = (
   // routine — the gate opens a moment later, every test below then passes, and
   // the sender reports a cancel nobody sent (C7).
   !wasChannelClosedLocally(currentChannel) &&
-  (hasImmediateRemoteCancel(currentChannel) ||
-    !immediateCloseMeansPause(currentChannel)) &&
+  hasImmediateRemoteCancel(currentChannel) &&
   currentEpc.connectionState === "connected" &&
   transferGateLease !== undefined &&
   isCurrentRatchetGateLease(roomId, peerId, transferGateLease) &&

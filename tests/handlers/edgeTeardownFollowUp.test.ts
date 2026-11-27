@@ -39,23 +39,35 @@ describe("requestPeersAfterEdgeTeardown", () => {
     ]);
   });
 
-  test("does not re-dial on a connected but unverified socket", () => {
+  test("records an intent on a connected but unverified socket", () => {
     const { api, dispatched } = fakeApi({
       isConnected: true,
       isVerified: false,
     });
 
     expect(requestPeersAfterEdgeTeardown(api, ROOM_ID)).toBe(false);
-    expect(dispatched).toEqual([]);
+    expect(dispatched).toEqual([
+      setConnectingToPeers({
+        roomId: ROOM_ID,
+        connectingToPeers: true,
+        reason: "redial",
+      }),
+    ]);
   });
 
-  test("does not re-dial on a disconnected socket", () => {
+  test("records an intent on a disconnected socket", () => {
     const { api, dispatched } = fakeApi({
       isConnected: false,
       isVerified: false,
     });
 
     expect(requestPeersAfterEdgeTeardown(api, ROOM_ID)).toBe(false);
-    expect(dispatched).toEqual([]);
+    expect(dispatched).toEqual([
+      setConnectingToPeers({
+        roomId: ROOM_ID,
+        connectingToPeers: true,
+        reason: "redial",
+      }),
+    ]);
   });
 });

@@ -203,6 +203,7 @@ beforeAll(async () => {
         serializableCheck: false,
         immutableCheck: false,
       }).concat(webrtcApi.middleware),
+    enhancers: (defaults) => defaults({ autoBatch: { type: "tick" } }),
   });
 
   restore = () => {

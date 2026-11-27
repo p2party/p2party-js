@@ -186,11 +186,20 @@ const countingBuild = (costMs: number, onHash?: (hashes: number) => void) => {
 const manualHandBacks = () => {
   const waiting: (() => void)[] = [];
   let taken = 0;
+  const first = Promise.withResolvers<void>();
+  let automatic = false;
   return {
+    first: first.promise,
+    releaseAll: () => {
+      automatic = true;
+      for (const release of waiting.splice(0)) release();
+    },
     yieldToEventLoop: (): Promise<void> =>
       new Promise((resolve) => {
         taken++;
-        waiting.push(resolve);
+        first.resolve();
+        if (automatic) resolve();
+        else waiting.push(resolve);
       }),
     get pending(): number {
       return waiting.length;
@@ -204,32 +213,14 @@ const manualHandBacks = () => {
   };
 };
 
-/** Event-loop turns until `ready()`; a bounded count, never a wall clock. */
-const turnsUntil = async (ready: () => boolean): Promise<void> => {
-  for (let turn = 0; !ready(); turn++) {
-    if (turn > 10_000) throw new Error("never became ready");
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-};
-
-/**
- * How `promise` settled, waited for over a bounded number of turns: a cell
- * still waiting on a build nobody drives fails the test instead of hanging it.
- */
 const outcome = async <T>(
   promise: Promise<T>,
 ): Promise<{ readonly value?: T; readonly error?: unknown }> => {
-  let settled: { value?: T; error?: unknown } | undefined;
-  promise.then(
-    (value) => {
-      settled = { value };
-    },
-    (error: unknown) => {
-      settled = { error };
-    },
-  );
-  await turnsUntil(() => settled !== undefined);
-  return settled!;
+  try {
+    return { value: await promise };
+  } catch (error) {
+    return { error };
+  }
 };
 
 /** The error `promise` was rejected with; a failure if it resolved. */
@@ -244,17 +235,8 @@ const driveUntilSettled = async (
   handBacks: ReturnType<typeof manualHandBacks>,
   promises: readonly Promise<unknown>[],
 ): Promise<void> => {
-  let settled = 0;
-  for (const promise of promises)
-    promise.then(
-      () => settled++,
-      () => settled++,
-    );
-  await turnsUntil(() => {
-    if (settled === promises.length) return true;
-    handBacks.release();
-    return false;
-  });
+  handBacks.releaseAll();
+  await Promise.allSettled(promises);
 };
 
 /** A cell's proof, as the receiver reads it, verified against the root. */
@@ -314,7 +296,7 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
 
     const first = await message.read(3);
     const asked = [message.cellPlaintext(first!)];
-    await turnsUntil(() => handBacks.pending === 1);
+    await handBacks.first;
     // The build is under way: one slice done, its levels so far held.
     expect(build.state.hashes).toBe(2);
     expect(message.proofLevelBytes).toBeGreaterThan(0);
@@ -368,7 +350,7 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     producing.catch(() => undefined);
     // A scheduled slot's cell waits on the same build.
     const slotCell = slot(1);
-    await turnsUntil(() => handBacks.pending === 1);
+    await handBacks.first;
     expect(build.state.hashes).toBe(2);
     const heldWhileBuilding = message.proofLevelBytes;
     expect(heldWhileBuilding).toBeGreaterThan(0);
@@ -410,7 +392,7 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     );
 
     const asked = [message.cellPlaintext((await message.read(0))!)];
-    await turnsUntil(() => handBacks.pending === 1);
+    await handBacks.first;
     asked.push(message.cellPlaintext((await message.read(9))!));
     await driveUntilSettled(handBacks, asked);
     const errors = await Promise.all(asked.map(rejection));
@@ -440,7 +422,7 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     const message = messageOver(staged, build, handBacks, wrong);
 
     const asked = [message.cellPlaintext((await message.read(2))!)];
-    await turnsUntil(() => handBacks.pending === 1);
+    await handBacks.first;
     asked.push(message.cellPlaintext((await message.read(11))!));
     await driveUntilSettled(handBacks, asked);
     for (const cell of asked)

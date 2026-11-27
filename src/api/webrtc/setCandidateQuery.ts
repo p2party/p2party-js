@@ -93,21 +93,24 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
           // if (!ignoreOffer) throw error;
 
           if (!ignoreOffer) {
-            await repairIceTransportAfterCandidateFailure(epc, async () => {
-              // A later room peer update creates a fresh transport. This
-              // callback runs only when in-place restart is impossible, never
-              // before restartIce().
-              epc.iceCandidates.length = 0;
-              await api.dispatch(
-                webrtcApi.endpoints.disconnectFromPeer.initiate(
-                  {
-                    peerId: epc.withPeerId,
-                    roomId: epc.roomId,
-                  },
-                  { track: false },
-                ),
+            // A correlated credential response is delivered by this same
+            // serial ingress queue. Release it before waiting for that response.
+            if (epc.iceConnectionState === "failed")
+              void repairIceTransportAfterCandidateFailure(epc, async () => {
+                if (!peerConnections.includes(epc)) return;
+                epc.iceCandidates.length = 0;
+                await api.dispatch(
+                  webrtcApi.endpoints.disconnectFromPeer.initiate(
+                    {
+                      peerId: epc.withPeerId,
+                      roomId: epc.roomId,
+                    },
+                    { track: false },
+                  ),
+                );
+              }).catch((error: unknown) =>
+                console.warn("p2party: candidate repair failed", error),
               );
-            });
           }
         }
       }

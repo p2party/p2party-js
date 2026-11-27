@@ -59,12 +59,10 @@ let DEFAULT_ROOM_POLICY_V1: RoomPolicy["DEFAULT_ROOM_POLICY_V1"];
 
 beforeAll(async () => {
   await import("../../../src/store");
-  ({ default: webrtcSetDescriptionQuery } = await import(
-    "../../../src/api/webrtc/setDescriptionQuery"
-  ));
-  ({ runRoomPeerExclusive } = await import(
-    "../../../src/api/webrtc/negotiationLock"
-  ));
+  ({ default: webrtcSetDescriptionQuery } =
+    await import("../../../src/api/webrtc/setDescriptionQuery"));
+  ({ runRoomPeerExclusive } =
+    await import("../../../src/api/webrtc/negotiationLock"));
   ({ resetRatchetGate } = await import("../../../src/handlers/ratchetGate"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../../src/roomPolicy"));
 });
@@ -208,16 +206,8 @@ const expectMutexFree = async (): Promise<void> => {
   const next = runRoomPeerExclusive(ROOM_ID, PEER_ID, async () => {
     ran = true;
   });
-  const stuck = Symbol("stuck");
-  const outcome = await Promise.race([
-    next.then(() => "acquired"),
-    new Promise((resolve) =>
-      setTimeout(() => {
-        resolve(stuck);
-      }, 1000),
-    ),
-  ]);
-  expect(outcome).toBe("acquired");
+  // Bun's test deadline bounds this await when the mutex was left held.
+  await next;
   expect(ran).toBe(true);
 };
 

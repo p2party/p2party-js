@@ -18,6 +18,10 @@ export interface IRTCPeerConnection extends RTCPeerConnection {
    * pre-generation server, where it must never be read as a change.
    */
   peerSocketGeneration?: string;
+  /** Disarm the timers owned by this concrete WebRTC transport. */
+  clearTransportTimers?: () => void;
+  /** Retry the outstanding browser negotiation once room signaling returns. */
+  resumeDeferredNegotiation?: () => void;
   makingOffer: boolean;
   ignoreOffer: boolean;
   receiveMessageModule: LibCrypto;

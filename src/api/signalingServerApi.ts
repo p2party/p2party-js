@@ -100,6 +100,18 @@ export interface WebSocketMessage {
 
 let ws: WebSocket | null = null;
 let wsIngressLease: SignalingSocketIngressLease | null = null;
+/** A pending offer can only be published through the socket that originated it. */
+export const captureSignalingSendLease = (): (() => boolean) | undefined => {
+  const socket = ws;
+  const lease = wsIngressLease;
+  if (!socket || !lease || socket.readyState !== WebSocket.OPEN)
+    return undefined;
+  return () =>
+    socket === ws &&
+    lease === wsIngressLease &&
+    socket.readyState === WebSocket.OPEN &&
+    lease.isCurrent(() => true);
+};
 // Liveness watchdog of the open socket in `ws`. Invariant: null, or owned by
 // exactly that socket — every path that replaces `ws` stops it first.
 let wsHeartbeatWatchdog: SignalingHeartbeatWatchdog | null = null;
@@ -539,6 +551,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         // reuse standard codes (1008 in particular), so only a code the server
         // chose may be read as a permanent refusal.
         let selfInitiatedClose = false;
+        let transportReportedError = false;
         const settleClosedSocket = (
           close?: Readonly<{ code: number; reason: string }>,
           refusal?: "version-mismatch",
@@ -563,7 +576,9 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           // watchdog's own close routes here too: it detects a dead socket, it
           // does not repair one.
           signalingReconnect.schedule("socket-closed");
-          resolveOnce({ data: undefined });
+          if (transportReportedError)
+            rejectOnce(new Error("WebSocket connection failed"));
+          else resolveOnce({ data: undefined });
         };
         // This socket's own instance: a beat that lands after the socket was
         // replaced hits a stopped watchdog (a no-op), never the successor's.
@@ -622,21 +637,10 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           socket.onerror = (error) => {
             if (!ownsSocketAttempt()) return;
             console.error("WebSocket error:", error);
-            stopCurrentHeartbeatWatchdog();
-            invalidateSocketIngress("socket-closed");
-            ingressQueue.close();
-            socket.onmessage = null;
-            socket.onopen = null;
-            socket.onclose = null;
-            socket.onerror = null;
-            socket.close();
-            ws = null;
-            signalingAttemptLifecycle.clear(attempt);
-
-            api.dispatch(signalingServerActions.disconnect());
-            signalingReconnect.schedule("socket-error");
-
-            rejectOnce(new Error("WebSocket connection failed"));
+            // Browsers dispatch error before close. Only the CloseEvent carries
+            // the server's refusal code. Its handler owns socket invalidation
+            // and decides whether the reconnect ladder is permitted to run.
+            transportReportedError = true;
           };
 
           socket.onmessage = (message) => {

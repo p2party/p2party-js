@@ -238,7 +238,10 @@ interface ChannelFake {
 const fakeChannel = (
   label: string,
   readyState: RTCDataChannelState,
-  { peerId = PEER_ID, roomId = ROOM_ID }: { peerId?: string; roomId?: string } = {},
+  {
+    peerId = PEER_ID,
+    roomId = ROOM_ID,
+  }: { peerId?: string; roomId?: string } = {},
 ): ChannelFake => {
   let state = readyState;
   let closes = 0;
@@ -603,9 +606,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
     const epc = {
       ratchetGateLease: lease,
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      false,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(false);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 
@@ -615,9 +618,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
       ratchetGateLease: lease,
       mainChannel: mainChannel("connecting"),
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      false,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(false);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 
@@ -627,9 +630,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
       ratchetGateLease: lease,
       ratchetState: ratchetState(),
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      true,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(true);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 
@@ -639,9 +642,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
     const epc = {
       ratchetGateLease: lease,
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      true,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(true);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 
@@ -651,9 +654,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
     const epc = {
       ratchetGateLease: { token: Symbol("stale") },
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      false,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(false);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 
@@ -663,9 +666,9 @@ describe("isEdgeAuthenticatedOnTransport", () => {
       ratchetGateLease: lease,
       mainChannel: mainChannel("open"),
     } as unknown as IRTCPeerConnection;
-    expect(isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID)).toBe(
-      true,
-    );
+    expect(
+      isEdgeAuthenticatedOnTransport(epc, AUTH_ROOM_ID, AUTH_PEER_ID),
+    ).toBe(true);
     resetRatchetGate(AUTH_ROOM_ID, AUTH_PEER_ID);
   });
 });
@@ -784,11 +787,13 @@ const REDIAL = () =>
     roomId: DEADLINE_ROOM_ID,
     connectingToPeers: true,
     reason: "redial",
+    peerId: DEADLINE_PEER_ID,
   });
 
 const redials = (dispatched: unknown[]): unknown[] =>
   dispatched.filter(
-    (action) => (action as { type?: string }).type === setConnectingToPeers.type,
+    (action) =>
+      (action as { type?: string }).type === setConnectingToPeers.type,
   );
 
 describe("the in-place re-bind authentication deadline", () => {

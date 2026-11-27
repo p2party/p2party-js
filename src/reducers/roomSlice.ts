@@ -7,7 +7,10 @@ import {
   canonicalizeRoomPolicyV1,
   roomPoliciesEqualV1,
 } from "../roomPolicy";
-import { MAX_ACTIVE_SIGNALING_ROOMS } from "../utils/constants";
+import {
+  MAX_ACTIVE_SIGNALING_ROOMS,
+  MAX_TRANSPORT_REDIAL_ATTEMPTS,
+} from "../utils/constants";
 import {
   MAX_DATA_CHANNEL_LABEL_CHARS,
   MAX_SIGNALING_ROOM_CHANNELS,
@@ -202,7 +205,11 @@ export interface SetPeerCoverStatusArgs {
  * only be a policy/transcript mismatch.
  */
 export type PeerHandshakeFailureReason =
-  "pin-mismatch" | "pin-throttled" | "policy" | "transport";
+  | "pin-mismatch"
+  | "pin-throttled"
+  | "policy"
+  | "transport"
+  | "transport-exhausted";
 
 export interface PeerHandshakeStatus {
   status: "authenticating" | "authenticated" | "failed";
@@ -332,6 +339,7 @@ export interface Room extends SetRoomArgs {
    * waiting-for-peers state.
    */
   handshakeStatusByPeer?: Record<string, PeerHandshakeStatus>;
+  transportRedialsByPeer?: Record<string, number>;
 }
 
 /** Fully normalized reducer state; public Room keeps new fields optional. */
@@ -825,6 +833,15 @@ const roomSlice = createSlice({
         (r) => r.id === action.payload.roomId && r.signalingActive !== false,
       );
       if (room && action.payload.peers.length <= MAX_SIGNALING_ROOM_PEERS) {
+        for (const id of Object.keys(room.transportRedialsByPeer ?? {})) {
+          if (!action.payload.peers.some((p) => p.peerId === id)) {
+            delete room.transportRedialsByPeer![id];
+            if (
+              room.handshakeStatusByPeer?.[id]?.reason === "transport-exhausted"
+            )
+              delete room.handshakeStatusByPeer[id];
+          }
+        }
         room.knownPeers = action.payload.peers.map((peer) => ({ ...peer }));
         prunePeerPresence(room);
       }
@@ -842,11 +859,20 @@ const roomSlice = createSlice({
       );
       if (!room || !isRoomMember(room, peerId)) return;
       room.peerPresence ??= {};
+      const previousGeneration = room.peerPresence[peerId]?.socketGeneration;
       room.peerPresence[peerId] = notedPeerPresence(
         room.peerPresence[peerId],
         socketGeneration,
         evidence,
       );
+      if (room.peerPresence[peerId].socketGeneration !== previousGeneration) {
+        if (room.transportRedialsByPeer)
+          delete room.transportRedialsByPeer[peerId];
+        if (
+          room.handshakeStatusByPeer?.[peerId]?.reason === "transport-exhausted"
+        )
+          delete room.handshakeStatusByPeer[peerId];
+      }
     },
 
     /**
@@ -974,9 +1000,37 @@ const roomSlice = createSlice({
       }
     },
 
+    recordTransportRedial: (
+      state,
+      action: PayloadAction<{ roomId: string; peerId: string }>,
+    ) => {
+      const { roomId, peerId } = action.payload;
+      const room = state.find(
+        (r) => r.id === roomId && r.signalingActive !== false,
+      );
+      if (!room || !isUUID(peerId)) return;
+      const member =
+        room.knownPeers?.find((p) => p.peerId === peerId) ??
+        room.peers.find((p) => p.peerId === peerId);
+      if (!member) return;
+      room.transportRedialsByPeer ??= {};
+      const attempts = room.transportRedialsByPeer[peerId] ?? 0;
+      if (attempts < MAX_TRANSPORT_REDIAL_ATTEMPTS)
+        room.transportRedialsByPeer[peerId] = attempts + 1;
+      else {
+        room.handshakeStatusByPeer ??= {};
+        room.handshakeStatusByPeer[peerId] = {
+          status: "failed",
+          reason: "transport-exhausted",
+          peerPublicKey: member.peerPublicKey,
+        };
+      }
+    },
+
     /** Explicit connect() retry; ordinary signaling refreshes never clear failures. */
     clearPeerHandshakeFailures: (state, action: PayloadAction<string>) => {
       const room = state.find((candidate) => candidate.url === action.payload);
+      if (room) delete room.transportRedialsByPeer;
       if (!room?.handshakeStatusByPeer) return;
       for (const [peerId, status] of Object.entries(room.handshakeStatusByPeer))
         if (status.status === "failed")
@@ -1005,6 +1059,8 @@ const roomSlice = createSlice({
     allowPeerHandshakeRetry: (state, action: PayloadAction<SetPeerArgs>) => {
       const { roomId, peerId, peerPublicKey } = action.payload;
       const room = state.find((candidate) => candidate.id === roomId);
+      if (room?.transportRedialsByPeer)
+        delete room.transportRedialsByPeer[peerId];
       if (!room?.handshakeStatusByPeer) return;
       for (const [failedPeerId, status] of Object.entries(
         room.handshakeStatusByPeer,
@@ -1028,6 +1084,8 @@ const roomSlice = createSlice({
 
       if (roomIndex > -1) {
         const room = state[roomIndex];
+        if (status === "authenticated" && room.transportRedialsByPeer)
+          delete room.transportRedialsByPeer[peerId];
         room.handshakeStatusByPeer ??= {};
         room.handshakeStatusByPeer[peerId] = {
           status,
@@ -1497,6 +1555,7 @@ export const {
   setPeer,
   setPeerCoverStatus,
   setPeerHandshakeStatus,
+  recordTransportRedial,
   clearPeerHandshakeFailures,
   clearPeerHandshakeStatus,
   allowPeerHandshakeRetry,

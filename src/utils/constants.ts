@@ -583,3 +583,9 @@ export const COVER_TIMER_WORKER_RESTART_BACKOFF_MS = 1_000;
 // count of replacements starts again, so only losses in quick succession
 // exhaust it.
 export const COVER_TIMER_WORKER_HEALTHY_WAKE_UPS = 100;
+
+/** Consecutive automatic redials per room member before a deliberate retry. */
+export const MAX_TRANSPORT_REDIAL_ATTEMPTS = 6;
+
+/** Time for interrupted ICE connectivity or an in-place restart to recover. */
+export const ICE_REPAIR_GRACE_MS = 8000;

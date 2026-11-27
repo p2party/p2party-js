@@ -211,14 +211,14 @@ describe("the pre-authentication frame guard admits only what it should", () => 
 });
 
 describe("a channel this side closed is never a peer cancel", () => {
-  test("an unmarked close on a current, connected, authenticated edge is a cancel", () => {
+  test("a bare close on a current authenticated edge remains an interruption", () => {
     const lease = claimRatchetGate(ROOM_ID, PEER_ID);
     openRatchetGate(ROOM_ID, PEER_ID, lease);
     const epc = fakeEpc(lease);
     const channel = fakeChannel();
     expect(
       isAuthenticatedPeerCancel(epc, [epc], ROOM_ID, PEER_ID, lease, channel),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   // C7: this is the whole bug. The sender's own pre-authentication guard closed
@@ -242,7 +242,7 @@ describe("a channel this side closed is never a peer cancel", () => {
     const epc = fakeEpc(lease);
     expect(
       isAuthenticatedPeerCancel(epc, [epc], ROOM_ID, PEER_ID, lease, undefined),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   // sendWithReconcile re-reads the very channel it retired on its next loop

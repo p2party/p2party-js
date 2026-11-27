@@ -107,7 +107,7 @@ Immediate resume uses the channel protocol `p2party-resume-v1` and a capability
 echo to distinguish pause from explicit cancellation. Type-6 controls are
 authenticated by the concrete DTLS/SCTP channel and current identity gate,
 with an exact-root check; they do not have a separate application AEAD.
-Legacy peers retain close-as-cancel behavior. A fresh immediate attempt
+The current receiver retains partial data on a bare channel close. Earlier peers may still discard their own partial on close. A fresh immediate attempt
 rebuilds its have-set from paced receiver receipts instead of assuming a
 legacy receiver retained its partial. Remote cancellation drains pending
 writes, then atomically checks room, sender and incomplete status before

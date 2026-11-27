@@ -135,3 +135,17 @@ describe("outbox authentication event coalescing", () => {
     expect(calls).toEqual(["A", "B", "A"]);
   });
 });
+
+test("stopping a room releases its sleeping debounce and a later visit can resume", async () => {
+  const coordinator = createOutboxResumeCoordinator(undefined, 60000);
+  const visits: string[] = [];
+  coordinator.register(async (room) => {
+    visits.push(room);
+  });
+  await coordinator.resume("a");
+  const waiting = coordinator.resume("a");
+  coordinator.stop("a");
+  await waiting;
+  await coordinator.resume("a");
+  expect(visits).toEqual(["a", "a"]);
+});

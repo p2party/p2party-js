@@ -119,8 +119,8 @@ type=6(1) || kind(1) || transfer Merkle root(64)
 Kind 0 announces resume support; kind 1 is explicit CANCEL. An immediate
 message channel opened with DCEP protocol `p2party-resume-v1` promises that a
 bare close may pause the transfer. A supporting receiver echoes kind 0 after
-the identity gate opens; the opener then also treats a bare remote close as
-pause. CANCEL is accepted once per concrete channel, only under its current
+the identity gate opens. The current client treats any bare close as an
+interruption, including a close before this echo. CANCEL is accepted once per concrete channel, only under its current
 authenticated gate and exact root. Malformed, unknown, stale and cross-root
 controls have no effect. This control relies on the authenticated DTLS/SCTP
 channel; it has no separate application AEAD envelope.

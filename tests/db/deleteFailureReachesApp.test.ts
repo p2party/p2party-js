@@ -11,6 +11,7 @@
 // and time is a clock the test moves.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
+import { SHOULD_AUTOBATCH } from "@reduxjs/toolkit";
 import {
   afterAll,
   afterEach,
@@ -146,11 +147,23 @@ const OTHER_ROOM_URL = normalizeRoomCapability("c9".repeat(32));
 // The whole-file hash every message of this file carries.
 const HASH = "c3".repeat(64);
 
-afterAll(() => {
+afterAll(async () => {
   // No room of this file is left in the SDK's store for the files that run
   // after it. (Not deleteRoom: that keeps a placeholder for the URL, and its
   // listener would ask the database, which is no longer this file's.)
   store.dispatch(purgeAllRooms());
+  // The real store batches RTK Query notifications on the next frame. Wait
+  // for that notification before releasing this file's store/worker fixtures.
+  await new Promise<void>((resolve) => {
+    const unsubscribe = store.subscribe(() => {
+      unsubscribe();
+      resolve();
+    });
+    store.dispatch({
+      type: "test/flushNotifications",
+      meta: { [SHOULD_AUTOBATCH]: true },
+    });
+  });
   restoreClient();
   globals.onmessage = sharedWorker;
   globals.indexedDB = indexedDBBefore;

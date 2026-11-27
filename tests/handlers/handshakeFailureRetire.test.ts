@@ -212,6 +212,7 @@ const REDIAL = () =>
     roomId: ROOM_ID,
     connectingToPeers: true,
     reason: "redial",
+    peerId: PEER_ID,
   });
 
 /** Secrets a generation can hold when a step after the seed throws. */

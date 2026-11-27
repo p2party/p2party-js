@@ -131,11 +131,15 @@ class FakeLane implements CoverLaneChannel {
   readyState = "open";
   bufferedAmount = 0;
   sent = 0;
-  constructor(label: string) {
+  constructor(
+    label: string,
+    private readonly onSend: () => void,
+  ) {
     this.label = label;
   }
   send(): void {
     this.sent++;
+    this.onSend();
   }
   close(): void {
     this.readyState = "closed";
@@ -163,6 +167,7 @@ interface Edge {
   readonly statuses: CoverSchedulerStatus[];
   readonly interruptions: CoverJobInterruption[];
   readonly results: CoverJobResult[];
+  nextSlotResult: () => Promise<void>;
 }
 
 /** An authenticated edge with a real scheduled-cover runtime on a fake clock. */
@@ -192,6 +197,11 @@ const makeEdge = (): Edge => {
   } as unknown as IRTCPeerConnection;
   const clock = new FakeClock();
   const lanes: FakeLane[] = [];
+  let slot = Promise.withResolvers<void>();
+  const reportSlot = () => {
+    slot.resolve();
+    slot = Promise.withResolvers<void>();
+  };
   const statuses: CoverSchedulerStatus[] = [];
   const interruptions: CoverJobInterruption[] = [];
   const results: CoverJobResult[] = [];
@@ -204,11 +214,14 @@ const makeEdge = (): Edge => {
     policyHash: new Uint8Array(32),
     laneLabelName: "chat",
     openLaneChannel: (label) => {
-      const lane = new FakeLane(label);
+      const lane = new FakeLane(label, reportSlot);
       lanes.push(lane);
       return lane;
     },
-    onStatusChange: ({ status }) => statuses.push(status),
+    onStatusChange: ({ status }) => {
+      statuses.push(status);
+      if (status === "degraded") reportSlot();
+    },
     onJobInterrupted: (interruption) => interruptions.push(interruption),
     onJobResult: (result) => results.push(result),
     maxTimerDriftMs: 0,
@@ -219,7 +232,16 @@ const makeEdge = (): Edge => {
     runtime.destroy();
     pq.destroy();
   });
-  return { epc, runtime, clock, lanes, statuses, interruptions, results };
+  return {
+    epc,
+    runtime,
+    clock,
+    lanes,
+    statuses,
+    interruptions,
+    results,
+    nextSlotResult: () => slot.promise,
+  };
 };
 
 /** A two-cell staged message, and a store whose reads the test can hold. */
@@ -427,10 +449,6 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
     staged.holdNextRead();
     const lanesSent = (): number =>
       edge.lanes.reduce((total, lane) => total + lane.sent, 0);
-    // Real time passes while the cell finishes (its receipt token is a
-    // WebCrypto digest); schedule time must not, or the slot misses its
-    // deadline for a reason that has nothing to do with the cell.
-    let clockPaused = false;
 
     const delivery = withOutboundMessage(staged.params, (message) =>
       sendScheduled(
@@ -452,21 +470,13 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
             expect(allZero(stepping.keys[0])).toBe(true);
             expect(message.closed).toBe(false);
             const sentBefore = lanesSent();
-            clockPaused = true;
+            const pendingSlot = edge.nextSlotResult();
             staged.releaseRead();
             // Keep the delivery (and its message) open until the scheduler has
             // answered the slot whose cell was in flight: a cell on the lane,
             // or a degraded schedule.
-            for (let turn = 0; turn < 10_000; turn++) {
-              if (
-                lanesSent() > sentBefore ||
-                edge.statuses.includes("degraded")
-              )
-                break;
-              await new Promise((resolve) => setImmediate(resolve));
-            }
+            await pendingSlot;
             expect(lanesSent()).toBeGreaterThan(sentBefore);
-            clockPaused = false;
             return true;
           },
         },
@@ -477,11 +487,11 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
     void delivery.then(() => {
       settled = true;
     });
-    for (let turn = 0; !settled && t < 4_000 && turn < 100_000; turn++) {
-      if (!clockPaused) {
-        t += 25;
-        await edge.clock.advanceTo(t);
-      }
+    while (!settled && t < 4_000) {
+      // Preparation is asynchronous; sending occurs on the next scheduled
+      // slot. Advance the fake clock while the delivery waits on that event.
+      t += 25;
+      await edge.clock.advanceTo(t);
       await new Promise((resolve) => setImmediate(resolve));
     }
     expect(settled).toBe(true);
@@ -503,10 +513,6 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
     staged.holdNextRead();
     const lanesSent = (): number =>
       edge.lanes.reduce((total, lane) => total + lane.sent, 0);
-    // Real time passes while the cell finishes (its receipt token is a
-    // WebCrypto digest); schedule time must not, or the slot misses its
-    // deadline for a reason that has nothing to do with the cell.
-    let clockPaused = false;
 
     const delivery = withOutboundMessage(staged.params, (message) =>
       sendScheduled(
@@ -527,21 +533,13 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
             controller.abort(new Error("Message transfer cancelled"));
             expect(message.closed).toBe(false);
             const sentBefore = lanesSent();
-            clockPaused = true;
+            const pendingSlot = edge.nextSlotResult();
             staged.releaseRead();
             // Keep the delivery (and its message) open until the scheduler has
             // answered the slot whose cell was in flight: a cell on the lane,
             // or a degraded schedule.
-            for (let turn = 0; turn < 10_000; turn++) {
-              if (
-                lanesSent() > sentBefore ||
-                edge.statuses.includes("degraded")
-              )
-                break;
-              await new Promise((resolve) => setImmediate(resolve));
-            }
+            await pendingSlot;
             expect(lanesSent()).toBeGreaterThan(sentBefore);
-            clockPaused = false;
             return false;
           },
         },
@@ -552,11 +550,11 @@ describe("a job settled under an in-flight cell leaves the edge's schedule intac
     void delivery.then(() => {
       settled = true;
     });
-    for (let turn = 0; !settled && t < 4_000 && turn < 100_000; turn++) {
-      if (!clockPaused) {
-        t += 25;
-        await edge.clock.advanceTo(t);
-      }
+    while (!settled && t < 4_000) {
+      // Preparation is asynchronous; sending occurs on the next scheduled
+      // slot. Advance the fake clock while the delivery waits on that event.
+      t += 25;
+      await edge.clock.advanceTo(t);
       await new Promise((resolve) => setImmediate(resolve));
     }
     expect(settled).toBe(true);

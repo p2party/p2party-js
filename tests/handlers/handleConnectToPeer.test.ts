@@ -1,4 +1,13 @@
-import { afterEach, beforeAll, describe, expect, jest, test } from "bun:test";
+import {
+  afterEach,
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  jest,
+  spyOn,
+  test,
+} from "bun:test";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { IRTCPeerConnection } from "../../src/api/webrtc/interfaces";
@@ -92,10 +101,20 @@ let clearUnnegotiatedTransportRebuilds: UnnegotiatedTransport["clearUnnegotiated
 let recordUnnegotiatedTransportRebuild: UnnegotiatedTransport["recordUnnegotiatedTransportRebuild"];
 let unnegotiatedTransportRebuilds: UnnegotiatedTransport["unnegotiatedTransportRebuilds"];
 
+let sendLease: (() => boolean) | undefined = () => true;
+let restoreSendLease: () => void;
+afterAll(() => restoreSendLease());
 beforeAll(async () => {
   // Enter the store/API cycle through its normal application root so every
   // createApi initializer has run before the handler modules load.
   await import("../../src/store");
+  const signalApi = await import("../../src/api/signalingServerApi");
+  const leaseSpy = spyOn(
+    signalApi,
+    "captureSignalingSendLease",
+  ).mockImplementation(() => sendLease);
+  restoreSendLease = () => leaseSpy.mockRestore();
+
   ({ handleConnectToPeer } =
     await import("../../src/handlers/handleConnectToPeer"));
   ({ setConnectingToPeers, setPeer } =
@@ -111,6 +130,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+  sendLease = () => true;
   jest.useRealTimers();
   clearUnnegotiatedTransportRebuilds(ROOM_ID, PEER_ID);
 });
@@ -224,6 +244,7 @@ const REDIAL = () =>
     roomId: ROOM_ID,
     connectingToPeers: true,
     reason: "redial",
+    peerId: PEER_ID,
   });
 
 const thunks = (dispatched: unknown[]): unknown[] =>
@@ -469,5 +490,33 @@ describe("handleConnectToPeer un-negotiated responder transport", () => {
 
     await driveConnectionState(epc, "connected");
     expect(unnegotiatedTransportRebuilds(ROOM_ID, PEER_ID)).toBe(0);
+  });
+});
+
+describe("offer ownership", () => {
+  test("a closing socket never starts a local offer", async () => {
+    const { api } = fakeApi();
+    const { epc } = await connect(api);
+    sendLease = undefined;
+    await epc.onnegotiationneeded?.call(epc, new Event("negotiationneeded"));
+    expect(epc.localDescription).toBeNull();
+    expect(epc.signalingState).toBe("stable");
+  });
+  test("an offer loses its socket before publication and is rolled back", async () => {
+    const { api, dispatched } = fakeApi();
+    const { epc } = await connect(api);
+    sendLease = () => false;
+    await epc.onnegotiationneeded?.call(epc, new Event("negotiationneeded"));
+    expect(epc.signalingState).toBe("stable");
+    expect(epc.makingOffer).toBe(false);
+    expect(dispatched).toContainEqual({
+      type: "rooms/setConnectingToPeers",
+      payload: {
+        roomId: ROOM_ID,
+        peerId: PEER_ID,
+        connectingToPeers: true,
+        reason: "redial",
+      },
+    });
   });
 });

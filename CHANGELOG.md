@@ -6,7 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## [Unreleased]
 
-## [0.15.0]
+## [0.15.0] — 2026-11-27
+
+### Release verification
+
+- The tagged Linux CI archive has SHA-256
+  `d2eb1fbc40a585da0144413a0da9bbf5b17a03536cd5f982e0c20d429078353b`.
+  It matches the archive vendored by the website. All 2,440 SDK tests and the
+  standalone encrypted-session and restore example passed. [CI record](https://github.com/p2party/p2party-js/actions/runs/45984544053)
+- Two fresh Chromium pairs on the public web app verified persisted text
+  and a byte-exact 32 KiB disk-backed file. The selected ICE candidates were
+  host/server-reflexive on the direct path and relay/relay on the forced TURN
+  path. The 16 MiB receive and 64 MiB interrupted-transfer checks ran locally. [Browser tests](docs/e2e/release-0.15.0.md)
 
 ### Breaking
 

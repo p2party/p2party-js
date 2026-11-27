@@ -12,9 +12,20 @@ room mesh.
 Apache-2.0 · [License](LICENSE.md) · [Getting started](docs/getting-started.md) ·
 [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)
 
-> Status: protocol v4 is an intentional wire break — v3 peers and persisted v3
-> crypto rows are not resumed. The current code has not completed an
-> independent third-party security audit.
+The public web app runs **SDK 0.15.0** with signaling protocol **5**. The
+protocol between peers remains **4**. Upgrade a self-hosted signaling server
+to 0.2.0 or later before updating its clients. This SDK opens a keyless
+WebSocket URL, signs a challenge bound to the host, and joins with a hash of the
+room capability. The service can still associate a room with its participants.
+[Web client](https://p2party.com) · [Signaling health](https://signaling.p2party.com/health) · [Release verification](docs/e2e/release-0.15.0.md)
+
+Contacts and blocks now follow the authenticated Ed25519 key across routing
+changes. The browser keeps older messages readable and only offers a contact
+action on a message with a proved sender key. A retained, prepared file can
+resume after sender reload. If deletion leaves a file on disk, the SDK reports
+it and can retry cleanup after restart. Protocol-v3 peer sessions and saved v3
+crypto state require a fresh handshake. Independent security review remains
+open. [0.15.0 migration notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
 
 ## What is shipped
 
@@ -74,8 +85,19 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
+The tagged GitHub release provides the exact 0.15.0 archive used by the web app.
+[Archive and SHA-256 checksum](https://github.com/p2party/p2party-js/releases/tag/v0.15.0)
+
 ```sh
-npm install p2party
+npm install https://github.com/p2party/p2party-js/releases/download/v0.15.0/p2party-0.15.0.tgz
+```
+
+For the registry copy, check the version before installing. The expected
+integrity is `sha512-7Uhf17GnctiRuuZnNF8gU0oAYfeocGiF5ja6Fjel2kUeWqVj7rl7fzfk3vxKZkKyAOAGXagUP0nLW+YU9qID5Q==`.
+
+```sh
+npm view p2party@0.15.0 dist.integrity
+npm install p2party@0.15.0
 ```
 
 That is the whole setup. The package ships its own WebAssembly cryptography and

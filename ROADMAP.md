@@ -14,12 +14,21 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 The SDK `0.15.0` includes durable sender recovery, selective scheduled receipts,
 sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
 Signaling protocol 5 provides authenticated room membership snapshots and targeted
-mesh repair. Deploy server `0.2.0` before upgrading the client. Local verification results and remaining limits are recorded in
-[the browser harness report](docs/e2e/README.md).
+mesh repair. On November 27 the public browser app used the tagged SDK archive
+and two fresh browser pairs verified stored text and a 32 KiB disk-backed
+file. Browser statistics identified a direct host/server-reflexive path for
+one pair and a forced relay/relay path for the other. Local runs recovered a 16 MiB file and resumed a 64 MiB
+file across a sender reload. [Public web client](https://p2party.com) ·
+[SDK release evidence](docs/e2e/release-0.15.0.md) ·
+[Signaling health](https://signaling.p2party.com/health)
 
-This remediation does not publish, deploy, or push any repository. A site must
-vendor the tested SDK tarball and the deployed signaling server must be upgraded
-before the new recovery behavior can be claimed for that deployment.
+P2Party Testnet 1 is a separate server and native-library experiment awaiting
+public activation. Its published genesis defines 128 valueless units, and its
+validator orders native post-quantum transfers. Rooms, peer
+authentication and file transfer use no ledger, staking or payment step.
+Independent validators, proof of stake, EVM execution and mainnet monetary
+rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·
+[Native transfer library](https://github.com/ondemos/libdemos)
 
 - protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets
   are combined by `HKDF-Extract` over a fixed-order concatenation —
@@ -63,10 +72,12 @@ transport terminates on the certificate the SDP advertised.
 
 ### Known open, in priority order
 
-1. **Signaling version cutover.** SDK `0.15.0` requires signaling protocol 5.
-   Upgrade the server before clients. An explicit version refusal reaches the
-   caller as `SignalingVersionMismatchError`. Servers that reject the WebSocket
-   upgrade can surface only a browser connection error.
+1. **Device and network coverage.** Exercise recovery and storage limits on
+   physical devices and across independent networks. The public TURN run
+   verified a 32 KiB file and a message. Large files, prolonged suspension and latency on
+   those paths still need measurement. Android 17 LAN permission grant,
+   denial and relay fallback are next for the web client's native shell.
+   [Native verification](https://p2party.com/blog/rooms-after-signaling-v5)
 
 2. **Existing limits.** Import cycles, unexecuted ProVerif verification and
    Firefox's missing post-connect certificate statistics remain. Recovery

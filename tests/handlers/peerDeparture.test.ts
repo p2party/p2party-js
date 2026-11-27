@@ -225,6 +225,10 @@ beforeAll(async () => {
           serverUrl: "wss://signal.example/ws",
         },
       } as State,
+      // RTK Query's batched notifications on a microtask, not on the default
+      // 10 ms timer, so no timer of this store outlives the file.
+      enhancers: (getDefaultEnhancers) =>
+        getDefaultEnhancers({ autoBatch: { type: "tick" } }),
       middleware: (getDefaultMiddleware) =>
         getDefaultMiddleware({
           serializableCheck: false,
@@ -454,6 +458,43 @@ describe("peerLeft: reason offline", () => {
     });
     expect(reconciler.armedRooms()).toContain(retryKey);
     expect(retriesOver(harness, 5_000)).toBe(1);
+  });
+
+  test("a snapshot naming a new generation clears the offline mark, and one naming none does not", async () => {
+    const harness = await joined();
+    const { store, reconciler } = harness;
+    await deliver(store, peerLeft("offline"));
+    const snapshot = (socketGeneration?: string) => ({
+      type: "peers",
+      rosterKind: "snapshot",
+      rosterRequestId: debouncer.beginRosterRequest(ROOM_ID),
+      roomId: ROOM_ID,
+      protocolVersion: 4,
+      peers: [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY, socketGeneration }],
+    });
+
+    // Listed without a generation, as every offline member is: still offline.
+    await deliver(store, snapshot());
+    expect(room(store).peerPresence?.[PEER_ID]).toEqual({
+      socketGeneration: GENERATION,
+      departure: "offline",
+    });
+    // Listed on the socket that went offline: the snapshot is older than the
+    // report, and still offline.
+    await deliver(store, snapshot(GENERATION));
+    expect(room(store).peerPresence?.[PEER_ID]?.departure).toBe("offline");
+    expect(reconciler.armedRooms()).not.toContain(retryKey);
+    expect(retriesOver(harness, 600_000)).toBe(0);
+
+    // Listed on a new socket: the member is online again and retried.
+    await deliver(store, snapshot(RETURN_GENERATION));
+    expect(room(store).peerPresence?.[PEER_ID]).toEqual({
+      socketGeneration: RETURN_GENERATION,
+    });
+    expect(reconciler.armedRooms()).toContain(retryKey);
+    expect(retriesOver(harness, 5_000)).toBe(1);
+    // A snapshot discovers; it never dials.
+    expect(dialled).toEqual([]);
   });
 });
 

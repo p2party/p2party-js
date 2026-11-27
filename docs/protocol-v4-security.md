@@ -183,17 +183,23 @@ endpoint peer necessarily learns plaintexts it decrypts, peer identity, message
 ordering, and transfer activity.
 
 Room members learn from the signaling server when another member leaves a
-room and when its last signaling socket closes (`peerLeft`, see below). Before
-this frame existed a member learned that only from its own edge to that
-member, if it had one. Now every online member of every room an identity is
-in is told each time that identity goes offline, whether or not it holds an
-edge to that identity, within the server's delivery time and subject to the
-server's per-identity limit (`p2party-server` announces at most six offline
-closes per identity per minute per process and drops the rest). With the
-introductions a returning member already causes, room-mates can record the
-start and end of each of a member's signaling sessions. The frame carries the
-room UUID, the member's peer id and a socket generation that introductions and
-deltas already show to room-mates; it carries no address and no key.
+room and when its last signaling socket closes (`peerLeft`, see below). Much
+of this was already visible on request: any member can ask for a membership
+snapshot at any time, a member absent from it has left, and the snapshot
+names a member's socket generation exactly when the answering server process
+holds that member's current socket, so on a one-process server a missing
+generation means the member is offline. What `peerLeft` adds is a real-time
+push, unrequested, of those transitions to every online member of every room
+an identity is in, whether or not it holds an edge to that identity, within
+the server's delivery time; on a server with several processes it also
+reports an offline member whose socket was on another process, which a
+snapshot could not show. `p2party-server` bounds the pushes (at most six
+offline closes per identity per minute per process, and a frame budget per
+source address) and does not announce the rest. With the introductions a
+returning member already causes, room-mates can record the start and end of
+each of a member's signaling sessions. The frame carries the room UUID, the
+member's peer id and a socket generation that introductions and deltas
+already show to room-mates; it carries no address and no key.
 
 Fixed chunk cells hide exact plaintext length only within the frame-count
 bucket and chosen decoy allocation. With immediate delivery, observers still

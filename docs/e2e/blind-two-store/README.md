@@ -8,10 +8,9 @@ release byte.
 As with the other harnesses in `docs/e2e/`, these reference absolute paths on
 the author's machine (`playwright-core` and the cached Chromium under
 `p2party.com/node_modules` and `~/Library/Caches/ms-playwright`); adjust if the
-tree moves. They run against the **development** WASM
-(`src/cryptography/libcrypto.wasm`, SRI-pinned in `wasmLoader.ts`) — do NOT run
-`npm run predist` first, it overwrites that artifact with the web-only
-production build.
+tree moves. Run the browser bundle build after `npm run release:pack` to test the
+production WASM. The script copies `src/cryptography/libcrypto.wasm` next to
+the page and bundles the loader from the same checkout.
 
 ## `provider-smoke.*` — the WebRTC transport provider on its own
 

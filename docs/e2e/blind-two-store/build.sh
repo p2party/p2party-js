@@ -3,12 +3,9 @@
 #
 #   bash docs/e2e/blind-two-store/build.sh
 #
-# Both outputs are generated and must NOT be committed: `bundle.js` beside this
-# script, and a copy of the DEVELOPMENT `libcrypto.wasm` the page fetches.
-#
-# Do not run `npm run predist` first: it overwrites src/cryptography/libcrypto.wasm
-# with the web-only production build, which is not what wasmLoader.ts is pinned
-# to in a checkout.
+# Serve the WASM built with the checkout's loader. After a release build this
+# is the production binary whose digest is recorded in libcrypto.provenance.json.
+# Both bundle.js and the local copy of the binary are generated artifacts.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

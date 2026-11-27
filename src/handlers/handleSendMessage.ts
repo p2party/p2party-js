@@ -22,7 +22,7 @@ import { debugLog } from "../utils/debug";
 import { handleOpenChannel } from "./handleOpenChannel";
 
 import { fisherYatesShuffle } from "../cryptography/utils";
-import { buildMerkleProofLevels } from "../cryptography/merkle";
+import { startMerkleProofLevelsBuild } from "../cryptography/merkle";
 import {
   crypto_hash_sha512_BYTES,
   crypto_sign_ed25519_PUBLICKEYBYTES,
@@ -127,7 +127,11 @@ import type {
   IRTCPeerConnection,
 } from "../api/webrtc/interfaces";
 import type { LibCrypto } from "../cryptography/libcrypto";
-import type { MerkleProofLevels } from "../cryptography/merkle";
+import type {
+  MerkleProofLevels,
+  MerkleProofLevelsBuild,
+  MerkleProofLevelsBuildOptions,
+} from "../cryptography/merkle";
 import type { PqMessageKeyContext } from "../cryptography/pqMessageKey";
 import type { MessageChunkSealer } from "./messageChunkCrypto";
 import type { NewChunk } from "../db/types";
@@ -288,6 +292,15 @@ export interface OutboundMessageParams {
   /** Hashes the tree's internal nodes when the proof levels are built. */
   readonly merkleModule: LibCrypto;
   readonly store?: OutboundChunkStore;
+  /**
+   * The clock the proof-level build's slices are timed on, and how it hands
+   * the thread back between them. Production passes neither (performance.now,
+   * a MessageChannel task); a test passes a counting clock.
+   */
+  readonly proofLevelBuild?: Pick<
+    MerkleProofLevelsBuildOptions,
+    "now" | "yieldToEventLoop"
+  >;
 }
 
 /** One staged cell, read once, with what its own metadata says it is. */
@@ -330,11 +343,17 @@ const CHUNK_KIND_DECOY = 2;
  * leaves). A resume after a page reload builds them once from the leaves the
  * outbox claim returned, and only if some chunk still lacks a stored proof.
  *
+ * The build runs in slices of at most PROOF_LEVEL_BUILD_SLICE_MS, handing the
+ * page back between them, so a cover wake-up due meanwhile is not held for
+ * the build (about 2.5 µs a leaf). Every cell that needs a proof while it runs
+ * awaits the same build; a scheduled slot whose cell is still waiting sends
+ * its dummy, on time, and the chunk takes a later slot of its lane.
+ *
  * It also remembers which cells a read showed to be decoys, so a retransmit
  * pass skips them without reading them again.
  *
- * `close()` drops both. `withOutboundMessage` owns that call; after it nothing
- * is rebuilt.
+ * `close()` drops both, and stops a build still running at its next slice.
+ * `withOutboundMessage` owns that call; after it nothing is rebuilt.
  */
 export class OutboundMessage {
   readonly transferId: string;
@@ -345,6 +364,7 @@ export class OutboundMessage {
   readonly #chunkHashes: Uint8Array;
   readonly #merkleModule: LibCrypto;
   readonly #store: OutboundChunkStore;
+  readonly #buildOptions: OutboundMessageParams["proofLevelBuild"];
   #kinds: Uint8Array;
   // Cells whose staged row now carries its proof; the levels are not needed
   // for those again.
@@ -353,6 +373,12 @@ export class OutboundMessage {
   #totalSize = 0;
   #levels: MerkleProofLevels | null = null;
   #levelsError: Error | null = null;
+  // The build every caller awaits while it runs, and what it holds so far.
+  #levelsBuilding: Promise<MerkleProofLevels> | null = null;
+  #build: MerkleProofLevelsBuild | null = null;
+  readonly #stopBuild = new AbortController();
+  // Proofs being taken from the levels: they are not released under one.
+  #proofsPending = 0;
   #closed = false;
 
   constructor(params: OutboundMessageParams) {
@@ -373,6 +399,7 @@ export class OutboundMessage {
     this.#chunkHashes = params.chunkHashes;
     this.#merkleModule = params.merkleModule;
     this.#store = params.store ?? stagedChunkStore;
+    this.#buildOptions = params.proofLevelBuild;
     this.#kinds = new Uint8Array(params.totalChunks);
     this.#proven = new Uint8Array(params.totalChunks);
   }
@@ -381,9 +408,13 @@ export class OutboundMessage {
     return this.#closed;
   }
 
-  /** Bytes the cached proof levels hold; zero before they are built and after close. */
+  /**
+   * Bytes the proof levels hold, built or being built; zero before the build
+   * starts, once every cell carries its proof, and once a build stopped by
+   * `close()` has reached its next slice.
+   */
   get proofLevelBytes(): number {
-    return this.#levels?.byteLength ?? 0;
+    return this.#levels?.byteLength ?? this.#build?.byteLength ?? 0;
   }
 
   /** True once a read of this cell showed it is padding. */
@@ -459,14 +490,22 @@ export class OutboundMessage {
     const hasStoredProof = row.merkleProof.byteLength > 0;
     const merkleProof = new Uint8Array(PROOF_LEN);
     if (hasStoredProof) merkleProof.set(new Uint8Array(row.merkleProof));
-    else
-      merkleProof.set(
-        this.#proofLevels().proof(
-          index,
-          hexToUint8Array(row.leafHash),
-          PROOF_LEN,
-        ),
-      );
+    else {
+      throwIfTransferAborted(signal);
+      this.#proofsPending++;
+      try {
+        // A cancelled peer stops waiting at once; the build goes on for the
+        // delivery's other peers and cells.
+        const levels = await waitWithTransferAbort(this.#proofLevels(), signal);
+        this.#assertOpen();
+        merkleProof.set(
+          levels.proof(index, hexToUint8Array(row.leafHash), PROOF_LEN),
+        );
+      } finally {
+        this.#proofsPending--;
+        this.#releaseLevelsOnceAllProven();
+      }
+    }
 
     if (hasStoredProof) this.#noteProven(index);
     const receiptToken =
@@ -524,9 +563,16 @@ export class OutboundMessage {
     return chunk;
   }
 
-  /** Drop the proof levels and the decoy map. Idempotent. */
+  /**
+   * Drop the proof levels and the decoy map, and stop a build still running:
+   * it does no more work after its current slice, and drops what it built
+   * then. Idempotent.
+   */
   close(): void {
     this.#closed = true;
+    this.#stopBuild.abort(
+      new Error("Outbound message delivery has already ended"),
+    );
     this.#levels?.release();
     this.#levels = null;
     this.#kinds = new Uint8Array(0);
@@ -538,10 +584,21 @@ export class OutboundMessage {
     if (this.#closed || this.#proven[index] === 1) return;
     this.#proven[index] = 1;
     this.#provenCount++;
-    if (this.#provenCount === this.totalChunks) {
-      this.#levels?.release();
-      this.#levels = null;
-    }
+    this.#releaseLevelsOnceAllProven();
+  }
+
+  // Not while a proof is being taken from them: that cell's row was read
+  // before another pass stored its proof.
+  #releaseLevelsOnceAllProven(): void {
+    if (
+      !this.#levels ||
+      this.#provenCount !== this.totalChunks ||
+      this.#proofsPending > 0
+    )
+      return;
+    this.#levels.release();
+    this.#levels = null;
+    this.#levelsBuilding = null;
   }
 
   #assertOpen(): void {
@@ -549,19 +606,42 @@ export class OutboundMessage {
       throw new Error("Outbound message delivery has already ended");
   }
 
-  #proofLevels(): MerkleProofLevels {
+  async #proofLevels(): Promise<MerkleProofLevels> {
     this.#assertOpen();
     if (this.#levels) return this.#levels;
     // A failed build is not retried: every peer and cell of this delivery
     // would only pay N − 1 hashes again to reach the same answer.
     if (this.#levelsError) throw this.#levelsError;
+    if (!this.#levelsBuilding) {
+      this.#levelsBuilding = this.#buildLevels();
+      // Every caller may have stopped waiting (a cancel) before it settles.
+      this.#levelsBuilding.catch(() => undefined);
+    }
+    return await this.#levelsBuilding;
+  }
+
+  async #buildLevels(): Promise<MerkleProofLevels> {
+    const build = startMerkleProofLevelsBuild(
+      this.#chunkHashes,
+      this.#merkleModule,
+      { ...this.#buildOptions, signal: this.#stopBuild.signal },
+    );
+    this.#build = build;
     let levels: MerkleProofLevels;
     try {
-      levels = buildMerkleProofLevels(this.#chunkHashes, this.#merkleModule);
+      levels = await build.done;
     } catch (error) {
+      // Stopped by close(): the delivery ended, the build did not fail.
+      this.#assertOpen();
       this.#levelsError =
         error instanceof Error ? error : new Error(String(error));
       throw this.#levelsError;
+    } finally {
+      this.#build = null;
+    }
+    if (this.#closed) {
+      levels.release();
+      this.#assertOpen();
     }
     // The leaves came from the outbox, not from this page's staging, on a
     // resume. Proofs over leaves that do not reach the message's root would
@@ -575,6 +655,8 @@ export class OutboundMessage {
       throw this.#levelsError;
     }
     this.#levels = levels;
+    // Every cell may have been proven, and every caller gone, meanwhile.
+    this.#releaseLevelsOnceAllProven();
     return levels;
   }
 }
@@ -1027,9 +1109,15 @@ const waitForConnectedEdge = (
       settle(false);
     };
     // The budget is armed only once both listeners are in place: a
-    // registration that throws rejects this promise and leaves no timer.
+    // registration that throws rejects this promise and leaves no timer, and
+    // no listener: the first is removed when the second cannot be added.
     epc.addEventListener("connectionstatechange", onChange);
-    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    } catch (error) {
+      epc.removeEventListener("connectionstatechange", onChange);
+      throw error;
+    }
     if (!settled)
       timer = setTimeout(() => {
         settle(false);
@@ -1083,13 +1171,17 @@ const resumeChannel = async (
   channel: IRTCDataChannel;
 } | null> => {
   const deadline = clock.now() + timeoutMs;
+  // A poll, or what is left of the budget if that is less: the watch ends at
+  // its budget, not up to a poll after it.
+  const pollWithinBudget = (): number =>
+    Math.max(0, Math.min(RECONNECT_RESUME_POLL_MS, deadline - clock.now()));
   while (clock.now() < deadline) {
     throwIfTransferAborted(signal);
     const epc = peerConnections.find((p) =>
       isResumableAuthenticatedTransport(p, roomId, peerId),
     );
     if (!epc) {
-      await sleepUnlessAborted(RECONNECT_RESUME_POLL_MS, signal, clock);
+      await sleepUnlessAborted(pollWithinBudget(), signal, clock);
       throwIfTransferAborted(signal);
       continue;
     }
@@ -1126,7 +1218,7 @@ const resumeChannel = async (
       // Retried after a poll, never at once: an attempt that fails without
       // any I/O would otherwise retry in a microtask loop that starves the
       // page for the whole budget.
-      await sleepUnlessAborted(RECONNECT_RESUME_POLL_MS, signal, clock);
+      await sleepUnlessAborted(pollWithinBudget(), signal, clock);
     }
   }
   return null;

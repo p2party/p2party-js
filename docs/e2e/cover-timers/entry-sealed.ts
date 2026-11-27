@@ -266,12 +266,13 @@ const run = async (): Promise<void> => {
   (window as unknown as Record<string, unknown>).__coverTimersProgress =
     "loading the WASM";
   const module = await loadModule();
-  // The synchronous proof-level build a message of LEAVES cells pays once.
+  // The proof-level build a message of LEAVES cells pays once (in slices
+  // since 2026-11-27: this is the whole build, start to end).
   const proofLevelBuildMs: number[] = [];
   for (let i = 0; i < 10; i++) {
     const leaves = random(LEAVES * 64);
     const started = performance.now();
-    buildMerkleProofLevels(leaves, module).release();
+    (await buildMerkleProofLevels(leaves, module)).release();
     proofLevelBuildMs.push(performance.now() - started);
   }
   const roomId = "00000000-0000-4000-8000-0000000000a1";

@@ -225,10 +225,6 @@ beforeAll(async () => {
           serverUrl: "wss://signal.example/ws",
         },
       } as State,
-      // RTK Query's batched notifications on a microtask, not on the default
-      // 10 ms timer, so no timer of this store outlives the file.
-      enhancers: (getDefaultEnhancers) =>
-        getDefaultEnhancers({ autoBatch: { type: "tick" } }),
       middleware: (getDefaultMiddleware) =>
         getDefaultMiddleware({
           serializableCheck: false,
@@ -239,6 +235,11 @@ beforeAll(async () => {
           webrtc.default.middleware,
           createRoomListenerMiddleware(reconciler).middleware,
         ]),
+      // After `middleware`, which the enhancers' type is inferred from. RTK
+      // Query's batched notifications run on a microtask, not on the default
+      // 10 ms timer, so no timer of this store outlives the file.
+      enhancers: (getDefaultEnhancers) =>
+        getDefaultEnhancers({ autoBatch: { type: "tick" } }),
     });
     live.push({ reconciler, roomIds: [ROOM_ID, OTHER_ROOM_ID] });
     return { store, timeouts, reconciler, reconcileTargets };

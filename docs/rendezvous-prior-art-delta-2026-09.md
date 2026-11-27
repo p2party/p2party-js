@@ -750,7 +750,7 @@ Evaluation methodology and attacks the prototype must be measured against:
   "Algorithm Updates in WebCrypto" (chromestatus 5198951632470016: status
   Proposed; prototype M150, origin trial M151, ship M154; WebKit position
   "neutral", issue 641 closed 2026-04-28).
-  https://wicg.github.io/webcrypto-modern-algos/ — VERIFIED (draft fetched;
+  https://github.com/WICG/webcrypto-modern-algos — VERIFIED (draft fetched;
   chromestatus API; MDN BCD 8.1.0 dump parsed; WebKit issue via GitHub API).
   Adds ML-KEM, hybrid KEMs, ML-DSA, SLH-DSA, ChaCha20-Poly1305, SHA-3,
   Argon2 and more to SubtleCrypto, none mandatory and not a W3C Standard;

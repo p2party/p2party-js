@@ -1,3 +1,5 @@
+import { leaveMembershipsForPurge } from "./utils/purgeMemberships";
+export type { PurgeMembershipResult } from "./utils/purgeMemberships";
 import { deriveRoomLocator } from "./utils/roomLocator";
 import { outboxRequest } from "./db/api";
 import { pendingMessageView, discardPendingSelection } from "./handlers/outbox";
@@ -42,6 +44,7 @@ import {
   getReceiveFile,
   getAllDBBlacklisted,
   getAllDBUniqueRooms,
+  setDBRoomKnownOnly,
   getDBRoomStats,
   deleteIdentityDerivation,
   deleteIdentityEd25519,
@@ -128,6 +131,7 @@ import {
 import { commonStateSelector } from "./reducers/commonSlice";
 import {
   roomSelector,
+  defaultRTCConfig,
   deriveEffectiveRTCConfig,
   rtcConfigurationsEqual,
   setConnectionRelay,
@@ -249,6 +253,8 @@ type State = Omit<InternalState, "rooms"> & { rooms: Room[] };
 // };
 
 export interface ConnectRoomOptions {
+  /** Restrict ICE gathering and signaling to TURN relay candidates. */
+  relayOnly?: boolean;
   /**
    * Canonical public room policy. Omit on reconnect to preserve the room's
    * existing policy; a new room defaults to hybrid-PQ, no-PIN, immediate
@@ -316,12 +322,15 @@ const activateSignalingRoom = async (
 
     if (appliedLiveConfiguration)
       await dispatch(
-        webrtcApi.endpoints.applyRoomConfiguration.initiate({
-          roomId: existing.id,
-          rtcConfig: nextRtcConfig,
-          restartIce: true,
-          failurePolicy: "rollback",
-        }),
+        webrtcApi.endpoints.applyRoomConfiguration.initiate(
+          {
+            roomId: existing.id,
+            rtcConfig: nextRtcConfig,
+            restartIce: true,
+            failurePolicy: "rollback",
+          },
+          { track: false },
+        ),
       ).unwrap();
 
     try {
@@ -347,12 +356,15 @@ const activateSignalingRoom = async (
     } catch (error) {
       if (appliedLiveConfiguration && existing && previousRtcConfig)
         await dispatch(
-          webrtcApi.endpoints.applyRoomConfiguration.initiate({
-            roomId: existing.id,
-            rtcConfig: previousRtcConfig,
-            restartIce: true,
-            failurePolicy: "close",
-          }),
+          webrtcApi.endpoints.applyRoomConfiguration.initiate(
+            {
+              roomId: existing.id,
+              rtcConfig: previousRtcConfig,
+              restartIce: true,
+              failurePolicy: "close",
+            },
+            { track: false },
+          ),
         ).unwrap();
       throw error;
     }
@@ -367,7 +379,9 @@ const startSignalingConnectionInBackground = (
   // second room join could select another server in the same turn.
   dispatch(signalingServerActions.startConnecting(signalingServerUrl));
   void dispatch(
-    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl),
+    signalingServerApi.endpoints.connectWebSocket.initiate(signalingServerUrl, {
+      track: false,
+    }),
   )
     .unwrap()
     .catch((error: unknown) => {
@@ -454,9 +468,11 @@ const connect = async (
       throw new SignalingVersionMismatchError();
     const roomIndex = rooms.findIndex((room) => room.url === roomUrl);
     let persistedPolicy: RoomPolicyV1 | undefined;
+    let persistedKnownOnly: boolean | undefined;
     if (roomIndex === -1) {
       const persistedRooms = await getAllDBUniqueRooms();
       const persisted = persistedRooms.find((room) => room.roomUrl === roomUrl);
+      persistedKnownOnly = persisted?.onlyConnectWithKnownPeers;
       if (persisted?.roomPolicy) {
         persistedPolicy = decodeRoomPolicyV1(
           new Uint8Array(persisted.roomPolicy),
@@ -483,8 +499,19 @@ const connect = async (
         await clearPinAttemptLimits(deriveRoomLocator(roomUrl));
     }
 
+    const callerConfig =
+      rtcConfig ?? rooms[roomIndex]?.callerRtcConfig ?? defaultRTCConfig;
     await activateSignalingRoom(roomUrl, {
-      rtcConfig,
+      onlyConnectWithKnownPeers: persistedKnownOnly,
+      rtcConfig:
+        options.relayOnly === undefined
+          ? rtcConfig
+          : {
+              ...callerConfig,
+              iceTransportPolicy: options.relayOnly
+                ? "relay"
+                : (rtcConfig?.iceTransportPolicy ?? "all"),
+            },
       policy,
     });
 
@@ -789,13 +816,20 @@ const connectToSignalingServer = async (
 const disconnectFromSignalingServer = async () => {
   await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
     await dispatch(
-      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined, {
+        track: false,
+      }),
     ).unwrap();
   });
 };
 
 const disconnectFromPeer = async (peerId: string) => {
-  await dispatch(webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId }));
+  await dispatch(
+    webrtcApi.endpoints.disconnectFromPeer.initiate(
+      { peerId },
+      { track: false },
+    ),
+  );
 };
 
 // Remove everything stored for a room's messages. First the files an earlier
@@ -851,10 +885,13 @@ const deleteStoredRoomData = async (
 // again tries the files that were left.
 const disconnectFromRoom = async (roomId: string, deleteMessages = false) => {
   await dispatch(
-    webrtcApi.endpoints.disconnectFromRoom.initiate({
-      roomId,
-      deleteMessages: false,
-    }),
+    webrtcApi.endpoints.disconnectFromRoom.initiate(
+      {
+        roomId,
+        deleteMessages: false,
+      },
+      { track: false },
+    ),
   );
   if (!deleteMessages) return;
   try {
@@ -879,10 +916,13 @@ const disconnectFromAllRooms = async (
   exceptionRoomIds: string[] = [],
 ) => {
   await dispatch(
-    webrtcApi.endpoints.disconnectFromAllRooms.initiate({
-      deleteMessages: false,
-      exceptionRoomIds,
-    }),
+    webrtcApi.endpoints.disconnectFromAllRooms.initiate(
+      {
+        deleteMessages: false,
+        exceptionRoomIds,
+      },
+      { track: false },
+    ),
   );
   if (!deleteMessages) return;
   const exceptions = new Set(exceptionRoomIds);
@@ -935,41 +975,38 @@ const onlyAllowConnectionsFromAddressBook = async (
     return;
   }
   roomUrl = canonicalRoomUrl;
-  const { rooms } = store.getState();
-  const roomIndex = rooms.findIndex((r) => r.url === roomUrl);
-  if (roomIndex === -1 || rooms[roomIndex].signalingActive === false) return;
-
-  if (
-    roomIndex > -1 &&
-    !rooms[roomIndex].onlyConnectWithKnownAddresses &&
-    onlyAllow &&
-    rooms[roomIndex].peers.length > 0
-  ) {
-    const peersLen = rooms[roomIndex].peers.length;
-    for (let i = 0; i < peersLen; i++) {
-      const address = await getDBAddressBookEntry(
-        rooms[roomIndex].peers[i].peerPublicKey,
-      );
-
-      if (!address) {
-        await dispatch(
-          webrtcApi.endpoints.disconnectFromPeer.initiate({
-            peerId: rooms[roomIndex].peers[i].peerId,
-            roomId: rooms[roomIndex].id,
-            alsoDeleteData: false,
-          }),
-        );
-      }
-    }
-  }
-
+  const room = store.getState().rooms.find((entry) => entry.url === roomUrl);
+  if (!room || room.signalingActive === false) return;
   dispatch(
     setOnlyConnectWithKnownPeers({
-      roomId: rooms[roomIndex].id,
+      roomId: room.id,
       roomUrl,
       onlyConnectWithKnownPeers: onlyAllow,
     }),
   );
+  await setDBRoomKnownOnly(roomUrl, onlyAllow);
+  if (!onlyAllow) return;
+  for (const peer of room.peers) {
+    const address = await getDBAddressBookEntry(peer.peerPublicKey);
+    const current = store
+      .getState()
+      .rooms.find((entry) => entry.url === roomUrl);
+    if (!current?.onlyConnectWithKnownAddresses || current.id !== room.id)
+      return;
+    if (!address) {
+      await dispatch(
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          {
+            peerId: peer.peerId,
+            roomId: room.id,
+            expectedPeerPublicKey: peer.peerPublicKey,
+            alsoDeleteData: false,
+          },
+          { track: false },
+        ),
+      );
+    }
+  }
 };
 
 // A remembered routing ID can now belong to a different key. Only disconnect
@@ -981,12 +1018,15 @@ const disconnectIdentity = async (
   for (const connection of snapshotPeerConnections()) {
     if (connection.withPeerPublicKey !== peerPublicKey) continue;
     await dispatch(
-      webrtcApi.endpoints.disconnectFromPeer.initiate({
-        roomId: connection.roomId,
-        peerId: connection.withPeerId,
-        expectedPeerPublicKey: peerPublicKey,
-        alsoDeleteData: false,
-      }),
+      webrtcApi.endpoints.disconnectFromPeer.initiate(
+        {
+          roomId: connection.roomId,
+          peerId: connection.withPeerId,
+          expectedPeerPublicKey: peerPublicKey,
+          alsoDeleteData: false,
+        },
+        { track: false },
+      ),
     );
   }
   if (alsoDeleteData) {
@@ -1077,16 +1117,19 @@ const sendMessage = (
     throw new Error("Invalid transfer ID");
   const transfer = beginTransfer(roomId, transferId);
   const request = dispatch(
-    webrtcApi.endpoints.sendMessage.initiate({
-      transferId,
-      data,
-      label: toChannel,
-      roomId,
-      minChunks,
-      chunkSize,
-      percentageFilledChunk,
-      metadataSchemaVersion,
-    }),
+    webrtcApi.endpoints.sendMessage.initiate(
+      {
+        transferId,
+        data,
+        label: toChannel,
+        roomId,
+        minChunks,
+        chunkSize,
+        percentageFilledChunk,
+        metadataSchemaVersion,
+      },
+      { track: false },
+    ),
   );
   const done = request.unwrap().finally(() => transfer.finish());
 
@@ -1152,11 +1195,14 @@ const resumePendingMessages = (
       if (!hasRecipient) continue;
       try {
         const result = await dispatch(
-          webrtcApi.endpoints.sendMessage.initiate({
-            transferId: message.transferId,
-            roomId,
-            label: message.channelLabel,
-          }),
+          webrtcApi.endpoints.sendMessage.initiate(
+            {
+              transferId: message.transferId,
+              roomId,
+              label: message.channelLabel,
+            },
+            { track: false },
+          ),
         ).unwrap();
         if (result) results.push(result);
       } catch (error) {
@@ -1623,11 +1669,14 @@ const removeStoredMessage = async (
   try {
     await answeringForRemoval(merkleRootHex, async () => {
       await store.dispatch(
-        webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-          roomId,
-          label,
-          alsoDeleteData: true,
-        }),
+        webrtcApi.endpoints.disconnectFromChannelLabel.initiate(
+          {
+            roomId,
+            label,
+            alsoDeleteData: true,
+          },
+          { track: false },
+        ),
       );
       await deleteReceiveTransfer(merkleRootHex);
       await deleteDBNewChunk({ merkleRootHex });
@@ -1723,14 +1772,39 @@ const deleteMsg = async (
  */
 const stopSignalingAndDeleteIdentity = async (
   finishWhilePurged: () => Promise<void> = async () => undefined,
-): Promise<void> => {
+) => {
+  // The global room-operation lease is already held. Keep the authenticated
+  // ingress alive until the matching roomLeft frames have arrived.
+  const { rooms, signalingServer, keyPair } = store.getState();
+  const serverUrl = signalingServer.serverUrl;
+  const publicKey = keyPair.publicKey;
+  const membershipResult = await leaveMembershipsForPurge(
+    rooms,
+    serverUrl,
+    publicKey,
+    getAllDBUniqueRooms,
+    (url, timeoutMs) => {
+      const current = store.getState();
+      if (
+        !current.signalingServer.isVerified ||
+        current.signalingServer.serverUrl !== serverUrl ||
+        current.keyPair.publicKey !== publicKey
+      )
+        return Promise.reject(
+          new Error("No authenticated socket for this membership"),
+        );
+      return requestCurrentSocketRoomLeave(store, url, { timeoutMs });
+    },
+  );
   const releaseIdentityBootstrap =
     await signalingAttemptLifecycle.cancelAndAcquireBootstrap();
   try {
     await runIdentityPurgeSettlement({
       disconnectSignaling: async () => {
         await dispatch(
-          signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+          signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined, {
+            track: false,
+          }),
         ).unwrap();
       },
       clearRoomPins: () => clearRoomPins(),
@@ -1750,6 +1824,10 @@ const stopSignalingAndDeleteIdentity = async (
       // it can be exported as a recovery phrase.
       deleteIdentityDerivation: () => deleteIdentityDerivation(),
     });
+    return membershipResult;
+  } catch (error) {
+    if (error instanceof Error) Object.assign(error, { membershipResult });
+    throw error;
   } finally {
     // No await between the final cancellation/state reset and releasing the
     // purge lease: every attempt invoked during deletion remains rejected.
@@ -1772,18 +1850,25 @@ const disconnectEveryRoomTransport = async (message: string): Promise<void> => {
     rooms.map(
       (room) => async () =>
         await dispatch(
-          webrtcApi.endpoints.disconnectFromRoom.initiate({
-            roomId: room.id,
-          }),
+          webrtcApi.endpoints.disconnectFromRoom.initiate(
+            {
+              roomId: room.id,
+            },
+            { track: false },
+          ),
         ).unwrap(),
     ),
   );
 };
 
+/** Delete the local identity after a single three-second leave window.
+ * The result identifies unacknowledged rooms and whether the saved-room
+ * inventory could be read. Stored room data stays on the device.
+ */
 const purgeIdentity = async () => {
-  await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+  return signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
     abortAllTransfers();
-    await stopSignalingAndDeleteIdentity(
+    return stopSignalingAndDeleteIdentity(
       async () =>
         await disconnectEveryRoomTransport(
           "One or more WebRTC rooms could not be disconnected during identity purge",
@@ -1830,7 +1915,9 @@ const identityRestoreEffects: IdentityRestoreEffects = {
 
   disconnectSignaling: async () => {
     await dispatch(
-      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined),
+      signalingServerApi.endpoints.disconnectWebSocket.initiate(undefined, {
+        track: false,
+      }),
     ).unwrap();
   },
 
@@ -2007,9 +2094,12 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
         try {
           await getRoomIceConfigurationMutex(roomUrl).runExclusive(async () => {
             await dispatch(
-              webrtcApi.endpoints.disconnectFromRoom.initiate({
-                roomId: removedRoom.id,
-              }),
+              webrtcApi.endpoints.disconnectFromRoom.initiate(
+                {
+                  roomId: removedRoom.id,
+                },
+                { track: false },
+              ),
             ).unwrap();
           });
         } finally {
@@ -2030,6 +2120,7 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
   });
 };
 
+// Returns the same membership receipt as purgeIdentity.
 // Every step runs even when an earlier one fails. A received file the wipe
 // could not remove makes this reject with one StorageFailedError (`cause`:
 // what the purge's steps threw; `failures`: each file and the browser's error
@@ -2038,17 +2129,20 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
 // and calling purge again tries it at once.
 const purge = async () => {
   try {
-    await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
+    return await signalingRoomOperationLifecycle.runGlobalTerminal(async () => {
       abortAllTransfers();
-      await stopSignalingAndDeleteIdentity(async () => {
+      return stopSignalingAndDeleteIdentity(async () => {
         await runTerminalSettlement(
           "Full purge did not fully settle local data",
           [
             async () => {
               await dispatch(
-                webrtcApi.endpoints.disconnect.initiate({
-                  alsoDeleteDB: false,
-                }),
+                webrtcApi.endpoints.disconnect.initiate(
+                  {
+                    alsoDeleteDB: false,
+                  },
+                  { track: false },
+                ),
               ).unwrap();
             },
             // Awaited here, not inside the disconnect query, so its typed

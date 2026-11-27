@@ -117,10 +117,13 @@ const webrtcDisconnectFromPeerChannelLabelQuery: BaseQueryFn<
 
     if (peerIndex > -1) {
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          peerId: peerConnections[peerIndex].withPeerId,
-          roomId,
-        }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          {
+            peerId: peerConnections[peerIndex].withPeerId,
+            roomId,
+          },
+          { track: false },
+        ),
       );
     }
   }

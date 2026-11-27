@@ -335,6 +335,12 @@ and is checksum-protected — it encodes the same 256 bits, it is not a
 lower-entropy password. Signaling v5 sends the SHA-512 digest of the canonical capability
 as a stable room locator. The server sees which identities join each locator.
 
+To restrict a room to TURN relays, pass `{ relayOnly: true }` as the fourth
+argument to `connect`. The SDK applies the relay ICE policy and forwards only
+relay candidates. The known-contacts preference is saved with the room in
+IndexedDB. On the next room load, existing capability-bearing preference keys
+are migrated out of localStorage.
+
 ## PIN rooms
 
 A capability alone authenticates whoever _received the link_. If the link leaks

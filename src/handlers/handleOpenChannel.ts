@@ -454,10 +454,13 @@ export const handleOpenChannel = async (
       // invalidates every message channel on this room/peer edge; tear the
       // entire edge down so reconnect creates a fresh gate + handshake.
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          roomId,
-          peerId: epc.withPeerId,
-        }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          {
+            roomId,
+            peerId: epc.withPeerId,
+          },
+          { track: false },
+        ),
       );
       // A main that closed on its own is a transport failure (a deliberate
       // disconnect nulls this handler before closing, and a replaced
@@ -558,13 +561,16 @@ export const handleOpenChannel = async (
         releaseProtocolResources();
       }
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-          roomId,
-          peerId: epc.withPeerId,
-          label: extChannel.label,
-          channel: extChannel,
-          alsoDeleteData: deleteIncompleteReceive,
-        }),
+        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate(
+          {
+            roomId,
+            peerId: epc.withPeerId,
+            label: extChannel.label,
+            channel: extChannel,
+            alsoDeleteData: deleteIncompleteReceive,
+          },
+          { track: false },
+        ),
       );
     }
   };
@@ -579,10 +585,13 @@ export const handleOpenChannel = async (
       )
         return;
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          roomId,
-          peerId: epc.withPeerId,
-        }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          {
+            roomId,
+            peerId: epc.withPeerId,
+          },
+          { track: false },
+        ),
       );
     } else {
       if (!dataChannels.includes(extChannel)) {
@@ -591,12 +600,15 @@ export const handleOpenChannel = async (
         return;
       }
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate({
-          roomId,
-          peerId: epc.withPeerId,
-          label: extChannel.label,
-          channel: extChannel,
-        }),
+        webrtcApi.endpoints.disconnectFromPeerChannelLabel.initiate(
+          {
+            roomId,
+            peerId: epc.withPeerId,
+            label: extChannel.label,
+            channel: extChannel,
+          },
+          { track: false },
+        ),
       );
     }
 
@@ -977,10 +989,13 @@ export const handleOpenChannel = async (
               // need not deliver that event after pc.close() anyway.
               void Promise.resolve(
                 api.dispatch(
-                  webrtcApi.endpoints.disconnectFromPeer.initiate({
-                    roomId,
-                    peerId: epc.withPeerId,
-                  }),
+                  webrtcApi.endpoints.disconnectFromPeer.initiate(
+                    {
+                      roomId,
+                      peerId: epc.withPeerId,
+                    },
+                    { track: false },
+                  ),
                 ),
               ).then(() => {
                 requestPeersAfterEdgeTeardown(api, roomId);
@@ -1170,10 +1185,13 @@ export const handleOpenChannel = async (
                 ))
             )
               await api.dispatch(
-                webrtcApi.endpoints.disconnectFromPeer.initiate({
-                  roomId,
-                  peerId: epc.withPeerId,
-                }),
+                webrtcApi.endpoints.disconnectFromPeer.initiate(
+                  {
+                    roomId,
+                    peerId: epc.withPeerId,
+                  },
+                  { track: false },
+                ),
               );
           }
           // pc.close() fires no connectionstatechange, so no transport-level

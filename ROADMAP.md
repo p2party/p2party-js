@@ -44,10 +44,9 @@ rules remain separate design work. [Testnet guide](https://github.com/p2party/p2
   (`handleWebSocketMessage.ts` copies `message.peers[i].publicKey` into
   `peerPublicKey`, and the handshake reads it back as
   `epc.withPeerPublicKey`). The SDK has no automatic trust-on-first-use store.
-  The one durable pin is the opt-in address book —
-  `addPeerToAddressBook` plus `onlyAllowConnectionsFromAddressBook`, which the
-  application must switch on per room — and it filters who a room stays
-  connected to rather than being checked inside the handshake;
+  Rooms can opt into the address book with `onlyAllowConnectionsFromAddressBook`.
+  After the peer proves its Ed25519 key, the handshake checks that key against
+  the room's admission rules;
 - sparse post-quantum healing — the OFFER/ADVANCE/ACK epoch exchange, with
   persist-before-dispatch and application traffic blocked mid-exchange;
 - room-wide scheduled timing cover — policy-pinned cadence, lanes, and frames
@@ -149,9 +148,8 @@ shipped design does expose to the signaling operator is stated plainly in the
 [security boundary](docs/protocol-v4-security.md) rather than listed here as
 though it were a defect.
 
-**Server-blind rendezvous.** The largest remaining metadata leak: today's
-signaling operator sees the normalized room capability, membership, and
-timing, so the `opaque` and `blind` rendezvous modes exist in the policy codec
+**Server-blind rendezvous.** The signaling operator sees a stable SHA-512
+room locator, membership and timing. In the shipped client, the `opaque` and `blind` rendezvous modes exist in the policy codec
 but are rejected by `connect()`. Making them real means answering DP5's
 private-presence design, _Private Signaling_ (USENIX Security 2022), and Tor's
 onion rendezvous protocol, plus deciding whether Oblivious HTTP (RFC 9458) and
@@ -183,8 +181,7 @@ SDP with DTLS verified on both sides, the existing protocol-v4 session runs over
 it, and messages round-trip byte-exact — including with one store killed, one
 store lying, and one browser able to reach only one of the two. It changes
 nothing above: the prototype is not exported either, its stores refuse to start
-without two environment flags, its bytes say `prototype-v0` rather than any
-release version, its admission and allocation are open, and two store processes
+without two environment flags, its route family is `prototype-v1`, its admission and allocation are open, and two store processes
 on one laptop are one fault domain. It demonstrates a shape rather than
 establishing a property, and
 [`docs/blind-rendezvous-two-store-prototype.md`](docs/blind-rendezvous-two-store-prototype.md)

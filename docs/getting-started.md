@@ -628,3 +628,11 @@ key (64 lowercase hexadecimal characters) to `getPeerAddressBookEntry`,
 An ID alone raises `TypeError`. Stored entries keep their key when a signaling
 server reassigns IDs. The SDK checks that key again after the peer authenticates
 and before its encrypted connection opens.
+
+### Contacts-only rooms and relay-only connections
+
+Call `await p2party.onlyAllowConnectionsFromAddressBook(roomUrl, true)` to require a saved contact. The SDK saves the preference in the room’s IndexedDB row and migrates earlier localStorage preference keys when it loads saved rooms. A browser profile with access to that database can still read its saved room invitations.
+
+Pass `{ relayOnly: true }` as the fourth argument to `connect(roomUrl, signalingUrl, rtcConfig, options)` to use TURN for this room. This requires a reachable relay. It suppresses local host and server-reflexive ICE candidates sent to peers. The relay and signaling service can still see their respective connections.
+
+Protocol 5 signs a fresh challenge bound to the signaling host. An old challenge ID or signature cached by an earlier browser session cannot satisfy a new socket’s challenge. The identity signing key and invitation remain sensitive.

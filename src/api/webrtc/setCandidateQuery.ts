@@ -99,10 +99,13 @@ const webrtcSetIceCandidateQuery: BaseQueryFn<
               // before restartIce().
               epc.iceCandidates.length = 0;
               await api.dispatch(
-                webrtcApi.endpoints.disconnectFromPeer.initiate({
-                  peerId: epc.withPeerId,
-                  roomId: epc.roomId,
-                }),
+                webrtcApi.endpoints.disconnectFromPeer.initiate(
+                  {
+                    peerId: epc.withPeerId,
+                    roomId: epc.roomId,
+                  },
+                  { track: false },
+                ),
               );
             });
           }

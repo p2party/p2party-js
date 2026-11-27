@@ -1,3 +1,4 @@
+import type { RoomMembershipAuthority } from "./types";
 import { executeOutbox, getSendDB, storeOutboxChunk } from "./outboxStore";
 import type {
   OutboxLease,
@@ -234,18 +235,45 @@ async function fnRecordAuthenticatedPeer(
   }
 }
 
-async function fnGetAllDBUniqueRooms(): Promise<UniqueRoom[]> {
+async function fnGetAllDBUniqueRooms(
+  legacyPreferences?: Record<string, boolean>,
+): Promise<UniqueRoom[]> {
   const db = await getDB();
-
   try {
-    const rooms = await db.getAll("uniqueRoom");
-    db.close();
-
+    if (!legacyPreferences) return await db.getAll("uniqueRoom");
+    const tx = db.transaction("uniqueRoom", "readwrite");
+    const rooms = await tx.store.getAll();
+    for (const room of rooms) {
+      const legacy = legacyPreferences[room.roomUrl];
+      if (
+        room.onlyConnectWithKnownPeers === undefined &&
+        typeof legacy === "boolean"
+      ) {
+        room.onlyConnectWithKnownPeers = legacy;
+        await tx.store.put(room);
+      }
+    }
+    await tx.done;
     return rooms;
-  } catch {
+  } finally {
     db.close();
+  }
+}
 
-    return [];
+async function fnSetDBRoomKnownOnly(
+  roomUrl: string,
+  knownOnly: boolean,
+): Promise<void> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction("uniqueRoom", "readwrite");
+    const room = await tx.store.index("roomUrl").get(roomUrl);
+    // A concurrent room purge must win. Only admission may create a row.
+    if (room)
+      await tx.store.put({ ...room, onlyConnectWithKnownPeers: knownOnly });
+    await tx.done;
+  } finally {
+    db.close();
   }
 }
 
@@ -253,6 +281,8 @@ async function fnSetDBUniqueRoom(
   roomUrl: string,
   roomId: string,
   roomPolicy: ArrayBuffer,
+  initialKnownOnly?: boolean,
+  authority?: RoomMembershipAuthority,
 ): Promise<void> {
   if (roomPolicy.byteLength !== 32)
     throw new Error("Room policy must be the canonical 32-byte descriptor");
@@ -274,6 +304,8 @@ async function fnSetDBUniqueRoom(
         roomId,
         roomUrl,
         roomPolicy,
+        onlyConnectWithKnownPeers: initialKnownOnly ?? false,
+        ...authority,
         messageCount: 0,
         lastMessageMerkleRoot: "",
         createdAt: d,
@@ -285,6 +317,10 @@ async function fnSetDBUniqueRoom(
         roomId,
         roomUrl,
         roomPolicy,
+        ...(existing.roomUrl === roomUrl && existing.roomId === roomId
+          ? {}
+          : { signalingServerUrl: undefined, membershipPublicKey: undefined }),
+        ...authority,
         updatedAt: Date.now(),
       });
     }
@@ -4745,6 +4781,9 @@ onmessage = async (e: MessageEvent) => {
         break;
       case "getAllDBUniqueRooms":
         result = await fnGetAllDBUniqueRooms(...message.args);
+        break;
+      case "setDBRoomKnownOnly":
+        await fnSetDBRoomKnownOnly(...message.args);
         break;
       case "setDBUniqueRoom":
         await fnSetDBUniqueRoom(...message.args);

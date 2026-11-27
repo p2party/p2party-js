@@ -228,6 +228,7 @@ export const signalingReconnect = createSignalingReconnectController({
     void host.dispatch(
       signalingServerApi.endpoints.connectWebSocket.initiate(
         signalingServer.serverUrl,
+        { track: false },
       ),
     );
   },
@@ -984,9 +985,12 @@ export const sendRoomRequestMessage = async (
 ): Promise<void> => {
   await api
     .dispatch(
-      signalingServerApi.endpoints.sendMessage.initiate({
-        content: request,
-      }),
+      signalingServerApi.endpoints.sendMessage.initiate(
+        {
+          content: request,
+        },
+        { track: false },
+      ),
     )
     .unwrap();
 };

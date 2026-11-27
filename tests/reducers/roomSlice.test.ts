@@ -20,6 +20,7 @@ const {
   deleteRoom,
   defaultRTCConfig,
   setMessage,
+  hydrateRoomHistory,
   resetMessageReceiveProgress,
   setIceServers,
   setChannel,
@@ -34,6 +35,36 @@ const {
 } = await import("../../src/reducers/roomSlice");
 const { MAX_SIGNALING_ROOM_PEERS } =
   await import("../../src/utils/signalingBounds");
+
+test("history hydration is idempotent across a reload and retains repeated logical sends", () => {
+  const roomId = "00000000-0000-4000-8000-000000000017";
+  const initial = roomReducer(
+    [],
+    setRoom({ url: "ac".repeat(32), id: roomId }),
+  );
+  const messages = Array.from({ length: 2000 }, (_, i) => ({
+    transferId: i.toString(16).padStart(64, "0"),
+    merkleRootHex: "ab".repeat(64),
+    sha512Hex: "cd".repeat(64),
+    fromPeerId: roomId,
+    filename: "photo",
+    messageType: 1,
+    savedSize: 4,
+    totalSize: 10,
+    chunksCreated: 0,
+    totalChunks: 0,
+    channelLabel: "images",
+    timestamp: 1000,
+  }));
+  const action = hydrateRoomHistory({ roomId, messages });
+  const once = roomReducer(initial, action);
+  const twice = roomReducer(once, action);
+  expect(twice[0].messages).toHaveLength(2000);
+  expect(twice[0].messages.at(-1)?.savedSize).toBe(4);
+  expect(twice[0].messages[0].transferId).not.toBe(
+    twice[0].messages[1].transferId,
+  );
+});
 
 describe("room policy reducer boundary", () => {
   test("member discovery survives transport teardown but replacement snapshots and leave remove it", () => {

@@ -2464,3 +2464,124 @@ describe("the start pass's gate", () => {
     expect(clock.now()).toBeLessThan(clockBase + RECEIVE_RECONCILE_GATE_MS);
   });
 });
+
+describe("membership receipts from the public purge methods", () => {
+  for (const method of ["purgeIdentity", "purge"] as const) {
+    test(
+      method + " retains the outgoing key until all room leaves settle",
+      async () => {
+        const signaling = await import("../../src/api/signalingServerApi");
+        const { signalingServerActions } =
+          await import("../../src/reducers/signalingServerSlice");
+        const key = "23".repeat(32);
+        addOtherRoom();
+        await roomRecorded(ROOM);
+        await roomRecorded(OTHER_ROOM);
+        store.dispatch(
+          setKeyPair({ publicKey: key, secretKey: "44".repeat(64) }),
+        );
+        store.dispatch(signalingServerActions.connectionVerified());
+        const seen: string[] = [];
+        let release: () => void = () => {};
+        const ack = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const send = spyOn(
+          signaling,
+          "requestCurrentSocketRoomLeave",
+        ).mockImplementation(async (_api, url) => {
+          seen.push(url);
+          expect(store.getState().keyPair.publicKey).toBe(key);
+          await ack;
+          if (url === OTHER_ROOM_URL) throw new Error("fixture socket closed");
+        });
+        try {
+          const result = p2party[method]();
+          await untilTurns(() => seen.length === 2);
+          expect(store.getState().keyPair.publicKey).toBe(key);
+          release();
+          expect(await result).toEqual({
+            unacknowledgedRoomIds: [OTHER_ROOM],
+            roomInventoryComplete: true,
+          });
+          expect(store.getState().keyPair.publicKey).toBe("");
+        } finally {
+          release();
+          send.mockRestore();
+          store.dispatch(signalingServerActions.disconnect());
+        }
+      },
+    );
+  }
+});
+
+test("reading saved rooms migrates a legacy strict preference and removes only its old capability key", async () => {
+  const connection = await getDB();
+  try {
+    const room = (await connection.getFromIndex(
+      "uniqueRoom",
+      "roomUrl",
+      ROOM_URL,
+    )) ?? {
+      roomId: ROOM,
+      roomUrl: ROOM_URL,
+      roomPolicy: encodeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1).slice()
+        .buffer as ArrayBuffer,
+      messageCount: 0,
+      lastMessageMerkleRoot: "",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    delete room.onlyConnectWithKnownPeers;
+    await connection.put("uniqueRoom", room);
+  } finally {
+    connection.close();
+  }
+  const key = ROOM_URL + "-onlyConnectWithKnownPeers";
+  const data = new Map([
+    [key, "true"],
+    ["ui-theme", "dark"],
+  ]);
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      get length() {
+        return data.size;
+      },
+      key(i: number) {
+        return Array.from(data.keys())[i] ?? null;
+      },
+      getItem(k: string) {
+        return data.get(k) ?? null;
+      },
+      removeItem(k: string) {
+        data.delete(k);
+      },
+    },
+  });
+  try {
+    expect(
+      (await db.getAllDBUniqueRooms()).find((r) => r.roomUrl === ROOM_URL)
+        ?.onlyConnectWithKnownPeers,
+    ).toBe(true);
+    expect([...data]).toEqual([["ui-theme", "dark"]]);
+    expect(
+      (await db.getAllDBUniqueRooms()).find((r) => r.roomUrl === ROOM_URL)
+        ?.onlyConnectWithKnownPeers,
+    ).toBe(true);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
+test("20,000 settled SDK transport mutations keep the RTK cache bounded", async () => {
+  const { default: webrtc } = await import("../../src/api/webrtc");
+  const count = () =>
+    Object.keys(store.getState()[webrtc.reducerPath].mutations).length;
+  const before = count();
+  for (let i = 0; i < 20_000; ++i)
+    await p2party.disconnectFromPeer("00000000-0000-4000-8000-000000000001");
+  expect(count()).toBeLessThanOrEqual(before + 16);
+}, 30_000);

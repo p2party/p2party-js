@@ -595,10 +595,6 @@ const roomSlice = createSlice({
           if (onlyConnectWithKnownPeers != undefined) {
             state[roomIndex].onlyConnectWithKnownAddresses =
               onlyConnectWithKnownPeers;
-          } else {
-            state[roomIndex].onlyConnectWithKnownAddresses =
-              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-              "true";
           }
         } else {
           const callerRtcConfig = freshCallerRTCConfig(rtcConfig);
@@ -608,10 +604,7 @@ const roomSlice = createSlice({
             connectingToPeers: false,
             connectedToPeers: false,
             canBeConnectionRelay: canBeConnectionRelay ?? true,
-            onlyConnectWithKnownAddresses:
-              onlyConnectWithKnownPeers ??
-              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-                "true",
+            onlyConnectWithKnownAddresses: onlyConnectWithKnownPeers ?? false,
             callerRtcConfig,
             signalingTurnCredentials: null,
             rtcConfig: deriveEffectiveRTCConfig(callerRtcConfig, null),
@@ -644,10 +637,6 @@ const roomSlice = createSlice({
           if (onlyConnectWithKnownPeers != undefined) {
             state[roomIndex].onlyConnectWithKnownAddresses =
               onlyConnectWithKnownPeers;
-          } else {
-            state[roomIndex].onlyConnectWithKnownAddresses =
-              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-              "true";
           }
         } else {
           const callerRtcConfig = freshCallerRTCConfig(rtcConfig);
@@ -657,10 +646,7 @@ const roomSlice = createSlice({
             connectingToPeers: false,
             connectedToPeers: false,
             canBeConnectionRelay: canBeConnectionRelay ?? true,
-            onlyConnectWithKnownAddresses:
-              onlyConnectWithKnownPeers ??
-              localStorage.getItem(url + "-onlyConnectWithKnownPeers") ===
-                "true",
+            onlyConnectWithKnownAddresses: onlyConnectWithKnownPeers ?? false,
             callerRtcConfig,
             signalingTurnCredentials: null,
             rtcConfig: deriveEffectiveRTCConfig(callerRtcConfig, null),
@@ -1151,6 +1137,47 @@ const roomSlice = createSlice({
       }
     },
 
+    hydrateRoomHistory: (
+      state,
+      { payload }: PayloadAction<{ roomId: string; messages: Message[] }>,
+    ) => {
+      const room = state.find((entry) => entry.id === payload.roomId);
+      if (!room || !payload.messages.length) return;
+      // A transfer ID distinguishes repeated sends of the same bytes. Older
+      // receive rows use the root and timestamp, as do their on-screen copies.
+      const key = (msg: Message) =>
+        msg.transferId !== undefined
+          ? "transfer/" + msg.transferId
+          : (msg.merkleRootHex || msg.sha512Hex) + "/" + String(msg.timestamp);
+      const indices = new Map(
+        room.messages.map((msg, index) => [key(msg), index]),
+      );
+      for (const saved of payload.messages) {
+        const id = key(saved);
+        const placeholder = saved.sha512Hex + "/" + String(saved.timestamp);
+        const index =
+          indices.get(id) ??
+          (!saved.transferId &&
+            saved.merkleRootHex &&
+            indices.get(placeholder));
+        if (typeof index !== "number") {
+          indices.set(id, room.messages.length);
+          room.messages.push(saved);
+          continue;
+        }
+        const live = room.messages[index];
+        if (!live.merkleRootHex && saved.merkleRootHex) {
+          live.merkleRootHex = saved.merkleRootHex;
+          indices.delete(placeholder);
+          indices.set(id, index);
+        }
+        // These are stored totals. Reopening the room must not count its
+        // bytes again or discard newer live progress and transport telemetry.
+        live.savedSize = Math.max(live.savedSize, saved.savedSize);
+        live.fromPeerPublicKey ??= saved.fromPeerPublicKey;
+      }
+    },
+
     setMessage: (state, action: PayloadAction<SetMessageArgs>) => {
       const {
         roomId,
@@ -1476,6 +1503,7 @@ export const {
   setChannel,
   setIceServers,
   setMessage,
+  hydrateRoomHistory,
   setMessageAllChunks,
   resetMessageReceiveProgress,
   incrementMessageStats,

@@ -162,12 +162,15 @@ const handleWebSocketMessage = async (
         const { keyPair } = api.getState() as State;
 
         await api.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "pong",
-              fromPeerId: keyPair.peerId,
+          signalingServerApi.endpoints.sendMessage.initiate(
+            {
+              content: {
+                type: "pong",
+                fromPeerId: keyPair.peerId,
+              },
             },
-          }),
+            { track: false },
+          ),
         );
         onHeartbeat();
 
@@ -294,12 +297,15 @@ const handleWebSocketMessage = async (
                   async (roomId, rtcConfig, failurePolicy) => {
                     await api
                       .dispatch(
-                        webrtcApi.endpoints.applyRoomConfiguration.initiate({
-                          roomId,
-                          rtcConfig,
-                          restartIce: true,
-                          failurePolicy,
-                        }),
+                        webrtcApi.endpoints.applyRoomConfiguration.initiate(
+                          {
+                            roomId,
+                            rtcConfig,
+                            restartIce: true,
+                            failurePolicy,
+                          },
+                          { track: false },
+                        ),
                       )
                       .unwrap();
                   },
@@ -351,6 +357,7 @@ const handleWebSocketMessage = async (
                                   restartIce: true,
                                   failurePolicy: "close",
                                 },
+                                { track: false },
                               ),
                             )
                             .unwrap();
@@ -481,15 +488,18 @@ const handleWebSocketMessage = async (
           }),
         );
         await api.dispatch(
-          signalingServerApi.endpoints.sendMessage.initiate({
-            content: {
-              type: "peerConnection",
-              roomId: message.roomId,
-              fromPeerId: keyPair.peerId,
-              toPeerId: message.peer.id,
-              protocolVersion: SIGNALING_PROTOCOL_VERSION,
+          signalingServerApi.endpoints.sendMessage.initiate(
+            {
+              content: {
+                type: "peerConnection",
+                roomId: message.roomId,
+                fromPeerId: keyPair.peerId,
+                toPeerId: message.peer.id,
+                protocolVersion: SIGNALING_PROTOCOL_VERSION,
+              },
             },
-          }),
+            { track: false },
+          ),
         );
 
         break;
@@ -540,10 +550,13 @@ const handleWebSocketMessage = async (
         // abandoned, so it is not completed against a departed member.
         if (verdict === "remove" && edges.length > 0)
           await api.dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({
-              roomId: report.roomId,
-              peerId: report.peerId,
-            }),
+            webrtcApi.endpoints.disconnectFromPeer.initiate(
+              {
+                roomId: report.roomId,
+                peerId: report.peerId,
+              },
+              { track: false },
+            ),
           );
 
         break;
@@ -698,20 +711,23 @@ const handleWebSocketMessage = async (
               }),
             );
             await api.dispatch(
-              webrtcApi.endpoints.connectWithPeer.initiate({
-                roomId: message.roomId,
-                peerId: message.peers[i].id,
-                peerPublicKey: message.peers[i].publicKey,
-                // Read RAW, not from mergedPeers: that projection drops the
-                // field and skips peer ids it already knows. Advisory only —
-                // the roster is re-sent on join, on re-dial and on reconcile,
-                // and a signaling socket now reconnects on its own, so a
-                // healthy edge routinely sees a changed generation here and
-                // must survive it (C4).
-                peerSocketGeneration: message.peers[i].socketGeneration,
-                peerSocketGenerationSource: "roster",
-                rtcConfig: rooms[roomIndex].rtcConfig,
-              }),
+              webrtcApi.endpoints.connectWithPeer.initiate(
+                {
+                  roomId: message.roomId,
+                  peerId: message.peers[i].id,
+                  peerPublicKey: message.peers[i].publicKey,
+                  // Read RAW, not from mergedPeers: that projection drops the
+                  // field and skips peer ids it already knows. Advisory only —
+                  // the roster is re-sent on join, on re-dial and on reconcile,
+                  // and a signaling socket now reconnects on its own, so a
+                  // healthy edge routinely sees a changed generation here and
+                  // must survive it (C4).
+                  peerSocketGeneration: message.peers[i].socketGeneration,
+                  peerSocketGenerationSource: "roster",
+                  rtcConfig: rooms[roomIndex].rtcConfig,
+                },
+                { track: false },
+              ),
             );
           }
         }
@@ -755,13 +771,16 @@ const handleWebSocketMessage = async (
 
           if (!isCurrentSocket()) break;
           await api.dispatch(
-            webrtcApi.endpoints.setDescription.initiate({
-              peerId: message.fromPeerId,
-              peerPublicKey: message.fromPeerPublicKey,
-              roomId: message.roomId,
-              description: message.description,
-              rtcConfig: rooms[roomIndex].rtcConfig,
-            }),
+            webrtcApi.endpoints.setDescription.initiate(
+              {
+                peerId: message.fromPeerId,
+                peerPublicKey: message.fromPeerPublicKey,
+                roomId: message.roomId,
+                description: message.description,
+                rtcConfig: rooms[roomIndex].rtcConfig,
+              },
+              { track: false },
+            ),
           );
         }
 
@@ -797,11 +816,14 @@ const handleWebSocketMessage = async (
           break;
         if (!isCurrentSocket()) break;
         await api.dispatch(
-          webrtcApi.endpoints.setCandidate.initiate({
-            peerId: message.fromPeerId,
-            roomId: message.roomId,
-            candidate: message.candidate,
-          }),
+          webrtcApi.endpoints.setCandidate.initiate(
+            {
+              peerId: message.fromPeerId,
+              roomId: message.roomId,
+              candidate: message.candidate,
+            },
+            { track: false },
+          ),
         );
 
         break;
@@ -869,7 +891,9 @@ const handleWebSocketMessage = async (
                 if (!isCurrentSocket()) return;
                 await api
                   .dispatch(
-                    webrtcApi.endpoints.connectWithPeer.initiate(params),
+                    webrtcApi.endpoints.connectWithPeer.initiate(params, {
+                      track: false,
+                    }),
                   )
                   .unwrap();
               },

@@ -1,3 +1,4 @@
+import type { RoomMembershipAuthority } from "./types";
 import { isCanonicalEd25519Identity } from "../utils/identityRole";
 import type {
   FileRemovalNotice,
@@ -362,13 +363,42 @@ export const setDBPeerInBlacklist = (peerId: string, peerPublicKey: string) =>
 export const deleteDBPeerFromBlacklist = (peerPublicKey: string) =>
   callWorker("deleteDBPeerFromBlacklist", checkedPeerKey(peerPublicKey));
 
-export const getAllDBUniqueRooms = () => callWorker("getAllDBUniqueRooms");
+export const getAllDBUniqueRooms = async () => {
+  const legacy: Record<string, boolean> = {};
+  const suffix = "-onlyConnectWithKnownPeers";
+  const storage = globalThis.localStorage;
+  for (let i = 0; storage && i < storage.length; i++) {
+    const key = storage.key(i);
+    if (!key?.endsWith(suffix)) continue;
+    const roomUrl = key.slice(0, -suffix.length);
+    if (/^[0-9a-f]{64}$/.test(roomUrl))
+      legacy[roomUrl] = storage.getItem(key) === "true";
+  }
+  const keys = Object.keys(legacy);
+  if (!keys.length) return callWorker("getAllDBUniqueRooms");
+  const rooms = await callWorker("getAllDBUniqueRooms", legacy);
+  for (const roomUrl of keys) storage.removeItem(roomUrl + suffix);
+  return rooms;
+};
+
+export const setDBRoomKnownOnly = (roomUrl: string, knownOnly: boolean) =>
+  callWorker("setDBRoomKnownOnly", roomUrl, knownOnly);
 
 export const setDBUniqueRoom = (
   roomUrl: string,
   roomId: string,
   roomPolicy: ArrayBuffer,
-) => callWorker("setDBUniqueRoom", roomUrl, roomId, roomPolicy);
+  initialKnownOnly?: boolean,
+  authority?: RoomMembershipAuthority,
+) =>
+  callWorker(
+    "setDBUniqueRoom",
+    roomUrl,
+    roomId,
+    roomPolicy,
+    initialKnownOnly,
+    authority,
+  );
 
 export const getDBMessageData = (merkleRootHex?: string, hashHex?: string) =>
   callWorker("getDBMessageData", merkleRootHex, hashHex);

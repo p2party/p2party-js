@@ -126,6 +126,7 @@ const HIGHER_PUBLIC_KEY = "ff".repeat(32);
 const fakeApi = (
   selfPublicKey: string = LOWER_PUBLIC_KEY,
   handshakeStatusByPeer: Record<string, PeerHandshakeStatus> = {},
+  rtcConfig: RTCConfiguration = { iceServers: [] },
 ): { api: BaseQueryApi; dispatched: unknown[] } => {
   const dispatched: unknown[] = [];
   const state = {
@@ -141,7 +142,7 @@ const fakeApi = (
       {
         id: ROOM_ID,
         url: ROOM_URL,
-        rtcConfig: { iceServers: [] },
+        rtcConfig,
         signalingActive: true,
         handshakeStatusByPeer,
         peers: [],
@@ -235,6 +236,27 @@ const redials = (dispatched: unknown[]): unknown[] =>
   );
 
 describe("handleConnectToPeer edge teardown follow-up", () => {
+  test("relay-only signaling forwards only local relay candidates", async () => {
+    const { api, dispatched } = fakeApi(
+      LOWER_PUBLIC_KEY,
+      {},
+      { iceTransportPolicy: "relay" },
+    );
+    const { epc } = await connect(api);
+    const baseline = thunks(dispatched).length;
+    const emit = (type: RTCIceCandidateType) =>
+      epc.onicecandidate!.call(epc, {
+        candidate: { type, candidate: "candidate:fixture" },
+      } as RTCPeerConnectionIceEvent);
+    await emit("host");
+    await emit("srflx");
+    await emit("prflx");
+    expect(thunks(dispatched)).toHaveLength(baseline);
+    await emit("relay");
+    expect(thunks(dispatched)).toHaveLength(baseline + 1);
+    epc.close();
+  });
+
   test.each(["pin-mismatch", "pin-throttled", "policy"] as const)(
     "%s cannot create another transport until deliberate retry",
     async (reason) => {

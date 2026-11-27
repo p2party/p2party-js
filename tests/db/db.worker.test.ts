@@ -969,6 +969,30 @@ describe("db.worker atomic receive progress", () => {
 });
 
 describe("db.worker room policy persistence", () => {
+  test("moves a legacy known-contacts preference once and preserves later choices", async () => {
+    const roomUrl = "fa".repeat(32);
+    const db = await getDB();
+    await db.put("uniqueRoom", {
+      roomUrl,
+      roomId: "00000000-0000-4000-8000-000000000017",
+      messageCount: 0,
+      lastMessageMerkleRoot: "",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    db.close();
+    const legacy = { [roomUrl]: true };
+    const first = await callWorker("getAllDBUniqueRooms", [legacy]);
+    expect(first.result).toMatchObject([{ onlyConnectWithKnownPeers: true }]);
+    await callWorker("setDBRoomKnownOnly", [roomUrl, false]);
+    const second = await callWorker("getAllDBUniqueRooms", [legacy]);
+    expect(second.result).toMatchObject([{ onlyConnectWithKnownPeers: false }]);
+    await callWorker("setDBRoomKnownOnly", ["11".repeat(32), true]);
+    expect((await callWorker("getAllDBUniqueRooms", [])).result).toHaveLength(
+      1,
+    );
+  });
+
   test("stores and updates the canonical public policy with the room record", async () => {
     const roomUrl = "ef".repeat(32);
     const roomId = "00000000-0000-4000-8000-000000000017";

@@ -468,17 +468,20 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
         const answer = epc.localDescription;
         if (answer) {
           await api.dispatch(
-            signalingServerApi.endpoints.sendMessage.initiate({
-              content: {
-                type: "description",
-                description: answer,
-                fromPeerId: keyPair.peerId,
-                fromPeerPublicKey: keyPair.publicKey,
-                toPeerId: peerId,
-                roomId,
-                protocolVersion: SIGNALING_PROTOCOL_VERSION,
-              } as WebSocketMessageDescriptionSend,
-            }),
+            signalingServerApi.endpoints.sendMessage.initiate(
+              {
+                content: {
+                  type: "description",
+                  description: answer,
+                  fromPeerId: keyPair.peerId,
+                  fromPeerPublicKey: keyPair.publicKey,
+                  toPeerId: peerId,
+                  roomId,
+                  protocolVersion: SIGNALING_PROTOCOL_VERSION,
+                } as WebSocketMessageDescriptionSend,
+              },
+              { track: false },
+            ),
           );
         }
       }

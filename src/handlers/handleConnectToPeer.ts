@@ -115,17 +115,23 @@ export const handleConnectToPeer = async (
     );
     for (const alias of aliases) {
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({
-          roomId,
-          peerId: alias.withPeerId,
-        }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          {
+            roomId,
+            peerId: alias.withPeerId,
+          },
+          { track: false },
+        ),
       );
     }
 
     let existing = findRoomPeerConnection(peerConnections, roomId, peerId);
     if (existing && existing.withPeerPublicKey !== peerPublicKey) {
       await api.dispatch(
-        webrtcApi.endpoints.disconnectFromPeer.initiate({ roomId, peerId }),
+        webrtcApi.endpoints.disconnectFromPeer.initiate(
+          { roomId, peerId },
+          { track: false },
+        ),
       );
       existing = undefined;
     }
@@ -197,6 +203,7 @@ export const handleConnectToPeer = async (
           await api.dispatch(
             signalingServerApi.endpoints.connectWebSocket.initiate(
               state.signalingServer.serverUrl,
+              { track: false },
             ),
           );
         }
@@ -243,11 +250,14 @@ export const handleConnectToPeer = async (
       if (currentSignaling.isConnected && currentSignaling.isVerified) {
         await api
           .dispatch(
-            signalingServerApi.endpoints.connectWithPeer.initiate({
-              roomId,
-              peerId,
-              peerPublicKey,
-            }),
+            signalingServerApi.endpoints.connectWithPeer.initiate(
+              {
+                roomId,
+                peerId,
+                peerPublicKey,
+              },
+              { track: false },
+            ),
           )
           .unwrap();
         assertStillReserved();
@@ -295,7 +305,10 @@ export const handleConnectToPeer = async (
         );
         void api
           .dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
+            webrtcApi.endpoints.disconnectFromPeer.initiate(
+              { peerId, roomId },
+              { track: false },
+            ),
           )
           .then(() => {
             requestPeersAfterEdgeTeardown(api, roomId);
@@ -334,7 +347,10 @@ export const handleConnectToPeer = async (
         );
         void api
           .dispatch(
-            webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
+            webrtcApi.endpoints.disconnectFromPeer.initiate(
+              { peerId, roomId },
+              { track: false },
+            ),
           )
           .then(() => {
             requestPeersAfterEdgeTeardown(api, roomId);
@@ -370,17 +386,20 @@ export const handleConnectToPeer = async (
           const currentKeyPair = (api.getState() as State).keyPair;
           await api
             .dispatch(
-              signalingServerApi.endpoints.sendMessage.initiate({
-                content: {
-                  type: "description",
-                  description: epc.localDescription,
-                  fromPeerId: currentKeyPair.peerId,
-                  fromPeerPublicKey: currentKeyPair.publicKey,
-                  toPeerId: peerId,
-                  roomId,
-                  protocolVersion: SIGNALING_PROTOCOL_VERSION,
-                } as WebSocketMessageDescriptionSend,
-              }),
+              signalingServerApi.endpoints.sendMessage.initiate(
+                {
+                  content: {
+                    type: "description",
+                    description: epc.localDescription,
+                    fromPeerId: currentKeyPair.peerId,
+                    fromPeerPublicKey: currentKeyPair.publicKey,
+                    toPeerId: peerId,
+                    roomId,
+                    protocolVersion: SIGNALING_PROTOCOL_VERSION,
+                  } as WebSocketMessageDescriptionSend,
+                },
+                { track: false },
+              ),
             )
             .unwrap();
 
@@ -397,19 +416,27 @@ export const handleConnectToPeer = async (
 
     epc.onicecandidate = async ({ candidate }) => {
       if (candidate && candidate.candidate !== "") {
+        if (
+          epc.getConfiguration().iceTransportPolicy === "relay" &&
+          candidate.type !== "relay"
+        )
+          return;
         const currentKeyPair = (api.getState() as State).keyPair;
         await api
           .dispatch(
-            signalingServerApi.endpoints.sendMessage.initiate({
-              content: {
-                type: "candidate",
-                candidate,
-                fromPeerId: currentKeyPair.peerId,
-                toPeerId: peerId,
-                roomId,
-                protocolVersion: SIGNALING_PROTOCOL_VERSION,
-              } as WebSocketMessageCandidateSend,
-            }),
+            signalingServerApi.endpoints.sendMessage.initiate(
+              {
+                content: {
+                  type: "candidate",
+                  candidate,
+                  fromPeerId: currentKeyPair.peerId,
+                  toPeerId: peerId,
+                  roomId,
+                  protocolVersion: SIGNALING_PROTOCOL_VERSION,
+                } as WebSocketMessageCandidateSend,
+              },
+              { track: false },
+            ),
           )
           .unwrap()
           .catch((error: unknown) => {
@@ -502,10 +529,13 @@ export const handleConnectToPeer = async (
           // not expired while it was frozen) and will not offer on its own.
           void api
             .dispatch(
-              webrtcApi.endpoints.disconnectFromPeer.initiate({
-                peerId,
-                roomId,
-              }),
+              webrtcApi.endpoints.disconnectFromPeer.initiate(
+                {
+                  peerId,
+                  roomId,
+                },
+                { track: false },
+              ),
             )
             .then(() => {
               if (wasConnected) requestPeersAfterEdgeTeardown(api, roomId);
@@ -526,7 +556,10 @@ export const handleConnectToPeer = async (
         clearUnnegotiatedTransportWatchdog();
 
         await api.dispatch(
-          webrtcApi.endpoints.disconnectFromPeer.initiate({ peerId, roomId }),
+          webrtcApi.endpoints.disconnectFromPeer.initiate(
+            { peerId, roomId },
+            { track: false },
+          ),
         );
 
         console.error(

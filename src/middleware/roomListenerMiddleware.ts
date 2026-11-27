@@ -6,6 +6,7 @@ import { isUUID } from "../utils/formatValidation";
 import {
   setConnectingToPeers,
   setRoom,
+  hydrateRoomHistory,
   applyRoomResponse,
   setMessage,
   deleteMessage,
@@ -70,6 +71,40 @@ import type { State } from "../store";
 import type { WebSocketMessagePeersRequest } from "../utils/interfaces";
 import type { RoomRosterReconciler } from "../utils/roomRosterReconciler";
 import type { SignalingPeerRequestKind } from "../utils/signalingPeerRequestDebouncer";
+
+const loadSavedRoomHistory = async (roomId: string, dispatch: Dispatch) => {
+  const rows = await getDBRoomMessageData(roomId, { verifyHeld: true });
+  if (!rows.length) return;
+  dispatch(
+    hydrateRoomHistory({
+      roomId,
+      messages: rows
+        .filter(
+          (row) =>
+            row.roomId === roomId &&
+            isUUID(row.fromPeerId) &&
+            !!row.channelLabel &&
+            !!row.messageType &&
+            row.totalSize > 0,
+        )
+        .map((row) => ({
+          transferId: row.transferId,
+          merkleRootHex: row.merkleRoot,
+          sha512Hex: row.hash,
+          fromPeerId: row.fromPeerId,
+          fromPeerPublicKey: row.fromPeerPublicKey,
+          filename: row.filename || "txt",
+          messageType: row.messageType,
+          savedSize: Math.max(0, row.savedSize),
+          totalSize: row.totalSize,
+          channelLabel: row.channelLabel,
+          timestamp: row.timestamp,
+          chunksCreated: 0,
+          totalChunks: 0,
+        })),
+    }),
+  );
+};
 
 const PEERS_REQUEST_DEBOUNCE_MS = 2000;
 
@@ -359,19 +394,22 @@ export const createRoomListenerMiddleware = (
                     : undefined;
                   if (targetPeerIds?.length === 0) return;
                   listenerApi.dispatch(
-                    signalingServerApi.endpoints.sendMessage.initiate({
-                      content: {
-                        type: "peers",
-                        fromPeerId: state.keyPair.peerId,
-                        roomId,
-                        rosterRequestId:
-                          signalingPeerRequestDebouncer.beginRosterRequest(
-                            roomId,
-                          ),
-                        ...(targetPeerIds ? { targetPeerIds } : {}),
-                        protocolVersion: SIGNALING_PROTOCOL_VERSION,
-                      } satisfies WebSocketMessagePeersRequest,
-                    }),
+                    signalingServerApi.endpoints.sendMessage.initiate(
+                      {
+                        content: {
+                          type: "peers",
+                          fromPeerId: state.keyPair.peerId,
+                          roomId,
+                          rosterRequestId:
+                            signalingPeerRequestDebouncer.beginRosterRequest(
+                              roomId,
+                            ),
+                          ...(targetPeerIds ? { targetPeerIds } : {}),
+                          protocolVersion: SIGNALING_PROTOCOL_VERSION,
+                        } satisfies WebSocketMessagePeersRequest,
+                      },
+                      { track: false },
+                    ),
                   );
                 },
               );
@@ -392,13 +430,6 @@ export const createRoomListenerMiddleware = (
             onlyConnectWithKnownPeers,
           });
 
-          if (url.length === 64 && onlyConnectWithKnownPeers != undefined) {
-            localStorage.setItem(
-              url + "-onlyConnectWithKnownPeers",
-              String(onlyConnectWithKnownPeers),
-            );
-          }
-
           if (url.length === 64 && isUUID(id)) {
             debugLog("[roomListenerMiddleware] setRoom processed:", {
               url,
@@ -412,31 +443,14 @@ export const createRoomListenerMiddleware = (
             if (roomIndex === -1) return;
             const encodedPolicy = encodeRoomPolicyV1(rooms[roomIndex].policy);
             const persistedPolicy = encodedPolicy.slice().buffer as ArrayBuffer;
-            await setDBUniqueRoom(url, id, persistedPolicy);
+            await setDBUniqueRoom(
+              url,
+              id,
+              persistedPolicy,
+              rooms[roomIndex].onlyConnectWithKnownAddresses,
+            );
 
-            // Loading the room to show it: its held files are verified.
-            const oldMessages = await getDBRoomMessageData(id, {
-              verifyHeld: true,
-            });
-            const oldMessagesLen = oldMessages.length;
-            for (let i = 0; i < oldMessagesLen; i++) {
-              listenerApi.dispatch(
-                setMessage({
-                  roomId: oldMessages[i].roomId,
-                  transferId: oldMessages[i].transferId,
-                  merkleRootHex: oldMessages[i].merkleRoot,
-                  sha512Hex: oldMessages[i].hash,
-                  fromPeerId: oldMessages[i].fromPeerId,
-                  fromPeerPublicKey: oldMessages[i].fromPeerPublicKey,
-                  filename: oldMessages[i].filename,
-                  messageType: oldMessages[i].messageType,
-                  chunkSize: oldMessages[i].savedSize,
-                  totalSize: oldMessages[i].totalSize,
-                  channelLabel: oldMessages[i].channelLabel,
-                  timestamp: oldMessages[i].timestamp,
-                }),
-              );
-            }
+            await loadSavedRoomHistory(id, listenerApi.dispatch);
 
             debugLog(
               "[roomListenerMiddleware] Checking peers request conditions:",
@@ -457,43 +471,35 @@ export const createRoomListenerMiddleware = (
           const { roomUrl, roomId } = action.payload;
           const originalRooms = (listenerApi.getOriginalState() as State).rooms;
           const original = originalRooms.find((room) => room.url === roomUrl);
-          // A credential refresh keeps the same room identity and must not reload
-          // the room's complete message history on every rotation.
-          if (!original || original.id === roomId) return;
-
-          const current = (listenerApi.getState() as State).rooms.find(
+          const state = listenerApi.getState() as State;
+          const current = state.rooms.find(
             (room) => room.url === roomUrl && room.id === roomId,
           );
-          if (!current) return;
+          if (
+            !original ||
+            !current ||
+            current.roomResponseGeneration !==
+              action.payload.requestGeneration ||
+            original.roomResponseGeneration === current.roomResponseGeneration
+          )
+            return;
           const encodedPolicy = encodeRoomPolicyV1(current.policy);
           await setDBUniqueRoom(
             roomUrl,
             roomId,
             encodedPolicy.slice().buffer as ArrayBuffer,
+            current.onlyConnectWithKnownAddresses,
+            state.signalingServer.isVerified && state.keyPair.publicKey
+              ? {
+                  signalingServerUrl: state.signalingServer.serverUrl,
+                  membershipPublicKey: state.keyPair.publicKey,
+                }
+              : undefined,
           );
-
-          // Loading the room to show it: its held files are verified.
-          const oldMessages = await getDBRoomMessageData(roomId, {
-            verifyHeld: true,
-          });
-          for (const message of oldMessages) {
-            listenerApi.dispatch(
-              setMessage({
-                roomId: message.roomId,
-                transferId: message.transferId,
-                merkleRootHex: message.merkleRoot,
-                sha512Hex: message.hash,
-                fromPeerId: message.fromPeerId,
-                fromPeerPublicKey: message.fromPeerPublicKey,
-                filename: message.filename,
-                messageType: message.messageType,
-                chunkSize: message.savedSize,
-                totalSize: message.totalSize,
-                channelLabel: message.channelLabel,
-                timestamp: message.timestamp,
-              }),
-            );
-          }
+          // Refresh provenance on a new authenticated response, but reload files
+          // only when this response established the room ID.
+          if (original.id !== roomId)
+            await loadSavedRoomHistory(roomId, listenerApi.dispatch);
         } else if (setMessage.match(action)) {
           const { roomId, merkleRootHex, sha512Hex, chunkSize, totalSize } =
             action.payload;
@@ -519,13 +525,16 @@ export const createRoomListenerMiddleware = (
               const messageHash = hexToUint8Array(sha512Hex);
 
               await listenerApi.dispatch(
-                webrtcApi.endpoints.disconnectFromChannelLabel.initiate({
-                  roomId,
-                  label,
-                  messageHash,
-                  alsoDeleteData: false,
-                  alsoSendFinishedMessage: true,
-                }),
+                webrtcApi.endpoints.disconnectFromChannelLabel.initiate(
+                  {
+                    roomId,
+                    label,
+                    messageHash,
+                    alsoDeleteData: false,
+                    alsoSendFinishedMessage: true,
+                  },
+                  { track: false },
+                ),
               );
             }
           }

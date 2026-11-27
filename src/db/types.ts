@@ -19,7 +19,16 @@ export interface BlacklistedPeer extends Peer {
   dateAdded: number;
 }
 
+export interface RoomMembershipAuthority {
+  signalingServerUrl: string;
+  membershipPublicKey: string;
+}
+
 export interface UniqueRoom {
+  /** Signaling server that authenticated this room membership. */
+  signalingServerUrl?: string;
+  membershipPublicKey?: string;
+  onlyConnectWithKnownPeers?: boolean;
   roomUrl: string;
   roomId: string;
   /** Canonical 32-byte public RoomPolicyV1 descriptor; absent on pre-v3 rows. */
@@ -496,12 +505,23 @@ export type WorkerMessages =
   | {
       id: number;
       method: "getAllDBUniqueRooms";
-      args: [];
+      args: [legacyPreferences?: Record<string, boolean>];
     }
   | {
       id: number;
       method: "setDBUniqueRoom";
-      args: [roomUrl: string, roomId: string, roomPolicy: ArrayBuffer];
+      args: [
+        roomUrl: string,
+        roomId: string,
+        roomPolicy: ArrayBuffer,
+        initialKnownOnly?: boolean,
+        authority?: RoomMembershipAuthority,
+      ];
+    }
+  | {
+      id: number;
+      method: "setDBRoomKnownOnly";
+      args: [roomUrl: string, knownOnly: boolean];
     }
   | {
       id: number;
@@ -787,6 +807,7 @@ export interface WorkerMethodReturnTypes {
   setDBPeerInBlacklist: undefined;
   getAllDBUniqueRooms: UniqueRoom[];
   setDBUniqueRoom: undefined;
+  setDBRoomKnownOnly: undefined;
   deleteDBPeerFromBlacklist: undefined;
   getDBMessageData: MessageData | undefined;
   getDBRoomMessageData: MessageData[];

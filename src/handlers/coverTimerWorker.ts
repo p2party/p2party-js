@@ -35,8 +35,10 @@ import type { CoverClock, CoverTimerKind } from "./coverScheduler";
 // which is not built (an owner decision). On the hidden page the kinds of
 // cell were compared only at 500 ms slots on one grid, where the shift was the
 // same for all of them (the scheduler produces each cell a slot ahead,
-// CoverScheduler.prepare); at 25 and 100 ms slots almost every hidden cycle
-// degraded. Times are of send() on the data channel, not of packets. What was
+// CoverScheduler.prepare); at 25 and 100 ms slots, with the screen locked,
+// almost every hidden cycle degraded (unlocked, a 5 s hidden phase at 100 ms
+// slots sent 308 and 357 of 360 cells, none of them a job's). Times are of
+// send() on the data channel, not of packets. What was
 // measured on a visible page, and what remains, is in
 // docs/protocol-v4-pq-cover-architecture.md.
 //

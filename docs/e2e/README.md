@@ -692,6 +692,59 @@ its entry file's SHA-256. The `-gap` runs used the committed file before two
 edits that change no code: a one-line reformatting by prettier and five lines
 of its header comment.
 
+### Proof-level mode: what the proof-level build holds
+
+`driver.mjs --mode=proof-levels` drives `entry-proof-levels.ts`, built with
+`bun docs/e2e/cover-timers/build-sealed.ts <dir> docs/e2e/cover-timers/entry-proof-levels.ts`.
+The page stays visible, and the run ends when the page has done its work:
+
+- "alone": `repeats` builds of a message's proof levels for each size in
+  `sizes` (leaves) and each slice budget in `slices` (ms; a build that runs
+  in one call takes none), on a page that runs nothing else, while a probe
+  posts itself MessageChannel messages: the longest gap between two probe
+  runs inside a build is the longest the build held the page's thread;
+- "grid": `edges` real `CoverRuntime`s of one grid (`cadence`, `lanes`,
+  `frames`) on the page's shared timer worker; edge 0 sends, one after
+  another, a scheduled job of `cells` cells per size in `gridSizes`, each the
+  first send of a fresh message of that many leaves, through the real slot
+  sealer and the real database worker. Each job's first cell production
+  builds the levels and is the build's window; the summary compares the slot
+  wake-ups due inside each window with the others (median and mean shift,
+  Kolmogorov–Smirnov distance), and counts what each edge sent in the cycles
+  the build overlapped.
+
+Flags added: `--headless` (Chrome for Testing with `--headless=new`, whose
+page is visible and cannot be occluded), `--limit=<s>` (how long the run may
+take). The summary records the screen-lock state before and after
+(`ioreg IOConsoleLocked`, macOS), the load average every 5 s, and the SHA-256
+of the bundle, the entry file and `libcrypto.wasm`; every slot wake-up of the
+grid is in the matching `.slots.tsv`. `summarise-proof-levels.mjs` rewrites a
+summary from a raw recording (`resummarisedBy` names its SHA-256).
+
+### Recorded results, proof-level mode (2026-11-27)
+
+`results-2026-11-27-proof-levels-before.json` and
+`results-2026-11-27-proof-levels-after.json`, with their `.slots.tsv`: headless
+Chrome for Testing 159.0.8154.6, macOS 27.2 arm64, the screen locked before
+and after each run, other work on the host (load average 5.5 to 7.5, then 9.3
+to 12.8). Query:
+`sizes=1600,16000,160000,1600000&repeats=3&slices=1,4&gridSizes=16000,160000,1600000&cadence=250&lanes=2&frames=5&edges=3`
+(`slices=1` before, whose build takes no budget). Each ran from the archive
+copy, with `--wasm=` naming the built `libcrypto.wasm` (untracked, so not in
+an archive).
+
+- before: the bundle built from an archive of commit `13acaba` (its `src/` is
+  that of `32129c8`), SHA-256 `e3006942…`, the same on a rebuild;
+- after: from commit `0594e38`, `92b51d61…`, the same on a rebuild;
+- the entry file `8c9cce90…` (the committed `entry-proof-levels.ts`) and
+  `libcrypto.wasm` `7fc91b61…` in both.
+
+Both summaries were rewritten from their raw recordings by the committed
+summariser, which added the comparison of the slots inside and outside a
+build and the `.slots.tsv`. The figures are in
+`docs/protocol-v4-pq-cover-architecture.md`, section 4, "The proof-level
+build".
+
 ## `frontend-audit-report.md`
 
 The synthesized multi-agent UI/UX + v3/v4-wiring audit of `p2party.com`.

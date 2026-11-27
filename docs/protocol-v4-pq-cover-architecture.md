@@ -228,9 +228,18 @@ So tab visibility can still be read off the wire:
   the cells to be sent off the page's event loop, from the worker, which is
   not built. On the hidden page, kinds of cell were compared only at 500 ms
   slots on one grid, where they left alike (all 1,770 cells sent; KS 0.06 to
-  0.07 against 0.10). At 25 and 100 ms slots almost every hidden cycle
-  degraded (at most 51 of up to 1,770 cells were sent), so nothing could be
-  compared there.
+  0.07 against 0.10). At 25 and 100 ms slots with the screen locked almost
+  every hidden cycle degraded (at most 51 of up to 1,770 cells were sent,
+  `results-2026-11-26-fallback-one-grid-100ms.json`), so nothing could be
+  compared there. With it unlocked, the 5 s hidden phase of the confirmatory
+  runs (below) sent 357 and 308 of the 360 cells of its whole cycles at
+  100 ms slots, none of them a job's
+  (`results-2026-11-27-confirm-two-grids-100ms-1600cells-gap.json`,
+  `results-2026-11-27-confirm-two-grids-100ms-5cells-gap.json`), and at 25 ms
+  slots 56 of 1,710
+  (`results-2026-11-27-confirm-two-grids-25ms-1600cells-gap.json`; the
+  5-cell run, whose screen was unlocked about two minutes in, near its hidden
+  phase, sent 102). Kinds of cell were not compared there either.
 - in the cycles that still degrade at short slot spacings, as measured above;
 - in cases that were not measured:
   - a frozen or discarded page (mobile browsers, Safari), where `freeze`
@@ -348,12 +357,25 @@ What (a) costs:
 - a production's synchronous parts run on the page's thread between
   wake-ups, so one that is running when another grid's wake-up on the same
   page falls due delays that wake-up by up to its own length. Measured sizes:
-  a dummy's seal 0.5 ms at the median, at most 2.6 ms on a visible page (once
-  9.7 ms on a hidden one); a control cell's seal
-  at most 3.1 ms; a chunk's seal at most about 1.8 ms; a message's proof-level
-  build, once on its first cell, 4.0 ms at 1,600 cells (6.2 to 7.0 ms the
-  first time in a run) and more for larger files. Taking the proof-level build
-  off the page's thread is a separate task (A4b);
+  - a dummy's seal 0.5 ms at the median, at most 2.6 ms on a visible page
+    (`results-2026-11-26-sealed-100ms-slots-before.json`; once 9.7 ms on a
+    hidden one, `results-2026-11-26-sealed-500ms-slots-before.json`);
+  - a control cell's seal at most 3.1 ms (the same 500 ms file);
+  - a chunk's seal (the summaries' `realCellStagesMs.*.seal`) at most 1.2 ms
+    on a visible page in every committed run
+    (`results-2026-11-26-clearance-two-grids-25ms-1600cells.json`; 0.4 ms in
+    the confirmatory runs) and at most 2.1 ms on a hidden one
+    (`results-2026-11-26-sealed-500ms-slots-before.json`), except on the
+    hidden page of `results-2026-11-26-sealed-500ms-slots-after.json`, 9.6 and
+    116.3 ms, while the host's load average rose past 300;
+  - a message's proof-level build, once on its first cell without a stored
+    proof, now in slices of at most 1 ms (`PROOF_LEVEL_BUILD_SLICE_MS`) with
+    the page handed back between them, so a wake-up due during it waits for
+    the slice it falls in, not for the build. In one call, before, it was
+    4.2 ms at 1,600 cells, 395 ms at 160,000 and 3.9 s at 1,600,000, and at
+    25 ms slots every edge degraded at each size measured there (16,000
+    cells and up). What the slices leave is in "The proof-level build",
+    below;
 - a cancel, a completion or a rekey after the next cell was produced makes the
   scheduler produce that slot's cell again (a CANCEL, or a dummy), so a
   cancelled, completed or retired job never sends a cell it produced earlier.
@@ -497,17 +519,94 @@ What remains observable:
 - a job's chunk delayed by a lane period when its production overran its slot.
   The slot itself still went out on time;
 - a production's synchronous parts, which delay another grid's wake-up that
-  falls due while they run (sizes above), the proof-level build of a large
-  message the longest of them;
+  falls due while they run (sizes above). The proof-level build now holds a
+  wake-up for at most the slice it falls in, which at 1,600,000 cells moved
+  the slots due during the build by about 0.5 ms (below);
 - the hidden page's lateness, the same for every cell where it was compared
   (above);
 - the page's own main-thread work (rendering, the application, garbage
   collection) delays wake-ups whatever the cells carry. These runs had none.
 
 Not measured: a quiet host (the confirmatory runs had the screen unlocked but
-other work running), a hidden page at 25 or 100 ms slots, other browsers,
-messages larger than 1,600 cells, idle grids at other offsets than 1 to
-10 ms, packets on the wire.
+other work running); kinds of cell compared on a hidden page at 25 or 100 ms
+slots (these runs recorded a 5 s hidden phase, and no job cell went in it at
+100 ms slots, 8 and 16 at 25 ms); other browsers; messages larger than 1,600
+cells, but for the proof-level build (below); idle grids at other offsets
+than 1 to 10 ms; packets on the wire.
+
+#### The proof-level build, from commit 0594e38
+
+A message's Merkle proof levels are built once, on the page, when its first
+cell without a stored proof is produced: N − 1 SHA-512 node hashes. Measured
+with `docs/e2e/cover-timers/entry-proof-levels.ts` (`driver.mjs
+--mode=proof-levels --headless`; files and hashes in `docs/e2e/README.md`):
+headless Chrome for Testing 159, macOS 27.2 arm64, the screen locked (a
+headless page is visible), other work on the host (1-minute load average 5.5
+to 7.5 before, 9.3 to 12.8 after). Before is built from `13acaba`, whose
+`src/` is that of `32129c8`; after, from `0594e38`.
+
+On an otherwise idle page, a probe posting itself MessageChannel messages
+recorded the longest the page's thread was held during each build (three
+builds of each; medians, and the holds' range):
+
+| Leaves (file at 0.9 fill) | Levels hold   | One call, before | 1 ms slices: build; longest hold | 4 ms slices: build; longest hold |
+| ------------------------- | ------------- | ---------------- | -------------------------------- | -------------------------------- |
+| 1,600 (85 MiB)            | 102,528 B     | 4.2 ms           | 4.7 ms; 1.0 to 1.2 ms            | 4.5 ms; 4.0 to 4.1 ms            |
+| 16,000 (0.8 GiB)          | 1,024,064 B   | 40.0 ms          | 42.7 ms; 1.0 to 1.1 ms           | 42.0 ms; 4.1 to 4.2 ms           |
+| 160,000 (8.3 GiB)         | 10,240,320 B  | 395 ms           | 424 ms; 1.1 to 7.9 ms            | 429 ms; 4.1 to 10.1 ms           |
+| 1,600,000 (83 GiB)        | 102,400,384 B | 3,928 ms         | 4,310 ms; 2.2 to 2.8 ms          | 4,242 ms; 4.9 to 5.9 ms          |
+
+The build is linear, about 2.5 µs a leaf. In slices it took 7 to 12 % longer
+than the one call of the earlier run, at a higher load average; 1 ms and
+4 ms slices took the same time within 2 % from 16,000 leaves up (4.7 against
+4.5 ms at 1,600). The longest holds above a slice (7.9 ms once at 160,000
+leaves) are gaps the probe saw; the harness cannot tell the build's own work
+from what the browser or the host ran meanwhile.
+
+Then three edges of one grid at the shortest slots a schedule may have
+(25 ms: 2 lanes × 5 frames per 250 ms, 24 ms tolerance), edge 0 sending a
+5-cell scheduled job through the real slot sealer, each the first send of a
+fresh message of 16,000, 160,000 and 1,600,000 leaves, one after another:
+
+| Leaves    | Before: slot lateness; cells of the overlapped cycles sent, per edge | After: slot lateness (median / p99 / max), slots; cells sent, per edge |
+| --------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 16,000    | 39 ms; 0 of 10, every edge degraded                                  | 10.5 / 10.5 / 10.5 ms, 6; 10 of 10                                     |
+| 160,000   | 390 ms; 0 of 20, every edge degraded                                 | 6.3 / 10.7 / 10.7 ms, 54; 20 of 20                                     |
+| 1,600,000 | 3,916 ms; 0 of 160, every edge degraded                              | 5.3 / 11.0 / 11.1 ms, 525; 180 of 180                                  |
+
+Slots due outside the builds were late by 5.3 / 10.6 / 10.9 ms before and
+4.8 / 10.6 / 11.5 ms after (median / p99 / max). Before, the first wake-up
+due during the build ran as late as the build was long, past the tolerance,
+and every edge degraded and sent nothing for the cycles the build
+overlapped. After, every slot was sent, none past the tolerance, and no
+edge degraded; the job's lane sent its slot's dummy while the build ran (88
+of them at 1,600,000 leaves) and its five chunks after.
+
+What remains:
+
+- a wake-up due during the build waits for the slice it falls in. At
+  1,600,000 leaves the 525 slots due during the 4.4 s build left 0.5 ms
+  later than the others at the median and at the mean (KS 0.091 against a
+  5 % critical value of 0.074, which assumes independent slots, and the
+  three edges' slots of one instant share its lateness); at 160,000 leaves
+  the median was 1.5 ms later and the mean 0.1 ms earlier (KS 0.127 against
+  0.19). An observer timing one page's slots against the grid may therefore
+  see a large message's first send as a shift of about half a slice for the
+  build's length. A build in a worker would not hold the page at all; that
+  is not built (the SDK's workers are the database worker and the cover
+  timer worker);
+- the levels hold 64 bytes a leaf above the leaves, which the message holds
+  for its whole delivery anyway: at 1,600,000 leaves 102.4 MB of levels and
+  102.4 MB of leaves. The levels are held from the first cell without a
+  stored proof until every cell's row carries its proof (each cell sent
+  once) or the delivery ends. A phone's browser cannot be counted on to
+  hold that beside an application; not measured on a phone;
+- in scheduled mode a message is at most the room's F × D cells (the job
+  refuses more), so builds this large come from immediate-mode sends, or
+  scheduled rooms with a large F × D, on a page whose cover grids they then
+  share;
+- not measured: a hidden page, other browsers, a phone, a page with its own
+  work.
 
 ## Alternatives rejected
 

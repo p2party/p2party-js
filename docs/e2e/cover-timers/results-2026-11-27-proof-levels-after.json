@@ -1,0 +1,564 @@
+{
+  "measuredAt": "2026-11-27T00:04:39.448Z",
+  "code": "0594e38",
+  "sha256": {
+    "bundle": "92b51d6145ce2eacdb1e8d0c38e9772f0eb117a0c36a5835ea4b438e75b0f884",
+    "docs/e2e/cover-timers/entry-proof-levels.ts": "8c9cce908ae7b6a210d3508acf409796b358a0ba92bdb2180c558396ac098571",
+    "libcrypto.wasm": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76"
+  },
+  "browser": "Chrome/159.0.8154.6",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/159.0.0.0 Safari/537.36",
+  "host": "darwin 27.2.0 arm64",
+  "hostState": {
+    "screenLockedBefore": true,
+    "screenLockedAfter": true,
+    "headless": true
+  },
+  "chromeArgs": [
+    "--remote-debugging-port=5917",
+    "--user-data-dir=<scratch profile>",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=900,700",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--proxy-server=http://127.0.0.1:5919",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--use-mock-keychain",
+    "--headless=new",
+    "http://127.0.0.1:5918/?sizes=1600,16000,160000,1600000&repeats=3&slices=1,4&gridSizes=16000,160000,1600000&cadence=250&lanes=2&frames=5&edges=3"
+  ],
+  "query": {
+    "sizes": "1600,16000,160000,1600000",
+    "repeats": "3",
+    "slices": "1,4",
+    "gridSizes": "16000,160000,1600000",
+    "cadence": "250",
+    "lanes": "2",
+    "frames": "5",
+    "edges": "3"
+  },
+  "loadAverage1m": [
+    [
+      -2,
+      9.2646484375
+    ],
+    [
+      5055,
+      9.0029296875
+    ],
+    [
+      10060,
+      9.40283203125
+    ],
+    [
+      15069,
+      9.6103515625
+    ],
+    [
+      20110,
+      9.80126953125
+    ],
+    [
+      25124,
+      10.53759765625
+    ],
+    [
+      30136,
+      12.17578125
+    ],
+    [
+      35146,
+      12.16162109375
+    ],
+    [
+      40156,
+      12.708984375
+    ],
+    [
+      45163,
+      12.65185546875
+    ],
+    [
+      50171,
+      12.759765625
+    ],
+    [
+      50185,
+      12.759765625
+    ]
+  ],
+  "clockOffsetMs": 0.400146484375,
+  "results": {
+    "alone": [
+      {
+        "leaves": 1600,
+        "sliceMs": 1,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 4.5,
+          "p50": 4.7,
+          "p90": 4.8,
+          "p99": 4.8,
+          "max": 4.8
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 1,
+          "p50": 1,
+          "p90": 1.2,
+          "p99": 1.2,
+          "max": 1.2
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 4,
+          "p50": 4,
+          "p90": 4,
+          "p99": 4,
+          "max": 4
+        },
+        "levelBytes": 102528,
+        "leafBytes": 102400,
+        "levelBytesPerLeaf": 64.08
+      },
+      {
+        "leaves": 1600,
+        "sliceMs": 4,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 4.4,
+          "p50": 4.5,
+          "p90": 4.5,
+          "p99": 4.5,
+          "max": 4.5
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 4,
+          "p50": 4.1,
+          "p90": 4.1,
+          "p99": 4.1,
+          "max": 4.1
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 1,
+          "p50": 1,
+          "p90": 1,
+          "p99": 1,
+          "max": 1
+        },
+        "levelBytes": 102528,
+        "leafBytes": 102400,
+        "levelBytesPerLeaf": 64.08
+      },
+      {
+        "leaves": 16000,
+        "sliceMs": 1,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 42.3,
+          "p50": 42.7,
+          "p90": 43.5,
+          "p99": 43.5,
+          "max": 43.5
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 1,
+          "p50": 1,
+          "p90": 1.1,
+          "p99": 1.1,
+          "max": 1.1
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 42,
+          "p50": 42,
+          "p90": 43,
+          "p99": 43,
+          "max": 43
+        },
+        "levelBytes": 1024064,
+        "leafBytes": 1024000,
+        "levelBytesPerLeaf": 64
+      },
+      {
+        "leaves": 16000,
+        "sliceMs": 4,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 41.9,
+          "p50": 42,
+          "p90": 42.3,
+          "p99": 42.3,
+          "max": 42.3
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 4.1,
+          "p50": 4.1,
+          "p90": 4.2,
+          "p99": 4.2,
+          "max": 4.2
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 10,
+          "p50": 10,
+          "p90": 10,
+          "p99": 10,
+          "max": 10
+        },
+        "levelBytes": 1024064,
+        "leafBytes": 1024000,
+        "levelBytesPerLeaf": 64
+      },
+      {
+        "leaves": 160000,
+        "sliceMs": 1,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 419.9,
+          "p50": 423.9,
+          "p90": 431,
+          "p99": 431,
+          "max": 431
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 1.1,
+          "p50": 1.1,
+          "p90": 7.9,
+          "p99": 7.9,
+          "max": 7.9
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 418,
+          "p50": 419,
+          "p90": 423,
+          "p99": 423,
+          "max": 423
+        },
+        "levelBytes": 10240320,
+        "leafBytes": 10240000,
+        "levelBytesPerLeaf": 64
+      },
+      {
+        "leaves": 160000,
+        "sliceMs": 4,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 427.2,
+          "p50": 429.4,
+          "p90": 433.9,
+          "p99": 433.9,
+          "max": 433.9
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 4.1,
+          "p50": 4.2,
+          "p90": 10.1,
+          "p99": 10.1,
+          "max": 10.1
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 106,
+          "p50": 106,
+          "p90": 107,
+          "p99": 107,
+          "max": 107
+        },
+        "levelBytes": 10240320,
+        "leafBytes": 10240000,
+        "levelBytesPerLeaf": 64
+      },
+      {
+        "leaves": 1600000,
+        "sliceMs": 1,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 4270.1,
+          "p50": 4309.8,
+          "p90": 4351.8,
+          "p99": 4351.8,
+          "max": 4351.8
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 2.2,
+          "p50": 2.7,
+          "p90": 2.8,
+          "p99": 2.8,
+          "max": 2.8
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 4265,
+          "p50": 4305,
+          "p90": 4347,
+          "p99": 4347,
+          "max": 4347
+        },
+        "levelBytes": 102400384,
+        "leafBytes": 102400000,
+        "levelBytesPerLeaf": 64
+      },
+      {
+        "leaves": 1600000,
+        "sliceMs": 4,
+        "builds": 3,
+        "totalMs": {
+          "n": 3,
+          "min": 4221.7,
+          "p50": 4242,
+          "p90": 4293.7,
+          "p99": 4293.7,
+          "max": 4293.7
+        },
+        "longestHoldMs": {
+          "n": 3,
+          "min": 4.9,
+          "p50": 5.1,
+          "p90": 5.9,
+          "p99": 5.9,
+          "max": 5.9
+        },
+        "probeRuns": {
+          "n": 3,
+          "min": 1054,
+          "p50": 1059,
+          "p90": 1072,
+          "p99": 1072,
+          "max": 1072
+        },
+        "levelBytes": 102400384,
+        "leafBytes": 102400000,
+        "levelBytesPerLeaf": 64
+      }
+    ],
+    "grid": {
+      "schedule": {
+        "phaseOffsetMs": 0,
+        "coverCadenceMs": 250,
+        "coverLanes": 2,
+        "coverFramesPerCell": 5,
+        "coverDurationEpochs": 1
+      },
+      "maxTimerDriftMs": 24,
+      "edges": 3,
+      "visibility": [
+        [
+          0,
+          "visible"
+        ]
+      ],
+      "slotLatenessOutsideBuildsMs": {
+        "n": 963,
+        "min": -0.2,
+        "p50": 4.8,
+        "p90": 9.7,
+        "p99": 10.6,
+        "max": 11.5
+      },
+      "jobs": [
+        {
+          "leaves": 16000,
+          "outcome": "completed",
+          "buildWindowMs": 48.7,
+          "productionsMs": [
+            48.7,
+            2.3,
+            2.5,
+            6.3,
+            2.4
+          ],
+          "slotsDueDuringBuild": 6,
+          "slotsLateBeyondTolerance": 0,
+          "slotLatenessDuringBuildMs": {
+            "n": 6,
+            "min": 3.6,
+            "p50": 10.5,
+            "p90": 10.5,
+            "p99": 10.5,
+            "max": 10.5
+          },
+          "versusSlotsOutsideBuilds": {
+            "medianShiftMs": 5.7,
+            "meanShiftMs": 1.99,
+            "ks": {
+              "distance": 0.474,
+              "critical5": 0.556
+            }
+          },
+          "overlappedCycles": 1,
+          "cellsExpectedPerEdge": 10,
+          "cellsSentPerEdge": [
+            10,
+            10,
+            10
+          ],
+          "degradedWhileBuilding": [],
+          "jobLaneDuringBuild": {
+            "dummies": 1,
+            "chunks": 0
+          },
+          "jobLaneChunksSent": 5
+        },
+        {
+          "leaves": 160000,
+          "outcome": "completed",
+          "buildWindowMs": 444.4,
+          "productionsMs": [
+            444.4,
+            2.1,
+            2.8,
+            2.6,
+            2.1
+          ],
+          "slotsDueDuringBuild": 54,
+          "slotsLateBeyondTolerance": 0,
+          "slotLatenessDuringBuildMs": {
+            "n": 54,
+            "min": 0.3,
+            "p50": 6.3,
+            "p90": 8.9,
+            "p99": 10.7,
+            "max": 10.7
+          },
+          "versusSlotsOutsideBuilds": {
+            "medianShiftMs": 1.5,
+            "meanShiftMs": -0.11,
+            "ks": {
+              "distance": 0.127,
+              "critical5": 0.19
+            }
+          },
+          "overlappedCycles": 2,
+          "cellsExpectedPerEdge": 20,
+          "cellsSentPerEdge": [
+            20,
+            20,
+            20
+          ],
+          "degradedWhileBuilding": [],
+          "jobLaneDuringBuild": {
+            "dummies": 9,
+            "chunks": 0
+          },
+          "jobLaneChunksSent": 5
+        },
+        {
+          "leaves": 1600000,
+          "outcome": "completed",
+          "buildWindowMs": 4365.9,
+          "productionsMs": [
+            4365.9,
+            3.2,
+            2.2,
+            3.1,
+            2.2
+          ],
+          "slotsDueDuringBuild": 525,
+          "slotsLateBeyondTolerance": 0,
+          "slotLatenessDuringBuildMs": {
+            "n": 525,
+            "min": 0.3,
+            "p50": 5.3,
+            "p90": 10.3,
+            "p99": 11,
+            "max": 11.1
+          },
+          "versusSlotsOutsideBuilds": {
+            "medianShiftMs": 0.5,
+            "meanShiftMs": 0.49,
+            "ks": {
+              "distance": 0.091,
+              "critical5": 0.074
+            }
+          },
+          "overlappedCycles": 18,
+          "cellsExpectedPerEdge": 180,
+          "cellsSentPerEdge": [
+            180,
+            180,
+            180
+          ],
+          "degradedWhileBuilding": [],
+          "jobLaneDuringBuild": {
+            "dummies": 88,
+            "chunks": 0
+          },
+          "jobLaneChunksSent": 5
+        }
+      ],
+      "statusesByEdge": [
+        [
+          [
+            0,
+            "starting",
+            ""
+          ],
+          [
+            37,
+            "active",
+            ""
+          ],
+          [
+            14899,
+            "stopped",
+            ""
+          ]
+        ],
+        [
+          [
+            1,
+            "starting",
+            ""
+          ],
+          [
+            37,
+            "active",
+            ""
+          ],
+          [
+            14899,
+            "stopped",
+            ""
+          ]
+        ],
+        [
+          [
+            1,
+            "starting",
+            ""
+          ],
+          [
+            37,
+            "active",
+            ""
+          ],
+          [
+            14899,
+            "stopped",
+            ""
+          ]
+        ]
+      ]
+    },
+    "console": []
+  },
+  "resummarisedBy": "62938ff4ca17f2a6d2ce0b06555d4c0a9453b703f2c37e6ceac433f752faf001",
+  "slotsFile": "results-2026-11-27-proof-levels-after.slots.tsv"
+}

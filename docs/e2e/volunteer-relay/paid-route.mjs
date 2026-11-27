@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openPayerScreen } from "./payer-screen.mjs";
 import { withRelayBrowsers } from "./browser-fixture.mjs";
+import { connectOrder, refusalTrials } from "./refusal-trials.mjs";
 import {
   checkQuotes,
   digest,
@@ -27,21 +28,31 @@ const screenMode =
     ? args[0]
     : null;
 function cliSelection() {
-  const [via = "--via=D,B", maximum = "--max=2"] = args;
+  const [via = "--via=D,B", maximum = "--max=2", replaces] = args;
   if (
-    args.length > 2 ||
+    args.length > 3 ||
+    (replaces !== undefined && !/^--replaces=[BDEF]$/.test(replaces)) ||
     !/^--via=[BDE](,[BDE]){1,2}$/.test(via) ||
     !/^--max=[1-9]\d*$/.test(maximum)
   )
-    throw Error("Usage: paid-route.mjs --via=D,B --max=2, or --interactive");
-  return { chosen: via.slice(6).split(","), cap: Number(maximum.slice(6)) };
+    throw Error(
+      "Usage: paid-route.mjs --via=D,B --max=2 [--replaces=E], or --interactive",
+    );
+  return {
+    chosen: via.slice(6).split(","),
+    cap: Number(maximum.slice(6)),
+    replaces: replaces?.slice("--replaces=".length),
+  };
 }
-async function purchase({ chosen, cap }, screen) {
+async function purchase({ chosen, cap, replaces }, screen) {
   if (
     !Array.isArray(chosen) ||
     chosen.length < 2 ||
     chosen.length > 3 ||
     !chosen.every((r) => ["B", "D", "E"].includes(r)) ||
+    (replaces !== undefined &&
+      (!["B", "D", "E", "F"].includes(replaces) ||
+        chosen.includes(replaces))) ||
     !Number.isSafeInteger(cap) ||
     chosen.length !== new Set(chosen).size ||
     chosen.length > cap
@@ -164,7 +175,7 @@ async function purchase({ chosen, cap }, screen) {
     assert(genesisResponse.ok);
     assert.equal((await genesisResponse.json()).result, "0x" + genesis);
     await withRelayBrowsers(
-      ["A", ...chosen, "C"],
+      ["A", ...chosen, ...(replaces ? [replaces] : []), "C"],
       async ({ pages, establish, connect, chromium }) => {
         const browserKey = async (name) =>
           Buffer.from(
@@ -196,6 +207,69 @@ async function purchase({ chosen, cap }, screen) {
           budget: cap,
           hops,
         };
+        const send = () => pages.A.evaluate(() => peer.send("sample"));
+        let failures = [],
+          abandoned = null;
+        if (replaces) {
+          await establish("A", "C", "AC");
+          const last = hops.length - 1;
+          const oldProvider = { key: makeKey(), payee: wallet() };
+          const oldRoles = [...chosen.slice(0, -1), replaces];
+          const earlierChallenge = randomBytes(32);
+          const previous = {
+            ...route,
+            nonce: randomBytes(32).toString("hex"),
+            challengeHash: digest("challenge", earlierChallenge),
+            hops: [
+              ...hops.slice(0, last),
+              {
+                ...hops[last],
+                ...oldProvider.payee.owner,
+                provider: providerId(oldProvider.key.publicKey),
+                browserKey: await browserKey(replaces),
+                witnessKey: await pages[replaces].evaluate(() =>
+                  peer.deliveryKey(),
+                ),
+              },
+            ],
+          };
+          const oldProviders = [...providers.slice(0, last), oldProvider];
+          const previousQuotes = oldProviders.map((provider, index) =>
+            signQuote(previous, index, provider.key.privateKey),
+          );
+          const previousPins = oldProviders.map(
+            (provider) => provider.key.publicKey,
+          );
+          const oldId = checkQuotes(previous, previousQuotes, previousPins);
+          const oldOrder = await connectOrder({
+            pages,
+            connect,
+            roles: oldRoles,
+            id: oldId,
+            challenge: earlierChallenge,
+            content,
+          });
+          failures = await refusalTrials({
+            pages,
+            roles: oldRoles,
+            rpc,
+            send,
+            fundingInputs: previous.hops.map((h) => h.inputId),
+            payees: oldProviders.map((p) => readHandle(p.payee.owner)),
+          });
+          await Promise.all(
+            Object.values(pages).map((p) =>
+              p.evaluate(() => peer.abandonRoute()),
+            ),
+          );
+          assert.throws(() => checkQuotes(route, previousQuotes, previousPins));
+          abandoned = {
+            id: oldId,
+            recordHash: oldOrder.recordHash,
+            path: oldOrder.path,
+            replacedPayeeHandle: readHandle(oldProvider.payee.owner),
+          };
+        }
         const quotes = providers.map((p, i) =>
           signQuote(route, i, p.key.privateKey),
         );
@@ -264,71 +338,33 @@ async function purchase({ chosen, cap }, screen) {
           checkQuotes({ ...route, chainId: hex(32) }, quotes, pins),
         );
         assert.throws(() => checkQuotes(route, quotes.slice(1), pins));
-        // The test UI asks each selected browser for consent after the quote and
-        // checks one preconnected neighbor in each direction. The CLI is the payer.
-        await establish("A", "C", "AC");
-        const path = ["A", ...chosen, "C"];
-        for (const [index, role] of chosen.entries()) {
-          await pages[role].evaluate((order) => peer.setPaidGrant(order), {
-            bytes: paidRecordBytes,
-            id,
-            index,
-          });
-        }
-        for (let i = 1; i < path.length; i++)
-          await connect(
-            pages[path[i - 1]],
-            pages[path[i]],
-            path[i - 1] + path[i],
-          );
-        const payload = Buffer.concat([
-          Buffer.from(id, "hex"),
+        if (!abandoned) await establish("A", "C", "AC");
+        const { path, payload, recordHash } = await connectOrder({
+          pages,
+          connect,
+          roles: chosen,
+          id,
           challenge,
           content,
-        ]);
-        const send = () => pages.A.evaluate(() => peer.send("sample"));
-        const recordHash = await pages.A.evaluate(
-          (data) => peer.prepare(data),
-          [...payload],
-        );
-        if (!screen) {
-          await send();
-          await pages[chosen[0]].waitForFunction(
-            () => peer.snapshot().verdicts.at(-1) === "disabled",
-          );
-          await assert.rejects(pages.C.evaluate(() => peer.acknowledge()));
-          assert.equal((await rpc("demos_getHead")).height, "0x0");
-          // A stopped relay drops even an authentic record.
-          await pages[chosen[0]]
-            .getByRole("button", { name: /Enable forwarding/ })
-            .click();
-          await pages[chosen[0]]
-            .getByRole("button", { name: "Stop forwarding" })
-            .click();
-          await send();
-          await pages[chosen[0]].waitForFunction(
-            () => peer.snapshot().verdicts.at(-1) === "stopped",
-          );
-          await assert.rejects(pages.C.evaluate(() => peer.acknowledge()));
-          // One consenting upstream relay alone cannot authorize a purchase.
-          await pages[chosen[0]]
-            .getByRole("button", { name: /Enable forwarding/ })
-            .click();
-          await send();
-          await pages[chosen[1]].waitForFunction(
-            () => peer.snapshot().verdicts.at(-1) === "disabled",
-          );
-          assert.equal(
-            await pages[chosen[0]].evaluate(() => peer.snapshot().used),
-            paidRecordBytes,
-          );
-          await assert.rejects(pages.C.evaluate(() => peer.acknowledge()));
-          assert.equal((await rpc("demos_getHead")).height, "0x0");
-          await pages[chosen[0]].evaluate(() => peer.forwardingReceipt());
-          await assert.rejects(
-            pages[chosen[1]].evaluate(() => peer.forwardingReceipt()),
-          );
+        });
+        if (abandoned) {
+          assert.notEqual(id, abandoned.id);
+          assert.notEqual(recordHash, abandoned.recordHash);
+        } else if (!screen) {
+          failures = await refusalTrials({
+            pages,
+            roles: chosen,
+            rpc,
+            send,
+            fundingInputs: hops.map((h) => h.inputId),
+            payees: providers.map((p) => readHandle(p.payee.owner)),
+          });
         }
+        const bytesBeforeDelivery = await Promise.all(
+          chosen.map((role) =>
+            pages[role].evaluate(() => peer.snapshot().totalForwardedBytes),
+          ),
+        );
         for (const role of [...chosen].reverse())
           await pages[role]
             .getByRole("button", { name: /Enable forwarding/ })
@@ -345,13 +381,13 @@ async function purchase({ chosen, cap }, screen) {
           ),
           payload,
         );
-        for (const role of chosen) {
+        for (const [i, role] of chosen.entries()) {
           const s = await pages[role].evaluate(() => peer.snapshot());
           assert.equal(s.used, paidRecordBytes);
           assert.equal(s.state, "exhausted");
           assert.equal(
-            s.verdicts.filter((x) => x === "forwarded").length,
-            !screen && role === chosen[0] ? 2 : 1,
+            s.totalForwardedBytes - bytesBeforeDelivery[i],
+            paidRecordBytes,
           );
         }
         await send();
@@ -520,6 +556,16 @@ async function purchase({ chosen, cap }, screen) {
             commitment: p.payee.owner.commitment,
           });
         }
+        if (abandoned) {
+          assert.equal(
+            await rpc(
+              "eth_getBalance",
+              abandoned.replacedPayeeHandle,
+              "latest",
+            ),
+            "0x0",
+          );
+        }
         completion =
           "Delivery verified. " +
           chosen.length +
@@ -531,6 +577,18 @@ async function purchase({ chosen, cap }, screen) {
             {
               chromium,
               route: path,
+              ...(!screen ? { declinedAttempts: failures } : {}),
+              ...(abandoned
+                ? {
+                    reroute: {
+                      abandonedRoute: abandoned.path,
+                      acceptedRoute: path,
+                      replacedVolunteerBalance: 0,
+                      sameSession: true,
+                      sameFundingInputs: true,
+                    },
+                  }
+                : {}),
               loopbackLinks: path.length - 1,
               verifiedPlaintextBytes: payload.length,
               forwardedBytesPerRelay: paidRecordBytes,

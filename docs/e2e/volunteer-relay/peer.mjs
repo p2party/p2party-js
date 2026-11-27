@@ -46,7 +46,8 @@ const hex = (bytes) =>
   ).join("");
 const verdicts = [],
   received = [];
-let rejected = 0;
+let rejected = 0,
+  totalForwardedBytes = 0;
 
 function mailbox(name) {
   if (!inbox.has(name)) inbox.set(name, { data: [], waiting: null });
@@ -158,7 +159,10 @@ window.peer = {
     if (intermediate && name.endsWith(role))
       dc.onmessage = ({ data }) => {
         const verdict = gate?.forward(data) ?? "disabled";
-        if (verdict === "forwarded") lastForwarded = data; // test observer for the wrong-key check
+        if (verdict === "forwarded") {
+          lastForwarded = data;
+          totalForwardedBytes += data.byteLength;
+        }
         if (verdicts.length < 32) verdicts.push(verdict);
       };
     if (role === "C")
@@ -244,6 +248,9 @@ window.peer = {
       new Uint8Array(data)[kind === "version" ? 3 : data.byteLength - 1] ^= 1;
     }
     sourceChannel.send(data);
+    return typeof data === "string"
+      ? new TextEncoder().encode(data).length
+      : data.byteLength;
   },
   async canOpenAsVolunteer() {
     const diagnostic = sessions.get("AB");
@@ -256,7 +263,29 @@ window.peer = {
       return false;
     }
   },
+  // Disconnect the abandoned route and erase its receipt state. Endpoint
+  // identities, the authenticated A-C session and its ratchet remain live.
+  abandonRoute() {
+    if (received.length)
+      throw new Error("Only an undelivered route can be abandoned");
+    gate?.stop();
+    for (const { pc, dc } of links.values()) {
+      dc.onmessage = null;
+      pc.close();
+    }
+    links.clear();
+    for (const button of document.querySelectorAll("#enable, #stop"))
+      button.onclick = null;
+    gate =
+      paidGrant =
+      paidOrder =
+      lastForwarded =
+      sourceChannel =
+      sample =
+        null;
+  },
   snapshot: () => ({
+    totalForwardedBytes,
     verdicts,
     received,
     rejected,

@@ -72,6 +72,23 @@ The payer durably stores every exact signed transfer in one SQLite transaction b
 | A → D → B → C | D and B received 1 each | 2 |
 | A → B → E → D → C | B, E and D received 1 each | 3 |
 
-Chromium 159.0.8154.6 recovered the complete plaintext on both successful routes. The negative checks include changed payout commitments, route reordering, a wrong chain, missing quotes, missing, swapped or duplicated forwarding witnesses, witnesses replayed against a different order or ciphertext, a stopped hop, a downstream volunteer declining after its upstream neighbor forwarded, expired authorization and an invalid delivery acknowledgment. The declined route consumed the upstream allowance and left the ledger at height zero.
+Chromium 159.0.8154.6 recovered the complete plaintext on both successful routes. The negative checks include changed payout commitments, route reordering, a wrong chain, missing quotes, missing, swapped or duplicated forwarding witnesses, witnesses replayed against a different order or ciphertext, a stopped hop, a downstream volunteer declining after its upstream neighbor forwarded, expired authorization and an invalid delivery acknowledgment. The CLI now checks each individual refusal position and an explicit withdrawal at the first hop. The output records the source submission and each relay’s outbound application bytes separately. Withholding a grant at hop 1, 2 or 3 left these amounts unpaid across the volunteers:
+
+| Refusing hop | Sender bytes | Upstream relay bytes | Delivered messages | Total paid |
+| --- | ---: | ---: | ---: | ---: |
+| First, including withdrawal | 65,559 | 0 | 0 | 0 |
+| Second | 65,559 | 65,559 | 0 | 0 |
+| Third | 65,559 | 131,118 | 0 | 0 |
+
+Each successful upstream relay consumed its full one-record allowance. Every failed attempt left each funding input unspent and the ledger at genesis. Byte counts measure encrypted records submitted to the browsers’ outgoing DataChannels. Transport overhead is outside the measurement.
+
+To repeat the failed last hop with a different volunteer, use an explicitly chosen replacement order. For example, these commands first try a route ending in E or F respectively, then purchase the route named by `--via`:
+
+```sh
+node docs/e2e/volunteer-relay/paid-route.mjs --via=D,B --max=2 --replaces=E
+node docs/e2e/volunteer-relay/paid-route.mjs --via=B,E,D --max=3 --replaces=F
+```
+
+On November 27, both replacements retained the original authenticated A–C session, user content, chain and funding inputs. The driver closed the abandoned DataChannels, verified fresh provider signatures on a different order, established the replacement links and encrypted a new record. D → E became D → B and settled at height 2. B → E → F became B → E → D and settled at height 3. Each replacement route paid one unit to each successful relay. The abandoned final volunteer received zero. Repeating the prepared transfers kept both final heights unchanged. The CLI supplies the new route and its spending cap; this experiment measures recovery after an explicit selection on one computer.
 
 The recipient acknowledges possession of the challenge and content under its pinned key. Every selected witness attests to forwarding the same ciphertext at its assigned position. The driver also observes the selected WebRTC links independently on this machine. Colluding witnesses and endpoints can fabricate the off-chain record, and a payer can withhold a transfer after service. Distinct keys do not establish distinct operators, physical links or networks. The on-chain record contains an ordinary transfer without the route, content or receipt, and timing and payment correlations may still reveal associations. Operator-controlled wallets, directory enrollment, conditional multi-party settlement, independent path evidence and public-network measurements remain open.

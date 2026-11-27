@@ -13,10 +13,12 @@ them. These are local, disposable test environments; use no production data or
 credentials. Historical results below describe the exact versions originally
 tested and do not certify later releases.
 
-All runs use the **development** WASM (`src/cryptography/libcrypto.wasm`,
+The source-built harnesses use the **development** WASM (`src/cryptography/libcrypto.wasm`,
 `ENVIRONMENT=web,worker,node`, SRI-pinned in `wasmLoader.ts`). Do NOT run
 `npm run predist` before these — it overwrites that artifact with the
 web-only production build that cannot instantiate under Bun.
+
+The [volunteer relay experiment](volunteer-relay/README.md) uses the released SDK 0.15.1 package and its WASM. Three local Chromium peers verify consent, bounded forwarding and endpoint decryption across two WebRTC hops.
 
 ## `webrtc-e2e/` — session-API + CoverRuntime over real WebRTC
 

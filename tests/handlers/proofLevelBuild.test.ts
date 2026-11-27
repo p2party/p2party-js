@@ -212,6 +212,33 @@ const turnsUntil = async (ready: () => boolean): Promise<void> => {
   }
 };
 
+/**
+ * How `promise` settled, waited for over a bounded number of turns: a cell
+ * still waiting on a build nobody drives fails the test instead of hanging it.
+ */
+const outcome = async <T>(
+  promise: Promise<T>,
+): Promise<{ readonly value?: T; readonly error?: unknown }> => {
+  let settled: { value?: T; error?: unknown } | undefined;
+  promise.then(
+    (value) => {
+      settled = { value };
+    },
+    (error: unknown) => {
+      settled = { error };
+    },
+  );
+  await turnsUntil(() => settled !== undefined);
+  return settled!;
+};
+
+/** The error `promise` was rejected with; a failure if it resolved. */
+const rejection = async (promise: Promise<unknown>): Promise<Error> => {
+  const { error } = await outcome(promise);
+  expect(error).toBeInstanceOf(Error);
+  return error as Error;
+};
+
 /** Release hand-backs until every promise has settled. */
 const driveUntilSettled = async (
   handBacks: ReturnType<typeof manualHandBacks>,
@@ -296,7 +323,9 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     asked.push(message.cellPlaintext(second!), message.cellPlaintext(again!));
     await driveUntilSettled(handBacks, asked);
 
-    const cells = await Promise.all(asked);
+    const cells = await Promise.all(
+      asked.map(async (cell) => (await outcome(cell)).value!),
+    );
     // One build for all three: N − 1 hashes in 20 slices.
     expect(build.state.hashes).toBe(leafCount - 1);
     expect(handBacks.taken).toBe(19);
@@ -347,10 +376,10 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     // It stops at its next slice: until that runs it still holds them.
     expect(message.proofLevelBytes).toBe(heldWhileBuilding);
     handBacks.release();
-    await expect(producing).rejects.toThrow("already ended");
+    expect((await rejection(producing)).message).toContain("already ended");
     // The slot gets no cell (its dummy goes), and no error that would
     // degrade the edge.
-    expect(await slotCell).toBeNull();
+    expect(await outcome(slotCell)).toEqual({ value: null });
     expect(build.state.hashes).toBe(2);
     expect(handBacks.pending).toBe(0);
     expect(handBacks.taken).toBe(1);
@@ -383,15 +412,8 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     await turnsUntil(() => handBacks.pending === 1);
     asked.push(message.cellPlaintext((await message.read(9))!));
     await driveUntilSettled(handBacks, asked);
-    const errors = await Promise.all(
-      asked.map((cell) =>
-        cell.then(
-          () => null,
-          (error: unknown) => error,
-        ),
-      ),
-    );
-    expect((errors[0] as Error).message).toBe("Could not calculate hash.");
+    const errors = await Promise.all(asked.map(rejection));
+    expect(errors[0].message).toBe("Could not calculate hash.");
     // One failure, the same error to every cell that waited on it.
     expect(errors[1]).toBe(errors[0]);
     expect(build.state.hashes).toBe(5);
@@ -399,7 +421,7 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
 
     // A later cell gets it too, without a hash or a slice.
     const later = message.cellPlaintext((await message.read(20))!);
-    await expect(later).rejects.toBe(errors[0] as Error);
+    expect(await rejection(later)).toBe(errors[0]);
     expect(build.state.hashes).toBe(5);
     expect(handBacks.taken).toBe(2);
     expect(message.proofLevelBytes).toBe(0);
@@ -421,14 +443,17 @@ describe("the proof-level build of an outgoing message runs in slices", () => {
     asked.push(message.cellPlaintext((await message.read(11))!));
     await driveUntilSettled(handBacks, asked);
     for (const cell of asked)
-      await expect(cell).rejects.toThrow("do not reach its Merkle root");
+      expect((await rejection(cell)).message).toContain(
+        "do not reach its Merkle root",
+      );
     // Built whole, in its 20 slices, once.
     expect(build.state.hashes).toBe(leafCount - 1);
     expect(handBacks.taken).toBe(19);
     expect(message.proofLevelBytes).toBe(0);
-    await expect(
-      message.cellPlaintext((await message.read(12))!),
-    ).rejects.toThrow("do not reach its Merkle root");
+    expect(
+      (await rejection(message.cellPlaintext((await message.read(12))!)))
+        .message,
+    ).toContain("do not reach its Merkle root");
     expect(build.state.hashes).toBe(leafCount - 1);
   });
 });

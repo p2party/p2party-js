@@ -11,7 +11,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.15.0-rc.0` includes durable sender recovery, selective scheduled receipts,
+The SDK `0.15.0-rc.1` includes durable sender recovery, selective scheduled receipts,
 sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
 Signaling server `0.1.3` or newer provides membership snapshots and targeted mesh
 repair. Local verification results and remaining limits are recorded in

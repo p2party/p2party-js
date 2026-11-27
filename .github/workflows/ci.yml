@@ -33,7 +33,7 @@ jobs:
       - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
-          version: 6.0.9
+          version: 7.0.0
           actions-cache-folder: emsdk-cache
           update: true
 

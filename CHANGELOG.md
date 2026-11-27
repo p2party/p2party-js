@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## [Unreleased]
 
+### 0.15.0-rc.1
+
+- Blacklist and address-book entries follow the Ed25519 identity across server
+  peer-ID changes. IndexedDB upgrades existing entries, and the SDK applies the
+  local admission policy after the peer proves its key. Lookups, removal and
+  unblocking now take the public key.
+- The release workflow builds the cryptographic module with Emscripten 7.0.0.
+
 ### 0.15.0-rc.0
 
 - The browser SDK requires signaling protocol 5. Upgrade the server first.

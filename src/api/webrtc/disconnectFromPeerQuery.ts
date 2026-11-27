@@ -212,6 +212,7 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   {
     peerId,
     roomId,
+    expectedPeerPublicKey,
     alsoDeleteData,
     peerConnections,
     dataChannels,
@@ -219,6 +220,13 @@ const webrtcDisconnectPeerQuery: BaseQueryFn<
   },
   api,
 ) => {
+  if (expectedPeerPublicKey !== undefined) {
+    const live = peerConnections.find(
+      (entry) => entry.roomId === roomId && entry.withPeerId === peerId,
+    );
+    if (live?.withPeerPublicKey !== expectedPeerPublicKey)
+      return { data: undefined };
+  }
   const terminalRoomIds = new Set<string>();
   for (let i = peerConnections.length - 1; i >= 0; i--) {
     const connection = peerConnections[i];

@@ -5,7 +5,7 @@ if (typeof WebAssembly != "object") {
   throw new Error("no native wasm support detected");
 }
 
-const wasmVersion = process.env.P2PARTY_VERSION ?? "0.15.0-rc.0";
+const wasmVersion = process.env.P2PARTY_VERSION ?? "0.15.0-rc.1";
 const defaultWasmUrl = new URL(
   `https://cdn.p2party.com/@${wasmVersion}/libcrypto.wasm`,
 );
@@ -21,7 +21,7 @@ let wasmSourcePinned = false;
  */
 const cdnRequest = {
   integrity:
-    "sha384-K0QqktkF2/8IHMDEgDIcyDl/ywcUXUO8fF1ZzcwhVrUYfGn8jN8Foohn1+bw4HmZ",
+    "sha384-1pDKeCXxKNB9lzIGQyDsr3apTXUgQcRYI5ChgbzdQfTKUSekBO6z7PVeJn46kMgE",
 };
 
 /** `sha384-<base64>` of `bytes`, by this runtime's WebCrypto. */

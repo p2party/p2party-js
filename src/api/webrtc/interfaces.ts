@@ -235,6 +235,8 @@ export interface RTCDisconnectFromAllRoomsParams {
 
 export interface RTCDisconnectFromPeerParams {
   peerId: string;
+  /** An identity-scoped teardown must still match the live room transport. */
+  expectedPeerPublicKey?: string;
   /** When present, tear down only this room/peer transport. */
   roomId?: string;
   alsoDeleteData?: boolean;

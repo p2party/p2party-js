@@ -43,6 +43,7 @@ export interface ReceiveMessageResult {
   chunkSize: number;
   chunkIndex: number;
   receivedFullSize: boolean;
+  fromPeerPublicKey?: string;
   chunkAlreadyExists: boolean;
   totalSize: number;
   messageType: number;
@@ -505,6 +506,7 @@ export const handleReceiveMessage = async (
       schemaVersion: metadata.schemaVersion,
       roomId,
       fromPeerId: epc.withPeerId,
+      fromPeerPublicKey: epc.withPeerPublicKey,
       channelLabel,
       timestamp: metadata.date.getTime(),
       merkleRoot: merkleRootHex,
@@ -564,6 +566,7 @@ export const handleReceiveMessage = async (
       chunkSize,
       receivedFullSize,
       chunkAlreadyExists: !progress.stored,
+      fromPeerPublicKey: progress.fromPeerPublicKey,
       totalSize: metadata.totalSize,
       messageType: metadata.messageType,
       filename: metadata.name,

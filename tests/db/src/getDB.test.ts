@@ -69,8 +69,8 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
 }
 
 describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
-  test("dbVersion is bumped to exactly 22", () => {
-    expect(dbVersion).toBe(22);
+  test("dbVersion is bumped to exactly 23", () => {
+    expect(dbVersion).toBe(23);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -302,7 +302,7 @@ describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
 
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
-    expect(db.version).toBe(22);
+    expect(db.version).toBe(dbVersion);
     expect(await db.count("ratchetSessions")).toBe(0);
     // Other stores are untouched; the schema is complete.
     expect(await db.count("messageData")).toBe(1);
@@ -487,6 +487,48 @@ test("v22 drops server-ID PIN records, preserving locator PIN records and other 
   const db = await getDB();
   try {
     expect((await db.getAllKeys("meta")).sort()).toEqual(kept.sort());
+  } finally {
+    db.close();
+  }
+});
+
+test("v22 contacts and blocks retain their Ed25519 key, name and date across the v23 upgrade", async () => {
+  const publicKey = "ab".repeat(32);
+  const legacyId = "old routing id";
+  const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(dbName, 22);
+    request.onupgradeneeded = () => {
+      for (const name of ["addressBook", "blacklist"]) {
+        const store = request.result.createObjectStore(name, {
+          keyPath: ["peerId"],
+        });
+        store.createIndex("peerPublicKey", "peerPublicKey", { unique: true });
+        store.createIndex("peerId", "peerId", { unique: true });
+        store.put({
+          peerId: legacyId,
+          peerPublicKey: publicKey.toUpperCase(),
+          dateAdded: 123,
+          username: "Ada",
+        });
+        store.put({ peerId: "no key", peerPublicKey: "" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  legacy.close();
+  const db = await getDB();
+  try {
+    for (const name of ["addressBook", "blacklist"] as const) {
+      expect(db.transaction(name).store.keyPath).toBe("peerPublicKey");
+      expect(await db.get(name, publicKey)).toMatchObject({
+        peerId: legacyId,
+        peerPublicKey: publicKey,
+        dateAdded: 123,
+        username: "Ada",
+      });
+      expect(await db.count(name)).toBe(1);
+    }
   } finally {
     db.close();
   }

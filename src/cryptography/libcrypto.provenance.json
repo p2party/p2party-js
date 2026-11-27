@@ -29,7 +29,7 @@
     }
   },
   "toolchain": {
-    "emscripten": "6.0.9"
+    "emscripten": "7.0.0"
   },
   "build": {
     "mode": "production",
@@ -38,8 +38,8 @@
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 211350,
-    "sha256": "7fc91b615f6ca7f7f61497b784c8e75102751cdc84251bcadcd688aaa17c4d76",
-    "sri": "sha384-K0QqktkF2/8IHMDEgDIcyDl/ywcUXUO8fF1ZzcwhVrUYfGn8jN8Foohn1+bw4HmZ"
+    "bytes": 210598,
+    "sha256": "54fe3c9da24f6c49ee240c7607e759bc68890a7350e49954ed0dc366c115b3db",
+    "sri": "sha384-1pDKeCXxKNB9lzIGQyDsr3apTXUgQcRYI5ChgbzdQfTKUSekBO6z7PVeJn46kMgE"
   }
 }

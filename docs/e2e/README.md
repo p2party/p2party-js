@@ -1,5 +1,8 @@
 # Protocol-v4 browser verification harnesses
 
+The signaling v5 rollout includes a dated record of the direct and TURN browser transfers, the Linux archive and the Wasm checksum. [SDK 0.15.0 acceptance results](release-0.15.0.md)
+
+
 Real headless-Chromium E2E harnesses used to verify protocol v4 over **real
 WebRTC** (real `RTCPeerConnection` + DTLS/SCTP DataChannels). Preserved here
 as reproducible development fixtures. Keep `p2party-js`, `p2party-server`, and

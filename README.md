@@ -12,12 +12,12 @@ room mesh.
 Apache-2.0 · [License](LICENSE.md) · [Getting started](docs/getting-started.md) ·
 [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)
 
-The public web app runs **SDK 0.15.0** with signaling protocol **5**. The
+This release pairs **SDK 0.15.1** with signaling protocol **5**. The
 protocol between peers remains **4**. Upgrade a self-hosted signaling server
 to 0.2.0 or later before updating its clients. This SDK opens a keyless
 WebSocket URL, signs a challenge bound to the host, and joins with a hash of the
 room capability. The service can still associate a room with its participants.
-[Web client](https://p2party.com) · [Signaling health](https://signaling.p2party.com/health) · [Release verification](docs/e2e/release-0.15.0.md)
+[Web client](https://p2party.com) · [Signaling health](https://signaling.p2party.com/health) · [Release verification](docs/e2e/README.md)
 
 Contacts and blocks now follow the authenticated Ed25519 key across routing
 changes. The browser keeps older messages readable and only offers a contact
@@ -25,7 +25,7 @@ action on a message with a proved sender key. A retained, prepared file can
 resume after sender reload. If deletion leaves a file on disk, the SDK reports
 it and can retry cleanup after restart. Protocol-v3 peer sessions and saved v3
 crypto state require a fresh handshake. Independent security review remains
-open. [0.15.0 migration notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
+open. [0.15.1 migration notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
 
 P2Party Testnet 1 is a separate, valueless native-transfer experiment. Its
 first funded unit was spent with ML-DSA-65 by ethers at height 2 and with
@@ -91,19 +91,19 @@ by themselves provide continuous traffic-analysis resistance.
 
 ## Install
 
-The tagged GitHub release provides the exact 0.15.0 archive used by the web app.
-[Archive and SHA-256 checksum](https://github.com/p2party/p2party-js/releases/tag/v0.15.0)
+The tagged GitHub release provides the checked 0.15.1 archive.
+[Archive and SHA-256 checksum](https://github.com/p2party/p2party-js/releases/tag/v0.15.1)
 
 ```sh
-npm install https://github.com/p2party/p2party-js/releases/download/v0.15.0/p2party-0.15.0.tgz
+npm install https://github.com/p2party/p2party-js/releases/download/v0.15.1/p2party-0.15.1.tgz
 ```
 
 For the registry copy, check the version before installing. The expected
 integrity is `sha512-7Uhf17GnctiRuuZnNF8gU0oAYfeocGiF5ja6Fjel2kUeWqVj7rl7fzfk3vxKZkKyAOAGXagUP0nLW+YU9qID5Q==`.
 
 ```sh
-npm view p2party@0.15.0 dist.integrity
-npm install p2party@0.15.0
+npm view p2party@0.15.1 dist.integrity
+npm install p2party@0.15.1
 ```
 
 That is the whole setup. The package ships its own WebAssembly cryptography and
@@ -848,8 +848,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.15.0/p2party.min.js"
-  integrity="sha384-O+T+i61wDcnRyP1p/AWzSSi4U7HzdacWmqabpTcbFLNo4LaG23XCCxEGI5YhxGQj"
+  src="https://cdn.p2party.com/@0.15.1/p2party.min.js"
+  integrity="sha384-0R1rSTGF+C6fd8VR8rs5aqWwruIJNTV8aq6JML/iqbqj46QcHbuTGlnXeeorw/R1"
   crossorigin="anonymous"
 ></script>
 
@@ -888,7 +888,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-C/hrS5HuLQBE6LI2rxSPRIwIqUX1IJo0HpLrCHWcO1v2+Ch+A6xZfJOyr47C4AXn`.
+`integrity=sha384-8ww42gtbK/Sl3kYa8bwOS+p/Cj0IdLPrCR98UbMRSptFSqWAiby7i1rQlAXvNijT`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.

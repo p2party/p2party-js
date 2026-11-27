@@ -11,7 +11,7 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.15.0` includes durable sender recovery, selective scheduled receipts,
+The SDK `0.15.1` includes durable sender recovery, selective scheduled receipts,
 sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
 Signaling protocol 5 provides authenticated room membership snapshots and targeted
 mesh repair. On November 27 the public browser app used the tagged SDK archive
@@ -19,7 +19,7 @@ and two fresh browser pairs verified stored text and a 32 KiB disk-backed
 file. Browser statistics identified a direct host/server-reflexive path for
 one pair and a forced relay/relay path for the other. Local runs recovered a 16 MiB file and resumed a 64 MiB
 file across a sender reload. [Public web client](https://p2party.com) ·
-[SDK release evidence](docs/e2e/release-0.15.0.md) ·
+[SDK release evidence](docs/e2e/README.md) ·
 [Signaling health](https://signaling.p2party.com/health)
 
 P2Party Testnet 1 is a separate, live server and native-library experiment.
@@ -28,8 +28,10 @@ genesis defines 128 valueless units and one validator orders native transfers.
 An ethers client and a viem client moved the same funded unit at heights 2
 and 3 using the two supported post-quantum signature suites. Rooms, peer
 authentication and file transfer use no ledger, staking or payment step.
-Independent validators, proof of stake, EVM execution and mainnet monetary
-rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·
+A local second node has replayed both signing suites into a separate database,
+matched receipt-history digests, and rejected a conflicting history. A separately
+operated host, signed consensus checkpoints, fork choice and finality are open.
+EVM execution and mainnet monetary rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·
 [Native transfer library](https://github.com/ondemos/libdemos)
 
 - protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets

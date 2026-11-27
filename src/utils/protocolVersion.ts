@@ -1,4 +1,20 @@
-import { PROTOCOL_VERSION } from "./constants";
+import { SIGNALING_PROTOCOL_VERSION } from "./constants";
+
+export class SignalingVersionMismatchError extends Error {
+  constructor() {
+    super(
+      "The signaling server and this SDK use incompatible protocol versions",
+    );
+    this.name = "SignalingVersionMismatchError";
+  }
+}
+
+export const isSignalingVersionRefusal = (
+  code: number,
+  reason: string,
+): boolean =>
+  code === 1003 &&
+  /^Unsupported signaling protocol version(?:;|$)/.test(reason);
 
 /**
  * The signaling version is a fail-closed compatibility check, not a suite
@@ -9,4 +25,4 @@ export const isProtocolVersionCompatible = (
 ): boolean =>
   typeof peerProtocolVersion === "number" &&
   Number.isInteger(peerProtocolVersion) &&
-  peerProtocolVersion === PROTOCOL_VERSION;
+  peerProtocolVersion === SIGNALING_PROTOCOL_VERSION;

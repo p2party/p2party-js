@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 // The production seam between a completed PIN handshake and the attempt
 // limiter: handleOpenChannel must record the peer as authenticated in the
 // room, or the room window's exemption for established members never applies.
@@ -194,7 +195,10 @@ describe("handleOpenChannel PIN success", () => {
     pinAttempts.usePinAttemptStoreForTests(tracked.store);
     // The peer had two failed attempts before it got the PIN right.
     for (let i = 0; i < pinAttempts.MAX_PIN_ATTEMPTS - 1; i++)
-      await pinAttempts.recordPinFailure(PIN_ROOM_ID, HIGHER_PUBLIC_KEY);
+      await pinAttempts.recordPinFailure(
+        deriveRoomLocator(PIN_ROOM_URL),
+        HIGHER_PUBLIC_KEY,
+      );
     const deletesBefore = tracked.deletes();
 
     let handshakes = 0;
@@ -252,7 +256,7 @@ describe("handleOpenChannel PIN success", () => {
       expect(
         await callPinWorker(
           "getPinAttemptState",
-          PIN_ROOM_ID,
+          deriveRoomLocator(PIN_ROOM_URL),
           HIGHER_PUBLIC_KEY,
         ),
       ).toBeUndefined();
@@ -264,14 +268,20 @@ describe("handleOpenChannel PIN success", () => {
       );
       for (let i = 1; i <= pinAttempts.MAX_ROOM_PIN_FAILURES_PER_WINDOW; i++)
         await reloaded.recordFailure(
-          PIN_ROOM_ID,
+          deriveRoomLocator(PIN_ROOM_URL),
           (0x1000 + i).toString(16).padStart(64, "0"),
         );
       await expect(
-        reloaded.assertAttemptAllowed(PIN_ROOM_ID, HIGHER_PUBLIC_KEY),
+        reloaded.assertAttemptAllowed(
+          deriveRoomLocator(PIN_ROOM_URL),
+          HIGHER_PUBLIC_KEY,
+        ),
       ).resolves.toBeUndefined();
       await expect(
-        reloaded.assertAttemptAllowed(PIN_ROOM_ID, "cd".repeat(32)),
+        reloaded.assertAttemptAllowed(
+          deriveRoomLocator(PIN_ROOM_URL),
+          "cd".repeat(32),
+        ),
       ).rejects.toThrow("identities new to this room");
     } finally {
       destroyPqHealingOrchestrator(epc);

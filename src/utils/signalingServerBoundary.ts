@@ -2,20 +2,13 @@ const parseSignalingServerUrl = (value: string): URL => {
   const url = new URL(value);
   if (url.protocol !== "ws:" && url.protocol !== "wss:")
     throw new Error("Signaling server URL must use ws: or wss:");
+  if (url.searchParams.has("publickey"))
+    throw new Error("The signaling URL must not contain a public key");
   return url;
 };
 
 export const canonicalSignalingServerUrl = (value: string): string =>
   parseSignalingServerUrl(value).toString();
-
-export const buildSignalingWebSocketUrl = (
-  signalingServerUrl: string,
-  publicKey: string,
-): string => {
-  const url = parseSignalingServerUrl(signalingServerUrl);
-  url.searchParams.set("publickey", publicKey);
-  return url.toString();
-};
 
 export interface SignalingServerSelection {
   requestedServerUrl: string;

@@ -68,6 +68,27 @@ describe("waitForRoom", () => {
     expect(room.id).toBe(ROOM_ID);
   });
 
+  test("a signaling version refusal rejects pending and later room joins", async () => {
+    const { signalingServerActions } =
+      await import("../src/reducers/signalingServerSlice");
+    const { serverUrl } = store.getState().signalingServer;
+    const pending = p2party.waitForRoom(ROOM_URL);
+    try {
+      dispatch(signalingServerActions.disconnect("version-mismatch"));
+      await expect(pending).rejects.toBeInstanceOf(
+        p2party.SignalingVersionMismatchError,
+      );
+      await expect(
+        p2party.joinRoom(ROOM_URL, serverUrl),
+      ).rejects.toBeInstanceOf(p2party.SignalingVersionMismatchError);
+      expect(store.getState().signalingServer.isEstablishingConnection).toBe(
+        false,
+      );
+    } finally {
+      dispatch(signalingServerActions.disconnect());
+    }
+  });
+
   test("rejects on timeout instead of hanging forever", async () => {
     seedRoom("");
     await expect(

@@ -13,6 +13,7 @@ import { hashMerkleLeafWasm } from "../../src/utils/leafHash";
 import {
   PROOF_LEN,
   PROOF_LEVEL_BUILD_SLICE_MS,
+  PROOF_LEVEL_MAX_HASHES_PER_SLICE,
 } from "../../src/utils/constants";
 import { uint8ArrayToHex } from "../../src/utils/uint8array";
 
@@ -266,6 +267,69 @@ describe("the proof-level build shares the thread", () => {
         ),
       ).toBe(true);
     levels.release();
+  });
+
+  test.each(["frozen", "100 ms steps"])(
+    "each slice bounds its hash count with a %s clock",
+    async (resolution) => {
+      const leafCount = 2 * PROOF_LEVEL_MAX_HASHES_PER_SLICE + 3;
+      const { leaves } = makeTree(leafCount);
+      const clock = countingClock(module, 0.3);
+      const sliceHashes: number[] = [];
+      let previous = 0;
+      const record = () => {
+        sliceHashes.push(clock.state.hashes - previous);
+        previous = clock.state.hashes;
+      };
+      const levels = await buildMerkleProofLevels(leaves, clock.module, {
+        now: () =>
+          resolution === "frozen" ? 0 : Math.floor(clock.now() / 100) * 100,
+        yieldToEventLoop: async () => {
+          record();
+          await Promise.resolve();
+        },
+      });
+      record();
+      expect(Math.max(...sliceHashes)).toBe(PROOF_LEVEL_MAX_HASHES_PER_SLICE);
+      expect(clock.state.hashes).toBe(leafCount - 1);
+      expect(levels.root()).toEqual(await getMerkleRoot(leaves, module));
+      levels.release();
+    },
+  );
+
+  test("concurrent trees share one runnable slice per task", async () => {
+    const { leaves } = makeTree(2 * PROOF_LEVEL_MAX_HASHES_PER_SLICE + 1);
+    const clock = countingClock(module, 0);
+    const wake = new MessageChannel();
+    const wakeCount = new Promise<number>((resolve) => {
+      wake.port1.onmessage = () => resolve(clock.state.hashes);
+    });
+    const probe = new Proxy(clock.module, {
+      get(target, prop, receiver) {
+        if (prop === "_sha512_init")
+          return (ptr: number) => {
+            if (!clock.state.hashes) wake.port2.postMessage(null);
+            return target._sha512_init(ptr);
+          };
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+    try {
+      const builds = Array.from({ length: 6 }, () =>
+        buildMerkleProofLevels(leaves, probe, { now: clock.now }),
+      );
+      expect(clock.state.hashes).toBe(0);
+      const levels = await Promise.all(builds);
+      expect(await wakeCount).toBe(PROOF_LEVEL_MAX_HASHES_PER_SLICE);
+      const expectedRoot = await getMerkleRoot(leaves, module);
+      for (const tree of levels) {
+        expect(tree.root()).toEqual(expectedRoot);
+        tree.release();
+      }
+    } finally {
+      wake.port1.close();
+      wake.port2.close();
+    }
   });
 
   test("between slices a task queued during one runs before the next", async () => {

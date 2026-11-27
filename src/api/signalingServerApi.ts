@@ -1,3 +1,4 @@
+import { isSignalingVersionRefusal } from "../utils/protocolVersion";
 import { debugLog } from "../utils/debug";
 import { createApi } from "@reduxjs/toolkit/query";
 
@@ -15,10 +16,7 @@ import {
   signalingAttemptLifecycle,
   type SignalingAttempt,
 } from "../utils/signalingAttemptLifecycle";
-import {
-  buildSignalingWebSocketUrl,
-  canonicalSignalingServerUrl,
-} from "../utils/signalingServerBoundary";
+import { canonicalSignalingServerUrl } from "../utils/signalingServerBoundary";
 import {
   sendAuthenticatedSignalingFrame,
   sendPeerConnectionRequest,
@@ -73,7 +71,6 @@ import type { State } from "../store";
 import type {
   WebSocketMessageCandidateSend,
   WebSocketMessageDescriptionSend,
-  WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdRequest,
   WebSocketMessagePeersRequest,
   WebSocketMessageConnectionResponse,
@@ -94,7 +91,6 @@ export interface WebSocketMessage {
     | WebSocketMessagePongResponse
     | WebSocketMessageCandidateSend
     | WebSocketMessageDescriptionSend
-    | WebSocketMessageChallengeResponse
     | WebSocketMessageRoomIdRequest
     | WebSocketMessageLeaveRoomRequest
     | WebSocketMessagePeersRequest
@@ -216,7 +212,11 @@ export const signalingReconnect = createSignalingReconnectController({
     if (!host) return false;
     if (signalingCloseIsPermanent) return false;
     const { rooms, signalingServer } = host.getState() as State;
-    if (signalingServer.isConnected || signalingServer.isEstablishingConnection)
+    if (
+      signalingServer.refusal ||
+      signalingServer.isConnected ||
+      signalingServer.isEstablishingConnection
+    )
       return false;
     if (signalingServer.serverUrl.length === 0) return false;
     return rooms.some((room) => room.signalingActive !== false);
@@ -266,6 +266,11 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
     return { error: "Identity purge is in progress" };
 
   const { keyPair, signalingServer } = api.getState() as State;
+  if (
+    signalingServer.refusal &&
+    normalizedSignalingServerUrl === signalingServer.serverUrl
+  )
+    return { error: "Incompatible signaling protocol version" };
   if (
     ws ||
     signalingServer.isConnected ||
@@ -450,17 +455,12 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         }
       }
 
-      const fullUrl = buildSignalingWebSocketUrl(
-        normalizedSignalingServerUrl,
-        publicKey,
-      );
-
       // Identity bootstrap may await IndexedDB and crypto. A manual disconnect
       // or replacement during those awaits owns the newer lifecycle.
       requireCurrentAttempt();
       releaseIdentityBootstrap();
       releaseIdentityBootstrap = null;
-      socketForAttempt = new WebSocket(fullUrl);
+      socketForAttempt = new WebSocket(normalizedSignalingServerUrl);
       ws = socketForAttempt;
       socketForAttempt.binaryType = "arraybuffer";
 
@@ -540,6 +540,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         let selfInitiatedClose = false;
         const settleClosedSocket = (
           close?: Readonly<{ code: number; reason: string }>,
+          refusal?: "version-mismatch",
         ): void => {
           if (socketSettled) return;
           socketSettled = true;
@@ -554,7 +555,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
           ws = null;
           signalingAttemptLifecycle.clear(attempt);
 
-          api.dispatch(signalingServerActions.disconnect());
+          api.dispatch(signalingServerActions.disconnect(refusal));
           // C4: every settle here is a close the SDK did not initiate —
           // websocketDisconnectQuery nulls onclose before closing, so a
           // deliberate disconnect never reaches this function. The heartbeat
@@ -582,7 +583,7 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
         try {
           socket.onopen = () => {
             if (!isCurrentSocket()) return;
-            debugLog("WebSocket connected to:", fullUrl);
+            debugLog("WebSocket connected");
             const watchdog = createSignalingHeartbeatWatchdog({
               now: () => Date.now(),
               timeoutMs: SIGNALING_HEARTBEAT_TIMEOUT_MS,
@@ -704,6 +705,17 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
                   api,
                   isCurrentSocket,
                   noteHeartbeat,
+                  () => {
+                    if (!isCurrentSocket()) return;
+                    stopOutboxOwners("terminal signaling refusal");
+                    settleClosedSocket(
+                      {
+                        code: 4003,
+                        reason: "Unsupported signaling protocol version",
+                      },
+                      "version-mismatch",
+                    );
+                  },
                 ),
               payloadSize,
             );
@@ -717,7 +729,13 @@ const websocketBaseQuery: BaseQueryFn<WebSocketParams, undefined> = async (
               code: event.code,
               selfInitiated: selfInitiatedClose,
             });
-            settleClosedSocket();
+            settleClosedSocket(
+              undefined,
+              !selfInitiatedClose &&
+                isSignalingVersionRefusal(event.code, event.reason)
+                ? "version-mismatch"
+                : undefined,
+            );
             debugLog("WebSocket disconnected");
           };
         } catch (error) {

@@ -1,9 +1,11 @@
 import "fake-indexeddb/auto";
-import { IDBFactory } from "fake-indexeddb";
+import { IDBFactory, forceCloseDatabase } from "fake-indexeddb";
+import { unwrap } from "idb";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { getDB } from "../../src/db/src/getDB";
 import {
   executeOutbox,
+  getSendDB,
   storeOutboxChunk,
   MAX_PENDING_OUTBOX,
   OUTBOX_LEASE_MS,
@@ -476,5 +478,93 @@ describe("durable outbox transactions across worker lifetimes", () => {
       roomId: "other-room",
     });
     expect((await executeOutbox({ kind: "renew", lease })).accepted).toBe(true);
+  });
+});
+
+describe("sender database connection and byte accounting", () => {
+  test("concurrent sends share an open and reconnect after versionchange or forced close", async () => {
+    const open = spyOn(indexedDB, "open");
+    try {
+      const [first, same] = await Promise.all([getSendDB(), getSendDB()]);
+      expect(first).toBe(same);
+      expect(open).toHaveBeenCalledTimes(1);
+      // Deletion also sends a versionchange event to every open connection.
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(first.name);
+        request.onsuccess = () => resolve();
+        request.onblocked = () =>
+          reject(new Error("sender blocked another context"));
+      });
+      const reopened = await getSendDB();
+      expect(reopened).not.toBe(first);
+      expect(open).toHaveBeenCalledTimes(2);
+      const closed = new Promise<void>((resolve) =>
+        reopened.addEventListener("close", () => resolve(), { once: true }),
+      );
+      // fake-indexeddb declares the constructor here but takes the instance.
+      forceCloseDatabase(
+        unwrap(reopened) as unknown as Parameters<typeof forceCloseDatabase>[0],
+      );
+      await closed;
+      expect(await getSendDB()).not.toBe(reopened);
+      expect(open).toHaveBeenCalledTimes(3);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  test("binding a pre-index cell preserves the bytes already charged", async () => {
+    const lease = await create();
+    const initial = chunk(lease.transferId, 0);
+    await storeOutboxChunk(initial, lease);
+    const db = await getSendDB();
+    // Model a transfer staged by v20 or v21: the reservation includes this
+    // body, and after upgrade its existing row still lacks the size field.
+    await db.put("newChunks", initial);
+    await storeOutboxChunk(
+      {
+        ...initial,
+        merkleRoot: root,
+        receiptToken: hash,
+        merkleProof: new ArrayBuffer(48),
+      },
+      lease,
+    );
+    const size =
+      2048 + initial.data.byteLength + initial.metadata.byteLength + 48;
+    expect((await db.get("outbox", lease.transferId))?.writtenBytes).toBe(size);
+    expect(
+      (await db.get("newChunks", [lease.transferId, 0]))?.accountedBytes,
+    ).toBe(size);
+  });
+
+  test("concurrent proof bindings read no staged value and charge the proof once", async () => {
+    const lease = await create();
+    const initial = chunk(lease.transferId, 0);
+    await storeOutboxChunk(initial, lease);
+    const bound = {
+      ...initial,
+      merkleRoot: root,
+      receiptToken: hash,
+      merkleProof: new ArrayBuffer(80),
+    };
+    const read = spyOn(IDBObjectStore.prototype, "get");
+    try {
+      await Promise.all([
+        storeOutboxChunk(bound, lease),
+        storeOutboxChunk(bound, lease),
+      ]);
+      expect(
+        read.mock.calls.some(
+          ([key]) => Array.isArray(key) && key[0] === lease.transferId,
+        ),
+      ).toBe(false);
+      const db = await getSendDB();
+      expect((await db.get("outbox", lease.transferId))?.writtenBytes).toBe(
+        2048 + 4 + 128 + 80,
+      );
+    } finally {
+      read.mockRestore();
+    }
   });
 });

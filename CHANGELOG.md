@@ -6,11 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## [Unreleased]
 
-Nothing in this entry is part of the package. The SDK's public surface,
-protocol, wire format and behaviour are unchanged, and no released code path
-reaches any of it.
+### 0.15.0-rc.0
 
-### Added
+- The browser SDK requires signaling protocol 5. Upgrade the server first.
+  The browser opens a keyless WebSocket URL, signs a challenge bound to the
+  signaling host, and sends a SHA-512 room locator on join and leave. The
+  server can still link a room to its members. Peer handshakes and message
+  cells continue to use protocol 4.
+- An explicit signaling version refusal rejects pending and subsequent joins
+  to that endpoint with `SignalingVersionMismatchError`. Older servers that
+  reject the WebSocket upgrade can surface only a browser connection error.
+- Room and message deletion report files the browser could not remove.
+  Interrupted cleanup can retry after a restart, including for transfers
+  with only a receive lease left on disk.
+- Receipt lookups read chunk indices without loading plaintext. The sender
+  reuses its IndexedDB connection and yields between batches of Merkle work
+  even when the browser clock has coarse resolution.
+
+### Internal research
 
 - An internal, flagged prototype of server-blind rendezvous over two stores,
   under `src/blindRendezvous/prototype/`. It is not exported from

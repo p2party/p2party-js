@@ -279,6 +279,7 @@ const validateDocumentedVersions = () => {
       ":!:docs/e2e/desync-hunt-2026-09-07.md",
       ":!:docs/e2e/desync-status-2026-09-08.md",
       ":!:docs/rendezvous-prior-art-delta-2026-09.md",
+      ":!:docs/rendezvous-latency-2026-09/attack-privacy.md",
       ":!:libsodium/**",
       ":!:src/cryptography/vendor/**",
     ],

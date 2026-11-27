@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "./utils/roomLocator";
 import { outboxRequest } from "./db/api";
 import { pendingMessageView, discardPendingSelection } from "./handlers/outbox";
 import { createExpiredReceiveMaintenance } from "./handlers/expiredReceiveProjection";
@@ -9,6 +10,7 @@ import pkg from "../package.json";
 
 import { store, dispatch } from "./store";
 
+import { SignalingVersionMismatchError } from "./utils/protocolVersion";
 import { newKeyPair, sign, verify } from "./cryptography/ed25519";
 import {
   createSession,
@@ -169,6 +171,7 @@ import type { State as InternalState } from "./store";
 import type {
   Room,
   Peer,
+  PeerSignalingPresence,
   Channel,
   Message,
   SetRoomArgs,
@@ -224,6 +227,8 @@ import {
   DatabaseWorkerError,
   filesNotRemoved,
   InvalidMessageHashError,
+  InvalidTransferIdError,
+  MissingMessageIdentifierError,
   StorageFailedError,
 } from "./db/dbErrors";
 import { deleteRoomDataTerminal } from "./api/webrtc/deleteRoomData";
@@ -390,6 +395,11 @@ const joinRoomThroughSignaling = (
   normalizedRequestedUrl: string,
 ): void => {
   const { keyPair, signalingServer } = store.getState();
+  if (
+    signalingServer.refusal &&
+    signalingServer.serverUrl === normalizedRequestedUrl
+  )
+    throw new SignalingVersionMismatchError();
   const socketActive =
     signalingServer.isConnected || signalingServer.isEstablishingConnection;
 
@@ -434,7 +444,13 @@ const connect = async (
     throw new Error("Invalid room connection options");
 
   await signalingRoomOperationLifecycle.runJoin(async () => {
-    const { rooms } = store.getState();
+    const { rooms, signalingServer } = store.getState();
+    if (
+      signalingServer.refusal &&
+      signalingServer.serverUrl ===
+        canonicalSignalingServerUrl(signalingServerUrl)
+    )
+      throw new SignalingVersionMismatchError();
     const roomIndex = rooms.findIndex((room) => room.url === roomUrl);
     let persistedPolicy: RoomPolicyV1 | undefined;
     if (roomIndex === -1) {
@@ -462,7 +478,8 @@ const connect = async (
       // A deliberate PIN re-entry resets the throttles but keeps the record
       // of peers that already authenticated here: they stay exempt from the
       // room window. Purge (below) removes that record too.
-      if (existingRoomId) await clearPinAttemptLimits(existingRoomId);
+      if (existingRoomId)
+        await clearPinAttemptLimits(deriveRoomLocator(roomUrl));
     }
 
     await activateSignalingRoom(roomUrl, {
@@ -533,6 +550,8 @@ const waitForRoom = async (
     return candidate?.id ? candidate : undefined;
   };
 
+  if (store.getState().signalingServer.refusal)
+    throw new SignalingVersionMismatchError();
   const alreadyJoined = current();
   if (alreadyJoined) return alreadyJoined;
   if (signal?.aborted)
@@ -570,6 +589,10 @@ const waitForRoom = async (
     }
 
     const inspect = () => {
+      if (store.getState().signalingServer.refusal) {
+        finish(() => reject(new SignalingVersionMismatchError()));
+        return;
+      }
       const room = current();
       if (room)
         finish(() => {
@@ -1442,7 +1465,7 @@ const messageHashHex = (
   value: string | Uint8Array | undefined,
   argument: "merkleRoot" | "hash",
 ): string => {
-  if (!value) return "";
+  if (value === undefined) return "";
   if (typeof value !== "string") {
     if (value.length !== crypto_hash_sha512_BYTES)
       throw new InvalidMessageHashError(argument);
@@ -1502,10 +1525,14 @@ const cancelMessage = async (
   hash?: string | Uint8Array,
   transferId?: string,
 ) => {
-  if (!transferId && !merkleRoot && !hash)
-    throw new Error("Need to provide a transfer ID, Merkle root, or hash");
-  if (transferId && !/^[0-9a-f]{64}$/.test(transferId))
-    throw new Error("Invalid transfer ID");
+  if (
+    transferId === undefined &&
+    merkleRoot === undefined &&
+    hash === undefined
+  )
+    throw new MissingMessageIdentifierError();
+  if (transferId !== undefined && !/^[0-9a-f]{64}$/.test(transferId))
+    throw new InvalidTransferIdError();
   const merkleRootHex = messageHashHex(merkleRoot, "merkleRoot");
   const hashHex = messageHashHex(hash, "hash");
 
@@ -1983,7 +2010,7 @@ const purgeRoomSettled = async (roomUrl: string): Promise<void> => {
       // failure reaches this call; closeLocalTransport already disconnected.
       deleteLocalData: () => deleteStoredRoomData(removedRoom.id, roomUrl),
       clearPinAttempts: async () => {
-        if (removedRoom.id) await clearPinAttempts(removedRoom.id);
+        await clearPinAttempts(deriveRoomLocator(roomUrl));
       },
     });
   });
@@ -2143,12 +2170,15 @@ export const p2party = {
   MIN_COVER_SLOT_MS,
   validateRoomPolicyV1,
   MessageDeliveryError,
+  SignalingVersionMismatchError,
   RemoteRoomRevocationUnconfirmedError,
   // The typed errors of storage, as the guide names them (`p2party.X`), so
   // that `error instanceof p2party.StorageFailedError` works with the default
   // import as it does with the named one.
   StorageFailedError,
   InvalidMessageHashError,
+  InvalidTransferIdError,
+  MissingMessageIdentifierError,
   ReceiveIntegrityError,
   DatabaseUnavailableError,
   DatabaseUpgradeBlockedError,
@@ -2186,6 +2216,7 @@ export type {
   State,
   Room,
   Peer,
+  PeerSignalingPresence,
   Channel,
   Message,
   RoomData,
@@ -2220,6 +2251,7 @@ export {
   SessionReplayError,
   setWasmSourceUrl,
   MessageDeliveryError,
+  SignalingVersionMismatchError,
   RemoteRoomRevocationUnconfirmedError,
   createRecoverableIdentity,
   restoreIdentityFromMnemonic,
@@ -2237,6 +2269,8 @@ export {
   DatabaseUpgradeBlockedError,
   DatabaseWorkerError,
   InvalidMessageHashError,
+  InvalidTransferIdError,
+  MissingMessageIdentifierError,
   StorageFailedError,
   setDebugLogging,
   getCoverTimerSource,

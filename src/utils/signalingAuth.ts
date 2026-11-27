@@ -46,40 +46,33 @@ export const hasCurrentSocketProof = (
   /^[0-9a-f]{128}$/u.test(keyPair.signature);
 
 /**
- * Exact protocol-v3 server challenge. Legacy reconnect credentials are
+ * Exact v5 server challenge. Legacy reconnect credentials are
  * deliberately not accepted: every WebSocket must prove possession anew.
  */
-export const isFreshV3Challenge = (
+export const isFreshSignalingChallenge = (
   value: unknown,
 ): value is WebSocketMessageChallengeRequest => {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, [
-      "type",
-      "peerId",
-      "challenge",
-      "protocolVersion",
-      "message",
-    ]) &&
-    value.type === "peerId" &&
-    typeof value.peerId === "string" &&
-    isUUID(value.peerId) &&
+    hasOnlyKeys(value, ["type", "challenge", "protocolVersion"]) &&
+    value.type === "authChallenge" &&
     typeof value.challenge === "string" &&
     /^[0-9a-f]{64}$/.test(value.challenge) &&
     typeof value.protocolVersion === "number" &&
-    isProtocolVersionCompatible(value.protocolVersion) &&
-    typeof value.message === "string"
+    isProtocolVersionCompatible(value.protocolVersion)
   );
 };
 
-/** Exact protocol-v3 proof-success response. TURN is issued only at room join. */
-export const isV3ChallengeSuccess = (
+/** Exact v5 proof-success response. TURN is issued only at room join. */
+export const isSignalingChallengeSuccess = (
   value: unknown,
 ): value is WebSocketMessageSuccessfulChallenge => {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["type", "challengeId", "protocolVersion"]) &&
+    hasOnlyKeys(value, ["type", "peerId", "challengeId", "protocolVersion"]) &&
     value.type === "challenge" &&
+    typeof value.peerId === "string" &&
+    isUUID(value.peerId, 4) &&
     typeof value.challengeId === "string" &&
     isUUID(value.challengeId) &&
     typeof value.protocolVersion === "number" &&
@@ -97,7 +90,6 @@ export const isV3ChallengeSuccess = (
 export const parseTurnCredentials = (
   value: unknown,
   nowMs = Date.now(),
-  expectedPublicKey?: string,
 ): TurnCredentials | null => {
   if (!isRecord(value)) return null;
   if (
@@ -137,14 +129,12 @@ export const parseTurnCredentials = (
   )
     return null;
 
-  const usernameBinding = /^([1-9][0-9]{0,10}):([0-9a-f]{64})$/u.exec(
+  const usernameBinding = /^([1-9][0-9]{0,10}):[A-Za-z0-9_-]{22}$/u.exec(
     value.username,
   );
   if (
     usernameBinding === null ||
-    Number(usernameBinding[1]) !== value.expiresAtUnixSeconds ||
-    (expectedPublicKey !== undefined &&
-      usernameBinding[2] !== expectedPublicKey)
+    Number(usernameBinding[1]) !== value.expiresAtUnixSeconds
   )
     return null;
 

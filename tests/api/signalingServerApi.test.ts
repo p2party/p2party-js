@@ -9,11 +9,8 @@ import { describe, expect, test } from "bun:test";
   length: 0,
 } as Storage;
 
-const {
-  buildSignalingWebSocketUrl,
-  canonicalSignalingServerUrl,
-  selectSignalingServerUrl,
-} = await import("../../src/utils/signalingServerBoundary");
+const { canonicalSignalingServerUrl, selectSignalingServerUrl } =
+  await import("../../src/utils/signalingServerBoundary");
 const { sendAuthenticatedSignalingFrame, sendPeerConnectionRequest } =
   await import("../../src/utils/signalingFrame");
 
@@ -56,23 +53,21 @@ const api = (verified = true) => {
 describe("signaling WebSocket boundary", () => {
   test("canonical URL construction preserves existing query parameters", () => {
     const result = new URL(
-      buildSignalingWebSocketUrl(
-        "wss://signal.example/ws?deployment=blue",
-        SELF_PUBLIC_KEY,
-      ),
+      canonicalSignalingServerUrl("wss://signal.example/ws?deployment=blue"),
     );
     expect(result.protocol).toBe("wss:");
     expect(result.searchParams.get("deployment")).toBe("blue");
-    expect(result.searchParams.getAll("publickey")).toEqual([SELF_PUBLIC_KEY]);
+    expect(result.searchParams.getAll("publickey")).toEqual([]);
+    expect(() =>
+      canonicalSignalingServerUrl("wss://signal.example/ws?publickey=old"),
+    ).toThrow();
   });
 
   test("only ws and wss signaling schemes are accepted", () => {
     expect(() =>
       canonicalSignalingServerUrl("https://signal.example/ws"),
     ).toThrow("must use ws: or wss:");
-    expect(() =>
-      buildSignalingWebSocketUrl("not a URL", SELF_PUBLIC_KEY),
-    ).toThrow();
+    expect(() => canonicalSignalingServerUrl("not a URL")).toThrow();
   });
 
   test("first custom server is allowed, but retained rooms stay bound across disconnect", () => {

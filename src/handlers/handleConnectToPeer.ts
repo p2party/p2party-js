@@ -43,7 +43,7 @@ import {
   isIdentityInitiator,
 } from "../utils/identityRole";
 import { assertTransportIdentityCurrent } from "../utils/transportIdentity";
-import { PROTOCOL_VERSION } from "../utils/constants";
+import { SIGNALING_PROTOCOL_VERSION } from "../utils/constants";
 import { requestRoomFromSignaling } from "./requestRoom";
 import { waitForFreshSocketProof } from "../utils/roomRequestCoordinator";
 // import libcrypto from "../cryptography/libcrypto";
@@ -378,7 +378,7 @@ export const handleConnectToPeer = async (
                   fromPeerPublicKey: currentKeyPair.publicKey,
                   toPeerId: peerId,
                   roomId,
-                  protocolVersion: PROTOCOL_VERSION,
+                  protocolVersion: SIGNALING_PROTOCOL_VERSION,
                 } as WebSocketMessageDescriptionSend,
               }),
             )
@@ -407,7 +407,7 @@ export const handleConnectToPeer = async (
                 fromPeerId: currentKeyPair.peerId,
                 toPeerId: peerId,
                 roomId,
-                protocolVersion: PROTOCOL_VERSION,
+                protocolVersion: SIGNALING_PROTOCOL_VERSION,
               } as WebSocketMessageCandidateSend,
             }),
           )

@@ -60,22 +60,19 @@ const webrtcMessageQuery: BaseQueryFn<
         ).manifests?.find((row) => row.transferId === transferId)
       : undefined;
   if (data === undefined && !pending) return { data: undefined };
-  const totalSize =
-    typeof data === "string"
-      ? new TextEncoder().encode(data).length
-      : (data?.size ?? pending!.totalSize);
-  const totalChunks =
-    pending?.totalChunks ??
+  if (data !== undefined)
     planMessageChunkCount(
-      totalSize,
+      typeof data === "string"
+        ? new TextEncoder().encode(data).length
+        : data.size,
       effectiveMinChunks,
       effectiveChunkSize,
       effectivePercentageFilledChunk,
     );
   const encryptionModule = await wasmLoader(cryptoMemory.protocolV3Memory());
-  const merkleModule = await wasmLoader(
-    cryptoMemory.getMerkleProofMemory(totalChunks),
-  );
+  // Streaming file hashes and sliced Merkle trees keep only the hash state
+  // and a fixed input buffer in WASM. Tree levels live on the JS heap.
+  const merkleModule = await wasmLoader(cryptoMemory.protocolV3Memory());
 
   // MessageDeliveryError must be RETURNED, not thrown. RTK Query serializes an
   // error that escapes a queryFn — the caller then receives a plain object, so

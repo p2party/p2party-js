@@ -460,9 +460,15 @@ describe("db.worker atomic receive progress", () => {
       now += 24 * 60 * 60 * 1000 - 1;
       expect((await callWorker("sweepStaleReceives", [])).result).toEqual([]);
       now += 2;
-      expect((await callWorker("sweepStaleReceiveDetails", [])).result).toEqual([
-        { merkleRoot: chunk.merkleRoot, roomId: chunk.roomId, fromPeerId: chunk.fromPeerId },
-      ]);
+      expect((await callWorker("sweepStaleReceiveDetails", [])).result).toEqual(
+        [
+          {
+            merkleRoot: chunk.merkleRoot,
+            roomId: chunk.roomId,
+            fromPeerId: chunk.fromPeerId,
+          },
+        ],
+      );
       expect(
         (await callWorker("getDBAllChunksCount", [chunk.merkleRoot])).result,
       ).toBe(0);
@@ -1777,4 +1783,36 @@ describe("getDBRoomStats", () => {
     expect(stats.bytesTotal).toBe(0);
     expect(stats.peerIds).toEqual([]);
   });
+});
+
+test("receipt lookup returns only its scope and index, while a full staged read transfers its buffers", async () => {
+  const merkleRoot = "01".repeat(64);
+  const receiptToken = "02".repeat(64);
+  const row = {
+    transferId: "11".repeat(32),
+    chunkIndex: 0,
+    hash: merkleRoot,
+    leafHash: merkleRoot,
+    merkleRoot,
+    receiptToken,
+    data: rnd(1024),
+    metadata: rnd(64),
+    merkleProof: rnd(80),
+  };
+  expect((await callWorker("setDBNewChunk", [row])).error).toBeUndefined();
+  const found = await callWorker("getDBNewChunkByReceipt", [
+    merkleRoot,
+    receiptToken,
+  ]);
+  expect(found.result).toEqual({
+    transferId: row.transferId,
+    chunkIndex: 0,
+    merkleRoot,
+    receiptToken,
+  });
+  const full = await callWorker("getDBNewChunk", [row.transferId, 0]);
+  expect((full.result as typeof row).data).toEqual(row.data);
+  expect(
+    lastWorkerTransferredBuffers.map((buffer) => buffer.byteLength),
+  ).toEqual([0, 0, 0]);
 });

@@ -783,7 +783,12 @@ export interface WorkerMethodReturnTypes {
   getDBChunk: ArrayBuffer | undefined;
   existsDBChunk: boolean;
   getDBNewChunk: NewChunk | undefined;
-  getDBNewChunkByReceipt: NewChunk | undefined;
+  getDBNewChunkByReceipt:
+    | Pick<
+        NewChunk,
+        "transferId" | "chunkIndex" | "merkleRoot" | "receiptToken"
+      >
+    | undefined;
   existsDBNewChunk: boolean;
   getDBSendQueue: SendQueue[];
   getDBAllChunks: Chunk[];
@@ -809,7 +814,7 @@ export interface WorkerMethodReturnTypes {
   deleteDBChunk: undefined;
   deleteDBNewChunk: undefined;
   deleteDBSendQueue: undefined;
-  deleteDBUniqueRoom: undefined;
+  deleteDBUniqueRoom: string[];
   getRatchetSession: RatchetSession | undefined;
   setRatchetSession: undefined;
   deleteRatchetSession: undefined;

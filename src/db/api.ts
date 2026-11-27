@@ -6,7 +6,7 @@ import type {
   ReceiveDeleteGuard,
   RoomMessageLoadOptions,
 } from "./types";
-import type { OutboxLease, OutboxRequest } from "./outboxTypes";
+import type { OutboxLease, OutboxRequest, OutboxResponse } from "./outboxTypes";
 import type {
   WorkerMessages,
   Chunk,
@@ -566,8 +566,20 @@ export const getDBAllNewChunks = (selector: NewChunkSelector) =>
 export const getDBAllNewChunksCount = (transferId: string) =>
   callWorker("getDBAllNewChunksCount", transferId);
 
-export const setDBNewChunk = (chunk: NewChunk, lease?: OutboxLease) =>
-  callWorker("setDBNewChunk", chunk, lease);
+/** With ownership, the worker receives the buffers and wipes its temporary
+ * plaintext after the transaction. Other callers keep their buffers. */
+export const setDBNewChunk = (
+  chunk: NewChunk,
+  lease?: OutboxLease,
+  transferOwnership = false,
+) =>
+  transferOwnership
+    ? (callWorkerOwned(
+        "setDBNewChunk",
+        [chunk, lease],
+        [...new Set([chunk.data, chunk.metadata, chunk.merkleProof])],
+      ) as Promise<undefined>)
+    : callWorker("setDBNewChunk", chunk, lease);
 
 export const setDBSendQueue = (item: SendQueue) =>
   callWorker("setDBSendQueue", item);
@@ -668,8 +680,15 @@ export const setIdentityDerivation = (derivation: IdentityDerivation) =>
 export const deleteIdentityDerivation = () =>
   callWorker("deleteIdentityDerivation");
 
-export const outboxRequest = (request: OutboxRequest) =>
-  callWorker("outboxRequest", request);
+export const outboxRequest = (
+  request: OutboxRequest,
+  transfer: Transferable[] = [],
+) =>
+  callWorkerOwned(
+    "outboxRequest",
+    [request],
+    transfer,
+  ) as Promise<OutboxResponse>;
 export const sweepStaleReceives = () => callWorker("sweepStaleReceives");
 export const sweepStaleReceiveDetails = () =>
   callWorker("sweepStaleReceiveDetails");

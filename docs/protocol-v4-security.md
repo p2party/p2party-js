@@ -169,9 +169,9 @@ third-party cryptographic audit or a ProVerif/CryptoVerif analysis.
 
 Encryption does not hide all communication metadata.
 
-The current legacy signaling operator can observe:
+The signaling operator can observe the following metadata.
 
-- the normalized room capability and room membership;
+- the stable room locator and membership;
 - peer identifiers and presented public identity keys;
 - signaling timing, SDP, ICE candidates, IP/network information, and TURN use;
 - room joins, leaves, and connection attempts; and
@@ -207,27 +207,26 @@ see when a message starts, how many cells/channels are active, when receipts
 flow, and when a transfer ends. Fixed cells without a room-wide schedule are
 not continuous cover traffic.
 
-Putting the capability in a URL fragment keeps it out of ordinary HTTP
-requests and common access logs, but the shipped legacy signaling path still
-receives its normalized value. A fragment is not a server-blind meeting point.
+The SDK keeps the 256-bit capability locally. Join and leave requests carry
+`roomLocator`, the lowercase hex SHA-512 digest of the 64-character canonical
+capability string encoded as UTF-8. A room can be linked across visits by
+this digest. Roster requests omit local PIN and policy failure lists.
 
 ## Signaling and TURN correctness boundary
 
-SDK 0.14.10 makes legacy signaling state transitions correlated and bounded; it
-does not make that signaling path blind.
+Signaling v5 uses peer protocol v4 for end-to-end connections.
 
 - A room response is accepted only for the exact current socket, room
-  capability, and UUIDv4 request. A delayed response cannot configure another
+  locator, and UUIDv4 request. A delayed response cannot configure another
   room.
 - Caller ICE configuration and signaling-managed TURN credentials are separate
   inputs. Managed credentials carry an absolute expiry, are applied to every
   live room edge before an ICE restart, refresh proactively, and are removed or
   failed closed when they expire.
 - `purgeRoom()` tears down local transports and durable state before waiting
-  for a correlated server acknowledgement. The leave is keyed by the stable
-  room capability rather than the server-assigned room UUID, so a purge racing
-  an in-flight join still revokes that membership. Matching `p2party-server`
-  0.1.1 unlinks the authenticated peer from the room before acknowledging. An
+  for a correlated server acknowledgement. The stable room locator identifies
+  the membership even if the server has yet to send the room UUID. The server
+  unlinks the authenticated peer before acknowledging. An
   offline or non-acknowledging server produces
   `RemoteRoomRevocationUnconfirmedError`; it is never reported as confirmed.
 - Signaling ingress, room rosters, live mesh edges, pending ICE, and channel
@@ -236,7 +235,7 @@ does not make that signaling path blind.
   proof.
 - The server reports departures with a `peerLeft` frame:
   `{ type: "peerLeft", roomId, peerId, reason: "left" | "offline",
-socketGeneration, protocolVersion: 4 }`. `"left"` means the member sent
+socketGeneration, protocolVersion: 5 }`. `"left"` means the member sent
   `leaveRoom`; `"offline"` means its last signaling socket closed, and the
   server sends one frame per room the identity is in. `socketGeneration` names
   the socket that left or closed. The client cannot verify the report, and a
@@ -262,21 +261,18 @@ socketGeneration, protocolVersion: 4 }`. `"left"` means the member sent
   make this client stop retrying a member whose edge later drops; the other
   member's own retries still reach it through the server.
 
-TURN is a transport relay, not a privacy proxy. The legacy REST username is
-expiry-bound but contains the client's Ed25519 public key, and the TURN
-operator can observe source addresses, allocations, timing, and byte volume.
-Neither relay use nor TLS makes the signaling operator unable to read SDP, ICE,
-room capabilities, or membership.
+The relay sees source addresses, allocations, timing and byte counts. Its
+TURN REST username contains a Unix expiry and a 22-character opaque
+base64url tag. The client checks that the username prefix matches the
+expiry and that it lies within the allowed lifetime. The issuing signaling server can associate
+an issued credential with the socket that requested it.
 
-The current challenge proves possession of the presented Ed25519 key to the
-server by signing a fresh nonce. Its transcript is not bound to a server
-identity or origin, so it does not resist a malicious server relaying another
-server's nonce as a signing oracle. The legacy service also has no
-cross-instance session-generation fence or Byzantine quorum. Consequently none
-of malicious-rendezvous blindness, two-server BFT, social-graph hiding,
-server-bound authentication, shutdown survival, or post-quantum signaling
-authentication is a property of this path. Those remain requirements of the
-versioned blind-rendezvous design.
+The first client frame carries its public Ed25519 identity key and a signature
+over the UTF-8 string `p2party-signaling-auth-v2`, a zero byte, the lowercase
+WebSocket host (including any nondefault port), a zero byte and the server's
+32-byte nonce. The server checks this against its configured host. The
+WebSocket upgrade URL omits the public key. The signaling operator still
+sees identities, room membership, SDP and ICE, and it controls availability.
 
 ## Shipped, implemented core, and research
 

@@ -1,3 +1,4 @@
+import { SignalingVersionMismatchError } from "../utils/protocolVersion";
 import { isUUID } from "../utils/formatValidation";
 
 import {
@@ -48,6 +49,8 @@ export const requestRoomFromSignaling = (
   sendRoomRequest: SendRoomRequest,
 ): Promise<AppliedRoomResponse> => {
   const { keyPair, rooms, signalingServer } = api.getState() as State;
+  if (signalingServer.refusal)
+    return Promise.reject(new SignalingVersionMismatchError());
   const room = rooms.find((candidate) => candidate.url === roomUrl);
   if (
     !room ||
@@ -85,6 +88,7 @@ export const requestRoomFromSignalingWithRetry = async (
     } catch (error) {
       attempt += 1;
       if (
+        error instanceof SignalingVersionMismatchError ||
         attempt >= maxAttempts ||
         !isRoomRequestLifecycleCurrent(lifecycleEpoch)
       )

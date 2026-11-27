@@ -1,3 +1,4 @@
+import { hasTerminalPeerHandshakeFailure } from "./handshakeFailure";
 import { debugLog } from "../utils/debug";
 import { isUUID, isHexadecimal } from "../utils/formatValidation";
 
@@ -38,13 +39,14 @@ import {
   notePeerPresence,
   peerDeparted,
 } from "../reducers/roomSlice";
-import { setChallengeId } from "../reducers/keyPairSlice";
+import { setChallengeId, setPeerData } from "../reducers/keyPairSlice";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
 import type { AcceptedRoomResponsePlan } from "./roomResponse";
 import type {
   WebSocketMessageChallengeRequest,
+  WebSocketMessageChallengeResponse,
   WebSocketMessageRoomIdResponse,
   WebSocketMessageDescriptionReceive,
   WebSocketMessageCandidateReceive,
@@ -62,12 +64,12 @@ import { getDBAddressBookEntry, getDBPeerIsBlacklisted } from "../db/api";
 import { isCanonicalEd25519Identity } from "../utils/identityRole";
 import { isProtocolVersionCompatible } from "../utils/protocolVersion";
 import {
-  isFreshV3Challenge,
-  isV3ChallengeSuccess,
+  isFreshSignalingChallenge,
+  isSignalingChallengeSuccess,
 } from "../utils/signalingAuth";
 import { findActiveSignalingRoomIndex } from "../utils/signalingRoomLifecycle";
 import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebouncer";
-import { PROTOCOL_VERSION } from "../utils/constants";
+import { SIGNALING_PROTOCOL_VERSION } from "../utils/constants";
 import {
   areCanonicalConnectionLabels,
   isBoundedDescription,
@@ -96,6 +98,11 @@ const isConnectedEdge = (connection: IRTCPeerConnection): boolean =>
   connection.connectionState === "connected" ||
   connection.connectionState === "disconnected";
 
+const pendingProofs = new WeakMap<
+  WebSocket,
+  WebSocketMessageChallengeResponse
+>();
+
 const handleWebSocketMessage = async (
   event: MessageEvent,
   ws: WebSocket,
@@ -105,6 +112,8 @@ const handleWebSocketMessage = async (
   // Passed in by the socket owner rather than imported, so this handler stays
   // free of any dependency on the live socket's state.
   onHeartbeat: () => void = () => undefined,
+  onVersionMismatch: () => void = () =>
+    ws.close(4003, "Unsupported signaling protocol version"),
 ) => {
   try {
     if (!isCurrentSocket()) return;
@@ -115,8 +124,6 @@ const handleWebSocketMessage = async (
 
       return;
     }
-
-    // debugLog(event.data);
 
     const serialized = String(event.data);
     if (serialized.length > MAX_SIGNALING_MESSAGE_CHARS) {
@@ -136,6 +143,15 @@ const handleWebSocketMessage = async (
       | WebSocketMessagePeerConnectionResponse
       | WebSocketMessagePeerLeft
       | WebSocketMessageRoomLeftResponse;
+
+    if (
+      (message.type === "authChallenge" || message.type === "challenge") &&
+      typeof message.protocolVersion === "number" &&
+      !isProtocolVersionCompatible(message.protocolVersion)
+    ) {
+      onVersionMismatch();
+      return;
+    }
 
     switch (message.type) {
       case "ping": {
@@ -166,24 +182,21 @@ const handleWebSocketMessage = async (
         break;
       }
 
-      case "peerId": {
-        if (!isFreshV3Challenge(message)) {
+      case "authChallenge": {
+        if (!isFreshSignalingChallenge(message)) {
           console.error("Rejecting malformed or incompatible auth challenge");
-          ws.close(1002, "protocol-v4 auth required");
+          ws.close(4002, "Malformed signaling authentication frame");
           break;
         }
         const { keyPair } = api.getState() as State;
 
-        // Protocol v3 has no reconnect bearer shortcut: every WebSocket proves
-        // the Ed25519 identity against a fresh server nonce.
         const challengeResponse = await handleChallenge(
           keyPair,
-          message.peerId,
+          ws.url,
           message.challenge,
-          api,
-          isCurrentSocket,
         );
-        if (!challengeResponse || !isCurrentSocket()) break;
+        if (!isCurrentSocket()) break;
+        pendingProofs.set(ws, challengeResponse);
         ws.send(JSON.stringify(challengeResponse));
 
         break;
@@ -204,7 +217,7 @@ const handleWebSocketMessage = async (
           break;
         }
         const claim = claimRoomResponse(
-          correlation.roomUrl,
+          correlation.roomLocator,
           correlation.roomRequestId,
         );
         if (!claim) {
@@ -212,13 +225,8 @@ const handleWebSocketMessage = async (
           break;
         }
 
-        const { keyPair, rooms } = api.getState() as State;
-        const initialPlan = planRoomResponse(
-          message,
-          rooms,
-          claim,
-          keyPair.publicKey,
-        );
+        const { rooms } = api.getState() as State;
+        const initialPlan = planRoomResponse(message, rooms, claim);
         if (!initialPlan.accepted) {
           rejectRoomResponse(
             claim.roomUrl,
@@ -276,7 +284,6 @@ const handleWebSocketMessage = async (
                   message,
                   freshState.rooms,
                   claim,
-                  freshState.keyPair.publicKey,
                 );
                 if (!replanned.accepted)
                   throw new Error(`roomRequest: ${replanned.reason}`);
@@ -408,11 +415,27 @@ const handleWebSocketMessage = async (
       }
 
       case "challenge": {
-        if (!isV3ChallengeSuccess(message)) {
+        if (!isSignalingChallengeSuccess(message)) {
           console.error("Rejecting malformed or incompatible auth success");
-          ws.close(1002, "protocol-v4 auth required");
+          ws.close(4002, "Malformed signaling authentication frame");
           break;
         }
+        const proof = pendingProofs.get(ws);
+        if (
+          !proof ||
+          (api.getState() as State).keyPair.publicKey !== proof.publicKey
+        ) {
+          ws.close(4002, "Unexpected signaling auth success");
+          break;
+        }
+        pendingProofs.delete(ws);
+        api.dispatch(
+          setPeerData({
+            peerId: message.peerId,
+            challenge: proof.challenge,
+            signature: proof.signature,
+          }),
+        );
         if (isCurrentSocket()) api.dispatch(setChallengeId(message));
 
         break;
@@ -466,7 +489,7 @@ const handleWebSocketMessage = async (
               roomId: message.roomId,
               fromPeerId: keyPair.peerId,
               toPeerId: message.peer.id,
-              protocolVersion: PROTOCOL_VERSION,
+              protocolVersion: SIGNALING_PROTOCOL_VERSION,
             },
           }),
         );
@@ -540,7 +563,6 @@ const handleWebSocketMessage = async (
         debugLog("[handleWebSocketMessage] Received peers response:", {
           roomId: message.roomId,
           peersCount: message.peers.length,
-          peers: message.peers,
         });
         const { keyPair, rooms } = api.getState() as State;
         const roomIndex = findActiveSignalingRoomIndex(rooms, message.roomId);
@@ -659,14 +681,20 @@ const handleWebSocketMessage = async (
               if (!p) continue;
             }
 
+            const currentRooms = (api.getState() as State).rooms;
+            const activeIndex = findActiveSignalingRoomIndex(
+              currentRooms,
+              message.roomId,
+            );
+            if (!isCurrentSocket() || activeIndex === -1) return;
             if (
-              !isCurrentSocket() ||
-              findActiveSignalingRoomIndex(
-                (api.getState() as State).rooms,
-                message.roomId,
-              ) === -1
+              hasTerminalPeerHandshakeFailure(
+                currentRooms[activeIndex].handshakeStatusByPeer,
+                message.peers[i].id,
+                message.peers[i].publicKey,
+              )
             )
-              return;
+              continue;
             api.dispatch(
               setPeer({
                 roomId: message.roomId,
@@ -716,8 +744,7 @@ const handleWebSocketMessage = async (
         ) {
           if (!isProtocolVersionCompatible(message.protocolVersion))
             console.error(
-              `Rejecting SDP from ${message.fromPeerId}: incompatible protocol ` +
-                `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
+              "Rejecting SDP with an incompatible signaling version",
             );
           break;
         }
@@ -767,10 +794,7 @@ const handleWebSocketMessage = async (
           !isUUID(message.roomId) ||
           !isBoundedIceCandidate(message.candidate)
         ) {
-          console.error(
-            `Rejecting ICE from ${message.fromPeerId}: incompatible protocol ` +
-              `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
-          );
+          console.error("Rejecting malformed or incompatible ICE signaling");
           break;
         }
         const blacklisted = await getDBPeerIsBlacklisted(message.fromPeerId);
@@ -876,8 +900,7 @@ const handleWebSocketMessage = async (
           );
         } else if (!isProtocolVersionCompatible(message.protocolVersion)) {
           console.error(
-            `Rejecting peer ${message.fromPeerId}: incompatible protocol ` +
-              `version ${String(message.protocolVersion)} (expected v4). No fallback.`,
+            "Rejecting peer with an incompatible signaling version",
           );
         }
 
@@ -885,19 +908,20 @@ const handleWebSocketMessage = async (
       }
 
       case "error": {
-        console.error(message);
+        console.error("Signaling server returned an error");
 
         break;
       }
 
       default: {
-        console.error("Unknown message type " + JSON.stringify(message));
+        console.error("Unknown signaling message type");
 
         break;
       }
     }
-  } catch (error) {
-    console.error("[p2party] WebSocket message handling error:", error);
+  } catch {
+    // Parser exceptions may include text from the incoming frame.
+    console.error("[p2party] Signaling message handling failed");
     return;
   }
 };

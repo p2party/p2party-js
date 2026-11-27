@@ -54,17 +54,10 @@ export const METADATA_LEN =
 // byte-matched with MERKLE_NODE_DOMAIN in src/cryptography/merkle.c. Leaves use
 // 0x00 (src/utils/leafHash.ts).
 export const MERKLE_NODE_DOMAIN = 0x01;
-// The longest one slice of an outgoing message's proof-level build holds the
-// thread, in ms (src/cryptography/merkle.ts). The build is about 2.5 µs a leaf
-// in Chromium (3.9 s for 1,600,000 leaves in one call, docs/e2e/cover-timers/),
-// so it runs in slices, handing the page back between them; a cover wake-up
-// that falls due during the build then waits for at most the slice it fell
-// in. Below MIN_COVER_SLOT_MS (25 ms, src/roomPolicy.ts), the shortest slot
-// spacing a schedule may have, so no slot passes whole inside one slice. In
-// Chromium 1 ms slices built as fast as 4 ms ones, within 2 % from 16,000
-// leaves up (docs/protocol-v4-pq-cover-architecture.md, "The proof-level
-// build").
+// Time target on a fine clock and work limit when clocks are coarsened.
+// At the measured Chromium rate (~2.5 µs/hash), 256 hashes take ~0.64 ms.
 export const PROOF_LEVEL_BUILD_SLICE_MS = 1;
+export const PROOF_LEVEL_MAX_HASHES_PER_SLICE = 256;
 export const PROOF_LEN =
   4 + // length of the proof
   48 * (crypto_hash_sha512_BYTES + 1); // ceil(log2(tree)) <= 48 * (hash + position)
@@ -89,6 +82,8 @@ export const DECRYPTED_LEN = CHUNK_PLAINTEXT_LEN;
 // MESSAGE_LEN test). A mismatch here mis-routes frames silently, so the values
 // are asserted equal to the C #defines by src/utils/constants.test.ts.
 export const PROTOCOL_VERSION = 4;
+/** WebSocket signaling is versioned separately from encrypted peer frames. */
+export const SIGNALING_PROTOCOL_VERSION = 5;
 export const FRAME_TYPE_LEN = 1;
 export const FRAME_TYPE_HANDSHAKE = 1;
 export const FRAME_TYPE_CHUNK = 2;
@@ -314,6 +309,11 @@ export const RECEIVE_RECONCILE_BATCH_FILES = 64;
 // this long. A pass that takes longer (a file system call that never
 // settles, or a very large directory) goes on while the requests are served.
 export const RECEIVE_RECONCILE_GATE_MS = 5_000;
+// The domain of the digest that stands for a room's URL once the room's
+// record is deleted: SHA-512 of this prefix followed by the URL. The prefix
+// makes the digest of no use as a hash of the URL anywhere else. Changing it
+// orphans the digests already stored.
+export const ROOM_REMOVAL_KEY_DOMAIN = "p2party room removal key v1\n";
 
 // Resume-on-reconnect: a FULL peer reconnect (new RTCPeerConnection) destroys the
 // per-message data channel — only "main" is auto-reopened — so an in-flight send

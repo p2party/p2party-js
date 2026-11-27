@@ -1,4 +1,8 @@
-import { MAX_ACTIVE_SIGNALING_ROOMS, PROTOCOL_VERSION } from "./constants";
+import { deriveRoomLocator, ROOM_LOCATOR_PATTERN } from "./roomLocator";
+import {
+  MAX_ACTIVE_SIGNALING_ROOMS,
+  SIGNALING_PROTOCOL_VERSION,
+} from "./constants";
 import { isUuidV4, randomUuidV4 } from "./correlationId";
 
 import type {
@@ -8,7 +12,6 @@ import type {
 
 export const ROOM_LEAVE_ACK_TIMEOUT_MS = 2_000;
 export const MAX_PENDING_ROOM_LEAVES = MAX_ACTIVE_SIGNALING_ROOMS;
-const ROOM_URL_PATTERN = /^[0-9a-f]{64}$/u;
 
 export type RemoteRoomRevocationFailure =
   | "no-current-socket"
@@ -71,15 +74,13 @@ export const buildRoomLeaveRequest = (
 ): WebSocketMessageLeaveRoomRequest => {
   if (!isUuidV4(fromPeerId))
     throw new Error("roomLeave: fromPeerId must be a UUIDv4");
-  if (!ROOM_URL_PATTERN.test(roomUrl))
-    throw new Error("roomLeave: roomUrl must be 32-byte lowercase hex");
   if (!isUuidV4(roomLeaveId))
     throw new Error("roomLeave: roomLeaveId must be a UUIDv4");
   return {
     type: "leaveRoom",
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: SIGNALING_PROTOCOL_VERSION,
     fromPeerId,
-    roomUrl,
+    roomLocator: deriveRoomLocator(roomUrl),
     roomLeaveId,
   };
 };
@@ -218,11 +219,12 @@ export const hasExactRoomLeftShape = (
     keys.length === 4 &&
     keys[0] === "protocolVersion" &&
     keys[1] === "roomLeaveId" &&
-    keys[2] === "roomUrl" &&
+    keys[2] === "roomLocator" &&
     keys[3] === "type" &&
     message.type === "roomLeft" &&
-    message.protocolVersion === PROTOCOL_VERSION &&
-    ROOM_URL_PATTERN.test(message.roomUrl) &&
+    message.protocolVersion === SIGNALING_PROTOCOL_VERSION &&
+    typeof message.roomLocator === "string" &&
+    ROOM_LOCATOR_PATTERN.test(message.roomLocator) &&
     isUuidV4(message.roomLeaveId)
   );
 };
@@ -233,7 +235,7 @@ export const parseRoomLeftAcknowledgement = (
 ): WebSocketMessageRoomLeftResponse | null => {
   if (typeof data !== "string" || data.length === 0 || data.length > 256)
     return null;
-  for (const key of ["type", "protocolVersion", "roomUrl", "roomLeaveId"])
+  for (const key of ["type", "protocolVersion", "roomLocator", "roomLeaveId"])
     if ((data.match(new RegExp(`"${key}"\\s*:`, "g")) ?? []).length !== 1)
       return null;
   try {
@@ -257,7 +259,7 @@ export const acknowledgeRoomLeft = (
   if (
     !pending ||
     pending.socketToken !== socketToken ||
-    pending.roomUrl !== message.roomUrl
+    deriveRoomLocator(pending.roomUrl) !== message.roomLocator
   )
     return false;
   return settlePendingRoomLeave(pending);

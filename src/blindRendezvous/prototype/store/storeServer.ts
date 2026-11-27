@@ -24,6 +24,12 @@
  *   ruler and sign a chain that disagrees with the one already on disk, so a
  *   mismatch refuses to start rather than equivocate.
  * - **The identity seed is created 0600 or not at all.**
+ * - **The descriptor's validity is a hard end.** It is
+ *   `PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS` (30 days) from one minute before
+ *   the chain start, and the start-up line states it and the instant it ends.
+ *   There is no rotation: from that instant every request is refused with an
+ *   unsigned 410 (the operator is told once), and the cure is a new chain
+ *   with a new `P2PARTY_STORE_DB` and a new `P2PARTY_STORE_KEY_FILE`.
  * - **Retention is swept on a timer.** `P2PARTY_STORE_RETENTION_WINDOWS` sets
  *   how many windows back the store serves and states in its descriptor
  *   (default `PROTOTYPE_STORE_DEFAULT_RETENTION_WINDOWS`, 256; at least
@@ -49,7 +55,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { wasmLoader } from "../../../cryptography/wasmLoader";
-import { PROTOTYPE_STORE_SWEEP_INTERVAL_MS } from "../../../utils/constants";
+import {
+  PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS,
+  PROTOTYPE_STORE_SWEEP_INTERVAL_MS,
+} from "../../../utils/constants";
 import { deliveryProfileHash } from "../../derivations";
 import { ingressWindow } from "../../publicWindow";
 import {
@@ -76,7 +85,6 @@ const MIN_PORT = 5001;
 const MAX_PORT = 65535;
 const DEFAULT_DB_PATH = "./p2party-store-prototype.sqlite";
 const DEFAULT_KEY_FILE = "./p2party-store-prototype.key";
-const DESCRIPTOR_VALIDITY_MS = 2_592_000_000n; // 30 days
 const FINALIZE_INTERVAL_MS = 250;
 /**
  * One sweep per interval deletes up to `PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS`
@@ -303,7 +311,7 @@ const module = (await wasmLoader(
 
 const origin = `http://127.0.0.1:${String(port)}`;
 // The reachable failure here is expiry: with the descriptor anchored to the
-// chain start, a chain older than DESCRIPTOR_VALIDITY_MS needs a new
+// chain start, a chain older than PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS needs a new
 // descriptor generation that this prototype's persistence cannot express. It
 // refuses with a sentence rather than a stack trace, because the operator's
 // fix is a fresh database, not a code change.
@@ -315,7 +323,7 @@ const core = await PrototypeStoreCore.create({
   persistence,
   chainStartIngressWindow,
   origin,
-  descriptorValidityMs: DESCRIPTOR_VALIDITY_MS,
+  descriptorValidityMs: PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS,
   fault,
   allocationAdmission,
   retentionWindows,
@@ -396,6 +404,10 @@ console.log(
     `chainStart=${String(chainStartIngressWindow)}`,
     `db=${databasePath}`,
     `retention=${String(core.retentionWindows)}`,
+    // The one limit no restart lifts: there is no descriptor rotation, so
+    // from this instant every request is refused with 410.
+    `descriptorValidityMs=${String(PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS)}`,
+    `descriptorNotAfter=${new Date(Number(core.descriptor.notAfterUnixMs)).toISOString()}`,
     admissionModulePath === undefined
       ? "admission=open"
       : `admission=${admissionModulePath}`,

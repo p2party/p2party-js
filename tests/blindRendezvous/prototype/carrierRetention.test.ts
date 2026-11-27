@@ -117,6 +117,12 @@ const fireUntil = async (
   }
 };
 
+/** Bounded event-loop turns, never a wall-clock wait. */
+const turns = async (rounds = 50): Promise<void> => {
+  for (let round = 0; round < rounds; round += 1)
+    await new Promise<void>((resolve) => setImmediate(resolve));
+};
+
 const missedAt = (
   events: readonly CarrierEvent[],
   window: bigint,
@@ -140,6 +146,8 @@ describe("carrier runtime and store retention", () => {
       storeId: new Uint8Array(32).fill(0xaa),
       carrierContextId: new Uint8Array(32).fill(0xaa),
       inert: false,
+      stopped: null,
+      backoffUntilMs: null,
       faults: [],
       issueToken: (): Promise<boolean> => Promise.resolve(true),
       allocate: (): Promise<null> => Promise.resolve(null),
@@ -191,6 +199,8 @@ describe("carrier runtime and store retention", () => {
       storeId: new Uint8Array(32).fill(0xbb),
       carrierContextId: new Uint8Array(32).fill(0xbb),
       inert: false,
+      stopped: null,
+      backoffUntilMs: null,
       faults: [],
       issueToken: (): Promise<boolean> => Promise.resolve(true),
       allocate: (): Promise<null> => Promise.resolve(null),
@@ -239,6 +249,8 @@ describe("carrier runtime and store retention", () => {
       storeId: new Uint8Array(32).fill(0xcc),
       carrierContextId: new Uint8Array(32).fill(0xcc),
       inert: false,
+      stopped: null,
+      backoffUntilMs: null,
       faults: [],
       issueToken: (): Promise<boolean> => Promise.resolve(true),
       allocate: (): Promise<null> => Promise.resolve(null),
@@ -628,6 +640,8 @@ describe("carrier runtime and store retention", () => {
       storeId: new Uint8Array(32).fill(0xdd),
       carrierContextId: new Uint8Array(32).fill(0xdd),
       inert: false,
+      stopped: null,
+      backoffUntilMs: null,
       faults: [],
       issueToken: (): Promise<boolean> => Promise.resolve(true),
       allocate: (): Promise<null> => Promise.resolve(null),
@@ -690,6 +704,203 @@ describe("carrier runtime and store retention", () => {
       }
     } finally {
       await harness.runtime.stop();
+    }
+  });
+
+  /** A store double: answers every write, and each scan as `scan` says. */
+  const doubleStore = (
+    storeIdHex: string,
+    scan: (window: bigint) => Promise<WindowScan>,
+    state: { stopped: unknown; backoffUntilMs: bigint | null } = {
+      stopped: null,
+      backoffUntilMs: null,
+    },
+    calls: string[] = [],
+  ): PrototypeStoreClient =>
+    ({
+      storeIdHex,
+      storeId: new Uint8Array(32).fill(0xee),
+      carrierContextId: new Uint8Array(32).fill(0xee),
+      inert: false,
+      get stopped() {
+        return state.stopped;
+      },
+      get backoffUntilMs() {
+        return state.backoffUntilMs;
+      },
+      faults: [],
+      issueToken: (): Promise<boolean> => {
+        calls.push("token");
+        return Promise.resolve(true);
+      },
+      allocate: (): Promise<null> => {
+        calls.push("allocation");
+        return Promise.resolve(null);
+      },
+      append: (): Promise<null> => {
+        calls.push("append");
+        return Promise.resolve(null);
+      },
+      scanWindow: (window: bigint): Promise<WindowScan> => {
+        calls.push(`scan ${String(window)}`);
+        return scan(window);
+      },
+      recordReceipt: (): void => undefined,
+      checkpointHashFor: (): null => null,
+    }) as unknown as PrototypeStoreClient;
+
+  const unreachableScan = (window: bigint): WindowScan => ({
+    window,
+    status: "unreachable",
+    objects: [],
+    checkpointHash: null,
+  });
+
+  /** Resume a page suspended since the chain start, five windows later. */
+  const resumeAfterSuspension = (harness: Harness): void => {
+    harness.nowMs = windowStart(CHAIN_START + 6n) + profile.publicReadOffsetMs;
+    const first = [...harness.pending.entries()].sort((left, right) =>
+      left[1].atMs < right[1].atMs ? -1 : 1,
+    )[0];
+    if (first === undefined) throw new Error("the schedule was not armed");
+    harness.pending.delete(first[0]);
+    first[1].callback();
+  };
+
+  test("a caught-up read that fails during stop queues nothing", async () => {
+    // Twice: the read held is a window's first catch-up attempt, then its
+    // last. The resume releases two scheduled reads first (the newest
+    // window's, and the one a window late), then the catch-ups of the four
+    // older windows, newest first, then their retries.
+    for (const holdScan of [3, 7]) {
+      const storeIdHex = "ee".repeat(32);
+      const scanned: bigint[] = [];
+      let release: ((scan: WindowScan) => void) | null = null;
+      const store = doubleStore(storeIdHex, (window) => {
+        scanned.push(window);
+        if (scanned.length === holdScan)
+          return new Promise<WindowScan>((resolve) => {
+            release = resolve;
+          });
+        return Promise.resolve(unreachableScan(window));
+      });
+      const harness = harnessFor([store], windowStart(CHAIN_START + 1n) + 50n);
+      harness.runtime.start();
+      resumeAfterSuspension(harness);
+      await turns();
+      if (release === null) throw new Error("the held scan was not made");
+      const heldWindow = scanned[holdScan - 1];
+      // The read is out when the runtime stops; it then fails.
+      harness.runtime.stop();
+      const eventsAtStop = harness.events.length;
+      (release as (scan: WindowScan) => void)(unreachableScan(heldWindow));
+      await harness.runtime.drain();
+      // Nothing reported for it after the stop, and nothing queued: a
+      // runtime started again does not read the stale window back.
+      expect(harness.events.slice(eventsAtStop)).toEqual([]);
+      const scansAtStop = scanned.length;
+      harness.runtime.start();
+      const next = [...harness.pending.entries()].sort((left, right) =>
+        left[1].atMs < right[1].atMs ? -1 : 1,
+      )[0];
+      if (next !== undefined) {
+        harness.pending.delete(next[0]);
+        harness.nowMs =
+          next[1].atMs > harness.nowMs ? next[1].atMs : harness.nowMs;
+        next[1].callback();
+      }
+      await harness.runtime.drain();
+      expect([
+        holdScan,
+        scanned.slice(scansAtStop).includes(heldWindow),
+      ]).toEqual([holdScan, false]);
+      harness.runtime.stop();
+    }
+  });
+
+  test("a catch-up waits out its store's back-off instead of asking again at once", async () => {
+    const storeIdHex = "ef".repeat(32);
+    const state = { stopped: null, backoffUntilMs: null as bigint | null };
+    const at: bigint[] = [];
+    let harness: Harness | null = null;
+    // Every scan meets a 503, and its client backs off for 250 ms.
+    const store = doubleStore(
+      storeIdHex,
+      (window) => {
+        const nowMs = harness?.nowMs ?? 0n;
+        at.push(nowMs);
+        state.backoffUntilMs = nowMs + 250n;
+        return Promise.resolve(unreachableScan(window));
+      },
+      state,
+    );
+    harness = harnessFor([store], windowStart(CHAIN_START + 1n) + 50n);
+    harness.runtime.start();
+    try {
+      resumeAfterSuspension(harness);
+      await harness.runtime.drain();
+      const resumedAt = harness.nowMs;
+      // The two scheduled reads went out at the resume; the catch-up did
+      // not follow them at once: one timer waits for the back-off's end,
+      // and nothing is in flight meanwhile.
+      expect(at).toEqual([resumedAt, resumedAt]);
+      const resumeTimers = [...harness.pending.values()].filter(
+        (timer) => timer.atMs === resumedAt + 250n,
+      );
+      expect(resumeTimers.length).toBe(1);
+      // Each catch-up read is then a back-off after the one before, never at
+      // request rate, until the next window's events.
+      await fireUntil(harness, resumedAt + 3_500n);
+      const caughtUp = at.slice(2);
+      expect(caughtUp.length).toBeGreaterThan(3);
+      expect(caughtUp[0]).toBe(resumedAt + 250n);
+      for (let index = 1; index < caughtUp.length; index++)
+        expect(caughtUp[index] - caughtUp[index - 1] >= 250n).toBe(true);
+    } finally {
+      harness.runtime.stop();
+    }
+  });
+
+  test("a store its client stopped using is asked nothing and reported once", async () => {
+    const storeIdHex = "fa".repeat(32);
+    const state = { stopped: null as unknown, backoffUntilMs: null };
+    const calls: string[] = [];
+    const store = doubleStore(
+      storeIdHex,
+      (window) =>
+        Promise.resolve({
+          window,
+          status: "finalized",
+          objects: [],
+          checkpointHash: new Uint8Array(32),
+        }),
+      state,
+      calls,
+    );
+    const harness = harnessFor([store], windowStart(CHAIN_START + 1n));
+    harness.runtime.start();
+    try {
+      await fireUntil(harness, windowStart(CHAIN_START + 2n) - 1n);
+      expect(calls.length).toBeGreaterThan(0);
+      // The client stops using the store (its own event said so, once).
+      state.stopped = { reason: "descriptor-expired" };
+      const callsAtStop = calls.length;
+      const eventsAtStop = harness.events.length;
+      await fireUntil(harness, windowStart(CHAIN_START + 12n));
+      // Not one request in ten windows, and no event per request or per
+      // read at this store; each window's read is settled as given up.
+      expect(calls.slice(callsAtStop)).toEqual([]);
+      const after = harness.events.slice(eventsAtStop);
+      expect(after.filter((event) => event.storeIdHex === storeIdHex)).toEqual(
+        [],
+      );
+      expect(
+        after.filter((event) =>
+          (event.detail ?? "").includes("no store served a finalized read"),
+        ).length,
+      ).toBe(10);
+    } finally {
+      harness.runtime.stop();
     }
   });
 });

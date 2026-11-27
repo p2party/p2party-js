@@ -23,7 +23,13 @@
  *   cold start when `p` is already past `allocationRequestOffsetMs`, so it
  *   goes out exactly once either way (design doc §3a item 16). A real object
  *   simply takes a dummy's place. A store therefore cannot learn from traffic
- *   shape whether this client had anything to say. A timer the engine delivers late fires its events late
+ *   shape whether this client had anything to say. Fewer requests leave for a
+ *   store in two cases, both driven by that store's own answers and never by
+ *   this client's content: while its client backs off after an unsigned 503
+ *   (`PrototypeStoreClient.backoffUntilMs`; nothing is sent until it ends),
+ *   and once its client has stopped using it (`PrototypeStoreClient.stopped`:
+ *   its descriptor expired, or it reached the disagreement limit), after
+ *   which none do. A timer the engine delivers late fires its events late
  *   rather than dropping them — a late request is the same request, a
  *   dropped one changes the count — and nothing is ever retried: retrying
  *   inside a window would make the shape event-driven again, and retrying at
@@ -310,6 +316,12 @@ interface StoreSchedulerState {
   /** Scheduled handlers in flight for this store. Catch-up waits for zero. */
   busy: number;
   readonly idleWaiters: (() => void)[];
+  /**
+   * The timer that resumes this store's catch-up when its client's 503
+   * back-off ends, while one is armed. The catch-up itself is not running
+   * meanwhile, so `drain` never waits on it; `stop` clears it.
+   */
+  backoffResume: CarrierTimerHandle | null;
 }
 
 /** One window's union across the stores, built by their reads of it. */
@@ -343,9 +355,13 @@ const readSucceeded = (status: WindowScan["status"]): boolean =>
  * outside the validity of the descriptor the client pinned. Retention does
  * not run backwards and neither does a descriptor's end. A refusal stated in
  * the window a descriptor's validity begins in is the one case a later read
- * could change; it is reported like the rest and not asked for again. */
+ * could change; it is reported like the rest and not asked for again. And a
+ * store its client has stopped using (`PrototypeStoreClient.stopped`), which
+ * is reported once, by the client's own event, and never per window. */
 const readIsLost = (status: WindowScan["status"]): boolean =>
-  status === "beyond-retention" || status === "descriptor-out-of-validity";
+  status === "beyond-retention" ||
+  status === "descriptor-out-of-validity" ||
+  status === "stopped";
 
 interface OutboxEntry {
   /** The exact canonical bytes both stores carry, identical across carriers. */
@@ -502,6 +518,7 @@ export class CarrierRuntime {
       catchingUp: false,
       busy: 0,
       idleWaiters: [],
+      backoffResume: null,
     }));
   }
 
@@ -539,6 +556,8 @@ export class CarrierRuntime {
       // window are one more than the profile's fixed shape.
       queue = queue.filter((event) => event.kindByte !== EVENT_ALLOCATION);
       for (const state of this.#schedulers) {
+        // A store its client already stopped using is asked nothing.
+        if (state.store.stopped !== null) continue;
         this.#emit({
           kind: "missed",
           storeIdHex: state.store.storeIdHex,
@@ -563,9 +582,13 @@ export class CarrierRuntime {
     for (const state of this.#schedulers) {
       for (const held of state.leases.values()) held.secretKey.fill(0);
       state.leases.clear();
-      // A catch-up loop waiting for the store to go idle ends here.
+      // A catch-up loop waiting for the store to go idle ends here, and one
+      // waiting for its back-off to end is not resumed.
       state.catchUp.length = 0;
       for (const wake of state.idleWaiters.splice(0)) wake();
+      if (state.backoffResume !== null)
+        this.#timers.clearTimeout(state.backoffResume);
+      state.backoffResume = null;
     }
   }
 
@@ -937,9 +960,23 @@ export class CarrierRuntime {
   async #catchUp(state: StoreSchedulerState): Promise<void> {
     try {
       while (this.#running) {
+        // A store whose client answered 503 is not asked again until its
+        // back-off ends (`backoffUntilMs`): a catch-up is the one place this
+        // runtime would otherwise send the next request as soon as one
+        // failed. It stops here and is resumed by a timer.
+        if (this.#deferForBackoff(state)) return;
         while (state.busy > 0 && this.#running)
           await new Promise<void>((resolve) => state.idleWaiters.push(resolve));
         if (!this.#running) return;
+        // A scheduled request may have met a 503 while this waited.
+        if (this.#deferForBackoff(state)) return;
+        // A store its client stopped using is read no more: what it still
+        // owes is given up at once, and reported once, by the client.
+        if (state.store.stopped !== null) {
+          for (const owed of state.catchUp.splice(0))
+            this.#abandonRead(owed.window);
+          return;
+        }
         const next = state.catchUp.shift();
         if (next === undefined) return;
 
@@ -963,6 +1000,10 @@ export class CarrierRuntime {
           next.window,
           next.attempt === 1 ? "catch-up-first" : "catch-up-last",
         );
+        // `stop` ran while the read was out: it cleared this queue and wiped
+        // what the store was owed, so neither a retry nor a report of this
+        // read belongs to anything now.
+        if (!this.#running) return;
         // An expired window stays expired, and so does a descriptor
         // (`readIsLost`): retrying either would only spend six more requests
         // on the same answer, and `#read` already reported it.
@@ -995,11 +1036,47 @@ export class CarrierRuntime {
     }
   }
 
+  /** How long the store's client still holds back after a 503, in ms. */
+  #backoffRemainingMs(state: StoreSchedulerState): number {
+    const untilMs = state.store.backoffUntilMs;
+    if (untilMs === null) return 0;
+    const remaining = untilMs - this.#clock.nowMs();
+    return remaining > 0n ? Number(remaining) : 0;
+  }
+
+  /**
+   * While the store's client backs off, arm one timer, on the runtime's
+   * timers, that resumes this store's catch-up when the back-off ends, and
+   * return true: the caller ends its run. A catch-up started meanwhile (by a
+   * later timer) finds the timer armed and ends too, so there is never more
+   * than one, and nothing is in flight while it waits.
+   */
+  #deferForBackoff(state: StoreSchedulerState): boolean {
+    const delayMs = this.#backoffRemainingMs(state);
+    if (delayMs === 0 || !this.#running) return false;
+    state.backoffResume ??= this.#timers.setTimeout(() => {
+      state.backoffResume = null;
+      if (!this.#running || state.catchingUp || state.catchUp.length === 0)
+        return;
+      state.catchingUp = true;
+      this.#spawn(this.#catchUp(state));
+    }, delayMs);
+    return true;
+  }
+
   async #runEvent(
     state: StoreSchedulerState,
     event: ScheduledEvent,
   ): Promise<void> {
     if (!this.#running) return;
+    // A store its client stopped using gets nothing more, and no event per
+    // request says so: the client's own event did, once. Its share of each
+    // window's read is settled at once, so the union still completes.
+    if (state.store.stopped !== null) {
+      if (event.kindByte === EVENT_READ && event.window > 0n)
+        await this.#read(state, event.window - 1n, "scheduled");
+      return;
+    }
     switch (event.kindByte) {
       case EVENT_TOKEN:
         return this.#issueToken(state, event.window + 1n);
@@ -1350,6 +1427,12 @@ export class CarrierRuntime {
     const store = state.store;
     const key = readKey(store.storeIdHex, window);
     const union = this.#windowRead(window);
+    // Not asked, not counted as a scan, and not reported per window.
+    if (store.stopped !== null) {
+      this.#rememberScanStatus(key, "stopped");
+      this.#settleRead(window, union, "stopped");
+      return "stopped";
+    }
     let status: WindowScan["status"] = "unreachable";
     this.#rememberScanStatus(key, "pending");
     try {
@@ -1363,6 +1446,8 @@ export class CarrierRuntime {
       this.#rememberScanStatus(key, status);
       this.#count({ scans: 1 });
       state.lastScanStatus = scan.status;
+      // A read still out when `stop` ran reports nothing afterwards.
+      if (!this.#running) return status;
       this.#emit({
         kind: "scan",
         storeIdHex: store.storeIdHex,

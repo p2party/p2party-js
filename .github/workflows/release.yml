@@ -102,6 +102,7 @@ jobs:
         run: npm run verify:cdn
 
       - name: Publish validated tarball to npm
+        if: vars.P2PARTY_AUTO_PUBLISH_NPM == 'true'
         run: npm publish "p2party-$(node -p "require('./package.json').version").tgz" --access public --ignore-scripts --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTOMATION_TOKEN }}

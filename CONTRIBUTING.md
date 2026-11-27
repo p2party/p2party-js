@@ -95,7 +95,9 @@ Security reports belong at `security@p2party.com`, not in a public issue.
 `master` carries the public history. Publish from this repository root with
 `git push`; a separate export checkout is not needed. When ready, push the
 stable tag matching `package.json` (for example `vX.Y.Z`). The tagged workflow
-publishes the SDK to npm and the CDN. Prerelease versions use `release:pack`
+publishes the CDN assets and verifies the public WASM. npm publication is manual
+unless the maintainer enables the repository variable `P2PARTY_AUTO_PUBLISH_NPM`
+with the value `true`. Prerelease versions use `release:pack`
 for local testing.
 
 Start public changes from `master`. Keep older private research histories on

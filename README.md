@@ -1020,8 +1020,9 @@ vendored source digests and provenance, enforces the tarball allowlist, and
 produces `p2party-<version>.tgz`. Direct source-tree publication is refused.
 
 Tagged releases publish immutable CDN objects first, fetch the public WASM back
-and compare its exact bytes, SHA-256, and SRI to the validated build, and only
-then publish the npm tarball with provenance.
+and compare its exact bytes, SHA-256 and SRI to the validated build. The
+maintainer publishes the checked tarball to npm. Setting the repository variable
+`P2PARTY_AUTO_PUBLISH_NPM` to `true` enables tagged npm publication with provenance.
 
 ## Built on
 

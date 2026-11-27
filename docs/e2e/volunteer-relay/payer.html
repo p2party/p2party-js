@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Relay purchase · P2Party</title>
+    <link rel="icon" href="/cat.svg" />
+    <style>
+      :root {
+        color: #291810;
+        background: #fffaf0;
+        font-family: system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif;
+        --line: #411a0b;
+        --orange: #eb5e28;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header {
+        border-bottom: 2px solid var(--line);
+        background: #fff;
+      }
+      header div,
+      main {
+        max-width: 52rem;
+        margin: auto;
+        padding: 1rem 1.5rem;
+      }
+      header div {
+        display: flex;
+        gap: 0.65rem;
+        align-items: center;
+        font-weight: 800;
+      }
+      header img {
+        width: 2rem;
+        height: 2rem;
+      }
+      header span {
+        margin-left: auto;
+        font-size: 0.85rem;
+        font-weight: 600;
+      }
+      main {
+        padding-block: 2.4rem 4rem;
+      }
+      h1 {
+        font-size: clamp(2.2rem, 6vw, 3.8rem);
+        letter-spacing: -0.045em;
+        line-height: 1;
+        margin: 0 0 0.8rem;
+      }
+      main > p {
+        line-height: 1.55;
+        max-width: 62ch;
+        margin: 0 0 1.6rem;
+      }
+      section {
+        background: white;
+        border: 2px solid var(--line);
+        box-shadow: 6px 6px 0 var(--orange);
+        padding: clamp(1rem, 4vw, 2rem);
+      }
+      h2 {
+        font-size: 1.35rem;
+        line-height: 1.15;
+        margin: 0 0 1rem;
+      }
+      label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.92rem;
+        font-weight: 660;
+      }
+      select,
+      input,
+      button {
+        font: inherit;
+        border: 2px solid var(--line);
+        border-radius: 0;
+        min-height: 2.85rem;
+        background: white;
+        color: inherit;
+        padding: 0.45rem 0.6rem;
+      }
+      select,
+      input {
+        width: 100%;
+      }
+      .fields {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.8rem;
+        margin: 1.1rem 0;
+      }
+      button {
+        cursor: pointer;
+        font-weight: 700;
+        padding-inline: 1rem;
+      }
+      .primary {
+        background: var(--orange);
+        color: #200c03;
+      }
+      button:disabled {
+        background: #e2dfdb;
+        border-color: #b0aaa5;
+        color: #605a55;
+        cursor: default;
+      }
+      button:focus-visible,
+      select:focus-visible,
+      input:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid #1457a4;
+        outline-offset: 3px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        margin-top: 1.2rem;
+      }
+      .meta,
+      code {
+        font:
+          0.86rem/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        overflow-wrap: anywhere;
+      }
+      .summary {
+        font-size: 1.05rem;
+        line-height: 1.5;
+      }
+      .quote {
+        border-top: 1px solid #a99e93;
+        padding: 0.9rem 0;
+      }
+      .quote strong {
+        display: block;
+      }
+      .quote p {
+        margin: 0.35rem 0;
+      }
+      .quote details {
+        margin-top: 0.45rem;
+      }
+      .quote summary {
+        cursor: pointer;
+      }
+      code {
+        display: block;
+        max-height: 7rem;
+        overflow: auto;
+        margin: 0.35rem 0 0.75rem;
+      }
+      #status {
+        min-height: 1.5rem;
+        margin-top: 1.4rem;
+        font-weight: 650;
+      }
+      #validation {
+        min-height: 1.3rem;
+        color: #8d2e13;
+      }
+      .budget {
+        max-width: 15rem;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 36rem) {
+        .fields {
+          grid-template-columns: 1fr;
+        }
+        main {
+          padding-top: 1.8rem;
+        }
+        header div,
+        main {
+          padding-inline: 1rem;
+        }
+        .actions button {
+          flex: 1;
+        }
+        header span {
+          font-size: 0.75rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <img src="/cat.svg" alt="" /><b>P2Party</b
+        ><span>Local test wallet</span>
+      </div>
+    </header>
+    <main>
+      <h1>Request relay delivery</h1>
+      <p>
+        Choose the volunteers between Alice and Carol. Each earns one valueless
+        test P2PARTY when all forwarding receipts and Carol’s delivery
+        acknowledgment verify.
+      </p>
+      <section id="setup">
+        <h2>Select the route</h2>
+        <form id="request">
+          <div class="fields">
+            <label>First relay<select id="first"></select></label
+            ><label>Second relay<select id="second"></select></label
+            ><label>Third relay (optional)<select id="third"></select></label>
+          </div>
+          <label class="budget"
+            >Maximum total (P2PARTY)<input
+              id="cap"
+              type="number"
+              min="1"
+              step="1"
+              value="2"
+              required
+          /></label>
+          <p id="validation" aria-live="polite"></p>
+          <button class="primary" id="review" type="submit">
+            Review signed quotes
+          </button>
+        </form>
+      </section>
+      <section id="terms" hidden>
+        <h2 id="stage" tabindex="-1">Review signed quotes</h2>
+        <p id="route" class="summary"></p>
+        <p id="price"></p>
+        <p id="expires" class="meta"></p>
+        <div id="offers"></div>
+        <div class="actions" id="decision">
+          <button class="primary" id="approve">Approve purchase</button
+          ><button id="cancel">Cancel purchase</button>
+        </div>
+      </section>
+      <p role="status" id="status" aria-live="polite"></p>
+      <button id="close" hidden>Close test wallet</button>
+    </main>
+    <script>
+      "use strict";
+      const el = (id) => document.getElementById(id);
+      const state = {
+        selection: null,
+        decision: null,
+        done: false,
+        orderId: null,
+      };
+      for (const [id, initial] of [
+        ["first", "D"],
+        ["second", "B"],
+        ["third", ""],
+      ]) {
+        const choices = id === "third" ? ["", "B", "D", "E"] : ["B", "D", "E"];
+        for (const name of choices)
+          el(id).add(new Option(name ? "Relay " + name : "None", name));
+        el(id).value = initial;
+      }
+      const values = () => ({
+        chosen: ["first", "second", "third"]
+          .map((id) => el(id).value)
+          .filter(Boolean),
+        cap: Number(el("cap").value),
+      });
+      function check() {
+        const { chosen, cap } = values();
+        const message =
+          new Set(chosen).size !== chosen.length
+            ? "Select distinct relays for each position."
+            : !Number.isSafeInteger(cap) || cap < chosen.length
+              ? "Set a whole-unit budget of at least " +
+                chosen.length +
+                " P2PARTY."
+              : "";
+        el("validation").textContent = message;
+        el("review").disabled = Boolean(message);
+      }
+      el("request").addEventListener("input", check);
+      check();
+      el("request").onsubmit = (e) => {
+        e.preventDefault();
+        check();
+        if (el("review").disabled || state.selection) return;
+        state.selection = values();
+        for (const item of el("request").elements) item.disabled = true;
+        el("status").textContent =
+          "Collecting signed quotes from the selected volunteers…";
+      };
+      function line(parent, tag, text, cls) {
+        const item = document.createElement(tag);
+        if (cls) item.className = cls;
+        item.textContent = text;
+        parent.append(item);
+        return item;
+      }
+      function showQuotes(q) {
+        state.orderId = q.id;
+        el("setup").hidden = true;
+        el("terms").hidden = false;
+        el("stage").focus();
+        el("route").textContent = q.path.join(" → ");
+        el("price").textContent =
+          q.cost + " test P2PARTY total · Budget " + q.cap + " P2PARTY";
+        el("expires").textContent =
+          "Quote expires " + new Date(q.until).toLocaleTimeString();
+        for (const h of q.hops) {
+          const item = line(el("offers"), "article", "", "quote");
+          line(
+            item,
+            "strong",
+            "Relay " + h.role + " · " + h.reward + " test P2PARTY",
+          );
+          const status = line(
+            item,
+            "p",
+            "ML-DSA-65 quote verified · " +
+              h.bytes.toLocaleString() +
+              " bytes per grant",
+          );
+          status.id = "hop-" + h.role;
+          const details = line(item, "details", "");
+          line(details, "summary", "Inspect quote and receive commitment");
+          for (const [name, data] of [
+            ["Route commitment", q.id],
+            ["Provider key fingerprint", h.provider],
+            ["Witness key", h.witness],
+            [
+              "Native receive suite",
+              h.suite === 1 ? "ML-DSA-65" : "SLH-DSA-SHA2-192s",
+            ],
+            ["Native input", h.inputId],
+            ["Native receive commitment", h.commitment],
+            ["ML-DSA-65 signature", h.signature],
+          ]) {
+            line(details, "span", name);
+            line(details, "code", data);
+          }
+        }
+        el("status").textContent =
+          "Review the terms before any relay forwards or the wallet signs a payment.";
+      }
+      function decide(value) {
+        if (state.decision !== null || !state.orderId) return;
+        state.decision = value;
+        el("decision").hidden = true;
+        el("status").textContent =
+          value === "cancel"
+            ? "Canceling purchase…"
+            : "Approved. Waiting for forwarding and delivery receipts…";
+      }
+      el("approve").onclick = () => decide(state.orderId);
+      el("cancel").onclick = () => decide("cancel");
+      function verified(roles) {
+        el("stage").textContent = "Delivery receipts";
+        for (const role of roles)
+          el("hop-" + role).textContent =
+            "Forwarding receipt verified · Awaiting native payment";
+        el("status").textContent =
+          "Carol acknowledged delivery. Verifying native transfers…";
+      }
+      function recordCredit(credit) {
+        const status = el("hop-" + credit.role);
+        status.textContent =
+          "Forwarding receipt verified · Received 1 test P2PARTY";
+        const details = line(status.parentElement, "details", "");
+        line(details, "summary", "Inspect payment receipt");
+        for (const [name, data] of [
+          ["Transaction", credit.transferId],
+          ["Output", credit.outputId],
+          ["Record digest", credit.recordHash],
+          ["Forwarding signature", credit.witness],
+        ]) {
+          line(details, "span", name);
+          line(details, "code", data);
+        }
+      }
+      function finish(message) {
+        el("decision").hidden = true;
+        el("review").disabled = true;
+        el("status").textContent = message;
+        el("close").hidden = false;
+        el("close").focus();
+      }
+      el("close").onclick = () => {
+        state.done = true;
+      };
+      window.payer = { state, showQuotes, verified, recordCredit, finish };
+    </script>
+  </body>
+</html>

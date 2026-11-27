@@ -27,7 +27,7 @@ it and can retry cleanup after restart. Protocol-v3 peer sessions and saved v3
 crypto state require a fresh handshake. Independent security review remains
 open. [0.15.1 migration notes](CHANGELOG.md) · [Roadmap](ROADMAP.md)
 
-A local payer can select two or three consenting browser relays and set a total budget. Tests forwarded one authenticated message and paid each relay one valueless native unit to a fresh commitment, including recovery after the first payment. Independently operated relays and conditional settlement remain research work. [Run the multi-relay fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route)
+A local payer can select two or three consenting browser relays, set a budget and review the signed quotes before approving a purchase in Chromium. Tests forwarded one authenticated message and paid each relay one valueless native unit to a fresh commitment, including recovery after the first payment. Independently operated relays and conditional settlement remain research work. [Run the multi-relay fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route)
 
 P2Party Testnet 1 is a separate, valueless native-transfer experiment. Its
 first funded unit was spent with ML-DSA-65 by ethers at height 2 and with

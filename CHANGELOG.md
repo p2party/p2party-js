@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## Unreleased research
 
-- The [local multi-relay purchase fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route) lets a payer choose two or three volunteers, verify their signed quotes and forwarding observations, and check native payouts after a receipt from the recipient.
+- The [local multi-relay purchase fixture](docs/e2e/volunteer-relay/README.md#choose-a-paid-route) includes a local wallet screen for choosing an ordered route and budget, approving verified quotes, and inspecting individual native transactions. CLI checks for two or three volunteers verify their signed quotes and forwarding observations, and check native payouts after a receipt from the recipient.
 
 ## [0.15.1] — 2026-11-27
 

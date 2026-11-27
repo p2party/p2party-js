@@ -39,7 +39,7 @@ const resources = new Map([
 // Playwright fulfills this local origin in memory. There is no signaling,
 // TURN or application server listening for a visitor to connect to.
 const origin = "http://127.0.0.1:49678";
-export async function withRelayBrowsers(roles, exercise) {
+export async function withRelayBrowsers(roles, exercise, timeout = 45_000) {
   const browser = await chromium.launch({
     args: [
       "--allow-loopback-in-peer-connection",
@@ -53,7 +53,7 @@ export async function withRelayBrowsers(roles, exercise) {
   const neighbors = new Map();
   const watchdog = setTimeout(() => {
     void browser.close();
-  }, 45_000);
+  }, timeout);
   try {
     for (const name of roles) {
       const context = await browser.newContext();

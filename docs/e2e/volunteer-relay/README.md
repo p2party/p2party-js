@@ -35,7 +35,7 @@ The local driver supplies pinned endpoint identities, random channel bindings an
 
 The payer chooses an ordered list of two or three volunteers from B, D and E and a maximum total in whole test P2PARTY. The fixture charges one existing unit per selected relay after a signed delivery acknowledgment. For example, `--via=D,B --max=2` requests A → D → B → C for two units. `--via=B,E,D --max=3` requests four WebRTC links and three payments. Duplicate volunteers and a budget below the sum of the quotes fail before a wallet or ledger is opened.
 
-Install the browser dependencies above. Install the signaling server dependencies with Bun and build its wallet client with `npm ci --prefix clients/evm` and `npm run build --prefix clients/evm` from the server repository. Build the native verifier from the libdemos checkout with `cmake -S ledger -B build/ledger` and `cmake --build build/ledger --target demos-ledger-verify`. Put Node 26.13.1 and Bun on PATH. Start a disposable PostgreSQL server as described in the server's testing instructions. [Server PostgreSQL setup](https://github.com/p2party/p2party-server#testing-against-postgresql) · [Native verifier build](https://github.com/p2party/libdemos/tree/master/ledger)
+Use the SDK branch `research/multi-relay-payout-local` and server branch `research/certified-dag-ordering` for these research drivers. Install the browser dependencies above. Install the signaling server dependencies with `bun install --frozen-lockfile` and build its wallet client with `npm ci --prefix clients/evm` and `npm run build --prefix clients/evm` from the server repository. Build the native verifier from the libdemos research branch `feat/ledger-sparse-state` with `cmake -S ledger -B build/ledger` and `cmake --build build/ledger --target demos-ledger-verify`. Put Node 26.13.1 and Bun on PATH. Start a disposable PostgreSQL server as described in the server's testing instructions. [Server PostgreSQL setup](https://github.com/p2party/p2party-server#testing-against-postgresql) · [Native verifier build](https://github.com/p2party/libdemos/tree/master/ledger)
 
 ```sh
 export P2PARTY_RELAY_DEPS=/absolute/path/to/p2party.com
@@ -45,7 +45,17 @@ export P2PARTY_TEST_POSTGRES_URL=postgresql://test@127.0.0.1:55434/postgres
 node docs/e2e/volunteer-relay/paid-route.mjs --via=D,B --max=2
 ```
 
-The driver prints the accepted quotes to stderr before forwarding. The final JSON on stdout lists each relay, reward, native transaction ID, output ID, suite and receive commitment. It creates a random local chain with one valueless input for each chosen relay, runs the server's actual RPC and PostgreSQL ledger with native C verification, and drops its own database on exit. The test harness holds the wallet and quote keys. On a deployed network, each operator would need to generate and protect their own keys and authenticate their quote key to users.
+To choose and authorize a purchase in a visible local Chromium window, use the same environment and run
+
+```sh
+node docs/e2e/volunteer-relay/paid-route.mjs --interactive
+```
+
+Select two or three distinct volunteers in forwarding order and set the maximum total. **Review signed quotes** shows the verified ML-DSA-65 offers, price, deadline, native input and fresh receive commitment for every relay. **Approve purchase** authorizes that exact order. **Cancel purchase** ends the trial with zero forwarded records and zero payments. Each confirmed credit on the results screen includes the forwarding signature, encrypted record digest, native transaction and output ID. Click **Close test wallet** to finish. The payer page runs in a local browser context and the driver fulfills its HTML and cat icon from memory without listening on a public port.
+
+For a repeatable mobile-width UI check, run `node docs/e2e/volunteer-relay/paid-route.mjs --test-ui` and `node docs/e2e/volunteer-relay/paid-route.mjs --test-ui-cancel`. The first selects B → E → D with a four-unit ceiling and pays three units. The second selects the same terms, cancels before forwarding and verifies the chain is still at genesis.
+
+The CLI driver prints the accepted quotes to stderr before forwarding. The final JSON on stdout lists each relay, reward, native transaction ID, output ID, suite and receive commitment. It creates a random local chain with one valueless input for each chosen relay, runs the server's actual RPC and PostgreSQL ledger with native C verification, and drops its own database on exit. The test harness holds the wallet and quote keys. On a deployed network, each operator would need to generate and protect their own keys and authenticate their quote key to users.
 
 ### What the payer verifies
 

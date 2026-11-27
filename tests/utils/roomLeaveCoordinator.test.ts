@@ -151,7 +151,10 @@ describe("correlated room leave acknowledgement", () => {
     ).toBe(false);
     expect(
       parseRoomLeftAcknowledgement(
-        JSON.stringify({ ...ack(), roomLocator: [deriveRoomLocator(ROOM_URL)] }),
+        JSON.stringify({
+          ...ack(),
+          roomLocator: [deriveRoomLocator(ROOM_URL)],
+        }),
       ),
     ).toBeNull();
     expect(acknowledgeRoomLeft(ack(), socket)).toBe(true);

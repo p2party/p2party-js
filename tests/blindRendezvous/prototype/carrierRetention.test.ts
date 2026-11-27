@@ -117,12 +117,6 @@ const fireUntil = async (
   }
 };
 
-/** Bounded event-loop turns, never a wall-clock wait. */
-const turns = async (rounds = 50): Promise<void> => {
-  for (let round = 0; round < rounds; round += 1)
-    await new Promise<void>((resolve) => setImmediate(resolve));
-};
-
 const missedAt = (
   events: readonly CarrierEvent[],
   window: bigint,
@@ -775,31 +769,31 @@ describe("carrier runtime and store retention", () => {
     for (const holdScan of [3, 7]) {
       const storeIdHex = "ee".repeat(32);
       const scanned: bigint[] = [];
-      let release: ((scan: WindowScan) => void) | null = null;
+      const started = Promise.withResolvers<bigint>();
+      const held = Promise.withResolvers<WindowScan>();
       const store = doubleStore(storeIdHex, (window) => {
         scanned.push(window);
-        if (scanned.length === holdScan)
-          return new Promise<WindowScan>((resolve) => {
-            release = resolve;
-          });
+        if (scanned.length === holdScan) {
+          started.resolve(window);
+          return held.promise;
+        }
         return Promise.resolve(unreachableScan(window));
       });
       const harness = harnessFor([store], windowStart(CHAIN_START + 1n) + 50n);
       harness.runtime.start();
       resumeAfterSuspension(harness);
-      await turns();
-      if (release === null) throw new Error("the held scan was not made");
-      const heldWindow = scanned[holdScan - 1];
+      const heldWindow = await started.promise;
       // The read is out when the runtime stops; it then fails.
       harness.runtime.stop();
+      // A fresh run may already be active when the previous read settles.
+      harness.runtime.start();
       const eventsAtStop = harness.events.length;
-      (release as (scan: WindowScan) => void)(unreachableScan(heldWindow));
+      held.resolve(unreachableScan(heldWindow));
       await harness.runtime.drain();
       // Nothing reported for it after the stop, and nothing queued: a
       // runtime started again does not read the stale window back.
       expect(harness.events.slice(eventsAtStop)).toEqual([]);
       const scansAtStop = scanned.length;
-      harness.runtime.start();
       const next = [...harness.pending.entries()].sort((left, right) =>
         left[1].atMs < right[1].atMs ? -1 : 1,
       )[0];
@@ -882,8 +876,10 @@ describe("carrier runtime and store retention", () => {
     try {
       await fireUntil(harness, windowStart(CHAIN_START + 2n) - 1n);
       expect(calls.length).toBeGreaterThan(0);
+      expect(harness.runtime.storeTopology).toBe("single-carrier-dependent");
       // The client stops using the store (its own event said so, once).
       state.stopped = { reason: "descriptor-expired" };
+      expect(harness.runtime.storeTopology).toBe("no-usable-carrier");
       const callsAtStop = calls.length;
       const eventsAtStop = harness.events.length;
       await fireUntil(harness, windowStart(CHAIN_START + 12n));

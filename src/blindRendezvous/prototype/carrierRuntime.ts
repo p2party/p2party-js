@@ -459,7 +459,8 @@ export class CarrierRuntime {
   readonly #undelivered: OuterValidatedIdentifiedOperationV1[] = [];
   #delivering = false;
 
-  #running = false;
+  // A read may settle after a stop and restart of the same runtime.
+  #activeRun: symbol | null = null;
   #counters: CarrierCounters = {
     appendsReal: 0,
     appendsDummy: 0,
@@ -536,8 +537,8 @@ export class CarrierRuntime {
    * instead would make the very first window of a session distinguishable.
    */
   start(): void {
-    if (this.#running) fail("the runtime is already started");
-    this.#running = true;
+    if (this.#activeRun) fail("the runtime is already started");
+    this.#activeRun = Symbol();
 
     const nowMs = this.#clock.nowMs();
     const window = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
@@ -575,7 +576,9 @@ export class CarrierRuntime {
 
   /** Disarm the schedule and wipe the allocation secrets still held. */
   stop(): void {
-    this.#running = false;
+    this.#activeRun = null;
+    this.#windowReads.clear();
+    this.#scanStatuses.clear();
     if (this.#handle !== null) this.#timers.clearTimeout(this.#handle);
     this.#handle = null;
     this.#undelivered.length = 0;
@@ -585,6 +588,7 @@ export class CarrierRuntime {
       // A catch-up loop waiting for the store to go idle ends here, and one
       // waiting for its back-off to end is not resumed.
       state.catchUp.length = 0;
+      state.catchingUp = false;
       for (const wake of state.idleWaiters.splice(0)) wake();
       if (state.backoffResume !== null)
         this.#timers.clearTimeout(state.backoffResume);
@@ -650,7 +654,7 @@ export class CarrierRuntime {
    * ---------------------------------------------------------------- */
 
   /**
-   * Counted from this client's own last completed read and nothing else.
+   * A usable store must still be active and have a finalized last scan.
    *
    * It is never evidence that the stores are independently operated, and it
    * never becomes one: a store's own claims about other stores are not read.
@@ -658,7 +662,11 @@ export class CarrierRuntime {
   get storeTopology(): StoreTopology {
     let usable = 0;
     for (const state of this.#schedulers)
-      if (!state.store.inert && state.lastScanStatus === "finalized")
+      if (
+        state.store.stopped === null &&
+        !state.store.inert &&
+        state.lastScanStatus === "finalized"
+      )
         usable += 1;
     if (usable >= 2) return "multi-store-union";
     if (usable === 1) return "single-carrier-dependent";
@@ -818,7 +826,7 @@ export class CarrierRuntime {
   }
 
   #arm(): void {
-    if (!this.#running) return;
+    if (!this.#activeRun) return;
     const delayMs = this.#peek().timeMs - this.#clock.nowMs();
     this.#handle = this.#timers.setTimeout(
       () => {
@@ -839,7 +847,7 @@ export class CarrierRuntime {
    */
   #fire(): void {
     this.#handle = null;
-    if (!this.#running) return;
+    if (!this.#activeRun) return;
     const { due, catchUp } = this.#takeDue(this.#clock.nowMs());
     this.#arm();
     for (const event of due)
@@ -958,16 +966,17 @@ export class CarrierRuntime {
    * comes, the window is reported `missed` for that store.
    */
   async #catchUp(state: StoreSchedulerState): Promise<void> {
+    const run = this.#activeRun;
     try {
-      while (this.#running) {
+      while (run !== null && run === this.#activeRun) {
         // A store whose client answered 503 is not asked again until its
         // back-off ends (`backoffUntilMs`): a catch-up is the one place this
         // runtime would otherwise send the next request as soon as one
         // failed. It stops here and is resumed by a timer.
         if (this.#deferForBackoff(state)) return;
-        while (state.busy > 0 && this.#running)
+        while (state.busy > 0 && run === this.#activeRun)
           await new Promise<void>((resolve) => state.idleWaiters.push(resolve));
-        if (!this.#running) return;
+        if (run !== this.#activeRun) return;
         // A scheduled request may have met a 503 while this waited.
         if (this.#deferForBackoff(state)) return;
         // A store its client stopped using is read no more: what it still
@@ -1003,7 +1012,7 @@ export class CarrierRuntime {
         // `stop` ran while the read was out: it cleared this queue and wiped
         // what the store was owed, so neither a retry nor a report of this
         // read belongs to anything now.
-        if (!this.#running) return;
+        if (run !== this.#activeRun) return;
         // An expired window stays expired, and so does a descriptor
         // (`readIsLost`): retrying either would only spend six more requests
         // on the same answer, and `#read` already reported it.
@@ -1032,7 +1041,7 @@ export class CarrierRuntime {
         state.catchUp.push({ window: next.window, attempt: 2 });
       }
     } finally {
-      state.catchingUp = false;
+      if (run === this.#activeRun) state.catchingUp = false;
     }
   }
 
@@ -1053,10 +1062,10 @@ export class CarrierRuntime {
    */
   #deferForBackoff(state: StoreSchedulerState): boolean {
     const delayMs = this.#backoffRemainingMs(state);
-    if (delayMs === 0 || !this.#running) return false;
+    if (delayMs === 0 || !this.#activeRun) return false;
     state.backoffResume ??= this.#timers.setTimeout(() => {
       state.backoffResume = null;
-      if (!this.#running || state.catchingUp || state.catchUp.length === 0)
+      if (!this.#activeRun || state.catchingUp || state.catchUp.length === 0)
         return;
       state.catchingUp = true;
       this.#spawn(this.#catchUp(state));
@@ -1068,7 +1077,7 @@ export class CarrierRuntime {
     state: StoreSchedulerState,
     event: ScheduledEvent,
   ): Promise<void> {
-    if (!this.#running) return;
+    if (!this.#activeRun) return;
     // A store its client stopped using gets nothing more, and no event per
     // request says so: the client's own event did, once. Its share of each
     // window's read is settled at once, so the union still completes.
@@ -1191,7 +1200,7 @@ export class CarrierRuntime {
     const { object, entry } = built;
     // `stop` wipes the allocation secrets, so a runtime stopped while this
     // handler was sealing must not go on to sign an admission with zeroes.
-    if (!this.#running) return;
+    if (!this.#activeRun) return;
 
     if (entry === null) this.#count({ appendsDummy: 1 });
     else this.#count({ appendsReal: 1 });
@@ -1424,6 +1433,7 @@ export class CarrierRuntime {
     window: bigint,
     attempt: ReadAttempt,
   ): Promise<WindowScan["status"]> {
+    const run = this.#activeRun;
     const store = state.store;
     const key = readKey(store.storeIdHex, window);
     const union = this.#windowRead(window);
@@ -1443,11 +1453,10 @@ export class CarrierRuntime {
         return status;
       }
       status = scan.status;
+      if (run !== this.#activeRun) return status;
       this.#rememberScanStatus(key, status);
       this.#count({ scans: 1 });
       state.lastScanStatus = scan.status;
-      // A read still out when `stop` ran reports nothing afterwards.
-      if (!this.#running) return status;
       this.#emit({
         kind: "scan",
         storeIdHex: store.storeIdHex,
@@ -1455,6 +1464,8 @@ export class CarrierRuntime {
         detail: scan.status,
         count: scan.objects.length,
       });
+      // The observer can stop and restart the runtime during a scan event.
+      if (run !== this.#activeRun) return status;
       if (scan.status === "beyond-retention")
         this.#emit({
           kind: "missed",
@@ -1485,10 +1496,10 @@ export class CarrierRuntime {
           detail:
             "the read fell outside the validity of the store descriptor this client pinned; this window was not read at this store",
         });
-      if (!this.#running) return status;
+      if (run !== this.#activeRun) return status;
 
       const observed = await this.#openObjects(store, window, scan.objects);
-      if (!this.#running) return status;
+      if (run !== this.#activeRun) return status;
       const fresh: OuterValidatedIdentifiedOperationV1[] = [];
       for (const candidate of observed) {
         const idHex = hexOf(candidate.operationId);
@@ -1509,18 +1520,20 @@ export class CarrierRuntime {
           window,
           count: fresh.length,
         });
-        this.#deliver(fresh);
+        if (run === this.#activeRun) this.#deliver(fresh);
       }
       return status;
     } finally {
-      if (this.#scanStatuses.get(key) === "pending")
-        this.#rememberScanStatus(key, status);
-      if (
-        readSucceeded(status) ||
-        readIsLost(status) ||
-        attempt !== "catch-up-first"
-      )
-        this.#settleRead(window, union, status);
+      if (run === this.#activeRun) {
+        if (this.#scanStatuses.get(key) === "pending")
+          this.#rememberScanStatus(key, status);
+        if (
+          readSucceeded(status) ||
+          readIsLost(status) ||
+          attempt !== "catch-up-first"
+        )
+          this.#settleRead(window, union, status);
+      }
     }
   }
 
@@ -1548,7 +1561,7 @@ export class CarrierRuntime {
     if (union.pending > 0) return;
     const key = String(window);
     if (this.#windowReads.get(key) === union) this.#windowReads.delete(key);
-    if (!this.#running) return;
+    if (!this.#activeRun) return;
     if (union.finalized === 0 && union.failed > 0)
       this.#emit({
         kind: "missed",
@@ -1632,7 +1645,11 @@ export class CarrierRuntime {
   }
 
   #pumpDeliveries(): void {
-    while (!this.#delivering && this.#running && this.#undelivered.length > 0) {
+    while (
+      !this.#delivering &&
+      this.#activeRun &&
+      this.#undelivered.length > 0
+    ) {
       const batch = this.#undelivered.splice(0);
       // Set before the call, so a delivery reached from inside the callback
       // queues behind it instead of re-entering it.
@@ -1683,6 +1700,7 @@ export class CarrierRuntime {
     window: bigint,
     objects: readonly Uint8Array[],
   ): Promise<readonly OuterValidatedIdentifiedOperationV1[]> {
+    const run = this.#activeRun;
     if (objects.length === 0) return [];
     // The room's own clock, never the carrier's: which operations are live is
     // a room decision, and letting the delivery geometry set it would give a
@@ -1701,6 +1719,7 @@ export class CarrierRuntime {
         position < bucketObjects && index < objects.length;
         position += 1, index += 1
       ) {
+        if (run !== this.#activeRun) return [];
         const candidate = await this.#openObject(
           store,
           window,
@@ -1721,6 +1740,7 @@ export class CarrierRuntime {
     object: Uint8Array,
     context: OperationValidationContext,
   ): Promise<OuterValidatedIdentifiedOperationV1 | null> {
+    const run = this.#activeRun;
     let envelope: CarrierEnvelopeV1;
     try {
       envelope = decodeCarrierEnvelope(object);
@@ -1746,7 +1766,7 @@ export class CarrierRuntime {
       // A failed open is cover, never a fault: every object of every other
       // room in this bucket looks exactly like this, which is the whole point
       // of unrelated rooms sharing one carrier.
-      if (plaintext === null) return null;
+      if (plaintext === null || run !== this.#activeRun) return null;
       operationBytes = plaintext.operationBytes;
     } catch {
       return null;
@@ -1759,6 +1779,7 @@ export class CarrierRuntime {
         this.#module,
       );
     } catch (error) {
+      if (run !== this.#activeRun) return null;
       // It opened under this room's key, so it was addressed here and failing
       // is worth reporting — but one bad operation must not end the window.
       this.#emit({
@@ -1872,7 +1893,7 @@ export class CarrierRuntime {
         });
         continue;
       }
-      if (!this.#running) return;
+      if (!this.#activeRun) return;
       if (
         status !== "finalized" ||
         witnessed.store.inert ||

@@ -8,7 +8,10 @@ import {
   crypto_hash_sha512_STATEBYTES,
 } from "./interfaces";
 import { hashMerkleLeaf, hashMerkleLeafWasm } from "../utils/leafHash";
-import { MERKLE_NODE_DOMAIN } from "../utils/constants";
+import {
+  MERKLE_NODE_DOMAIN,
+  PROOF_LEVEL_BUILD_SLICE_MS,
+} from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
 
@@ -295,19 +298,90 @@ export interface MerkleProofLevels {
   release(): void;
 }
 
+/** How a proof-level build shares the thread it runs on. */
+export interface MerkleProofLevelsBuildOptions {
+  /**
+   * The longest one slice of the build may hold the thread, in ms of `now`.
+   * Defaults to PROOF_LEVEL_BUILD_SLICE_MS.
+   */
+  readonly sliceMs?: number;
+  /** The clock slices are timed on. Defaults to `performance.now`. */
+  readonly now?: () => number;
+  /**
+   * Hands the thread back between slices, until the event loop has run what
+   * was queued meanwhile. Defaults to a message to the build's own
+   * MessageChannel: a task, never throttled as a hidden page's timers are, and
+   * queued behind a timer worker's message that arrived during the slice.
+   */
+  readonly yieldToEventLoop?: () => Promise<void>;
+  /** Stops the build at its next slice; it then rejects with the reason. */
+  readonly signal?: AbortSignal;
+}
+
+/** A proof-level build that is running, or has ended. */
+export interface MerkleProofLevelsBuild {
+  /** The levels, or the build's error, or the stop signal's reason. */
+  readonly done: Promise<MerkleProofLevels>;
+  /**
+   * Bytes the levels built so far hold above the leaves. Zero once the build
+   * has ended: when it succeeds the levels it settles with hold them; when it
+   * fails or is stopped they are dropped, at the slice it stops in.
+   */
+  readonly byteLength: number;
+}
+
 /**
  * Build every level of the tree over `treeHashes` (the domain-separated leaf
  * hashes) with merkle.c's rules: an internal node is SHA-512(0x01 ‖ left ‖
  * right), computed by the module's libsodium SHA-512, and a lone odd node is
  * promoted unchanged. That is N − 1 node hashes, once.
  *
+ * The build runs in slices. A slice stops before the hash that would take it
+ * past `sliceMs` at the slice's own rate so far, then the thread is handed
+ * back (`yieldToEventLoop`) before the next one: so on a page, a timer or a
+ * message that falls due during the build waits at most one slice, not the
+ * whole build (Chromium, 1,600,000 leaves: 3.9 s in one call; see
+ * docs/e2e/cover-timers/). A slice hashes at least one node, so a hash that
+ * alone takes longer than `sliceMs` (which no measured one did) overruns it.
+ *
  * Level 0 is `treeHashes` itself, not a copy: the caller must not modify it
  * while the levels are live.
  */
+export const startMerkleProofLevelsBuild = (
+  treeHashes: Uint8Array,
+  module: LibCrypto,
+  options: MerkleProofLevelsBuildOptions = {},
+): MerkleProofLevelsBuild => {
+  let built: Uint8Array[] = [];
+  const done = runMerkleProofLevelsBuild(treeHashes, module, options, (level) =>
+    built.push(level),
+  ).finally(() => {
+    built = [];
+  });
+  return {
+    done,
+    get byteLength(): number {
+      let bytes = 0;
+      for (const level of built) bytes += level.length;
+      return bytes;
+    },
+  };
+};
+
+/** `startMerkleProofLevelsBuild`, for a caller that only needs the levels. */
 export const buildMerkleProofLevels = (
   treeHashes: Uint8Array,
   module: LibCrypto,
-): MerkleProofLevels => {
+  options: MerkleProofLevelsBuildOptions = {},
+): Promise<MerkleProofLevels> =>
+  startMerkleProofLevelsBuild(treeHashes, module, options).done;
+
+const runMerkleProofLevelsBuild = async (
+  treeHashes: Uint8Array,
+  module: LibCrypto,
+  options: MerkleProofLevelsBuildOptions,
+  onLevel: (level: Uint8Array) => void,
+): Promise<MerkleProofLevels> => {
   if (treeHashes.length % crypto_hash_sha512_BYTES !== 0) {
     throw new Error("Hashes were not passed");
   }
@@ -315,9 +389,26 @@ export const buildMerkleProofLevels = (
   if (leafCount === 0) {
     throw new Error("Cannot calculate Merkle proof of element of empty tree.");
   }
+  const sliceMs = options.sliceMs ?? PROOF_LEVEL_BUILD_SLICE_MS;
+  if (!Number.isFinite(sliceMs) || sliceMs <= 0)
+    throw new RangeError("Proof-level build slice must be a positive time.");
+  const now = options.now ?? (() => performance.now());
+  const signal = options.signal;
+  signal?.throwIfAborted();
 
   let levels: Uint8Array[] = [treeHashes];
   if (leafCount > 1) {
+    let channel: MessageChannel | undefined;
+    const yieldToEventLoop =
+      options.yieldToEventLoop ??
+      (() =>
+        new Promise<void>((resolve) => {
+          channel ??= new MessageChannel();
+          channel.port1.onmessage = () => {
+            resolve();
+          };
+          channel.port2.postMessage(null);
+        }));
     const statePtr = module._malloc(crypto_hash_sha512_STATEBYTES);
     const inputPtr = module._malloc(MERKLE_NODE_INPUT_BYTES);
     const outputPtr = module._malloc(crypto_hash_sha512_BYTES);
@@ -326,7 +417,8 @@ export const buildMerkleProofLevels = (
         throw new Error(
           "Could not allocate memory for hash concatenation helper array.",
         );
-      // ALLOW_MEMORY_GROWTH=0: the heap never moves, so these views stay valid.
+      // ALLOW_MEMORY_GROWTH=0: the heap never moves, so these views stay
+      // valid across slices, whatever else uses the module between them.
       const input = new Uint8Array(
         module.wasmMemory.buffer,
         inputPtr,
@@ -340,17 +432,37 @@ export const buildMerkleProofLevels = (
       input[0] = MERKLE_NODE_DOMAIN;
       let below = treeHashes;
       let nodes = leafCount;
-      while (nodes > 1) {
-        const parents = Math.ceil(nodes / 2);
-        const level = new Uint8Array(parents * crypto_hash_sha512_BYTES);
-        for (let j = 0; j < parents; j++) {
+      let parents = Math.ceil(nodes / 2);
+      let level = new Uint8Array(parents * crypto_hash_sha512_BYTES);
+      onLevel(level);
+      let j = 0;
+      for (;;) {
+        // One slice, synchronous: the thread is held from here to its end.
+        const sliceStart = now();
+        let hashed = 0;
+        while (nodes > 1) {
+          if (j === parents) {
+            levels.push(level);
+            below = level;
+            nodes = parents;
+            if (nodes === 1) break;
+            parents = Math.ceil(nodes / 2);
+            level = new Uint8Array(parents * crypto_hash_sha512_BYTES);
+            onLevel(level);
+            j = 0;
+          }
           const left = 2 * j * crypto_hash_sha512_BYTES;
           if (2 * j + 1 === nodes) {
             level.set(
               below.subarray(left, left + crypto_hash_sha512_BYTES),
               j * crypto_hash_sha512_BYTES,
             );
+            j++;
             continue;
+          }
+          if (hashed > 0) {
+            const held = now() - sliceStart;
+            if (held + held / hashed > sliceMs) break;
           }
           input.set(
             below.subarray(left, left + 2 * crypto_hash_sha512_BYTES),
@@ -367,15 +479,19 @@ export const buildMerkleProofLevels = (
           )
             throw new Error("Could not calculate hash.");
           level.set(output, j * crypto_hash_sha512_BYTES);
+          hashed++;
+          j++;
         }
-        levels.push(level);
-        below = level;
-        nodes = parents;
+        if (nodes === 1) break;
+        await yieldToEventLoop();
+        signal?.throwIfAborted();
       }
     } finally {
       module._free(statePtr);
       module._free(inputPtr);
       module._free(outputPtr);
+      channel?.port1.close();
+      channel?.port2.close();
     }
   }
 

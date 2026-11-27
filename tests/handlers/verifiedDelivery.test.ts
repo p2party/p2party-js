@@ -893,7 +893,15 @@ const PEER_TWO = "peer-a4-verify-two";
  * out, the receiver acknowledges them all as the last one is sent, and the
  * sender is then in its verification wait on the manual clock.
  */
-const startImmediateVerification = async (totalSize: number) => {
+const startImmediateVerification = async (
+  totalSize: number,
+  options: {
+    /** The resume watch's budget on its own clock. */
+    readonly resumeBudgetMs?: number;
+    /** Every legacy-queue delete after the send's own throws. */
+    readonly failResumeDeletes?: boolean;
+  } = {},
+) => {
   const staged = await stageMessage(3, 1, totalSize);
   const channel = new TransferChannel(
     await compileChannelMessageLabel("chat", staged.merkleRootHex),
@@ -958,12 +966,14 @@ const startImmediateVerification = async (totalSize: number) => {
       ratchetStep,
       deleteSendQueue: async (label, peerId) => {
         queueDeletes.push([label, peerId]);
+        if (options.failResumeDeletes && queueDeletes.length > 1)
+          throw new Error("the legacy queue could not be deleted");
       },
       persistCancellation: async (receipt) => {
         cancellations.push(receipt.transferId);
         return true;
       },
-      resumeTimeoutMs: RESUME_BUDGET_MS,
+      resumeTimeoutMs: options.resumeBudgetMs ?? RESUME_BUDGET_MS,
       clock,
       resumeClock,
     },
@@ -1671,6 +1681,65 @@ describe("immediate mode: completion and the receiver's CANCEL around a close", 
     expect(resumeClock.now()).toBe(RECONNECT_RESUME_POLL_MS);
   });
 
+  /**
+   * A resume watch whose budget is a poll and 200 ms: it sleeps one poll,
+   * then only what is left. Before, it slept a second whole poll and ended
+   * 300 ms past its budget. Answers how many failed attempts it logged.
+   */
+  const watchToItsBudget = async (
+    transport: "none" | "failing",
+  ): Promise<number> => {
+    const budgetMs = RECONNECT_RESUME_POLL_MS + 200;
+    const { channel, epc, sending, resumeClock, realIndexes } =
+      await startImmediateVerification(800 * MIB, {
+        resumeBudgetMs: budgetMs,
+        failResumeDeletes: true,
+      });
+    const outcome = sending.then(
+      () => "delivered",
+      (error: Error) => error.message,
+    );
+    const logged = spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(() => {
+      logged.mockRestore();
+    });
+    // "failing": the transport is back by the time the resume looks (it has
+    // reset the have-set), and each attempt on it fails at the queue delete.
+    Object.defineProperty(epc, "connectionState", {
+      configurable: true,
+      get: () =>
+        transport === "none" ||
+        hasChunkAcked(ROOM, PEER, TRANSFER_ID, realIndexes[0])
+          ? "disconnected"
+          : "connected",
+    });
+    closeFromTheFarSide(channel);
+    await resumeClock.whenArmed();
+    resumeClock.advanceTo(RECONNECT_RESUME_POLL_MS);
+    await resumeClock.whenArmed();
+    resumeClock.advanceTo(budgetMs - 1);
+    expect((await settledWithin(outcome)).settled).toBe(false);
+    // Its last sleep ends at the budget: nothing is left armed past it.
+    resumeClock.advanceTo(budgetMs);
+    expect(resumeClock.armed).toBe(0);
+    expect(await outcomeOf(outcome)).toEqual({
+      settled: true,
+      value: "Message transfer ended without receiver confirmation",
+    });
+    expect(resumeClock.now()).toBe(budgetMs);
+    return logged.mock.calls.length;
+  };
+
+  test("the resume watch ends at its budget, not one poll later", async () => {
+    // No transport to resume on: it sleeps and looks again.
+    expect(await watchToItsBudget("none")).toBe(0);
+  });
+
+  test("the resume watch ends at its budget after a failed attempt, not one poll later", async () => {
+    // A transport that is back, and an attempt on it that fails each time.
+    expect(await watchToItsBudget("failing")).toBe(2);
+  });
+
   test("a receiver's CANCEL frame then close is reported as a cancel without waiting", async () => {
     const { channel, clock, sending, cancellations, merkleRoot } =
       await startImmediateVerification(800 * MIB);
@@ -1876,6 +1945,57 @@ describe("a failed send leaves nothing running", () => {
     });
     expect(pendingTimers).toBe(0);
   });
+
+  test("an abort listener that cannot be added leaves no connection listener behind", async () => {
+    const staged = await stageMessage(3, 1, 800 * MIB);
+    // A connection still coming up, whose listeners are counted, and a send
+    // whose abort signal refuses a listener: the admission wait registers on
+    // the connection first, then on the signal.
+    const listeners = new Set<unknown>();
+    const edge = {
+      roomId: ROOM,
+      withPeerId: PEER,
+      connectionState: "connecting",
+      addEventListener: (_type: string, listener: unknown) => {
+        listeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: unknown) => {
+        listeners.delete(listener);
+      },
+    } as unknown as IRTCPeerConnection;
+    const refusing = new AbortController().signal;
+    Object.defineProperty(refusing, "addEventListener", {
+      value: () => {
+        throw new Error("the abort listener could not be added");
+      },
+    });
+    const timers = trackRealTimers();
+    const result = await own(
+      sendScheduled(
+        ROOM,
+        "chat",
+        policy,
+        [{ peerId: PEER, epc: edge }],
+        staged.message,
+        module,
+        refusing,
+        undefined,
+        [edge],
+        {
+          waitForGate: async () => undefined,
+          ratchetStep,
+          waitForDelivery: async () => true,
+          resumeWaitMs: 1,
+        },
+      ).catch((error: Error) => error),
+    );
+    expect(timers.stop()).toBe(0);
+    expect((result as { outcomes: unknown[] }).outcomes[0]).toMatchObject({
+      peerId: PEER,
+      status: "failed",
+    });
+    expect(listeners.size).toBe(0);
+  });
 });
 
 describe("a sealed cell's plaintext does not outlive its sealing", () => {
@@ -1981,6 +2101,18 @@ describe("a sealed cell's plaintext does not outlive its sealing", () => {
     expect(misplaced.handedOut).toHaveLength(1);
     expect(allZero(misplaced.handedOut[0].data)).toBe(true);
     expect(allZero(misplaced.handedOut[0].metadata)).toBe(true);
+
+    // A row whose metadata cannot be read (one byte short).
+    const malformed = await stageMessage(1, 1, 800 * MIB, (copy) => ({
+      ...copy,
+      metadata: copy.metadata.slice(0, copy.metadata.byteLength - 1),
+    }));
+    await expect(malformed.message.read(0)).rejects.toThrow(
+      "Invalid metadata buffer",
+    );
+    expect(malformed.handedOut).toHaveLength(1);
+    expect(allZero(malformed.handedOut[0].data)).toBe(true);
+    expect(allZero(malformed.handedOut[0].metadata)).toBe(true);
   });
 
   test("the immediate sender zeroes each cell's plaintext after sealing", async () => {

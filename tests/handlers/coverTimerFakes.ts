@@ -77,6 +77,33 @@ export class CoverTimeline {
   }
 
   /**
+   * The page's thread is busy for `ms`, inside a synchronous call that is
+   * running now: time moves on, the worker's timers fire and their messages
+   * queue for the page in the order they fell due, and nothing on the page
+   * runs until the call returns.
+   */
+  busyPage(ms: number): void {
+    const until = this.time + ms;
+    for (;;) {
+      let next: QueuedEvent | undefined;
+      for (const event of this.queue.values())
+        if (
+          !event.page &&
+          event.at <= until &&
+          (!next ||
+            event.at < next.at ||
+            (event.at === next.at && event.id < next.id))
+        )
+          next = event;
+      if (!next) break;
+      this.queue.delete(next.id);
+      this.time = Math.max(this.time, next.at);
+      next.run();
+    }
+    this.time = until;
+  }
+
+  /**
    * The whole process sleeps (a laptop lid): nothing runs for `ms`, then
    * everything that fell due runs at once, in the order it fell due.
    */

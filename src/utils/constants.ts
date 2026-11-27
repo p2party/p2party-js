@@ -532,6 +532,33 @@ export const PROTOTYPE_STORE_SQLITE_SCHEMA_VERSION = 2;
 // after the scan.
 export const PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS = 1_024;
 export const PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS = 16;
+// How long a store's descriptor is valid, from one minute before its chain
+// start: 30 days. There is no rotation. Past the end the store refuses every
+// request with one unsigned status (410) rather than answer under an expired
+// descriptor, and a client stops using the store when its own clock reaches
+// the end. The store states the limit in its start-up line.
+export const PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS = 2_592_000_000n;
+// The most retention a client lets a store's descriptor state, in windows:
+// the pinned profile's `carrierRetentionWindows`, the most a store of it may
+// keep (about 7.4 days at 4,000 ms). A descriptor stating more is refused at
+// connect.
+export const PROTOTYPE_STORE_MAX_RETENTION_WINDOWS = 160_000;
+// Consecutive reports of one kind (a clock disagreement, a descriptor out of
+// validity, a signed answer naming another descriptor or another request) on
+// one route (reads, allocations, appends) of one store, with no believed
+// answer on that route between them, after which a client stops using the
+// store until it reconnects. An honest store within the allowed skew gives
+// none of these except in the one window its validity begins or ends in
+// (Task P3's measurement), and there the most it gives on one route is that
+// window's appends (5 at the pinned profile) plus the requests in flight as
+// validity ends; reads and allocations give at most two. 8 is above that.
+export const PROTOTYPE_STORE_DISAGREEMENT_LIMIT = 8;
+// A client that gets an unsigned 503 from a store sends that store nothing
+// for a delay that doubles with each further 503, from the minimum (one
+// finalizer tick of the stock server) to the maximum (eight windows at the
+// pinned profile). Any other answer resets it.
+export const PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS = 250;
+export const PROTOTYPE_STORE_CLIENT_BACKOFF_MAX_MS = 32_000;
 
 // The largest delay a platform timer honours (2^31 - 1 ms): a longer one fires
 // at once.

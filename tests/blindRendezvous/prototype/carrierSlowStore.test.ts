@@ -308,6 +308,8 @@ const slowStore = (
     storeId: new Uint8Array(32).fill(tag),
     carrierContextId: new Uint8Array(32).fill(tag),
     inert: false,
+    stopped: null,
+    backoffUntilMs: null,
     faults: [],
     issueToken: (window: bigint): Promise<boolean> =>
       pool.request("token", window),

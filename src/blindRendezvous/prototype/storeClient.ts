@@ -41,8 +41,12 @@ import { sign, verify } from "../../cryptography/ed25519";
 import {
   PROTOTYPE_READ_BACK_WINDOWS,
   PROTOTYPE_STORE_ADMISSION_TOKEN_BYTES,
+  PROTOTYPE_STORE_CLIENT_BACKOFF_MAX_MS,
+  PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS,
   PROTOTYPE_STORE_CLIENT_MAX_IN_FLIGHT_APPENDS,
   PROTOTYPE_STORE_CLIENT_MAX_SCANNED_WINDOWS,
+  PROTOTYPE_STORE_DISAGREEMENT_LIMIT,
+  PROTOTYPE_STORE_MAX_RETENTION_WINDOWS,
 } from "../../utils/constants";
 import { bytesEqual } from "../canonicalSchema";
 import {
@@ -51,6 +55,7 @@ import {
   deliveryProfileHash,
   prototypeStoreCompatibilityHash,
   publicAllocationLeaseSignedMessage,
+  publicAllocationRequestHash,
   publicAllocationStatusSignedMessage,
   publicAppendRequestHash,
   publicAppendResultSignedMessage,
@@ -114,13 +119,18 @@ import type {
   PublicStoreCheckpointV1,
 } from "../publicWindow";
 import type { StoreDescriptorV1 } from "../storeDescriptor";
+import type { CarrierTimers } from "./carrierRuntime";
 import type { DeliveryProfileV1 } from "./profile";
 import type {
   PrototypeStoreDescriptorDocumentV1,
   PublicAllocationLeaseV1,
+  PublicAllocationRequestV1,
+  PublicAllocationStatusBodyV1,
+  PublicAllocationStatusKindV1,
   PublicAppendAdmissionV1,
   PublicAppendRequestV1,
   PublicAppendResultV1,
+  PublicAppendStatusV1,
   PublicChunkStatusBodyV1,
   PublicChunkStatusKindV1,
   PublicStoreCheckpointStatusBodyV1,
@@ -162,6 +172,16 @@ export interface StoreClientOptions {
   /** Injected so a test, a worker or a proxy can supply its own transport. */
   readonly fetch?: typeof fetch;
   readonly nowMs: () => bigint;
+  /**
+   * The timer pair every request deadline (`requestDeadlineMs`) is armed on,
+   * the descriptor fetch at `connect` included. Default: the platform timers.
+   */
+  readonly timers?: CarrierTimers;
+  /**
+   * Called once, at the moment this client stops using the store
+   * (`StoreStopEvent`). A listener that throws changes nothing.
+   */
+  readonly onStopped?: (event: StoreStopEvent) => void;
   /**
    * Admission tokens for a store that gates its routes. Absent, the client
    * runs open admission: 32 zero bytes in the allocation body and no
@@ -213,28 +233,55 @@ export interface StoreClientOptions {
  * profile it does not serve, so no window and no clock makes it true.
  *
  * `chunk-denial-breach`: the store signed `no-such-chunk` for a chunk the
- * profile defines, in a window it signed a checkpoint for. The checkpoint
- * commits to every chunk of the profile, so the two statements contradict
- * each other; the record keeps both, the checkpoint read first.
+ * profile defines, of a profile its descriptor declares a chain for. A store
+ * signs that status only for coordinates its profile does not define, so the
+ * denial alone contradicts the descriptor it names. The client also holds
+ * the checkpoint it signed for that window, which commits to every chunk of
+ * the profile, and keeps both, the checkpoint read first; the denial alone
+ * proves the same fault.
  *
- * `store-clock-disagreement` is a report: a signed refusal that proves no
+ * `write-window-breach`: the store signed an answer to a write that its own
+ * signed window contradicts (`writeStatusContradictsStoreWindow`): a refusal
+ * that says the window is closed (`window-closed`, `window-finalized`) when
+ * the window it states had not reached the close; an append's
+ * `capacity-exhausted`, which means "past the horizon", for a window inside
+ * it; or any other answer (an acceptance such as `stored`, or a refusal such
+ * as `slot-conflict`), which the store gives only for a window it may still
+ * write to, for one below the chain start, beyond the horizon or already
+ * closed at the start of the window it states. The record keeps the signed
+ * answer.
+ *
+ * `store-clock-disagreement` is a report: a signed answer that proves no
  * fault, and that no store whose clock is within the profile's
  * `maxScheduleSkewMs` of this client's could honestly have signed while the
  * request was out. Either the window the store states is one no such clock
  * showed (`storeWindowWithinSkewOfRead`), or the status is `not-final` and
  * the request left at or after the window's finalization instant plus the
- * skew. Expiry or "not yet" cannot then be told from a store lying about its
- * time, and a third party cannot check when the answer was given, so it is no
- * blame: the scan says `clock-disagreement`, the window is not read at this
- * store this time, and the store is asked again on later reads (an honest
- * store whose clock is set right recovers).
+ * skew, or it is `window-closed` or `window-finalized` for the window the
+ * store states and the answer was in before that window's finalization
+ * instant less the skew. Expiry or "not yet" cannot then be told from a store
+ * lying about its time, and a third party cannot check when the answer was
+ * given, so it is no blame: the scan says `clock-disagreement`, the window is
+ * not read at this store this time (a write refusal is not believed), and the
+ * store is asked again on later requests (an honest store whose clock is set
+ * right recovers). A promise of custody (`stored`, `already-present`) whose
+ * stated window disagrees is reported and still kept for the custody check.
  *
  * `descriptor-out-of-validity` is a report: the descriptor this client pinned
- * does not cover the read. Either a signed refusal states a store window
+ * does not cover the request. Either a signed answer states a store window
  * that is not wholly inside the descriptor's validity, or this client's own
  * clock was outside that validity while the request was out. A refusal that
- * proves a fault is blamed first; nothing else from such a read is believed
- * or served, and the scan says `descriptor-out-of-validity`.
+ * proves a fault is blamed first; nothing else from such a request is
+ * believed or served (a promise of custody is kept, as above), and a scan
+ * says `descriptor-out-of-validity`. Once this client's own clock reaches the
+ * descriptor's end it sends the store nothing more (`StoreStopEvent`).
+ *
+ * `write-refusal` is a report: the store refused a write, inside the window's
+ * open interval, with a signed status an honest store also gives —
+ * `invalid-token`, `token-spent` and `capacity-exhausted` on an allocation,
+ * `slot-conflict` on an admitted append. A third party cannot tell it from
+ * the store refusing at will, so it is no blame; it is recorded, with the
+ * window the store states, so a store that refuses every write is visible.
  *
  * `custody-unchecked` is a report: receipts for a window this client could not
  * read back (expired or withheld) were not checked, rather than dropped
@@ -249,8 +296,12 @@ export interface StoreClientOptions {
  * `signature-invalid` is reserved for an answer this client *could* judge:
  * bytes that decoded as the expected type, carrying a signature, which either
  * does not verify under the pinned descriptor key or verifies but names the
- * wrong store, profile, window or version — a well-formed, signed answer to a
- * different question than the one this client asked. A response that decodes
+ * wrong store, profile, window, request, descriptor or version — a
+ * well-formed, signed answer to a different question than the one this
+ * client asked. When the signature verified and the answer is a signed
+ * status (a read refusal, an allocation status, an append result), the
+ * record keeps it as `evidence`, with the descriptor this client pinned (the
+ * key it verified under; the answer may name another). A response that decodes
  * and verifies but names the wrong coordinates is deliberately kept here
  * rather than folded into `unreachable`: the store was reachable and spent a
  * real signature over real bytes, which is closer to "signed something
@@ -270,8 +321,10 @@ export type StoreFaultKind =
   | "finalization-breach"
   | "chain-denial-breach"
   | "chunk-denial-breach"
+  | "write-window-breach"
   | "store-clock-disagreement"
   | "descriptor-out-of-validity"
+  | "write-refusal"
   | "custody-unacknowledged"
   | "custody-unchecked"
   | "checkpoint-split-view-hint";
@@ -282,18 +335,23 @@ export interface StoreFaultRecord {
   readonly window: bigint | null;
   readonly detail: string;
   /**
-   * The store's own signed answers, canonical bytes, that prove the fault:
-   * one status for a `retention-breach`, `finalization-breach` or
-   * `chain-denial-breach`; the finalized checkpoint read and then the chunk
-   * status that denies one of its chunks for a `chunk-denial-breach`. It is
-   * the `evidence` argument of `signedStatusProvesFault`, as it stands.
+   * The store's own signed answers, canonical bytes. For blame, the ones that
+   * prove the fault: one status for a `retention-breach`,
+   * `finalization-breach`, `chain-denial-breach` or `write-window-breach`
+   * (a read status, an allocation result, an append result); the finalized
+   * checkpoint read and then the chunk status that denies one of its chunks
+   * for a `chunk-denial-breach`. It is the `evidence` argument of
+   * `signedStatusProvesFault`, as it stands. For a `signature-invalid`
+   * report, the signed answer that verified under the pinned key and named
+   * another descriptor or answered another request.
    */
   readonly evidence?: readonly Uint8Array[];
   /**
-   * The descriptor the answers name by `descriptorHash`, kept with them so the
-   * evidence is checkable without anything this client might later drop. The
-   * delivery profile is not kept: the signed answers name it by hash, and the
-   * verifier refuses any other.
+   * The descriptor this client pinned at `connect`, kept with the evidence so
+   * it is checkable without anything this client might later drop. For blame
+   * it is the descriptor the answers name by `descriptorHash`. The delivery
+   * profile is not kept: the signed answers name it by hash, and the verifier
+   * refuses any other.
    */
   readonly descriptor?: StoreDescriptorV1;
 }
@@ -307,7 +365,58 @@ const BLAME_FAULT_KINDS: ReadonlySet<StoreFaultKind> = new Set([
   "finalization-breach",
   "chain-denial-breach",
   "chunk-denial-breach",
+  "write-window-breach",
 ]);
+
+/**
+ * The routes a store's answers are counted on for `StoreStopEvent`: a read
+ * (one scan of a window), an allocation, an append. A believed answer on one
+ * route does not excuse disagreements on another, so a store cannot serve
+ * appends to keep refusing every read.
+ */
+export type StoreAnswerRoute = "read" | "allocation" | "append";
+
+/**
+ * The non-blame reports counted towards `PROTOTYPE_STORE_DISAGREEMENT_LIMIT`:
+ * `store-clock-disagreement`, `descriptor-out-of-validity`, and
+ * `signed-mismatch` (a `signature-invalid` record for an answer whose
+ * signature verified under the pinned key and that names another descriptor,
+ * or another store, profile, window, chunk or request, or answers no request
+ * this client made).
+ */
+export type StoreDisagreementKind =
+  "store-clock-disagreement" | "descriptor-out-of-validity" | "signed-mismatch";
+
+/**
+ * Why this client has stopped using its store, given once to
+ * `StoreClientOptions.onStopped` and kept as `PrototypeStoreClient.stopped`.
+ * From then on no request is sent: every operation answers as if the store
+ * were unreachable, and a scan says `stopped`. A new `connect` is the only
+ * way back.
+ *
+ * `descriptor-expired`: this client's clock reached the pinned descriptor's
+ * `notAfterUnixMs`. Nothing the store says under it is believed any more; a
+ * reconnect to a store serving a fresh descriptor is needed.
+ *
+ * `disagreement-limit`: `count` (`PROTOTYPE_STORE_DISAGREEMENT_LIMIT`)
+ * consecutive reports of one `disagreement` kind on one `route`, with no
+ * believed answer on that route between them.
+ */
+export type StoreStopEvent =
+  | {
+      readonly reason: "descriptor-expired";
+      readonly storeIdHex: string;
+      readonly notAfterUnixMs: bigint;
+      /** This client's clock when it found the descriptor expired. */
+      readonly atMs: bigint;
+    }
+  | {
+      readonly reason: "disagreement-limit";
+      readonly storeIdHex: string;
+      readonly route: StoreAnswerRoute;
+      readonly disagreement: StoreDisagreementKind;
+      readonly count: number;
+    };
 
 /**
  * What one fixed scan of one window came back with.
@@ -336,7 +445,9 @@ const BLAME_FAULT_KINDS: ReadonlySet<StoreFaultKind> = new Set([
  * answer: it is this client's own word for a window below the chain start,
  * for which no request is made. `descriptor-out-of-validity` is also what a
  * window that was served whole comes back as when this client's clock was
- * outside the pinned descriptor's validity during the read.
+ * outside the pinned descriptor's validity during the read. `stopped` is
+ * this client's own word too: it no longer uses the store (`stopped`, the
+ * getter), and made no request.
  */
 export interface WindowScan {
   readonly window: bigint;
@@ -347,6 +458,7 @@ export interface WindowScan {
     | "beyond-retention"
     | "clock-disagreement"
     | "descriptor-out-of-validity"
+    | "stopped"
     | "unreachable";
   readonly objects: readonly Uint8Array[];
   readonly checkpointHash: Uint8Array | null;
@@ -410,9 +522,11 @@ export class StoreVersionError extends StoreClientError {
 }
 
 /**
- * The store's signed descriptor states a retention shorter than this client
- * reads back (`PROTOTYPE_READ_BACK_WINDOWS`). A client that used it would ask
- * for windows the store has let expire, so `connect` refuses it.
+ * The store's signed descriptor states a retention this client will not use:
+ * shorter than it reads back (`PROTOTYPE_READ_BACK_WINDOWS`), so it would ask
+ * for windows the store has let expire, or longer than
+ * `PROTOTYPE_STORE_MAX_RETENTION_WINDOWS`, more than any store of the pinned
+ * profile may keep. `connect` refuses either.
  */
 export class StoreRetentionError extends StoreClientError {
   override readonly name = "StoreRetentionError";
@@ -571,16 +685,38 @@ export const descriptorValidThroughRead = (
   descriptor.notBeforeUnixMs <= read.sentMs &&
   read.receivedMs < descriptor.notAfterUnixMs;
 
+/** One answer's bytes, and this client's clock when they were all in. */
+interface RequestAnswer {
+  readonly bytes: Uint8Array;
+  readonly receivedMs: bigint;
+}
+
+/**
+ * The span one answer is judged against. A clock that stepped back while the
+ * request was out is read as not having moved.
+ */
+const spanOf = (sentMs: bigint, receivedMs: bigint): StoreReadSpan => ({
+  sentMs,
+  receivedMs: receivedMs > sentMs ? receivedMs : sentMs,
+});
+
+const describeSpan = (span: StoreReadSpan): string =>
+  `${String(span.sentMs)} to ${String(span.receivedMs)} ms`;
+
+const describeValidity = (descriptor: StoreDescriptorV1): string =>
+  `${String(descriptor.notBeforeUnixMs)} to ${String(descriptor.notAfterUnixMs)} ms`;
+
 /** The faults a store's own signed answers can prove against it. */
 export type StoreEvidenceFaultKind =
   | "retention-breach"
   | "finalization-breach"
   | "chain-denial-breach"
-  | "chunk-denial-breach";
+  | "chunk-denial-breach"
+  | "write-window-breach";
 
 interface SignedStoreStatusWindows {
   readonly deliveryProfileHash: Uint8Array;
-  /** The window the status is about. */
+  /** The window the status is about: the one read, allocated or appended to. */
   readonly window: bigint;
   /** The store's own current window when it signed. */
   readonly storeWindow: bigint;
@@ -597,7 +733,87 @@ export type SignedStoreStatusStatement =
       readonly status: PublicChunkStatusKindV1;
       readonly sizeClass: number;
       readonly chunkIndex: bigint;
+    })
+  | (SignedStoreStatusWindows & {
+      readonly route: "allocation";
+      readonly status: PublicAllocationStatusKindV1;
+    })
+  | (SignedStoreStatusWindows & {
+      readonly route: "append";
+      readonly status: PublicAppendStatusV1;
+      /**
+       * Whether the append carried an admission (a lease). Only the client
+       * that sent it knows; it decides what a status means at step 7 and is
+       * read at no other step, so a third party's verdict never depends on
+       * it.
+       */
+      readonly admitted: boolean;
     });
+
+/**
+ * What a write status says about its window, which decides when the store
+ * core signs it: `closed` (`window-closed`, `window-finalized`), `beyond the
+ * horizon` (an append's `capacity-exhausted`), or `open` (every other write
+ * status: the window is one a write may still be made to).
+ */
+const writeStatusClass = (
+  route: "allocation" | "append",
+  status: PublicAllocationStatusKindV1 | PublicAppendStatusV1,
+): "closed" | "beyond-horizon" | "open" =>
+  status === "window-closed" || status === "window-finalized"
+    ? "closed"
+    : route === "append" && status === "capacity-exhausted"
+      ? "beyond-horizon"
+      : "open";
+
+/**
+ * Whether a signed write status for `window`, given when the store's own
+ * current window was `storeWindow`, contradicts the store's rule for when it
+ * signs that status (see `writeStatusClass`), with H the profile's
+ * `maxFutureIngressWindows` and fin(W) `windowFinalizationInstantMs`:
+ *
+ * - `closed`: signed only for a window below the chain start, one whose
+ *   close (fin(W)) some instant of the stated window has reached, or, for an
+ *   allocation, one outside `[storeWindow, storeWindow + H]`;
+ * - `beyond-horizon`: signed only for a window at or after the chain start
+ *   and past `storeWindow + H`, where no lease can exist;
+ * - `open`: signed only for a window at or after the chain start, inside
+ *   `storeWindow + H`, and not closed at the start of the stated window.
+ *
+ * A status outside its condition is one no reading of any clock lets the
+ * store sign: the stated window alone, with the descriptor's chain start and
+ * the profile, proves it.
+ */
+export const writeStatusContradictsStoreWindow = (
+  route: "allocation" | "append",
+  status: PublicAllocationStatusKindV1 | PublicAppendStatusV1,
+  window: bigint,
+  storeWindow: bigint,
+  chainStart: bigint,
+  profile: DeliveryProfileV1,
+): boolean => {
+  const horizonEnd = storeWindow + BigInt(profile.maxFutureIngressWindows);
+  const finalizationMs = windowFinalizationInstantMs(window, profile);
+  switch (writeStatusClass(route, status)) {
+    case "closed":
+      return !(
+        window < chainStart ||
+        ingressWindowStartMs(storeWindow + 1n, profile.deliveryWindowMs) >
+          finalizationMs ||
+        (route === "allocation" &&
+          (window < storeWindow || window > horizonEnd))
+      );
+    case "beyond-horizon":
+      return !(window >= chainStart && window > horizonEnd);
+    case "open":
+      return !(
+        window >= chainStart &&
+        window <= horizonEnd &&
+        ingressWindowStartMs(storeWindow, profile.deliveryWindowMs) <
+          finalizationMs
+      );
+  }
+};
 
 /** Whether `profile` defines chunk `chunkIndex` of class `sizeClass`. */
 const profileDefinesChunk = (
@@ -626,19 +842,19 @@ const profileDefinesChunk = (
  * store core signs `out-of-range` only for a window outside the retention of
  * the descriptor it names, `not-final` only before the window's finalization
  * instant, `chain-unavailable` only for a profile that descriptor does not
- * declare, and `no-such-chunk` only for coordinates its profile does not
- * define, whatever its clock reads.
+ * declare, `no-such-chunk` only for coordinates its profile does not define,
+ * and each write status only for a window its stated window puts where that
+ * status is true (`writeStatusContradictsStoreWindow`), whatever its clock
+ * reads.
  *
  * `profile` must be the profile `statement.deliveryProfileHash` names (the
- * client pins it; the verifier checks it). `checkpointCommitsWindow` says the
- * caller holds a checkpoint this store signed for the statement's window and
- * profile, which is what turns a `no-such-chunk` into a contradiction.
+ * client pins it; the verifier checks it). A lease states no window and is
+ * never judged here.
  */
 export const signedStatusContradiction = (
   statement: SignedStoreStatusStatement,
   descriptor: StoreDescriptorV1,
   profile: DeliveryProfileV1,
-  checkpointCommitsWindow = false,
 ): StoreEvidenceFaultKind | null => {
   const chainStart = descriptorChainStart(
     descriptor,
@@ -647,6 +863,17 @@ export const signedStatusContradiction = (
   // No chain declared for this profile: `chain-unavailable` is then the
   // truth, and no other status says anything this descriptor contradicts.
   if (chainStart === null) return null;
+  if (statement.route === "allocation" || statement.route === "append")
+    return writeStatusContradictsStoreWindow(
+      statement.route,
+      statement.status,
+      statement.window,
+      statement.storeWindow,
+      chainStart,
+      profile,
+    )
+      ? "write-window-breach"
+      : null;
   switch (statement.status) {
     case "chain-unavailable":
       return "chain-denial-breach";
@@ -669,8 +896,9 @@ export const signedStatusContradiction = (
         ? "finalization-breach"
         : null;
     case "no-such-chunk":
-      return checkpointCommitsWindow &&
-        statement.route === "chunk" &&
+      // The denial alone contradicts the descriptor: the store signs it only
+      // for coordinates the profile it declares does not define.
+      return statement.route === "chunk" &&
         profileDefinesChunk(profile, statement.sizeClass, statement.chunkIndex)
         ? "chunk-denial-breach"
         : null;
@@ -684,20 +912,32 @@ export type SignedRefusalJudgment =
   | { readonly step: 5; readonly outcome: "descriptor-out-of-validity" }
   | {
       readonly step: 7;
-      readonly outcome: "beyond-retention" | "not-final" | "no-benign-meaning";
+      readonly outcome:
+        | "beyond-retention"
+        | "not-final"
+        | "window-closed"
+        | "window-finalized"
+        | "capacity-exhausted"
+        | "custody-promised"
+        | "cover-accepted"
+        | "write-refusal"
+        | "no-benign-meaning";
     };
 
 /**
- * The one decision order for every signed refusal a read can be answered
- * with: both routes (`checkpoint` and `chunk`), every status, a
- * scheduled read and a catch-up read alike. `PrototypeStoreClient` does
- * steps 1 and 2 (`#judgeSignedRefusal`) and then calls this for the rest.
+ * The one decision order for every signed status a store answers a read or
+ * a write with: the two read routes (`checkpoint` and `chunk`) and the two
+ * write routes (`allocation` and `append`), every status, a scheduled request
+ * and a catch-up read alike. `PrototypeStoreClient` does steps 1 and 2 and
+ * then calls this for the rest.
  *
  * 1. The answer decodes, is version 1, verifies under the pinned key, and
- *    names this store, profile and window (and, for a chunk, the class and
- *    index asked for). Otherwise `signature-invalid`, a report.
+ *    names this store, profile and window (for a chunk, the class and index
+ *    asked for; for a write, the request this client sent, by hash).
+ *    Otherwise `signature-invalid`, a report.
  * 2. It names the pinned descriptor by hash. Otherwise `signature-invalid`,
  *    a report: a descriptor this client does not hold could state anything.
+ *    From step 1's binding on, the answer verified, so the record keeps it.
  * 3. It contradicts the store's own signed statements
  *    (`signedStatusContradiction`). Blame under the fault's own name, the
  *    evidence kept with the descriptor, the store inert. Decided before any
@@ -713,37 +953,75 @@ export type SignedRefusalJudgment =
  * 6. This client's own clock rules the status out. `not-final`: the request
  *    left at or after `windowFinalizationInstantMs + maxScheduleSkewMs`, so a
  *    store within the skew read its clock at or after the finalization
- *    instant and could not sign it. `store-clock-disagreement`, as in step 4.
- *    `out-of-range` has no such step: after 3 and 4 the stated window is past
- *    the retention and is one a store within the skew could have read.
+ *    instant and could not sign it. `window-closed` and `window-finalized`
+ *    for the very window the store states: the answer was in before the
+ *    finalization instant less the skew, so a store within the skew read its
+ *    clock before it and could not sign them. `store-clock-disagreement`, as
+ *    in step 4. No other status has such a step: after 3 and 4 its stated
+ *    window is one a store within the skew could have read, and what it says
+ *    then holds at every instant of that window.
  * 7. Only then the status's own meaning.
  *
  * Which step can end each status, and in what (W the window asked for, S the
- * window the store states, R and the chain start from the descriptor):
+ * window the store states, R and the chain start C from the descriptor, H
+ * the profile's `maxFutureIngressWindows`):
  *
- * | status              | route      | 3 blame                                   | 4 | 5 | 6                              | 7 benign           |
- * | ------------------- | ---------- | ----------------------------------------- | - | - | ------------------------------ | ------------------ |
- * | `out-of-range`      | both       | `retention-breach` if W > S or S - W <= R | x | x | none                           | `beyond-retention` |
- * | `not-final`         | both       | `finalization-breach` if                  | x | x | `store-clock-disagreement` if  | `not-final`        |
- * |                     |            | start(S) >= fin(W)                        |   |   | sent >= fin(W) + skew          |                    |
- * | `chain-unavailable` | checkpoint | `chain-denial-breach`, always             | - | - | -                              | none               |
- * | `no-such-chunk`     | chunk      | `chunk-denial-breach`, always             | - | - | -                              | none               |
+ * | status                               | route                | 3 blame                                   | 4  | 5  | 6                                   | 7                               |
+ * | ------------------------------------ | -------------------- | ----------------------------------------- | -- | -- | ----------------------------------- | ------------------------------- |
+ * | `out-of-range`                       | both reads           | `retention-breach` if W > S or S - W <= R | x  | x  | none                                | `beyond-retention`, benign      |
+ * | `not-final`                          | both reads           | `finalization-breach` if                  | x  | x  | `store-clock-disagreement` if       | `not-final`, benign             |
+ * |                                      |                      | start(S) >= fin(W)                        |    |    | sent >= fin(W) + skew               |                                 |
+ * | `chain-unavailable`                  | checkpoint           | `chain-denial-breach`, always             | -  | -  | -                                   | none                            |
+ * | `no-such-chunk`                      | chunk                | `chunk-denial-breach`, always             | -  | -  | -                                   | none                            |
+ * | `window-closed`                      | allocation           | `write-window-breach` if W >= C and       | x  | x  | `store-clock-disagreement` if       | `window-closed`, benign         |
+ * |                                      |                      | S < W <= S + H                            |    |    | W = S >= C and                      |                                 |
+ * |                                      |                      |                                           |    |    | received + skew < fin(W)            |                                 |
+ * | `invalid-token`, `token-spent`,      | allocation           | `write-window-breach` if W < C,           | x  | x  | `store-clock-disagreement` if       | `write-refusal`, a report       |
+ * | `capacity-exhausted`                 |                      | W > S + H or start(S) >= fin(W)           |    |    | sent >= fin(W) + skew               |                                 |
+ * | `window-finalized`                   | append               | `write-window-breach` if W >= C and S < W | x  | x  | as `window-closed`                  | `window-finalized`, benign      |
+ * | `capacity-exhausted`                 | append               | `write-window-breach` if W < C or         | x  | x  | none                                | `capacity-exhausted`, benign    |
+ * |                                      |                      | W <= S + H                                |    |    |                                     |                                 |
+ * | `stored`, `already-present`          | append, admitted     | as `invalid-token`                        | xp | xp | xp, as `invalid-token`              | `custody-promised`              |
+ * | `slot-conflict`                      | append, admitted     | as `invalid-token`                        | x  | x  | as `invalid-token`                  | `write-refusal`, a report       |
+ * | `unallocated-cover`                  | append, cover        | as `invalid-token`                        | x  | x  | as `invalid-token`                  | `cover-accepted`, benign        |
+ * | `unallocated-cover`                  | append, admitted     | as `invalid-token`                        | x  | x  | as `invalid-token`                  | `no-benign-meaning`             |
+ * | `stored`, `already-present`,         | append, cover        | as `invalid-token`                        | x  | x  | as `invalid-token`                  | `no-benign-meaning`             |
+ * | `slot-conflict`                      |                      |                                           |    |    |                                     |                                 |
  *
  * `x`: the step applies (4 ends in `store-clock-disagreement`, 5 in
- * `descriptor-out-of-validity`). `-`: never reached, because step 3 always
+ * `descriptor-out-of-validity`); `xp`: it applies and the promise is still
+ * kept for the custody check, since dropping it would let a store escape the
+ * check by misstating its time. `-`: never reached, because step 3 always
  * ends the status for a read this client makes: every window it asks for is
  * at or after the chain start of a profile the pinned descriptor declares,
- * every chunk it asks for is one the profile defines, and a chunk status is
- * judged only after the same scan verified that window's checkpoint. For any
- * other input the last row holds too: a status with no benign meaning ends
- * in `no-benign-meaning`, which the client records as `signature-invalid`.
+ * and every chunk it asks for is one the profile defines. For any other
+ * input the last rows hold too: a status with no benign meaning ends in
+ * `no-benign-meaning`, which the client records as `signature-invalid`, and
+ * every status of a profile the descriptor declares no chain for ends there.
+ * A write refusal inside the window's open interval (`invalid-token`,
+ * `token-spent`, an allocation's `capacity-exhausted`, `slot-conflict`) is
+ * what an honest store also gives, and nothing it signs tells the two apart,
+ * so it is a report (`write-refusal`), never blame, and never silent. A lease
+ * is a promise, not a status: it states no window and names no descriptor,
+ * so of these steps only 1 (its binding to the request) and 5's half on this
+ * client's clock apply to it, in the client.
  *
- * The benign outcomes are exactly the answers an honest store whose clock is
- * within the skew of this client's can sign while the request is out, under
- * a descriptor valid then: `out-of-range` iff its window S is past W + R, and
- * `not-final` iff its clock reads before fin(W), which needs S's start before
- * fin(W) (step 3) and the request sent before fin(W) + skew (step 6). So such
- * a store is never blamed and never reported, at any read time. At a read the
+ * The benign outcomes (and `custody-promised`) are exactly the answers an
+ * honest store whose clock is within the skew of this client's can sign
+ * while the request is out, under a descriptor valid then. For reads:
+ * `out-of-range` iff its window S is past W + R, and `not-final` iff its
+ * clock reads before fin(W), which needs S's start before fin(W) (step 3)
+ * and the request sent before fin(W) + skew (step 6). For writes, with one
+ * reading r of its clock deciding each answer and S its window:
+ * `window-closed` and `window-finalized` iff W < C or r >= fin(W) (an
+ * allocation also iff W is outside [S, S + H]), so S >= W for W >= C inside
+ * the horizon (step 3), and for S = W a reading at or after fin(W) within
+ * the skew, which needs received + skew >= fin(W) (step 6); an append's
+ * `capacity-exhausted` iff W >= C and W > S + H (step 3); every other write
+ * status iff W >= C, W <= S + H and r < fin(W), which needs start(S) < fin(W)
+ * (step 3) and sent - skew < fin(W) (step 6). So such a store is never
+ * blamed for any of them and never reported for a benign one, at any request
+ * time. At a read the
  * carrier runtime makes, `not-final` is never benign: the profile's rule
  * `chunkFinalizationOffsetMs + maxScheduleSkewMs < deliveryWindowMs +
  * publicReadOffsetMs` puts every read of W after fin(W) + skew.
@@ -753,14 +1031,8 @@ export const judgeSignedRefusal = (
   descriptor: StoreDescriptorV1,
   profile: DeliveryProfileV1,
   read: StoreReadSpan,
-  checkpointCommitsWindow: boolean,
 ): SignedRefusalJudgment => {
-  const fault = signedStatusContradiction(
-    statement,
-    descriptor,
-    profile,
-    checkpointCommitsWindow,
-  );
+  const fault = signedStatusContradiction(statement, descriptor, profile);
   if (fault !== null) return { step: 3, outcome: fault };
 
   if (!storeWindowWithinSkewOfRead(statement.storeWindow, read, profile))
@@ -776,28 +1048,100 @@ export const judgeSignedRefusal = (
   )
     return { step: 5, outcome: "descriptor-out-of-validity" };
 
+  const skew = profile.maxScheduleSkewMs;
+  const finalizationMs = windowFinalizationInstantMs(statement.window, profile);
   if (
+    (statement.route === "checkpoint" || statement.route === "chunk") &&
     statement.status === "not-final" &&
-    read.sentMs >=
-      windowFinalizationInstantMs(statement.window, profile) +
-        profile.maxScheduleSkewMs
+    read.sentMs >= finalizationMs + skew
   )
     return { step: 6, outcome: "store-clock-disagreement" };
 
-  // A profile the descriptor declares no chain for has no window to expire
-  // or to be not yet final.
-  const declared =
-    descriptorChainStart(descriptor, statement.deliveryProfileHash) !== null;
-  if (declared && statement.status === "out-of-range")
-    return { step: 7, outcome: "beyond-retention" };
-  if (declared && statement.status === "not-final")
-    return { step: 7, outcome: "not-final" };
-  return { step: 7, outcome: "no-benign-meaning" };
+  // A profile the descriptor declares no chain for has no window to expire,
+  // to be not yet final, or to be written to.
+  const chainStart = descriptorChainStart(
+    descriptor,
+    statement.deliveryProfileHash,
+  );
+  if (chainStart === null) return { step: 7, outcome: "no-benign-meaning" };
+
+  if (statement.route === "allocation" || statement.route === "append") {
+    const writeClass = writeStatusClass(statement.route, statement.status);
+    // Closed only by the clock: a store within the skew read fin(W) or later
+    // no later than `received + skew`.
+    const closedByTimeAlone =
+      statement.window >= chainStart &&
+      ingressWindowStartMs(statement.storeWindow, profile.deliveryWindowMs) <
+        finalizationMs &&
+      !(
+        statement.route === "allocation" &&
+        statement.window >
+          statement.storeWindow + BigInt(profile.maxFutureIngressWindows)
+      );
+    if (
+      writeClass === "closed" &&
+      closedByTimeAlone &&
+      read.receivedMs + skew < finalizationMs
+    )
+      return { step: 6, outcome: "store-clock-disagreement" };
+    // Open: a store within the skew read before fin(W) no earlier than
+    // `sent - skew`, as for `not-final`.
+    if (writeClass === "open" && read.sentMs >= finalizationMs + skew)
+      return { step: 6, outcome: "store-clock-disagreement" };
+  }
+
+  switch (statement.route) {
+    case "checkpoint":
+    case "chunk":
+      if (statement.status === "out-of-range")
+        return { step: 7, outcome: "beyond-retention" };
+      if (statement.status === "not-final")
+        return { step: 7, outcome: "not-final" };
+      return { step: 7, outcome: "no-benign-meaning" };
+    case "allocation":
+      return {
+        step: 7,
+        outcome:
+          statement.status === "window-closed"
+            ? "window-closed"
+            : "write-refusal",
+      };
+    case "append":
+      switch (statement.status) {
+        case "window-finalized":
+          return { step: 7, outcome: "window-finalized" };
+        case "capacity-exhausted":
+          // After step 3, past the horizon and at or after the chain start.
+          return { step: 7, outcome: "capacity-exhausted" };
+        case "stored":
+        case "already-present":
+          return {
+            step: 7,
+            outcome: statement.admitted
+              ? "custody-promised"
+              : "no-benign-meaning",
+          };
+        case "slot-conflict":
+          return {
+            step: 7,
+            outcome: statement.admitted ? "write-refusal" : "no-benign-meaning",
+          };
+        case "unallocated-cover":
+          return {
+            step: 7,
+            outcome: statement.admitted
+              ? "no-benign-meaning"
+              : "cover-accepted",
+          };
+      }
+  }
 };
 
 /**
  * A signed status read out of evidence bytes, with what its signature is
- * over. `null` when the bytes are neither status, or are not version 1.
+ * over: a read status (checkpoint or chunk), an allocation result that is a
+ * status, or an append result. `null` when the bytes are none of them, or
+ * are not version 1.
  */
 const decodeStatusEvidence = async (
   bytes: Uint8Array,
@@ -826,7 +1170,7 @@ const decodeStatusEvidence = async (
       signature: read.storeSignature,
     };
   } catch {
-    // Not a checkpoint read: a chunk read, or nothing.
+    // Not a checkpoint read: one of the others, or nothing.
   }
   try {
     const read = decodePublicChunkReadV1(bytes);
@@ -847,6 +1191,47 @@ const decodeStatusEvidence = async (
       signature: read.storeSignature,
     };
   } catch {
+    // Not a chunk read either.
+  }
+  try {
+    const result = decodePublicAllocationResultV1(bytes);
+    if (result.kind !== "status" || result.value.version !== 1) return null;
+    return {
+      statement: {
+        route: "allocation",
+        status: result.value.status,
+        deliveryProfileHash: result.value.deliveryProfileHash,
+        window: result.value.ingressWindow,
+        storeWindow: result.value.storeIngressWindow,
+      },
+      storeId: result.value.storeId,
+      descriptorHash: result.value.descriptorHash,
+      message: await publicAllocationStatusSignedMessage(result.value),
+      signature: result.storeSignature,
+    };
+  } catch {
+    // Not an allocation result.
+  }
+  try {
+    const { storeSignature, ...body } = decodePublicAppendResultV1(bytes);
+    if (body.version !== 1) return null;
+    return {
+      statement: {
+        route: "append",
+        status: body.status,
+        deliveryProfileHash: body.bucket.deliveryProfileHash,
+        window: body.bucket.ingressWindow,
+        storeWindow: body.storeIngressWindow,
+        // Not in the result, and read by no step a contradiction is decided
+        // at.
+        admitted: false,
+      },
+      storeId: body.storeId,
+      descriptorHash: body.descriptorHash,
+      message: await publicAppendResultSignedMessage(body),
+      signature: storeSignature,
+    };
+  } catch {
     return null;
   }
 };
@@ -857,23 +1242,27 @@ const decodeStatusEvidence = async (
  * No clock is consulted and the descriptor's validity is not a condition, so
  * the verdict is the same for anyone, at any time.
  *
- * `evidence` is one signed status, or a finalized checkpoint read and then a
- * chunk status. It proves a fault when:
+ * `evidence` is one signed status (a read status, an allocation result, an
+ * append result), or a finalized checkpoint read and then a chunk status. It
+ * proves a fault when:
  *
  * - the descriptor is authentic;
  * - `profile` is the profile the signed answers name. Every status and
  *   checkpoint carries `deliveryProfileHash` inside its signed body, and this
  *   recomputes `DeliveryProfileHash(profile)` and refuses any other profile,
  *   which is why a fault record does not need to hold one;
- * - the status is version 1, names this descriptor by hash (and, for a
- *   checkpoint status, this descriptor's store), names a chunk the profile
- *   defines if it is a chunk status, and verifies under the descriptor's key;
- * - a checkpoint beside it is version 1, names this store, this profile, the
- *   status's window and the profile's fixed chunk count, and verifies under
- *   the same key. It may name an earlier descriptor of the same store: the
- *   contradiction is between two statements of one key about one window;
+ * - the status is version 1, names this descriptor by hash (and, for every
+ *   status but a chunk status, this descriptor's store), names a chunk the
+ *   profile defines if it is a chunk status, and verifies under the
+ *   descriptor's key;
+ * - a checkpoint beside it, if there is one, is version 1, names this store,
+ *   this profile, the status's window and the profile's fixed chunk count,
+ *   and verifies under the same key. It may name an earlier descriptor of the
+ *   same store: the contradiction is between two statements of one key about
+ *   one window;
  * - `signedStatusContradiction` holds: `retention-breach`,
- *   `finalization-breach` and `chain-denial-breach` from the status alone,
+ *   `finalization-breach`, `chain-denial-breach`, `chunk-denial-breach` and
+ *   `write-window-breach` from the status alone, the pair form of
  *   `chunk-denial-breach` from a `no-such-chunk` with its checkpoint.
  */
 export const signedStatusProvesFault = async (
@@ -914,7 +1303,6 @@ export const signedStatusProvesFault = async (
   )
     return null;
 
-  let checkpointCommitsWindow = false;
   if (evidence.length === 2) {
     // Only a chunk status stands beside a checkpoint.
     if (statement.route !== "chunk") return null;
@@ -941,14 +1329,8 @@ export const signedStatusProvesFault = async (
       ))
     )
       return null;
-    checkpointCommitsWindow = true;
   }
-  return signedStatusContradiction(
-    statement,
-    descriptor,
-    profile,
-    checkpointCommitsWindow,
-  );
+  return signedStatusContradiction(statement, descriptor, profile);
 };
 
 const copyDescriptor = (descriptor: StoreDescriptorV1): StoreDescriptorV1 => ({
@@ -1011,6 +1393,44 @@ const requestDeadlineMs = (profile: DeliveryProfileV1): number => {
       "the delivery profile's window length is not a usable request deadline",
     );
   return deadline;
+};
+
+/**
+ * One request's deadline, armed on the client's timer pair rather than
+ * `AbortSignal.timeout`, so a caller that drives time itself drives the
+ * deadline too. `signal` aborts the request and its body at the deadline;
+ * `clear` disarms it once the answer is in.
+ */
+interface RequestDeadline {
+  readonly signal: AbortSignal;
+  readonly clear: () => void;
+}
+
+const armDeadline = (
+  timers: CarrierTimers,
+  deadlineMs: number,
+): RequestDeadline => {
+  const controller = new AbortController();
+  const handle = timers.setTimeout(() => {
+    controller.abort(new DOMException("request deadline", "TimeoutError"));
+  }, deadlineMs);
+  return {
+    signal: controller.signal,
+    clear: () => {
+      timers.clearTimeout(handle);
+    },
+  };
+};
+
+/**
+ * The platform's timers, wrapped: a WebIDL operation called as a method of
+ * anything but `window` throws "Illegal invocation" in Chromium.
+ */
+const platformTimers: CarrierTimers = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
 };
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -1163,7 +1583,9 @@ export class PrototypeStoreClient {
   readonly #chainStart: bigint;
   readonly #objectBytesByClass: ReadonlyMap<number, number>;
   readonly #requestDeadlineMs: number;
+  readonly #timers: CarrierTimers;
   readonly #admissionTokens: StoreAdmissionTokenProvider | undefined;
+  readonly #onStopped: ((event: StoreStopEvent) => void) | undefined;
 
   readonly #nowMs: () => bigint;
   /**
@@ -1175,6 +1597,24 @@ export class PrototypeStoreClient {
   readonly #descriptorHash: Uint8Array;
 
   #inert = false;
+  /**
+   * Why this client stopped using the store, or `null` while it uses it.
+   * Set once, synchronously, by `#stop`; never cleared.
+   */
+  #stopped: StoreStopEvent | null = null;
+  /**
+   * Consecutive reports of one kind on one route since a believed answer on
+   * that route, keyed `${route}:${kind}`. Updated in the same synchronous
+   * step as the judgment it counts, in the order answers arrive.
+   */
+  readonly #disagreements = new Map<string, number>();
+  /**
+   * The back-off after an unsigned 503. `delayMs` is the current delay (0:
+   * none), `untilMs` the instant before which nothing is sent, and
+   * `generation` counts every change, so an answer changes the state only if
+   * nothing changed it since its request left (`#request`).
+   */
+  readonly #backoff = { delayMs: 0, untilMs: 0n, generation: 0 };
   /** Recorded faults with their arrival order, blame and reports apart. */
   readonly #blame: {
     readonly order: number;
@@ -1261,7 +1701,9 @@ export class PrototypeStoreClient {
     this.#chainStart = pinned.chainStart;
     this.#objectBytesByClass = pinned.objectBytesByClass;
     this.#requestDeadlineMs = requestDeadlineMs(options.profile);
+    this.#timers = options.timers ?? platformTimers;
     this.#admissionTokens = options.admissionTokens;
+    this.#onStopped = options.onStopped;
     this.#nowMs = options.nowMs;
     this.#descriptor = copyDescriptor(pinned.descriptor);
     this.#descriptorHash = copyBytes(pinned.descriptorHash);
@@ -1276,16 +1718,18 @@ export class PrototypeStoreClient {
    * push that decision to a caller with less context. Everything after this
    * point degrades instead.
    *
-   * `nowMs` is read here, and twice at every scan: when its requests leave
-   * and when their answers are in. Those two readings decide only what is
-   * believed without proof — whether a signed refusal is one a store within
-   * the profile's skew could have given then, and whether the pinned
-   * descriptor covered the read (`judgeSignedRefusal`, steps 4 to 6). Whether
-   * an answer is a breach is decided from the store's own signed statements,
-   * never from this clock. The route lease is about now too and is checked
-   * here only; every other later check is anchored to the instant the window
-   * it concerns was finalized — historical evidence must not change meaning
-   * because the wall clock moved.
+   * `nowMs` is read here; once as each operation's requests leave (a scan's
+   * leave together), which is also when this client finds the pinned
+   * descriptor expired and stops (`StoreStopEvent`); and once as each answer
+   * is in. Those readings decide only what is believed without proof —
+   * whether a signed answer is one a store within the profile's skew could
+   * have given then, and whether the pinned descriptor covered the request
+   * (`judgeSignedRefusal`, steps 4 to 6) — and when a 503's back-off ends.
+   * Whether an answer is a breach is decided from the store's own signed
+   * statements, never from this clock. The route lease is about now too and
+   * is checked here only; every other later check is anchored to the instant
+   * the window it concerns was finalized — historical evidence must not
+   * change meaning because the wall clock moved.
    */
   static async connect(
     options: StoreClientOptions,
@@ -1300,44 +1744,52 @@ export class PrototypeStoreClient {
     // would otherwise leave the caller's whole composition waiting on one
     // origin before the run has begun.
     const deadlineMs = requestDeadlineMs(options.profile);
-    const deadline = AbortSignal.timeout(deadlineMs);
-    let response: Response;
-    try {
-      response = await transport(
-        `${options.origin}${PROTOTYPE_STORE_ROUTES.descriptor}`,
-        { signal: deadline },
-      );
-    } catch (error) {
-      return fail(
-        deadline.aborted
-          ? `the store descriptor did not arrive within the ${String(deadlineMs)} ms request deadline`
-          : `the store descriptor could not be fetched: ${
-              error instanceof Error ? error.name : "unknown error"
-            }`,
-      );
-    }
-    // The version first, whatever the status: a store of another version
-    // answers this client's descriptor path with its own 404 or 426, and
-    // says which version it is in this header on every answer.
-    const protocol = response.headers.get("x-p2party-store");
-    if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
-      throw new StoreVersionError(protocol);
-    if (response.status !== 200)
-      fail(`the store descriptor route answered ${String(response.status)}`);
-    if (protocol === null)
-      fail("the descriptor answer is not from a prototype store");
-
+    const deadline = armDeadline(options.timers ?? platformTimers, deadlineMs);
     let served: PrototypeStoreDescriptorDocumentV1;
     try {
-      served = decodePrototypeStoreDescriptorDocumentV1(
-        new Uint8Array(await response.arrayBuffer()),
-      );
-    } catch (error) {
-      return fail(
-        `the store descriptor document is not canonical: ${
-          error instanceof Error ? error.message : "unknown error"
-        }`,
-      );
+      let response: Response;
+      try {
+        response = await transport(
+          `${options.origin}${PROTOTYPE_STORE_ROUTES.descriptor}`,
+          { signal: deadline.signal },
+        );
+      } catch (error) {
+        return fail(
+          deadline.signal.aborted
+            ? `the store descriptor did not arrive within the ${String(deadlineMs)} ms request deadline`
+            : `the store descriptor could not be fetched: ${
+                error instanceof Error ? error.name : "unknown error"
+              }`,
+        );
+      }
+      // The version first, whatever the status: a store of another version
+      // answers this client's descriptor path with its own 404 or 426, and
+      // says which version it is in this header on every answer.
+      const protocol = response.headers.get("x-p2party-store");
+      if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
+        throw new StoreVersionError(protocol);
+      if (response.status === 410 && protocol !== null)
+        fail(
+          "the store says its descriptor has expired; it serves nothing until its operator starts a new chain",
+        );
+      if (response.status !== 200)
+        fail(`the store descriptor route answered ${String(response.status)}`);
+      if (protocol === null)
+        fail("the descriptor answer is not from a prototype store");
+
+      try {
+        served = decodePrototypeStoreDescriptorDocumentV1(
+          new Uint8Array(await response.arrayBuffer()),
+        );
+      } catch (error) {
+        return fail(
+          `the store descriptor document is not canonical: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`,
+        );
+      }
+    } finally {
+      deadline.clear();
     }
 
     const descriptor = served.descriptor;
@@ -1357,6 +1809,13 @@ export class PrototypeStoreClient {
     if (descriptor.retentionWindows < PROTOTYPE_READ_BACK_WINDOWS)
       throw new StoreRetentionError(
         `storeClient: the store states a retention of ${String(descriptor.retentionWindows)} windows, and this client reads up to ${String(PROTOTYPE_READ_BACK_WINDOWS)} back`,
+      );
+    // And a bound from above: no store of the pinned profile may keep more,
+    // and a descriptor must not be able to make this client reason about
+    // (or, in a later version, keep anything for) more windows than that.
+    if (descriptor.retentionWindows > PROTOTYPE_STORE_MAX_RETENTION_WINDOWS)
+      throw new StoreRetentionError(
+        `storeClient: the store states a retention of ${String(descriptor.retentionWindows)} windows, more than the ${String(PROTOTYPE_STORE_MAX_RETENTION_WINDOWS)} this client accepts`,
       );
 
     // Prototype compatibility is deliberately its own hash: a store that
@@ -1440,6 +1899,24 @@ export class PrototypeStoreClient {
     return this.#inert;
   }
 
+  /**
+   * Why this client no longer sends the store anything, or `null` while it
+   * does (`StoreStopEvent`).
+   */
+  get stopped(): StoreStopEvent | null {
+    return this.#stopped;
+  }
+
+  /**
+   * The instant on this client's clock before which it sends the store
+   * nothing, after the store answered an unsigned 503, or `null` when it is
+   * not backing off. A caller that would otherwise retry at once (the
+   * carrier runtime's catch-up) waits for it.
+   */
+  get backoffUntilMs(): bigint | null {
+    return this.#backoff.delayMs === 0 ? null : this.#backoff.untilMs;
+  }
+
   get faults(): readonly StoreFaultRecord[] {
     return [...this.#blame, ...this.#reports]
       .sort((left, right) => left.order - right.order)
@@ -1467,6 +1944,7 @@ export class PrototypeStoreClient {
    * did not.
    */
   async issueToken(targetWindow: bigint): Promise<boolean> {
+    if (typeof this.#gate() !== "bigint") return false;
     const body = encodeAllocationTokenIssueRequestV1({
       version: 1,
       storeId: copyBytes(this.#storeId),
@@ -1474,17 +1952,17 @@ export class PrototypeStoreClient {
       ingressWindow: targetWindow,
       privacyPassTokenRequest: new Uint8Array(32),
     });
-    const bytes = await this.#post(
+    const answer = await this.#post(
       PROTOTYPE_STORE_ROUTES.token,
       PROTOTYPE_STORE_MEDIA_TYPES.tokenRequest,
       body,
       targetWindow,
     );
-    if (bytes === null) return false;
+    if (answer === null) return false;
 
     const result = this.#decode(
       decodeAllocationTokenIssueResultV1,
-      bytes,
+      answer.bytes,
       targetWindow,
       "allocation token result",
     );
@@ -1518,62 +1996,68 @@ export class PrototypeStoreClient {
    *
    * Only the public half of `allocationKey` is sent; the secret stays with the
    * caller, which is what makes the lease usable by nobody else.
+   *
+   * A signed refusal goes through `judgeSignedRefusal` like every read
+   * refusal (`#judgeAllocationStatus`), and a lease must name the request
+   * this client sent, by hash. Either way the answer is judged only once it
+   * is in, and nothing is sent once this client has stopped using the store:
+   * the gate is checked again after the awaits that precede the request.
    */
   async allocate(
     targetWindow: bigint,
     allocationKey: { publicKey: Uint8Array; secretKey: Uint8Array },
   ): Promise<PublicAllocationLeaseV1 | null> {
     const allocationEd25519PublicKey = copyBytes(allocationKey.publicKey);
+    if (typeof this.#gate() !== "bigint") return null;
     const token =
       (await this.#admissionToken("allocation", targetWindow)) ??
       new Uint8Array(ADMISSION_TOKEN_BYTES);
-    const body = encodePublicAllocationRequestV1({
+    const request: PublicAllocationRequestV1 = {
       version: 1,
       deliveryProfileHash: copyBytes(this.#profileHash),
       ingressWindow: targetWindow,
       allocationEd25519PublicKey,
       privacyPassToken: token,
-    });
-    token.fill(0);
-    const bytes = await this.#post(
+    };
+    const body = encodePublicAllocationRequestV1(request);
+    // The hash every answer must name, taken over the request as sent, so
+    // before the token is wiped.
+    let requestHash: Uint8Array;
+    try {
+      requestHash = await publicAllocationRequestHash(request);
+    } finally {
+      token.fill(0);
+    }
+    const sentMs = this.#gate();
+    if (typeof sentMs !== "bigint") return null;
+    const answer = await this.#post(
       PROTOTYPE_STORE_ROUTES.allocation,
       PROTOTYPE_STORE_MEDIA_TYPES.allocationRequest,
       body,
       targetWindow,
     );
-    if (bytes === null) return null;
+    if (answer === null) return null;
+    const span = spanOf(sentMs, answer.receivedMs);
 
     const result = this.#decode(
       decodePublicAllocationResultV1,
-      bytes,
+      answer.bytes,
       targetWindow,
       "allocation result",
     );
     if (result === null) return null;
 
     if (result.kind === "status") {
-      if (result.value.version !== 1)
-        return this.#reject(
-          "signature-invalid",
-          targetWindow,
-          "unsupported allocation status version",
-          null,
-        );
       // A refusal is verified for the same reason a lease is: an unsigned one
       // could be forged by the network to push this client onto one store.
-      const verified = await verify(
-        await publicAllocationStatusSignedMessage(result.value),
+      await this.#judgeAllocationStatus(
+        targetWindow,
+        requestHash,
+        result.value,
         result.storeSignature,
-        this.#storeKey,
-        this.#module,
+        answer.bytes,
+        span,
       );
-      if (!verified)
-        return this.#reject(
-          "signature-invalid",
-          targetWindow,
-          "the allocation status signature does not verify",
-          null,
-        );
       return null;
     }
 
@@ -1601,18 +2085,23 @@ export class PrototypeStoreClient {
       );
 
     // The signature only proves this store wrote the lease; these checks prove
-    // it wrote the lease this client asked for. A lease for another window or
-    // another key would be admitted by nothing later.
+    // it wrote the lease this client asked for. A lease for another window,
+    // another key or another request would be admitted by nothing later.
     if (
       !bytesEqual(lease.storeId, this.#storeId) ||
       !bytesEqual(lease.deliveryProfileHash, this.#profileHash) ||
       lease.ingressWindow !== targetWindow ||
-      !bytesEqual(lease.allocationEd25519PublicKey, allocationEd25519PublicKey)
+      !bytesEqual(
+        lease.allocationEd25519PublicKey,
+        allocationEd25519PublicKey,
+      ) ||
+      !bytesEqual(lease.requestHash, requestHash)
     )
-      return this.#reject(
-        "signature-invalid",
+      return this.#mismatch(
+        "allocation",
         targetWindow,
         "the lease does not bind the allocation this client requested",
+        answer.bytes,
         null,
       );
 
@@ -1622,12 +2111,25 @@ export class PrototypeStoreClient {
     // meant it: `appendSlotCoordinates` would throw on the first use, which is
     // a store choosing when this client crashes. It is refused here instead.
     if (!this.#ordinalWithinCohort(lease.allocationOrdinal))
-      return this.#reject(
-        "signature-invalid",
+      return this.#mismatch(
+        "allocation",
         targetWindow,
         "the lease names an allocation ordinal outside the cohort capacity",
+        answer.bytes,
         null,
       );
+    // A lease states no window and names no descriptor, so of the decision
+    // order only this client's half of step 5 applies: it is not believed
+    // from a request outside the pinned descriptor's validity.
+    if (!descriptorValidThroughRead(this.#descriptor, span))
+      return this.#disagree(
+        "allocation",
+        "descriptor-out-of-validity",
+        targetWindow,
+        `the lease came while this client's clock read ${describeSpan(span)}, outside the pinned descriptor's validity (${describeValidity(this.#descriptor)}); it was not used`,
+        null,
+      );
+    this.#believed("allocation");
     return lease;
   }
 
@@ -1663,6 +2165,11 @@ export class PrototypeStoreClient {
    * An append with a lease is tracked from the moment it is sent until its
    * answer arrives: a scan of its window that finds it still unanswered
    * reports `custody-unacknowledged` (see `StoreFaultKind`).
+   *
+   * The answer is judged by `judgeSignedRefusal` (`#judgeAppendResult`): a
+   * refusal is believed only where an honest store within the skew could
+   * have signed it, and a promise of custody is returned whatever its stated
+   * window, so the caller keeps it for the custody check.
    */
   async append(
     window: bigint,
@@ -1690,12 +2197,27 @@ export class PrototypeStoreClient {
               allocationSignature: copyBytes(admission.allocationSignature),
             },
     };
+    if (typeof this.#gate() !== "bigint") return null;
 
     const token = await this.#admissionToken("append", window);
-    const inFlight = this.#trackInFlight(window, sizeClass, request.admission);
-    let bytes: Uint8Array | null;
+    let requestHash: Uint8Array;
     try {
-      bytes = await this.#post(
+      requestHash = await publicAppendRequestHash(request);
+    } catch (error) {
+      token?.fill(0);
+      throw error;
+    }
+    // The token provider and the hash awaited: the store may have been
+    // stopped, or have answered 503, meanwhile.
+    const sentMs = this.#gate();
+    if (typeof sentMs !== "bigint") {
+      token?.fill(0);
+      return null;
+    }
+    const inFlight = this.#trackInFlight(window, sizeClass, request.admission);
+    let answer: RequestAnswer | null;
+    try {
+      answer = await this.#post(
         PROTOTYPE_STORE_ROUTES.append,
         PROTOTYPE_STORE_MEDIA_TYPES.appendRequest,
         encodePublicAppendRequestV1(request),
@@ -1706,54 +2228,24 @@ export class PrototypeStoreClient {
       if (inFlight !== null) this.#inFlight.delete(inFlight);
       token?.fill(0);
     }
-    if (bytes === null) return null;
+    if (answer === null) return null;
 
     const result = this.#decode(
       decodePublicAppendResultV1,
-      bytes,
+      answer.bytes,
       window,
       "append result",
     );
     if (result === null) return null;
-    if (result.version !== 1)
-      return this.#reject(
-        "signature-invalid",
-        window,
-        "unsupported append result version",
-        null,
-      );
-
-    const { storeSignature, ...body } = result;
-    const verified = await verify(
-      await publicAppendResultSignedMessage(body),
-      storeSignature,
-      this.#storeKey,
-      this.#module,
+    return this.#judgeAppendResult(
+      window,
+      sizeClass,
+      requestHash,
+      request.admission !== null,
+      result,
+      answer.bytes,
+      spanOf(sentMs, answer.receivedMs),
     );
-    if (!verified)
-      return this.#reject(
-        "signature-invalid",
-        window,
-        "the append result signature does not verify",
-        null,
-      );
-
-    // The echoed request hash is what makes this receipt evidence about *this*
-    // append rather than some other one the store also answered.
-    if (
-      !bytesEqual(body.storeId, this.#storeId) ||
-      !bytesEqual(body.bucket.deliveryProfileHash, this.#profileHash) ||
-      body.bucket.ingressWindow !== window ||
-      body.bucket.sizeClass !== sizeClass ||
-      !bytesEqual(body.requestHash, await publicAppendRequestHash(request))
-    )
-      return this.#reject(
-        "signature-invalid",
-        window,
-        "the append result does not answer the request this client sent",
-        null,
-      );
-    return result;
   }
 
   /**
@@ -1794,7 +2286,12 @@ export class PrototypeStoreClient {
       objectHash: copyBytes(receipt.objectHash),
       result: { ...receipt.result },
     };
-    if (this.#unreadable.has(String(receipt.window))) {
+    // No scan of this store comes after it has stopped, and none believed of
+    // a window it no longer serves.
+    if (
+      this.#stopped !== null ||
+      this.#unreadable.has(String(receipt.window))
+    ) {
       this.#reportUnchecked(receipt.window, 1);
       return;
     }
@@ -1842,13 +2339,15 @@ export class PrototypeStoreClient {
     // Below the chain start there is nothing this store ever promised, so it
     // is out of range rather than missing.
     if (window < this.#chainStart) return empty("out-of-range");
+    // This client's clock as the requests leave: with each answer's own
+    // receive time, the span that answer is judged against.
+    const sentMs = this.#gate();
+    if (sentMs === "stopped") return empty("stopped");
+    if (sentMs === "backing-off") return empty("unreachable");
 
     const classes = [...this.#profile.sizeClasses].sort(
       (left, right) => left.id - right.id,
     );
-    // This client's clock as the requests leave: with the reading when the
-    // answers are in, the span every signed refusal is judged against.
-    const sentMs = this.#nowMs();
     const checkpointPromise = this.#get(
       `${PROTOTYPE_STORE_ROUTES.checkpoint}/${this.#profileHex}/${String(window)}`,
       window,
@@ -1861,24 +2360,15 @@ export class PrototypeStoreClient {
         ),
       ),
     );
-    const [checkpointBytes, chunkBytes] = await Promise.all([
+    const [checkpointAnswer, chunkAnswers] = await Promise.all([
       checkpointPromise,
       Promise.all(chunkPromises.map((promises) => Promise.all(promises))),
     ]);
 
-    // One reading for the whole scan, taken before any answer is judged:
-    // every answer was signed before it. A clock that stepped back while the
-    // requests were out is read as not having moved.
-    const nowMs = this.#nowMs();
-    const read: StoreReadSpan = {
-      sentMs,
-      receivedMs: nowMs > sentMs ? nowMs : sentMs,
-    };
-
     const checkpointStatus = await this.#readCheckpoint(
       window,
-      checkpointBytes,
-      read,
+      checkpointAnswer,
+      sentMs,
     );
     if (checkpointStatus.kind !== "finalized")
       return this.#unreadableOutcome(window, empty(checkpointStatus.status));
@@ -1887,9 +2377,9 @@ export class PrototypeStoreClient {
     const chunks = await this.#readChunks(
       window,
       classes,
-      chunkBytes,
-      read,
-      checkpointBytes ?? new Uint8Array(0),
+      chunkAnswers,
+      sentMs,
+      checkpointAnswer?.bytes ?? new Uint8Array(0),
     );
     if (chunks.kind !== "finalized")
       return this.#unreadableOutcome(window, empty(chunks.status));
@@ -1924,15 +2414,23 @@ export class PrototypeStoreClient {
     // checked at every read, not only at `connect`. A window read while this
     // client's clock is outside it is not served: everything above still ran,
     // because what the store signed is evidence whenever it is read, and the
-    // window's receipts were judged against it.
-    if (!descriptorValidThroughRead(this.#descriptor, read)) {
-      this.#record(
+    // window's receipts were judged against it. The span is the whole read's:
+    // from the requests leaving to the last answer in.
+    let lastReceivedMs = checkpointAnswer?.receivedMs ?? sentMs;
+    for (const answers of chunkAnswers)
+      for (const answer of answers)
+        if (answer !== null && answer.receivedMs > lastReceivedMs)
+          lastReceivedMs = answer.receivedMs;
+    const read = spanOf(sentMs, lastReceivedMs);
+    if (!descriptorValidThroughRead(this.#descriptor, read))
+      return this.#disagree(
+        "read",
         "descriptor-out-of-validity",
         window,
-        `this client's clock read ${String(read.sentMs)} to ${String(read.receivedMs)} ms during the read, outside the pinned descriptor's validity (${String(this.#descriptor.notBeforeUnixMs)} to ${String(this.#descriptor.notAfterUnixMs)} ms); the window was not served`,
+        `this client's clock read ${describeSpan(read)} during the read, outside the pinned descriptor's validity (${describeValidity(this.#descriptor)}); the window was not served`,
+        empty("descriptor-out-of-validity"),
       );
-      return empty("descriptor-out-of-validity");
-    }
+    this.#believed("read");
 
     // Objects in `(sizeClass, chunkIndex, objectIndex)` order: the profile's
     // own order, which is what makes an index into this array meaningful to a
@@ -1992,19 +2490,21 @@ export class PrototypeStoreClient {
    */
   async postWitness(record: StoreWitnessRecordV1): Promise<boolean> {
     const privateRecord = copyWitnessRecord(record);
+    if (typeof this.#gate() !== "bigint") return false;
     const token = await this.#admissionToken(
       "witness",
       privateRecord.ingressWindow,
     );
     try {
-      const bytes = await this.#post(
+      if (typeof this.#gate() !== "bigint") return false;
+      const answer = await this.#post(
         PROTOTYPE_STORE_ROUTES.witness,
         PROTOTYPE_STORE_MEDIA_TYPES.witnessRecord,
         encodeStoreWitnessRecordV1(privateRecord),
         privateRecord.ingressWindow,
         token,
       );
-      return bytes !== null;
+      return answer !== null;
     } finally {
       token?.fill(0);
     }
@@ -2024,14 +2524,15 @@ export class PrototypeStoreClient {
   async readWitnesses(
     window: bigint,
   ): Promise<readonly StoreWitnessRecordV1[]> {
-    const bytes = await this.#get(
+    if (typeof this.#gate() !== "bigint") return [];
+    const answer = await this.#get(
       `${PROTOTYPE_STORE_ROUTES.witness}/${this.#profileHex}/${String(window)}`,
       window,
     );
-    if (bytes === null) return [];
+    if (answer === null) return [];
     const records = this.#decode(
       decodeStoreWitnessRecordsV1,
-      bytes,
+      answer.bytes,
       window,
       "witness records",
     );
@@ -2063,7 +2564,8 @@ export class PrototypeStoreClient {
    * ---------------------------------------------------------------- */
 
   /**
-   * One GET or POST, reduced to bytes or `null`.
+   * One GET or POST, reduced to the answer's bytes and this client's clock
+   * when they were in, or `null`.
    *
    * A rejected fetch, a request that outlived its deadline, a non-200 status,
    * a missing protocol header and a body that cannot even be read off the wire
@@ -2075,74 +2577,109 @@ export class PrototypeStoreClient {
    * dishonesty, and the store may come back.
    *
    * The deadline is the reason a store that answers *nothing* lands in this
-   * same class rather than hanging: `requestDeadlineMs` explains the value.
+   * same class rather than hanging: `requestDeadlineMs` explains the value. It
+   * is armed on the client's timer pair (`StoreClientOptions.timers`).
+   *
+   * The receive time is read once per answer, when its body is in, so a store
+   * that stalls one answer cannot widen the span another is judged against.
+   *
+   * An unsigned 503 from the store starts or doubles the back-off
+   * (`#backOff`), and every other answer from it ends one (`#answered`). The
+   * back-off state as the request leaves goes with it, and its answer changes
+   * that state only if nothing changed it meanwhile: the 503s of one scan's
+   * parallel requests double the delay once, and the answer to a request
+   * sent before a 503 arrived cannot end the back-off that 503 began.
    */
   async #request(
     path: string,
     window: bigint | null,
     init?: RequestInit,
-  ): Promise<Uint8Array | null> {
-    const deadline = AbortSignal.timeout(this.#requestDeadlineMs);
-    let response: Response;
+  ): Promise<RequestAnswer | null> {
+    const generation = this.#backoff.generation;
+    const deadline = armDeadline(this.#timers, this.#requestDeadlineMs);
     try {
-      response = await this.#fetch(`${this.origin}${path}`, {
-        ...init,
-        signal: deadline,
-      });
-    } catch (error) {
-      return this.#reject(
-        "unreachable",
-        window,
-        deadline.aborted
-          ? `${path}: no answer within the ${String(this.#requestDeadlineMs)} ms request deadline`
-          : `${path}: the request failed (${
-              error instanceof Error ? error.name : "unknown error"
-            })`,
-        null,
-      );
-    }
-    // Every answer of this protocol is attributable to it; one that is not did
-    // not come from a store of this version, whatever is in its body or its
-    // status. A store that changed version since `connect` is named.
-    const protocol = response.headers.get("x-p2party-store");
-    if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
-      return this.#reject(
-        "unreachable",
-        window,
-        `${path}: the answer is from a ${protocol} store, and this client speaks ${PROTOTYPE_STORE_PROTOCOL}`,
-        null,
-      );
-    if (response.status !== 200)
-      return this.#reject(
-        "unreachable",
-        window,
-        `${path}: answered ${String(response.status)}`,
-        null,
-      );
-    if (protocol === null)
-      return this.#reject(
-        "unreachable",
-        window,
-        `${path}: the answer is not from a prototype store`,
-        null,
-      );
-    try {
-      return new Uint8Array(await response.arrayBuffer());
-    } catch {
-      // The deadline covers the body too: a store that sends headers and then
-      // stops writing is the same stall as one that never answered at all.
-      return this.#reject(
-        "unreachable",
-        window,
-        deadline.aborted
-          ? `${path}: the answer body did not arrive within the ${String(this.#requestDeadlineMs)} ms request deadline`
-          : `${path}: the answer body could not be read`,
-        null,
-      );
+      let response: Response;
+      try {
+        response = await this.#fetch(`${this.origin}${path}`, {
+          ...init,
+          signal: deadline.signal,
+        });
+      } catch (error) {
+        return this.#reject(
+          "unreachable",
+          window,
+          deadline.signal.aborted
+            ? `${path}: no answer within the ${String(this.#requestDeadlineMs)} ms request deadline`
+            : `${path}: the request failed (${
+                error instanceof Error ? error.name : "unknown error"
+              })`,
+          null,
+        );
+      }
+      // Every answer of this protocol is attributable to it; one that is not
+      // did not come from a store of this version, whatever is in its body or
+      // its status. A store that changed version since `connect` is named.
+      const protocol = response.headers.get("x-p2party-store");
+      if (protocol !== null && protocol !== PROTOTYPE_STORE_PROTOCOL)
+        return this.#reject(
+          "unreachable",
+          window,
+          `${path}: the answer is from a ${protocol} store, and this client speaks ${PROTOTYPE_STORE_PROTOCOL}`,
+          null,
+        );
+      if (protocol !== null && response.status === 503) {
+        const delayMs = this.#backOff(generation);
+        return this.#reject(
+          "unreachable",
+          window,
+          delayMs === null
+            ? `${path}: answered 503`
+            : `${path}: answered 503; this client sends the store nothing for ${String(delayMs)} ms`,
+          null,
+        );
+      }
+      if (protocol !== null) this.#answered(generation);
+      if (response.status !== 200)
+        return this.#reject(
+          "unreachable",
+          window,
+          response.status === 410 && protocol !== null
+            ? `${path}: answered 410: the store says its descriptor has expired`
+            : `${path}: answered ${String(response.status)}`,
+          null,
+        );
+      if (protocol === null)
+        return this.#reject(
+          "unreachable",
+          window,
+          `${path}: the answer is not from a prototype store`,
+          null,
+        );
+      let bytes: Uint8Array;
+      try {
+        bytes = new Uint8Array(await response.arrayBuffer());
+      } catch {
+        // The deadline covers the body too: a store that sends headers and
+        // then stops writing is the same stall as one that never answered.
+        return this.#reject(
+          "unreachable",
+          window,
+          deadline.signal.aborted
+            ? `${path}: the answer body did not arrive within the ${String(this.#requestDeadlineMs)} ms request deadline`
+            : `${path}: the answer body could not be read`,
+          null,
+        );
+      }
+      return { bytes, receivedMs: this.#nowMs() };
+    } finally {
+      deadline.clear();
     }
   }
 
-  async #get(path: string, window: bigint | null): Promise<Uint8Array | null> {
+  async #get(
+    path: string,
+    window: bigint | null,
+  ): Promise<RequestAnswer | null> {
     return this.#request(path, window);
   }
 
@@ -2159,7 +2696,7 @@ export class PrototypeStoreClient {
     body: Uint8Array,
     window: bigint | null,
     admissionToken: Uint8Array | null = null,
-  ): Promise<Uint8Array | null> {
+  ): Promise<RequestAnswer | null> {
     // `lib.dom`'s `BodyInit` is narrower than the codecs' `Uint8Array`, and a
     // copy is owed anyway: the request must not be able to change under the
     // transport after the bytes were signed over.
@@ -2177,6 +2714,149 @@ export class PrototypeStoreClient {
             },
       body: buffer,
     });
+  }
+
+  /**
+   * Whether this client may send the store a request now: this client's
+   * clock reading when it may, `"stopped"` once it no longer uses the store,
+   * `"backing-off"` while a 503's back-off runs. The first call at or after
+   * the pinned descriptor's end stops the client (`descriptor-expired`), so
+   * an expired descriptor is reported once, by that event, and never once per
+   * request. Synchronous: every operation checks it right before its request
+   * leaves, after whatever it awaited first, so nothing is sent after a stop.
+   */
+  #gate(): bigint | "stopped" | "backing-off" {
+    if (this.#stopped !== null) return "stopped";
+    const nowMs = this.#nowMs();
+    if (nowMs >= this.#descriptor.notAfterUnixMs) {
+      this.#stop({
+        reason: "descriptor-expired",
+        storeIdHex: this.storeIdHex,
+        notAfterUnixMs: this.#descriptor.notAfterUnixMs,
+        atMs: nowMs,
+      });
+      return "stopped";
+    }
+    if (this.#backoff.delayMs > 0 && nowMs < this.#backoff.untilMs)
+      return "backing-off";
+    return nowMs;
+  }
+
+  /**
+   * Start or double the back-off after a 503, bounded by
+   * `PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS` and `_MAX_MS`, unless the state
+   * changed since the request that got it left. Returns the delay begun.
+   */
+  #backOff(generation: number): number | null {
+    const backoff = this.#backoff;
+    if (generation !== backoff.generation) return null;
+    backoff.delayMs =
+      backoff.delayMs === 0
+        ? PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS
+        : Math.min(2 * backoff.delayMs, PROTOTYPE_STORE_CLIENT_BACKOFF_MAX_MS);
+    backoff.untilMs = this.#nowMs() + BigInt(backoff.delayMs);
+    backoff.generation += 1;
+    return backoff.delayMs;
+  }
+
+  /** End the back-off on an answer, unless it began after the request left. */
+  #answered(generation: number): void {
+    const backoff = this.#backoff;
+    if (generation !== backoff.generation || backoff.delayMs === 0) return;
+    backoff.delayMs = 0;
+    backoff.untilMs = 0n;
+    backoff.generation += 1;
+  }
+
+  /**
+   * Stop using the store, once: report the receipts held for windows no scan
+   * will now read back, then tell `onStopped`. Synchronous, so no request
+   * can leave between the decision and the gate seeing it.
+   */
+  #stop(event: StoreStopEvent): void {
+    if (this.#stopped !== null) return;
+    this.#stopped = event;
+    const held = new Map<string, { window: bigint; count: number }>();
+    for (const receipt of this.#receipts) {
+      const key = String(receipt.window);
+      const entry = held.get(key) ?? { window: receipt.window, count: 0 };
+      entry.count += 1;
+      held.set(key, entry);
+    }
+    this.#receipts = [];
+    for (const { window, count } of held.values())
+      this.#reportUnchecked(window, count);
+    try {
+      this.#onStopped?.(event);
+    } catch {
+      /* A listener cannot change what happened. */
+    }
+  }
+
+  /**
+   * Count one non-blame report of `kind` on `route`, and stop using the store
+   * when the count reaches `PROTOTYPE_STORE_DISAGREEMENT_LIMIT`.
+   */
+  #countDisagreement(
+    route: StoreAnswerRoute,
+    kind: StoreDisagreementKind,
+  ): void {
+    const key = `${route}:${kind}`;
+    const count = (this.#disagreements.get(key) ?? 0) + 1;
+    this.#disagreements.set(key, count);
+    if (count >= PROTOTYPE_STORE_DISAGREEMENT_LIMIT)
+      this.#stop({
+        reason: "disagreement-limit",
+        storeIdHex: this.storeIdHex,
+        route,
+        disagreement: kind,
+        count,
+      });
+  }
+
+  /** A believed answer on `route`: its counts start again. */
+  #believed(route: StoreAnswerRoute): void {
+    for (const kind of [
+      "store-clock-disagreement",
+      "descriptor-out-of-validity",
+      "signed-mismatch",
+    ] as const)
+      this.#disagreements.delete(`${route}:${kind}`);
+  }
+
+  /** Record a clock or validity report on `route`, count it, answer `value`. */
+  #disagree<T>(
+    route: StoreAnswerRoute,
+    kind: "store-clock-disagreement" | "descriptor-out-of-validity",
+    window: bigint,
+    detail: string,
+    value: T,
+  ): T {
+    this.#record(kind, window, detail);
+    this.#countDisagreement(route, kind);
+    return value;
+  }
+
+  /**
+   * Record a signed answer that verified under the pinned key and yet names
+   * another descriptor or answers another request: `signature-invalid`, the
+   * answer kept as evidence, counted as `signed-mismatch` on `route`.
+   */
+  #mismatch<T>(
+    route: StoreAnswerRoute,
+    window: bigint,
+    detail: string,
+    bytes: Uint8Array | null,
+    value: T,
+  ): T {
+    this.#record(
+      "signature-invalid",
+      window,
+      detail,
+      bytes === null ? undefined : [bytes],
+    );
+    this.#countDisagreement(route, "signed-mismatch");
+    return value;
   }
 
   /**
@@ -2362,8 +3042,8 @@ export class PrototypeStoreClient {
    */
   async #readCheckpoint(
     window: bigint,
-    bytes: Uint8Array | null,
-    span: StoreReadSpan,
+    answer: RequestAnswer | null,
+    sentMs: bigint,
   ): Promise<
     | {
         readonly kind: "finalized";
@@ -2373,11 +3053,11 @@ export class PrototypeStoreClient {
     | { readonly kind: "status"; readonly status: WindowScan["status"] }
   > {
     const unusable = { kind: "status", status: "unreachable" } as const;
-    if (bytes === null) return unusable;
+    if (answer === null) return unusable;
 
     const read = this.#decode(
       decodePublicStoreCheckpointReadV1,
-      bytes,
+      answer.bytes,
       window,
       "checkpoint read",
     );
@@ -2393,8 +3073,8 @@ export class PrototypeStoreClient {
             value: read.value,
             storeSignature: read.storeSignature,
           },
-          bytes,
-          span,
+          answer.bytes,
+          spanOf(sentMs, answer.receivedMs),
         ),
       };
 
@@ -2440,10 +3120,11 @@ export class PrototypeStoreClient {
       checkpoint.ingressWindow !== window ||
       !bytesEqual(checkpoint.deliveryProfileHash, this.#profileHash)
     )
-      return this.#reject(
-        "signature-invalid",
+      return this.#mismatch(
+        "read",
         window,
         "the checkpoint names another window or delivery profile",
+        null,
         unusable,
       );
     // `structurallyValidCheckpoint` judges the chain start against the
@@ -2481,8 +3162,8 @@ export class PrototypeStoreClient {
       readonly id: number;
       readonly publicChunksPerWindow: number;
     }[],
-    chunkBytes: readonly (readonly (Uint8Array | null)[])[],
-    span: StoreReadSpan,
+    chunkAnswers: readonly (readonly (RequestAnswer | null)[])[],
+    sentMs: bigint,
     checkpointBytes: Uint8Array,
   ): Promise<
     | {
@@ -2512,11 +3193,11 @@ export class PrototypeStoreClient {
       let previousChunkHash = ZERO32;
 
       for (let index = 0; index < sizeClass.publicChunksPerWindow; index++) {
-        const bytes = chunkBytes[classIndex][index];
-        if (bytes === null) return unusable;
+        const answer = chunkAnswers[classIndex][index];
+        if (answer === null) return unusable;
         const read = this.#decode(
           decodePublicChunkReadV1,
-          bytes,
+          answer.bytes,
           window,
           "chunk read",
         );
@@ -2524,7 +3205,8 @@ export class PrototypeStoreClient {
 
         // A refusal for a chunk of a window whose checkpoint this scan has
         // just verified: judged by the same order as a checkpoint refusal,
-        // with that checkpoint beside it.
+        // against this answer's own receive time, with that checkpoint kept
+        // beside it.
         if (read.kind === "status")
           return {
             kind: "status",
@@ -2538,8 +3220,8 @@ export class PrototypeStoreClient {
                 chunkIndex: index,
                 checkpointBytes,
               },
-              bytes,
-              span,
+              answer.bytes,
+              spanOf(sentMs, answer.receivedMs),
             ),
           };
 
@@ -2576,10 +3258,11 @@ export class PrototypeStoreClient {
           chunk.bucket.sizeClass !== sizeClass.id ||
           chunk.chunkIndex !== BigInt(index)
         )
-          return this.#reject(
-            "signature-invalid",
+          return this.#mismatch(
+            "read",
             window,
             "the chunk does not name the coordinates that were requested",
+            null,
             unusable,
           );
         if (chunk.fixedObjects.length !== this.#profile.publicChunkObjectCount)
@@ -2894,7 +3577,8 @@ export class PrototypeStoreClient {
    * Blame marks the window unreadable, sets `inert` and keeps the evidence.
    * A report keeps the window's receipts for a later read, except where this
    * client will make none it believes: after `beyond-retention`, and once
-   * its own clock is past the pinned descriptor's end.
+   * its own clock is past the pinned descriptor's end. A report of a counted
+   * kind is counted on the `read` route, and a benign answer resets it.
    */
   async #judgeSignedRefusal(
     window: bigint,
@@ -2947,10 +3631,11 @@ export class PrototypeStoreClient {
         !bytesEqual(value.deliveryProfileHash, this.#profileHash) ||
         value.ingressWindow !== window
       )
-        return this.#reject(
-          "signature-invalid",
+        return this.#mismatch(
+          "read",
           window,
           "the checkpoint status does not name this store, profile and window",
+          bytes,
           unusable,
         );
       what = "the checkpoint";
@@ -2971,10 +3656,11 @@ export class PrototypeStoreClient {
         value.bucket.sizeClass !== refusal.sizeClass ||
         value.chunkIndex !== BigInt(refusal.chunkIndex)
       )
-        return this.#reject(
-          "signature-invalid",
+        return this.#mismatch(
+          "read",
           window,
           "the chunk status does not name the chunk that was requested",
+          bytes,
           unusable,
         );
       what = `chunk ${String(refusal.chunkIndex)} of class ${String(refusal.sizeClass)}`;
@@ -2990,28 +3676,28 @@ export class PrototypeStoreClient {
     }
 
     // Step 2. Judged against the descriptor it names and no other: one this
-    // client does not hold could state any retention.
+    // client does not hold could state any retention. The answer verified
+    // under the pinned key, so it is kept.
     if (!bytesEqual(refusal.value.descriptorHash, this.#descriptorHash))
-      return this.#reject(
-        "signature-invalid",
+      return this.#mismatch(
+        "read",
         window,
         `the ${noun} names a descriptor other than the one this client pinned`,
+        bytes,
         unusable,
       );
 
     // Steps 3 to 7. Every chunk asked for is one the profile defines (the
-    // scan derives each request from it), and a chunk status is judged only
-    // after this scan verified the window's checkpoint, which commits to it.
+    // scan derives each request from it).
     const judgment = judgeSignedRefusal(
       statement,
       this.#descriptor,
       this.#profile,
       span,
-      refusal.route === "chunk",
     );
     const stated = `the store signed ${statement.status} for ${what} at its own window ${String(statement.storeWindow)}`;
     const skew = String(this.#profile.maxScheduleSkewMs);
-    const during = `${String(span.sentMs)} to ${String(span.receivedMs)} ms`;
+    const during = describeSpan(span);
     switch (judgment.outcome) {
       case "retention-breach":
         return this.#blameOnEvidence(
@@ -3044,52 +3730,323 @@ export class PrototypeStoreClient {
             : [bytes],
         );
       case "store-clock-disagreement":
-        this.#record(
+        return this.#disagree(
+          "read",
           "store-clock-disagreement",
           window,
           judgment.step === 4
             ? `${stated}, a window no clock within ${skew} ms of this client's showed while the request was out (${during}); not read at this store this time`
             : `${stated}, and the request left at ${String(span.sentMs)} ms on this client's clock, at or after this window's finalization instant plus the ${skew} ms skew; not read at this store this time`,
+          "clock-disagreement",
         );
-        return "clock-disagreement";
       case "descriptor-out-of-validity":
         // Past the descriptor's end on this client's own clock, no later
         // read of this window will be believed either: its receipts are
         // reported now instead of held.
         if (span.receivedMs >= this.#descriptor.notAfterUnixMs)
           this.#markUnreadable(window);
-        this.#record(
+        return this.#disagree(
+          "read",
           "descriptor-out-of-validity",
           window,
-          `${stated}; the pinned descriptor's validity (${String(this.#descriptor.notBeforeUnixMs)} to ${String(this.#descriptor.notAfterUnixMs)} ms) does not cover that whole window and this client's clock during the read (${during}); not read at this store`,
+          `${stated}; the pinned descriptor's validity (${describeValidity(this.#descriptor)}) does not cover that whole window and this client's clock during the read (${during}); not read at this store`,
+          "descriptor-out-of-validity",
         );
-        return "descriptor-out-of-validity";
       case "beyond-retention":
         this.#markUnreadable(window);
+        this.#believed("read");
         return "beyond-retention";
       case "not-final":
+        this.#believed("read");
         return "not-final";
-      case "no-benign-meaning":
-        return this.#reject(
-          "signature-invalid",
+      default:
+        // `no-benign-meaning`, and the write outcomes, which no read status
+        // reaches.
+        return this.#mismatch(
+          "read",
           window,
           `${stated}, which answers no read this client makes`,
+          bytes,
           unusable,
         );
     }
   }
 
   /**
+   * Judge a signed allocation refusal: steps 1 and 2 here (a version 1 body
+   * whose signature verifies, naming this store, profile, window and
+   * request, and the pinned descriptor), steps 3 to 7 by
+   * `judgeSignedRefusal`, then what each outcome does. No refusal grants a
+   * lease, so what differs is only what is recorded and counted.
+   */
+  async #judgeAllocationStatus(
+    window: bigint,
+    requestHash: Uint8Array,
+    value: PublicAllocationStatusBodyV1,
+    storeSignature: Uint8Array,
+    bytes: Uint8Array,
+    span: StoreReadSpan,
+  ): Promise<void> {
+    if (value.version !== 1) {
+      this.#record(
+        "signature-invalid",
+        window,
+        "unsupported allocation status version",
+      );
+      return;
+    }
+    if (
+      !(await verify(
+        await publicAllocationStatusSignedMessage(value),
+        storeSignature,
+        this.#storeKey,
+        this.#module,
+      ))
+    ) {
+      this.#record(
+        "signature-invalid",
+        window,
+        "the allocation status signature does not verify",
+      );
+      return;
+    }
+    if (
+      !bytesEqual(value.storeId, this.#storeId) ||
+      !bytesEqual(value.deliveryProfileHash, this.#profileHash) ||
+      value.ingressWindow !== window ||
+      !bytesEqual(value.requestHash, requestHash)
+    ) {
+      this.#mismatch(
+        "allocation",
+        window,
+        "the allocation status does not answer the request this client sent",
+        bytes,
+        undefined,
+      );
+      return;
+    }
+    if (!bytesEqual(value.descriptorHash, this.#descriptorHash)) {
+      this.#mismatch(
+        "allocation",
+        window,
+        "the allocation status names a descriptor other than the one this client pinned",
+        bytes,
+        undefined,
+      );
+      return;
+    }
+
+    const judgment = judgeSignedRefusal(
+      {
+        route: "allocation",
+        status: value.status,
+        deliveryProfileHash: this.#profileHash,
+        window,
+        storeWindow: value.storeIngressWindow,
+      },
+      this.#descriptor,
+      this.#profile,
+      span,
+    );
+    const stated = `the store signed ${value.status} for an allocation in this window at its own window ${String(value.storeIngressWindow)}`;
+    this.#actOnWriteJudgment(
+      "allocation",
+      window,
+      judgment,
+      stated,
+      bytes,
+      span,
+    );
+  }
+
+  /**
+   * Judge a signed append result: steps 1 and 2 here (a version 1 body whose
+   * signature verifies, naming this store, profile, window, class and
+   * request, and the pinned descriptor), steps 3 to 7 by
+   * `judgeSignedRefusal`. Returns the result when it is believed, or when it
+   * is a promise of custody (kept for the custody check whatever steps 4 and
+   * 5 found); `null` otherwise.
+   */
+  async #judgeAppendResult(
+    window: bigint,
+    sizeClass: number,
+    requestHash: Uint8Array,
+    admitted: boolean,
+    result: PublicAppendResultV1,
+    bytes: Uint8Array,
+    span: StoreReadSpan,
+  ): Promise<PublicAppendResultV1 | null> {
+    if (result.version !== 1)
+      return this.#reject(
+        "signature-invalid",
+        window,
+        "unsupported append result version",
+        null,
+      );
+    const { storeSignature, ...body } = result;
+    if (
+      !(await verify(
+        await publicAppendResultSignedMessage(body),
+        storeSignature,
+        this.#storeKey,
+        this.#module,
+      ))
+    )
+      return this.#reject(
+        "signature-invalid",
+        window,
+        "the append result signature does not verify",
+        null,
+      );
+    // The echoed request hash is what makes this receipt evidence about
+    // *this* append rather than some other one the store also answered.
+    if (
+      !bytesEqual(body.storeId, this.#storeId) ||
+      !bytesEqual(body.bucket.deliveryProfileHash, this.#profileHash) ||
+      body.bucket.ingressWindow !== window ||
+      body.bucket.sizeClass !== sizeClass ||
+      !bytesEqual(body.requestHash, requestHash)
+    )
+      return this.#mismatch(
+        "append",
+        window,
+        "the append result does not answer the request this client sent",
+        bytes,
+        null,
+      );
+    if (!bytesEqual(body.descriptorHash, this.#descriptorHash))
+      return this.#mismatch(
+        "append",
+        window,
+        "the append result names a descriptor other than the one this client pinned",
+        bytes,
+        null,
+      );
+
+    const judgment = judgeSignedRefusal(
+      {
+        route: "append",
+        status: body.status,
+        deliveryProfileHash: this.#profileHash,
+        window,
+        storeWindow: body.storeIngressWindow,
+        admitted,
+      },
+      this.#descriptor,
+      this.#profile,
+      span,
+    );
+    const stated = `the store signed ${body.status} for ${admitted ? "an admitted" : "a cover"} append to this window at its own window ${String(body.storeIngressWindow)}`;
+    const believed = this.#actOnWriteJudgment(
+      "append",
+      window,
+      judgment,
+      stated,
+      bytes,
+      span,
+    );
+    const promise =
+      admitted &&
+      (body.status === "stored" || body.status === "already-present");
+    // A promise of custody is kept whatever its stated window: the custody
+    // check is what judges it, and dropping it would let a store escape that
+    // check by misstating its time.
+    if (
+      promise &&
+      (judgment.outcome === "store-clock-disagreement" ||
+        judgment.outcome === "descriptor-out-of-validity")
+    )
+      return result;
+    return believed ? result : null;
+  }
+
+  /**
+   * What steps 3 to 7 found about a write answer, acted on: blame with the
+   * answer kept, a counted report, a `write-refusal` report, or a believed
+   * answer, which resets the route's counts. Returns whether the answer is
+   * believed: a benign refusal, a promise, accepted cover, or a
+   * `write-refusal` (true, the refusal stands, reported).
+   */
+  #actOnWriteJudgment(
+    route: "allocation" | "append",
+    window: bigint,
+    judgment: SignedRefusalJudgment,
+    stated: string,
+    bytes: Uint8Array,
+    span: StoreReadSpan,
+  ): boolean {
+    const skew = String(this.#profile.maxScheduleSkewMs);
+    switch (judgment.outcome) {
+      case "write-window-breach":
+        this.#blameOnEvidence(
+          judgment.outcome,
+          window,
+          `${stated}, which its own window contradicts: the store signs that answer only for a window that its stated window puts elsewhere`,
+          [bytes],
+          false,
+        );
+        return false;
+      case "store-clock-disagreement":
+        this.#disagree(
+          route,
+          "store-clock-disagreement",
+          window,
+          judgment.step === 4
+            ? `${stated}, a window no clock within ${skew} ms of this client's showed while the request was out (${describeSpan(span)}); not believed`
+            : `${stated}, and the answer was in at ${String(span.receivedMs)} ms on this client's clock, before this window's finalization instant less the ${skew} ms skew; not believed`,
+          undefined,
+        );
+        return false;
+      case "descriptor-out-of-validity":
+        this.#disagree(
+          route,
+          "descriptor-out-of-validity",
+          window,
+          `${stated}; the pinned descriptor's validity (${describeValidity(this.#descriptor)}) does not cover that whole window and this client's clock during the request (${describeSpan(span)}); not believed`,
+          undefined,
+        );
+        return false;
+      case "window-closed":
+      case "window-finalized":
+      case "capacity-exhausted":
+      case "custody-promised":
+      case "cover-accepted":
+        this.#believed(route);
+        return true;
+      case "write-refusal":
+        this.#record(
+          "write-refusal",
+          window,
+          `${stated}: a refusal nothing the store signed contradicts, so it is not proof of a fault`,
+        );
+        return true;
+      default:
+        // `no-benign-meaning`, and the read outcomes, which no write status
+        // reaches.
+        this.#mismatch(
+          route,
+          window,
+          `${stated}, which answers no request this client made`,
+          bytes,
+          undefined,
+        );
+        return false;
+    }
+  }
+
+  /**
    * Record a fault the store's own signed answers prove, keep them, and go
-   * inert. The window will not be read back from this store.
+   * inert. A read's window will not be read back from this store
+   * (`unreadable`); a write's window still may be.
    */
   #blameOnEvidence(
     kind: StoreEvidenceFaultKind,
     window: bigint,
     detail: string,
     evidence: readonly Uint8Array[],
+    unreadable = true,
   ): "unreachable" {
-    this.#markUnreadable(window);
+    if (unreadable) this.#markUnreadable(window);
     this.#inert = true;
     this.#verified = null;
     this.#generation += 1;

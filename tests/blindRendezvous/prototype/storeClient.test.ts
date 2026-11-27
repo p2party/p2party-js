@@ -28,6 +28,7 @@ import {
 } from "../../../src/blindRendezvous/storeDescriptor";
 import {
   PROTOTYPE_READ_BACK_WINDOWS,
+  PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS,
   PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
 } from "../../../src/utils/constants";
 import {
@@ -2148,8 +2149,10 @@ describe("prototype store client retention", () => {
       expect(await proves(kept, ...(breach.evidence ?? []))).toBe(
         "chunk-denial-breach",
       );
-      // Neither statement proves it without the other.
-      expect(await proves(kept, denial)).toBeNull();
+      // The denial alone proves it too: the descriptor declares the
+      // profile, and the profile defines the chunk. The checkpoint alone, or
+      // the two in the other order, prove nothing.
+      expect(await proves(kept, denial)).toBe("chunk-denial-breach");
       expect(await proves(kept, servedCheckpoint)).toBeNull();
       expect(await proves(kept, denial, servedCheckpoint)).toBeNull();
       // Not with an altered denial or an altered checkpoint.
@@ -2351,8 +2354,14 @@ describe("prototype store client retention", () => {
       expect(client.faults.every((fault) => fault.kind === "unreachable")).toBe(
         true,
       );
+      // The 503 began the client's back-off: it asks again once that is over.
+      expect(client.backoffUntilMs).toBe(
+        FINALIZE_AT + BigInt(PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS),
+      );
       await store.core.finalizeDue();
+      clock.now = FINALIZE_AT + BigInt(PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS);
       expect((await client.scanWindow(CHAIN_START)).status).toBe("finalized");
+      expect(client.backoffUntilMs).toBeNull();
     });
   });
 
@@ -2566,7 +2575,9 @@ describe("prototype store client retention", () => {
       const object = new Uint8Array(CLASS_0_OBJECT_BYTES).fill(0x91);
       // The runtime already handles both: a missing lease and an unanswered
       // append are reported missed, and the entry waits for its next slot.
+      // The append is asked once the 503's back-off has passed.
       expect(await client.allocate(CHAIN_START, keyPair)).toBeNull();
+      clock.now += BigInt(PROTOTYPE_STORE_CLIENT_BACKOFF_MIN_MS);
       expect(await client.append(CHAIN_START, 0, object, null)).toBeNull();
       expect(client.faults.map((fault) => fault.kind)).toEqual([
         "unreachable",
@@ -3032,13 +3043,13 @@ describe("prototype store client signed refusals", () => {
   test("out-of-range inside the named descriptor's retention is a breach whatever window the store states", async () => {
     const runs = [
       {
-        // The descriptor ran out at the start of W + 10; the client pinned
-        // it while it was valid, and its clock now reads W + 12, as does the
-        // store's signed window.
+        // The descriptor runs out at the start of W + 10, and the store
+        // states W + 12. This client's own clock is still inside validity:
+        // from its end on, this client asks the store nothing at all.
         name: "stated past notAfter",
         notAfter: startOf(W + 10n),
         storeWindow: W + 12n,
-        readMs: startOf(W + 12n) + READ_OFFSET,
+        readMs: startOf(W + 10n) - 1n,
       },
       {
         // Validity ends in the middle of W + 5, the window the store states;
@@ -3203,6 +3214,8 @@ describe("prototype store client signed refusals", () => {
     expect(before.scan.status).toBe("finalized");
     expect(before.scan.objects.length).toBe(OBJECTS_PER_WINDOW);
     expect(before.kinds).toEqual([]);
+    // From the end on, nothing is asked: the client stops using the store,
+    // once, and records nothing per read.
     for (const readMs of [notAfter, notAfter + 40n * L]) {
       const { client, scan, kinds } = await scanAt(
         document,
@@ -3210,11 +3223,11 @@ describe("prototype store client signed refusals", () => {
         null,
         readMs,
       );
-      expect(scan.status).toBe("descriptor-out-of-validity");
+      expect(scan.status).toBe("stopped");
       expect(scan.objects).toEqual([]);
       expect(scan.checkpointHash).toBeNull();
-      expect(kinds).toEqual(["descriptor-out-of-validity"]);
-      expect(client.faults[0].window).toBe(W);
+      expect(kinds).toEqual([]);
+      expect(client.stopped?.reason).toBe("descriptor-expired");
       expect(client.inert).toBe(false);
     }
     // The answers arriving after the end count as the read being outside.
@@ -3227,7 +3240,8 @@ describe("prototype store client signed refusals", () => {
     // A refusal that would otherwise be believed is not believed either: an
     // honest expiry (W + R + 1, past the retention), stated within the skew
     // of this client's clock, under a descriptor whose end that clock has
-    // passed. In the last two runs the stated window lies wholly inside the
+    // passed. Read after the end, it is not even asked for. Sent before the
+    // end and answered at it, the stated window lies wholly inside the
     // validity, so it is this client's own clock alone that decides.
     const past = W + R + 1n;
     const lapses = [
@@ -3236,18 +3250,21 @@ describe("prototype store client signed refusals", () => {
         notAfter: startOf(past) + READ_OFFSET - 10n,
         readMs: startOf(past) + READ_OFFSET,
         answeredAfterMs: 0n,
+        want: ["stopped", []],
       },
       {
         name: "the end at the stated window's own end, read just after it",
         notAfter: startOf(past + 1n),
         readMs: startOf(past + 1n) + SKEW / 2n,
         answeredAfterMs: 0n,
+        want: ["stopped", []],
       },
       {
         name: "sent before the end, answered at it",
         notAfter: startOf(past + 1n),
         readMs: startOf(past + 1n) - 1n,
         answeredAfterMs: 1n,
+        want: ["descriptor-out-of-validity", ["descriptor-out-of-validity"]],
       },
     ];
     for (const lapse of lapses)
@@ -3265,13 +3282,13 @@ describe("prototype store client signed refusals", () => {
           lapse.readMs,
           lapse.answeredAfterMs,
         );
-        expect([lapse.name, route, scan.status, kinds, client.inert]).toEqual([
+        expect([
           lapse.name,
           route,
-          "descriptor-out-of-validity",
-          ["descriptor-out-of-validity"],
-          false,
-        ]);
+          scan.status,
+          kinds as string[],
+          client.inert,
+        ]).toEqual([lapse.name, route, ...lapse.want, false]);
       }
     // The same expiry read and answered one millisecond inside the end is
     // believed, so each report above is the lapse's doing.
@@ -3298,13 +3315,14 @@ describe("prototype store client signed refusals", () => {
       ]);
     }
 
-    // What the store signs is evidence whenever it is read: a refusal that
-    // contradicts the store's own words is blamed after the end too.
+    // What the store signs is evidence whatever window it states: a refusal
+    // that contradicts the store's own words is blamed when it states a
+    // window past the descriptor's end too.
     const breach = await scanAt(
       document,
       "checkpoint",
       await signedStatus("checkpoint", "out-of-range", W + 30n, hash),
-      startOf(W + 30n) + READ_OFFSET,
+      notAfter - 1n,
     );
     expect([breach.scan.status, breach.kinds, breach.client.inert]).toEqual([
       "unreachable",
@@ -3349,13 +3367,14 @@ describe("prototype store client signed refusals", () => {
     refuse = true;
     clock.now = startOf(notAfter / L + 1n) + READ_OFFSET;
     expect(clock.now >= notAfter).toBe(true);
-    expect((await client.scanWindow(W)).status).toBe(
-      "descriptor-out-of-validity",
-    );
+    // Nothing is asked after the end: the client stops using the store, and
+    // the receipts no read will now check are reported then.
+    expect((await client.scanWindow(W)).status).toBe("stopped");
+    expect(client.stopped?.reason).toBe("descriptor-expired");
     expect(client.faults.map((fault) => fault.kind)).toEqual([
-      "descriptor-out-of-validity",
       "custody-unchecked",
     ]);
+    expect(client.faults[0].window).toBe(W);
     expect(client.inert).toBe(false);
   });
 
@@ -3431,7 +3450,12 @@ describe("prototype store client signed refusals", () => {
         expect(client.faults[0].detail).toContain(
           "names a descriptor other than the one this client pinned",
         );
-        expect(client.faults[0].evidence).toBeUndefined();
+        // The answer verified under the pinned key: it is kept, beside the
+        // pinned descriptor, and proves nothing.
+        expect((client.faults[0].evidence ?? []).map(hex)).toEqual([
+          hex(answer),
+        ]);
+        expect(client.faults[0].descriptor).toEqual(pinned.descriptor);
         // Nor is it evidence under the pinned descriptor for anyone else,
         // alone or beside the window's checkpoint.
         for (const evidence of [
@@ -3452,39 +3476,29 @@ describe("prototype store client signed refusals", () => {
   test("a status with no benign meaning has no benign outcome, whatever is passed to the decision", async () => {
     // What the client never passes, the function still decides: a profile
     // the descriptor declares no chain for, a chunk the profile does not
-    // define, a denial with no checkpoint beside it. None of them is ever
-    // one of the two benign outcomes.
+    // define. None of them is ever one of the two benign outcomes. A denial
+    // of a chunk the profile defines is a breach by itself.
     const { descriptor } = await wideDocument();
     const undeclared = new Uint8Array(32).fill(0x11);
     const span = { sentMs: FIN - 1n, receivedMs: FIN - 1n };
     const windows = { window: W, storeWindow: W };
     const outcomeOf = (
       statement: Parameters<typeof judgeSignedRefusal>[0],
-      checkpointCommitsWindow: boolean,
     ): string =>
-      judgeSignedRefusal(
-        statement,
-        descriptor,
-        profile,
-        span,
-        checkpointCommitsWindow,
-      ).outcome;
+      judgeSignedRefusal(statement, descriptor, profile, span).outcome;
 
     // The declared profile at this instant: the two benign answers, and the
     // two denials as breaches.
     expect(
       (["not-final", "out-of-range", "chain-unavailable"] as const).map(
         (status) =>
-          outcomeOf(
-            {
-              route: "checkpoint",
-              status,
-              deliveryProfileHash: PROFILE_HASH,
-              window: W,
-              storeWindow: status === "out-of-range" ? W + R + 1n : W,
-            },
-            false,
-          ),
+          outcomeOf({
+            route: "checkpoint",
+            status,
+            deliveryProfileHash: PROFILE_HASH,
+            window: W,
+            storeWindow: status === "out-of-range" ? W + R + 1n : W,
+          }),
       ),
     ).toEqual(["not-final", "store-clock-disagreement", "chain-denial-breach"]);
 
@@ -3495,40 +3509,33 @@ describe("prototype store client signed refusals", () => {
     ] as const)
       expect([
         status,
-        outcomeOf(
-          {
-            route: "checkpoint",
-            status,
-            deliveryProfileHash: undeclared,
-            ...windows,
-          },
-          false,
-        ),
+        outcomeOf({
+          route: "checkpoint",
+          status,
+          deliveryProfileHash: undeclared,
+          ...windows,
+        }),
       ]).toEqual([status, "no-benign-meaning"]);
     for (const status of [
       "not-final",
       "out-of-range",
       "no-such-chunk",
     ] as const)
-      for (const checkpointCommitsWindow of [false, true])
-        expect([
+      expect([
+        status,
+        outcomeOf({
+          route: "chunk",
           status,
-          outcomeOf(
-            {
-              route: "chunk",
-              status,
-              deliveryProfileHash: undeclared,
-              ...windows,
-              sizeClass: 0,
-              chunkIndex: 0n,
-            },
-            checkpointCommitsWindow,
-          ),
-        ]).toEqual([status, "no-benign-meaning"]);
+          deliveryProfileHash: undeclared,
+          ...windows,
+          sizeClass: 0,
+          chunkIndex: 0n,
+        }),
+      ]).toEqual([status, "no-benign-meaning"]);
 
-    // A `no-such-chunk` is a breach only for a chunk the profile defines
-    // beside a checkpoint; otherwise it is the truth or unproven, and in
-    // neither case an answer to a read: never benign.
+    // A `no-such-chunk` is a breach for a chunk the profile defines, by
+    // itself; otherwise it is the truth, and not an answer to a read: never
+    // benign.
     const denial = (chunkIndex: bigint, sizeClass = 0) =>
       ({
         route: "chunk",
@@ -3539,13 +3546,11 @@ describe("prototype store client signed refusals", () => {
         chunkIndex,
       }) as const;
     expect([
-      outcomeOf(denial(0n), true),
-      outcomeOf(denial(0n), false),
-      outcomeOf(denial(CLASS_0_CHUNKS), true),
-      outcomeOf(denial(0n, 250), true),
+      outcomeOf(denial(0n)),
+      outcomeOf(denial(CLASS_0_CHUNKS)),
+      outcomeOf(denial(0n, 250)),
     ]).toEqual([
       "chunk-denial-breach",
-      "no-benign-meaning",
       "no-benign-meaning",
       "no-benign-meaning",
     ]);
@@ -3685,6 +3690,10 @@ describe("prototype store client signed refusals", () => {
       notAfter: bigint;
     }): { step: number; scan: string; kinds: string[]; inert: boolean } => {
       const { status, stated, readMs, notBefore, notAfter } = cell;
+      // 0. This client's clock has reached the descriptor's end: it asks
+      // the store nothing, and stops using it once, with no record per read.
+      if (readMs >= notAfter)
+        return { step: 0, scan: "stopped", kinds: [], inert: false };
       const blame = (kind: string) => ({
         step: 3,
         scan: "unreachable",
@@ -3827,8 +3836,9 @@ describe("prototype store client signed refusals", () => {
             if (proved !== (expected.step === 3 ? expected.kinds[0] : null))
               wrong.push(`${name}: the verifier said ${String(proved)}`);
             // Where the client did not blame, the answer itself (beside
-            // W's checkpoint, for a chunk) proves nothing to anyone either.
-            if (expected.step !== 3) {
+            // W's checkpoint, for a chunk) proves nothing to anyone either;
+            // an answer to a request never made is not judged at all.
+            if (expected.step !== 3 && expected.step !== 0) {
               const direct = await signedStatusProvesFault(
                 document.descriptor,
                 profile,
@@ -3873,7 +3883,7 @@ describe("prototype store client signed refusals", () => {
     );
     // Not vacuous: every step ends some cell, both benign outcomes occur,
     // and every outcome the table names was seen.
-    expect([...endedAt.keys()].sort()).toEqual([1, 3, 4, 5, 6, 7]);
+    expect([...endedAt.keys()].sort()).toEqual([0, 1, 3, 4, 5, 6, 7]);
     expect((benign.get("not-final") ?? 0) > 0).toBe(true);
     expect((benign.get("beyond-retention") ?? 0) > 0).toBe(true);
     expect([...seenKinds].sort()).toEqual([

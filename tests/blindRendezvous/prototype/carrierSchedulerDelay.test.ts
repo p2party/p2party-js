@@ -32,6 +32,8 @@ const recordingStore = (
     storeIdHex: "aa".repeat(32),
     carrierContextId: new Uint8Array(32).fill(0xaa),
     inert: false,
+    stopped: null,
+    backoffUntilMs: null,
     faults: [],
     issueToken: (window: bigint): Promise<boolean> => {
       calls.tokens.push({ window, atMs: clock.nowMs() });
@@ -230,6 +232,8 @@ const heldStore = (): {
     storeIdHex: "bb".repeat(32),
     carrierContextId: new Uint8Array(32).fill(0xbb),
     inert: false,
+    stopped: null,
+    backoffUntilMs: null,
     faults: [],
     issueToken: (): Promise<boolean> => Promise.resolve(true),
     allocate: (): Promise<null> => Promise.resolve(null),

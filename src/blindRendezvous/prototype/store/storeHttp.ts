@@ -22,11 +22,13 @@
  *   `window-closed`, `slot-conflict` and friends are signed statements from
  *   the store, not transport errors, so they travel as ordinary bodies. A
  *   reader that trusted HTTP status codes would be trusting an unsigned value.
- *   Three refusals have no signed form and are constant bodies instead: the
+ *   Four refusals have no signed form and are constant bodies instead: the
  *   admission hook refusing an append or a witness offer is `403 refused`,
- *   a witness offer the store did not record is `409 not recorded`, and an
+ *   a witness offer the store did not record is `409 not recorded`, an
  *   allocation or append arriving while the mutation queue is full is
- *   `503 busy`, answered before its body is read.
+ *   `503 busy`, answered before its body is read, and every request once the
+ *   store's descriptor has expired on its own clock is `410 descriptor
+ *   expired` (the operator is told once, on the first).
  * - **Another version is refused as such.** A request for a path of another
  *   version of this family (another `prototype-vN` route prefix or descriptor
  *   path) answers `426` naming this store's version, in the
@@ -72,6 +74,7 @@ import {
 import {
   StoreAdmissionRefusedError,
   StoreBusyError,
+  StoreDescriptorExpiredError,
   StoreRequestError,
 } from "./storeCore";
 
@@ -253,6 +256,7 @@ const refused = (): Response => textResponse(403, "refused");
 const notFound = (): Response => textResponse(404, "not found");
 const notRecorded = (): Response => textResponse(409, "not recorded");
 const busy = (): Response => textResponse(503, "busy");
+const expired = (): Response => textResponse(410, "descriptor expired");
 const versionRefused = (): Response =>
   new Response(`this store speaks ${PROTOTYPE_STORE_PROTOCOL}`, {
     status: 426,
@@ -318,10 +322,25 @@ export const createPrototypeStoreHandler = (
 ): ((request: Request) => Promise<Response>) => {
   const { core, logBodiesPath } = options;
 
+  // One sentence for the operator, the first time an expired descriptor
+  // refuses a request; every later refusal is the same constant 410.
+  let toldExpired = false;
+  const refuseExpired = (): Response => {
+    if (!toldExpired) {
+      toldExpired = true;
+      const { notBeforeUnixMs, notAfterUnixMs } =
+        core.descriptorDocument().descriptor;
+      console.error(
+        `p2party store prototype: the store descriptor expired at ${new Date(Number(notAfterUnixMs)).toISOString()}, the end of its ${String(notAfterUnixMs - notBeforeUnixMs)} ms validity; every request is now refused with 410 and nothing is signed, and there is no rotation: start a new chain with a new P2PARTY_STORE_DB and a new P2PARTY_STORE_KEY_FILE`,
+      );
+    }
+    return expired();
+  };
+
   const health = (): Response =>
     new Response(
       JSON.stringify({
-        status: "ok",
+        status: core.descriptorExpired() ? "descriptor-expired" : "ok",
         role: "store-prototype",
         protocol: PROTOTYPE_STORE_PROTOCOL,
         storeId: hexOf(core.storeId),
@@ -486,7 +505,10 @@ export const createPrototypeStoreHandler = (
       if (method === "OPTIONS") return preflight();
       if (method === "GET") {
         if (path === PROTOTYPE_STORE_ROUTES.health) return health();
-        if (path === PROTOTYPE_STORE_ROUTES.descriptor) return descriptor();
+        // An expired descriptor is not served either: a client that pinned
+        // it would be refused everything after.
+        if (path === PROTOTYPE_STORE_ROUTES.descriptor)
+          return core.descriptorExpired() ? refuseExpired() : descriptor();
       }
       if (!path.startsWith(ROUTE_PREFIX))
         return PROTOTYPE_ANY_VERSION_PATH.test(path) &&
@@ -503,6 +525,7 @@ export const createPrototypeStoreHandler = (
       return notFound();
     } catch (error) {
       if (error instanceof StoreAdmissionRefusedError) return refused();
+      if (error instanceof StoreDescriptorExpiredError) return refuseExpired();
       if (error instanceof StoreBusyError) return busy();
       if (
         error instanceof StoreRequestError ||

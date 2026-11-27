@@ -95,6 +95,8 @@ export interface PublicAppendResultBodyV1 {
   descriptorHash: Uint8Array;
   bucket: PublicBucketV1;
   requestHash: Uint8Array;
+  /** The store's own current ingress window when it decided this answer. */
+  storeIngressWindow: bigint;
   status: PublicAppendStatusV1;
   fixedStatusPadding: Uint8Array;
 }
@@ -149,9 +151,13 @@ export type PublicAllocationStatusKindV1 =
 export interface PublicAllocationStatusBodyV1 {
   version: 1;
   storeId: Uint8Array;
+  /** `DescriptorHash` of the descriptor this answer was given under. */
+  descriptorHash: Uint8Array;
   deliveryProfileHash: Uint8Array;
   ingressWindow: bigint;
   requestHash: Uint8Array;
+  /** The store's own current ingress window when it decided this answer. */
+  storeIngressWindow: bigint;
   status: PublicAllocationStatusKindV1;
   fixedErrorPadding: Uint8Array;
 }

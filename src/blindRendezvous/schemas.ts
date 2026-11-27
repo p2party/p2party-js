@@ -921,6 +921,9 @@ const publicAppendResultFields: readonly FieldDescriptor[] = [
   { name: "descriptorHash", type: bytes32 },
   { name: "bucket", type: publicBucketV1Schema },
   { name: "requestHash", type: bytes32 },
+  // The store's own current window when it decided this answer, as in the
+  // read statuses: a refusal that its own window contradicts is evidence.
+  { name: "storeIngressWindow", type: u64 },
   { name: "status", type: publicAppendStatusV1Schema },
   // Reserved so a later status can carry a reason code without changing the
   // result's length: an append result is the same size whatever the store
@@ -1022,9 +1025,13 @@ export const publicAllocationStatusBodyV1Schema = record(
   [
     { name: "version", type: u8 },
     { name: "storeId", type: bytes32 },
+    // As in the read statuses: the descriptor this answer was given under,
+    // and the store's own current window when it decided it.
+    { name: "descriptorHash", type: bytes32 },
     { name: "deliveryProfileHash", type: bytes32 },
     { name: "ingressWindow", type: u64 },
     { name: "requestHash", type: bytes32 },
+    { name: "storeIngressWindow", type: u64 },
     {
       name: "status",
       type: enumOf("PublicAllocationStatusKindV1", [

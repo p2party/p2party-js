@@ -31,6 +31,24 @@
  *   store, whatever its clock reads. A finalized answer may come from a
  *   precomputed row, but only once that reading has let the read through,
  *   so a row never answers for a window the clock refuses.
+ * - A write is decided from one reading of the clock too, and every signed
+ *   write status states that reading's window and the descriptor it is given
+ *   under (`storeIngressWindow`, `descriptorHash`). `window-closed` and
+ *   `window-finalized` are signed only for a window below the chain start or
+ *   one whose close that reading has reached (`window-closed` also for one
+ *   outside the allocation horizon); an append's `capacity-exhausted` only
+ *   past that horizon, for a window at or after the chain start; and every
+ *   other write status (a lease's refusals, `stored`, `already-present`,
+ *   `slot-conflict`, `unallocated-cover`) only for a window at or after the
+ *   chain start, inside the horizon and not yet closed on that reading. A
+ *   window already finalized while the reading says it is open (the clock
+ *   stepped back) gets the unsigned 503 instead. So no write status this
+ *   store signs contradicts its own stated window (`write-window-breach` in
+ *   the client) either.
+ * - Past its descriptor's end on its own clock it answers nothing: every
+ *   route refuses with `StoreDescriptorExpiredError` (the transport's
+ *   unsigned 410), before any row is read, and no window whose finalization
+ *   instant is at or after that end is signed.
  * - A finalized window is never re-signed. Signing two different chunk bodies
  *   for one index, or two checkpoints for one window, is a permanent fault
  *   proof against the store — so `#finalizeWindow` returns early rather than
@@ -245,6 +263,25 @@ export class StoreFinalizationPendingError extends StoreBusyError {
   }
 }
 
+/**
+ * This store's descriptor has expired on its own clock (`notAfterUnixMs` has
+ * passed). Every route refuses with this rather than answer, sign or accept
+ * anything under a descriptor no client accepts, and the transport answers
+ * one constant unsigned `410 descriptor expired`. The prototype has no
+ * descriptor rotation: the operator starts a new chain.
+ */
+export class StoreDescriptorExpiredError extends Error {
+  override readonly name = "StoreDescriptorExpiredError";
+  readonly notAfterUnixMs: bigint;
+
+  constructor(notAfterUnixMs: bigint) {
+    super(
+      `storeCore: the store descriptor expired at ${new Date(Number(notAfterUnixMs)).toISOString()}`,
+    );
+    this.notAfterUnixMs = notAfterUnixMs;
+  }
+}
+
 const fail: (message: string) => never = (message) => {
   throw new StoreRequestError(message);
 };
@@ -418,10 +455,23 @@ type Admission =
   | { readonly kind: "admitted"; readonly quotaKey32: Uint8Array }
   | { readonly kind: "refused" };
 
-/** What the allocation path settled on: a lease, or a status to sign. */
+/**
+ * What the allocation path settled on: a lease, or a status to sign with the
+ * clock reading it was decided on.
+ */
 type AllocationDecision =
   | { readonly kind: "lease"; readonly lease: PublicAllocationLeaseV1 }
-  | { readonly kind: "status"; readonly status: PublicAllocationStatusKindV1 };
+  | {
+      readonly kind: "status";
+      readonly status: PublicAllocationStatusKindV1;
+      readonly atMs: bigint;
+    };
+
+/** A status an append settled on, with the clock reading it was decided on. */
+interface AppendDecision {
+  readonly status: PublicAppendStatusV1;
+  readonly atMs: bigint;
+}
 
 const OPEN_ADMISSION: Admission = { kind: "open" };
 const REFUSED_ADMISSION: Admission = { kind: "refused" };
@@ -868,6 +918,11 @@ export class PrototypeStoreCore {
     return ingressWindow(this.#profile.deliveryWindowMs, this.#clock.nowMs());
   }
 
+  /** True once this store's clock has reached its descriptor's end. */
+  descriptorExpired(): boolean {
+    return this.#clock.nowMs() >= this.#descriptor.notAfterUnixMs;
+  }
+
   /* ---------------------------------------------------------------- *
    * Allocation
    * ---------------------------------------------------------------- */
@@ -892,6 +947,7 @@ export class PrototypeStoreCore {
     };
     if (privateRequest.version !== 1)
       fail("unsupported allocation token issue request version");
+    this.#nowUnexpired();
 
     const body: AllocationTokenIssueResultV1["body"] = {
       kind: "issued",
@@ -928,32 +984,40 @@ export class PrototypeStoreCore {
 
     const requestHash = await publicAllocationRequestHash(privateRequest);
     const status = (
-      kind: PublicAllocationStatusKindV1,
+      decided: Extract<AllocationDecision, { kind: "status" }>,
     ): Promise<PublicAllocationResultV1> =>
       this.#allocationStatus(
         privateRequest.deliveryProfileHash,
         privateRequest.ingressWindow,
         requestHash,
-        kind,
+        decided.status,
+        decided.atMs,
       );
 
     // Everything up to the lease is decided off the mutation queue: the clock,
     // the admission hook, and — when this process holds a record of the open
     // window — a replay, a spent grant and a full cohort. None of them loads
-    // the window, and none of them waits behind requests that do.
-    const refusal = this.#allocationRefusal(privateRequest);
-    if (refusal !== null) return status(refusal);
+    // the window, and none of them waits behind requests that do. Each status
+    // is signed stating the window of the clock reading it was decided on.
+    const atMs = this.#nowUnexpired();
+    const refusal = this.#allocationRefusal(privateRequest, atMs);
+    if (refusal !== null)
+      return status({ kind: "status", status: refusal, atMs });
     const admitted = await this.#admit({
       ...privateRequest,
       route: "allocation",
     });
-    if (admitted.kind === "refused") return status("invalid-token");
+    // Answered with the reading the window was found open on; the descriptor
+    // is checked again, since the hook awaited.
+    this.#nowUnexpired();
+    if (admitted.kind === "refused")
+      return status({ kind: "status", status: "invalid-token", atMs });
 
     const known = this.#openWindows.get(String(privateRequest.ingressWindow));
     const early =
       known === undefined
         ? null
-        : this.#allocationFromState(known, requestHash, admitted);
+        : this.#allocationFromState(known, requestHash, admitted, atMs);
     const decided =
       early ??
       (await this.#serialize(() =>
@@ -961,12 +1025,18 @@ export class PrototypeStoreCore {
       ));
     return decided.kind === "lease"
       ? { kind: "allocated", lease: copyLease(decided.lease) }
-      : status(decided.status);
+      : status(decided);
   }
 
-  /** The refusal the request and the clock alone decide, or `null`. */
+  /**
+   * The refusal the request and one clock reading alone decide, or `null`.
+   * The reading is also the window the status states, so the two cannot
+   * straddle a step of the clock: a `window-closed` for a window after the
+   * stated one and inside its horizon is never signed.
+   */
   #allocationRefusal(
     request: PublicAllocationRequestV1,
+    nowMs: bigint,
   ): PublicAllocationStatusKindV1 | null {
     // The closed status set has no "unsupported profile" value. `invalid-token`
     // is the honest one: in every allocation scheme the token is bound to the
@@ -976,14 +1046,14 @@ export class PrototypeStoreCore {
       return "invalid-token";
 
     const target = request.ingressWindow;
-    const current = this.currentWindow();
+    const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
     // Below the chain start no window is ever finalized, so a lease there
     // would promise custody of slots no chunk will carry.
     if (
       target < this.#chainStart ||
       target < current ||
       target > current + BigInt(this.#profile.maxFutureIngressWindows) ||
-      this.#closedOnClock(target)
+      this.#closedOnClock(target, nowMs)
     )
       return "window-closed";
     return null;
@@ -998,6 +1068,7 @@ export class PrototypeStoreCore {
     state: StoreWindowState,
     requestHash: Uint8Array,
     admitted: Admission,
+    atMs: bigint,
   ): AllocationDecision | null {
     // An exact duplicate replays the byte-identical lease and consumes no
     // second ordinal, on any route and after a restart.
@@ -1011,10 +1082,10 @@ export class PrototypeStoreCore {
           record.admissionQuotaKey32 !== undefined &&
           bytesEqual(record.admissionQuotaKey32, admitted.quotaKey32)
         )
-          return { kind: "status", status: "invalid-token" };
+          return { kind: "status", status: "invalid-token", atMs };
 
     if (state.allocations.size >= this.#profile.cohortAllocationsPerWindow)
-      return { kind: "status", status: "capacity-exhausted" };
+      return { kind: "status", status: "capacity-exhausted", atMs };
     return null;
   }
 
@@ -1023,16 +1094,28 @@ export class PrototypeStoreCore {
     requestHash: Uint8Array,
     admitted: Admission,
   ): Promise<AllocationDecision> {
-    // Decided again: the window may have closed while this request waited,
-    // and a finalized window is always closed on the clock.
-    const refusal = this.#allocationRefusal(request);
-    if (refusal !== null) return { kind: "status", status: refusal };
+    // Decided again, from a new reading: the window may have closed while
+    // this request waited, and a finalized window is always closed on the
+    // clock.
+    const atMs = this.#nowUnexpired();
+    const refusal = this.#allocationRefusal(request, atMs);
+    if (refusal !== null) return { kind: "status", status: refusal, atMs };
 
     const target = request.ingressWindow;
     const state = await this.#openWindowState(target);
-    if (this.#windowIsClosed(state, target))
-      return { kind: "status", status: "window-closed" };
-    const decided = this.#allocationFromState(state, requestHash, admitted);
+    // And once more after the load, which awaited: what is signed from here
+    // on states this reading, and every condition is checked on it.
+    const loadedAtMs = this.#nowUnexpired();
+    const closed = this.#allocationRefusal(request, loadedAtMs);
+    if (closed !== null)
+      return { kind: "status", status: closed, atMs: loadedAtMs };
+    this.#refuseFinalizedAheadOfClock(state, target, loadedAtMs);
+    const decided = this.#allocationFromState(
+      state,
+      requestHash,
+      admitted,
+      loadedAtMs,
+    );
     if (decided !== null) return decided;
 
     let allocationOrdinal = 0;
@@ -1078,13 +1161,20 @@ export class PrototypeStoreCore {
     target: bigint,
     requestHash: Uint8Array,
     status: PublicAllocationStatusKindV1,
+    atMs: bigint,
   ): Promise<PublicAllocationResultV1> {
+    // As for an append result.
+    this.#nowUnexpired();
     const value: PublicAllocationStatusBodyV1 = {
       version: 1,
       storeId: copyBytes(this.#storeId),
+      // As in the read statuses: the descriptor this answer is given under,
+      // and the window of the reading it was decided on.
+      descriptorHash: copyBytes(this.#descriptorHash),
       deliveryProfileHash: copyBytes(profileHashBytes),
       ingressWindow: target,
       requestHash,
+      storeIngressWindow: ingressWindow(this.#profile.deliveryWindowMs, atMs),
       status,
       fixedErrorPadding: new Uint8Array(32),
     };
@@ -1157,26 +1247,31 @@ export class PrototypeStoreCore {
       fail("the carrier object is not this size class's exact wire length");
 
     const requestHash = await publicAppendRequestHash(privateRequest);
+    // Every result states the reading its decision was made on.
     const result = (
       status: PublicAppendStatusV1,
+      statedAtMs: bigint,
     ): Promise<PublicAppendResultV1> =>
-      this.#appendResult(bucket, requestHash, status);
+      this.#appendResult(bucket, requestHash, { status, atMs: statedAtMs });
 
-    // Answered from the clock: a finalized window, one closed but not yet
-    // finalized, one below the chain start and one already swept are the
-    // same request to this line and get the same answer for the same work.
-    // Below the chain start no window is ever finalized, so it is closed.
+    // Answered from one reading of the clock, which is also the window the
+    // result states: a finalized window, one closed but not yet finalized,
+    // one below the chain start and one already swept are the same request to
+    // this line and get the same answer for the same work. Below the chain
+    // start no window is ever finalized, so it is closed.
     const window = bucket.ingressWindow;
-    if (window < this.#chainStart || this.#closedOnClock(window))
-      return result("window-finalized");
+    const atMs = this.#nowUnexpired();
+    if (window < this.#chainStart || this.#closedOnClock(window, atMs))
+      return result("window-finalized", atMs);
     // The status set has no "not open yet". `capacity-exhausted` is the
     // honest one: no lease can exist this far ahead, so the window has no
-    // capacity any append to it could use.
+    // capacity any append to it could use. It is signed for nothing else.
     if (
       window >
-      this.currentWindow() + BigInt(this.#profile.maxFutureIngressWindows)
+      ingressWindow(this.#profile.deliveryWindowMs, atMs) +
+        BigInt(this.#profile.maxFutureIngressWindows)
     )
-      return result("capacity-exhausted");
+      return result("capacity-exhausted", atMs);
 
     const admitted = await this.#admit({
       route: "append",
@@ -1193,7 +1288,7 @@ export class PrototypeStoreCore {
       throw new StoreAdmissionRefusedError("append");
 
     // Degraded cover: the same bounded parse, the one fixed result, no row.
-    if (appendAdmission === null) return result("unallocated-cover");
+    if (appendAdmission === null) return result("unallocated-cover", atMs);
 
     if (appendAdmission.version !== 1)
       fail("unsupported append admission version");
@@ -1250,7 +1345,7 @@ export class PrototypeStoreCore {
     // The fault mode answers as an honest store would and then drops the
     // object, which is what makes the client's cross-store comparison the
     // thing under test rather than the store's own honesty report.
-    if (this.#fault === "withhold") return result("stored");
+    if (this.#fault === "withhold") return result("stored", atMs);
 
     const coordinates = appendSlotCoordinates(
       this.#geometry,
@@ -1273,8 +1368,11 @@ export class PrototypeStoreCore {
         bytesEqual(bound.objectHash, objectHash)
           ? "already-present"
           : "slot-conflict",
+        atMs,
       );
-    return result(
+    return this.#appendResult(
+      bucket,
+      requestHash,
       await this.#serialize(() =>
         this.#bindSlot(window, key, objectHash, exactFixedObject),
       ),
@@ -1287,17 +1385,30 @@ export class PrototypeStoreCore {
     key: string,
     objectHash: Uint8Array,
     object: Uint8Array,
-  ): Promise<PublicAppendStatusV1> {
+  ): Promise<AppendDecision> {
     const state = await this.#openWindowState(window);
-    // Decided again: the window may have closed while this waited, and a
-    // finalized row is final whatever the clock says.
-    if (this.#windowIsClosed(state, window)) return "window-finalized";
+    // Decided again, from a new reading: the window may have closed while
+    // this waited, and a clock that stepped back may have put it beyond the
+    // horizon again. The answer states this reading.
+    const atMs = this.#nowUnexpired();
+    if (this.#closedOnClock(window, atMs))
+      return { status: "window-finalized", atMs };
+    if (
+      window >
+      ingressWindow(this.#profile.deliveryWindowMs, atMs) +
+        BigInt(this.#profile.maxFutureIngressWindows)
+    )
+      return { status: "capacity-exhausted", atMs };
+    this.#refuseFinalizedAheadOfClock(state, window, atMs);
 
     const bound = state.slots.get(key);
     if (bound !== undefined)
-      return bytesEqual(bound.objectHash, objectHash)
-        ? "already-present"
-        : "slot-conflict";
+      return {
+        status: bytesEqual(bound.objectHash, objectHash)
+          ? "already-present"
+          : "slot-conflict",
+        atMs,
+      };
 
     // Never mutate a window a caching persistence adapter handed back before
     // saveWindow commits: a failed write must not leave the slot bound in a
@@ -1307,21 +1418,29 @@ export class PrototypeStoreCore {
     const nextState = { ...state, slots };
     await this.#persistence.saveWindow(nextState);
     this.#rememberOpenWindow(nextState);
-    return "stored";
+    return { status: "stored", atMs };
   }
 
   async #appendResult(
     bucket: PublicBucketV1,
     requestHash: Uint8Array,
-    status: PublicAppendStatusV1,
+    decided: AppendDecision,
   ): Promise<PublicAppendResultV1> {
+    // Signed only while the descriptor is valid, whatever awaited since the
+    // decision.
+    this.#nowUnexpired();
     const body: PublicAppendResultBodyV1 = {
       version: 1,
       storeId: copyBytes(this.#storeId),
       descriptorHash: copyBytes(this.#descriptorHash),
       bucket: copyBucket(bucket),
       requestHash,
-      status,
+      // The window of the reading this answer was decided on.
+      storeIngressWindow: ingressWindow(
+        this.#profile.deliveryWindowMs,
+        decided.atMs,
+      ),
+      status: decided.status,
       fixedStatusPadding: new Uint8Array(16),
     };
     return {
@@ -1371,6 +1490,9 @@ export class PrototypeStoreCore {
         ingressWindowStartMs(window, this.#profile.deliveryWindowMs) +
         this.#profile.chunkFinalizationOffsetMs;
       if (dueAt > nowMs) break;
+      // A checkpoint is valid only under a descriptor valid at its window's
+      // finalization instant, so none is signed from the descriptor's end on.
+      if (dueAt >= this.#descriptor.notAfterUnixMs) break;
       await this.#finalizeWindow(window);
       finalized.push(window);
       window += 1n;
@@ -1610,8 +1732,10 @@ export class PrototypeStoreCore {
     requireWindow(window);
     // One reading of the clock decides the answer and is the window it
     // states: two readings could straddle a step of the wall clock and sign a
-    // window that contradicts the decision made on the other.
-    const nowMs = this.#clock.nowMs();
+    // window that contradicts the decision made on the other. Past the
+    // descriptor's end it decides nothing: the read is refused before any row,
+    // precomputed or not, is looked at.
+    const nowMs = this.#nowUnexpired();
     const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
     const status = (
       kind: PublicStoreCheckpointStatusKindV1,
@@ -1739,7 +1863,7 @@ export class PrototypeStoreCore {
     requireSizeClassId(requested.sizeClass);
     requireChunkIndex(chunkIndex);
     // One reading of the clock, as in `#decideCheckpointRead`.
-    const nowMs = this.#clock.nowMs();
+    const nowMs = this.#nowUnexpired();
     const current = ingressWindow(this.#profile.deliveryWindowMs, nowMs);
     const status = async (
       kind: PublicChunkStatusKindV1,
@@ -1864,6 +1988,7 @@ export class PrototypeStoreCore {
       privateRecord.checkpointHash.length !== 32
     )
       fail("a witness record names a 32-byte store id and checkpoint hash");
+    this.#nowUnexpired();
 
     // A record about another profile answers no read of this one, and a
     // window outside retention can never be read back: neither is worth a
@@ -1897,6 +2022,7 @@ export class PrototypeStoreCore {
   /** The records held for `window`; none outside retention, unloaded. */
   async witnessRecords(window: bigint): Promise<StoreWitnessRecordV1[]> {
     requireWindow(window);
+    this.#nowUnexpired();
     if (!this.#witnessRetained(window)) return [];
     return this.#persistence.loadWitnessRecords(window);
   }
@@ -2060,12 +2186,34 @@ export class PrototypeStoreCore {
   }
 
   /**
-   * A window is closed once its finalization instant has passed, whether or
-   * not `finalizeDue` has run: the close is a property of the clock, not of
-   * the finalizer's schedule.
+   * One reading of the clock for a decision, refused with
+   * `StoreDescriptorExpiredError` once the descriptor's end has passed: no
+   * route answers, signs or accepts anything after that.
    */
-  #windowIsClosed(state: StoreWindowState, window: bigint): boolean {
-    return state.finalized !== null || this.#closedOnClock(window);
+  #nowUnexpired(): bigint {
+    const nowMs = this.#clock.nowMs();
+    if (nowMs >= this.#descriptor.notAfterUnixMs)
+      throw new StoreDescriptorExpiredError(this.#descriptor.notAfterUnixMs);
+    return nowMs;
+  }
+
+  /**
+   * A window finalized while the clock reading a write is decided on says it
+   * is still open: the clock stepped back since the finalizer ran. A refusal
+   * signed now would state a window before the one it calls closed, which no
+   * reader can tell from a lie, so the answer is the unsigned 503 instead.
+   * A window is otherwise closed once its finalization instant has passed,
+   * whether or not `finalizeDue` has run.
+   */
+  #refuseFinalizedAheadOfClock(
+    state: StoreWindowState,
+    window: bigint,
+    atMs: bigint,
+  ): void {
+    if (state.finalized !== null && !this.#closedOnClock(window, atMs))
+      throw new StoreBusyError(
+        `window ${String(window)} is finalized ahead of this store's clock`,
+      );
   }
 
   /** `IngressWindowStart(window) + chunkFinalizationOffsetMs` has passed. */

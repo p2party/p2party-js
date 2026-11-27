@@ -80,6 +80,7 @@ import type { DeliveryProfileV1 } from "./profile";
 import type {
   StoreAdmissionTokenProvider,
   StoreFaultRecord,
+  StoreStopEvent,
 } from "./storeClient";
 import type { DataChannelTransport } from "./webrtcProvider";
 
@@ -273,9 +274,16 @@ export interface PrototypeRunOptions {
   readonly admissionTokens?: StoreAdmissionTokenProvider;
   /**
    * The clock the run reads (its schedule, its store clients, its pair
-   * driver and the events it emits) and the timer pair its schedule and
-   * deadlines arm. Default: the wall clock and the platform timers. A
-   * harness or a test that drives the run's time itself injects both.
+   * driver and the events it emits) and the timer pair armed by the carrier
+   * schedule (its events, a catch-up's wait for a store's 503 back-off), by
+   * every store request's deadline, the descriptor fetch at connect
+   * included, and by this file's own deadlines (the session handoff and the
+   * message deadlines of `sendMessage` and `recvMessage`, the data-channel
+   * and handshake waits, the drain at `stop`). Default: the wall clock and
+   * the platform timers. A harness or a test that drives the run's time
+   * itself injects both. Not governed by them: ICE gathering in the WebRTC
+   * provider and whatever timers `createSession` arms for itself, which keep
+   * the platform's.
    */
   readonly clock?: { nowMs(): bigint };
   readonly timers?: CarrierTimers;
@@ -1291,6 +1299,12 @@ const loadModule = async (wasmBinary: ArrayBuffer): Promise<LibCrypto> =>
     }),
   })) as unknown as LibCrypto;
 
+/** One line for a page: which store stopped, and why. */
+const describeStoreStop = (origin: string, event: StoreStopEvent): string =>
+  event.reason === "descriptor-expired"
+    ? `${origin} storeId=${event.storeIdHex}: its descriptor expired at ${new Date(Number(event.notAfterUnixMs)).toISOString()}; a reconnect to a store serving a fresh descriptor is needed`
+    : `${origin} storeId=${event.storeIdHex}: ${String(event.count)} consecutive ${event.disagreement} reports on ${event.route}; not used again until it is reconnected`;
+
 /**
  * Connect every store origin. A store that cannot be reached, whose descriptor
  * does not validate, or which serves another delivery profile is skipped: the
@@ -1302,6 +1316,7 @@ const connectStores = async (
   profileHash: Uint8Array,
   module: LibCrypto,
   clock: { nowMs(): bigint },
+  timers: CarrierTimers,
   emit: (kind: string, detail?: string) => void,
 ): Promise<readonly PrototypeStoreClient[]> => {
   const connected: PrototypeStoreClient[] = [];
@@ -1313,7 +1328,13 @@ const connectStores = async (
         profileHash,
         module,
         nowMs: () => clock.nowMs(),
+        timers,
         admissionTokens: options.admissionTokens,
+        // Once per store, when its client stops using it: the descriptor it
+        // pinned expired, or the store reached the disagreement limit.
+        onStopped: (event) => {
+          emit("store-stopped", describeStoreStop(origin, event));
+        },
       });
       connected.push(client);
       emit("store-connected", `${origin} storeId=${client.storeIdHex}`);
@@ -1372,6 +1393,7 @@ export const runBlindRendezvousPrototype = async (
     profileHash,
     module,
     clock,
+    timers,
     emit,
   );
 

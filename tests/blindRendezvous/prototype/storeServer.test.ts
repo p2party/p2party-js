@@ -10,6 +10,7 @@ import { PROTOTYPE_DELIVERY_PROFILE_V0 } from "../../../src/blindRendezvous/prot
 import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
 import { emptyStoreWindowState } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import {
+  PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS,
   PROTOTYPE_STORE_MIN_RETENTION_WINDOWS,
   PROTOTYPE_STORE_SWEEP_BATCH_WINDOWS,
 } from "../../../src/utils/constants";
@@ -499,5 +500,50 @@ describe("prototype store entrypoint", () => {
     expect(await new Response(child.stderr).text()).toContain(
       "retentionWindows must be an integer from",
     );
+  }, 30_000);
+
+  test("the start-up line states the descriptor's validity and the instant it ends", async () => {
+    const directory = join(root, "validity");
+    mkdirSync(directory, { recursive: true });
+    const chainStart = ingressWindow(
+      PROTOTYPE_DELIVERY_PROFILE_V0.deliveryWindowMs,
+      BigInt(Date.now()),
+    );
+    const child = spawnStore({
+      P2PARTY_STORE_PROTOTYPE: "1",
+      P2PARTY_STORE_OPEN_ALLOCATION: "1",
+      P2PARTY_STORE_PORT: String(freePort()),
+      P2PARTY_STORE_DB: join(directory, "store.sqlite"),
+      P2PARTY_STORE_KEY_FILE: join(directory, "store.key"),
+      P2PARTY_STORE_CHAIN_START: String(chainStart),
+    });
+    let said = "";
+    try {
+      // Read until the line is in, or the process has gone: no timed wait.
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      while (!/listening on[^\n]*\n/.test(said)) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        said += decoder.decode(value);
+      }
+      reader.releaseLock();
+    } finally {
+      child.kill("SIGTERM");
+      await child.exited;
+    }
+    const line = said.split("\n").find((text) => text.includes("listening on"));
+    expect(line).toContain(
+      `descriptorValidityMs=${String(PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS)}`,
+    );
+    // Anchored a minute before the chain start, as the descriptor is.
+    const notAfterUnixMs =
+      chainStart * PROTOTYPE_DELIVERY_PROFILE_V0.deliveryWindowMs -
+      60_000n +
+      PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS;
+    expect(line).toContain(
+      `descriptorNotAfter=${new Date(Number(notAfterUnixMs)).toISOString()}`,
+    );
+    expect(PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS).toBe(30n * 86_400_000n);
   }, 30_000);
 });

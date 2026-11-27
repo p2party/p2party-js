@@ -47,7 +47,10 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadavg, release } from "node:os";
 import { summariseSealed, writeSealedSummary } from "./summarise-sealed.mjs";
-import { summariseProofLevels } from "./summarise-proof-levels.mjs";
+import {
+  summariseProofLevels,
+  writeProofLevelSummary,
+} from "./summarise-proof-levels.mjs";
 
 const arg = (name, fallback) => {
   const hit = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -495,6 +498,6 @@ async function runProofLevels(evaluate, version) {
     clockOffsetMs: data.clockOffsetMs,
     results: summariseProofLevels(data),
   };
-  writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`);
+  writeProofLevelSummary(SUMMARY, summary);
   console.log(JSON.stringify(summary.results, null, 2));
 }

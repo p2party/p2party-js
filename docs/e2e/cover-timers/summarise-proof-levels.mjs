@@ -2,6 +2,7 @@
 // --mode=proof-levels). Also runs on a saved raw recording:
 //   node docs/e2e/cover-timers/summarise-proof-levels.mjs <raw.json> <summary.json>
 // (it then keeps the summary's other fields and replaces its results).
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +24,39 @@ const distribution = (values) => {
     p90: round(at(90)),
     p99: round(at(99)),
     max: round(sorted[sorted.length - 1]),
+  };
+};
+
+const mean = (values) =>
+  values.length === 0
+    ? null
+    : values.reduce((sum, value) => sum + value, 0) / values.length;
+
+/**
+ * Two-sample Kolmogorov–Smirnov distance, and its 5 % critical value. It
+ * assumes independent samples; slots of one instant share its lateness, so
+ * it overstates significance here.
+ */
+const ks = (a, b) => {
+  const left = [...a].sort((x, y) => x - y);
+  const right = [...b].sort((x, y) => x - y);
+  let i = 0;
+  let j = 0;
+  let distance = 0;
+  while (i < left.length && j < right.length) {
+    const at = Math.min(left[i], right[j]);
+    while (i < left.length && left[i] <= at) i++;
+    while (j < right.length && right[j] <= at) j++;
+    distance = Math.max(distance, Math.abs(i / left.length - j / right.length));
+  }
+  return {
+    distance: Number(distance.toFixed(3)),
+    critical5: Number(
+      (
+        1.358 *
+        Math.sqrt((left.length + right.length) / (left.length * right.length))
+      ).toFixed(3),
+    ),
   };
 };
 
@@ -64,17 +98,26 @@ const summariseGrid = (grid, clockOffsetMs) => {
     const first = job.productions[0];
     return first ? [first[1], first[2]] : [job.enqueuedAt, job.enqueuedAt];
   });
-  const inWindow = (at) => windows.some(([from, to]) => at >= from && at < to);
+  const windowOf = (at) =>
+    windows.findIndex(([from, to]) => at >= from && at < to);
   const outsideLateness = [];
-  for (const edge of grid.edges)
-    for (const [due, ran, kind] of edge.wakeUps)
-      if (
-        kind === "slot" &&
-        due >= settleFrom &&
-        due < grid.endedAt &&
-        !inWindow(toPerf(due))
-      )
-        outsideLateness.push(ran - toPerf(due));
+  // Every slot wake-up after the first two seconds: [edge, due (ms from the
+  // grid's start), lateness (ms), the job whose build it fell in, or ""].
+  const slotRows = [];
+  grid.edges.forEach((edge, edgeIndex) => {
+    for (const [due, ran, kind] of edge.wakeUps) {
+      if (kind !== "slot" || due < settleFrom || due >= grid.endedAt) continue;
+      const lateness = ran - toPerf(due);
+      const job = windowOf(toPerf(due));
+      slotRows.push([
+        edgeIndex,
+        due - grid.startedAt,
+        round(lateness),
+        job < 0 ? "" : grid.jobs[job].leaves,
+      ]);
+      if (job < 0) outsideLateness.push(lateness);
+    }
+  });
 
   const jobs = grid.jobs.map((job, index) => {
     const [from, to] = windows[index];
@@ -129,6 +172,16 @@ const summariseGrid = (grid, clockOffsetMs) => {
       slotsDueDuringBuild: lateness.length,
       slotsLateBeyondTolerance: late,
       slotLatenessDuringBuildMs: distribution(lateness),
+      versusSlotsOutsideBuilds:
+        lateness.length < 2
+          ? null
+          : {
+              medianShiftMs: round(
+                distribution(lateness).p50 - distribution(outsideLateness).p50,
+              ),
+              meanShiftMs: round(mean(lateness) - mean(outsideLateness)),
+              ks: ks(lateness, outsideLateness),
+            },
       overlappedCycles: cycles,
       cellsExpectedPerEdge: cycles * perCycle,
       cellsSentPerEdge: cellsSent,
@@ -165,6 +218,7 @@ const summariseGrid = (grid, clockOffsetMs) => {
     slotLatenessOutsideBuildsMs: distribution(outsideLateness),
     jobs,
     statusesByEdge: statuses,
+    slotRows,
   };
 };
 
@@ -174,10 +228,30 @@ export const summariseProofLevels = (data) => ({
   console: data.console,
 });
 
+/**
+ * Write a proof-level summary and, beside it (`.slots.tsv`), every slot
+ * wake-up of its grid phase, one per line, taken out of the JSON.
+ */
+export const writeProofLevelSummary = (summaryPath, summary) => {
+  const lines = [
+    "# edge\tslot due (ms from the grid's start, page Date.now())\twake-up lateness (ms; performance.timeOrigin + now() minus the due time)\tleaves of the message whose proof-level build it fell in (empty: none)",
+    ...summary.results.grid.slotRows.map((row) => row.join("\t")),
+  ];
+  delete summary.results.grid.slotRows;
+  const tsvPath = summaryPath.replace(/\.json$/, "") + ".slots.tsv";
+  summary.slotsFile = tsvPath.split("/").pop();
+  writeFileSync(tsvPath, `${lines.join("\n")}\n`);
+  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+};
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [rawPath, summaryPath] = process.argv.slice(2);
   const data = JSON.parse(readFileSync(rawPath, "utf8"));
   const summary = JSON.parse(readFileSync(summaryPath, "utf8"));
   summary.results = summariseProofLevels(data);
-  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+  // Rewritten from the raw recording by this file, named by its hash.
+  summary.resummarisedBy = createHash("sha256")
+    .update(readFileSync(fileURLToPath(import.meta.url)))
+    .digest("hex");
+  writeProofLevelSummary(summaryPath, summary);
 }

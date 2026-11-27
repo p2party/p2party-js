@@ -60,8 +60,10 @@ export const MERKLE_NODE_DOMAIN = 0x01;
 // so it runs in slices, handing the page back between them; a cover wake-up
 // that falls due during the build then waits for at most the slice it fell
 // in. Below MIN_COVER_SLOT_MS (25 ms, src/roomPolicy.ts), the shortest slot
-// spacing a schedule may have, so no slot passes whole inside one slice; and
-// in Chromium 1 ms slices cost the build 5 to 8 % more time than 4 ms ones.
+// spacing a schedule may have, so no slot passes whole inside one slice. In
+// Chromium 1 ms slices built as fast as 4 ms ones, within 2 % from 16,000
+// leaves up (docs/protocol-v4-pq-cover-architecture.md, "The proof-level
+// build").
 export const PROOF_LEVEL_BUILD_SLICE_MS = 1;
 export const PROOF_LEN =
   4 + // length of the proof

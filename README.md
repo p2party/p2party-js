@@ -85,6 +85,10 @@ any `rendezvousMode` other than `legacy-signaling` — because that transport is
 not wired. The private BitTorrent extension remains a research direction, not a
 shipped property.
 
+The separate local two-store prototype offers an experimental append
+schedule for slower reads. Its study includes paired timings and the
+configuration for both clients and stores. [Two-store timing study](docs/rendezvous-latency-2026-09/slot-order-study.md)
+
 The current signaling operator can observe room membership, peer identities,
 network metadata, and timing. Fixed message cells and in-transfer decoys do not
 by themselves provide continuous traffic-analysis resistance.

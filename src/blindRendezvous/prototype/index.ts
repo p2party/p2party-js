@@ -51,7 +51,7 @@ import {
 import { deliveryProfileHash } from "../derivations";
 import { CarrierRuntime } from "./carrierRuntime";
 import { PairDriver } from "./pairDriver";
-import { PROTOTYPE_DELIVERY_PROFILE_V0, withDeliveryWindowMs } from "./profile";
+import { selectPrototypeDeliveryProfile } from "./profile";
 import { PrototypeStoreClient } from "./storeClient";
 import {
   WebRtcCandidateProvider,
@@ -76,7 +76,10 @@ import type {
   PairDriverPhase,
   TransportCandidateProvider,
 } from "./pairDriver";
-import type { DeliveryProfileV1 } from "./profile";
+import type {
+  DeliveryProfileV1,
+  PrototypeDeliveryProfileName,
+} from "./profile";
 import type {
   StoreAdmissionTokenProvider,
   StoreFaultRecord,
@@ -265,6 +268,8 @@ export interface PrototypeRunOptions {
    * geometry, and a store serving a different hash serves a different bucket.
    */
   readonly deliveryWindowMs?: bigint;
+  /** Locally selected profile. Every participating store must advertise its hash. */
+  readonly deliveryProfile?: PrototypeDeliveryProfileName;
   /**
    * Admission tokens for stores that gate their allocation, append and
    * witness routes, handed to every store client this run connects
@@ -1374,13 +1379,10 @@ export const runBlindRendezvousPrototype = async (
     }
   };
 
-  const profile =
-    options.deliveryWindowMs === undefined
-      ? PROTOTYPE_DELIVERY_PROFILE_V0
-      : withDeliveryWindowMs(
-          PROTOTYPE_DELIVERY_PROFILE_V0,
-          options.deliveryWindowMs,
-        );
+  const profile = selectPrototypeDeliveryProfile(
+    options.deliveryProfile,
+    options.deliveryWindowMs,
+  );
   const profileHash = await deliveryProfileHash(profile);
 
   const module = await loadModule(options.wasmBinary);

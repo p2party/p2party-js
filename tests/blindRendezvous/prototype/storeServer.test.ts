@@ -4,9 +4,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { loadTestModule } from "../../../src/cryptography/testModule";
 import { deliveryProfileHash } from "../../../src/blindRendezvous/derivations";
 import { ingressWindow } from "../../../src/blindRendezvous/publicWindow";
-import { PROTOTYPE_DELIVERY_PROFILE_V0 } from "../../../src/blindRendezvous/prototype/profile";
+import {
+  carrierObjectWireBytes,
+  PROTOTYPE_DELIVERY_PROFILE_V0,
+  selectPrototypeDeliveryProfile,
+} from "../../../src/blindRendezvous/prototype/profile";
+import { PrototypeStoreClient } from "../../../src/blindRendezvous/prototype/storeClient";
 import { SqliteStorePersistence } from "../../../src/blindRendezvous/prototype/store/storeSqlite";
 import { emptyStoreWindowState } from "../../../src/blindRendezvous/prototype/store/storePersistence";
 import {
@@ -23,7 +29,6 @@ import {
   encodePublicAllocationRequestV1,
   encodePublicAppendRequestV1,
 } from "../../../src/blindRendezvous/prototype/storeWire";
-import { carrierObjectWireBytes } from "../../../src/blindRendezvous/prototype/profile";
 
 import type { Subprocess } from "bun";
 
@@ -103,6 +108,110 @@ const waitForHealth = async (
 };
 
 describe("prototype store entrypoint", () => {
+  test("the experimental schedule pins the client handshake and survives a refused profile change", async () => {
+    const directory = join(root, "experimental-profile");
+    mkdirSync(directory);
+    const databasePath = join(directory, "store.sqlite");
+    const name = "experimental-critical-later-v1";
+    const profile = selectPrototypeDeliveryProfile(name);
+    const pinned = selectPrototypeDeliveryProfile();
+    const digest = await deliveryProfileHash(profile);
+    const pinnedDigest = await deliveryProfileHash(pinned);
+    expect(hex(digest)).not.toBe(hex(pinnedDigest));
+    const nowMs = () => BigInt(Date.now());
+    const chainStart = ingressWindow(profile.deliveryWindowMs, nowMs());
+    const port = freePort();
+    const base = {
+      P2PARTY_STORE_PROTOTYPE: "1",
+      P2PARTY_STORE_OPEN_ALLOCATION: "1",
+      P2PARTY_STORE_WINDOW_MS: String(profile.deliveryWindowMs),
+      P2PARTY_STORE_CHAIN_START: String(chainStart),
+      P2PARTY_STORE_PORT: String(port),
+      P2PARTY_STORE_DB: databasePath,
+      P2PARTY_STORE_KEY_FILE: join(directory, "store.key"),
+    };
+    const store = spawnStore({ ...base, P2PARTY_STORE_DELIVERY_PROFILE: name });
+    try {
+      await waitForHealth(store, port);
+      const paths: string[] = [];
+      const options = {
+        origin: `http://127.0.0.1:${String(port)}`,
+        module: await loadTestModule(),
+        nowMs,
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          paths.push(new URL(String(input)).pathname);
+          return fetch(input, init);
+        }) as typeof fetch,
+      };
+      await expect(
+        PrototypeStoreClient.connect({
+          ...options,
+          profile: pinned,
+          profileHash: digest,
+        }),
+      ).rejects.toThrow(
+        "the delivery profile hash does not match the local profile",
+      );
+      expect(paths).toEqual([]);
+      await expect(
+        PrototypeStoreClient.connect({
+          ...options,
+          profile: pinned,
+          profileHash: pinnedDigest,
+        }),
+      ).rejects.toThrow(/not compatible with this prototype delivery profile/);
+      expect(paths).toEqual([PROTOTYPE_STORE_ROUTES.descriptor]);
+
+      const client = await PrototypeStoreClient.connect({
+        ...options,
+        profile,
+        profileHash: digest,
+      });
+      expect(client.descriptor.supportedDeliveryProfileHashes.map(hex)).toEqual(
+        [hex(digest)],
+      );
+      const nextWindow = ingressWindow(profile.deliveryWindowMs, nowMs()) + 1n;
+      expect((await client.scanWindow(nextWindow)).status).toBe("not-final");
+      expect(client.faults).toEqual([]);
+    } finally {
+      store.kill("SIGTERM");
+      await store.exited;
+    }
+
+    const metadata = () => {
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        return Object.fromEntries(
+          db
+            .query<{ key: string; value: string }, []>(
+              "SELECT key, value FROM meta",
+            )
+            .all()
+            .map(({ key, value }) => [key, value]),
+        );
+      } finally {
+        db.close();
+      }
+    };
+    const before = metadata();
+    expect(before.deliveryProfileHash).toBe(hex(digest));
+    expect(before.chainStartIngressWindow).toBe(String(chainStart));
+    const restart = spawnStore({
+      ...base,
+      P2PARTY_STORE_DELIVERY_PROFILE: "pinned",
+    });
+    const deadline = setTimeout(() => restart.kill("SIGKILL"), 10_000);
+    try {
+      expect(await restart.exited).toBe(1);
+      expect(await new Response(restart.stderr).text()).toContain(
+        "another delivery profile",
+      );
+    } finally {
+      clearTimeout(deadline);
+    }
+    expect(metadata()).toEqual(before);
+  }, 30_000);
+
   test("a refused start anchors nothing, so the next launch is free to choose", async () => {
     const directory = join(root, "recovery");
     mkdirSync(directory, { recursive: true });

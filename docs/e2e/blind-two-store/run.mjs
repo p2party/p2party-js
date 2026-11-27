@@ -82,11 +82,40 @@ const STORE_PORT_BASE = argOf("store-port-base", 5910);
 const PAGE_PORT = argOf("page-port", 5920);
 const WINDOW_MS = argOf("window-ms", 4000);
 const DEADLINE_MS = argOf("deadline-ms", 180_000);
-// The pinned profile's own value. `--cohort` rebuilds the geometry on both
-// sides (see cohortPreload.ts) and is the only reason a store ever runs with a
-// preload.
 const PINNED_COHORT = 8;
+const SLOT_ORDER = stringArgOf("slot-order", "pinned");
+if (!["pinned", "critical-later"].includes(SLOT_ORDER))
+  throw new Error(
+    "Expected --slot-order=pinned or --slot-order=critical-later",
+  );
 const COHORT = argOf("cohort", null);
+const DELIVERY_PROFILE =
+  SLOT_ORDER === "pinned" ? "pinned" : "experimental-critical-later-v1";
+const PROFILE_ENV = {
+  P2PARTY_STORE_DELIVERY_PROFILE: DELIVERY_PROFILE,
+  P2PARTY_BLIND_COHORT: COHORT === null ? "" : String(COHORT),
+};
+const START_PHASE = argOf("start-phase-ms", null);
+if (
+  START_PHASE !== null &&
+  (!Number.isSafeInteger(START_PHASE) ||
+    START_PHASE < 0 ||
+    START_PHASE >= WINDOW_MS)
+)
+  throw new Error(
+    "--start-phase-ms must be an integer within the selected window",
+  );
+const CHUNK_DELAY = argOf("chunk-reply-delay-ms", 0);
+if (
+  !Number.isSafeInteger(CHUNK_DELAY) ||
+  CHUNK_DELAY < 0 ||
+  CHUNK_DELAY >= WINDOW_MS
+)
+  throw new Error(
+    "--chunk-reply-delay-ms must be an integer within the selected window",
+  );
+if (CHUNK_DELAY && REQUESTED !== "healthy")
+  throw new Error("Chunk timing measurements require --scenario=healthy");
 
 /**
  * The class the transport flight must be published in.
@@ -290,6 +319,7 @@ const COHORT_PRELOAD = path.join(dir, "cohortPreload.ts");
 const startStore = (workspace, name, port, options, onError) => {
   const env = {
     ...process.env,
+    ...PROFILE_ENV,
     P2PARTY_STORE_PROTOTYPE: "1",
     P2PARTY_STORE_OPEN_ALLOCATION: "1",
     P2PARTY_STORE_PORT: String(port),
@@ -301,7 +331,6 @@ const startStore = (workspace, name, port, options, onError) => {
     P2PARTY_STORE_LOG_BODIES: path.join(workspace, `${name}.bodies.log`),
   };
   if (options.fault !== null) env.P2PARTY_STORE_FAULT = options.fault;
-  if (COHORT !== null) env.P2PARTY_BLIND_COHORT = String(COHORT);
 
   // `--preload` must follow `run`, and its path must be absolute: bun resolves
   // a preload against the module resolver, not against cwd.
@@ -494,6 +523,7 @@ const runScenario = async (name, index, profileInfo) => {
   const startPhase = { A: null, B: null };
   /** `append window-finalized` refusals, per page. Any is a failure. */
   const finalizedMisses = { A: 0, B: 0 };
+  const delayedReads = { A: 0, B: 0 };
 
   const countRequest = (label, which, url) => {
     requests[label][which] += 1;
@@ -575,6 +605,33 @@ const runScenario = async (name, index, profileInfo) => {
   const openPage = async (label, origins) => {
     const context = await browser.newContext();
     const page = await context.newPage();
+    if (CHUNK_DELAY > 0) {
+      // Defer handing a successful local chunk fetch back to the client.
+      // The checkpoint, uploads, browser HTTP cache and store remain native.
+      await page.addInitScript(
+        ({ origins, delayMs }) => {
+          window.__blindDelayedReads = 0;
+          const original = window.fetch.bind(window);
+          window.fetch = async (input, init) => {
+            const response = await original(input, init);
+            const url = new URL(response.url);
+            const method =
+              init?.method ?? (input instanceof Request ? input.method : "GET");
+            if (
+              method === "GET" &&
+              response.ok &&
+              origins.includes(url.origin) &&
+              url.pathname.startsWith("/p2party/prototype-v1/chunk/")
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, delayMs));
+              window.__blindDelayedReads += 1;
+            }
+            return response;
+          };
+        },
+        { origins, delayMs: CHUNK_DELAY },
+      );
+    }
     page.on("pageerror", (error) =>
       say(`  [${label} pageerror] ${error.message}`),
     );
@@ -659,9 +716,16 @@ const runScenario = async (name, index, profileInfo) => {
         capabilityHex,
         storeOrigins: origins,
         rtcConfig: { iceServers: [] },
+        deliveryProfile: DELIVERY_PROFILE,
         deliveryWindowMs: String(WINDOW_MS),
       });
 
+    // Align the two browser calls before WASM startup and descriptor reads.
+    // The actual phase of each presence event is recorded independently.
+    if (START_PHASE !== null)
+      await sleep(
+        (START_PHASE - (Date.now() % WINDOW_MS) + WINDOW_MS) % WINDOW_MS,
+      );
     const armed = Date.now();
     await Promise.all([
       a.page.evaluate(
@@ -722,6 +786,17 @@ const runScenario = async (name, index, profileInfo) => {
       `${name}: rendezvous and message exchange`,
     );
     connectedMs = Date.now() - armed;
+    if (CHUNK_DELAY > 0) {
+      [delayedReads.A, delayedReads.B] = await Promise.all(
+        [a, b].map(({ page }) =>
+          page.evaluate(() => window.__blindDelayedReads),
+        ),
+      );
+      if (!delayedReads.A || !delayedReads.B)
+        note(
+          "Expected successful local chunk reads to be delayed on both pages",
+        );
+    }
 
     /*
      * Compared as bytes, not as strings.
@@ -1358,6 +1433,9 @@ const runScenario = async (name, index, profileInfo) => {
     ok,
     connectedMs,
     timings,
+    startPhase,
+    finalizedMisses,
+    delayedReads,
     problems,
     ...(result ?? {}),
   };
@@ -1410,8 +1488,6 @@ const PROFILE_TOOL = "docs/e2e/blind-two-store/profileTool.ts";
 
 let failed = false;
 try {
-  const cohortEnv =
-    COHORT === null ? {} : { P2PARTY_BLIND_COHORT: String(COHORT) };
   const profileArgv =
     COHORT === null
       ? ["run", PROFILE_TOOL, "info", `--window-ms=${WINDOW_MS}`]
@@ -1423,7 +1499,7 @@ try {
           "info",
           `--window-ms=${WINDOW_MS}`,
         ];
-  const profileInfo = JSON.parse(await bunJson(profileArgv, cohortEnv));
+  const profileInfo = JSON.parse(await bunJson(profileArgv, PROFILE_ENV));
 
   // The cohort override is a loader rewrite, not an option: if it silently did
   // not apply, every number this run reports would be attributed to a geometry
@@ -1434,11 +1510,23 @@ try {
       `--cohort=${COHORT} did not take: the rebuilt profile carries cohortAllocationsPerWindow=${profileInfo.cohortAllocationsPerWindow}`,
     );
 
+  if (SLOT_ORDER === "critical-later") {
+    const observed = profileInfo.sizeClasses.map((c) =>
+      c.appendRoles.join("/"),
+    );
+    if (
+      observed.join(",") !==
+      "state-replication/identity-bootstrap/safety-control,state-replication/safety-control"
+    )
+      throw new Error(
+        "Rebuilt profile does not contain the candidate slot roles",
+      );
+  }
   if (COHORT !== null) {
     bundleFile = path.join(dir, `bundle.cohort-${COHORT}.js`);
     await bunJson(
       ["run", PROFILE_TOOL, "build", `--out=${bundleFile}`],
-      cohortEnv,
+      PROFILE_ENV,
     );
     say(`built ${path.basename(bundleFile)} for cohort ${COHORT}`);
   }
@@ -1454,12 +1542,14 @@ try {
   say(
     `per client per store per window: appends ${profileInfo.appendedBytesPerWindow} bytes, ` +
       `full scan ${profileInfo.scannedBytesPerWindow} bytes` +
-      (COHORT !== null && COHORT !== PINNED_COHORT
+      (SLOT_ORDER !== "pinned" || (COHORT !== null && COHORT !== PINNED_COHORT)
         ? "  (NOT the pinned geometry — a measurement profile)"
         : ""),
   );
 
-  await new Promise((resolve) => pageServer.listen(PAGE_PORT, "127.0.0.1", resolve));
+  await new Promise((resolve) =>
+    pageServer.listen(PAGE_PORT, "127.0.0.1", resolve),
+  );
   say(`page server on http://localhost:${PAGE_PORT}/`);
 
   const results = [];
@@ -1474,6 +1564,30 @@ try {
     "scenario                 verdict   connect   A:peer→verified   B:peer→verified   topology A / B",
   );
   for (const outcome of results) {
+    if (START_PHASE !== null) {
+      say(
+        "TIMING_SAMPLE " +
+          JSON.stringify({
+            scenario: outcome.name,
+            passed: outcome.ok,
+            slotOrder: SLOT_ORDER,
+            profileHash: profileInfo.deliveryProfileHash,
+            requestedPhaseMs: START_PHASE,
+            actualPhaseMs: outcome.startPhase,
+            chunkReplyDelayMs: CHUNK_DELAY,
+            delayedReads: outcome.delayedReads,
+            verifiedMs: {
+              A: outcome.timings.A?.["message-verified"] ?? null,
+              B: outcome.timings.B?.["message-verified"] ?? null,
+            },
+            peerObservedMs: {
+              A: outcome.timings.A?.["peer-observed"] ?? null,
+              B: outcome.timings.B?.["peer-observed"] ?? null,
+            },
+            finalizedMisses: outcome.finalizedMisses,
+          }),
+      );
+    }
     const span = (page) => {
       const observed = outcome.timings?.[page]?.["peer-observed"];
       const verified = outcome.timings?.[page]?.["message-verified"];

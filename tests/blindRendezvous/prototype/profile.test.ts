@@ -5,6 +5,7 @@ import {
   ProfileGeometryError,
   carrierObjectWireBytes,
   profileGeometry,
+  selectPrototypeDeliveryProfile,
   sizeClassForPayloadClass,
   validateDeliveryProfileGeometry,
   withDeliveryWindowMs,
@@ -18,9 +19,32 @@ describe("prototype delivery profile", () => {
     ).not.toThrow();
   });
 
-  test("hashes canonically", async () => {
-    const digest = await deliveryProfileHash(PROTOTYPE_DELIVERY_PROFILE_V0);
-    expect(digest.length).toBe(32);
+  test("pins each named profile with its measured role order and hash", async () => {
+    const pinned = selectPrototypeDeliveryProfile();
+    const candidate = selectPrototypeDeliveryProfile(
+      "experimental-critical-later-v1",
+    );
+    expect(pinned).toBe(PROTOTYPE_DELIVERY_PROFILE_V0);
+    expect(
+      candidate.sizeClasses.map((c) =>
+        c.appendSchedule.map((slot) => slot.role),
+      ),
+    ).toEqual([
+      ["state-replication", "identity-bootstrap", "safety-control"],
+      ["state-replication", "safety-control"],
+    ]);
+    expect(Buffer.from(await deliveryProfileHash(pinned)).toString("hex")).toBe(
+      "83a2261ee4c0f345977e94416591372007578db22619b80afa583d2082c68a38",
+    );
+    expect(
+      Buffer.from(await deliveryProfileHash(candidate)).toString("hex"),
+    ).toBe("9728493b6acbc77e9a819a64011fce9f72b12e73b3d3c0951fca275ed3cbef3c");
+    expect(
+      selectPrototypeDeliveryProfile("experimental-critical-later-v1", 2000n),
+    ).toEqual(withDeliveryWindowMs(candidate, 2000n));
+    expect(() => selectPrototypeDeliveryProfile("other")).toThrow(
+      ProfileGeometryError,
+    );
   });
 
   test("publicChunksPerWindow is minimal for scheduledObjects", () => {

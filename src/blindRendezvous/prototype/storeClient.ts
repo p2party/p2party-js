@@ -1737,13 +1737,16 @@ export class PrototypeStoreClient {
     if (options.profileHash.length !== 32)
       fail("the delivery profile hash must be exactly 32 bytes");
     const profileHash = copyBytes(options.profileHash);
+    const profile = structuredClone(options.profile);
+    if (!bytesEqual(await deliveryProfileHash(profile), profileHash))
+      fail("the delivery profile hash does not match the local profile");
     const transport = transportOf(options);
 
     // The descriptor fetch is bounded like every later request, and for the
     // same reason: a store that accepts this connection and then says nothing
     // would otherwise leave the caller's whole composition waiting on one
     // origin before the run has begun.
-    const deadlineMs = requestDeadlineMs(options.profile);
+    const deadlineMs = requestDeadlineMs(profile);
     const deadline = armDeadline(options.timers ?? platformTimers, deadlineMs);
     let served: PrototypeStoreDescriptorDocumentV1;
     try {
@@ -1877,21 +1880,27 @@ export class PrototypeStoreClient {
     // the profile, and recomputing it per verified object would burn it on the
     // read path.
     const objectBytesByClass = new Map<number, number>(
-      options.profile.sizeClasses.map((sizeClass) => [
+      profile.sizeClasses.map((sizeClass) => [
         sizeClass.id,
-        carrierObjectWireBytes(options.profile, sizeClass.id, profileHash),
+        carrierObjectWireBytes(profile, sizeClass.id, profileHash),
       ]),
     );
 
-    return new PrototypeStoreClient(options, {
-      storeId: storeIdBytes,
-      descriptor,
-      descriptorHash: await computeDescriptorHash(descriptor),
-      carrierContextId: await publicCarrierContextId(storeIdBytes, profileHash),
-      chainStart,
-      profileHash,
-      objectBytesByClass,
-    });
+    return new PrototypeStoreClient(
+      { ...options, profile },
+      {
+        storeId: storeIdBytes,
+        descriptor,
+        descriptorHash: await computeDescriptorHash(descriptor),
+        carrierContextId: await publicCarrierContextId(
+          storeIdBytes,
+          profileHash,
+        ),
+        chainStart,
+        profileHash,
+        objectBytesByClass,
+      },
+    );
   }
 
   /** True once this store has been caught in a fault no absence explains. */

@@ -20,9 +20,9 @@
  *   was signed under, so a store that re-chose its chain start on each boot
  *   would orphan its own chain and be marked inert by every client.
  * - **The delivery profile is pinned to that chain.** A restart under a
- *   different `P2PARTY_STORE_WINDOW_MS` would measure windows with a different
- *   ruler and sign a chain that disagrees with the one already on disk, so a
- *   mismatch refuses to start rather than equivocate.
+ *   different `P2PARTY_STORE_WINDOW_MS` or `P2PARTY_STORE_DELIVERY_PROFILE`
+ *   would sign a chain under a profile different from the one already on
+ *   disk. A mismatch refuses to start.
  * - **The identity seed is created 0600 or not at all.**
  * - **The descriptor's validity is a hard end.** It is
  *   `PROTOTYPE_STORE_DESCRIPTOR_VALIDITY_MS` (30 days) from one minute before
@@ -61,10 +61,7 @@ import {
 } from "../../../utils/constants";
 import { deliveryProfileHash } from "../../derivations";
 import { ingressWindow } from "../../publicWindow";
-import {
-  PROTOTYPE_DELIVERY_PROFILE_V0,
-  withDeliveryWindowMs,
-} from "../profile";
+import { selectPrototypeDeliveryProfile } from "../profile";
 import { PrototypeStoreCore, StoreDescriptorChangedError } from "./storeCore";
 import {
   PROTOTYPE_STORE_MAX_REQUEST_BODY_BYTES,
@@ -147,14 +144,24 @@ const parsePort = (raw: string | undefined): number => {
   return port;
 };
 
-const parseProfile = (raw: string | undefined): DeliveryProfileV1 => {
-  if (raw === undefined) return PROTOTYPE_DELIVERY_PROFILE_V0;
-  if (!DECIMAL.test(raw) || raw === "0")
+const parseProfile = (
+  name: string | undefined,
+  raw: string | undefined,
+): DeliveryProfileV1 => {
+  if (raw !== undefined && (!DECIMAL.test(raw) || raw === "0"))
     refuse("P2PARTY_STORE_WINDOW_MS must be a positive decimal integer");
-  // Every schedule offset is rescaled by the same ratio, so the profile's
-  // ordering inequalities survive the change; the client passes the same
-  // override, and both then derive the same profile hash.
-  return withDeliveryWindowMs(PROTOTYPE_DELIVERY_PROFILE_V0, BigInt(raw));
+  try {
+    return selectPrototypeDeliveryProfile(
+      name,
+      raw === undefined ? undefined : BigInt(raw),
+    );
+  } catch (error) {
+    return refuse(
+      error instanceof Error
+        ? error.message
+        : "invalid prototype delivery profile",
+    );
+  }
 };
 
 const parseFault = (raw: string | undefined): "withhold" | null => {
@@ -238,7 +245,10 @@ const setting = (name: string): string | undefined => {
 };
 
 const port = parsePort(setting("P2PARTY_STORE_PORT"));
-const profile = parseProfile(setting("P2PARTY_STORE_WINDOW_MS"));
+const profile = parseProfile(
+  setting("P2PARTY_STORE_DELIVERY_PROFILE"),
+  setting("P2PARTY_STORE_WINDOW_MS"),
+);
 const fault = parseFault(setting("P2PARTY_STORE_FAULT"));
 const databasePath = setting("P2PARTY_STORE_DB") ?? DEFAULT_DB_PATH;
 const keyFilePath = setting("P2PARTY_STORE_KEY_FILE") ?? DEFAULT_KEY_FILE;
@@ -272,7 +282,7 @@ const profileHashHex = hexOf(await deliveryProfileHash(profile));
 const persistedProfileHash = persistence.loadMeta(META_PROFILE_HASH);
 if (persistedProfileHash !== null && persistedProfileHash !== profileHashHex)
   refuse(
-    `${databasePath} holds a chain for another delivery profile; use a fresh database or restore P2PARTY_STORE_WINDOW_MS`,
+    `${databasePath} holds a chain for another delivery profile; use a fresh database or restore P2PARTY_STORE_WINDOW_MS and P2PARTY_STORE_DELIVERY_PROFILE`,
   );
 
 const persistedChainStart = persistence.loadMeta(META_CHAIN_START);

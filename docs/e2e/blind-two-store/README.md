@@ -346,6 +346,15 @@ PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
     [--store-port-base=5910] [--page-port=5920]
 ```
 
+For the healthy timing study, `--slot-order=pinned|critical-later` selects
+the append roles for both stores and both browsers. The default is the
+release profile. `--start-phase-ms=<offset>` aligns both launches to the
+window and emits a JSON timing row with the phase actually observed on each
+page. `--chunk-reply-delay-ms=<ms>` delays delivery of successful local chunk
+fetches inside each page. The default delay is zero. Both numeric offsets
+must be smaller than the window. The paired study includes the run command,
+profile hashes and results. [Slot order study](../../rendezvous-latency-2026-09/slot-order-study.md)
+
 `bundle.js`, `bundle.cohort-<n>.js`, `provider-smoke-bundle.js` and
 `libcrypto.wasm` are generated and are covered by `.gitignore`, so "do not
 commit them" is enforced rather than remembered. Ports: `--store-port-base` and

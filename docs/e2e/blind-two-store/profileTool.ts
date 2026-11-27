@@ -24,14 +24,11 @@
 
 import { deliveryProfileHash } from "../../../src/blindRendezvous/derivations";
 import {
-  PROTOTYPE_DELIVERY_PROFILE_V0,
   carrierObjectWireBytes,
+  selectPrototypeDeliveryProfile,
   validateDeliveryProfileGeometry,
-  withDeliveryWindowMs,
 } from "../../../src/blindRendezvous/prototype/profile";
 import { cohortFromEnv, cohortProfilePlugin } from "./cohortPreload";
-
-import type { DeliveryProfileV1 } from "../../../src/blindRendezvous/prototype/profile";
 
 const here = new URL(".", import.meta.url).pathname;
 
@@ -45,10 +42,10 @@ const hexOf = (value: Uint8Array): string =>
 
 const info = async (): Promise<void> => {
   const windowMs = argOf("window-ms");
-  const profile: DeliveryProfileV1 =
-    windowMs === undefined
-      ? PROTOTYPE_DELIVERY_PROFILE_V0
-      : withDeliveryWindowMs(PROTOTYPE_DELIVERY_PROFILE_V0, BigInt(windowMs));
+  const profile = selectPrototypeDeliveryProfile(
+    process.env.P2PARTY_STORE_DELIVERY_PROFILE,
+    windowMs === undefined ? undefined : BigInt(windowMs),
+  );
   // The store rescales and validates; a profile that would be rejected there
   // must be rejected here, before anything is spawned.
   validateDeliveryProfileGeometry(profile);
@@ -77,6 +74,7 @@ const info = async (): Promise<void> => {
       // offsets are still ahead of the start phase. Deriving them there by
       // rescaling hardcoded 4,000 ms constants would make the assertion agree
       // with a copy of the profile rather than with the profile.
+      appendRoles: sizeClass.appendSchedule.map((entry) => entry.role),
       appendOffsetsMs: sizeClass.appendSchedule.map((entry) =>
         Number(entry.offsetMs),
       ),

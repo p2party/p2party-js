@@ -774,6 +774,7 @@ time. §9 says what a next stage owes here.
 | `P2PARTY_STORE_OPEN_ALLOCATION` | must be `1`. Gate flag, and the only allocation mode implemented — there is no issuer. |
 | `P2PARTY_STORE_PORT` | default 5910; must be 5001–65535. Nothing binds below 5000 locally. |
 | `P2PARTY_STORE_WINDOW_MS` | rescales the pinned delivery profile. Pinned to the chain on first start; a restart under a different value refuses rather than equivocate. |
+| `P2PARTY_STORE_DELIVERY_PROFILE` | Selects `pinned` (default) or `experimental-critical-later-v1`. Both clients must select the matching profile with `runBlindRendezvousPrototype({ deliveryProfile, ... })`. A separate database is required to start a chain under a different profile. [Timing measurements](rendezvous-latency-2026-09/slot-order-study.md) |
 | `P2PARTY_STORE_DB` | SQLite path. A restart replays state; a finalized window is never re-signed. |
 | `P2PARTY_STORE_KEY_FILE` | 32-byte Ed25519 seed, created `0600` on first start or not at all. |
 | `P2PARTY_STORE_CHAIN_START` | the chain's first ingress window. Chosen once, then persisted; it cannot be moved afterwards. |

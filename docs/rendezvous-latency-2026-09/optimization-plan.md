@@ -189,6 +189,12 @@ window shrink at once.
 
 ### Step 4 — Reverse the append roles at the pinned offsets
 
+November 27 follow-up on SDK v0.15.1. The harness now runs the candidate
+against the release profile at matched launch phases, with both native
+and delayed local reads. The study records the conditions under which the
+extra scheduling margin changed time to verified messages.
+[Paired experiment and release decision](slot-order-study.md)
+
 *(A narrowing of SCHED-C1. See the note below: I am recommending **less** than
 `angle-schedule-shape` proposes, and saying why.)*
 

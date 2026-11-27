@@ -189,6 +189,11 @@ establishing a property, and
 [`docs/blind-rendezvous-two-store-prototype.md`](docs/blind-rendezvous-two-store-prototype.md)
 opens by saying at length what it does not claim.
 
+The local stores and clients now support an opt-in append schedule. A
+matched loopback study recovered two delivery windows when chunk reads
+were delayed by 800 ms. Measuring browser and device latency distributions
+is the next step before choosing a default. [Profile study and data](docs/rendezvous-latency-2026-09/slot-order-study.md)
+
 **Finding peers across independently operated servers.** A room today lives on
 exactly one signaling service. Federating discovery is what makes self-hosting
 useful to anyone but the host, and it is also the precondition for the

@@ -3,8 +3,8 @@
  * every client and both store servers in the server-blind rendezvous
  * prototype (design doc §4.2).
  *
- * `PROTOTYPE_DELIVERY_PROFILE_V0` is the one constant everything downstream
- * — the store server, the client adapter, and the scheduler — reads. Pinning
+ * `PROTOTYPE_DELIVERY_PROFILE_V0` is the default for the prototype store
+ * and client. Both can explicitly select the measured append-role variant. Pinning
  * it here, next to the validator that checks it against the specification's
  * §4.3 arithmetic, means a profile that ships is a profile that has already
  * been proven geometrically self-consistent; nothing downstream re-derives or
@@ -478,4 +478,37 @@ export const withDeliveryWindowMs = (
 
   validateDeliveryProfileGeometry(scaled);
   return scaled;
+};
+
+export type PrototypeDeliveryProfileName =
+  "pinned" | "experimental-critical-later-v1";
+
+/** Select locally before deriving the expected signed descriptor compatibility hash. */
+export const selectPrototypeDeliveryProfile = (
+  name: string = "pinned",
+  windowMs?: bigint,
+): DeliveryProfileV1 => {
+  let profile = PROTOTYPE_DELIVERY_PROFILE_V0;
+  if (name === "experimental-critical-later-v1") {
+    // Rotate roles one slot later within each size class. Presence takes the
+    // first slot, leaving more time after the read for dependent flights.
+    profile = {
+      ...profile,
+      sizeClasses: profile.sizeClasses.map((sizeClass) => ({
+        ...sizeClass,
+        appendSchedule: sizeClass.appendSchedule.map((entry, index, slots) => ({
+          ...entry,
+          role: slots[(index + slots.length - 1) % slots.length].role,
+        })),
+      })),
+    };
+    validateDeliveryProfileGeometry(profile);
+  } else if (name !== "pinned") {
+    fail(
+      "unknown prototype delivery profile; expected pinned or experimental-critical-later-v1",
+    );
+  }
+  return windowMs === undefined
+    ? profile
+    : withDeliveryWindowMs(profile, windowMs);
 };

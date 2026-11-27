@@ -21,6 +21,7 @@
 import { runBlindRendezvousPrototype } from "../../../src/blindRendezvous/prototype";
 
 import type { CarrierCounters } from "../../../src/blindRendezvous/prototype/carrierRuntime";
+import type { PrototypeDeliveryProfileName } from "../../../src/blindRendezvous/prototype/profile";
 import type {
   PrototypeRun,
   PrototypeRunAudit,
@@ -41,6 +42,7 @@ interface BlindRunOptionsJson {
   readonly rtcConfig?: RTCConfiguration;
   /** Decimal string or number; a bigint cannot travel through JSON. */
   readonly deliveryWindowMs?: string | number;
+  readonly deliveryProfile?: PrototypeDeliveryProfileName;
   /** Defaults to the copy `build.sh` places beside the bundle. */
   readonly wasmUrl?: string;
 }
@@ -114,6 +116,9 @@ const run = async (optionsJson: string): Promise<{ started: true }> => {
     storeOrigins: options.storeOrigins,
     wasmBinary,
     rtcConfig: options.rtcConfig ?? { iceServers: [] },
+    ...(options.deliveryProfile === undefined
+      ? {}
+      : { deliveryProfile: options.deliveryProfile }),
     ...(options.deliveryWindowMs === undefined
       ? {}
       : { deliveryWindowMs: BigInt(options.deliveryWindowMs) }),

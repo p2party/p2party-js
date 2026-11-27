@@ -1459,7 +1459,7 @@ try {
         : ""),
   );
 
-  await new Promise((resolve) => pageServer.listen(PAGE_PORT, resolve));
+  await new Promise((resolve) => pageServer.listen(PAGE_PORT, "127.0.0.1", resolve));
   say(`page server on http://localhost:${PAGE_PORT}/`);
 
   const results = [];

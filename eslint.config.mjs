@@ -14,6 +14,10 @@ export default [
       "docs/*",
       // Local session-history scratch space, not project source.
       ".remember/*",
+      ".release-stage/**",
+      ".superpowers/**",
+      // Independent experiments and archived audit fixtures use their own tools.
+      "research/**",
       "eslint.config.mjs",
       "rollup.config.ts",
       "rollup.worker.config.ts",
@@ -27,7 +31,12 @@ export default [
       "src/cryptography/libcrypto.js",
     ],
   },
-  { languageOptions: { globals: globals.browser } },
+  {
+    languageOptions: {
+      globals: globals.browser,
+      parserOptions: { tsconfigRootDir: import.meta.dirname },
+    },
+  },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
   {

@@ -29,7 +29,7 @@ const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const bun = process.platform === "win32" ? "bun.exe" : "bun";
 const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH ?? "0";
-const expectedNodeMajor = 24;
+const expectedNodeMajor = 26;
 const expectedEmscriptenVersion = "7.0.0";
 const expectedLibsodiumCommit = "05de1ce8088d4281a6264800070baf4ddf17b6a4";
 const expectedLibsodiumTree = "08eb21829cd70a2bf53acae3f88f435eef0cfd5f";
@@ -236,7 +236,7 @@ const validateDocumentedVersions = () => {
   const current = packageJson.version;
 
   // Scanning for a bare \d+\.\d+\.\d+ is unusable here: the docs also pin Node
-  // 24.11.1, Bun 1.3.14, Emscripten 7.0.0 and a dozen dependency versions.
+  // 26.13.1, Bun 1.4.5, Emscripten 7.0.0 and a dozen dependency versions.
   // Instead, take the set of versions this project has ever released — the
   // CHANGELOG headings — and treat any of them except the current one as a
   // stale reference. That cannot fire on a toolchain pin, and it needs no

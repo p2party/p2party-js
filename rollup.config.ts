@@ -70,7 +70,7 @@ const createPlugins = (includeIndexedDbWorker) => {
 
     isDist &&
       terser({
-        ecma: 2020,
+        ecma: 2025,
         toplevel: true,
       }),
 
@@ -114,7 +114,7 @@ const rootConfigs = [
         preventAssignment: true,
       }),
       terser({
-        ecma: 2020,
+        ecma: 2025,
         toplevel: true,
       }),
     ],

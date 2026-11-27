@@ -32,7 +32,7 @@ A local second node has replayed both signing suites into a separate database,
 matched receipt-history digests, and rejected a conflicting history. A separately
 operated host, signed consensus checkpoints, fork choice and finality are open.
 EVM execution and mainnet monetary rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·
-[Native transfer library](https://github.com/ondemos/libdemos)
+[Native transfer library](https://github.com/p2party/libdemos)
 
 - protocol v4 — hybrid interactive 3DH plus ML-KEM bootstrap. The two secrets
   are combined by `HKDF-Extract` over a fixed-order concatenation —

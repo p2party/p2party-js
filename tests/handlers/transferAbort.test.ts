@@ -7,26 +7,11 @@ import {
   beginTransfer,
   claimTransfer,
   createTransferId,
-  isRemoteCancelClose,
   throwIfTransferAborted,
   waitWithTransferAbort,
 } from "../../src/handlers/transferAbort";
 
 describe("message-scoped transfer cancellation", () => {
-  test("an authenticated channel close deletes only that peer's incomplete receive", () => {
-    const partial = {
-      fromPeerId: "peer-a",
-      savedSize: 10,
-      totalSize: 20,
-    };
-    expect(isRemoteCancelClose(partial, "peer-a", true)).toBe(true);
-    expect(isRemoteCancelClose(partial, "peer-b", true)).toBe(false);
-    expect(isRemoteCancelClose(partial, "peer-a", false)).toBe(false);
-    expect(
-      isRemoteCancelClose({ ...partial, savedSize: 20 }, "peer-a", true),
-    ).toBe(false);
-  });
-
   test("allocates independent random 32-byte transfer IDs", () => {
     const first = createTransferId();
     const second = createTransferId();
@@ -43,9 +28,7 @@ describe("message-scoped transfer cancellation", () => {
     second.bindHash("22".repeat(64));
     otherRoom.bindHash("11".repeat(64));
 
-    expect(
-      abortTransfer("room-a", { hashHex: "11".repeat(64) }),
-    ).toBe(1);
+    expect(abortTransfer("room-a", { hashHex: "11".repeat(64) })).toBe(1);
     expect(first.signal.aborted).toBe(true);
     expect(second.signal.aborted).toBe(false);
     expect(otherRoom.signal.aborted).toBe(false);
@@ -62,9 +45,7 @@ describe("message-scoped transfer cancellation", () => {
     const third = beginTransfer("room-d");
     first.bindMerkleRoot("aa".repeat(64));
 
-    expect(
-      abortTransfer("room-c", { merkleRootHex: "aa".repeat(64) }),
-    ).toBe(1);
+    expect(abortTransfer("room-c", { merkleRootHex: "aa".repeat(64) })).toBe(1);
     expect(first.signal.aborted).toBe(true);
     expect(second.signal.aborted).toBe(false);
     expect(abortRoomTransfers("room-c")).toBe(2);
@@ -97,9 +78,9 @@ describe("message-scoped transfer cancellation", () => {
     first.bindHash("44".repeat(64));
     second.bindHash("44".repeat(64));
 
-    expect(() =>
-      abortTransfer("room-f", { hashHex: "44".repeat(64) }),
-    ).toThrow("ambiguous");
+    expect(() => abortTransfer("room-f", { hashHex: "44".repeat(64) })).toThrow(
+      "ambiguous",
+    );
     expect(first.signal.aborted).toBe(false);
     expect(second.signal.aborted).toBe(false);
 

@@ -6,7 +6,7 @@ import {
   rejectRatchetGate,
   resetRatchetGate,
 } from "../../src/handlers/ratchetGate";
-import { isRemoteCancelClose } from "../../src/handlers/transferAbort";
+import { hasImmediateRemoteCancel } from "../../src/handlers/immediateDisposition";
 import { wasChannelClosedLocally } from "../../src/api/webrtc/localChannelClose";
 import {
   MAX_QUEUED_FRAMES_PER_CHANNEL,
@@ -56,15 +56,12 @@ let DEFAULT_ROOM_POLICY_V1: (typeof import("../../src/roomPolicy"))["DEFAULT_ROO
 
 beforeAll(async () => {
   await import("../../src/store");
-  ({ handleOpenChannel } = await import(
-    "../../src/handlers/handleOpenChannel"
-  ));
-  ({ isAuthenticatedPeerCancel } = await import(
-    "../../src/handlers/handleSendMessage"
-  ));
-  ({ compileChannelMessageLabel } = await import(
-    "../../src/utils/channelLabel"
-  ));
+  ({ handleOpenChannel } =
+    await import("../../src/handlers/handleOpenChannel"));
+  ({ isAuthenticatedPeerCancel } =
+    await import("../../src/handlers/handleSendMessage"));
+  ({ compileChannelMessageLabel } =
+    await import("../../src/utils/channelLabel"));
   ({ DEFAULT_ROOM_POLICY_V1 } = await import("../../src/roomPolicy"));
 });
 
@@ -227,7 +224,11 @@ const receiptCell = (index: number): Uint8Array => {
   const frame = new Uint8Array(WIRE_RECEIPT_FRAME_LEN);
   frame[0] = FRAME_TYPE_RECEIPT;
   new DataView(frame.buffer).setUint32(1, index, false);
-  new DataView(frame.buffer).setUint32(WIRE_RECEIPT_FRAME_LEN - 4, index, false);
+  new DataView(frame.buffer).setUint32(
+    WIRE_RECEIPT_FRAME_LEN - 4,
+    index,
+    false,
+  );
   return frame;
 };
 
@@ -269,7 +270,6 @@ const burstAcrossTheCeiling = async (
 
   // What the two sides stand to lose.
   const senderStaging = new Set([0, 1, 2]);
-  const peerProgress = { fromPeerId: PEER_ID, savedSize: 4, totalSize: 9 };
   let peerStoredChunks = 4;
 
   const outcome = await withCapturedErrors(async () => {
@@ -280,11 +280,9 @@ const burstAcrossTheCeiling = async (
 
     const guardClosedTheChannel = fake.channel.readyState === "closed";
 
-    // The close reaches the PEER as a plain remote close. Its onclose reads
-    // isRemoteCancelClose over a live, authenticated edge and deletes the
-    // partial receive — chunks, messageData row and OPFS file. The local-close
-    // marker cannot help here: it never leaves this process.
-    if (guardClosedTheChannel && isRemoteCancelClose(peerProgress, PEER_ID, true))
+    // Model the matching receive disposition. Bytes can be discarded only
+    // after a valid CANCEL on the authenticated channel.
+    if (guardClosedTheChannel && hasImmediateRemoteCancel(fake.channel))
       peerStoredChunks = 0;
 
     // ...and sendWithReconcile finds its own channel closed and asks whether
@@ -320,22 +318,16 @@ describe("C-1: overrunning the park ceiling must not destroy the peer's partial"
   test("a burst past the ceiling on a healthy edge closes nothing and deletes nothing", async () => {
     const outcome = await burstAcrossTheCeiling("pending");
 
-    // The ceiling bounds memory by DROPPING the surplus frame. Closing bounds
-    // the same memory, but the peer cannot tell our close from a cancel, so a
-    // close here destroys the very partial this guard exists to protect.
     expect(outcome.peerStoredChunks).toBe(4);
     expect(outcome.senderStagedChunks).toBe(3);
     expect(outcome.guardClosedTheChannel).toBe(false);
   });
 
-  // Control. It exists to prove the burst above can SEE a deletion: on an edge
-  // that will never authenticate the guard still closes on the first frame, and
-  // the peer still reads that close as a cancel and deletes its partial.
-  test("the same burst on a genuinely dead edge still closes — and that close does destroy the partial", async () => {
+  test("a failed gate closes the channel and preserves the partial", async () => {
     const outcome = await burstAcrossTheCeiling("rejected");
 
     expect(outcome.guardClosedTheChannel).toBe(true);
-    expect(outcome.peerStoredChunks).toBe(0);
+    expect(outcome.peerStoredChunks).toBe(4);
     // The local-close marker still saves the SENDER's staging, because that
     // decision is made in this process.
     expect(outcome.senderStagedChunks).toBe(3);
@@ -449,10 +441,6 @@ describe("I-3: a budget-exceeded close is marked as ours, so no peer reads it as
 
     expect(fake.closes.count).toBe(1);
     expect(fake.channel.readyState).toBe("closed");
-    // Without the marker every other test in isAuthenticatedPeerCancel passes
-    // on this still-connected, still-current edge, and the sender throws
-    // "Message transfer cancelled by peer" and drops its staging for a cancel
-    // nobody sent.
     expect(
       isAuthenticatedPeerCancel(
         epc,

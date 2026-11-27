@@ -79,6 +79,28 @@ describe("live room ICE configuration", () => {
     expect(applied[0].iceServers).not.toBe(applied[1].iceServers);
   });
 
+  test("a signaling credential refresh restarts no healthy sibling", () => {
+    const applied: RTCConfiguration[] = [];
+    const peers = [
+      connection("room", "connected", applied),
+      connection("room", "connected", applied),
+    ];
+    let restarts = 0;
+    for (const peer of peers) {
+      Object.assign(peer, {
+        remoteDescription: { type: "answer" },
+        restartIce: () => {
+          restarts++;
+        },
+      });
+    }
+    expect(
+      applyRoomIceConfiguration(peers, "room", { iceServers: [] }, false),
+    ).toBe(2);
+    expect(applied.length).toBe(2);
+    expect(restarts).toBe(0);
+  });
+
   test("configures every peer before restarting the room ICE generation", () => {
     const events: string[] = [];
     const makePeer = (name: string) =>

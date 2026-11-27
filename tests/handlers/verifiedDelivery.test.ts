@@ -232,11 +232,10 @@ class ManualClock {
   }
 }
 
-/** Real time for queued work (crypto, receipt queues) to run between steps. */
-const settle = async (): Promise<void> => {
-  for (let i = 0; i < 4; i++)
-    await new Promise((resolve) => setImmediate(resolve));
-};
+/** The fake clock and receipt callbacks enqueue promises. One event-loop turn
+ * drains their microtasks. Worker or storage completion is awaited explicitly. */
+const settle = (): Promise<void> =>
+  new Promise((resolve) => setImmediate(resolve));
 
 /**
  * The outcome of a promise the test expects to settle without the test's

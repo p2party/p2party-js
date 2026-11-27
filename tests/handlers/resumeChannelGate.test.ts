@@ -12,7 +12,7 @@ import {
   admitPreAuthenticatedFrame,
   waitForRatchetGateSettled,
 } from "../../src/handlers/ratchetGateWait";
-import { isRemoteCancelClose } from "../../src/handlers/transferAbort";
+import { hasImmediateRemoteCancel } from "../../src/handlers/immediateDisposition";
 import {
   markChannelClosedLocally,
   wasChannelClosedLocally,
@@ -483,11 +483,6 @@ const replayResumedEarlyReceipt = async (
 
   // What the two sides stand to lose.
   const senderStaging = new Set([0, 1, 2]);
-  const receiverProgress = {
-    fromPeerId: PEER_ID,
-    savedSize: 4,
-    totalSize: 9,
-  };
   let receiverStoredChunks = 4;
 
   // This side's persist lands 20 ms after the peer's replayed receipt arrives.
@@ -522,13 +517,8 @@ const replayResumedEarlyReceipt = async (
   )
     senderStaging.clear();
 
-  // 3. the same close reaches the peer as a remote close. Its onclose reads
-  //    isRemoteCancelClose over a live, authenticated edge and deletes the
-  //    partial receive — chunks, messageData row and OPFS file.
-  if (
-    guardClosedTheChannel &&
-    isRemoteCancelClose(receiverProgress, PEER_ID, true)
-  )
+  // Receiver cleanup requires an explicit in-band CANCEL for this channel.
+  if (guardClosedTheChannel && hasImmediateRemoteCancel(channel))
     receiverStoredChunks = 0;
 
   clearTimeout(persist);
@@ -550,16 +540,11 @@ describe("C7: a resumed channel's own pre-auth close must not destroy data", () 
     expect(outcome.receiverStoredChunks).toBe(4);
   });
 
-  test("without the park the receiver still loses its partial — this is the damage", async () => {
-    // Control. It exists to prove the replay above can SEE a deletion: with no
-    // park budget the guard closes exactly as it did before this fix, and the
-    // receiver's partial is destroyed. It also isolates what each half of the
-    // fix buys: the local-close marker alone saves only the SENDER's staging,
-    // because the peer cannot tell our close from a cancel.
+  test("park expiry closes the channel and preserves the partial", async () => {
     const outcome = await replayResumedEarlyReceipt(0);
 
     expect(outcome.guardClosedTheChannel).toBe(true);
     expect(outcome.senderStagedChunks).toBe(3);
-    expect(outcome.receiverStoredChunks).toBe(0);
+    expect(outcome.receiverStoredChunks).toBe(4);
   });
 });

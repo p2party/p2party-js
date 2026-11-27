@@ -123,32 +123,6 @@ export interface TransferSelector {
   merkleRootHex?: string;
 }
 
-export interface IncomingTransferProgress {
-  fromPeerId: string;
-  savedSize: number;
-  totalSize: number;
-}
-
-/**
- * In immediate mode, closing only a message-scoped DataChannel while its
- * authenticated peer connection remains alive is the remote CANCEL signal.
- * Delete only an incomplete receive owned by that peer; completed messages and
- * the sender's local self-copy must survive the ordinary terminal close.
- */
-export const isRemoteCancelClose = (
-  progress: IncomingTransferProgress | undefined,
-  remotePeerId: string,
-  authenticatedTransportStillAlive: boolean,
-): boolean =>
-  authenticatedTransportStillAlive &&
-  progress !== undefined &&
-  progress.fromPeerId === remotePeerId &&
-  Number.isFinite(progress.totalSize) &&
-  Number.isFinite(progress.savedSize) &&
-  progress.totalSize > 0 &&
-  progress.savedSize >= 0 &&
-  progress.savedSize < progress.totalSize;
-
 export const abortTransfer = (
   roomId: string,
   selector: TransferSelector,

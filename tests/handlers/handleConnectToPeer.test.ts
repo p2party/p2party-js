@@ -147,7 +147,7 @@ const fakeApi = (
   selfPublicKey: string = LOWER_PUBLIC_KEY,
   handshakeStatusByPeer: Record<string, PeerHandshakeStatus> = {},
   rtcConfig: RTCConfiguration = { iceServers: [] },
-): { api: BaseQueryApi; dispatched: unknown[] } => {
+) => {
   const dispatched: unknown[] = [];
   const state = {
     keyPair: {
@@ -191,7 +191,7 @@ const fakeApi = (
     },
     getState: () => state,
   } as unknown as BaseQueryApi;
-  return { api, dispatched };
+  return { api, dispatched, signaling: state.signalingServer };
 };
 
 const connect = async (
@@ -502,6 +502,33 @@ describe("offer ownership", () => {
     expect(epc.localDescription).toBeNull();
     expect(epc.signalingState).toBe("stable");
   });
+  test("transport repair cannot reopen a refused signaling socket", async () => {
+    const { api, dispatched, signaling } = fakeApi();
+    const { epc } = await connect(api);
+    signaling.isConnected = false;
+    signaling.isVerified = false;
+    const before = dispatched.length;
+    await expect(epc.ensureFreshIceConfiguration?.()).rejects.toThrow(
+      "verified signaling socket",
+    );
+    expect(dispatched.length).toBe(before);
+  });
+
+  test("a deferred offer resumes on the current verified socket", async () => {
+    jest.useFakeTimers();
+    const { api } = fakeApi();
+    const { epc } = await connect(api);
+    sendLease = undefined;
+    await epc.onnegotiationneeded?.call(epc, new Event("negotiationneeded"));
+    expect(epc.localDescription).toBeNull();
+    sendLease = () => true;
+    epc.resumeDeferredNegotiation?.();
+    await flushMicrotasks();
+    expect(epc.localDescription?.type).toBe("offer");
+    expect(epc.resumeDeferredNegotiation).toBeUndefined();
+    epc.clearTransportTimers?.();
+  });
+
   test("an offer loses its socket before publication and is rolled back", async () => {
     const { api, dispatched } = fakeApi();
     const { epc } = await connect(api);

@@ -4,7 +4,7 @@ import {
   acceptImmediateDisposition,
   bindImmediateDisposition,
   hasImmediateRemoteCancel,
-  immediateCloseMeansPause,
+  peerSupportsImmediateResume,
   sendImmediateCancel,
   sendImmediateResumeCapability,
 } from "../../src/handlers/immediateDisposition";
@@ -34,13 +34,13 @@ describe("immediate transfer pause and explicit cancellation", () => {
   test("the opener waits for the receiver capability; legacy close remains cancel", () => {
     const sender = endpoint(false);
     const receiver = endpoint(true);
-    expect(immediateCloseMeansPause(sender.channel)).toBe(false);
-    expect(immediateCloseMeansPause(receiver.channel)).toBe(true);
+    expect(peerSupportsImmediateResume(sender.channel)).toBe(false);
+    expect(peerSupportsImmediateResume(receiver.channel)).toBe(true);
     sendImmediateResumeCapability(receiver.channel);
     expect(acceptImmediateDisposition(sender.channel, receiver.sent[0])).toBe(
       "capability",
     );
-    expect(immediateCloseMeansPause(sender.channel)).toBe(true);
+    expect(peerSupportsImmediateResume(sender.channel)).toBe(true);
     expect(hasImmediateRemoteCancel(sender.channel)).toBe(false);
   });
 
@@ -54,7 +54,7 @@ describe("immediate transfer pause and explicit cancellation", () => {
     expect(
       acceptImmediateDisposition(old.channel, current.sent[0]),
     ).toBeUndefined();
-    expect(immediateCloseMeansPause(old.channel)).toBe(false);
+    expect(peerSupportsImmediateResume(old.channel)).toBe(false);
   });
 
   test("explicit CANCEL is idempotent and scoped to the concrete channel", async () => {

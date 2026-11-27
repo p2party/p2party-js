@@ -37,7 +37,7 @@ export const bindImmediateDisposition = (
   });
 };
 
-export const immediateCloseMeansPause = (channel?: IRTCDataChannel): boolean =>
+export const peerSupportsImmediateResume = (channel?: IRTCDataChannel): boolean =>
   channel !== undefined && bindings.get(channel)?.peerSupportsPause === true;
 
 export const hasImmediateRemoteCancel = (channel?: IRTCDataChannel): boolean =>
@@ -57,7 +57,8 @@ export const sendImmediateResumeCapability = (
 ): void => {
   const binding = bindings.get(channel);
   if (
-    binding?.peerSupportsPause &&
+    binding &&
+    peerSupportsImmediateResume(channel) &&
     binding.authenticated() &&
     channel.readyState === "open"
   )

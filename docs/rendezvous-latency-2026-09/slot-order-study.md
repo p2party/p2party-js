@@ -1,14 +1,15 @@
 # Append slot order in the two-store prototype
 
-The experimental profile saved 7.94–7.99 seconds when local chunk replies
-were delayed by 800 ms. With native reads, the two profiles finished within
-19 ms of each other at every matched phase. The opt-in is available to
-prototype clients and stores as `experimental-critical-later-v1`.
+The experimental profile saved about eight seconds when local chunk replies
+were delayed by 800 ms. The two profiles finished in the same delivery
+window at every native-read start phase. All 24 two-way exchanges passed.
+Prototype clients and stores can opt in with `experimental-critical-later-v1`.
 
 ## Results
 
 Each cell is the slower endpoint's time in seconds from publishing presence
 to verifying its peer's message. The delta is candidate minus release.
+The first matrix tested the proposed schedule through a harness override.
 
 | Added chunk delay | Target phase | Release | Candidate | Delta |
 | ---: | ---: | ---: | ---: | ---: |
@@ -19,14 +20,31 @@ to verifying its peer's message. The delta is candidate minus release.
 | 800 ms | 1,650 ms | 31.861 | 23.869 | −7.992 |
 | 800 ms | 2,350 ms | 31.157 | 23.168 | −7.989 |
 
-All 12 exchanges passed the existing two-store checks. Each pair verified
+We repeated all 12 trials on the implemented profiles at commit `3a059c0`.
+Both stores and browsers used the ordinary runtime selectors and a single
+browser bundle. The final column accounts for startup variation. It compares
+the slower endpoint on each profile after adding each page's observed start
+phase to its own verification time.
+
+| Added chunk delay | Target phase | Release | Candidate | Delta | Phase-adjusted delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 ms | 350 ms | 24.367 | 24.292 | −0.075 | 0.000 |
+| 0 ms | 1,650 ms | 23.089 | 23.077 | −0.012 | −0.016 |
+| 0 ms | 2,350 ms | 22.365 | 22.366 | +0.001 | +0.001 |
+| 800 ms | 350 ms | 33.165 | 25.163 | −8.002 | −7.998 |
+| 800 ms | 1,650 ms | 31.857 | 23.856 | −8.001 | −7.956 |
+| 800 ms | 2,350 ms | 31.161 | 23.161 | −8.000 | −8.000 |
+
+All 24 exchanges passed the existing two-store checks. Each pair verified
 140,005 bytes in one direction and 9,005 in the other, with zero appends
 refused because the window had finalized. The time saved under delay is
 consistent with two dependent identity flights each reaching a slot one
-4-second window earlier. One exchange per cell on a shared laptop gives
-no estimate of variation within a cell, real-device percentiles or the
-frequency of this delay. These trials cover foreground Chromium with both
-stores available. [Per-trial timings and counters](bench/slot-order-samples-2026-11-27.jsonl)
+4-second window earlier. Each matrix sampled one exchange per condition on
+the same shared laptop. These observations cover foreground Chromium with
+both stores available. Estimating real-device latency percentiles or the
+frequency of this read delay requires additional measurements across devices.
+[Harness trial data](bench/slot-order-samples-2026-11-27.jsonl) ·
+[Runtime confirmation data](bench/slot-order-confirmation-2026-11-27.jsonl)
 
 ## Experiment
 
@@ -87,9 +105,7 @@ profile against the store's signed descriptor before reading a window.
 
 The original matrix used a harness-only role override. Its hashes are now
 fixtures for the named profiles, and the runner selects them through the
-prototype API. An additional exchange using the normal store command and
-browser bundle verified both messages in 23.723 s with an 800 ms chunk
-delay and observed phases of 1,826–1,827 ms. A future default change would require a coordinated profile
+prototype API. A future default change would require a coordinated profile
 migration and measurements on representative devices with a range of read
 latencies. [Store configuration](../blind-rendezvous-two-store-prototype.md)
 

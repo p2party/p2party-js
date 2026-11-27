@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/) and the spirit of
 
 ## Unreleased
 
-- The local two-store prototype supports an opt-in delivery profile that schedules identity and safety traffic 400 ms later. With an 800 ms chunk-read delay, verified two-way messages arrived 7.94–7.99 seconds sooner across three launch phases. Native-read runs finished within 19 ms of the default. [Measurements and configuration](docs/rendezvous-latency-2026-09/slot-order-study.md)
+- The local two-store prototype supports an opt-in delivery profile that schedules identity and safety traffic 400 ms later. With an 800 ms chunk-read delay, verified two-way messages arrived about eight seconds sooner at each of three start phases in two successive experiments. With native reads, both profiles finished in the same delivery window. All 24 exchanges passed. [Measurements and configuration](docs/rendezvous-latency-2026-09/slot-order-study.md)
 
 ## [0.15.1] — 2026-11-27
 

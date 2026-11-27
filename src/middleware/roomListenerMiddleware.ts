@@ -266,6 +266,8 @@ export const createRoomListenerMiddleware = (
       try {
         if (resetIdentity.match(action)) {
           deferredRedials.clear();
+          pendingTargets.clear();
+          signalingPeerRequestDebouncer.resetSocketLifecycle();
           stopRoomOutboxResume();
         }
         if (deleteRoom.match(action)) {
@@ -316,9 +318,20 @@ export const createRoomListenerMiddleware = (
           signalingServerActions.startConnecting.match(action) ||
           signalingServerActions.disconnect.match(action)
         ) {
-          pendingTargets.clear();
           if (signalingServerActions.disconnect.match(action) && action.payload)
             deferredRedials.clear();
+          else {
+            for (const room of (listenerApi.getState() as State).rooms) {
+              if (room.signalingActive === false) continue;
+              const queued = pendingTargets.get(`redial:${room.id}`);
+              if (queued === undefined) continue;
+              const targets =
+                deferredRedials.get(room.id) ?? new Set<string | undefined>();
+              for (const id of queued ?? [undefined]) targets.add(id);
+              deferredRedials.set(room.id, targets);
+            }
+          }
+          pendingTargets.clear();
           signalingPeerRequestDebouncer.resetSocketLifecycle();
         } else if (signalingServerActions.connectionVerified.match(action)) {
           const { rooms } = listenerApi.getState() as State;
@@ -423,40 +436,45 @@ export const createRoomListenerMiddleware = (
                     hasOnlyTerminalPeerHandshakeFailures(room)
                   )
                     return;
-                  if (kind === "redial" && pending) {
-                    for (const id of pending) {
-                      if (
-                        !hasTerminalPeerHandshakeFailure(
-                          room.handshakeStatusByPeer,
-                          id,
-                        )
-                      )
-                        listenerApi.dispatch(
-                          recordTransportRedial({ roomId, peerId: id }),
-                        );
-                    }
-                  }
-                  const currentRoom = (
-                    listenerApi.getState() as State
-                  ).rooms.find((r) => r.id === roomId);
-                  if (!currentRoom) return;
-                  const targetPeerIds =
-                    pending && currentRoom.knownPeers
-                      ? [...pending].filter((id) =>
-                          currentRoom.knownPeers?.some(
-                            (peer) =>
-                              peer.peerId === id &&
-                              !hasTerminalPeerHandshakeFailure(
-                                currentRoom.handshakeStatusByPeer,
-                                id,
-                                peer.peerPublicKey,
-                              ) &&
-                              !hasReportedDeparture(currentRoom, id) &&
-                              currentRoom.handshakeStatusByPeer?.[id]
-                                ?.status !== "authenticated",
-                          ),
-                        )
+                  const members =
+                    room.knownPeers ??
+                    (kind === "redial" ? room.peers : undefined);
+                  let targetPeerIds =
+                    pending && members
+                      ? [...pending].filter((id) => {
+                          const member = members.find(
+                            (peer) => peer.peerId === id,
+                          );
+                          return (
+                            member !== undefined &&
+                            !hasTerminalPeerHandshakeFailure(
+                              room.handshakeStatusByPeer,
+                              id,
+                              member.peerPublicKey,
+                            ) &&
+                            !hasReportedDeparture(room, id) &&
+                            room.handshakeStatusByPeer?.[id]?.status !==
+                              "authenticated"
+                          );
+                        })
                       : undefined;
+                  if (kind === "redial" && targetPeerIds?.length) {
+                    for (const peerId of targetPeerIds)
+                      listenerApi.dispatch(
+                        recordTransportRedial({ roomId, peerId }),
+                      );
+                    const current = (
+                      listenerApi.getState() as State
+                    ).rooms.find((r) => r.id === roomId);
+                    if (!current) return;
+                    targetPeerIds = targetPeerIds.filter(
+                      (id) =>
+                        !hasTerminalPeerHandshakeFailure(
+                          current.handshakeStatusByPeer,
+                          id,
+                        ),
+                    );
+                  }
                   if (targetPeerIds?.length === 0) return;
                   listenerApi.dispatch(
                     signalingServerApi.endpoints.sendMessage.initiate(

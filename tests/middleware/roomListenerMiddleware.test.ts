@@ -622,6 +622,38 @@ describe("deferred edge repair", () => {
     ).toEqual([expect.objectContaining({ targetPeerIds: [OTHER_PEER_ID] })]);
   });
 
+  test("a socket drop preserves a trailing redial already inside the debounce window", async () => {
+    const h = reconcilingStore();
+    h.store.dispatch(
+      setKnownRoomPeers({
+        roomId: h.roomId,
+        peers: [{ peerId: OTHER_PEER_ID, peerPublicKey: "22".repeat(32) }],
+      }),
+    );
+    const retry = () =>
+      h.store.dispatch(
+        setConnectingToPeers({
+          roomId: h.roomId,
+          peerId: OTHER_PEER_ID,
+          connectingToPeers: true,
+          reason: "redial",
+        }),
+      );
+    const targeted = () =>
+      h.requestFrames.filter((frame) =>
+        frame.targetPeerIds?.includes(OTHER_PEER_ID),
+      );
+    retry();
+    await waitFor(() => targeted().length === 1);
+    retry();
+    h.store.dispatch({ type: "signalingServer/disconnect" });
+    h.store.dispatch({ type: "signalingServer/connectionEstablished" });
+    expect(targeted().length).toBe(1);
+    h.store.dispatch({ type: "signalingServer/connectionVerified" });
+    await waitFor(() => targeted().length === 2);
+    expect(targeted()[1].targetPeerIds).toEqual([OTHER_PEER_ID]);
+  });
+
   test("the seventh failed attempt stays stopped until the member changes generation or the user retries", async () => {
     const h = reconcilingStore();
     const {

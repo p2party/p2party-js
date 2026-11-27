@@ -8,6 +8,7 @@ import {
   test,
 } from "bun:test";
 
+import { expectDatabaseCall } from "../support/databaseCall";
 import { loadTestModule } from "../../src/cryptography/testModule";
 import { getMerkleRoot } from "../../src/cryptography/merkle";
 import { initRatchet } from "../../src/cryptography/ratchet";
@@ -318,6 +319,14 @@ const scheduledEdge = (): {
 };
 
 describe("handleSendMessage closes the message's proof levels when the delivery settles", () => {
+  test("an unarmed chunk read reaches the real database client", async () => {
+    const transfer = "ef".repeat(32);
+    const api = await import("../../src/db/api");
+    await expectDatabaseCall("getDBNewChunk", [transfer, 7], () =>
+      api.getDBNewChunk(transfer, 7),
+    );
+  });
+
   test("after the receiver's final receipt nothing reads, rebuilds or seals another cell", async () => {
     const totalChunks = 6;
     const { merkleRootHex } = await stagePendingMessage(totalChunks);

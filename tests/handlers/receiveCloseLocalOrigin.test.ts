@@ -13,6 +13,7 @@ import {
   openRatchetGate,
   resetRatchetGate,
 } from "../../src/handlers/ratchetGate";
+import { expectDatabaseCall } from "../support/databaseCall";
 import { markChannelClosedLocally } from "../../src/api/webrtc/localChannelClose";
 
 import type {
@@ -42,11 +43,8 @@ const localStorageMemory: Record<string, string> = {};
   length: 0,
 } as Storage;
 
-// The receiver's delete-on-close decision is taken between two storage reads,
-// and the DB worker bundle is not inlined in a unit run (every call rejects),
-// which would make any assertion about that decision vacuous. Stand in for the
-// two calls it depends on and record the deletion it may order. Everything else
-// stays the real module.
+// Model the incomplete file owned by this fixture. Other roots use the real
+// database client, including calls from subsequent files.
 const realDb = { ...(await import("../../src/db/api")) };
 const dbState: {
   messageData: MessageData | undefined;
@@ -55,10 +53,24 @@ const dbState: {
 
 mock.module("../../src/db/api", () => ({
   ...realDb,
-  getDBMessageData: async () => dbState.messageData,
-  getDBAllChunkLeafHashes: async () => [],
-  deleteReceiveTransfer: async (merkleRootHex: string) => {
-    dbState.deletedTransfers.push(merkleRootHex);
+  getDBMessageData: async (
+    ...args: Parameters<typeof realDb.getDBMessageData>
+  ) =>
+    args[0] === MERKLE_ROOT_HEX
+      ? dbState.messageData
+      : realDb.getDBMessageData(...args),
+  getDBAllChunkLeafHashes: async (root: string) =>
+    root === MERKLE_ROOT_HEX ? [] : realDb.getDBAllChunkLeafHashes(root),
+  deleteReceiveTransfer: async (
+    root: string,
+    guard?: Parameters<typeof realDb.deleteReceiveTransfer>[1],
+  ) => {
+    if (root !== MERKLE_ROOT_HEX)
+      return guard
+        ? realDb.deleteReceiveTransfer(root, guard)
+        : realDb.deleteReceiveTransfer(root);
+    dbState.deletedTransfers.push(root);
+    return guard ? true : undefined;
   },
 }));
 
@@ -190,6 +202,14 @@ const closeAndSettle = async (channel: IRTCDataChannel): Promise<void> => {
 };
 
 describe("I-1: the receiver's own close is not the peer cancelling either", () => {
+  test("an unrelated root reaches the real database client", async () => {
+    const root = "ee".repeat(64);
+    const db = await import("../../src/db/api");
+    await expectDatabaseCall("getDBMessageData", [root, undefined], () =>
+      db.getDBMessageData(root),
+    );
+  });
+
   test("a bare remote close on a live edge preserves the partial for resume", async () => {
     dbState.messageData = partialReceive();
     const { channel } = await openReceivingChannel();

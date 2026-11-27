@@ -43,7 +43,9 @@ const localStorageMemory: Record<string, string> = {};
 
 type RunHandshake =
   (typeof import("../../src/handlers/handleHandshake"))["runHandshake"];
-const realHandshake = await import("../../src/handlers/handleHandshake");
+const realHandshake = {
+  ...(await import("../../src/handlers/handleHandshake")),
+};
 const realRunHandshake: RunHandshake = realHandshake.runHandshake;
 let runHandshakeImpl: RunHandshake = realRunHandshake;
 mock.module("../../src/handlers/handleHandshake", () => ({
@@ -85,6 +87,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   runHandshakeImpl = realRunHandshake;
+  mock.module("../../src/handlers/handleHandshake", () => realHandshake);
   pinAttempts.usePinAttemptStoreForTests();
 });
 

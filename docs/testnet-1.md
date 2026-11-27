@@ -1,6 +1,6 @@
 # P2Party Testnet 1
 
-Activation is pending. The network parameters and client downloads below are published for preparation. Once the validator is serving the chain IDs below, you can receive a valueless unit, sign a native post-quantum transfer and verify the receipt. The published genesis contains 128 units of weight one. The design uses one validator to order accepted transfers. Queries and signed submissions open when the endpoint is activated. Chat rooms, peer identities and files use no ledger. [Web release article](https://p2party.com/blog/rooms-after-signaling-v5) · [Native verifier source](https://github.com/ondemos/libdemos/tree/ceef24a8bf1f5dee045e72c838ffdbf080d9cd83/ledger)
+The public RPC is live. On November 27 a fresh installation of the wallet client verified both chain IDs and read the genesis head at height zero. The published genesis contains 128 valueless units of weight one. One validator orders accepted native post-quantum transfers. You can request a test unit, sign locally and look up the resulting receipt. Chat rooms, peer identities and files use no ledger. [Web release article](https://p2party.com/blog/rooms-after-signaling-v5) · [Native verifier source](https://github.com/ondemos/libdemos/tree/ceef24a8bf1f5dee045e72c838ffdbf080d9cd83/ledger)
 
 | Setting                                    | Testnet value                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------- |
@@ -55,7 +55,7 @@ writeFileSync("wallet/nonce", nonce, { mode: 0o600, flag: "wx" });
 console.log(JSON.stringify(receiveOwner(nodeSigner(privateKey), nonce)));
 ```
 
-Once the public endpoint reports the chain IDs above, grants can begin. For suite 2, generate a `slh-dsa-sha2-192s` key in a fresh directory. Open an issue titled **Testnet unit request** with just the public suite number and the full 64-byte commitment. The operator can transfer one available genesis unit and reply with its output ID. The request and receipt are public. [Request a test unit](https://github.com/p2party/p2party-js/issues/new?title=Testnet%20unit%20request)
+For suite 2, generate a `slh-dsa-sha2-192s` key in a fresh directory. Open an issue titled **Testnet unit request** with just the public suite number and the full 64-byte commitment. The operator can transfer one available genesis unit and reply with its output ID. The request and receipt are public. [Request a test unit](https://github.com/p2party/p2party-js/issues/new?title=Testnet%20unit%20request)
 
 ## Verify and spend a unit
 

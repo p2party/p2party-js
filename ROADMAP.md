@@ -22,9 +22,9 @@ file across a sender reload. [Public web client](https://p2party.com) ·
 [SDK release evidence](docs/e2e/release-0.15.0.md) ·
 [Signaling health](https://signaling.p2party.com/health)
 
-P2Party Testnet 1 is a separate server and native-library experiment awaiting
-public activation. Its published genesis defines 128 valueless units, and its
-validator orders native post-quantum transfers. Rooms, peer
+P2Party Testnet 1 is a separate, live server and native-library experiment.
+A fresh wallet installation read the public genesis head at height zero. The
+genesis defines 128 valueless units and one validator orders native transfers. Rooms, peer
 authentication and file transfer use no ledger, staking or payment step.
 Independent validators, proof of stake, EVM execution and mainnet monetary
 rules remain separate design work. [Testnet guide](https://github.com/p2party/p2party-js/blob/master/docs/testnet-1.md) ·

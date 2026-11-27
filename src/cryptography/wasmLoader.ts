@@ -21,7 +21,7 @@ let wasmSourcePinned = false;
  */
 const cdnRequest = {
   integrity:
-    "sha384-1pDKeCXxKNB9lzIGQyDsr3apTXUgQcRYI5ChgbzdQfTKUSekBO6z7PVeJn46kMgE",
+    "sha384-vDjnb66aoxATbFGr+3bH1k6zuofJfgPMrEBXnVIPO9iRUIVoIoeyGpT7ZrXtaHis",
 };
 
 /** `sha384-<base64>` of `bytes`, by this runtime's WebCrypto. */

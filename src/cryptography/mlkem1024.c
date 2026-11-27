@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /*
- * mlkem-native v1.2.0, pinned in vendor/mlkem-native/UPSTREAM.md.
+ * mlkem-native v2.1.0, pinned in vendor/mlkem-native/UPSTREAM.md.
  *
  * This is one member of a three-parameter-set build. Every member enables
  * MLK_CONFIG_MULTILEVEL_BUILD. ML-KEM-768 owns the shared implementation;
@@ -18,7 +18,6 @@
 #define MLK_CONFIG_MULTILEVEL_BUILD
 #define MLK_CONFIG_MULTILEVEL_NO_SHARED
 #define MLK_CONFIG_NO_RANDOMIZED_API
-#define MLK_CONFIG_NO_SUPERCOP
 #define MLK_CONFIG_NO_ASM
 #define MLK_CONFIG_CUSTOM_ZEROIZE
 

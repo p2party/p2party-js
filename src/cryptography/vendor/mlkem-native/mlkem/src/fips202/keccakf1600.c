@@ -33,6 +33,7 @@
 #define MLK_KECCAK_NROUNDS 24
 #define MLK_KECCAK_ROL(a, offset) (((a) << (offset)) ^ ((a) >> (64 - (offset))))
 
+MLK_INTERNAL_API
 void mlk_keccakf1600_extract_bytes(uint64_t *state, unsigned char *data,
                                    unsigned offset, unsigned length)
 {
@@ -56,6 +57,7 @@ void mlk_keccakf1600_extract_bytes(uint64_t *state, unsigned char *data,
 #endif /* !MLK_SYS_LITTLE_ENDIAN */
 }
 
+MLK_INTERNAL_API
 void mlk_keccakf1600_xor_bytes(uint64_t *state, const unsigned char *data,
                                unsigned offset, unsigned length)
 {
@@ -80,6 +82,7 @@ void mlk_keccakf1600_xor_bytes(uint64_t *state, const unsigned char *data,
 #endif /* !MLK_SYS_LITTLE_ENDIAN */
 }
 
+#if !defined(MLK_CONFIG_SERIAL_FIPS202_ONLY)
 static void mlk_keccakf1600x4_extract_bytes_c(uint64_t *state,
                                               unsigned char *data0,
                                               unsigned char *data1,
@@ -110,19 +113,20 @@ __contract__(
                                 length);
 }
 
+MLK_INTERNAL_API
 void mlk_keccakf1600x4_extract_bytes(uint64_t *state, unsigned char *data0,
                                      unsigned char *data1, unsigned char *data2,
                                      unsigned char *data3, unsigned offset,
                                      unsigned length)
 {
-#if defined(MLK_USE_FIPS202_X4_EXTRACT_BYTES_NATIVE)
+#if defined(MLK_USE_NATIVE_FIPS202_X4_EXTRACT_BYTES)
   if (mlk_keccakf1600_extract_bytes_x4_native(state, data0, data1, data2, data3,
                                               offset, length) ==
       MLK_NATIVE_FUNC_SUCCESS)
   {
     return;
   }
-#endif /* MLK_USE_FIPS202_X4_EXTRACT_BYTES_NATIVE */
+#endif /* MLK_USE_NATIVE_FIPS202_X4_EXTRACT_BYTES */
   mlk_keccakf1600x4_extract_bytes_c(state, data0, data1, data2, data3, offset,
                                     length);
 }
@@ -158,37 +162,40 @@ __contract__(
                             length);
 }
 
+MLK_INTERNAL_API
 void mlk_keccakf1600x4_xor_bytes(uint64_t *state, const unsigned char *data0,
                                  const unsigned char *data1,
                                  const unsigned char *data2,
                                  const unsigned char *data3, unsigned offset,
                                  unsigned length)
 {
-#if defined(MLK_USE_FIPS202_X4_XOR_BYTES_NATIVE)
+#if defined(MLK_USE_NATIVE_FIPS202_X4_XOR_BYTES)
   if (mlk_keccakf1600_xor_bytes_x4_native(state, data0, data1, data2, data3,
                                           offset,
                                           length) == MLK_NATIVE_FUNC_SUCCESS)
   {
     return;
   }
-#endif /* MLK_USE_FIPS202_X4_XOR_BYTES_NATIVE */
+#endif /* MLK_USE_NATIVE_FIPS202_X4_XOR_BYTES */
   mlk_keccakf1600x4_xor_bytes_c(state, data0, data1, data2, data3, offset,
                                 length);
 }
 
+MLK_INTERNAL_API
 void mlk_keccakf1600x4_permute(uint64_t *state)
 {
-#if defined(MLK_USE_FIPS202_X4_NATIVE)
+#if defined(MLK_USE_NATIVE_FIPS202_X4)
   if (mlk_keccak_f1600_x4_native(state) == MLK_NATIVE_FUNC_SUCCESS)
   {
     return;
   }
-#endif /* MLK_USE_FIPS202_X4_NATIVE */
+#endif /* MLK_USE_NATIVE_FIPS202_X4 */
   mlk_keccakf1600_permute(state + MLK_KECCAK_LANES * 0);
   mlk_keccakf1600_permute(state + MLK_KECCAK_LANES * 1);
   mlk_keccakf1600_permute(state + MLK_KECCAK_LANES * 2);
   mlk_keccakf1600_permute(state + MLK_KECCAK_LANES * 3);
 }
+#endif /* !MLK_CONFIG_SERIAL_FIPS202_ONLY */
 
 static const uint64_t mlk_KeccakF_RoundConstants[MLK_KECCAK_NROUNDS] = {
     (uint64_t)0x0000000000000001ULL, (uint64_t)0x0000000000008082ULL,
@@ -476,14 +483,15 @@ __contract__(
   state[24] = Asu;
 }
 
+MLK_INTERNAL_API
 void mlk_keccakf1600_permute(uint64_t *state)
 {
-#if defined(MLK_USE_FIPS202_X1_NATIVE)
+#if defined(MLK_USE_NATIVE_FIPS202_X1)
   if (mlk_keccak_f1600_x1_native(state) == MLK_NATIVE_FUNC_SUCCESS)
   {
     return;
   }
-#endif /* MLK_USE_FIPS202_X1_NATIVE */
+#endif /* MLK_USE_NATIVE_FIPS202_X1 */
   mlk_keccakf1600_permute_c(state);
 }
 

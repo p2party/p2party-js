@@ -6,13 +6,13 @@ const { execFileSync } = require("child_process");
 
 const { methodsPath, libsodiumRepositoryPath } = require("./paths");
 
-const LIBSODIUM_COMMIT = "2ce4d906a68eae82b27b4867f3d4172ec508cb27";
-const LIBSODIUM_TREE = "2dabe17c708edd7334e3316b5094b753859395d9";
-const MLKEM_NATIVE_COMMIT = "0ba906cb14b1c241476134d7403a811b382ca498";
+const LIBSODIUM_COMMIT = "05de1ce8088d4281a6264800070baf4ddf17b6a4";
+const LIBSODIUM_TREE = "08eb21829cd70a2bf53acae3f88f435eef0cfd5f";
+const MLKEM_NATIVE_COMMIT = "4d69d6b0358e678e3a694ea1bb8404a41770f68e";
 const MLKEM_NATIVE_SOURCE_TREE_SHA256 =
-  "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
+  "e4d0469fc4edf1e0773b1043b47b05c182c1febd462c17612481a243c00c73ae";
 const MLKEM_WRAPPER_SHA256 =
-  "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d";
+  "3277ce2b16265d4c59d7f0c8c185b94aa232232e748dd5eee810c00d4bb65c39";
 
 const buildPath = path.join(process.cwd(), "src", "cryptography");
 const finalJsPath = path.join(buildPath, "libcrypto.js");
@@ -396,7 +396,7 @@ try {
         configuredBuild: true,
       },
       mlkemNative: {
-        release: "v1.2.0",
+        release: "v2.1.0",
         commit: MLKEM_NATIVE_COMMIT,
         sourceTreeSha256: mlkemSourceTreeSha256,
         wrapperSha256: mlkemWrapperSha256,

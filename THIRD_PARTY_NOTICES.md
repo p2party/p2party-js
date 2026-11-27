@@ -7,8 +7,8 @@ are recorded in `lib/libcrypto.provenance.json`.
 ## libsodium
 
 Source: libsodium stable commit
-`2ce4d906a68eae82b27b4867f3d4172ec508cb27`, tree
-`2dabe17c708edd7334e3316b5094b753859395d9`.
+`05de1ce8088d4281a6264800070baf4ddf17b6a4`, tree
+`08eb21829cd70a2bf53acae3f88f435eef0cfd5f`.
 
 Verbatim tracked license:
 
@@ -35,8 +35,8 @@ Verbatim tracked license:
 
 ## mlkem-native
 
-Source: mlkem-native v1.2.0 commit
-`0ba906cb14b1c241476134d7403a811b382ca498`, portable C backend. Upstream
+Source: mlkem-native v2.1.0 commit
+`4d69d6b0358e678e3a694ea1bb8404a41770f68e`, portable C backend. Upstream
 offers Apache-2.0 OR ISC OR MIT; this distribution exercises the MIT option.
 
 Verbatim tracked MIT block:
@@ -68,7 +68,7 @@ SOFTWARE.
 
 ## Emscripten-generated runtime
 
-The WebAssembly and JavaScript glue are built with Emscripten 6.0.9.
+The WebAssembly and JavaScript glue are built with Emscripten 7.0.0.
 
 Verbatim upstream license:
 

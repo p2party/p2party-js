@@ -46,14 +46,24 @@
 
 #endif /* MLK_CHECK_APIS */
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API)
 #define mlk_kem_keypair_derand \
   MLK_NAMESPACE_K(keypair_derand) MLK_CONTEXT_PARAMETERS_3
+#if !defined(MLK_CONFIG_NO_RANDOMIZED_API)
 #define mlk_kem_keypair MLK_NAMESPACE_K(keypair) MLK_CONTEXT_PARAMETERS_2
+#endif
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API */
+#if !defined(MLK_CONFIG_NO_ENCAPS_API)
 #define mlk_kem_enc_derand MLK_NAMESPACE_K(enc_derand) MLK_CONTEXT_PARAMETERS_4
+#if !defined(MLK_CONFIG_NO_RANDOMIZED_API)
 #define mlk_kem_enc MLK_NAMESPACE_K(enc) MLK_CONTEXT_PARAMETERS_3
-#define mlk_kem_dec MLK_NAMESPACE_K(dec) MLK_CONTEXT_PARAMETERS_3
+#endif
 #define mlk_kem_check_pk MLK_NAMESPACE_K(check_pk) MLK_CONTEXT_PARAMETERS_1
+#endif /* !MLK_CONFIG_NO_ENCAPS_API */
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
+#define mlk_kem_dec MLK_NAMESPACE_K(dec) MLK_CONTEXT_PARAMETERS_3
 #define mlk_kem_check_sk MLK_NAMESPACE_K(check_sk) MLK_CONTEXT_PARAMETERS_1
+#endif
 
 /**
  * Implements modulus check mandated by FIPS 203, i.e., ensures that
@@ -70,19 +80,21 @@
  *                    MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @retval 0                     Success.
- * @retval MLK_ERR_FAIL          Modulus check failed.
+ * @retval MLK_ERR_INVALID_PK    Modulus check failed.
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  */
+#if !defined(MLK_CONFIG_NO_ENCAPS_API)
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
 int mlk_kem_check_pk(const uint8_t pk[MLKEM_INDCCA_PUBLICKEYBYTES],
                      MLK_CONFIG_CONTEXT_PARAMETER_TYPE context)
 __contract__(
   requires(memory_no_alias(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_INVALID_PK ||
           return_value == MLK_ERR_OUT_OF_MEMORY)
 );
+#endif /* !MLK_CONFIG_NO_ENCAPS_API */
 
 
 /**
@@ -100,24 +112,36 @@ __contract__(
  *                    MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @retval 0                     Success.
- * @retval MLK_ERR_FAIL          Public key hash check failed.
+ * @retval MLK_ERR_INVALID_SK    Public key hash check failed.
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  */
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
 int mlk_kem_check_sk(const uint8_t sk[MLKEM_INDCCA_SECRETKEYBYTES],
                      MLK_CONFIG_CONTEXT_PARAMETER_TYPE context)
 __contract__(
   requires(memory_no_alias(sk, MLKEM_INDCCA_SECRETKEYBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_INVALID_SK ||
           return_value == MLK_ERR_OUT_OF_MEMORY)
 );
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 
+#if !defined(MLK_CONFIG_NO_KEYPAIR_API)
 /**
  * Generate a public/private keypair for the ML-KEM key encapsulation mechanism.
  *
- * @spec{Implements @[FIPS203, Algorithm 16, ML-KEM.KeyGen_Internal].}
+ * @spec{Implements @[FIPS203, Algorithm 16, ML-KEM.KeyGen_Internal]. When
+ * `MLK_CONFIG_KEYGEN_PCT` is enabled, also performs the encapsulation-key
+ * modulus check, decapsulation-key hash check, and pairwise consistency test
+ * described in steps 2-4 of @[FIPS203, Section 7.1, Key pair check].}
+ *
+ * @note If MLK_CONFIG_KEYGEN_PCT is enabled, the keypair is written to
+ *       the output buffers before the PCT is run, and zeroized if the PCT
+ *       fails. A keypair failing the PCT is thus temporarily present in
+ *       the output buffers. If this is a concern, pass buffers that are
+ *       not accessible to untrusted parties, and copy out upon success.
  *
  * @param[out] pk      Output public key (an already allocated array of
  *                     MLKEM_INDCCA_PUBLICKEYBYTES bytes).
@@ -130,9 +154,11 @@ __contract__(
  *                     MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @retval 0                     Success.
- * @retval MLK_ERR_FAIL          MLK_CONFIG_KEYGEN_PCT enabled and PCT failed.
+ * @retval MLK_ERR_PCT_FAIL      MLK_CONFIG_KEYGEN_PCT enabled and PCT failed.
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
+ * @retval MLK_ERR_RNG_FAIL      MLK_CONFIG_KEYGEN_PCT enabled and random
+ *                               number generation failed within the PCT.
  */
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
@@ -146,15 +172,30 @@ __contract__(
   requires(memory_no_alias(coins, 2 * MLKEM_SYMBYTES))
   assigns(memory_slice(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
   assigns(memory_slice(sk, MLKEM_INDCCA_SECRETKEYBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_PCT_FAIL ||
           return_value == MLK_ERR_OUT_OF_MEMORY ||
           return_value == MLK_ERR_RNG_FAIL)
+  /* Output buffers on error, per API-CONVENTIONS.md */
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(sk, MLKEM_INDCCA_SECRETKEYBYTES))
 );
 
+#if !defined(MLK_CONFIG_NO_RANDOMIZED_API)
 /**
  * Generate a public/private keypair for the ML-KEM key encapsulation mechanism.
  *
- * @spec{Implements @[FIPS203, Algorithm 19, ML-KEM.KeyGen].}
+ * @spec{Implements @[FIPS203, Algorithm 19, ML-KEM.KeyGen]. When
+ * `MLK_CONFIG_KEYGEN_PCT` is enabled, also performs the encapsulation-key
+ * modulus check, decapsulation-key hash check, and pairwise consistency test
+ * described in steps 2-4 of @[FIPS203, Section 7.1, Key pair check].}
+ *
+ * @note If MLK_CONFIG_KEYGEN_PCT is enabled, the keypair is written to
+ *       the output buffers before the PCT is run, and zeroized if the PCT
+ *       fails. A keypair failing the PCT is thus temporarily present in
+ *       the output buffers. If this is a concern, pass buffers that are
+ *       not accessible to untrusted parties, and copy out upon success.
  *
  * @param[out] pk      Output public key (an already allocated array of
  *                     MLKEM_INDCCA_PUBLICKEYBYTES bytes).
@@ -168,7 +209,7 @@ __contract__(
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  * @retval MLK_ERR_RNG_FAIL      Random number generation failed.
- * @retval MLK_ERR_FAIL          MLK_CONFIG_KEYGEN_PCT enabled and PCT failed.
+ * @retval MLK_ERR_PCT_FAIL      MLK_CONFIG_KEYGEN_PCT enabled and PCT failed.
  */
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
@@ -180,15 +221,24 @@ __contract__(
   requires(memory_no_alias(sk, MLKEM_INDCCA_SECRETKEYBYTES))
   assigns(memory_slice(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
   assigns(memory_slice(sk, MLKEM_INDCCA_SECRETKEYBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_PCT_FAIL ||
           return_value == MLK_ERR_OUT_OF_MEMORY ||
           return_value == MLK_ERR_RNG_FAIL)
+  /* Output buffers on error, per API-CONVENTIONS.md */
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(sk, MLKEM_INDCCA_SECRETKEYBYTES))
 );
+#endif /* !MLK_CONFIG_NO_RANDOMIZED_API */
+#endif /* !MLK_CONFIG_NO_KEYPAIR_API */
 
 /**
  * Generate ciphertext and shared secret for a given public key.
  *
- * @spec{Implements @[FIPS203, Algorithm 17, ML-KEM.Encaps_Internal].}
+ * @spec{Implements @[FIPS203, Algorithm 17, ML-KEM.Encaps_Internal] and
+ * performs the encapsulation-key modulus check from
+ * @[FIPS203, Section 7.2, Encapsulation key check] before using the key.}
  *
  * @param[out] ct      Output ciphertext (an already allocated array of
  *                     MLKEM_INDCCA_CIPHERTEXTBYTES bytes).
@@ -203,11 +253,12 @@ __contract__(
  *                     MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @retval 0                     Success.
- * @retval MLK_ERR_FAIL          The 'modulus check' @[FIPS203, Section 7.2]
+ * @retval MLK_ERR_INVALID_PK    The 'modulus check' @[FIPS203, Section 7.2]
  *                               for the public key failed.
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  */
+#if !defined(MLK_CONFIG_NO_ENCAPS_API)
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
 int mlk_kem_enc_derand(uint8_t ct[MLKEM_INDCCA_CIPHERTEXTBYTES],
@@ -222,14 +273,22 @@ __contract__(
   requires(memory_no_alias(coins, MLKEM_SYMBYTES))
   assigns(memory_slice(ct, MLKEM_INDCCA_CIPHERTEXTBYTES))
   assigns(memory_slice(ss, MLKEM_SSBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_INVALID_PK ||
           return_value == MLK_ERR_OUT_OF_MEMORY)
+  /* Output buffers on error, per API-CONVENTIONS.md */
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(ct, MLKEM_INDCCA_CIPHERTEXTBYTES))
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(ss, MLKEM_SSBYTES))
 );
 
+#if !defined(MLK_CONFIG_NO_RANDOMIZED_API)
 /**
  * Generate ciphertext and shared secret for a given public key.
  *
- * @spec{Implements @[FIPS203, Algorithm 20, ML-KEM.Encaps].}
+ * @spec{Implements @[FIPS203, Algorithm 20, ML-KEM.Encaps] and performs the
+ * encapsulation-key modulus check from
+ * @[FIPS203, Section 7.2, Encapsulation key check] before using the key.}
  *
  * @param[out] ct      Output ciphertext (an already allocated array of
  *                     MLKEM_INDCCA_CIPHERTEXTBYTES bytes).
@@ -245,7 +304,7 @@ __contract__(
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  * @retval MLK_ERR_RNG_FAIL      Random number generation failed.
- * @retval MLK_ERR_FAIL          The 'modulus check' @[FIPS203, Section 7.2]
+ * @retval MLK_ERR_INVALID_PK    The 'modulus check' @[FIPS203, Section 7.2]
  *                               for the public key failed.
  */
 MLK_EXTERNAL_API
@@ -260,15 +319,24 @@ __contract__(
   requires(memory_no_alias(pk, MLKEM_INDCCA_PUBLICKEYBYTES))
   assigns(memory_slice(ct, MLKEM_INDCCA_CIPHERTEXTBYTES))
   assigns(memory_slice(ss, MLKEM_SSBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_INVALID_PK ||
           return_value == MLK_ERR_OUT_OF_MEMORY ||
           return_value == MLK_ERR_RNG_FAIL)
+  /* Output buffers on error, per API-CONVENTIONS.md */
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(ct, MLKEM_INDCCA_CIPHERTEXTBYTES))
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(ss, MLKEM_SSBYTES))
 );
+#endif /* !MLK_CONFIG_NO_RANDOMIZED_API */
+#endif /* !MLK_CONFIG_NO_ENCAPS_API */
 
 /**
  * Generate shared secret for a given ciphertext and private key.
  *
- * @spec{Implements @[FIPS203, Algorithm 21, ML-KEM.Decaps].}
+ * @spec{Implements @[FIPS203, Algorithm 21, ML-KEM.Decaps] and performs the
+ * decapsulation-key hash check from
+ * @[FIPS203, Section 7.3, Decapsulation key check] before using the key.}
  *
  * @param[out] ss      Output shared secret (an already allocated array of
  *                     MLKEM_SSBYTES bytes).
@@ -281,11 +349,12 @@ __contract__(
  *                     MLK_CONFIG_CONTEXT_PARAMETER_TYPE.
  *
  * @retval 0                     Success.
- * @retval MLK_ERR_FAIL          The 'hash check' @[FIPS203, Section 7.3]
+ * @retval MLK_ERR_INVALID_SK    The 'hash check' @[FIPS203, Section 7.3]
  *                               for the secret key failed.
  * @retval MLK_ERR_OUT_OF_MEMORY MLK_CONFIG_CUSTOM_ALLOC_FREE was used and
  *                               MLK_CUSTOM_ALLOC returned NULL.
  */
+#if !defined(MLK_CONFIG_NO_DECAPS_API)
 MLK_EXTERNAL_API
 MLK_MUST_CHECK_RETURN_VALUE
 int mlk_kem_dec(uint8_t ss[MLKEM_SSBYTES],
@@ -297,8 +366,12 @@ __contract__(
   requires(memory_no_alias(ct, MLKEM_INDCCA_CIPHERTEXTBYTES))
   requires(memory_no_alias(sk, MLKEM_INDCCA_SECRETKEYBYTES))
   assigns(memory_slice(ss, MLKEM_SSBYTES))
-  ensures(return_value == 0 || return_value == MLK_ERR_FAIL ||
+  ensures(return_value == 0 || return_value == MLK_ERR_INVALID_SK ||
           return_value == MLK_ERR_OUT_OF_MEMORY)
+  /* Output buffers on error, per API-CONVENTIONS.md */
+  ensures(return_value != 0 ==>
+          array_unchanged_or_zeroized_u8(ss, MLKEM_SSBYTES))
 );
+#endif /* !MLK_CONFIG_NO_DECAPS_API */
 
 #endif /* !MLK_KEM_H */

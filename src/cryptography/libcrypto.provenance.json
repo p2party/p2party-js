@@ -3,16 +3,16 @@
   "sources": {
     "libsodium": {
       "releaseLine": "1.0.22-stable",
-      "commit": "2ce4d906a68eae82b27b4867f3d4172ec508cb27",
-      "tree": "2dabe17c708edd7334e3316b5094b753859395d9",
+      "commit": "05de1ce8088d4281a6264800070baf4ddf17b6a4",
+      "tree": "08eb21829cd70a2bf53acae3f88f435eef0cfd5f",
       "extraction": "git-archive",
       "configuredBuild": true
     },
     "mlkemNative": {
-      "release": "v1.2.0",
-      "commit": "0ba906cb14b1c241476134d7403a811b382ca498",
-      "sourceTreeSha256": "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6",
-      "wrapperSha256": "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d",
+      "release": "v2.1.0",
+      "commit": "4d69d6b0358e678e3a694ea1bb8404a41770f68e",
+      "sourceTreeSha256": "e4d0469fc4edf1e0773b1043b47b05c182c1febd462c17612481a243c00c73ae",
+      "wrapperSha256": "3277ce2b16265d4c59d7f0c8c185b94aa232232e748dd5eee810c00d4bb65c39",
       "backend": "portable-c",
       "parameterSets": [
         512,
@@ -38,8 +38,8 @@
   },
   "artifact": {
     "file": "libcrypto.wasm",
-    "bytes": 210598,
-    "sha256": "54fe3c9da24f6c49ee240c7607e759bc68890a7350e49954ed0dc366c115b3db",
-    "sri": "sha384-1pDKeCXxKNB9lzIGQyDsr3apTXUgQcRYI5ChgbzdQfTKUSekBO6z7PVeJn46kMgE"
+    "bytes": 232181,
+    "sha256": "34a866df90d13b43292a0b1eaa3182b01d1994e03fc533c799ce01bdf11691a2",
+    "sri": "sha384-vDjnb66aoxATbFGr+3bH1k6zuofJfgPMrEBXnVIPO9iRUIVoIoeyGpT7ZrXtaHis"
   }
 }

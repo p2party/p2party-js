@@ -31,13 +31,13 @@ const bun = process.platform === "win32" ? "bun.exe" : "bun";
 const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH ?? "0";
 const expectedNodeMajor = 24;
 const expectedEmscriptenVersion = "7.0.0";
-const expectedLibsodiumCommit = "2ce4d906a68eae82b27b4867f3d4172ec508cb27";
-const expectedLibsodiumTree = "2dabe17c708edd7334e3316b5094b753859395d9";
-const expectedMlkemNativeCommit = "0ba906cb14b1c241476134d7403a811b382ca498";
+const expectedLibsodiumCommit = "05de1ce8088d4281a6264800070baf4ddf17b6a4";
+const expectedLibsodiumTree = "08eb21829cd70a2bf53acae3f88f435eef0cfd5f";
+const expectedMlkemNativeCommit = "4d69d6b0358e678e3a694ea1bb8404a41770f68e";
 const expectedMlkemNativeSourceTreeSha256 =
-  "a2e15382a8dc0207752b3f5cdfc907886505fe304948183b4b61e99e7cb92ac6";
+  "e4d0469fc4edf1e0773b1043b47b05c182c1febd462c17612481a243c00c73ae";
 const expectedMlkemWrapperSha256 =
-  "ec8250c5fefebf1b7958c5ad20ed92bf7ef0a3c5e7b0783c2079d2be678f090d";
+  "3277ce2b16265d4c59d7f0c8c185b94aa232232e748dd5eee810c00d4bb65c39";
 const expectedRoomWordlistSha256 =
   "531238ede7be78f5fd444b3a4452b023f408f0146aa82bd9fe03aad902b3ff8e";
 const releaseRoot = mkdtempSync(

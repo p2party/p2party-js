@@ -33,7 +33,6 @@ import {
 import {
   descriptorHash,
   storeDescriptorSignedMessage,
-  storeId as computeStoreId,
   storeRouteSignedMessage,
 } from "../../../src/blindRendezvous/storeDescriptor";
 import {

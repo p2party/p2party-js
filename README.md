@@ -17,7 +17,7 @@ protocol between peers remains **4**. Upgrade a self-hosted signaling server
 to 0.2.0 or later before updating its clients. This SDK opens a keyless
 WebSocket URL, signs a challenge bound to the host, and joins with a hash of the
 room capability. The service can still associate a room with its participants.
-[Web client](https://p2party.com) · [Web client source](https://github.com/p2party/p2party.com-source) · [Signaling server source](https://github.com/p2party/p2party-server-source) · [Signaling health](https://signaling.p2party.com/health) · [Release verification](docs/e2e/README.md)
+[Web client](https://p2party.com) · [Web client source](https://github.com/p2party/p2party.com) · [Signaling server source](https://github.com/p2party/p2party-server) · [Signaling health](https://signaling.p2party.com/health) · [Release verification](docs/e2e/README.md)
 
 Contacts and blocks now follow the authenticated Ed25519 key across routing
 changes. The browser keeps older messages readable and only offers a contact

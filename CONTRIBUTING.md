@@ -18,6 +18,26 @@ npm run predist
 npm run check
 ```
 
+### Check Merkle proofs against the compiled WASM
+
+After building the production WASM, run the bounded property suite offline.
+The normal `npm test` and CI `npm run check` also include it.
+
+```sh
+bun test ./tests/cryptography/merkleWasmProperties.test.ts
+```
+
+The suite verifies the binary against its recorded SHA-256 and exercises the
+SDK's normal leaf, root, proof and verification wrappers. Seed `0x50325035`
+selects 32 reproducible trees of 1–65 leaves. Synthetic chunks range from
+0 to 512 bytes and include SHA-512 padding boundaries. An independent Node
+SHA-512 calculation checks the root, including odd-node promotion. The
+verifier checks selected first, last and interior leaves, then checks changed
+payloads, roots and sibling hashes. Failing test names identify the case and
+tree size. Coverage is limited to those Merkle operations and bounds.
+Production network traffic, memory sanitizers and the rest of the
+cryptographic module are outside this suite.
+
 ## Building from source
 
 Needed whenever you change the cryptography, and whenever you want to

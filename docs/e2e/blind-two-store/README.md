@@ -358,6 +358,58 @@ binds below 5000.
 `bunx tsc --noEmit -p tsconfig.json`, and `bun build` only transpiles. A green
 build here is not a type check.
 
+### Recorded result (2026-11-27, `prototype-v1`, commit `600c1a4`, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
+
+Run once after the write path was put through the read path's decision order
+and the descriptor's end was enforced (`ab28f63`). The run was from a `git archive` of
+`600c1a4` with the bundle rebuilt by `build.sh` in that archive. The bundle names
+`prototype-v1` five times and `prototype-v0` none. `run.mjs` imports
+playwright-core by a path relative to the checkout's parent
+(`../../../../p2party.com/node_modules/playwright-core`), so the archive was
+unpacked as `<scratch>/h/p2party-js` beside a directory `<scratch>/h/p2party.com`
+holding only a symlink `node_modules` to the existing `p2party.com` checkout's
+`node_modules`. Nothing was installed.
+
+```
+PLAYWRIGHT_BROWSERS_PATH=~/Library/Caches/ms-playwright \
+  node docs/e2e/blind-two-store/run.mjs --scenario=all \
+    --store-port-base=6310 --page-port=6320
+```
+
+**The run.**
+
+- Result: `TWO-STORE E2E PASS (4 of 4 scenarios)`, exit 0, from 02:24:09 to 02:25:44.
+- Conditions: the screen was locked for the whole run (`CGSSessionScreenIsLocked` true), and other jobs were running (1-minute load average 5.1 at the start, 10.5 at the end).
+- Network: everything bound to 127.0.0.1 or localhost on ports 6310-6317 and 6320, checked free before. The pages used `iceServers: []`.
+- Browser: playwright-core 1.65.1, browser from the existing cache.
+- How to read the table:
+  - Times are from each page's own `presence-published`.
+  - "faults" are the client's records at the end.
+  - "audited" is the request bodies the privacy audit searched, with the 148 needles over 14 secrets it looked for.
+- No page recorded an `append window-finalized`.
+
+| scenario | verdict | peer-observed A / B | handoff A / B | message-verified A / B | start phase A / B | faults A / B | audited, found |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `healthy` | PASS in 22.8 s | 6.7 / 6.7 s | 22.7 / 18.8 s | 22.8 / 22.8 s | +1896 / +1896 ms | none / none | 178, 0 |
+| `kill-a` | PASS in 23.4 s | 7.4 / 7.4 s | 23.4 / 19.4 s | 23.4 / 23.4 s | +1264 / +1264 ms | 86× `unreachable` vs the killed store, each page (first: `/p2party/prototype-v1/append: the request failed (TypeError)`) | 88, 0 |
+| `withhold-a` | PASS in 23.5 s | 7.4 / 7.4 s | 19.4 / 23.4 s | 23.4 / 23.5 s | +1220 / +1220 ms | 25× `custody-breach` vs the withholding store, each page | 174, 0 |
+| `unreachable-b-for-one` | PASS in 23.4 s | 7.3 / 7.3 s | 19.3 / 23.3 s | 23.3 / 23.3 s | +1343 / +1340 ms | none / none | 134, 0 |
+
+**What this one run shows of the change.**
+
+- **Not exercised.** No scenario makes a store answer 503, refuse a write with a signed status, state a wrong window, or reach its descriptor's end. So the back-off, the escalation, `write-window-breach`, `write-refusal` and the stop at the end are not exercised here; the unit tests cover them.
+- **The write path against real stores.** Every allocation and append answer from two real stores was judged by the new order, and none was recorded against an honest store: `healthy` and `unreachable-b-for-one` end with no faults.
+- **The withholding store's promises.** In `withhold-a` those promises (`stored`, with the window the store states) were kept and caught by the custody check as before.
+- **`kill-a`.** A refused connection is no 503, so the client did not back off. Its records stayed `unreachable`.
+- **The start-up line.** Each store's start-up line stated `descriptorValidityMs=2592000000` and its `descriptorNotAfter`.
+
+Topology at the end was as expected per scenario:
+- `healthy`: `multi-store-union` for both pages.
+- `kill-a` and `withhold-a`: `single-carrier-dependent` for both.
+- `unreachable-b-for-one`: `multi-store-union` / `single-carrier-dependent`.
+
+The start-window check (design §3a item 16) and the transport flights' payload class (0) held on every page.
+
 ### Recorded result (2026-11-27, `prototype-v1`, commit `e4140cd`, headless Chromium, macOS, `--window-ms=4000`, pinned cohort 8)
 
 Run once after the protocol version bump (`c4f5411`), from a `git archive` of

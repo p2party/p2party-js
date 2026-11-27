@@ -11,10 +11,10 @@ Citation numbers refer to [docs/references.md](docs/references.md).
 
 ## Where things stand
 
-The SDK `0.15.0-rc.1` includes durable sender recovery, selective scheduled receipts,
+The SDK `0.15.0` includes durable sender recovery, selective scheduled receipts,
 sparse-PQ overlap handling, and disabled secret-bearing DevTools integration.
-Signaling server `0.1.3` or newer provides membership snapshots and targeted mesh
-repair. Local verification results and remaining limits are recorded in
+Signaling protocol 5 provides authenticated room membership snapshots and targeted
+mesh repair. Deploy server `0.2.0` before upgrading the client. Local verification results and remaining limits are recorded in
 [the browser harness report](docs/e2e/README.md).
 
 This remediation does not publish, deploy, or push any repository. A site must
@@ -63,10 +63,11 @@ transport terminates on the certificate the SDP advertised.
 
 ### Known open, in priority order
 
-1. **Compatibility with older signaling servers.** Socket-generation recovery
-   needs server `0.1.2` or newer; correlated membership and targeted per-member
-   repair need `0.1.3`. Older servers cannot supply those missing facts. Retry
-   ceilings bound failures without guaranteeing convergence.
+1. **Signaling version cutover.** SDK `0.15.0` requires signaling protocol 5.
+   Upgrade the server before clients. An explicit version refusal reaches the
+   caller as `SignalingVersionMismatchError`. Servers that reject the WebSocket
+   upgrade can surface only a browser connection error.
+
 2. **Existing limits.** Import cycles, unexecuted ProVerif verification and
    Firefox's missing post-connect certificate statistics remain. Recovery
    latency outside the measured loopback scenarios is not established.
@@ -77,11 +78,10 @@ Their acceptance tests and explicit limits are tracked in the
 ACK membership checks are constant-time, but snapshot size, staged-index scans
 and fixed cover traffic still scale with their respective inputs.
 
-**Close the verification gaps.** Three properties are implemented and believed
-correct but still not demonstrated end to end: PIN backoff escalation under
-repeated wrong PINs, packet-trace indistinguishability at n > 2, and cover
-behaviour across a real network rather than loopback. Claims stay out of the
-README until a harness demonstrates them.
+**Close the verification gaps.** The local protocol-5 browser harness now
+checks wrong PINs, corrected entry and persisted PIN backoff. Packet-trace
+indistinguishability at n > 2 and cover behaviour across a wide-area network
+remain open.
 
 The recovery harness is committed at `docs/e2e/desync/`. It uses separate
 Chromium processes and floods the frozen peer's UDP receive buffers, so a

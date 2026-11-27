@@ -1255,24 +1255,29 @@ describe("session PQ combiner", () => {
       root: string;
       frameSha512: string[];
     };
-    // Restore and encrypt are one sequential chain, so a fixed random
-    // stream and clock fix every byte of the message.
+    const alice = await restoreSession(
+      fromBase64(kat.aliceSnapshot),
+      cryptoOptions,
+    );
+    // The fixture's libsodium initialization consumed 16 splitmix64 words
+    // before encrypt. Start at that recorded position so changes to WASM
+    // initialization do not shift the message padding and nonces.
+    const encryptionSeed = BigInt.asUintN(
+      64,
+      0x0123456789abcdefn + 16n * 0x9e3779b97f4a7c15n,
+    );
     const random = spyOn(
       globalThis.crypto,
       "getRandomValues",
-    ).mockImplementation(splitmix64Fill(0x0123456789abcdefn));
+    ).mockImplementation(splitmix64Fill(encryptionSeed));
     const clock = spyOn(Date, "now").mockReturnValue(kat.dateNow);
     let message: EncryptedSessionMessage;
     try {
-      const alice = await restoreSession(
-        fromBase64(kat.aliceSnapshot),
-        cryptoOptions,
-      );
       message = await alice.encrypt(katPlaintext(kat.plaintextLength));
-      await alice.destroy();
     } finally {
       random.mockRestore();
       clock.mockRestore();
+      await alice.destroy();
     }
     expect(message.frames).toHaveLength(3);
     expect(Buffer.from(message.root).toString("hex")).toBe(kat.root);

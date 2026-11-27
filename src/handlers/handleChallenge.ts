@@ -1,49 +1,31 @@
-import { setPeerData } from "../reducers/keyPairSlice";
-
-import { hexToUint8Array } from "../utils/uint8array";
-
+import { hexToUint8Array, uint8ArrayToHex } from "../utils/uint8array";
 import { sign } from "../cryptography/ed25519";
-import { PROTOCOL_VERSION } from "../utils/constants";
-
-import type { MiddlewareAPI } from "@reduxjs/toolkit";
+import { SIGNALING_PROTOCOL_VERSION } from "../utils/constants";
 import type { KeyPair } from "../reducers/keyPairSlice";
 import type { WebSocketMessageChallengeResponse } from "../utils/interfaces";
 
+/** Sign the nonce for the WebSocket the client actually opened. */
 export const handleChallenge = async (
   keyPair: KeyPair,
-  peerId: string,
+  socketUrl: string,
   challenge: string,
-  store: MiddlewareAPI,
-  isCurrentSocket: () => boolean = () => true,
-): Promise<WebSocketMessageChallengeResponse | null> => {
+): Promise<WebSocketMessageChallengeResponse> => {
+  if (!/^[0-9a-f]{64}$/.test(challenge)) throw new Error("Invalid challenge");
+  const host = new URL(socketUrl).host.toLowerCase();
+  const prefix = new TextEncoder().encode(
+    `p2party-signaling-auth-v2\0${host}\0`,
+  );
+  const message = new Uint8Array(prefix.length + 32);
+  message.set(prefix);
+  message.set(hexToUint8Array(challenge), prefix.length);
   const secretKey = hexToUint8Array(keyPair.secretKey);
   try {
-    const matches = challenge.match(/.{1,2}/g);
-    if (!matches) throw new Error("Invalid challenge format");
-    const nonce = Uint8Array.from(
-      matches.map((byte: string) => parseInt(byte, 16)),
-    );
-
-    const sig = await sign(nonce, secretKey);
-
-    const signature = [...new Uint8Array(sig)]
-      .map((x) => x.toString(16).padStart(2, "0"))
-      .join("");
-
-    if (!isCurrentSocket()) return null;
-    store.dispatch(
-      setPeerData({
-        peerId,
-        challenge,
-        signature,
-      }),
-    );
     return {
       type: "challenge",
-      fromPeerId: peerId,
+      publicKey: keyPair.publicKey,
       challenge,
-      signature,
-      protocolVersion: PROTOCOL_VERSION,
+      signature: uint8ArrayToHex(await sign(message, secretKey)),
+      protocolVersion: SIGNALING_PROTOCOL_VERSION,
     };
   } finally {
     secretKey.fill(0);

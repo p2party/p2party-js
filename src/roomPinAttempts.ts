@@ -14,7 +14,8 @@ export const MAX_ROOM_PIN_FAILURES_PER_WINDOW = 30;
 
 // Two durable controls bound online PIN guessing in a room:
 //
-// - per identity: `(roomId, peer Ed25519 identity)` → exponential backoff
+// Production callers use the stable room locator as roomId.
+// - per identity: `(room locator, peer Ed25519 identity)` → exponential backoff
 //   after MAX_PIN_ATTEMPTS failures;
 // - per room: one failure window that opens at the room's first failure and
 //   lasts ROOM_PIN_FAILURE_WINDOW_MS. Once it holds

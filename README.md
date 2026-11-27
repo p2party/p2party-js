@@ -304,9 +304,8 @@ await p2party.connect(fragment);
 `generateRoomInvite()` is the one-liner for the fragment form. The word list is
 [BIP-39 English](https://github.com/bitcoin/bips/blob/master/bip-0039/bip-0039-wordlists.md)
 and is checksum-protected — it encodes the same 256 bits, it is not a
-lower-entropy password. The shipped `legacy-signaling` route still sends the
-normalized capability to the signaling service, so a fragment is not
-server-blind rendezvous.
+lower-entropy password. Signaling v5 sends the SHA-512 digest of the canonical capability
+as a stable room locator. The server sees which identities join each locator.
 
 ## PIN rooms
 
@@ -800,7 +799,7 @@ is what this package compiles.
 
 ## No build step: a script tag and the CDN
 
-> **`0.14.10` is a local release candidate.** This work does not publish npm
+> **`0.15.0-rc.0` is a local release candidate.** This work does not publish npm
 > packages or CDN assets. The snippet names the candidate's intended release
 > path; use the generated local bundle until that version is published.
 
@@ -815,8 +814,8 @@ script in and `window.p2party` is there — no npm, no bundler, no build:
 <title>p2party in one file</title>
 
 <script
-  src="https://cdn.p2party.com/@0.14.10/p2party.min.js"
-  integrity="sha384-z5PjsRDKjtPcQ9JhEwkPyr/7zthzQgjjh6pSTdjTmhZrwVhhhFS/KhRkGtmJwqJX"
+  src="https://cdn.p2party.com/@0.15.0-rc.0/p2party.min.js"
+  integrity="sha384-RNjMsrVUi7lC3KP7la/Y1SyLeA+Umlvrpl4FlKpAlkP3VcyggnzwCNX7VPyUGuWD"
   crossorigin="anonymous"
 ></script>
 
@@ -855,7 +854,7 @@ https://cdn.p2party.com/@<version>/libcrypto.wasm  the cryptographic module
 The `integrity` value above is this release's bundle, and the release build
 fails if the README and the built artifact ever disagree — so it is safe to
 copy verbatim. The worker, if you host it yourself, is
-`integrity=sha384-iZfBJVoMgpK1+s2shZQucC0OUSBaX4eHMTjHj4NqzGApUodsP9T16+EHgyDKTVQP`.
+`integrity=sha384-z9beL8iWayubbCW6R8E71jPW8D7JpLva/ho642pIMLCI61Iz4b6jR27bQ5a3S+G+`.
 
 The WASM is integrity-checked whether or not you pin the script: that hash is
 compiled into the bundle and cannot be turned off.

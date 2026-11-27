@@ -305,7 +305,8 @@ const messageOver = (
 describe("the proof-level build of an outgoing message runs in slices", () => {
   test("cells of one delivery that ask during the build share it", async () => {
     const leafCount = 41;
-    const staged = await stageMessage(leafCount);
+    // Calculate receipt tokens before the test starts advancing build slices.
+    const staged = await stageMessage(leafCount, 18, true);
     // Two hashes a slice: 40 hashes, 20 slices.
     const build = countingBuild(SLICE_MS / 2);
     const handBacks = manualHandBacks();

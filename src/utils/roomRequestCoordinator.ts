@@ -1,4 +1,8 @@
-import { MAX_ACTIVE_SIGNALING_ROOMS, PROTOCOL_VERSION } from "./constants";
+import { deriveRoomLocator } from "./roomLocator";
+import {
+  MAX_ACTIVE_SIGNALING_ROOMS,
+  SIGNALING_PROTOCOL_VERSION,
+} from "./constants";
 import { isUuidV4, randomUuidV4 } from "./correlationId";
 
 import type { WebSocketMessageRoomIdRequest } from "./interfaces";
@@ -27,6 +31,7 @@ type SendRoomRequest = (
 ) => void | Promise<unknown>;
 
 interface PendingRoomRequest {
+  readonly roomLocator: string;
   readonly roomUrl: string;
   readonly roomRequestId: string;
   readonly requestGeneration: number;
@@ -80,8 +85,6 @@ const refreshReservations = new Map<string, RefreshReservationRecord>();
 let nextRequestGeneration = 1;
 let roomRequestLifecycleEpoch = 1;
 
-const ROOM_URL_PATTERN = /^[0-9a-f]{64}$/;
-
 const roomRequestError = (message: string): Error =>
   new Error(`roomRequest: ${message}`);
 
@@ -90,14 +93,12 @@ export const buildRoomRequest = (
   roomUrl: string,
 ): WebSocketMessageRoomIdRequest => {
   if (!isUuidV4(peerId)) throw roomRequestError("peerId must be a UUIDv4");
-  if (!ROOM_URL_PATTERN.test(roomUrl))
-    throw roomRequestError("roomUrl must be 32-byte lowercase hex");
   return {
     type: "room",
     fromPeerId: peerId,
-    roomUrl,
+    roomLocator: deriveRoomLocator(roomUrl),
     roomRequestId: randomUuidV4(),
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: SIGNALING_PROTOCOL_VERSION,
   };
 };
 
@@ -145,6 +146,7 @@ export const requestRoomResponse = (
     pending.reject(roomRequestError("room response timed out"));
   }, timeoutMs);
   const pending: PendingRoomRequest = {
+    roomLocator: request.roomLocator,
     roomUrl,
     roomRequestId: request.roomRequestId,
     requestGeneration,
@@ -182,15 +184,18 @@ export interface PendingRoomResponseClaim {
 
 /** Claim only the exact echoed UUID of the current single-flight request. */
 export const claimRoomResponse = (
-  roomUrl: string,
+  roomLocator: string,
   roomRequestId: string,
 ): PendingRoomResponseClaim | null => {
-  const pending = pendingRoomRequests.get(roomUrl);
-  if (!pending || pending.claimed || pending.roomRequestId !== roomRequestId)
-    return null;
+  const pending = Array.from(pendingRoomRequests.values()).find(
+    (entry) =>
+      entry.roomRequestId === roomRequestId &&
+      entry.roomLocator === roomLocator,
+  );
+  if (!pending || pending.claimed) return null;
   pending.claimed = true;
   return {
-    roomUrl,
+    roomUrl: pending.roomUrl,
     roomRequestId,
     requestGeneration: pending.requestGeneration,
   };
@@ -421,11 +426,8 @@ export const scheduleRoomCredentialRefresh = (
     refreshTimers.delete(roomUrl);
     try {
       await expire();
-    } catch (error) {
-      console.warn(
-        "p2party: failed to remove expired TURN credentials",
-        error instanceof Error ? error.message : String(error),
-      );
+    } catch {
+      console.warn("p2party: failed to remove expired TURN credentials");
     }
   };
   const run = async (): Promise<void> => {
@@ -447,7 +449,7 @@ export const scheduleRoomCredentialRefresh = (
         return;
       }
       timer.timeout = setTimeout(() => void run(), remainingAfterRefreshMs);
-    } catch (error) {
+    } catch {
       if (refreshTimers.get(roomUrl) !== timer) return;
       const remainingAfterRefreshMs = expiresAtUnixSeconds * 1_000 - now();
       if (remainingAfterRefreshMs <= 0) {
@@ -465,7 +467,6 @@ export const scheduleRoomCredentialRefresh = (
         timer.attempt <= (options.maxAttempts ?? MAX_TURN_REFRESH_ATTEMPTS)
           ? "p2party: scheduled TURN refresh failed; retrying"
           : "p2party: TURN refresh retries exhausted; credentials will be removed at expiry",
-        error instanceof Error ? error.message : String(error),
       );
     }
   };
@@ -609,9 +610,9 @@ export const cancelRoomRequestLifecycle = (
  * Remove the managed bundle now; a later proof repopulates it before repair.
  */
 export const resetRoomRequestLifecycle = (
-  reason = "signaling socket disconnected",
+  reason: string | Error = "signaling socket disconnected",
 ): void => {
-  const error = roomRequestError(reason);
+  const error = typeof reason === "string" ? roomRequestError(reason) : reason;
   roomRequestLifecycleEpoch += 1;
   if (!Number.isSafeInteger(roomRequestLifecycleEpoch))
     roomRequestLifecycleEpoch = 1;
@@ -622,12 +623,9 @@ export const resetRoomRequestLifecycle = (
   pendingRoomRequests.clear();
   for (const timer of refreshTimers.values()) {
     if (timer.timeout) clearTimeout(timer.timeout);
-    void Promise.resolve(timer.expire()).catch((expireError: unknown) => {
+    void Promise.resolve(timer.expire()).catch(() => {
       console.warn(
         "p2party: failed to clear TURN credentials on signaling teardown",
-        expireError instanceof Error
-          ? expireError.message
-          : String(expireError),
       );
     });
   }

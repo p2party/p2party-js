@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../src/utils/roomLocator";
 // The two room-level clears, through the public API that triggers them:
 // connect() with a PIN for a loaded room (a deliberate PIN re-entry) and
 // purgeRoom(). The limiter writes to the real database worker over
@@ -38,6 +39,7 @@ const p2party = (await import("../src/index")).default;
 import type { RoomPolicyV1 } from "../src/roomPolicy";
 
 const ROOM_URL = normalizeRoomCapability("b3".repeat(32));
+const LOCATOR = deriveRoomLocator(ROOM_URL);
 const ROOM_ID = "33333333-3333-4333-8333-333333333333";
 const SERVER_URL = "wss://signal.example/ws";
 const PIN_POLICY: RoomPolicyV1 = { ...DEFAULT_ROOM_POLICY_V1, authMode: "pin" };
@@ -48,7 +50,7 @@ let identityCounter = 0;
 const fillRoomWindow = async (): Promise<void> => {
   for (let i = 0; i < MAX_ROOM_PIN_FAILURES_PER_WINDOW; i++)
     await recordPinFailure(
-      ROOM_ID,
+      LOCATOR,
       (0x2000 + identityCounter++).toString(16).padStart(64, "0"),
     );
 };
@@ -85,9 +87,9 @@ afterEach(async () => {
 
 describe("room-level PIN attempt clears", () => {
   test("PIN re-entry keeps authenticated peers exempt", async () => {
-    await recordPinSuccess(ROOM_ID, KNOWN);
+    await recordPinSuccess(LOCATOR, KNOWN);
     await fillRoomWindow();
-    await expect(assertPinAttemptAllowed(ROOM_ID, NEVER_SEEN)).rejects.toThrow(
+    await expect(assertPinAttemptAllowed(LOCATOR, NEVER_SEEN)).rejects.toThrow(
       "identities new to this room",
     );
 
@@ -101,22 +103,42 @@ describe("room-level PIN attempt clears", () => {
 
     // The re-entry reset the throttles...
     await expect(
-      assertPinAttemptAllowed(ROOM_ID, NEVER_SEEN),
+      assertPinAttemptAllowed(LOCATOR, NEVER_SEEN),
     ).resolves.toBeUndefined();
     // ...and, after a reload and a refilled window, the member who had
     // authenticated is still exempt while a new identity is refused.
     reload();
     await fillRoomWindow();
     await expect(
-      assertPinAttemptAllowed(ROOM_ID, KNOWN),
+      assertPinAttemptAllowed(LOCATOR, KNOWN),
     ).resolves.toBeUndefined();
-    await expect(assertPinAttemptAllowed(ROOM_ID, NEVER_SEEN)).rejects.toThrow(
+    await expect(assertPinAttemptAllowed(LOCATOR, NEVER_SEEN)).rejects.toThrow(
+      "identities new to this room",
+    );
+  });
+
+  test("a renumbered room keeps its PIN window and authenticated peers", async () => {
+    await recordPinSuccess(LOCATOR, KNOWN);
+    await fillRoomWindow();
+    reload();
+    const newId = "77777777-7777-4777-8777-777777777777";
+    dispatch(
+      setRoom({ url: ROOM_URL, id: newId, rtcConfig: {}, policy: PIN_POLICY }),
+    );
+    const renumbered = store
+      .getState()
+      .rooms.find((room) => room.id === newId)!;
+    const scope = deriveRoomLocator(renumbered.url);
+    await expect(
+      assertPinAttemptAllowed(scope, KNOWN),
+    ).resolves.toBeUndefined();
+    await expect(assertPinAttemptAllowed(scope, NEVER_SEEN)).rejects.toThrow(
       "identities new to this room",
     );
   });
 
   test("room purge removes authenticated-peer rows", async () => {
-    await recordPinSuccess(ROOM_ID, KNOWN);
+    await recordPinSuccess(LOCATOR, KNOWN);
 
     // Remote revocation and message deletion fail in a unit run (no socket,
     // no database worker); the PIN step runs regardless.
@@ -124,7 +146,7 @@ describe("room-level PIN attempt clears", () => {
 
     reload();
     await fillRoomWindow();
-    await expect(assertPinAttemptAllowed(ROOM_ID, KNOWN)).rejects.toThrow(
+    await expect(assertPinAttemptAllowed(LOCATOR, KNOWN)).rejects.toThrow(
       "identities new to this room",
     );
   });

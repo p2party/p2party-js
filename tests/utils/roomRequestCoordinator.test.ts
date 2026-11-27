@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
@@ -46,12 +47,21 @@ describe("wire-correlated room requests", () => {
 
     expect(sent?.type).toBe("room");
     expect(sent?.fromPeerId).toBe(PEER_ID);
-    expect(sent?.roomUrl).toBe(ROOM_URL);
-    expect(sent?.protocolVersion).toBe(4);
+    expect(sent?.roomLocator).toBe(
+      "99d606e763d446b3009e635dd74b32340c9b8bd8eaf580ad481af7c9b154d5521630c569a8d055bceac34296504ec852b4eca15384774b9bca1f10cd7d047f94",
+    );
+    expect(sent).not.toHaveProperty("roomUrl");
+    expect(JSON.stringify(sent)).not.toContain(ROOM_URL);
+    expect(sent?.protocolVersion).toBe(5);
     const requestId = sent?.roomRequestId;
     if (!requestId) throw new Error("expected mandatory request correlation");
-    expect(claimRoomResponse(ROOM_URL, anotherRequestId(requestId))).toBeNull();
-    const claimed = claimRoomResponse(ROOM_URL, requestId);
+    expect(
+      claimRoomResponse(
+        deriveRoomLocator(ROOM_URL),
+        anotherRequestId(requestId),
+      ),
+    ).toBeNull();
+    const claimed = claimRoomResponse(deriveRoomLocator(ROOM_URL), requestId);
     expect(claimed).not.toBeNull();
     if (!claimed) throw new Error("expected exact request claim");
 
@@ -71,13 +81,18 @@ describe("wire-correlated room requests", () => {
   });
 
   test("old and unsolicited responses cannot claim a later generation", async () => {
-    expect(claimRoomResponse(ROOM_URL, REQUEST_ID)).toBeNull();
+    expect(
+      claimRoomResponse(deriveRoomLocator(ROOM_URL), REQUEST_ID),
+    ).toBeNull();
 
     let firstRequestId = "";
     const first = requestRoomResponse(PEER_ID, ROOM_URL, (request) => {
       firstRequestId = request.roomRequestId;
     });
-    const firstClaim = claimRoomResponse(ROOM_URL, firstRequestId);
+    const firstClaim = claimRoomResponse(
+      deriveRoomLocator(ROOM_URL),
+      firstRequestId,
+    );
     if (!firstClaim) throw new Error("first claim missing");
     completeRoomResponse({
       ...firstClaim,
@@ -91,8 +106,13 @@ describe("wire-correlated room requests", () => {
       secondRequestId = request.roomRequestId;
     });
     expect(secondRequestId).not.toBe(firstRequestId);
-    expect(claimRoomResponse(ROOM_URL, firstRequestId)).toBeNull();
-    const secondClaim = claimRoomResponse(ROOM_URL, secondRequestId);
+    expect(
+      claimRoomResponse(deriveRoomLocator(ROOM_URL), firstRequestId),
+    ).toBeNull();
+    const secondClaim = claimRoomResponse(
+      deriveRoomLocator(ROOM_URL),
+      secondRequestId,
+    );
     expect(secondClaim?.requestGeneration).toBeGreaterThan(
       firstClaim.requestGeneration,
     );
@@ -119,7 +139,10 @@ describe("wire-correlated room requests", () => {
       [ROOM_URL, firstRequestId, first],
       [OTHER_ROOM_URL, secondRequestId, second],
     ] as const) {
-      const claimed = claimRoomResponse(roomUrl, roomRequestId);
+      const claimed = claimRoomResponse(
+        deriveRoomLocator(roomUrl),
+        roomRequestId,
+      );
       if (!claimed) throw new Error("room claim missing");
       completeRoomResponse({
         ...claimed,

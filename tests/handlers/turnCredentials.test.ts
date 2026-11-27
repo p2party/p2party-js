@@ -1,8 +1,9 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 import { afterEach, describe, expect, test } from "bun:test";
 import { configureStore } from "@reduxjs/toolkit";
 
 import { parseTurnCredentials } from "../../src/utils/signalingAuth";
-import { PROTOCOL_VERSION } from "../../src/utils/constants";
+import { SIGNALING_PROTOCOL_VERSION } from "../../src/utils/constants";
 import { applyRoomIceConfiguration } from "../../src/api/webrtc/applyIceConfiguration";
 import {
   getRoomIceConfigurationMutex,
@@ -44,7 +45,7 @@ const [
 
 const NOW_MS = 1_700_000_000_000;
 const EXPIRY = Math.floor(NOW_MS / 1_000) + 3_600;
-const PUBLIC_KEY = "ab".repeat(32);
+const OPAQUE_TAG = "Aa_-".repeat(5) + "Z0";
 const OTHER_PUBLIC_KEY = "cd".repeat(32);
 const ROOM_ID = "00000000-0000-4000-8000-000000000080";
 const OTHER_ROOM_ID = "00000000-0000-4000-8000-000000000081";
@@ -61,7 +62,7 @@ const valid = {
     "turns:turn.p2party.com:443?transport=tcp",
     "turn:turn.p2party.com:3478",
   ],
-  username: `${String(EXPIRY)}:${PUBLIC_KEY}`,
+  username: `${String(EXPIRY)}:${OPAQUE_TAG}`,
   credential: "XY6V5LzRrbIFUOH5w0qdZ90iYuQ=",
   expiresAtUnixSeconds: EXPIRY,
 };
@@ -79,48 +80,47 @@ const claim = (
 const response = (overrides: Record<string, unknown> = {}) => ({
   type: "roomId",
   roomId: ROOM_ID,
-  roomUrl: ROOM_URL,
+  roomLocator: deriveRoomLocator(ROOM_URL),
   roomRequestId: REQUEST_ID,
-  protocolVersion: PROTOCOL_VERSION,
+  protocolVersion: SIGNALING_PROTOCOL_VERSION,
   turnCredentials: valid,
   ...overrides,
 });
 
 describe("relay credentials from signaling", () => {
-  test("accepts an exact bounded bundle bound to this identity and expiry", () => {
-    const accepted = parseTurnCredentials(valid, NOW_MS, PUBLIC_KEY);
+  test("accepts an exact bounded bundle with an opaque tag and matching expiry", () => {
+    const accepted = parseTurnCredentials(valid, NOW_MS);
     expect(accepted).toEqual(valid);
   });
 
-  test("rejects invalid relay URLs, shape, expiry, or identity binding", () => {
+  test("rejects invalid relay URLs, shape, expiry, or tags", () => {
+    expect(parseTurnCredentials(valid, EXPIRY * 1_000)).toBeNull();
+    expect(
+      parseTurnCredentials(
+        { ...valid, username: `${String(EXPIRY)}:${"+".repeat(22)}` },
+        NOW_MS,
+      ),
+    ).toBeNull();
     for (const url of [
       "https://evil.example.com",
       "stun:stun.example.com:3478",
       "javascript:alert(1)",
     ])
       expect(
-        parseTurnCredentials(
-          { ...valid, urls: [valid.urls[0], url] },
-          NOW_MS,
-          PUBLIC_KEY,
-        ),
+        parseTurnCredentials({ ...valid, urls: [valid.urls[0], url] }, NOW_MS),
       ).toBeNull();
 
     expect(
       parseTurnCredentials(
         { ...valid, urls: [valid.urls[0], valid.urls[0]] },
         NOW_MS,
-        PUBLIC_KEY,
       ),
     ).toBeNull();
-    expect(
-      parseTurnCredentials({ ...valid, ttl: 3_600 }, NOW_MS, PUBLIC_KEY),
-    ).toBeNull();
+    expect(parseTurnCredentials({ ...valid, ttl: 3_600 }, NOW_MS)).toBeNull();
     expect(
       parseTurnCredentials(
         { ...valid, expiresAtUnixSeconds: EXPIRY + 1 },
         NOW_MS,
-        PUBLIC_KEY,
       ),
     ).toBeNull();
     expect(
@@ -130,7 +130,6 @@ describe("relay credentials from signaling", () => {
           username: `${String(EXPIRY)}:${OTHER_PUBLIC_KEY}`,
         },
         NOW_MS,
-        PUBLIC_KEY,
       ),
     ).toBeNull();
     expect(
@@ -141,7 +140,6 @@ describe("relay credentials from signaling", () => {
           credential: valid.credential,
         },
         NOW_MS,
-        PUBLIC_KEY,
       ),
     ).toBeNull();
   });
@@ -173,7 +171,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     expect(plan.accepted).toBe(true);
@@ -227,7 +224,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(1),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!first.accepted) throw new Error(first.reason);
@@ -242,7 +238,6 @@ describe("atomic correlated room response", () => {
       response({ turnCredentials: rotated }),
       store.getState().rooms,
       claim(2),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!second.accepted) throw new Error(second.reason);
@@ -262,7 +257,6 @@ describe("atomic correlated room response", () => {
       clearedResponse,
       store.getState().rooms,
       claim(3),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!cleared.accepted) throw new Error(cleared.reason);
@@ -286,7 +280,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!accepted.accepted) throw new Error(accepted.reason);
@@ -320,7 +313,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(1),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!first.accepted) throw new Error(first.reason);
@@ -331,7 +323,6 @@ describe("atomic correlated room response", () => {
       }),
       store.getState().rooms,
       claim(2),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!second.accepted) throw new Error(second.reason);
@@ -357,7 +348,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(1),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!first.accepted) throw new Error(first.reason);
@@ -368,7 +358,6 @@ describe("atomic correlated room response", () => {
       withoutTurn,
       store.getState().rooms,
       claim(2),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!second.accepted) throw new Error(second.reason);
@@ -394,7 +383,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -432,7 +420,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -482,7 +469,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -541,13 +527,15 @@ describe("atomic correlated room response", () => {
       },
     );
     const pendingRejection = pending.catch((error: unknown) => error);
-    const realClaim = claimRoomResponse(ROOM_URL, roomRequestId);
+    const realClaim = claimRoomResponse(
+      deriveRoomLocator(ROOM_URL),
+      roomRequestId,
+    );
     if (!realClaim) throw new Error("expected real coordinator claim");
     const plan = planRoomResponse(
       response({ roomRequestId }),
       store.getState().rooms,
       realClaim,
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -598,7 +586,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -686,7 +673,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!plan.accepted) throw new Error(plan.reason);
@@ -747,7 +733,6 @@ describe("atomic correlated room response", () => {
         }),
         store.getState().rooms,
         claim(),
-        PUBLIC_KEY,
         NOW_MS,
       ),
     ).toEqual({
@@ -759,7 +744,6 @@ describe("atomic correlated room response", () => {
         response({ roomId: OTHER_ROOM_ID }),
         store.getState().rooms,
         claim(),
-        PUBLIC_KEY,
         NOW_MS,
       ),
     ).toEqual({ accepted: false, reason: "room-id-collision" });
@@ -768,7 +752,6 @@ describe("atomic correlated room response", () => {
       response(),
       store.getState().rooms,
       claim(2),
-      PUBLIC_KEY,
       NOW_MS,
     );
     if (!accepted.accepted) throw new Error(accepted.reason);
@@ -779,18 +762,11 @@ describe("atomic correlated room response", () => {
         response({ roomId: OTHER_ROOM_ID }),
         store.getState().rooms,
         claim(3),
-        PUBLIC_KEY,
         NOW_MS,
       ),
     ).toEqual({ accepted: false, reason: "room-id-reassignment" });
     expect(
-      planRoomResponse(
-        response(),
-        store.getState().rooms,
-        claim(1),
-        PUBLIC_KEY,
-        NOW_MS,
-      ),
+      planRoomResponse(response(), store.getState().rooms, claim(1), NOW_MS),
     ).toEqual({ accepted: false, reason: "stale-room-response" });
   });
 
@@ -801,26 +777,20 @@ describe("atomic correlated room response", () => {
     const otherRequestId = "00000000-0000-4000-8000-000000000091";
     const firstMessage = response();
     const secondMessage = response({
-      roomUrl: OTHER_ROOM_URL,
+      roomLocator: deriveRoomLocator(OTHER_ROOM_URL),
       roomRequestId: otherRequestId,
     });
     const firstClaim = claim(1);
     const secondClaim = claim(1, OTHER_ROOM_URL, otherRequestId);
     expect(
-      planRoomResponse(
-        firstMessage,
-        store.getState().rooms,
-        firstClaim,
-        PUBLIC_KEY,
-        NOW_MS,
-      ).accepted,
+      planRoomResponse(firstMessage, store.getState().rooms, firstClaim, NOW_MS)
+        .accepted,
     ).toBe(true);
     expect(
       planRoomResponse(
         secondMessage,
         store.getState().rooms,
         secondClaim,
-        PUBLIC_KEY,
         NOW_MS,
       ).accepted,
     ).toBe(true);
@@ -836,7 +806,6 @@ describe("atomic correlated room response", () => {
             message,
             store.getState().rooms,
             pendingClaim,
-            PUBLIC_KEY,
             NOW_MS,
           );
           if (!fresh.accepted) return fresh.reason;
@@ -866,7 +835,6 @@ describe("atomic correlated room response", () => {
         response({ socialGraphHint: "leak" }),
         store.getState().rooms,
         claim(),
-        PUBLIC_KEY,
         NOW_MS,
       ),
     ).toEqual({ accepted: false, reason: "malformed-room-response" });

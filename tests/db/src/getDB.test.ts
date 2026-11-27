@@ -69,8 +69,8 @@ function putLegacyNewChunk(db: IDBDatabase, chunk: unknown): Promise<void> {
 }
 
 describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
-  test("dbVersion is bumped to exactly 21", () => {
-    expect(dbVersion).toBe(21);
+  test("dbVersion is bumped to exactly 22", () => {
+    expect(dbVersion).toBe(22);
   });
 
   test("upgrade preserves received data but recreates only outbound newChunks", async () => {
@@ -126,7 +126,7 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
     const outbound = outboundTx.objectStore("newChunks");
     expect(outbound.keyPath).toEqual(["transferId", "chunkIndex"]);
     expect((Array.from(outbound.indexNames) as string[]).sort()).toEqual(
-      ["hash", "merkleRoot", "receiptScope", "transferId"].sort(),
+      ["hash", "merkleRoot", "receiptScope", "stagedSize", "transferId"].sort(),
     );
     expect(outbound.index("receiptScope").unique).toBe(false);
     await outboundTx.done;
@@ -148,7 +148,7 @@ describe("getDB — v17 -> v20 protocol-v4/outbox migration", () => {
     expect(value).toEqual(fakeKey);
   });
 
-  test("opening at v21 fresh creates the complete schema", async () => {
+  test("opening at v22 fresh creates the complete schema", async () => {
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
 
@@ -302,7 +302,7 @@ describe("getDB — v21 clears ratchet rows in an older envelope form", () => {
 
     const db = await getDB();
     openDbs.push(db as unknown as IDBDatabase);
-    expect(db.version).toBe(21);
+    expect(db.version).toBe(22);
     expect(await db.count("ratchetSessions")).toBe(0);
     // Other stores are untouched; the schema is complete.
     expect(await db.count("messageData")).toBe(1);
@@ -460,4 +460,34 @@ describe("getDB — connections never block or hang an upgrade", () => {
     expect(db.objectStoreNames.contains("receiveActivity")).toBe(true);
     db.close();
   });
+});
+
+test("v22 drops server-ID PIN records, preserving locator PIN records and other metadata", async () => {
+  const uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const identity = "cc".repeat(32);
+  const locator = "de".repeat(64);
+  const scopes = (id: string) =>
+    [id, `pin-room-window:${id}`, `pin-known-peers:${id}`].map(
+      (scope) => `pinAttempts:v2:${String(scope.length)}:${scope}:${identity}`,
+    );
+  const obsolete = [`pinAttempts:${uuid}`, ...scopes(uuid)];
+  const kept = ["other-setting", ...scopes(locator)];
+  await new Promise<void>((resolve, reject) => {
+    const opening = indexedDB.open(dbName, 21);
+    opening.onupgradeneeded = () => {
+      const meta = opening.result.createObjectStore("meta");
+      for (const key of [...obsolete, ...kept]) meta.put(1, key);
+    };
+    opening.onerror = () => reject(opening.error);
+    opening.onsuccess = () => {
+      opening.result.close();
+      resolve();
+    };
+  });
+  const db = await getDB();
+  try {
+    expect((await db.getAllKeys("meta")).sort()).toEqual(kept.sort());
+  } finally {
+    db.close();
+  }
 });

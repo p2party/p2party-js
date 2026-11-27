@@ -1,5 +1,9 @@
-import { executeOutbox, storeOutboxChunk } from "./outboxStore";
-import type { OutboxLease, ReceiveActivity } from "./outboxTypes";
+import { executeOutbox, getSendDB, storeOutboxChunk } from "./outboxStore";
+import type {
+  OutboxLease,
+  OutboxResponse,
+  ReceiveActivity,
+} from "./outboxTypes";
 import { deleteDB } from "idb";
 import type { IDBPObjectStore, StoreNames } from "idb";
 
@@ -16,6 +20,7 @@ import {
   RECEIVE_VERIFY_RECEIPT_INTERVAL_MS,
   RECEIVE_VERIFY_SETTLED_MEMORY,
   RECEIVE_VERIFY_START_RETRY_WINDOW_MS,
+  ROOM_REMOVAL_KEY_DOMAIN,
 } from "../utils/constants";
 
 import { getDB, dbName } from "./src/getDB";
@@ -88,6 +93,18 @@ import type {
   PinAttemptState,
 } from "./types";
 // import type { MessageType } from "../utils/messageTypes";
+
+// A message's row and its transfer's row are rebuilt by several writers. The
+// digest a room's removal stamped on them (fnDeleteDBUniqueRoom) is what says
+// that the removal began, so each writer carries it over: from the first of
+// `rows` that has one.
+const keptRoomKey = (
+  ...rows: Array<{ roomKey?: string } | undefined>
+): { roomKey?: string } => {
+  for (const row of rows)
+    if (row?.roomKey !== undefined) return { roomKey: row.roomKey };
+  return {};
+};
 
 async function fnGetDBAddressBookEntry(
   peerId?: string,
@@ -590,6 +607,7 @@ async function fnSetDBRoomMessageData(
             : totalSize,
         totalSize,
         channelLabel,
+        ...keptRoomKey(msg),
       });
     } catch (error) {
       await tx.done;
@@ -648,32 +666,32 @@ async function fnGetDBNewChunk(
   transferId: string,
   chunkIndex: number,
 ): Promise<NewChunk | undefined> {
-  const db = await getDB();
-  try {
-    return await db.get("newChunks", [transferId, chunkIndex]);
-  } finally {
-    db.close();
-  }
+  const db = await getSendDB();
+  return db.get("newChunks", [transferId, chunkIndex]);
 }
 
 async function fnGetDBNewChunkByReceipt(
   merkleRootHex: string,
   receiptTokenHex: string,
-): Promise<NewChunk | undefined> {
+): Promise<WorkerMethodReturnTypes["getDBNewChunkByReceipt"]> {
   if (
     merkleRootHex.length !== crypto_hash_sha512_BYTES * 2 ||
     receiptTokenHex.length !== crypto_hash_sha512_BYTES * 2
   )
     return undefined;
-  const db = await getDB();
-  try {
-    return await db.getFromIndex("newChunks", "receiptScope", [
-      merkleRootHex,
-      receiptTokenHex,
-    ]);
-  } finally {
-    db.close();
-  }
+  const db = await getSendDB();
+  const key = await db.getKeyFromIndex("newChunks", "receiptScope", [
+    merkleRootHex,
+    receiptTokenHex,
+  ]);
+  return (
+    key && {
+      transferId: key[0],
+      chunkIndex: key[1],
+      merkleRoot: merkleRootHex,
+      receiptToken: receiptTokenHex,
+    }
+  );
 }
 
 async function fnExistsDBNewChunk(
@@ -1477,6 +1495,7 @@ async function startVerification(
       lastActivityAt: Date.now(),
       writeToken: token,
       leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+      ...keptRoomKey(activity, row),
     });
     await tx.done;
     return {
@@ -2280,6 +2299,7 @@ async function storeReceiveChunkLocked(
       channelLabel,
       // Cleared only by a verified completion.
       ...(previous?.integrityFailed === true ? { integrityFailed: true } : {}),
+      ...keptRoomKey(previous, activity),
     };
     if (verifies) {
       // Hold the completing chunk on the row, outside the have-set, until the
@@ -2469,6 +2489,7 @@ async function fnStoreReceiveChunk(
         lastActivityAt: Date.now(),
         writeToken: token,
         leaseUntil: Date.now() + RECEIVE_WRITE_LEASE_MS,
+        ...keptRoomKey(current, prior),
       });
       await tx.done;
       break;
@@ -2883,7 +2904,12 @@ async function fnSetDBNewChunk(
   chunk: NewChunk,
   lease?: OutboxLease,
 ): Promise<void> {
-  await storeOutboxChunk(chunk, lease);
+  try {
+    await storeOutboxChunk(chunk, lease);
+  } finally {
+    new Uint8Array(chunk.data).fill(0);
+    new Uint8Array(chunk.metadata).fill(0);
+  }
 }
 
 async function fnSetDBSendQueue(item: SendQueue): Promise<void> {
@@ -3745,7 +3771,7 @@ async function fnDeleteIdentityDerivation(): Promise<void> {
 // deleted transfer's row if their file cannot be removed, and the transfer
 // rows the room already has. A later purge of the same URL finds the room's
 // files by it (retryFileRemovals).
-async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
+async function fnDeleteDBUniqueRoom(roomId: string): Promise<string[]> {
   const db = await getDB();
   try {
     const tx = db.transaction(
@@ -3754,18 +3780,24 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
     );
     const store = tx.objectStore("uniqueRoom");
     const index = store.index("roomId");
+    const roots = new Set<string>();
     const item = await index.getKey(roomId);
     if (item !== undefined) {
       const room = await store.get(item);
       if (room && roomId !== "") {
         const roomKey = roomRemovalKey(room.roomUrl);
         const messages = tx.objectStore("messageData");
-        for (const message of await messages.index("roomId").getAll(roomId))
+        for (const message of await messages.index("roomId").getAll(roomId)) {
+          roots.add(message.merkleRoot);
           await messages.put({ ...message, roomKey });
+        }
         const activities = tx.objectStore("receiveActivity");
         for (const activity of await activities.getAll())
-          if (activity.roomId === roomId)
+          if (activity.roomId === roomId) {
+            if (activity.deletedAt === undefined)
+              roots.add(activity.merkleRoot);
             await activities.put({ ...activity, roomKey });
+          }
       }
       await store.delete(item);
     }
@@ -3780,6 +3812,7 @@ async function fnDeleteDBUniqueRoom(roomId: string): Promise<void> {
     }
 
     await tx.done;
+    return [...roots];
   } finally {
     db.close();
   }
@@ -3875,14 +3908,13 @@ async function fnDeleteDBSendQueue(
   position?: number,
 ): Promise<void> {
   try {
-    const db = await getDB();
+    const db = await getSendDB();
     if (position !== undefined) {
       await db.delete("sendQueue", [position, label, toPeerId]);
     } else {
       const keyRange = IDBKeyRange.only([label, toPeerId]);
       await db.delete("sendQueue", keyRange);
     }
-    db.close();
   } catch {
     /* empty */
   }
@@ -3913,6 +3945,23 @@ async function fnDeleteDBSendQueue(
 //   - the application can repeat the delete (retryFileRemovals);
 //   - a deleted transfer's receiveActivity row is kept until its file is
 //     gone (expireTombstone), so a room's pending removals can be found.
+//
+// A room's removal that began and did not finish. Removing a room's stored
+// data deletes the room's record first and its messages one by one after it
+// (deleteRoomDataTerminal). Deleting the record stamps every row the room
+// has with the room's removal key, in the same transaction
+// (fnDeleteDBUniqueRoom). A message row that carries a key while its room has
+// no record is therefore a message the removal had not reached when its tab
+// went away, and that state is the durable record that the removal began. It
+// is finished:
+//   - at the worker's start (finishRoomRemovals), with nothing called again;
+//   - when the application purges the room's URL again, or leaves all rooms
+//     with their messages again (fnRetryFileRemovals).
+// Each message goes as any deleted message does, under its file's lock, in a
+// transaction that reads its row and its room's record again
+// (finishRoomRemoval). A room that was joined again has its record back: its
+// messages are live, whatever key they still carry, and nothing here touches
+// them.
 // ---------------------------------------------------------------------------
 
 /** Whose file a removal left behind, for the report. */
@@ -3967,14 +4016,24 @@ interface StoredFileRecords {
   scope: RemovalScope;
 }
 
+const leftoverNames = (names: {
+  roomId: string;
+  roomKey?: string;
+  transferId?: string;
+  hash?: string;
+}): LeftoverNames => ({
+  roomId: names.roomId,
+  ...(names.roomKey === undefined ? {} : { roomKey: names.roomKey }),
+  ...(names.transferId === undefined ? {} : { transferId: names.transferId }),
+  ...(names.hash === undefined ? {} : { hash: names.hash }),
+});
+
 // The digest a room's leftovers are found by once its record is gone. It is
 // domain-separated, so it is of no use as a hash of the URL anywhere else.
 const roomRemovalKey = (roomUrl: string): string =>
   uint8ArrayToHex(
     new Sha512Stream()
-      .update(
-        new TextEncoder().encode(`p2party room removal key v1\n${roomUrl}`),
-      )
+      .update(new TextEncoder().encode(ROOM_REMOVAL_KEY_DOMAIN + roomUrl))
       .digest(),
   );
 
@@ -3999,18 +4058,7 @@ const storedFileRecords = (
   const names = row ?? activity;
   return {
     owned,
-    ...(owned || names === undefined
-      ? {}
-      : {
-          left: {
-            roomId: names.roomId,
-            ...(names.roomKey === undefined ? {} : { roomKey: names.roomKey }),
-            ...(names.transferId === undefined
-              ? {}
-              : { transferId: names.transferId }),
-            ...(names.hash === undefined ? {} : { hash: names.hash }),
-          },
-        }),
+    ...(owned || names === undefined ? {} : { left: leftoverNames(names) }),
     marked:
       activity?.deletedAt !== undefined && activity.fileNotRemoved === true,
     scope: {
@@ -4177,11 +4225,19 @@ async function listStoredFiles(
 // record before it creates its file, and each removal is decided again under
 // the file's lock, from records read there, immediately before the file is
 // removed. The lock is taken only if nothing holds it (never waited for).
-async function reconcileStoredFiles(): Promise<void> {
+//
+// `refused` names the files this start has already tried and reported
+// (finishRoomRemovals): they are not tried a second time.
+async function reconcileStoredFiles(
+  refused: ReadonlySet<string>,
+): Promise<void> {
   const dir = await receivedFilesDirectory();
   if (!dir) return;
   const names = (await listStoredFiles(dir))
-    .filter(({ name, kind }) => kind === "file" && STORED_FILE_NAME.test(name))
+    .filter(
+      ({ name, kind }) =>
+        kind === "file" && STORED_FILE_NAME.test(name) && !refused.has(name),
+    )
     .map(({ name }) => name);
   for (let at = 0; at < names.length; at += RECEIVE_RECONCILE_BATCH_FILES) {
     const records = await readStoredFileRecords(
@@ -4198,6 +4254,145 @@ async function reconcileStoredFiles(): Promise<void> {
   }
 }
 
+// Whether a room's removal began on a message and did not reach it: its row
+// carries a removal key, its room has no record, and the caller covers it.
+// Every read that decides this, the candidates' and the two under the file's
+// lock, decides it here.
+const roomRemovalBegan = (
+  row: LeftoverNames | undefined,
+  roomHasRecord: boolean,
+  covers: (left: LeftoverNames) => boolean,
+): boolean =>
+  row?.roomKey !== undefined && !roomHasRecord && covers(leftoverNames(row));
+
+// The messages a room's removal did not reach, as Merkle roots, narrowed to
+// what `covers`. They are candidates only; each is decided again under its
+// file's lock (finishRoomRemoval).
+//
+// One step per room that has messages, not per message: only the rows of a
+// room without a record are read.
+async function readUnfinishedRoomRemovals(
+  covers: (left: LeftoverNames) => boolean = () => true,
+): Promise<string[]> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction(
+      ["messageData", "uniqueRoom", "receiveActivity"],
+      "readonly",
+    );
+    const byRoom = tx.objectStore("messageData").index("roomId");
+    const records = tx.objectStore("uniqueRoom").index("roomId");
+    const merkleRoots = new Set<string>();
+    let room = await byRoom.openKeyCursor(null, "nextunique");
+    while (room) {
+      if ((await records.getKey(room.key)) === undefined) {
+        let row = await byRoom.openCursor(IDBKeyRange.only(room.key));
+        while (row) {
+          if (roomRemovalBegan(row.value, false, covers))
+            merkleRoots.add(row.value.merkleRoot);
+          row = await row.continue();
+        }
+      }
+      room = await room.continue();
+    }
+    // A crash during the first chunk's OPFS write leaves only the lease.
+    let activity = await tx.objectStore("receiveActivity").openCursor();
+    while (activity) {
+      const row = activity.value;
+      if (
+        row.deletedAt === undefined &&
+        row.roomKey !== undefined &&
+        covers(row) &&
+        !merkleRoots.has(row.merkleRoot) &&
+        (await records.getKey(row.roomId)) === undefined
+      )
+        merkleRoots.add(row.merkleRoot);
+      activity = await activity.continue();
+    }
+    await tx.done;
+    return [...merkleRoots];
+  } finally {
+    db.close();
+  }
+}
+
+// Whether a room's removal began on this message and did not reach it, as
+// its row and its room's record say now.
+async function roomRemovalUnfinished(
+  merkleRoot: string,
+  covers: (left: LeftoverNames) => boolean,
+): Promise<boolean> {
+  const db = await getDB();
+  try {
+    const tx = db.transaction(
+      ["messageData", "uniqueRoom", "receiveActivity"],
+      "readonly",
+    );
+    const message = await tx
+      .objectStore("messageData")
+      .index("merkleRoot")
+      .get(merkleRoot);
+    const activity = message
+      ? undefined
+      : await tx.objectStore("receiveActivity").get(merkleRoot);
+    const row =
+      message ?? (activity?.deletedAt === undefined ? activity : undefined);
+    const roomHasRecord =
+      row !== undefined &&
+      (await tx
+        .objectStore("uniqueRoom")
+        .index("roomId")
+        .getKey(row.roomId)) !== undefined;
+    await tx.done;
+    return roomRemovalBegan(row, roomHasRecord, covers);
+  } finally {
+    db.close();
+  }
+}
+
+// Finish the removal of one message that a room's removal did not reach.
+// Called under the file's lock. The row and the room's record are read here,
+// under it: a message whose room has its record again, or that the caller
+// does not cover, is left exactly as it is (its verification and its open
+// handle too). The delete reads both once more in its own transaction, so a
+// room joined again in between keeps the message. The message's records, the
+// cells staged for it if this device sent it, and its file go as with any
+// delete; a file the browser refuses to remove is returned as `notRemoved`
+// and stays pending on its transfer's row, which carries the room's key.
+async function finishRoomRemoval(
+  merkleRoot: string,
+  covers: (left: LeftoverNames) => boolean = () => true,
+): Promise<ReceiveDeletion> {
+  if (!(await roomRemovalUnfinished(merkleRoot, covers)))
+    return { deleted: false };
+  return await fnDeleteReceiveTransferLocked(
+    merkleRoot,
+    undefined,
+    undefined,
+    covers,
+  );
+}
+
+// The start-up pass, before the directory is looked at: finish every room
+// removal that began and did not finish, so that a person whose tab went
+// away inside a purge does not have to call anything again. A file's lock is
+// taken only if nothing holds it (never waited for); a message whose lock is
+// busy is left for the next start. Resolves with the files the browser
+// refused to remove, each already reported.
+async function finishRoomRemovals(): Promise<Set<string>> {
+  const refused = new Set<string>();
+  for (const merkleRoot of await readUnfinishedRoomRemovals()) {
+    const deletion = await withReceiveLockIfFree(merkleRoot, () =>
+      finishRoomRemoval(merkleRoot),
+    );
+    if (deletion === RECEIVE_LOCK_BUSY || !deletion.notRemoved) continue;
+    refused.add(merkleRoot);
+    if (deletion.scope)
+      reportFileNotRemoved(deletion.scope, deletion.notRemoved);
+  }
+  return refused;
+}
+
 // Try pending removals again because the application repeated a delete, a
 // cancel or a purge. A scope that names a room covers only what that room's
 // deleted messages left: a call that names one room never removes what the
@@ -4206,12 +4401,18 @@ async function reconcileStoredFiles(): Promise<void> {
 // that no record of any room names (after a full purge, say): it is no
 // room's, and the start pass would remove it anyway.
 //
+// A scope that names a whole room (or every room but some) also finishes a
+// removal of that room that began and did not finish: the messages it had
+// not reached are removed, as the start pass removes them.
+//
 // Resolves with the Merkle roots whose files are gone now. Rejects with one
 // StorageFailedError naming each file the browser still refuses to remove.
 async function fnRetryFileRemovals(
   scope: FileRemovalRetryScope,
 ): Promise<string[]> {
   let merkleRoots: string[];
+  // The messages a removal of the scope's room (or rooms) did not reach.
+  let unfinished: string[] = [];
   let covers: (left: LeftoverNames | undefined) => boolean;
   if ("merkleRootHex" in scope) {
     if (!STORED_FILE_NAME.test(scope.merkleRootHex))
@@ -4253,9 +4454,18 @@ async function fnRetryFileRemovals(
     } finally {
       db.close();
     }
+    if (!("transferId" in scope) && !("hash" in scope))
+      unfinished = await readUnfinishedRoomRemovals(covers);
   }
   const gone: string[] = [];
   const failures: FileRemovalFailure[] = [];
+  for (const merkleRoot of unfinished) {
+    const deletion = await withReceiveLock(merkleRoot, () =>
+      finishRoomRemoval(merkleRoot, covers),
+    );
+    if (deletion.notRemoved) failures.push(deletion.notRemoved);
+    else if (deletion.deleted) gone.push(merkleRoot);
+  }
   for (const merkleRoot of merkleRoots) {
     const outcome = await withReceiveLock(merkleRoot, () =>
       removeUnownedFile(merkleRoot, covers),
@@ -4290,11 +4500,18 @@ interface ReceiveDeletion {
  * thrown: it is returned as `notRemoved`, and each caller reports it its own
  * way. The transfer's row (now a tombstone) is marked so the removal stays
  * pending.
+ *
+ * With `unfinished` the delete finishes a room's removal (finishRoomRemoval):
+ * it changes nothing unless the message's row carries a removal key, the
+ * row's room has no record and `unfinished` covers the row, all read in the
+ * transaction that deletes. It then also deletes the cells staged for the
+ * message, which a room's removal deletes with it.
  */
 async function fnDeleteReceiveTransferLocked(
   merkleRootHex: string,
   staleBefore?: number,
   guard?: ReceiveDeleteGuard,
+  unfinished?: (left: LeftoverNames) => boolean,
 ): Promise<ReceiveDeletion> {
   if (!STORED_FILE_NAME.test(merkleRootHex))
     throw new Error("invalid receive transfer Merkle root");
@@ -4310,13 +4527,10 @@ async function fnDeleteReceiveTransferLocked(
   await fnCloseReceiveFile(merkleRootHex);
 
   let scope: RemovalScope | undefined;
-  // The other names of the message being deleted, for its row if its file is
-  // refused below.
-  let names: DeletedMessageNames;
   const db = await getDB();
   try {
     const tx = db.transaction(
-      ["chunks", "messageData", "uniqueRoom", "receiveActivity"],
+      ["chunks", "messageData", "uniqueRoom", "receiveActivity", "newChunks"],
       "readwrite",
     );
     const activityStore = tx.objectStore("receiveActivity");
@@ -4325,6 +4539,18 @@ async function fnDeleteReceiveTransferLocked(
       .objectStore("messageData")
       .index("merkleRoot")
       .get(merkleRootHex);
+    const owner =
+      previous ?? (activity?.deletedAt === undefined ? activity : undefined);
+    const roomRemoval =
+      owner?.roomKey !== undefined &&
+      (await tx
+        .objectStore("uniqueRoom")
+        .index("roomId")
+        .getKey(owner.roomId)) === undefined;
+    if (unfinished && (!owner || !roomRemoval || !unfinished(owner))) {
+      await tx.done;
+      return { deleted: false };
+    }
     if (
       guard &&
       (!previous ||
@@ -4352,7 +4578,7 @@ async function fnDeleteReceiveTransferLocked(
       await tx.done;
       return { deleted: false };
     }
-    names = {
+    const names = {
       transferId: previous?.transferId ?? activity?.transferId,
       hash: previous?.hash ?? activity?.hash,
       roomKey: previous?.roomKey ?? activity?.roomKey,
@@ -4364,6 +4590,10 @@ async function fnDeleteReceiveTransferLocked(
         fromPeerId: activity?.fromPeerId ?? previous!.fromPeerId,
         lastActivityAt: Date.now(),
         deletedAt: Date.now(),
+        // OPFS is outside this transaction. Keep removal retryable if the
+        // worker stops after commit, before the file operation completes.
+        fileNotRemoved: true,
+        ...names,
       });
     const chunkStore = tx.objectStore("chunks");
     const messageStore = tx.objectStore("messageData");
@@ -4373,6 +4603,14 @@ async function fnDeleteReceiveTransferLocked(
       .index("merkleRoot")
       .getAllKeys(merkleRootHex);
     for (const key of chunkKeys) await chunkStore.delete(key);
+
+    if (roomRemoval) {
+      const staged = tx.objectStore("newChunks");
+      const stagedKeys = await staged
+        .index("merkleRoot")
+        .getAllKeys(merkleRootHex);
+      for (const key of stagedKeys) await staged.delete(key);
+    }
 
     const messageKeys = await messageStore
       .index("merkleRoot")
@@ -4419,8 +4657,10 @@ async function fnDeleteReceiveTransferLocked(
   }
 
   const notRemoved = await removeStoredFile(merkleRootHex);
-  if (!notRemoved) return { deleted: true, scope };
-  if (scope) await markFileNotRemoved(merkleRootHex, true, names);
+  if (!notRemoved) {
+    if (scope) await markFileNotRemoved(merkleRootHex, false);
+    return { deleted: true, scope };
+  }
   return { deleted: true, scope, notRemoved };
 }
 
@@ -4494,11 +4734,13 @@ async function fnDeleteDB(): Promise<void> {
     throw filesNotRemoved(leftBehind, "p2party: the purge could not remove");
 }
 
-// The start of this worker: one pass over the directory, begun when the
-// module is evaluated. Requests that create, read or remove files wait for it
+// The start of this worker: one pass, begun when the module is evaluated.
+// It finishes the room removals that began and did not finish, then looks at
+// the directory. Requests that create, read or remove files wait for it
 // (FILE_REQUESTS), so that it does not run alongside the start of a receive
-// in this worker. It never rejects: a pass that could not list the directory
-// or read the records removes nothing, and the next start tries again.
+// in this worker. It never rejects: a part that could not read the records
+// or list the directory removes nothing, the other part still runs, and the
+// next start tries again.
 //
 // The wait is bounded (RECEIVE_RECONCILE_GATE_MS): a listing or a removal
 // that never settles must not hold every file request, a purge included,
@@ -4516,7 +4758,15 @@ const storedFilesGate = new Promise<void>((resolve) => {
     resolve();
   };
   bound = setTimeout(open, RECEIVE_RECONCILE_GATE_MS);
-  void reconcileStoredFiles()
+  void finishRoomRemovals()
+    .catch((error: unknown) => {
+      console.error(
+        "p2party: could not finish a room's removal at start",
+        error,
+      );
+      return new Set<string>();
+    })
+    .then(reconcileStoredFiles)
     .catch((error: unknown) => {
       console.error(
         "p2party: could not reconcile stored files at start",
@@ -4548,9 +4798,16 @@ onmessage = async (e: MessageEvent) => {
       await storedFilesGate;
     let result: WorkerMethodReturnTypes[typeof method];
     switch (method) {
-      case "outboxRequest":
-        result = await executeOutbox(...message.args);
+      case "outboxRequest": {
+        const [request] = message.args;
+        try {
+          result = await executeOutbox(request);
+        } finally {
+          if (request.kind === "selfChunk" && request.chunk.data)
+            new Uint8Array(request.chunk.data).fill(0);
+        }
         break;
+      }
       case "sweepStaleReceives":
         result = (await fnSweepStaleReceives()).map((row) => row.merkleRoot);
         break;
@@ -4743,8 +5000,7 @@ onmessage = async (e: MessageEvent) => {
         result = undefined;
         break;
       case "deleteDBUniqueRoom":
-        await fnDeleteDBUniqueRoom(...message.args);
-        result = undefined;
+        result = await fnDeleteDBUniqueRoom(...message.args);
         break;
       case "deleteDBSendQueue":
         await fnDeleteDBSendQueue(...message.args);
@@ -4812,16 +5068,32 @@ onmessage = async (e: MessageEvent) => {
         return;
     }
 
+    const transfer = new Set<ArrayBuffer>();
     if (message.method === "getIdentityEd25519" && result !== undefined) {
-      const secret = (result as IdentityEd25519).secret;
+      transfer.add((result as IdentityEd25519).secret);
+    } else if (message.method === "getDBNewChunk" && result !== undefined) {
+      const row = result as NewChunk;
+      transfer.add(row.data).add(row.metadata).add(row.merkleProof);
+    } else if (
+      message.method === "outboxRequest" &&
+      message.args[0].kind === "claim"
+    ) {
+      const reply = result as OutboxResponse;
+      if (reply.chunkHashes) transfer.add(reply.chunkHashes);
+      for (const ack of reply.acknowledgments ?? [])
+        if (ack.bitmap.buffer instanceof ArrayBuffer)
+          transfer.add(ack.bitmap.buffer);
+    }
+    if (transfer.size) {
       try {
         (
           globalThis as unknown as {
-            postMessage: (message: unknown, transfer?: Transferable[]) => void;
+            postMessage(value: unknown, transfer: Transferable[]): void;
           }
-        ).postMessage({ id, result }, [secret]);
+        ).postMessage({ id, result }, [...transfer]);
       } catch (error) {
-        new Uint8Array(secret).fill(0);
+        for (const buffer of transfer)
+          if (buffer.byteLength) new Uint8Array(buffer).fill(0);
         throw error;
       }
     } else {

@@ -20,7 +20,7 @@ import {
 } from "./retiredRemoteTransports";
 import { awaitPcOperation } from "./settleOnClose";
 import { isIdentityInitiator } from "../../utils/identityRole";
-import { PROTOCOL_VERSION } from "../../utils/constants";
+import { SIGNALING_PROTOCOL_VERSION } from "../../utils/constants";
 
 import { handleConnectToPeer } from "../../handlers/handleConnectToPeer";
 import { handleOpenChannel } from "../../handlers/handleOpenChannel";
@@ -476,7 +476,7 @@ const webrtcSetDescriptionQuery: BaseQueryFn<
                 fromPeerPublicKey: keyPair.publicKey,
                 toPeerId: peerId,
                 roomId,
-                protocolVersion: PROTOCOL_VERSION,
+                protocolVersion: SIGNALING_PROTOCOL_VERSION,
               } as WebSocketMessageDescriptionSend,
             }),
           );

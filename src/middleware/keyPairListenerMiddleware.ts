@@ -9,6 +9,7 @@ import {
 } from "../reducers/keyPairSlice";
 import { signalingServerActions } from "../reducers/signalingServerSlice";
 
+import { SignalingVersionMismatchError } from "../utils/protocolVersion";
 import { sendRoomRequestMessage } from "../api/signalingServerApi";
 import { requestAllActiveRooms } from "../handlers/requestRoom";
 import { stopOutboxOwners } from "../handlers/outbox";
@@ -84,7 +85,11 @@ keyPairListenerMiddleware.startListening({
       localStorage.setItem("challenge", "");
       localStorage.setItem("signature", "");
     } else if (signalingServerActions.disconnect.match(action)) {
-      resetRoomRequestLifecycle();
+      resetRoomRequestLifecycle(
+        action.payload === "version-mismatch"
+          ? new SignalingVersionMismatchError()
+          : undefined,
+      );
     }
   },
 });

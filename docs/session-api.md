@@ -494,9 +494,9 @@ number of messages received in order in one direction. Alternating traffic
 adds 40 bytes per superseded chain until the record holds 256 chains, then
 stops growing.
 
-`serialize()` writes snapshot format 5. `restoreSession()` also reads format
-4, written by 0.14.10: the receive keys it carries all belong to messages
-0.14.10 already returned, so restore records their identities in the replay
+`serialize()` writes snapshot format 5. `restoreSession()` also reads
+format 4. Its stored receive keys all belong to messages that the earlier SDK
+already returned, so restore records their identities in the replay
 record, wipes the keys, and those messages stay rejected.
 
 After `restoreSession(snapshot, cryptoOptions)`, wipe the caller's snapshot

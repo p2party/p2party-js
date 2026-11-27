@@ -9,37 +9,36 @@ export interface WebSocketMessagePongResponse {
 
 export interface WebSocketMessageLeaveRoomRequest {
   type: "leaveRoom";
-  protocolVersion: 4;
+  protocolVersion: 5;
   fromPeerId: string;
-  roomUrl: string;
+  roomLocator: string;
   roomLeaveId: string;
 }
 
 export interface WebSocketMessageRoomLeftResponse {
   type: "roomLeft";
-  protocolVersion: 4;
-  roomUrl: string;
+  protocolVersion: 5;
+  roomLocator: string;
   roomLeaveId: string;
 }
 
 export interface WebSocketMessageChallengeRequest {
-  type: "peerId";
-  peerId: string;
+  type: "authChallenge";
   challenge: string;
   protocolVersion: number;
-  message: string;
 }
 
 export interface WebSocketMessageChallengeResponse {
   type: "challenge";
   challenge: string;
   signature: string;
-  fromPeerId: string;
+  publicKey: string;
   protocolVersion: number;
 }
 
 export interface WebSocketMessageSuccessfulChallenge {
   type: "challenge";
+  peerId: string;
   challengeId: string;
   protocolVersion: number;
 }
@@ -47,10 +46,10 @@ export interface WebSocketMessageSuccessfulChallenge {
 export interface WebSocketMessageRoomIdRequest {
   type: "room";
   fromPeerId: string;
-  roomUrl: string;
+  roomLocator: string;
   /** Fresh request/response correlation nonce. Never reused across requests. */
   roomRequestId: string;
-  protocolVersion: 4;
+  protocolVersion: 5;
 }
 
 export interface TurnCredentials {
@@ -68,11 +67,11 @@ export interface TurnCredentials {
 export interface WebSocketMessageRoomIdResponse {
   type: "roomId";
   roomId: string;
-  roomUrl: string;
+  roomLocator: string;
   /** Exact echo of the request's fresh `roomRequestId`. */
   roomRequestId: string;
   turnCredentials?: TurnCredentials;
-  protocolVersion: 4;
+  protocolVersion: 5;
 }
 
 export interface WebSocketMessageDescriptionSend {
@@ -119,8 +118,6 @@ export interface WebSocketMessagePeersRequest {
   roomId: string;
   protocolVersion: number;
   rosterRequestId?: string;
-  /** Terminal failures need deliberate retry; discovery must not re-introduce them. */
-  excludedPeerIds?: string[];
   targetPeerIds?: string[];
 }
 

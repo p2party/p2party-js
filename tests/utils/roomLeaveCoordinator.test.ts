@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 import { describe, expect, test } from "bun:test";
 
 import {
@@ -20,20 +21,20 @@ const OTHER_LEAVE_ID = "00000000-0000-4000-8000-000000000005";
 const ack = (roomUrl = ROOM_URL, roomLeaveId = LEAVE_ID) =>
   ({
     type: "roomLeft",
-    protocolVersion: 4,
-    roomUrl,
+    protocolVersion: 5,
+    roomLocator: deriveRoomLocator(roomUrl),
     roomLeaveId,
   }) as const;
 
 describe("correlated room leave acknowledgement", () => {
-  test("uses the stable room capability before any server room id exists", async () => {
+  test("sends only the stable room locator before any server room ID exists", async () => {
     const socket = {};
     const request = buildRoomLeaveRequest(PEER_ID, ROOM_URL, LEAVE_ID);
     expect(request).toEqual({
       type: "leaveRoom",
-      protocolVersion: 4,
+      protocolVersion: 5,
       fromPeerId: PEER_ID,
-      roomUrl: ROOM_URL,
+      roomLocator: deriveRoomLocator(ROOM_URL),
       roomLeaveId: LEAVE_ID,
     });
 
@@ -144,10 +145,15 @@ describe("correlated room leave acknowledgement", () => {
     ).toBe(false);
     expect(
       acknowledgeRoomLeft(
-        { ...ack(), roomUrl: ROOM_URL.toUpperCase() },
+        { ...ack(), roomLocator: deriveRoomLocator(ROOM_URL).toUpperCase() },
         socket,
       ),
     ).toBe(false);
+    expect(
+      parseRoomLeftAcknowledgement(
+        JSON.stringify({ ...ack(), roomLocator: [deriveRoomLocator(ROOM_URL)] }),
+      ),
+    ).toBeNull();
     expect(acknowledgeRoomLeft(ack(), socket)).toBe(true);
     await leaving;
   });

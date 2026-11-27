@@ -559,8 +559,8 @@ only one store is re-queued as `REPLICATION_OR_BACKFILL` for the other
 Store failure handling: a rejected fetch or a bad signature marks that
 event missed for that store; nothing about the other store changes. The
 runtime exposes `storeTopology: "multi-store-union" | "single-carrier-dependent"
-| "no-usable-carrier"` computed only from locally observed successful reads
-in the last window, and nothing else — no umbrella label.
+| "no-usable-carrier"` counts stores whose last scan finalized and that the client still uses. A
+stopped or inert store immediately drops out of that count.
 
 ### 4.6 Pair driver (`prototype/pairDriver.ts`)
 

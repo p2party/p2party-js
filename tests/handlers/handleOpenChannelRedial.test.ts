@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import { HandshakeFailure } from "../../src/handlers/handshakeFailure";
@@ -350,7 +351,10 @@ describe("handleOpenChannel main-channel failure re-dials", () => {
     // transport failure, so the limiter gets a working in-memory store.
     usePinAttemptStoreForTests(memoryPinAttemptStore());
     for (let i = 1; i <= MAX_ROOM_PIN_FAILURES_PER_WINDOW; i++)
-      await recordPinFailure(PIN_ROOM_ID, i.toString(16).padStart(64, "0"));
+      await recordPinFailure(
+        deriveRoomLocator(PIN_ROOM_URL),
+        i.toString(16).padStart(64, "0"),
+      );
     const pc = fakePeerConnection(PIN_ROOM_ID);
     const main = fakeMain();
     const { api, dispatched } = fakeApi([pinRoom]);

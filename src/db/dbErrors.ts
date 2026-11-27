@@ -31,6 +31,22 @@ export class InvalidMessageHashError extends Error {
   }
 }
 
+export class InvalidTransferIdError extends Error {
+  readonly code = "invalid-transfer-id";
+  constructor() {
+    super("Invalid transfer ID");
+    this.name = "InvalidTransferIdError";
+  }
+}
+
+export class MissingMessageIdentifierError extends Error {
+  readonly code = "missing-message-identifier";
+  constructor() {
+    super("Need to provide a transfer ID, Merkle root, or hash");
+    this.name = "MissingMessageIdentifierError";
+  }
+}
+
 export const DATABASE_UPGRADE_BLOCKED = "database-upgrade-blocked";
 
 /**

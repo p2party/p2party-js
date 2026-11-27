@@ -22,7 +22,7 @@ const signal = (
   fromPeerPublicKey: peerPublicKey,
   labels: ["main"],
   fromPeerSocketGeneration,
-  protocolVersion: 4,
+  protocolVersion: 5,
 });
 
 describe("accepted connection signaling", () => {

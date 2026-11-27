@@ -279,7 +279,7 @@ export interface OutboundChunkStore {
 
 const stagedChunkStore: OutboundChunkStore = {
   get: (transferId, chunkIndex) => getDBNewChunk(transferId, chunkIndex),
-  put: (chunk, lease) => setDBNewChunk(chunk, lease),
+  put: (chunk, lease) => setDBNewChunk(chunk, lease, true),
 };
 
 export interface OutboundMessageParams {
@@ -314,14 +314,13 @@ export interface StagedOutboundChunk {
 }
 
 /**
- * Zero a staged row's plaintext. A read gets a fresh copy of the staged row
- * (the database worker's reply is a structured clone, and a staging put
- * clones it again), owned by the one caller that seals it or by the read
- * that drops it; nothing reads it after that.
+ * Wipe this read's private plaintext buffers. A proof-binding write transfers
+ * them back to the worker, which wipes them after persisting the row. A read
+ * that skips binding still owns its buffers and clears them here.
  */
 const wipeRowPlaintext = (row: NewChunk): void => {
-  new Uint8Array(row.data).fill(0);
-  new Uint8Array(row.metadata).fill(0);
+  if (row.data.byteLength) new Uint8Array(row.data).fill(0);
+  if (row.metadata.byteLength) new Uint8Array(row.metadata).fill(0);
 };
 
 const wipeStagedPlaintext = (staged: StagedOutboundChunk): void => {
@@ -343,7 +342,7 @@ const CHUNK_KIND_DECOY = 2;
  * leaves). A resume after a page reload builds them once from the leaves the
  * outbox claim returned, and only if some chunk still lacks a stored proof.
  *
- * The build runs in slices of at most PROOF_LEVEL_BUILD_SLICE_MS, handing the
+ * The build targets PROOF_LEVEL_BUILD_SLICE_MS per slice, handing the
  * page back between them, so a cover wake-up due meanwhile is not held for
  * the build (about 2.5 µs a leaf). Every cell that needs a proof while it runs
  * awaits the same build; a scheduled slot whose cell is still waiting sends
@@ -520,29 +519,6 @@ export class OutboundMessage {
           );
     throwIfTransferAborted(signal);
 
-    if (
-      !hasStoredProof ||
-      row.merkleRoot !== this.merkleRootHex ||
-      row.receiptToken !== receiptToken
-    ) {
-      await this.#store.put(
-        {
-          transferId: this.transferId,
-          hash: this.hashHex,
-          merkleRoot: this.merkleRootHex,
-          leafHash: row.leafHash,
-          receiptToken,
-          chunkIndex: index,
-          data: row.data,
-          metadata: row.metadata,
-          merkleProof: merkleProof.buffer,
-        },
-        outboxLease,
-      );
-      this.#noteProven(index);
-      throwIfTransferAborted(signal);
-    }
-
     const data = new Uint8Array(row.data);
     if (
       DECRYPTED_LEN !==
@@ -555,12 +531,35 @@ export class OutboundMessage {
       merkleProof,
       data,
     ]);
-    if (signal?.aborted) {
-      // Never handed to the caller, so it is zeroed here.
-      chunk.fill(0);
+    try {
+      if (
+        !hasStoredProof ||
+        row.merkleRoot !== this.merkleRootHex ||
+        row.receiptToken !== receiptToken
+      ) {
+        await this.#store.put(
+          {
+            transferId: this.transferId,
+            hash: this.hashHex,
+            merkleRoot: this.merkleRootHex,
+            leafHash: row.leafHash,
+            receiptToken,
+            chunkIndex: index,
+            data: row.data,
+            metadata: row.metadata,
+            merkleProof: merkleProof.buffer,
+          },
+          outboxLease,
+        );
+        this.#noteProven(index);
+      }
+
       throwIfTransferAborted(signal);
+      return chunk;
+    } catch (error) {
+      chunk.fill(0);
+      throw error;
     }
-    return chunk;
   }
 
   /**

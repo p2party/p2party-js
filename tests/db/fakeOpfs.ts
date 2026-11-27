@@ -37,6 +37,8 @@ export interface FakeOpfsHooks {
   onHeldRemove?: (name: string) => void;
   /** Awaited when a listing of the directory starts, before it reads it. */
   onList?: () => void | Promise<void>;
+  /** Called when a sync access handle is closed, after it is. */
+  onClose?: (name: string) => void;
 }
 
 export interface FakeOpfsStats {
@@ -138,6 +140,7 @@ export const fakeOpfs = (
       close: () => {
         state.closed = true;
         stats.closes.push(name);
+        hooks.onClose?.(name);
       },
     };
   };

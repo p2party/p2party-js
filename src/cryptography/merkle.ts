@@ -11,6 +11,7 @@ import { hashMerkleLeaf, hashMerkleLeafWasm } from "../utils/leafHash";
 import {
   MERKLE_NODE_DOMAIN,
   PROOF_LEVEL_BUILD_SLICE_MS,
+  PROOF_LEVEL_MAX_HASHES_PER_SLICE,
 } from "../utils/constants";
 
 import type { LibCrypto } from "./libcrypto";
@@ -301,17 +302,15 @@ export interface MerkleProofLevels {
 /** How a proof-level build shares the thread it runs on. */
 export interface MerkleProofLevelsBuildOptions {
   /**
-   * The longest one slice of the build may hold the thread, in ms of `now`.
+   * The target duration of a slice, in ms of `now`.
    * Defaults to PROOF_LEVEL_BUILD_SLICE_MS.
    */
   readonly sliceMs?: number;
   /** The clock slices are timed on. Defaults to `performance.now`. */
   readonly now?: () => number;
   /**
-   * Hands the thread back between slices, until the event loop has run what
-   * was queued meanwhile. Defaults to a message to the build's own
-   * MessageChannel: a task, never throttled as a hidden page's timers are, and
-   * queued behind a timer worker's message that arrived during the slice.
+   * Hands the thread back between slices. The default posts one task for
+   * the next runnable build across all messages on the page.
    */
   readonly yieldToEventLoop?: () => Promise<void>;
   /** Stops the build at its next slice; it then rejects with the reason. */
@@ -330,19 +329,42 @@ export interface MerkleProofLevelsBuild {
   readonly byteLength: number;
 }
 
+// One outstanding message per realm. Resolve one waiter per task, then
+// let its promise continuation run the slice before posting the next task.
+const waitingSlices: (() => void)[] = [];
+let slicePosted = false;
+const postNextMerkleSlice = (): void => {
+  if (slicePosted || !waitingSlices.length) return;
+  slicePosted = true;
+  // Use a fresh port for each task. Runtimes that drain an active port's
+  // queue can otherwise run successive slices before other ready ports.
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => {
+    channel.port1.close();
+    channel.port2.close();
+    waitingSlices.shift()!();
+    queueMicrotask(() => {
+      slicePosted = false;
+      postNextMerkleSlice();
+    });
+  };
+  channel.port2.postMessage(null);
+};
+const nextMerkleSlice = (): Promise<void> =>
+  new Promise<void>((resolve) => {
+    waitingSlices.push(resolve);
+    postNextMerkleSlice();
+  });
+
 /**
  * Build every level of the tree over `treeHashes` (the domain-separated leaf
  * hashes) with merkle.c's rules: an internal node is SHA-512(0x01 ‖ left ‖
  * right), computed by the module's libsodium SHA-512, and a lone odd node is
  * promoted unchanged. That is N − 1 node hashes, once.
  *
- * The build runs in slices. A slice stops before the hash that would take it
- * past `sliceMs` at the slice's own rate so far, then the thread is handed
- * back (`yieldToEventLoop`) before the next one: so on a page, a timer or a
- * message that falls due during the build waits at most one slice, not the
- * whole build (Chromium, 1,600,000 leaves: 3.9 s in one call; see
- * docs/e2e/cover-timers/). A slice hashes at least one node, so a hash that
- * alone takes longer than `sliceMs` (which no measured one did) overruns it.
+ * A slice targets `sliceMs` using the average hash cost so far, with a
+ * separate cap on hashes even when the clock does not advance. A single
+ * slow hash, allocation, or browser scheduling delay can overrun the target.
  *
  * Level 0 is `treeHashes` itself, not a copy: the caller must not modify it
  * while the levels are live.
@@ -398,17 +420,13 @@ const runMerkleProofLevelsBuild = async (
 
   let levels: Uint8Array[] = [treeHashes];
   if (leafCount > 1) {
-    let channel: MessageChannel | undefined;
-    const yieldToEventLoop =
-      options.yieldToEventLoop ??
-      (() =>
-        new Promise<void>((resolve) => {
-          channel ??= new MessageChannel();
-          channel.port1.onmessage = () => {
-            resolve();
-          };
-          channel.port2.postMessage(null);
-        }));
+    const yieldToEventLoop = options.yieldToEventLoop ?? nextMerkleSlice;
+    // Queue the first production slice too: starting many messages in a
+    // single turn must not execute one synchronous slice per message.
+    if (!options.yieldToEventLoop) {
+      await nextMerkleSlice();
+      signal?.throwIfAborted();
+    }
     const statePtr = module._malloc(crypto_hash_sha512_STATEBYTES);
     const inputPtr = module._malloc(MERKLE_NODE_INPUT_BYTES);
     const outputPtr = module._malloc(crypto_hash_sha512_BYTES);
@@ -460,6 +478,7 @@ const runMerkleProofLevelsBuild = async (
             j++;
             continue;
           }
+          if (hashed >= PROOF_LEVEL_MAX_HASHES_PER_SLICE) break;
           if (hashed > 0) {
             const held = now() - sliceStart;
             if (held + held / hashed > sliceMs) break;
@@ -490,8 +509,6 @@ const runMerkleProofLevelsBuild = async (
       module._free(statePtr);
       module._free(inputPtr);
       module._free(outputPtr);
-      channel?.port1.close();
-      channel?.port2.close();
     }
   }
 

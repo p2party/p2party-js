@@ -289,7 +289,7 @@ const peerLeft = (
   peerId: PEER_ID,
   reason,
   socketGeneration,
-  protocolVersion: 4,
+  protocolVersion: 5,
   ...overrides,
 });
 
@@ -298,7 +298,7 @@ const delta = (socketGeneration: string, roomId = ROOM_ID) => ({
   type: "peers",
   rosterKind: "delta",
   roomId,
-  protocolVersion: 4,
+  protocolVersion: 5,
   peers: [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY, socketGeneration }],
 });
 
@@ -307,7 +307,7 @@ const introduction = (socketGeneration: string) => ({
   type: "peerConnection",
   roomId: ROOM_ID,
   peer: { id: PEER_ID, publicKey: PEER_PUBLIC_KEY, socketGeneration },
-  protocolVersion: 4,
+  protocolVersion: 5,
 });
 
 const edge = (connectionState: RTCPeerConnectionState): FakeEdge => {
@@ -357,6 +357,24 @@ const retriesOver = (harness: ReturnType<typeof makeStore>, ms: number) => {
 const edgeCloses = (store: TestStore) => {
   store.dispatch(roomSlice.deletePeer({ peerId: PEER_ID, roomId: ROOM_ID }));
 };
+
+test("a roster delta does not dial a peer with a terminal PIN failure", async () => {
+  const { store } = makeStore();
+  store.dispatch(
+    roomSlice.setPeerHandshakeStatus({
+      roomId: ROOM_ID,
+      peerId: PEER_ID,
+      peerPublicKey: PEER_PUBLIC_KEY,
+      status: "failed",
+      reason: "pin-mismatch",
+    }),
+  );
+  await deliver(store, delta(GENERATION));
+  expect(dialled).toEqual([]);
+  expect(room(store).handshakeStatusByPeer?.[PEER_ID]?.reason).toBe(
+    "pin-mismatch",
+  );
+});
 
 describe("peerLeft: reason left", () => {
   test("left removes a peer that has no connected edge and cancels dialling", async () => {
@@ -446,7 +464,7 @@ describe("peerLeft: reason offline", () => {
       rosterKind: "snapshot",
       rosterRequestId,
       roomId: ROOM_ID,
-      protocolVersion: 4,
+      protocolVersion: 5,
       peers: [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY }],
     });
     expect(room(store).peerPresence?.[PEER_ID]?.departure).toBe("offline");
@@ -470,7 +488,7 @@ describe("peerLeft: reason offline", () => {
       rosterKind: "snapshot",
       rosterRequestId: debouncer.beginRosterRequest(ROOM_ID),
       roomId: ROOM_ID,
-      protocolVersion: 4,
+      protocolVersion: 5,
       peers: [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY, socketGeneration }],
     });
 

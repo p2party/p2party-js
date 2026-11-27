@@ -93,11 +93,35 @@ const remove = async (tx: Tx, transferId: string): Promise<void> => {
   await tx.objectStore("outbox").delete(transferId);
 };
 
+// A worker shares the pending open as well as the established connection.
+// getDB closes the handle on versionchange; discard it here too.
+const sendConnections = new WeakMap<IDBFactory, ReturnType<typeof getDB>>();
+export const getSendDB = (): ReturnType<typeof getDB> => {
+  const factory = indexedDB;
+  const existing = sendConnections.get(factory);
+  if (existing) return existing;
+  const opening = getDB().then((db) => {
+    const discard = () => {
+      if (sendConnections.get(factory) === opening)
+        sendConnections.delete(factory);
+    };
+    db.addEventListener("versionchange", discard, { once: true });
+    db.addEventListener("close", discard, { once: true });
+    return db;
+  });
+  sendConnections.set(factory, opening);
+  void opening.catch(() => {
+    if (sendConnections.get(factory) === opening)
+      sendConnections.delete(factory);
+  });
+  return opening;
+};
+
 /** Every mutation uses one IDB transaction, so separate tab workers fence each other. */
 export async function executeOutbox(
   request: OutboxRequest,
 ): Promise<OutboxResponse> {
-  const db = await getDB();
+  const db = await getSendDB();
   const tx = db.transaction(stores, "readwrite");
   try {
     const store = tx.objectStore("outbox");
@@ -298,17 +322,15 @@ export async function executeOutbox(
             .index("roomId")
             .get(row.roomId);
           if (room)
-            await tx
-              .objectStore("uniqueRoom")
-              .put({
-                ...room,
-                messageCount: await tx
-                  .objectStore("messageData")
-                  .index("roomId")
-                  .count(row.roomId),
-                lastMessageMerkleRoot: root,
-                updatedAt: now,
-              });
+            await tx.objectStore("uniqueRoom").put({
+              ...room,
+              messageCount: await tx
+                .objectStore("messageData")
+                .index("roomId")
+                .count(row.roomId),
+              lastMessageMerkleRoot: root,
+              updatedAt: now,
+            });
         }
       }
       if (request.kind === "publish") {
@@ -336,12 +358,10 @@ export async function executeOutbox(
         row.hashHex = request.hashHex;
         row.phase = "sending";
         row.expiresAt = now + OUTBOX_RETENTION_MS;
-        await tx
-          .objectStore("outboxTrees")
-          .put({
-            transferId: row.transferId,
-            chunkHashes: request.chunkHashes,
-          });
+        await tx.objectStore("outboxTrees").put({
+          transferId: row.transferId,
+          chunkHashes: request.chunkHashes,
+        });
       }
       if (request.kind === "release") {
         row.owner = "";
@@ -431,17 +451,21 @@ export async function executeOutbox(
     }
     await tx.done.catch(() => undefined);
     throw error;
-  } finally {
-    db.close();
   }
 }
+
+const storedChunkSize = (chunk: NewChunk): number =>
+  chunk.data.byteLength +
+  chunk.metadata.byteLength +
+  chunk.merkleProof.byteLength +
+  2048;
 
 /** Admission and every queued staging/proof update share the same owner fence. */
 export async function storeOutboxChunk(
   chunk: NewChunk,
   lease?: OutboxLease,
 ): Promise<void> {
-  const db = await getDB();
+  const db = await getSendDB();
   const tx = db.transaction(stores, "readwrite");
   try {
     const store = tx.objectStore("outbox");
@@ -455,16 +479,27 @@ export async function storeOutboxChunk(
         chunk.chunkIndex >= row.totalChunks
       )
         throw new Error("Invalid outbound staging index");
-      const previous = await tx
-        .objectStore("newChunks")
-        .get([chunk.transferId, chunk.chunkIndex]);
-      const size = (value: NewChunk): number =>
-        value.data.byteLength +
-        value.metadata.byteLength +
-        value.merkleProof.byteLength +
-        2048;
+      const chunks = tx.objectStore("newChunks");
+      const sizeKey = await chunks
+        .index("stagedSize")
+        .openKeyCursor(
+          IDBKeyRange.bound(
+            [chunk.transferId, chunk.chunkIndex, 0],
+            [chunk.transferId, chunk.chunkIndex, Infinity],
+          ),
+        );
+      let previousBytes = sizeKey?.key[2] ?? 0;
+      // An outbound row written before the size index may survive an upgrade.
+      // Read its size once. This write then indexes the row.
+      if (
+        !sizeKey &&
+        (await chunks.getKey([chunk.transferId, chunk.chunkIndex]))
+      ) {
+        const previous = await chunks.get([chunk.transferId, chunk.chunkIndex]);
+        if (previous) previousBytes = storedChunkSize(previous);
+      }
       const nextBytes =
-        row.writtenBytes + size(chunk) - (previous ? size(previous) : 0);
+        row.writtenBytes + storedChunkSize(chunk) - previousBytes;
       if (nextBytes > row.stagedBytes)
         throw new Error(
           "Durable outbox padded staging exceeds its reservation",
@@ -473,7 +508,9 @@ export async function storeOutboxChunk(
       await store.put(row);
     } else if (row)
       throw new Error("Durable outbox chunk writes require ownership");
-    await tx.objectStore("newChunks").put(chunk);
+    await tx
+      .objectStore("newChunks")
+      .put({ ...chunk, accountedBytes: storedChunkSize(chunk) });
     await tx.done;
   } catch (error) {
     try {
@@ -483,7 +520,5 @@ export async function storeOutboxChunk(
     }
     await tx.done.catch(() => undefined);
     throw error;
-  } finally {
-    db.close();
   }
 }

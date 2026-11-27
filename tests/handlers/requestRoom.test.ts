@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../../src/utils/roomLocator";
 import { afterEach, describe, expect, test } from "bun:test";
 
 (globalThis as unknown as { localStorage?: Storage }).localStorage ??= {
@@ -83,7 +84,7 @@ describe("room request orchestration", () => {
     for (const roomUrl of ROOM_URLS.slice(0, 2)) {
       const requestId = pendingRoomRequestId(roomUrl);
       if (!requestId) throw new Error("active room request was not emitted");
-      const claimed = claimRoomResponse(roomUrl, requestId);
+      const claimed = claimRoomResponse(deriveRoomLocator(roomUrl), requestId);
       if (!claimed) throw new Error("active room response was not claimable");
       completeRoomResponse({
         ...claimed,
@@ -124,7 +125,7 @@ describe("room request orchestration", () => {
         if (attempts === 1)
           return Promise.reject(new Error("transient signaling failure"));
         const claimed = claimRoomResponse(
-          request.roomUrl,
+          request.roomLocator,
           request.roomRequestId!,
         );
         if (!claimed) throw new Error("retried response was not claimable");
@@ -160,13 +161,13 @@ describe("room request orchestration", () => {
     await requestAllActiveRooms(
       api,
       (request) => {
-        emitted.add(request.roomUrl);
+        emitted.add(request.roomLocator);
         maximumPending = Math.max(
           maximumPending,
           roomRequestCoordinatorCounts().pending,
         );
         const claimed = claimRoomResponse(
-          request.roomUrl,
+          request.roomLocator,
           request.roomRequestId!,
         );
         if (!claimed) throw new Error("worker response was not claimable");

@@ -74,9 +74,15 @@ const port: DatabaseWorkerPort = {
   onerror: null,
   onmessageerror: null,
 };
+// The files the worker itself reported as left on disk, one entry per notice
+// it posted (the page raises one event per file, however often it is told).
+const removalNotices: string[] = [];
 const routeReplies = () => {
-  globals.postMessage = (reply: unknown) =>
+  globals.postMessage = (reply: unknown) => {
+    const removal = (reply as { removal?: { merkleRoot: string } }).removal;
+    if (removal) removalNotices.push(removal.merkleRoot);
     port.onmessage?.({ data: structuredClone(reply) } as MessageEvent);
+  };
 };
 routeReplies();
 const db = await import("../../src/db/api");
@@ -179,6 +185,8 @@ let onRemoval: ((name: string) => void) | undefined;
 let onHeldRefusal: ((name: string) => void) | undefined;
 // Awaited by the file system before it lists the directory.
 let listing: (() => Promise<void>) | undefined;
+// Called when a handle on a file is closed.
+let onClosed: ((name: string) => void) | undefined;
 let errors: ReceiveStorageError[];
 let stopListening: () => void;
 
@@ -192,6 +200,7 @@ const advanceClock = (ms: number): void => {
 
 beforeEach(async () => {
   routeReplies();
+  removalNotices.length = 0;
   globals.indexedDB = new IDBFactory();
   refused.clear();
   refusal = () =>
@@ -202,6 +211,7 @@ beforeEach(async () => {
   onRemoval = undefined;
   onHeldRefusal = undefined;
   listing = undefined;
+  onClosed = undefined;
   const fake = fakeOpfs(
     new Map(),
     {},
@@ -214,6 +224,7 @@ beforeEach(async () => {
       },
       onHeldRemove: (name) => onHeldRefusal?.(name),
       onList: () => listing?.(),
+      onClose: (name) => onClosed?.(name),
     },
   );
   opfs = fake.stats;
@@ -1536,7 +1547,7 @@ describe("a call that asks for a removal is repeated", () => {
       arrange: (root) => sent(root, "d7".repeat(32)),
       call: (() => {
         let handle: ReturnType<typeof p2party.sendMessage> | undefined;
-        return () => {
+        return async () => {
           if (!handle) {
             handle = p2party.sendMessage(
               "again",
@@ -1550,7 +1561,12 @@ describe("a call that asks for a removal is repeated", () => {
             );
             handle.done.catch(() => {});
           }
-          return handle.cancel();
+          try {
+            await handle.cancel();
+          } finally {
+            // Let the aborted send settle before this test reloads the room.
+            await handle.done.catch(() => undefined);
+          }
         };
       })(),
     },
@@ -1612,6 +1628,18 @@ describe("a call that asks for a removal is repeated", () => {
       expect(await attempt()).toEqual({ result: "resolved", onDisk: [] });
     },
   );
+
+  test("cancelMessage identifies missing and malformed transfer identifiers", async () => {
+    await expect(p2party.cancelMessage(ROOM, "chat")).rejects.toBeInstanceOf(
+      p2party.MissingMessageIdentifierError,
+    );
+    await expect(
+      p2party.cancelMessage(ROOM, "chat", undefined, undefined, ""),
+    ).rejects.toBeInstanceOf(p2party.InvalidTransferIdError);
+    await expect(
+      p2party.cancelMessage(ROOM, "chat", ""),
+    ).rejects.toBeInstanceOf(p2party.InvalidMessageHashError);
+  });
 
   test("a Merkle root or hash in a form the SDK does not report is refused with a typed error", async () => {
     const root = "ab".repeat(64);
@@ -1915,5 +1943,524 @@ describe("the wait for the start-up pass is bounded", () => {
     expect(opfs.list()).toEqual([fresh]);
     expect(await db.getDBMessageData(fresh)).toMatchObject({ savedSize: 5 });
     expect(errors).toEqual([]);
+  });
+});
+
+// The rows a store holds for one message, read as another context would.
+const storedRows = async (root: string) => {
+  const connection = await getDB();
+  try {
+    return {
+      message: await connection.getFromIndex("messageData", "merkleRoot", root),
+      activity: await connection.get("receiveActivity", root),
+      chunks: await connection.countFromIndex("chunks", "merkleRoot", root),
+      staged: await connection.countFromIndex("newChunks", "merkleRoot", root),
+    };
+  } finally {
+    connection.close();
+  }
+};
+// One staged cell of a sent message, as the send path leaves it once its
+// root is bound.
+const stage = (root: string, transferId: string): Promise<void> =>
+  db.setDBNewChunk({
+    transferId,
+    chunkIndex: 0,
+    hash: HASH,
+    merkleRoot: root,
+    leafHash: "c4".repeat(64),
+    receiptToken: "c5".repeat(64),
+    data: new Uint8Array(8).fill(7).buffer,
+    metadata: new Uint8Array(8).buffer,
+    merkleProof: new Uint8Array(8).buffer,
+  });
+// What a tab that died inside a room's removal leaves: the room's record is
+// deleted, which is the first thing the removal does and what stamps the
+// room's rows, and the messages are not.
+const interruptRoomRemoval = async (roomId = ROOM): Promise<void> => {
+  await roomRecorded(roomId);
+  await db.deleteDBUniqueRoom(roomId);
+  expect(await roomRecord(roomId)).toBeUndefined();
+};
+// The page after a reload: it lists no room until one is joined again.
+const reloadListingNothing = async (): Promise<void> => {
+  await reload();
+  store.dispatch(purgeAllRooms());
+};
+
+describe("a room removal that was interrupted is finished", () => {
+  test.each(["room deletion", "restart"])(
+    "a %s removes a first chunk written before its message row was committed",
+    async (action) => {
+      const root = "b7".repeat(32) + "cd".repeat(32);
+      await roomRecorded();
+      const connection = await getDB();
+      await connection.put("receiveActivity", {
+        merkleRoot: root,
+        roomId: ROOM,
+        fromPeerId: PEER,
+        writeToken: "interrupted-writer",
+        leaseUntil: Date.now() + 60_000,
+        lastActivityAt: Date.now(),
+      });
+      connection.close();
+      const file = await directory.getFileHandle(root, { create: true });
+      const handle = await file.createSyncAccessHandle();
+      handle.close();
+
+      if (action === "restart") {
+        await interruptRoomRemoval();
+        await reloadListingNothing();
+      } else {
+        await p2party.disconnectFromRoom(ROOM, true);
+      }
+      expect(opfs.list()).toEqual([]);
+      expect((await tombstone(root))?.deletedAt).toBeDefined();
+    },
+  );
+
+  test("a room can retry its file if removal stops after committing the tombstone", async () => {
+    const root = "b8".repeat(32) + "cd".repeat(32);
+    const transferId = "eb".repeat(32);
+    await sent(root, transferId);
+    await stage(root, transferId);
+    await interruptRoomRemoval();
+    const connection = await getDB();
+    let beforeRemoval:
+      ReturnType<typeof connection.get<"receiveActivity">> | undefined;
+    let staged: Promise<number> | undefined;
+    // Capture precisely the durable state another worker sees if this one
+    // dies as OPFS receives its removal request.
+    onRemoval = () => {
+      beforeRemoval = connection.get("receiveActivity", root);
+      staged = connection.countFromIndex("newChunks", "merkleRoot", root);
+    };
+    try {
+      await db.deleteReceiveTransfer(root);
+      expect(await beforeRemoval).toMatchObject({
+        fileNotRemoved: true,
+        roomKey: expect.stringMatching(/^[0-9a-f]{128}$/),
+        hash: HASH,
+        transferId,
+      });
+      expect(await staged).toBe(0);
+      expect((await tombstone(root))?.fileNotRemoved).toBeUndefined();
+    } finally {
+      connection.close();
+    }
+  });
+
+  test("a room purge interrupted after its record is deleted is finished at the next start", async () => {
+    const received = "d1".repeat(32) + "1d".repeat(32);
+    const sentRoot = "d2".repeat(32) + "2d".repeat(32);
+    const transferId = "d3".repeat(32);
+    const elsewhere = "d4".repeat(32) + "4d".repeat(32);
+    addOtherRoom();
+    await receive(received);
+    await sent(sentRoot, transferId);
+    await stage(sentRoot, transferId);
+    await receive(elsewhere, OTHER_ROOM);
+    await roomRecorded(OTHER_ROOM);
+    await interruptRoomRemoval();
+    // The messages are all still there, and each owns its file.
+    expect((await storedRows(received)).message?.roomKey).toMatch(
+      /^[0-9a-f]{128}$/,
+    );
+    expect(await storedRows(sentRoot)).toMatchObject({ chunks: 2, staged: 1 });
+    expect(opfs.list()).toEqual([received, sentRoot, elsewhere].sort());
+
+    // Nothing is called for the room again: the next start removes what the
+    // removal had not reached, and leaves the room that still has its record.
+    await reloadListingNothing();
+    expect(await storedRows(received)).toMatchObject({
+      message: undefined,
+      chunks: 0,
+    });
+    expect(await storedRows(sentRoot)).toMatchObject({
+      message: undefined,
+      chunks: 0,
+      staged: 0,
+    });
+    expect(opfs.list()).toEqual([elsewhere]);
+    expect(await storedRows(elsewhere)).toMatchObject({
+      message: { roomId: OTHER_ROOM, savedSize: 5 },
+      chunks: 1,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  test("a file the start cannot remove while it finishes a room's removal is reported, and goes at a later start", async () => {
+    const root = "d5".repeat(32) + "5d".repeat(32);
+    await receive(root);
+    await interruptRoomRemoval();
+    const release = await hold(root);
+
+    await reloadListingNothing();
+    // The message is gone as after any other removal; its file is left, and
+    // its transfer's row says so and carries the room's digest.
+    expect((await storedRows(root)).message).toBeUndefined();
+    expect(opfs.list()).toEqual([root]);
+    const left = await tombstone(root);
+    expect(left).toMatchObject({ fileNotRemoved: true, roomId: ROOM });
+    expect(left?.roomKey).toMatch(/^[0-9a-f]{128}$/);
+    await until(() => errors.length === 1);
+    expect(errors[0]).toMatchObject({
+      code: "not-removed",
+      roomId: ROOM,
+      merkleRootHex: root,
+    });
+    // One start tries the file once and says so once: the look at the
+    // directory that follows does not come back to it.
+    expect(removalNotices).toEqual([root]);
+
+    release();
+    await reloadListingNothing();
+    expect(opfs.list()).toEqual([]);
+    expect((await tombstone(root))?.fileNotRemoved).toBeUndefined();
+  });
+
+  test("purging a room again after an interrupted purge removes its messages and rejects while a file remains", async () => {
+    const kept = "d6".repeat(32) + "6d".repeat(32);
+    const removed = "d7".repeat(32) + "7d".repeat(32);
+    const elsewhere = "d8".repeat(32) + "8d".repeat(32);
+    addOtherRoom();
+    await receive(kept);
+    await receive(removed);
+    await receive(elsewhere, OTHER_ROOM);
+    await roomRecorded(OTHER_ROOM);
+    await interruptRoomRemoval();
+    // The page after its reload, with the start not having reached these
+    // messages (it takes a file's lock only when it is free).
+    store.dispatch(purgeAllRooms());
+    const release = await hold(kept);
+
+    // A purge of some other URL is not about this room's messages.
+    expect(await outcome(p2party.purgeRoom(OTHER_ROOM_URL))).toBe("resolved");
+    expect((await storedRows(kept)).message).toBeDefined();
+    expect((await storedRows(removed)).message).toBeDefined();
+
+    const again = await outcome(p2party.purgeRoom(ROOM_URL));
+    expect(again).toBeInstanceOf(StorageFailedError);
+    expect(fileFailures(again)).toEqual([{ merkleRootHex: kept, name: HELD }]);
+    expect((await storedRows(kept)).message).toBeUndefined();
+    expect((await storedRows(removed)).message).toBeUndefined();
+    expect(opfs.list()).toEqual([kept, elsewhere].sort());
+    expect((await storedRows(elsewhere)).message).toBeDefined();
+
+    // While the file is there the call keeps saying so, after a reload too.
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    await reloadListingNothing();
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    release();
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBe("resolved");
+    expect(opfs.list()).toEqual([elsewhere]);
+  });
+
+  test("a message of a room that has its record again is kept by the start and by a repeated purge", async () => {
+    const root = "d9".repeat(32) + "9d".repeat(32);
+    await receive(root);
+    await interruptRoomRemoval();
+    // The room is joined again before anything finished its removal: its
+    // record is back, under the id it had.
+    await db.setDBUniqueRoom(
+      ROOM_URL,
+      ROOM,
+      encodeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1).slice().buffer,
+    );
+    const removals: string[] = [];
+    onRemoval = (name) => removals.push(name);
+
+    await reloadListingNothing();
+    expect(await outcome(db.retryFileRemovals({ roomUrl: ROOM_URL }))).toBe(
+      "resolved",
+    );
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBe("resolved");
+    expect(
+      await outcome(p2party.disconnectFromAllRooms(true, [OTHER_ROOM])),
+    ).toBe("resolved");
+    expect(removals).toEqual([]);
+    expect(opfs.list()).toEqual([root]);
+    expect(await storedRows(root)).toMatchObject({
+      message: { roomId: ROOM, savedSize: 5 },
+      chunks: 1,
+    });
+    expect(await bytesOf(root)).toEqual([0, 1, 2, 3, 4, 0, 0, 0, 0, 0]);
+    expect(errors).toEqual([]);
+  });
+
+  // The room is joined again: its record is back, under the id it had.
+  const rejoin = async (): Promise<void> => {
+    const connection = await getDB();
+    try {
+      await connection.put("uniqueRoom", {
+        roomId: ROOM,
+        roomUrl: ROOM_URL,
+        roomPolicy: encodeRoomPolicyV1(DEFAULT_ROOM_POLICY_V1).slice()
+          .buffer as ArrayBuffer,
+        messageCount: 1,
+        lastMessageMerkleRoot: "",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+    } finally {
+      connection.close();
+    }
+  };
+  // A lock manager whose first grant of this file's lock runs `first` before
+  // the holder does: what another tab did while the lock was waited for.
+  const locksGranting = (root: string, first: () => Promise<void>) => {
+    let granted = 0;
+    return {
+      granted: () => granted,
+      locks: {
+        request: async (name: string, second: unknown, third?: unknown) => {
+          const run = (typeof second === "function" ? second : third) as (
+            lock: unknown,
+          ) => unknown;
+          if (name === `p2party:receive:${root}` && granted++ === 0)
+            await first();
+          return await run({ name });
+        },
+      },
+    };
+  };
+
+  test("a room joined again while its file's lock was waited for keeps the message, untouched", async () => {
+    const root = "e1".repeat(32) + "1e".repeat(32);
+    // Received and still being received: this worker holds the file open.
+    expect(await db.storeReceiveChunk(chunkOf(root, 0))).toMatchObject({
+      stored: true,
+    });
+    list(root);
+    await interruptRoomRemoval();
+    store.dispatch(purgeAllRooms());
+    const { granted, locks } = locksGranting(root, rejoin);
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { storage, locks },
+    });
+    const removals: string[] = [];
+    onRemoval = (name) => removals.push(name);
+    const handles = opfs.openHandles();
+    expect(handles).toBe(1);
+
+    expect(await outcome(db.retryFileRemovals({ roomUrl: ROOM_URL }))).toBe(
+      "resolved",
+    );
+    expect(granted()).toBe(1);
+    // Not removed, and not disturbed either: the handle the receive writes
+    // through is still open.
+    expect(removals).toEqual([]);
+    expect(opfs.openHandles()).toBe(handles);
+    expect(opfs.closes).not.toContain(root);
+    expect(await storedRows(root)).toMatchObject({
+      message: { roomId: ROOM, savedSize: 5 },
+      chunks: 1,
+    });
+  });
+
+  test("the start leaves a message whose room was joined again while it looked", async () => {
+    const root = "e2".repeat(32) + "2e".repeat(32);
+    await receive(root);
+    await interruptRoomRemoval();
+    const { granted, locks } = locksGranting(root, rejoin);
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { storage, locks },
+    });
+    const removals: string[] = [];
+    onRemoval = (name) => removals.push(name);
+
+    await reloadListingNothing();
+    // The start had the message as one to remove, took its lock, and found
+    // the room's record there.
+    expect(granted()).toBe(1);
+    expect(removals).toEqual([]);
+    expect(opfs.list()).toEqual([root]);
+    expect(await storedRows(root)).toMatchObject({
+      message: { roomId: ROOM, savedSize: 5 },
+      chunks: 1,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  test("a room joined again between the read under the lock and the delete keeps the message", async () => {
+    const root = "e3".repeat(32) + "3e".repeat(32);
+    expect(await db.storeReceiveChunk(chunkOf(root, 0))).toMatchObject({
+      stored: true,
+    });
+    list(root);
+    await interruptRoomRemoval();
+    store.dispatch(purgeAllRooms());
+    // The delete closes this worker's handle on the file before it opens its
+    // transaction. The record is written from there: after the read that
+    // chose to delete, and ahead of the transaction that would.
+    let rejoined: Promise<void> | undefined;
+    onClosed = (name) => {
+      if (name === root) rejoined ??= rejoin();
+    };
+    const removals: string[] = [];
+    onRemoval = (name) => removals.push(name);
+
+    expect(await outcome(db.retryFileRemovals({ roomUrl: ROOM_URL }))).toBe(
+      "resolved",
+    );
+    expect(rejoined).toBeDefined();
+    await rejoined;
+    expect(removals).toEqual([]);
+    expect(opfs.list()).toEqual([root]);
+    expect(await storedRows(root)).toMatchObject({
+      message: { roomId: ROOM, savedSize: 5 },
+      chunks: 1,
+    });
+  });
+
+  test("a message whose room never had a record is not taken for an interrupted removal", async () => {
+    const root = "e4".repeat(32) + "4e".repeat(32);
+    const unrecorded = "00000000-0000-4000-8000-0000000000e4";
+    // Nothing deleted a record for this room, so nothing stamped the row.
+    await receive(root, unrecorded);
+    expect(await roomRecord(unrecorded)).toBeUndefined();
+    expect((await storedRows(root)).message?.roomKey).toBeUndefined();
+
+    await reloadListingNothing();
+    expect(await outcome(p2party.disconnectFromAllRooms(true))).toBe(
+      "resolved",
+    );
+    expect(await outcome(db.retryFileRemovals({ roomId: unrecorded }))).toBe(
+      "resolved",
+    );
+    expect(opfs.list()).toEqual([root]);
+    expect(await storedRows(root)).toMatchObject({
+      message: { roomId: unrecorded, savedSize: 5 },
+      chunks: 1,
+    });
+  });
+
+  test("leaving all rooms again finishes an interrupted removal, an excepted room's aside", async () => {
+    const root = "da".repeat(32) + "ad".repeat(32);
+    const excepted = "db".repeat(32) + "bd".repeat(32);
+    addOtherRoom();
+    await receive(root);
+    await receive(excepted, OTHER_ROOM);
+    await interruptRoomRemoval();
+    await interruptRoomRemoval(OTHER_ROOM);
+    store.dispatch(purgeAllRooms());
+
+    expect(
+      await outcome(p2party.disconnectFromAllRooms(true, [OTHER_ROOM])),
+    ).toBe("resolved");
+    expect(opfs.list()).toEqual([excepted]);
+    expect((await storedRows(root)).message).toBeUndefined();
+    expect((await storedRows(excepted)).message).toBeDefined();
+  });
+
+  test("a write that lands after the room's record is deleted keeps the removal key", async () => {
+    const received = "dc".repeat(32) + "cd".repeat(32);
+    const sentRoot = "dd".repeat(32) + "dd".repeat(32);
+    const transferId = "de".repeat(32);
+    await receive(received);
+    await sent(sentRoot, transferId);
+    await interruptRoomRemoval();
+    const stamp = (await storedRows(received)).message?.roomKey;
+    expect(stamp).toMatch(/^[0-9a-f]{128}$/);
+    expect((await storedRows(received)).activity?.roomKey).toBe(stamp);
+    expect((await storedRows(sentRoot)).message?.roomKey).toBe(stamp);
+
+    // The receive path: a chunk that was on its way when the record went.
+    const last = await db.storeReceiveChunk(chunkOf(received, 1));
+    expect(last).toMatchObject({ stored: true });
+    expect((await storedRows(received)).message?.roomKey).toBe(stamp);
+    expect((await storedRows(received)).activity?.roomKey).toBe(stamp);
+    // It is the file's last chunk, so the file is verified: the transfer's
+    // row is written again when that starts.
+    const token = (last as { verification?: string }).verification ?? "";
+    expect(await db.verifyReceivedFile(received, token, "this-edge")).toBe(
+      "mismatch",
+    );
+    expect(
+      await db.settleReceivedFileVerification(
+        received,
+        token,
+        false,
+        "this-edge",
+      ),
+    ).toBe("aborted");
+    await db.closeReceiveFile(received);
+    expect((await storedRows(received)).message?.roomKey).toBe(stamp);
+    expect((await storedRows(received)).activity?.roomKey).toBe(stamp);
+    // The sender's own row, written again as its send goes on.
+    await db.setDBRoomMessageData(
+      ROOM,
+      sentRoot,
+      HASH,
+      SELF,
+      0,
+      10,
+      2,
+      "f.bin",
+      "chat",
+      1,
+      transferId,
+    );
+    expect((await storedRows(sentRoot)).message?.roomKey).toBe(stamp);
+
+    // So both are still what the interrupted removal left, and go with it.
+    await reloadListingNothing();
+    expect((await storedRows(received)).message).toBeUndefined();
+    expect((await storedRows(sentRoot)).message).toBeUndefined();
+    expect(opfs.list()).toEqual([]);
+  });
+
+  test("a delete repeated on a room's leftover keeps the removal key its transfer's row carries", async () => {
+    const root = "df".repeat(32) + "fd".repeat(32);
+    await receive(root);
+    await roomRecorded();
+    const release = await hold(root);
+    // The message is deleted while the room has its record, so what it
+    // leaves carries no digest; purging the room then stamps it.
+    expect(await outcome(p2party.deleteMessage(ROOM, root))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    expect((await tombstone(root))?.roomKey).toBeUndefined();
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    const stamp = (await tombstone(root))?.roomKey;
+    expect(stamp).toMatch(/^[0-9a-f]{128}$/);
+
+    // The transfer is deleted once more with only that row left of it: the
+    // digest is the row's, and stays with what the delete leaves.
+    expect(await outcome(db.deleteReceiveTransfer(root))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    expect(await tombstone(root)).toMatchObject({
+      fileNotRemoved: true,
+      roomKey: stamp,
+    });
+    await reloadListingNothing();
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBeInstanceOf(
+      StorageFailedError,
+    );
+    release();
+    expect(await outcome(p2party.purgeRoom(ROOM_URL))).toBe("resolved");
+    expect(opfs.list()).toEqual([]);
+  });
+});
+
+describe("the start pass's gate", () => {
+  test("the start pass's gate leaves no timer when the pass ends in time", async () => {
+    const clock = installFakeClock();
+    restores.push(clock.restore);
+    const before = clock.armed();
+    // Answered once the pass is over, well inside the gate's bound.
+    await startWorker();
+    expect(clock.armed()).toBeGreaterThan(before);
+    expect(clock.pending()).toBe(0);
+    expect(clock.now()).toBeLessThan(clockBase + RECEIVE_RECONCILE_GATE_MS);
   });
 });

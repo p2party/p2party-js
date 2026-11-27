@@ -23,7 +23,7 @@ import {
 
 import { setMessage, deleteMessage } from "../reducers/roomSlice";
 
-import { getMerkleRoot } from "../cryptography/merkle";
+import { buildMerkleProofLevels } from "../cryptography/merkle";
 import { hashFileStreaming } from "../cryptography/hashStream";
 import {
   generateRandomRoomUrl,
@@ -270,6 +270,7 @@ export const splitToChunks = async (
         merkleProof: new Uint8Array().buffer,
       },
       transfer.outboxLease,
+      true,
     );
 
     api.dispatch(
@@ -291,7 +292,14 @@ export const splitToChunks = async (
     );
   }
 
-  if (transfer.signal.aborted) {
+  const levels = transfer.signal.aborted
+    ? undefined
+    : await buildMerkleProofLevels(chunkHashes, merkleModule, {
+        signal: transfer.signal,
+      }).catch((error: unknown) => {
+        if (!transfer.signal.aborted) throw error;
+      });
+  if (!levels) {
     if (!transfer.outboxLease)
       await deleteDBNewChunk({ transferId: transfer.transferId });
     api.dispatch(
@@ -310,7 +318,8 @@ export const splitToChunks = async (
     };
   }
 
-  const merkleRoot = await getMerkleRoot(chunkHashes, merkleModule);
+  const merkleRoot = levels.root();
+  levels.release();
   const merkleRootHex = uint8ArrayToHex(merkleRoot);
 
   try {
@@ -323,26 +332,34 @@ export const splitToChunks = async (
       const staged = await getDBNewChunk(transfer.transferId, i);
       if (!staged)
         throw new Error(`Missing staged outbound chunk ${String(i)}`);
-      const metadata = deserializeMetadata(new Uint8Array(staged.metadata));
-      const realLen = metadata.chunkEndIndex - metadata.chunkStartIndex;
-      if (realLen <= 0 || realLen > metadata.totalSize) continue;
-      const selfChunk = {
-        merkleRoot: merkleRootHex,
-        hash: sha512Hex,
-        chunkIndex: metadata.chunkIndex,
-        data: staged.data.slice(
-          metadata.chunkStartIndex,
-          metadata.chunkEndIndex,
-        ),
-        mimeType,
-      };
-      if (transfer.outboxLease)
-        await outboxRequest({
-          kind: "selfChunk",
-          lease: transfer.outboxLease,
-          chunk: selfChunk,
-        });
-      else await setDBChunk(selfChunk);
+      try {
+        const metadata = deserializeMetadata(new Uint8Array(staged.metadata));
+        const realLen = metadata.chunkEndIndex - metadata.chunkStartIndex;
+        if (realLen <= 0 || realLen > metadata.totalSize) continue;
+        const selfChunk = {
+          merkleRoot: merkleRootHex,
+          hash: sha512Hex,
+          chunkIndex: metadata.chunkIndex,
+          data: staged.data.slice(
+            metadata.chunkStartIndex,
+            metadata.chunkEndIndex,
+          ),
+          mimeType,
+        };
+        if (transfer.outboxLease)
+          await outboxRequest(
+            {
+              kind: "selfChunk",
+              lease: transfer.outboxLease,
+              chunk: selfChunk,
+            },
+            [selfChunk.data],
+          );
+        else await setDBChunk(selfChunk);
+      } finally {
+        new Uint8Array(staged.data).fill(0);
+        new Uint8Array(staged.metadata).fill(0);
+      }
     }
   } catch (error) {
     if (!transfer.outboxLease) await deleteReceiveTransfer(merkleRootHex);

@@ -1,8 +1,5 @@
 import { debugLog } from "../utils/debug";
-import {
-  hasTerminalPeerHandshakeFailure,
-  isTerminalHandshakeStatus,
-} from "../handlers/handshakeFailure";
+import { hasTerminalPeerHandshakeFailure } from "../handlers/handshakeFailure";
 import { createListenerMiddleware, isAnyOf } from "@reduxjs/toolkit";
 import { isUUID } from "../utils/formatValidation";
 
@@ -31,13 +28,12 @@ import { encodeRoomPolicyV1 } from "../roomPolicy";
 
 import { crypto_hash_sha512_BYTES } from "../cryptography/interfaces";
 import {
-  PROTOCOL_VERSION,
+  SIGNALING_PROTOCOL_VERSION,
   ROOM_ROSTER_RECONCILE_DEBOUNCE_MS,
   ROOM_ROSTER_RECONCILE_DELAYS_MS,
   ROOM_ROSTER_RECONCILE_MAX_ATTEMPTS,
 } from "../utils/constants";
 import { signalingPeerRequestDebouncer } from "../utils/signalingPeerRequestDebouncer";
-import { MAX_SIGNALING_ROOM_PEERS } from "../utils/signalingBounds";
 import { stopOutboxOwners } from "../handlers/outbox";
 import { reportReceiveStorageError } from "../handlers/handleReceiveMessage";
 import {
@@ -345,40 +341,16 @@ export const createRoomListenerMiddleware = (
                     hasOnlyTerminalPeerHandshakeFailures(room)
                   )
                     return;
-                  const excludedPeerIds = [
-                    ...new Set([
-                      ...(room.knownPeers ?? room.peers)
-                        .filter((peer) =>
-                          hasTerminalPeerHandshakeFailure(
-                            room.handshakeStatusByPeer,
-                            peer.peerId,
-                            peer.peerPublicKey,
-                          ),
-                        )
-                        .map((peer) => peer.peerId),
-                      ...Object.entries(room.handshakeStatusByPeer ?? {})
-                        .filter(([, status]) =>
-                          isTerminalHandshakeStatus(status),
-                        )
-                        .map(([peerId]) => peerId),
-                    ]),
-                  ].filter((peerId) => isUUID(peerId));
-                  // Legacy servers ignore exclusions. Never trigger a failed
-                  // peer's fresh-connection retry via an unrelated repair.
-                  if (
-                    excludedPeerIds.length > MAX_SIGNALING_ROOM_PEERS ||
-                    (Object.values(room.handshakeStatusByPeer ?? {}).some(
-                      isTerminalHandshakeStatus,
-                    ) &&
-                      !signalingPeerRequestDebouncer.supportsRosterSnapshots)
-                  )
-                    return;
                   const targetPeerIds = pending
                     ? [...pending].filter((id) =>
                         room.knownPeers?.some(
                           (peer) =>
                             peer.peerId === id &&
-                            !excludedPeerIds.includes(id) &&
+                            !hasTerminalPeerHandshakeFailure(
+                              room.handshakeStatusByPeer,
+                              id,
+                              peer.peerPublicKey,
+                            ) &&
                             !hasReportedDeparture(room, id) &&
                             room.handshakeStatusByPeer?.[id]?.status !==
                               "authenticated",
@@ -396,9 +368,8 @@ export const createRoomListenerMiddleware = (
                           signalingPeerRequestDebouncer.beginRosterRequest(
                             roomId,
                           ),
-                        excludedPeerIds,
                         ...(targetPeerIds ? { targetPeerIds } : {}),
-                        protocolVersion: PROTOCOL_VERSION,
+                        protocolVersion: SIGNALING_PROTOCOL_VERSION,
                       } satisfies WebSocketMessagePeersRequest,
                     }),
                   );

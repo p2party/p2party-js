@@ -100,7 +100,7 @@ const deliverRoster = async (socketGeneration?: string): Promise<void> => {
       data: JSON.stringify({
         type: "peers",
         roomId: ROOM_ID,
-        protocolVersion: 4,
+        protocolVersion: 5,
         peers: [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY, socketGeneration }],
       }),
     } as MessageEvent,
@@ -161,7 +161,7 @@ describe("correlated room membership snapshots", () => {
         data: JSON.stringify({
           type: "peers",
           roomId: ROOM_ID,
-          protocolVersion: 4,
+          protocolVersion: 5,
           rosterKind: options.kind ?? "snapshot",
           rosterRequestId: requestId,
           peers: options.peers ?? [{ id: PEER_ID, publicKey: PEER_PUBLIC_KEY }],

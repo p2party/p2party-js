@@ -25,7 +25,7 @@ import type {
 } from "../types";
 
 export const dbName = "p2party";
-export const dbVersion = 21;
+export const dbVersion = 22;
 
 export interface RepoSchema extends DBSchema {
   outbox: {
@@ -78,13 +78,14 @@ export interface RepoSchema extends DBSchema {
     indexes: { merkleRoot: string; hash: string };
   };
   newChunks: {
-    value: NewChunk;
+    value: NewChunk & { accountedBytes?: number };
     key: [string, number];
     indexes: {
       transferId: string;
       hash: string;
       merkleRoot: string;
       receiptScope: [string, string];
+      stagedSize: [string, number, number];
     };
   };
   sendQueue: {
@@ -328,6 +329,14 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
         }
       }
 
+      const staged = tx.objectStore("newChunks");
+      if (!staged.indexNames.contains("stagedSize"))
+        staged.createIndex("stagedSize", [
+          "transferId",
+          "chunkIndex",
+          "accountedBytes",
+        ]);
+
       if (!db.objectStoreNames.contains("sendQueue")) {
         const sendQueue = db.createObjectStore("sendQueue", {
           keyPath: ["position", "label", "toPeerId"],
@@ -374,14 +383,12 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
               message.transferId === undefined &&
               message.savedSize < message.totalSize
             )
-              await tx
-                .objectStore("receiveActivity")
-                .put({
-                  merkleRoot: message.merkleRoot,
-                  roomId: message.roomId,
-                  fromPeerId: message.fromPeerId,
-                  lastActivityAt: migrationTime,
-                });
+              await tx.objectStore("receiveActivity").put({
+                merkleRoot: message.merkleRoot,
+                roomId: message.roomId,
+                fromPeerId: message.fromPeerId,
+                lastActivityAt: migrationTime,
+              });
             cursor = await cursor.continue();
           }
         };
@@ -400,6 +407,27 @@ export async function getDB(): Promise<IDBPDatabase<RepoSchema>> {
 
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta");
+      } else if (oldVersion > 0 && oldVersion < 22) {
+        // All prior PIN counters and authenticated-peer exemptions were keyed
+        // by server-assigned room ID. Start v5 with locator-keyed records.
+        const pinRows = tx.objectStore("meta");
+        const range = IDBKeyRange.bound(
+          "pinAttempts:",
+          "pinAttempts;",
+          false,
+          true,
+        );
+        void pinRows.getAllKeys(range).then((keys) => {
+          for (const key of keys) {
+            if (typeof key !== "string") continue;
+            const scope =
+              /^pinAttempts:v2:(\d+):((?:pin-room-window:|pin-known-peers:)?[0-9a-f]{128}):[0-9a-f]{64}$/.exec(
+                key,
+              );
+            if (!scope || Number(scope[1]) !== scope[2].length)
+              void pinRows.delete(key);
+          }
+        });
       }
     },
   });

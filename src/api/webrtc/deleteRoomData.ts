@@ -9,7 +9,9 @@ import type { MessageData } from "../../db/types";
 
 export interface DeleteRoomDataDependencies {
   readonly getMessages: (roomId: string) => Promise<MessageData[]>;
-  readonly deleteRoomRecord: (roomId: string) => Promise<void>;
+  readonly deleteRoomRecord: (
+    roomId: string,
+  ) => Promise<readonly string[] | void>;
   readonly deleteReceive: (merkleRootHex: string) => Promise<void>;
   readonly deleteOutgoing: (merkleRootHex: string) => Promise<void>;
 }
@@ -39,23 +41,27 @@ export const deleteRoomDataTerminal = async (
   } catch (error) {
     failures.push(error);
   }
+  const roots = new Set(messages.map((message) => message.merkleRoot));
   try {
-    await dependencies.deleteRoomRecord(roomId);
+    // Includes leases written before the first chunk and messages committed
+    // since the listing above. The room deletion stamps them atomically.
+    const stamped = await dependencies.deleteRoomRecord(roomId);
+    for (const root of stamped ?? []) roots.add(root);
   } catch (error) {
     failures.push(error);
   }
-  for (const message of messages) {
+  for (const root of roots) {
     try {
-      await dependencies.deleteReceive(message.merkleRoot);
+      await dependencies.deleteReceive(root);
     } catch (error) {
       failures.push(error);
     }
     try {
-      await dependencies.deleteOutgoing(message.merkleRoot);
+      await dependencies.deleteOutgoing(root);
     } catch (error) {
       failures.push(error);
     }
-    removeLocalMessage(message.merkleRoot);
+    removeLocalMessage(root);
   }
   if (failures.length > 0)
     throw new AggregateError(

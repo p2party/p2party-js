@@ -416,7 +416,7 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
     signalingPeerRequestDebouncer.cancelRoom(roomId);
   });
 
-  test("legacy mixed-terminal discovery is suppressed; negotiated discovery excludes the failed peer", async () => {
+  test("mixed-room discovery keeps terminal handshake failures private", async () => {
     signalingPeerRequestDebouncer.resetSocketLifecycle();
     const roomId = "00000000-0000-4000-8000-0000000000d8";
     const { store, requestFrames, settled, reconciler } = reconcilingStore({
@@ -445,7 +445,8 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
     );
     store.dispatch(setConnectingToPeers({ roomId, connectingToPeers: true }));
     await waitFor(() => settled() === 1);
-    expect(requestFrames).toEqual([]);
+    expect(requestFrames).toHaveLength(1);
+    expect(requestFrames[0]).not.toHaveProperty("excludedPeerIds");
     signalingPeerRequestDebouncer.confirmRosterSnapshots();
     store.dispatch(
       setConnectingToPeers({
@@ -455,8 +456,8 @@ describe("roomListenerMiddleware empty-room reconciliation", () => {
       }),
     );
     await waitFor(() => settled() === 2);
-    expect(requestFrames).toHaveLength(1);
-    expect(requestFrames[0].excludedPeerIds).toEqual([c.peerId]);
+    expect(requestFrames).toHaveLength(2);
+    expect(requestFrames[1]).not.toHaveProperty("excludedPeerIds");
     expect(requestFrames[0].rosterRequestId).toMatch(/^[0-9a-f-]{36}$/);
     reconciler.cancelAll();
     signalingPeerRequestDebouncer.resetSocketLifecycle();

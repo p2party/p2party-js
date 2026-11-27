@@ -1,4 +1,4 @@
-# Getting started with p2party 0.14
+# Getting started with p2party 0.15
 
 p2party has two entry points:
 
@@ -39,6 +39,13 @@ const room = await p2party.waitForRoom(invite, {
 });
 ```
 
+Upgrade the signaling server to 0.2.0-rc.0 or a compatible protocol-5 release
+before deploying this SDK. The peer handshake still uses protocol 4. When a
+server explicitly reports an incompatible signaling version, `joinRoom()`
+rejects with `SignalingVersionMismatchError` and the SDK stops reconnecting
+to that endpoint. A server that rejects the HTTP upgrade before opening the
+WebSocket can only surface a connection failure in the browser.
+
 Every peer that joins the same room is connected to every other present peer.
 The signaling service coordinates discovery and WebRTC setup; it is not the
 message hub. A room with `n` participants therefore has up to `n(n - 1) / 2`
@@ -70,9 +77,8 @@ await p2party.connect(fragment);
 
 `generateRoomInvite()` is the one-line form when only the versioned fragment is
 needed. Put it after `#` in an HTTPS URL so ordinary HTTP requests do not carry
-the capability. The current `legacy-signaling` connection path still sends a
-normalized form to the signaling service, so this is not server-blind
-rendezvous.
+the capability. Signaling sends the SHA-512 digest of the normalized capability
+as a stable room locator. The service can link connections that join the same room.
 
 The word form is a checksum-protected encoding of the same 256-bit capability,
 not a lower-entropy replacement. Its fixed word-list identifier is exported as
@@ -120,9 +126,7 @@ edge; the PIN-attempt limits below still apply.
 ### Failed PIN attempts
 
 A wrong PIN shows up as a failed key confirmation. Each device limits these
-failures per room in two layers. Both are stored in IndexedDB under the room
-ID the signaling server assigned (see the last paragraph for what that means
-across a reload).
+failures per room in two layers. IndexedDB stores both under the locator derived from the room capability.
 
 - **Per peer identity.** Failures are counted per room and per peer Ed25519
   identity. The first two cost nothing. From the third, that identity waits
@@ -157,12 +161,10 @@ What remains:
 - Calling `connect()` with a PIN for a room this page has already loaded
   clears both limits for that room and keeps its record of authenticated
   identities. Purging the room clears all three.
-- **Reload against a hostile signaling server.** After a reload the client
-  accepts whatever room ID the server assigns to the room URL; it does not
-  require the ID it stored before. A server that hands out a new ID on each
-  reload therefore starts both limits and the record of authenticated
-  identities afresh each time. Against an honest server that keeps the room's
-  ID, the limits survive a reload.
+- **Reload against a hostile signaling server.** The same invite derives the same locator after a reload.
+  The PIN failure window, identity backoff, and authenticated-peer record
+  survive a change to the room UUID assigned by the server. Upgrading to
+  signaling v5 discards PIN records keyed by the former server room IDs.
 
 Scheduled timing cover is wired as of 0.14: a policy may pin `coverMode:
 "scheduled"` with a cadence, lane count, and frames per cell, and every edge in
@@ -514,7 +516,10 @@ only a file of the message it cancels rejects the call.
 The removal is tried again without a purge:
 
 - Every time the SDK's database worker starts, which is once per page load.
-  It lists the directory and removes every file that no record owns. A file
+  If a room purge was interrupted after its room record was deleted, the
+  worker resumes deletion under each available file lock. Rejoining the room
+  under the same ID before recovery preserves its remaining messages. The
+  worker also lists the directory and removes every file that no record owns. A file
   another tab is receiving, verifying or reading has its records and is left
   alone. Requests that create, read or remove a file wait for this pass, for
   at most 5 seconds; after that they are served while the pass goes on. The
@@ -524,8 +529,7 @@ The removal is tried again without a purge:
 - When you repeat the call with the same arguments, in the same session or
   after a reload. The message or the room is no longer listed; the call
   finds what it left and tries the file again. It rejects as before while the
-  browser still refuses: none of these calls resolves while a file it left
-  is on disk.
+  browser refuses a file that the call can identify as pending.
   - `deleteMessage` and `cancelMessage`: by the Merkle root, the hash or (for
     `cancelMessage`, `handle.cancel()` and `cancelPendingMessage`) the
     transfer ID the first call used.
@@ -534,9 +538,10 @@ The removal is tried again without a purge:
   - `disconnectFromAllRooms(true, exceptRoomIds)`: the same for every room,
     listed or not, the excepted ones aside.
   - `purgeRoom(roomUrl)`: every file the room's messages left, also when the
-    room itself was already removed. The SDK keeps no copy of a removed
-    room's URL for this. What the room left carries a SHA-512 digest of the
-    URL, which goes when the file does.
+    room itself was already removed. Repeating the purge waits for the file
+    locks and finishes an interrupted removal. Pending rows carry a SHA-512
+    digest of a fixed prefix and the room URL. A successful removal clears
+    this digest from the transfer record.
   - `purge()`: every file.
 - When the storage sweep comes back to a deleted transfer after 24 hours.
 
@@ -563,8 +568,8 @@ fail at once instead of waiting: those that report errors reject with
 `p2party.DatabaseUpgradeBlockedError` (a `p2party.DatabaseUnavailableError`),
 some lookups return an empty result, and received chunks are reported as
 `storage-failed`. Ask the user to close the site's other tabs and reload.
-A tab still running 0.14.10 cannot open the database once a tab of this
-version has upgraded it.
+After this upgrade, a tab using the previous database schema must reload
+with the updated SDK to open the database.
 
 The first received file in a page also asks the browser once for persistent
 storage (`navigator.storage.persist()`), so storage pressure does not evict a

@@ -1,3 +1,4 @@
+import { deriveRoomLocator, ROOM_LOCATOR_PATTERN } from "../utils/roomLocator";
 import { isUUID } from "../utils/formatValidation";
 
 import {
@@ -14,11 +15,10 @@ import type {
 } from "../utils/interfaces";
 import type { PendingRoomResponseClaim } from "../utils/roomRequestCoordinator";
 
-const ROOM_URL_PATTERN = /^[0-9a-f]{64}$/;
 const ROOM_RESPONSE_KEYS = new Set([
   "type",
   "roomId",
-  "roomUrl",
+  "roomLocator",
   "roomRequestId",
   "protocolVersion",
   "turnCredentials",
@@ -26,7 +26,7 @@ const ROOM_RESPONSE_KEYS = new Set([
 const REQUIRED_ROOM_RESPONSE_KEYS = [
   "type",
   "roomId",
-  "roomUrl",
+  "roomLocator",
   "roomRequestId",
   "protocolVersion",
 ] as const;
@@ -45,7 +45,7 @@ const hasExactRoomResponseShape = (value: Record<string, unknown>): boolean => {
 };
 
 export interface RoomResponseCorrelation {
-  readonly roomUrl: string;
+  readonly roomLocator: string;
   readonly roomRequestId: string;
 }
 
@@ -57,15 +57,15 @@ export const parseRoomResponseCorrelation = (
   value: unknown,
 ): RoomResponseCorrelation | null => {
   if (!isRecord(value)) return null;
-  const { roomUrl, roomRequestId } = value;
+  const { roomLocator, roomRequestId } = value;
   if (
-    typeof roomUrl !== "string" ||
-    !ROOM_URL_PATTERN.test(roomUrl) ||
+    typeof roomLocator !== "string" ||
+    !ROOM_LOCATOR_PATTERN.test(roomLocator) ||
     typeof roomRequestId !== "string" ||
     !isUUID(roomRequestId, 4)
   )
     return null;
-  return { roomUrl, roomRequestId };
+  return { roomLocator, roomRequestId };
 };
 
 export type RoomResponsePlan =
@@ -100,7 +100,6 @@ export const planRoomResponse = (
   value: unknown,
   rooms: readonly ManagedRoom[],
   claim: PendingRoomResponseClaim,
-  expectedPublicKey: string,
   nowMs = Date.now(),
 ): RoomResponsePlan => {
   if (!isRecord(value) || !hasExactRoomResponseShape(value))
@@ -111,14 +110,14 @@ export const planRoomResponse = (
     message.type !== "roomId" ||
     !isProtocolVersionCompatible(message.protocolVersion) ||
     !isUUID(message.roomId, 4) ||
-    !ROOM_URL_PATTERN.test(message.roomUrl) ||
+    !ROOM_LOCATOR_PATTERN.test(message.roomLocator) ||
     !isUUID(message.roomRequestId, 4) ||
-    message.roomUrl !== claim.roomUrl ||
+    message.roomLocator !== deriveRoomLocator(claim.roomUrl) ||
     message.roomRequestId !== claim.roomRequestId
   )
     return { accepted: false, reason: "malformed-room-response" };
 
-  const room = rooms.find((candidate) => candidate.url === message.roomUrl);
+  const room = rooms.find((candidate) => candidate.url === claim.roomUrl);
   if (!room || room.signalingActive === false)
     return { accepted: false, reason: "unknown-room" };
   if (isUUID(room.id) && room.id !== message.roomId)
@@ -126,7 +125,7 @@ export const planRoomResponse = (
   if (
     rooms.some(
       (candidate) =>
-        candidate.url !== message.roomUrl && candidate.id === message.roomId,
+        candidate.url !== claim.roomUrl && candidate.id === message.roomId,
     )
   )
     return { accepted: false, reason: "room-id-collision" };
@@ -136,7 +135,7 @@ export const planRoomResponse = (
   const turn =
     message.turnCredentials === undefined
       ? null
-      : parseTurnCredentials(message.turnCredentials, nowMs, expectedPublicKey);
+      : parseTurnCredentials(message.turnCredentials, nowMs);
   if (message.turnCredentials !== undefined && turn === null)
     return { accepted: false, reason: "malformed-turn-credentials" };
 
@@ -144,13 +143,13 @@ export const planRoomResponse = (
     accepted: true,
     action: applyRoomResponse({
       roomId: message.roomId,
-      roomUrl: message.roomUrl,
+      roomUrl: claim.roomUrl,
       roomRequestId: message.roomRequestId,
       requestGeneration: claim.requestGeneration,
       turnCredentials: turn,
     }),
     roomId: message.roomId,
-    roomUrl: message.roomUrl,
+    roomUrl: claim.roomUrl,
     roomRequestId: message.roomRequestId,
     requestGeneration: claim.requestGeneration,
     expiresAtUnixSeconds: turn?.expiresAtUnixSeconds ?? null,

@@ -4,7 +4,7 @@ import { setChannel, setPeer } from "../reducers/roomSlice";
 import { isCanonicalEd25519Identity } from "./identityRole";
 import { hasCurrentSocketProof } from "./signalingAuth";
 import { debugLog } from "./debug";
-import { PROTOCOL_VERSION } from "./constants";
+import { SIGNALING_PROTOCOL_VERSION } from "./constants";
 
 import type { BaseQueryApi } from "@reduxjs/toolkit/query";
 import type { State } from "../store";
@@ -75,7 +75,7 @@ export const sendPeerConnectionRequest = (
         fromPeerId: keyPair.peerId,
         toPeerId: peerId,
         labels: ["main"],
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion: SIGNALING_PROTOCOL_VERSION,
       } satisfies WebSocketMessagePeerConnectionRequest,
     },
     api,

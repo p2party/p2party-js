@@ -1,3 +1,4 @@
+import { deriveRoomLocator } from "../utils/roomLocator";
 import { debugLog } from "../utils/debug";
 import {
   IMMEDIATE_RESUME_PROTOCOL,
@@ -854,7 +855,7 @@ export const handleOpenChannel = async (
     if (extChannel.label === "main") {
       void (async () => {
         let pin: Uint8Array | undefined;
-        let pinRoom = false;
+        let pinLocator: string | undefined;
         let handshakeStarted = false;
         api.dispatch(
           setPeerHandshakeStatus({
@@ -872,13 +873,13 @@ export const handleOpenChannel = async (
           if (!room) throw new Error("Handshake room is unavailable");
 
           if (room.policy.authMode === "pin") {
-            pinRoom = true;
+            pinLocator = deriveRoomLocator(room.url);
             pin = getRoomPin(room.url);
             if (!pin) throw new Error("PIN room has no local PIN");
           }
 
-          if (pinRoom)
-            await assertPinAttemptAllowed(roomId, epc.withPeerPublicKey);
+          if (pinLocator)
+            await assertPinAttemptAllowed(pinLocator, epc.withPeerPublicKey);
 
           // Role tie-break on the stable Ed25519 identity edge.
           const amInitiator = isIdentityInitiator(
@@ -1015,8 +1016,8 @@ export const handleOpenChannel = async (
           // Clears this identity's backoff and records it as authenticated
           // in this room, which exempts it from the room-wide failure window.
           // The window itself is left as it is.
-          if (pinRoom)
-            await recordPinSuccess(roomId, epc.withPeerPublicKey).catch(
+          if (pinLocator)
+            await recordPinSuccess(pinLocator, epc.withPeerPublicKey).catch(
               (successError) => {
                 console.error(
                   "Could not persist successful PIN attempt state:",
@@ -1061,11 +1062,11 @@ export const handleOpenChannel = async (
           // genuine handshake failure always finds the transport still open.
           const transportAlreadyClosed = epc.connectionState === "closed";
           if (
-            pinRoom &&
+            pinLocator &&
             handshakeStarted &&
             /key-confirmation/i.test(handshakeError.message)
           ) {
-            await recordPinFailure(roomId, epc.withPeerPublicKey).catch(
+            await recordPinFailure(pinLocator, epc.withPeerPublicKey).catch(
               (backoffError) => {
                 console.error(
                   "Could not persist PIN attempt state:",
@@ -1081,13 +1082,13 @@ export const handleOpenChannel = async (
           const { reason: failureReason, retryAfter: classifiedRetryAfter } =
             classifyHandshakeFailure(handshakeError, {
               handshakeStarted,
-              pinRoom,
+              pinRoom: pinLocator !== undefined,
             });
           let retryAfter = classifiedRetryAfter;
-          if (failureReason === "pin-mismatch" && pinRoom) {
+          if (failureReason === "pin-mismatch" && pinLocator) {
             try {
               const attemptState = await getPinAttemptState(
-                roomId,
+                pinLocator,
                 epc.withPeerPublicKey,
               );
               if (attemptState && attemptState.retryAfter > Date.now())

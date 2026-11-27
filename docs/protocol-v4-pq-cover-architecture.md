@@ -369,9 +369,9 @@ What (a) costs:
     hidden page of `results-2026-11-26-sealed-500ms-slots-after.json`, 9.6 and
     116.3 ms, while the host's load average rose past 300;
   - a message's proof-level build, once on its first cell without a stored
-    proof, now in slices of at most 1 ms (`PROOF_LEVEL_BUILD_SLICE_MS`) with
-    the page handed back between them, so a wake-up due during it waits for
-    the slice it falls in, not for the build. In one call, before, it was
+    proof, now targets 1 ms per slice (`PROOF_LEVEL_BUILD_SLICE_MS`) and
+    yields after at most 256 hashes even on coarse clocks. Other tasks can
+    run between slices. In one call, before, it was
     4.2 ms at 1,600 cells, 395 ms at 160,000 and 3.9 s at 1,600,000, and at
     25 ms slots every edge degraded at each size measured there (16,000
     cells and up). What the slices leave is in "The proof-level build",
@@ -584,17 +584,15 @@ of them at 1,600,000 leaves) and its five chunks after.
 
 What remains:
 
-- a wake-up due during the build waits for the slice it falls in. At
-  1,600,000 leaves the 525 slots due during the 4.4 s build left 0.5 ms
-  later than the others at the median and at the mean (KS 0.091 against a
-  5 % critical value of 0.074, which assumes independent slots, and the
-  three edges' slots of one instant share its lateness); at 160,000 leaves
-  the median was 1.5 ms later and the mean 0.1 ms earlier (KS 0.127 against
-  0.19). An observer timing one page's slots against the grid may therefore
-  see a large message's first send as a shift of about half a slice for the
-  build's length. A build in a worker would not hold the page at all; that
-  is not built (the SDK's workers are the database worker and the cover
-  timer worker);
+- the three edges share each wake-up. At 1,600,000 leaves, the 525 slots
+  during the build left 0.5 ms later at the median than slots outside it.
+  Counting each wake-up once gives 175 observations during and 321 outside
+  the build, with KS distance 0.089 (5 % critical value 0.128). The run
+  does not establish a timing distinction. These measurements predate the
+  work cap and shared queue: staging and proof construction now target
+  1 ms and at most 256 node hashes per slice, with one continuation posted
+  at a time across messages. Browser task scheduling and the duration of a
+  single hash or allocation still affect wake-up latency;
 - the levels hold 64 bytes a leaf above the leaves, which the message holds
   for its whole delivery anyway: at 1,600,000 leaves 102.4 MB of levels and
   102.4 MB of leaves. The levels are held from the first cell without a

@@ -7,6 +7,7 @@ export interface SignalingState {
   isConnected: boolean;
   isVerified: boolean;
   serverUrl: string;
+  refusal?: "version-mismatch";
 }
 
 const defaultServerUrl = "wss://signaling.p2party.com/ws";
@@ -23,6 +24,7 @@ const signalingServerSlice = createSlice({
   initialState,
   reducers: {
     startConnecting: (state, action: PayloadAction<string | undefined>) => {
+      delete state.refusal;
       state.isEstablishingConnection = true;
       state.serverUrl = action.payload ?? defaultServerUrl;
     },
@@ -39,7 +41,12 @@ const signalingServerSlice = createSlice({
       state.isVerified = true;
     },
 
-    disconnect: (state) => {
+    disconnect: (
+      state,
+      action: PayloadAction<"version-mismatch" | undefined>,
+    ) => {
+      if (action.payload) state.refusal = action.payload;
+      else delete state.refusal;
       state.isConnected = false;
       state.isEstablishingConnection = false;
       state.isVerified = false;
